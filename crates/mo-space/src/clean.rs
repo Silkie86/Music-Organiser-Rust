@@ -431,6 +431,8 @@ pub enum What {
     Plugin(SpaceKind),
     /// A Bitwig project's copy of a Library multisample, once a "(fixed)" project points at the Library file.
     BitwigCopy,
+    /// An F12 note's words or picture, about 3 months old, put there by the app's start-up clean-up (rule 28).
+    Note,
 }
 
 /// A line that couldn't go (or come back), and why.
@@ -476,6 +478,13 @@ pub trait Bin {
     fn find(&self, removed: &mut [Removed]) -> Vec<Problem>;
     /// Puts things back from the bin where they were; says what couldn't come back.
     fn put_back(&self, removed: &[Removed]) -> Vec<Problem>;
+    /// Why this bin can't take `path` (`bytes` big) quietly: sending it would ask you something first, or remove it for
+    /// good. `None` when it can. For what the app clears by itself, with nobody there to answer (the start-up sweep's
+    /// old F12 notes); the Space page's clean-ups, which you start and watch, check what they need as they go. A bin of
+    /// the tests' own (a folder) takes everything.
+    fn refuses_quietly(&self, _path: &Path, _bytes: u64) -> Option<String> {
+        None
+    }
 }
 
 /// Sends each line of the plan to the bin, checking each again just before: one that changed, or that the guard now
@@ -511,7 +520,7 @@ pub fn apply(plan: &Plan, guard: &Guard<'_>, bin: &dyn Bin, stop: &AtomicBool) -
 }
 
 /// What's said of something that's only online in OneDrive (all of it, or some of what's inside).
-pub(crate) const ONLINE_ONLY: &str = "It's only online in OneDrive (all of it or some of it), so it can't go to the \
+pub const ONLINE_ONLY: &str = "It's only online in OneDrive (all of it or some of it), so it can't go to the \
                                       Recycle Bin: removing it would delete it from OneDrive everywhere. It stays.";
 
 /// Why the Recycle Bin couldn't keep something, so removing it would delete it for good: it's on a network drive, or a
@@ -545,14 +554,30 @@ pub(crate) fn cant_keep(path: &str, real: &str, stop: &AtomicBool) -> Option<&'s
 }
 
 /// What's said of something that couldn't all be looked at to check the Recycle Bin can keep it.
-const CANT_LOOK: &str = "Some of it couldn't be read to check it's all on this computer (not only online in OneDrive), \
+pub const CANT_LOOK: &str = "Some of it couldn't be read to check it's all on this computer (not only online in OneDrive), \
                          so it stays.";
 
 /// What's said of something that stays because you pressed Stop.
 pub(crate) const STOPPED: &str = "Stopped before it went.";
 
 /// What [`Bin::find`] says of something that went but isn't in the bin.
-pub(crate) const NOT_IN_BIN: &str = "It isn't in the Recycle Bin, so it may have been removed for good.";
+pub const NOT_IN_BIN: &str = "It isn't in the Recycle Bin, so it may have been removed for good.";
+
+/// What [`Bin::send`] says when Windows didn't put it in the Recycle Bin and didn't say why: it asked first and was
+/// told no, or something stopped it that the app can't see (with nobody to answer, Windows lets an error pass in
+/// silence, and says the same as for a no). A file a program has open, or one that needs administrator rights, is told
+/// apart from this (see [`why_kept`]). Also what's said when Windows did say why, and it was that: the question was
+/// cancelled, or its Recycle Bin couldn't take it (see [`bin_problem`]); that isn't looked into further.
+pub const KEPT_BY_YOU: &str = "It stays: Windows asked first and was told no, or couldn't move it.";
+
+/// What [`Bin::send`] says of a file a program is using.
+pub const IN_USE: &str = "A program is using it. Close your DAW and try again.";
+
+/// What [`Bin::send`] says when Windows said it moved something to the Recycle Bin but it's still there: a program is
+/// using some of it (a folder), or Windows asked first and was told no, or, told yes, removed it for good while a
+/// program still had it open, so that it lingers for a moment. The start-up sweep's notes stop going by themselves on
+/// it, as on [`KEPT_BY_YOU`].
+pub const STILL_THERE: &str = "It's still there: you chose to keep it, or a program is using some of it.";
 
 /// Sends checked things to the bin one at a time. Anything Windows guards waits, and all of it goes in one
 /// administrator step ([`Sending::flush`]), so Windows asks once. [`Sending::finish`] sends what waits and then finds
@@ -736,11 +761,9 @@ impl Bin for SystemBin {
         let sent = catch_unwind(AssertUnwindSafe(|| trash::delete(path)))
             .map_err(|_| "Windows wouldn't start moving it to the Recycle Bin.".to_owned())?;
         match sent {
-            Ok(()) if fs::symlink_metadata(path).is_ok() => {
-                Err("It's still there: you chose to keep it, or a program is using some of it.".to_owned())
-            }
+            Ok(()) if fs::symlink_metadata(path).is_ok() => Err(STILL_THERE.to_owned()),
             Ok(()) => Ok(()),
-            Err(e) => Err(bin_problem(&e)),
+            Err(e) => Err(problem_with(&e, path)),
         }
     }
 
@@ -751,16 +774,300 @@ impl Bin for SystemBin {
     fn put_back(&self, removed: &[Removed]) -> Vec<Problem> {
         put_back_from_system_bin(removed)
     }
+
+    fn refuses_quietly(&self, path: &Path, bytes: u64) -> Option<String> {
+        refuses_quietly(path, bytes).map(str::to_owned)
+    }
 }
 
-fn bin_problem(e: &trash::Error) -> String {
-    match e {
-        // HRESULTs from Windows: access denied, file in use.
-        trash::Error::Os { code, .. } if code & 0xFFFF == 5 || code & 0xFFFF == 0x78 => NEEDS_ADMIN.to_owned(),
-        trash::Error::Os { code, .. } if code & 0xFFFF == 32 => {
-            "A program is using it. Close your DAW and try again.".to_owned()
+/// Why the computer's own Recycle Bin can't take `path` (`bytes` big) without a word: what [`cant_keep`] looks for (a
+/// network drive, a USB stick or memory card, a file only online in OneDrive), without walking a folder; or, on
+/// Windows, what [`bin_refuses`] looks for. Windows asks "permanently delete?" about a file it can't keep, and removes
+/// it for good on a yes. On a Mac the Trash is reached through Finder, which can ask first too.
+fn refuses_quietly(path: &Path, bytes: u64) -> Option<&'static str> {
+    let shown = text(path);
+    let (shown, real) = both(&shown);
+    if on_network(shown) || on_network(&real) {
+        return Some(Refused::NetworkDrive.text());
+    }
+    if on_removable(&real) {
+        return Some(Refused::RemovableDrive.text());
+    }
+    match fs::symlink_metadata(path) {
+        Ok(meta) if is_online_only(&meta) => return Some(ONLINE_ONLY),
+        Ok(_) => {}
+        Err(_) => return Some(CANT_LOOK),
+    }
+    bin_refuses(Path::new(&real), bytes)
+}
+
+/// What's said of something that stays because the Recycle Bin is off where it is.
+#[cfg_attr(not(windows), allow(dead_code))]
+const BIN_OFF: &str = "The Recycle Bin is off for that drive, so it would be removed for good. It stays.";
+/// What's said of something the Recycle Bin hasn't room for.
+#[cfg_attr(not(windows), allow(dead_code))]
+const NO_ROOM: &str = "The Recycle Bin on that drive is nearly full (or smaller than it), so putting it there would \
+                       remove it, or the oldest things in the Recycle Bin, for good. It stays.";
+/// What's said of something on a drive Windows doesn't name.
+#[cfg(windows)]
+const UNKNOWN_DRIVE: &str =
+    "Windows didn't say which drive it's on, so whether the Recycle Bin can take it isn't known. It stays.";
+/// What's said of something that isn't on one of the computer's own drives.
+#[cfg_attr(not(windows), allow(dead_code))]
+const NOT_OWN_DRIVE: &str =
+    "It isn't on one of this computer's own drives, so the Recycle Bin may not keep it. It stays.";
+/// What's said when how full the Recycle Bin is can't be read.
+#[cfg_attr(not(windows), allow(dead_code))]
+const CANT_SEE_ROOM: &str = "How full the Recycle Bin on that drive is couldn't be read, so it stays.";
+/// What Windows calls one of the computer's own drives (a hard drive or SSD inside it, or a USB one plugged in),
+/// rather than a USB stick, memory card, CD, network drive or RAM drive.
+#[cfg_attr(not(windows), allow(dead_code))]
+const DRIVE_FIXED: u32 = 3;
+
+/// Windows: whether the Recycle Bin can't take `real` (`bytes` big) without asking. It can't when the Recycle Bin is
+/// off (a policy for this account or the whole computer, or that drive's own setting), when it isn't one of the
+/// computer's own drives, or when the Recycle Bin there hasn't room: past its size Windows asks about something too
+/// big, and makes room for the rest by removing the oldest things in it for good. One that can't be told about stays.
+/// What Windows says is read here; [`bin_decides`] works it out.
+#[cfg(windows)]
+fn bin_refuses(real: &Path, bytes: u64) -> Option<&'static str> {
+    use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
+    // Where policies can say "Do not move deleted files to the Recycle Bin" and "Maximum allowed Recycle Bin size".
+    const POLICY: &str = r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer";
+    // Each drive's Recycle Bin settings (the Recycle Bin's Properties), under the drive's id.
+    const DRIVES: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume";
+    // A path Windows can't put on a drive (a `\\?\Volume{…}\` one, once its `\\?\` is taken off) stays.
+    if !real.is_absolute() {
+        return Some(UNKNOWN_DRIVE);
+    }
+    let policies = |name: &str| -> Vec<u32> {
+        [LOCAL_MACHINE, CURRENT_USER]
+            .into_iter()
+            .filter_map(|hive| hive.open(POLICY).ok()?.get_u32(name).ok())
+            .collect()
+    };
+    let Some(drive) = Drive::of(real) else { return Some(UNKNOWN_DRIVE) };
+    // A drive whose Recycle Bin settings were never changed may have none of its own: then Windows' own hold.
+    let settings = CURRENT_USER.open(format!(r"{DRIVES}\{}", drive.id)).ok();
+    let setting = |name: &str| settings.as_ref().and_then(|s| s.get_u32(name).ok());
+    let facts = BinFacts {
+        no_recycle_policy: policies("NoRecycleFiles").into_iter().any(|on| on != 0),
+        kind: drive.kind,
+        nuke_on_delete: setting("NukeOnDelete").is_some_and(|on| on != 0),
+        size: drive.size,
+        policy_percent: policies("RecycleBinSize").into_iter().min(),
+        max_mb: setting("MaxCapacity"),
+    };
+    bin_decides(&facts, bytes, || drive.bin_holds())
+}
+
+/// What Windows says of a drive and its Recycle Bin, as [`bin_refuses`] reads it.
+#[cfg_attr(not(windows), allow(dead_code))]
+#[derive(Clone, Copy)]
+struct BinFacts {
+    /// A policy says "Do not move deleted files to the Recycle Bin", for this account or the whole computer.
+    no_recycle_policy: bool,
+    /// What kind of drive it is ([`DRIVE_FIXED`] for one of the computer's own).
+    kind: u32,
+    /// The drive's own "Don't move files to the Recycle Bin. Remove files immediately when deleted."
+    nuke_on_delete: bool,
+    /// How big the drive is, in bytes.
+    size: u64,
+    /// A policy's "Maximum allowed Recycle Bin size", as a share of the drive in percent (the smaller of two).
+    policy_percent: Option<u32>,
+    /// The drive's own "Maximum size", in MB.
+    max_mb: Option<u32>,
+}
+
+/// Whether the Recycle Bin can't take `bytes` more without asking, by what Windows says of it (`facts`); `held` reads
+/// what's in it now, only when that's needed. The bin may hold a policy's share of the drive, else that drive's own
+/// maximum size, else a twentieth of the drive (Windows' own first choice is more); past nine tenths of that, it stays.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn bin_decides(facts: &BinFacts, bytes: u64, held: impl FnOnce() -> Option<u64>) -> Option<&'static str> {
+    if facts.no_recycle_policy || facts.nuke_on_delete {
+        return Some(BIN_OFF);
+    }
+    if facts.kind != DRIVE_FIXED {
+        return Some(NOT_OWN_DRIVE);
+    }
+    let most = match (facts.policy_percent, facts.max_mb) {
+        (Some(percent), _) => facts.size / 100 * u64::from(percent.min(100)),
+        (None, Some(mb)) => u64::from(mb).saturating_mul(1024 * 1024),
+        (None, None) => facts.size / 20,
+    };
+    // What's in it now, with a tenth to spare.
+    let Some(held) = held() else { return Some(CANT_SEE_ROOM) };
+    (held.saturating_add(bytes) > most / 10 * 9).then_some(NO_ROOM)
+}
+
+/// The drive holding a file, as Windows knows it.
+#[cfg(windows)]
+struct Drive {
+    /// Where it starts ("C:\", or the folder a drive is mounted in), ending in a 0 as Windows reads it.
+    root: Vec<u16>,
+    /// The id its Recycle Bin settings are kept under (the `{…}` of `\\?\Volume{…}\`).
+    id: String,
+    /// What kind of drive it is ([`DRIVE_FIXED`] for one of the computer's own).
+    kind: u32,
+    /// How big it is, in bytes.
+    size: u64,
+}
+
+#[cfg(windows)]
+impl Drive {
+    /// The drive holding `real`; `None` when Windows can't say.
+    #[allow(unsafe_code)]
+    fn of(real: &Path) -> Option<Drive> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetDiskFreeSpaceExW, GetDriveTypeW, GetVolumeNameForVolumeMountPointW, GetVolumePathNameW,
+        };
+        let path: Vec<u16> = real.as_os_str().encode_wide().chain([0]).collect();
+        // The drive's root is never longer than the path inside it.
+        let mut root = vec![0u16; path.len().max(261)];
+        let room = u32::try_from(root.len()).ok()?;
+        // SAFETY: `path` ends in a 0, and `root` has room for `room` characters, as the call is told.
+        if unsafe { GetVolumePathNameW(path.as_ptr(), root.as_mut_ptr(), room) } == 0 {
+            return None;
         }
-        trash::Error::Unknown { description } if description.contains("aborted") => "You chose to keep it.".to_owned(),
+        let end = root.iter().position(|&c| c == 0)?;
+        root.truncate(end + 1);
+        // "\\?\Volume{…}\" is 49 characters and the 0 after them.
+        let mut name = [0u16; 64];
+        // SAFETY: `root` ends in a 0, and `name` has room for the 64 characters the call is told.
+        if unsafe { GetVolumeNameForVolumeMountPointW(root.as_ptr(), name.as_mut_ptr(), 64) } == 0 {
+            return None;
+        }
+        let end = name.iter().position(|&c| c == 0)?;
+        let name = String::from_utf16(name.get(..end)?).ok()?;
+        let id = name.strip_prefix(r"\\?\Volume")?.strip_suffix('\\')?;
+        if !(id.starts_with('{') && id.ends_with('}')) {
+            return None;
+        }
+        // SAFETY: `root` ends in a 0.
+        let kind = unsafe { GetDriveTypeW(root.as_ptr()) };
+        let mut size = 0u64;
+        // SAFETY: `root` ends in a 0, `size` is a number to write to, and the two left out may be, as the call allows.
+        if unsafe { GetDiskFreeSpaceExW(root.as_ptr(), std::ptr::null_mut(), &mut size, std::ptr::null_mut()) } == 0 {
+            return None;
+        }
+        Some(Drive { root, id: id.to_owned(), kind, size })
+    }
+
+    /// How much is in the Recycle Bin on this drive now (this account's), when Windows says. Read again at most every
+    /// 5 seconds, as the drives are in [`on_removable`]: Windows counts it by going through the whole Recycle Bin, and
+    /// the start-up sweep asks about each note it sends.
+    #[allow(unsafe_code)]
+    fn bin_holds(&self) -> Option<u64> {
+        use std::sync::{Mutex, PoisonError};
+        use std::time::{Duration, Instant};
+        use windows_sys::Win32::UI::Shell::{SHQUERYRBINFO, SHQueryRecycleBinW};
+        /// The drive last asked about, and what its Recycle Bin held then.
+        static READ: Mutex<Option<(Instant, Vec<u16>, u64)>> = Mutex::new(None);
+        let mut read = READ.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((at, root, held)) = read.as_ref()
+            && at.elapsed() < Duration::from_secs(5)
+            && *root == self.root
+        {
+            return Some(*held);
+        }
+        let size = u32::try_from(std::mem::size_of::<SHQUERYRBINFO>()).ok()?;
+        let mut info = SHQUERYRBINFO { cbSize: size, ..Default::default() };
+        // SAFETY: `root` ends in a 0, and `info` is as big as it says it is.
+        if unsafe { SHQueryRecycleBinW(self.root.as_ptr(), &mut info) } != 0 {
+            return None;
+        }
+        let held = u64::try_from(info.i64Size).ok()?;
+        *read = Some((Instant::now(), self.root.clone(), held));
+        Some(held)
+    }
+}
+
+/// A Mac: the Trash is reached through Finder, which can first ask you to let the app use it.
+#[cfg(target_os = "macos")]
+fn bin_refuses(_real: &Path, _bytes: u64) -> Option<&'static str> {
+    Some("On a Mac the Trash is reached through Finder, which can ask you first, so nothing goes there by itself.")
+}
+
+/// Linux keeps its Trash in folders of its own, and never asks.
+#[cfg(not(any(windows, target_os = "macos")))]
+fn bin_refuses(_real: &Path, _bytes: u64) -> Option<&'static str> {
+    None
+}
+
+/// Windows: why a file Windows didn't move without saying why ([`KEPT_BY_YOU`]) stayed, when the file tells: a program
+/// has it open and won't let it be removed ([`IN_USE`]), or it needs administrator rights ([`NEEDS_ADMIN`]). It's
+/// only opened to see, asking for nothing but the right to remove it, and closed again; nothing in it changes.
+#[cfg(windows)]
+fn why_kept(path: &Path) -> Option<&'static str> {
+    use std::os::windows::fs::OpenOptionsExt;
+    // The right to remove it (DELETE), sharing everything with whoever else has it open: only a program that holds
+    // it and won't let it be removed stops this.
+    const DELETE: u32 = 0x0001_0000;
+    const SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
+    // What Windows says of a file another program won't let go of, and of one this account may not remove.
+    const SHARING_VIOLATION: i32 = 32;
+    const ACCESS_DENIED: i32 = 5;
+    // A folder can't be told about this way (the file in use may be anywhere inside it).
+    if !fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
+        return None;
+    }
+    match fs::OpenOptions::new().access_mode(DELETE).share_mode(SHARE_ALL).open(path) {
+        Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => Some(IN_USE),
+        Err(e) if e.raw_os_error() == Some(ACCESS_DENIED) => Some(NEEDS_ADMIN),
+        _ => None,
+    }
+}
+
+/// Elsewhere the bin never says it was told no.
+#[cfg(not(windows))]
+fn why_kept(_path: &Path) -> Option<&'static str> {
+    None
+}
+
+/// What stopped `path` going to the Recycle Bin (`e`, from `trash`). When Windows didn't say why, the file may tell
+/// ([`why_kept`]); when it did (the question was cancelled, or its Recycle Bin couldn't take it), that stands, even if
+/// a program has the file open too.
+fn problem_with(e: &trash::Error, path: &Path) -> String {
+    let why = bin_problem(e);
+    if why == KEPT_BY_YOU && matches!(e, trash::Error::Unknown { .. }) {
+        return why_kept(path).map_or(why, str::to_owned);
+    }
+    why
+}
+
+/// What an error from `trash` means here. Windows' own errors (HRESULTs) are told apart by their whole number, as
+/// which part of Windows a code comes from counts too.
+fn bin_problem(e: &trash::Error) -> String {
+    /// Access denied. (`trash` asks Windows' newer file operations, whose errors are all HRESULTs: the bare 0x78
+    /// that its older one gave for access denied never comes.)
+    const ACCESS_DENIED: [u32; 1] = [0x8007_0005];
+    /// A program has it open and won't let it go (the sharing violation, and the copy engine's own word for it).
+    const SHARING_VIOLATION: [u32; 2] = [0x8007_0020, 0x8027_0027];
+    /// Windows didn't move it: it was told no or cancelled (ERROR_CANCELLED, E_ABORT, COPYENGINE_E_USER_CANCELLED,
+    /// COPYENGINE_E_CANCELLED), or the Recycle Bin couldn't take it (COPYENGINE_E_RECYCLE_UNKNOWN_ERROR, _FORCE_NUKE,
+    /// _SIZE_TOO_BIG, _PATH_TOO_LONG, _BIN_NOT_FOUND). The start-up sweep's notes stop going by themselves on these, the
+    /// safe side when it may have asked.
+    const NOT_MOVED: [u32; 4] = [0x8007_04C7, 0x8000_4004, 0x8027_0000, 0x8027_0001];
+    const RECYCLE_BIN_COULDNT: std::ops::RangeInclusive<u32> = 0x8027_0035..=0x8027_003A;
+    match e {
+        trash::Error::Os { code, .. } => {
+            let code = code.cast_unsigned();
+            if ACCESS_DENIED.contains(&code) {
+                NEEDS_ADMIN.to_owned()
+            } else if SHARING_VIOLATION.contains(&code) {
+                IN_USE.to_owned()
+            } else if NOT_MOVED.contains(&code) || RECYCLE_BIN_COULDNT.contains(&code) {
+                KEPT_BY_YOU.to_owned()
+            } else {
+                format!("It couldn't go to the Recycle Bin ({e:?}).")
+            }
+        }
+        // What `trash` says when Windows didn't move something and didn't say why (5.2.9: "Some operations were
+        // aborted"). On Windows it says `Unknown` for nothing else, so the kind of error decides, not its words. The
+        // start-up sweep's notes stop going by themselves on it, so `trash` is held at that version (mo-space's
+        // Cargo.toml): check this before updating it.
+        trash::Error::Unknown { .. } if cfg!(windows) => KEPT_BY_YOU.to_owned(),
         trash::Error::CouldNotAccess { .. } => "It couldn't be reached.".to_owned(),
         _ => format!("It couldn't go to the Recycle Bin ({e:?})."),
     }
@@ -880,7 +1187,96 @@ fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
 
 #[cfg(test)]
 mod tests {
-    use super::on_network;
+    use super::{Bin, IN_USE, KEPT_BY_YOU, NEEDS_ADMIN, SystemBin, bin_problem, on_network, text};
+
+    #[test]
+    fn the_recycle_bin_takes_notes_quietly_only_when_its_on_and_has_room() {
+        use super::{BIN_OFF, BinFacts, CANT_SEE_ROOM, DRIVE_FIXED, NO_ROOM, NOT_OWN_DRIVE, bin_decides};
+        const GB: u64 = 1 << 30;
+        let fixed = BinFacts {
+            no_recycle_policy: false,
+            kind: DRIVE_FIXED,
+            nuke_on_delete: false,
+            size: 1000 * GB,
+            policy_percent: None,
+            max_mb: None,
+        };
+        // No size set: a twentieth of the drive (50 GB), with a tenth to spare, so up to 45 GB.
+        assert_eq!(bin_decides(&fixed, GB, || Some(44 * GB)), None);
+        assert_eq!(bin_decides(&fixed, GB + 1, || Some(44 * GB)), Some(NO_ROOM));
+        assert_eq!(bin_decides(&fixed, 1, || Some(u64::MAX)), Some(NO_ROOM));
+        assert_eq!(bin_decides(&fixed, 1, || None), Some(CANT_SEE_ROOM));
+        // The drive's own maximum size (1024 MB), so up to 0.9 GB.
+        let own = BinFacts { max_mb: Some(1024), ..fixed };
+        assert_eq!(bin_decides(&own, GB / 2, || Some(0)), None);
+        assert_eq!(bin_decides(&own, 950_000_000, || Some(0)), None, "a MB is 1024 * 1024 bytes");
+        assert_eq!(bin_decides(&own, GB, || Some(0)), Some(NO_ROOM));
+        // A policy's share of the drive comes first (1%: 10 GB), and is never more than the whole drive.
+        assert_eq!(bin_decides(&BinFacts { policy_percent: Some(1), ..own }, 8 * GB, || Some(0)), None);
+        let all = BinFacts { policy_percent: Some(500), ..own };
+        assert_eq!(bin_decides(&all, 900 * GB, || Some(0)), None);
+        assert_eq!(bin_decides(&all, 901 * GB, || Some(0)), Some(NO_ROOM));
+        // Off, or not one of the computer's own drives: never, however much room, and the bin isn't even read.
+        let unread = || -> Option<u64> { panic!("not needed") };
+        assert_eq!(bin_decides(&BinFacts { no_recycle_policy: true, ..fixed }, 1, unread), Some(BIN_OFF));
+        assert_eq!(bin_decides(&BinFacts { nuke_on_delete: true, ..fixed }, 1, unread), Some(BIN_OFF));
+        assert_eq!(bin_decides(&BinFacts { kind: 2, ..fixed }, 1, unread), Some(NOT_OWN_DRIVE));
+    }
+
+    /// The start-up sweep's notes stop going by themselves when Windows didn't move one and didn't say why, or was
+    /// told no, or its Recycle Bin couldn't take it: what `trash` says then has to come out as [`KEPT_BY_YOU`]; a file
+    /// in use, or one that needs administrator rights, is told apart by Windows' whole number.
+    #[test]
+    fn windows_not_saying_why_is_told_apart() {
+        let os = |code: u32| bin_problem(&trash::Error::Os { code: code.cast_signed(), description: String::new() });
+        // What `trash` 5.2.9 says then on Windows, whatever its words (elsewhere it means something else).
+        let aborted = trash::Error::Unknown { description: "Some operations were aborted".to_owned() };
+        let reworded = trash::Error::Unknown { description: "Not every file was moved".to_owned() };
+        for unknown in [aborted, reworded] {
+            assert_eq!(bin_problem(&unknown) == KEPT_BY_YOU, cfg!(windows), "{unknown:?}");
+        }
+        // Told no, or cancelled; or the Recycle Bin couldn't take it.
+        for code in [0x8007_04C7, 0x8000_4004, 0x8027_0000, 0x8027_0001, 0x8027_0035, 0x8027_0036, 0x8027_003A] {
+            assert_eq!(os(code), KEPT_BY_YOU, "{code:#x}");
+        }
+        assert_eq!(os(0x8007_0020), IN_USE);
+        assert_eq!(os(0x8027_0027), IN_USE);
+        assert_eq!(os(0x8007_0005), NEEDS_ADMIN);
+        // The same last digits from another part of Windows are something else, and so is "not implemented".
+        for code in [0x8027_0005, 0x8027_0020, 0x8004_0005, 0x8007_0001, 0x8007_0078] {
+            let said = os(code);
+            assert!(said != KEPT_BY_YOU && said != IN_USE && said != NEEDS_ADMIN, "{code:#x}: {said}");
+        }
+    }
+
+    /// Windows: a file a program holds without letting it be removed is told apart from one Windows was told no about,
+    /// and so is one this account may not remove. Only opened to see: nothing is sent to the bin (rule 11).
+    #[cfg(windows)]
+    #[test]
+    fn a_file_a_program_holds_is_told_apart() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        use super::{problem_with, why_kept};
+        let dir = std::env::temp_dir().join(format!("mo-space-why-kept-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("note-2026-07-01_10-00-00.png");
+        std::fs::write(&file, b"x").unwrap();
+        // Held as an image viewer may hold it: others may read it, but not remove it.
+        let held = std::fs::OpenOptions::new().read(true).share_mode(0x1).open(&file).unwrap();
+        assert_eq!(why_kept(&file), Some(IN_USE));
+        // Only looked into when Windows didn't say why: a cancelled question stays a no, held or not.
+        let unknown = trash::Error::Unknown { description: "Some operations were aborted".to_owned() };
+        let cancelled = trash::Error::Os { code: 0x8007_04C7_u32.cast_signed(), description: String::new() };
+        assert_eq!(problem_with(&unknown, &file), IN_USE);
+        assert_eq!(problem_with(&cancelled, &file), KEPT_BY_YOU);
+        drop(held);
+        // Let go of: nothing tells why, so it counts as Windows having been told no.
+        assert_eq!(why_kept(&file), None);
+        // A folder can't be told about this way.
+        assert_eq!(why_kept(&dir), None);
+        assert!(file.exists(), "it was only looked at");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn a_server_path_is_on_the_network() {
@@ -888,5 +1284,36 @@ mod tests {
         assert!(on_network("//nas/music/Kontakt"));
         // A folder that isn't there can't be asked about: only its path tells.
         assert!(!on_network("no such folder/Kontakt"));
+    }
+
+    /// Only asks: nothing is sent to the computer's bin here (rule 11).
+    #[test]
+    fn the_computers_bin_says_whether_it_takes_a_file_quietly() {
+        let dir = std::env::temp_dir().join(format!("mo-space-quiet-bin-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("note-2026-07-01_10-00-00.md");
+        std::fs::write(&file, b"x").unwrap();
+        assert!(SystemBin.refuses_quietly(&dir.join("not there.md"), 1).is_some(), "what can't be looked at stays");
+        let said = SystemBin.refuses_quietly(&file, 1);
+        // Linux's Trash never asks (only a temp folder on a network drive stays); a Mac's Finder can, so nothing goes
+        // there by itself. On Windows it depends on the computer's own Recycle Bin settings, but the drive and how
+        // full its Recycle Bin is can always be read for the temp folder.
+        if cfg!(target_os = "macos") {
+            assert!(said.is_some());
+        } else if cfg!(unix) {
+            assert_eq!(said.is_some(), on_network(&text(&dir)), "{said:?}");
+        }
+        #[cfg(windows)]
+        {
+            let real = crate::real_path(&text(&file)).expect("it's there");
+            let drive = super::Drive::of(std::path::Path::new(&real)).expect("Windows says which drive it's on");
+            assert!(drive.id.starts_with('{') && drive.id.ends_with('}'), "{}", drive.id);
+            assert_eq!(drive.kind, super::DRIVE_FIXED, "the temp folder is on one of the computer's own drives");
+            assert!(drive.size > 0 && drive.bin_holds().is_some(), "how full its Recycle Bin is can be read");
+            assert_ne!(said.as_deref(), Some(super::UNKNOWN_DRIVE));
+            assert_ne!(said.as_deref(), Some(super::CANT_SEE_ROOM));
+        }
+        assert!(file.exists(), "it was only asked about");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

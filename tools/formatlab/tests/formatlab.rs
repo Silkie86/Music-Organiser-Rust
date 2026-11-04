@@ -429,7 +429,9 @@ fn census_counts_what_the_registry_does_not_know() {
     let report = census.report(40);
     assert!(report.contains("Format census of 5 projects"), "{report}");
     assert!(report.contains("event 151  in 1 (33.3%)"), "{report}");
-    assert!(report.contains("Broken.flp"), "{report}");
+    // Why, never which: a project's name is often its song's title, and the report is for pasting.
+    assert!(report.contains("1 couldn't be read at all:\n  1 x "), "{report}");
+    assert!(!report.contains("Broken"), "{report}");
 }
 
 // ---- The command ----

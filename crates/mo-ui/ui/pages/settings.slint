@@ -50,6 +50,8 @@ export struct DawRowInfo {
     ok: bool,
     // Whether this is Bitwig (its colour, and its Check again button).
     bitwig: bool,
+    // Its Install button's words, or empty for none.
+    install: string,
     facts: [SettingsFact],
 }
 
@@ -108,6 +110,11 @@ export global SettingsData {
     in property <bool> daws-checking;
     in property <string> daws-note;
     callback check-daws();
+    // What the last Install did; whether one is running now.
+    in property <string> daws-message;
+    in property <bool> daws-installing;
+    // Install on a row: Bitwig's extension (true) or FL Studio's script.
+    callback install-daw(bool);
 
     // Developer.
     in property <[SettingsFact]> facts;
@@ -626,6 +633,12 @@ component DawsTab inherits VerticalLayout {
         font-size: Type.meta;
         wrap: word-wrap;
     }
+    if SettingsData.daws-message != "": Text {
+        text: SettingsData.daws-message;
+        color: Theme.text;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
     for d in SettingsData.daws: SettingsCard {
         title: d.daw;
         HorizontalLayout {
@@ -648,6 +661,13 @@ component DawsTab inherits VerticalLayout {
                 tip: "Asks the link in Bitwig how it stands. Only reads: nothing goes into the project.";
                 enabled: !SettingsData.daws-checking;
                 clicked => { SettingsData.check-daws(); }
+            }
+            if d.install != "": StudioButton {
+                horizontal-stretch: 0;
+                text: SettingsData.daws-installing ? "Installing\u{2026}" : d.install;
+                tip: d.bitwig ? "Puts the app's extension in Bitwig's folders and takes out the older script. Close Bitwig first." : "Puts the app's script in FL Studio's folders, keeping your setting for letting the app make changes";
+                enabled: !SettingsData.daws-installing;
+                clicked => { SettingsData.install-daw(d.bitwig); }
             }
         }
         for f in d.facts: FactLine {

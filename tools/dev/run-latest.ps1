@@ -582,7 +582,41 @@ function Build-App {
             catch { Say "Couldn't copy the debugging info ($($_.Exception.Message)): a crash log may not name the functions." 'Yellow' }
         }
     }
+    Add-BitwigExtension $folder
     $copy
+}
+
+function Add-BitwigExtension([string]$Folder) {
+    # The Bitwig extension (extensions\bitwig-java, Java) is built with its Maven Wrapper when a JDK is installed, and
+    # copied beside the app as extensions\MusicOrganiser.bwextension, where Settings > DAWs installs it from. It's only
+    # built again when its code changed, and without its tests (CI runs them). Without a JDK, or if the build fails,
+    # the app still runs: the DAWs tab says the app has no copy to install.
+    $code = [IO.Path]::Combine($Repo, 'extensions', 'bitwig-java')
+    if (-not [IO.File]::Exists((Join-Path $code 'pom.xml'))) { return }
+    $built = [IO.Path]::Combine($code, 'target', 'MusicOrganiser.bwextension')
+    if (-not $env:JAVA_HOME -and -not (Get-Command java -ErrorAction SilentlyContinue)) {
+        Say 'No JDK, so the Bitwig extension is not built (winget install Microsoft.OpenJDK.21 to have it).' 'Yellow'
+        return
+    }
+    $sources = @(Get-ChildItem -LiteralPath ([IO.Path]::Combine($code, 'src', 'main')) -Recurse -File -ErrorAction SilentlyContinue) +
+               @(Get-Item -LiteralPath (Join-Path $code 'pom.xml'))
+    $newest = ($sources | Measure-Object -Property LastWriteTimeUtc -Maximum).Maximum
+    if (-not [IO.File]::Exists($built) -or [IO.File]::GetLastWriteTimeUtc($built) -lt $newest) {
+        Say 'Building the Bitwig extension...' 'DarkGray'
+        $wrapper = if ($OnWindows) { Join-Path $code 'mvnw.cmd' } else { Join-Path $code 'mvnw' }
+        Push-Location -LiteralPath $code
+        try { & $wrapper -B -q package -DskipTests 2>&1 | ForEach-Object { Say "  $_" 'DarkGray' } }
+        finally { Pop-Location }
+        if ($LASTEXITCODE -ne 0 -or -not [IO.File]::Exists($built)) {
+            Say 'The Bitwig extension did not build (what Maven said is above). The app runs without a copy to install.' 'Yellow'
+            return
+        }
+    }
+    try {
+        $null = [IO.Directory]::CreateDirectory((Join-Path $Folder 'extensions'))
+        Copy-Item -Force -LiteralPath $built -Destination ([IO.Path]::Combine($Folder, 'extensions', 'MusicOrganiser.bwextension')) -ErrorAction Stop
+    }
+    catch { Say "Couldn't copy the Bitwig extension beside the app ($($_.Exception.Message))." 'Yellow' }
 }
 
 function Remove-OldBuilds([string]$Keep) {

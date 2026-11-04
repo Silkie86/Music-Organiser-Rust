@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The Music Organiser extension for Bitwig Studio (a Java controller extension).
+
+    mvn package    builds target/MusicOrganiser.bwextension (tests included)
+    ./mvnw package does the same with only a JDK installed (mvnw.cmd on Windows)
+
+  Bitwig's API comes from Bitwig's own Maven repository and is "provided": Bitwig has it at run time, so
+  the extension ships alone, with nothing else inside but its own classes.
+-->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>org.musicorganiser</groupId>
+  <artifactId>music-organiser-bitwig</artifactId>
+  <version>3.18</version>
+  <packaging>jar</packaging>
+  <name>Music Organiser extension for Bitwig Studio</name>
+
+  <properties>
+    <!-- Bitwig runs extensions on its own Java (25 in Bitwig 6.1); building for 17 leaves room to spare. -->
+    <maven.compiler.release>17</maven.compiler.release>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+    <!-- API 23 is all Bitwig 6.1 offers without beta methods, and the extension asks Bitwig for no more. -->
+    <bitwig.api.version>23</bitwig.api.version>
+    <junit.version>5.11.4</junit.version>
+  </properties>
+
+  <repositories>
+    <!-- Maven Central first, so only Bitwig's API is looked for in Bitwig's repository. -->
+    <repository>
+      <id>central</id>
+      <url>https://repo.maven.apache.org/maven2</url>
+      <snapshots><enabled>false</enabled></snapshots>
+    </repository>
+    <repository>
+      <id>bitwig</id>
+      <name>Bitwig Maven Repository</name>
+      <url>https://maven.bitwig.com</url>
+      <snapshots><enabled>false</enabled></snapshots>
+    </repository>
+  </repositories>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.bitwig</groupId>
+      <artifactId>extension-api</artifactId>
+      <version>${bitwig.api.version}</version>
+      <scope>provided</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>${junit.version}</version>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <!-- target/MusicOrganiser.jar, copied to MusicOrganiser.bwextension below: the name Bitwig looks for. -->
+    <finalName>MusicOrganiser</finalName>
+    <plugins>
+      <plugin>
+        <artifactId>maven-clean-plugin</artifactId>
+        <version>3.4.0</version>
+      </plugin>
+      <plugin>
+        <artifactId>maven-resources-plugin</artifactId>
+        <version>3.3.1</version>
+      </plugin>
+      <plugin>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.14.0</version>
+        <configuration>
+          <compilerArgs>
+            <arg>-Xlint:all</arg>
+            <!-- Bitwig's API classes are Java 8 class files without generic types, which -Xlint finds plenty to say about. -->
+            <arg>-Xlint:-rawtypes</arg>
+            <arg>-Xlint:-unchecked</arg>
+            <arg>-Xlint:-options</arg>
+            <arg>-Xlint:-processing</arg>
+          </compilerArgs>
+        </configuration>
+      </plugin>
+      <plugin>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <version>3.5.2</version>
+      </plugin>
+      <plugin>
+        <artifactId>maven-jar-plugin</artifactId>
+        <version>3.4.2</version>
+        <configuration>
+          <archive>
+            <addMavenDescriptor>false</addMavenDescriptor>
+            <manifestEntries>
+              <Implementation-Title>Music Organiser</Implementation-Title>
+              <Implementation-Version>${project.version}</Implementation-Version>
+            </manifestEntries>
+          </archive>
+        </configuration>
+      </plugin>
+      <plugin>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <version>3.1.0</version>
+        <executions>
+          <execution>
+            <id>bwextension</id>
+            <phase>package</phase>
+            <goals>
+              <goal>run</goal>
+            </goals>
+            <configuration>
+              <target>
+                <copy file="${project.build.directory}/${project.build.finalName}.jar"
+                      tofile="${project.build.directory}/MusicOrganiser.bwextension" overwrite="true"/>
+              </target>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <artifactId>maven-install-plugin</artifactId>
+        <version>3.1.3</version>
+      </plugin>
+    </plugins>
+  </build>
+</project>

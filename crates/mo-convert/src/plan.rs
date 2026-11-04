@@ -376,15 +376,16 @@ pub fn sample_ticks(seconds: f64, semitones: f64, tempo: f64, ppq: u16) -> i64 {
     (seconds / 2f64.powf(semitones / 12.0) * tempo / 60.0 * ppq as f64 - 1e-6).ceil() as i64
 }
 
-/// FL's Time knob counts 192 a beat.
-const TIME_PER_BEAT: f64 = 192.0;
+/// FL's tempo for a new song, used when a save's own can't be read.
+const FL_TEMPO: f64 = 140.0;
 
-/// How many seconds a sample `seconds` long plays for at `tempo`, stretched as the channel stretches it.
+/// The slowest tempo Bitwig takes, in BPM.
+pub const MIN_BPM: f64 = 20.0;
+
+/// How many seconds a sample `seconds` long plays for at `tempo`, stretched as the channel stretches it: the FL
+/// reader's own rule, so the converter and the arrangement page always agree.
 pub fn played_seconds(stretch: &FlStretch, seconds: f64, tempo: f64) -> f64 {
-    let length =
-        if stretch.time > 0 && tempo > 0.0 { stretch.time as f64 / TIME_PER_BEAT * 60.0 / tempo } else { seconds };
-    let length = length * stretch.multiplier;
-    if stretch.mode == 0 { length / 2f64.powf(stretch.pitch_cents as f64 / 1200.0) } else { length }
+    stretch.played_seconds(seconds, tempo)
 }
 
 /// How many semitones higher than recorded a sample `seconds` long sounds when it plays for `played` seconds.
@@ -419,6 +420,8 @@ type EffectCopies = HashMap<(u32, u32), Vec<(TrackRef, usize, FlPlugin)>>;
 
 struct Planner<'a> {
     song: &'a FlSong,
+    /// The tempo the project plays at (the song's, kept to what Bitwig plays).
+    tempo: f64,
     options: Options,
     read_sample: &'a mut dyn FnMut(&str) -> Option<SampleFile>,
     /// Each sample read once (rule 12), however many channels play it.
@@ -536,7 +539,7 @@ impl Planner<'_> {
                     )),
                     Some(i) if !self.options.steps_until_next_note => {
                         let (seconds, root, pitch) = (i.seconds, c.root_key, c.pitch_cents);
-                        let (tempo, ppq) = (song.tempo, song.ppq);
+                        let (tempo, ppq) = (self.tempo, song.ppq);
                         sample_length = Some(Box::new(move |key| {
                             sample_ticks(seconds, key as f64 - root as f64 + pitch as f64 / 100.0, tempo, ppq)
                         }));
@@ -639,7 +642,7 @@ impl Planner<'_> {
             let track_muted = clips::all_on_muted_tracks(clips);
             let audio_clips = clips::on_muted_tracks(clips, track_muted)
                 .iter()
-                .map(|x| audio_clip(c, x, info.as_ref(), song.tempo, song.ppq))
+                .map(|x| audio_clip(c, x, info.as_ref(), self.tempo, song.ppq))
                 .collect();
             let on = clips.iter().filter(|x| x.on_muted_track).map(|x| x.track);
             if let Some(n) = notes::on_muted_tracks(&name, on, &song.muted_tracks, track_muted) {
@@ -818,6 +821,20 @@ fn in_song_order(mut points: Vec<LanePoint>) -> Vec<LanePoint> {
 
 /// What an FL song becomes. `read_sample` says what's known of a sample file (`None` when it can't be read).
 pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str) -> Option<SampleFile>) -> Plan {
+    // The tempo the project plays at, which every clip's length is worked out from. A damaged save can give 0 (or
+    // worse), which would make clip lengths endless: FL's own 140 instead. Bitwig goes down to 20 BPM, FL to 10.
+    let (tempo, tempo_note) = match song.tempo {
+        t if !(t.is_finite() && t > 0.0) => {
+            (FL_TEMPO, Some(format!("Song: its tempo couldn't be read, so it plays at {FL_TEMPO} BPM")))
+        }
+        t if t < MIN_BPM => (
+            MIN_BPM,
+            Some(format!(
+                "Song: its tempo is {t} BPM and Bitwig's goes down to {MIN_BPM} BPM, so it plays at {MIN_BPM} BPM"
+            )),
+        ),
+        t => (t, None),
+    };
     let inserts: HashMap<u32, &FlInsert> = song.inserts.iter().map(|i| (i.index, i)).collect();
     // Audio clip channels play their clips on audio tracks; one with no notes needs no instrument track too.
     let audio: HashSet<u32> =
@@ -842,6 +859,7 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
 
     let mut planner = Planner {
         song,
+        tempo,
         options,
         read_sample,
         samples: HashMap::new(),
@@ -851,6 +869,7 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
         effect_copies: HashMap::new(),
         tracks_with_effects: HashMap::new(),
     };
+    planner.notes.extend(tempo_note);
     let mut tracks: Vec<Track> = Vec::new();
     // Each carried channel's tracks (its instrument track first), and its plugin's place on its instrument track.
     let mut placed: HashMap<u32, (usize, usize)> = HashMap::new();
@@ -1154,12 +1173,12 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
             && let Some(&first) = lane.points.first()
             && first.beat > SAME_BEAT
         {
-            let held = LanePoint { beat: 0.0, value: song.tempo, from: 0.0, ..first };
+            let held = LanePoint { beat: 0.0, value: tempo, from: 0.0, ..first };
             lane.points.splice(0..0, [held, LanePoint { beat: first.beat, ..held }]);
         }
     }
 
     let mut seen = HashSet::new();
     let notes = planner.notes.into_iter().filter(|n| seen.insert(n.clone())).collect();
-    Plan { title: song.title.clone(), tempo: song.tempo, ppq: song.ppq, tracks, master_effects, lanes, notes }
+    Plan { title: song.title.clone(), tempo, ppq: song.ppq, tracks, master_effects, lanes, notes }
 }

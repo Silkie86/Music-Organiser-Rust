@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
-use mo_space::bitwig::{FixedProject, LibraryCopy, LibraryIndex, project_folders, remove_copies};
+use mo_space::bitwig::{FixedProject, LibraryCopy, LibraryIndex, project_folders, remove_copies, saves_in};
 use mo_space::clean::{Bin, Problem, Removed, What, undo};
 use mo_space::key;
 
@@ -271,6 +271,54 @@ fn the_project_folders_are_the_ones_with_a_bitwig_project_and_its_copies() {
 
     // A stop stops it.
     assert!(project_folders(&roots, &AtomicBool::new(true)).is_err());
+}
+
+/// A Bitwig project saved `minutes` after a fixed time.
+fn saved(dir: &Path, rel: &str, minutes: u64) -> PathBuf {
+    write(dir, rel, b"project");
+    let path = dir.join(rel);
+    let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000 + minutes * 60);
+    fs::File::options().write(true).open(&path).unwrap().set_modified(at).unwrap();
+    path
+}
+
+#[test]
+fn a_project_folders_saves_are_listed_newest_first_each_with_its_fixed_project() {
+    let dir = fixtures("mo-space-bitwig-saves");
+    let song = dir.join("Song");
+    let older = saved(&song, "Song.bwproject", 10);
+    let newest = saved(&song, "Song v2.bwproject", 30);
+    // The newest save's fixed project, written after it; and the older one's, written before it was saved again.
+    let fixed = saved(&song, "Song v2 (fixed).bwproject", 40);
+    let old_fixed = saved(&song, "Song (fixed).bwproject", 5);
+    // Bitwig's auto-backups in a folder below are saves too. A fixed project whose save has gone is no one's, and a
+    // Mac's "._" file isn't a save.
+    let backup = saved(&song, "auto-backups/Song v2-1.bwproject", 20);
+    saved(&song, "Gone (fixed 2).bwproject", 50);
+    saved(&song, "._Song v2.bwproject", 60);
+    write(&song, "multi-samples/Kicks-2.multisample", b"kicks");
+    let stop = AtomicBool::new(false);
+    type Seen = (PathBuf, bool, Option<(PathBuf, bool)>);
+    let seen = |saves: &[mo_space::bitwig::Save]| -> Vec<Seen> {
+        saves.iter().map(|s| (s.path.clone(), s.below, s.fixed.clone())).collect()
+    };
+    let saves = saves_in(&song, &stop).unwrap();
+    assert_eq!(
+        seen(&saves),
+        [
+            (newest.clone(), false, Some((fixed.clone(), true))),
+            (older.clone(), false, Some((old_fixed.clone(), false))),
+            (backup.clone(), true, None),
+        ]
+    );
+    assert!(saves[0].is_fixed() && !saves[1].is_fixed() && !saves[2].is_fixed());
+
+    // Of two fixed projects for one save the newest counts, and once the save is saved again it's out of date.
+    let second = saved(&song, "Song v2 (fixed 2).bwproject", 45);
+    saved(&song, "Song v2.bwproject", 50);
+    let saves = saves_in(&song, &stop).unwrap();
+    assert_eq!(saves[0].fixed, Some((second, false)));
+    assert!(saves_in(&song, &AtomicBool::new(true)).is_err());
 }
 
 #[test]

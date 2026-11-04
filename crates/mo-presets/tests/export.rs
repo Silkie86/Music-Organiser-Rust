@@ -109,12 +109,32 @@ fn half_written_files_a_crash_left_are_cleared() {
     for f in [&old, &yours] {
         std::fs::File::options().write(true).open(f).unwrap().set_modified(hour_ago).unwrap();
     }
+    // A folder and a link named like half-written files, as old: never removed, nor what the link points at.
+    #[cfg(unix)]
+    let outside = {
+        std::fs::File::open(presets.join("Kept.fxp.mo-part-1-1")).unwrap().set_modified(hour_ago).unwrap();
+        let outside = root.join("Outside.fxp");
+        std::fs::write(&outside, b"yours").unwrap();
+        std::os::unix::fs::symlink(&outside, presets.join("x.fxp.mo-part-1-2")).unwrap();
+        // The link's own time, not its target's (GNU's and BSD's touch both take -h -t).
+        let touched = std::process::Command::new("touch")
+            .args(["-h", "-t", "202001010000"])
+            .arg(presets.join("x.fxp.mo-part-1-2"))
+            .status()
+            .unwrap();
+        assert!(touched.success());
+        outside
+    };
     export::export(&[serum("Lead", "")], "Song.flp", &root, None).unwrap();
     // Only the old one of the export's own shape goes; one still being written, other files and folders stay.
-    assert_eq!(
-        names(&presets),
-        ["Kept.fxp.mo-part-1-1", "Lead.part-1-2", "Serum - Lead.fxp", "Serum - Pad.fxp.mo-part-98-0"]
-    );
+    #[allow(unused_mut)]
+    let mut kept = vec!["Kept.fxp.mo-part-1-1", "Lead.part-1-2", "Serum - Lead.fxp", "Serum - Pad.fxp.mo-part-98-0"];
+    #[cfg(unix)]
+    {
+        kept.push("x.fxp.mo-part-1-2");
+        assert_eq!(std::fs::read(&outside).unwrap(), b"yours");
+    }
+    assert_eq!(names(&presets), kept);
 }
 
 #[test]

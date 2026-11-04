@@ -267,8 +267,13 @@ fn read_peaks(found: &HashMap<String, PathBuf>, asked: u64) -> Arc<HashMap<Strin
             if SHOWN.load(Ordering::Relaxed) != asked {
                 return None;
             }
-            let audio = mo_audio::read(file, mo_audio::MAX_SECONDS).ok()?;
-            Some((saved.clone(), Arc::new(Peaks::of(audio.sample_rate, &audio.channels, audio.file_seconds))))
+            // A sound that trips the reader is drawn without its wave; the others still come.
+            std::panic::catch_unwind(|| {
+                let audio = mo_audio::read(file, mo_audio::MAX_SECONDS).ok()?;
+                Some((saved.clone(), Arc::new(Peaks::of(audio.sample_rate, &audio.channels, audio.file_seconds))))
+            })
+            .ok()
+            .flatten()
         })
         .collect();
     Arc::new(peaks)

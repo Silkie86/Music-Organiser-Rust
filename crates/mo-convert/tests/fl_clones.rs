@@ -286,7 +286,8 @@ fn an_fl_8_saves_rows_go_below_its_audio_tracks() {
 
 #[test]
 fn the_fix_writes_a_copy_and_never_changes_the_project() {
-    let dir = std::env::temp_dir().join(format!("mo-convert-test-fl-clones-{}", std::process::id()));
+    // The test build's own folder, under a fixed name, so a failed run leaves nothing new behind.
+    let dir = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-convert").join("fix-writes-a-copy");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let project = dir.join("old song_3.flp");

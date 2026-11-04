@@ -70,8 +70,8 @@ pub type Templates = HashMap<String, Template>;
 
 /// A `.bwpreset` that can serve as a template ([`inspect_doc`]), with its path and time.
 pub fn inspect(path: &Path) -> Option<Template> {
-    let raw = std::fs::read(path).ok()?;
-    let mut template = inspect_bytes(&raw)?;
+    // The file's bytes handed to the decoder as they are, not copied (rule 24).
+    let mut template = inspect_doc(&bitwig::decode(std::fs::read(path).ok()?).ok()?)?;
     template.path = path.to_path_buf();
     template.modified = std::fs::metadata(path).and_then(|m| m.modified()).ok();
     Some(template)

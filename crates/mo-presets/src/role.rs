@@ -465,9 +465,9 @@ pub fn guess(part: &Part<'_>, limits: &Thresholds) -> Guess {
         };
     };
     let (role, mut reason, weak) = from_notes(&stats, limits);
-    // Bass and lead are told apart by pitch, so only they depend on the octave; the reason says so even when a name
-    // then overrules the call.
-    let pitch_matters = matches!(role, Role::Bass | Role::Lead);
+    // Bass, lead and arp are told apart by pitch (a fast even line below the bass line is bass), so only they depend
+    // on the octave; the reason says so even when a name then overrules the call.
+    let pitch_matters = matches!(role, Role::Bass | Role::Lead | Role::Arp);
     if pitch_matters && !octave_checked {
         reason += unchecked;
     }

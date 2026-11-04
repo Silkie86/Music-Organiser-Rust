@@ -1,8 +1,9 @@
 //! The Space page: the drives your projects, samples, backup and the app's own files are on, how full each is, what
-//! the app's own files take (part 1), and Bitwig's copies of Library multisamples in your projects (part 2). mo_app's
-//! `space` and `space_bitwig` decide every word. It looks the first time the page shows, on low-priority threads, and
-//! again when it shows after five minutes or on Measure again, so nothing on the window's thread waits for a disk
-//! (rule 12). Nothing here changes a file, and the library is only read.
+//! the app's own files take (part 1), and Bitwig's copies of Library multisamples in your projects (part 2), with Fix
+//! for the saves you tick. mo_app's `space` and `space_bitwig` decide every word. It looks the first time the page
+//! shows, on low-priority threads, and again when it shows after five minutes or on Measure again, so nothing on the
+//! window's thread waits for a disk (rule 12). Only Fix writes, and only new "(fixed)" projects beside the saves you
+//! ticked; the library is only read.
 
 use std::cell::RefCell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -14,10 +15,10 @@ use std::time::{Duration, Instant};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::places::Place;
-use mo_app::shortcuts::{Shortcuts, what_of};
-use mo_app::space::{self, Drive, Fill, Holds};
-use mo_app::space_bitwig::{self, BITWIG_COPIES, Copies};
-use mo_app::{backup, log, paths};
+use mo_app::shortcuts::what_of;
+use mo_app::space::{self, Drive, Fill, Holds, Part};
+use mo_app::space_bitwig::{self, BITWIG_COPIES, Copies, Fixes, Fixing, ToFix};
+use mo_app::{backup, log, paths, shell};
 use mo_space::app_files::{self, AppFilesPart};
 use mo_space::bitwig::{self, LibraryIndex};
 use slint::{ComponentHandle, ModelRc, VecModel};
@@ -31,11 +32,15 @@ const FRESH: Duration = Duration::from_secs(5 * 60);
 /// How often a look for Bitwig copies tells the window how far it is, at most (rule 12).
 const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 
-/// The buttons' ids, from the one shortcut list (rule 15): Measure again and Show in folder are the page's own
+/// The buttons' ids, from the one shortcut list (rule 15): Measure again, Show in folder and Fix are the page's own
 /// (`mo_app::shortcuts::SPACE_ACTIONS`); the Recycle Bin is the app-wide action, so its button shows the same key.
 const MEASURE: &str = "space.measure";
 const REVEAL: &str = "space.reveal";
+const FIX: &str = "space.fix";
 const RECYCLE_BIN: &str = "app.recycleBin";
+
+/// The name the library knows Bitwig by, for the program picked for it in Settings.
+const BITWIG: &str = "Bitwig";
 
 /// One look at the drives and the app's files.
 struct Ask {
@@ -57,7 +62,8 @@ struct BitwigAsk {
 
 /// What a look brings back, a step at a time: the drives first (quick), then the app's files once they're measured;
 /// and from the look for Bitwig copies, how far it is, then what it found. A look that crashed (the crash is logged)
-/// says so, so the page doesn't wait for it for ever.
+/// says so, so the page doesn't wait for it for ever. Fix brings back how each save went, then that it has finished,
+/// always, even when it crashed.
 enum Step {
     Drives(u64, Vec<Drive>),
     AppFiles(u64, Vec<AppFilesPart>),
@@ -65,6 +71,8 @@ enum Step {
     BitwigLooking(u64, (usize, usize)),
     Bitwig(u64, Copies),
     BitwigCrashed(u64),
+    Fixed(PathBuf, Fixing),
+    FixDone,
 }
 
 /// One of the page's looks: its low-priority thread (started the first time a look is asked for), how many looks were
@@ -107,7 +115,6 @@ struct Page {
     library: PathBuf,
     /// Set once the page is wired; it looks at nothing before.
     feed: Option<Feed>,
-    shortcuts: Shortcuts,
     /// The look at the drives and the app's files.
     look: Looks<Ask>,
     /// When the newest look was asked for: none before the page first shows.
@@ -125,8 +132,25 @@ struct Page {
     /// While a look for Bitwig copies is on: the project folders looked through, of how many (0 while they're still
     /// being found).
     bitwig_looking: Option<(usize, usize)>,
+    /// What Fix did this time, the saves you ticked or unticked, and the projects whose other saves are on show.
+    fixes: Fixes,
     /// The picked line's id, or "" when none is.
     picked: String,
+    /// The parts on the card on show, for its ticks and links (they say which part by its place). The card's rows
+    /// are only made again when these change.
+    card_parts: Vec<Part>,
+}
+
+/// What a step that arrived changes on show.
+enum Changed {
+    /// The drives, the lists and the card.
+    All,
+    /// Biggest wins first and the card: what a look for Bitwig copies found or how far it is, or how Fix is doing.
+    Wins,
+    /// Fix has finished: the page looks for copies again, to see what Fix wrote as it is on disk.
+    LookAgain,
+    /// Nothing: an older look's step, or how far a later look for Bitwig copies is while the last one's stay on show.
+    Nothing,
 }
 
 thread_local! {
@@ -134,14 +158,14 @@ thread_local! {
 }
 
 /// Wires the page. It reads nothing until it first shows ([`shown`]): the library at `library` (read-only) for your
-/// project and sample folders, and the backup's settings for its drive. Opening a folder or the Recycle Bin reports
-/// on `feed`'s cards if it can't, and the look for Bitwig copies shows how far it is there.
-pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
+/// project and sample folders, the program picked for Bitwig and the backup's settings for its drive. Opening a folder
+/// or the Recycle Bin reports on `feed`'s cards if it can't, and the look for Bitwig copies and Fix show how far they
+/// are there. The buttons' tooltips take their keys from the app's one list as it is now (`crate::shortcuts`).
+pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.library = library;
         p.feed = Some(feed);
-        p.shortcuts = shortcuts.clone();
     });
     let data = app.global::<SpaceData>();
     let weak = app.as_weak();
@@ -160,6 +184,37 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     data.on_chosen(move |id| {
         let Some(app) = weak.upgrade() else { return };
         chosen(&app, &id);
+    });
+    let weak = app.as_weak();
+    data.on_tick_part(move |at, ticked| {
+        let Some(app) = weak.upgrade() else { return };
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            if let Some((save, _)) = part_at(&p, at).and_then(|part| part.tick.clone()) {
+                p.fixes.ticks.insert(save, ticked);
+            }
+            // The tick box ticked itself, which undoes its tie to the card's rows: made again, they tie it again.
+            p.card_parts.clear();
+        });
+        show_card(&app);
+    });
+    data.on_open_part(move |at| {
+        if let Some(file) = PAGE.with(|p| part_at(&p.borrow(), at).and_then(|part| part.open.clone())) {
+            open_in_bitwig(file);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_more_part(move |at| {
+        let Some(app) = weak.upgrade() else { return };
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            if let Some((_, folder)) = part_at(&p, at).and_then(|part| part.more.clone())
+                && !p.fixes.shown.remove(&folder)
+            {
+                p.fixes.shown.insert(folder);
+            }
+        });
+        show_card(&app);
     });
     show(app);
     // The app may start on this page, before it was wired.
@@ -188,16 +243,23 @@ pub fn shown(app: &AppWindow) {
 /// Runs one of the page's own shortcuts ([`mo_app::shortcuts::SPACE_ACTIONS`]). Returns whether it did anything,
 /// so an unused key goes on.
 pub fn run_action(app: &AppWindow, id: &str) -> bool {
-    let (measuring, picked) = PAGE.with(|p| {
+    let (measuring, picked, can_fix) = PAGE.with(|p| {
         let p = p.borrow();
-        (p.measuring, p.picked.clone())
+        let can_fix = p.fixes.button(p.bitwig.as_ref()).is_some_and(|(_, enabled)| enabled);
+        (p.measuring, p.picked.clone(), can_fix)
     });
     match id {
         MEASURE if !measuring => chosen(app, MEASURE),
         REVEAL if picked == space::APP_FILES => chosen(app, REVEAL),
+        FIX if picked == BITWIG_COPIES && can_fix => chosen(app, FIX),
         _ => return false,
     }
     true
+}
+
+/// The part at `at` on the card on show.
+fn part_at(p: &Page, at: i32) -> Option<&Part> {
+    usize::try_from(at).ok().and_then(|at| p.card_parts.get(at))
 }
 
 /// A button on the page or its card.
@@ -209,25 +271,129 @@ fn chosen(app: &AppWindow, id: &str) {
             look_for_copies(app);
         }
         (REVEAL, Some(feed)) => crate::files::open_folder(&feed, &paths::data_dir().to_string_lossy()),
+        (FIX, Some(feed)) => fix_ticked(app, feed),
         (RECYCLE_BIN, Some(feed)) => crate::files::open_recycle_bin(&feed),
         _ => {}
     }
 }
 
-/// The buttons with their words, each with its tooltip and key from the shortcut list (rule 15). Measure again
-/// waits while the drives and the app's files are being measured.
-fn actions(p: &Page, buttons: &[(&str, &str)]) -> ModelRc<CardAction> {
+/// The buttons: each one's id, words and whether it can be pressed now, with its tooltip and key from the shortcut
+/// list as it is now (rule 15).
+fn actions(buttons: Vec<(&str, String, bool)>) -> ModelRc<CardAction> {
+    let keys = crate::shortcuts();
     let actions: Vec<CardAction> = buttons
-        .iter()
-        .map(|&(id, text)| CardAction {
+        .into_iter()
+        .map(|(id, text, enabled)| CardAction {
             text: text.into(),
             tip: what_of(id).into(),
-            key: p.shortcuts.key_of(id).into(),
+            key: keys.key_of(id).into(),
             id: id.into(),
-            enabled: !(id == MEASURE && p.measuring),
+            enabled,
         })
         .collect();
     ModelRc::new(VecModel::from(actions))
+}
+
+/// Measure again, which waits while the drives and the app's files are being measured.
+fn measure_button(p: &Page) -> (&'static str, String, bool) {
+    (MEASURE, "Measure again".to_owned(), !p.measuring)
+}
+
+/// Fix: writes a "(fixed)" project beside each ticked save, one after another on a low-priority thread, with an
+/// activity card saying how far it is. Each save's line says how it went once it's done; then the page looks for
+/// copies again, so it sees the fixed projects as they are on disk. The saves and their copies aren't changed.
+fn fix_ticked(app: &AppWindow, feed: Feed) {
+    let jobs = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let p = &mut *p;
+        if p.fixes.busy() {
+            return Vec::new();
+        }
+        let jobs = p.bitwig.as_ref().map(|found| p.fixes.to_fix(found)).unwrap_or_default();
+        if !jobs.is_empty() {
+            p.fixes.start(&jobs);
+        }
+        jobs
+    });
+    if jobs.is_empty() {
+        return;
+    }
+    let weak = app.as_weak();
+    let started = background::spawn("Space fix", move || {
+        // A crash outside a save's own fix (logged as one) still finishes Fix, so the page isn't busy for ever: the
+        // saves it didn't get to say so.
+        let _ = catch_unwind(AssertUnwindSafe(|| fix_each(&jobs, &feed, &weak)));
+        arrive(&weak, Step::FixDone);
+    });
+    if let Err(e) = started {
+        log::error("Space", &format!("Couldn't start fixing: {e}"));
+        PAGE.with(|p| p.borrow_mut().fixes.finished());
+    }
+    show_wins(app);
+}
+
+/// Fix's own work, off the window's thread: each save in turn, inside the low-priority pool (rule 21), with an
+/// activity card saying how far it is and how it went, and each save's line told how it went.
+fn fix_each(jobs: &[ToFix], feed: &Feed, weak: &slint::Weak<AppWindow>) {
+    let card = feed.start(space_bitwig::FIXING, "");
+    let (mut written, mut failed) = (0, 0);
+    for (n, job) in jobs.iter().enumerate() {
+        card.progress(n as f32 / jobs.len() as f32, Some(&space_bitwig::fix_progress_words(n, jobs.len())));
+        // A crash (logged as one) fails this save only: the rest are still tried.
+        let done = catch_unwind(AssertUnwindSafe(|| background::on_pool(|| space_bitwig::fix(job))))
+            .unwrap_or_else(|_| Fixing::Failed("it stopped with an error, which the log says".to_owned()));
+        let save = job.save.display();
+        match &done {
+            Fixing::Written(file) => {
+                written += 1;
+                log::info("Space", &format!("Fixed {save}: wrote {}", file.display()));
+            }
+            Fixing::Failed(why) => {
+                failed += 1;
+                log::warning("Space", &format!("Couldn't fix {save}: {why}"));
+            }
+            Fixing::Writing => {}
+        }
+        arrive(weak, Step::Fixed(job.save.clone(), done));
+    }
+    match space_bitwig::fixed_words(written, failed) {
+        Ok(words) => card.done(&words),
+        Err(words) => card.failed(&words),
+    }
+}
+
+/// Opens a fixed project in Bitwig: the program picked for it in Settings (shared with the C# app), else whatever opens
+/// Bitwig projects. Off the window's thread, with an activity card saying how it went.
+fn open_in_bitwig(file: PathBuf) {
+    let Some((feed, library)) = PAGE.with(|p| {
+        let p = p.borrow();
+        Some((p.feed.clone()?, p.library.clone()))
+    }) else {
+        return;
+    };
+    let started = background::spawn("Open", move || {
+        let path = file.to_string_lossy().into_owned();
+        let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.clone());
+        if !shell::exists(&path) {
+            feed.start(&format!("Can't find {name}"), "")
+                .failed("It has moved or been deleted since. Measure again to see what's there now.");
+            return;
+        }
+        let exe = open_library(&library)
+            .and_then(|lib| lib.setting(&shell::daw_exe_key(BITWIG)).ok().flatten())
+            .filter(|e| shell::usable_exe(e));
+        let card = feed.start(&format!("Opening {name}"), "");
+        match shell::run(&shell::open(&path, exe.as_deref(), shell::Os::THIS)) {
+            Ok(()) => card.done("Sent to Bitwig. It opens there in a moment."),
+            Err(e) => {
+                log::warning("Open", &format!("{path}: {e}"));
+                card.failed(&format!("Couldn't open it in Bitwig: {e}"));
+            }
+        }
+    });
+    if let Err(e) = started {
+        log::error("Space", &format!("Couldn't start opening a fixed project: {e}"));
+    }
 }
 
 /// Asks for a new look at the drives and the app's files, on the page's own low-priority thread. One still measuring
@@ -385,35 +551,54 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
     let _ = slint::invoke_from_event_loop(move || {
         let Some(app) = weak.upgrade() else { return };
         let _doing = crate::watchdog::doing("Space: a look arrived");
-        // How much to show again: all of it, only the Bitwig copies line and card (how far a look is), or nothing
-        // (an older look's step).
-        let (all, wins) = PAGE.with(|p| {
+        let changed = PAGE.with(|p| {
             let mut p = p.borrow_mut();
             match step {
-                Step::Drives(id, drives) if id == p.look.asked => p.drives = drives,
+                Step::Drives(id, drives) if id == p.look.asked => {
+                    p.drives = drives;
+                    Changed::All
+                }
                 Step::AppFiles(id, parts) if id == p.look.asked => {
                     p.parts = Some(parts);
                     p.measuring = false;
+                    Changed::All
                 }
-                Step::Crashed(id) if id == p.look.asked => p.measuring = false,
+                Step::Crashed(id) if id == p.look.asked => {
+                    p.measuring = false;
+                    Changed::All
+                }
+                // Only the first look's progress is on the page; the activity card has a later one's.
                 Step::BitwigLooking(id, at) if id == p.bitwig_look.asked => {
                     p.bitwig_looking = Some(at);
-                    return (false, true);
+                    if p.bitwig.is_none() { Changed::Wins } else { Changed::Nothing }
                 }
                 Step::Bitwig(id, copies) if id == p.bitwig_look.asked => {
+                    p.fixes.looked();
                     p.bitwig = Some(copies);
                     p.bitwig_looking = None;
+                    Changed::Wins
                 }
                 // Shown again, the page looks again.
-                Step::BitwigCrashed(id) if id == p.bitwig_look.asked => p.bitwig_looking = None,
-                _ => return (false, false),
+                Step::BitwigCrashed(id) if id == p.bitwig_look.asked => {
+                    p.bitwig_looking = None;
+                    Changed::Wins
+                }
+                Step::Fixed(save, fixing) => {
+                    p.fixes.done(save, fixing);
+                    Changed::Wins
+                }
+                Step::FixDone => {
+                    p.fixes.finished();
+                    Changed::LookAgain
+                }
+                _ => Changed::Nothing,
             }
-            (true, false)
         });
-        if all {
-            show(&app);
-        } else if wins {
-            show_wins(&app);
+        match changed {
+            Changed::All => show(&app),
+            Changed::Wins => show_wins(&app),
+            Changed::LookAgain => look_for_copies(&app),
+            Changed::Nothing => {}
         }
     });
 }
@@ -450,7 +635,7 @@ pub fn show(app: &AppWindow) {
         let app_drive = space::app_drive(&p.drives);
         let also = vec![room_line(space::app_files_line(p.parts.as_deref(), app_drive.map(|d| d.name.as_str())))];
         data.set_also(ModelRc::new(VecModel::from(also)));
-        data.set_actions(actions(&p, &[(MEASURE, "Measure again"), (RECYCLE_BIN, "Open Recycle Bin")]));
+        data.set_actions(actions(vec![measure_button(&p), (RECYCLE_BIN, "Open Recycle Bin".to_owned(), true)]));
     });
     show_wins(app);
 }
@@ -476,14 +661,18 @@ fn show_wins(app: &AppWindow) {
 fn show_card(app: &AppWindow) {
     let data = app.global::<SpaceData>();
     PAGE.with(|p| {
-        let p = p.borrow();
+        let mut p = p.borrow_mut();
         data.set_picked(p.picked.as_str().into());
-        let (card, buttons): (space::Card, &[(&str, &str)]) = match p.picked.as_str() {
+        let (card, buttons) = match p.picked.as_str() {
             space::APP_FILES => (
                 space::app_files_card(p.parts.as_deref(), space::app_drive(&p.drives)),
-                &[(REVEAL, "Show in folder"), (MEASURE, "Measure again")],
+                vec![(REVEAL, "Show in folder".to_owned(), true), measure_button(&p)],
             ),
-            BITWIG_COPIES => (space_bitwig::card(p.bitwig.as_ref(), p.bitwig_looking), &[(MEASURE, "Measure again")]),
+            BITWIG_COPIES => {
+                let fix = p.fixes.button(p.bitwig.as_ref()).map(|(words, enabled)| (FIX, words, enabled));
+                let card = space_bitwig::card(p.bitwig.as_ref(), p.bitwig_looking, &p.fixes);
+                (card, fix.into_iter().chain([measure_button(&p)]).collect())
+            }
             _ => return,
         };
         data.set_card_kind(card.kind.into());
@@ -491,26 +680,51 @@ fn show_card(app: &AppWindow) {
         data.set_card_big(card.big.into());
         data.set_card_big_note(card.big_note.into());
         data.set_card_lead(card.lead.into());
-        let parts: Vec<CardPart> = card
-            .parts
-            .into_iter()
-            .map(|(name, what, size)| CardPart { name: name.into(), what: what.into(), size: size.into() })
-            .collect();
-        data.set_card_parts(ModelRc::new(VecModel::from(parts)));
+        data.set_card_ticks(card.ticks);
+        // Made again only when they change, so how far a look or Fix is doesn't make every row again.
+        if card.parts != p.card_parts {
+            let parts: Vec<CardPart> = card.parts.iter().map(card_part).collect();
+            data.set_card_parts(ModelRc::new(VecModel::from(parts)));
+            p.card_parts = card.parts;
+        }
         data.set_card_note(card.note.into());
         data.set_card_room(card.room.into());
         data.set_card_warning(card.warning.into());
-        data.set_card_actions(actions(&p, buttons));
+        data.set_card_actions(actions(buttons));
     });
 }
 
-/// Shows made-up drives, app files and Bitwig copies, without reading any disk: for the screenshots.
-pub fn show_sample(app: &AppWindow, drives: Vec<Drive>, parts: Vec<AppFilesPart>, bitwig: Copies, picked: &str) {
+fn card_part(part: &Part) -> CardPart {
+    CardPart {
+        name: part.name.as_str().into(),
+        what: part.what.as_str().into(),
+        size: part.size.as_str().into(),
+        under: part.under,
+        can_tick: part.tick.is_some(),
+        ticked: part.tick.as_ref().is_some_and(|(_, ticked)| *ticked),
+        status: part.status.as_str().into(),
+        problem: part.problem,
+        can_open: part.open.is_some(),
+        more: part.more.as_ref().map(|(words, _)| words.as_str()).unwrap_or_default().into(),
+    }
+}
+
+/// Shows made-up drives, app files and Bitwig copies (with what Fix did to them), without reading any disk: for the
+/// screenshots.
+pub fn show_sample(
+    app: &AppWindow,
+    drives: Vec<Drive>,
+    parts: Vec<AppFilesPart>,
+    bitwig: Copies,
+    fixes: Fixes,
+    picked: &str,
+) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.drives = drives;
         p.parts = Some(parts);
         p.bitwig = Some(bitwig);
+        p.fixes = fixes;
         p.picked = picked.to_owned();
         // Shown now, so showing the page doesn't look at the real drives or projects.
         p.looked = Some(Instant::now());
@@ -524,10 +738,10 @@ mod tests {
 
     #[test]
     fn every_button_is_in_the_shortcut_list() {
-        for id in [MEASURE, REVEAL, RECYCLE_BIN] {
+        for id in [MEASURE, REVEAL, FIX, RECYCLE_BIN] {
             assert_ne!(what_of(id), "", "{id} isn't in the shortcut list");
         }
-        let keys = Shortcuts::default();
+        let keys = mo_app::shortcuts::Shortcuts::default();
         assert_eq!(keys.page_action_for("F5", mo_app::shortcuts::SPACE_ACTIONS), Some(MEASURE));
         assert_eq!(keys.page_action_for("Ctrl+Shift+E", mo_app::shortcuts::SPACE_ACTIONS), Some(REVEAL));
     }

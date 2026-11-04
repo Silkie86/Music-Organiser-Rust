@@ -16,6 +16,10 @@ use std::sync::Arc;
 use super::encode::{encode, fresh_id};
 use super::format::{Document, HEADER, ObjId, Object, Slot, Text, Value, decode};
 
+/// Goes up by one whenever what's read from the same curve files changes (rule 7), so the curves library reads them
+/// again.
+pub const VERSION: u32 = 1;
+
 /// The metadata's type for a curve.
 pub const TYPE: &str = "application/bitwig-curve";
 /// The file ending.

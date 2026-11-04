@@ -6,7 +6,9 @@
 //! Every word the page shows is decided here, so it's tested without a window. The choices are kept by
 //! [`crate::app_settings`]: this app's own file over the C# app's, which stays read-only.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use mo_dawlink::scripts::{BitwigInstalled, Installed, ScriptState};
 
 use mo_space::folder_move::MovedFolder;
 
@@ -526,26 +528,124 @@ pub fn bitwig_status(checked: &Result<mo_dawlink::bitwig::Hello, mo_dawlink::bit
     DawStatus { daw: "Bitwig Studio", state, ok, facts }
 }
 
-/// FL Studio's row: its link comes later in phase 5.
-pub fn fl_status() -> DawStatus {
-    DawStatus {
-        daw: "FL Studio",
-        state: "Comes later".to_owned(),
-        ok: false,
-        facts: vec![Fact {
-            what: "For now",
-            value: "The Rust app's FL Studio link comes later in phase 5. The old app's Settings > DAW links still \
-                    installs and checks FL's script."
+/// FL Studio's row: whether the Music Organiser script is installed (none while it's being looked at), and where it
+/// goes. Talking to FL Studio through it comes later in phase 5.
+pub fn fl_status(state: Option<ScriptState>, folders: &[PathBuf]) -> DawStatus {
+    let fact = |what, value: String| Fact { what, value, button: None };
+    let (state, ok) = match state {
+        None => ("Looking\u{2026}", false),
+        Some(_) if folders.is_empty() => ("No FL Studio folder found", false),
+        Some(ScriptState::Installed) => ("Script installed", true),
+        Some(ScriptState::Outdated) => ("Script out of date", false),
+        Some(ScriptState::NotInstalled) => ("Script not installed", false),
+    };
+    let mut facts: Vec<Fact> = folders.iter().map(|f| fact("Goes into", f.display().to_string())).collect();
+    if folders.is_empty() {
+        facts.push(fact(
+            "Looked in",
+            "Documents\\Image-Line\\FL Studio, and above each project folder, for a folder with Settings, Presets and \
+             Projects in it"
                 .to_owned(),
-            button: None,
-        }],
+        ));
     }
+    facts.push(fact(
+        "Then",
+        "FL Studio loads the script when it starts. Its MIDI port is set in FL Studio's MIDI settings, as before; the \
+         app talking to FL Studio through it comes later in phase 5."
+            .to_owned(),
+    ));
+    DawStatus { daw: "FL Studio", state: state.to_owned(), ok, facts }
+}
+
+/// The lines Bitwig's row adds for the extension the app installs: whether the one in Bitwig's folders is the app's
+/// own, and where it goes. `built` is the app's own copy's version (none inside when its manifest doesn't say), or
+/// none when the app has no copy (the launcher builds it when a JDK is installed). Gives the Install button's words
+/// too, or "" for none.
+pub fn bitwig_extension_facts(
+    state: Option<ScriptState>,
+    built: Option<Option<String>>,
+    folders: &[PathBuf],
+) -> (Vec<Fact>, &'static str) {
+    let fact = |what, value: String| Fact { what, value, button: None };
+    let Some(state) = state else { return (Vec::new(), "") };
+    let Some(version) = built else {
+        return (
+            vec![fact(
+                "Extension",
+                "The app has no copy of the extension to install: the launcher builds it when a JDK is installed \
+                 (winget install Microsoft.OpenJDK.21)."
+                    .to_owned(),
+            )],
+            "",
+        );
+    };
+    let version = version.map_or_else(String::new, |v| format!(" {v}"));
+    let mut facts = vec![fact(
+        "Extension",
+        match state {
+            ScriptState::Installed => format!("The app's own{version} is installed"),
+            ScriptState::Outdated => format!("Another copy is installed; the app has{version}"),
+            ScriptState::NotInstalled => format!("Not installed; the app has{version}"),
+        },
+    )];
+    if folders.is_empty() {
+        facts
+            .push(fact("Goes into", "No Bitwig Studio folder found in Documents, or chosen in the old app".to_owned()));
+        return (facts, "");
+    }
+    facts.extend(folders.iter().map(|f| fact("Goes into", f.display().to_string())));
+    let button = match state {
+        ScriptState::NotInstalled => "Install",
+        ScriptState::Outdated => "Update",
+        ScriptState::Installed => "Install again",
+    };
+    (facts, button)
+}
+
+/// What installing the Bitwig extension did, in words.
+pub fn bitwig_installed_note(done: &BitwigInstalled) -> String {
+    let mut out = String::new();
+    if !done.installed.went.is_empty() {
+        out = format!(
+            "Installed the Bitwig extension in {}. Bitwig picks it up by itself (restart Bitwig if it doesn't).",
+            done.installed.went.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(" and ")
+        );
+    }
+    if !done.removed.is_empty() {
+        out.push_str(" Took out the older script it replaces.");
+    }
+    for (folder, why) in &done.installed.failed {
+        out.push_str(&format!(" Couldn't put it in {}: {why}", folder.display()));
+    }
+    if !done.installed.failed.is_empty() {
+        out.push_str(" If Bitwig is open, close it, then press Install again.");
+    }
+    out.trim_start().to_owned()
+}
+
+/// What Install did, in words.
+pub fn installed_note(done: &Installed) -> String {
+    let mut out = String::new();
+    if !done.went.is_empty() {
+        out = format!(
+            "Installed the FL Studio script in {}. Restart FL Studio to load it.",
+            done.went.iter().map(|f| f.display().to_string()).collect::<Vec<_>>().join(" and ")
+        );
+    }
+    for (folder, why) in &done.failed {
+        if !out.is_empty() {
+            out.push(' ');
+        }
+        out.push_str(&format!("Couldn't put it in {}: {why}", folder.display()));
+    }
+    out
 }
 
 /// Under the DAW rows: where the scripts are installed from for now.
-pub const DAWS_NOTE: &str = "The app talks to Bitwig through the Music Organiser extension. Installing it, and the \
-    live tests, stay in the old app's Settings > DAW links for now; this tab checks that the link answers, and only \
-    reads.";
+pub const DAWS_NOTE: &str = "The scripts that let the app talk to Bitwig and FL Studio. Checking Bitwig only \
+    reads. Install puts the app's own copy in the DAW's folders: on FL Studio's row its script (keeping your setting \
+    for letting the app make changes), on Bitwig's its extension (close Bitwig first on Windows). The live tests stay \
+    in the old app's Settings > DAW links for now.";
 
 pub const SLINT_CREDIT: &str = "Music Organiser's screens are made with Slint, under its royalty-free licence.";
 
@@ -652,7 +752,7 @@ mod tests {
         let lines = key_lines(&keys);
         assert_eq!(lines[0].page, crate::shortcuts::EVERYWHERE);
         let heads: Vec<&str> = lines.iter().filter(|l| !l.page.is_empty()).map(|l| l.page).collect();
-        assert_eq!(heads, vec!["Everywhere", "Songs", "Sounds", "MIDI", "Space"]);
+        assert_eq!(heads, vec!["Everywhere", "Songs", "Sounds", "Presets", "Curves", "MIDI", "Space"]);
         let rescan = lines.iter().find(|l| l.id == "app.fullRescan").unwrap();
         assert_eq!((rescan.key.as_str(), rescan.changed), ("F6", true));
         assert_eq!(rescan.starts, "It starts with no key");
@@ -730,5 +830,43 @@ mod tests {
                 None
             ]
         );
+    }
+
+    #[test]
+    fn fl_row_says_whether_the_script_is_in() {
+        let folder = PathBuf::from(r"I:\FL Studio\Settings\Hardware\Music Organiser");
+        assert_eq!(fl_status(None, &[]).state, "Looking\u{2026}");
+        assert_eq!(fl_status(Some(ScriptState::NotInstalled), &[]).state, "No FL Studio folder found");
+        let row = fl_status(Some(ScriptState::Installed), std::slice::from_ref(&folder));
+        assert_eq!((row.state.as_str(), row.ok), ("Script installed", true));
+        assert_eq!(row.facts[0].value, folder.display().to_string());
+        assert_eq!(fl_status(Some(ScriptState::Outdated), std::slice::from_ref(&folder)).state, "Script out of date");
+        let done = Installed { went: vec![folder.clone()], failed: vec![(PathBuf::from("K:"), "not there".into())] };
+        let note = installed_note(&done);
+        assert!(note.starts_with("Installed the FL Studio script in"), "{note}");
+        assert!(note.ends_with("Couldn't put it in K:: not there"), "{note}");
+    }
+
+    #[test]
+    fn bitwig_extension_lines_say_what_install_would_do() {
+        let folder = PathBuf::from(r"K:\Bitwig Studio\Extensions");
+        assert_eq!(bitwig_extension_facts(None, None, &[]), (Vec::new(), ""));
+        let (facts, button) =
+            bitwig_extension_facts(Some(ScriptState::NotInstalled), None, std::slice::from_ref(&folder));
+        assert_eq!(button, "");
+        assert!(facts[0].value.contains("JDK"));
+        let (facts, button) = bitwig_extension_facts(
+            Some(ScriptState::Outdated),
+            Some(Some("3.18".into())),
+            std::slice::from_ref(&folder),
+        );
+        assert_eq!(button, "Update");
+        assert_eq!(facts[0].value, "Another copy is installed; the app has 3.18");
+        assert_eq!(facts[1].value, folder.display().to_string());
+        let done = BitwigInstalled {
+            installed: Installed { went: vec![], failed: vec![(folder.clone(), "in use".into())] },
+            removed: vec![],
+        };
+        assert!(bitwig_installed_note(&done).ends_with("If Bitwig is open, close it, then press Install again."));
     }
 }

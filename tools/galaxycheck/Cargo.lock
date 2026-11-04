@@ -2898,6 +2898,7 @@ dependencies = [
  "mo-harmony",
  "mo-library",
  "mo-midi",
+ "mo-presets",
  "mo-sounds",
  "mo-space",
  "rayon",
@@ -2946,6 +2947,7 @@ version = "0.1.0"
 dependencies = [
  "mo-formats",
  "serde_json",
+ "zip",
 ]
 
 [[package]]
@@ -2994,6 +2996,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-presets"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "mo-formats",
+ "rayon",
+ "rusqlite",
+ "sha2",
+ "zip",
+]
+
+[[package]]
 name = "mo-sounds"
 version = "0.1.0"
 dependencies = [
@@ -3029,6 +3043,7 @@ dependencies = [
  "sysinfo",
  "trash",
  "windows-registry",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

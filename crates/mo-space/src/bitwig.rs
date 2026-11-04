@@ -5,7 +5,8 @@
 //! copies it changed are offered for the Recycle Bin.
 //!
 //! [`LibraryIndex::copies_in`] finds the copies that are the same as a Library file byte for byte, and changes nothing.
-//! [`remove_copies`] sends the copies a "(fixed)" project no longer uses to the Recycle Bin, once you've opened it.
+//! [`saves_in`] lists a project folder's saves, each with its "(fixed)" project when it has one. [`remove_copies`]
+//! sends the copies a "(fixed)" project no longer uses to the Recycle Bin, once you've opened it.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -15,6 +16,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
+use mo_formats::paths;
+use mo_library::songs::is_fixed_copy;
 use rayon::prelude::*;
 
 use crate::clean::{Bin, Done, Problem, STOPPED, Sending, Sent, What, cant_keep};
@@ -186,6 +189,72 @@ pub fn documents() -> Option<PathBuf> {
         let home = crate::home_folder()?;
         Some(if cfg!(target_os = "macos") { home.join("Documents") } else { home })
     }
+}
+
+/// One of the Bitwig projects in a project folder: one of your saves beside the project, or one in a folder below it
+/// (Bitwig's auto-backups).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Save {
+    pub path: PathBuf,
+    /// When it was last saved, when that can be read.
+    pub modified: Option<SystemTime>,
+    /// In a folder below the project's own (Bitwig's auto-backups).
+    pub below: bool,
+    /// Its newest "(fixed)" project, beside it ("<name> (fixed).bwproject", or "(fixed 2)" and on), and whether that's
+    /// as new as the save or newer. An older one was written before the save was saved again.
+    pub fixed: Option<(PathBuf, bool)>,
+}
+
+impl Save {
+    /// Whether it has a "(fixed)" project as new as it.
+    pub fn is_fixed(&self) -> bool {
+        matches!(self.fixed, Some((_, true)))
+    }
+}
+
+/// The Bitwig projects in a project folder and the folders below it, for a fix: your saves beside the project, newest
+/// first, then the ones in folders below it (Bitwig's auto-backups), newest first. A "(fixed)" project isn't one of
+/// them: it's its save's [`Save::fixed`]. Nor is a "._" file a Mac leaves. Links aren't followed. Call it off the
+/// window's thread.
+pub fn saves_in(folder: &Path, stop: &AtomicBool) -> Result<Vec<Save>, Stopped> {
+    let found = walk(folder, false, stop, |path, meta| {
+        let shadow = path.file_name().is_some_and(|n| n.to_string_lossy().starts_with("._"));
+        let project = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bwproject"));
+        (meta.is_file() && project && !shadow).then(|| (path.to_path_buf(), meta.modified().ok()))
+    })?;
+    let stem = |p: &Path| paths::stem(&p.to_string_lossy()).to_owned();
+    let (fixed, mut saves): (Vec<_>, Vec<_>) = found.into_iter().partition(|(p, _)| is_fixed_copy(&stem(p)));
+    // Newest first; saves of the same time in the order of their paths, so a folder always lists the same way.
+    let newest_first = |a: &(PathBuf, Option<SystemTime>), b: &(PathBuf, Option<SystemTime>)| {
+        b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0))
+    };
+    saves.sort_by(newest_first);
+    let mut out: Vec<Save> = saves
+        .into_iter()
+        .map(|(path, modified)| {
+            let name = stem(&path);
+            let twin = fixed
+                .iter()
+                .filter(|(f, _)| f.parent() == path.parent())
+                .filter(|(f, _)| fixed_from(&stem(f)).is_some_and(|from| from.eq_ignore_ascii_case(&name)))
+                .min_by(|a, b| newest_first(a, b));
+            let below = path.parent() != Some(folder);
+            Save { fixed: twin.map(|(f, at)| (f.clone(), *at >= modified)), path, modified, below }
+        })
+        .collect();
+    // Your own saves first; each group stays newest first.
+    out.sort_by_key(|s| s.below);
+    Ok(out)
+}
+
+/// The name of the save a "(fixed)" project was written from, as the converter names them: "Song v2" for
+/// "Song v2 (fixed)" and "Song v2 (fixed 3)". None for any other name.
+fn fixed_from(stem: &str) -> Option<&str> {
+    // Lower case keeps every byte where it was, so `at` is a place in `stem` too.
+    let at = stem.to_ascii_lowercase().rfind(" (fixed")?;
+    let tail = stem[at + " (fixed".len()..].strip_suffix(')')?;
+    let numbered = tail.strip_prefix(' ').is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()));
+    (tail.is_empty() || numbered).then(|| &stem[..at])
 }
 
 /// Whether a folder is in (or is) a folder a move left behind as "… (old copy)".
@@ -419,8 +488,21 @@ fn best<'a>(copy: &Path, same: &[&'a PathBuf]) -> Option<&'a PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::first_name;
+    use super::{first_name, fixed_from};
     use std::path::Path;
+
+    #[test]
+    fn a_fixed_projects_name_says_which_save_it_was_written_from() {
+        assert_eq!(fixed_from("Song v2 (fixed)"), Some("Song v2"));
+        assert_eq!(fixed_from("Song v2 (Fixed 12)"), Some("Song v2"));
+        assert_eq!(fixed_from("Café (fixed)"), Some("Café"));
+        // Only the names the converter writes.
+        assert_eq!(fixed_from("Song v2 (fixed)(fixed)"), None);
+        assert_eq!(fixed_from("Song v2 (fixed 2b)"), None);
+        assert_eq!(fixed_from("Song v2 (fixed )"), None);
+        assert_eq!(fixed_from("Song v2(fixed)"), None);
+        assert_eq!(fixed_from("Song v2"), None);
+    }
 
     #[test]
     fn bitwigs_endings_come_off_the_name() {

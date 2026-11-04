@@ -181,15 +181,14 @@ impl ChordSpan {
     }
 
     /// Chord check's choices for it, at most `n`, each named differently ([`Chord::name_key`]: two choices both named
-    /// C would be one): the first reading; the best reading of its same-notes group named another way (Am7 for C6),
-    /// or when there's none, the first reading with its doubtful tensions named or its tensions left out (Cmaj9 for
-    /// Cmaj7); the best reading outside its group; then the other readings, in order. Besides the first, a reading is
-    /// a choice only with a chance of [`CHOICE_FLOOR`] or more.
+    /// C would be one): the first reading; the best reading of its same-notes group (Am7 for C6: the readings are each
+    /// named differently, so it's named another way), or when there's none, the first reading with its doubtful
+    /// tensions named or its tensions left out (Cmaj9 for Cmaj7); the best reading outside its group; then the other
+    /// readings, in order. Besides the first, a reading is a choice only with a chance of [`CHOICE_FLOOR`] or more.
     pub fn choices(&self, n: usize) -> Vec<Choice> {
         let Some(first) = self.readings.first() else { return Vec::new() };
         let rest = || self.readings.iter().skip(1).filter(|r| r.chance >= CHOICE_FLOOR);
-        let other_way = |r: &&Reading| r.group == first.group && !named_the_same(r.chord, first.chord);
-        let second = match rest().find(other_way) {
+        let second = match rest().find(|r| r.group == first.group) {
             Some(same) => Some(Choice { chord: same.chord, from: ChoiceFrom::SameNotes }),
             None => tensions_other_way(first).map(|chord| Choice { chord, from: ChoiceFrom::Tensions }),
         };

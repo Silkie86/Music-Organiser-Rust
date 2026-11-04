@@ -43,11 +43,11 @@ use std::ops::Range;
 use super::candidates::Label;
 use super::decode::{PinnedSpan, kept_pins};
 use super::hear::{BassTexture, HeardNote, Hearing, Level, Line, Shape, Shaped, Stream};
-use super::name::{Reading, SpanFlags, push_to};
+use super::name::{Reading, SpanFlags, push_to, tune_may_carry};
 use super::reader::{ChordContext, ChordReading, ChordSpan, Model, ReadFrom, SHIPPED, pinned};
 use super::score::{Evidence, Feature, PerFeature, SpanFacts};
 use super::weights::Priors;
-use crate::chord::{Chord, Family, ToneRole, role};
+use crate::chord::{Chord, ToneRole};
 use crate::notes::{Grid, Part};
 use crate::pitch::{PcSet, PitchClass};
 use crate::spell::Degree;
@@ -604,9 +604,7 @@ fn does(hearing: &Hearing, n: &HeardNote, shape: Option<&Shaped>, place: Place, 
         return NoteDoes::Colour(degree);
     }
     // The tune counts only on a tension the chord can carry there, as the name's gate has it.
-    let intervals = label.core.intervals();
-    let carried = role(intervals, Family::of(intervals), i32::from(pc.above(label.root))) != ToneRole::Avoid;
-    if carried { NoteDoes::TuneOver(degree) } else { NoteDoes::Clash }
+    if tune_may_carry(label, pc) { NoteDoes::TuneOver(degree) } else { NoteDoes::Clash }
 }
 
 impl Explanation {

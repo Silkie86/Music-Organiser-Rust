@@ -455,7 +455,7 @@ impl Context<'_> {
 }
 
 /// The newest save; of two saved at the same moment, the first listed (as the Space page picks it).
-fn newest_save(saves: &[SongSave]) -> Option<&SongSave> {
+pub fn newest_save(saves: &[SongSave]) -> Option<&SongSave> {
     saves.iter().fold(None, |best: Option<&SongSave>, s| match best {
         Some(b) if b.modified >= s.modified => Some(b),
         _ => Some(s),

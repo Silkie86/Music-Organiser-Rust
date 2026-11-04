@@ -18,8 +18,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 # Saves that are byte-for-byte copies are found by their SHA-256, as the C# app finds them.
 sha2 = "0.10"
-# The Recycle Bin (Windows), the Trash (Mac, Linux): removing to it, and putting things back from it.
-trash = "5.2"
+# The Recycle Bin (Windows), the Trash (Mac, Linux): removing to it, and putting things back from it. Held at this
+# version: the start-up sweep's notes stop going by themselves on what it says when Windows doesn't move something
+# and doesn't say why (5.2.9: an `Unknown` error, "Some operations were aborted"; see `clean::bin_problem`). Before
+# updating it, check what the new version says then, and what errors it gives.
+trash = "=5.2.9"
 # How much room a drive has left.
 fs4 = "1.1"
 
@@ -34,6 +37,9 @@ windows-registry = "0.6"
 junction = "1.4.1"
 # Which drives are USB sticks or memory cards: Windows keeps no Recycle Bin on them, so nothing there is removed.
 sysinfo = { version = "0.40", default-features = false, features = ["disk"] }
+# Which drive a file is on (and what kind), by the id Windows keeps its Recycle Bin settings under, and how full
+# that Recycle Bin is.
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_UI_Shell"] }
 
 # Whether a folder is on a network share (Mac, Linux). Already used by fs4.
 [target.'cfg(unix)'.dependencies]

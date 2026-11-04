@@ -2988,6 +2988,8 @@ name = "mo-app"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "flate2",
+ "junction",
  "mo-backup",
  "mo-convert",
  "mo-dawlink",
@@ -2995,6 +2997,7 @@ dependencies = [
  "mo-harmony",
  "mo-library",
  "mo-midi",
+ "mo-presets",
  "mo-sounds",
  "mo-space",
  "rayon",
@@ -3049,6 +3052,7 @@ dependencies = [
  "mo-formats",
  "mo-sounds",
  "serde_json",
+ "zip",
 ]
 
 [[package]]
@@ -3170,6 +3174,7 @@ dependencies = [
  "sysinfo",
  "trash",
  "windows-registry",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3217,6 +3222,7 @@ dependencies = [
  "mo-harmony",
  "mo-library",
  "mo-midi",
+ "mo-presets",
  "mo-sounds",
  "mo-space",
  "rayon",

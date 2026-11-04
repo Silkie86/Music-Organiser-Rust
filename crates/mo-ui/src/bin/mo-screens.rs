@@ -83,8 +83,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     );
     // The Space page, from made-up drives: it only reads the real ones when it's shown in the app.
-    mo_ui::space::connect(&app, out.join("no library.db"), feed.clone(), &Shortcuts::default());
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), sample_bitwig_copies(), "");
+    mo_ui::space::connect(&app, out.join("no library.db"), feed.clone());
+    mo_ui::space::show_sample(
+        &app,
+        sample_drives(),
+        sample_app_files(),
+        sample_bitwig_copies(),
+        Default::default(),
+        "",
+    );
 
     let mut shots = Vec::new();
     for place in Place::ALL {
@@ -143,6 +150,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sample_drives(),
         sample_app_files(),
         sample_bitwig_copies(),
+        Default::default(),
         mo_app::space::APP_FILES,
     );
     capture(&window);
@@ -151,12 +159,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     capture(&window);
     shots.push(("space-paper.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &graphite);
-    // The Bitwig copies card: each project's copies of Library multisamples, biggest first.
+    // The Bitwig copies card: each project's copies of Library multisamples, biggest first, with Fix's ticks: one
+    // project fixed with its other saves on show (one of them ticked), one that couldn't be fixed.
     let bitwig = mo_app::space_bitwig::BITWIG_COPIES;
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), sample_bitwig_copies(), bitwig);
+    let (copies, fixes) = (sample_bitwig_copies(), sample_fixes());
+    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), copies, fixes, bitwig);
     capture(&window);
     shots.push(("space-bitwig.png".into(), capture(&window)));
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), sample_bitwig_copies(), "");
+    mo_ui::space::show_sample(
+        &app,
+        sample_drives(),
+        sample_app_files(),
+        sample_bitwig_copies(),
+        Default::default(),
+        "",
+    );
+    presets_shots(&app, &window, &mut shots);
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
         mo_ui::apply_look(&app, &Look::from_settings(Some(theme.name), None));
@@ -270,6 +288,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", path.display());
     }
     Ok(())
+}
+
+/// The Presets page: made-up sounds with one picked, then the Curves section with a curve picked.
+fn presets_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &mut Vec<(String, Vec<u8>)>) {
+    use mo_app::presets::Section;
+    app.set_place(Place::Presets.index() as i32);
+    mo_ui::presets::show_sample(app);
+    shots.push(("presets-list.png".into(), capture(window)));
+    mo_ui::presets::pick_row(app, 3);
+    shots.push(("presets-picked.png".into(), capture(window)));
+    mo_ui::presets::show_section(app, Section::Curves);
+    shots.push(("presets-curves.png".into(), capture(window)));
+    mo_ui::presets::pick_row(app, 0);
+    shots.push(("presets-curve-picked.png".into(), capture(window)));
+    mo_ui::presets::show_section(app, Section::Sounds);
+    mo_ui::presets::pick_row(app, usize::MAX);
 }
 
 /// Ctrl+K: opened from the Songs page with nothing typed, a search that finds a song and a sound, only the sounds
@@ -462,13 +496,21 @@ fn sample_app_files() -> Vec<mo_space::app_files::AppFilesPart> {
     ]
 }
 
-/// Made-up Bitwig copies for the Space page: projects on the Bitwig drive with copies of Library multisamples.
+/// Made-up Bitwig projects on the Bitwig drive with copies of Library multisamples, written as on Windows (the page
+/// splits them the same way here). Each has its own save; GARAGE FOR BW 1 is fixed and has an older save and an
+/// auto-backup, Night Drive has three more saves.
 fn sample_bitwig_copies() -> mo_app::space_bitwig::Copies {
     use mo_app::space_bitwig::{Copies, Project};
-    use mo_space::bitwig::LibraryCopy;
+    use mo_space::bitwig::{LibraryCopy, Save};
     const MB: u64 = 1 << 20;
-    // Written as on Windows: the page splits them the same way here.
-    let project = |name: &str, copies: &[(&str, u64)]| {
+    // Saved `days` after 1 Oct 2026, at 20:15.
+    let save = |folder: &str, name: &str, days: u64| Save {
+        path: format!(r"{folder}\{name}.bwproject").into(),
+        modified: Some(std::time::UNIX_EPOCH + Duration::from_secs(1_790_799_300 + days * 86_400)),
+        below: name.contains('\\'),
+        fixed: None,
+    };
+    let project = |name: &str, copies: &[(&str, u64)], others: &[(&str, u64)]| {
         let folder = format!(r"K:\Bitwig Studio\Projects\{name}");
         let copies = copies
             .iter()
@@ -478,18 +520,44 @@ fn sample_bitwig_copies() -> mo_app::space_bitwig::Copies {
                 bytes: mb * MB,
             })
             .collect();
-        Project { folder: folder.into(), copies }
+        let saves = std::iter::once(save(&folder, name, 33)).chain(others.iter().map(|&(n, d)| save(&folder, n, d)));
+        Project { folder: folder.clone().into(), copies, saves: saves.collect() }
     };
+    let mut garage = project(
+        "GARAGE FOR BW 1",
+        &[("Kicks 1 Select", 96), ("OHH 1 Select", 74), ("Snares 2 Select", 72)],
+        &[("GARAGE FOR BW 1 v2", 20), (r"auto-backups\GARAGE FOR BW 1-14", 32)],
+    );
+    garage.saves[0].fixed =
+        Some((r"K:\Bitwig Studio\Projects\GARAGE FOR BW 1\GARAGE FOR BW 1 (fixed).bwproject".into(), true));
     Copies {
         library: vec![r"K:\Bitwig Studio\Library".into()],
         folders: 31,
         projects: vec![
-            project("GARAGE FOR BW 1", &[("Kicks 1 Select", 96), ("OHH 1 Select", 74), ("Snares 2 Select", 72)]),
-            project("Night Drive", &[("Kicks 1 Select", 96), ("Pads Warm", 41)]),
-            project("Bounce 2", &[("OHH 1 Select", 74)]),
-            project("Sketch 14", &[("Bass Mono", 12), ("Keys Soft", 9)]),
+            garage,
+            project(
+                "Night Drive",
+                &[("Kicks 1 Select", 96), ("Pads Warm", 41)],
+                &[("Night Drive v3", 30), ("Night Drive v2", 12), ("Night Drive v1", 4)],
+            ),
+            project("Bounce 2", &[("OHH 1 Select", 74)], &[]),
+            project("Sketch 14", &[("Bass Mono", 12), ("Keys Soft", 9)], &[]),
         ],
     }
+}
+
+/// What Fix did to the made-up projects: GARAGE FOR BW 1's other saves on show with its older save ticked, and
+/// Sketch 14's save not fixed (which takes its tick off, so Fix isn't pressed again for it by mistake).
+fn sample_fixes() -> mo_app::space_bitwig::Fixes {
+    use mo_app::space_bitwig::{Fixes, Fixing};
+    let garage = r"K:\Bitwig Studio\Projects\GARAGE FOR BW 1";
+    let sketch = r"K:\Bitwig Studio\Projects\Sketch 14\Sketch 14.bwproject";
+    let mut fixes = Fixes::default();
+    fixes.shown.insert(garage.into());
+    fixes.ticks.insert(format!(r"{garage}\GARAGE FOR BW 1 v2.bwproject").into(), true);
+    let why = "nothing was written: the project uses none of the other copies";
+    fixes.done(sketch.into(), Fixing::Failed(why.to_owned()));
+    fixes
 }
 
 /// Made-up fingerprints for the made-up sounds: sounds of a type, and of a length, sit near each other.
@@ -794,6 +862,17 @@ fn settings_shots(
             loopback: Some(true),
             ..Default::default()
         })),
+    );
+    mo_ui::settings::show_bitwig_extension(
+        app,
+        mo_dawlink::scripts::ScriptState::Outdated,
+        "3.19",
+        vec![std::path::PathBuf::from(r"K:\Bitwig Studio\Extensions")],
+    );
+    mo_ui::settings::show_fl(
+        app,
+        mo_dawlink::scripts::ScriptState::Outdated,
+        vec![std::path::PathBuf::from(r"I:\Fl Studio Data\FL Studio\Settings\Hardware\Music Organiser")],
     );
     capture(window);
     shots.push(("settings-daws.png".into(), capture(window)));

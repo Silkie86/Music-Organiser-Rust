@@ -877,4 +877,8 @@ set):
   their G# is a #5 now where the labels say b13, so b13's F1 falls from 61.9% to 42.6%.
 - **The readings after the first** move where two named the same became one, so the labelled chord is among the first
   three a little less often: the labels tell Fmaj7/D from Dm9, and the app's names don't.
+- **The review fixes after it** (`CHORD_READER_VERSION` 3: a note played a little early is held as long as it was
+  played, the bass a chord's root moves from is only what's struck or sounds a quarter of a unit, and a 9 carried in
+  that passes by costs nothing) leave every number in the table the same: a few chords in POP909-CL and Billboard read
+  differently, too few to move one by a tenth.
 - The fits' tables above were scored before; score them again before comparing with these.

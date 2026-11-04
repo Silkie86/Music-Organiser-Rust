@@ -479,6 +479,18 @@ fn a_push_is_told_by_how_early_and_where_its_struck() {
     assert_eq!(pushed_words(grid, 2 * 480, 2 * 480 - 240), "Pushed: struck half a beat early, on the and of 2.");
     let six_eight = Grid { ticks_per_beat: 240, beats_per_bar: 6, bar_line: 120 };
     assert_eq!(pushed_words(six_eight, 1560, 1320), "Pushed: struck a beat early, on beat 6.");
+    // A bar line far from the music (a damaged grid) reads as the same grid with its bar line moved near it by whole
+    // bars, and ticks far apart don't overflow.
+    for bar_line in [i64::MIN, i64::MAX, i64::MAX - 7] {
+        let near = i64::try_from(i128::from(bar_line).rem_euclid(1920)).unwrap();
+        let (far, near) = (Grid { bar_line, ..grid }, Grid { bar_line: near, ..grid });
+        assert_eq!(pushed_words(far, 4 * 480, 4 * 480 - 240), pushed_words(near, 4 * 480, 4 * 480 - 240));
+    }
+    for (start, struck) in [(i64::MAX, i64::MIN), (i64::MIN, i64::MAX), (i64::MAX, i64::MAX - 240)] {
+        for bar_line in [0, i64::MIN, i64::MAX] {
+            let _ = pushed_words(Grid { bar_line, ..grid }, start, struck);
+        }
+    }
 }
 
 #[test]
@@ -552,5 +564,43 @@ fn a_word_said_with_a_vowel_first_takes_an() {
             "As the songs counted name tensions, C is a more usual way to write a major chord than C+ is to write an \
               augmented chord."
         )
+    );
+}
+
+#[test]
+fn a_chord_given_over_a_bass_of_its_own_says_what_plays_in_the_bass() {
+    // Given with a bass of its own, a chord stands on it (Db7 over F is written Db7), whatever plays there.
+    let told = |bass: Vec<Note>, keys: &str, given: &str| {
+        let mut music = Music::new().keys(notes(keys, 0, BAR));
+        if !bass.is_empty() {
+            music = music.bass(bass);
+        }
+        let pins = [Pin { start: 0, end: BAR, chord: Some(chord(given)) }];
+        let (reading, all) = explained(&music.looped(), &pins, MOST_READINGS);
+        words_of(&reading, &all, None).swap_remove(0).expect("no words").chord
+    };
+    let c_e_g = "C4 E4 G4";
+    assert_eq!(
+        told(notes("C2", 0, BAR), c_e_g, "Db7/F"),
+        "Db7: it's given over F, its third, but C plays in the bass, and nothing plays its root, Db."
+    );
+    assert_eq!(
+        told(Vec::new(), c_e_g, "Db7/F"),
+        "Db7: it's given over F, its third, but no bass plays, and nothing plays its root, Db."
+    );
+    assert_eq!(
+        told(Vec::new(), "C3 E4 G4", "C/G"),
+        "C: it's given over G, its fifth, but the lowest note is C (no bass part plays), and the chords play E and G, \
+         its 3 and 5."
+    );
+    let walk = ["C2", "E2", "G2", "A2"].iter().zip(0..).flat_map(|(n, k)| notes(n, k * BEAT, BEAT)).collect();
+    assert_eq!(
+        told(walk, c_e_g, "C/G"),
+        "C: it's given over G, its fifth, but the bass moves, and the chords play C, E and G, its root, 3 and 5."
+    );
+    // Over the bass it's given with, it's told as any chord is.
+    assert_eq!(
+        told(notes("G2", 0, BAR), c_e_g, "C/G"),
+        "C: G in the bass is its fifth, and the chords play C, E and G, its root, 3 and 5."
     );
 }

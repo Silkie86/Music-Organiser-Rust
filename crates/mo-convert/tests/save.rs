@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use common::bitwig::{Template, bitwig_template};
 use mo_convert::Options;
 use mo_convert::sample::read_sample;
-use mo_convert::save::{bitwig_file, bitwig_from_fl, bitwig_name, can_save_over};
+use mo_convert::save::{bitwig_file, bitwig_from_fl, bitwig_name, can_save_over, is_left_behind};
 
 /// A folder of its own for one test, emptied first.
 fn folder(name: &str) -> PathBuf {
@@ -111,13 +111,7 @@ fn a_samples_md5_and_size_are_what_bitwig_checks() {
 fn a_sample_that_moved_is_found_and_used() {
     let dir = folder("moved sample");
     let song = project(&dir);
-    let snare = dir.join("Songs").join("Samples").join("Snare 01.wav");
-    std::fs::create_dir_all(snare.parent().unwrap()).unwrap();
-    let mut wav = b"RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x44\xac\0\0\x88\x58\x01\0\x02\0\x10\0data".to_vec();
-    wav.extend_from_slice(&8820u32.to_le_bytes());
-    wav.resize(wav.len() + 8820, 0);
-    std::fs::write(&snare, &wav).unwrap();
-    let found = snare.to_string_lossy().into_owned();
+    let found = snare(&dir);
     let asked = std::sync::Mutex::new(Vec::new());
     let find = |s: &str| {
         asked.lock().unwrap().push(s.to_owned());
@@ -134,4 +128,78 @@ fn a_sample_that_moved_is_found_and_used() {
     // The Bitwig project points at where it was found.
     let bytes = std::fs::read(&saved.file).unwrap();
     assert!(bytes.windows(found.len()).any(|w| w == found.as_bytes()));
+}
+
+/// A short WAV, as the snare the song plays.
+fn snare(dir: &Path) -> String {
+    let snare = dir.join("Songs").join("Samples").join("Snare 01.wav");
+    std::fs::create_dir_all(snare.parent().unwrap()).unwrap();
+    let mut wav = b"RIFF\0\0\0\0WAVEfmt \x10\0\0\0\x01\0\x01\0\x44\xac\0\0\x88\x58\x01\0\x02\0\x10\0data".to_vec();
+    wav.extend_from_slice(&8820u32.to_le_bytes());
+    wav.resize(wav.len() + 8820, 0);
+    std::fs::write(&snare, &wav).unwrap();
+    snare.to_string_lossy().into_owned()
+}
+
+#[test]
+fn an_earlier_convert_saved_in_bitwig_while_samples_are_read_keeps_its_own_list() {
+    let dir = folder("kept list");
+    let song = project(&dir);
+    let found = snare(&dir);
+    let exports = dir.join("Exports");
+    let template = bitwig_template(Template::default());
+    let find = |s: &str| s.ends_with("Snare 01.wav").then(|| found.clone());
+    let first = bitwig_from_fl(&song, &exports, &template, "civil_18", None, Options::default(), &find).unwrap();
+    let list_file = first.file.with_file_name("civil_18 - not carried over.txt");
+    let list = std::fs::read(&list_file).unwrap();
+    // Converted again, this time with the snare not found; while that's looked for, the first is saved in Bitwig.
+    let project = std::fs::read(&first.file).unwrap();
+    let saved_in_bitwig = |_: &str| {
+        std::fs::write(&first.file, &project).unwrap();
+        // A time of its own, so a disk that keeps whole seconds sees the change too.
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        std::fs::File::options().write(true).open(&first.file).unwrap().set_modified(later).unwrap();
+        None
+    };
+    let again = bitwig_from_fl(
+        &song,
+        &exports,
+        &template,
+        "civil_18",
+        Some(&first.written),
+        Options::default(),
+        &saved_in_bitwig,
+    );
+    assert!(again.unwrap_err().contains("may hold work"));
+    assert_eq!(std::fs::read(&list_file).unwrap(), list, "the kept project's list is its own");
+    let left: Vec<_> =
+        std::fs::read_dir(first.file.parent().unwrap()).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert_eq!(left.len(), 2, "nothing half-written left: {left:?}");
+}
+
+#[test]
+fn a_half_written_file_an_earlier_save_left_is_cleared_and_nothing_else() {
+    let dir = folder("left behind");
+    let song = project(&dir);
+    let exports = dir.join("Exports");
+    let folder = bitwig_file(&song, &exports, "civil_18").parent().unwrap().to_owned();
+    std::fs::create_dir_all(&folder).unwrap();
+    let old = folder.join("civil_18.bwproject.12-3.saving");
+    let fresh = folder.join("civil_18.bwproject.12-4.saving");
+    let other = folder.join("Other.bwproject.12-3.saving");
+    let yours = folder.join("civil_18.bwproject.saving");
+    for f in [&old, &fresh, &other, &yours] {
+        std::fs::write(f, b"x").unwrap();
+    }
+    let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for f in [&old, &other, &yours] {
+        std::fs::File::options().write(true).open(f).unwrap().set_modified(hour_ago).unwrap();
+    }
+    let template = bitwig_template(Template::default());
+    bitwig_from_fl(&song, &exports, &template, "civil_18", None, Options::default(), &|_| None).unwrap();
+    // Only the old one of this file's own shape goes: one still being written, and other files, stay.
+    assert!(!old.exists() && fresh.exists() && other.exists() && yours.exists());
+    assert!(is_left_behind("a.flp.1-2.saving", "a.flp"));
+    assert!(!is_left_behind("a.flp.1-.saving", "a.flp") && !is_left_behind("a.flp.1-2.saving.x", "a.flp"));
+    assert!(!is_left_behind("b.flp.1-2.saving", "a.flp") && !is_left_behind("xa.flp.1-2.saving", "a.flp"));
 }

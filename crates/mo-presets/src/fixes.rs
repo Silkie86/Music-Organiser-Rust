@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use rusqlite::{Connection, OptionalExtension, params};
 use sha2::{Digest, Sha256};
@@ -187,7 +187,7 @@ pub(crate) fn make_new(path: &Path, schema: &str, table: &str) -> Result<(), Fix
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir).map_err(|e| FixesError(format!("couldn't make its folder: {e}")))?;
     }
-    remove_old_half_made(path);
+    remove_old_half_made(path, SystemTime::now());
     if let Err(e) = make_checked(&temp, schema, table) {
         // Whatever stopped it, the half-made file doesn't stay.
         let _ = std::fs::remove_file(&temp);
@@ -217,21 +217,32 @@ pub(crate) fn make_new(path: &Path, schema: &str, table: &str) -> Result<(), Fix
     placed
 }
 
-/// Removes half-made databases that a copy of the app left when it stopped part way (`presets.db.new-<number>`), once
-/// they're a minute old, so one being made right now by another copy is left alone.
-fn remove_old_half_made(path: &Path) {
-    let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return };
+/// Removes half-made databases that a copy of the app left when it stopped part way (`presets.db.new-<number>`, and
+/// SQLite's own `-journal`, `-wal` and `-shm` beside it), once they're a minute older than `now` (the app passes the
+/// time it is), so one being made right now by another copy is left alone. Only plain files named exactly so (rule 28):
+/// never "presets.db.new-12.bak", a folder, or a link of that name (nor what it leads to).
+fn remove_old_half_made(path: &Path, now: SystemTime) {
+    let (Some(dir), Some(name)) = (path.parent(), path.file_name().and_then(|n| n.to_str())) else { return };
     let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
-    let mut prefix = name.to_os_string();
-    prefix.push(".new-");
-    let prefix = prefix.to_string_lossy().into_owned();
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     for e in entries.flatten() {
-        let old = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok());
-        if e.file_name().to_string_lossy().starts_with(&prefix) && old.is_some_and(|o| o.as_secs() >= 60) {
+        // The entry itself, never followed: a link of that name is a link, not a plain file.
+        let plain = e.file_type().is_ok_and(|t| t.is_file());
+        let ours = e.file_name().to_str().is_some_and(|n| is_half_made(n, name));
+        let old = e.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| now.duration_since(t).ok());
+        if plain && ours && old.is_some_and(|o| o.as_secs() >= 60) {
             let _ = std::fs::remove_file(e.path());
         }
     }
+}
+
+/// Whether `name` is a half-made copy of the database called `database` ([`FILE_NAME`], or the curves' own) that
+/// `make_new` left: `<database>.new-`, a number, and perhaps SQLite's `-journal`, `-wal` or `-shm`, and nothing else.
+/// The app's start-up sweep (rule 28) uses this too, to clear one a crash left.
+pub fn is_half_made(name: &str, database: &str) -> bool {
+    let Some(rest) = name.strip_prefix(database).and_then(|r| r.strip_prefix(".new-")) else { return false };
+    let number = ["-journal", "-wal", "-shm"].iter().find_map(|end| rest.strip_suffix(end)).unwrap_or(rest);
+    !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// Makes the tables in a new file at `temp` and checks them. The file is closed again when this returns, so it can be
@@ -251,6 +262,58 @@ fn make_checked(temp: &Path, schema: &str, table: &str) -> Result<(), FixesError
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_half_made_databases_named_exactly_so_are_ours() {
+        let p = FILE_NAME;
+        assert!(is_half_made("presets.db.new-4120", p) && is_half_made("presets.db.new-77-journal", p));
+        assert!(is_half_made("presets.db.new-1-wal", p) && is_half_made("presets.db.new-1-shm", p));
+        for name in [
+            "presets.db.new-",
+            "presets.db.new-12.bak",
+            "presets.db.new-old copy",
+            "presets.db.new-1-wal2",
+            "presets.db",
+            "presets.dbx.new-1",
+            "my presets.db.new-1",
+        ] {
+            assert!(!is_half_made(name, p), "{name}");
+        }
+        assert!(!is_half_made("curves.db.new-1", p));
+        assert!(is_half_made("curves.db.new-1", crate::curves::FILE_NAME));
+    }
+
+    #[test]
+    fn an_old_half_made_file_goes_but_never_a_folder_or_a_link_of_that_name() {
+        let dir = std::env::temp_dir().join(format!("mo-fixes-half-made-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Numbers bigger than any process's number can be, so none is ever this test's own half-made file.
+        let half_made = dir.join("presets.db.new-9999999901");
+        std::fs::write(&half_made, b"half made").unwrap();
+        let folder = dir.join("presets.db.new-9999999902");
+        std::fs::create_dir_all(&folder).unwrap();
+        // A link of that name, to a file of yours elsewhere.
+        #[cfg(unix)]
+        let (link, yours) = {
+            let yours = folder.join("Song.flp");
+            std::fs::write(&yours, b"yours").unwrap();
+            let link = dir.join("presets.db.new-9999999903");
+            std::os::unix::fs::symlink(&yours, &link).unwrap();
+            (link, yours)
+        };
+        // An hour on, each of them is old enough to go, were it a half-made database.
+        remove_old_half_made(&dir.join(FILE_NAME), SystemTime::now() + Duration::from_secs(3600));
+        assert!(!half_made.exists(), "a plain half-made file goes");
+        assert!(folder.is_dir(), "a folder of that name stays");
+        #[cfg(unix)]
+        {
+            let link_there = std::fs::symlink_metadata(&link).is_ok_and(|m| m.file_type().is_symlink());
+            assert!(link_there, "a link of that name stays");
+            assert_eq!(std::fs::read(&yours).unwrap(), b"yours", "and so does what it leads to");
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 
     #[test]
     fn a_fingerprint_is_the_same_every_time() {
