@@ -388,7 +388,7 @@ fn when(at: NaiveDateTime, now: NaiveDateTime) -> String {
 
 /// A sound's waveform for the screens: every stored peak, one thin line each.
 fn wave(s: &Sound) -> String {
-    list::wave_path(&s.analysis.as_ref().map(|a| a.waveform.to_vec()).unwrap_or_default())
+    s.analysis.as_ref().map(|a| list::wave_path_of(a.waveform.iter())).unwrap_or_default()
 }
 
 fn points(s: &Sound) -> i32 {

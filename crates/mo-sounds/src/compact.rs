@@ -31,8 +31,8 @@ use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Row, Transaction, TransactionBehavior, params, params_from_iter,
 };
 
-use crate::db::{Reading, SOUND_COLUMNS, int_at, real_at, sound_at, sound_columns, text_at};
-use crate::{ChordSpan, Everything, Peaks, Sound, SoundAnalysis, SoundsDb, SoundsError, Word};
+use crate::db::{Reading, SOUND_COLUMNS, int_at, real_at, sound_at, sound_columns, text_at, word_at};
+use crate::{ChordSpan, Everything, Peaks, Sound, SoundAnalysis, SoundsDb, SoundsError};
 
 /// The copy's name, beside `sounds.db`.
 pub const FILE_NAME: &str = "sounds-rust.db";
@@ -973,7 +973,7 @@ fn analysis_values(a: Option<&SoundAnalysis>) -> Vec<Value> {
         packed_chords(&a.chords),
         packed(&a.chroma),
         json_list(&a.character),
-        packed(&a.waveform.to_vec()),
+        packed_peaks(&a.waveform),
     ]
 }
 
@@ -1001,13 +1001,13 @@ pub(crate) fn analysis_at(r: &Row<'_>, at: usize) -> Option<SoundAnalysis> {
         width: real(9).unwrap_or(0.0),
         is_loop: int(10) == Some(1),
         bpm: real(11),
-        bpm_source: text(12).map(Word::from).unwrap_or_default(),
+        bpm_source: word_at(r, at + 12).unwrap_or_default(),
         pitch: real(13),
         pitch_confidence: real(14).unwrap_or(0.0),
         key_tonic: int(15),
         key_minor: int(16) == Some(1),
         key_confidence: real(17).unwrap_or(0.0),
-        key_source: text(18).map(Word::from).unwrap_or_default(),
+        key_source: word_at(r, at + 18).unwrap_or_default(),
         chord: text(19),
         chords: match get(20) {
             Some(ValueRef::Blob(b)) => unpacked_chords(b),
@@ -1015,7 +1015,7 @@ pub(crate) fn analysis_at(r: &Row<'_>, at: usize) -> Option<SoundAnalysis> {
         },
         chroma: unpacked(blob(21)),
         character: from_json_list(text(22).as_deref()),
-        waveform: Peaks::new(&unpacked::<f32>(blob(23))),
+        waveform: unpacked_peaks(blob(23)),
     })
 }
 
@@ -1087,7 +1087,7 @@ fn unpacked_chords(bytes: &[u8]) -> Vec<ChordSpan> {
 }
 
 /// A number type the analysis keeps lists of: the waveform's points (`f32`) and the chroma (`f64`).
-trait Packable: Copy + 'static {
+pub(crate) trait Packable: Copy + 'static {
     const SIZE: usize;
     /// Each whole number of thousandths from 0 to 1023 as this kind of number, as the C# analyser makes it
     /// (`Math.Round(x, 3)`): see [`F64_THOUSANDTHS`].
@@ -1110,7 +1110,7 @@ const F64_THOUSANDTHS: [f64; 1024] = {
     table
 };
 
-const F32_THOUSANDTHS: [f32; 1024] = {
+pub(crate) const F32_THOUSANDTHS: [f32; 1024] = {
     let mut table = [0.0; 1024];
     let mut k = 0;
     while k < 1024 {
@@ -1159,7 +1159,7 @@ impl Packable for f64 {
 }
 
 /// `x` as a whole number of thousandths (0 to 1023), when that gives back `x` itself, to the last bit.
-fn thousandths<T: Packable>(x: T) -> Option<u16> {
+pub(crate) fn thousandths<T: Packable>(x: T) -> Option<u16> {
     let k = (x.as_f64() * 1000.0).round();
     if !(0.0..=1023.0).contains(&k) {
         return None;
@@ -1175,24 +1175,7 @@ fn packed<T: Packable>(list: &[T]) -> Value {
         return Value::Null;
     }
     let bytes = match list.iter().map(|&x| thousandths(x)).collect::<Option<Vec<u16>>>() {
-        Some(ks) => {
-            let mut out = Vec::with_capacity(1 + (ks.len() * 10).div_ceil(8));
-            out.push(THOUSANDTHS);
-            let (mut bits, mut held) = (0u32, 0u32);
-            for k in ks {
-                bits |= u32::from(k) << held;
-                held += 10;
-                while held >= 8 {
-                    out.push(bits as u8);
-                    bits >>= 8;
-                    held -= 8;
-                }
-            }
-            if held > 0 {
-                out.push(bits as u8);
-            }
-            out
-        }
+        Some(ks) => packed_thousandths(&ks),
         None => {
             let mut out = Vec::with_capacity(1 + list.len() * T::SIZE);
             out.push(AS_IS);
@@ -1205,32 +1188,72 @@ fn packed<T: Packable>(list: &[T]) -> Value {
     Value::Blob(bytes)
 }
 
+/// Whole thousandths packed 10 bits each, after the [`THOUSANDTHS`] mark.
+fn packed_thousandths(ks: &[u16]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + (ks.len() * 10).div_ceil(8));
+    out.push(THOUSANDTHS);
+    let (mut bits, mut held) = (0u32, 0u32);
+    for &k in ks {
+        bits |= u32::from(k) << held;
+        held += 10;
+        while held >= 8 {
+            out.push(bits as u8);
+            bits >>= 8;
+            held -= 8;
+        }
+    }
+    if held > 0 {
+        out.push(bits as u8);
+    }
+    out
+}
+
 /// A list [`packed`] packed. Empty when there's none (or it isn't one).
 fn unpacked<T: Packable>(bytes: &[u8]) -> Vec<T> {
     match bytes.split_first() {
-        Some((&THOUSANDTHS, rest)) => {
-            // Each byte holds 8 bits and each number 10, and the last byte's spare bits are fewer than 10.
-            let n = rest.len() * 8 / 10;
-            // Four numbers to every 5 bytes, the first in the lowest bits; then the last few, in fewer bytes.
-            let number = |word: u64, j: u32| T::THOUSANDTHS[((word >> (10 * j)) & 0x3ff) as usize];
-            let mut out = Vec::with_capacity(n);
-            let (fives, last) = rest.as_chunks::<5>();
-            for b in fives {
-                let word = u64::from(b[0])
-                    | (u64::from(b[1]) << 8)
-                    | (u64::from(b[2]) << 16)
-                    | (u64::from(b[3]) << 24)
-                    | (u64::from(b[4]) << 32);
-                out.extend_from_slice(&[number(word, 0), number(word, 1), number(word, 2), number(word, 3)]);
-            }
-            let word = last.iter().rev().fold(0u64, |word, &b| (word << 8) | u64::from(b));
-            for j in 0..(n - out.len()) as u32 {
-                out.push(number(word, j));
-            }
-            out
-        }
+        Some((&THOUSANDTHS, rest)) => unpacked_thousandths(rest, |k| T::THOUSANDTHS[usize::from(k)]),
         Some((&AS_IS, rest)) => rest.chunks_exact(T::SIZE).map(T::take).collect(),
         _ => Vec::new(),
+    }
+}
+
+/// The 10-bit whole thousandths after a [`THOUSANDTHS`] mark, each made into what `number` gives for it.
+fn unpacked_thousandths<T>(rest: &[u8], number: impl Fn(u16) -> T) -> Vec<T> {
+    // Each byte holds 8 bits and each number 10, and the last byte's spare bits are fewer than 10.
+    let n = rest.len() * 8 / 10;
+    // Four numbers to every 5 bytes, the first in the lowest bits; then the last few, in fewer bytes.
+    let at = |word: u64, j: u32| number(((word >> (10 * j)) & 0x3ff) as u16);
+    let mut out = Vec::with_capacity(n);
+    let (fives, last) = rest.as_chunks::<5>();
+    for b in fives {
+        let word = u64::from(b[0])
+            | (u64::from(b[1]) << 8)
+            | (u64::from(b[2]) << 16)
+            | (u64::from(b[3]) << 24)
+            | (u64::from(b[4]) << 32);
+        out.extend([at(word, 0), at(word, 1), at(word, 2), at(word, 3)]);
+    }
+    let word = last.iter().rev().fold(0u64, |word, &b| (word << 8) | u64::from(b));
+    for j in 0..(n - out.len()) as u32 {
+        out.push(at(word, j));
+    }
+    out
+}
+
+/// A waveform packed for the copy, as [`packed`] packs it, straight from the thousandths it's held as.
+fn packed_peaks(peaks: &Peaks) -> Value {
+    match peaks.as_thousandths() {
+        Some([]) => Value::Null,
+        Some(ks) => Value::Blob(packed_thousandths(ks)),
+        None => packed(&peaks.to_vec()),
+    }
+}
+
+/// A waveform [`packed_peaks`] packed, kept as the thousandths it was packed as when it was.
+fn unpacked_peaks(bytes: &[u8]) -> Peaks {
+    match bytes.split_first() {
+        Some((&THOUSANDTHS, rest)) => Peaks::from_thousandths(unpacked_thousandths(rest, |k| k).into()),
+        _ => Peaks::new(&unpacked::<f32>(bytes)),
     }
 }
 
@@ -1351,6 +1374,23 @@ mod tests {
         assert_eq!(packed::<f32>(&[]), Value::Null);
         assert!(unpacked::<f32>(&[]).is_empty());
         assert!(unpacked::<f32>(&[9, 1, 2]).is_empty());
+    }
+
+    #[test]
+    fn a_waveform_packs_straight_from_its_thousandths_and_back() {
+        let points: Vec<f32> = (0..160).map(|i| F32_THOUSANDTHS[(i * 389) % 1024]).collect();
+        for list in [points.clone(), vec![0.5, 0.1234], vec![0.25; 3], Vec::new()] {
+            let peaks = Peaks::new(&list);
+            let packed_here = packed_peaks(&peaks);
+            // The same bytes as the floats would pack to, and the same `Peaks` back (thousandths stay thousandths).
+            assert_eq!(packed_here, packed(&list));
+            let back = match &packed_here {
+                Value::Blob(bytes) => unpacked_peaks(bytes),
+                _ => unpacked_peaks(&[]),
+            };
+            assert_eq!(back, peaks);
+            assert_eq!(back.as_thousandths().is_some(), peaks.as_thousandths().is_some());
+        }
     }
 
     #[test]

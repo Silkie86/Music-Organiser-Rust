@@ -537,10 +537,15 @@ pub fn bpm_text(bpm: f64) -> String {
 /// `peaks.len()` wide and 100 high. Peaks are scaled so the loudest reaches the edges, and the quietest still shows as a
 /// sliver, as the old app drew them.
 pub fn wave_path(peaks: &[f32]) -> String {
+    wave_path_of(peaks.iter().copied())
+}
+
+/// [`wave_path`] for peaks given one by one (a sound's `Peaks`, with no list made of them).
+pub fn wave_path_of(peaks: impl Iterator<Item = f32> + Clone) -> String {
     use std::fmt::Write;
-    let loudest = peaks.iter().fold(0.0f32, |m, v| m.max(v.abs())).max(f32::EPSILON);
-    let mut out = String::with_capacity(peaks.len() * 16);
-    for (i, p) in peaks.iter().enumerate() {
+    let loudest = peaks.clone().fold(0.0f32, |m, v| m.max(v.abs())).max(f32::EPSILON);
+    let mut out = String::with_capacity(peaks.size_hint().0 * 16);
+    for (i, p) in peaks.enumerate() {
         let half = (p.abs() / loudest * 50.0).clamp(0.5, 50.0);
         let _ = write!(out, "M{}.5 {:.1}V{:.1}", i, 50.0 - half, 50.0 + half);
     }

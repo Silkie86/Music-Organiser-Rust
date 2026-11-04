@@ -10,7 +10,7 @@ use std::borrow::Borrow;
 use std::collections::HashSet;
 use std::fmt;
 use std::ops::Deref;
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, PoisonError, RwLock};
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
@@ -19,8 +19,10 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 pub struct Word(Option<Arc<str>>);
 
 /// Every different word met so far. Only ever grows, and only by words not seen before: types, sources and character
-/// words come from a short list, plus the names you give your own types.
-static WORDS: LazyLock<Mutex<HashSet<Arc<str>>>> = LazyLock::new(|| Mutex::new(HashSet::new()));
+/// words come from a short list, plus the names you give your own types. (Odd text in a damaged database's type
+/// columns would stay here until the app closes: a few bytes a word.) Many threads can look words up at once; only a
+/// word never seen before waits its turn to be added.
+static WORDS: LazyLock<RwLock<HashSet<Arc<str>>>> = LazyLock::new(|| RwLock::new(HashSet::new()));
 
 impl Word {
     /// `text` as a shared word: the copy already held when the word has been seen before.
@@ -29,7 +31,11 @@ impl Word {
             return Word(None);
         }
         // A panic elsewhere while the list was held can't have left it wrong (it's only ever added to), so go on.
-        let mut words = WORDS.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(held) = WORDS.read().unwrap_or_else(PoisonError::into_inner).get(text) {
+            return Word(Some(held.clone()));
+        }
+        let mut words = WORDS.write().unwrap_or_else(PoisonError::into_inner);
+        // Another thread may have added it between the two looks.
         if let Some(held) = words.get(text) {
             return Word(Some(held.clone()));
         }
@@ -149,9 +155,18 @@ impl Serialize for Word {
 
 impl<'de> Deserialize<'de> for Word {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Word, D::Error> {
-        // Borrowed straight from the text being read when it can be, so a word seen before costs no copy at all.
-        let text = std::borrow::Cow::<'de, str>::deserialize(d)?;
-        Ok(Word::new(&text))
+        // Looked at where it lies in the text being read, so a word seen before costs no copy at all.
+        struct Text;
+        impl serde::de::Visitor<'_> for Text {
+            type Value = Word;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("a word")
+            }
+            fn visit_str<E: serde::de::Error>(self, text: &str) -> Result<Word, E> {
+                Ok(Word::new(text))
+            }
+        }
+        d.deserialize_str(Text)
     }
 }
 

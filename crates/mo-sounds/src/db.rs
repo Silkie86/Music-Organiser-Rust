@@ -697,10 +697,10 @@ pub(crate) fn sound_at(r: &Row<'_>) -> Result<Sound, rusqlite::Error> {
         error: text_at(r, 3),
         // An analysis that can't be read shows as none, as in the C# app.
         analysis: analysis_at(r, 4),
-        name_type: text_at(r, 5).map(Word::from),
-        user_type: text_at(r, 6).map(Word::from),
-        sound_type: Word::from(text_at(r, 7).as_deref().unwrap_or(types::UNKNOWN)),
-        type_source: text_at(r, 8).map(Word::from).unwrap_or_default(),
+        name_type: word_at(r, 5),
+        user_type: word_at(r, 6),
+        sound_type: word_at(r, 7).unwrap_or_else(|| Word::new(types::UNKNOWN)),
+        type_source: word_at(r, 8).unwrap_or_default(),
         type_confidence: real_at(r, 9).unwrap_or(0.0),
         favourite: int_at(r, 10) == Some(1),
         rating: int(int_at(r, 11)),
@@ -720,10 +720,10 @@ fn copy_sound_at(r: &Row<'_>) -> Result<Sound, rusqlite::Error> {
         added: local(int_at(r, 2).unwrap_or(0)),
         error: text_at(r, 3),
         analysis: compact::analysis_at(r, COPY_ANALYSIS),
-        name_type: text_at(r, 4).map(Word::from),
-        user_type: text_at(r, 5).map(Word::from),
-        sound_type: Word::from(text_at(r, 6).as_deref().unwrap_or(types::UNKNOWN)),
-        type_source: text_at(r, 7).map(Word::from).unwrap_or_default(),
+        name_type: word_at(r, 4),
+        user_type: word_at(r, 5),
+        sound_type: word_at(r, 6).unwrap_or_else(|| Word::new(types::UNKNOWN)),
+        type_source: word_at(r, 7).unwrap_or_default(),
         type_confidence: real_at(r, 8).unwrap_or(0.0),
         favourite: int_at(r, 9) == Some(1),
         rating: int(int_at(r, 10)),
@@ -794,6 +794,14 @@ pub(crate) fn real_at(r: &Row<'_>, i: usize) -> Option<f64> {
 }
 
 /// Text, or `None` for NULL or a value of another kind (the C# app's `as string`).
+/// A text column as a shared [`Word`], read without a copy of its own on the way.
+pub(crate) fn word_at(r: &Row<'_>, i: usize) -> Option<Word> {
+    match r.get_ref(i) {
+        Ok(ValueRef::Text(t)) => Some(Word::new(&String::from_utf8_lossy(t))),
+        _ => None,
+    }
+}
+
 pub(crate) fn text_at(r: &Row<'_>, i: usize) -> Option<String> {
     match r.get_ref(i) {
         Ok(ValueRef::Text(t)) => Some(String::from_utf8_lossy(t).into_owned()),
