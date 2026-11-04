@@ -9,6 +9,8 @@
 //! log), and then the crash that ends the app and the lines of how the run ended ("Closed"), up to 256 KB more (one
 //! that doesn't fit is cut short, saying so). A crash is counted by where in the code it happened, whichever thread it
 //! was on, and so is its backtrace, a line of its own after it; the crash that ends the app is never only counted.
+//! A panic the app catches on purpose (`mo_catch::catch`: a damaged file tripped a reader) isn't a crash: it's one
+//! warning line ([`caught`]), counted by its place too.
 //! At each start, a low-priority thread keeps the folder in bounds
 //! ([`crate::tidy::prune_logs`]): the newest 30 runs' logs, the newest 30 crash logs and each tool's newest 10 reports.
 //! A run's log can't be removed while it's written: on Windows nobody can remove it while it's open, and on a Mac or
@@ -139,11 +141,17 @@ impl CrashFiles {
     }
 }
 
-/// Whether a crash ends the app: one on the window's thread (`main`), or one std can't recover from, on any thread
-/// (`message` is what the crash says). `thread` is the crashing thread's name.
+/// Whether a crash that nothing catches ends the app: one on the window's thread (`main`), or one std can't recover
+/// from, on any thread (`message` is what the crash says, see [`std_ends_the_app`]). `thread` is the crashing thread's
+/// name.
 pub fn crash_ends_the_app(thread: Option<&str>, message: Option<&str>) -> bool {
-    let std_ends_it = |m: &str| ENDS_THE_APP.contains(&m) || ENDS_THE_APP_STARTS.iter().any(|s| m.starts_with(s));
-    thread == Some("main") || message.is_some_and(std_ends_it)
+    thread == Some("main") || std_ends_the_app(message)
+}
+
+/// Whether `message` (what a panic says) is std's own as it ends the app ([`ENDS_THE_APP`]): nothing can catch such a
+/// panic, whatever was to catch it.
+pub fn std_ends_the_app(message: Option<&str>) -> bool {
+    message.is_some_and(|m| ENDS_THE_APP.contains(&m) || ENDS_THE_APP_STARTS.iter().any(|s| m.starts_with(s)))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -184,6 +192,9 @@ enum Kind<'a> {
     /// a count each, and written into the extra room for crashes. The crash that ends the app (`ends_the_app`) is
     /// never only counted, however many came before it, and goes into the room for how the run ended.
     Crash { place: &'a str, backtrace: bool, ends_the_app: bool },
+    /// A panic the app caught on purpose ([`caught`]): counted by `place`, as a crash is, but not written once the log
+    /// is full, as it isn't a crash.
+    Caught { place: &'a str },
     /// A line of how the run ended ("Closed"): written into the room for that too ([`LAST_ROOM`]), so it shows.
     Last,
 }
@@ -271,6 +282,17 @@ pub fn crash(place: &str, text: &str, ends_the_app: bool) {
     }
 }
 
+/// A panic the app caught on purpose at `place` in the code (`file:line`), with `mo_catch::catch`: a damaged file
+/// tripped a reader, and the work it was part of gives an error instead. A warning in the "Caught" area, counted by its
+/// place as crashes are, so a folder of damaged files, or one read again and again, is written three times and then
+/// only counted. Not written once this run's log is full: it isn't a crash. Called from the crash handler, so it never
+/// waits long and never crashes itself.
+pub fn caught(place: &str, text: &str) {
+    if let Some(log) = current() {
+        log.put(Level::Warning, "Caught", text, Kind::Caught { place });
+    }
+}
+
 /// The backtrace of a crash at `place` (where in the code it came from), as a line of its own after the crash's own
 /// line ([`crash`]): the crash handler writes the crash first, as taking its backtrace can wait. Counted by its place
 /// as the crash's line is, with a count of its own, so each crash counts once; past the third at a place, the crash's
@@ -337,7 +359,7 @@ impl SessionLog {
         let message: String = message.lines().map(str::trim_end).collect::<Vec<_>>().join("\n");
         // A crash's line, and any line written while a thread is crashing (from the crash handler, or by a drop as the
         // thread unwinds), mustn't crash or wait long: a crash there ends the app at once.
-        let crash = matches!(kind, Kind::Crash { .. }) || std::thread::panicking();
+        let crash = matches!(kind, Kind::Crash { .. } | Kind::Caught { .. }) || std::thread::panicking();
         // The time and the key the line is counted by are made before the lock is taken: nothing that could crash
         // runs while it's held (see the top of this file).
         let time = if crash {
@@ -352,6 +374,7 @@ impl SessionLog {
         let key = match kind {
             Kind::Crash { place, backtrace: false, .. } => format!("Crash\u{1}{place}"),
             Kind::Crash { place, backtrace: true, .. } => format!("Backtrace\u{1}{place}"),
+            Kind::Caught { place } => format!("Caught\u{1}{place}"),
             Kind::Plain | Kind::Last => format!("{}\u{1}{area}\u{1}{message}", level.name()),
         };
         let whole = |message: &str| format!("{time} {:<7} [{area}] {message}", level.name());
@@ -372,6 +395,7 @@ impl SessionLog {
                     // The crash's own line says how many times by now.
                     Kind::Crash { backtrace: true, .. } => return,
                     Kind::Crash { place, .. } => whole(&format!("(crashed at {place} {times} times now) {first}")),
+                    Kind::Caught { place } => whole(&format!("(caught at {place} {times} times now) {first}")),
                     Kind::Plain | Kind::Last => whole(&format!("(said {times} times now) {first}")),
                 };
                 st.recent.push_back(line.clone());
@@ -385,7 +409,7 @@ impl SessionLog {
             None => whole(&message),
         };
         let msg = match kind {
-            Kind::Plain => Msg::Line(line),
+            Kind::Plain | Kind::Caught { .. } => Msg::Line(line),
             Kind::Crash { ends_the_app: false, .. } => Msg::Crash(line),
             Kind::Crash { ends_the_app: true, .. } => Msg::Last(line, CUT_CRASH),
             Kind::Last => Msg::Last(line, CUT_LINE),
@@ -1140,6 +1164,35 @@ mod tests {
     }
 
     #[test]
+    fn panics_caught_on_purpose_are_warnings_counted_by_place_and_not_written_once_the_log_is_full() {
+        let dir = temp_folder("caught");
+        let log = SessionLog::new(&dir, Local::now(), "start");
+        let caught = |place: &str, said: &str| log.put(Level::Warning, "Caught", said, Kind::Caught { place });
+        // A folder of damaged files: each says which, but all trip the reader at one place.
+        for i in 0..12 {
+            caught("src/read.rs:9", &format!("damaged file {i} (at src/read.rs:9, on thread Scan {i})"));
+        }
+        caught("src/other.rs:3", "another place");
+        // Counted apart from a crash at the same place.
+        crash_at(&log, "src/read.rs:9", "Music Organiser crashed on thread Scan 1");
+        // Once the log is full, only crashes go on being written.
+        let filler = "x".repeat(200);
+        for i in 0..(MAX_BYTES / 200 + 100) {
+            log.write(Level::Info, "Scan", &format!("{i} {filler}"));
+        }
+        caught("src/late.rs:1", "not written: the log is full");
+        log.close();
+        let text = std::fs::read_to_string(log.path().expect("a file")).expect("readable");
+        assert_eq!(text.matches("Warning [Caught] damaged file ").count(), 3, "{text}");
+        assert!(text.contains("Warning [Caught] (caught at src/read.rs:9 10 times now) damaged file 9 (at "), "{text}");
+        assert!(!text.contains("damaged file 10"), "the later ones are only counted");
+        assert!(text.contains("Warning [Caught] another place"));
+        assert!(text.contains("[Crash] Music Organiser crashed on thread Scan 1"));
+        assert!(!text.contains("not written: the log is full"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn a_crash_files_backtrace_is_added_after_it() {
         let dir = temp_folder("crash-added");
         let files = CrashFiles::new();
@@ -1419,7 +1472,7 @@ mod tests {
         let (done, finished) = channel();
         let writer = std::sync::Arc::clone(&log);
         std::thread::spawn(move || {
-            let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let crashed = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
                 let _writes = WritesAsItGoes(writer);
                 panic!("a crash in a test, on purpose");
             }));

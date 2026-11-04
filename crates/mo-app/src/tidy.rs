@@ -2190,7 +2190,7 @@ mod tests {
 
         // The app closes as the second note is being put in the bin.
         let closing = ClosingBin { bin: TestBin(dir.join("bin")), sent: std::cell::Cell::new(0) };
-        let cut_off = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| sweep(&places, now, &closing)));
+        let cut_off = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| sweep(&places, now, &closing)));
         assert!(cut_off.is_err());
         assert!(!first.exists() && second.exists() && third.exists());
         // The second may have gone (and been put back since), so it counts as looked at; the third doesn't.

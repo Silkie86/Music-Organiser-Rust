@@ -151,7 +151,7 @@ pub fn free_later<T: Send + 'static>(value: T) {
             for value in freeing {
                 // A part that panics as it's let go is logged (the panic hook does that) and the thread goes on, so
                 // what comes after is still freed here, not on the window's thread.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(value)));
+                let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| drop(value)));
             }
         })
         .ok()
@@ -235,7 +235,7 @@ impl<J: Send + 'static> Newest<J> {
                     }
                 };
                 // `work` keeps nothing half-changed that the next job relies on: each job starts from its own ask.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(job)));
+                let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| work(job)));
             }
         })?;
         Ok(Newest { slot })

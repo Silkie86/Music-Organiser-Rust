@@ -13,6 +13,7 @@ name = "formatlab"
 path = "src/main.rs"
 
 [dependencies]
+mo-catch = { path = "../../crates/mo-catch" }
 mo-formats = { path = "../../crates/mo-formats" }
 rayon = "1.10"
 # The census counts at low priority, so the computer stays quick while it runs (rule 21).

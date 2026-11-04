@@ -112,7 +112,7 @@ pub fn read_save(path: &str, installed: &Installed, samples: &SampleLocator) -> 
     let file = Path::new(path);
     // One file that can't be read must never stop a scan: a reader that trips over a damaged file is caught here
     // and the file listed with what went wrong.
-    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match daw {
+    let read = mo_catch::catch(std::panic::AssertUnwindSafe(|| match daw {
         "FL Studio" => fl::read(file),
         "Bitwig Studio" => std::fs::read(file).map(|raw| match bitwig::Project::open(raw) {
             Ok(project) => bitwig::read_project(Some(&project), &project.doc.raw, file, &known),

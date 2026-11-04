@@ -74,7 +74,7 @@ impl Peaks {
 pub fn read(project: &Path, sounds_db: Option<&Path>) -> Result<Preview, String> {
     // A reader that trips on a damaged save (overflow checks stay on) says so here, as the library's scan does,
     // instead of ending the page's reader with the arrangement never shown.
-    let views = std::panic::catch_unwind(|| mo_formats::arrangement::read(project))
+    let views = mo_catch::catch(|| mo_formats::arrangement::read(project))
         .map_err(|_| "Couldn't read the arrangement: the save holds something the reader didn't expect.".to_owned())?
         .map_err(|e| format!("Couldn't read the arrangement: {e}."))?;
     let locator = crate::sound_library::locator(sounds_db);

@@ -3,13 +3,13 @@
 //! phrases ([`analyser::split`]), and the same notes twice in one file are kept once.
 //!
 //! Files are only read. A damaged file gives an error for the failed list, never a crash: every reader runs inside
-//! `catch_unwind`, as the app must with overflow checks on.
+//! `mo_catch::catch`, as the app must with overflow checks on.
 //!
 //! Not yet: phrases joined from clips that play back to back (the C# `PhraseJoiner`); it needs each DAW's
 //! arrangement, which comes with the arrangement preview.
 
 use std::io;
-use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
 use mo_formats::{MidiClip, NoteEvent, bitwig, case, fl, midi, paths, studio_one};
@@ -100,7 +100,7 @@ pub fn read(path: &Path, midi_folders: &[String]) -> Result<Vec<Found>, Unread> 
 /// Finds the parts in a file's bytes, already read from `path`.
 pub fn from_bytes(path: &Path, raw: &[u8], midi_folders: &[String]) -> Result<Vec<Found>, Unread> {
     let text = path.to_string_lossy();
-    let found = catch_unwind(AssertUnwindSafe(|| {
+    let found = mo_catch::catch(AssertUnwindSafe(|| {
         if midi::is_midi_path(&text) {
             from_midi_file(&text, raw, path, midi_folders)
         } else {

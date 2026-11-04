@@ -135,7 +135,7 @@ pub fn templates(found: &[FoundPreset]) -> Templates {
         .par_iter()
         .filter(|f| f.file.as_ref().is_ok_and(|p| p.format == Some(FileFormat::BwPreset) && p.wraps_plugin))
         // A damaged file is only not a template.
-        .filter_map(|f| std::panic::catch_unwind(|| inspect(Path::new(&f.path))).ok().flatten())
+        .filter_map(|f| mo_catch::catch(|| inspect(Path::new(&f.path))).ok().flatten())
         .collect();
     all.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.path.cmp(&b.path)));
     let mut out = Templates::new();

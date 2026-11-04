@@ -11,8 +11,11 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
   The format registry's source of truth is now the Rust copy, `tools/formatlab/registry/*.json` (Solomon, 2026-11-02:
   the C# app is frozen); new findings go there, not back into C#.
 - **Layout (spec section 12):** one Cargo workspace, `crates/mo-*` (formats, library, space, backup, work, audio, sounds, harmony,
-  midi, playground, dawlink, convert, app, ui) and `tools/` (formatlab, theorybench). UI is Slint; screen logic lives in
+  midi, playground, dawlink, convert, app, ui, catch) and `tools/` (formatlab, theorybench). UI is Slint; screen logic lives in
   `mo-app` so it can be tested without a window.
+- **Catching a panic:** only through `mo-catch` (clippy.toml forbids `catch_unwind`): `mo_catch::catch` for what a
+  damaged file or a library can do (one warning line in the log), `mo_catch::catch_crash` for a bug a thread lives
+  through (still logged as a crash, in full).
 - **`vendor/femtovg`:** a patched copy of Slint's drawing library (it rebuilt its graphics card steps every frame).
   `vendor/femtovg/PATCHED.md` says what changed and when to delete it. Never edit it for anything else.
 
