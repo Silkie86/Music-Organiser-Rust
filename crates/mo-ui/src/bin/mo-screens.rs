@@ -90,6 +90,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sample_app_files(),
         sample_bitwig_copies(),
         Default::default(),
+        sample_old_copies(),
         "",
     );
 
@@ -151,6 +152,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sample_app_files(),
         sample_bitwig_copies(),
         Default::default(),
+        sample_old_copies(),
         mo_app::space::APP_FILES,
     );
     capture(&window);
@@ -163,15 +165,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // project fixed with its other saves on show (one of them ticked), one that couldn't be fixed.
     let bitwig = mo_app::space_bitwig::BITWIG_COPIES;
     let (copies, fixes) = (sample_bitwig_copies(), sample_fixes());
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), copies, fixes, bitwig);
+    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), copies, fixes, sample_old_copies(), bitwig);
     capture(&window);
     shots.push(("space-bitwig.png".into(), capture(&window)));
+    // The old copies card: what moving plugin folders to another drive left, biggest first, with one that can't go yet.
+    let (copies, old) = (sample_bitwig_copies(), sample_old_copies());
+    let old_copies = mo_app::space_old::OLD_COPIES;
+    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), copies, Default::default(), old, old_copies);
+    capture(&window);
+    shots.push(("space-old.png".into(), capture(&window)));
     mo_ui::space::show_sample(
         &app,
         sample_drives(),
         sample_app_files(),
         sample_bitwig_copies(),
         Default::default(),
+        sample_old_copies(),
         "",
     );
     presets_shots(&app, &window, &mut shots);
@@ -544,6 +553,60 @@ fn sample_bitwig_copies() -> mo_app::space_bitwig::Copies {
             project("Sketch 14", &[("Bass Mono", 12), ("Keys Soft", 9)], &[]),
         ],
     }
+}
+
+/// Made-up old copies left after moving plugin folders to I:, written as on Windows, biggest first: two that can go,
+/// the old place of the folder the moved folders live in, and one that can't go yet.
+fn sample_old_copies() -> mo_app::space_old::Found {
+    use mo_space::after_move::OldHome;
+    use mo_space::old_copies::{Left, Leftover, Reminder};
+    const MB: u64 = 1 << 20;
+    let moved = |day: u32| chrono::NaiveDate::from_ymd_opt(2026, 10, day).and_then(|d| d.and_hms_opt(14, 3, 0));
+    let left = |path: &str, mb: u64, what: Left, now_in: &str, day: Option<u32>, stays: Option<&str>| Leftover {
+        path: path.to_owned(),
+        bytes: mb * MB,
+        what,
+        now_in: now_in.to_owned(),
+        since: day.and_then(moved),
+        stays: stays.map(str::to_owned),
+    };
+    let stays = "It's the only copy the plugin could use now (the link or the copy on the other drive isn't as the move \
+                 left it), so it stays.";
+    let leftovers = vec![
+        left(
+            r"C:\Program Files\Common Files\Spitfire Audio (old copy)",
+            62_870,
+            Left::OldCopy(0),
+            r"I:\Plugin Data\Spitfire Audio",
+            Some(26),
+            None,
+        ),
+        left(
+            r"C:\Users\Public\Documents\Native Instruments\Kontakt Factory Library (old copy)",
+            9_420,
+            Left::OldCopy(1),
+            r"I:\Plugin Data\Kontakt Factory Library",
+            Some(29),
+            None,
+        ),
+        left(r"C:\Plugin Data", 5_210, Left::Behind(0), r"I:\Plugin Data", None, None),
+        left(
+            r"C:\ProgramData\Arturia (old copy)",
+            4_300,
+            Left::OldCopy(2),
+            r"I:\Plugin Data\Arturia",
+            Some(31),
+            Some(stays),
+        ),
+    ];
+    let home = OldHome {
+        path: r"C:\Plugin Data".to_owned(),
+        bytes: 5_210 * MB,
+        note: "its old place".to_owned(),
+        copy: r"I:\Plugin Data".to_owned(),
+        kind: 2,
+    };
+    mo_app::space_old::Found { reminder: Reminder { leftovers }, moved: Vec::new(), homes: vec![home] }
 }
 
 /// What Fix did to the made-up projects: GARAGE FOR BW 1's other saves on show with its older save ticked, and

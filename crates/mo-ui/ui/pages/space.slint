@@ -1,8 +1,8 @@
 // The Space page (phase 4): the drives your projects, samples, backup and the app's own files are on, how full each
-// is, what the app's own files take, and (part 2) Bitwig's copies of Library multisamples, with Fix for the saves you
-// tick. Agreed layout: the design canvas's Space board (2026-11-03): the drives
-// across the top, Biggest wins first, Also taking room, and the picked line's card beside them. Only shared parts from
-// studio.slint; mo-app decides every word (mo_app::space), mo-ui/src/space.rs fills it.
+// is, what the app's own files take, (part 2) Bitwig's copies of Library multisamples, with Fix for the saves you
+// tick, and (part 3) the old copies moving plugin folders left. Agreed layout: the design canvas's Space board
+// (2026-11-03): the drives across the top, Biggest wins first, Also taking room, and the picked line's card beside
+// them. Only shared parts from studio.slint; mo-app decides every word (mo_app::space), mo-ui/src/space.rs fills it.
 import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, CardAction, CardActions, TickBox, LinkText } from "../studio.slint";
 
 // One drive across the top.
@@ -30,8 +30,9 @@ export struct RoomLine {
     size: string,
 }
 
-// One part on the picked line's card: its name, what it holds and its size. On the Bitwig copies card a part can also
-// have a tick, a line saying how it's doing, and links to open it or show more; a save under its project is a step in.
+// One part on the picked line's card: its name, what it holds and its size. A part can also have a tick, a line saying
+// how it's doing, and links to open it (a fixed project in Bitwig, an old copy in its folder) or show more; a save
+// under its project is a step in.
 export struct CardPart {
     name: string,
     what: string,
@@ -42,8 +43,8 @@ export struct CardPart {
     status: string,
     // Shows `status` as a problem.
     problem: bool,
-    // It has a fixed project to open in Bitwig.
-    can-open: bool,
+    // The words of its link that opens it ("Open in Bitwig", "Show in folder"); "" for none.
+    open: string,
     // The words of its link that shows or hides more under it; "" for none.
     more: string,
 }
@@ -78,7 +79,7 @@ export global SpaceData {
     // A button on the page or the card (its id).
     callback chosen(string);
     callback panel-resized(length);
-    // A part on the card (its place in the list): its tick changed, its Open in Bitwig link, its link that shows more.
+    // A part on the card (its place in the list): its tick changed, its link that opens it, its link that shows more.
     callback tick-part(int, bool);
     callback open-part(int);
     callback more-part(int);
@@ -267,11 +268,11 @@ component SpaceCard inherits SidePanel {
                     wrap: word-wrap;
                     min-width: 0px;
                 }
-                if part.can-open || part.more != "": HorizontalLayout {
+                if part.open != "" || part.more != "": HorizontalLayout {
                     spacing: Space.md;
                     alignment: start;
-                    if part.can-open: LinkText {
-                        text: "Open in Bitwig";
+                    if part.open != "": LinkText {
+                        text: part.open;
                         font-size: Type.meta;
                         clicked => { SpaceData.open-part(i); }
                     }
