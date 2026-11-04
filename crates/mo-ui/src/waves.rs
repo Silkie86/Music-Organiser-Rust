@@ -15,47 +15,60 @@ use slint::{ComponentHandle, Image, SharedString};
 use crate::canvas::{Canvas, Kind};
 use crate::{AppWindow, Waves, gpu};
 
-/// How many pictures are kept: the tiles of a big screen several times over (each a few tens of kilobytes on the
-/// card), so scrolling back doesn't draw them again.
+/// How many waveforms' pictures are kept: the tiles of a big screen several times over (each a few tens of kilobytes
+/// on the card), so scrolling back doesn't draw them again.
 const KEEP: usize = 256;
 
-/// What a picture shows: a waveform's lines (its path and how many points across), its tint, its width, height and
-/// lines' width in pixels (to the bit, so a picture is only used again at exactly its size), and which card it's on.
+/// What a picture shows: a waveform's lines (its path and how many points across), its tint, and which card it's on.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct Shows {
     shape: SharedString,
     points: i32,
     tint: u32,
-    size: [u32; 3],
     card: u64,
 }
 
-/// The pictures drawn, by what they show, with when each was last asked for; the least lately asked for goes first.
+/// A picture's width, height and lines' width in pixels, to the bit: a picture is only shown again at exactly its
+/// size.
+type Size = [u32; 3];
+
+/// The pictures drawn: one for each waveform, at the size it was last drawn at (a new size, as the window is resized,
+/// takes the old one's place), with when each was last asked for. Once [`KEEP`] are kept, the least lately asked for
+/// goes first.
 #[derive(Default)]
 struct Kept {
-    pictures: HashMap<Shows, (Image, u64)>,
+    pictures: HashMap<Shows, (Size, Image, u64)>,
     asks: u64,
 }
 
 impl Kept {
-    fn get(&mut self, shows: &Shows) -> Option<Image> {
+    /// The picture of `shows` at `size`, if it's kept.
+    fn get(&mut self, shows: &Shows, size: Size) -> Option<Image> {
         self.asks += 1;
         let asks = self.asks;
-        self.pictures.get_mut(shows).map(|(image, asked)| {
-            *asked = asks;
-            image.clone()
-        })
+        match self.pictures.get_mut(shows) {
+            Some((kept, image, asked)) if *kept == size => {
+                *asked = asks;
+                Some(image.clone())
+            }
+            _ => None,
+        }
     }
 
-    fn keep(&mut self, shows: Shows, image: Image) {
+    fn keep(&mut self, shows: Shows, size: Size, image: Image) {
         if self.pictures.len() >= KEEP
-            && let Some(oldest) = self.pictures.iter().min_by_key(|(_, (_, asked))| *asked).map(|(k, _)| k.clone())
+            && !self.pictures.contains_key(&shows)
+            && let Some(oldest) = self.pictures.iter().min_by_key(|(_, (_, _, asked))| *asked).map(|(k, _)| k.clone())
         {
             self.pictures.remove(&oldest);
         }
         // Counted as asked for now, after everything kept before it.
         self.asks += 1;
-        self.pictures.insert(shows, (image, self.asks));
+        self.pictures.insert(shows, (size, image, self.asks));
+    }
+
+    fn clear(&mut self) {
+        self.pictures.clear();
     }
 }
 
@@ -88,23 +101,28 @@ fn painter(gpu: &gpu::Gpu) -> Canvas {
 /// itself goes).
 pub fn card_gone() {
     CARD.with(|c| c.borrow_mut().gone());
-    KEPT.with(|k| k.borrow_mut().pictures.clear());
+    KEPT.with(|k| k.borrow_mut().clear());
 }
 
 /// The card went and the window's still here: every `Waveform` asks again, drawing its path until there's a card again.
 pub fn graphics_gone(app: &AppWindow) {
-    let weak = app.as_weak();
-    let _ = slint::invoke_from_event_loop(move || {
-        if let Some(app) = weak.upgrade() {
-            ask_again(&app);
-        }
-    });
+    ask_again_later(app.as_weak());
 }
 
 /// Every `Waveform` asks for its picture again.
 fn ask_again(app: &AppWindow) {
     let waves = app.global::<Waves>();
     waves.set_asked(waves.get_asked().wrapping_add(1));
+}
+
+/// Every `Waveform` asks for its picture again, at the event loop's next turn: not now, while the window may be
+/// working out what to show.
+fn ask_again_later(app: slint::Weak<AppWindow>) {
+    let _ = slint::invoke_from_event_loop(move || {
+        if let Some(app) = app.upgrade() {
+            ask_again(&app);
+        }
+    });
 }
 
 /// The picture of a waveform's lines (`shape`, as `mo_app::sounds::wave_path` makes it, `points` across) in `tint`,
@@ -119,15 +137,10 @@ fn picture(
     line: f32,
 ) -> Option<Image> {
     let (gpu, generation) = CARD.with(|c| c.borrow().card())?;
-    let size = (pixels(width)?, pixels(height)?);
-    let shows = Shows {
-        shape,
-        points,
-        tint: tint.as_argb_encoded(),
-        size: [width.to_bits(), height.to_bits(), line.to_bits()],
-        card: generation,
-    };
-    if let Some(image) = KEPT.with(|k| k.borrow_mut().get(&shows)) {
+    let pixel_size = (pixels(width)?, pixels(height)?);
+    let shows = Shows { shape, points, tint: tint.as_argb_encoded(), card: generation };
+    let size = [width.to_bits(), height.to_bits(), line.to_bits()];
+    if let Some(image) = KEPT.with(|k| k.borrow_mut().get(&shows, size)) {
         return Some(image);
     }
     // The painter is set up away from the window's thread: as the card is handed over, or now, if the window draws a
@@ -150,12 +163,13 @@ fn picture(
             painter(gpu)
         })?;
         let _doing = crate::watchdog::doing("Waveforms: draw on the GPU");
-        let texture = gpu::checked(&gpu.device, || canvas.draw_new(size, 1.0, scene.background, &scene.pack(1.0)))?;
+        let texture =
+            gpu::checked(&gpu.device, || canvas.draw_new(pixel_size, 1.0, scene.background, &scene.pack(1.0)))?;
         Image::try_from(texture).map_err(|e| format!("Slint wouldn't show the picture: {e}"))
     });
     match drawn {
         Ok(image) => {
-            KEPT.with(|k| k.borrow_mut().keep(shows, image.clone()));
+            KEPT.with(|k| k.borrow_mut().keep(shows, size, image.clone()));
             Some(image)
         }
         Err(e) => {
@@ -164,14 +178,9 @@ fn picture(
                 &format!("The graphics card couldn't draw a waveform, so the window draws them: {e}"),
             );
             CARD.with(|c| c.borrow_mut().refused(generation));
-            KEPT.with(|k| k.borrow_mut().pictures.clear());
-            // Every waveform asks again and draws its path; not now, while the window is working out what to show.
-            let app = app.clone();
-            let _ = slint::invoke_from_event_loop(move || {
-                if let Some(app) = app.upgrade() {
-                    ask_again(&app);
-                }
-            });
+            KEPT.with(|k| k.borrow_mut().clear());
+            // Every waveform asks again and draws its path.
+            ask_again_later(app.clone());
             None
         }
     }
@@ -200,29 +209,50 @@ mod tests {
     /// The least lately asked for goes first once [`KEEP`] are kept.
     #[test]
     fn the_pictures_kept_are_the_ones_asked_for_lately() {
-        let shows = |points: usize| Shows {
-            shape: "M0.5 10.0V90.0".into(),
-            points: points as i32,
-            tint: 0xFF4FB3FF,
-            size: [200f32.to_bits(), 40f32.to_bits(), 1f32.to_bits()],
-            card: 1,
-        };
+        let shows =
+            |points: usize| Shows { shape: "M0.5 10.0V90.0".into(), points: points as i32, tint: 0xFF4FB3FF, card: 1 };
+        let size = [200f32.to_bits(), 40f32.to_bits(), 1f32.to_bits()];
         let mut kept = Kept::default();
         for n in 0..KEEP {
-            kept.keep(shows(n), Image::default());
+            kept.keep(shows(n), size, Image::default());
         }
         // The first is asked for again, so the second is the least lately asked for.
-        assert!(kept.get(&shows(0)).is_some());
-        kept.keep(shows(9999), Image::default());
+        assert!(kept.get(&shows(0), size).is_some());
+        kept.keep(shows(9999), size, Image::default());
         assert_eq!(kept.pictures.len(), KEEP);
-        assert!(kept.get(&shows(0)).is_some(), "asked for lately");
-        assert!(kept.get(&shows(1)).is_none(), "the least lately asked for went");
-        assert!(kept.get(&shows(9999)).is_some());
-        // Anything else different is another picture: on another card, or a hair wider.
-        assert!(kept.get(&Shows { card: 2, ..shows(0) }).is_none());
-        assert!(
-            kept.get(&Shows { size: [200.01f32.to_bits(), 40f32.to_bits(), 1f32.to_bits()], ..shows(0) }).is_none()
-        );
+        assert!(kept.get(&shows(0), size).is_some(), "asked for lately");
+        assert!(kept.get(&shows(1), size).is_none(), "the least lately asked for went");
+        assert!(kept.get(&shows(9999), size).is_some());
+        // On another card, it's another picture.
+        assert!(kept.get(&Shows { card: 2, ..shows(0) }, size).is_none());
+    }
+
+    /// A waveform drawn at a new size (the window resized) takes the place of its picture at the old size, instead of
+    /// filling the pictures kept with sizes nothing shows any more.
+    #[test]
+    fn a_new_size_takes_the_old_ones_place() {
+        let shows = Shows { shape: "M0.5 10.0V90.0".into(), points: 160, tint: 0xFF4FB3FF, card: 1 };
+        let at = |width: f32| [width.to_bits(), 40f32.to_bits(), 1f32.to_bits()];
+        let mut kept = Kept::default();
+        for step in 0..KEEP * 2 {
+            let width = 200.0 + step as f32 * 0.25;
+            assert!(kept.get(&shows, at(width)).is_none(), "not drawn at {width} yet");
+            kept.keep(shows.clone(), at(width), Image::default());
+        }
+        assert_eq!(kept.pictures.len(), 1, "one picture, at the size it's at now");
+        let last = 200.0 + (KEEP * 2 - 1) as f32 * 0.25;
+        assert!(kept.get(&shows, at(last)).is_some());
+        assert!(kept.get(&shows, at(200.0)).is_none(), "a hair off is another picture");
+        // A full set of pictures doesn't lose one to a waveform drawn again at a new size.
+        let other = |n: usize| Shows { shape: "M2.5 20.0V80.0".into(), points: n as i32, ..shows.clone() };
+        for n in 1..KEEP {
+            kept.keep(other(n), at(200.0), Image::default());
+        }
+        assert_eq!(kept.pictures.len(), KEEP);
+        kept.keep(shows.clone(), at(321.0), Image::default());
+        assert_eq!(kept.pictures.len(), KEEP);
+        assert!(kept.get(&other(1), at(200.0)).is_some(), "still kept");
+        assert!(kept.get(&shows, at(321.0)).is_some());
     }
 
     /// The card draws a waveform's lines where the processor would: how much of the tint shows in each pixel (the
