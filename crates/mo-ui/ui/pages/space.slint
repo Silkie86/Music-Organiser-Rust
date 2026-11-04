@@ -1,5 +1,5 @@
-// The Space page (phase 4), part 1: the drives your projects, samples, backup and the app's own files are on, how full
-// each is, and what the app's own files take. Agreed layout: the design canvas's Space board (2026-11-03): the drives
+// The Space page (phase 4): the drives your projects, samples, backup and the app's own files are on, how full each
+// is, what the app's own files take, and (part 2) Bitwig's copies of Library multisamples. Agreed layout: the design canvas's Space board (2026-11-03): the drives
 // across the top, Biggest wins first, Also taking room, and the picked line's card beside them. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::space), mo-ui/src/space.rs fills it.
 import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, CardAction, CardActions } from "../studio.slint";
@@ -39,7 +39,8 @@ export struct CardPart {
 export global SpaceData {
     in property <string> summary;
     in property <[DriveCard]> drives;
-    // What Biggest wins first will list, while it lists nothing yet.
+    // What can be freed, biggest first; then what's still to come (and why a kind isn't listed when it isn't).
+    in property <[RoomLine]> wins;
     in property <string> wins-note;
     in property <[RoomLine]> also;
     // The buttons beside Biggest wins first: Measure again, Open Recycle Bin.
@@ -52,6 +53,8 @@ export global SpaceData {
     in property <string> card-big-note;
     in property <string> card-lead;
     in property <[CardPart]> card-parts;
+    // What to know about them, under the parts.
+    in property <string> card-note;
     in property <string> card-room;
     in property <string> card-warning;
     in property <[CardAction]> card-actions;
@@ -123,7 +126,7 @@ component DriveView inherits Rectangle {
     }
 }
 
-// A line of Also taking room (and, once there are some, Biggest wins first): picked, it opens its card.
+// A line of Biggest wins first or Also taking room: picked, it opens its card.
 component RoomLineView inherits ListLine {
     in property <RoomLine> line;
     height: 56px;
@@ -225,6 +228,12 @@ component SpaceCard inherits SidePanel {
             }
         }
     }
+    if SpaceData.card-note != "": Text {
+        text: SpaceData.card-note;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
     if SpaceData.card-room != "": Text {
         text: SpaceData.card-room;
         color: Theme.muted;
@@ -289,10 +298,14 @@ export component SpacePage inherits Rectangle {
                         chosen(id) => { SpaceData.chosen(id); }
                     }
                 }
+                for line in SpaceData.wins: RoomLineView {
+                    line: line;
+                }
+                // Smaller once there are lines above it.
                 Well {
-                    min-height: 96px;
+                    min-height: SpaceData.wins.length > 0 ? 0px : 96px;
                     VerticalLayout {
-                        padding: Space.xl;
+                        padding: SpaceData.wins.length > 0 ? Space.lg : Space.xl;
                         alignment: center;
                         Text {
                             text: SpaceData.wins-note;
