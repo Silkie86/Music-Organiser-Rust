@@ -7,7 +7,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 use mo_sounds::compact::{self, Synced};
-use mo_sounds::{ChordSpan, SoundAnalysis, SoundsDb};
+use mo_sounds::index::{Gathered, SoundIndex};
+use mo_sounds::{ChordSpan, Everything, SoundAnalysis, SoundsDb, SoundsError};
 use rusqlite::{Connection, params};
 
 /// The C# app's tables and indexes, as it makes them (`SoundLibrary.Schema`, `NewIndexes` and `PrintSchema`).
@@ -389,6 +390,21 @@ fn same_answers(old: &Path, copy: &Path) {
     }
 }
 
+/// The same sounds and fingerprints, to the last bit.
+fn same_everything(a: &Everything, b: &Everything) {
+    assert_eq!(a.sounds.len(), b.sounds.len());
+    for (x, y) in a.sounds.iter().zip(&b.sounds) {
+        assert_eq!(format!("{x:?}"), format!("{y:?}"));
+    }
+    assert_eq!(a.features, b.features);
+    assert_eq!(a.clap, b.clap);
+}
+
+/// What the page's own read of `sounds.db` gives.
+fn read_for_page(old: &Path) -> Everything {
+    SoundsDb::open_read_only(old).unwrap().everything(now()).unwrap()
+}
+
 #[test]
 fn the_copy_gives_every_answer_sounds_db_gives() {
     let dir = folder("every");
@@ -754,4 +770,143 @@ fn sounds_db_is_never_changed() {
     compact::sync(&old, &copy).unwrap();
     assert_ne!(before, changed);
     assert_eq!(std::fs::read(&old).unwrap(), changed, "reading it changed nothing");
+}
+
+/// With no copy yet, the page's read and the copy's are one pass over `sounds.db`: the page gets what its own read
+/// gives, and the copy made on the same pass gives it too. An update on the same pass likewise.
+#[test]
+fn the_page_reads_sounds_db_once_while_the_copy_is_made() {
+    let dir = folder("one-pass");
+    let old = library(&dir, 300);
+    let copy = compact::copy_of(&old);
+    let (e, synced) = compact::sync_reading(&old, &copy, now()).unwrap();
+    let s = synced.unwrap();
+    assert!(s.made);
+    assert_eq!(s.sounds, e.sounds.len());
+    same_everything(&e, &read_for_page(&old));
+    assert!(compact::in_step(&old, &copy));
+    same_answers(&old, &copy);
+    cs(&old)
+        .execute_batch(
+            "UPDATE sounds SET plays = COALESCE(plays, 0) + 1
+                 WHERE id IN (SELECT id FROM sounds WHERE id < (SELECT MAX(id) FROM sounds) LIMIT 7);
+             DELETE FROM sounds WHERE id = (SELECT MAX(id) FROM sounds);",
+        )
+        .unwrap();
+    let (e, synced) = compact::sync_reading(&old, &copy, now()).unwrap();
+    let s = synced.unwrap();
+    assert_eq!((s.made, s.added, s.changed, s.removed), (false, 0, 7, 1));
+    same_everything(&e, &read_for_page(&old));
+    assert!(compact::in_step(&old, &copy));
+    same_answers(&old, &copy);
+}
+
+/// When no copy can be made (here another database is where it goes, which is never replaced), the page still gets
+/// its sounds, and says why there's no copy. Without a library at all there's nothing to read.
+#[test]
+fn the_page_gets_its_sounds_when_no_copy_can_be_made() {
+    let dir = folder("no-copy");
+    let old = library(&dir, 40);
+    let copy = compact::copy_of(&old);
+    Connection::open(&copy).unwrap().execute_batch("CREATE TABLE notes (x); INSERT INTO notes VALUES (1);").unwrap();
+    let (e, synced) = compact::sync_reading(&old, &copy, now()).unwrap();
+    assert!(matches!(synced, Err(SoundsError::Copy { .. })), "{synced:?}");
+    same_everything(&e, &read_for_page(&old));
+    let notes: i64 =
+        Connection::open(&copy).unwrap().query_row("SELECT COUNT(*) FROM notes", [], |r| r.get(0)).unwrap();
+    assert_eq!(notes, 1, "the other database is left as it was");
+    assert!(compact::sync_reading(&dir.join("none.db"), &dir.join("none-rust.db"), now()).is_err());
+}
+
+/// The page reads the copy's list first and its fingerprints after: what the likeness index keeps, the same from both
+/// files. CLAP's are read only once deep listening has heard enough of the analysed sounds (the index would drop
+/// them otherwise), counted as the index counts them: those of the most common length, a damaged one left out.
+#[test]
+fn the_fingerprints_come_apart_from_the_list() {
+    let dir = folder("prints-apart");
+    let old = library(&dir, 400);
+    // A CLAP of another length (an older model's) and one that isn't whole floats: neither counts towards "enough".
+    cs(&old)
+        .execute_batch(&format!(
+            "INSERT INTO sounds (path, analysis, clap) VALUES ('E:\\Old model.wav', '{{}}', x'{}');
+             INSERT INTO sounds (path, analysis, clap) VALUES ('E:\\Torn.wav', '{{}}', x'0102030405');",
+            "00".repeat(256 * 4)
+        ))
+        .unwrap();
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    let e = read_for_page(&old);
+    let mut lengths = std::collections::HashMap::new();
+    for (_, v) in e.clap.iter() {
+        *lengths.entry(v.len()).or_insert(0usize) += 1;
+    }
+    let heard = lengths.values().copied().max().unwrap();
+    assert!(heard < e.clap.len(), "the test needs CLAP of two lengths");
+    // The most analysed sounds deep listening is "enough" for, and one more.
+    let enough = (heard as f64 / 0.9).floor() as usize;
+    assert!(mo_sounds::learn::heard_enough(heard, enough) && !mo_sounds::learn::heard_enough(heard, enough + 1));
+    for path in [&old, &copy] {
+        let db = SoundsDb::open_read_only(path).unwrap();
+        for (analysed, deep) in [(enough, true), (enough + 1, false)] {
+            let (features, clap) = db.fingerprints(analysed).unwrap();
+            assert_eq!(features, e.features, "{analysed}");
+            assert_eq!(clap, if deep { e.clap.clone() } else { Gathered::default() }, "{analysed}");
+            let apart = SoundIndex::from_gathered(features, clap, analysed);
+            let together = SoundIndex::from_gathered(e.features.clone(), e.clap.clone(), analysed);
+            assert_eq!((apart.deep, apart.clap.is_some()), (together.deep, together.clap.is_some()));
+            assert_eq!((apart.deep, apart.clap.is_some()), (deep, deep));
+        }
+    }
+}
+
+/// The page reads the copy whenever there's one to read, at once even when it's behind (with the sounds as they were
+/// when it was last brought up to date), and `sounds.db` only when there's none, making it on the same pass. A copy
+/// a newer version of the app made isn't read (or touched): `sounds.db` is, and the page still gets its sounds.
+#[test]
+fn the_page_reads_the_copy_whenever_there_is_one() {
+    let dir = folder("page-read");
+    let old = library(&dir, 120);
+    let copy = compact::copy_of(&old);
+    let listed = |path: &Path| format!("{:?}", SoundsDb::open_read_only(path).unwrap().all(now()).unwrap());
+    let Ok(compact::PageRead::Library { everything, made }) = compact::read_for_page(&old, now()) else {
+        panic!("no copy yet, so sounds.db is read");
+    };
+    assert!(made.unwrap().made);
+    same_everything(&everything, &read_for_page(&old));
+    let Ok(compact::PageRead::Copy { db, sounds, behind }) = compact::read_for_page(&old, now()) else {
+        panic!("the copy is read once it's there");
+    };
+    assert!(!behind);
+    assert!(db.is_copy());
+    assert_eq!(format!("{sounds:?}"), listed(&old));
+    drop(db);
+    // A save in the C# app: the copy is still read at once, as it was, and says it's behind.
+    let before = listed(&old);
+    cs(&old)
+        .execute("UPDATE sounds SET rating = 5 - COALESCE(rating, 0) WHERE id IN (SELECT id FROM sounds LIMIT 4)", [])
+        .unwrap();
+    assert_ne!(listed(&old), before);
+    let Ok(compact::PageRead::Copy { sounds, behind, .. }) = compact::read_for_page(&old, now()) else {
+        panic!("the copy is read even when it's behind");
+    };
+    assert!(behind);
+    assert_eq!(format!("{sounds:?}"), before);
+    compact::sync(&old, &copy).unwrap();
+    let Ok(compact::PageRead::Copy { sounds, behind, .. }) = compact::read_for_page(&old, now()) else {
+        panic!("the copy brought up to date is read");
+    };
+    assert!(!behind);
+    assert_eq!(format!("{sounds:?}"), listed(&old));
+    // A newer version's copy: left alone, and sounds.db is read instead.
+    Connection::open(&copy).unwrap().execute("UPDATE copy_info SET value = 99 WHERE key = 'format'", []).unwrap();
+    let Ok(compact::PageRead::Library { everything, made }) = compact::read_for_page(&old, now()) else {
+        panic!("a newer copy isn't read");
+    };
+    assert!(made.is_err());
+    same_everything(&everything, &read_for_page(&old));
+    let format: i64 = Connection::open(&copy)
+        .unwrap()
+        .query_row("SELECT value FROM copy_info WHERE key = 'format'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(format, 99, "the newer copy is left as it is");
 }

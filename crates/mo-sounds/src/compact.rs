@@ -25,13 +25,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
+use chrono::NaiveDateTime;
 use rusqlite::types::{ToSqlOutput, Value, ValueRef};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Row, Transaction, TransactionBehavior, params, params_from_iter,
 };
 
-use crate::db::{int_at, real_at, text_at};
-use crate::{ChordSpan, SoundAnalysis, SoundsDb, SoundsError};
+use crate::db::{Reading, SOUND_COLUMNS, int_at, real_at, sound_at, sound_columns, text_at};
+use crate::{ChordSpan, Everything, Sound, SoundAnalysis, SoundsDb, SoundsError};
 
 /// The copy's name, beside `sounds.db`.
 pub const FILE_NAME: &str = "sounds-rust.db";
@@ -87,17 +88,23 @@ const SCHEMA: &str = concat!(
 const INDEXES: &str = "CREATE INDEX sounds_path ON sounds(path);";
 
 /// Each sound in `sounds.db`, every column, in the order the rows are stored (never `ORDER BY`: see
-/// [`SoundsDb::everything`]).
-const OLD_SOUNDS: &str = "SELECT id, path, size, mtime, error, analysis, features, clap, name_type, user_type, type,
-    type_source, type_conf, favourite, rating, plays, last_played FROM sounds";
+/// [`SoundsDb::everything`]). The page's read takes the first columns, in its own order, so one pass over the file
+/// can serve both ([`sync_reading`]).
+const OLD_SOUNDS: &str = concat!("SELECT ", sound_columns!(), ", features, clap, size, last_played FROM sounds");
 
-/// Where [`OLD_SOUNDS`] has the analysis and the two fingerprints.
-const OLD_ANALYSIS: usize = 5;
-const OLD_FEATURES: usize = 6;
-const OLD_CLAP: usize = 7;
+/// Where [`OLD_SOUNDS`] has the analysis, the two fingerprints and the two columns the page doesn't read.
+const OLD_ANALYSIS: usize = 4;
+const OLD_FEATURES: usize = SOUND_COLUMNS;
+const OLD_CLAP: usize = SOUND_COLUMNS + 1;
+const OLD_SIZE: usize = SOUND_COLUMNS + 2;
+const OLD_LAST_PLAYED: usize = SOUND_COLUMNS + 3;
 
 /// The columns of [`OLD_SOUNDS`] that are copied as they are, in the order [`INSERT_SOUND`] takes them after the id.
-const AS_THEY_ARE: [usize; 13] = [1, 2, 3, 4, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+const AS_THEY_ARE: [usize; 13] = [1, OLD_SIZE, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, OLD_LAST_PLAYED];
+
+/// The columns of [`OLD_SOUNDS`] a row's hash is made from: all but the id and the two fingerprints (each hashed on
+/// its own).
+const HASHED: [usize; 14] = [1, OLD_SIZE, 2, 3, OLD_ANALYSIS, 5, 6, 7, 8, 9, 10, 11, 12, OLD_LAST_PLAYED];
 
 const INSERT_SOUND: &str = concat!(
     "INSERT OR REPLACE INTO sounds (id, path, size, mtime, error, name_type, user_type, type, type_source, type_conf,
@@ -123,6 +130,10 @@ const WAIT: Duration = Duration::from_secs(5);
 
 /// A half-made copy whose file hasn't changed for this long was left by an app that stopped while making it.
 const STALE: Duration = Duration::from_secs(10 * 60);
+
+/// What's left free on the disk once a copy is made, at least: making one never fills the disk (Solomon's C: was
+/// 98.8% full, 2026-11-03).
+const ROOM_LEFT: u64 = 1 << 30;
 
 /// One [`sync`] at a time in this app: two at once would make the same half-made copy.
 static SYNCING: Mutex<()> = Mutex::new(());
@@ -184,8 +195,71 @@ pub fn in_step(sounds_db: &Path, copy: &Path) -> bool {
 /// always whole. An update happens in one transaction: if anything goes wrong, the copy stays as it was.
 ///
 /// Nothing but a copy is ever removed or replaced: a database of anything else where the copy goes (or the library
-/// itself) is left as it is, and this says so.
+/// itself) is left as it is, and this says so. Nor is one made on a disk without room for it and
+/// [`ROOM_LEFT`] to spare.
 pub fn sync(sounds_db: &Path, copy: &Path) -> Result<Synced, SoundsError> {
+    run(sounds_db, copy, None, &mut None)
+}
+
+/// The Sounds page's first read of the library: the quickest way to its sounds there is.
+pub enum PageRead {
+    /// From the copy, a fraction of the reading: the sounds now, their fingerprints after, from `db`
+    /// ([`SoundsDb::fingerprints`]). `behind`: `sounds.db` has changed since the copy was last brought up to date,
+    /// so these are as they were then; [`sync`] it, then read it again.
+    Copy { db: SoundsDb, sounds: Vec<Sound>, behind: bool },
+    /// From `sounds.db`, the fingerprints too, on the one pass that made the copy (`made` says how that went): there
+    /// was no copy this version of the app can read.
+    Library { everything: Everything, made: Result<Synced, SoundsError> },
+}
+
+/// The Sounds page's first read of the sound library at `sounds_db`: from the copy beside it whenever there's one to
+/// read, even one that's behind (the page shows it at once and brings it up to date after), else from `sounds_db`
+/// while the copy is made on the same pass ([`sync_reading`]). `now` is the page's "now", for what counts as recent.
+pub fn read_for_page(sounds_db: &Path, now: NaiveDateTime) -> Result<PageRead, SoundsError> {
+    let copy = copy_of(sounds_db);
+    // Looked at before reading, so a save the C# app makes while this reads counts as one next time.
+    let behind = !in_step(sounds_db, &copy);
+    if let Ok(db) = SoundsDb::open_read_only(&copy)
+        && db.is_copy()
+        && let Ok(sounds) = db.all(now)
+    {
+        return Ok(PageRead::Copy { db, sounds, behind });
+    }
+    // None, or none this version can read: made (or brought up to date) on the page's own read.
+    let (everything, made) = sync_reading(sounds_db, &copy, now)?;
+    Ok(PageRead::Library { everything, made })
+}
+
+/// [`sync`], reading the library for the Sounds page on the same pass over `sounds_db`: what
+/// [`SoundsDb::everything`] gives for it, as it was at the moment the copy is brought up to (`now` is the page's
+/// "now", for what counts as recent). For when the page has no copy to read yet: making one reads all of
+/// `sounds_db` anyway, so it isn't read twice.
+///
+/// The sounds come back however the copy fared (the second part says): only a library that can't be read at all is
+/// an error. When the copy couldn't be made or brought up to date before every sound was read, they're read for the
+/// page alone.
+pub fn sync_reading(
+    sounds_db: &Path,
+    copy: &Path,
+    now: NaiveDateTime,
+) -> Result<(Everything, Result<Synced, SoundsError>), SoundsError> {
+    let mut read = None;
+    let synced = run(sounds_db, copy, Some(now), &mut read);
+    let everything = match read {
+        Some(everything) => everything,
+        None => SoundsDb::open_read_only(sounds_db)?.everything(now)?,
+    };
+    Ok((everything, synced))
+}
+
+/// What [`sync`] does, also reading the library for the page into `read` on the way when `read_for` says when "now"
+/// is ([`sync_reading`]). `read` is left as `None` if the pass stopped before every sound was read.
+fn run(
+    sounds_db: &Path,
+    copy: &Path,
+    read_for: Option<NaiveDateTime>,
+    read: &mut Option<Everything>,
+) -> Result<Synced, SoundsError> {
     let _one_at_a_time = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
     let failed = |why: String| SoundsError::Copy { path: copy.to_owned(), why };
     if same_file(sounds_db, copy) {
@@ -202,12 +276,13 @@ pub fn sync(sounds_db: &Path, copy: &Path) -> Result<Synced, SoundsError> {
     }
     // A copy that can't be read just now (another program holding it) is left as it is, for the next time.
     let found = look_at(copy, WAIT).map_err(|why| failed(format!("it couldn't be read just now ({why})")))?;
+    let pass = Pass { stamp: &stamp, read_for, read };
     match found {
-        Found::Copy { format: FORMAT, .. } => update(&old, copy, &stamp),
+        Found::Copy { format: FORMAT, .. } => update(&old, copy, pass),
         Found::Copy { format, .. } if format > FORMAT => {
             Err(failed(format!("a newer version of the app made it (format {format}), so it's left as it is")))
         }
-        Found::Nothing | Found::Unreadable | Found::Copy { .. } => make(&old, copy, &stamp),
+        Found::Nothing | Found::Unreadable | Found::Copy { .. } => make(&old, copy, pass),
         Found::Foreign => {
             Err(failed("a database that isn't a copy of the library is there, so it's left as it is".into()))
         }
@@ -222,9 +297,24 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
+/// What one pass over `sounds.db` is for: the copy brought up to `stamp`, and (when `read_for` says when "now" is) the
+/// page's read into `read`.
+struct Pass<'a> {
+    stamp: &'a str,
+    read_for: Option<NaiveDateTime>,
+    read: &'a mut Option<Everything>,
+}
+
 /// A new copy, made under a name of its own beside the copy's and then renamed.
-fn make(old: &SoundsDb, copy: &Path, stamp: &str) -> Result<Synced, SoundsError> {
+fn make(old: &SoundsDb, copy: &Path, pass: Pass<'_>) -> Result<Synced, SoundsError> {
     let failed = |why: String| SoundsError::Copy { path: copy.to_owned(), why };
+    let dir = copy.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    if let (Ok(free), Ok(library)) = (fs4::available_space(dir), fs::metadata(old.path())) {
+        // What's there now and goes first counts as free.
+        let going: u64 =
+            ["", "-wal", "-shm"].iter().filter_map(|end| fs::metadata(side(copy, end)).ok()).map(|m| m.len()).sum();
+        room_to_make(free.saturating_add(going), library.len()).map_err(failed)?;
+    }
     // A copy of an older format (or a file that can't be read) goes first, with SQLite's files beside it: a log left
     // beside the new one would be read into it as if it were its own.
     remove_database(copy).map_err(|e| failed(format!("the old copy couldn't be removed ({e})")))?;
@@ -239,7 +329,7 @@ fn make(old: &SoundsDb, copy: &Path, stamp: &str) -> Result<Synced, SoundsError>
         conn.pragma_update(None, "journal_mode", "OFF")?;
         conn.pragma_update(None, "synchronous", "OFF")?;
         conn.execute_batch(SCHEMA)?;
-        let synced = fill(old, &conn, stamp, true)?;
+        let synced = fill(old, &conn, true, pass)?;
         // From now on it's updated while the page may be reading it: in WAL mode readers never wait for a writer.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.close().map_err(|(_, e)| e)?;
@@ -261,14 +351,30 @@ fn make(old: &SoundsDb, copy: &Path, stamp: &str) -> Result<Synced, SoundsError>
     Ok(synced)
 }
 
+/// Whether a disk with `free` bytes free has room to make a copy of a library of `library` bytes: the copy comes to
+/// under half the library's size (0.29 of it with a library like Solomon's), and [`ROOM_LEFT`] stays free.
+fn room_to_make(free: u64, library: u64) -> Result<(), String> {
+    let takes = library / 2;
+    if free >= takes.saturating_add(ROOM_LEFT) {
+        return Ok(());
+    }
+    let gb = |bytes: u64| format!("{:.1} GB", bytes as f64 / 1e9);
+    Err(format!(
+        "only {} is free on its disk: making it takes up to {}, and {} is always left free",
+        gb(free),
+        gb(takes),
+        gb(ROOM_LEFT)
+    ))
+}
+
 /// The copy brought up to date in place, in one transaction.
-fn update(old: &SoundsDb, copy: &Path, stamp: &str) -> Result<Synced, SoundsError> {
+fn update(old: &SoundsDb, copy: &Path, pass: Pass<'_>) -> Result<Synced, SoundsError> {
     let failed = |Failed(why)| SoundsError::Copy { path: copy.to_owned(), why };
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = open_for_writing(copy, flags).map_err(|e| failed(e.into()))?;
     conn.busy_timeout(WAIT).map_err(|e| failed(e.into()))?;
     conn.pragma_update(None, "synchronous", "NORMAL").map_err(|e| failed(e.into()))?;
-    let synced = fill(old, &conn, stamp, false).map_err(failed)?;
+    let synced = fill(old, &conn, false, pass).map_err(failed)?;
     // What this update wrote goes into the file itself, and the log beside it back to nothing: the disk the
     // library is on may be nearly full. Not done if the page is reading just then (without waiting for it): SQLite
     // does it with a later save.
@@ -305,51 +411,68 @@ fn known(conn: &Connection) -> rusqlite::Result<HashMap<i64, Hashes>> {
 }
 
 /// Writes into the copy at `conn` what's changed in `old` since the copy was last brought up to date, all in one
-/// transaction, reading `old` at one moment. `made`: `conn` is a new, empty copy.
-fn fill(old: &SoundsDb, conn: &Connection, stamp: &str, made: bool) -> Result<Synced, Failed> {
+/// transaction, reading `old` at one moment. `made`: `conn` is a new, empty copy. The page's read, when the pass is
+/// for it too, is handed over as soon as the last sound is read, whatever happens to the copy after.
+fn fill(old: &SoundsDb, conn: &Connection, made: bool, pass: Pass<'_>) -> Result<Synced, Failed> {
     let mut synced = Synced { made, ..Synced::default() };
     let snapshot = old.conn.unchecked_transaction()?;
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
     // Read once the copy is this update's alone, so another copy of the app updating it too can't be missed.
     let mut known = if made { HashMap::new() } else { known(&tx)? };
+    // From the same moment as the rows: the page gets what the copy gets.
+    let mut reading =
+        pass.read_for.map(|now| Reading::start(old, now, true)).transpose().map_err(|e| Failed(e.to_string()))?;
     let mut st = old.conn.prepare(OLD_SOUNDS)?;
     let mut rows = st.query([])?;
     while let Some(r) = rows.next()? {
         synced.sounds += 1;
         let id: i64 = r.get(0)?;
+        // The page's sound, when the pass reads for it too: its analysis is read once, for both.
+        let sound = if reading.is_some() { Some(sound_at(r)?) } else { None };
         let now = Hashes {
             row: hash_row(r)?,
             features: hash_of(r.get_ref(OLD_FEATURES)?),
             clap: hash_of(r.get_ref(OLD_CLAP)?),
         };
         let was = known.remove(&id);
-        if was == Some(now) {
-            continue;
+        if was != Some(now) {
+            if was.is_none_or(|w| w.row != now.row) {
+                let read_here;
+                let analysis = match &sound {
+                    Some(s) => s.analysis.as_ref(),
+                    None => {
+                        read_here = crate::db::analysis_at(r, OLD_ANALYSIS);
+                        read_here.as_ref()
+                    }
+                };
+                write_sound(&tx, id, r, analysis)?;
+            }
+            if was.is_none_or(|w| w.features != now.features) {
+                write_vector(&tx, "sound_features", id, r.get_ref(OLD_FEATURES)?)?;
+            }
+            if was.is_none_or(|w| w.clap != now.clap) {
+                write_vector(&tx, "sound_clap", id, r.get_ref(OLD_CLAP)?)?;
+            }
+            tx.prepare_cached("INSERT OR REPLACE INTO sound_hashes VALUES (?1, ?2, ?3, ?4, ?5)")?.execute(params![
+                id,
+                now.row,
+                now.features,
+                now.clap,
+                clap_len(r.get_ref(OLD_CLAP)?)
+            ])?;
+            if was.is_some() {
+                synced.changed += 1;
+            } else {
+                synced.added += 1;
+            }
         }
-        if was.is_none_or(|w| w.row != now.row) {
-            write_sound(&tx, id, r)?;
-        }
-        if was.is_none_or(|w| w.features != now.features) {
-            write_vector(&tx, "sound_features", id, r.get_ref(OLD_FEATURES)?)?;
-        }
-        if was.is_none_or(|w| w.clap != now.clap) {
-            write_vector(&tx, "sound_clap", id, r.get_ref(OLD_CLAP)?)?;
-        }
-        tx.prepare_cached("INSERT OR REPLACE INTO sound_hashes VALUES (?1, ?2, ?3, ?4, ?5)")?.execute(params![
-            id,
-            now.row,
-            now.features,
-            now.clap,
-            clap_len(r.get_ref(OLD_CLAP)?)
-        ])?;
-        if was.is_some() {
-            synced.changed += 1;
-        } else {
-            synced.added += 1;
+        if let (Some(reading), Some(sound)) = (reading.as_mut(), sound) {
+            reading.add_read(r, sound);
         }
     }
     drop(rows);
     drop(st);
+    *pass.read = reading.map(Reading::finish);
     // What's left wasn't in `sounds.db` any more.
     for id in known.into_keys() {
         for table in ["sounds", "sound_features", "sound_clap", "sound_hashes"] {
@@ -375,22 +498,22 @@ fn fill(old: &SoundsDb, conn: &Connection, stamp: &str, made: bool) -> Result<Sy
         return Err(Failed(format!("the copy came out with {copied} sounds where sounds.db has {}", synced.sounds)));
     }
     set_info(&tx, "format", FORMAT)?;
-    set_info(&tx, "stamp", stamp)?;
+    set_info(&tx, "stamp", pass.stamp)?;
     tx.commit()?;
     snapshot.finish()?;
     Ok(synced)
 }
 
-/// One sound's row in the copy, from its row in `sounds.db`: its analysis as numbers, everything else as it is.
-fn write_sound(tx: &Transaction<'_>, id: i64, r: &Row<'_>) -> rusqlite::Result<()> {
+/// One sound's row in the copy, from its row in `sounds.db` and the `analysis` read from it: the analysis as numbers,
+/// everything else as it is.
+fn write_sound(tx: &Transaction<'_>, id: i64, r: &Row<'_>, analysis: Option<&SoundAnalysis>) -> rusqlite::Result<()> {
     // Each value passed on as SQLite gave it, even text that isn't readable as text (a damaged row).
     let mut values: Vec<ToSqlOutput<'_>> = Vec::with_capacity(1 + AS_THEY_ARE.len() + ANALYSIS_COLUMNS);
     values.push(ToSqlOutput::Owned(Value::Integer(id)));
     for i in AS_THEY_ARE {
         values.push(ToSqlOutput::Borrowed(r.get_ref(i)?));
     }
-    let analysis = crate::db::analysis_at(r, OLD_ANALYSIS);
-    values.extend(analysis_values(analysis.as_ref()).into_iter().map(ToSqlOutput::Owned));
+    values.extend(analysis_values(analysis).into_iter().map(ToSqlOutput::Owned));
     tx.prepare_cached(INSERT_SOUND)?.execute(params_from_iter(values))?;
     Ok(())
 }
@@ -1024,7 +1147,7 @@ fn clap_len(v: ValueRef<'_>) -> Option<i64> {
 /// The hash of a row of [`OLD_SOUNDS`] without its fingerprints.
 fn hash_row(r: &Row<'_>) -> rusqlite::Result<i64> {
     let mut hash = Hash::new();
-    for i in (1..=16).filter(|&i| i != OLD_FEATURES && i != OLD_CLAP) {
+    for i in HASHED {
         hash.value(r.get_ref(i)?);
     }
     Ok(hash.get())
@@ -1121,6 +1244,43 @@ mod tests {
         let db = Path::new("C:/Users/x/AppData/Local/MusicOrganiser/sounds.db");
         assert_eq!(copy_of(db), Path::new("C:/Users/x/AppData/Local/MusicOrganiser/sounds-rust.db"));
         assert_eq!(side(&copy_of(db), "-wal"), Path::new("C:/Users/x/AppData/Local/MusicOrganiser/sounds-rust.db-wal"));
+    }
+
+    #[test]
+    fn the_old_rows_columns_are_where_they_are_taken_from() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE sounds (id INTEGER PRIMARY KEY, path, size, mtime, error, analysis, features, clap, name_type,
+                 user_type, type, type_source, type_conf, favourite, rating, plays, last_played)",
+        )
+        .unwrap();
+        let st = conn.prepare(OLD_SOUNDS).unwrap();
+        let name = |i: usize| st.column_name(i).unwrap().to_owned();
+        let at = [OLD_ANALYSIS, OLD_FEATURES, OLD_CLAP, OLD_SIZE, OLD_LAST_PLAYED].map(name);
+        assert_eq!(at, ["analysis", "features", "clap", "size", "last_played"]);
+        // Copied as they are into the columns INSERT_SOUND names after the id.
+        let start = INSERT_SOUND.find('(').unwrap() + 1;
+        let named: Vec<&str> = INSERT_SOUND[start..].split(',').map(str::trim).collect();
+        for (k, &i) in AS_THEY_ARE.iter().enumerate() {
+            assert_eq!(name(i), named[k + 1], "column {k} after the id");
+        }
+        // Hashed: every column but the id and the fingerprints, each once.
+        let mut hashed: Vec<String> = HASHED.iter().map(|&i| name(i)).collect();
+        let mut rest: Vec<String> =
+            (0..st.column_count()).map(name).filter(|n| !["id", "features", "clap"].contains(&n.as_str())).collect();
+        hashed.sort();
+        rest.sort();
+        assert_eq!(hashed, rest);
+    }
+
+    #[test]
+    fn a_copy_is_made_only_with_room_to_spare() {
+        let gb = 1_000_000_000u64;
+        // Solomon's C:, 2026-11-03: 12 GB free, a 4.6 GB library.
+        assert!(room_to_make(12 * gb, 4_560_000_000).is_ok());
+        assert!(room_to_make(2 * gb + ROOM_LEFT, 4 * gb).is_ok());
+        let why = room_to_make(2 * gb + ROOM_LEFT - 1, 4 * gb).unwrap_err();
+        assert!(why.starts_with("only 3.1 GB is free on its disk"), "{why}");
     }
 
     #[test]
