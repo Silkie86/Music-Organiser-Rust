@@ -330,9 +330,8 @@ export global SoundsData {
     callback select(int);
     callback play-row(int);
     // Arrow keys: -1 or 1 across, -2 or 2 up and down.
-    callback step(int);
-    // An arrow key was let go: its next press is a fresh one, not the key repeating.
-    callback step-let-go();
+    // Moves the pick: -1/1 left and right, -2/2 up and down; `held` when it's the key repeating.
+    callback step(int, bool);
 
     in property <bool> panel-shown;
     in property <PickedSound> picked;
@@ -907,7 +906,7 @@ export component SoundsPage inherits Rectangle {
                     }
                     if (k == Key.DownArrow) {
                         keys.focus();
-                        SoundsData.step(2);
+                        SoundsData.step(2, false);
                         return true;
                     }
                     false
@@ -1242,31 +1241,24 @@ export component SoundsPage inherits Rectangle {
             keys := FocusScope {
                 x: 0;
                 width: area.list-width - area.folders-width - area.years-width;
-                key-released(event) => {
-                    if (event.text == Key.LeftArrow || event.text == Key.RightArrow || event.text == Key.UpArrow
-                        || event.text == Key.DownArrow) {
-                        SoundsData.step-let-go();
-                    }
-                    reject
-                }
                 key-pressed(event) => {
                     if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
                         return reject;
                     }
                     if (event.text == Key.LeftArrow) {
-                        SoundsData.step(-1);
+                        SoundsData.step(-1, event.repeat);
                         return accept;
                     }
                     if (event.text == Key.RightArrow) {
-                        SoundsData.step(1);
+                        SoundsData.step(1, event.repeat);
                         return accept;
                     }
                     if (event.text == Key.UpArrow) {
-                        SoundsData.step(-2);
+                        SoundsData.step(-2, event.repeat);
                         return accept;
                     }
                     if (event.text == Key.DownArrow) {
-                        SoundsData.step(2);
+                        SoundsData.step(2, event.repeat);
                         return accept;
                     }
                     if (event.text == Key.Return) {

@@ -607,6 +607,8 @@ impl Stepping {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::NaiveDate;
+    use mo_sounds::SoundAnalysis;
 
     #[test]
     fn a_held_arrow_steps_no_faster_than_the_step_time_with_autoplay() {
@@ -628,8 +630,6 @@ mod tests {
         assert_eq!(step_ms(Some("x")), STEP_MS);
         assert_eq!(step_ms(None), STEP_MS);
     }
-    use chrono::NaiveDate;
-    use mo_sounds::SoundAnalysis;
 
     fn sound(id: i64, path: &str, ty: &str, analysis: Option<SoundAnalysis>) -> Sound {
         Sound {

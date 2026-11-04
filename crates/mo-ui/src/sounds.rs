@@ -106,8 +106,6 @@ struct Page {
     /// How long each sound plays while a held arrow key steps through them, and when the pick last moved.
     step: Duration,
     stepping: list::Stepping,
-    /// An arrow key is down (pressed and not let go yet), so its next press is the key repeating.
-    arrow_down: bool,
     /// Counts the asks for a new list, so an older answer that arrives late is dropped.
     asked: u64,
     /// The sounds have been read and handed to the page ([`show`]): the next list shown is of them.
@@ -155,7 +153,6 @@ impl Default for Page {
             autoplay: false,
             step: Duration::from_millis(list::STEP_MS),
             stepping: list::Stepping::default(),
-            arrow_down: false,
             asked: 0,
             read: false,
             types: Vec::new(),
@@ -1068,12 +1065,11 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         play_picked(&app, 0.0);
     });
     let weak = app.as_weak();
-    data.on_step(move |d| {
+    data.on_step(move |d, held| {
         if let Some(app) = weak.upgrade() {
-            step(&app, d);
+            step(&app, d, held);
         }
     });
-    data.on_step_let_go(|| PAGE.with(|p| p.borrow_mut().arrow_down = false));
     let weak = app.as_weak();
     data.on_play(move || {
         if let Some(app) = weak.upgrade() {
@@ -1678,11 +1674,10 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
 }
 
 /// The arrow keys: across a row of tiles (-1, 1) or down and up the list (-2, 2), a row of tiles at a time.
-fn step(app: &AppWindow, d: i32) {
+fn step(app: &AppWindow, d: i32, held: bool) {
     let next = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         // A held key's repeats wait for the sound they're on to have played (with Autoplay on).
-        let held = std::mem::replace(&mut p.arrow_down, true);
         let (autoplay, step) = (p.autoplay, p.step);
         if !p.stepping.may_step(autoplay, held, step, Instant::now()) {
             return None;
