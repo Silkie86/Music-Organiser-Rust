@@ -226,6 +226,24 @@ fn tone(name: &str) -> PathBuf {
 }
 
 #[test]
+fn an_mp3_with_a_tag_over_a_megabyte_still_decodes() {
+    // Cover art makes tags big; without symphonia's ID3v2 reader the probe looked through the tag a byte at a time
+    // and gave up after 1 MB. The tone's own tag (ID3v2.4), made 1.5 MB bigger with padding.
+    let mp3 = std::fs::read(tone("tone.mp3")).unwrap();
+    let synchsafe = |b: &[u8]| b.iter().fold(0usize, |n, &b| n << 7 | usize::from(b & 0x7F));
+    let tag_len = synchsafe(&mp3[6..10]);
+    let padding = 1_500_000;
+    let size = tag_len + padding;
+    let mut big = mp3[..6].to_vec();
+    big.extend([21, 14, 7, 0].map(|shift| ((size >> shift) & 0x7F) as u8));
+    big.extend(&mp3[10..10 + tag_len]);
+    big.extend(std::iter::repeat_n(0, padding));
+    big.extend(&mp3[10 + tag_len..]);
+    let a = read(&fixture("big tag.mp3", &big), 60.0).unwrap();
+    assert!((a.seconds() - 0.5).abs() < 0.06, "{}", a.seconds());
+}
+
+#[test]
 fn decodes_mp3_flac_m4a_ogg_and_aac() {
     for name in ["tone.flac", "tone.mp3", "tone.m4a", "tone.ogg", "tone.aac"] {
         let a = read(&tone(name), 60.0).unwrap_or_else(|e| panic!("{name}: {e}"));

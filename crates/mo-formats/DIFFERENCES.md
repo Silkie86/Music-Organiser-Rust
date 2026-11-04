@@ -64,6 +64,9 @@ tests don't have.
 | A plugin state in the song's zip that won't come out whole | No presets at all from the song. | That one preset is left out; the rest are taken out. | Better |
 | An XML file in the song's zip that won't come out whole | The song can't be read. | The rest is read, with a warning naming the file left out. | Better |
 | A file in the song's zip that unpacks to more than 256 MB (a damaged or made-up zip) | Unpacked whole, however big. | Left out, as a file that won't come out whole is. | Better |
+| A song whose metainfo.xml has no tempo (or won't come out of the zip), from Studio One 6.5 on | Takes the first `tempo` in song.xml, a TempoMapSegment's seconds per beat, as the BPM (0.46 for 130), and squashes the MIDI of parts timed in seconds by the same. | Turns seconds per beat into BPM, as the arrangement reader does (VERSION 4). | Better |
+| A network-share sample in the media pool (`file://NAS/Samples/Kick.wav`) | `/NAS/Samples/Kick.wav`: the server is lost. | `\\NAS\Samples\Kick.wav` (VERSION 4). | Better |
+| A note's velocity saved as "NaN" | MIDI 1.0's 1, the quietest. | The same, in the MIDI and the arrangement preview alike (the MIDI had a 16-bit 0). | Same |
 | XML whose DOCTYPE declares its own entities (`<!ENTITY`; Studio One never writes them) | Expanded, up to 10 million letters. | The file is refused as unreadable: a few KB of entities can stand for gigabytes. | Safer |
 | A damaged zip that names two files the same | Reads the first of them, and lists (and counts) every copy's presets. | The zip reader keeps only the last one's bytes, and the song says so in a warning. | Same for real songs |
 | A note's velocity | Rounded to MIDI 1.0's 0 to 127 as it's read. | Kept at MIDI 2.0's 16 bits (a 0-to-127 velocity from an older song by MIDI 2.0's own scaling), rounded to 0 to 127 only when a MIDI 1.0 value is wanted. As with Bitwig, a few in 10,000 of the 0-to-1 velocities come out 1 apart. | Better (rule 22) |

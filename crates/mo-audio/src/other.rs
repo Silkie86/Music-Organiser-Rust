@@ -7,6 +7,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
 use symphonia::core::codecs::audio::AudioDecoderOptions;
+use symphonia::core::common::Limit;
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};
@@ -45,9 +46,10 @@ fn decode(file: File, path: &Path, max_seconds: f64) -> Result<AudioData, AudioE
         hint.with_extension(ext);
     }
     let mss = MediaSourceStream::new(Box::new(file), Default::default());
-    let mut format = symphonia::default::get_probe()
-        .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
-        .map_err(format_error)?;
+    // Tags are read past, not kept: their pictures (cover art, often megabytes) are skipped rather than loaded.
+    let metadata = MetadataOptions::default().limit_visual_bytes(Limit::Maximum(0));
+    let mut format =
+        symphonia::default::get_probe().probe(&hint, mss, FormatOptions::default(), metadata).map_err(format_error)?;
     let track = format
         .default_track(TrackType::Audio)
         .ok_or_else(|| AudioError::Format("The file has no audio in it".into()))?;
