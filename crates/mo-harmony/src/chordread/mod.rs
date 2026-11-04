@@ -15,8 +15,8 @@
 //!   ([`Shaped`]), and the chords that may be pushed ([`Push`]);
 //! - the readings worth scoring for a stretch of music ([`candidates()`]): each a root and a core ([`Label`]);
 //! - the evidence for and against each reading of a stretch ([`Feature`], worked out by [`Evidence`] into
-//!   [`SpanFacts`]), weighed by the built-in weights ([`FITTED`]: the hand-set ones, [`HAND`], moved part of the way
-//!   to a fit) and ranked, best first ([`SpanFacts::rank`]);
+//!   [`SpanFacts`]), weighed by the built-in weights ([`FITTED`]: the hand-set ones, [`HAND`], moved a fifth of the
+//!   way to the first fit, [`FIRST_FIT`]) and ranked, best first ([`SpanFacts::rank`]);
 //! - the tables the priors read (how often each kind of chord is the labelled one, how often its labels name each
 //!   tension, and how chords move from one to the next), counted from POP909-CL's and the Billboard charts' labels by
 //!   `theorybench tables` ([`COUNTED`]);
@@ -105,7 +105,7 @@ pub use reader::{
 pub use score::{Evidence, Feature, PerFeature, Scored, Scorer, Scoring, SpanFacts};
 pub use tables::{COUNTED, COUNTED_FROM};
 pub use version::{SHIPPED_HASH, numbers_hash};
-pub use weights::{Bound, EVEN, FITTED, HAND, NUMBERS, Priors, RULES, Rule, THRESHOLDS, Tables, Weights};
+pub use weights::{Bound, EVEN, FIRST_FIT, FITTED, HAND, NUMBERS, Priors, RULES, Rule, THRESHOLDS, Tables, Weights};
 pub use words::Words;
 
 /// Bumped whenever the reader can read the same notes differently (new weights, a new rule for hearing, decoding,

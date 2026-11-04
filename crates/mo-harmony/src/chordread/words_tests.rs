@@ -273,6 +273,11 @@ fn why_a_chord_reads_as_it_does_is_told_from_the_evidence() {
     ));
     // A moving bass.
     assert!(has(
+        &case("37 Dm7 | G13 over a walk", 0),
+        "Of what the moving bass plays (counting the strongest beats most), 27% is on Dm7's other notes; for F, 27% is \
+         on notes not its own, on a strong beat or held long."
+    ));
+    assert!(has(
         &case("h6 Cmaj9 | Am11 | Dm9 | G13 in sixteenths over eighths", 0),
         "Of what the moving bass plays (counting the strongest beats most), 53% is on Cmaj9's root; for Em7, 20% is on \
          its root and 27% on notes not its own, on a strong beat or held long."

@@ -19,8 +19,9 @@ fn the_built_in_reader_keeps_every_gate() {
     assert_eq!(read_whole_cases().unwrap().len(), stretches + super::cases::whole_cases().unwrap().len());
     assert_eq!(count(Step::Named, true), named_cases().unwrap().len());
     assert_eq!(count(Step::Named, false), named_targets().unwrap().len());
-    // The design's targets met so far (harmony/design/chord-reader-design.md, "As built (namer PR)"): 36, 39, 41, 46
-    // and 56. The one the design holds out (15e) isn't counted.
+    // The design's targets met so far (docs/harmony/chord-reader-design.md, "As built (namer PR)", and 41 since "As
+    // built (first fit shipped, 2026-11-04)"): 36, 39, 41, 46 and 56. The one the design holds out (15e) isn't
+    // counted.
     let targets = named_targets().unwrap();
     assert_eq!(book.targets(), (5, targets.iter().filter(|(name, ..)| !held_out(name)).count()));
     assert_eq!(

@@ -293,7 +293,7 @@ fn chord_check_offers_the_same_notes_another_way_then_another_chord() {
     let r = case("38 Dm7 | G7 | Cmaj7 over a walk");
     assert_eq!(r.spans[0].answer, ChordAnswer::Chord, "{}", render(&r));
     assert_eq!(choices(&r.spans[0], 3), own(&[("Dm7", First), ("F6", SameNotes), ("F", Other)]), "{}", render(&r));
-    // A rest has none, and none are asked for: none.
+    // None asked for: none.
     assert!(r.spans[0].choices(0).is_empty());
     // For every span: the first reading first, then each different, likely enough, and in the order given.
     for (music, pins) in the_music_in_ticks() {

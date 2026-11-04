@@ -902,7 +902,8 @@ and answerfit).
 So the reader ships the numbers pulled back, as the key finder's are: each is the hand-set one moved a share of the way
 to the fit's, the same share for all. Tried in steps of 0.05, a fifth (0.2) is the last where every gate holds, the
 held-out ones too, and every answer the hand cases want holds; a quarter of the way, cases 13 and 20 are one chord
-(0.803). These are `chordread::FITTED`, which `SHIPPED` reads with: `CHORD_READER_VERSION` 4.
+(0.803). These are `chordread::FITTED`, worked out from the fit's own numbers (`FIRST_FIT`), and `SHIPPED` reads with
+them: `CHORD_READER_VERSION` 4.
 
 Scored as before (fold 1 of POP909-CL and Billboard; RS200 and the sweep whole), with the hand-set numbers, a fifth of
 the way and the whole fit:
@@ -937,7 +938,9 @@ the way and the whole fit:
   80.5%), fewer inversions are read in root position, and the extensions' macro F1 is at or above the hand-set numbers'
   everywhere, RS200 too, where the whole fit loses some (set B 27.9%, hand 26.8%, the fit 22.9%).
 - **What it costs.** Where the chords change scores a little lower on RS200 (set A 98.3 against 98.5, block chords 99.7
-  against 99.8); every other number in both tables is the same or better.
+  against 99.8), and the chords change a little less often than the labels on POP909-CL (1.25 times a bar, the labels
+  1.30, hand 1.32) and set A (0.95 against 0.99, hand 1.01), so a few short chords run together. Every other score in
+  both tables is the same or better.
 - **The hand cases.** Every gate holds, held-out ones too, and 5 of the 15 targets are met: 41 (Cadd9 arpeggiated) is
   new. No chart changes, and 9 stretches in 7 cases answer otherwise. 8 that were the same notes or unclear only because
   the hand-set numbers were unsure are one chord now: C | F in eighths (40, C at 0.84) and the Alberti C (42, 0.84), Dm7
@@ -948,4 +951,6 @@ the way and the whole fit:
 - **Next.** The calibration's fit (σ and the thresholds) on these numbers; with chances that are true, the numbers can
   go further towards the fit.
 - **To score the hand-set numbers now**, give `chords --weights` a file that names no number, `{"numbers": {}}` (a
-  number a file leaves out is the hand-set one): with no `--weights`, `chords` reads with the numbers built in.
+  number a file leaves out is the hand-set one, and the run says how many it names): with no `--weights`, `chords`
+  reads with the numbers built in. `chordfit` still starts from the hand-set numbers when given no `--from`, pulls
+  towards them, and reports its gates and targets against them, not against the numbers built in.
