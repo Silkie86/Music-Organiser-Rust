@@ -70,6 +70,18 @@ fn time(p: &Path) -> SystemTime {
     fs::metadata(p).unwrap().modified().unwrap()
 }
 
+/// What tells a link apart from one made again in its place, a while later: its own time (made again, it has a new
+/// one), with its inode on a Mac and Linux (a new link can get the inode of one just deleted), its creation time on
+/// Windows.
+fn link_id(p: &Path) -> String {
+    let meta = fs::symlink_metadata(p).unwrap();
+    #[cfg(unix)]
+    let id = format!("{} {:?}", std::os::unix::fs::MetadataExt::ino(&meta), meta.modified().unwrap());
+    #[cfg(not(unix))]
+    let id = format!("{:?}", meta.created().unwrap());
+    id
+}
+
 /// Any file a copy left half-way under its temporary name.
 fn part_files(dir: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
@@ -1506,8 +1518,8 @@ fn the_drive_the_copys_link_leads_to_going_once_all_of_it_came_back_isnt_taken_f
 }
 
 /// With the old copy there: as the first file comes back, the copy on the other drive is put aside, with a link to
-/// another folder in its place, and that link is pointed at nothing just after the last file is read. Where the files
-/// read came from can't be told then, so none goes into the old copy.
+/// another folder in its place, and that link is pointed at nothing just after the last file is read. The copy was a
+/// folder as the pass began and is a link now, so the copying stops, and none of the files read goes into the old copy.
 #[cfg(unix)]
 #[test]
 fn moving_back_brings_nothing_into_the_old_copy_when_the_copy_leads_elsewhere_then_nowhere() {
@@ -1537,12 +1549,50 @@ fn moving_back_brings_nothing_into_the_old_copy_when_the_copy_leads_elsewhere_th
     };
     let result = move_back(&moved, &ROOMY, &progress, &stop);
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
-    assert!(why.starts_with(&format!("Copying stopped at {}", s(&copy))), "{why}");
+    assert!(why.starts_with(&format!("{} turned into a link", s(&copy))), "{why}");
     let old = PathBuf::from(&moved.old_copy);
     for n in 0..4 {
         assert_eq!(fs::read_to_string(old.join(format!("{n}.db"))).unwrap(), "x", "{n}");
     }
     assert!(is_link(&library));
+}
+
+/// As above, with the copy a link already as moving back begins (it was moved on to a third drive and linked), and
+/// that drive going just after the last file is read: where the files read came from can't be told then, so none goes
+/// into the old copy.
+#[cfg(unix)]
+#[test]
+fn moving_back_brings_nothing_into_the_old_copy_when_the_copys_link_leads_nowhere_part_way() {
+    let dir = fixtures("mo-space-move-back-linked-leads-nowhere");
+    let (c, d, e) = (dir.join("C"), dir.join("D"), dir.join("E"));
+    let library = c.join("Library");
+    for n in 0..4 {
+        write(&library, &format!("{n}.db"), "x");
+    }
+    fs::create_dir_all(&d).unwrap();
+    fs::create_dir_all(&e).unwrap();
+    let stop = AtomicBool::new(false);
+    let moved = move_folder(&s(&library), &s(&d), 4, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
+    let copy = d.join("Library");
+    fs::rename(&copy, e.join("Library")).unwrap();
+    folder_link(&e.join("Library"), &copy);
+    // The plugin saves them all again through the links.
+    for n in 0..4 {
+        fs::write(library.join(format!("{n}.db")), "yy").unwrap();
+    }
+    let progress = |bytes: u64| {
+        if bytes == 8 {
+            fs::rename(&e, dir.join("E unplugged")).unwrap();
+        }
+    };
+    let result = move_back(&moved, &ROOMY, &progress, &stop);
+    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    assert!(why.starts_with(&format!("Copying stopped at {}", s(&copy))), "{why}");
+    let old = PathBuf::from(&moved.old_copy);
+    for n in 0..4 {
+        assert_eq!(fs::read_to_string(old.join(format!("{n}.db"))).unwrap(), "x", "{n}");
+    }
+    assert!(part_files(&old).is_empty() && is_link(&library));
 }
 
 /// As above, with the old copy there: as the first pass reads the folder, the copy's link is pointed at another
@@ -1763,8 +1813,11 @@ fn a_link_the_plugin_points_somewhere_else_as_the_folder_copies_leads_there_in_t
     write(&dir, "LoopsB/b.wav", "b");
     folder_link(&dir.join("LoopsA"), &dir.join("Shared"));
     folder_link(&dir.join("Shared"), &library.join("Loops"));
+    // And one left as it is, which the last pass leaves as the first made it.
+    folder_link(&dir.join("KitsA"), &library.join("Same"));
     fs::create_dir_all(&d).unwrap();
     let stop = AtomicBool::new(false);
+    let made_first = Mutex::new(None);
     // The first pass makes the links again (the top folder's turn comes before Sub's); as it copies Sub, the plugin
     // points its link at the other kits, and the shared link is pointed at the other loops.
     let progress = |bytes: u64| {
@@ -1773,10 +1826,15 @@ fn a_link_the_plugin_points_somewhere_else_as_the_folder_copies_leads_there_in_t
             folder_link(&dir.join("KitsB"), &library.join("Kits"));
             unlink(&dir.join("Shared"));
             folder_link(&dir.join("LoopsB"), &dir.join("Shared"));
+            *made_first.lock().unwrap() = Some(link_id(&d.join("Library/Same")));
+            // So a link made again in its place later would have another time.
+            std::thread::sleep(Duration::from_millis(100));
         }
     };
     let moved = move_folder(&s(&library), &s(&d), 1, whose(), &ROOMY, &[], &[], &progress, &stop).unwrap();
     let (copy, old) = (d.join("Library"), PathBuf::from(&moved.old_copy));
+    assert_eq!(made_first.lock().unwrap().clone(), Some(link_id(&copy.join("Same"))));
+    assert_eq!(real(&copy.join("Same")), real(&dir.join("KitsA")));
     for (link, now) in [("Kits", "KitsB"), ("Loops", "LoopsB")] {
         assert!(is_link(&copy.join(link)) && is_link(&old.join(link)), "{link}");
         assert_eq!(real(&copy.join(link)), real(&dir.join(now)), "{link}");

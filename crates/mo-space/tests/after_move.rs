@@ -318,6 +318,45 @@ fn a_link_pointed_elsewhere_just_before_the_swap_is_still_named_once_the_moved_f
     assert_eq!(only_in_old_copy(&done.moved[0], &done.moved, &stop).unwrap(), ["Kits"]);
 }
 
+/// As the last pass copies the folder the moved folders live in, it's put aside, with a link to another folder in its
+/// place, and that link is pointed at nothing just as the last file comes in: what was read through it isn't the
+/// moved folders', so the move stops, the copy goes, and the links still lead where they did.
+#[cfg(unix)]
+#[test]
+fn moving_the_moved_folders_home_stops_when_it_turns_into_a_link_that_leads_nowhere() {
+    let dir = fixtures("mo-space-after-home-turns-into-link");
+    let (c, d, e) = (dir.join("C"), dir.join("D"), dir.join("E"));
+    for n in 1..=3 {
+        write(&c, &format!("STEAM/{n}.db"), "x");
+        write(&dir, &format!("Other/STEAM/{n}.db"), "zz");
+    }
+    let data = d.join("Plugin Data");
+    fs::create_dir_all(&data).unwrap();
+    fs::create_dir_all(&e).unwrap();
+    let all = vec![move_it(&c.join("STEAM"), &data, &[])];
+    let steam = data.join("STEAM");
+    let stop = AtomicBool::new(false);
+    // The plugin saves them all again as the first pass ends, so the last pass copies them too; as the first of those
+    // comes in, the folder is put aside with a link to the other folder in its place, and as the last comes in, that
+    // link is pointed at nothing.
+    let progress = |bytes: u64| {
+        if bytes == 3 {
+            (1..=3).for_each(|n| fs::write(steam.join(format!("{n}.db")), "yy").unwrap());
+        } else if bytes == 5 {
+            fs::rename(&data, d.join("Plugin Data aside")).unwrap();
+            folder_link(&dir.join("Other"), &data);
+        } else if bytes == 9 {
+            unlink(&data);
+            folder_link(&dir.join("Nowhere"), &data);
+        }
+    };
+    let result = move_home(&s(&data), &s(&e), &all, &[], 3, &OtherDrive, &progress, &stop);
+    let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
+    assert!(why.starts_with(&format!("{} turned into a link", s(&data))), "{why}");
+    assert!(!e.join("Plugin Data").exists());
+    assert_eq!(fs::read_link(c.join("STEAM")).unwrap(), steam);
+}
+
 #[test]
 fn the_folder_moved_folders_live_in_moves_as_a_whole() {
     let dir = fixtures("mo-space-after-home");
