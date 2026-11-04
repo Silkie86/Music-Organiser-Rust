@@ -369,6 +369,7 @@ fn tile(p: &Page, row: usize, at: usize) -> SoundTile {
 fn line(p: &Page, row: usize, at: usize) -> SoundLine {
     let Some(s) = p.list.sound(at) else { return SoundLine::default() };
     let a = s.analysis.as_ref();
+    let used = p.list.used_in(at);
     SoundLine {
         row: row as i32,
         name: s.name().into(),
@@ -377,7 +378,8 @@ fn line(p: &Page, row: usize, at: usize) -> SoundLine {
         key: list::key_text(s).into(),
         bpm: a.and_then(|a| a.bpm).map(list::bpm_text).unwrap_or_default().into(),
         length: a.map(|a| list::length_text(a.seconds)).unwrap_or_default().into(),
-        used: list::used_text(p.list.used_in(at)).into(),
+        used: list::used_text(used).into(),
+        used_words: list::used_words(used).into(),
         folder: s.folder().into(),
         when: p.history.get(row).filter(|_| p.view == HISTORY).map(|h| when(h.1, p.now)).unwrap_or_default().into(),
         reason: p.rediscover.get(row).filter(|_| p.view == REDISCOVER).map(|r| r.1.clone()).unwrap_or_default().into(),

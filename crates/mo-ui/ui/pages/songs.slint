@@ -182,6 +182,21 @@ export global SongsData {
     out property <length> line-height: 62px;
 }
 
+// What's wrong with a plugin on the Plugins tab: beside it, or first under its name in a narrow panel.
+component PluginTrouble inherits Text {
+    text: "Not installed";
+    color: Theme.missing;
+    font-size: Type.meta;
+}
+
+// What's wrong with a sample on the Samples tab, the same way.
+component SampleTrouble inherits Text {
+    in property <SampleLine> sample;
+    text: root.sample.missing ? "Can't be found" : "Loaded, never played";
+    color: root.sample.missing ? Theme.missing : Theme.faint;
+    font-size: Type.meta;
+}
+
 // A tab's content in the song panel. It says how tall it wants to be at the panel's real width, because the `if`
 // round it is measured at its widest: in a narrow window, where its lines wrap, the panel then scrolls far enough.
 component TabRoom inherits VerticalLayout {
@@ -194,6 +209,9 @@ component TabRoom inherits VerticalLayout {
 component SongPanel inherits Rectangle {
     // How tall the tab on show wants to be, which it says itself (see TabRoom).
     property <length> tab-height;
+    // Too narrow for a list line's name to share its line with a date or what's wrong (about 250 px in the narrowest
+    // window): those go on the line below. The panel's width is set by hand, so this doesn't depend on itself.
+    property <bool> narrow: root.width < 400px;
     // The song on show, by its place in the library's list. When another is picked, the panel goes back to its top,
     // so the new song opens at its name, as it opens on Overview. A new tab keeps the place, as the tabs are in sight.
     property <int> song-row: SongsData.selected;
@@ -499,7 +517,7 @@ component SongPanel inherits Rectangle {
                         min-height: 160px;
                         preferred-height: 160px;
                         for line in SongsData.saves: Rectangle {
-                            height: line.run != "" ? 40px : 30px;
+                            height: line.run != "" ? 40px : root.narrow ? 44px : 30px;
                             if line.run != "": HorizontalLayout {
                                 padding-top: Space.md;
                                 spacing: Space.sm;
@@ -523,14 +541,14 @@ component SongPanel inherits Rectangle {
                             if line.run == "": ListLine {
                               // The buttons show when there's room for them and the save's name; in a narrow panel the
                               // right-click menu and a double-click do the same.
-                              property <bool> roomy: !line.missing
+                              property <bool> roomy: !root.narrow && !line.missing
                                   && self.width - 96px - 160px - 4 * Space.md >= buttons.preferred-width;
                               double-clicked => { SongsData.open-save(line.path); }
                               right-clicked(x, y) => {
                                   SongsData.save-menu-for(line.path);
                                   save-menu.open-at(x, y);
                               }
-                              HorizontalLayout {
+                              if !root.narrow: HorizontalLayout {
                                 padding-left: Space.sm;
                                 padding-right: Space.sm;
                                 spacing: Space.md;
@@ -559,6 +577,37 @@ component SongPanel inherits Rectangle {
                                 }
                                 // The buttons' place, so the name stops short of them.
                                 if roomy: Rectangle { width: buttons.preferred-width; }
+                              }
+                              // In a narrow panel: the save's name, then its date and whether it has moved below it.
+                              if root.narrow: VerticalLayout {
+                                padding-left: Space.sm;
+                                padding-right: Space.sm;
+                                alignment: center;
+                                spacing: Space.xs;
+                                Text {
+                                    text: line.name;
+                                    color: line.newest ? Theme.text : Theme.muted;
+                                    font-weight: line.newest ? 600 : 400;
+                                    font-size: Type.body;
+                                    overflow: elide;
+                                }
+                                HorizontalLayout {
+                                    spacing: Space.sm;
+                                    Text {
+                                        text: line.date;
+                                        color: Theme.muted;
+                                        font-family: Theme.number-font;
+                                        font-size: Type.meta;
+                                    }
+                                    if line.missing: Text {
+                                        horizontal-stretch: 1;
+                                        min-width: 0px;
+                                        text: "File moved";
+                                        color: Theme.missing;
+                                        font-size: Type.meta;
+                                        overflow: elide;
+                                    }
+                                }
                               }
                               // Always made, so it can be measured; on the right of the line, the same as its menu's lines.
                               buttons := HorizontalLayout {
@@ -621,19 +670,22 @@ component SongPanel inherits Rectangle {
                                     font-size: Type.body;
                                     overflow: elide;
                                 }
-                                Text {
-                                    text: p.about;
-                                    color: Theme.muted;
-                                    font-size: Type.meta;
-                                    overflow: elide;
+                                // In a narrow panel what's wrong comes first on this line, so the name above keeps
+                                // the whole width.
+                                HorizontalLayout {
+                                    spacing: Space.sm;
+                                    if root.narrow && !p.installed: PluginTrouble { }
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        min-width: 0px;
+                                        text: p.about;
+                                        color: Theme.muted;
+                                        font-size: Type.meta;
+                                        overflow: elide;
+                                    }
                                 }
                             }
-                            if !p.installed: Text {
-                                text: "Not installed";
-                                color: Theme.missing;
-                                font-size: Type.meta;
-                                vertical-alignment: center;
-                            }
+                            if !root.narrow && !p.installed: PluginTrouble { vertical-alignment: center; }
                         }
                     }
                 }
@@ -660,17 +712,22 @@ component SongPanel inherits Rectangle {
                                     font-size: Type.body;
                                     overflow: elide;
                                 }
-                                Text {
-                                    text: sm.folder;
-                                    color: Theme.muted;
-                                    font-size: Type.meta;
-                                    overflow: elide;
+                                // As on Plugins: in a narrow panel what's wrong comes first on this line.
+                                HorizontalLayout {
+                                    spacing: Space.sm;
+                                    if root.narrow && (sm.missing || sm.unplayed): SampleTrouble { sample: sm; }
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        min-width: 0px;
+                                        text: sm.folder;
+                                        color: Theme.muted;
+                                        font-size: Type.meta;
+                                        overflow: elide;
+                                    }
                                 }
                             }
-                            if sm.missing || sm.unplayed: Text {
-                                text: sm.missing ? "Can't be found" : "Loaded, never played";
-                                color: sm.missing ? Theme.missing : Theme.faint;
-                                font-size: Type.meta;
+                            if !root.narrow && (sm.missing || sm.unplayed): SampleTrouble {
+                                sample: sm;
                                 vertical-alignment: center;
                             }
                         }

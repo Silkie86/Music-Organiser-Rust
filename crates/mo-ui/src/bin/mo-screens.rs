@@ -237,13 +237,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("sounds-empty.png".into(), sounds_empty));
     shots.push(("sounds-reading.png".into(), sounds_reading));
     sounds_shots(&app, &window, &graphite, &mut shots)?;
-    // The Sounds filters in the narrowest window, every one in sight, and each view's own choices too.
+    // The Sounds filters in the narrowest window, every one in sight, and each view's own choices too. There the
+    // List, History and Rediscover lines take two lines each and the Kits pads put their names before their sounds',
+    // so every name has room.
     app.set_place(Place::Sounds.index() as i32);
     save_narrow(&window, &out, "sounds-narrow.png")?;
     let sounds = app.global::<mo_ui::SoundsData>();
-    for (view, name) in
-        [(2, "sounds-galaxy-narrow.png"), (4, "sounds-rediscover-narrow.png"), (5, "sounds-kits-narrow.png")]
-    {
+    for (view, name) in [
+        (1, "sounds-list-narrow.png"),
+        (2, "sounds-galaxy-narrow.png"),
+        (3, "sounds-history-narrow.png"),
+        (4, "sounds-rediscover-narrow.png"),
+        (5, "sounds-kits-narrow.png"),
+    ] {
         sounds.invoke_pick_view(view);
         save_narrow(&window, &out, name)?;
     }
