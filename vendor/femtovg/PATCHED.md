@@ -32,4 +32,5 @@ Each change is marked "Music Organiser patch".
 
 femtovg 0.28 keeps its pipelines in its own way. Once a Slint release uses femtovg 0.28 or later, the `mo-ui` test says
 the copy isn't used any more. Then delete this folder, the `[patch.crates-io]` lines in both `Cargo.toml` files, the
-`exclude` entry in the workspace's `Cargo.toml`, and the test.
+`exclude` entry in the workspace's `Cargo.toml`, and the test, and move the `femtovg` the waveforms' look test uses
+(`mo-ui`'s `[dev-dependencies]`) to the version Slint uses.

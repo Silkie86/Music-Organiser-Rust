@@ -24,6 +24,7 @@ pub mod songs;
 pub mod sounds;
 pub mod space;
 pub mod watchdog;
+mod waves;
 
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -61,6 +62,7 @@ pub fn page_name() -> &'static str {
 pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> Result<AppWindow, slint::PlatformError> {
     let app = AppWindow::new()?;
     arrangement::connect(&app);
+    waves::connect(&app);
     apply_look(&app, look);
     show_places(&app, &shortcuts);
     app.set_settings_place(Place::Settings.index() as i32);
