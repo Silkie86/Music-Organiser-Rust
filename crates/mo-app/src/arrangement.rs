@@ -4,19 +4,19 @@
 //! about the mouse, dragging moves around and a double-click fits it all in (again to go back). Ported from the C#
 //! app's `ArrangementView`.
 //!
-//! [`View`] keeps where the view is and answers the mouse; [`View::frame`] draws it: the shapes as a picture (on the
-//! CPU with tiny-skia, away from the window's thread), and the words as labels for the window to lay on top, so they
-//! use the app's own fonts.
+//! [`View`] keeps where the view is and answers the mouse; [`View::frame`] works out what to draw, away from the window's
+//! thread: the shapes, as a [`Scene`] the graphics card draws (or the processor, where there's no card: see
+//! [`crate::shapes`]), and the words as labels for the window to lay on top, so they use the app's own fonts.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mo_formats::arrangement::{Arrangement, AudioPart, LaneKind, PreviewClip, PreviewLane};
-use tiny_skia::{Color, FillRule, Paint, PathBuilder, Pixmap, Rect, Stroke, Transform};
 
 use mo_library::songs::thousands;
 
+use crate::shapes::{Colour, Scene};
 use crate::themes::Look;
 
 /// A project's arrangement views, read and with its audio files looked for: what [`read`] gives.
@@ -224,12 +224,11 @@ pub struct Hover {
     pub text: String,
 }
 
-/// A drawn view: the picture (RGBA, premultiplied, `scale` pixels to a point) and the words to lay on it.
+/// A view worked out for drawing: its shapes (in points, for the graphics card or [`Scene::paint`]) and the words to lay
+/// on them.
 #[derive(Clone, Debug)]
 pub struct Frame {
-    pub pixel_width: u32,
-    pub pixel_height: u32,
-    pub rgba: Vec<u8>,
+    pub scene: Scene,
     pub labels: Vec<Label>,
     pub hover: Option<Hover>,
     pub header_width: f64,
@@ -274,9 +273,9 @@ fn lane_height(lane: &PreviewLane) -> f64 {
 
 impl View {
     pub fn new(arrangement: Arc<Arrangement>, found: Arc<HashMap<String, PathBuf>>) -> View {
+        // Never past the readers' longest song (mo_formats::arrangement::MOST_BEATS), so the bar numbers can count it.
         let length = arrangement.length();
-        let song_beats =
-            (arrangement.beats_per_bar.max(1) as f64).max(if length.is_finite() { length * 1.02 } else { 0.0 });
+        let song_beats = (arrangement.beats_per_bar.max(1) as f64).max(length * 1.02);
         let content_height = arrangement.lanes.iter().map(lane_height).sum();
         let keys = arrangement
             .lanes
@@ -434,7 +433,7 @@ impl View {
         let a = &self.arrangement;
         let beat = self.beat(px).max(0.0);
         let bpb = a.beats_per_bar.max(1) as f64;
-        let mut text = format!("Bar {}.{}", (beat / bpb) as u64 + 1, (beat % bpb) as u64 + 1);
+        let mut text = format!("Bar {}.{}", ((beat / bpb) as u64).saturating_add(1), (beat % bpb) as u64 + 1);
         if py >= ruler {
             let scale = self.lane_scale();
             let mut y = ruler - self.top;
@@ -457,7 +456,7 @@ impl View {
     fn bar_step(&self) -> u64 {
         let bar = self.zoom() * self.arrangement.beats_per_bar.max(1) as f64;
         let mut step = 1;
-        while (step as f64) * bar < 44.0 && step < 4096 {
+        while (step as f64) * bar < 44.0 && step < 1 << 40 {
             step *= 2;
         }
         step
@@ -470,10 +469,11 @@ impl View {
         if !(zoom > 0.0 && zoom.is_finite()) {
             return Vec::new();
         }
-        let first = ((self.left / bpb / step as f64).floor().max(0.0) as u64) * step;
+        let first = ((self.left / bpb / step as f64).floor().max(0.0) as u64).saturating_mul(step);
         let mut out = Vec::new();
         let mut bar = first;
-        loop {
+        // At most so many turns, whatever is pushed: far to the right the numbers stop moving.
+        for _ in 0..8192 {
             let x = self.x(bar as f64 * bpb);
             if x > self.width || out.len() > 4096 {
                 break;
@@ -481,20 +481,19 @@ impl View {
             if x >= self.header_width() {
                 out.push((bar, x));
             }
-            bar += step;
+            let Some(next) = bar.checked_add(step) else { break };
+            bar = next;
         }
         out
     }
 
-    /// Draws the view at `scale` pixels to a point. Away from the window's thread: a big song has millions of notes.
+    /// Works out what to draw for the view at `scale` pixels to a point (a waveform has a column for each pixel). Away
+    /// from the window's thread: a big song has millions of notes.
     pub fn frame(&self, palette: &Palette, scale: f64) -> Frame {
         let mut d = Draw::new(self, palette, scale);
         d.draw();
-        let (pixel_width, pixel_height) = (d.pixmap.width(), d.pixmap.height());
         Frame {
-            pixel_width,
-            pixel_height,
-            rgba: d.pixmap.take(),
+            scene: d.scene,
             labels: d.labels,
             hover: self.hover(),
             header_width: self.header_width(),
@@ -536,10 +535,48 @@ impl Box2 {
     }
 }
 
-/// A colour with `alpha` (0 to 1).
-fn colour(rgb: u32, alpha: f64) -> Color {
-    let a = (alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-    Color::from_rgba8((rgb >> 16) as u8, (rgb >> 8) as u8, rgb as u8, a)
+/// Crisp rectangles of one colour, as few as fill the same pixels: ones in the same row of pixels that touch or overlap
+/// there become one. Fitted to the view, a dense clip has many notes to a pixel, and a huge song millions; this keeps
+/// them to about one a run of pixels (what the view has room for), so drawing them stays quick on the card and the
+/// processor alike, and a see-through clip's notes don't build up where they overlap.
+struct Runs {
+    scale: f32,
+    /// Each run, and its left and right in pixels.
+    runs: Vec<(Box2, f32, f32)>,
+    /// For each row of pixels (its top and bottom), the run added to it last.
+    last: HashMap<(i32, i32), usize>,
+}
+
+impl Runs {
+    fn new(scale: f64) -> Runs {
+        Runs { scale: scale as f32, runs: Vec::new(), last: HashMap::new() }
+    }
+
+    /// Adds a rectangle: to the run last added in its row of pixels when the two touch or overlap there, else as a
+    /// run of its own. One that fills no pixel is left out, as either painter would leave it.
+    fn add(&mut self, b: Box2) {
+        let (x, y, w, h) = (b.x as f32, b.y as f32, b.w as f32, b.h as f32);
+        let Some([left, top, right, bottom]) = crate::shapes::crisp([x, y, x + w, y + h], self.scale) else {
+            return;
+        };
+        let row = (top as i32, bottom as i32);
+        if let Some(&i) = self.last.get(&row)
+            && let Some((run, l, r)) = self.runs.get_mut(i)
+            && left <= *r
+            && right >= *l
+        {
+            let (from, to) = (run.x.min(b.x), run.right().max(b.right()));
+            *run = Box2::new(from, run.y, to - from, run.h);
+            (*l, *r) = (l.min(left), r.max(right));
+            return;
+        }
+        self.last.insert(row, self.runs.len());
+        self.runs.push((b, left, right));
+    }
+
+    fn boxes(self) -> impl Iterator<Item = Box2> {
+        self.runs.into_iter().map(|(b, ..)| b)
+    }
 }
 
 /// Moves a colour `amount` of the way to black.
@@ -557,63 +594,30 @@ fn lighten(rgb: u32, amount: f64) -> u32 {
     ch(16) << 16 | ch(8) << 8 | ch(0)
 }
 
+/// Works out a view's shapes and words.
 struct Draw<'a> {
     v: &'a View,
     p: &'a Palette,
-    pixmap: Pixmap,
-    transform: Transform,
+    /// Pixels to a point.
+    scale: f64,
+    scene: Scene,
     labels: Vec<Label>,
     clip_labels: usize,
 }
 
 impl<'a> Draw<'a> {
     fn new(v: &'a View, p: &'a Palette, scale: f64) -> Draw<'a> {
-        let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
-        let size = |points: f64| ((points * scale).ceil().clamp(1.0, 16384.0)) as u32;
-        let pixmap = Pixmap::new(size(v.width), size(v.height)).unwrap_or_else(|| {
-            // 1 by 1 is always possible.
-            Pixmap::new(1, 1).unwrap_or_else(|| unreachable!())
-        });
-        Draw {
-            v,
-            p,
-            pixmap,
-            transform: Transform::from_scale(scale as f32, scale as f32),
-            labels: Vec::new(),
-            clip_labels: 0,
-        }
+        let scale = crate::shapes::usable_scale(scale);
+        Draw { v, p, scale, scene: Scene::new(v.width, v.height, p.surface), labels: Vec::new(), clip_labels: 0 }
     }
 
-    fn rect(&mut self, r: Box2, c: Color) {
-        let paint = Paint { shader: tiny_skia::Shader::SolidColor(c), anti_alias: false, ..Paint::default() };
-        if let Some(r) = Rect::from_xywh(r.x as f32, r.y as f32, r.w as f32, r.h as f32) {
-            self.pixmap.fill_rect(r, &paint, self.transform, None);
-        }
+    fn rect(&mut self, r: Box2, c: Colour) {
+        self.scene.rect((r.x, r.y, r.w, r.h), c);
     }
 
     /// A rectangle with rounded corners, filled and (when `edge` is some) outlined.
-    fn rounded(&mut self, r: Box2, radius: f64, fill: Color, edge: Option<Color>) {
-        let rad = radius.min(r.w / 2.0).min(r.h / 2.0).max(0.0) as f32;
-        let (x, y, w, h) = (r.x as f32, r.y as f32, r.w as f32, r.h as f32);
-        let mut pb = PathBuilder::new();
-        pb.move_to(x + rad, y);
-        pb.line_to(x + w - rad, y);
-        pb.quad_to(x + w, y, x + w, y + rad);
-        pb.line_to(x + w, y + h - rad);
-        pb.quad_to(x + w, y + h, x + w - rad, y + h);
-        pb.line_to(x + rad, y + h);
-        pb.quad_to(x, y + h, x, y + h - rad);
-        pb.line_to(x, y + rad);
-        pb.quad_to(x, y, x + rad, y);
-        pb.close();
-        let Some(path) = pb.finish() else { return };
-        let mut paint = Paint { shader: tiny_skia::Shader::SolidColor(fill), anti_alias: true, ..Paint::default() };
-        self.pixmap.fill_path(&path, &paint, FillRule::Winding, self.transform, None);
-        if let Some(e) = edge {
-            paint.shader = tiny_skia::Shader::SolidColor(e);
-            let stroke = Stroke { width: 1.0, ..Stroke::default() };
-            self.pixmap.stroke_path(&path, &paint, &stroke, self.transform, None);
-        }
+    fn rounded(&mut self, r: Box2, radius: f64, fill: Colour, edge: Option<Colour>) {
+        self.scene.rounded((r.x, r.y, r.w, r.h), radius, fill, edge);
     }
 
     fn label(&mut self, area: Area, r: Box2, text: impl Into<String>, style: Style) {
@@ -624,7 +628,6 @@ impl<'a> Draw<'a> {
         let v = self.v;
         let a = v.arrangement.clone();
         let (w, h) = (v.width, v.height);
-        self.pixmap.fill(colour(self.p.surface, 1.0));
         if w < 60.0 || h < 40.0 {
             return;
         }
@@ -635,7 +638,7 @@ impl<'a> Draw<'a> {
         // Bar lines behind everything.
         for &(bar, x) in &bars {
             let c = if bar % (step * 4) == 0 { self.p.stroke } else { self.p.hover };
-            self.rect(Box2::new(x, ruler, 1.0, h - ruler), colour(c, 1.0));
+            self.rect(Box2::new(x, ruler, 1.0, h - ruler), Colour::rgb(c, 1.0));
         }
 
         // Lanes.
@@ -650,11 +653,11 @@ impl<'a> Draw<'a> {
             y += lh;
         }
         if y < h {
-            self.rect(Box2::new(0.0, y, w, 1.0), colour(self.p.stroke, 1.0));
+            self.rect(Box2::new(0.0, y, w, 1.0), Colour::rgb(self.p.stroke, 1.0));
         }
 
         self.ruler(&a, &bars);
-        self.rect(Box2::new(hx - 1.0, 0.0, 1.0, h), colour(self.p.stroke, 1.0));
+        self.rect(Box2::new(hx - 1.0, 0.0, 1.0, h), Colour::rgb(self.p.stroke, 1.0));
 
         // Thin scroll bars when zoomed in or when the lanes don't fit.
         let (tw, zoom) = (v.timeline_width(), v.zoom());
@@ -662,25 +665,25 @@ impl<'a> Draw<'a> {
         if visible < v.song_beats - 1e-6 {
             let bw = (tw * visible / v.song_beats).max(16.0);
             let r = Box2::new(hx + tw * v.left / v.song_beats, h - SCROLLBAR - 2.0, bw, SCROLLBAR);
-            self.rounded(r, 2.5, colour(self.p.faint, 1.0), None);
+            self.rounded(r, 2.5, Colour::rgb(self.p.faint, 1.0), None);
         }
         let lanes = h - ruler;
         let content = v.content_height * scale;
         if content > lanes + 1.0 {
             let bh = (lanes * lanes / content).max(16.0);
             let r = Box2::new(w - SCROLLBAR - 2.0, ruler + lanes * v.top / content, SCROLLBAR, bh);
-            self.rounded(r, 2.5, colour(self.p.faint, 1.0), None);
+            self.rounded(r, 2.5, Colour::rgb(self.p.faint, 1.0), None);
         }
     }
 
     fn ruler(&mut self, a: &Arrangement, bars: &[(u64, f64)]) {
         let v = self.v;
         let (w, h, hx, ruler) = (v.width, v.height, v.header_width(), v.ruler_height());
-        self.rect(Box2::new(0.0, 0.0, w, ruler), colour(self.p.raised, 1.0));
-        self.rect(Box2::new(0.0, ruler - 1.0, w, 1.0), colour(self.p.stroke, 1.0));
+        self.rect(Box2::new(0.0, 0.0, w, ruler), Colour::rgb(self.p.raised, 1.0));
+        self.rect(Box2::new(0.0, ruler - 1.0, w, 1.0), Colour::rgb(self.p.stroke, 1.0));
         self.label(Area::Ruler, Box2::new(12.0, 0.0, hx - 20.0, 24.0), a.view.to_uppercase(), Style::Head);
         for &(bar, x) in bars {
-            self.rect(Box2::new(x, 17.0, 1.0, 6.0), colour(self.p.muted, 1.0));
+            self.rect(Box2::new(x, 17.0, 1.0, 6.0), Colour::rgb(self.p.muted, 1.0));
             self.label(Area::Ruler, Box2::new(x + 4.0, 0.0, 40.0, 17.0), (bar + 1).to_string(), Style::Bar);
         }
         // Markers on their own row, each name cut short where the next marker starts.
@@ -697,7 +700,7 @@ impl<'a> Draw<'a> {
             let x = at.max(hx);
             let room = next - x - 3.0;
             if at >= hx {
-                self.rect(Box2::new(x, 24.0, 1.5, h - 24.0), colour(self.p.warning, 1.0));
+                self.rect(Box2::new(x, 24.0, 1.5, h - 24.0), Colour::rgb(self.p.warning, 1.0));
             }
             if room < 8.0 {
                 continue;
@@ -705,7 +708,7 @@ impl<'a> Draw<'a> {
             let name = if m.name.is_empty() { "Marker" } else { m.name.as_str() };
             // About how wide the name is at the ruler's size; the window cuts it to the room there is.
             let wide = (name.chars().count() as f64 * 6.2 + 8.0).min(room);
-            self.rounded(Box2::new(x, 24.0, wide, 15.0), 3.0, colour(self.p.warning, 1.0), None);
+            self.rounded(Box2::new(x, 24.0, wide, 15.0), 3.0, Colour::rgb(self.p.warning, 1.0), None);
             self.label(Area::Ruler, Box2::new(x + 4.0, 24.0, wide - 6.0, 15.0), name, Style::Marker);
         }
     }
@@ -725,9 +728,9 @@ impl<'a> Draw<'a> {
         let (w, hx, ruler) = (v.width, v.header_width(), v.ruler_height());
         let c = self.colour_of(lane, None);
         if lane.kind == LaneKind::Group {
-            self.rect(Box2::new(0.0, y, w, lh - 1.0), colour(c, 0.08));
+            self.rect(Box2::new(0.0, y, w, lh - 1.0), Colour::rgb(c, 0.08));
         }
-        self.rect(Box2::new(0.0, y + lh - 1.0, w, 1.0), colour(self.p.stroke, 1.0));
+        self.rect(Box2::new(0.0, y + lh - 1.0, w, 1.0), Colour::rgb(self.p.stroke, 1.0));
 
         // The name, with a strip of the lane's colour like a DAW's track header.
         let indent = 10.0 + lane.depth.min(8) as f64 * 12.0;
@@ -735,7 +738,7 @@ impl<'a> Draw<'a> {
         self.rounded(
             Box2::new(indent - 6.0, y + inset, 3.0, (lh - 2.0 * inset - 1.0).max(1.0)),
             1.5,
-            colour(c, 1.0),
+            Colour::rgb(c, 1.0),
             None,
         );
         let style = Style::Lane {
@@ -768,11 +771,11 @@ impl<'a> Draw<'a> {
         let fade = if clip.muted { 0.35 } else { 1.0 };
         // Only what shows of the clip is drawn; one cut by the edges is drawn square there.
         let Some(shown) = r.intersect(&area) else { return };
-        self.rounded(shown, 3.0, colour(c, 0.24 * fade), Some(colour(c, 0.75 * fade)));
+        self.rounded(shown, 3.0, Colour::rgb(c, 0.24 * fade), Some(Colour::rgb(c, 0.75 * fade)));
         let title = if r.h >= 30.0 && r.w > 28.0 { 13.0 } else { 0.0 };
         if title > 0.0 {
             if let Some(bar) = Box2::new(r.x, r.y, r.w, title).intersect(&area) {
-                self.rect(bar, colour(c, 0.55 * fade));
+                self.rect(bar, Colour::rgb(c, 0.55 * fade));
             }
             if !clip.name.is_empty() && r.w > 34.0 && self.clip_labels < MOST_CLIP_LABELS {
                 let x = r.x.max(area.x) + 4.0;
@@ -785,7 +788,7 @@ impl<'a> Draw<'a> {
         }
         let inner = Box2::new(r.x + 2.0, r.y + title + 2.0, (r.w - 4.0).max(1.0), (r.h - title - 4.0).max(1.0));
         let Some(visible) = inner.intersect(&area) else { return };
-        let fill = colour(if self.p.light { darken(c, 0.35) } else { lighten(c, 0.25) }, fade);
+        let fill = Colour::rgb(if self.p.light { darken(c, 0.35) } else { lighten(c, 0.25) }, fade);
         if !clip.notes.is_empty() {
             self.notes(clip, inner, visible, fill, keys);
         }
@@ -806,27 +809,24 @@ impl<'a> Draw<'a> {
     }
 
     /// Draws a clip's notes as a little piano roll, spread over the lane's lowest to highest key.
-    fn notes(&mut self, clip: &PreviewClip, inner: Box2, visible: Box2, fill: Color, keys: (u8, u8)) {
+    fn notes(&mut self, clip: &PreviewClip, inner: Box2, visible: Box2, fill: Colour, keys: (u8, u8)) {
         let v = self.v;
         let (lo, hi) = (keys.0 as f64, keys.1 as f64);
         let rows = (hi - lo + 1.0).max(1.0);
         let row_h = (inner.h / rows).clamp(1.2, 5.0);
         let span = inner.h - row_h;
         let zoom = v.zoom();
-        let paint = Paint { shader: tiny_skia::Shader::SolidColor(fill), anti_alias: false, ..Paint::default() };
-        let mut pb = PathBuilder::new();
+        let mut runs = Runs::new(self.scale);
         for n in clip.notes.iter().filter(|n| !n.muted) {
             let x = v.x(clip.start + n.start);
             let nw = (n.length * zoom - 0.5).max(1.2);
             let ny = inner.y + if rows <= 1.0 { span / 2.0 } else { span * (1.0 - (n.key as f64 - lo) / (rows - 1.0)) };
-            if let Some(b) = Box2::new(x, ny, nw, row_h).intersect(&visible)
-                && let Some(r) = Rect::from_xywh(b.x as f32, b.y as f32, b.w as f32, b.h as f32)
-            {
-                pb.push_rect(r);
+            if let Some(b) = Box2::new(x, ny, nw, row_h).intersect(&visible) {
+                runs.add(b);
             }
         }
-        if let Some(path) = pb.finish() {
-            self.pixmap.fill_path(&path, &paint, FillRule::Winding, self.transform, None);
+        for r in runs.boxes() {
+            self.rect(r, fill);
         }
     }
 
@@ -847,13 +847,13 @@ impl<'a> Draw<'a> {
             // The sound itself is drawn once its file has been read; until then (or when it can't be) a soft band.
             let band = Box2::new(x0, mid - inner.h * 0.3, x1 - x0, inner.h * 0.6);
             if let Some(b) = band.intersect(&visible) {
-                self.rect(b, colour(c, 0.22 * fade));
+                self.rect(b, Colour::rgb(c, 0.22 * fade));
             }
             return;
         }
         // No file: a flat line and a note, so it's clear the clip is there but its sound isn't.
         if let Some(b) = Box2::new(x0, mid, x1 - x0, 1.0).intersect(&visible) {
-            self.rect(b, colour(c, 0.6 * fade));
+            self.rect(b, Colour::rgb(c, 0.6 * fade));
         }
         if x1 - x0 > 120.0 && visible.h >= 12.0 {
             // Just above the line, or at the top of a clip too thin for that.
@@ -863,7 +863,7 @@ impl<'a> Draw<'a> {
         }
     }
 
-    /// Draws an audio part's waveform, a thin bar a column, mirrored about the clip's middle. False when the file's
+    /// Draws an audio part's waveform, a thin bar a pixel, mirrored about the clip's middle. False when the file's
     /// speed in the song can't be told, so the caller draws the plain band.
     #[allow(clippy::too_many_arguments)]
     fn waveform(
@@ -890,47 +890,36 @@ impl<'a> Draw<'a> {
             let into = (b - start).clamp(0.0, part.length);
             part.from + (if part.reversed { part.length - into } else { into }) * rate
         };
-        let fill = colour(if self.p.light { darken(c, 0.35) } else { lighten(c, 0.25) }, 0.9 * fade);
-        let paint = Paint { shader: tiny_skia::Shader::SolidColor(fill), anti_alias: false, ..Paint::default() };
-        let mut pb = PathBuilder::new();
-        let mut x = x0.floor();
-        while x < x1 {
-            let (b0, b1) = (v.beat(x), v.beat(x + 1.0));
+        let fill = Colour::rgb(if self.p.light { darken(c, 0.35) } else { lighten(c, 0.25) }, 0.9 * fade);
+        // A column for each pixel, on the pixel grid.
+        let column = 1.0 / self.scale;
+        let (first, last) = ((x0 * self.scale).floor() as i64, (x1 * self.scale).ceil() as i64);
+        for i in first..last {
+            let x = i as f64 * column;
+            let (b0, b1) = (v.beat(x), v.beat(x + column));
             if let Some(loud) = peaks.loudest(at(b0), at(b1)) {
                 let h = (f64::from(loud) * half).max(0.5);
-                if let Some(b) = Box2::new(x, mid - h, 1.0, 2.0 * h).intersect(&visible)
-                    && let Some(r) = Rect::from_xywh(b.x as f32, b.y as f32, b.w as f32, b.h as f32)
-                {
-                    pb.push_rect(r);
+                if let Some(b) = Box2::new(x, mid - h, column, 2.0 * h).intersect(&visible) {
+                    self.rect(b, fill);
                 }
             }
-            x += 1.0;
-        }
-        if let Some(path) = pb.finish() {
-            self.pixmap.fill_path(&path, &paint, FillRule::Winding, self.transform, None);
         }
         true
     }
 
-    fn curve(&mut self, clip: &PreviewClip, inner: Box2, visible: Box2, fill: Color) {
+    fn curve(&mut self, clip: &PreviewClip, inner: Box2, visible: Box2, fill: Colour) {
         let v = self.v;
         let points: Vec<(f64, f64)> = clip
             .points
             .iter()
             .map(|p| (v.x(clip.start + p.beat), inner.bottom() - p.value.clamp(0.0, 1.0) * inner.h))
             .collect();
-        let mut pb = PathBuilder::new();
         for pair in points.windows(2) {
             let [a, b] = pair else { continue };
-            if let Some(((x0, y0), (x1, y1))) = clip_segment(*a, *b, &visible) {
-                pb.move_to(x0 as f32, y0 as f32);
-                pb.line_to(x1 as f32, y1 as f32);
+            if let Some((from, to)) = clip_segment(*a, *b, &visible) {
+                self.scene.line(from, to, 1.5, fill);
             }
         }
-        let Some(path) = pb.finish() else { return };
-        let paint = Paint { shader: tiny_skia::Shader::SolidColor(fill), anti_alias: true, ..Paint::default() };
-        let stroke = Stroke { width: 1.5, ..Stroke::default() };
-        self.pixmap.stroke_path(&path, &paint, &stroke, self.transform, None);
     }
 }
 
@@ -1062,13 +1051,66 @@ mod tests {
         v
     }
 
-    fn pixel(f: &Frame, x: u32, y: u32) -> [u8; 4] {
-        let i = ((y * f.pixel_width + x) * 4) as usize;
-        [f.rgba[i], f.rgba[i + 1], f.rgba[i + 2], f.rgba[i + 3]]
+    fn pixel(p: &tiny_skia::Pixmap, x: u32, y: u32) -> [u8; 4] {
+        let c = p.pixel(x, y).expect("inside the picture");
+        [c.red(), c.green(), c.blue(), c.alpha()]
     }
 
     fn palette() -> Palette {
         Palette::from_look(&Look::from_settings(None, None))
+    }
+
+    /// Notes in the same pixels are drawn as one rectangle: as few as the pixels they fill, and those very pixels,
+    /// see-through ones (a muted clip's) included.
+    #[test]
+    fn notes_in_the_same_pixels_are_drawn_as_one() {
+        let scale = 1.5;
+        let fill = Colour::rgb(0xFFFFFF, 0.35);
+        let (mut each, mut merged) = (Scene::new(100.0, 12.0, 0x101010), Scene::new(100.0, 12.0, 0x101010));
+        let mut runs = Runs::new(scale);
+        // 2,000 notes a sixteenth of a point apart in two rows, then two more in the first row, apart.
+        let notes = (0..2000)
+            .map(|i| Box2::new(f64::from(i % 1000) * 0.0625, if i < 1000 { 2.0 } else { 6.0 }, 1.25, 1.25))
+            .chain([Box2::new(80.0, 2.0, 1.25, 1.25), Box2::new(90.0, 2.0, 1.25, 1.25)]);
+        for b in notes {
+            each.rect((b.x, b.y, b.w, b.h), fill);
+            runs.add(b);
+        }
+        for b in runs.boxes() {
+            merged.rect((b.x, b.y, b.w, b.h), fill);
+        }
+        assert_eq!(merged.shapes.len(), 4, "a run in each row, and the two apart");
+        assert!(merged.paint(scale).data() == each.paint(scale).data(), "the same pixels");
+    }
+
+    /// A clip far too dense for the view, fitted, is drawn as about one rectangle a run of pixels.
+    #[test]
+    fn a_huge_clip_is_as_many_rectangles_as_the_view_has_room_for() {
+        let mut song = song();
+        song.lanes[0].clips[0].notes = (0..100_000).map(|i| note(f64::from(i) * 0.00016, 60 + (i % 4) as u8)).collect();
+        let mut v = View::new(Arc::new(song), Arc::default());
+        v.resize(900.0, 300.0);
+        let shapes = v.frame(&palette(), 2.0).scene.shapes.len();
+        assert!(shapes < 500, "{shapes} shapes for 100,000 notes");
+    }
+
+    #[test]
+    fn a_clip_ending_at_1e20_beats_neither_panics_nor_hangs() {
+        let mut song = song();
+        song.lanes[0].clips[1].start = 1e20;
+        let mut v = View::new(Arc::new(song), Arc::default());
+        v.resize(900.0, 300.0);
+        v.moved(880.0, 10.0);
+        assert!(v.hover().is_some_and(|h| h.text.starts_with("Bar ")));
+        v.frame(&palette(), 1.0);
+        // Zoomed in and scrolled far to the right, where the bars are drawn.
+        for _ in 0..40 {
+            v.wheel(800.0, 0.0, 5.0, true, false);
+        }
+        v.wheel(800.0, -1e12, 0.0, false, true);
+        v.moved(880.0, 10.0);
+        let _ = v.hover();
+        v.frame(&palette(), 1.0);
     }
 
     #[test]
@@ -1123,7 +1165,8 @@ mod tests {
         let mut v = view(800.0, 200.0);
         v.moved(300.0, 50.0);
         let f = v.frame(&palette(), 2.0);
-        assert_eq!((f.pixel_width, f.pixel_height), (1600, 400));
+        let picture = f.scene.paint(2.0);
+        assert_eq!((picture.width(), picture.height()), (1600, 400));
         let names: Vec<_> = f.labels.iter().map(|l| (l.area, l.text.as_str())).collect();
         for expected in [
             (Area::Header, "Keys"),
@@ -1140,7 +1183,7 @@ mod tests {
         }
         // The Verse clip's title bar is the lane's blue, over the surface.
         let x = v.x(2.0);
-        let px = pixel(&f, (x * 2.0) as u32, ((v.ruler_height() + 6.0) * 2.0) as u32);
+        let px = pixel(&picture, (x * 2.0) as u32, ((v.ruler_height() + 6.0) * 2.0) as u32);
         assert!(px[2] > px[0] && px[2] > px[1], "{px:?}");
         assert_eq!(f.hover, v.hover(), "the window asks the view itself between pictures");
         let hover = f.hover.expect("the mouse is over a clip");
@@ -1162,7 +1205,8 @@ mod tests {
     fn a_tiny_view_draws_nothing_but_its_background() {
         let f = view(30.0, 20.0).frame(&palette(), 1.0);
         assert!(f.labels.is_empty());
-        assert_eq!((f.pixel_width, f.pixel_height), (30, 20));
+        assert!(f.scene.shapes.is_empty());
+        assert_eq!(f.scene.pixel_size(1.0), (30, 20));
     }
 
     #[test]

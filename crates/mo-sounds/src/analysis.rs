@@ -62,7 +62,14 @@ pub struct SoundAnalysis {
 impl SoundAnalysis {
     /// Reads the JSON the C# app stored. `None` when it isn't a readable analysis (the C# app then shows none too).
     pub fn from_json(json: &str) -> Option<SoundAnalysis> {
-        serde_json::from_str(json).ok()
+        let mut a: SoundAnalysis = serde_json::from_str(json).ok()?;
+        // Reading a list doubles its room each time it fills, so the 160 waveform points got room for 256: with half a
+        // million sounds held, that spare room alone was about 200 MB. Each list is cut to what it holds.
+        a.waveform.shrink_to_fit();
+        a.chroma.shrink_to_fit();
+        a.character.shrink_to_fit();
+        a.chords.shrink_to_fit();
+        Some(a)
     }
 
     /// The key, short ("Ebm", "F#"), when one was found.
@@ -79,5 +86,26 @@ impl SoundAnalysis {
     pub fn root_note_name(&self) -> Option<String> {
         // C# rounds half to even (Math.Round), and casts to int.
         self.pitch.filter(|p| p.is_finite()).map(|p| music::note_name(p.round_ties_even() as i32))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_read_analysis_keeps_no_spare_room() {
+        let points: Vec<String> = (0..160).map(|i| format!("{}", f64::from(i) / 160.0)).collect();
+        let json = format!(
+            r#"{{"Waveform":[{}],"Chroma":[0,0,0,0,0,0,0,0,0,0,0,0.5],"Character":["dark","wide","soft"],
+                "Chords":[{{"Name":"Cm"}},{{"Name":"Fm"}},{{"Name":"G"}}]}}"#,
+            points.join(",")
+        );
+        let a = SoundAnalysis::from_json(&json).unwrap();
+        assert_eq!((a.waveform.len(), a.chroma.len(), a.character.len(), a.chords.len()), (160, 12, 3, 3));
+        assert_eq!(a.waveform.capacity(), a.waveform.len());
+        assert_eq!(a.chroma.capacity(), a.chroma.len());
+        assert_eq!(a.character.capacity(), a.character.len());
+        assert_eq!(a.chords.capacity(), a.chords.len());
     }
 }

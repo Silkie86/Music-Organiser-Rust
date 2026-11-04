@@ -15,8 +15,15 @@ chrono.workspace = true
 mo-backup = { path = "../mo-backup" }
 # FL Studio songs converted for Bitwig ("Open in Bitwig").
 mo-convert = { path = "../mo-convert" }
+# The link to Bitwig: Send to Bitwig from the Sounds page, and Settings › DAWs saying how it stands.
+mo-dawlink = { path = "../mo-dawlink" }
 mo-formats = { path = "../mo-formats" }
+mo-harmony = { path = "../mo-harmony" }
 mo-library = { path = "../mo-library" }
+mo-midi = { path = "../mo-midi" }
+# The names the presets and curves files are written under while being made, so the start-up sweep (rule 28) knows
+# the half-made ones a crash left (one rule, kept where they're written).
+mo-presets = { path = "../mo-presets" }
 mo-sounds = { path = "../mo-sounds" }
 mo-space = { path = "../mo-space" }
 thread-priority.workspace = true
@@ -26,3 +33,5 @@ tiny-skia.workspace = true
 [dev-dependencies]
 # A small library made by the backup test.
 rusqlite = { version = "0.41", features = ["bundled"] }
+# The stand-in Bitwig, for the Send to Bitwig tests: no test reaches a real Bitwig (rule 11).
+mo-dawlink = { path = "../mo-dawlink", features = ["fake-bitwig"] }

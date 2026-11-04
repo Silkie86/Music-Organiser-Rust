@@ -2,12 +2,14 @@
 //! without opening a window. The Slint screens in `mo-ui` only show what this crate decides.
 
 pub mod activity;
+pub mod app_settings;
 pub mod arrangement;
 pub mod background;
 pub mod backup;
 pub mod backup_gone;
 pub mod backup_older;
 pub mod bitwig_convert;
+pub mod finder;
 pub mod frame_timing;
 pub mod galaxy_grid;
 pub mod galaxy_look;
@@ -16,9 +18,12 @@ pub mod galaxy_picture;
 pub mod galaxy_view;
 pub mod live;
 pub mod log;
+pub mod midi;
 pub mod note;
 pub mod paths;
 pub mod places;
+pub mod settings;
+pub mod shapes;
 pub mod shell;
 pub mod shortcuts;
 pub mod song_panel;
@@ -26,7 +31,10 @@ pub mod songs;
 pub mod sound_library;
 pub mod sounds;
 pub mod space;
+pub mod space_bitwig;
 pub mod sweep_timing;
 pub mod themes;
+pub mod tidy;
+pub mod to_bitwig;
 pub mod version;
 pub mod year_strip;

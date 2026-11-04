@@ -345,7 +345,7 @@ fn kept_error(e: &std::io::Error) -> String {
 }
 
 /// Opens the system's folder picker without holding up the window, and hands on the folder picked.
-fn pick_folder(title: &'static str, then: impl FnOnce(PathBuf) + 'static) {
+pub(crate) fn pick_folder(title: &'static str, then: impl FnOnce(PathBuf) + 'static) {
     let asked = slint::spawn_local(async move {
         if let Some(folder) = rfd::AsyncFileDialog::new().set_title(title).pick_folder().await {
             then(folder.path().to_path_buf());

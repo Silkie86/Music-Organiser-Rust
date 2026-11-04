@@ -397,6 +397,28 @@ fn a_damaged_project_cant_loop_a_clip_for_ever() {
 }
 
 #[test]
+fn a_damaged_songs_huge_transpose_or_steps_past_the_part_end_quickly() {
+    // "1e10" saturated to i32::MAX and overflowed on the add; steps past the part with a tiny loop never ended.
+    let song = r#"<Song><List x:id="Tracks"><MediaTrack name="Keys" mediaType="Music"><List x:id="Events">
+        <MusicPart start="0" length="4" transpose="1e10"><NoteEvent start="0" length="1" pitch="60"/></MusicPart>
+        <MusicPart start="4" length="4" transpose="-Infinity"><NoteEvent start="0" length="1" pitch="60"/></MusicPart>
+        <MusicPatternPart start="8" length="16" clipID="{P1}"/>
+    </List></MediaTrack></List></Song>"#;
+    let pool = r#"<MediaPool><MusicClip mediaID="{P1}"><Url url="media:///Beat.pattern"/></MusicClip></MediaPool>"#;
+    let pattern = r#"<Pattern><PatternPerformance stepLength="0.25" stepCount="1e-12"><PatternStep start="64" pitch="36"/></PatternPerformance></Pattern>"#;
+    let bytes = stored_zip(&[
+        ("Song/song.xml", song.as_bytes()),
+        ("Song/mediapool.xml", pool.as_bytes()),
+        ("Beat.pattern", pattern.as_bytes()),
+    ]);
+    let started = std::time::Instant::now();
+    let a = read("Damaged.song", &bytes);
+    assert!(started.elapsed().as_secs() < 5, "{:?}", started.elapsed());
+    let keys: Vec<Vec<u8>> = a.lanes[0].clips.iter().map(|c| c.notes.iter().map(|n| n.key).collect()).collect();
+    assert_eq!(keys, [vec![127], vec![0], vec![]]);
+}
+
+#[test]
 fn notes_on_muted_tracks_dont_count_as_playing() {
     let song = r#"<Song><List x:id="Tracks">
         <MediaTrack name="On" mediaType="Music"><List x:id="Events"><MusicPart start="0" length="4"><NoteEvent start="0" pitch="60"/></MusicPart></List></MediaTrack>

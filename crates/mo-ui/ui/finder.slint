@@ -1,0 +1,243 @@
+// Ctrl+K: one box, from anywhere, that jumps to a song, a sound, a page or an action. What it finds and every word on
+// it come from mo-app's `finder`; this only shows them and passes keys and clicks back.
+import { Theme, Type, Space, Caps, Groove, ListLine, Segmented } from "studio.slint";
+
+// One line of the list: a group's heading, a thing found, a "12 more songs" line or a quiet note.
+export struct FinderLine {
+    // "heading", "hit", "more" or "note".
+    kind: string,
+    title: string,
+    detail: string,
+    // An action's key, at the right like a menu line (rule 15).
+    key: string,
+    // The kind's or place's icon, from Icons ("" for none).
+    icon: string,
+}
+
+export global FinderData {
+    in-out property <bool> open;
+    in-out property <string> query;
+    in property <[FinderLine]> lines;
+    // The line picked with the arrows (-1 for none).
+    in property <int> selected: -1;
+    // "All", then each kind there's something to find of.
+    in property <[string]> kinds;
+    in property <int> kind;
+    // What it says when nothing matches.
+    in property <string> note;
+    // The keys line at the foot.
+    in property <string> hints;
+    // Where the picked line is, so the list can scroll it into view when the arrows move it.
+    in property <length> show-y;
+    in property <int> show-ask;
+    // Each kind of line's height, read by mo-ui to work out `show-y`.
+    out property <length> heading-height: 30px;
+    out property <length> hit-height: 46px;
+    out property <length> more-height: 32px;
+    callback edited(string);
+    // A key the box doesn't type: the arrows, Enter, Tab, Space after the arrows. Returns whether it was used.
+    callback key(string, bool, bool) -> bool;
+    // A line clicked (its place in `lines`), with Ctrl held or not.
+    callback chosen(int, bool);
+    callback kind-picked(int);
+    callback close();
+}
+
+export component Finder inherits Rectangle {
+    // The dimmed page behind. A click on it closes the finder.
+    Rectangle {
+        background: Theme.scrim;
+        TouchArea {
+            clicked => { FinderData.close(); }
+        }
+    }
+    card := Rectangle {
+        width: min(720px, root.width - 80px);
+        x: (root.width - self.width) / 2;
+        y: max(40px, root.height * 0.1);
+        height: min(layout.preferred-height, root.height - self.y - 40px);
+        background: Theme.surface;
+        border-radius: Theme.radius + 4px;
+        border-width: 1px;
+        border-color: Theme.edge;
+        drop-shadow-blur: 40px;
+        drop-shadow-color: Theme.shadow;
+        clip: true;
+        // Swallows clicks so they don't reach the backdrop.
+        TouchArea { }
+        layout := VerticalLayout {
+            padding: Space.md;
+            spacing: Space.sm;
+            HorizontalLayout {
+                padding-left: Space.sm;
+                padding-right: Space.sm;
+                spacing: Space.md;
+                height: 44px;
+                // A magnifying glass.
+                Path {
+                    width: 18px;
+                    height: 18px;
+                    y: (parent.height - self.height) / 2;
+                    viewbox-width: 16;
+                    viewbox-height: 16;
+                    commands: "M 11.5 6.5 A 5 5 0 1 1 1.5 6.5 A 5 5 0 1 1 11.5 6.5 M 10.2 10.2 L 14.5 14.5";
+                    stroke: Theme.muted;
+                    stroke-width: 1.6px;
+                }
+                Rectangle {
+                    horizontal-stretch: 1;
+                    Text {
+                        x: 0;
+                        text: "Jump to a song, sound, page or action";
+                        visible: input.text == "";
+                        color: Theme.faint;
+                        font-size: Type.heading;
+                        vertical-alignment: center;
+                        height: parent.height;
+                    }
+                    input := TextInput {
+                        text <=> FinderData.query;
+                        color: Theme.text;
+                        font-size: Type.heading;
+                        vertical-alignment: center;
+                        single-line: true;
+                        selection-background-color: Theme.accent.transparentize(60%);
+                        init => { self.focus(); }
+                        edited => { FinderData.edited(self.text); }
+                        key-pressed(event) => {
+                            if (event.text == Key.Escape) {
+                                FinderData.close();
+                                return accept;
+                            }
+                            if (FinderData.key(event.text, event.modifiers.control, event.modifiers.shift)) {
+                                return accept;
+                            }
+                            reject
+                        }
+                    }
+                }
+            }
+            if FinderData.kinds.length > 2: HorizontalLayout {
+                padding-left: Space.sm;
+                Segmented {
+                    choices: FinderData.kinds;
+                    current: FinderData.kind;
+                    picked(i) => {
+                        FinderData.kind-picked(i);
+                        input.focus();
+                    }
+                }
+                Rectangle { }
+            }
+            Groove { }
+            if FinderData.note != "": Text {
+                text: FinderData.note;
+                color: Theme.muted;
+                font-size: Type.body;
+                horizontal-alignment: center;
+                height: 64px;
+                vertical-alignment: center;
+            }
+            list := Flickable {
+                // As tall as its lines, up to most of the window.
+                preferred-height: min(lines.preferred-height, root.height * 0.6);
+                property <int> show-ask: FinderData.show-ask;
+                // Scrolls only when the picked line is out of sight.
+                changed show-ask => {
+                    if (FinderData.show-y < -self.content-y) {
+                        self.content-y = -FinderData.show-y;
+                    } else if (FinderData.show-y + FinderData.hit-height > -self.content-y + self.height) {
+                        self.content-y = -(FinderData.show-y + FinderData.hit-height - self.height);
+                    }
+                }
+                lines := VerticalLayout {
+                    for line[i] in FinderData.lines: Rectangle {
+                        height: line.kind == "heading" ? FinderData.heading-height
+                            : line.kind == "hit" ? FinderData.hit-height : FinderData.more-height;
+                        if line.kind == "heading": Caps {
+                            x: Space.md;
+                            y: parent.height - self.height - Space.xs;
+                            text: line.title;
+                        }
+                        if line.kind == "note": Text {
+                            x: Space.md;
+                            height: parent.height;
+                            text: line.title;
+                            color: Theme.faint;
+                            font-size: Type.meta;
+                            vertical-alignment: center;
+                        }
+                        if line.kind == "more": ListLine {
+                            selected: FinderData.selected == i;
+                            clicked => {
+                                FinderData.chosen(i, false);
+                                input.focus();
+                            }
+                            Text {
+                                x: Space.md + 26px;
+                                height: parent.height;
+                                text: line.title;
+                                color: Theme.accent;
+                                font-size: Type.meta;
+                                vertical-alignment: center;
+                            }
+                        }
+                        if line.kind == "hit": ListLine {
+                            selected: FinderData.selected == i;
+                            clicked => { FinderData.chosen(i, false); }
+                            HorizontalLayout {
+                                padding-left: Space.md;
+                                padding-right: Space.md;
+                                spacing: Space.md;
+                                Rectangle {
+                                    width: 16px;
+                                    Path {
+                                        width: 16px;
+                                        height: 16px;
+                                        visible: line.icon != "";
+                                        viewbox-width: 16;
+                                        viewbox-height: 16;
+                                        commands: line.icon;
+                                        stroke: FinderData.selected == i ? Theme.accent : Theme.muted;
+                                        stroke-width: 1.4px;
+                                    }
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    Text {
+                                        text: line.title;
+                                        color: Theme.text;
+                                        font-size: Type.body;
+                                        font-weight: 500;
+                                        overflow: elide;
+                                    }
+                                    if line.detail != "": Text {
+                                        text: line.detail;
+                                        color: Theme.muted;
+                                        font-size: Type.meta;
+                                        overflow: elide;
+                                    }
+                                }
+                                if line.key != "": Text {
+                                    text: line.key;
+                                    color: Theme.faint;
+                                    font-family: Theme.number-font;
+                                    font-size: Type.meta;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Groove { }
+            Text {
+                text: FinderData.hints;
+                color: Theme.faint;
+                font-size: Type.small;
+                horizontal-alignment: center;
+            }
+        }
+    }
+}

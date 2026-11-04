@@ -159,7 +159,7 @@ impl Live {
     /// The saves whose read failed last time, to read again a moment later; None when there are none.
     pub fn retries(&mut self) -> Option<Changes> {
         let files: Vec<String> = self.retry.keys().cloned().collect();
-        (!files.is_empty()).then_some(Changes { files, overflowed: Vec::new() })
+        (!files.is_empty()).then_some(Changes { files, ..Changes::default() })
     }
 
     /// Takes in what the folder watch saw: new and changed project files are read, gone ones marked missing, and
@@ -168,6 +168,16 @@ impl Live {
     pub fn update(&mut self, changes: &Changes) -> Updated {
         let mut done = Updated::default();
         let mut paths: Vec<String> = changes.files.clone();
+        // A path that went and may have been a folder: the saves listed inside it are looked at (the ones that went
+        // are marked missing below), with no walk.
+        if !changes.went.is_empty() {
+            paths.extend(
+                self.saves
+                    .iter()
+                    .filter(|s| !s.file_missing && changes.went.iter().any(|w| scan::is_inside(&s.path, w)))
+                    .map(|s| s.path.clone()),
+            );
+        }
         if !changes.overflowed.is_empty() {
             self.walk(&changes.overflowed, &mut paths, &mut done);
         }

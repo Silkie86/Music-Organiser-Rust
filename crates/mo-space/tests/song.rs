@@ -86,8 +86,9 @@ fn a_song_with_its_own_folder_lists_copies_old_autosaves_and_unused_audio() {
     assert_eq!(
         kinds,
         [
-            // v1 is a copy of v2, the newer of the two; v3 (the newest) is never listed.
-            (CompactKind::SameSave, "Glass Harbor v1.bwproject".into()),
+            // v2 is a copy of v1: v1 stays, as the song's first save, which thinning keeps too (so a later Compact
+            // can't thin the copy that's left); v3 (the newest) is never listed.
+            (CompactKind::SameSave, "Glass Harbor v2.bwproject".into()),
             // The newest five autosaves stay.
             (CompactKind::Backup, "Glass Harbor 1.bwproject".into()),
             (CompactKind::Backup, "Glass Harbor 0.bwproject".into()),
@@ -96,8 +97,8 @@ fn a_song_with_its_own_folder_lists_copies_old_autosaves_and_unused_audio() {
         ]
     );
     let copy = &report.items[0];
-    assert_eq!(copy.same_as.as_deref(), Some(v2.as_str()));
-    assert_eq!(copy.note(), "Same as Glass Harbor v2.bwproject");
+    assert_eq!(copy.same_as.as_deref(), Some(v1.as_str()));
+    assert_eq!(copy.note(), "Same as Glass Harbor v1.bwproject");
     assert_eq!(report.items[1].note(), "Autosave from 14 Mar 2026");
     // Copies, old autosaves and caches free room straight away; unused audio only when you pick it.
     assert_eq!(report.freeable(), 10 + 4 + 4);
@@ -326,4 +327,59 @@ fn a_song_folder_that_is_a_link_isnt_its_own() {
             .unwrap();
     assert!(!report.own_folder);
     assert_eq!(report.bytes, 1);
+}
+
+#[test]
+fn of_two_identical_saves_the_one_ending_a_sitting_stays() {
+    // X ends the first sitting; Y, identical, is in the middle of the second. Keeping Y (the newer) would let the next
+    // Compact thin it, and the first sitting's last state would be only in the Recycle Bin.
+    let root = fixtures("mo-space-twin-sitting");
+    let song = root.join("Song");
+    let a = write(&song, "A.bwproject", b"a", 0);
+    let x = write(&song, "X.bwproject", b"same", 1);
+    let y = write(&song, "Y.bwproject", b"same", 6);
+    let z = write(&song, "Z.bwproject", b"z", 7);
+    let saves = [save(&a, 0), save(&x, 1), save(&y, 6), save(&z, 7)];
+    let settings = CompactSettings { keep_backups: 5, sitting_hours: 3 };
+    let report = measure(&saves, &[s(&root)], &[], settings, None, &AtomicBool::new(false)).unwrap();
+    let lines: Vec<(CompactKind, &str)> =
+        report.items.iter().map(|i| (i.kind, Path::new(&i.path).file_name().unwrap().to_str().unwrap())).collect();
+    assert_eq!(lines, [(CompactKind::SameSave, "Y.bwproject")]);
+    assert_eq!(report.items[0].same_as.as_deref(), Some(x.as_str()));
+}
+
+#[test]
+fn only_the_daws_own_autosaves_are_autosaves() {
+    let root = fixtures("mo-space-own-backups");
+    let song = root.join("MySong");
+    let newest = write(&song, "MySong.flp", b"newest", 20);
+    // FL Studio's own copies, Studio One's History and Bitwig's auto-backups are.
+    write(&song, "Backup/MySong (overwritten at 2213h05).flp", b"fl", 8);
+    write(&song, "History/MySong (Autosaved).song", b"s1", 9);
+    write(&song, "auto-backups/MySong 3.bwproject", b"bw", 10);
+    let settings = CompactSettings { keep_backups: 0, sitting_hours: 3 };
+    let measure_it = || measure(&[save(&newest, 20)], &[s(&root)], &[], settings, None, &AtomicBool::new(false));
+    let report = measure_it().unwrap();
+    assert!(report.own_folder);
+    let mut backups: Vec<&str> = report
+        .items
+        .iter()
+        .filter(|i| i.kind == CompactKind::Backup)
+        .map(|i| Path::new(&i.path).file_name().unwrap().to_str().unwrap())
+        .collect();
+    backups.sort_unstable();
+    assert_eq!(backups, ["MySong (Autosaved).song", "MySong (overwritten at 2213h05).flp", "MySong 3.bwproject"]);
+
+    // Your own versions in a Backups folder are yours: they aren't autosaves, and the folder isn't the song's alone
+    // any more (they may use audio its saves don't), so nothing in it is offered: only FL Studio's autosaves of the
+    // song, which are looked for in a Backup folder beside it either way.
+    for n in 1..=3 {
+        write(&song, &format!("Backups/MySong v{n}.flp"), b"mine", n);
+    }
+    write(&song, "Backups/take.wav", &[0; 10], 0);
+    let report = measure_it().unwrap();
+    assert!(!report.own_folder);
+    let lines: Vec<(CompactKind, &str)> =
+        report.items.iter().map(|i| (i.kind, Path::new(&i.path).file_name().unwrap().to_str().unwrap())).collect();
+    assert_eq!(lines, [(CompactKind::Backup, "MySong (overwritten at 2213h05).flp")]);
 }

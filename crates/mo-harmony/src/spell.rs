@@ -277,8 +277,13 @@ impl fmt::Display for Degree {
     }
 }
 
-/// A chord with its root spelled. Every other note follows from the root by its degree, so A7 over its third is
-/// A7/C♯, D♭7's seventh is C♭, and Cdim7's is B𝄫 (shown as A).
+/// A chord with its root spelled. Every other note follows from the root by its degree, so A7's third is C♯ (and so
+/// is a C♯ bass under it), D♭7's seventh is C♭, and Cdim7's is B𝄫 (shown as A).
+///
+/// It holds the chord it's given, and its root, bass, notes and Harte label are that chord's: the chart's are written
+/// already ([`spell_in_key`]), while a chord read over a bass that's only a bass keeps its own (F over G has F for its
+/// root here). Its name is always the chord as written ([`Spelled::name`]: G9sus4), and [`Spelled::as_written`] gives
+/// that chord spelled, its root and notes with it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Spelled {
     chord: Chord,
@@ -304,17 +309,31 @@ impl Spelled {
         Spelled { chord, root: Tpc::in_window(chord.root(), lowest) }
     }
 
+    /// The chord held, as given ([`Spelled`]).
     pub const fn chord(self) -> Chord {
         self.chord
     }
 
+    /// The root of the chord held, as spelled: F for F over G, though its name is G9sus4 ([`Spelled::as_written`]).
     pub const fn root(self) -> Tpc {
         self.root
     }
 
-    /// The bass, spelled by its degree above the root: the third of A7 is C♯, the C under D/C its ♭7.
+    /// The bass, spelled by its degree above the root: the third of A7 is C♯, the C under D over C its ♭7.
     pub const fn bass(self) -> Tpc {
         self.root.up(self.chord.bass_degree())
+    }
+
+    /// The chord as it's written ([`Chord::as_written`]), spelled the same way: a chord written on its bass (F over G
+    /// is G9sus4) has its root spelled as the bass was ([`Spelled::bass`], with no double sharp or flat).
+    pub fn as_written(self) -> Spelled {
+        let written = self.chord.as_written();
+        let root = if written.root().number() == self.chord.root().number() {
+            self.root
+        } else {
+            self.bass().without_doubles()
+        };
+        Spelled { chord: written, root }
     }
 
     /// The chord's own notes from the root up, each with its degree and spelling: Cdim7 is C E♭ G♭ B𝄫.
@@ -322,21 +341,19 @@ impl Spelled {
         self.chord.degrees().into_iter().map(|d| (d, self.root.up(d))).collect()
     }
 
-    /// "A7/C#", "Dbmaj7", "C#dim7": the root as spelled, the quality, and the bass by its degree (a double sharp or flat
-    /// in the bass shown as the plain note: E7(#9)/G, not E7(#9)/F##).
+    /// "A7", "Dbmaj7", "C#dim7", "G9sus4": the chord as it's written ([`Spelled::as_written`]), its root as spelled
+    /// and its quality, with no slash (Solomon, 2026-11-03).
     pub fn name(self) -> String {
-        let mut name = self.root.name();
-        name.push_str(&self.chord.quality());
-        if self.chord.bass() != self.chord.root() {
-            name.push('/');
-            name.push_str(&self.bass().without_doubles().name());
-        }
+        let written = self.as_written();
+        let mut name = written.root.name();
+        name.push_str(&written.chord.quality());
         name
     }
 
     /// The chord as a Harte label, the way chord datasets and JAMS files write chords: "A:(1,3,5,b7)/3",
     /// "Db:(1,3,5,b7,9,13)". Every degree is listed, so nothing depends on which notes a shorthand like "13" implies.
-    /// A root that doesn't sound at all is marked left out ("*1").
+    /// A root that doesn't sound at all is marked left out ("*1"). Unlike a name, a label keeps the chord as it is,
+    /// with its bass after a slash: "D:(1,3,5)/b7" for D over C, which is named D7.
     pub fn harte(self) -> String {
         let mut parts: Vec<String> = self.chord.degrees().iter().map(Degree::to_string).collect();
         if !self.chord.notes().contains(self.chord.root()) {
@@ -352,7 +369,7 @@ impl Spelled {
     }
 
     /// Reads a typed chord and keeps its root as typed: "C#m7" stays C♯m7 and "Dbm7" stays D♭m7. The bass is spelled
-    /// by its degree, so a typed "A7/Db" comes back as A7/C#.
+    /// by its degree, so a typed "A7/Db" has C♯ in the bass, and a typed "Gb/Ab" is written Ab9sus4.
     pub fn parse(text: &str) -> Option<Spelled> {
         let chord = Chord::parse(text)?;
         let (root, _) = Tpc::parse(text.trim())?;
@@ -425,12 +442,12 @@ fn guarded(root: Tpc, key: Key) -> Tpc {
     if root.is_readable() || (key.has(root) && root.accidentals().abs() < 2) { root } else { root.readable() }
 }
 
-/// Spells a run of chords in `key` (or as charts do with no key), each root by what it does next: the last chord is
-/// spelled first, so each knows how the one after it is written.
+/// Spells a run of chords in `key` (or as charts do with no key), each as it's written ([`Chord::as_written`]) and
+/// its root by what it does next: the last chord is spelled first, so each knows how the one after it is written.
 pub fn spell_in_key(chords: &[Chord], key: Option<Key>) -> Vec<Spelled> {
     let mut spelled = Vec::with_capacity(chords.len());
     let mut next: Option<Spelled> = None;
-    for &chord in chords.iter().rev() {
+    for chord in chords.iter().rev().map(|c| c.as_written()) {
         let s = match key {
             Some(k) => Spelled::new(chord, root_in_key(chord, k, next)),
             None => Spelled::plain(chord),
@@ -550,49 +567,55 @@ mod tests {
         };
         assert_eq!(notes("C", "Cdim7"), "C Eb Gb Bbb");
         assert_eq!(notes("F#", "F#m7b5"), "F# A C E");
-        assert_eq!(notes("C", "C13(#11)"), "C E G Bb D F# A");
+        assert_eq!(notes("C", "C13#11"), "C E G Bb D F# A");
         assert_eq!(notes("Db", "Db7"), "Db F Ab Cb");
         assert_eq!(notes("E#", "Fdim7"), "E# G# B D");
-        assert_eq!(notes("C", "C7(#9)"), "C E G Bb D#");
-        assert_eq!(notes("C", "C7(b5)"), "C E Gb Bb");
-        assert_eq!(notes("C", "C7(#11)"), "C E G Bb F#");
-        assert_eq!(notes("C", "C7(#5)"), "C E G# Bb");
-        assert_eq!(notes("C", "C7(b13)"), "C E G Bb Ab");
+        assert_eq!(notes("C", "C7#9"), "C E G Bb D#");
+        assert_eq!(notes("C", "C7b5"), "C E Gb Bb");
+        assert_eq!(notes("C", "C7#11"), "C E G Bb F#");
+        assert_eq!(notes("C", "C7#5"), "C E G# Bb");
+        assert_eq!(notes("C", "C7b13"), "C E G Bb Ab");
         assert_eq!(notes("D#", "D#m9"), "D# F# A# C# E#");
         assert_eq!(notes("G", "G+"), "G B D#");
         assert_eq!(notes("C#", "C#7"), "C# E# G# B");
-        // The full altered dominant: b9, #9, #11 and b13 over the third and seventh.
+        // The full altered dominant, its notes written out: b9, #9, #11 and #5 over the third and seventh.
         let alt = Chord::of(PitchClass::C, PcSet::of(&[0, 4, 10, 1, 3, 6, 8]));
-        assert_eq!(alt.name(), "C7alt");
+        assert_eq!(alt.name(), "C7b9#9#11#5");
         assert_eq!(
             Spelled::new(alt, Tpc::C).notes().iter().map(|(_, t)| t.name()).collect::<Vec<_>>().join(" "),
-            "C E Bb Db D# F# Ab"
+            "C E G# Bb Db D# F#"
         );
     }
 
     #[test]
-    fn a_slash_bass_is_spelled_by_its_degree() {
-        for (typed, name) in [
-            ("A7/C#", "A7/C#"),
-            ("A7/Db", "A7/C#"),
-            ("E7/G#", "E7/G#"),
-            ("F#7/A#", "F#7/A#"),
-            ("B/D#", "B/D#"),
-            ("D/C", "D/C"),
-            ("F/G", "F/G"),
-            ("Bb/C", "Bb/C"),
-            ("Ab/Bb", "Ab/Bb"),
-            ("C/F#", "C/F#"),
-            ("E/C", "E/C"),
-            ("Bbmaj7/D", "Bbmaj7/D"),
-            ("C#dim7/E", "C#dim7/E"),
+    fn a_bass_is_spelled_by_its_degree_and_folded_into_the_name() {
+        for (typed, bass, name) in [
+            ("A7/C#", "C#", "A7"),
+            ("A7/Db", "C#", "A7"),
+            ("E7/G#", "G#", "E7"),
+            ("F#7/A#", "A#", "F#7"),
+            ("B/D#", "D#", "B"),
+            ("D/C", "C", "D7"),
+            ("F/G", "G", "G9sus4"),
+            ("Bb/C", "C", "C9sus4"),
+            ("Ab/Bb", "Bb", "Bb9sus4"),
+            ("Db/Eb", "Eb", "Eb9sus4"),
+            ("C#/D#", "D#", "D#9sus4"),
+            ("C/F#", "F#", "Cadd#11"),
+            ("E/C", "C", "Cmaj7#5"),
+            ("Bbmaj7/D", "D", "Bbmaj7"),
+            ("C#dim7/E", "E", "C#dim7"),
         ] {
-            assert_eq!(chord(typed).name(), name, "{typed}");
+            let spelled = Spelled::parse(typed).unwrap_or_else(|| panic!("{typed} doesn't read"));
+            assert_eq!((spelled.bass().name(), spelled.name()), (bass.to_owned(), name.to_owned()), "{typed}");
         }
-        // A double sharp in the bass is shown as the plain note.
-        let e7_sharp9 = Spelled::new(Chord::new(PitchClass::E, chord("E7(#9)").notes(), PitchClass::G), Tpc::E);
-        assert_eq!(e7_sharp9.bass().name(), "F##");
-        assert_eq!(e7_sharp9.name(), "E7(#9)/G");
+        // A double sharp in the bass: the chord is written as it is, and on the bass it's the plain note.
+        let e7_sharp9 = Spelled::new(Chord::new(PitchClass::E, chord("E7#9").notes(), PitchClass::G), Tpc::E);
+        assert_eq!((e7_sharp9.bass().name(), e7_sharp9.name()), ("F##".into(), "E7#9".into()));
+        let (e_sharp, _) = Tpc::parse("E#").unwrap();
+        let f_over_g = Spelled::new(chord("F/G"), e_sharp);
+        assert_eq!((f_over_g.bass().name(), f_over_g.name()), ("F##".into(), "G9sus4".into()));
+        assert_eq!(f_over_g.as_written().root().name(), "G");
     }
 
     #[test]
@@ -600,8 +623,11 @@ mod tests {
         let spelled = |t: &str| Spelled::parse(t).map(Spelled::name);
         assert_eq!(spelled("C#m7").as_deref(), Some("C#m7"));
         assert_eq!(spelled("Dbm7").as_deref(), Some("Dbm7"));
-        assert_eq!(spelled("Gb7/Bb").as_deref(), Some("Gb7/Bb"));
-        assert_eq!(spelled("F#7/Bb").as_deref(), Some("F#7/A#"));
+        assert_eq!(spelled("Gb7/Bb").as_deref(), Some("Gb7"));
+        assert_eq!(spelled("F#7/Bb").as_deref(), Some("F#7"));
+        // Written on the bass, the root is the bass as spelled.
+        assert_eq!(spelled("Gb/Ab").as_deref(), Some("Ab9sus4"));
+        assert_eq!(spelled("F#/G#").as_deref(), Some("G#9sus4"));
         assert_eq!(spelled("Cfoo"), None);
         // With no key, the C# app's way.
         assert_eq!(chord("C#m7").name(), "Dbm7");
@@ -619,7 +645,7 @@ mod tests {
         assert_eq!(harte("D/C").as_deref(), Some("D:(1,3,5)/b7"));
         assert_eq!(harte("Cdim7").as_deref(), Some("C:(1,b3,b5,bb7)"));
         assert_eq!(harte("C6/9").as_deref(), Some("C:(1,3,5,6,9)"));
-        assert_eq!(harte("C7(#9)").as_deref(), Some("C:(1,3,5,b7,#9)"));
+        assert_eq!(harte("C7#9").as_deref(), Some("C:(1,3,5,b7,#9)"));
         // A rootless voicing with no bass under it.
         let rootless = Spelled::new(Chord::new(PitchClass::C, PcSet::of(&[4, 10, 2, 9]), PitchClass::E), Tpc::C);
         assert_eq!(rootless.harte(), "C:(*1,3,b7,9,13)/3");
@@ -654,8 +680,10 @@ mod tests {
             ("C", &["F#m7b5", "B7", "Em7"], &["F#m7b5", "B7", "Em7"]),
             ("C", &["Gb7", "Fmaj7"], &["Gb7", "Fmaj7"]),
             ("Eb", &["G7", "Cm7", "F7", "Bb7", "Eb"], &["G7", "Cm7", "F7", "Bb7", "Eb"]),
-            // Sharp keys keep their sharps, the bass by its degree.
-            ("A", &["F#m", "C#7/E#", "F#m"], &["F#m", "C#7/E#", "F#m"]),
+            // Sharp keys keep their sharps; a bass is folded into the name.
+            ("A", &["F#m", "C#7/E#", "F#m"], &["F#m", "C#7", "F#m"]),
+            ("C", &["F/G", "C"], &["G9sus4", "C"]),
+            ("Db", &["Gb/Ab", "Db"], &["Ab9sus4", "Db"]),
             ("B", &["D#m7", "G#7", "C#m7", "F#7"], &["D#m7", "G#7", "C#m7", "F#7"]),
             // A diminished chord with nothing after it takes sharps.
             ("C", &["D#dim7"], &["D#dim7"]),

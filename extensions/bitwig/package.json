@@ -1,0 +1,13 @@
+{
+  "name": "music-organiser-bitwig-link",
+  "private": true,
+  "description": "Checks for the Music Organiser controller script for Bitwig Studio (the script itself needs no build)",
+  "scripts": {
+    "test": "tsc -p . && node --test test/link.test.js"
+  },
+  "devDependencies": {
+    "acorn": "8.19.0",
+    "typed-bitwig-api": "18.0.0",
+    "typescript": "5.9.3"
+  }
+}

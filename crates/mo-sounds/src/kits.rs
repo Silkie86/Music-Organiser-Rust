@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use crate::dotnet_random::DotnetRandom;
-use crate::index::{SoundIndex, dot};
+use crate::index::SoundIndex;
 use crate::usage::Usage;
 use crate::{Sound, directory, types};
 
@@ -156,9 +156,10 @@ pub fn roll(
                 if c.favourite {
                     score += 0.2;
                 }
-                score += f64::from((c.rating - 3).max(0)) * 0.1;
-                if let (Some(vibe), Some(cv)) = (vibe, clap.and_then(|i| i.get(c.id))) {
-                    score += 3.0 * dot(vibe, cv);
+                // Saturating: a damaged row's rating is clamped to i32's ends, and `- 3` mustn't overflow there.
+                score += f64::from(c.rating.saturating_sub(3).max(0)) * 0.1;
+                if let Some(likeness) = vibe.and_then(|vibe| clap.and_then(|i| i.dot_with(c.id, vibe))) {
+                    score += 3.0 * likeness;
                 }
                 if let (Some(key), true, Some(p)) = (
                     o.key_tonic,
@@ -294,6 +295,36 @@ pub fn export<'a>(
         }
     }
     let mut pads = Vec::new();
+    let filled = fill(slots, get, &folder, kit_name, o, &mut pads);
+    if let Err(e) = filled {
+        // The folder is new and holds only what this export wrote, so a failed export takes it all away again:
+        // no half kit is left, and the next try doesn't make "Name (2)" beside it.
+        for pad in &pads {
+            let _ = std::fs::remove_file(pad);
+        }
+        let _ = std::fs::remove_file(part_of(&folder.join("kit.txt")));
+        // Windows may hold a pad a moment longer (a virus check, the search indexer): try the folder a few times.
+        for wait in [0, 50, 200] {
+            std::thread::sleep(std::time::Duration::from_millis(wait));
+            if std::fs::remove_dir(&folder).is_ok() || !folder.exists() {
+                break;
+            }
+        }
+        return Err(e);
+    }
+    Ok(Exported { folder, pads })
+}
+
+/// Writes the pads and `kit.txt` into the new `folder`, adding each pad to `pads` as soon as it's there (so a failed
+/// export knows what to take away).
+fn fill<'a>(
+    slots: &[KitSlot],
+    get: impl Fn(i64) -> Option<&'a Sound>,
+    folder: &Path,
+    kit_name: &str,
+    o: ExportOptions,
+    pads: &mut Vec<PathBuf>,
+) -> Result<(), ExportError> {
     let mut lines = vec![kit_name.to_owned(), String::new()];
     let mut n = 0;
     for slot in slots {
@@ -344,19 +375,23 @@ pub fn export<'a>(
         let _ = std::fs::remove_file(&part);
         return Err(ExportError::Io(list, e));
     }
-    Ok(Exported { folder, pads })
+    Ok(())
 }
 
 /// Copies `from` to `to`: beside it first, checked to be the whole file and on the disk, then renamed. A copy that
 /// fails is removed, so no half pad is left behind.
+///
+/// The bytes go through a file this export makes itself, not `std::fs::copy`: that copies the sample's read-only
+/// flag too (common for packs unpacked from a zip or copied off a disc), and the pad then couldn't be opened again to
+/// flush it, nor removed on Windows. The pad is a new, plain file the user can change.
 fn copy_whole(from: &Path, to: &Path) -> Result<(), ExportError> {
-    let size = std::fs::metadata(from).map_err(|e| ExportError::Missing(from.to_owned(), e))?.len();
+    let mut source = std::fs::File::open(from).map_err(|e| ExportError::Missing(from.to_owned(), e))?;
+    let size = source.metadata().map_err(|e| ExportError::Missing(from.to_owned(), e))?.len();
     let part = part_of(to);
     let done = (|| {
-        std::fs::copy(from, &part).map_err(|e| ExportError::Io(to.to_owned(), e))?;
-        // Opened to write: Windows only flushes a file to the disk through a handle that may write to it.
-        let file =
-            std::fs::OpenOptions::new().write(true).open(&part).map_err(|e| ExportError::Io(to.to_owned(), e))?;
+        let mut file = std::fs::File::create(&part).map_err(|e| ExportError::Io(to.to_owned(), e))?;
+        std::io::copy(&mut source, &mut file).map_err(|e| ExportError::Io(to.to_owned(), e))?;
+        // Through the handle that wrote it: Windows only flushes a file to the disk through a handle that may write.
         file.sync_all().map_err(|e| ExportError::Io(to.to_owned(), e))?;
         if file.metadata().map_err(|e| ExportError::Io(to.to_owned(), e))?.len() != size {
             return Err(ExportError::Short(from.to_owned()));

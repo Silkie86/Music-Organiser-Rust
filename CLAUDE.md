@@ -13,6 +13,8 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
 - **Layout (spec section 12):** one Cargo workspace, `crates/mo-*` (formats, library, space, backup, work, audio, sounds, harmony,
   midi, playground, dawlink, convert, app, ui) and `tools/` (formatlab, theorybench). UI is Slint; screen logic lives in
   `mo-app` so it can be tested without a window.
+- **`vendor/femtovg`:** a patched copy of Slint's drawing library (it rebuilt its graphics card steps every frame).
+  `vendor/femtovg/PATCHED.md` says what changed and when to delete it. Never edit it for anything else.
 
 ## Rules carried over (spec section 14)
 
@@ -44,6 +46,16 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
 21. Highly multithreaded where it helps (rayon), at low priority, never on the UI thread.
 22. MIDI 2.0 ready: notes and controllers keep MIDI 2.0 resolution (16-bit velocity, 32-bit controllers, per-note
     controllers, MIDI Clip Files, UMP ports); only a MIDI 1.0 file, port or DAW gets 7-bit values (spec section 4.4).
+
+Rules 23 to 27 are Solomon's later rules in `docs/handover/memory/rust-rebuild-rules.md` (code already cites rule 23).
+
+28. The app cleans up after itself: every cache, temp file and report it writes has a limit or is removed when done,
+    and a start-up sweep (`mo_app::tidy`) clears leftovers (Solomon, 2026-11-02). It removes only plain files whose
+    whole name the app gives them, in the folders it writes them to; never by folder alone, never through a link in
+    them (the logs folder is the one it follows: the app writes its logs through it), never what the user made. The one
+    exception: F12 notes and their pictures about 3 months old go to the Recycle Bin, only when it can take them
+    without asking, never the drafts. The app never empties the Recycle Bin itself: Solomon does, and the app warns
+    him what's in it (Solomon, 2026-11-03).
 
 ## How work is done
 

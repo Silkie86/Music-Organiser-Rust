@@ -342,8 +342,12 @@ pub struct Evidence {
     longest: i64,
     /// For each unit, the bass pitch classes sounding in it from a note played longer than a felt beat.
     long_bass: Vec<PcSet>,
-    /// For each unit, the bass pitch classes of the last unit before it, at most a bar before, in which the bass
-    /// sounds (as the masses count it): the bass a note struck there moves from.
+    /// Where those notes start and stop sounding as the bass: the unit, the pitch class, whether it's a chord note
+    /// (the bass only where it's the unit's gap bass), and 1 where it starts or -1 after its last unit.
+    long_edges: Vec<(usize, PitchClass, bool, i32)>,
+    /// For each unit, the bass pitch classes of the last unit before it, at most a bar before, in which the bass is
+    /// struck or sounds (for at least a quarter of the unit, so the last moment of a note played legato doesn't count,
+    /// but a short note struck there does): the bass a note struck there moves from.
     bass_before: Vec<PcSet>,
     /// For each unit, the chords' notes sounding in the last unit before it, at most a bar before, in which they sound:
     /// what the chords struck there are new against.
@@ -366,21 +370,44 @@ impl Evidence {
         self.shaped.sort_unstable_by_key(|s| (s.shaped.start, s.shaped.end, s.shaped.note));
         self.longest = self.shaped.iter().map(|s| s.shaped.end - s.shaped.start).max().unwrap_or(0).max(0);
         let units = hearing.units();
-        self.long_bass.clear();
-        self.long_bass.resize(units, PcSet::EMPTY);
+        // The long notes that may be the bass, as `Hearing::is_bass_in` has it: a bass part's, and a chord note that
+        // isn't broken (the bass where it's the unit's gap bass). Each adds its pitch class where it starts and takes it
+        // off after it ends, so a note held for a hundred bars costs no more than a short one.
         let felt = hearing.felt_ticks();
+        self.long_edges.clear();
         for n in hearing.notes().iter().filter(|n| n.length > felt) {
+            let chord_note = match n.stream {
+                Stream::Bass => false,
+                Stream::Harmony if !n.broken => true,
+                Stream::Harmony | Stream::Melody => continue,
+            };
             // Its main part: a held-over end is never the bass.
             let end = n.held_over.unwrap_or(n.end).clamp(n.start, n.end);
             if end <= n.start {
                 continue;
             }
             let (from, to) = (hearing.unit_of(n.start), hearing.unit_of(end - 1).min(units.saturating_sub(1)));
-            for u in from..=to {
-                if let (true, Some(set)) = (hearing.is_bass_in(u, n), self.long_bass.get_mut(u)) {
-                    *set = set.with(n.pitch_class());
-                }
+            if from <= to {
+                self.long_edges.push((from, n.pitch_class(), chord_note, 1));
+                self.long_edges.push((to + 1, n.pitch_class(), chord_note, -1));
             }
+        }
+        self.long_edges.sort_unstable_by_key(|e| e.0);
+        self.long_bass.clear();
+        let (mut bass, mut chords) = (PerPitch::<i32>::default(), PerPitch::<i32>::default());
+        let mut edges = self.long_edges.iter().peekable();
+        for u in 0..units {
+            while let Some(&(_, pc, chord_note, step)) = edges.next_if(|e| e.0 <= u) {
+                let count = if chord_note { &mut chords[pc] } else { &mut bass[pc] };
+                *count = count.saturating_add(step);
+            }
+            let mut set: PcSet = PitchClass::ALL.into_iter().filter(|&pc| bass[pc] > 0).collect();
+            if let Some(gap) = hearing.gap_bass(u).map(PitchClass::of_key)
+                && chords[gap] > 0
+            {
+                set = set.with(gap);
+            }
+            self.long_bass.push(set);
         }
         self.bass_before.clear();
         self.chords_before.clear();
@@ -392,10 +419,9 @@ impl Evidence {
         for u in 0..units {
             self.bass_before.push(before(last_bass, u));
             self.chords_before.push(before(last_chords, u));
-            let bass = hearing.mass(u..u + 1, Mass::Bass);
-            let set = PitchClass::ALL.into_iter().filter(|&pc| bass[pc] > 0).fold(PcSet::EMPTY, PcSet::with);
-            if !set.is_empty() {
-                last_bass = Some((u, set));
+            let bass = hearing.sounding(u, Stream::Bass).union(hearing.struck(u, Stream::Bass));
+            if !bass.is_empty() {
+                last_bass = Some((u, bass));
             }
             let chords = hearing.sounding(u, Stream::Harmony);
             if !chords.is_empty() {
@@ -927,7 +953,8 @@ impl Scoring<'_> {
 /// The ticks of the chords and the tune by what each note is to a label, less what only passes by under it
 /// ([`SpanFacts::by_kind`]): its own notes; its tensions struck in the span, and in the tune; the notes that don't
 /// belong, struck in the span, carried in, held over and in the tune; and what passes by, in the chords and in what
-/// they hold over. Whole ticks, divided once each where they're weighed.
+/// they hold over (of the tensions, only what was struck in the span: the rest counts nowhere). Whole ticks, divided
+/// once each where they're weighed.
 #[derive(Clone, Copy, Debug)]
 struct ByKind {
     own: Sums,
@@ -1026,15 +1053,18 @@ impl SpanFacts {
             let passes = by.chords[pc].min(self.chords[pc]);
             let held_passes = by.over[pc].min(self.held_over[pc]);
             let tune_passes = by.tune[pc].min(self.tune[pc]);
-            out.passing = out.passing.wrapping_add(passes);
-            out.over_passing = out.over_passing.wrapping_add(held_passes);
             let struck = self.struck.contains(pc);
             if tension_set.contains(pc) {
+                // A tension counts only struck in the span (T2): what passes by of it comes out of that and costs as
+                // passing (T5). Carried in or held over, it counts nowhere, and passing by doesn't make it cost.
                 if struck {
                     out.tension = out.tension.wrapping_sub(passes);
+                    out.passing = out.passing.wrapping_add(passes);
                 }
                 out.tune_tension = out.tune_tension.wrapping_sub(tune_passes);
             } else {
+                out.passing = out.passing.wrapping_add(passes);
+                out.over_passing = out.over_passing.wrapping_add(held_passes);
                 if struck {
                     out.wrong = out.wrong.wrapping_sub(passes);
                 } else {

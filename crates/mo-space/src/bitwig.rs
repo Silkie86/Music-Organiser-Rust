@@ -36,8 +36,9 @@ pub struct LibraryCopy {
     pub bytes: u64,
 }
 
-/// The Library's multisamples, by size, with each one's fingerprint kept once read. Made once and used for every
-/// project, so a Library file is read once, and again only if it changed since (rule 12).
+/// The Library's multisamples, by size, with each one's fingerprint kept once read (and each copy's). Made once and
+/// used for every project, so a file is read once, and again only if it changed since (rule 12). Kept for the next
+/// look ([`LibraryIndex::list_again`]), a file already read isn't read again then either.
 pub struct LibraryIndex {
     by_size: HashMap<u64, Vec<PathBuf>>,
     prints: Prints,
@@ -95,6 +96,13 @@ impl LibraryIndex {
         Ok(LibraryIndex { by_size, prints: Prints::default() })
     }
 
+    /// Lists the Library folders again for a new look (a multisample may have been added or removed since), keeping
+    /// the fingerprints read so far: a file is read again only if its size or time changed. Stopped, it's as it was.
+    pub fn list_again(&mut self, folders: &[PathBuf], stop: &AtomicBool) -> Result<(), Stopped> {
+        self.by_size = Self::new(folders, stop)?.by_size;
+        Ok(())
+    }
+
     /// The copies in one project folder that are the same as a Library file. A copy that's a link, or that isn't the
     /// same as any, isn't listed. Where more than one Library file is the same, the one with the copy's own name (or
     /// that name with fewer of Bitwig's "-2" endings) is picked, or else the shortest name. Only copies and Library
@@ -119,7 +127,7 @@ impl LibraryIndex {
         let copies: Vec<Option<LibraryCopy>> = found
             .par_iter()
             .map(|(path, bytes)| {
-                let print = file_hash(path, stop)?;
+                let print = self.prints.of(path, stop)?;
                 let same: Vec<&PathBuf> =
                     self.by_size.get(bytes)?.iter().filter(|l| prints.get(l) == Some(&print)).collect();
                 let library = best(path, &same)?;
@@ -133,6 +141,56 @@ impl LibraryIndex {
         copies.sort_by(|a, b| a.in_project.cmp(&b.in_project));
         Ok(copies)
     }
+}
+
+/// The project folders under `roots` that hold a Bitwig project and a `multi-samples` folder, each once, in the order
+/// of their paths: the folders [`LibraryIndex::copies_in`] looks in. A root moved to another drive with a link in its
+/// place is read where it really is, and its folders keep the paths you know, as for the Library. A folder reached two
+/// ways (roots inside each other, spelled in another case, or one through a link) is listed once, so its copies count
+/// once. Folders in an "… (old copy)" folder that a move left behind are left out: that goes as a whole. Call it off
+/// the window's thread.
+pub fn project_folders(roots: &[PathBuf], stop: &AtomicBool) -> Result<Vec<PathBuf>, Stopped> {
+    let mut found = Vec::new();
+    for root in roots {
+        let real = really(root);
+        found.extend(walk(&real, false, stop, |path, meta| {
+            let project = meta.is_file() && path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bwproject"));
+            let folder = path.parent()?;
+            if !project || in_a_project(folder) || !folder.join(PROJECT_FOLDER).is_dir() {
+                return None;
+            }
+            let inside = folder.strip_prefix(&real).ok()?;
+            let shown = if inside.as_os_str().is_empty() { root.clone() } else { root.join(inside) };
+            (!in_old_copy(&shown)).then_some(shown)
+        })?);
+    }
+    found.sort_unstable();
+    let mut seen = HashSet::new();
+    found.retain(|folder| {
+        let shown = text(folder);
+        seen.insert(key(&real_path(&shown).unwrap_or(shown)))
+    });
+    Ok(found)
+}
+
+/// Documents, where Bitwig keeps its Bitwig Studio folder unless told otherwise: on Windows where Windows says it is
+/// (it may have been moved, to OneDrive say), on a Mac the one in your home folder, and on Linux the home folder
+/// itself.
+pub fn documents() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        known_folders::get_known_folder_path(known_folders::KnownFolder::Documents)
+    }
+    #[cfg(not(windows))]
+    {
+        let home = crate::home_folder()?;
+        Some(if cfg!(target_os = "macos") { home.join("Documents") } else { home })
+    }
+}
+
+/// Whether a folder is in (or is) a folder a move left behind as "… (old copy)".
+fn in_old_copy(folder: &Path) -> bool {
+    folder.components().any(|c| c.as_os_str().to_string_lossy().ends_with(crate::folder_move::OLD_SUFFIX))
 }
 
 /// Fingerprints of files once read, used again only while each file's size and time are as they were.

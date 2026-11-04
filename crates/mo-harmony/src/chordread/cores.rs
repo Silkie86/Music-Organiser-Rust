@@ -20,8 +20,8 @@ use std::fmt;
 use crate::chord::{Chord, Family};
 use crate::pitch::{PcSet, PitchClass};
 
-/// One of the 16 kinds of chord the reader decides between: a chord with its tensions left out (C9, C13(♭9) and
-/// C7alt are all [`Core::Dominant7`]). Their order here is the order exact ties are broken in, and each fits in four
+/// One of the 16 kinds of chord the reader decides between: a chord with its tensions left out (C9, C13♭9 and C7♯9♯5
+/// are all [`Core::Dominant7`]). Their order here is the order exact ties are broken in, and each fits in four
 /// bits ([`Core::index`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[repr(u8)]
@@ -191,7 +191,7 @@ impl Core {
     ///
     /// The core's own notes include its fifth, so whether the fifth sounds is left to the scoring, where a missing
     /// fifth costs a little: a ♭13 is a minor chord's tension even where it takes the fifth's place (C E♭ A♭ is also
-    /// A♭/C, and the bass decides between them).
+    /// A♭ over C, and the bass decides between them).
     pub const fn tensions(self) -> PcSet {
         // Each set is worked out when the app is built.
         match self {

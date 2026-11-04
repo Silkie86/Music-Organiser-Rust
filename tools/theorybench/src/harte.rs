@@ -744,10 +744,10 @@ mod tests {
         assert!(chord("C:maj7/7").notes().contains(chord("C:maj7/7").bass()));
         assert!(!chord("C:maj/7").notes().contains(chord("C:maj/7").bass()));
         assert_eq!(notes("C:maj/9"), (0, bits(&[0, 4, 7]), 2));
-        assert_eq!(chord("G:13").name(), "G13");
-        assert_eq!(chord("C:maj7/7").name(), "Cmaj7/B");
-        assert_eq!(chord("C:maj/7").name(), "C/B");
-        assert_eq!(chord("A:min7/b3").name(), "Am7/C");
+        assert_eq!(chord("G:13").slash_name(), "G13");
+        assert_eq!(chord("C:maj7/7").slash_name(), "Cmaj7/B");
+        assert_eq!(chord("C:maj/7").slash_name(), "C/B");
+        assert_eq!(chord("A:min7/b3").slash_name(), "Am7/C");
         assert_eq!(named("N"), Named::NoChord);
         for bad in ["X", "H:maj", "C:foo", "C:maj(15)", "C(*5)", ""] {
             assert_eq!(named(bad), Named::Unknown, "{bad}");

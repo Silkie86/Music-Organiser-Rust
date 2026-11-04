@@ -1,0 +1,2 @@
+# The copied library keeps its own formatting: rustfmt leaves these files as they came.
+disable_all_formatting = true
