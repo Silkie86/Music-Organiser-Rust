@@ -139,6 +139,37 @@ fn a_library_file_changed_since_it_was_read_is_read_again() {
 }
 
 #[test]
+fn the_next_look_lists_the_library_again_and_reads_again_only_what_changed() {
+    let dir = fixtures("mo-space-bitwig-look-again");
+    let library = dir.join("Library");
+    let (kicks, pads) = ([1u8; 256], [3u8; 512]);
+    write(&library, "Kicks.multisample", &kicks);
+    write(&dir, "Song/multi-samples/Kicks-2.multisample", &kicks);
+    write(&dir, "Song/multi-samples/Pads-2.multisample", &pads);
+    let stop = AtomicBool::new(false);
+    let mut index = LibraryIndex::new(std::slice::from_ref(&library), &stop).unwrap();
+    assert_eq!(index.copies_in(&dir.join("Song"), &stop).unwrap().len(), 1);
+    // Added to the Library since: found on the next look.
+    write(&library, "Pads.multisample", &pads);
+    index.list_again(std::slice::from_ref(&library), &stop).unwrap();
+    assert_eq!(index.copies_in(&dir.join("Song"), &stop).unwrap().len(), 2);
+    // A copy saved again in Bitwig since (the same size, other bytes, a later time) is read again: it's its own now.
+    let copy = dir.join("Song/multi-samples/Kicks-2.multisample");
+    fs::write(&copy, [2u8; 256]).unwrap();
+    let later = SystemTime::now() + Duration::from_secs(3600);
+    fs::File::options().write(true).open(&copy).unwrap().set_modified(later).unwrap();
+    let copies = index.copies_in(&dir.join("Song"), &stop).unwrap();
+    assert_eq!(
+        copies.iter().map(|c| key(&c.library_file)).collect::<Vec<_>>(),
+        [key(&s(&library.join("Pads.multisample")))]
+    );
+    // Stopped, the Library stays as it was listed.
+    write(&library, "Kicks Again.multisample", &[2u8; 256]);
+    assert!(index.list_again(std::slice::from_ref(&library), &AtomicBool::new(true)).is_err());
+    assert_eq!(index.copies_in(&dir.join("Song"), &stop).unwrap().len(), 1);
+}
+
+#[test]
 fn a_stop_stops_it() {
     let dir = fixtures("mo-space-bitwig-stop");
     write(&dir, "Library/A.multisample", b"a");

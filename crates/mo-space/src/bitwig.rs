@@ -36,8 +36,9 @@ pub struct LibraryCopy {
     pub bytes: u64,
 }
 
-/// The Library's multisamples, by size, with each one's fingerprint kept once read. Made once and used for every
-/// project, so a Library file is read once, and again only if it changed since (rule 12).
+/// The Library's multisamples, by size, with each one's fingerprint kept once read (and each copy's). Made once and
+/// used for every project, so a file is read once, and again only if it changed since (rule 12). Kept for the next
+/// look ([`LibraryIndex::list_again`]), a file already read isn't read again then either.
 pub struct LibraryIndex {
     by_size: HashMap<u64, Vec<PathBuf>>,
     prints: Prints,
@@ -95,6 +96,13 @@ impl LibraryIndex {
         Ok(LibraryIndex { by_size, prints: Prints::default() })
     }
 
+    /// Lists the Library folders again for a new look (a multisample may have been added or removed since), keeping
+    /// the fingerprints read so far: a file is read again only if its size or time changed. Stopped, it's as it was.
+    pub fn list_again(&mut self, folders: &[PathBuf], stop: &AtomicBool) -> Result<(), Stopped> {
+        self.by_size = Self::new(folders, stop)?.by_size;
+        Ok(())
+    }
+
     /// The copies in one project folder that are the same as a Library file. A copy that's a link, or that isn't the
     /// same as any, isn't listed. Where more than one Library file is the same, the one with the copy's own name (or
     /// that name with fewer of Bitwig's "-2" endings) is picked, or else the shortest name. Only copies and Library
@@ -119,7 +127,7 @@ impl LibraryIndex {
         let copies: Vec<Option<LibraryCopy>> = found
             .par_iter()
             .map(|(path, bytes)| {
-                let print = file_hash(path, stop)?;
+                let print = self.prints.of(path, stop)?;
                 let same: Vec<&PathBuf> =
                     self.by_size.get(bytes)?.iter().filter(|l| prints.get(l) == Some(&print)).collect();
                 let library = best(path, &same)?;
