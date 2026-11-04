@@ -738,7 +738,7 @@ export component ToggleChip inherits Rectangle {
     border-bottom-left-radius: joined-left ? 0 : 14px;
     border-top-right-radius: joined-right ? 0 : 14px;
     border-bottom-right-radius: joined-right ? 0 : 14px;
-    border-width: 1px;
+    border-width: 2px;
     border-color: on ? Theme.accent : Theme.edge;
     background: on ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
     animate background, border-color { duration: Motion.tap; }
@@ -841,7 +841,7 @@ component MenuChipFace inherits Rectangle {
     border-bottom-left-radius: joined-left ? 0 : 14px;
     border-top-right-radius: 14px;
     border-bottom-right-radius: 14px;
-    border-width: 1px;
+    border-width: 2px;
     border-color: value != "" ? Theme.accent : Theme.edge;
     background: value != "" ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
     animate background, border-color { duration: Motion.tap; }
@@ -974,7 +974,7 @@ component FilterName inherits Rectangle {
     height: 28px;
     border-top-left-radius: 14px;
     border-bottom-left-radius: 14px;
-    border-width: 1px;
+    border-width: 2px;
     border-color: Theme.edge;
     background: Theme.well;
     label := Text {
