@@ -20,6 +20,7 @@ pub mod finder;
 pub mod gpu;
 pub mod midi;
 pub mod note;
+mod piano_roll;
 pub mod plugins;
 pub mod presets;
 pub mod settings;
@@ -359,6 +360,7 @@ pub fn apply_look(app: &AppWindow, look: &Look) {
         slint::language::ColorScheme::Dark
     });
     arrangement::set_look(app, look);
+    piano_roll::look_changed(app);
 }
 
 pub(crate) fn rgb(c: u32) -> Color {
