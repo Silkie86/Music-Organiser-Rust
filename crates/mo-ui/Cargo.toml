@@ -43,6 +43,9 @@ known-folders = "1.4"
 [dev-dependencies]
 # Tests make a small song library to read the use counts from.
 rusqlite = "0.41"
+# The waveforms' look test draws a path the way the window does, with Slint's own drawing library (the patched copy in
+# vendor/femtovg): the version and features Slint uses, so nothing more is built.
+femtovg = { version = "0.27", default-features = false, features = ["wgpu"] }
 
 [build-dependencies]
 slint-build.workspace = true

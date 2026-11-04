@@ -87,10 +87,12 @@ pub fn connect(app: &AppWindow) {
             });
         }
         // Frame timing (the `[Frames]` lines): how long Slint takes to lay out and draw the window, marked for the
-        // freeze watchdog too. Only measures; it changes nothing that's drawn.
+        // freeze watchdog too. Only measures; it changes nothing that's drawn. The waveforms' time to draw new
+        // pictures in starts again with each frame.
         RenderingState::BeforeRendering => {
             DRAWING_SINCE.with(|d| d.set(Some(std::time::Instant::now())));
             crate::watchdog::drawing(true);
+            crate::waves::frame_starts();
         }
         RenderingState::AfterRendering => {
             crate::watchdog::drawing(false);
@@ -229,9 +231,11 @@ pub fn prepare<T: Send + 'static>(
     }
     let weak = app.as_weak();
     let started = background::spawn(&format!("{name} painter"), move || {
-        let made = checked(&gpu.device, || make(&gpu));
+        let on_its_way = OnItsWay(Some(checked(&gpu.device, || make(&gpu))));
         // Kept on the window's thread, where the view draws, if it's still wanted there.
         let _ = slint::invoke_from_event_loop(move || {
+            let mut on_its_way = on_its_way;
+            let Some(made) = on_its_way.0.take() else { return };
             slot.with(|p| {
                 let mut p = p.borrow_mut();
                 if p.preparing == Some(on) {
@@ -260,6 +264,21 @@ pub fn prepare<T: Send + 'static>(
         Ok(_) => slot.with(|p| p.borrow_mut().preparing = Some(on)),
         // The view makes it itself, when it's first drawn on the card.
         Err(e) => log::info(name, &format!("Couldn't set up the graphics card's painter ahead of time: {e}")),
+    }
+}
+
+/// A painter (or why there's none) on its way to the window's thread. If the window has closed and its event loop
+/// ended by then, the message is never run: Slint keeps it, and lets it go only as the app's thread ends, along with
+/// that thread's own stores, after wgpu's (in a debug build, wgpu then stops the app with an error). So a painter that
+/// never arrives isn't dropped, just left for the system to clear away with the rest of the app, which is ending.
+struct OnItsWay<T>(Option<T>);
+
+impl<T> Drop for OnItsWay<T> {
+    fn drop(&mut self) {
+        // Taken out when it arrives; still here only if it never did.
+        if let Some(never_arrived) = self.0.take() {
+            std::mem::forget(never_arrived);
+        }
     }
 }
 
@@ -317,6 +336,26 @@ mod tests {
         p.made = Some((now + 1, "next"));
         p.refused(now);
         assert_eq!(p.made().copied(), Some("next"));
+    }
+
+    /// A painter that reaches the window's thread is taken and used (dropped as usual when it's let go); one that
+    /// never gets there (the window closed first) isn't dropped at all.
+    #[test]
+    fn a_painter_that_never_arrives_is_left_alone() {
+        struct Painter(std::rc::Rc<Cell<bool>>);
+        impl Drop for Painter {
+            fn drop(&mut self) {
+                self.0.set(true);
+            }
+        }
+        let dropped = std::rc::Rc::new(Cell::new(false));
+        let mut arrived = OnItsWay(Some(Painter(dropped.clone())));
+        drop(arrived.0.take());
+        drop(arrived);
+        assert!(dropped.get(), "used and let go");
+        let dropped = std::rc::Rc::new(Cell::new(false));
+        drop(OnItsWay(Some(Painter(dropped.clone()))));
+        assert!(!dropped.get(), "never arrived, so never dropped");
     }
 
     /// While a painter is being made away from the window's thread, the processor draws the view.

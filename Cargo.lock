@@ -3210,6 +3210,7 @@ version = "0.1.0"
 dependencies = [
  "arboard",
  "chrono",
+ "femtovg",
  "image",
  "known-folders",
  "mo-app",
