@@ -303,7 +303,13 @@ pub fn export<'a>(
             let _ = std::fs::remove_file(pad);
         }
         let _ = std::fs::remove_file(part_of(&folder.join("kit.txt")));
-        let _ = std::fs::remove_dir(&folder);
+        // Windows may hold a pad a moment longer (a virus check, the search indexer): try the folder a few times.
+        for wait in [0, 50, 200] {
+            std::thread::sleep(std::time::Duration::from_millis(wait));
+            if std::fs::remove_dir(&folder).is_ok() || !folder.exists() {
+                break;
+            }
+        }
         return Err(e);
     }
     Ok(Exported { folder, pads })
