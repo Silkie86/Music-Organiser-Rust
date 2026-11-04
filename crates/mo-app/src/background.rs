@@ -46,7 +46,18 @@ pub fn on_bulk_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
     install(BULK.as_ref(), work)
 }
 
-/// The most threads [`on_bulk_pool`] gets.
+/// [`on_bulk_pool`] for a backup's copy, which can run for hours: a pool of its own again, so working out the next
+/// plan (or reading the drive's older versions) while it copies isn't held up behind it either.
+pub fn on_copy_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    static COPY: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
+        let threads = POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed);
+        let threads = if threads == 0 { cores() } else { threads };
+        build_pool("Backup copy", threads.clamp(1, BULK_THREADS))
+    });
+    install(COPY.as_ref(), work)
+}
+
+/// The most threads [`on_bulk_pool`] (and [`on_copy_pool`]) gets.
 const BULK_THREADS: usize = 4;
 
 /// A pool of `threads` low-priority threads called `name 0`, `name 1`...; 0 is rayon's own choice, one per core.
@@ -261,6 +272,32 @@ mod tests {
         assert_eq!(Pace::from_setting(Some("Balanced")), Pace::Balanced);
         assert_eq!(Pace::from_setting(Some("?")), Pace::Fast);
         assert_eq!(Pace::from_setting(None), Pace::Fast);
+    }
+
+    #[test]
+    fn long_disk_work_leaves_the_main_pool_free() {
+        use rayon::prelude::*;
+        let (release_tx, release) = mpsc::channel::<()>();
+        let release = Mutex::new(release);
+        let (started_tx, started) = mpsc::channel::<()>();
+        // A long par_iter on the disk pool, held until the main pool's job has answered.
+        let long = std::thread::spawn(move || {
+            on_bulk_pool(|| {
+                let _ = started_tx.send(());
+                (0..64).into_par_iter().for_each(|_| {
+                    let r = release.lock().unwrap_or_else(PoisonError::into_inner);
+                    let _ = r.recv_timeout(Duration::from_secs(10));
+                });
+            });
+        });
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (answer_tx, answer) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = answer_tx.send(on_pool(|| (0..1000).into_par_iter().sum::<u64>()));
+        });
+        assert_eq!(answer.recv_timeout(Duration::from_secs(5)).unwrap(), 499_500);
+        drop(release_tx);
+        long.join().unwrap();
     }
 
     #[test]
