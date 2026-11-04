@@ -612,14 +612,23 @@ fn place_of(name: &str) -> Option<usize> {
     (0..NUMBERS).find(|&k| Weights::number_name(k) == name)
 }
 
-/// Reads weights a fit wrote (`--out`): each number by its name, any it leaves out as the hand-set weights have it.
-/// Refuses a name that's no number's, and weights that break a rule.
-pub(crate) fn load_weights(path: &Path) -> Result<Weights, String> {
+/// Reads weights a fit wrote (`--out`): each number by its name, any it leaves out as the hand-set weights have it,
+/// and how many it names. Refuses a name that's no number's, and weights that break a rule.
+pub(crate) fn load_weights(path: &Path) -> Result<(Weights, usize), String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
     weights_from(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-fn weights_from(text: &str) -> Result<Weights, String> {
+/// A weights file, as the run says it reads with it: its path, and the numbers it leaves out, if any.
+pub(crate) fn weights_named(path: &Path, named: usize) -> String {
+    if named < NUMBERS {
+        format!("{} ({named} of the {NUMBERS} numbers; the others as the hand-set weights have them)", path.display())
+    } else {
+        path.display().to_string()
+    }
+}
+
+fn weights_from(text: &str) -> Result<(Weights, usize), String> {
     let file: serde_json::Value = serde_json::from_str(text).map_err(|e| e.to_string())?;
     let given = file.get("numbers").and_then(serde_json::Value::as_object).ok_or("it has no \"numbers\"")?;
     let mut numbers = HAND.numbers();
@@ -629,7 +638,11 @@ fn weights_from(text: &str) -> Result<Weights, String> {
     }
     let weights = Weights::from_numbers(&numbers);
     let broken = weights.check();
-    if broken.is_empty() { Ok(weights) } else { Err(format!("the weights break these rules: {}", broken.join("; "))) }
+    if broken.is_empty() {
+        Ok((weights, given.len()))
+    } else {
+        Err(format!("the weights break these rules: {}", broken.join("; ")))
+    }
 }
 
 /// The weights file a fit writes: each number by its name, in the reader's order (to the last bit), then what it was
@@ -698,9 +711,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let read = items.len();
     items.retain(|i| !i.chords.is_empty());
     let folds = keyfit::drawn_folds(&items);
-    let start = match &o.from {
-        Some(path) => load_weights(path)?.numbers(),
-        None => HAND.numbers(),
+    let (start, named) = match &o.from {
+        Some(path) => load_weights(path).map(|(weights, named)| (weights.numbers(), named))?,
+        None => (HAND.numbers(), NUMBERS),
     };
     let mut fixed = [false; NUMBERS];
     for &k in &o.fix {
@@ -749,7 +762,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let plan = Plan { steps: o.steps, slope: 1e-6, fall: 1e-5 };
     println!(
         "Starting from {}; the pull towards it {}.",
-        o.from.as_ref().map_or("the hand-set weights".to_owned(), |p| p.display().to_string()),
+        o.from.as_ref().map_or("the hand-set weights".to_owned(), |p| weights_named(p, named)),
         o.lambda
     );
     let start_weights = Weights::from_numbers(&start);
@@ -1165,9 +1178,17 @@ mod tests {
         numbers[0] = std::f64::consts::E;
         numbers[Weights::NONE] = -1.0 / 3.0;
         let text = weights_file(&numbers, &[("train", "[2, 3, 4]".to_owned())]);
-        assert_eq!(weights_from(&text).unwrap().numbers(), numbers);
-        // A number left out is the hand-set one.
-        assert_eq!(weights_from(r#"{"numbers": {"T1": 4}}"#).unwrap().numbers()[1..], HAND.numbers()[1..]);
+        assert_eq!(weights_from(&text).unwrap(), (Weights::from_numbers(&numbers), NUMBERS));
+        // A number left out is the hand-set one, and the run says so.
+        let (weights, named) = weights_from(r#"{"numbers": {"T1": 4}}"#).unwrap();
+        assert_eq!(weights.numbers()[1..], HAND.numbers()[1..]);
+        assert_eq!(named, 1);
+        assert_eq!(weights_from(r#"{"numbers": {}}"#).unwrap(), (HAND, 0));
+        assert_eq!(weights_named(Path::new("w.json"), NUMBERS), "w.json");
+        assert_eq!(
+            weights_named(Path::new("w.json"), 1),
+            "w.json (1 of the 39 numbers; the others as the hand-set weights have them)"
+        );
         assert_eq!(weights_from(r#"{"numbers": {"Z1": 4}}"#).unwrap_err(), "Z1 is no number of the chord reader's");
         assert_eq!(weights_from(r#"{"numbers": {"T1": "a"}}"#).unwrap_err(), "T1 isn't a number");
         assert_eq!(weights_from(r#"{"weights": {}}"#).unwrap_err(), "it has no \"numbers\"");
