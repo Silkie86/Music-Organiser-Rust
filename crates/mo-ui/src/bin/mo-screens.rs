@@ -20,6 +20,8 @@ use slint::{ComponentHandle, PhysicalSize, Rgb8Pixel};
 
 const WIDTH: u32 = 1440;
 const HEIGHT: u32 = 900;
+/// The app's narrowest window (app.slint's min-width).
+const NARROW: u32 = 900;
 
 struct Headless(Rc<MinimalSoftwareWindow>);
 
@@ -212,11 +214,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::apply_look(&app, &graphite);
     // The filters with more than one pick: FL Studio, and two statuses at once.
     let songs = app.global::<mo_ui::SongsData>();
+    let before = capture(&window);
     for (chip, choice) in [("daw", "FL Studio"), ("status", "Idea"), ("status", "Finished")] {
         songs.invoke_toggle_choice(chip.into(), choice.into());
     }
-    shots.push(("songs-filters.png".into(), capture(&window)));
+    let after = capture(&window);
+    if before == after {
+        return Err("songs-filters.png: picking FL Studio, Idea and Finished changed nothing; are they wired?".into());
+    }
+    shots.push(("songs-filters.png".into(), after));
     songs.invoke_clear();
+    // The narrowest window the app allows: a filter too long for a line of its own wraps inside, so every chip stays
+    // in sight. Saved here, at its own width.
+    window.set_size(PhysicalSize::new(NARROW, HEIGHT));
+    let narrow = capture(&window);
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    let row = WIDTH as usize * 3;
+    let narrow: Vec<u8> = narrow.chunks(row).flat_map(|line| &line[..NARROW as usize * 3]).copied().collect();
+    let path = out.join("songs-narrow.png");
+    image::save_buffer(&path, &narrow, NARROW, HEIGHT, image::ExtendedColorType::Rgb8)?;
+    println!("{}", path.display());
     shots.push(("sounds-empty.png".into(), sounds_empty));
     shots.push(("sounds-reading.png".into(), sounds_reading));
     sounds_shots(&app, &window, &graphite, &mut shots);

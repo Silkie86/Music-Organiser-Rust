@@ -829,7 +829,7 @@ export component PicksChip inherits MenuChipFace {
 // picked or unpicked by a click, behind the filter's name; or a longer list's in a PicksChip's menu, the chip saying
 // the name and what's picked. mo-app's `filters` decides which, what each says and whether more than one can be
 // picked. Put filters in a row `Space.md` apart, so each one's chips stay together.
-export component FilterPicks inherits HorizontalLayout {
+export component FilterPicks inherits FlexboxLayout {
     in property <string> name;
     in property <FilterView> filter;
     // A choice was picked or unpicked: its words, as its chip or menu line says them.
@@ -837,24 +837,49 @@ export component FilterPicks inherits HorizontalLayout {
     // The menu's Any.
     callback cleared();
     spacing: Space.sm;
-    alignment: start;
-    if root.filter.chips.length > 0: Text {
-        text: root.name;
-        color: Theme.muted;
-        font-size: Type.meta;
-        vertical-alignment: center;
+    // As wide as the whole filter on one line, so the row it's in moves it to a line of its own before breaking it; it
+    // only wraps inside itself when it's wider than a line on its own (a narrow window, a long list of chips).
+    preferred-width: root.filter.chips.length > 0 ? line.preferred-width : head.preferred-width;
+    // The name before the chips, or the menu's chip: always the first thing, so the name never ends a line.
+    Rectangle {
+        min-width: head.min-width;
+        preferred-width: head.preferred-width;
+        max-width: head.preferred-width;
+        min-height: head.min-height;
+        preferred-height: head.preferred-height;
+        head := HorizontalLayout {
+            if root.filter.chips.length > 0: Text {
+                text: root.name;
+                color: Theme.muted;
+                font-size: Type.meta;
+                vertical-alignment: center;
+            }
+            if root.filter.more.length > 0: PicksChip {
+                name: root.name;
+                value: root.filter.more-picked;
+                choices: root.filter.more;
+                toggled(text) => { root.toggled(text); }
+                cleared => { root.cleared(); }
+            }
+        }
+        // Never drawn: the chips on one line, to measure it.
+        line := HorizontalLayout {
+            visible: false;
+            spacing: Space.sm;
+            Text {
+                text: root.name;
+                font-size: Type.meta;
+            }
+            for c in root.filter.chips: ToggleChip {
+                text: c.count == "" ? c.text : c.text + "  " + c.count;
+                on: c.on;
+            }
+        }
     }
     for c in root.filter.chips: ToggleChip {
         text: c.count == "" ? c.text : c.text + "  " + c.count;
         on: c.on;
         clicked => { root.toggled(c.text); }
-    }
-    if root.filter.more.length > 0: PicksChip {
-        name: root.name;
-        value: root.filter.more-picked;
-        choices: root.filter.more;
-        toggled(text) => { root.toggled(text); }
-        cleared => { root.cleared(); }
     }
 }
 

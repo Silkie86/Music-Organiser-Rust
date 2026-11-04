@@ -282,8 +282,11 @@ pub struct Songs {
     pub saves: usize,
     /// How many saves are the same file found again elsewhere (a copied project folder): hidden, never deleted.
     pub copies: usize,
-    /// The tags in use, for the Tag chip.
+    /// The tags in use, for the Tag chips.
     pub tags: Vec<String>,
+    /// The DAWs the songs were last saved in, A to Z, for the DAW chips: worked out once with the list, not each time
+    /// the filters change.
+    pub daws: Vec<String>,
     /// The program picked in Settings for each DAW that has one (the C# app's `daw_exe:` settings), for Open.
     pub daw_exes: HashMap<String, String>,
     /// Songs that may be saves of one, for the Health strip, newest first.
@@ -353,18 +356,14 @@ impl Songs {
             .collect();
         let saves = rows.iter().map(|r| r.song.save_count()).sum();
         let copies = rows.iter().map(|r| r.song.copies.len()).sum();
-        Songs { rows, saves, copies, tags, daw_exes: HashMap::new(), doubts }
+        let daws: BTreeSet<&str> = rows.iter().map(|r| r.song.latest.daw.as_str()).collect();
+        let daws = daws.into_iter().map(str::to_owned).collect();
+        Songs { rows, saves, copies, tags, daws, daw_exes: HashMap::new(), doubts }
     }
 
     /// The questions about the song at `row`.
     pub fn doubts_of(&self, row: usize) -> impl Iterator<Item = &Doubt> {
         self.doubts.iter().filter(move |d| d.a == row || d.other == Other::Song(row))
-    }
-
-    /// The DAWs the songs come from, for the DAW chip, in order.
-    pub fn daws(&self) -> Vec<String> {
-        let set: BTreeSet<&str> = self.rows.iter().map(|r| r.song.latest.daw.as_str()).collect();
-        set.into_iter().map(str::to_owned).collect()
     }
 
     /// How many songs were last saved in each year, newest first, for the year strip (every song, whatever the
@@ -387,21 +386,30 @@ impl Songs {
         let search = Search::new(&filters.search);
         let mut daws: HashMap<&str, usize> = HashMap::new();
         let mut tags: HashMap<&str, usize> = HashMap::new();
-        for (i, row) in self.rows.iter().enumerate().filter(|(_, r)| filters.passes_others(r, &search)) {
+        for (i, row) in self.rows.iter().enumerate() {
+            // The chips first, as they're quick: a song two of them leave out is neither shown nor counted, so the
+            // search (the slow part) isn't run for it.
             let ok = filters.chips_pass(row);
             let fails = ok.iter().filter(|&&o| !o).count();
-            let counts_on = |chip: usize| fails == 0 || (fails == 1 && !ok[chip]);
+            if fails > 1 || !filters.passes_others(row, &search) {
+                continue;
+            }
+            let counts_on = |chip: usize| fails == 0 || !ok[chip];
             if counts_on(0) {
                 *daws.entry(row.song.latest.daw.as_str()).or_default() += 1;
             }
+            // Matched as the filter matches it, without minding capitals.
             if counts_on(1)
-                && let Some(at) = STATUSES.iter().position(|s| *s == row.status)
+                && let Some(at) = STATUSES.iter().position(|s| s.eq_ignore_ascii_case(&row.status))
             {
                 view.counts.statuses[at] += 1;
             }
             if counts_on(2) {
-                for t in &row.tags {
-                    *tags.entry(t.as_str()).or_default() += 1;
+                for (k, t) in row.tags.iter().enumerate() {
+                    // A tag the song has twice (in other capitals) counts it once: picking it shows the song once.
+                    if !row.tags[..k].iter().any(|other| other.eq_ignore_ascii_case(t)) {
+                        *tags.entry(t.as_str()).or_default() += 1;
+                    }
                 }
             }
             if fails > 0 {
@@ -484,14 +492,7 @@ impl Songs {
         let n = |map: &HashMap<String, usize>, name: &str| {
             thousands(map.get(&name.to_ascii_lowercase()).copied().unwrap_or(0))
         };
-        let daws: Vec<(String, String)> = self
-            .daws()
-            .into_iter()
-            .map(|d| {
-                let c = n(&counts.daws, &d);
-                (d, c)
-            })
-            .collect();
+        let daws: Vec<(String, String)> = self.daws.iter().map(|d| (d.clone(), n(&counts.daws, d))).collect();
         let statuses: Vec<(String, String)> =
             STATUSES.iter().zip(counts.statuses).map(|(s, c)| ((*s).to_owned(), thousands(c))).collect();
         let tags: Vec<(String, String)> = self.tags.iter().map(|t| (t.clone(), n(&counts.tags, t))).collect();
@@ -539,7 +540,7 @@ impl Filters {
         [
             self.daws.is_empty() || self.daws.iter().any(|d| d.eq_ignore_ascii_case(daw)),
             if self.statuses.is_empty() {
-                !(self.hide_archived && r.status == ARCHIVED)
+                !(self.hide_archived && r.status.eq_ignore_ascii_case(ARCHIVED))
             } else {
                 self.statuses.iter().any(|s| s.eq_ignore_ascii_case(&r.status))
             },
@@ -790,7 +791,7 @@ mod tests {
         assert_eq!(s.view(&Filters { favourites: true, ..Filters::default() }, day(2026, 1, 1)).count, "1 of 3 songs");
         assert!(!Filters { hide_archived: true, ..Filters::default() }.any());
         assert!(Filters { search: "x".into(), ..Filters::default() }.any());
-        assert_eq!(s.daws(), ["Bitwig Studio", "FL Studio"]);
+        assert_eq!(s.daws, ["Bitwig Studio", "FL Studio"]);
 
         // More than one of a chip: any of them. Picking a chip again unpicks it.
         let mut f = Filters::default();
@@ -823,6 +824,14 @@ mod tests {
         let tag_count =
             |f: &Filters| tagged.chips(f, &tagged.view(f, day(2026, 1, 1)).counts).tag.chips[0].count.clone();
         assert_eq!((tag_count(&fl), tag_count(&Filters::default())), ("0".to_owned(), "1".to_owned()));
+        // A status or tag in other capitals counts as the filter matches it, and a tag a song has twice counts once.
+        let mut odd = tagged.clone();
+        odd.rows[0].status = "idea".into();
+        odd.rows[0].tags = vec!["Dark".into(), "dark".into()];
+        let view = odd.view(&Filters::default(), day(2026, 1, 1));
+        assert_eq!(view.counts.statuses[at("Idea")], 2);
+        let shown = odd.view(&Filters { tags: vec!["dark".into()], ..Filters::default() }, day(2026, 1, 1)).shown;
+        assert_eq!((view.counts.tags.get("dark"), shown), (Some(&1), 1));
     }
 
     #[test]

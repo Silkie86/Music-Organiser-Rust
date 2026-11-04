@@ -41,7 +41,8 @@ pub fn show(choices: &[(String, String)], picked: &[String]) -> Filter {
     for gone in picked.iter().filter(|p| !choices.iter().any(|(text, _)| text.eq_ignore_ascii_case(p))) {
         shown.push(Shown { text: gone.clone(), count: if counted { "0".into() } else { String::new() }, on: true });
     }
-    if shown.len() <= CHIPS_UP_TO {
+    // Chips or a menu by the choices alone, so a gone one doesn't turn the chips into a menu until it's unpicked.
+    if choices.len() <= CHIPS_UP_TO {
         return Filter { chips: shown, ..Filter::default() };
     }
     // In the order they were picked, as the menu shows them.
@@ -115,6 +116,9 @@ mod tests {
         let counted = vec![("Bass".to_owned(), "3".to_owned())];
         let kept = show(&counted, &["Vocal".to_owned()]);
         assert_eq!(kept.chips.last(), Some(&Shown { text: "Vocal".into(), count: "0".into(), on: true }));
+        // A full row of chips with a gone one too stays chips, so the row doesn't turn into a menu and back.
+        let full = show(&plugins[..CHIPS_UP_TO], &["Gone".to_owned()]);
+        assert_eq!((full.chips.len(), full.more.len()), (CHIPS_UP_TO + 1, 0));
     }
 
     #[test]
