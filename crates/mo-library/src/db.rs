@@ -23,6 +23,8 @@ pub enum LibraryError {
     Open { path: PathBuf, why: String },
     /// A read failed (the file is damaged, or locked for longer than the wait).
     Read(rusqlite::Error),
+    /// A change ([`crate::folders`]) wasn't made: why. Nothing was changed.
+    Write { path: PathBuf, why: String },
 }
 
 impl fmt::Display for LibraryError {
@@ -30,6 +32,7 @@ impl fmt::Display for LibraryError {
         match self {
             LibraryError::Open { path, why } => write!(f, "Couldn't open the library {}: {why}", path.display()),
             LibraryError::Read(e) => write!(f, "Couldn't read the library: {e}"),
+            LibraryError::Write { path, why } => write!(f, "Couldn't change the library {}: {why}", path.display()),
         }
     }
 }

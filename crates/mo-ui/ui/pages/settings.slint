@@ -55,6 +55,8 @@ export struct DawRowInfo {
 
 export struct FolderGroupInfo {
     title: string,
+    // Whether its folders can be added and removed here.
+    editable: bool,
     note: string,
     folders: [string],
     empty: string,
@@ -94,6 +96,12 @@ export global SettingsData {
     // Folders.
     in property <string> folders-note;
     in property <[FolderGroupInfo]> folder-groups;
+    // What the last change did, or why it couldn't; and whether one is being kept now.
+    in property <string> folders-message;
+    in property <bool> folders-busy;
+    // By the group's number: pick a folder to add, or take one off.
+    callback add-folder(int);
+    callback remove-folder(int, string);
 
     // DAWs: each DAW's link, whether Bitwig is being checked, and the note under them.
     in property <[DawRowInfo]> daws;
@@ -482,7 +490,13 @@ component FoldersTab inherits VerticalLayout {
         font-size: Type.meta;
         wrap: word-wrap;
     }
-    for g in SettingsData.folder-groups: SettingsCard {
+    if SettingsData.folders-message != "": Text {
+        text: SettingsData.folders-message;
+        color: Theme.text;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    for g[gi] in SettingsData.folder-groups: SettingsCard {
         title: g.title;
         intro: g.note;
         if g.folders.length == 0: Text {
@@ -490,13 +504,33 @@ component FoldersTab inherits VerticalLayout {
             color: Theme.faint;
             font-size: Type.meta;
         }
-        for f in g.folders: Text {
-            min-width: 0px;
-            text: f;
-            color: Theme.text;
-            font-family: Theme.number-font;
-            font-size: Type.meta;
-            wrap: word-wrap;
+        for f in g.folders: HorizontalLayout {
+            spacing: Space.md;
+            Text {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                text: f;
+                color: Theme.text;
+                font-family: Theme.number-font;
+                font-size: Type.meta;
+                vertical-alignment: center;
+                wrap: word-wrap;
+            }
+            if g.editable: StudioButton {
+                horizontal-stretch: 0;
+                text: "Remove";
+                tip: "Takes the folder off this list. Nothing on disk is moved or deleted.";
+                enabled: !SettingsData.folders-busy;
+                clicked => { SettingsData.remove-folder(gi, f); }
+            }
+        }
+        if g.editable: HorizontalLayout {
+            alignment: start;
+            StudioButton {
+                text: "Add folder\u{2026}";
+                enabled: !SettingsData.folders-busy;
+                clicked => { SettingsData.add-folder(gi); }
+            }
         }
     }
 }
