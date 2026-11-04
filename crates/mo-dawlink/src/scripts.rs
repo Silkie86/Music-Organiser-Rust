@@ -1,11 +1,12 @@
-//! Installing the Music Organiser script in FL Studio (Settings › DAWs), as the C# app's `DawScripts` does: the app's
-//! own copy of `extensions/fl-studio/device_MusicOrganiser.py` goes into `Settings\Hardware\Music Organiser` in each of
-//! FL Studio's user data folders. FL Studio picks the new copy up the next time it starts (or reloads its scripts).
+//! Installing the Music Organiser links in the DAWs (Settings › DAWs), as the C# app's `DawScripts` does:
+//! - FL Studio: the app's copy of `extensions/fl-studio/device_MusicOrganiser.py` goes into
+//!   `Settings\Hardware\Music Organiser` in each of FL Studio's user data folders. FL Studio picks it up when it starts.
+//! - Bitwig: the built extension (`extensions/bitwig-java`, `MusicOrganiser.bwextension`) goes into `Extensions` in
+//!   each of Bitwig's user folders, and the older JavaScript script it replaces comes out of `Controller Scripts`.
 //!
-//! Only that one file is ever written, and only in a folder of its own (`Music Organiser`), never anything of FL's.
-//! It's written beside itself first (`.mo-part`), read back to check, and only then put in place, so a copy that can't
-//! be written leaves the old one as it was. The `LET_THE_APP_MAKE_CHANGES` line is the user's: an update keeps the
-//! one their copy has.
+//! Only those files are ever written, never anything of the DAWs' own. Each is written beside itself first
+//! (`.mo-part`), read back to check, and only then put in place, so a copy that can't be written leaves the old one
+//! as it was. FL's `LET_THE_APP_MAKE_CHANGES` line is the user's: an update keeps the one their copy has.
 
 use std::fs;
 use std::io::{self, Write};
@@ -109,14 +110,21 @@ pub fn install_fl(folders: &[PathBuf]) -> Installed {
 fn copy_into(folder: &Path) -> io::Result<()> {
     let target = folder.join(FL_SCRIPT_NAME);
     let text = with_kept(FL_SCRIPT, fs::read_to_string(&target).ok().as_deref());
+    write_checked(folder, FL_SCRIPT_NAME, text.as_bytes())
+}
+
+/// Writes `bytes` as `name` in `folder` (made if it isn't there): as `name.mo-part` first, synced and read back, then
+/// renamed into place, so a write that fails part way leaves the old file as it was. The part file never stays.
+fn write_checked(folder: &Path, name: &str, bytes: &[u8]) -> io::Result<()> {
+    let target = folder.join(name);
     fs::create_dir_all(folder)?;
-    let part = folder.join(format!("{FL_SCRIPT_NAME}.mo-part"));
+    let part = folder.join(format!("{name}.mo-part"));
     let written = (|| {
         let mut file = fs::File::create(&part)?;
-        file.write_all(text.as_bytes())?;
+        file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
-        if fs::read(&part)? != text.as_bytes() {
+        if fs::read(&part)? != bytes {
             return Err(io::Error::other("the copy read back wasn't the one written"));
         }
         fs::rename(&part, &target)
@@ -162,4 +170,135 @@ fn lines(text: &str) -> Vec<&str> {
         lines.pop();
     }
     lines
+}
+
+/// The Bitwig extension's file name.
+pub const BITWIG_EXTENSION_NAME: &str = "MusicOrganiser.bwextension";
+
+/// The older JavaScript script's file name, which the extension replaces.
+pub const BITWIG_SCRIPT_NAME: &str = "MusicOrganiser.control.js";
+
+/// The built extension the app installs: next to the app in `extensions` (where the launcher puts it), or, when the
+/// app runs from a build in a copy of the repo, the one Maven built there (`extensions/bitwig-java/target`).
+pub fn bitwig_extension_source(app: &Path) -> Option<PathBuf> {
+    let beside = app.parent()?.join("extensions").join(BITWIG_EXTENSION_NAME);
+    if beside.is_file() {
+        return Some(beside);
+    }
+    app.ancestors()
+        .map(|d| d.join("extensions").join("bitwig-java").join("target").join(BITWIG_EXTENSION_NAME))
+        .find(|f| f.is_file())
+}
+
+/// Bitwig's user folders: the one chosen in the C# app (`bitwig_user_folder`, like `K:\Bitwig Studio`), and every
+/// `Bitwig Studio` folder in a Documents folder that's there. Bitwig may load extensions from one while it keeps the
+/// projects in another, and every copy is the same, so the extension goes in each (as the C# app does).
+pub fn bitwig_user_folders(chosen: Option<&str>, documents: &[PathBuf]) -> Vec<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    let mut add = |f: PathBuf| {
+        let key = mo_formats::case::key(f.to_string_lossy().trim_end_matches(['\\', '/']));
+        if !found.iter().any(|g| mo_formats::case::key(g.to_string_lossy().trim_end_matches(['\\', '/'])) == key) {
+            found.push(f);
+        }
+    };
+    if let Some(chosen) = chosen.map(str::trim).filter(|c| !c.is_empty()) {
+        add(PathBuf::from(chosen));
+    }
+    for d in documents {
+        let f = d.join("Bitwig Studio");
+        if f.is_dir() {
+            add(f);
+        }
+    }
+    found
+}
+
+/// Where the extension goes: `Extensions` in each user folder, and the Extensions folder Bitwig was seen loading it
+/// from (the link's `loadedFrom`), when that is one and is there.
+pub fn bitwig_extension_folders(user_folders: &[PathBuf], loaded_from: Option<&str>) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = user_folders.iter().map(|f| f.join("Extensions")).collect();
+    let seen = loaded_from.map(Path::new).filter(|f| {
+        f.file_name().is_some_and(|n| n.eq_ignore_ascii_case(BITWIG_EXTENSION_NAME))
+            && f.parent().and_then(Path::file_name).is_some_and(|n| n.eq_ignore_ascii_case("Extensions"))
+    });
+    if let Some(folder) = seen.and_then(Path::parent).filter(|f| f.is_dir()) {
+        let key = mo_formats::case::key(&folder.to_string_lossy());
+        if !folders.iter().any(|f| mo_formats::case::key(&f.to_string_lossy()) == key) {
+            folders.push(folder.to_owned());
+        }
+    }
+    folders
+}
+
+/// The version a built extension gives in its manifest (`Implementation-Version`), if it says.
+pub fn extension_version(file: &Path) -> Option<String> {
+    let mut zip = zip::ZipArchive::new(fs::File::open(file).ok()?).ok()?;
+    let mut manifest = String::new();
+    io::Read::read_to_string(&mut zip.by_name("META-INF/MANIFEST.MF").ok()?, &mut manifest).ok()?;
+    manifest.lines().find_map(|l| {
+        let (key, value) = l.split_once(':')?;
+        key.trim().eq_ignore_ascii_case("Implementation-Version").then(|| value.trim().to_owned())
+    })
+}
+
+/// Whether the extension in `folders` is the one `source` holds, byte for byte.
+pub fn bitwig_state(source: &Path, folders: &[PathBuf]) -> ScriptState {
+    let Ok(built) = fs::read(source) else { return ScriptState::NotInstalled };
+    let mut any = false;
+    for folder in folders {
+        let Ok(theirs) = fs::read(folder.join(BITWIG_EXTENSION_NAME)) else { continue };
+        any = true;
+        if theirs != built {
+            return ScriptState::Outdated;
+        }
+    }
+    if any { ScriptState::Installed } else { ScriptState::NotInstalled }
+}
+
+/// Puts the extension from `source` into every folder, then takes out the older script
+/// (`Controller Scripts\Music Organiser\MusicOrganiser.control.js`) from each user folder the extension went into, so
+/// Bitwig doesn't run both: only that file, and its `Music Organiser` folder when that's left empty. On Windows,
+/// Bitwig keeps its extensions open, so a copy it has open can't be replaced: close Bitwig first.
+pub fn install_bitwig(source: &Path, folders: &[PathBuf], user_folders: &[PathBuf]) -> BitwigInstalled {
+    let mut done = BitwigInstalled::default();
+    let built = match fs::read(source) {
+        Ok(b) => b,
+        Err(e) => {
+            done.installed.failed = folders.iter().map(|f| (f.clone(), e.to_string())).collect();
+            return done;
+        }
+    };
+    for folder in folders {
+        match write_checked(folder, BITWIG_EXTENSION_NAME, &built) {
+            Ok(()) => done.installed.went.push(folder.clone()),
+            Err(e) => done.installed.failed.push((folder.clone(), e.to_string())),
+        }
+    }
+    for user in user_folders {
+        if !done.installed.went.iter().any(|f| f.parent() == Some(user.as_path())) {
+            continue;
+        }
+        let script_folder = user.join("Controller Scripts").join("Music Organiser");
+        let old = script_folder.join(BITWIG_SCRIPT_NAME);
+        if !old.is_file() {
+            continue;
+        }
+        match fs::remove_file(&old) {
+            Ok(()) => {
+                done.removed.push(old);
+                if fs::read_dir(&script_folder).is_ok_and(|mut d| d.next().is_none()) {
+                    let _ = fs::remove_dir(&script_folder);
+                }
+            }
+            Err(e) => done.installed.failed.push((old, e.to_string())),
+        }
+    }
+    done
+}
+
+/// What installing the Bitwig extension did: where it went, and the older scripts it took out.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct BitwigInstalled {
+    pub installed: Installed,
+    pub removed: Vec<PathBuf>,
 }

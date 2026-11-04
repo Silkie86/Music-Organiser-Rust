@@ -113,7 +113,8 @@ export global SettingsData {
     // What the last Install did; whether one is running now.
     in property <string> daws-message;
     in property <bool> daws-installing;
-    callback install-fl();
+    // Install on a row: Bitwig's extension (true) or FL Studio's script.
+    callback install-daw(bool);
 
     // Developer.
     in property <[SettingsFact]> facts;
@@ -664,9 +665,9 @@ component DawsTab inherits VerticalLayout {
             if d.install != "": StudioButton {
                 horizontal-stretch: 0;
                 text: SettingsData.daws-installing ? "Installing\u{2026}" : d.install;
-                tip: "Puts the app's script in FL Studio's folders, keeping your setting for letting the app make changes";
+                tip: d.bitwig ? "Puts the app's extension in Bitwig's folders and takes out the older script. Close Bitwig first." : "Puts the app's script in FL Studio's folders, keeping your setting for letting the app make changes";
                 enabled: !SettingsData.daws-installing;
-                clicked => { SettingsData.install-fl(); }
+                clicked => { SettingsData.install-daw(d.bitwig); }
             }
         }
         for f in d.facts: FactLine {
