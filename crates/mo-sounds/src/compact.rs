@@ -943,8 +943,8 @@ fn unpacked<T: Packable>(bytes: &[u8]) -> Vec<T> {
             // Four numbers to every 5 bytes, the first in the lowest bits; then the last few, in fewer bytes.
             let number = |word: u64, j: u32| T::THOUSANDTHS[((word >> (10 * j)) & 0x3ff) as usize];
             let mut out = Vec::with_capacity(n);
-            let mut fives = rest.chunks_exact(5);
-            for b in &mut fives {
+            let (fives, last) = rest.as_chunks::<5>();
+            for b in fives {
                 let word = u64::from(b[0])
                     | (u64::from(b[1]) << 8)
                     | (u64::from(b[2]) << 16)
@@ -952,7 +952,7 @@ fn unpacked<T: Packable>(bytes: &[u8]) -> Vec<T> {
                     | (u64::from(b[4]) << 32);
                 out.extend_from_slice(&[number(word, 0), number(word, 1), number(word, 2), number(word, 3)]);
             }
-            let word = fives.remainder().iter().rev().fold(0u64, |word, &b| (word << 8) | u64::from(b));
+            let word = last.iter().rev().fold(0u64, |word, &b| (word << 8) | u64::from(b));
             for j in 0..(n - out.len()) as u32 {
                 out.push(number(word, j));
             }
