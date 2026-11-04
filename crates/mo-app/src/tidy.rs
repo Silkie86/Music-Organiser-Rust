@@ -565,8 +565,8 @@ fn is_gone(path: &Path) -> bool {
 fn stop_reason(name: &str, why: &str, gone: bool) -> String {
     match (gone, why == STILL_THERE) {
         (true, true) => format!(
-            "Windows said it put {name} in the Recycle Bin, but it was still in the notes folder after, and is gone now \
-             (it may have asked first, and removed it for good)"
+            "Windows said it put {name} in the Recycle Bin, but it was still in the notes folder after, and is gone \
+             now (it may have asked first, and removed it for good)"
         ),
         (true, false) => format!(
             "{name} is gone from the notes folder, but Windows said it couldn't put it in the Recycle Bin (it may have \
@@ -724,8 +724,8 @@ fn write_notes_done(path: &Path, up_to: NaiveDateTime, stopped: Option<&str>) ->
     );
     if let Some(why) = stopped {
         text += &format!(
-            "{STOPPED}{why}\nNo more notes go to the Recycle Bin by themselves. To let them go again, take out only the \
-             line above that starts \"Stopped:\".\n"
+            "{STOPPED}{why}\nNo more notes go to the Recycle Bin by themselves. To let them go again, take out only \
+             the line above that starts \"Stopped:\".\n"
         );
     }
     // Written whole beside it first, then put in its place, so a crash part way leaves the old one whole (with its
@@ -1149,7 +1149,8 @@ mod tests {
         }
     }
 
-    /// A test's bin that says each file couldn't go, though it's gone afterwards (Windows may have removed it for good).
+    /// A test's bin that says each file couldn't go, though it's gone afterwards (Windows may have removed it for
+    /// good).
     struct GoneAfterAnError;
 
     impl Bin for GoneAfterAnError {

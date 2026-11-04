@@ -15,8 +15,8 @@ pub const DRAFT_FILE: &str = "draft.txt";
 /// What the draft is written as first ([`keep_draft`]): made new beside `draft.txt`, written whole, then renamed over
 /// it, so a write cut short (a crash that ends the app, a full disk, a power cut) leaves the draft from before whole,
 /// not an empty file. A crash between the writing and the renaming leaves this behind; the next draft written this
-/// way removes it first, so at most one small file stays. The start-up sweep never touches it (rule 17: it may hold the newest
-/// words), and it's never read back as the draft: it may be cut short.
+/// way removes it first, so at most one small file stays. The start-up sweep never touches it (rule 17: it may hold
+/// the newest words), and it's never read back as the draft: it may be cut short.
 pub const DRAFT_PART: &str = "draft.txt.mo-part";
 /// The same, for a draft written without its turn ([`keep_draft_alone`]): a crash, or the app closing, while the
 /// writer whose turn it is is stuck part way through [`DRAFT_PART`]. A name of its own, so neither writer ever removes
