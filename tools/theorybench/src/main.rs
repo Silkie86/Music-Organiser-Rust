@@ -79,7 +79,7 @@ theorybench tables <labelled.jsonl>... [--write <tables.rs>]
   --roles    off: mo-harmony hears every part as one, with no role, as the C# app does (on: each with its role)
   --oracle-cuts  mo-harmony given the labelled changes: each labelled chord read as one chord
   --timing   mo-harmony reads on one core and says how long a read takes: a piece, and 16 bars of it
-  --weights  mo-harmony reads with the weights a fit wrote (chordfit --out); the hand-set ones when left out
+  --weights  mo-harmony reads with the weights a fit wrote (chordfit --out); the built-in ones when left out
   --folds    only the pieces in these folds (1 to 4), drawn as chordfit draws them: a chart's renders with the chart
   --per-segment  mir_eval's scores per labelled chord too, each counted once
   --by       the chords named whole split by a tag convert/voice.py gives each chord it plays: set, recipe, texture,

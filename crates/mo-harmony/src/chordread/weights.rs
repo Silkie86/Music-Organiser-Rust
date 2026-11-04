@@ -1,10 +1,11 @@
 //! The numbers the evidence is weighed by ([`Weights`]), and the counted tables the two template priors read
 //! ([`Tables`]).
 //!
-//! For now the weights are set by hand ([`HAND`]): chosen so the design's hand cases read as a player would read them,
+//! The first weights were set by hand ([`HAND`]): chosen so the design's hand cases read as a player would read them,
 //! one stretch at a time and read whole, on the tables counted from labelled music ([`COUNTED`](super::COUNTED)). The
-//! fit (chordfit) will start from them and learn the rest from labelled music, keeping every rule [`Weights::check`]
-//! lists, so no explanation can ever show a chord's own note counting against it.
+//! fit (`theorybench chordfit`) starts from them and learns from labelled music, keeping every rule
+//! [`Weights::check`] lists, so no explanation can ever show a chord's own note counting against it. The reader is
+//! built with [`FITTED`]: the hand-set weights moved part of the way to a fit.
 
 use super::answer::Thresholds;
 use super::candidates::Label;
@@ -14,8 +15,8 @@ use super::score::{Feature, PerFeature};
 /// The hash of every number the reader is built from ([`super::numbers_hash`]) that these were written with, and the
 /// version of the reader they were first given with ([`super::CHORD_READER_VERSION`]). A test checks both: change a
 /// number here, in the counted tables or among those set by hand, and it asks for the new hash and a new version.
-pub(super) const SHIPPED_HASH: u64 = 0x2a25_dc50_1312_92a7;
-pub(super) const HASH_VERSION: u32 = 1;
+pub(super) const SHIPPED_HASH: u64 = 0xeb70_d957_2341_a787;
+pub(super) const HASH_VERSION: u32 = 4;
 
 /// What each piece of evidence is worth ([`Feature`]), the trust in the pair term, and what a stretch read as no chord
 /// scores.
@@ -106,10 +107,75 @@ pub const HAND: Weights = Weights {
     none: -0.5,
 };
 
+/// The weights the reader is built with ([`SHIPPED`](super::SHIPPED)): the hand-set ones ([`HAND`]) moved a fifth of the
+/// way towards the first fit that keeps every gate.
+///
+/// - **The fit:** `theorybench chordfit pop909cl.jsonl billboard-A.jsonl --steps 40 --hand 1 --hold 3`, run on main at
+///   a014537 (2026-11-04). It learned from folds 2 to 4 of POP909-CL (the piano heard four ways) and of the Billboard
+///   charts played by voice.py (set A), and from the hand cases, holding the gates it looks at. It started from the
+///   hand-set weights and stopped after 65 steps over two rounds. Fold 1 was measured; fold 0 is kept for the final
+///   look.
+/// - **Pulled back:** each number is the hand-set one moved 0.2 of the way to the fit's (each line below gives both).
+///   That's the last point, in steps of 0.05, where every gate holds (the held-out ones too) and every answer a player
+///   would give holds with the hand-set [`THRESHOLDS`]. A quarter of the way, keys alone that a player could read more
+///   than one way (B E F A, or B F Bb Eb, with no bass) are read as one chord; at the full fit, case 15a's C13(#11) is
+///   read as a D chord over C. Going further waits for the thresholds' own fit (the calibration).
+/// - **Learned from:** POP909-CL (Yao, Chen, Dubnov and Berg-Kirkpatrick (2026), MIT licence) and the McGill Billboard
+///   charts (Burgoyne, Wild and Fujinaga (ISMIR 2011), CC0). Only these numbers come from them.
+/// - **Scored** where it didn't learn (tools/theorybench/README.md, "The first fit shipped (2026-11-04)"): every set
+///   reads as well as with the hand-set weights or better. The chords named whole, for example, go from 79.2% to
+///   84.0% of the time on Billboard set B, from 68.3% to 71.8% on POP909-CL with its tune, and from 70.3% to 72.5% on
+///   the sweep.
+pub const FITTED: Weights = Weights {
+    features: PerFeature([
+        3.3948572691289702,   // T1: hand-set 3, the fit 4.974
+        1.4463338074306833,   // T2: hand-set 1, the fit 3.232
+        -3.385263749605766,   // T3: hand-set -3, the fit -4.926
+        -1.0491432262258837,  // T4: hand-set -1, the fit -1.246
+        -0.6356759110920678,  // T5: hand-set -0.5, the fit -1.178
+        0.8885820415770461,   // T6: hand-set 1, the fit 0.443
+        0.32,                 // T7: hand-set 0.4, the fit 0
+        -0.8426879072389734,  // T8: hand-set -1, the fit -0.213
+        -1.7065272236864995,  // T9: hand-set -2, the fit -0.533
+        -0.9529583104544364,  // T10: hand-set -1, the fit -0.765
+        -1.3226489936290757,  // T11: hand-set -1.5, the fit -0.613
+        -0.15048847239448981, // T12: hand-set -0.1, the fit -0.352
+        0.8525672886893291,   // T15: hand-set 1, the fit 0.263
+        0.028902253368589367, // R1: hand-set 0, the fit 0.145
+        0.649736734906135,    // R2: hand-set 0.7, the fit 0.449
+        -0.24,                // R3: hand-set -0.3, the fit 0
+        -0.8,                 // R4: hand-set -1, the fit 0
+        0.4579993402232289,   // L1: hand-set 0.4, the fit 0.69
+        0.939750774306798,    // B1: hand-set 0.9, the fit 1.099
+        0.4790971430344563,   // B2: hand-set 0.5, the fit 0.395
+        0.1932707724043488,   // B3: hand-set 0.2, the fit 0.166
+        0.4,                  // B4: hand-set 0.5, the fit 0
+        -0.16181961141161316, // B5: hand-set -0.05, the fit -0.609
+        -0.2018196114116132,  // B6: hand-set -0.1, the fit -0.609
+        1.0147430537770117,   // B7: hand-set 1, the fit 1.074
+        0.44835730408818464,  // B8: hand-set 0.5, the fit 0.242
+        -0.760104836653657,   // B9: hand-set -0.5, the fit -1.801
+        1.8886526129692751,   // E1: hand-set 2, the fit 1.443
+        0.4977808400313616,   // E2: hand-set 0.5, the fit 0.489
+        -1.9774787898059019,  // E3: hand-set -2, the fit -1.887
+        -1.1812471481958287,  // E4: hand-set -1, the fit -1.906
+        -1.5454565813881642,  // E5: hand-set -1.2, the fit -2.927
+        -2.0961541678353,     // E6: hand-set -1.5, the fit -4.481
+        -2.4961541678353,     // E7: hand-set -2, the fit -4.481
+        -0.5514506473742018,  // E8: hand-set -0.3, the fit -1.557
+        0.14528903707630858,  // P1: hand-set 0.11, the fit 0.286
+        0.09231198676540538,  // P2: hand-set 0.06, the fit 0.222
+    ]),
+    pair: 0.28340324645111675, // hand-set 0.25, the fit 0.417
+    none: -0.8929716401718013, // hand-set -0.5, the fit -2.465
+};
+
 /// The hand-set thresholds the answers are graded by (texture by texture: a full mix, an accompaniment, chords alone,
 /// one line), until the calibration's fit sets them. Set from the hand cases: keys alone that a player could read
-/// more than one way (cases 13, 20, 22 and 33 with no bass) give their first reading a chance of 0.63 to 0.76 and
-/// must not be one chord, while the chords the cases want as one chord read 0.98 or more (cases 1, 10, 11 and 54).
+/// more than one way (cases 13, 20, 22 and 33 with no bass) gave their first reading a chance of 0.63 to 0.76 with
+/// the hand-set weights, and must not be one chord, while the chords the cases want as one chord read 0.98 or more
+/// (cases 1, 10, 11 and 54). With the built-in weights ([`FITTED`]) those keys give 0.75 to 0.79 and those chords
+/// 0.997 or more: how close the first stays under 0.8 is what keeps the weights from going further towards the fit.
 /// The same notes need their group at 0.9: were the chances true, the chord would be outside it at most one time in
 /// ten, the design's target. One line alone is never one chord or the same notes: it's implied.
 pub const THRESHOLDS: Thresholds = Thresholds { one: [0.8, 0.8, 0.8, 1.0], same: [0.9, 0.9, 0.9, 1.0] };

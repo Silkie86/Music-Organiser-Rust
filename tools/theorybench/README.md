@@ -840,7 +840,7 @@ scores are in the first fit's table):
   hand case holds read whole and one stretch at a time, the held-out G cases too (`show_the_grid`, with its `SET=` line
   and its own pair value as the one point of `AXES`). Shipping its numbers is a pull request of its own: `SHIPPED`
   changes, so `CHORD_READER_VERSION` goes up, and the fit is run once more on what's merged then (it ran on this
-  branch's `7dd1183`).
+  branch's `7dd1183`). Shipped a fifth of the way: see "The first fit shipped".
 - **Its numbers** (to three places): T1 4.977, T2 3.233, T3 −4.926, T4 −1.219, T5 −1.181, T6 0.441, T7 0.000, T8 −0.218,
   T9 −0.530, T10 −0.763, T11 −0.640, T12 −0.355, T15 0.259, R1 0.145, R2 0.448, R3 0.000, R4 0.000, L1 0.696, B1 1.098,
   B2 0.393, B3 0.163, B4 0.000, B5 −0.609, B6 −0.609, B7 1.072, B8 0.238, B9 −1.812, E1 1.436, E2 0.490, E3 −1.900, E4
@@ -882,3 +882,70 @@ set):
   that passes by costs nothing) leave every number in the table the same: a few chords in POP909-CL and Billboard read
   differently, too few to move one by a tenth.
 - The fits' tables above were scored before; score them again before comparing with these.
+
+## The first fit shipped (2026-11-04)
+
+The third fit above (`--hand 1 --hold 3`), run again on main (`a014537`, with the naming PR and the review fixes), with
+the same files, folds and settings. It took 65 steps over two rounds (each step a reading of every piece, 73 s on 4
+cores), and its numbers are within 0.03 of the run on `7dd1183`. Its first round broke the same three gates (33, w31 and
+31); after its second, every one of the 229 it looks at holds, and it meets 6 of the 14 targets (13 and 41 besides the
+hand-set numbers' 4). The loss per bar held out falls from 2.786 to 0.979 on POP909-CL's piano and from 0.579 to 0.443
+on set A.
+
+Its numbers aren't shipped as they are. Read with them, the held-out case 15a (C13(#11)) is read as a D chord over C
+(Dadd9b13 over a C bass, though still written C13#11), and the reader is surer than the thresholds it grades by allow:
+keys alone that a player could read more than one way are one chord (B E F A with no bass, case 13, and B F Bb Eb, case
+20, their first reading at 0.958 where one chord needs 0.8), and so is A7sus4 with no bass (case 33, 0.839). The
+thresholds were set by hand for the hand-set numbers, and wait for a fit of their own (the calibration: the design's σ
+and answerfit).
+
+So the reader ships the numbers pulled back, as the key finder's are: each is the hand-set one moved a share of the way
+to the fit's, the same share for all. Tried in steps of 0.05, a fifth (0.2) is the last where every gate holds, the
+held-out ones too, and every answer the hand cases want holds; a quarter of the way, cases 13 and 20 are one chord
+(0.803). These are `chordread::FITTED`, which `SHIPPED` reads with: `CHORD_READER_VERSION` 4.
+
+Scored as before (fold 1 of POP909-CL and Billboard; RS200 and the sweep whole), with the hand-set numbers, a fifth of
+the way and the whole fit:
+
+| set | majmin: hand / a fifth / fit | name: hand / a fifth / fit | extensions' macro F1: hand / a fifth / fit | inversions read in root position: hand / a fifth / fit |
+|---|---|---|---|---|
+| POP909-CL piano | 85.3 / 87.3 / 88.7 | 73.3 / 75.2 / 76.3 | - | 78.0 / 77.2 / 76.2 |
+| POP909-CL with the tune | 85.4 / 87.9 / 89.8 | 68.3 / 71.8 / 76.2 | - | 77.2 / 77.1 / 76.2 |
+| Billboard block chords | 98.1 / 98.6 / 98.9 | 92.4 / 92.7 / 92.8 | 71.0 / 72.5 / 77.6 | 27.2 / 24.9 / 19.7 |
+| Billboard set A | 92.7 / 95.4 / 96.3 | 84.5 / 87.1 / 87.9 | 56.5 / 61.1 / 63.0 | 37.4 / 35.7 / 34.2 |
+| Billboard set B | 88.0 / 92.4 / 96.1 | 79.2 / 84.0 / 87.8 | 45.1 / 52.9 / 57.2 | 19.6 / 16.7 / 14.0 |
+| RS200 block chords | 98.5 / 98.7 / 98.9 | 98.2 / 98.3 / 98.4 | 74.8 / 74.8 / 73.0 | 30.7 / 29.0 / 24.0 |
+| RS200 set A | 96.0 / 96.9 / 97.1 | 90.9 / 91.9 / 91.9 | 26.4 / 26.6 / 28.3 | 28.1 / 26.7 / 24.9 |
+| RS200 set B | 91.9 / 94.4 / 97.3 | 87.4 / 90.4 / 93.7 | 26.8 / 27.9 / 22.9 | 17.0 / 14.0 / 10.4 |
+| The sweep | 78.3 / 80.6 / 84.0 | 70.3 / 72.5 / 75.6 | 61.7 / 63.6 / 67.6 | 40.6 / 39.2 / 35.6 |
+
+| set | where the chords change: hand / a fifth / fit | changes a bar: hand / a fifth / fit (the labels) | the labelled chord first: hand / a fifth / fit | among the first three: hand / a fifth / fit |
+|---|---|---|---|---|
+| POP909-CL piano | 92.9 / 93.5 / 93.1 | 1.32 / 1.25 / 1.17 (1.30) | 76.1 / 78.2 / 79.6 | 80.5 / 81.8 / 82.7 |
+| POP909-CL with the tune | 91.9 / 92.7 / 93.0 | 1.32 / 1.24 / 1.17 (1.30) | 71.5 / 75.2 / 80.0 | 80.8 / 82.6 / 84.1 |
+| Billboard block chords | 97.1 / 97.1 / 96.1 | 0.96 / 0.96 / 0.93 (1.01) | 93.1 / 93.5 / 93.3 | 94.8 / 94.8 / 94.0 |
+| Billboard set A | 95.3 / 96.5 / 95.4 | 1.01 / 0.95 / 0.91 (0.99) | 85.0 / 87.6 / 88.5 | 90.1 / 91.4 / 91.0 |
+| Billboard set B | 88.8 / 93.3 / 95.4 | 1.22 / 1.06 / 0.92 (0.99) | 80.5 / 85.0 / 88.8 | 86.4 / 90.0 / 92.2 |
+| RS200 block chords | 99.8 / 99.7 / 99.6 | 1.28 / 1.28 / 1.27 (1.28) | 98.2 / 98.3 / 98.4 | 99.7 / 99.7 / 99.5 |
+| RS200 set A | 98.5 / 98.3 / 97.5 | 1.26 / 1.26 / 1.24 (1.28) | 91.0 / 91.9 / 92.0 | 93.8 / 93.8 / 93.1 |
+| RS200 set B | 96.0 / 97.6 / 97.9 | 1.39 / 1.33 / 1.25 (1.28) | 87.4 / 90.4 / 93.8 | 91.3 / 93.3 / 95.2 |
+| The sweep | 84.8 / 87.5 / 93.9 | 1.06 / 0.97 / 0.79 (0.68) | 71.5 / 73.9 / 77.1 | 80.0 / 83.1 / 88.4 |
+
+- **A fifth of the way gains on every set**, most where the music is hardest to read: Billboard set B is named 84.0% of
+  its time (hand 79.2%, the whole fit 87.8%), RS200's set B 90.4% (87.4%, 93.7%), POP909-CL with its tune 71.8% (68.3%,
+  76.2%) and the sweep 72.5% (70.3%, 75.6%). The labelled chord is the first reading more often (set B 85.0%, hand
+  80.5%), fewer inversions are read in root position, and the extensions' macro F1 is at or above the hand-set numbers'
+  everywhere, RS200 too, where the whole fit loses some (set B 27.9%, hand 26.8%, the fit 22.9%).
+- **What it costs.** Where the chords change scores a little lower on RS200 (set A 98.3 against 98.5, block chords 99.7
+  against 99.8); every other number in both tables is the same or better.
+- **The hand cases.** Every gate holds, held-out ones too, and 5 of the 15 targets are met: 41 (Cadd9 arpeggiated) is
+  new. No chart changes, and 9 stretches in 7 cases answer otherwise. 8 that were the same notes or unclear only because
+  the hand-set numbers were unsure are one chord now: C | F in eighths (40, C at 0.84) and the Alberti C (42, 0.84), Dm7
+  over a walk (38, 0.81), the dense part's Am11 and Dm9 (h6, 0.84 and 0.81), Cmaj7 over a Bb (4, 0.81) and G over the
+  pedal C (9, written G(add11), 0.87). One goes the other way: Dm11 (33) is the same notes now, at 0.80 just under one
+  chord's 0.8. Keys alone read surer but never one chord: B E F A's first reading is at 0.775 (hand 0.633), A7sus4 with
+  no bass at 0.787 (0.763).
+- **Next.** The calibration's fit (σ and the thresholds) on these numbers; with chances that are true, the numbers can
+  go further towards the fit.
+- **To score the hand-set numbers now**, give `chords --weights` a file that names no number, `{"numbers": {}}` (a
+  number a file leaves out is the hand-set one): with no `--weights`, `chords` reads with the numbers built in.

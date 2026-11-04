@@ -118,7 +118,7 @@ fn each_chord_is_told_by_its_bass_and_its_notes_degrees() {
     for (name, span, want) in cases {
         assert_eq!(case(name, span).chord, want, "{name} [{span}]");
     }
-    assert!(case("38 Dm7 | G7 | Cmaj7 over a walk", 0).chord.starts_with("Unclear, most likely Dm7: "));
+    assert!(case("41 C, D4 passing", 0).chord.starts_with("Unclear, most likely C: "));
 }
 
 #[test]
@@ -233,8 +233,8 @@ fn why_a_chord_reads_as_it_does_is_told_from_the_evidence() {
         ]
     );
     assert!(has(
-        &case("35 Cm | Cm(maj7) | Cm7 | Cm6 over a held C", 2),
-        "Cm(maj7) to Cm7 to Cm6 is a more common way for the root to move than Cm(maj7) to Eb6 to Cm6."
+        &case("38 Dm7 | G7 | Cmaj7 over a walk", 1),
+        "Dm7 to G7 to Cmaj7 is a more common way for the root to move than Dm7 to Dm6 to Cmaj7."
     ));
     // With no bass, the lowest note; how common each kind of chord is; a fifth left out.
     let w = case("22 no bass", 0);
@@ -251,15 +251,20 @@ fn why_a_chord_reads_as_it_does_is_told_from_the_evidence() {
     assert!(has(&w, "G7's third, B, isn't heard."));
     // How usual its tensions are for its kind of chord.
     assert!(has(
-        &case("1 C", 0),
+        &case("5 C | F, never C/G", 0),
         "As the songs counted name tensions, C is a more usual way to write a major chord than Gsus4(add6) is to write \
          a sus4 chord; of the chords in the songs counted, 52% are major chords and 1.7% sus4 chords."
     ));
     // Where a chord starts, and a chord held on.
     assert!(has(
         &case("4 C C/B | Am", 1),
-        "Cmaj7 is the chord before, C, going on, so where a chord starts doesn't count for it; the bass moves to \
-         Bsus4's root, B, where it would start; Bsus4 would start in the middle of a bar."
+        "Cmaj7 is the chord before, C, going on, so where a chord starts doesn't count for it; Am9 would start in the \
+         middle of a bar."
+    ));
+    assert!(has(
+        &case("6 C C/E | F F#dim7 | C/G", 1),
+        "C is the chord before going on, so where a chord starts doesn't count for it; the bass moves to Emaddb13's \
+         root, E, where it would start; Emaddb13 would start in the middle of a bar."
     ));
     assert!(has(
         &case("36 a walk under F A C", 0),
@@ -268,9 +273,9 @@ fn why_a_chord_reads_as_it_does_is_told_from_the_evidence() {
     ));
     // A moving bass.
     assert!(has(
-        &case("38 Dm7 | G7 | Cmaj7 over a walk", 1),
-        "Of what the moving bass plays (counting the strongest beats most), 47% is on G7's other notes; for Dm6, 20% \
-         is on its other notes and 27% on notes not its own, on a strong beat or held long."
+        &case("h6 Cmaj9 | Am11 | Dm9 | G13 in sixteenths over eighths", 0),
+        "Of what the moving bass plays (counting the strongest beats most), 53% is on Cmaj9's root; for Em7, 20% is on \
+         its root and 27% on notes not its own, on a strong beat or held long."
     ));
     // The tune.
     assert!(has(

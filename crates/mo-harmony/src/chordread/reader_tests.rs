@@ -288,9 +288,10 @@ fn chord_check_offers_the_same_notes_another_way_then_another_chord() {
     // Dm9: Fmaj7/D is the same notes, but under 1%; so Dm9 with its tensions left out.
     let r = case("10 Dm9 | G13 | Cmaj9");
     assert_eq!(choices(&r.spans[0], 3), own(&[("Dm9", First), ("Dm7", Tensions)]), "{}", render(&r));
-    // Dm7 over a walk, unclear: F6 is the same notes, F another chord.
+    // Dm7 over a walk: F6 is the same notes, F another chord. (One chord, just: Dm7 is read at 0.81. With the
+    // hand-set weights it was unclear, and the choices are the same either way.)
     let r = case("38 Dm7 | G7 | Cmaj7 over a walk");
-    assert_eq!(r.spans[0].answer, ChordAnswer::Unclear, "{}", render(&r));
+    assert_eq!(r.spans[0].answer, ChordAnswer::Chord, "{}", render(&r));
     assert_eq!(choices(&r.spans[0], 3), own(&[("Dm7", First), ("F6", SameNotes), ("F", Other)]), "{}", render(&r));
     // A rest has none, and none are asked for: none.
     assert!(r.spans[0].choices(0).is_empty());
@@ -743,7 +744,8 @@ fn damaged_notes_are_read_without_a_panic() {
 
 /// What the hand cases, the tests' music and some music made here read at each version of the reader, as a hash
 /// ([`readings_hash`]). A change that moves any of them needs `CHORD_READER_VERSION` bumped, and a line added here.
-const READINGS: &[(u32, u64)] = &[(1, 0xe3a9_cd16_4f69_5725), (2, 0x1a86_e909_00c4_7d95), (3, 0x0b75_cf69_1fba_b90d)];
+const READINGS: &[(u32, u64)] =
+    &[(1, 0xe3a9_cd16_4f69_5725), (2, 0x1a86_e909_00c4_7d95), (3, 0x0b75_cf69_1fba_b90d), (4, 0xcb78_8296_e472_6c11)];
 
 /// The music whose readings the hash covers, with its pins: every hand case, the music the rules are checked on, and
 /// music made here so every kind of answer is read (one line, one note, all twelve, a rest, chords given), what is one

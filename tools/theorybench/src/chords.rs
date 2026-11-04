@@ -178,7 +178,7 @@ struct Options {
     by: Vec<String>,
     rust: RustRun,
     timing: bool,
-    /// The weights a fit wrote, for mo-harmony to read with (`--weights`); the hand-set ones when none is given.
+    /// The weights a fit wrote, for mo-harmony to read with (`--weights`); the built-in ones when none is given.
     weights: Option<PathBuf>,
     /// Only the pieces in these folds, as the chord fit draws them (`--folds`).
     folds: Option<Vec<usize>>,
