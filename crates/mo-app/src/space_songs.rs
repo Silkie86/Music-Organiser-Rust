@@ -466,8 +466,9 @@ fn thin_card(found: Option<&Found>, today: NaiveDate) -> Card {
             format!("{} in {}", saves_words(saves), songs_words(songs.len()))
         },
         lead: format!(
-            "Saves made less than {hours} hours apart while you worked. The last save of each sitting, the first save \
-             and the save each song opens always stay. None goes unless you pick it."
+            "Saves made less than {hours} hours apart while you worked. The first save, the last save of each \
+             sitting and the save each song opens always stay, and so do saves a copy wrote all at once. None goes \
+             unless you pick it."
         ),
         ticks: false,
         note: if parts.is_empty() { String::new() } else { NEXT.to_owned() },
@@ -677,6 +678,7 @@ mod tests {
         let card = thin_card(Some(&sample()), NaiveDate::from_ymd_opt(2026, 11, 4).unwrap_or_default());
         assert_eq!((card.big.as_str(), card.big_note.as_str()), ("45 MB", "2 saves in 1 song"));
         assert!(card.lead.starts_with("Saves made less than 3 hours apart while you worked."));
+        assert!(card.lead.contains("and so do saves a copy wrote all at once."));
         let rows: Vec<(&str, &str, &str, bool)> =
             card.parts.iter().map(|p| (p.name.as_str(), p.what.as_str(), p.size.as_str(), p.under)).collect();
         assert_eq!(rows, [("Bounce: 2 saves", "Sittings on 3 and 9 Oct; 4 saves stay", "45 MB", false)]);

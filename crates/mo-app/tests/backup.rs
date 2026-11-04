@@ -236,18 +236,13 @@ fn a_sample_named_where_it_really_is_matches_a_listed_link() {
     assert_eq!(kicks.len(), 1, "{kicks:?}");
 }
 
-#[test]
-fn the_save_a_song_opens_goes_even_when_by_time_its_from_the_middle_of_a_sitting() {
-    let root = fixtures("backup-screen-opens");
+/// A library in `root` with one song of big FL Studio saves in music/Song: each save's name and when it was written,
+/// in seconds after a fixed time, as the library lists it, with its file written. Gives the library, the music folder
+/// and the saves' files.
+fn one_song(root: &Path, saves: &[(&str, i64)]) -> (Library, PathBuf, Vec<PathBuf>) {
+    const BIG: usize = 6 << 20;
     let music = root.join("music");
     let song = music.join("Song");
-    // Three big saves in one sitting. The one the song opens is its highest-numbered one, but its second was saved
-    // again after it, so by time alone the third is from the middle of the sitting.
-    let (first, opens, newest) = (song.join("Song.flp"), song.join("Song_3.flp"), song.join("Song_2.flp"));
-    const BIG: usize = 6 << 20;
-    write(&first, &vec![1; BIG]);
-    write(&opens, &vec![3; BIG]);
-    write(&newest, &vec![2; BIG]);
     let db = root.join("library.db");
     let c = Connection::open(&db).unwrap();
     c.execute_batch(
@@ -257,35 +252,63 @@ fn the_save_a_song_opens_goes_even_when_by_time_its_from_the_middle_of_a_sitting
          CREATE TABLE samples (project_id INTEGER, path TEXT, found INTEGER);",
     )
     .unwrap();
-    for (id, path, minutes) in [(1, &first, 0), (2, &opens, 10), (3, &newest, 20)] {
+    let mut files = Vec::new();
+    for (id, (name, seconds)) in (1i64..).zip(saves) {
+        let path = song.join(format!("{name}.flp"));
+        write(&path, &vec![u8::try_from(id).unwrap(); BIG]);
         c.execute(
             "INSERT INTO projects (id, path, name, daw, folder, size, mtime) VALUES (?1, ?2, ?3, 'FL Studio', ?4, ?5, ?6)",
             rusqlite::params![
                 id,
                 path.display().to_string(),
-                path.file_stem().unwrap().to_string_lossy(),
+                name,
                 song.display().to_string(),
                 BIG as i64,
-                1_760_000_000 + minutes * 60,
+                1_760_000_000 + seconds
             ],
         )
         .unwrap();
+        files.push(path);
     }
     drop(c);
-    let lib = Library::open_read_only(&db).unwrap();
+    (Library::open_read_only(&db).unwrap(), music, files)
+}
+
+/// What a backup of `music` at `level` takes, to a drive in `root`.
+fn backed_up(lib: &Library, root: &Path, music: &Path, level: Level) -> Vec<PathBuf> {
     let backup = root.join("backup");
     fs::create_dir_all(&backup).unwrap();
-    let stop = AtomicBool::new(false);
+    let settings = Settings {
+        drive: Some(backup),
+        level,
+        folders: vec![Folder { path: music.to_owned(), mode: Mode::Slimmed }],
+        ..Settings::default()
+    };
+    prepare(lib, &settings, &AtomicBool::new(false)).unwrap().plan.copy.into_iter().map(|f| f.path).collect()
+}
+
+#[test]
+fn the_save_a_song_opens_goes_even_when_by_time_its_from_the_middle_of_a_sitting() {
+    let root = fixtures("backup-screen-opens");
+    // Three big saves in one sitting, ten minutes apart. The one the song opens is its highest-numbered one, but its
+    // second was saved again after it, so by time alone the third is from the middle of the sitting.
+    let (lib, music, saves) = one_song(&root, &[("Song", 0), ("Song_3", 600), ("Song_2", 1200)]);
+    let (opens, newest) = (&saves[1], &saves[2]);
     for level in [Level::Slim, Level::Essentials] {
-        let settings = Settings {
-            drive: Some(backup.clone()),
-            level,
-            folders: vec![Folder { path: music.clone(), mode: Mode::Slimmed }],
-            ..Settings::default()
-        };
-        let prepared = prepare(&lib, &settings, &stop).unwrap();
-        let going: Vec<&Path> = prepared.plan.copy.iter().map(|f| f.path.as_path()).collect();
-        assert!(going.contains(&opens.as_path()), "{level:?}: the save the song opens goes");
-        assert!(going.contains(&newest.as_path()), "{level:?}: the newest save goes");
+        let going = backed_up(&lib, &root, &music, level);
+        assert!(going.contains(opens), "{level:?}: the save the song opens goes");
+        assert!(going.contains(newest), "{level:?}: the newest save goes");
+    }
+}
+
+#[test]
+fn a_slim_backup_takes_every_save_a_copy_wrote_at_once() {
+    let root = fixtures("backup-screen-copied");
+    // A copied folder: the copy wrote the song's four big saves a second apart, so their times can't say which were
+    // from the middle of a sitting. Slim leaves out only big saves from the middle of one, so all four go.
+    let (lib, music, saves) = one_song(&root, &[("Song", 0), ("Song_2", 1), ("Song_3", 2), ("Song_4", 3)]);
+    let going = backed_up(&lib, &root, &music, Level::Slim);
+    for save in &saves {
+        assert!(going.contains(save), "{} goes", save.display());
     }
 }

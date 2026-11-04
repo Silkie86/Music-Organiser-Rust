@@ -127,6 +127,11 @@ pub const DEFAULT_KEEP_BACKUPS: usize = 5;
 /// next.
 pub const DEFAULT_SITTING_HOURS: u32 = 3;
 
+/// Two of a song's saves written less than this many seconds apart weren't both saved by you: copying the song's
+/// folder writes every save at once and gives each the copy's time (as does fixing several saves at once). Their times
+/// can't say which sitting they were saved in, so thinning leaves them be.
+pub const COPY_SECONDS: i64 = 60;
+
 /// Your choices for Compact (Settings).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CompactSettings {
@@ -331,7 +336,8 @@ fn relative_parts(dir: &Path, path: &Path) -> Vec<String> {
 /// The saves thinning would remove (Solomon's F12 note, 26 Oct: "thin the older saves so the first one and the most
 /// important ones are kept, the ones after a flurry of saves"). Saves less than `sitting_hours` apart make one
 /// sitting; the last save of each sitting stays, as do the very first save and the newest (the one [`measure`] keeps,
-/// even when another was written at the same moment).
+/// even when another was written at the same moment). Beyond the C# app, a save written by a copy (less than
+/// [`COPY_SECONDS`] from another) stays, and so does the save before one: their times aren't when you saved them.
 pub fn thin(saves: &[SongSave], sitting_hours: u32) -> Vec<&SongSave> {
     if sitting_hours == 0 || saves.len() < 3 {
         return Vec::new();
@@ -341,11 +347,19 @@ pub fn thin(saves: &[SongSave], sitting_hours: u32) -> Vec<&SongSave> {
     // Stable, as .NET's OrderBy: saves written at the same moment keep their order.
     ordered.sort_by_key(|s| s.modified);
     let gap = TimeDelta::hours(i64::from(sitting_hours));
+    let copy = TimeDelta::seconds(COPY_SECONDS);
+    // Sorted, a save a copy wrote is less than COPY_SECONDS from the one before or after it.
+    let close: Vec<bool> = ordered.windows(2).map(|w| matches!(w, [a, b] if b.modified - a.modified < copy)).collect();
+    let copied =
+        |i: usize| i.checked_sub(1).is_some_and(|j| close.get(j) == Some(&true)) || close.get(i) == Some(&true);
     ordered
         .windows(2)
+        .enumerate()
         .skip(1)
-        .filter_map(|w| match w {
-            [a, b] if b.modified - a.modified < gap && key(&a.path) != newest => Some(*a),
+        .filter_map(|(i, w)| match w {
+            [a, b] if !copied(i) && !copied(i + 1) && b.modified - a.modified < gap && key(&a.path) != newest => {
+                Some(*a)
+            }
             _ => None,
         })
         .collect()
