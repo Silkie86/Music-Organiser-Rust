@@ -347,8 +347,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_parts_gallery(false);
 
     // Activity cards: one going, one that can't say how far it is yet, one done and one failed, plus one put away.
-    let going = feed.start("Reading new FL saves", "");
-    going.progress(0.4, Some("212 of 540"));
+    // The one going has a title too long for a line, so its card must wrap it.
+    let going = feed.start(mo_app::space_bitwig::LOOKING, "");
+    going.progress(0.4, Some("148 of 371 projects"));
     let _starting = feed.start("Analysing sounds", "Getting ready");
     feed.start("Finding missing samples", "").done("All 31 found");
     feed.start("Copying Bitwig template", "").failed("The template folder isn't there any more");

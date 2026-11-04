@@ -29,32 +29,50 @@ component ActivityCard inherits Rectangle {
     drop-shadow-blur: 18px;
     drop-shadow-color: Theme.shadow;
     drop-shadow-offset-y: 6px;
+    // How wide the words are: inside the padding, and the title beside the dot and the ×. Worked out here, not left to
+    // the layouts: the column of cards measures each card before its layouts say how wide things are, so a title or
+    // detail that wraps would count as one line there.
+    property <length> inside: root.width - Space.md - Space.sm;
+    property <length> title-width: root.inside - 8px - 2 * Space.sm - 20px;
     VerticalLayout {
         padding: Space.md;
         padding-right: Space.sm;
         spacing: Space.sm;
+        // The title wraps rather than being cut off (Solomon's note, 4 Nov 2026: "Finding Bitwig's copies of your
+        // Libr…"). The dot and the × stay beside its first line.
         HorizontalLayout {
             spacing: Space.sm;
-            Rectangle {
-                width: 8px;
-                height: 8px;
-                y: (parent.height - self.height) / 2;
-                border-radius: 4px;
-                background: root.mark;
+            VerticalLayout {
+                alignment: start;
+                // As tall as a line of the title (and the ×), with the dot in its middle.
+                Rectangle {
+                    width: 8px;
+                    height: 20px;
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: root.mark;
+                    }
+                }
             }
             Text {
+                width: root.title-width;
                 text: root.card.title;
                 color: Theme.text;
                 font-size: Type.body;
                 font-weight: 500;
-                overflow: elide;
-                horizontal-stretch: 1;
+                wrap: word-wrap;
             }
-            CloseButton {
-                clicked => { root.dismiss(); }
+            VerticalLayout {
+                alignment: start;
+                CloseButton {
+                    clicked => { root.dismiss(); }
+                }
             }
         }
         if root.card.detail != "": Text {
+            width: root.inside;
             text: root.card.detail;
             color: Theme.muted;
             font-size: Type.meta;
@@ -90,6 +108,8 @@ export component ActivityCards inherits VerticalLayout {
     spacing: Space.sm;
     alignment: end;
     for c in root.cards: ActivityCard {
+        // Given, not left to the column, so each card knows how wide it is when the column measures it.
+        width: root.width;
         card: c;
         dismiss => { root.dismiss(c.id); }
     }
