@@ -690,15 +690,13 @@ export component MenuCard inherits Rectangle {
     }
 }
 
-// A chip that picks one of a list, like "DAW: FL Studio". "Any" clears it. In its menu the one that's picked is
-// ticked, and a list longer than 16 lines scrolls (with the wheel over it, or its bar).
-export component MenuChip inherits Rectangle {
+// The look of a chip that opens a menu: its name, with what's picked after it ("DAW: FL Studio"), lit while
+// something is, and a small arrow. MenuChip and PicksChip share it, so the two always look the same.
+component MenuChipFace inherits Rectangle {
     in property <string> name;
+    // What's picked, as the chip says it after its name; "" for none.
     in property <string> value;
-    in property <[string]> choices;
-    // Whether the menu starts with "Any" (which picks ""); off for a chip that always has a value.
-    in property <bool> has-any: true;
-    callback picked(string);
+    callback clicked;
     width: label.preferred-width + 34px;
     height: 28px;
     border-radius: 14px;
@@ -726,8 +724,18 @@ export component MenuChip inherits Rectangle {
         stroke-width: 1.5px;
     }
     touch := TouchArea {
-        clicked => { menu.show(); }
+        clicked => { root.clicked(); }
     }
+}
+
+// A chip that picks one of a list, like "DAW: FL Studio". "Any" clears it. In its menu the one that's picked is
+// ticked, and a list longer than 16 lines scrolls (with the wheel over it, or its bar).
+export component MenuChip inherits MenuChipFace {
+    in property <[string]> choices;
+    // Whether the menu starts with "Any" (which picks ""); off for a chip that always has a value.
+    in property <bool> has-any: true;
+    callback picked(string);
+    clicked => { menu.show(); }
     menu := PopupWindow {
         x: 0;
         y: root.height + 4px;
@@ -778,46 +786,15 @@ export struct FilterView {
     more-picked: string,
 }
 
-// A chip whose menu can pick more than one, like "Part: Bass + 2". Each picked line is ticked, with its count at the
-// right; a click picks or unpicks a line and the menu stays open for the next. "Any" picks none and closes it. A list
-// longer than 16 lines scrolls, and only the lines in sight are made, as in MenuChip's menu.
-export component PicksChip inherits Rectangle {
-    in property <string> name;
-    // What's picked, as the chip says it after its name; "" for none.
-    in property <string> value;
+// A chip whose menu can pick more than one, like "Plugin: Serum + 2". Each picked line is ticked, with its count at
+// the right; a click picks or unpicks a line and the menu stays open for the next. "Any" picks none and closes it. A
+// list longer than 16 lines scrolls, and only the lines in sight are made, as in MenuChip's menu.
+export component PicksChip inherits MenuChipFace {
     in property <[FilterChoice]> choices;
-    // A line was picked or unpicked (its place), or Any was.
-    callback toggled(int);
+    // A line was picked or unpicked (its words), or Any was.
+    callback toggled(string);
     callback cleared();
-    width: label.preferred-width + 34px;
-    height: 28px;
-    border-radius: 14px;
-    border-width: 1px;
-    border-color: value != "" ? Theme.accent : Theme.edge;
-    background: value != "" ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
-    label := Text {
-        x: 12px;
-        text: root.value == "" ? root.name : root.name + ": " + root.value;
-        color: root.value != "" ? Theme.text : Theme.muted;
-        font-size: Type.meta;
-        font-weight: 500;
-        vertical-alignment: center;
-        height: parent.height;
-    }
-    Path {
-        x: parent.width - 18px;
-        y: (parent.height - 6px) / 2;
-        width: 8px;
-        height: 6px;
-        viewbox-width: 8;
-        viewbox-height: 6;
-        commands: "M 1 1 L 4 4.5 L 7 1";
-        stroke: Theme.muted;
-        stroke-width: 1.5px;
-    }
-    touch := TouchArea {
-        clicked => { menu.show(); }
-    }
+    clicked => { menu.show(); }
     menu := PopupWindow {
         x: 0;
         y: root.height + 4px;
@@ -836,12 +813,12 @@ export component PicksChip inherits Rectangle {
             }
             if root.choices.length > 0: ListView {
                 height: min(root.choices.length, 16) * 32px;
-                for c[i] in root.choices: MenuLine {
+                for c in root.choices: MenuLine {
                     text: c.text;
                     key: c.count;
                     on: c.on;
                     tickable: true;
-                    clicked => { root.toggled(i); }
+                    clicked => { root.toggled(c.text); }
                 }
             }
         }
@@ -855,8 +832,8 @@ export component PicksChip inherits Rectangle {
 export component FilterPicks inherits HorizontalLayout {
     in property <string> name;
     in property <FilterView> filter;
-    // A choice was picked or unpicked: its place, the chips first, then the menu's lines.
-    callback toggled(int);
+    // A choice was picked or unpicked: its words, as its chip or menu line says them.
+    callback toggled(string);
     // The menu's Any.
     callback cleared();
     spacing: Space.sm;
@@ -867,16 +844,16 @@ export component FilterPicks inherits HorizontalLayout {
         font-size: Type.meta;
         vertical-alignment: center;
     }
-    for c[i] in root.filter.chips: ToggleChip {
+    for c in root.filter.chips: ToggleChip {
         text: c.count == "" ? c.text : c.text + "  " + c.count;
         on: c.on;
-        clicked => { root.toggled(i); }
+        clicked => { root.toggled(c.text); }
     }
     if root.filter.more.length > 0: PicksChip {
         name: root.name;
         value: root.filter.more-picked;
         choices: root.filter.more;
-        toggled(i) => { root.toggled(root.filter.chips.length + i); }
+        toggled(text) => { root.toggled(text); }
         cleared => { root.cleared(); }
     }
 }

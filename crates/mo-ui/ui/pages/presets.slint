@@ -102,9 +102,9 @@ export global PresetsData {
     in property <string> song;
     in property <bool> any-filter;
     in property <bool> unused;
-    // A filter's choice was picked or unpicked: which filter ("part", "maker", "type", "plugin", "from") and the
-    // choice's place in it; or its menu's Any was.
-    callback toggle(string, int);
+    // A filter's choice was picked or unpicked: which filter ("part", "maker", "type", "plugin", "from", or the
+    // Curves section's "found-in") and the choice's words; or its menu's Any was.
+    callback toggle(string, string);
     callback clear-chip(string);
     callback clear();
     callback clear-song();
@@ -604,34 +604,35 @@ export component PresetsPage inherits Rectangle {
         if PresetsData.section == 0: FlexboxLayout {
             spacing: Space.md;
             vertical-stretch: 0;
-            FilterPicks {
-                name: "Part";
-                filter: PresetsData.part-filter;
-                toggled(at) => { PresetsData.toggle("part", at); }
-                cleared => { PresetsData.clear-chip("part"); }
-            }
+            // The plugins first: a menu, so its chip stays in one place whatever the parts' chips say.
             FilterPicks {
                 name: "Plugin";
                 filter: PresetsData.plugin-filter;
-                toggled(at) => { PresetsData.toggle("plugin", at); }
+                toggled(text) => { PresetsData.toggle("plugin", text); }
                 cleared => { PresetsData.clear-chip("plugin"); }
+            }
+            FilterPicks {
+                name: "Part";
+                filter: PresetsData.part-filter;
+                toggled(text) => { PresetsData.toggle("part", text); }
+                cleared => { PresetsData.clear-chip("part"); }
             }
             FilterPicks {
                 name: "Made by";
                 filter: PresetsData.maker-filter;
-                toggled(at) => { PresetsData.toggle("maker", at); }
+                toggled(text) => { PresetsData.toggle("maker", text); }
                 cleared => { PresetsData.clear-chip("maker"); }
             }
             FilterPicks {
                 name: "Type";
                 filter: PresetsData.type-filter;
-                toggled(at) => { PresetsData.toggle("type", at); }
+                toggled(text) => { PresetsData.toggle("type", text); }
                 cleared => { PresetsData.clear-chip("type"); }
             }
             FilterPicks {
                 name: "From";
                 filter: PresetsData.from-filter;
-                toggled(at) => { PresetsData.toggle("from", at); }
+                toggled(text) => { PresetsData.toggle("from", text); }
                 cleared => { PresetsData.clear-chip("from"); }
             }
             // On the page, not in an options menu (Solomon, 4 Nov 2026: nothing useful hidden away). Clear leaves it.
@@ -657,7 +658,7 @@ export component PresetsPage inherits Rectangle {
             FilterPicks {
                 name: "Found in";
                 filter: PresetsData.curve-found-in;
-                toggled(at) => { PresetsData.toggle("found-in", at); }
+                toggled(text) => { PresetsData.toggle("found-in", text); }
                 cleared => { PresetsData.clear-chip("found-in"); }
             }
             ToggleChip {

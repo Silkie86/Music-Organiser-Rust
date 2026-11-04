@@ -38,6 +38,7 @@ use mo_presets::library::{self as plib, Source};
 use mo_presets::role::{Role, Thresholds};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel, Weak};
 
+use crate::filters::FilterModels;
 use crate::{
     ActionKey, AppWindow, CardAction, CurveCardInfo, CurveLineInfo, CurvePlace, MenuItem, PartChip, PresetCard,
     PresetFact, PresetLine, PresetsData, YearBar,
@@ -58,7 +59,7 @@ struct Page {
     years: Vec<(i32, usize)>,
     /// The plugins in the list, most used first, each with how many lines it has.
     plugins: Vec<(String, usize)>,
-    /// The filters as their chips and menus show them now, to tell which choice a click was on.
+    /// The filters as their chips and menus show them now.
     chips: logic::FilterChips,
     songs: usize,
     files: usize,
@@ -99,7 +100,19 @@ thread_local! {
     static PAGE: RefCell<Page> = RefCell::default();
     static LINES: Rc<Lines> = Rc::new(Lines::default());
     static CURVE_LINES: Rc<CurveLines> = Rc::new(CurveLines::default());
+    static FILTER_MODELS: ChipModels = ChipModels::default();
     static APP: RefCell<Option<Weak<AppWindow>>> = const { RefCell::new(None) };
+}
+
+/// The filters' chips and menus on screen, kept from one showing to the next.
+#[derive(Default)]
+struct ChipModels {
+    part: FilterModels,
+    plugin: FilterModels,
+    maker: FilterModels,
+    kind: FilterModels,
+    from: FilterModels,
+    found_in: FilterModels,
 }
 
 /// The sounds list, made a line at a time as the list asks.
@@ -184,6 +197,9 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         p.data_dir = mo_app::paths::data_dir();
         p.feed = feed;
         p.shortcuts = shortcuts.clone();
+        // The filters show from the start, before any song is read (with no lines, each choice counts none).
+        refilter(&mut p);
+        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
     });
     wire(app);
 }
@@ -221,18 +237,13 @@ fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
-    // A filter's choice was picked or unpicked, by its place among the filter's chips and menu lines on show.
-    data.on_toggle(move |chip, at| {
+    // A filter's choice was picked or unpicked, by its words.
+    data.on_toggle(move |chip, choice| {
         let Some(app) = weak.upgrade() else { return };
-        let choice = PAGE.with(|p| {
-            let p = p.borrow();
-            let filter = if chip == logic::FOUND_IN { &p.curve_found_in } else { p.chips.get(&chip)? };
-            mo_app::filters::choice_at(filter, usize::try_from(at).ok()?).map(str::to_owned)
-        });
-        match choice {
-            Some(choice) if chip == logic::FOUND_IN => change_curves(&app, |f| f.toggle_kind(&choice)),
-            Some(choice) => change(&app, |f| f.toggle(&chip, &choice)),
-            None => {}
+        if chip == logic::FOUND_IN {
+            change_curves(&app, |f| f.toggle_kind(&choice));
+        } else {
+            change(&app, |f| f.toggle(&chip, &choice));
         }
     });
     let weak = app.as_weak();
@@ -419,11 +430,14 @@ fn show_all(app: &AppWindow) {
             data.set_search(search.as_str().into());
         }
         let f = &p.filters;
-        data.set_part_filter(crate::filters::view(&p.chips.part));
-        data.set_plugin_filter(crate::filters::view(&p.chips.plugin));
-        data.set_maker_filter(crate::filters::view(&p.chips.maker));
-        data.set_type_filter(crate::filters::view(&p.chips.kind));
-        data.set_from_filter(crate::filters::view(&p.chips.from));
+        FILTER_MODELS.with(|m| {
+            data.set_part_filter(m.part.view(&p.chips.part));
+            data.set_plugin_filter(m.plugin.view(&p.chips.plugin));
+            data.set_maker_filter(m.maker.view(&p.chips.maker));
+            data.set_type_filter(m.kind.view(&p.chips.kind));
+            data.set_from_filter(m.from.view(&p.chips.from));
+            data.set_curve_found_in(m.found_in.view(&p.curve_found_in));
+        });
         data.set_song(
             f.song
                 .as_ref()
@@ -452,7 +466,6 @@ fn show_all(app: &AppWindow) {
         data.set_exporting(p.exporting);
 
         // The curves.
-        data.set_curve_found_in(crate::filters::view(&p.curve_found_in));
         data.set_curve_hidden(p.curve_filters.hidden);
         data.set_curves_shown(p.curve_shown.len() as i32);
         let (title, text) = logic::curves_empty(

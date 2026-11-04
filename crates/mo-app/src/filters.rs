@@ -27,8 +27,8 @@ pub struct Filter {
 }
 
 /// Shows `choices`, each with its count ("" for none), with the ones in `picked` on: each as a chip of its own when
-/// there are [`CHIPS_UP_TO`] or fewer, otherwise all in the menu. A pick is matched without minding capitals, as the
-/// lists it filters are.
+/// there are [`CHIPS_UP_TO`] or fewer, otherwise all in the menu. A pick is matched without minding capitals (ASCII
+/// ones, as the lists it filters match). The menu's chip names the first one picked, whatever order the menu is in.
 pub fn show(choices: &[(String, String)], picked: &[String]) -> Filter {
     let is_picked = |text: &str| picked.iter().any(|p| p.eq_ignore_ascii_case(text));
     let shown: Vec<Shown> = choices
@@ -38,7 +38,11 @@ pub fn show(choices: &[(String, String)], picked: &[String]) -> Filter {
     if shown.len() <= CHIPS_UP_TO {
         return Filter { chips: shown, ..Filter::default() };
     }
-    let on: Vec<&str> = shown.iter().filter(|s| s.on).map(|s| s.text.as_str()).collect();
+    // In the order they were picked, as the menu shows them.
+    let on: Vec<&str> = picked
+        .iter()
+        .filter_map(|p| shown.iter().find(|s| s.text.eq_ignore_ascii_case(p)).map(|s| s.text.as_str()))
+        .collect();
     Filter { more_picked: picked_words(&on), more: shown, chips: Vec::new() }
 }
 
@@ -52,7 +56,7 @@ pub fn picked_words(picked: &[&str]) -> String {
 }
 
 /// Picks or unpicks `choice`. With `many`, it joins or leaves the ones picked; alone, it becomes the only one, or none
-/// when it was the one already.
+/// when it was the one already. Every filter picks through this, so they all pick the same way.
 pub fn toggle(picked: &mut Vec<String>, choice: &str, many: bool) {
     let was = picked.iter().position(|p| p.eq_ignore_ascii_case(choice));
     match (was, many) {
@@ -65,9 +69,18 @@ pub fn toggle(picked: &mut Vec<String>, choice: &str, many: bool) {
     }
 }
 
-/// The choice at `at` in a filter shown by [`show`]: its chips first, then its menu's lines.
-pub fn choice_at(filter: &Filter, at: usize) -> Option<&str> {
-    filter.chips.iter().chain(&filter.more).nth(at).map(|s| s.text.as_str())
+/// [`toggle`] for a filter that keeps its picks as values, not words: `words` says each value's words, and
+/// `from_words` turns words back into a value (`None` for words that aren't one of its choices).
+pub fn toggle_as<T: Copy>(
+    picked: &mut Vec<T>,
+    choice: &str,
+    many: bool,
+    words: impl Fn(T) -> &'static str,
+    from_words: impl Fn(&str) -> Option<T>,
+) {
+    let mut as_words: Vec<String> = picked.iter().map(|&p| words(p).to_owned()).collect();
+    toggle(&mut as_words, choice, many);
+    *picked = as_words.iter().filter_map(|w| from_words(w)).collect();
 }
 
 #[cfg(test)]
@@ -85,12 +98,11 @@ mod tests {
         assert!(short.more.is_empty() && short.more_picked.is_empty());
         // One more than there's room for: all in the menu.
         let plugins: Vec<(String, String)> = (0..=CHIPS_UP_TO).map(|n| (format!("Synth {n}"), String::new())).collect();
-        let long = show(&plugins, &["Synth 1".to_owned(), "synth 3".to_owned()]);
+        let long = show(&plugins, &["synth 3".to_owned(), "Synth 1".to_owned()]);
         assert!(long.chips.is_empty());
         assert_eq!(long.more.iter().filter(|c| c.on).count(), 2);
-        assert_eq!(long.more_picked, "Synth 1 + 1");
-        assert_eq!(choice_at(&long, 3), Some("Synth 3"));
-        assert_eq!(choice_at(&long, CHIPS_UP_TO + 1), None);
+        // The chip names the first one picked, in the menu's own words.
+        assert_eq!(long.more_picked, "Synth 3 + 1");
         // As many as there's room for: all chips.
         assert_eq!(show(&plugins[..CHIPS_UP_TO], &[]).chips.len(), CHIPS_UP_TO);
     }
@@ -115,5 +127,15 @@ mod tests {
         assert_eq!(picked, ["Synths"]);
         toggle(&mut picked, "Synths", false);
         assert!(picked.is_empty());
+        // The same for picks kept as values.
+        let words = |n: u8| ["Zero", "One", "Two"][usize::from(n)];
+        let from_words = |w: &str| (0..3).find(|&n| words(n) == w);
+        let mut values = vec![1u8];
+        toggle_as(&mut values, "Two", true, words, from_words);
+        assert_eq!(values, [1, 2]);
+        toggle_as(&mut values, "Zero", false, words, from_words);
+        assert_eq!(values, [0]);
+        toggle_as(&mut values, "Zero", false, words, from_words);
+        assert!(values.is_empty());
     }
 }

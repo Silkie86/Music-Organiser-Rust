@@ -310,6 +310,18 @@ impl PartPick {
     }
 }
 
+/// Picks or unpicks a one-or-none filter's choice, kept as a value whose default (All) means none picked.
+fn toggle_one<T: Copy + Default + PartialEq>(
+    value: &mut T,
+    choice: &str,
+    words: impl Fn(T) -> &'static str,
+    from_words: impl Fn(&str) -> T,
+) {
+    let mut picked: Vec<T> = if *value == T::default() { Vec::new() } else { vec![*value] };
+    chips::toggle_as(&mut picked, choice, false, words, |w| Some(from_words(w)).filter(|v| *v != T::default()));
+    *value = picked.first().copied().unwrap_or_default();
+}
+
 /// The maker chip's words. A song's sounds come from FL Studio and Bitwig, so "the DAW's own" covers both.
 pub fn maker_label(m: Maker) -> &'static str {
     match m {
@@ -369,25 +381,13 @@ impl Filters {
     /// [`MAKER`], [`TYPE`], [`FROM`]). More than one part or plugin can be picked; the maker, the type and where the
     /// sounds are from are one or none, as each has only two choices.
     pub fn toggle(&mut self, chip: &str, choice: &str) {
+        let part = |l: &str| Some(PartPick::from_label(l)).filter(|p| *p != PartPick::Any);
         match chip {
-            PART => {
-                let mut picked: Vec<String> = self.parts.iter().map(|p| p.label().to_owned()).collect();
-                chips::toggle(&mut picked, choice, true);
-                self.parts = picked.iter().map(|l| PartPick::from_label(l)).filter(|p| *p != PartPick::Any).collect();
-            }
+            PART => chips::toggle_as(&mut self.parts, choice, true, PartPick::label, part),
             PLUGIN => chips::toggle(&mut self.plugins, choice, true),
-            MAKER => {
-                let picked = maker_from(choice);
-                self.choice.maker = if self.choice.maker == picked { Maker::All } else { picked };
-            }
-            TYPE => {
-                let picked = type_from(choice);
-                self.choice.kind = if self.choice.kind == picked { Type::All } else { picked };
-            }
-            FROM => {
-                let picked = From::from_label(choice);
-                self.from = if self.from == picked { From::All } else { picked };
-            }
+            MAKER => toggle_one(&mut self.choice.maker, choice, maker_label, maker_from),
+            TYPE => toggle_one(&mut self.choice.kind, choice, type_label, type_from),
+            FROM => toggle_one(&mut self.from, choice, From::label, From::from_label),
             _ => {}
         }
     }
@@ -474,7 +474,7 @@ pub struct ChoiceCounts {
     pub parts: Vec<usize>,
     pub songs: usize,
     pub files: usize,
-    /// By plugin, its name in lower case.
+    /// By plugin, its name in lower case (ASCII letters only, as the plugin filter matches).
     pub plugins: HashMap<String, usize>,
 }
 
@@ -510,7 +510,7 @@ pub fn counts(items: &[Item], f: &Filters) -> ChoiceCounts {
         }
     }
     for (name, n) in by_plugin {
-        *c.plugins.entry(name.to_lowercase()).or_default() += n;
+        *c.plugins.entry(name.to_ascii_lowercase()).or_default() += n;
     }
     c
 }
@@ -551,31 +551,17 @@ pub struct FilterChips {
     pub plugin: Filter,
 }
 
-impl FilterChips {
-    /// The filter called `chip`.
-    pub fn get(&self, chip: &str) -> Option<&Filter> {
-        match chip {
-            MAKER => Some(&self.maker),
-            TYPE => Some(&self.kind),
-            FROM => Some(&self.from),
-            PART => Some(&self.part),
-            PLUGIN => Some(&self.plugin),
-            _ => None,
-        }
-    }
-}
-
 pub fn filter_chips(c: &ChoiceCounts, plugins: &[(String, usize)], f: &Filters) -> FilterChips {
     let one = |label: &str| if label.is_empty() { Vec::new() } else { vec![label.to_owned()] };
     let from = [(From::Songs, c.songs), (From::Files, c.files)].map(|(w, n)| (w.label().to_owned(), thousands(n)));
     let parts: Vec<(String, String)> =
         PartPick::choices().into_iter().zip(&c.parts).map(|(l, n)| (l.to_owned(), thousands(*n))).collect();
-    // The plugins that would show the most lines first; the same, the most used first, as `plugins` has them.
+    // The most used first, as `plugins` has them: an order the other filters don't change, so a line doesn't move
+    // under the mouse when they do.
     let mut by_plugin: Vec<(String, usize)> = plugins
         .iter()
-        .map(|(name, _)| (name.clone(), c.plugins.get(&name.to_lowercase()).copied().unwrap_or(0)))
+        .map(|(name, _)| (name.clone(), c.plugins.get(&name.to_ascii_lowercase()).copied().unwrap_or(0)))
         .collect();
-    by_plugin.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     // One picked that no line has any more (after a new look at the songs) stays, to be unpicked.
     for gone in f.plugins.iter().filter(|p| !plugins.iter().any(|(name, _)| name.eq_ignore_ascii_case(p))) {
         by_plugin.push((gone.clone(), 0));
@@ -593,10 +579,11 @@ pub fn filter_chips(c: &ChoiceCounts, plugins: &[(String, usize)], f: &Filters) 
 }
 
 /// The plugins in the list, most used first (ties by name), each with how many lines it has; for the plugin chip.
+/// Names that differ only in ASCII capitals are one plugin, as the plugin filter matches them.
 pub fn plugins(items: &[Item]) -> Vec<(String, usize)> {
     let mut by: HashMap<String, (String, usize)> = HashMap::new();
     for i in items.iter().filter(|i| !i.row.plugin.is_empty()) {
-        by.entry(i.row.plugin.to_lowercase()).or_insert_with(|| (i.row.plugin.clone(), 0)).1 += 1;
+        by.entry(i.row.plugin.to_ascii_lowercase()).or_insert_with(|| (i.row.plugin.clone(), 0)).1 += 1;
     }
     let mut out: Vec<(String, usize)> = by.into_values().collect();
     out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
@@ -1083,13 +1070,7 @@ impl CurveFilters {
 
     /// Picks or unpicks a way curves are found, by its words: more than one can be picked.
     pub fn toggle_kind(&mut self, label: &str) {
-        let Some(k) = kind_from(label) else { return };
-        match self.kinds.iter().position(|&picked| picked == k) {
-            Some(at) => {
-                self.kinds.remove(at);
-            }
-            None => self.kinds.push(k),
-        }
+        chips::toggle_as(&mut self.kinds, label, true, kind_label, kind_from);
     }
 }
 
@@ -1471,14 +1452,16 @@ mod tests {
             c.chips.iter().chain(&c.more).map(|s| (s.text.clone(), s.count.clone(), s.on)).collect()
         };
         assert!(counted(&shown.from).iter().all(|(_, n, _)| n == "0"));
-        assert_eq!(counted(&shown.plugin)[0], ("Polysynth".to_owned(), "1".to_owned(), false));
+        // The most used first (Serum), whatever the counts say now.
+        let plugin = counted(&shown.plugin);
+        assert_eq!(plugin[0], ("Serum".to_owned(), "0".to_owned(), false));
+        assert!(plugin.contains(&("Polysynth".to_owned(), "1".to_owned(), false)));
         // A picked plugin that no line has (after a new look at the songs) stays on show, picked, to be unpicked.
         assert!(counted(&shown.plugin).contains(&("Vital".to_owned(), "0".to_owned(), true)));
         // The parts fit as chips of their own (there's room for them all), the two picked ones lit.
         assert!(shown.part.more.is_empty() && shown.part.chips.len() == Role::ALL.len() + 1);
         let lit: Vec<&str> = shown.part.chips.iter().filter(|c| c.on).map(|c| c.text.as_str()).collect();
         assert_eq!(lit, [Role::Bass.label(), NO_PART]);
-        assert_eq!(shown.get(PART), Some(&shown.part));
         f.clear_chip(PART);
         assert!(f.parts.is_empty() && f.any());
         f.clear_chip(PLUGIN);
