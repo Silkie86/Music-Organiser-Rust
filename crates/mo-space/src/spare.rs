@@ -286,12 +286,89 @@ fn still_the_copy(copy: &SpareCopy, stop: &AtomicBool) -> Result<(), String> {
     }
 }
 
-/// Whether two families are the same plugin: equal, or one with its maker in front of the other ("fabfilterproq" and
-/// "proq") when both are at least four letters. C# took one anywhere inside the other, which gave "Serum FX" Serum's
-/// projects.
-fn close(a: &str, b: &str) -> bool {
-    a == b || (a.chars().count() >= 4 && b.chars().count() >= 4 && (a.ends_with(b) || b.ends_with(a)))
+/// Whether a family your projects use (`used`) is the installed one (`installed`): equal, or one with its maker in
+/// front of the other ("fabfilterproq" and "proq") when both are at least four letters. Text in front of the installed
+/// name in a project counts whatever it is (it's nearly always the maker, and counting it only keeps more copies). Text
+/// in front of the used name in the installed one must be a maker's name ([`MAKERS`]): "Valhalla Supermassive" isn't
+/// NI's Massive. C# took one anywhere inside the other, which gave "Serum FX" Serum's projects.
+fn close(used: &str, installed: &str) -> bool {
+    if used == installed {
+        return true;
+    }
+    if used.chars().count() < 4 || installed.chars().count() < 4 {
+        return false;
+    }
+    used.ends_with(installed) || installed.strip_suffix(used).is_some_and(|maker| MAKERS.contains(&maker))
 }
+
+/// Makers whose name a project or an installed file may put in front of a plugin's ("FabFilter Pro-Q 3", "Xfer
+/// Serum"), as [`crate::plugins::family`] spells them: small letters and digits only.
+const MAKERS: [&str; 64] = [
+    "acustica",
+    "acusticaaudio",
+    "air",
+    "airmusic",
+    "arturia",
+    "audiothing",
+    "babyaudio",
+    "bitwig",
+    "bx",
+    "brainworx",
+    "cableguys",
+    "d16",
+    "d16group",
+    "eventide",
+    "fabfilter",
+    "goodhertz",
+    "ik",
+    "ikmultimedia",
+    "imageline",
+    "izotope",
+    "kilohearts",
+    "lennardigital",
+    "melda",
+    "meldaproduction",
+    "native",
+    "nativeinstruments",
+    "ni",
+    "oeksound",
+    "output",
+    "pluginalliance",
+    "polyverse",
+    "presonus",
+    "refx",
+    "revealsound",
+    "robpapen",
+    "slate",
+    "slatedigital",
+    "softube",
+    "solidstatelogic",
+    "sonnox",
+    "soundtoys",
+    "spectrasonics",
+    "spitfire",
+    "spitfireaudio",
+    "ssl",
+    "steinberg",
+    "sugarbytes",
+    "tal",
+    "tdr",
+    "tokyodawn",
+    "tokyodawnlabs",
+    "toguaudioline",
+    "uad",
+    "uhe",
+    "universalaudio",
+    "valhalla",
+    "valhalladsp",
+    "vengeance",
+    "vengeancesound",
+    "vital",
+    "vitalaudio",
+    "waves",
+    "xfer",
+    "xferrecords",
+];
 
 #[cfg(test)]
 mod tests {
@@ -353,6 +430,25 @@ mod tests {
         let spare = find(&files, &used, false, |_| (0, None));
         let names: Vec<(&str, &str)> = spare.iter().map(|s| (s.name.as_str(), s.format.as_str())).collect();
         assert_eq!(names, [("Pro-Q 3", "VST2")]);
+    }
+
+    #[test]
+    fn a_plugin_whose_name_ends_like_another_isnt_that_one() {
+        // Valhalla Supermassive is used by no project; NI's Massive (VST2) by 12. Supermassive's VST3 isn't spare
+        // because of Massive: it belongs on Never used.
+        let files =
+            [file("Valhalla Supermassive", "VST2"), file("Valhalla Supermassive", "VST3"), file("Massive", "VST2")];
+        let massive = used(&[("Massive", &[("VST2", 12)])]);
+        assert!(find(&files, &massive, false, |_| (0, None)).is_empty());
+        // With the maker in front it's the same plugin.
+        let supermassive = used(&[("Supermassive", &[("VST3", 2)])]);
+        let spare = find(&files, &supermassive, false, |_| (0, None));
+        let names: Vec<(&str, &str)> = spare.iter().map(|s| (s.name.as_str(), s.format.as_str())).collect();
+        assert_eq!(names, [("Valhalla Supermassive", "VST2")]);
+        // A project naming the plugin with any maker in front still uses it: its VST2 isn't spare.
+        let files = [file("Pro-Q 3", "VST2"), file("Pro-Q 3", "VST3")];
+        let both = used(&[("Pro-Q 3", &[("VST3", 5)]), ("SomeMaker Pro-Q 3", &[("VST2", 3)])]);
+        assert!(find(&files, &both, false, |_| (0, None)).is_empty());
     }
 
     #[test]
