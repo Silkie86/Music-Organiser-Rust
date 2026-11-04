@@ -301,6 +301,14 @@ impl SoundList {
         shown
     }
 
+    /// History's list: the sounds `played` (places in this list, newest first, each with when) that `filters` let
+    /// through, in the same order. The years picked on the year strip don't count, as History has no year strip.
+    pub fn played<T: Copy>(&self, played: &[(usize, T)], filters: &Filters) -> Vec<(usize, T)> {
+        let no_years = Filters { years: None, ..filters.clone() };
+        let test = Test::new(&no_years);
+        played.iter().copied().filter(|&(i, _)| i < self.shared.sounds.len() && self.allows(i, &test)).collect()
+    }
+
     /// Each type and how many sounds have it, most first (the type chips), counting every sound the list holds.
     pub fn type_counts(&self) -> Vec<(String, usize)> {
         let mut counts: HashMap<&str, usize> = HashMap::new();
@@ -780,6 +788,26 @@ mod tests {
         assert_eq!(by(Filters { bpm_to: Some(100.0), ..Filters::default() }), vec![4]);
         assert_eq!(by(Filters { search: "samples LOOPS".into(), ..Filters::default() }), vec![2]);
         assert_eq!(by(Filters { search: "kick pad".into(), ..Filters::default() }), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn history_lists_what_was_played_that_the_filters_let_through() {
+        let list = library();
+        // Newest first, each with when (a number here), and played more than once.
+        let played: Vec<(usize, u32)> =
+            [(2, 50), (3, 40), (1, 30), (2, 20)].map(|(id, at)| (list.find(id).unwrap(), at)).to_vec();
+        let by = |f: Filters| -> Vec<(i64, u32)> {
+            list.played(&played, &f).into_iter().map(|(i, at)| (list.sound(i).unwrap().id, at)).collect()
+        };
+        assert_eq!(by(Filters::default()), [(2, 50), (3, 40), (1, 30), (2, 20)]);
+        assert_eq!(by(Filters { length: Length::Loops, ..Filters::default() }), [(2, 50), (2, 20)]);
+        assert_eq!(by(Filters { search: "kick".into(), ..Filters::default() }), [(1, 30)]);
+        // The years picked on the year strip don't count: History has no strip.
+        let years = Filters { years: Some((1990, 1991)), favourites: true, ..Filters::default() };
+        assert!(list.view(&years, Order::Name, 0).is_empty());
+        assert_eq!(by(years), [(3, 40)]);
+        // A place that isn't in this list is left out.
+        assert!(list.played(&[(99, 1)], &Filters::default()).is_empty());
     }
 
     #[test]

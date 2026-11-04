@@ -87,6 +87,23 @@ impl Drives for SameDrive {
     }
 }
 
+/// Every folder is on its own drive; the ones in `exfat` hold no links (exFAT drives, say).
+struct NoLinks<'a> {
+    exfat: &'a Path,
+}
+
+impl Drives for NoLinks<'_> {
+    fn same(&self, _a: &Path, _b: &Path) -> bool {
+        false
+    }
+    fn free(&self, _path: &Path) -> Option<u64> {
+        None
+    }
+    fn holds_links(&self, path: &Path) -> bool {
+        !path.starts_with(self.exfat)
+    }
+}
+
 fn nothing(_: u64) {}
 
 fn move_it(from: &Path, to: &Path, all: &[MovedFolder]) -> MovedFolder {
@@ -499,6 +516,66 @@ fn a_file_saved_while_linking_again_goes_in_once() {
     assert_eq!(read(&steam.join("Pad.db")), "pad, saved meanwhile");
     assert_eq!(linked.replaced, ["Pad.db"]);
     assert_eq!(read(&PathBuf::from(&linked.kept.unwrap().path).join("Pad.db")), "pad");
+}
+
+#[test]
+fn linking_again_stopped_before_the_copy_changes_says_nothing_was_moved() {
+    let dir = fixtures("mo-space-after-stopped");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let steam = c.join("STEAM");
+    write(&steam, "Pad.db", "pad");
+    fs::create_dir_all(&d).unwrap();
+    let moved = move_it(&steam, &d, &[]);
+    let all = vec![moved.clone()];
+    unlink(&steam);
+    write(&steam, "Pad.db", "pad 2");
+    write(&steam, "Update.db", "new");
+    // Stop is pressed as the first file is copied: none has gone into the copy yet.
+    let stop = AtomicBool::new(false);
+    let pressed = |_: u64| stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let result = link_again(&moved, &all, 5, false, &OtherDrive, &pressed, &stop);
+    assert_eq!(result.as_ref().err(), Some(&CantMove::Stopped), "{result:?}");
+    let copy = d.join("STEAM");
+    assert_eq!(read(&copy.join("Pad.db")), "pad");
+    assert!(!copy.join("Update.db").exists());
+    assert!(!PathBuf::from(format!("{}{KEPT_BEFORE_SUFFIX}", moved.to)).exists());
+    assert!(!is_link(&steam));
+    // Tried again, it goes through.
+    stop.store(false, std::sync::atomic::Ordering::Relaxed);
+    let linked = link_again(&moved, &all, 5, false, &OtherDrive, &nothing, &stop).unwrap();
+    assert_eq!(linked.replaced, ["Pad.db"]);
+    assert!(is_link(&steam));
+    assert_eq!(read(&steam.join("Update.db")), "new");
+}
+
+#[test]
+fn linking_again_finds_a_link_the_copys_drive_cant_hold_before_the_copy_changes() {
+    let dir = fixtures("mo-space-after-no-links");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let steam = c.join("STEAM");
+    write(&steam, "Pad.db", "pad");
+    fs::create_dir_all(&d).unwrap();
+    let moved = move_it(&steam, &d, &[]);
+    let all = vec![moved.clone()];
+    // The update makes the folder again, with a link to a folder inside it.
+    unlink(&steam);
+    write(&steam, "Pad.db", "pad 2");
+    write(&steam, "Update.db", "new");
+    write(&dir, "Shared/Sounds.db", "sounds");
+    folder_link(&dir.join("Shared"), &steam.join("Shared"));
+    // The copy's drive holds no links (exFAT): that's found while the room is counted, before anything changes.
+    let stop = AtomicBool::new(false);
+    let result = link_again(&moved, &all, 5, false, &NoLinks { exfat: &d }, &nothing, &stop);
+    assert_eq!(result.as_ref().err(), Some(&CantMove::NoLinksThere(s(&steam.join("Shared")))), "{result:?}");
+    let copy = d.join("STEAM");
+    assert_eq!(read(&copy.join("Pad.db")), "pad");
+    assert!(!copy.join("Update.db").exists() && !copy.join("Shared").exists());
+    assert!(!PathBuf::from(format!("{}{KEPT_BEFORE_SUFFIX}", moved.to)).exists());
+    assert!(!is_link(&steam));
+    // Where the drive holds links, the link is made again in the copy.
+    link_again(&moved, &all, 5, false, &OtherDrive, &nothing, &stop).unwrap();
+    assert!(is_link(&steam) && is_link(&copy.join("Shared")));
+    assert_eq!(read(&steam.join("Shared/Sounds.db")), "sounds");
 }
 
 #[test]

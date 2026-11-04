@@ -246,7 +246,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for (name, x, y) in [
         ("tip-rail.png", 60.0, 125.0),
         ("tip-button.png", SHOW_BUTTON.0, SHOW_BUTTON.1),
-        ("tip-date.png", 530.0, 222.0),
+        ("tip-date.png", 530.0, 246.0),
     ] {
         hover(&window, x, y);
         // Before the tip's wait is over, then after: if nothing came up, the mouse missed what it was meant to rest on.

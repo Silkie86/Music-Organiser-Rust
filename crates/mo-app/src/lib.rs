@@ -38,4 +38,5 @@ pub mod themes;
 pub mod tidy;
 pub mod to_bitwig;
 pub mod version;
+pub mod waves;
 pub mod year_strip;

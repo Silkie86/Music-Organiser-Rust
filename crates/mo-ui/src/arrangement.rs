@@ -18,7 +18,7 @@ use mo_app::themes::Look;
 use rayon::prelude::*;
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
 
-use crate::canvas::Canvas;
+use crate::canvas::{Canvas, Kind};
 use crate::gpu;
 use crate::{AppWindow, ArrKind, ArrLabel, ArrangementData};
 
@@ -404,7 +404,7 @@ fn usable_card() -> Option<(gpu::Gpu, u64)> {
 /// A graphics card was handed over (the window opened, or the card was reset): the painter is set up on it, away from
 /// the window's thread, and the arrangement is drawn again on it once it's ready (by the processor until then).
 pub fn graphics_ready(app: &AppWindow) {
-    gpu::prepare(app, "Arrangement", &CARD, |gpu| Canvas::new(&gpu.device, &gpu.queue), redraw);
+    gpu::prepare(app, "Arrangement", &CARD, |gpu| Canvas::new(&gpu.device, &gpu.queue, Kind::Picture), redraw);
     redraw(app);
 }
 
@@ -435,7 +435,7 @@ fn draw_on_card(shapes: &Shapes) -> Result<Option<Image>, String> {
             // Set up when the card was handed over (`graphics_ready`), so only if that couldn't start does the card
             // build the shader here, which can take a moment.
             let _doing = crate::watchdog::doing("Arrangement: set up the GPU painter");
-            Canvas::new(&gpu.device, &gpu.queue)
+            Canvas::new(&gpu.device, &gpu.queue, Kind::Picture)
         })?;
         let _doing = crate::watchdog::doing("Arrangement: draw on the GPU");
         let texture =
@@ -764,7 +764,7 @@ mod tests {
         };
         let out = std::env::var("ARRANGEMENT_GPU_LOOK").ok();
         let timed = std::env::var("ARRANGEMENT_GPU_TIME").is_ok();
-        let mut canvas = Canvas::new(&device, &queue);
+        let mut canvas = Canvas::new(&device, &queue, Kind::Picture);
         let preview = sample_preview();
         let peaks = sample_peaks();
         let graphite = Palette::from_look(&Look::from_settings(None, None));

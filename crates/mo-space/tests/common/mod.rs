@@ -24,3 +24,13 @@ pub fn unlink(at: &Path) {
 pub fn is_link(p: &Path) -> bool {
     fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
 }
+
+/// A file link, where the system lets one be made (Windows only does with Developer Mode on, or as administrator).
+/// Says whether it was made.
+pub fn file_link(target: &Path, at: &Path) -> bool {
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_file(target, at);
+    #[cfg(not(windows))]
+    let made = std::os::unix::fs::symlink(target, at);
+    made.is_ok()
+}
