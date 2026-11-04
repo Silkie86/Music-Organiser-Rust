@@ -132,8 +132,16 @@ pub fn write(plan: &Plan, template: &[u8]) -> Result<Converted, String> {
         }
     }
 
+    // The project's own tempo has the same floor as its lane.
+    let tempo = plan.tempo.max(MIN_BPM);
+    if tempo > plan.tempo {
+        w.notes.push(format!(
+            "Song: its tempo is {} BPM and Bitwig's goes down to {MIN_BPM} BPM, so it plays at {MIN_BPM} BPM",
+            plan.tempo
+        ));
+    }
     let made: Vec<ObjId> = tracks.iter().flatten().map(|(t, _)| *t).collect();
-    let bytes = t.finish(&made, plan.tempo, &w.states)?;
+    let bytes = t.finish(&made, tempo, &plan.title, &w.states)?;
     let mut seen = HashSet::new();
     let notes = w.notes.into_iter().filter(|n| seen.insert(n.clone())).collect();
     Ok(Converted { bytes, notes })
@@ -1198,7 +1206,13 @@ impl Template {
     }
 
     /// Puts the new tracks in the project and writes it, with the plugin settings in its zip.
-    fn finish(mut self, tracks: &[ObjId], tempo: f64, states: &[(String, Vec<u8>)]) -> Result<Vec<u8>, String> {
+    fn finish(
+        mut self,
+        tracks: &[ObjId],
+        tempo: f64,
+        title: &str,
+        states: &[(String, Vec<u8>)],
+    ) -> Result<Vec<u8>, String> {
         self.doc.obj_mut(self.group).set(0x4de, Value::List(tracks.iter().map(|&t| Slot::Obj(t)).collect()));
         let root = self.doc.root.ok_or("no project")?;
         for o in reachable(&self.doc, root) {
@@ -1209,11 +1223,23 @@ impl Template {
 
         // The browser's summary of the project lists its tracks by name.
         if let Some(summary) = self.summary(tracks) {
-            let at = self.doc.meta.iter().rposition(|(k, _)| k.as_str() == "structure");
-            if let Some((_, v)) = at.and_then(|i| self.doc.meta.get_mut(i)) {
-                *v = Value::Blob(Box::new(Blob::new(&summary)));
+            self.set_meta("structure", Value::Blob(Box::new(Blob::new(&summary))));
+        }
+        // The FL song's title, and the files this project uses (its samples, and any the template's master keeps),
+        // never the template's own: the library reads both from here.
+        self.set_meta("title", text(title));
+        let mut used: Vec<String> = Vec::new();
+        for o in reachable(&self.doc, root) {
+            let path = self
+                .doc
+                .field_obj(o, 0x129e)
+                .and_then(|file| self.doc.field_obj(file, 0xd3b))
+                .map(|location| self.doc.obj(location).str(0x3b));
+            if let Some(path) = path.filter(|p| !p.is_empty() && !used.iter().any(|u| u == p)) {
+                used.push(path.to_owned());
             }
         }
+        self.set_meta("used_files", Value::Strings(used.iter().map(|u| Text::new(u)).collect()));
 
         // The template's own plugins still in the project (on its master) keep their settings from its zip.
         let made: HashSet<&str> = states.iter().map(|(n, _)| n.as_str()).collect();
@@ -1251,6 +1277,14 @@ impl Template {
 
     /// The project's summary (metadata "structure", a document of its own) listing the new tracks, or `None` when the
     /// template's can't be read, so it's left as it was.
+    /// Sets a metadata entry the template has (the last one, as [`Document::meta`] reads it); one it hasn't is left out.
+    fn set_meta(&mut self, key: &str, value: Value) {
+        let at = self.doc.meta.iter().rposition(|(k, _)| k.as_str() == key);
+        if let Some((_, v)) = at.and_then(|i| self.doc.meta.get_mut(i)) {
+            *v = value;
+        }
+    }
+
     fn summary(&self, tracks: &[ObjId]) -> Option<Vec<u8>> {
         let Some(Value::Blob(blob)) = self.doc.meta("structure") else { return None };
         let mut summary = bitwig::decode(blob.bytes()).ok()?;

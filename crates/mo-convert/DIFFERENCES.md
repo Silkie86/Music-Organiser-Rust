@@ -22,9 +22,13 @@ does something else on purpose, it's listed here and judged.
 | A template whose Sampler has no sample, or whose patterns share a track | Failed on the first song | Turned down when it's chosen | Better |
 | MP3, OGG and M4A samples, and compressed WAVs | Length read through Windows' decoders | Left for Bitwig, which asks where they are (WAV, RF64, AIFF and FLAC are timed from their headers) | To do: when mo-audio decodes them, the convert uses it |
 | A WAV whose header says more audio than the file holds | Cut to the file | Same | Same |
+| A WAV with an odd chunk left unpadded, or its audio more than 1 MB in | (not compared) | Read on: the unpadded place is taken when the padded one isn't a chunk, and chunks past the first 1 MB are looked at one by one | Better: such a sample got no length, so Bitwig asked where it was |
 | A damaged FL save read on, or one too big to read whole | Converted without saying | Said first in the notes | Better (rule 9) |
+| A song slower than 20 BPM (FL goes to 10) | (not compared) | Plays at 20 BPM, Bitwig's slowest, with a note, as its tempo lane already did | Better: said, never a tempo Bitwig can't play |
+| A tempo a damaged save gives as 0 | (not compared) | FL's 140, with a note | Better: a 0 made clip lengths endless |
+| The project's title and file list (Bitwig's browser, and the app's library, read them) | (not compared) | The FL song's title, and the samples it uses | Better: the template's title and samples never carry into every convert |
 | Samples | Read one after another | Read on every core, after the template is checked | Faster; a bad template is said straight away |
-| An earlier convert saved in Bitwig while samples were read | Replaced | Asked again just before saving, so it's kept | Better |
+| An earlier convert saved in Bitwig while samples were read | Replaced | Asked again just before saving, so it's kept, with its own list of what didn't come across (the new list is put in place only after the project) | Better |
 | A sample that is not where FL saved it | Bitwig asks where it is | Looked for first in the project's and the DAW's folders (rule 13), and used where found, with a note | Better |
 | Plugin sounds a save lost | Taken from the newest older save that has them, matched by id | Same, but matched by name when one save has no id (FL 9 may not save it), and a save before Fix's copy of it | Better |
 | Samples found somewhere else | (not looked for) | Listed under their own heading beside the project | New |

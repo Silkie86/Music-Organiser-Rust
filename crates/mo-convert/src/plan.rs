@@ -376,15 +376,13 @@ pub fn sample_ticks(seconds: f64, semitones: f64, tempo: f64, ppq: u16) -> i64 {
     (seconds / 2f64.powf(semitones / 12.0) * tempo / 60.0 * ppq as f64 - 1e-6).ceil() as i64
 }
 
-/// FL's Time knob counts 192 a beat.
-const TIME_PER_BEAT: f64 = 192.0;
+/// FL's tempo for a new song, used when a save's own can't be read.
+const FL_TEMPO: f64 = 140.0;
 
-/// How many seconds a sample `seconds` long plays for at `tempo`, stretched as the channel stretches it.
+/// How many seconds a sample `seconds` long plays for at `tempo`, stretched as the channel stretches it: the FL
+/// reader's own rule, so the converter and the arrangement page always agree.
 pub fn played_seconds(stretch: &FlStretch, seconds: f64, tempo: f64) -> f64 {
-    let length =
-        if stretch.time > 0 && tempo > 0.0 { stretch.time as f64 / TIME_PER_BEAT * 60.0 / tempo } else { seconds };
-    let length = length * stretch.multiplier;
-    if stretch.mode == 0 { length / 2f64.powf(stretch.pitch_cents as f64 / 1200.0) } else { length }
+    stretch.played_seconds(seconds, tempo)
 }
 
 /// How many semitones higher than recorded a sample `seconds` long sounds when it plays for `played` seconds.
@@ -818,6 +816,15 @@ fn in_song_order(mut points: Vec<LanePoint>) -> Vec<LanePoint> {
 
 /// What an FL song becomes. `read_sample` says what's known of a sample file (`None` when it can't be read).
 pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str) -> Option<SampleFile>) -> Plan {
+    // A damaged save can give a tempo of 0 (or worse), which would make clip lengths infinite: FL's own 140 instead.
+    let steady;
+    let unusable = !(song.tempo.is_finite() && song.tempo > 0.0);
+    let song = if unusable {
+        steady = FlSong { tempo: FL_TEMPO, ..song.clone() };
+        &steady
+    } else {
+        song
+    };
     let inserts: HashMap<u32, &FlInsert> = song.inserts.iter().map(|i| (i.index, i)).collect();
     // Audio clip channels play their clips on audio tracks; one with no notes needs no instrument track too.
     let audio: HashSet<u32> =
@@ -851,6 +858,9 @@ pub fn from_fl(song: &FlSong, options: Options, read_sample: &mut dyn FnMut(&str
         effect_copies: HashMap::new(),
         tracks_with_effects: HashMap::new(),
     };
+    if unusable {
+        planner.notes.push(format!("Song: its tempo couldn't be read, so it plays at {FL_TEMPO} BPM"));
+    }
     let mut tracks: Vec<Track> = Vec::new();
     // Each carried channel's tracks (its instrument track first), and its plugin's place on its instrument track.
     let mut placed: HashMap<u32, (usize, usize)> = HashMap::new();

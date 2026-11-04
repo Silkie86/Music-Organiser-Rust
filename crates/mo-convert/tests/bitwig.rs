@@ -275,6 +275,9 @@ fn builds_tracks_from_the_template_with_sampler_root_keys_and_transposed_plugins
     let tempo: Vec<_> = all.iter().filter(|&&o| doc.obj(o).str(0x2bd) == "TEMPO").collect();
     assert_eq!(tempo.len(), 1);
     assert_eq!(doc.obj(*tempo[0]).num(0x2c8), Some(128.0));
+    // The files it uses are its own samples, never the template's.
+    let used = doc.meta_strings("used_files");
+    assert!(used.len() == 1 && used[0].ends_with("Snare 01.wav"), "{used:?}");
 
     // The snare's volume automation as a lane of points on its fader, in the fader's units; the template's
     // automation clips and points don't come along.
@@ -759,4 +762,23 @@ fn a_vst2_program_that_cant_become_a_bank_keeps_its_own_ending_and_a_missing_id_
     let d = doc.obj(def(&doc, serum));
     assert!(d.str(0xbe5).ends_with(".fxp"), "{}", d.str(0xbe5));
     assert_eq!(d.num(0xce4), Some(0.0), "not Drumazon's id");
+}
+
+#[test]
+fn a_tempo_bitwig_cant_play_or_that_couldnt_be_read_is_said() {
+    let template = bitwig_template(Template::default());
+    let tempo = |doc: &Document| {
+        let all = reachable(doc);
+        all.iter().find(|&&o| doc.obj(o).str(0x2bd) == "TEMPO").and_then(|&o| doc.obj(o).num(0x2c8))
+    };
+    // FL goes down to 10 BPM, Bitwig to 20.
+    let slow = FlSong { tempo: 15.0, automation: Vec::new(), ..song() };
+    let (doc, notes, _) = convert(&slow, &template);
+    assert_eq!(tempo(&doc), Some(20.0));
+    assert!(notes.iter().any(|n| n.starts_with("Song: its tempo is 15 BPM")), "{notes:?}");
+    // A damaged save's tempo of 0 would make clip lengths endless: FL's own 140 instead.
+    let damaged = FlSong { tempo: 0.0, automation: Vec::new(), ..song() };
+    let (doc, notes, _) = convert(&damaged, &template);
+    assert_eq!(tempo(&doc), Some(140.0));
+    assert!(notes.iter().any(|n| n == "Song: its tempo couldn't be read, so it plays at 140 BPM"), "{notes:?}");
 }
