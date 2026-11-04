@@ -194,13 +194,14 @@ pub fn shortcuts() -> Shortcuts {
 }
 
 /// A key was changed in Settings: everything that shows or runs a key takes the new list at once (the rail's tooltips,
-/// the key sheet, the Songs buttons, the Sounds card and menu). Every page's keys already run from this one list; only
-/// Space's button tooltips still keep their own copy from the start.
+/// the key sheet, the Songs buttons, the Sounds card and menu, the Space buttons). Every page's keys run from this one
+/// list.
 pub fn keys_changed(app: &AppWindow, shortcuts: &Shortcuts) {
     KEYS.with(|k| *k.borrow_mut() = Some(std::rc::Rc::new(shortcuts.clone())));
     show_places(app, shortcuts);
     show_button_keys(app, shortcuts);
     sounds::show_keys(app, shortcuts);
+    space::show(app);
     if let Some(place) = place() {
         app.set_key_rows(ModelRc::new(VecModel::from(key_rows(shortcuts, place))));
         finder_actions(app, shortcuts, place);
