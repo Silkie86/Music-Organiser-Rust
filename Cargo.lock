@@ -3143,6 +3143,7 @@ name = "mo-sounds"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fs4",
  "half",
  "mo-audio",
  "mo-formats",
