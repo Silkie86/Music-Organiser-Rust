@@ -34,6 +34,10 @@ pub const SOUND_OUTPUT_KEY: &str = "sound_output";
 /// The Settings tab last shown, by its name. The C# app's name (its tabs had other names; an unknown one opens General).
 pub const TAB_KEY: &str = "settings_tab";
 
+/// Whether a Galaxy sweep holds the pointer back to the star that's playing, so a quick sweep can't pass stars before
+/// they're heard: "1" for on. Off unless set (this app's own; the C# app had no such setting).
+pub const SWEEP_HOLD_KEY: &str = "galaxy_sweep_hold";
+
 /// The C# app's settings this app reads from `library.db`, for whatever hasn't been changed here.
 pub const FROM_CSHARP: &[&str] = &[
     themes::THEME_KEY,
