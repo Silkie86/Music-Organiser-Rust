@@ -1,10 +1,11 @@
 //! The numbers the evidence is weighed by ([`Weights`]), and the counted tables the two template priors read
 //! ([`Tables`]).
 //!
-//! For now the weights are set by hand ([`HAND`]): chosen so the design's hand cases read as a player would read them,
+//! The first weights were set by hand ([`HAND`]): chosen so the design's hand cases read as a player would read them,
 //! one stretch at a time and read whole, on the tables counted from labelled music ([`COUNTED`](super::COUNTED)). The
-//! fit (chordfit) will start from them and learn the rest from labelled music, keeping every rule [`Weights::check`]
-//! lists, so no explanation can ever show a chord's own note counting against it.
+//! fit (`theorybench chordfit`) starts from them and learns from labelled music, keeping every rule
+//! [`Weights::check`] lists, so no explanation can ever show a chord's own note counting against it. The reader is
+//! built with [`FITTED`]: the hand-set weights moved part of the way to a fit.
 
 use super::answer::Thresholds;
 use super::candidates::Label;
@@ -14,8 +15,8 @@ use super::score::{Feature, PerFeature};
 /// The hash of every number the reader is built from ([`super::numbers_hash`]) that these were written with, and the
 /// version of the reader they were first given with ([`super::CHORD_READER_VERSION`]). A test checks both: change a
 /// number here, in the counted tables or among those set by hand, and it asks for the new hash and a new version.
-pub(super) const SHIPPED_HASH: u64 = 0x2a25_dc50_1312_92a7;
-pub(super) const HASH_VERSION: u32 = 1;
+pub(super) const SHIPPED_HASH: u64 = 0xeb70_d957_2341_a787;
+pub(super) const HASH_VERSION: u32 = 4;
 
 /// What each piece of evidence is worth ([`Feature`]), the trust in the pair term, and what a stretch read as no chord
 /// scores.
@@ -106,10 +107,80 @@ pub const HAND: Weights = Weights {
     none: -0.5,
 };
 
+/// The weights the reader is built with ([`SHIPPED`](super::SHIPPED)): the hand-set ones ([`HAND`]) moved a fifth of the
+/// way towards the first fit that keeps every gate ([`FIRST_FIT`]), each number on its own: hand-set + 0.2 × (fit −
+/// hand-set).
+///
+/// - **Pulled back** to 0.2: the last point, in steps of 0.05, where every gate holds (the held-out ones too) and every
+///   answer a player would give holds with the hand-set [`THRESHOLDS`]. A quarter of the way, keys alone that a player
+///   could read more than one way (B E F A, or B F Bb Eb, with no bass) are read as one chord; at the full fit, case
+///   15a's C13(#11) is read as a D chord over C. Going further waits for the thresholds' own fit (the calibration).
+/// - **Scored** where it didn't learn (tools/theorybench/README.md, "The first fit shipped (2026-11-04)"): every set
+///   names its chords as well as with the hand-set weights or better, and only where the chords change scores a little
+///   lower, on RS200 (by 0.1 to 0.2). The chords named whole, for example, go from 79.2% to 84.0% of the time on
+///   Billboard set B, from 68.3% to 71.8% on POP909-CL with its tune, and from 70.3% to 72.5% on the sweep.
+pub const FITTED: Weights = HAND.toward(&FIRST_FIT, 0.2);
+
+/// The first fit that keeps every gate, its numbers as it wrote them (to the last bit). The reader is built a fifth of
+/// the way to them ([`FITTED`]).
+///
+/// - **The fit:** `theorybench chordfit pop909cl.jsonl billboard-A.jsonl --steps 40 --hand 1 --hold 3`, run on main at
+///   a014537 (2026-11-04). It learned from folds 2 to 4 of POP909-CL (the piano heard four ways) and of the Billboard
+///   charts played by voice.py (set A), and from the hand cases, holding the gates it looks at. It started from the
+///   hand-set weights and stopped after 65 steps over two rounds. Fold 1 was measured; fold 0 is kept for the final
+///   look.
+/// - **Learned from:** POP909-CL (Yao, Chen, Dubnov and Berg-Kirkpatrick (2026), MIT licence) and the McGill Billboard
+///   charts (Burgoyne, Wild and Fujinaga (ISMIR 2011), CC0). Only these numbers come from them.
+pub const FIRST_FIT: Weights = Weights {
+    features: PerFeature([
+        4.974286345644851,      // T1 (hand-set 3)
+        3.231669037153417,      // T2 (hand-set 1)
+        -4.926318748028829,     // T3 (hand-set -3)
+        -1.2457161311294183,    // T4 (hand-set -1)
+        -1.1783795554603387,    // T5 (hand-set -0.5)
+        0.44291020788523083,    // T6 (hand-set 1)
+        0.0,                    // T7 (hand-set 0.4)
+        -0.21343953619486664,   // T8 (hand-set -1)
+        -0.5326361184324977,    // T9 (hand-set -2)
+        -0.7647915522721817,    // T10 (hand-set -1)
+        -0.6132449681453785,    // T11 (hand-set -1.5)
+        -0.3524423619724491,    // T12 (hand-set -0.1)
+        0.2628364434466454,     // T15 (hand-set 1)
+        0.14451126684294682,    // R1 (hand-set 0)
+        0.4486836745306753,     // R2 (hand-set 0.7)
+        -1.519535194830957e-18, // R3 (hand-set -0.3)
+        -1.519535194830957e-18, // R4 (hand-set -1)
+        0.6899967011161445,     // L1 (hand-set 0.4)
+        1.0987538715339897,     // B1 (hand-set 0.9)
+        0.3954857151722814,     // B2 (hand-set 0.5)
+        0.16635386202174404,    // B3 (hand-set 0.2)
+        0.0,                    // B4 (hand-set 0.5)
+        -0.6090980570580659,    // B5 (hand-set -0.05)
+        -0.6090980570580659,    // B6 (hand-set -0.1)
+        1.0737152688850589,     // B7 (hand-set 1)
+        0.2417865204409232,     // B8 (hand-set 0.5)
+        -1.800524183268285,     // B9 (hand-set -0.5)
+        1.4432630648463753,     // E1 (hand-set 2)
+        0.4889042001568079,     // E2 (hand-set 0.5)
+        -1.8873939490295089,    // E3 (hand-set -2)
+        -1.9062357409791428,    // E4 (hand-set -1)
+        -2.927282906940821,     // E5 (hand-set -1.2)
+        -4.480770839176501,     // E6 (hand-set -1.5)
+        -4.480770839176501,     // E7 (hand-set -2)
+        -1.557253236871009,     // E8 (hand-set -0.3)
+        0.28644518538154295,    // P1 (hand-set 0.11)
+        0.22155993382702688,    // P2 (hand-set 0.06)
+    ]),
+    pair: 0.4170162322555838,  // hand-set 0.25
+    none: -2.4648582008590068, // hand-set -0.5
+};
+
 /// The hand-set thresholds the answers are graded by (texture by texture: a full mix, an accompaniment, chords alone,
 /// one line), until the calibration's fit sets them. Set from the hand cases: keys alone that a player could read
-/// more than one way (cases 13, 20, 22 and 33 with no bass) give their first reading a chance of 0.63 to 0.76 and
-/// must not be one chord, while the chords the cases want as one chord read 0.98 or more (cases 1, 10, 11 and 54).
+/// more than one way (cases 13, 20, 22 and 33 with no bass) gave their first reading a chance of 0.63 to 0.76 with
+/// the hand-set weights, and must not be one chord, while the chords the cases want as one chord read 0.98 or more
+/// (cases 1, 10, 11 and 54). With the built-in weights ([`FITTED`]) those keys give 0.75 to 0.79 and those chords
+/// 0.997 or more: how close the first stays under 0.8 is what keeps the weights from going further towards the fit.
 /// The same notes need their group at 0.9: were the chances true, the chord would be outside it at most one time in
 /// ten, the design's target. One line alone is never one chord or the same notes: it's implied.
 pub const THRESHOLDS: Thresholds = Thresholds { one: [0.8, 0.8, 0.8, 1.0], same: [0.9, 0.9, 0.9, 1.0] };
@@ -257,6 +328,23 @@ impl Weights {
         }
         let at = |i: usize| numbers.get(i).copied().unwrap_or(0.0);
         Weights { features, pair: at(Weights::PAIR), none: at(Weights::NONE) }
+    }
+
+    /// The weights a share of the way from these to others, each number on its own: these + share × (others − these).
+    /// A share from 0 to 1 keeps every rule both keep, as each rule is a straight line in the numbers.
+    // The loop stays inside the lists, all three as long (a const fn can't use an iterator).
+    #[allow(clippy::indexing_slicing)]
+    pub const fn toward(&self, to: &Weights, share: f64) -> Weights {
+        let (mut features, mut k) = (self.features.0, 0);
+        while k < features.len() {
+            features[k] += share * (to.features.0[k] - self.features.0[k]);
+            k += 1;
+        }
+        Weights {
+            features: PerFeature(features),
+            pair: self.pair + share * (to.pair - self.pair),
+            none: self.none + share * (to.none - self.none),
+        }
     }
 
     /// A number's name, by its place: a piece of evidence's code ("T1", "E8", "P2"), "pair" or "none".

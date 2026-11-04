@@ -271,7 +271,7 @@ pub(super) fn wire(app: &AppWindow) {
 }
 
 /// The place in the list of the sound on pad `i`.
-fn pad_place(i: i32) -> Option<usize> {
+pub(super) fn pad_place(i: i32) -> Option<usize> {
     PAGE.with(|p| {
         let p = p.borrow();
         let id = p.kit.slots.get(usize::try_from(i).ok()?)?.sound?;
@@ -488,7 +488,7 @@ fn send_to_bitwig(app: &AppWindow) {
     let started = background::spawn("Kit to Bitwig", move || {
         let to = to_bitwig::Bitwig::default();
         // A panic in it is logged as a crash and fails the card as it goes; the button still comes back.
-        let line = std::panic::catch_unwind(AssertUnwindSafe(|| {
+        let line = mo_catch::catch_crash(AssertUnwindSafe(|| {
             to_bitwig::send_kit(job, &to, &KITS_TO_BITWIG, &name, &pads, setting.as_deref())
         }))
         .unwrap_or_else(|_| "The kit couldn't be sent: see the log.".to_owned());

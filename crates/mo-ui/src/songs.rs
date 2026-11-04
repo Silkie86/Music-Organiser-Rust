@@ -28,6 +28,7 @@ use mo_library::watch::{Changes, FolderWatch};
 use mo_library::{Library, STATUSES, SaveDetail};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
+use crate::filters::FilterModels;
 use crate::finder::How;
 use crate::{
     AppWindow, CountLine, DetailPair, HealthLine, MenuItem, OlderLine, PanelSong, PluginLine, SampleLine, SaveLine,
@@ -81,6 +82,8 @@ thread_local! {
     static FEED: RefCell<Option<Feed>> = const { RefCell::new(None) };
     /// The save last right-clicked on the Saves tab, by its path, for its menu's lines.
     static MENU_SAVE: RefCell<String> = const { RefCell::new(String::new()) };
+    /// The DAW, status and tag filters' chips and menus, kept from one showing to the next.
+    static FILTER_MODELS: [FilterModels; 3] = Default::default();
 }
 
 /// The list's lines, made from the page's view one at a time as the list draws them, so a new search doesn't build
@@ -126,14 +129,10 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     });
     data.on_save_menu_chosen(|id| {
         let path = MENU_SAVE.with(|m| m.borrow().clone());
-        with_save(&path, |p, s| match id.as_str() {
-            "open" => open_save(p, s),
-            "bitwig" => open_in_bitwig(p, s),
-            "reveal" => reveal(s),
-            "copy" => copy_path(&s.path),
-            _ => {}
-        });
+        do_to_save(&path, &id);
     });
+    // The same, from the buttons on the save's line.
+    data.on_save_chosen(|path, id| do_to_save(&path, &id));
     crate::finder::on_open(Kind::Song, |app, hit, how| {
         let Some(row) = PAGE.with(|p| p.borrow().songs.rows.iter().position(|r| r.song.key == hit.id)) else {
             return false;
@@ -164,43 +163,7 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
             crate::presets::show_song(&app, &save);
         }
     });
-    data.set_statuses(strings(STATUSES.iter().copied()));
-    let weak = app.as_weak();
-    data.on_search_edited(move |text| {
-        change(&weak, |f| f.search = text.to_string());
-    });
-    let weak = app.as_weak();
-    data.on_pick(move |kind, value| {
-        let value = (!value.is_empty()).then(|| value.to_string());
-        change(&weak, |f| match kind.as_str() {
-            "daw" => f.daw = value,
-            "status" => f.status = value,
-            "tag" => f.tag = value,
-            _ => {}
-        });
-    });
-    let weak = app.as_weak();
-    data.on_toggle(move |kind| {
-        change(&weak, |f| match kind.as_str() {
-            "favourites" => f.favourites = !f.favourites,
-            "missing" => f.missing = !f.missing,
-            "hide-archived" => f.hide_archived = !f.hide_archived,
-            _ => {}
-        });
-    });
-    let weak = app.as_weak();
-    data.on_clear(move || {
-        change(&weak, |f| *f = Filters { hide_archived: f.hide_archived, ..Filters::default() });
-    });
-    let weak = app.as_weak();
-    data.on_years_picked(move |a, b| {
-        let span = PAGE.with(|p| year_strip::year_span(&p.borrow().years, a, b));
-        if let Some(span) = span {
-            change(&weak, |f| f.years = Some(span));
-        }
-    });
-    let weak = app.as_weak();
-    data.on_years_cleared(move || change(&weak, |f| f.years = None));
+    wire_filters(app);
     let weak = app.as_weak();
     data.on_select(move |row| {
         if let Some(app) = weak.upgrade() {
@@ -376,8 +339,6 @@ fn show_again(app: &AppWindow, songs: Songs) {
         let p = p.borrow();
         p.picked.and_then(|i| p.songs.rows.get(i)).map(|r| r.song.key.clone())
     });
-    data.set_daws(strings(songs.daws().iter().map(String::as_str)));
-    data.set_tags(strings(songs.tags.iter().map(String::as_str)));
     data.set_message(if songs.rows.is_empty() { NO_SONGS.into() } else { SharedString::new() });
     let row = key.and_then(|k| songs.rows.iter().position(|r| r.song.key == k));
     // Read again only when the picked song's newest save changed: a save of another song leaves its panel as it is.
@@ -403,14 +364,58 @@ fn show_again(app: &AppWindow, songs: Songs) {
     }
 }
 
+/// Wires the search box, the filters, their chips and the year strip.
+fn wire_filters(app: &AppWindow) {
+    let data = app.global::<SongsData>();
+    let weak = app.as_weak();
+    data.on_search_edited(move |text| {
+        change(&weak, |f| f.search = text.to_string());
+    });
+    let weak = app.as_weak();
+    data.on_toggle_choice(move |chip, choice| {
+        change(&weak, |f| f.toggle(&chip, &choice));
+    });
+    let weak = app.as_weak();
+    data.on_clear_chip(move |chip| {
+        change(&weak, |f| f.clear_chip(&chip));
+    });
+    let weak = app.as_weak();
+    data.on_toggle(move |kind| {
+        change(&weak, |f| match kind.as_str() {
+            "favourites" => f.favourites = !f.favourites,
+            "missing" => f.missing = !f.missing,
+            "hide-archived" => f.hide_archived = !f.hide_archived,
+            "only" => f.only = None,
+            _ => {}
+        });
+    });
+    let weak = app.as_weak();
+    data.on_clear(move || {
+        change(&weak, |f| *f = Filters { hide_archived: f.hide_archived, ..Filters::default() });
+    });
+    let weak = app.as_weak();
+    data.on_years_picked(move |a, b| {
+        let span = PAGE.with(|p| year_strip::year_span(&p.borrow().years, a, b));
+        if let Some(span) = span {
+            change(&weak, |f| f.years = Some(span));
+        }
+    });
+    let weak = app.as_weak();
+    data.on_years_cleared(move || change(&weak, |f| f.years = None));
+}
+
+/// Shows made-up songs with the filters wired, for mo-screens (no library, nothing read).
+pub fn show_sample(app: &AppWindow, songs: Songs) {
+    wire_filters(app);
+    show(app, songs);
+}
+
 /// Puts a freshly read list on the page, keeping the filters as they are.
 pub fn show(app: &AppWindow, songs: Songs) {
     let _doing = crate::watchdog::doing("Songs: show the list");
     let data = app.global::<SongsData>();
     data.set_tabs(strings(Tab::ALL.iter().map(|t| t.name())));
     data.set_saves_tab(Tab::Saves.index() as i32);
-    data.set_daws(strings(songs.daws().iter().map(String::as_str)));
-    data.set_tags(strings(songs.tags.iter().map(String::as_str)));
     data.set_message(if songs.rows.is_empty() { NO_SONGS.into() } else { SharedString::new() });
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -428,6 +433,34 @@ fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
     let Some(app) = weak.upgrade() else { return };
     PAGE.with(|p| f(&mut p.borrow_mut().filters));
     refresh(&app);
+}
+
+/// Shows only the songs with one of `saves` (the Plugins page's Show in Songs), under a chip called `label`. The other
+/// filters go, archived songs included, so every song counted on the plugin's card is there.
+pub fn show_only(app: &AppWindow, label: &str, saves: HashSet<i64>) {
+    // Every other filter goes, but "hide archived" is a choice the user keeps.
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let hide_archived = p.filters.hide_archived;
+        p.filters = Filters { only: Some((label.to_owned(), saves)), hide_archived, ..Filters::default() };
+    });
+    pick(app, None);
+    refresh(app);
+}
+
+/// Picks the song with this save and brings it into view (the Plugins page's song lines). Returns whether the list has
+/// it (not while the library is still being read).
+pub fn show_save(app: &AppWindow, save: i64) -> bool {
+    let row = PAGE.with(|p| {
+        p.borrow().songs.rows.iter().position(|r| r.song.saves().chain(&r.song.copies).any(|s| s.id == save))
+    });
+    match row {
+        Some(row) => {
+            show_song(app, row);
+            true
+        }
+        None => false,
+    }
 }
 
 /// Picks the song at `row` and brings it into view in the list, clearing the filters first when they hide it.
@@ -476,13 +509,17 @@ fn refresh(app: &AppWindow) {
         data.set_years_from(from);
         data.set_years_to(to);
         data.set_count(view.count.as_str().into());
-        data.set_daw(f.daw.clone().unwrap_or_default().into());
-        data.set_status(f.status.clone().unwrap_or_default().into());
-        data.set_tag(f.tag.clone().unwrap_or_default().into());
+        let chips = p.songs.chips(f, &view.counts);
+        FILTER_MODELS.with(|m| {
+            data.set_daw_filter(m[0].view(&chips.daw));
+            data.set_status_filter(m[1].view(&chips.status));
+            data.set_tag_filter(m[2].view(&chips.tag));
+        });
         data.set_favourites(f.favourites);
         data.set_missing(f.missing);
         data.set_hide_archived(f.hide_archived);
         data.set_any_filter(f.any());
+        data.set_only(f.only.as_ref().map(|o| o.0.as_str()).unwrap_or_default().into());
         if data.get_search().as_str() != f.search {
             data.set_search(f.search.as_str().into());
         }
@@ -589,7 +626,7 @@ fn fill_panel(app: &AppWindow) {
             PanelSaveLine::Run { label, details } => {
                 SaveLine { run: label.into(), details: details.into(), ..SaveLine::default() }
             }
-            PanelSaveLine::Save { name, date, path, missing, newest } => SaveLine {
+            PanelSaveLine::Save { name, date, path, missing, newest, daw } => SaveLine {
                 run: SharedString::new(),
                 details: SharedString::new(),
                 name: name.into(),
@@ -597,6 +634,7 @@ fn fill_panel(app: &AppWindow) {
                 path: path.into(),
                 missing,
                 newest,
+                daw: daw.into(),
             },
         })));
     });
@@ -718,6 +756,18 @@ fn with_save(path: &str, f: impl FnOnce(&Page, &mo_library::Save)) {
         if let Some(s) = r.song.saves().find(|s| s.path == path) {
             f(p, s);
         }
+    });
+}
+
+/// Does `what` to the save at `path`: "open" (in its own DAW), "bitwig" (an FL Studio save in Bitwig), "reveal" or
+/// "copy" (its path), from its right-click menu or the buttons on its line.
+fn do_to_save(path: &str, what: &str) {
+    with_save(path, |p, s| match what {
+        "open" => open_save(p, s),
+        "bitwig" => open_in_bitwig(p, s),
+        "reveal" => reveal(s),
+        "copy" => copy_path(&s.path),
+        _ => {}
     });
 }
 

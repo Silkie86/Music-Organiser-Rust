@@ -318,7 +318,7 @@ mod tests {
     fn analysed(id: i64, path: &str, kind: &str) -> Sound {
         let mut s = sound(id, path);
         s.analysis = Some(SoundAnalysis::default());
-        s.sound_type = kind.to_owned();
+        s.sound_type = kind.into();
         s
     }
 

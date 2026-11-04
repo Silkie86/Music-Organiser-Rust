@@ -16,10 +16,12 @@ use mo_app::song_panel::Tab;
 use mo_app::themes::{Look, THEMES};
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Platform, WindowAdapter};
-use slint::{ComponentHandle, PhysicalSize, Rgb8Pixel};
+use slint::{ComponentHandle, Model, PhysicalSize, Rgb8Pixel};
 
 const WIDTH: u32 = 1440;
 const HEIGHT: u32 = 900;
+/// The app's narrowest window (app.slint's min-width).
+const NARROW: u32 = 900;
 
 struct Headless(Rc<MinimalSoftwareWindow>);
 
@@ -44,7 +46,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let feed = Feed::default();
     let app = mo_ui::new_app(&graphite, Shortcuts::default(), Place::Songs, feed.clone())?;
     app.show()?;
-    mo_ui::songs::show(&app, sample_songs());
+    mo_ui::songs::show_sample(&app, sample_songs());
     // The Sounds page, worked out in place too, from made-up sounds.
     mo_ui::sounds::compute_here();
     mo_ui::sounds::connect(
@@ -110,6 +112,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::midi::run_action(&app, "midi.moreLike");
     shots.push(("midi-more-like.png".into(), capture(&window)));
     mo_ui::midi::run_action(&app, "midi.back");
+    // Two kinds and a place picked on the shared filter chips, each choice with its count.
+    let midi = app.global::<mo_ui::MidiData>();
+    midi.invoke_toggle("kind".into(), "Basslines".into());
+    midi.invoke_toggle("kind".into(), "Chords".into());
+    midi.invoke_toggle("from".into(), "MIDI folders".into());
+    shots.push(("midi-filters.png".into(), capture(&window)));
+    midi.invoke_clear();
 
     // The Backup page, filled with made-up folders.
     app.set_place(Place::Backup.index() as i32);
@@ -143,6 +152,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("backup-gone-open.png".into(), capture(&window)));
     app.global::<mo_ui::BackupData>().set_gone_open(false);
     mo_ui::backup::show_gone(&app, &mo_app::backup_gone::Warning::default());
+    // The Plugins page, from made-up songs: a plugin picked, on each of its card's tabs.
+    mo_ui::plugins::connect(&app, out.join("no library.db"), feed.clone(), &Shortcuts::default());
+    app.set_place(Place::Plugins.index() as i32);
+    let (plugins, copies) = sample_plugins();
+    let serum = plugins.find("serum", "");
+    let kontakt = plugins.find("kontakt7", "");
+    let massive = plugins.find("massive", "");
+    mo_ui::plugins::show_sample(&app, plugins.clone(), serum, 0, &copies);
+    capture(&window);
+    shots.push(("plugins.png".into(), capture(&window)));
+    mo_ui::plugins::show_sample(&app, plugins.clone(), kontakt, 1, &[]);
+    capture(&window);
+    shots.push(("plugins-on-disk.png".into(), capture(&window)));
+    mo_ui::plugins::show_sample(&app, plugins.clone(), serum, 2, &copies);
+    capture(&window);
+    shots.push(("plugins-copies.png".into(), capture(&window)));
+    mo_ui::plugins::show_sample(&app, plugins, massive, 0, &[]);
+    capture(&window);
+    shots.push(("plugins-missing.png".into(), capture(&window)));
     settings_shots(&app, &window, &graphite, &mut shots);
     // Space with the App files card open: what each part of the app's folder takes, and C: nearly full.
     app.set_place(Place::Space.index() as i32);
@@ -183,7 +211,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sample_old_copies(),
         "",
     );
-    presets_shots(&app, &window, &mut shots);
+    presets_shots(&app, &window, &mut shots)?;
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
         mo_ui::apply_look(&app, &Look::from_settings(Some(theme.name), None));
@@ -191,22 +219,84 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     mo_ui::apply_look(&app, &graphite);
+    // The filters with more than one pick: FL Studio, and two statuses at once.
+    let songs = app.global::<mo_ui::SongsData>();
+    let before = capture(&window);
+    for (chip, choice) in [("daw", "FL Studio"), ("status", "Idea"), ("status", "Finished")] {
+        songs.invoke_toggle_choice(chip.into(), choice.into());
+    }
+    let after = capture(&window);
+    if before == after {
+        return Err("songs-filters.png: picking FL Studio, Idea and Finished changed nothing; are they wired?".into());
+    }
+    shots.push(("songs-filters.png".into(), after));
+    songs.invoke_clear();
+    // The narrowest window the app allows: a filter too long for a line of its own wraps inside, so every chip stays
+    // in sight.
+    save_narrow(&window, &out, "songs-narrow.png")?;
     shots.push(("sounds-empty.png".into(), sounds_empty));
     shots.push(("sounds-reading.png".into(), sounds_reading));
-    sounds_shots(&app, &window, &graphite, &mut shots);
+    sounds_shots(&app, &window, &graphite, &mut shots)?;
+    // The Sounds filters in the narrowest window, every one in sight, and each view's own choices too. There the
+    // List, History and Rediscover lines take two lines each and the Kits pads put their names before their sounds',
+    // so every name has room.
+    app.set_place(Place::Sounds.index() as i32);
+    save_narrow(&window, &out, "sounds-narrow.png")?;
+    let sounds = app.global::<mo_ui::SoundsData>();
+    for (view, name) in [
+        (1, "sounds-list-narrow.png"),
+        (2, "sounds-galaxy-narrow.png"),
+        (3, "sounds-history-narrow.png"),
+        (4, "sounds-rediscover-narrow.png"),
+        (5, "sounds-kits-narrow.png"),
+    ] {
+        sounds.invoke_pick_view(view);
+        save_narrow(&window, &out, name)?;
+    }
+    sounds.invoke_pick_view(0);
+    app.set_place(Place::Songs.index() as i32);
 
     // The song panel, on the first song, on Overview and on Plugins.
     for tab in [Tab::Overview, Tab::Plugins, Tab::Saves] {
-        mo_ui::songs::show_picked(&app, 0, sample_detail(), tab);
-        mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
-        mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
+        show_song_panel(&app, 0, tab);
         shots.push((format!("song-panel-{}.png", slug(tab.name())), capture(&window)));
     }
+    // Each tab in the narrowest window, where the panel is at its narrowest: its rows wrap, so nothing runs past its
+    // edge. On Saves, each line's buttons only show with room for them and the save's name.
+    for tab in Tab::ALL {
+        show_song_panel(&app, 0, tab);
+        save_narrow(&window, &out, &format!("song-panel-{}-narrow.png", slug(tab.name())))?;
+    }
+    // There the panel is taller than the window, so it scrolls: the Overview turned down to its arrangement, which
+    // keeps the room it needs.
+    show_song_panel(&app, 0, Tab::Overview);
+    save_narrow_scrolled(&window, &out, "song-panel-overview-narrow-down.png", Some(NARROW_PANEL_WHEEL))?;
+    opens_at_top(&app, &window)?;
     // The arrangement: the mouse on a clip, zoomed in about the mouse, the Bitwig view, and in a light theme.
     app.global::<mo_ui::SongsData>().set_tab(Tab::Overview.index() as i32);
     let arrangement = app.global::<mo_ui::ArrangementData>();
     arrangement.invoke_moved(ARRANGEMENT_CLIP.0, ARRANGEMENT_CLIP.1);
-    shots.push(("arrangement-hover.png".into(), capture(&window)));
+    let hovered = capture(&window);
+    shots.push(("arrangement-hover.png".into(), hovered.clone()));
+    // The clip under the mouse dragged out to a DAW: dimmed while it's carried, with the card that follows the mouse
+    // (and, as in the app, nothing said about what's under the mouse meanwhile), then lit once it has landed.
+    let Some(card) = mo_ui::arrangement::show_lifted(&app, ARRANGEMENT_CLIP.0, ARRANGEMENT_CLIP.1, false) else {
+        return Err(
+            "arrangement-drag-lifted.png: no clip to drag at the hover point; has the sample song moved?".into()
+        );
+    };
+    let lifted = capture(&window);
+    let (x, y, w, h) = changed_box(&hovered, &lifted).ok_or("arrangement-drag-lifted.png: the clip didn't dim")?;
+    arrangement.set_hover_text("".into());
+    let lifted = capture(&window);
+    shots.push((
+        "arrangement-drag-lifted.png".into(),
+        with_card(lifted, &card, &graphite, (x + w / 2 + 36, y + h / 2 + 22)),
+    ));
+    mo_ui::arrangement::show_lifted(&app, ARRANGEMENT_CLIP.0, ARRANGEMENT_CLIP.1, true);
+    shots.push(("arrangement-drag-landed.png".into(), capture_after(&window, Duration::from_millis(150))));
+    arrangement.set_landed(false);
+    capture_after(&window, Duration::from_millis(700));
     arrangement.invoke_wheel(ARRANGEMENT_CLIP.0, 0.0, 4.0, true, false);
     shots.push(("arrangement-zoomed.png".into(), capture(&window)));
     arrangement.invoke_left();
@@ -249,13 +339,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_put_away(0);
 
     // Tooltips: the mouse resting on a rail line, the song panel's Show in folder button and a song's date.
-    mo_ui::songs::show_picked(&app, 0, sample_detail(), Tab::Overview);
-    mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
-    mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
+    show_song_panel(&app, 0, Tab::Overview);
     for (name, x, y) in [
         ("tip-rail.png", 60.0, 125.0),
         ("tip-button.png", SHOW_BUTTON.0, SHOW_BUTTON.1),
-        ("tip-date.png", 530.0, 246.0),
+        ("tip-date.png", 530.0, 286.0),
     ] {
         hover(&window, x, y);
         // Before the tip's wait is over, then after: if nothing came up, the mouse missed what it was meant to rest on.
@@ -300,11 +388,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// The Presets page: made-up sounds with one picked, then the Curves section with a curve picked.
-fn presets_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &mut Vec<(String, Vec<u8>)>) {
+fn presets_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use mo_app::presets::Section;
     app.set_place(Place::Presets.index() as i32);
     mo_ui::presets::show_sample(app);
     shots.push(("presets-list.png".into(), capture(window)));
+    // The Plugin filter's menu, open, with two plugins picked and ticked, and the Synths chip lit; then a click beside
+    // the menu closes it, and the filters are cleared again.
+    let data = app.global::<mo_ui::PresetsData>();
+    data.invoke_toggle("plugin".into(), "Serum".into());
+    data.invoke_toggle("plugin".into(), "Vital".into());
+    data.invoke_toggle("type".into(), "Synths".into());
+    let before = capture(window);
+    click(window, PLUGIN_CHIP.0, PLUGIN_CHIP.1);
+    let after = capture(window);
+    if before == after {
+        return Err("filter-menu.png: the Plugin menu didn't open; has its chip moved?".into());
+    }
+    shots.push(("filter-menu.png".into(), after));
+    click(window, 1000.0, 40.0);
+    data.invoke_clear();
     mo_ui::presets::pick_row(app, 3);
     shots.push(("presets-picked.png".into(), capture(window)));
     mo_ui::presets::show_section(app, Section::Curves);
@@ -313,6 +420,7 @@ fn presets_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: 
     shots.push(("presets-curve-picked.png".into(), capture(window)));
     mo_ui::presets::show_section(app, Section::Sounds);
     mo_ui::presets::pick_row(app, usize::MAX);
+    Ok(())
 }
 
 /// Ctrl+K: opened from the Songs page with nothing typed, a search that finds a song and a sound, only the sounds
@@ -352,12 +460,17 @@ fn sounds_shots(
     window: &MinimalSoftwareWindow,
     graphite: &Look,
     shots: &mut Vec<(String, Vec<u8>)>,
-) {
+) -> Result<(), String> {
     app.set_place(Place::Sounds.index() as i32);
     let data = app.global::<mo_ui::SoundsData>();
-    // The first tile's liked bar, saying why.
-    hover(window, 350.0, 330.0);
-    shots.push(("sounds-liked-tip.png".into(), capture_after(window, Duration::from_millis(750))));
+    // The first tile's liked bar, saying why (its note comes up a moment after the mouse stops on it).
+    hover(window, LIKED_BAR.0, LIKED_BAR.1);
+    let hovered = capture_after(window, Duration::from_millis(80));
+    let tip = capture_after(window, Duration::from_millis(750));
+    if tip == hovered {
+        return Err(format!("sounds-liked-tip.png: no tip came up at {}, {}", LIKED_BAR.0, LIKED_BAR.1));
+    }
+    shots.push(("sounds-liked-tip.png".into(), tip));
     hover(window, -1.0, -1.0);
     // Autoplay is on, so picking a sound plays it.
     data.invoke_select(6);
@@ -379,14 +492,42 @@ fn sounds_shots(
     data.set_search("".into());
     data.invoke_search_edited("".into());
     // Two types at once, with the Clear types chip.
-    data.invoke_pick_type(0);
-    data.invoke_pick_type(1);
-    shots.push(("sounds-types.png".into(), capture(window)));
-    data.invoke_pick_type(1);
-    data.invoke_pick("key".into(), "A minor".into());
+    let type_at = |i: usize| data.get_type_filter().chips.row_data(i).map(|c| c.text).unwrap_or_default();
+    let (first, second) = (type_at(0), type_at(1));
+    let before = capture(window);
+    data.invoke_toggle_choice("type".into(), first);
+    data.invoke_toggle_choice("type".into(), second.clone());
+    let after = capture(window);
+    if before == after {
+        return Err("sounds-types.png: picking two types changed nothing; are the type chips wired?".into());
+    }
+    shots.push(("sounds-types.png".into(), after));
+    // One type, a key and the keys that mix well with it, and two tempos.
+    data.invoke_toggle_choice("type".into(), second);
+    data.invoke_toggle_choice("key".into(), "A minor".into());
     data.invoke_toggle("mix-well".into());
-    shots.push(("sounds-filtered.png".into(), capture(window)));
+    data.invoke_toggle_choice("tempo".into(), "110 to 130".into());
+    data.invoke_toggle_choice("tempo".into(), "130 to 150".into());
+    let filtered = capture(window);
+    if filtered == before {
+        return Err("sounds-filtered.png: the key and tempo picks changed nothing".into());
+    }
+    shots.push(("sounds-filtered.png".into(), filtered));
     data.invoke_clear();
+    // A tile dragged out to a DAW: dimmed while it's carried, with the card that follows the mouse a little way on
+    // from it, then lit for a moment once it has landed.
+    let still = capture(window);
+    data.set_lifted_row(2);
+    let lifted = capture(window);
+    let card = mo_ui::sounds::card_at_row(app, 2).ok_or("sounds-drag-lifted.png: no sound in the third tile")?;
+    let (x, y, w, h) = changed_box(&still, &lifted).ok_or("sounds-drag-lifted.png: the third tile didn't dim")?;
+    shots.push(("sounds-drag-lifted.png".into(), with_card(lifted, &card, graphite, (x + w / 2 + 40, y + h / 2 + 24))));
+    data.set_lifted_row(-1);
+    data.set_landed_row(2);
+    shots.push(("sounds-drag-landed.png".into(), capture_after(window, Duration::from_millis(150))));
+    data.set_landed_row(-1);
+    // Its glow fades before the next picture.
+    capture_after(window, Duration::from_millis(700));
     data.invoke_pick_view(1);
     shots.push(("sounds-list.png".into(), capture(window)));
     // Two years picked on the year strip.
@@ -468,6 +609,7 @@ fn sounds_shots(
     shots.push(("sounds-paper.png".into(), capture(window)));
     mo_ui::apply_look(app, graphite);
     app.set_place(Place::Songs.index() as i32);
+    Ok(())
 }
 
 /// Made-up drives for the Space page: C: nearly full with the app's files, a big drive of projects and samples, the
@@ -680,7 +822,7 @@ fn sample_sounds() -> mo_ui::sounds::Library {
         .map(|(i, &(folder, name, ty, seconds, bpm, key))| {
             let is_loop = bpm.is_some();
             // A made-up waveform: hits fall away fast, loops pulse on the beat, long sounds swell.
-            let waveform = (0..160)
+            let waveform: Vec<f32> = (0..160)
                 .map(|x| {
                     let t = x as f32 / 160.0;
                     let wobble = 0.75 + 0.25 * ((x * 7 + i * 13) % 11) as f32 / 10.0;
@@ -712,7 +854,7 @@ fn sample_sounds() -> mo_ui::sounds::Library {
                     bpm,
                     key_tonic: key.map(|k| k.0),
                     key_minor: key.is_some_and(|k| k.1),
-                    waveform,
+                    waveform: waveform.into(),
                     ..SoundAnalysis::default()
                 }),
                 sound_type: if ty.is_empty() { mo_sounds::types::UNKNOWN.into() } else { ty.into() },
@@ -782,12 +924,18 @@ fn sample_songs() -> mo_app::songs::Songs {
             tempo: Some(122.0),
             missing_samples: 3,
             status: "Mixing".into(),
+            tags: vec!["dark".into(), "live set".into()],
             ..save("Glass Harbour", "Bitwig Studio", 4)
         },
         save("Glass Harbor", "Bitwig Studio", 300),
         Save { tempo: Some(92.5), musical_key: "D major".into(), rating: 3, ..save("Slow Orbit v3", "Studio One", 12) },
         save("Slow Orbit v2", "Studio One", 20),
-        Save { tempo: Some(128.0), missing_plugins: 1, ..save("Copper Lines", "FL Studio", 70) },
+        Save {
+            tempo: Some(128.0),
+            missing_plugins: 1,
+            tags: vec!["dark".into()],
+            ..save("Copper Lines", "FL Studio", 70)
+        },
         Save { tempo: Some(174.0), rating: 5, status: "Finished".into(), ..save("Paper Moons_31", "FL Studio", 200) },
         Save { tempo: Some(110.0), ..save("Low Tide", "Bitwig Studio", 420) },
         Save {
@@ -834,15 +982,190 @@ fn sample_detail() -> mo_library::SaveDetail {
     }
 }
 
-/// Where the song panel's Show in folder and Older saves buttons are in the shots. If the panel's layout moves them,
-/// the tooltip and menu shots come out the same as the plain panel, and mo-screens stops with an error.
-const SHOW_BUTTON: (f32, f32) = (1140.0, 328.0);
+/// Where the song panel's Show in folder and Older saves buttons are in the shots, below the two lines of filters. If
+/// the page's layout moves them, the tooltip and menu shots come out the same as the plain panel, and mo-screens stops
+/// with an error.
+const SHOW_BUTTON: (f32, f32) = (1140.0, 368.0);
+/// Made-up songs and plugins for the Plugins page: some missing, some unused for years, one measured library.
+fn sample_plugins() -> (mo_app::plugins::Plugins, Vec<mo_library::plugins::ScannedPlugin>) {
+    use mo_app::plugins::{Plugins, Read, SaveBrief, SongBrief};
+    use mo_library::PluginKind::{Effect, Instrument};
+    use mo_library::plugins::{PluginUse, ScanCounts, StoredFolder, StoredSpace};
+    let day = |y: i32, m: u32| {
+        chrono::NaiveDate::from_ymd_opt(y, m, 12).and_then(|d| d.and_hms_opt(20, 0, 0)).unwrap_or_default()
+    };
+    let songs: [(&str, &str, i32, u32, u32); 8] = [
+        ("Didums", "FL Studio", 2026, 10, 14),
+        ("Night Drive", "Bitwig", 2026, 9, 6),
+        ("garage sept", "FL Studio", 2025, 9, 9),
+        ("Odd One", "FL Studio", 2024, 3, 3),
+        ("Lowlands", "Studio One", 2023, 6, 4),
+        ("Basement 4", "FL Studio", 2021, 2, 2),
+        ("Tape Loops", "FL Studio", 2019, 11, 5),
+        ("Old Rave", "FL Studio", 2017, 5, 1),
+    ];
+    let mut saves = Vec::new();
+    let mut song_of = std::collections::HashMap::new();
+    let mut briefs = Vec::new();
+    let mut id = 0i64;
+    for (i, (name, daw, y, m, n)) in songs.iter().enumerate() {
+        let first = id + 1;
+        for k in 0..*n {
+            id += 1;
+            let save_name = if k == 0 { (*name).to_owned() } else { format!("{name}_{}", n - k) };
+            saves.push(SaveBrief {
+                id,
+                name: save_name.clone(),
+                path: format!(r"I:\Projects\{name}\{save_name}.flp"),
+                daw: (*daw).into(),
+                modified: day(*y - i32::from(k > 2), m.saturating_sub(k).max(1)),
+            });
+            song_of.insert(id, i);
+        }
+        briefs.push(SongBrief { name: (*name).into(), latest: first });
+    }
+    // Which songs use which plugin: (name, vendor, format, kind, installed, songs by number).
+    type Uses<'a> = (&'a str, &'a str, &'a str, mo_library::PluginKind, bool, &'a [usize]);
+    let table: [Uses; 18] = [
+        ("Serum", "Xfer Records", "VST3", Instrument, true, &[0, 1, 2, 3, 5, 6]),
+        ("Pro-Q 3", "FabFilter", "VST3", Effect, true, &[0, 1, 2, 3, 4, 5, 6, 7]),
+        ("Valhalla VintageVerb", "Valhalla DSP", "VST3", Effect, true, &[0, 2, 3, 5]),
+        ("Kontakt 7", "Native Instruments", "VST3", Instrument, true, &[7]),
+        ("Massive", "Native Instruments", "VST2", Instrument, false, &[6]),
+        ("Nexus", "reFX", "VST2", Instrument, false, &[3, 5, 7]),
+        ("Ozone 9", "iZotope", "VST3", Effect, false, &[3, 5]),
+        ("Sylenth1", "LennarDigital", "VST2", Instrument, false, &[7]),
+        ("Diva", "u-he", "CLAP", Instrument, true, &[1]),
+        ("Phase Plant", "Kilohearts", "CLAP", Instrument, true, &[0, 1]),
+        ("Decapitator", "Soundtoys", "VST3", Effect, true, &[0, 2, 3]),
+        ("Fruity Reverb 2", "Image-Line", "Native", Effect, true, &[0, 2, 3, 5, 6, 7]),
+        ("Sytrus", "Image-Line", "Native", Instrument, true, &[2, 6]),
+        ("Polymer", "Bitwig", "Native", Instrument, true, &[1]),
+        ("Pro Compressor", "PreSonus", "Native", Effect, true, &[4]),
+        ("CLA-76 Stereo", "Waves", "VST3", Effect, true, &[4, 5]),
+        ("RC-20 Retro Color", "XLN Audio", "VST3", Effect, false, &[5]),
+        ("Omnisphere", "Spectrasonics", "VST2", Instrument, true, &[6, 7]),
+    ];
+    let mut uses = Vec::new();
+    for (name, vendor, format, kind, installed, used) in table {
+        for &song in used {
+            for s in saves.iter().filter(|s| song_of.get(&s.id) == Some(&song)) {
+                uses.push(PluginUse {
+                    save: s.id,
+                    name: name.into(),
+                    key: mo_library::read::name_key(name),
+                    vendor: vendor.into(),
+                    kind,
+                    format: format.into(),
+                    installed,
+                    daw: s.daw.clone(),
+                });
+            }
+        }
+    }
+    const MB: u64 = 1 << 20;
+    const GB: u64 = 1 << 30;
+    let space = |name: &str, folders: &[(&str, u8, u64, &[&str])]| StoredSpace {
+        key: mo_library::read::name_key(name),
+        name: name.into(),
+        vendor: String::new(),
+        folders: folders
+            .iter()
+            .map(|(p, k, b, w)| StoredFolder {
+                path: (*p).into(),
+                kind: *k,
+                bytes: *b,
+                shared_with: w.iter().map(|s| (*s).to_owned()).collect(),
+                added: false,
+            })
+            .collect(),
+        measured: Some(day(2026, 10)),
+    };
+    let spaces = vec![
+        space(
+            "Serum",
+            &[
+                (r"C:\Program Files\Common Files\VST3\Serum.vst3", 0, 40 * MB, &[]),
+                (r"C:\Users\silki\Documents\Xfer\Serum Presets", 1, 2 * GB, &[]),
+            ],
+        ),
+        space("FabFilter Pro-Q 3", &[(r"C:\Program Files\Common Files\VST3\FabFilter Pro-Q 3.vst3", 0, 60 * MB, &[])]),
+        space(
+            "Kontakt 7",
+            &[
+                (r"C:\Program Files\Common Files\VST3\Kontakt 7.vst3", 0, 600 * MB, &[]),
+                (r"K:\Native Instruments\Kontakt Libraries", 2, 182 * GB, &[]),
+                (r"C:\Users\Public\Documents\Native Instruments", 1, 3 * GB, &["kontakt8"]),
+            ],
+        ),
+        space(
+            "Omnisphere",
+            &[
+                (r"C:\Program Files\VSTPlugins\Omnisphere.dll", 0, 300 * MB, &[]),
+                (r"C:\ProgramData\Spectrasonics\STEAM", 2, 64 * GB, &[]),
+            ],
+        ),
+        space(
+            "Arturia Pigments",
+            &[
+                (r"C:\Program Files\Common Files\VST3\Pigments.vst3", 0, 200 * MB, &[]),
+                (r"C:\ProgramData\Arturia\Presets", 1, 4 * GB, &[]),
+            ],
+        ),
+    ];
+    let read = Read {
+        uses,
+        saves,
+        song_of,
+        songs: briefs,
+        spaces,
+        installed_names: vec!["Ozone 11".into(), "Serum".into(), "Kontakt 7".into(), "Arturia Pigments".into()],
+        scans: ScanCounts { files: 214, plugins: 380, failed: 3 },
+        looked_for_installed: true,
+        unused_years: 2,
+        needed_count: 6,
+    };
+    let copies = vec![
+        mo_library::plugins::ScannedPlugin {
+            path: r"C:\Program Files\Common Files\VST3\Serum.vst3".into(),
+            format: "VST3".into(),
+            id: "56535458667358736572756D00000000".into(),
+            name: "Serum".into(),
+            vendor: "Xfer Records".into(),
+            version: "1.368".into(),
+            kind: "instrument".into(),
+            shell: String::new(),
+            parameters: Some(2623),
+            error: String::new(),
+        },
+        mo_library::plugins::ScannedPlugin {
+            path: r"C:\Program Files\VSTPlugins\Serum_x64.dll".into(),
+            format: "VST2".into(),
+            id: "XfsX".into(),
+            name: "Serum_x64".into(),
+            vendor: "Xfer Records".into(),
+            version: "1368".into(),
+            kind: "instrument".into(),
+            ..Default::default()
+        },
+    ];
+    (Plugins::new(read, day(2026, 11)), copies)
+}
+
 /// The Backup page's Remove older versions button, and how far the page is turned down to show the question it asks.
 const REMOVE_OLDER_BUTTON: (f32, f32) = (1127.0, 820.0);
+/// The Presets page's Plugin chip: the first in its filter row, so the other chips' words don't move it.
+const PLUGIN_CHIP: (f32, f32) = (262.0, 156.0);
 const PAGE_DOWN: f32 = 300.0;
-const OLDER_BUTTON: (f32, f32) = (1005.0, 328.0);
+
+/// Where the wheel turns the song panel down in the narrowest window, and by how much: on its status line, which
+/// doesn't scroll on its own, as the lists and the arrangement in it do.
+const NARROW_PANEL_WHEEL: (f32, f32, f32) = (760.0, 404.0, -2.0 * PAGE_DOWN);
+const OLDER_BUTTON: (f32, f32) = (1005.0, 368.0);
 /// The Lock chip on the kit's second pad (Snare).
 const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
+/// The first tile's liked bar on Sounds, under the Order line and the three lines of filters.
+const LIKED_BAR: (f32, f32) = (350.0, 414.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
 const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 
@@ -963,6 +1286,125 @@ fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
 }
 
 /// Lets hover and slide-in animations finish, then draws the window.
+/// The box (x, y, width, height, in pixels) round every pixel that differs between two pictures of the window, or
+/// None when none does.
+fn changed_box(a: &[u8], b: &[u8]) -> Option<(i32, i32, i32, i32)> {
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for (i, (pa, pb)) in a.as_chunks::<3>().0.iter().zip(b.as_chunks::<3>().0).enumerate() {
+        if pa != pb {
+            let (x, y) = ((i as u32 % WIDTH) as i32, (i as u32 / WIDTH) as i32);
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+        }
+    }
+    (x1 >= x0).then_some((x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+}
+
+/// Lays the card that follows the mouse over a picture of the window, with the mouse's point at `at`: as it's drawn
+/// over every app while something is dragged out, a moment after it was picked up.
+fn with_card(mut pixels: Vec<u8>, payload: &mo_app::drag_out::Payload, look: &Look, at: (i32, i32)) -> Vec<u8> {
+    let start = std::time::Instant::now();
+    let mut flight = mo_app::drag_card::Flight::new(payload, look, mo_ui::drag::card_fonts(look.theme.font), start);
+    let Some(card) = flight.frame(start + Duration::from_millis(400), 1.0) else { return pixels };
+    // On a screen the card goes past the window's edge; here it's kept inside the picture.
+    let at = (
+        at.0.min(WIDTH as i32 - (card.width as i32 - card.hot_x)),
+        at.1.min(HEIGHT as i32 - (card.height as i32 - card.hot_y)),
+    );
+    for (row, line) in card.rgba.chunks_exact(card.width as usize * 4).enumerate() {
+        for (column, p) in line.as_chunks::<4>().0.iter().enumerate() {
+            let (x, y) = (at.0 - card.hot_x + column as i32, at.1 - card.hot_y + row as i32);
+            if x < 0 || y < 0 || x >= WIDTH as i32 || y >= HEIGHT as i32 {
+                continue;
+            }
+            let under = (y as usize * WIDTH as usize + x as usize) * 3;
+            let see_through = 255 - u32::from(p[3]);
+            for (c, &over) in pixels.get_mut(under..under + 3).unwrap_or_default().iter_mut().zip(p) {
+                // The card's colours are already times its alpha.
+                *c = (u32::from(over) + (u32::from(*c) * see_through + 127) / 255).min(255) as u8;
+            }
+        }
+    }
+    pixels
+}
+
+/// The song panel on the song at `row` of the sample library, on `tab`, with the sample arrangement in it.
+fn show_song_panel(app: &mo_ui::AppWindow, row: usize, tab: Tab) {
+    mo_ui::songs::show_picked(app, row, sample_detail(), tab);
+    mo_ui::arrangement::show_preview(app, mo_ui::arrangement::sample_preview());
+    mo_ui::arrangement::show_peaks(app, mo_ui::arrangement::sample_peaks());
+}
+
+/// In the narrowest window, another song picked while the song panel is turned down opens at its top, at the new
+/// song's name: the wheel turned back up there moves nothing. The first song is picked again after, as it was.
+fn opens_at_top(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), Box<dyn std::error::Error>> {
+    let (x, y, turn) = NARROW_PANEL_WHEEL;
+    window.set_size(PhysicalSize::new(NARROW, HEIGHT));
+    let top = capture(window);
+    scroll(window, x, y, turn);
+    let turned = capture(window);
+    show_song_panel(app, 1, Tab::Overview);
+    let picked = capture(window);
+    scroll(window, x, y, -turn);
+    let up = capture(window);
+    // The mouse moved away, as the wheel left it on whatever is there now (a button, whose tip would stay up).
+    hover(window, -1.0, -1.0);
+    show_song_panel(app, 0, Tab::Overview);
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    if turned == top {
+        return Err(
+            format!("song panel: the wheel at {x}, {y} moved nothing; does it still land on what scrolls?").into()
+        );
+    }
+    if up != picked {
+        return Err(
+            "song panel: another song picked while it was turned down kept its place; it should open at its top".into(),
+        );
+    }
+    Ok(())
+}
+
+/// The window at the narrowest the app allows, saved at that width as `name` in `out`; the window is set back after.
+fn save_narrow(
+    window: &MinimalSoftwareWindow,
+    out: &std::path::Path,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    save_narrow_scrolled(window, out, name, None)
+}
+
+/// [`save_narrow`], with the mouse wheel first turned at a point of the narrow window when `wheel` says where and by
+/// how much (x, y, turn; a negative turn shows what's below), and turned back after, the mouse then moved away. It
+/// stops with an error if the turn moves nothing, so a point that no longer lands on what scrolls can't pass unseen.
+fn save_narrow_scrolled(
+    window: &MinimalSoftwareWindow,
+    out: &std::path::Path,
+    name: &str,
+    wheel: Option<(f32, f32, f32)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    window.set_size(PhysicalSize::new(NARROW, HEIGHT));
+    let mut narrow = capture(window);
+    if let Some((x, y, turn)) = wheel {
+        scroll(window, x, y, turn);
+        let turned = capture(window);
+        scroll(window, x, y, -turn);
+        hover(window, -1.0, -1.0);
+        if turned == narrow {
+            window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+            return Err(
+                format!("{name}: the wheel at {x}, {y} moved nothing; does it still land on what scrolls?").into()
+            );
+        }
+        narrow = turned;
+    }
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    let row = WIDTH as usize * 3;
+    let narrow: Vec<u8> = narrow.chunks(row).flat_map(|line| &line[..NARROW as usize * 3]).copied().collect();
+    let path = out.join(name);
+    image::save_buffer(&path, &narrow, NARROW, HEIGHT, image::ExtendedColorType::Rgb8)?;
+    println!("{}", path.display());
+    Ok(())
+}
+
 fn capture(window: &MinimalSoftwareWindow) -> Vec<u8> {
     capture_after(window, Duration::from_millis(400))
 }

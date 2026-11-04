@@ -1,15 +1,16 @@
 // The window shell: the rail on the left and the page on show. Agreed map (2026-10-29): Songs, Sounds, Presets, MIDI,
 // Plugins and Space, with Settings at the bottom.
-import { Theme, Type, Space, Icons, RailItem, Groove, Caps, ActionKey, TipLayer, TipState } from "studio.slint";
+import { Theme, Type, Space, Motion, Icons, RailItem, Groove, Caps, ActionKey, TipLayer, TipState, StudioButton } from "studio.slint";
 import { ComingPage } from "pages/coming.slint";
 import { PartsGallery } from "pages/parts.slint";
-import { SoundsPage, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, TypeChipInfo, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook } from "pages/sounds.slint";
-import { MenuItem, CardAction, YearBar } from "studio.slint";
+import { SoundsPage, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook } from "pages/sounds.slint";
+import { MenuItem, CardAction, YearBar, FilterChoice, FilterView } from "studio.slint";
 import { SongsPage, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine } from "pages/songs.slint";
 import { ArrangementData, ArrLabel, ArrKind } from "pages/arrangement.slint";
 import { BackupPage, BackupData, BackupFolderLine, LeftOutLine } from "pages/backup.slint";
+import { PluginsPage, PluginsData, PluginListLine, NeededCard, RoomBar, RoomFolder, UseRow, CopyRow } from "pages/plugins.slint";
 import { PresetsPage, PresetsData, PresetLine, PresetFact, PartChip, PresetCard, CurveLineInfo, CurvePlace, CurveCardInfo } from "pages/presets.slint";
-import { MidiPage, MidiData, MidiLine, KindChip, RollNote, RollKey, MidiFact, PickedPart } from "pages/midi.slint";
+import { MidiPage, MidiData, MidiLine, RollLabel, RollRoom, MidiFact, PickedPart } from "pages/midi.slint";
 // The waveforms drawn on the graphics card (mo-ui's waves.rs).
 import { Waves, WavePicture } from "studio.slint";
 export { Waves, WavePicture }
@@ -36,10 +37,10 @@ import "../fonts/SpaceMono-400.ttf";
 import "../fonts/SpaceMono-700.ttf";
 
 export { PresetsData, PresetLine, PresetFact, PartChip, PresetCard, CurveLineInfo, CurvePlace, CurveCardInfo }
-export { MidiData, MidiLine, KindChip, RollNote, RollKey, MidiFact, PickedPart }
+export { MidiData, MidiLine, RollLabel, RollRoom, MidiFact, PickedPart }
 export { FinderData, FinderLine }
 export { Palette, SettingsData, ThemeCardInfo, AccentInfo, SettingsFact, FolderGroupInfo, KeyLineInfo, DawRowInfo }
-export { Theme, Icons, ActionKey, MenuItem, CardAction, YearBar, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, TypeChipInfo, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook, BackupData, BackupFolderLine, LeftOutLine, SpaceData, DriveCard, RoomLine, CardPart, ArrangementData, ArrLabel, ArrKind, CardInfo, KeyRow, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
+export { Theme, Icons, ActionKey, MenuItem, CardAction, YearBar, FilterChoice, FilterView, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook, BackupData, BackupFolderLine, LeftOutLine, SpaceData, DriveCard, RoomLine, CardPart, PluginsData, PluginListLine, NeededCard, RoomBar, RoomFolder, UseRow, CopyRow, ArrangementData, ArrLabel, ArrKind, CardInfo, KeyRow, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
 
 export struct PlaceInfo {
     name: string,
@@ -69,6 +70,8 @@ export component AppWindow inherits Window {
     in property <int> sounds-place: 1;
     // Backup: a lean copy of your music on another drive.
     in property <int> backup-place: -1;
+    // Plugins: every plugin your songs use, and what to install to open more of them.
+    in property <int> plugins-place: -1;
     // Presets: the sounds in your songs and your preset files, and the curves.
     in property <int> presets-place: -1;
     // MIDI: every MIDI part in your projects and MIDI folders.
@@ -105,6 +108,10 @@ export component AppWindow inherits Window {
     callback note-save();
     callback note-cancel();
     callback note-put-aside();
+
+    // The place's colour follows the place on show (the rail's light, the mark by the page's name).
+    init => { Theme.here = root.place; }
+    changed place => { Theme.here = root.place; }
 
     forward-focus: keys;
     // Keys go back to the window once the Ctrl+K finder closes.
@@ -146,21 +153,48 @@ export component AppWindow inherits Window {
                     padding: Space.sm;
                     padding-top: Space.lg;
                     spacing: Space.xs;
+                    // The app's name in its own title face.
                     Text {
                         text: "Music Organiser";
+                        font-family: Theme.title-font;
                         font-size: Type.row-title;
-                        font-weight: 600;
+                        font-weight: 700;
+                        letter-spacing: -0.2px;
                         color: Theme.text;
                         height: 40px;
                         x: 10px;
                     }
+                    // Ctrl+K in sight, not only on a key (Solomon, 4 Nov: nothing useful hidden away).
+                    StudioButton {
+                        text: "Jump to anything…";
+                        tip: "Jump to a song, sound, page or action";
+                        key: FinderData.jump-key;
+                        clicked => { FinderData.open-asked(); }
+                    }
+                    Rectangle { height: 4px; }
                     // The rail's places are the first ones in `places`; Settings sits apart at the bottom.
-                    for p[i] in root.rail: RailItem {
-                        text: p.name;
-                        icon: p.icon;
-                        key: p.key;
-                        selected: root.place == i;
-                        clicked => { root.place-chosen(i); }
+                    places-list := VerticalLayout {
+                        spacing: Space.xs;
+                        for p[i] in root.rail: RailItem {
+                            text: p.name;
+                            icon: p.icon;
+                            key: p.key;
+                            tint: Theme.place(i);
+                            lit-bar: false;
+                            selected: root.place == i;
+                            clicked => { root.place-chosen(i); }
+                            // Tells the rail's light where the picked line is.
+                            init => { self.report(); }
+                            changed selected => { self.report(); }
+                            changed y => { self.report(); }
+                            changed height => { self.report(); }
+                            function report() {
+                                if (self.selected) {
+                                    rail-light.at-y = places-list.y + self.y;
+                                    rail-light.line = self.height;
+                                }
+                            }
+                        }
                     }
                     Rectangle { height: 10px; }
                     Groove { }
@@ -174,12 +208,37 @@ export component AppWindow inherits Window {
                     }
                     Rectangle { }
                     RailItem {
+                        tint: Theme.place(root.settings-place);
                         text: root.places[root.settings-place].name;
                         icon: root.places[root.settings-place].icon;
                         key: root.places[root.settings-place].key;
                         selected: root.place == root.settings-place;
                         clicked => { root.place-chosen(root.settings-place); }
                     }
+                }
+                // The light on the picked place, in its colour. One light for the whole list, so it slides from the
+                // place you were on to the one you picked: you see where you went. Settings lights its own.
+                rail-light := Rectangle {
+                    // The picked line's top and height, which the line reports; kept when Settings is picked, so the
+                    // light goes out where it was instead of streaking down the rail.
+                    in-out property <length> at-y;
+                    in-out property <length> line;
+                    property <bool> on-list: root.place >= 0 && root.place < root.rail.length;
+                    // Off until the first frame is drawn, so the light doesn't slide in from the top as the app opens.
+                    property <bool> ready;
+                    Timer {
+                        interval: 1ms;
+                        running: !rail-light.ready;
+                        triggered => { rail-light.ready = true; }
+                    }
+                    x: Space.sm;
+                    width: 3px;
+                    height: self.on-list ? self.line - 2 * Space.sm : 0;
+                    y: self.at-y + (self.line - self.height) / 2;
+                    border-radius: 1.5px;
+                    background: Theme.here-colour;
+                    animate y { duration: self.ready ? Motion.move : 0ms; easing: ease-out; }
+                    animate height { duration: self.ready ? Motion.move : 0ms; easing: ease-out; }
                 }
                 // The seam between the rail and the page.
                 Rectangle {
@@ -198,6 +257,9 @@ export component AppWindow inherits Window {
             if root.place == root.backup-place: BackupPage {
                 horizontal-stretch: 1;
             }
+            if root.place == root.plugins-place: PluginsPage {
+                horizontal-stretch: 1;
+            }
             if root.place == root.presets-place: PresetsPage {
                 horizontal-stretch: 1;
             }
@@ -212,7 +274,8 @@ export component AppWindow inherits Window {
             }
             if root.place != root.songs-place && root.place != root.sounds-place && root.place != root.backup-place
                 && root.place != root.midi-place && root.place != root.space-place
-                && !(root.place == root.settings-place && root.settings-built) && root.place != root.presets-place: ComingPage {
+                && !(root.place == root.settings-place && root.settings-built) && root.place != root.presets-place
+                && root.place != root.plugins-place: ComingPage {
                 horizontal-stretch: 1;
                 title: root.places[root.place].name;
                 coming: root.places[root.place].coming;

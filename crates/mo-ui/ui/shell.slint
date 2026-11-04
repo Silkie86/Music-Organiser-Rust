@@ -1,5 +1,5 @@
 // The parts of the window shell that sit over every page: activity cards, the key sheet and the F12 note.
-import { Theme, Type, Space, StudioButton, Well, Caps, Groove, CloseButton, Chip, TickBox } from "studio.slint";
+import { Theme, Type, Space, Meter, StudioButton, Well, Caps, Groove, CloseButton, Chip, TickBox } from "studio.slint";
 
 export struct CardInfo {
     id: int,
@@ -60,18 +60,21 @@ component ActivityCard inherits Rectangle {
             font-size: Type.meta;
             wrap: word-wrap;
         }
-        if root.running: Rectangle {
-            height: 4px;
-            border-radius: 2px;
+        // A known amount lights the meter; an unknown one sweeps back and forth.
+        if root.running && root.card.progress >= 0: Meter {
+            height: 6px;
+            level: root.card.progress;
+        }
+        if root.running && root.card.progress < 0: Rectangle {
+            height: 6px;
+            border-radius: 1px;
             background: Theme.well;
             clip: true;
-            // A known amount fills the bar; an unknown one sweeps back and forth.
             Rectangle {
-                x: root.card.progress >= 0 ? 0 : (parent.width - self.width) * (0.5 + 0.5 * sin(animation-tick() / 900ms * 180deg));
-                width: root.card.progress >= 0 ? parent.width * root.card.progress : parent.width * 0.3;
-                border-radius: 2px;
+                x: (parent.width - self.width) * (0.5 + 0.5 * sin(animation-tick() / 900ms * 180deg));
+                width: parent.width * 0.3;
+                border-radius: 1px;
                 background: Theme.accent;
-                animate width { duration: 200ms; }
             }
         }
     }
@@ -133,6 +136,7 @@ export component KeySheet inherits Rectangle {
                 Text {
                     text: "Keys";
                     color: Theme.text;
+                    font-family: Theme.title-font;
                     font-size: Type.heading;
                     font-weight: 600;
                     horizontal-stretch: 1;
@@ -207,6 +211,7 @@ export component NoteDialog inherits Rectangle {
             Text {
                 text: "Note for Claude";
                 color: Theme.text;
+                font-family: Theme.title-font;
                 font-size: Type.heading;
                 font-weight: 600;
             }

@@ -174,8 +174,20 @@ impl SampleLine {
 /// One line of the Saves tab: a run's heading ("2024 rework", "Didums_77 · 3 Aug 2024 · 12 saves") or a save.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SaveLine {
-    Run { label: String, details: String },
-    Save { name: String, date: String, path: String, missing: bool, newest: bool },
+    Run {
+        label: String,
+        details: String,
+    },
+    /// A save: its name and date, where it is, whether the file has moved, whether it's the newest, and the DAW it
+    /// opens in (its own, which its buttons name).
+    Save {
+        name: String,
+        date: String,
+        path: String,
+        missing: bool,
+        newest: bool,
+        daw: String,
+    },
 }
 
 /// The Saves tab: every save of the song, newest first, under the run it belongs to.
@@ -215,6 +227,7 @@ pub fn save_lines(row: &SongRow) -> Vec<SaveLine> {
             path: s.path.clone(),
             missing: s.file_missing,
             newest: s.path == row.song.latest.path,
+            daw: s.daw.clone(),
         });
     }
     out

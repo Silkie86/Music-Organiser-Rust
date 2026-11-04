@@ -71,7 +71,7 @@ pub(crate) fn sounds_in(
 ) -> Result<(Vec<SongPreset>, Option<&'static str>), String> {
     let daw = daw_of(path).ok_or_else(|| "only FL Studio and Bitwig saves keep their plugins' settings".to_owned())?;
     // A reader that trips over a damaged file is caught here, as the library's scanner does.
-    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match daw {
+    let read = mo_catch::catch(std::panic::AssertUnwindSafe(|| match daw {
         // As `list::read_fl`, keeping the reader's own words for a damaged save and its warning for one read on.
         "FL Studio" => match events::load(&raw) {
             Ok(flp) => Ok((list::from_fl(&read_song(&flp), extract_presets(&flp), limits), flp.warning)),
@@ -137,7 +137,7 @@ pub fn find_preset_files(roots: &[PathBuf]) -> Vec<FoundPreset> {
         .par_iter()
         .map(|f| {
             // A reader that trips over a damaged file is caught here, as `read_save` does.
-            let read = std::panic::catch_unwind(|| files::read(f));
+            let read = mo_catch::catch(|| files::read(f));
             FoundPreset {
                 path: f.to_string_lossy().into_owned(),
                 file: match read {

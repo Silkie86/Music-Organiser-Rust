@@ -3,7 +3,7 @@
 // tick, and (part 3) the old copies moving plugin folders left. Agreed layout: the design canvas's Space board
 // (2026-11-03): the drives across the top, Biggest wins first, Also taking room, and the picked line's card beside
 // them. Only shared parts from studio.slint; mo-app decides every word (mo_app::space), mo-ui/src/space.rs fills it.
-import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, CardAction, CardActions, TickBox, LinkText } from "../studio.slint";
+import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, CardAction, CardActions, TickBox, LinkText, Meter } from "../studio.slint";
 
 // One drive across the top.
 export struct DriveCard {
@@ -119,16 +119,11 @@ component DriveView inherits Rectangle {
                 horizontal-alignment: right;
             }
         }
-        if root.drive.here: Rectangle {
+        // How full, as the shared level meter, in how-full's colour.
+        if root.drive.here: Meter {
             height: 6px;
-            border-radius: 3px;
-            background: Theme.surface-raised;
-            Rectangle {
-                x: 0;
-                width: parent.width * clamp(root.drive.used, 0, 1);
-                border-radius: 3px;
-                background: root.tint;
-            }
+            level: root.drive.used;
+            tint: root.tint;
         }
         Text {
             text: root.drive.holds;
@@ -191,6 +186,7 @@ component SpaceCard inherits SidePanel {
     Text {
         text: SpaceData.card-title;
         color: Theme.text;
+        font-family: Theme.title-font;
         font-size: Type.panel-title;
         font-weight: 600;
         wrap: word-wrap;

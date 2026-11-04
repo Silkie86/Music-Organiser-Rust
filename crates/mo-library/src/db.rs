@@ -108,14 +108,14 @@ impl PathSet {
 /// SQLite may leave `library.db-wal` and `library.db-shm` beside the file after reading (it needs them to read while
 /// the C# app writes). They hold nothing of their own, and the C# app goes on using them as it always does.
 pub struct Library {
-    conn: Connection,
+    pub(crate) conn: Connection,
     path: PathBuf,
     /// The tables this library has: one made by an older C# app may lack some, which then read as empty.
     tables: HashSet<String>,
     /// The list query, naming the columns this library has (all but the big `info`, which only the detail needs).
     summaries: String,
     /// The columns `projects` has: an older C# app's lacks some.
-    columns: HashSet<String>,
+    pub(crate) columns: HashSet<String>,
 }
 
 impl Library {
@@ -172,7 +172,7 @@ impl Library {
         &self.path
     }
 
-    fn has(&self, table: &str) -> bool {
+    pub(crate) fn has(&self, table: &str) -> bool {
         self.tables.contains(table)
     }
 
@@ -231,7 +231,16 @@ impl Library {
 
     /// Every save, the most recently written first.
     pub fn saves(&self) -> Result<Vec<Save>, LibraryError> {
-        self.summaries("", [])
+        // For the app's own library, from its small copy of the list when the library hasn't changed since.
+        crate::list_copy::saves(
+            &self.path,
+            &self.summaries,
+            |each| self.summaries_each("", [], each),
+            |st| {
+                let cols = SaveColumns::of(st);
+                st.query_map([], |r| Ok(cols.save(r)))?.collect()
+            },
+        )
     }
 
     /// The save at this path (ignoring case, as the library does), if the library has it.
@@ -239,10 +248,23 @@ impl Library {
         Ok(self.summaries("WHERE p.path = ?1", [path])?.into_iter().next())
     }
 
-    fn summaries<P: rusqlite::Params>(&self, filter: &str, args: P) -> Result<Vec<Save>, LibraryError> {
+    pub(crate) fn summaries<P: rusqlite::Params>(&self, filter: &str, args: P) -> Result<Vec<Save>, LibraryError> {
+        self.summaries_each(filter, args, &mut |_| {})
+    }
+
+    /// The saves the list query finds, newest first, handing `each` every row as it's read.
+    fn summaries_each<P: rusqlite::Params>(
+        &self,
+        filter: &str,
+        args: P,
+        each: &mut dyn FnMut(&Row<'_>),
+    ) -> Result<Vec<Save>, LibraryError> {
         let mut st = self.conn.prepare(&format!("{} {filter} ORDER BY p.mtime DESC", self.summaries))?;
         let cols = SaveColumns::of(&st);
-        let rows = st.query_map(args, |r| Ok(cols.save(r)))?;
+        let rows = st.query_map(args, |r| {
+            each(r);
+            Ok(cols.save(r))
+        })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -522,14 +544,14 @@ fn summaries_query(columns: &[String], tables: &HashSet<String>) -> String {
 // A column that's missing (a library made before it was added) or holds something else reads as empty, as in the C#
 // app, rather than failing the whole list.
 
-fn text(r: &Row<'_>, col: &str) -> String {
+pub(crate) fn text(r: &Row<'_>, col: &str) -> String {
     match r.get_ref(col) {
         Ok(ValueRef::Text(t)) => String::from_utf8_lossy(t).into_owned(),
         _ => String::new(),
     }
 }
 
-fn int(r: &Row<'_>, col: &str) -> Option<i64> {
+pub(crate) fn int(r: &Row<'_>, col: &str) -> Option<i64> {
     match r.get_ref(col) {
         Ok(ValueRef::Integer(i)) => Some(i),
         _ => None,
@@ -554,7 +576,7 @@ fn confidence(n: i64) -> Confidence {
     }
 }
 
-fn plugin_kind(n: i64) -> PluginKind {
+pub(crate) fn plugin_kind(n: i64) -> PluginKind {
     match n {
         1 => PluginKind::Instrument,
         2 => PluginKind::Effect,

@@ -7,8 +7,8 @@ use std::ops::Range;
 use super::cases::{Writer, all_labels, bar, label_named, ranked, stretch_verdicts};
 use super::hear_tests::{BAR, BEAT, Dice, Music, keys_only, line, notes, random_music, with_bass};
 use super::{
-    COUNTED, COUNTED_FROM, Candidate, Core, EVEN, Evidence, Feature, Group, HAND, Hearing, Label, Mass, PerFeature,
-    Priors, Push, Route, SHIPPED, Scored, Scorer, Shape, SpanFacts, Weights,
+    COUNTED, COUNTED_FROM, Candidate, Core, EVEN, Evidence, FIRST_FIT, FITTED, Feature, Group, HAND, Hearing, Label,
+    Mass, PerFeature, Priors, Push, Route, SHIPPED, Scored, Scorer, Shape, SpanFacts, Weights,
 };
 use crate::notes::{Note, Role};
 use crate::pitch::PitchClass;
@@ -987,6 +987,25 @@ fn the_hand_weights_keep_every_rule_and_broken_ones_are_named() {
     w = HAND;
     w.features[Tensions] = f64::INFINITY;
     assert_eq!(w.check(), ["T2 is between 0 and T1", "every number is finite"]);
+}
+
+#[test]
+fn the_built_in_weights_are_the_hand_set_ones_a_fifth_of_the_way_to_the_fit_and_keep_every_rule() {
+    // The reader is built with them, so no explanation shows a chord's own note counting against it.
+    assert_eq!(*SHIPPED.weights, FITTED);
+    assert_eq!(FIRST_FIT.check(), Vec::<&str>::new());
+    assert_eq!(FITTED.check(), Vec::<&str>::new());
+    // Each number on its own, to the last bit.
+    let (hand, fit) = (HAND.numbers(), FIRST_FIT.numbers());
+    for (k, ((h, f), built)) in hand.iter().zip(&fit).zip(&FITTED.numbers()).enumerate() {
+        assert_eq!(*built, h + 0.2 * (f - h), "{}", Weights::number_name(k));
+    }
+    // Any share of the way keeps every rule the two keep, as each rule is a straight line in the numbers.
+    assert_eq!(HAND.toward(&FIRST_FIT, 0.0), HAND);
+    for step in 0..=20 {
+        let share = f64::from(step) / 20.0;
+        assert_eq!(HAND.toward(&FIRST_FIT, share).check(), Vec::<&str>::new(), "{share}");
+    }
 }
 
 /// The design's hand cases that one stretch read on its own decides ([`super::cases::hand_cases`]).

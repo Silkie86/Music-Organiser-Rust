@@ -17,13 +17,18 @@ pub enum LaneKind {
 }
 
 /// A note in a clip, in beats from the clip's start. Velocity keeps MIDI 2.0's 16 bits (rule 22).
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct PreviewNote {
     pub start: f64,
     pub length: f64,
     pub key: u8,
     pub velocity: u16,
     pub muted: bool,
+    /// Entered in FL Studio's step sequencer: it has no length of its own (it's drawn a tick long) and FL plays it
+    /// until its sound ends, so a MIDI file made from it gives it a length ([`crate::midi::write::lengthen_steps`]).
+    pub step: bool,
+    /// Which of the clip's [`PreviewClip::parts`] plays it (0 when the clip has none).
+    pub part: u16,
 }
 
 /// A point on an automation curve, in beats from the clip's start, with the value from 0 to 1.
@@ -71,6 +76,10 @@ pub struct PreviewClip {
     pub points: Vec<PreviewPoint>,
     /// The clip's own colour (0xRRGGBB), when it has one; otherwise it takes its lane's.
     pub colour: Option<u32>,
+    /// The instruments whose notes the clip holds, by name, when a clip can hold more than one (an FL Studio pattern
+    /// holds a part for each channel in it): a note's [`PreviewNote::part`] is its place here. Empty when every note is
+    /// the lane's own.
+    pub parts: Vec<String>,
 }
 
 impl PreviewClip {

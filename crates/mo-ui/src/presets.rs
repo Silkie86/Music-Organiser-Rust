@@ -22,10 +22,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
-use mo_app::background;
+use mo_app::background::{self, Newest};
 use mo_app::bitwig_convert as bitwig;
 use mo_app::log;
-use mo_app::presets::{self as logic, CurveFilters, Filters, From, Item, PartPick, Section, act, curve_act};
+use mo_app::presets::{self as logic, CurveFilters, Filters, Item, Section, act, curve_act};
 use mo_app::shortcuts::{CURVES_ACTIONS, PRESETS_ACTIONS, Shortcuts, what_of};
 use mo_app::year_strip;
 use mo_library::Library;
@@ -36,8 +36,10 @@ use mo_presets::filter::Choice;
 use mo_presets::fixes::{self, RoleFixes};
 use mo_presets::library::{self as plib, Source};
 use mo_presets::role::{Role, Thresholds};
+use mo_presets::sound_store::{self, SoundStore};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel, Weak};
 
+use crate::filters::FilterModels;
 use crate::{
     ActionKey, AppWindow, CardAction, CurveCardInfo, CurveLineInfo, CurvePlace, MenuItem, PartChip, PresetCard,
     PresetFact, PresetLine, PresetsData, YearBar,
@@ -51,12 +53,22 @@ const BATCH: usize = 24;
 struct Page {
     section: Section,
     /// The Sounds section: every line, those shown (places in `items`), and the picked one (a place in `items`).
-    items: Vec<Item>,
+    /// Shared with the filtering worker, which works out what's shown off the window's thread.
+    items: Arc<Vec<Item>>,
     shown: Vec<usize>,
+    /// Counts the filterings asked for, so an older one finishing late is dropped (newest wins).
+    asked: u64,
+    /// The file types' notes for the lines shown, worked out with them.
+    format_note: String,
+    /// Filter here, not on the worker (the screenshots, which show the page at once).
+    filter_here: bool,
     filters: Filters,
     picked: Option<usize>,
     years: Vec<(i32, usize)>,
-    plugins: Vec<String>,
+    /// The plugins in the list, most used first, each with how many lines it has.
+    plugins: Vec<(String, usize)>,
+    /// The filters as their chips and menus show them now.
+    chips: logic::FilterChips,
     songs: usize,
     files: usize,
     started: bool,
@@ -68,6 +80,8 @@ struct Page {
     curves: Vec<Curve>,
     curve_shown: Vec<usize>,
     curve_filters: CurveFilters,
+    /// The Found in filter as its chips show it now.
+    curve_found_in: mo_app::filters::Filter,
     /// The picked curve, by its id (a rescan may move it in the list).
     curve_picked: Option<String>,
     curves_started: bool,
@@ -94,7 +108,51 @@ thread_local! {
     static PAGE: RefCell<Page> = RefCell::default();
     static LINES: Rc<Lines> = Rc::new(Lines::default());
     static CURVE_LINES: Rc<CurveLines> = Rc::new(CurveLines::default());
+    static FILTER_MODELS: ChipModels = ChipModels::default();
     static APP: RefCell<Option<Weak<AppWindow>>> = const { RefCell::new(None) };
+    /// Works out what the filters show, off the window's thread, newest ask first.
+    static FILTERER: RefCell<Option<Newest<FilterAsk>>> = const { RefCell::new(None) };
+}
+
+/// What the filtering worker is asked: the lines, the filters, and the plugins when they're to be counted again
+/// (`None`: the ones the page has).
+struct FilterAsk {
+    id: u64,
+    items: Arc<Vec<Item>>,
+    filters: Filters,
+    plugins: Option<Vec<(String, usize)>>,
+}
+
+/// What the filters show, worked out together, so the list and its chips change at once (a click on a chip is
+/// turned back into its choice through the chips on show).
+struct FilterAnswer {
+    id: u64,
+    shown: Vec<usize>,
+    years: Vec<(i32, usize)>,
+    chips: logic::FilterChips,
+    format_note: String,
+    plugins: Vec<(String, usize)>,
+}
+
+impl FilterAsk {
+    fn answer(self) -> FilterAnswer {
+        let plugins = self.plugins.unwrap_or_else(|| logic::plugins(&self.items));
+        let found = logic::filtered(&self.items, &self.filters);
+        let chips = logic::filter_chips(&found.counts, &plugins, &self.filters);
+        let format_note = logic::format_note(&self.items, &found.shown);
+        FilterAnswer { id: self.id, shown: found.shown, years: found.years, chips, format_note, plugins }
+    }
+}
+
+/// The filters' chips and menus on screen, kept from one showing to the next.
+#[derive(Default)]
+struct ChipModels {
+    part: FilterModels,
+    plugin: FilterModels,
+    maker: FilterModels,
+    kind: FilterModels,
+    from: FilterModels,
+    found_in: FilterModels,
 }
 
 /// The sounds list, made a line at a time as the list asks.
@@ -171,10 +229,6 @@ impl Model for CurveLines {
     }
 }
 
-fn strings<S: Into<SharedString>>(list: impl IntoIterator<Item = S>) -> ModelRc<SharedString> {
-    ModelRc::new(VecModel::from(list.into_iter().map(Into::into).collect::<Vec<SharedString>>()))
-}
-
 /// Wires the page. `library` is the C# app's `library.db`, only ever read.
 pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
     PAGE.with(|p| {
@@ -183,6 +237,9 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         p.data_dir = mo_app::paths::data_dir();
         p.feed = feed;
         p.shortcuts = shortcuts.clone();
+        // The filters show from the start, before any song is read (with no lines, each choice counts none).
+        refilter(&mut p);
+        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
     });
     wire(app);
 }
@@ -202,9 +259,6 @@ fn wire(app: &AppWindow) {
     let data = app.global::<PresetsData>();
     data.set_lines(ModelRc::from(LINES.with(|m| m.clone()) as Rc<dyn Model<Data = PresetLine>>));
     data.set_curve_lines(ModelRc::from(CURVE_LINES.with(|m| m.clone()) as Rc<dyn Model<Data = CurveLineInfo>>));
-    data.set_part_choices(strings(PartPick::choices()));
-    data.set_from_choices(strings([From::Songs.label(), From::Files.label()]));
-    data.set_curve_kinds(strings(logic::KINDS.map(logic::kind_label)));
     let key = PAGE.with(|p| p.borrow().shortcuts.key_of(act::EXPORT_SHOWN).to_owned());
     data.set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
 
@@ -223,17 +277,23 @@ fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
-    data.on_pick(move |chip, value| {
+    // A filter's choice was picked or unpicked, by its words.
+    data.on_toggle(move |chip, choice| {
         let Some(app) = weak.upgrade() else { return };
-        let v = value.as_str();
-        change(&app, |f| match chip.as_str() {
-            "maker" => f.choice = Choice { maker: logic::maker_from(v), ..f.choice },
-            "type" => f.choice = Choice { kind: logic::type_from(v), ..f.choice },
-            "part" => f.part = PartPick::from_label(v),
-            "from" => f.from = From::from_label(v),
-            "plugin" => f.plugin = Some(v.to_owned()).filter(|v| !v.is_empty()),
-            _ => {}
-        });
+        if chip == logic::FOUND_IN {
+            change_curves(&app, |f| f.toggle_kind(&choice));
+        } else {
+            change(&app, |f| f.toggle(&chip, &choice));
+        }
+    });
+    let weak = app.as_weak();
+    data.on_clear_chip(move |chip| {
+        let Some(app) = weak.upgrade() else { return };
+        if chip == logic::FOUND_IN {
+            change_curves(&app, |f| f.kinds.clear());
+        } else {
+            change(&app, |f| f.clear_chip(&chip));
+        }
     });
     let weak = app.as_weak();
     data.on_clear(move || {
@@ -299,12 +359,6 @@ fn wire(app: &AppWindow) {
         }
     });
 
-    let weak = app.as_weak();
-    data.on_curve_pick(move |v| {
-        if let Some(app) = weak.upgrade() {
-            change_curves(&app, |f| f.kind = logic::kind_from(&v));
-        }
-    });
     let weak = app.as_weak();
     data.on_curve_hidden_toggled(move |on| {
         if let Some(app) = weak.upgrade() {
@@ -390,15 +444,73 @@ fn change_curves(app: &AppWindow, f: impl FnOnce(&mut CurveFilters)) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         f(&mut p.curve_filters);
-        p.curve_shown = logic::shown_curves(&p.curves, &p.curve_filters);
+        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
     });
     show_all(app);
 }
 
-/// Works out what's shown from the filters. Quick (each line's search words are made once), so it runs here.
+/// Works out what's shown from the filters, off the window's thread: the list as it is stays on show until the new
+/// one is ready (a moment), and a newer ask wins over an older one still going. `count_plugins`: the lines changed,
+/// so the plugins are counted again too.
 fn refilter(p: &mut Page) {
-    p.shown = logic::shown(&p.items, &p.filters);
-    p.years = logic::year_counts(&p.items, &p.filters);
+    ask_filter(p, false);
+}
+
+fn ask_filter(p: &mut Page, count_plugins: bool) {
+    p.asked += 1;
+    let ask = FilterAsk {
+        id: p.asked,
+        items: Arc::clone(&p.items),
+        filters: p.filters.clone(),
+        plugins: (!count_plugins).then(|| p.plugins.clone()),
+    };
+    if p.filter_here || p.items.is_empty() {
+        take_filtered(p, ask.answer());
+        return;
+    }
+    let ask = FILTERER.with(|w| {
+        let mut w = w.borrow_mut();
+        if w.is_none() {
+            match Newest::start("Presets filter", |ask: FilterAsk| {
+                let answer = background::on_pool(|| ask.answer());
+                on_window(move |app| {
+                    let current = PAGE.with(|p| take_filtered(&mut p.borrow_mut(), answer));
+                    if current {
+                        show_all(app);
+                    }
+                });
+            }) {
+                Ok(worker) => *w = Some(worker),
+                Err(e) => log::error(
+                    "Presets",
+                    &format!("Couldn't start the list's filtering thread, so it filters here: {e}"),
+                ),
+            }
+        }
+        match w.as_ref() {
+            Some(worker) => {
+                worker.ask(ask);
+                None
+            }
+            None => Some(ask),
+        }
+    });
+    if let Some(ask) = ask {
+        take_filtered(p, ask.answer());
+    }
+}
+
+/// A filtering is done: the page takes it, unless a newer one has been asked for since. Whether it took it.
+fn take_filtered(p: &mut Page, a: FilterAnswer) -> bool {
+    if a.id != p.asked {
+        return false;
+    }
+    p.shown = a.shown;
+    p.years = a.years;
+    p.chips = a.chips;
+    p.format_note = a.format_note;
+    p.plugins = a.plugins;
+    true
 }
 
 /// Puts everything the page knows on screen.
@@ -415,18 +527,14 @@ fn show_all(app: &AppWindow) {
             data.set_search(search.as_str().into());
         }
         let f = &p.filters;
-        let c = logic::counts(&p.items, f);
-        let (makers, types) = (logic::maker_choices(&c), logic::type_choices(&c));
-        data.set_maker_choices(strings(makers.iter().map(|m| m.0.clone())));
-        data.set_type_choices(strings(types.iter().map(|t| t.0.clone())));
-        // The chips show the choice as it's listed, with its count.
-        let label = |list: &[(String, &str)], v: &str| list.iter().find(|m| m.1 == v).map(|m| m.0.clone());
-        data.set_maker(label(&makers, logic::maker_label(f.choice.maker)).unwrap_or_default().into());
-        data.set_type(label(&types, logic::type_label(f.choice.kind)).unwrap_or_default().into());
-        data.set_part(f.part.label().into());
-        data.set_plugin(f.plugin.clone().unwrap_or_default().into());
-        data.set_plugin_choices(strings(p.plugins.iter().take(60).cloned()));
-        data.set_from(f.from.label().into());
+        FILTER_MODELS.with(|m| {
+            data.set_part_filter(m.part.view(&p.chips.part));
+            data.set_plugin_filter(m.plugin.view(&p.chips.plugin));
+            data.set_maker_filter(m.maker.view(&p.chips.maker));
+            data.set_type_filter(m.kind.view(&p.chips.kind));
+            data.set_from_filter(m.from.view(&p.chips.from));
+            data.set_curve_found_in(m.found_in.view(&p.curve_found_in));
+        });
         data.set_song(
             f.song
                 .as_ref()
@@ -441,7 +549,7 @@ fn show_all(app: &AppWindow) {
         let (title, text) = logic::empty_words(p.items.len(), p.shown.len(), reading, f.any(), p.failed.as_deref());
         data.set_empty_title(title.into());
         data.set_empty_text(text.into());
-        data.set_format_note(logic::format_note(&p.items, &p.shown).into());
+        data.set_format_note(p.format_note.as_str().into());
         let most = p.years.iter().map(|y| y.1).max().unwrap_or(1).max(1) as f32;
         let bars: Vec<YearBar> = p
             .years
@@ -455,7 +563,6 @@ fn show_all(app: &AppWindow) {
         data.set_exporting(p.exporting);
 
         // The curves.
-        data.set_curve_kind(p.curve_filters.kind.map(logic::kind_label).unwrap_or_default().into());
         data.set_curve_hidden(p.curve_filters.hidden);
         data.set_curves_shown(p.curve_shown.len() as i32);
         let (title, text) = logic::curves_empty(
@@ -762,11 +869,39 @@ fn read_all(at: &Where) -> Result<(), String> {
         }
     };
     let limits = Thresholds::default();
+    // What was found in each save last time: only new and changed saves are read from their files.
+    let mut store = match SoundStore::open(&at.data_dir.join(sound_store::FILE_NAME), &limits) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            log::warning("Presets", &format!("Couldn't open what the saves held last time, so all are read: {}", e.0));
+            None
+        }
+    };
+    let read_now = |paths: &[String]| background::on_pool(|| plib::read_saves(paths, &limits));
     let mut done = 0;
     let mut failed = 0;
+    let mut from_files = 0;
     for batch in newest.chunks(BATCH) {
         let paths: Vec<String> = batch.iter().map(|s| s.path.clone()).collect();
-        let read = background::on_pool(|| plib::read_saves(&paths, &limits));
+        let kept = store.as_mut().map(|st| background::on_pool(|| st.saves(&paths, |p| plib::read_saves(p, &limits))));
+        let read = match kept {
+            Some(Ok(batch)) => {
+                from_files += batch.read;
+                if let Some(why) = batch.not_kept {
+                    log::warning("Presets", &format!("Couldn't keep what the saves hold for next time: {why}"));
+                    store = None;
+                }
+                batch.saves
+            }
+            other => {
+                if let Some(Err(e)) = other {
+                    log::warning("Presets", &format!("Couldn't read what the saves held last time: {}", e.0));
+                    store = None;
+                }
+                from_files += paths.len();
+                read_now(&paths)
+            }
+        };
         let mut items = Vec::new();
         let mut songs = 0;
         for mut s in read {
@@ -784,6 +919,16 @@ fn read_all(at: &Where) -> Result<(), String> {
     if failed > 0 {
         log::info("Presets", &format!("{failed} of {total} saves couldn't be read for their sounds"));
     }
+    log::info(
+        "Presets",
+        &format!("{from_files} of {total} saves read from their files, the rest as they were last time"),
+    );
+    if let Some(store) = store.as_mut() {
+        let all: Vec<String> = newest.iter().map(|s| s.path.clone()).collect();
+        if let Err(e) = store.keep_only(&all) {
+            log::warning("Presets", &format!("Couldn't forget saves no longer listed: {}", e.0));
+        }
+    }
     // The preset files, and the Bitwig presets among them that Send to Bitwig builds from.
     let roots = logic::preset_folders(&plib::default_folders(), &bitwig_folders);
     let (found, templates) = background::on_pool(|| {
@@ -795,7 +940,7 @@ fn read_all(at: &Where) -> Result<(), String> {
         use rayon::prelude::*;
         found.par_iter().map(|f| (f.path.clone(), file_year(&f.path))).collect()
     });
-    let items: Vec<Item> = plib::rows(&[], &found)
+    let mut items: Vec<Item> = plib::rows(&[], &found)
         .into_iter()
         .map(|row| {
             let year = match &row.source {
@@ -805,6 +950,8 @@ fn read_all(at: &Where) -> Result<(), String> {
             Item::new(row, String::new(), year)
         })
         .collect();
+    // In the list's order, so filtering needn't sort them.
+    logic::sort_files(&mut items);
     let files = items.len();
     let templates = Arc::new(templates);
     on_window(move |app| {
@@ -832,7 +979,9 @@ fn add(items: Vec<Item>, songs: usize, files: usize, reading: Option<(usize, usi
                     i.row.fixed = *fix;
                 }
             }
-            p.items.extend(items);
+            // While a filtering still holds the old lines, they're copied once for this (they're seldom both at once:
+            // the lines come at most four times a second, and a filtering takes a moment).
+            Arc::make_mut(&mut p.items).extend(items);
             p.songs += songs;
             p.files += files;
             if reading.is_some() {
@@ -842,10 +991,8 @@ fn add(items: Vec<Item>, songs: usize, files: usize, reading: Option<(usize, usi
             let due = p.shown_at.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) || reading.is_none();
             if due {
                 p.shown_at = Some(Instant::now());
-                let mut names: Vec<String> = logic::plugins(&p.items).into_iter().map(|(n, _)| n).collect();
-                names.truncate(200);
-                p.plugins = names;
-                refilter(&mut p);
+                // Every plugin, counted again with the filtering: the menu scrolls, and only makes the lines in sight.
+                ask_filter(&mut p, true);
             }
             due
         });
@@ -943,7 +1090,7 @@ fn set_fix(app: &AppWindow, item: &Item, role: Option<Role>) {
 fn apply(app: &AppWindow, hash: &str, role: Option<Role>) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        logic::apply_fix(&mut p.items, hash, role);
+        logic::apply_fix(Arc::make_mut(&mut p.items).as_mut_slice(), hash, role);
         p.fixed_now.insert(hash.to_owned(), role);
         // A part filter may drop it from the list; the card stays on it.
         refilter(&mut p);
@@ -1206,7 +1353,7 @@ fn read_curves(_app: &AppWindow) {
 fn set_curves(p: &mut Page, list: Vec<Curve>) {
     p.curves = list;
     p.curves_failed = None;
-    p.curve_shown = logic::shown_curves(&p.curves, &p.curve_filters);
+    (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
     if let Some(id) = &p.curve_picked
         && !p.curves.iter().any(|c| &c.id == id)
     {
@@ -1363,7 +1510,7 @@ fn curve_db_change(
                     if let Some(old) = p.curves.iter_mut().find(|o| o.id == c.id) {
                         *old = c;
                     }
-                    p.curve_shown = logic::shown_curves(&p.curves, &p.curve_filters);
+                    (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
                 });
                 show_all(app);
             }),
@@ -1389,14 +1536,15 @@ pub fn show_sample(app: &AppWindow) {
         let mut p = p.borrow_mut();
         p.started = true;
         p.curves_started = true;
-        p.items = sample_items();
+        p.filter_here = true;
+        p.items = Arc::new(sample_items());
         p.songs = 3;
         p.files = p.items.iter().filter(|i| i.is_file()).count();
-        p.plugins = logic::plugins(&p.items).into_iter().map(|(n, _)| n).collect();
+        p.plugins = logic::plugins(&p.items);
         p.curves = sample_curves();
         p.bitwig = vec![PathBuf::from(r"K:\Bitwig Studio")];
         refilter(&mut p);
-        p.curve_shown = logic::shown_curves(&p.curves, &p.curve_filters);
+        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
     });
     show_all(app);
 }
@@ -1624,6 +1772,11 @@ fn sample_items() -> Vec<Item> {
     };
     out.push(file("Warm Pad", "Vital", "Vital", ".vstpreset", Some(Role::Pad), 2023));
     out.push(file("Growl 3", "Serum", "Serum Presets", ".fxp", None, 2022));
+    // More plugins than fit as chips, so the Plugin filter is a menu that scrolls, as it is with a real library.
+    out.push(file("Glass Keys", "Pigments", "Pigments", ".vstpreset", Some(Role::Chords), 2025));
+    out.push(file("Dusty Lead", "Diva", "Diva", ".fxp", Some(Role::Lead), 2021));
+    out.push(file("Wide Choir", "Omnisphere", "Omnisphere", ".fxb", Some(Role::Pad), 2020));
+    out.push(file("Space Arp", "Massive X", "Massive X", ".vstpreset", Some(Role::Arp), 2025));
     out
 }
 

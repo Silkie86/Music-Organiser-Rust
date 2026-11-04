@@ -350,6 +350,14 @@ impl Link {
         inserted(&answer)
     }
 
+    /// Puts a file (a MIDI file, or audio) in the first empty clip launcher slot of a track (by its place in the project
+    /// listing), as if it were dropped there, and gives back the slot's place. `path` is the file's full path, as this
+    /// computer writes it.
+    pub fn add_clip(&mut self, track: usize, path: &str) -> Result<usize, Error> {
+        let answer = self.change(ask("clip", [("track", track.into()), ("path", path.into())]))?;
+        index(answer.get("slot")).ok_or(Error::Unexpected)
+    }
+
     /// Adds one of Bitwig's own devices to the end of a track's chain, by its ID.
     pub fn insert_device(&mut self, track: usize, device: DeviceId) -> Result<Inserted, Error> {
         let fields = [("track", track.into()), ("kind", "bitwig".into()), ("device", device.to_string().into())];

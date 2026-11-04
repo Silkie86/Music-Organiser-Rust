@@ -13,16 +13,21 @@ pub mod arrangement;
 pub mod backup;
 mod canvas;
 pub mod cards;
+pub mod drag;
 pub mod files;
+pub mod filters;
 pub mod finder;
 pub mod gpu;
 pub mod midi;
 pub mod note;
+mod piano_roll;
+pub mod plugins;
 pub mod presets;
 pub mod settings;
 pub mod songs;
 pub mod sounds;
 pub mod space;
+pub mod startup;
 mod stuck;
 pub mod watchdog;
 mod waves;
@@ -34,7 +39,8 @@ use mo_app::activity::Feed;
 use mo_app::log;
 use mo_app::places::Place;
 use mo_app::shortcuts::{
-    APP_ACTIONS, Action, MIDI_ACTIONS, SONGS_ACTIONS, SOUNDS_ACTIONS, SPACE_ACTIONS, Shortcuts, repeats, what_of,
+    APP_ACTIONS, Action, MIDI_ACTIONS, PLUGINS_ACTIONS, SONGS_ACTIONS, SOUNDS_ACTIONS, SPACE_ACTIONS, Shortcuts,
+    repeats, what_of,
 };
 use mo_app::themes::Look;
 use note::open_note;
@@ -47,6 +53,13 @@ static PAGE: AtomicUsize = AtomicUsize::new(0);
 thread_local! {
     /// The keys in use, for the key sheet, which changes with the page.
     static KEYS: RefCell<Option<std::rc::Rc<Shortcuts>>> = const { RefCell::new(None) };
+    /// The look in use, for what's drawn outside Slint (the card that follows a drag).
+    static LOOK: std::cell::Cell<Option<Look>> = const { std::cell::Cell::new(None) };
+}
+
+/// The look in use (on the window's thread): the one last put on the window, else the default.
+pub fn look() -> Look {
+    LOOK.with(std::cell::Cell::get).unwrap_or_else(|| Look::from_settings(None, None))
 }
 
 /// The place on show, safe to read from any thread.
@@ -70,6 +83,7 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     app.set_songs_place(Place::Songs.index() as i32);
     app.set_sounds_place(Place::Sounds.index() as i32);
     app.set_backup_place(Place::Backup.index() as i32);
+    app.set_plugins_place(Place::Plugins.index() as i32);
     app.set_presets_place(Place::Presets.index() as i32);
     app.set_midi_place(Place::Midi.index() as i32);
     app.set_space_place(Place::Space.index() as i32);
@@ -112,6 +126,13 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
             && songs::has_pick()
         {
             return repeat || songs::run_action(&app, id);
+        }
+        if let Some(app) = weak.upgrade()
+            && app.get_place() == Place::Plugins.index() as i32
+            && let Some(id) = shortcuts.page_action_for(&key, PLUGINS_ACTIONS)
+            && plugins::has_pick()
+        {
+            return repeat || plugins::run_action(&app, id);
         }
         if let Some(app) = weak.upgrade()
             && app.get_place() == Place::Presets.index() as i32
@@ -236,6 +257,7 @@ fn show_places(app: &AppWindow, shortcuts: &Shortcuts) {
     let settings = Place::Settings.index();
     app.set_rail(ModelRc::new(VecModel::from(places[..settings].to_vec())));
     app.set_places(ModelRc::new(VecModel::from(places)));
+    app.global::<FinderData>().set_jump_key(shortcuts.key_of("app.jump").into());
 }
 
 /// The Songs page's buttons' tooltips: what each does and its key, from the one shortcut list (rule 15).
@@ -248,17 +270,23 @@ fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
 }
 
 /// Shows a place, and notes it for the log and the watchdog.
-fn go_to(app: &AppWindow, index: i32) {
+pub(crate) fn go_to(app: &AppWindow, index: i32) {
     let Some(place) = usize::try_from(index).ok().and_then(Place::from_index) else { return };
     let _doing = watchdog::doing("go to a page");
     if PAGE.swap(place.index(), Ordering::Relaxed) != place.index() || app.get_place() != index {
         log::info("Page", place.name());
     }
+    // The place's colour first, so the new page's mark never shows the old place's colour for a frame (the window's
+    // own `changed place` comes a frame late).
+    app.global::<Theme>().set_here(index);
     app.set_place(index);
     finder::close(app);
     settings::page_shown(place);
     if place == Place::Backup {
         backup::shown();
+    }
+    if place == Place::Plugins {
+        plugins::shown();
     }
     if place == Place::Midi {
         midi::shown(app);
@@ -292,6 +320,7 @@ fn key_rows(shortcuts: &Shortcuts, place: Place) -> Vec<KeyRow> {
     let page: &[Action] = match place {
         Place::Songs => SONGS_ACTIONS,
         Place::Sounds => SOUNDS_ACTIONS,
+        Place::Plugins => PLUGINS_ACTIONS,
         Place::Presets => presets::page_actions(),
         Place::Midi => MIDI_ACTIONS,
         Place::Space => SPACE_ACTIONS,
@@ -310,6 +339,7 @@ fn key_rows(shortcuts: &Shortcuts, place: Place) -> Vec<KeyRow> {
 
 /// Puts a look's colours and fonts into the screens' `Theme` tokens.
 pub fn apply_look(app: &AppWindow, look: &Look) {
+    LOOK.with(|l| l.set(Some(*look)));
     let t = app.global::<Theme>();
     let th = &look.theme;
     t.set_background(rgb(th.background));
@@ -327,12 +357,16 @@ pub fn apply_look(app: &AppWindow, look: &Look) {
     t.set_square(th.square);
     t.set_text_font(th.font.text_family().into());
     t.set_number_font(th.font.number_family().into());
+    t.set_title_font(th.font.title_family().into());
+    let places: Vec<Color> = mo_app::themes::place_colours(look).iter().map(|c| rgb(*c)).collect();
+    t.set_places(ModelRc::new(VecModel::from(places)));
     app.global::<Palette>().set_color_scheme(if th.light {
         slint::language::ColorScheme::Light
     } else {
         slint::language::ColorScheme::Dark
     });
     arrangement::set_look(app, look);
+    piano_roll::look_changed(app);
 }
 
 pub(crate) fn rgb(c: u32) -> Color {

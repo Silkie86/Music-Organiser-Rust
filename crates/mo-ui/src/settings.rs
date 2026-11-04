@@ -7,7 +7,7 @@ use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 
 use mo_app::activity::Feed;
-use mo_app::app_settings::{self, AppSettings, PACE_KEY, SOUND_OUTPUT_KEY, START_PAGE_KEY, TAB_KEY};
+use mo_app::app_settings::{self, AppSettings, PACE_KEY, SOUND_OUTPUT_KEY, START_PAGE_KEY, SWEEP_HOLD_KEY, TAB_KEY};
 use mo_app::background::{self, Newest, Pace};
 use mo_app::log;
 use mo_app::places::Place;
@@ -160,6 +160,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     }
     let start_output = setup.settings.get(SOUND_OUTPUT_KEY).filter(|s| !s.is_empty()).map(str::to_owned);
     crate::sounds::choose_output(start_output);
+    crate::sounds::hold_sweeps(sweep_hold(&setup.settings));
     PAGE.with(|p| {
         *p.borrow_mut() = Some(Page {
             outputs: page::outputs(&[], setup.settings.get(SOUND_OUTPUT_KEY), cfg!(windows)),
@@ -332,6 +333,15 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         }
     });
     let weak = app.as_weak();
+    data.on_toggle_sweep_hold(move || {
+        let on = !PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| sweep_hold(&p.settings)));
+        change(SWEEP_HOLD_KEY, if on { "1" } else { "0" });
+        crate::sounds::hold_sweeps(on);
+        if let Some(app) = weak.upgrade() {
+            app.global::<SettingsData>().set_sweep_hold(on);
+        }
+    });
+    let weak = app.as_weak();
     data.on_refresh_outputs(move || {
         if let Some(app) = weak.upgrade() {
             list_outputs(&app);
@@ -400,6 +410,11 @@ pub fn connect(app: &AppWindow, setup: Setup) {
 
 fn strings<S: Into<SharedString>>(items: impl IntoIterator<Item = S>) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(items.into_iter().map(Into::into).collect::<Vec<SharedString>>()))
+}
+
+/// Whether a Galaxy sweep holds the pointer to the star that's playing (off unless turned on).
+pub fn sweep_hold(settings: &AppSettings) -> bool {
+    settings.get(SWEEP_HOLD_KEY) == Some("1")
 }
 
 /// Changes a setting and writes the file in the background, when it changed.
@@ -974,10 +989,11 @@ fn show(app: &AppWindow) {
         data.set_size_note(page::size_note(size_from_setting(s.get(SIZE_KEY))).into());
 
         let start = page::start_index(s.get(START_PAGE_KEY));
-        data.set_start_page(page::start_setting(start).unwrap_or_default().into());
+        data.set_start_index(start as i32);
         let pace = Pace::from_setting(s.get(PACE_KEY));
         data.set_pace(Pace::ALL.iter().position(|x| *x == pace).unwrap_or(2) as i32);
         data.set_pace_note(page::pace_note(pace, p.running_pace, background::cores()).into());
+        data.set_sweep_hold(sweep_hold(s));
         data.set_outputs(strings(p.outputs.labels.iter().cloned()));
         data.set_output(p.outputs.labels.get(p.outputs.picked).cloned().unwrap_or_default().into());
 

@@ -16,9 +16,9 @@ use mo_app::background::{self, Newest};
 use mo_app::log;
 use mo_app::themes::Look;
 use rayon::prelude::*;
-use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
+use slint::{ComponentHandle, Image, ModelRc, SharedString, VecModel};
 
-use crate::canvas::{Canvas, Kind};
+use crate::canvas::{self, Canvas, Kind};
 use crate::gpu;
 use crate::{AppWindow, ArrKind, ArrLabel, ArrangementData};
 
@@ -30,6 +30,9 @@ const NOT_YET: &str = "Arrangements can be drawn for FL Studio, Bitwig and Studi
 /// A picture to work out: for which song, which picture (they're counted), the view as it is, its colours, pixels to a
 /// point, and whether the graphics card draws it (else the processor does, on the drawing thread).
 type DrawJob = (u64, u64, View, Palette, f64, bool);
+
+/// The audio files to look for: for which song, its save, and the views read from it.
+type FindJob = (u64, PathBuf, Vec<Arc<mo_formats::arrangement::Arrangement>>);
 
 #[derive(Default)]
 struct State {
@@ -95,21 +98,52 @@ pub fn connect(app: &AppWindow) {
     });
     let weak = app.as_weak();
     data.on_grab(move |x, y| {
+        // On a clip or a track's name the press may become a drag out of the app; elsewhere it moves the view.
+        with_view(&weak, |v| {
+            v.left_press(f64::from(x), f64::from(y));
+            false
+        });
+    });
+    let weak = app.as_weak();
+    data.on_side_grab(move |x, y| {
         with_view(&weak, |v| {
             v.press(f64::from(x), f64::from(y));
             false
         });
     });
-    // Only a drag changes the picture; the mouse just moving changes what's under it, which the window shows itself.
+    // Only moving the view changes the picture; the mouse just moving changes what's under it, which the window shows
+    // itself.
     let weak = app.as_weak();
     data.on_moved(move |x, y| {
+        // While a drag out of the app is made and carried, the view stays as it is, with nothing shown under the mouse.
+        if crate::drag::busy() {
+            return;
+        }
+        let (x, y) = (f64::from(x), f64::from(y));
+        let out = STATE.with(|s| s.borrow_mut().view.as_mut().and_then(|v| v.moved_far(x, y)));
+        if let Some(pick) = out {
+            if let Some(app) = weak.upgrade() {
+                drag_out(&app, pick);
+            }
+            return;
+        }
         with_view(&weak, |v| {
-            v.moved(f64::from(x), f64::from(y));
+            v.moved(x, y);
             v.dragging()
         });
     });
     let weak = app.as_weak();
     data.on_let_go(move || {
+        if let Some(app) = weak.upgrade() {
+            crate::drag::let_go(&app);
+        }
+        with_view(&weak, |v| {
+            v.release();
+            false
+        });
+    });
+    let weak = app.as_weak();
+    data.on_side_let_go(move || {
         with_view(&weak, |v| {
             v.release();
             false
@@ -130,15 +164,40 @@ pub fn connect(app: &AppWindow) {
         });
     });
 
+    // Looking for a save's audio files can take far longer than reading it (whole folder trees, the Sounds library), so
+    // it has a thread of its own: the arrangement shows as soon as its save is read, and the next song picked is read
+    // meanwhile. The folders read are kept for the next song for a minute. Then the files' waveforms.
     let weak = app.as_weak();
-    let reader = Newest::start("Arrangement", move |(asked, path): (u64, PathBuf)| {
-        let read = arr::read(&path, Some(&mo_app::paths::data_dir().join("sounds.db")));
-        let found = read.as_ref().ok().map(|p| p.found.clone()).filter(|f| !f.is_empty());
-        let _ = weak.upgrade_in_event_loop(move |app| arrived(&app, asked, read));
-        // Then the waveforms: the arrangement is up meanwhile.
-        if let Some(found) = found {
+    let mut samples = arr::SampleFinder::new(Some(mo_app::paths::data_dir().join("sounds.db")));
+    let finder = Newest::start("Arrangement samples", move |(asked, path, views): FindJob| {
+        let wanted = || SHOWN.load(Ordering::Relaxed) == asked;
+        if !wanted() {
+            return;
+        }
+        let locator = samples.locator(std::time::Instant::now());
+        let Some(found) = arr::find_samples(&views, &path, &locator, wanted) else { return };
+        let found = Arc::new(found);
+        let shown = found.clone();
+        let _ = weak.upgrade_in_event_loop(move |app| samples_found(&app, asked, shown));
+        if !found.is_empty() && wanted() {
             let peaks = background::on_pool(|| read_peaks(&found, asked));
             let _ = weak.upgrade_in_event_loop(move |app| waves_arrived(&app, asked, peaks));
+        }
+    });
+    let finder = match finder {
+        Ok(f) => Some(f),
+        Err(e) => {
+            log::error("Arrangement", &format!("Couldn't start looking for the arrangement's audio files: {e}"));
+            None
+        }
+    };
+    let weak = app.as_weak();
+    let reader = Newest::start("Arrangement", move |(asked, path): (u64, PathBuf)| {
+        let read = arr::read(&path);
+        let looking = read.as_ref().ok().filter(|p| p.found.is_none()).map(|p| p.views.clone());
+        let _ = weak.upgrade_in_event_loop(move |app| arrived(&app, asked, read));
+        if let (Some(views), Some(finder)) = (looking, &finder) {
+            finder.ask((asked, path, views));
         }
     });
     match reader {
@@ -197,8 +256,16 @@ pub fn show_song(app: &AppWindow, path: Option<&str>, missing: bool) {
     data.set_message(READING.into());
     let path = PathBuf::from(path);
     if here {
-        // The screenshots: their made-up songs, without the real Sounds library.
-        arrived(app, asked, arr::read(&path, None));
+        // The screenshots: their made-up songs, with their audio files looked for at once, without the real Sounds
+        // library.
+        let mut read = arr::read(&path);
+        if let Ok(p) = read.as_mut()
+            && p.found.is_none()
+        {
+            let locator = mo_app::sound_library::locator(None);
+            p.found = arr::find_samples(&p.views, &path, &locator, || true).map(Arc::new);
+        }
+        arrived(app, asked, read);
         return;
     }
     READER.with(|slot| {
@@ -268,7 +335,7 @@ fn read_peaks(found: &HashMap<String, PathBuf>, asked: u64) -> Arc<HashMap<Strin
                 return None;
             }
             // A sound that trips the reader is drawn without its wave; the others still come.
-            std::panic::catch_unwind(|| {
+            mo_catch::catch(|| {
                 let audio = mo_audio::read(file, mo_audio::MAX_SECONDS).ok()?;
                 Some((saved.clone(), Arc::new(Peaks::of(audio.sample_rate, &audio.channels, audio.file_seconds))))
             })
@@ -277,6 +344,30 @@ fn read_peaks(found: &HashMap<String, PathBuf>, asked: u64) -> Arc<HashMap<Strin
         })
         .collect();
     Arc::new(peaks)
+}
+
+/// The save's audio files have been looked for: the clips whose files aren't here are marked so (in the picture and
+/// the label under the mouse), and the page says how many, if their song is still the one picked.
+fn samples_found(app: &AppWindow, asked: u64, found: Arc<HashMap<String, PathBuf>>) {
+    let shown = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let s = &mut *s;
+        if s.asked != asked {
+            return None;
+        }
+        s.preview.as_mut()?.found = Some(found.clone());
+        let view = s.view.as_mut()?;
+        view.set_found(found.clone());
+        let a = view.arrangement().clone();
+        let notes = arr::notes(&a, Some(&found));
+        Some((a, notes, view.hover()))
+    });
+    let Some((a, notes, hover)) = shown else { return };
+    let data = app.global::<ArrangementData>();
+    show_hover(&data, hover);
+    if show_notes(&data, &a, notes) {
+        redraw(app);
+    }
 }
 
 /// The waveforms came: drawn, if their song is still the one picked.
@@ -304,29 +395,112 @@ fn pick_view(app: &AppWindow, index: usize) {
         let mut s = s.borrow_mut();
         let p = s.preview.as_ref()?;
         let a = p.views.get(index)?.clone();
-        let mut view = View::new(a.clone(), p.found.clone());
+        let mut view = match &p.found {
+            Some(found) => View::new(a.clone(), found.clone()),
+            None => View::new(a.clone(), Arc::default()).looking_for_files(),
+        };
+        let notes = arr::notes(&a, p.found.as_deref());
         view.set_peaks(s.peaks.clone());
         view.resize(s.size.0, s.size.1);
         s.view = Some(view);
-        Some(a)
+        Some((a, notes))
     });
-    let Some(a) = shown else { return };
+    let Some((a, notes)) = shown else { return };
     data.set_view(i32::try_from(index).unwrap_or(0));
     data.set_summary(arr::summary(&a).into());
+    if show_notes(&data, &a, notes) {
+        redraw(app);
+    }
+}
+
+/// Puts a view's notes under its picture; or, for a view with nothing to draw, the reason in the picture's place.
+/// Whether there's a picture to draw.
+fn show_notes(data: &ArrangementData, a: &mo_formats::arrangement::Arrangement, notes: Vec<String>) -> bool {
     if a.lanes.is_empty() {
-        // Nothing to draw: the reason, when there is one, takes the picture's place.
-        let why = a.notes.join(" ");
+        let why = notes.join(" ");
         data.set_notes(ModelRc::default());
         data.set_message(if why.is_empty() {
             "Nothing has been placed in this arrangement yet.".into()
         } else {
             why.into()
         });
-        return;
+        return false;
     }
-    data.set_notes(strings(a.notes.iter().cloned()));
+    data.set_notes(strings(notes.into_iter()));
     data.set_message(SharedString::new());
-    redraw(app);
+    true
+}
+
+// ---- Dragging a clip or a track out to a DAW (`drag.rs`) ---------------------------------------------------------
+//
+// A clip, or a whole track by its name, goes out as a MIDI file of its notes (written to Temp) and its audio clips'
+// samples. The left button drags those; on empty space it moves the view, and the right or middle button moves the view
+// anywhere.
+
+/// Drags `pick` out of the app: dims it where it is, and makes what it carries (a MIDI file in Temp for its notes)
+/// while the drag gets going.
+fn drag_out(app: &AppWindow, pick: mo_app::drag_out::Pick) {
+    let Some((make, at)) = STATE.with(|s| {
+        let s = s.borrow();
+        let v = s.view.as_ref()?;
+        Some((v.drag_out(pick), v.pick_box(pick)))
+    }) else {
+        return;
+    };
+    let under_way = crate::drag::start(
+        app,
+        crate::drag::Drag {
+            make: Box::new(move || {
+                make()?.write(&std::env::temp_dir()).map_err(|e| format!("Couldn't write the MIDI file in Temp: {e}."))
+            }),
+            done: Box::new(|app, outcome| {
+                app.global::<ArrangementData>().set_lifted(false);
+                if outcome == crate::drag::Outcome::Landed {
+                    crate::drag::glow(app, |app, on| app.global::<ArrangementData>().set_landed(on));
+                }
+            }),
+        },
+    );
+    let data = app.global::<ArrangementData>();
+    data.set_hover_text(SharedString::new());
+    if let Some(at) = at.filter(|_| under_way) {
+        lift(&data, at);
+        data.set_landed(false);
+        data.set_lifted(true);
+    }
+}
+
+/// Puts the dimming and the landing glow over `at` (x, y, width, height on the view).
+fn lift(data: &ArrangementData, (x, y, w, h): (f64, f64, f64, f64)) {
+    data.set_lifted_x(x as f32);
+    data.set_lifted_y(y as f32);
+    data.set_lifted_width(w as f32);
+    data.set_lifted_height(h as f32);
+}
+
+/// For the screenshots: the clip or track at `x`, `y` on the view as it looks while it's dragged out, or once it has
+/// landed, without dragging anything; and what its card shows (no files: nothing is written). None when there's
+/// nothing there to drag.
+pub fn show_lifted(app: &AppWindow, x: f32, y: f32, landed: bool) -> Option<mo_app::drag_out::Payload> {
+    let found = STATE.with(|s| {
+        let s = s.borrow();
+        let v = s.view.as_ref()?;
+        let pick = v.pick_at(f64::from(x), f64::from(y))?;
+        Some((v.pick_box(pick)?, v.drag_out(pick)))
+    });
+    let data = app.global::<ArrangementData>();
+    if let Some((at, _)) = &found {
+        lift(&data, *at);
+    }
+    data.set_lifted(found.is_some() && !landed);
+    data.set_landed(found.is_some() && landed);
+    let out = (found?.1)().ok()?;
+    Some(mo_app::drag_out::Payload {
+        files: Vec::new(),
+        cards: out.cards,
+        caption: out.caption,
+        numbered: out.numbered,
+    })
 }
 
 /// Changes what the view knows and draws it again.
@@ -425,46 +599,16 @@ pub fn graphics_gone(app: &AppWindow) {
     });
 }
 
-/// Draws the shapes on the card, now, and gives the picture for Slint to show; `None` when there's no card to draw on
-/// any more (it went since the shapes were asked for).
-fn draw_on_card(shapes: &Shapes) -> Result<Option<Image>, String> {
-    let Some((gpu, generation)) = usable_card() else { return Ok(None) };
-    let image = CARD.with(|c| -> Result<_, String> {
-        let mut c = c.borrow_mut();
-        let canvas = c.on(&gpu, generation, |gpu| {
-            // Set up when the card was handed over (`graphics_ready`), so only if that couldn't start does the card
-            // build the shader here, which can take a moment.
-            let _doing = crate::watchdog::doing("Arrangement: set up the GPU painter");
-            Canvas::new(&gpu.device, &gpu.queue, Kind::Picture)
-        })?;
-        let _doing = crate::watchdog::doing("Arrangement: draw on the GPU");
-        let texture = gpu::checked(&gpu.device, || {
-            canvas.draw(shapes.size, shapes.scale, shapes.background, &shapes.bytes, 0.0)
-        })?;
-        Image::try_from(texture).map_err(|e| format!("Slint wouldn't show the picture: {e}"))
-    });
-    // If the card or Slint said no, the processor draws it from now on, on this card.
-    image.map(Some).inspect_err(|_| CARD.with(|c| c.borrow_mut().refused(generation)))
-}
-
-/// The shapes of a view for the graphics card, packed on the drawing thread.
-struct Shapes {
-    bytes: Vec<u8>,
-    /// The picture's size in pixels, and pixels to a point.
-    size: (u32, u32),
-    scale: f32,
-    background: u32,
-}
-
-/// What's drawn of a view on the drawing thread: the picture itself (by the processor), or the shapes for the card.
-enum Drawing {
-    Pixels(SharedPixelBuffer<Rgba8Pixel>),
-    Shapes(Shapes),
-}
+/// What the arrangement's steps on the window's thread are called in the freeze lines.
+const STEPS: canvas::Steps = canvas::Steps {
+    set_up: "Arrangement: set up the GPU painter",
+    draw: "Arrangement: draw on the GPU",
+    show: "Arrangement: show the CPU picture",
+};
 
 /// A worked out view, ready for the window: made on the drawing thread.
 struct Picture {
-    drawing: Drawing,
+    drawing: canvas::Drawing,
     header: Vec<ArrLabel>,
     timeline: Vec<ArrLabel>,
     ruler: Vec<ArrLabel>,
@@ -475,17 +619,7 @@ struct Picture {
 impl Picture {
     fn new(frame: Frame, scale: f64, on_card: bool) -> Picture {
         let Frame { scene, labels, header_width, ruler_height, .. } = frame;
-        let scale = mo_app::shapes::usable_scale(scale);
-        let drawing = if on_card {
-            Drawing::Shapes(Shapes {
-                bytes: scene.pack(scale),
-                size: scene.pixel_size(scale),
-                scale: scale as f32,
-                background: scene.background,
-            })
-        } else {
-            Drawing::Pixels(paint(&scene, scale))
-        };
+        let drawing = canvas::Drawing::new(&scene, scale, on_card);
         let (mut header, mut timeline, mut ruler) = (Vec::new(), Vec::new(), Vec::new());
         for l in labels {
             let (kind, muted) = kind(l.style);
@@ -515,12 +649,6 @@ impl Picture {
     }
 }
 
-/// The scene drawn on the processor, in the window's kind of buffer.
-fn paint(scene: &mo_app::shapes::Scene, scale: f64) -> SharedPixelBuffer<Rgba8Pixel> {
-    let pixmap = scene.paint(scale);
-    SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(pixmap.data(), pixmap.width(), pixmap.height())
-}
-
 /// A picture has been worked out (picture `number`, or here and now): drawn on the card if it's for the card, and put
 /// on the page with its words, unless another song has been picked since or a newer picture is on its way already.
 fn drawn(app: &AppWindow, asked: u64, number: Option<u64>, picture: Picture) {
@@ -528,55 +656,32 @@ fn drawn(app: &AppWindow, asked: u64, number: Option<u64>, picture: Picture) {
         return;
     }
     let data = app.global::<ArrangementData>();
-    match picture.drawing {
-        Drawing::Shapes(shapes) => match draw_on_card(&shapes) {
-            Ok(Some(image)) => data.set_picture(image),
-            // The card went since this was asked for: drawn again, on the processor.
-            Ok(None) => {
-                redraw(app);
-                return;
-            }
-            Err(e) => {
-                log::error(
-                    "Arrangement",
-                    &format!("The graphics card couldn't draw the arrangement, so the processor does: {e}"),
-                );
-                redraw(app);
-                return;
-            }
-        },
-        Drawing::Pixels(pixels) => {
-            let _doing = crate::watchdog::doing("Arrangement: show the CPU picture");
-            data.set_picture(Image::from_rgba8_premultiplied(pixels));
+    match canvas::show(picture.drawing, &CARD, &STEPS) {
+        Ok(Some(image)) => data.set_picture(image),
+        // The card went since this was asked for: drawn again, on the processor.
+        Ok(None) => {
+            redraw(app);
+            return;
+        }
+        Err(e) => {
+            log::error(
+                "Arrangement",
+                &format!("The graphics card couldn't draw the arrangement, so the processor does: {e}"),
+            );
+            redraw(app);
+            return;
         }
     }
     let _doing = crate::watchdog::doing("Arrangement: place the words");
     data.set_header_width(picture.header_width);
     data.set_ruler_height(picture.ruler_height);
     WORDS.with(|w| {
-        refill(&w.header, picture.header);
-        refill(&w.timeline, picture.timeline);
-        refill(&w.ruler, picture.ruler);
+        canvas::refill(&w.header, picture.header);
+        canvas::refill(&w.timeline, picture.timeline);
+        canvas::refill(&w.ruler, picture.ruler);
     });
     // What's under the mouse now, which may have moved on since this picture was asked for.
     show_hover(&data, STATE.with(|s| s.borrow().view.as_ref().and_then(View::hover)));
-}
-
-/// Puts `rows` in `model` in place of what's there, changing only the lines that differ, so the window keeps the words
-/// it has instead of making them all again.
-fn refill(model: &VecModel<ArrLabel>, rows: Vec<ArrLabel>) {
-    let old = model.row_count();
-    let keep = old.min(rows.len());
-    let mut rows = rows.into_iter();
-    for (i, row) in rows.by_ref().take(keep).enumerate() {
-        if model.row_data(i).as_ref() != Some(&row) {
-            model.set_row_data(i, row);
-        }
-    }
-    model.extend(rows);
-    for i in (keep..old).rev() {
-        model.remove(i);
-    }
 }
 
 /// A label's look, and whether it's greyed out.
@@ -603,7 +708,13 @@ pub fn sample_preview() -> Preview {
     use mo_formats::arrangement::{
         Arrangement, AudioPart, LaneKind, PreviewClip, PreviewLane, PreviewMarker, PreviewNote, PreviewPoint,
     };
-    let note = |start: f64, key: u8, length: f64| PreviewNote { start, length, key, velocity: 48000, muted: false };
+    let note = |start: f64, key: u8, length: f64| PreviewNote {
+        start,
+        length,
+        key,
+        velocity: 48000,
+        ..PreviewNote::default()
+    };
     let pattern = |name: &str, start: f64, length: f64, notes: Vec<PreviewNote>| PreviewClip {
         name: name.into(),
         start,
@@ -702,7 +813,7 @@ pub fn sample_preview() -> Preview {
     let mut bitwig = playlist.clone();
     bitwig.view = "As it opens in Bitwig";
     let found = HashMap::from([(SAMPLE_TAKE.to_owned(), PathBuf::from(SAMPLE_TAKE))]);
-    Preview { views: vec![Arc::new(playlist), Arc::new(bitwig)], found: Arc::new(found) }
+    Preview { views: vec![Arc::new(playlist), Arc::new(bitwig)], found: Some(Arc::new(found)) }
 }
 
 /// The made-up song's vocal take that's on this computer.
@@ -739,18 +850,6 @@ mod tests {
     use mo_app::themes::Look;
     use slint::wgpu_30::wgpu;
 
-    #[test]
-    fn the_words_change_line_by_line() {
-        let label = |text: &str| ArrLabel { text: text.into(), ..ArrLabel::default() };
-        let model = VecModel::from(vec![label("a"), label("b"), label("c")]);
-        refill(&model, vec![label("a"), label("x")]);
-        assert_eq!(model.iter().map(|l| l.text.to_string()).collect::<Vec<_>>(), ["a", "x"]);
-        refill(&model, vec![label("a"), label("x"), label("y"), label("z")]);
-        assert_eq!(model.iter().map(|l| l.text.to_string()).collect::<Vec<_>>(), ["a", "x", "y", "z"]);
-        refill(&model, Vec::new());
-        assert_eq!(model.row_count(), 0);
-    }
-
     /// Draws the made-up song on whatever graphics card there is (a software one will do) and on the processor, in a
     /// few views (fitted, zoomed in on the vocal's waveform, every lane squeezed in, on Paper, at 1, 1.5 and 2 pixels
     /// to a point), and checks the two pictures agree: the same shapes in the same places, differing only a little at
@@ -780,7 +879,7 @@ mod tests {
             ("paper-zoomed-2x", paper, 2.0, |v| v.wheel(560.0, 0.0, 6.0, true, false)),
         ];
         for (name, palette, scale, setup) in views {
-            let mut view = View::new(preview.views[0].clone(), preview.found.clone());
+            let mut view = View::new(preview.views[0].clone(), preview.found.clone().unwrap_or_default());
             view.set_peaks(peaks.clone());
             view.resize(900.0, 300.0);
             setup(&mut view);

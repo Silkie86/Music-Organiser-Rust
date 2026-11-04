@@ -5,7 +5,7 @@
 //! the stars they leave out. Which part of the map is on show, the wheel and clicks versus drags are
 //! `mo_app::galaxy_view`'s; the star under the mouse is found on a grid over the whole map (`mo_app::galaxy_grid`).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mo_app::background::{self, Newest};
+use mo_app::filters;
 use mo_app::galaxy_grid::{Crowd, Grid};
 use mo_app::galaxy_look::{self, LightBy};
 use mo_app::galaxy_names::{self as names, NO_KIND, Region};
@@ -26,7 +27,7 @@ use mo_sounds::{SoundsDb, StarPoint};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel};
 
 use super::sky::{Shine, Sky};
-use super::{FEED, HERE, PAGE, pick, play_picked, strings};
+use super::{CHOICES, FEED, HERE, PAGE, pick, play_picked};
 use crate::gpu;
 use crate::{AppWindow, GalaxyLabel, SoundsData, SweptLine, Theme, TrailDot};
 
@@ -386,28 +387,46 @@ fn fly(app: &AppWindow) {
     });
 }
 
+/// The galaxy's choices on show, each as a chip, with what the stars are placed and lit by picked.
+fn show_choices(app: &AppWindow) {
+    let (placing, light_by) = PAGE.with(|p| {
+        let g = &p.borrow().galaxy;
+        (g.placing, g.light_by)
+    });
+    let placing = PLACINGS.iter().find(|p| p.1 == placing).map_or("", |p| p.0);
+    let placings = filters::one_of(&PLACINGS.map(|p| p.0), placing);
+    let lights = filters::one_of(&LightBy::ALL.map(LightBy::name), light_by.name());
+    let data = app.global::<SoundsData>();
+    CHOICES.with(|c| {
+        data.set_placing_filter(c.placing.view(&placings));
+        data.set_light_filter(c.light.view(&lights));
+    });
+}
+
 /// Wires the galaxy's choices and the mouse on the map.
 pub(super) fn wire(app: &AppWindow) {
     let data = app.global::<SoundsData>();
-    data.set_galaxy_placings(strings(PLACINGS.map(|p| p.0)));
-    data.set_galaxy_placing(PLACINGS[0].0.into());
+    show_choices(app);
+    // The choice already picked stays picked, and the map stays as it is.
     let weak = app.as_weak();
     data.on_galaxy_place_by(move |v| {
         let Some(app) = weak.upgrade() else { return };
         let Some(&(_, placing)) = PLACINGS.iter().find(|p| p.0 == v.as_str()) else { return };
-        PAGE.with(|p| p.borrow_mut().galaxy.placing = placing);
-        app.global::<SoundsData>().set_galaxy_placing(v);
-        load(&app, false);
+        let changed = PAGE.with(|p| std::mem::replace(&mut p.borrow_mut().galaxy.placing, placing) != placing);
+        if changed {
+            show_choices(&app);
+            load(&app, false);
+        }
     });
-    data.set_galaxy_lights(strings(LightBy::ALL.map(LightBy::name)));
-    data.set_galaxy_light(LightBy::default().name().into());
     let weak = app.as_weak();
     data.on_galaxy_light_by(move |v| {
         let Some(app) = weak.upgrade() else { return };
         let Some(by) = LightBy::from_name(v.as_str()) else { return };
-        PAGE.with(|p| p.borrow_mut().galaxy.light_by = by);
-        app.global::<SoundsData>().set_galaxy_light(v);
-        draw(&app);
+        let changed = PAGE.with(|p| std::mem::replace(&mut p.borrow_mut().galaxy.light_by, by) != by);
+        if changed {
+            show_choices(&app);
+            draw(&app);
+        }
     });
     let weak = app.as_weak();
     data.on_galaxy_lay_out(move || {
@@ -616,6 +635,8 @@ pub(super) struct Sweep {
     waiting: Option<usize>,
     /// When the mouse last moved in this sweep, to tell how fast it's going.
     moved: Option<Instant>,
+    /// Where the pointer is held, on the star waiting its turn, when sweeps hold the pointer.
+    held: Option<(f32, f32)>,
 }
 
 /// How far ahead of the mouse a sweep's next sounds are read (the C# app's 40 ms), at most how far in points, how
@@ -627,6 +648,8 @@ const AHEAD_BYTES: usize = 128 * 1024;
 
 thread_local! {
     static SWEEP_TIMER: Timer = Timer::default();
+    /// Whether a sweep holds the pointer to the star waiting its turn (Settings › General), so none is passed unheard.
+    static HOLD: Cell<bool> = const { Cell::new(false) };
     /// Reads the start of the sounds a sweep is about to reach, newest ask first.
     static READ_AHEAD: RefCell<Option<Newest<Vec<String>>>> = const { RefCell::new(None) };
 }
@@ -697,21 +720,39 @@ fn read_ahead(from: (f32, f32), to: (f32, f32), dt: Duration, passed: &[usize]) 
     });
 }
 
+/// Whether a Galaxy sweep holds the pointer to the star waiting its turn.
+pub(super) fn hold_sweeps(on: bool) {
+    HOLD.with(|h| h.set(on));
+}
+
 /// The mouse swept from `from` to `to`: every star along the way, not just where it landed (a quick sweep moves many
-/// points between two moves), plays in turn.
+/// points between two moves), plays in turn. When sweeps hold the pointer, a star that has to wait its turn keeps
+/// the pointer on it until it plays, and the stars past it aren't reached yet.
 fn swept(app: &AppWindow, from: (f32, f32), to: (f32, f32)) {
     let _doing = crate::watchdog::doing(frame_timing::SWEEPING);
+    let hold = HOLD.with(Cell::get);
+    // Held on a star still waiting: the pointer goes back there, and the move reaches nothing new.
+    if hold
+        && let Some(at) = PAGE.with(|p| {
+            let s = &p.borrow().galaxy.sweep;
+            s.held.filter(|_| s.waiting.is_some())
+        })
+    {
+        hold_at(app, at, to);
+        return;
+    }
     let steps = ((to.0 - from.0).hypot(to.1 - from.1) / SWEEP_STEP).ceil().max(1.0) as usize;
-    let mut passed: Vec<usize> = Vec::new();
+    let mut passed: Vec<(usize, (f32, f32))> = Vec::new();
     // Whether the first star passed is the one under the last mouse point.
     let mut from_a_star = false;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
-        if let Some(at) = star_at(from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t)
-            && passed.last() != Some(&at)
+        let point = (from.0 + (to.0 - from.0) * t, from.1 + (to.1 - from.1) * t);
+        if let Some(at) = star_at(point.0, point.1)
+            && passed.last().map(|&(a, _)| a) != Some(at)
         {
             from_a_star |= i == 0;
-            passed.push(at);
+            passed.push((at, point));
         }
     }
     let data = app.global::<SoundsData>();
@@ -720,46 +761,80 @@ fn swept(app: &AppWindow, from: (f32, f32), to: (f32, f32)) {
     let now = Instant::now();
     let was = PAGE.with(|p| p.borrow_mut().galaxy.sweep.moved.replace(now));
     if let Some(was) = was {
-        read_ahead(from, to, now - was, &passed);
+        let stars: Vec<usize> = passed.iter().map(|&(at, _)| at).collect();
+        read_ahead(from, to, now - was, &stars);
     }
     // Timed from here: Slint doesn't say when the move happened, so how late the window heard of it isn't known. The
     // star under the last mouse point was reached on an earlier move (as C#'s HitPath, which starts past it), so its
     // wait isn't started again; on the sweep's first move it's reached now.
     let skip = usize::from(was.is_some() && from_a_star);
-    PAGE.with(|p| {
-        let p = p.borrow();
-        for &at in passed.iter().skip(skip) {
-            if let Some(s) = p.list.sound(at) {
-                sweep_timing::reached(&s.path, None);
-            }
+    for (i, &(at, point)) in passed.iter().enumerate() {
+        if i >= skip {
+            PAGE.with(|p| {
+                if let Some(s) = p.borrow().list.sound(at) {
+                    sweep_timing::reached(&s.path, None);
+                }
+            });
         }
-    });
-    for at in passed {
-        reached(app, at);
+        if !reached(app, at) && hold {
+            PAGE.with(|p| p.borrow_mut().galaxy.sweep.held = Some(point));
+            hold_at(app, point, to);
+            return;
+        }
     }
 }
 
-/// The sweep reached a star: it plays now if the last one has had its moment, otherwise it waits its turn.
-fn reached(app: &AppWindow, at: usize) {
+/// Holds the pointer at `at` (on the view, in points) while it's at `now`: the pointer is put back there, and the
+/// sweep goes on from there.
+fn hold_at(app: &AppWindow, at: (f32, f32), now: (f32, f32)) {
+    PAGE.with(|p| p.borrow_mut().galaxy.view.mouse = at);
+    let data = app.global::<SoundsData>();
+    data.set_galaxy_mouse_x(at.0);
+    data.set_galaxy_mouse_y(at.1);
+    // Putting it where it already is would only send another move to the same place.
+    if (now.0 - at.0).abs() + (now.1 - at.1).abs() < 0.5 {
+        return;
+    }
+    use slint::winit_030::WinitWindowAccessor;
+    use slint::winit_030::winit::dpi::PhysicalPosition;
+    let scale = app.window().scale_factor();
+    let x = f64::from((data.get_galaxy_sky_x() + at.0) * scale);
+    let y = f64::from((data.get_galaxy_sky_y() + at.1) * scale);
+    let put = app.window().with_winit_window(|w| w.set_cursor_position(PhysicalPosition::new(x, y)));
+    if let Some(Err(e)) = put {
+        // Once is enough: the sweep goes on without holding.
+        log::warning("Sounds", &format!("Couldn't hold the pointer on a swept star, so sweeps won't hold it: {e}"));
+        HOLD.with(|h| h.set(false));
+    }
+}
+
+/// The sweep reached a star: it plays now if the last one has had its moment, otherwise it waits its turn. Whether
+/// it didn't have to wait (it plays now, or it's the one playing).
+fn reached(app: &AppWindow, at: usize) -> bool {
     let now = Instant::now();
+    // None: it's the one playing, and nothing changes.
     let play = PAGE.with(|p| {
         let g = &mut p.borrow_mut().galaxy;
         let last = g.sweep.played;
         if last.is_some_and(|(was, _)| was == at) && g.sweep.waiting.is_none() {
-            return false;
+            return None;
         }
         if last.is_none_or(|(_, when)| now.duration_since(when) >= SWEEP_GAP) {
             g.sweep.waiting = None;
             g.sweep.played = Some((at, now));
-            true
+            Some(true)
         } else {
             g.sweep.waiting = Some(at);
-            false
+            Some(false)
         }
     });
-    if play {
-        sweep_play(app, at);
-        return;
+    match play {
+        None => return true,
+        Some(true) => {
+            sweep_play(app, at);
+            return true;
+        }
+        Some(false) => {}
     }
     let weak = app.as_weak();
     SWEEP_TIMER.with(|t| {
@@ -772,6 +847,7 @@ fn reached(app: &AppWindow, at: usize) {
                     let ready = g.sweep.played.is_none_or(|(_, when)| when.elapsed() >= SWEEP_GAP);
                     ready.then(|| {
                         g.sweep.waiting = None;
+                        g.sweep.held = None;
                         g.sweep.played = Some((waiting, Instant::now()));
                         waiting
                     })
@@ -784,6 +860,7 @@ fn reached(app: &AppWindow, at: usize) {
             });
         }
     });
+    false
 }
 
 /// Plays a star the sweep reached, and names it beside the mouse. It isn't picked: a sweep is for listening along.
@@ -878,7 +955,7 @@ fn show_trail(app: &AppWindow) {
                 let s = p.list.sound(at)?;
                 Some(SweptLine {
                     name: s.name().into(),
-                    kind: s.sound_type.clone().into(),
+                    kind: s.sound_type.as_str().into(),
                     colour: list::type_colour(&s.sound_type),
                     current: i == g.trail_at,
                 })
@@ -1046,6 +1123,30 @@ pub(super) fn forget(g: &mut Galaxy) {
     g.drawn_id = g.asked;
     g.count = 0;
     g.note = String::new();
+}
+
+/// The page's list was read again with the same sounds in the same places: the stars stay, and what was worked out
+/// from the old list (how lit each star is, what the stars were packed for) is let go, and the old list with it. It's
+/// worked out again for the new one when the galaxy's next drawn.
+pub(super) fn list_changed(g: &mut Galaxy) {
+    g.light = None;
+    g.set_for = None;
+    // Stars still being packed for the old list would bring it back (with how lit they are): too old to use. The ones
+    // in use stay until new ones come.
+    g.set_asked += 1;
+    g.set_got = g.set_asked;
+}
+
+/// The page's list was read again with sounds new or gone (`to`: each old place's new one, `None` for a sound that's
+/// gone): the star a sweep last played and the one waiting its turn move with their sounds. One that's gone isn't
+/// waited for, and the pointer isn't held to it.
+pub(super) fn places_moved(g: &mut Galaxy, to: impl Fn(usize) -> Option<usize>) {
+    let s = &mut g.sweep;
+    s.played = s.played.and_then(|(at, when)| Some((to(at)?, when)));
+    s.waiting = s.waiting.and_then(&to);
+    if s.waiting.is_none() {
+        s.held = None;
+    }
 }
 
 /// The view came on show (or a new library did while it was): reads the map the first time.
@@ -1674,5 +1775,41 @@ pub(super) fn show_picked(app: &AppWindow) {
     if let Some((x, y)) = at {
         data.set_galaxy_picked_x(x);
         data.set_galaxy_picked_y(y);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stars_packed_for_a_list_read_again_are_dropped() {
+        // A pack asked for (3) while the one in use is 2.
+        let mut g = Galaxy { set_asked: 3, set_got: 2, ..Galaxy::default() };
+        list_changed(&mut g);
+        assert!(g.set_for.is_none() && g.light.is_none());
+        // The pack still on its way is 3: [`packed`] takes only one newer than `set_got` and no newer than asked.
+        assert!(3 <= g.set_got && g.set_got == g.set_asked, "{} {}", g.set_got, g.set_asked);
+    }
+
+    #[test]
+    fn a_sweeps_stars_move_with_their_sounds() {
+        // The sound at 0 is gone, 1 is now at 0 and 2 at 3.
+        let moved = [None, Some(0), Some(3)];
+        let to = |at: usize| moved.get(at).copied().flatten();
+        let when = Instant::now();
+        let mut g = Galaxy::default();
+        g.sweep.played = Some((1, when));
+        g.sweep.waiting = Some(2);
+        g.sweep.held = Some((5.0, 6.0));
+        places_moved(&mut g, to);
+        assert_eq!(g.sweep.played, Some((0, when)));
+        assert_eq!(g.sweep.waiting, Some(3));
+        assert_eq!(g.sweep.held, Some((5.0, 6.0)));
+        // The one waiting is gone (and so is the one played): nothing's waited for, and the pointer isn't held.
+        g.sweep.played = Some((0, when));
+        g.sweep.waiting = Some(0);
+        places_moved(&mut g, to);
+        assert_eq!((g.sweep.played, g.sweep.waiting, g.sweep.held), (None, None, None));
     }
 }

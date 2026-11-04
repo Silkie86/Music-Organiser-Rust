@@ -191,7 +191,7 @@ pub struct Found {
 pub fn found_in(path: &str, raw: Vec<u8>, modified: i64) -> Vec<Found> {
     let place = Place { path, song: song_of(path), modified };
     let kind = SourceKind::of(path);
-    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let read = mo_catch::catch(std::panic::AssertUnwindSafe(|| {
         if kind == Some(SourceKind::FlKnobMoves) {
             let Ok(flp) = events::load(&raw) else { return Vec::new() };
             let song = read_song(&flp);

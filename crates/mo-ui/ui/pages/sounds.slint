@@ -3,15 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // Read-only for now (favourites, tags and types are shown, not changed), like the C# app's sounds.db until it's trusted.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, ListLine, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
-
-// One type chip: the type, how many sounds have it, its colour (a place in Theme.sound-types) and whether it's on.
-export struct TypeChipInfo {
-    name: string,
-    count: string,
-    colour: int,
-    on: bool,
-}
+import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -73,6 +65,8 @@ export struct SoundLine {
     bpm: string,
     length: string,
     used: string,
+    // The same, in words that make sense without the Used column's name over them: "used in 12 projects".
+    used-words: string,
     folder: string,
     // When it was played, on History.
     when: string,
@@ -127,7 +121,6 @@ export struct PickedSound {
     // How long the waveform lasts (the analysis reads up to the first minute).
     seconds: float,
     facts: [SoundFact],
-    tags: [string],
     favourite: bool,
     // What the analysis says it sounds like ("punchy, bright").
     character: string,
@@ -154,18 +147,17 @@ export global SoundsData {
     in property <int> view;
     callback pick-view(int);
 
-    // Rediscover: what it digs out (type, year, how adventurous, how many) and whether sounds used once count.
-    in property <string> re-type;
-    in property <[string]> re-types;
-    in property <string> re-year;
-    in property <[string]> re-years;
+    // Rediscover: what it digs out (type, year, how adventurous, how many) and whether sounds used once count. Each
+    // choice is on show, as the filters' are (one type and one year at most, and one of the counts).
+    in property <FilterView> re-type-filter;
+    in property <FilterView> re-year-filter;
     // 0 (close to what you use) to 1 (further afield).
     in-out property <float> re-adventure;
     callback re-adventure-set(float);
-    in property <string> re-count;
-    in property <[string]> re-counts;
+    in property <FilterView> re-count-filter;
     in property <bool> re-rarely;
-    // "type", "year" or "count", and the value ("" for any).
+    // "type", "year" or "count", and the choice clicked: the type or year picked already is unpicked, and "" is any;
+    // or "more-types" for the More types menu's Any, which keeps a type picked on its chip.
     callback re-pick(string, string);
     callback re-toggle-rarely();
     callback re-shuffle();
@@ -187,8 +179,8 @@ export global SoundsData {
     in property <length> galaxy-image-height;
     in property <string> galaxy-note;
     in property <bool> galaxy-busy;
-    in property <string> galaxy-placing;
-    in property <[string]> galaxy-placings;
+    // What the stars are placed by, each choice on show.
+    in property <FilterView> placing-filter;
     callback galaxy-place-by(string);
     // The year strip beside the list: each year with how much is in it; drag over years to show only those.
     in property <[YearBar]> years;
@@ -197,9 +189,8 @@ export global SoundsData {
     in property <int> years-to: -1;
     callback years-picked(int, int);
     callback years-cleared();
-    // What makes a star bigger and brighter.
-    in property <string> galaxy-light;
-    in property <[string]> galaxy-lights;
+    // What makes a star bigger and brighter, each choice on show.
+    in property <FilterView> light-filter;
     callback galaxy-light-by(string);
     callback galaxy-lay-out();
     callback galaxy-reset();
@@ -210,6 +201,9 @@ export global SoundsData {
     // A press: the left button sweeps (plays each star it passes), the right or middle button moves the map.
     callback galaxy-down(length, length, bool);
     callback galaxy-move(length, length);
+    // Where the view is in the window, set at each press: a sweep that holds the pointer puts it back on a star.
+    in-out property <length> galaxy-sky-x;
+    in-out property <length> galaxy-sky-y;
     // A button came up: the right or middle one (true), or the left one.
     callback galaxy-up(bool);
     callback galaxy-cancelled();
@@ -282,36 +276,34 @@ export global SoundsData {
 
     in-out property <string> search;
     callback search-edited(string);
-    in property <[TypeChipInfo]> types;
-    callback pick-type(int);
-    // Types past the first chips, in one menu.
-    in property <[string]> more-types;
-    in property <string> more-type;
+    // The filters, the same as on every page: the types (the most used as chips, the rest in More types), hits or
+    // loops, the key, the tempo and the tags, each choice with how many sounds it would show.
+    in property <FilterView> type-filter;
+    in property <FilterView> length-filter;
+    in property <FilterView> key-filter;
+    in property <FilterView> tempo-filter;
+    in property <FilterView> tag-filter;
+    // A choice was picked or unpicked: the filter ("type", "length", "key", "tempo" or "tag") and the choice's words.
+    callback toggle-choice(string, string);
+    // Picks nothing on a filter: "type" (Clear types), "more-types" (the More types menu's Any) or another filter.
+    callback clear-chip(string);
     // Whether any type is picked: shows the Clear types chip.
     in property <bool> any-type;
-    in property <string> length;
-    in property <[string]> lengths;
-    in property <string> key;
-    in property <[string]> keys;
     in property <bool> mix-well;
-    in property <string> bpm;
-    in property <[string]> bpms;
-    in property <string> tag;
-    in property <[string]> tags;
+    // The picked sound's tags, each lit while the Tag filter has it: a click picks or unpicks it there.
+    in property <[FilterChoice]> picked-tags;
     in property <bool> unused;
     in property <bool> used;
     // The use counts are in, so the Used and Unused chips can work.
     in property <bool> knows-use;
     in property <bool> favourites;
     in property <bool> any-filter;
-    // "length", "key", "bpm" or "tag", and the value ("" for any).
-    callback pick(string, string);
     // "mix-well", "unused", "used" or "favourites".
     callback toggle(string);
     callback clear();
 
-    in property <string> order;
-    in property <[string]> orders;
+    // The order Tiles and List are in, each on show (one is always picked).
+    in property <FilterView> order-filter;
     callback pick-order(string);
     callback shuffle();
     in property <bool> autoplay;
@@ -329,6 +321,20 @@ export global SoundsData {
 
     callback select(int);
     callback play-row(int);
+    // Dragging a sound out of the app, to a DAW or a folder (mo-ui's sounds/drag_out.rs): a tile or a line by its row,
+    // a pad by its place, a "Sounds like this" line by its sound's place in the library; then `drag-let-go` if the
+    // button comes up before the drag has got going. The one carried is dimmed (`lifted-…`) and glows for a moment
+    // once it has landed (`landed-…`); -1 for none.
+    callback drag-row(int);
+    callback drag-pad(int);
+    callback drag-alike(int);
+    callback drag-let-go();
+    in property <int> lifted-row: -1;
+    in property <int> landed-row: -1;
+    in property <int> lifted-pad: -1;
+    in property <int> landed-pad: -1;
+    in property <int> lifted-alike: -1;
+    in property <int> landed-alike: -1;
     // Arrow keys: -1 or 1 across, -2 or 2 up and down.
     // Moves the pick: -1/1 left and right, -2/2 up and down; `held` when it's the key repeating.
     callback step(int, bool);
@@ -427,8 +433,15 @@ component SoundTileView inherits Rectangle {
     // Drawn by the window, not the picture: off the card, and on the card while the tile plays or is under the mouse,
     // whose shade covers what the picture drew of it.
     property <bool> itself: !root.on-card || root.tile.playing || line.hovered;
+    // Dimmed as a whole while it's dragged out. With the tiles' picture on the graphics card, only what the tile draws
+    // itself (its words, its heart) dims for now: the picture doesn't know the lifted row yet.
+    opacity: root.tile.row == SoundsData.lifted-row ? 0.4 : 1;
     line := ListLine {
         selected: false;
+        draggable: true;
+        landed: root.tile.row == SoundsData.landed-row;
+        drag-out => { SoundsData.drag-row(root.tile.row); }
+        drag-let-go => { SoundsData.drag-let-go(); }
         // Why it's as liked as it is, when the mouse rests on the liked bar at the bottom.
         tip: root.tile.liked-why;
         tip-below: self.height - Space.md - Space.xs;
@@ -497,21 +510,64 @@ component SoundTileView inherits Rectangle {
     }
 }
 
-// The List and History views' line.
+// A sound's name in a list line, lit while it plays, with a heart after it when it's a favourite. Its room starts from
+// nothing and stretches, so every line splits the room the same way.
+component SoundName inherits HorizontalLayout {
+    in property <SoundLine> line;
+    preferred-width: 0px;
+    min-width: 0px;
+    spacing: Space.sm;
+    Text {
+        horizontal-stretch: 1;
+        preferred-width: 0px;
+        min-width: 0px;
+        text: root.line.name;
+        color: root.line.playing ? Theme.accent : Theme.text;
+        font-size: Type.body;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    if root.line.favourite: VerticalLayout {
+        alignment: center;
+        Heart { }
+    }
+}
+
+// The List, History and Rediscover views' line. In a narrow list (`narrow`) it takes two lines, its name and length
+// over the rest, because the columns alone (about 510 px) are wider than the list there and the name had no room.
 component SoundLineView inherits ListLine {
     in property <SoundLine> line;
     in property <bool> history;
     in property <bool> rediscover;
+    in property <bool> narrow;
     // A click on it, so the page can take the keys (arrows, Space) from the search box.
     callback chosen();
-    height: 40px;
+    // Its columns after the name, one after another for a narrow list's second line, the empty ones left out, in
+    // words that make sense without the columns' names over them: "Bass · Am · 140 BPM · played Tue · from Loops".
+    // On Rediscover its reason comes first, as it's why the sound is there, so the line is cut short after it.
+    property <string> facts: root.rediscover ? root.then(root.line.reason, root.about)
+        : root.then(root.then(root.about, root.history ? root.labelled("played", root.line.when) : root.line.used-words),
+            root.labelled("from", root.line.folder));
+    // What it is: its type, key and tempo.
+    property <string> about: root.then(root.then(root.line.sound-type, root.line.key), root.line.bpm);
+    pure function then(first: string, next: string) -> string {
+        return first == "" ? next : next == "" ? first : first + " · " + next;
+    }
+    pure function labelled(word: string, value: string) -> string {
+        return value == "" ? "" : word + " " + value;
+    }
     selected: line.picked;
+    draggable: true;
+    lifted: root.line.row == SoundsData.lifted-row;
+    landed: root.line.row == SoundsData.landed-row;
+    drag-out => { SoundsData.drag-row(root.line.row); }
+    drag-let-go => { SoundsData.drag-let-go(); }
     clicked => {
         root.chosen();
         SoundsData.select(root.line.row);
     }
     double-clicked => { SoundsData.play-row(root.line.row); }
-    HorizontalLayout {
+    if !root.narrow: HorizontalLayout {
         width: 100%;
         height: 100%;
         padding-left: Space.md;
@@ -522,25 +578,9 @@ component SoundLineView inherits ListLine {
             Dot { tint: Theme.sound-type(root.line.colour); }
         }
         // Columns that stretch start from no width, so every line splits the room the same way.
-        HorizontalLayout {
+        SoundName {
             horizontal-stretch: 2;
-            preferred-width: 0px;
-            min-width: 0px;
-            spacing: Space.sm;
-            Text {
-                horizontal-stretch: 1;
-                preferred-width: 0px;
-                min-width: 0px;
-                text: root.line.name;
-                color: root.line.playing ? Theme.accent : Theme.text;
-                font-size: Type.body;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-            if root.line.favourite: VerticalLayout {
-                alignment: center;
-                Heart { }
-            }
+            line: root.line;
         }
         Text {
             width: 110px;
@@ -596,11 +636,55 @@ component SoundLineView inherits ListLine {
             overflow: elide;
         }
     }
+    if root.narrow: VerticalLayout {
+        width: 100%;
+        height: 100%;
+        padding-left: Space.md;
+        padding-right: Space.md;
+        alignment: center;
+        spacing: Space.xs;
+        HorizontalLayout {
+            spacing: Space.md;
+            VerticalLayout {
+                alignment: center;
+                Dot { tint: Theme.sound-type(root.line.colour); }
+            }
+            SoundName {
+                horizontal-stretch: 1;
+                line: root.line;
+            }
+            Text {
+                width: 56px;
+                text: root.line.length;
+                color: Theme.muted;
+                font-family: Theme.number-font;
+                font-size: Type.meta;
+                vertical-alignment: center;
+                horizontal-alignment: right;
+            }
+        }
+        // Under the name: past the dot and the room after it, as the line above has.
+        HorizontalLayout {
+            spacing: Space.md;
+            Rectangle { width: 8px; }
+            Text {
+                horizontal-stretch: 1;
+                preferred-width: 0px;
+                min-width: 0px;
+                text: root.facts;
+                color: Theme.muted;
+                font-size: Type.meta;
+                overflow: elide;
+            }
+        }
+    }
 }
 
+// The List, History and Rediscover views' column names; in a narrow list, those of a line's first line.
 component ListHeading inherits HorizontalLayout {
     in property <bool> history;
     in property <bool> rediscover;
+    in property <bool> narrow;
     padding-left: Space.md + Space.xs;
     padding-right: Space.md + Space.xs;
     spacing: Space.md;
@@ -613,17 +697,17 @@ component ListHeading inherits HorizontalLayout {
         text: "SOUND";
         vertical-alignment: center;
     }
-    Caps {
+    if !root.narrow: Caps {
         width: 110px;
         text: "TYPE";
         vertical-alignment: center;
     }
-    Caps {
+    if !root.narrow: Caps {
         width: 52px;
         text: "KEY";
         vertical-alignment: center;
     }
-    Caps {
+    if !root.narrow: Caps {
         width: 80px;
         text: "TEMPO";
         vertical-alignment: center;
@@ -634,13 +718,13 @@ component ListHeading inherits HorizontalLayout {
         vertical-alignment: center;
         horizontal-alignment: right;
     }
-    Caps {
+    if !root.narrow: Caps {
         width: root.rediscover ? 0 : 96px;
         text: root.rediscover ? "" : root.history ? "PLAYED" : SoundsData.knows-use ? "USED" : "";
         vertical-alignment: center;
         horizontal-alignment: right;
     }
-    Caps {
+    if !root.narrow: Caps {
         horizontal-stretch: root.rediscover ? 3 : 1;
         preferred-width: 0px;
         min-width: 0px;
@@ -649,13 +733,23 @@ component ListHeading inherits HorizontalLayout {
     }
 }
 
-// One pad of the kit builder.
+// One pad of the kit builder. In a narrow list the pad's name goes before its sound's, rather than in a column of its
+// own, so the sound keeps room for its name (it was cut to two letters in a 900 px window).
 component PadLineView inherits ListLine {
     in property <PadLine> pad;
     in property <int> place;
     callback chosen();
+    // Where the names' column would leave the sound under about 140 px. The line is as wide as the list, whatever is
+    // in it, so this doesn't depend on itself.
+    property <bool> narrow: root.width < 520px;
     height: 52px;
     selected: pad.picked;
+    // An empty pad has nothing to drag.
+    draggable: pad.filled;
+    lifted: root.place == SoundsData.lifted-pad;
+    landed: root.place == SoundsData.landed-pad;
+    drag-out => { SoundsData.drag-pad(root.place); }
+    drag-let-go => { SoundsData.drag-let-go(); }
     clicked => {
         root.chosen();
         SoundsData.pad-pick(root.place);
@@ -667,7 +761,7 @@ component PadLineView inherits ListLine {
         padding-left: Space.md;
         padding-right: Space.md;
         spacing: Space.md;
-        Text {
+        if !root.narrow: Text {
             width: 120px;
             text: root.pad.name;
             color: Theme.text;
@@ -685,11 +779,25 @@ component PadLineView inherits ListLine {
             preferred-width: 0px;
             min-width: 0px;
             alignment: center;
-            Text {
-                text: root.pad.sound;
-                color: root.pad.playing ? Theme.accent : root.pad.filled ? Theme.text : Theme.muted;
-                font-size: Type.body;
-                overflow: elide;
+            HorizontalLayout {
+                spacing: Space.sm;
+                // Never wider than the names' column in a wide list, so a long name can't squeeze the sound out.
+                if root.narrow: Text {
+                    max-width: 120px;
+                    text: root.pad.name;
+                    color: Theme.text;
+                    font-size: Type.body;
+                    font-weight: 600;
+                    overflow: elide;
+                }
+                Text {
+                    horizontal-stretch: 1;
+                    min-width: 0px;
+                    text: root.pad.sound;
+                    color: root.pad.playing ? Theme.accent : root.pad.filled ? Theme.text : Theme.muted;
+                    font-size: Type.body;
+                    overflow: elide;
+                }
             }
             Text {
                 text: root.pad.detail;
@@ -799,6 +907,7 @@ component SoundPanel inherits SidePanel {
         Text {
             text: SoundsData.picked.name;
             color: Theme.text;
+            font-family: Theme.title-font;
             font-size: Type.panel-title;
             font-weight: 600;
             wrap: word-wrap;
@@ -844,8 +953,11 @@ component SoundPanel inherits SidePanel {
             clicked => { SoundsData.play(); }
         }
     }
-    HorizontalLayout {
-        spacing: Space.md;
+    // In a narrow panel the facts wrap onto a second line, rather than run past its edge.
+    FlexboxLayout {
+        alignment: stretch;
+        spacing-horizontal: Space.md;
+        spacing-vertical: Space.sm;
         for f in SoundsData.picked.facts: VerticalLayout {
             spacing: Space.xs;
             horizontal-stretch: 1;
@@ -874,15 +986,15 @@ component SoundPanel inherits SidePanel {
         font-size: Type.meta;
         wrap: word-wrap;
     }
-    if SoundsData.picked.tags.length > 0: VerticalLayout {
+    if SoundsData.picked-tags.length > 0: VerticalLayout {
         spacing: Space.xs;
         Caps { text: "TAGS"; }
         FlexboxLayout {
             spacing: Space.xs;
-            for t in SoundsData.picked.tags: ToggleChip {
-                text: t;
-                on: SoundsData.tag == t;
-                clicked => { SoundsData.pick("tag", SoundsData.tag == t ? "" : t); }
+            for t in SoundsData.picked-tags: ToggleChip {
+                text: t.text;
+                on: t.on;
+                clicked => { SoundsData.toggle-choice("tag", t.text); }
             }
         }
     }
@@ -897,6 +1009,11 @@ component SoundPanel inherits SidePanel {
         }
         for a in SoundsData.alike: ListLine {
             height: 28px;
+            draggable: true;
+            lifted: a.place == SoundsData.lifted-alike;
+            landed: a.place == SoundsData.landed-alike;
+            drag-out => { SoundsData.drag-alike(a.place); }
+            drag-let-go => { SoundsData.drag-let-go(); }
             clicked => { SoundsData.pick-alike(a.place); }
             double-clicked => { SoundsData.play-alike(a.place); }
             HorizontalLayout {
@@ -953,14 +1070,15 @@ export component SoundsPage inherits Rectangle {
             busy: SoundsData.busy;
             done: SoundsData.done;
         }
-        HorizontalLayout {
+        // The search, the views and Autoplay. They wrap onto another line when there isn't room (a narrow window), so
+        // nothing runs off the page and the rows under them wrap too.
+        FlexboxLayout {
             spacing: Space.sm;
             vertical-stretch: 0;
             search-box := SearchBox {
-                horizontal-stretch: 1;
                 // Wide enough for its hint, whatever else the row holds (it showed cut short on Tiles and List).
                 min-width: 320px;
-                max-width: 480px;
+                preferred-width: 400px;
                 hint: "Search names, types, tags and folders";
                 text <=> SoundsData.search;
                 edited(t) => { SoundsData.search-edited(t); }
@@ -986,24 +1104,6 @@ export component SoundsPage inherits Rectangle {
                     picked(i) => { SoundsData.pick-view(i); }
                 }
             }
-            if SoundsData.view < 2: VerticalLayout {
-                alignment: center;
-                MenuChip {
-                    name: "Order";
-                    value: SoundsData.order;
-                    choices: SoundsData.orders;
-                    picked(v) => { SoundsData.pick-order(v); }
-                }
-            }
-            if SoundsData.view < 2: VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: "Shuffle";
-                    tip: "A new order";
-                    clicked => { SoundsData.shuffle(); }
-                }
-            }
             VerticalLayout {
                 alignment: center;
                 ToggleChip {
@@ -1012,24 +1112,72 @@ export component SoundsPage inherits Rectangle {
                     clicked => { SoundsData.toggle-autoplay(); }
                 }
             }
-            Rectangle { horizontal-stretch: 1; }
         }
-        // Rediscover's own choices, in place of the filters.
-        if SoundsData.view == 4: HorizontalLayout {
-            spacing: Space.sm;
-            alignment: start;
+        // Each view's own choices, every one on show rather than in a menu (Solomon, 4 Nov 2026: "makes sure things
+        // that are useful arent hidden away"). Each row is a FlexboxLayout in an `if`, with its filters in it always:
+        // a filter in an `if` inside a FlexboxLayout is measured as if it wrapped, and leaves a gap under the row.
+        if SoundsData.view < 2: FlexboxLayout {
+            spacing: Space.md;
+            cross-axis-alignment: center;
             vertical-stretch: 0;
-            MenuChip {
-                name: "Type";
-                value: SoundsData.re-type;
-                choices: SoundsData.re-types;
-                picked(v) => { SoundsData.re-pick("type", v); }
+            FilterPicks {
+                name: "Order";
+                filter: SoundsData.order-filter;
+                toggled(text) => { SoundsData.pick-order(text); }
             }
-            if SoundsData.re-years.length > 0: MenuChip {
+            StudioButton {
+                horizontal-stretch: 0;
+                text: "Shuffle";
+                tip: "A new order";
+                clicked => { SoundsData.shuffle(); }
+            }
+        }
+        if SoundsData.view == 2: FlexboxLayout {
+            spacing: Space.md;
+            cross-axis-alignment: center;
+            vertical-stretch: 0;
+            FilterPicks {
+                name: "Placed by";
+                filter: SoundsData.placing-filter;
+                toggled(text) => { SoundsData.galaxy-place-by(text); }
+            }
+            FilterPicks {
+                name: "Light by";
+                filter: SoundsData.light-filter;
+                toggled(text) => { SoundsData.galaxy-light-by(text); }
+            }
+            StudioButton {
+                horizontal-stretch: 0;
+                text: "Lay out again";
+                tip: "Work the map out afresh from every sound's fingerprint";
+                clicked => { SoundsData.galaxy-lay-out(); }
+            }
+            StudioButton {
+                horizontal-stretch: 0;
+                text: "Whole map";
+                tip: "Zoom out to see every star";
+                clicked => { SoundsData.galaxy-reset(); }
+            }
+        }
+        // Rediscover's own choices, in place of the filters: the types as the Type filter shows them (the most used as
+        // chips, the rest in a menu), the years, and how many, each on show.
+        if SoundsData.view == 4: FlexboxLayout {
+            spacing: Space.md;
+            cross-axis-alignment: center;
+            vertical-stretch: 0;
+            FilterPicks {
+                name: "Type";
+                more-name: "More types";
+                filter: SoundsData.re-type-filter;
+                toggled(text) => { SoundsData.re-pick("type", text); }
+                cleared => { SoundsData.re-pick("more-types", ""); }
+            }
+            // With no years (before the first answer) it shows nothing, and leaves one gap in the row.
+            FilterPicks {
                 name: "Year";
-                value: SoundsData.re-year;
-                choices: SoundsData.re-years;
-                picked(v) => { SoundsData.re-pick("year", v); }
+                filter: SoundsData.re-year-filter;
+                toggled(text) => { SoundsData.re-pick("year", text); }
+                cleared => { SoundsData.re-pick("year", ""); }
             }
             StudioSlider {
                 low: "Safe";
@@ -1038,62 +1186,48 @@ export component SoundsPage inherits Rectangle {
                 value <=> SoundsData.re-adventure;
                 released(v) => { SoundsData.re-adventure-set(v); }
             }
-            MenuChip {
+            FilterPicks {
                 name: "How many";
-                value: SoundsData.re-count;
-                choices: SoundsData.re-counts;
-                has-any: false;
-                picked(v) => { SoundsData.re-pick("count", v); }
+                filter: SoundsData.re-count-filter;
+                toggled(text) => { SoundsData.re-pick("count", text); }
             }
             ToggleChip {
                 text: "Include sounds used once";
                 on: SoundsData.re-rarely;
                 clicked => { SoundsData.re-toggle-rarely(); }
             }
-            VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: SoundsData.re-busy ? "Shuffling…" : "Shuffle";
-                    main: true;
-                    tip: "Dig out a new set";
-                    clicked => { SoundsData.re-shuffle(); }
-                }
+            StudioButton {
+                horizontal-stretch: 0;
+                text: SoundsData.re-busy ? "Shuffling…" : "Shuffle";
+                main: true;
+                tip: "Dig out a new set";
+                clicked => { SoundsData.re-shuffle(); }
             }
         }
-        // The kit builder's choices, in place of the filters.
-        if SoundsData.view == 5: HorizontalLayout {
+        // The kit builder's choices, in place of the filters. They wrap in a narrow window, as the other rows do.
+        if SoundsData.view == 5: FlexboxLayout {
             spacing: Space.sm;
-            alignment: start;
+            cross-axis-alignment: center;
             vertical-stretch: 0;
-            VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: SoundsData.kit-busy ? "Rolling…" : "Roll a kit";
-                    main: true;
-                    tip: "Fill every pad that isn't locked";
-                    clicked => { SoundsData.kit-roll(); }
-                }
+            StudioButton {
+                horizontal-stretch: 0;
+                text: SoundsData.kit-busy ? "Rolling…" : "Roll a kit";
+                main: true;
+                tip: "Fill every pad that isn't locked";
+                clicked => { SoundsData.kit-roll(); }
             }
-            VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: "Export kit";
-                    tip: "Copy the pads into a folder of their own, ready for a sampler";
-                    clicked => { SoundsData.kit-export(); }
-                }
+            StudioButton {
+                horizontal-stretch: 0;
+                text: "Export kit";
+                tip: "Copy the pads into a folder of their own, ready for a sampler";
+                clicked => { SoundsData.kit-export(); }
             }
-            VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: SoundsData.kit-sending ? "Sending…" : "Send to Bitwig";
-                    enabled: !SoundsData.kit-sending && !SoundsData.kit-busy;
-                    tip: "Put the kit on a Drum Machine on a new track in the project open in Bitwig: kick on C1, snare on D1, closed hat on F#1, and the rest on the free pads";
-                    clicked => { SoundsData.kit-to-bitwig(); }
-                }
+            StudioButton {
+                horizontal-stretch: 0;
+                text: SoundsData.kit-sending ? "Sending…" : "Send to Bitwig";
+                enabled: !SoundsData.kit-sending && !SoundsData.kit-busy;
+                tip: "Put the kit on a Drum Machine on a new track in the project open in Bitwig: kick on C1, snare on D1, closed hat on F#1, and the rest on the free pads";
+                clicked => { SoundsData.kit-to-bitwig(); }
             }
             ToggleChip {
                 text: "Favour sounds I haven't used";
@@ -1164,60 +1298,57 @@ export component SoundsPage inherits Rectangle {
             font-size: Type.meta;
             wrap: word-wrap;
         }
-        // The type chips: every type with its count, most first.
-        if SoundsData.view < 4: HorizontalLayout {
-            spacing: Space.sm;
-            alignment: start;
+        // The filters, the same as on every page: the types first (the most used as chips, every one with how many
+        // sounds it would show), then the rest. A row moves a whole filter to the next line before it breaks one.
+        if SoundsData.view < 4: FlexboxLayout {
+            spacing: Space.md;
             vertical-stretch: 0;
-            for t[i] in SoundsData.types: ToggleChip {
-                text: t.count == "" ? t.name : t.name + "  " + t.count;
-                on: t.on;
-                clicked => { SoundsData.pick-type(i); }
-            }
-            if SoundsData.more-types.length > 0: MenuChip {
-                name: "More types";
-                value: SoundsData.more-type;
-                choices: SoundsData.more-types;
-                picked(v) => { SoundsData.pick("type", v); }
+            FilterPicks {
+                name: "Type";
+                more-name: "More types";
+                filter: SoundsData.type-filter;
+                toggled(text) => { SoundsData.toggle-choice("type", text); }
+                cleared => { SoundsData.clear-chip("more-types"); }
             }
             if SoundsData.any-type: ToggleChip {
                 text: "Clear types";
                 on: false;
-                clicked => { SoundsData.pick("types", ""); }
+                clicked => { SoundsData.clear-chip("type"); }
             }
         }
-        if SoundsData.view < 4: HorizontalLayout {
-            spacing: Space.sm;
-            alignment: start;
+        if SoundsData.view < 4: FlexboxLayout {
+            spacing: Space.md;
             vertical-stretch: 0;
-            MenuChip {
+            FilterPicks {
                 name: "Length";
-                value: SoundsData.length;
-                choices: SoundsData.lengths;
-                picked(v) => { SoundsData.pick("length", v); }
+                filter: SoundsData.length-filter;
+                toggled(text) => { SoundsData.toggle-choice("length", text); }
+                cleared => { SoundsData.clear-chip("length"); }
             }
-            MenuChip {
+            FilterPicks {
                 name: "Key";
-                value: SoundsData.key;
-                choices: SoundsData.keys;
-                picked(v) => { SoundsData.pick("key", v); }
+                filter: SoundsData.key-filter;
+                toggled(text) => { SoundsData.toggle-choice("key", text); }
+                cleared => { SoundsData.clear-chip("key"); }
             }
-            if SoundsData.key != "": ToggleChip {
+            if SoundsData.key-filter.more-picked != "": ToggleChip {
                 text: "Keys that mix well";
                 on: SoundsData.mix-well;
                 clicked => { SoundsData.toggle("mix-well"); }
             }
-            MenuChip {
+            FilterPicks {
                 name: "Tempo";
-                value: SoundsData.bpm;
-                choices: SoundsData.bpms;
-                picked(v) => { SoundsData.pick("bpm", v); }
+                filter: SoundsData.tempo-filter;
+                toggled(text) => { SoundsData.toggle-choice("tempo", text); }
+                cleared => { SoundsData.clear-chip("tempo"); }
             }
-            if SoundsData.tags.length > 0: MenuChip {
+            // Not in an `if`: a filter in one is measured as if it wrapped, and leaves a gap under the row. With no
+            // tags it shows nothing.
+            FilterPicks {
                 name: "Tag";
-                value: SoundsData.tag;
-                choices: SoundsData.tags;
-                picked(v) => { SoundsData.pick("tag", v); }
+                filter: SoundsData.tag-filter;
+                toggled(text) => { SoundsData.toggle-choice("tag", text); }
+                cleared => { SoundsData.clear-chip("tag"); }
             }
             if SoundsData.knows-use: ToggleChip {
                 text: "In my projects";
@@ -1238,45 +1369,6 @@ export component SoundsPage inherits Rectangle {
                 text: "Clear";
                 on: false;
                 clicked => { SoundsData.clear(); }
-            }
-            if SoundsData.view == 2: Rectangle { horizontal-stretch: 1; }
-            if SoundsData.view == 2: VerticalLayout {
-                alignment: center;
-                MenuChip {
-                    name: "Placed by";
-                    value: SoundsData.galaxy-placing;
-                    choices: SoundsData.galaxy-placings;
-                    has-any: false;
-                    picked(v) => { SoundsData.galaxy-place-by(v); }
-                }
-            }
-            if SoundsData.view == 2: VerticalLayout {
-                alignment: center;
-                MenuChip {
-                    name: "Light by";
-                    value: SoundsData.galaxy-light;
-                    choices: SoundsData.galaxy-lights;
-                    has-any: false;
-                    picked(v) => { SoundsData.galaxy-light-by(v); }
-                }
-            }
-            if SoundsData.view == 2: VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: "Lay out again";
-                    tip: "Work the map out afresh from every sound's fingerprint";
-                    clicked => { SoundsData.galaxy-lay-out(); }
-                }
-            }
-            if SoundsData.view == 2: VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: "Whole map";
-                    tip: "Zoom out to see every star";
-                    clicked => { SoundsData.galaxy-reset(); }
-                }
             }
         }
         // The sounds, and the picked one's panel beside them.
@@ -1448,21 +1540,31 @@ export component SoundsPage inherits Rectangle {
                             }
                         }
                     }
-                    if SoundsData.empty-title == "" && SoundsData.shown > 0 && (SoundsData.view == 1 || SoundsData.view == 3 || SoundsData.view == 4): VerticalLayout {
+                    if SoundsData.empty-title == "" && SoundsData.shown > 0 && (SoundsData.view == 1 || SoundsData.view == 3 || SoundsData.view == 4): list-box := VerticalLayout {
+                        // Two lines a sound where the columns would leave its name under about 100 px (in a
+                        // 900 px window); a big window with the panel and the year strip open keeps one line. The
+                        // columns take about 510 px (SoundLineView): make one wider, and raise this with it.
+                        property <bool> narrow: self.width < 660px;
+                        property <length> line-height: self.narrow ? 52px : 40px;
                         ListHeading {
                             history: SoundsData.view == 3;
                             rediscover: SoundsData.view == 4;
+                            narrow: list-box.narrow;
                         }
                         lines := ListView {
                             property <int> show-ask: SoundsData.show-ask;
+                            // The top of the line to bring into view.
+                            property <length> show-top: SoundsData.show-row * list-box.line-height;
                             changed show-ask => {
-                                if (SoundsData.show-row * 40px < -self.content-y
-                                    || (SoundsData.show-row + 1) * 40px > -self.content-y + self.visible-height) {
-                                    self.content-y = -clamp(SoundsData.show-row * 40px - self.visible-height / 3, 0px,
+                                if (self.show-top < -self.content-y
+                                    || self.show-top + list-box.line-height > -self.content-y + self.visible-height) {
+                                    self.content-y = -clamp(self.show-top - self.visible-height / 3, 0px,
                                         max(0px, self.content-height - self.visible-height));
                                 }
                             }
                             for l in SoundsData.lines: SoundLineView {
+                                height: list-box.line-height;
+                                narrow: list-box.narrow;
                                 line: l;
                                 history: SoundsData.view == 3;
                                 rediscover: SoundsData.view == 4;
@@ -1541,6 +1643,8 @@ export component SoundsPage inherits Rectangle {
                             grabbing: SoundsData.galaxy-grabbing;
                             down(x, y) => {
                                 keys.focus();
+                                SoundsData.galaxy-sky-x = sky.absolute-position.x;
+                                SoundsData.galaxy-sky-y = sky.absolute-position.y;
                                 SoundsData.galaxy-down(x, y, false);
                             }
                             side-down(x, y) => {

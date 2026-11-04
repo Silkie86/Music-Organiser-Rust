@@ -10,7 +10,7 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
 use crate::index::Gathered;
-use crate::{Sound, SoundActivity, SoundAnalysis, compact, event, types};
+use crate::{Sound, SoundActivity, SoundAnalysis, Word, compact, event, types};
 
 /// What went wrong reading the sound library.
 #[derive(Debug)]
@@ -40,6 +40,26 @@ impl fmt::Display for SoundsError {
 }
 
 impl std::error::Error for SoundsError {}
+
+impl SoundsError {
+    /// Whether SQLite found the file damaged (a file cut short, a page spoilt) or the disk couldn't read part of it
+    /// (a bad sector): reading it again won't help.
+    pub fn damaged(&self) -> bool {
+        matches!(self, SoundsError::Read(e) if is_damage(e))
+    }
+}
+
+/// [`SoundsError::damaged`], for an error SQLite gave.
+pub(crate) fn is_damage(e: &rusqlite::Error) -> bool {
+    use rusqlite::ffi;
+    match e {
+        rusqlite::Error::SqliteFailure(e, _) => {
+            matches!(e.code, rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+                || matches!(e.extended_code, ffi::SQLITE_IOERR_READ | ffi::SQLITE_IOERR_SHORT_READ)
+        }
+        _ => false,
+    }
+}
 
 impl From<rusqlite::Error> for SoundsError {
     fn from(e: rusqlite::Error) -> SoundsError {
@@ -99,22 +119,29 @@ pub struct Everything {
 }
 
 impl Everything {
-    /// How many sounds have been analysed, hidden copies too, as the C# app counts them when it decides whether deep
-    /// listening has heard enough (`SoundOrganiser.Reload`): what [`crate::index::SoundIndex::build`] takes.
+    /// How many sounds have been analysed ([`count_analysed`]).
     pub fn analysed(&self) -> usize {
-        self.sounds.iter().filter(|s| s.analysis.is_some()).count()
+        count_analysed(&self.sounds)
     }
 }
 
-/// A sound's columns, in the order [`sound_at`] takes them: one list for both reads below, so they can't drift apart.
+/// How many of `sounds` have been analysed, hidden copies too, as the C# app counts them when it decides whether deep
+/// listening has heard enough (`SoundOrganiser.Reload`): what [`crate::index::SoundIndex::build`] takes.
+pub fn count_analysed(sounds: &[Sound]) -> usize {
+    sounds.iter().filter(|s| s.analysis.is_some()).count()
+}
+
+/// A sound's columns, in the order [`sound_at`] takes them: one list for every read of them (the copy's too, as it's
+/// made), so they can't drift apart.
 macro_rules! sound_columns {
     () => {
         "id, path, mtime, error, analysis, name_type, user_type, type, type_source, type_conf, favourite, rating, plays"
     };
 }
+pub(crate) use sound_columns;
 
 /// How many columns [`sound_columns`] lists, counted from the list itself: the vectors come straight after them.
-const SOUND_COLUMNS: usize = columns(sound_columns!());
+pub(crate) const SOUND_COLUMNS: usize = columns(sound_columns!());
 
 /// How many columns a comma-separated list names.
 const fn columns(list: &str) -> usize {
@@ -289,60 +316,83 @@ impl SoundsDb {
         // One read transaction, so every query below sees the library as it was at one moment, even while the C# app
         // saves a scan or hides a batch of copies in between.
         let snapshot = self.conn.unchecked_transaction()?;
-        let mut activity = self.dated_activity(now)?;
-        let mut tags = self.tags()?;
-        let hidden = self.hidden()?;
-        let mut out = Everything::default();
+        let mut reading = Reading::start(self, now, vectors)?;
         // Read in the order the rows are stored, then sorted here. Asking SQLite for `ORDER BY path` walks the path
         // index and fetches each row from wherever it sits, and every row carries its fingerprints (`features`,
         // `clap`), which come before the type and rating columns, so each one meant reading several kilobytes from a
         // random place in a file of gigabytes: minutes on a cold disk with a big library. In stored order the same
         // read goes straight through the file once. On one connection: several at once were no faster on a slow
         // disk, and they held up the other pages reading from it (Solomon's PC, 2026-11-03).
-        let mut add = |mut s: Sound| {
-            s.tags = tags.remove(&s.id).unwrap_or_default();
-            s.hidden = hidden.contains(&s.id);
-            let mut a = activity.remove(&s.id).unwrap_or_default();
-            add_undated_plays(&mut a, s.plays);
-            s.activity = a;
-            out.sounds.push(s);
-        };
         if self.copy {
             // The copy keeps the fingerprints in tables of their own: the list comes first, then each of them.
             let mut st = self.conn.prepare(COPY_SOUND_SQL)?;
             let mut rows = st.query([])?;
             while let Some(r) = rows.next()? {
-                add(copy_sound_at(r)?);
+                reading.add(copy_sound_at(r)?);
             }
             drop(rows);
             drop(st);
             if vectors {
                 // In the same order as from sounds.db: by sound, as its rows are stored.
-                out.features = self.copied_gathered("sound_features")?;
-                out.clap = self.copied_gathered("sound_clap")?;
+                reading.out.features = self.copied_gathered("sound_features")?;
+                reading.out.clap = self.copied_gathered("sound_clap")?;
             }
         } else {
             let mut st = self.conn.prepare(if vectors { SOUND_AND_VECTORS_SQL } else { SOUND_SQL })?;
             let mut rows = st.query([])?;
             while let Some(r) = rows.next()? {
-                let s = sound_at(r)?;
-                if vectors {
-                    // Straight from SQLite's copy of each blob into the one block: no list of its own for each sound.
-                    if let Ok(ValueRef::Blob(blob)) = r.get_ref(SOUND_COLUMNS) {
-                        out.features.push_blob(s.id, blob);
-                    }
-                    if let Ok(ValueRef::Blob(blob)) = r.get_ref(SOUND_COLUMNS + 1) {
-                        out.clap.push_blob(s.id, blob);
-                    }
-                }
-                add(s);
+                reading.add_row(r)?;
             }
         }
         snapshot.finish()?;
-        // The list lives as long as the page: what it grew into and didn't use goes back (up to half of it).
-        out.sounds.shrink_to_fit();
-        out.sounds.sort_unstable_by(|a, b| by_path(&a.path, &b.path));
-        Ok(out)
+        Ok(reading.finish())
+    }
+
+    /// The fingerprints a [`crate::index::SoundIndex`] keeps of this library's sounds, gathered as
+    /// [`SoundsDb::everything`] gathers them: the analyser's, and CLAP's once deep listening has heard enough of the
+    /// `analysed` sounds ([`crate::learn::heard_enough`]). Until then the index drops CLAP's, so they aren't read
+    /// (a gigabyte for a library like Solomon's).
+    ///
+    /// Quick from the Rust app's copy, which keeps each kind in a table of its own and notes how long each sound's
+    /// CLAP is. From `sounds.db` it's a pass over the whole file: [`SoundsDb::everything`] takes them on the same pass
+    /// as the list.
+    pub fn fingerprints(&self, analysed: usize) -> Result<(Gathered, Gathered), SoundsError> {
+        let snapshot = self.conn.unchecked_transaction()?;
+        if !self.copy {
+            // As the page's read gathers them, in the order the rows are stored.
+            let (mut features, mut clap) = (Gathered::default(), Gathered::default());
+            let mut st = self.conn.prepare("SELECT id, features, clap FROM sounds")?;
+            let mut rows = st.query([])?;
+            while let Some(r) = rows.next()? {
+                let id: i64 = r.get(0)?;
+                if let Ok(ValueRef::Blob(blob)) = r.get_ref(1) {
+                    features.push_blob(id, blob);
+                }
+                if let Ok(ValueRef::Blob(blob)) = r.get_ref(2) {
+                    clap.push_blob(id, blob);
+                }
+            }
+            drop(rows);
+            drop(st);
+            snapshot.finish()?;
+            if !crate::learn::heard_enough(clap.common_length().1, analysed) {
+                clap = Gathered::default();
+            }
+            return Ok((features, clap));
+        }
+        // As the index counts them: the CLAP vectors of the most common length (a damaged one, not whole floats, has
+        // none).
+        let heard: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(n), 0) FROM (SELECT COUNT(*) AS n FROM sound_hashes
+                 WHERE clap_len > 0 AND clap_len % 4 = 0 GROUP BY clap_len)",
+            [],
+            |r| r.get(0),
+        )?;
+        let deep = crate::learn::heard_enough(usize::try_from(heard).unwrap_or(0), analysed);
+        let features = self.copied_gathered("sound_features")?;
+        let clap = if deep { self.copied_gathered("sound_clap")? } else { Gathered::default() };
+        snapshot.finish()?;
+        Ok((features, clap))
     }
 
     /// What's been done with each sound in the year before `now` and before that: deliberate plays, drags out of the
@@ -573,8 +623,71 @@ impl SoundsDb {
     }
 }
 
+/// The sounds as they're read, a row at a time, made into what [`SoundsDb::everything`] gives: each with its tags,
+/// plays and hidden mark, its vectors gathered (when asked for), sorted by path at the end. One way of doing it for
+/// the page's read and for making the copy ([`compact`]), which reads `sounds.db` for the page on the same pass.
+pub(crate) struct Reading {
+    activity: HashMap<i64, SoundActivity>,
+    tags: HashMap<i64, Vec<String>>,
+    hidden: HashSet<i64>,
+    vectors: bool,
+    out: Everything,
+}
+
+impl Reading {
+    /// Starts with what the other tables hold for each sound. Inside the read transaction the rows are read in, so
+    /// they all come from one moment.
+    pub(crate) fn start(db: &SoundsDb, now: NaiveDateTime, vectors: bool) -> Result<Reading, SoundsError> {
+        Ok(Reading {
+            activity: db.dated_activity(now)?,
+            tags: db.tags()?,
+            hidden: db.hidden()?,
+            vectors,
+            out: Everything::default(),
+        })
+    }
+
+    /// A row of `sounds.db` whose columns start as [`SOUND_AND_VECTORS_SQL`]'s do (as [`SOUND_SQL`]'s without the
+    /// vectors).
+    pub(crate) fn add_row(&mut self, r: &Row<'_>) -> rusqlite::Result<()> {
+        let s = sound_at(r)?;
+        self.add_read(r, s);
+        Ok(())
+    }
+
+    /// The same, with the row's sound already read from it ([`sound_at`]).
+    pub(crate) fn add_read(&mut self, r: &Row<'_>, s: Sound) {
+        if self.vectors {
+            // Straight from SQLite's copy of each blob into the one block: no list of its own for each sound.
+            if let Ok(ValueRef::Blob(blob)) = r.get_ref(SOUND_COLUMNS) {
+                self.out.features.push_blob(s.id, blob);
+            }
+            if let Ok(ValueRef::Blob(blob)) = r.get_ref(SOUND_COLUMNS + 1) {
+                self.out.clap.push_blob(s.id, blob);
+            }
+        }
+        self.add(s);
+    }
+
+    fn add(&mut self, mut s: Sound) {
+        s.tags = self.tags.remove(&s.id).unwrap_or_default();
+        s.hidden = self.hidden.contains(&s.id);
+        let mut a = self.activity.remove(&s.id).unwrap_or_default();
+        add_undated_plays(&mut a, s.plays);
+        s.activity = a;
+        self.out.sounds.push(s);
+    }
+
+    pub(crate) fn finish(mut self) -> Everything {
+        // The list lives as long as the page: what it grew into and didn't use goes back (up to half of it).
+        self.out.sounds.shrink_to_fit();
+        self.out.sounds.sort_unstable_by(|a, b| by_path(&a.path, &b.path));
+        self.out
+    }
+}
+
 /// A sound from a row of [`SOUND_SQL`], without its tags, activity or hidden mark yet.
-fn sound_at(r: &Row<'_>) -> Result<Sound, rusqlite::Error> {
+pub(crate) fn sound_at(r: &Row<'_>) -> Result<Sound, rusqlite::Error> {
     // Every column but the id and path is read as the C# app reads it: a value of an unexpected kind in a damaged row
     // reads as none (or 0) rather than stopping the whole list.
     Ok(Sound {
@@ -584,10 +697,10 @@ fn sound_at(r: &Row<'_>) -> Result<Sound, rusqlite::Error> {
         error: text_at(r, 3),
         // An analysis that can't be read shows as none, as in the C# app.
         analysis: analysis_at(r, 4),
-        name_type: text_at(r, 5),
-        user_type: text_at(r, 6),
-        sound_type: text_at(r, 7).unwrap_or_else(|| types::UNKNOWN.to_owned()),
-        type_source: text_at(r, 8).unwrap_or_default(),
+        name_type: word_at(r, 5),
+        user_type: word_at(r, 6),
+        sound_type: word_at(r, 7).unwrap_or_else(|| Word::new(types::UNKNOWN)),
+        type_source: word_at(r, 8).unwrap_or_default(),
         type_confidence: real_at(r, 9).unwrap_or(0.0),
         favourite: int_at(r, 10) == Some(1),
         rating: int(int_at(r, 11)),
@@ -607,10 +720,10 @@ fn copy_sound_at(r: &Row<'_>) -> Result<Sound, rusqlite::Error> {
         added: local(int_at(r, 2).unwrap_or(0)),
         error: text_at(r, 3),
         analysis: compact::analysis_at(r, COPY_ANALYSIS),
-        name_type: text_at(r, 4),
-        user_type: text_at(r, 5),
-        sound_type: text_at(r, 6).unwrap_or_else(|| types::UNKNOWN.to_owned()),
-        type_source: text_at(r, 7).unwrap_or_default(),
+        name_type: word_at(r, 4),
+        user_type: word_at(r, 5),
+        sound_type: word_at(r, 6).unwrap_or_else(|| Word::new(types::UNKNOWN)),
+        type_source: word_at(r, 7).unwrap_or_default(),
         type_confidence: real_at(r, 8).unwrap_or(0.0),
         favourite: int_at(r, 9) == Some(1),
         rating: int(int_at(r, 10)),
@@ -681,6 +794,14 @@ pub(crate) fn real_at(r: &Row<'_>, i: usize) -> Option<f64> {
 }
 
 /// Text, or `None` for NULL or a value of another kind (the C# app's `as string`).
+/// A text column as a shared [`Word`], read without a copy of its own on the way.
+pub(crate) fn word_at(r: &Row<'_>, i: usize) -> Option<Word> {
+    match r.get_ref(i) {
+        Ok(ValueRef::Text(t)) => Some(Word::new(&String::from_utf8_lossy(t))),
+        _ => None,
+    }
+}
+
 pub(crate) fn text_at(r: &Row<'_>, i: usize) -> Option<String> {
     match r.get_ref(i) {
         Ok(ValueRef::Text(t)) => Some(String::from_utf8_lossy(t).into_owned()),
@@ -771,6 +892,20 @@ fn year_before(t: NaiveDateTime) -> NaiveDateTime {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn damage_is_a_spoilt_file_or_a_sector_the_disk_cant_read() {
+        use rusqlite::ffi;
+        let sqlite = |code| SoundsError::Read(rusqlite::Error::SqliteFailure(ffi::Error::new(code), None));
+        for code in [ffi::SQLITE_CORRUPT, ffi::SQLITE_NOTADB, ffi::SQLITE_IOERR_READ, ffi::SQLITE_IOERR_SHORT_READ] {
+            assert!(sqlite(code).damaged(), "{code}");
+        }
+        // Reading again may well work: another program holding the file, a full disk, a lock.
+        for code in [ffi::SQLITE_BUSY, ffi::SQLITE_FULL, ffi::SQLITE_IOERR_LOCK, ffi::SQLITE_CANTOPEN] {
+            assert!(!sqlite(code).damaged(), "{code}");
+        }
+        assert!(!SoundsError::Open { path: PathBuf::new(), why: String::new() }.damaged());
+    }
 
     #[test]
     fn float_blobs() {

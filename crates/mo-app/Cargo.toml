@@ -11,6 +11,8 @@ workspace = true
 [dependencies]
 serde_json = "1"
 chrono.workspace = true
+# Catching a panic on purpose: a damaged file tripping a reader is a warning, not a crash.
+mo-catch = { path = "../mo-catch" }
 # The backup engine (Space page, Backup) and the sizes and song measures it uses.
 mo-backup = { path = "../mo-backup" }
 # FL Studio songs converted for Bitwig ("Open in Bitwig").
@@ -29,6 +31,9 @@ mo-space = { path = "../mo-space" }
 thread-priority.workspace = true
 rayon.workspace = true
 tiny-skia.workspace = true
+# The words on the card that follows a drag out of the app (drawn outside Slint, in the app's own fonts). Slint already
+# brings it in.
+swash = "0.2"
 
 [dev-dependencies]
 # A small library made by the backup test.

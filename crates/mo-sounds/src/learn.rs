@@ -92,7 +92,11 @@ pub fn update_types(sounds: &[Sound], vectors: &Vectors, space: &str) -> Result<
         .filter_map(|s| {
             let label = s.user_type.as_ref().or(s.name_type.as_ref())?;
             let x = vector(vectors, s.id)?;
-            Some(Example { x: x.into(), label: label.clone(), weight: if s.user_type.is_some() { 3.0 } else { 1.0 } })
+            Some(Example {
+                x: x.into(),
+                label: label.to_string(),
+                weight: if s.user_type.is_some() { 3.0 } else { 1.0 },
+            })
         })
         .collect();
     let kinds: HashSet<&str> = examples.iter().map(|e| e.label.as_str()).collect();
@@ -240,7 +244,7 @@ mod tests {
             error: None,
             analysis: None,
             sound_type: UNKNOWN.into(),
-            type_source: String::new(),
+            type_source: Default::default(),
             type_confidence: 0.0,
             user_type: user.map(Into::into),
             name_type: name.map(Into::into),
@@ -323,8 +327,8 @@ mod tests {
         // Once applied, nothing changes.
         for s in &mut sounds {
             if let Some(c) = by_id.get(&s.id) {
-                s.sound_type = c.sound_type.clone();
-                s.type_source = c.source.to_owned();
+                s.sound_type = c.sound_type.as_str().into();
+                s.type_source = c.source.into();
                 s.type_confidence = c.confidence;
             }
         }

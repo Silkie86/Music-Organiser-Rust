@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
-use mo_app::log;
 use mo_app::midi::{self as page, Filters, Order, Roll, Target};
 use mo_app::shortcuts::{Shortcuts, what_of};
+use mo_app::{log, to_bitwig};
 use mo_formats::NoteEvent;
 use mo_harmony::KeyFact;
 use mo_library::Library;
@@ -29,10 +29,9 @@ use mo_midi::store::MidiStore;
 use mo_midi::{Catalogue, Hit, MidiIndex, Role, StoredPhrase};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, VecModel};
 
+use crate::filters::FilterModels;
 use crate::sounds::{new_seed, strings};
-use crate::{
-    AppWindow, CardAction, KindChip, MenuItem, MidiData, MidiFact, MidiLine, PickedPart, RollKey, RollNote, YearBar,
-};
+use crate::{AppWindow, CardAction, MenuItem, MidiData, MidiFact, MidiLine, PickedPart, YearBar};
 
 /// Where a part's notes are read from.
 #[derive(Clone)]
@@ -51,18 +50,16 @@ pub struct Loaded {
     /// From the C# app's `midi.db`: the list's keys are the old app's.
     pub old: bool,
     pub notes: NotesFrom,
-    /// Worked out with the reading, off the window's thread: the summary, the year strip and the kind chips' counts.
+    /// Worked out with the reading, off the window's thread: the summary and the year strip.
     pub summary: String,
     pub years: Vec<(i32, usize)>,
-    pub counts: HashMap<Role, usize>,
 }
 
 impl Loaded {
     pub fn new(cat: Catalogue, old: bool, notes: NotesFrom) -> Loaded {
         let summary = page::summary(&cat, old);
         let years = page::year_counts(&cat);
-        let counts = cat.role_counts();
-        Loaded { cat, old, notes, summary, years, counts }
+        Loaded { cat, old, notes, summary, years }
     }
 }
 
@@ -77,7 +74,8 @@ struct Page {
     target: Option<Target>,
     shown: Arc<Vec<Hit>>,
     years: Vec<(i32, usize)>,
-    counts: HashMap<Role, usize>,
+    /// How many parts each filter chip's choices would show, from the last list worked out.
+    counts: page::ChoiceCounts,
     /// The picked part, as its place in the catalogue's entries, and its row in the list on show (kept, so stepping
     /// down a long list never searches it).
     picked: Option<usize>,
@@ -133,6 +131,8 @@ thread_local! {
     static NOTES: RefCell<Option<Newest<NotesAsk>>> = const { RefCell::new(None) };
     /// Works everything out in place, for the screenshots, which have no event loop to send answers back to.
     static HERE: RefCell<bool> = const { RefCell::new(false) };
+    /// The filter chips' lines, kept between showings: kinds, From and Key.
+    static CHIPS: [FilterModels; 3] = Default::default();
 }
 
 struct Lines {
@@ -200,6 +200,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         p.shortcuts = shortcuts.clone();
     });
     wire(app);
+    crate::piano_roll::connect(app);
     let data = app.global::<MidiData>();
     data.set_empty_title("Reading your MIDI…".into());
     data.set_empty_text("".into());
@@ -211,11 +212,9 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
 fn wire(app: &AppWindow) {
     let data = app.global::<MidiData>();
     data.set_lines(ModelRc::from(LINES.with(Rc::clone) as Rc<dyn Model<Data = MidiLine>>));
-    data.set_froms(strings(["Your projects", "MIDI files"]));
-    data.set_keys(strings(page::key_choices()));
     data.set_orders(strings(Order::ALL.map(Order::name)));
     data.set_order(Order::default().name().into());
-    show_kinds(app);
+    show_chips(app);
 
     let weak = app.as_weak();
     data.on_search_edited(move |text| {
@@ -229,18 +228,18 @@ fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
-    data.on_toggle_kind(move |i| {
-        if let (Some(app), Some(role)) = (weak.upgrade(), usize::try_from(i).ok().and_then(|i| Role::ALL.get(i))) {
-            PAGE.with(|p| p.borrow_mut().filters.toggle_role(*role));
-            show_kinds(&app);
+    data.on_toggle(move |name, choice| {
+        if let Some(app) = weak.upgrade() {
+            PAGE.with(|p| p.borrow_mut().filters.toggle(&name, &choice));
+            show_chips(&app);
             relist(&app);
         }
     });
     let weak = app.as_weak();
-    data.on_clear_kinds(move || {
+    data.on_clear_chip(move |name| {
         if let Some(app) = weak.upgrade() {
-            PAGE.with(|p| p.borrow_mut().filters.roles.clear());
-            show_kinds(&app);
+            PAGE.with(|p| p.borrow_mut().filters.clear(&name));
+            show_chips(&app);
             relist(&app);
         }
     });
@@ -250,21 +249,13 @@ fn wire(app: &AppWindow) {
         let data = app.global::<MidiData>();
         PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            match what.as_str() {
-                "from" => p.filters.from = page::from_of_name(&value),
-                "key" => p.filters.key = page::key_of_choice(&value),
-                "order" => {
-                    p.order = Order::from_name(&value);
-                    p.seed = None;
-                }
-                _ => {}
+            if what == "order" {
+                p.order = Order::from_name(&value);
+                p.seed = None;
             }
         });
-        match what.as_str() {
-            "from" => data.set_from(value),
-            "key" => data.set_key(value),
-            "order" => data.set_order(value),
-            _ => {}
+        if what == "order" {
+            data.set_order(value);
         }
         relist(&app);
     });
@@ -312,9 +303,7 @@ fn wire(app: &AppWindow) {
             });
             let data = app.global::<MidiData>();
             data.set_search("".into());
-            data.set_from("".into());
-            data.set_key("".into());
-            show_kinds(&app);
+            show_chips(&app);
             show_years(&app);
             relist(&app);
         }
@@ -451,7 +440,6 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         // The picked part stays picked when the index is read again, found by its notes.
         let hash = p.picked.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.hash.clone());
         p.years = loaded.years;
-        p.counts = loaded.counts;
         p.cat = Arc::new(loaded.cat);
         p.old = loaded.old;
         p.notes = Some(loaded.notes);
@@ -478,7 +466,7 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         data.set_empty_title("".into());
         data.set_empty_text("".into());
     }
-    show_kinds(app);
+    show_chips(app);
     show_years(app);
     relist(app);
     match picked {
@@ -643,23 +631,18 @@ fn stop_reading() {
     });
 }
 
-fn show_kinds(app: &AppWindow) {
-    let (chips, any) = PAGE.with(|p| {
+/// The filter chips for the picks now and the last list's counts.
+fn show_chips(app: &AppWindow) {
+    let chips = PAGE.with(|p| {
         let p = p.borrow();
-        let counts = &p.counts;
-        let chips: Vec<KindChip> = Role::ALL
-            .iter()
-            .map(|r| {
-                let n = counts.get(r).copied().unwrap_or(0);
-                let text = if n > 0 { format!("{} {}", r.plural(), thousands(n)) } else { r.plural().to_owned() };
-                KindChip { text: text.into(), on: p.filters.roles.contains(r) }
-            })
-            .collect();
-        (chips, !p.filters.roles.is_empty())
+        page::chips(&p.counts, &p.filters)
     });
     let data = app.global::<MidiData>();
-    data.set_kinds(ModelRc::new(VecModel::from(chips)));
-    data.set_any_kind(any);
+    CHIPS.with(|[kind, from, key]| {
+        data.set_kind_filter(kind.view(&chips.kind));
+        data.set_from_filter(from.view(&chips.from));
+        data.set_key_filter(key.view(&chips.key));
+    });
 }
 
 fn show_years(app: &AppWindow) {
@@ -695,8 +678,8 @@ fn relist(app: &AppWindow) {
     });
     app.global::<MidiData>().set_any_filter(PAGE.with(|p| p.borrow().filters.any()));
     if HERE.with(|h| *h.borrow()) {
-        let hits = page::view(&ask.cat, &ask.filters, ask.order, ask.target, ask.seed);
-        listed(app, ask.id, hits);
+        let (hits, counts) = page::view(&ask.cat, &ask.filters, ask.order, ask.target, ask.seed);
+        listed(app, ask.id, hits, counts);
         return;
     }
     WORKER.with(|w| {
@@ -704,12 +687,13 @@ fn relist(app: &AppWindow) {
         if w.is_none() {
             let weak = app.as_weak();
             match Newest::start("MIDI list", move |ask: Ask| {
-                let hits = background::on_pool(|| page::view(&ask.cat, &ask.filters, ask.order, ask.target, ask.seed));
+                let (hits, counts) =
+                    background::on_pool(|| page::view(&ask.cat, &ask.filters, ask.order, ask.target, ask.seed));
                 let weak = weak.clone();
                 let id = ask.id;
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(app) = weak.upgrade() {
-                        listed(&app, id, hits);
+                        listed(&app, id, hits, counts);
                     }
                 });
             }) {
@@ -723,7 +707,7 @@ fn relist(app: &AppWindow) {
     });
 }
 
-fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>) {
+fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) {
     let (shown, result, target) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         if p.asked != id {
@@ -732,6 +716,7 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>) {
         // The picked part's row in the new list: one look, here, rather than at every step.
         p.picked_row = p.picked.and_then(|at| hits.iter().position(|h| h.entry == at));
         p.shown = Arc::new(hits);
+        p.counts = counts;
         let target = p.target.and_then(|t| {
             let at = match t {
                 Target::Like(at) | Target::Within(at) => at,
@@ -748,6 +733,7 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>) {
         (Some(shown), page::result_text(shown, all, p.order, p.target, p.seed.is_some()), target_text)
     });
     let Some(shown) = shown else { return };
+    show_chips(app);
     LINES.with(|l| l.notify.reset());
     let data = app.global::<MidiData>();
     data.set_shown(shown as i32);
@@ -820,9 +806,7 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
         data.set_facts(ModelRc::new(VecModel::from(facts)));
         data.set_actions(ModelRc::new(VecModel::from(actions)));
         data.set_menu(ModelRc::new(VecModel::from(menu)));
-        data.set_roll(ModelRc::new(VecModel::from(Vec::<RollNote>::new())));
-        data.set_roll_bars(ModelRc::new(VecModel::from(Vec::<f32>::new())));
-        data.set_roll_keys(ModelRc::new(VecModel::from(Vec::<RollKey>::new())));
+        crate::piano_roll::show(app, None);
         Some(NotesAsk {
             id,
             from: notes,
@@ -873,24 +857,34 @@ enum Reader {
     Old(MidiIndex),
 }
 
-fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, Reader)>) -> Result<NotesRead, String> {
-    let notes = match &ask.from {
-        NotesFrom::Made(made) => made.get(&ask.hash).cloned().unwrap_or_default(),
+/// A part's notes, from wherever the index is; `open` keeps the index open for the next ask.
+fn notes_of(
+    from: &NotesFrom,
+    phrase_id: i64,
+    hash: &str,
+    open: &mut Option<(PathBuf, Reader)>,
+) -> Result<Vec<NoteEvent>, String> {
+    Ok(match from {
+        NotesFrom::Made(made) => made.get(hash).cloned().unwrap_or_default(),
         NotesFrom::Store(path) | NotesFrom::Old(path) => {
             if open.as_ref().is_none_or(|(p, _)| p != path) {
-                let reader = match &ask.from {
+                let reader = match from {
                     NotesFrom::Store(_) => Reader::Store(MidiStore::open_read_only(path).map_err(|e| e.to_string())?),
                     _ => Reader::Old(MidiIndex::open_read_only(path).map_err(|e| e.to_string())?),
                 };
                 *open = Some((path.clone(), reader));
             }
             match open.as_ref().map(|(_, r)| r) {
-                Some(Reader::Store(s)) => s.notes(ask.phrase_id, &ask.hash).map_err(|e| e.to_string())?,
-                Some(Reader::Old(o)) => o.notes(ask.phrase_id, Some(&ask.hash)).map_err(|e| e.to_string())?,
+                Some(Reader::Store(s)) => s.notes(phrase_id, hash).map_err(|e| e.to_string())?,
+                Some(Reader::Old(o)) => o.notes(phrase_id, Some(hash)).map_err(|e| e.to_string())?,
                 None => Vec::new(),
             }
         }
-    };
+    })
+}
+
+fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, Reader)>) -> Result<NotesRead, String> {
+    let notes = notes_of(&ask.from, ask.phrase_id, &ask.hash, open)?;
     let fact = if ask.read_key {
         mo_midi::keys::with_reader(|r| mo_midi::keys::read(r, &notes, ask.role, ask.cut)).1
     } else {
@@ -908,21 +902,9 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
     match read {
         Ok(read) => {
             let roll = &read.roll;
-            let notes: Vec<RollNote> = roll
-                .notes
-                .iter()
-                .map(|n| RollNote {
-                    x: n.x,
-                    y: n.y,
-                    w: n.w,
-                    h: n.h,
-                    strength: n.strength,
-                    name: page::note_name(n.key).into(),
-                })
-                .collect();
             if read.read == 0 {
                 picked.roll_note = "Its notes aren't in the index any more.".into();
-            } else if notes.is_empty() {
+            } else if roll.notes.is_empty() {
                 picked.roll_note = "Every note in it is muted.".into();
             } else {
                 picked.roll_low = page::note_name(roll.low).into();
@@ -930,31 +912,16 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
                 picked.roll_note = if roll.left_off > 0 {
                     format!(
                         "The first {} notes shown, of {}",
-                        thousands(notes.len()),
-                        thousands(notes.len() + roll.left_off)
+                        thousands(roll.notes.len()),
+                        thousands(roll.notes.len() + roll.left_off)
                     )
                     .into()
                 } else {
                     "".into()
                 };
             }
-            data.set_roll(ModelRc::new(VecModel::from(notes)));
-            data.set_roll_bars(ModelRc::new(VecModel::from(roll.bars.clone())));
-            let keys: Vec<RollKey> = if roll.notes.is_empty() {
-                Vec::new()
-            } else {
-                page::roll_keys(roll.low, roll.high)
-                    .into_iter()
-                    .map(|k| RollKey {
-                        y: k.y,
-                        h: k.h,
-                        black: k.black,
-                        c: k.name.starts_with('C'),
-                        name: k.name.into(),
-                    })
-                    .collect()
-            };
-            data.set_roll_keys(ModelRc::new(VecModel::from(keys)));
+            // Drawn off the window's thread, as up to 4,000 notes would be a lot for it to lay out.
+            crate::piano_roll::show(app, Some(read.roll));
             let drums = picked.kind == page::role_label(Role::Drums);
             if let Some(fact) = read.fact {
                 let words = page::key_card(Some(&fact), drums);
@@ -1020,7 +987,8 @@ fn card(e: &mo_midi::Entry, old: bool) -> PickedPart {
 
 /// The card's buttons and the line's right-click menu: one list (rule 15: each shows its key).
 fn actions(e: &mo_midi::Entry, shortcuts: &Shortcuts) -> (Vec<CardAction>, Vec<MenuItem>) {
-    let mut list: Vec<(&str, &str, bool)> = vec![("midi.moreLike", "More like this", true)];
+    let mut list: Vec<(&str, &str, bool)> =
+        vec![("midi.moreLike", "More like this", true), ("midi.toBitwig", "Send to Bitwig", true)];
     if !e.within.is_empty() {
         list.push(("midi.within", "Show the whole phrase", true));
     }
@@ -1086,6 +1054,10 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             }
             true
         }
+        ("midi.toBitwig", Some((at, _))) => {
+            send_to_bitwig(at);
+            true
+        }
         ("midi.copyPath", Some((_, path))) => {
             if let Some(feed) = feed {
                 crate::files::copy_path(&feed, &path);
@@ -1096,9 +1068,97 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
     }
 }
 
+/// What a send to Bitwig needs, taken from the page so it can go on a thread of its own.
+struct Sending {
+    library: PathBuf,
+    from: NotesFrom,
+    phrase_id: i64,
+    hash: String,
+    name: String,
+    bars: i32,
+}
+
+/// Send to Bitwig: the picked part as a new MIDI file in the export folder's "MIDI browser" folder, then as a clip
+/// on a new track in the project open in Bitwig (as the C# MIDI page did). The part's own file is never touched.
+/// Its card shows at once and says how it went.
+fn send_to_bitwig(at: usize) {
+    let Some((sending, feed)) = PAGE.with(|p| {
+        let p = p.borrow();
+        let e = p.cat.entry(at)?;
+        let sending = Sending {
+            library: p.library.clone(),
+            from: p.notes.clone()?,
+            phrase_id: e.phrase.id,
+            hash: e.phrase.hash.clone(),
+            name: page::title(e),
+            bars: e.phrase.bars,
+        };
+        Some((sending, p.feed.clone()?))
+    }) else {
+        return;
+    };
+    let job = to_bitwig::part_card(&feed, &sending.name);
+    let started = background::spawn("Send to Bitwig", move || {
+        let export = export_dir(&sending.library);
+        // A panic in it is logged as a crash and fails the card as it goes.
+        let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
+            send_part(job, &to_bitwig::Bitwig::default(), &sending, export.as_deref())
+        }));
+    });
+    // Its card was taken into the thread, so it fails by itself ("It stopped before it finished").
+    if let Err(e) = started {
+        log::error("MIDI", &format!("Couldn't start sending to Bitwig: {e}"));
+    }
+}
+
+/// Where parts sent to Bitwig are written: "MIDI browser" in the export folder (the one picked in Settings, else
+/// "Music Organiser Exports" in Documents).
+fn export_dir(library: &Path) -> Option<PathBuf> {
+    let setting = Library::open_read_only(library)
+        .ok()
+        .and_then(|lib| lib.setting(mo_app::bitwig_convert::EXPORT_FOLDER_KEY).ok().flatten());
+    let root = mo_app::bitwig_convert::export_root(setting.as_deref(), mo_app::bitwig_convert::home().as_deref())?;
+    Some(root.join(page::EXPORT_SUBFOLDER))
+}
+
+/// Reads the part's notes, writes them as a new MIDI file in `export`, and sends that to `to`, ending `job`'s card
+/// with how it went. Returns the file written, if it was. Waits for Bitwig, so never on the window's thread.
+fn send_part(
+    job: mo_app::activity::Job,
+    to: &to_bitwig::Bitwig,
+    part: &Sending,
+    export: Option<&Path>,
+) -> Option<PathBuf> {
+    let failed = |job: mo_app::activity::Job, why: String| {
+        log::warning("MIDI", &format!("Sending {} to Bitwig failed: {why}", part.name));
+        job.failed_as(mo_dawlink::bitwig::PART_FAILED, &why);
+        None
+    };
+    let Some(dir) = export else {
+        return failed(job, "There's no export folder: pick one in Settings, Folders.".to_owned());
+    };
+    let notes = match notes_of(&part.from, part.phrase_id, &part.hash, &mut None) {
+        Ok(notes) if notes.iter().any(|n| !n.muted) => notes,
+        Ok(_) => return failed(job, "It has no notes to send (every note in it is muted).".to_owned()),
+        Err(e) => return failed(job, format!("Its notes couldn't be read: {e}.")),
+    };
+    let clip = page::part_clip(&part.name, &notes, part.bars);
+    let bytes = match mo_formats::midi::write::write_clip(&clip) {
+        Ok(written) => written.bytes,
+        Err(e) => return failed(job, format!("Its MIDI file couldn't be made: {e}.")),
+    };
+    let file = match page::write_part(dir, &part.name, &bytes) {
+        Ok(file) => file,
+        Err(e) => return failed(job, format!("Its MIDI file couldn't be saved in {}: {e}.", dir.display())),
+    };
+    to_bitwig::send_part(job, to, &file.to_string_lossy(), &part.name);
+    Some(file)
+}
+
 /// For the screenshots: everything is worked out in place.
 pub fn work_here() {
     HERE.with(|h| *h.borrow_mut() = true);
+    crate::piano_roll::draw_here();
 }
 
 /// For the screenshots: picks the line at `row` of the list on show.
@@ -1314,6 +1374,42 @@ mod tests {
         let Ok(read) = read_notes(&ask, &mut None) else { panic!("the made-up notes should read") };
         assert_eq!(read.roll.notes.len(), 12);
         assert!(read.fact.is_some());
+    }
+
+    #[test]
+    fn a_part_goes_to_bitwig_as_a_new_midi_file_on_a_new_track() {
+        let s = sample();
+        let e = &s.cat.entries[0];
+        let part = Sending {
+            library: PathBuf::new(),
+            from: s.notes.clone(),
+            phrase_id: e.phrase.id,
+            hash: e.phrase.hash.clone(),
+            name: page::title(e),
+            bars: e.phrase.bars,
+        };
+        let dir = std::env::temp_dir().join(format!("mo-ui-midi-to-bitwig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bitwig = mo_dawlink::bitwig::fake::FakeBitwig::start().unwrap();
+        let feed = mo_app::activity::Feed::default();
+        let file = send_part(feed.start("Sending", ""), &bitwig.bitwig(), &part, Some(&dir)).unwrap();
+        // A real MIDI file of the part, beside nothing else.
+        let bytes = std::fs::read(&file).unwrap();
+        assert!(bytes.starts_with(b"MThd"));
+        assert!(file.starts_with(&dir));
+        let world = bitwig.world();
+        assert_eq!(world.commands(), ["newtrack", "clip"]);
+        let track = world.tracks.iter().find(|t| t.name == part.name).unwrap();
+        assert_eq!(track.clips, [file.to_string_lossy().into_owned()]);
+        let cards = feed.visible(Instant::now());
+        assert!(cards.iter().any(|c| c.title == format!("{} is in Bitwig", part.name)), "{cards:?}");
+        drop(world);
+
+        // No export folder: nothing is written or sent, and the card says why.
+        let feed = mo_app::activity::Feed::default();
+        assert!(send_part(feed.start("Sending", ""), &bitwig.bitwig(), &part, None).is_none());
+        assert_eq!(bitwig.world().commands(), ["newtrack", "clip"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A Standard MIDI File of one track: a C major scale up and down, a beat a note, at 96 ticks a beat.

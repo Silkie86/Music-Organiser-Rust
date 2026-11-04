@@ -111,6 +111,20 @@ pub fn connect(app: &AppWindow) {
         show_kind(&app, only);
     });
     let weak = app.as_weak();
+    data.on_play(move |line| {
+        if let Some(app) = weak.upgrade() {
+            choose(&app, usize::try_from(line).ok(), How::Play);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_open_asked(move || {
+        if let Some(app) = weak.upgrade()
+            && !app.global::<FinderData>().get_open()
+        {
+            toggle(&app);
+        }
+    });
+    let weak = app.as_weak();
     data.on_close(move || {
         if let Some(app) = weak.upgrade() {
             close(&app);
@@ -239,13 +253,21 @@ fn finder_line(app: &AppWindow, line: &Line) -> FinderLine {
             detail: h.detail.as_str().into(),
             key: h.key.as_str().into(),
             icon: icon(app, h),
+            place: place_of(h).map_or(-1, |p| p.index() as i32),
+            plays: h.plays,
+            daw: h.opens_in_daw,
         },
     }
 }
 
 /// A thing's icon: its page's, from the shared style's Icons; none for an action.
 fn icon(app: &AppWindow, hit: &Hit) -> SharedString {
-    let place = match hit.kind {
+    place_of(hit).map(|p| crate::icon(app, p)).unwrap_or_default()
+}
+
+/// The place a thing lives on: its icon and colour are that place's.
+fn place_of(hit: &Hit) -> Option<mo_app::places::Place> {
+    match hit.kind {
         Kind::Song => Some(mo_app::places::Place::Songs),
         Kind::Sound => Some(mo_app::places::Place::Sounds),
         Kind::Preset => Some(mo_app::places::Place::Presets),
@@ -254,8 +276,7 @@ fn icon(app: &AppWindow, hit: &Hit) -> SharedString {
         Kind::Setting => Some(mo_app::places::Place::Settings),
         Kind::Page => finder::page_of(&hit.id).map(|(p, _)| p),
         Kind::Action => None,
-    };
-    place.map(|p| crate::icon(app, p)).unwrap_or_default()
+    }
 }
 
 /// Marks the picked line, scrolls it into view and says which keys work on it.
