@@ -127,9 +127,10 @@ pub const DEFAULT_KEEP_BACKUPS: usize = 5;
 /// next.
 pub const DEFAULT_SITTING_HOURS: u32 = 3;
 
-/// Two of a song's saves written less than this many seconds apart weren't both saved by you: copying the song's
-/// folder writes every save at once and gives each the copy's time (as does fixing several saves at once). Their times
-/// can't say which sitting they were saved in, so thinning leaves them be.
+/// Two of a song's saves written less than this many seconds apart are taken as written by a copy, not by you:
+/// copying the song's folder writes every save at once and gives each the copy's time (as does fixing several saves at
+/// once). Their times can't say which sitting they were saved in, so thinning leaves them be. Two saves you really made
+/// that close together are only left be too, never offered wrongly.
 pub const COPY_SECONDS: i64 = 60;
 
 /// Your choices for Compact (Settings).
