@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
-use mo_app::filters::{Filter, Shown};
+use mo_app::filters::{self, Filter, Shown};
 use mo_app::finder::{self, Kind};
 use mo_app::places::Place;
 use mo_app::shortcuts::{Shortcuts, what_of};
@@ -128,6 +128,8 @@ struct Page {
     re_started: bool,
     /// The answer to Rediscover's newest ask hasn't come yet.
     re_busy: bool,
+    /// The years Rediscover can dig in, from its newest answer.
+    re_years: Vec<i32>,
     /// The kit builder's pads and choices.
     kit: kit::Kit,
     /// The galaxy's map and the part of it on show.
@@ -166,6 +168,7 @@ impl Default for Page {
             re_asked: 0,
             re_started: false,
             re_busy: false,
+            re_years: Vec::new(),
             kit: kit::Kit::default(),
             galaxy: galaxy::Galaxy::default(),
         }
@@ -213,6 +216,19 @@ struct Ask {
     played: Arc<Vec<(usize, NaiveDateTime)>>,
 }
 
+/// Each view's own choices, every one on show as chips (Solomon, 4 Nov 2026: "makes sure things that are useful arent
+/// hidden away"): Tiles and List's order, the galaxy's Placed by and Light by, and Rediscover's type, year and how
+/// many.
+#[derive(Default)]
+struct Choices {
+    order: FilterModels,
+    placing: FilterModels,
+    light: FilterModels,
+    re_type: FilterModels,
+    re_year: FilterModels,
+    re_count: FilterModels,
+}
+
 thread_local! {
     static PAGE: Rc<RefCell<Page>> = Rc::default();
     static TILE_ROWS: Rc<TileRows> = PAGE.with(|p| Rc::new(TileRows { page: p.clone(), notify: ModelNotify::default() }));
@@ -223,6 +239,8 @@ thread_local! {
     static FILTER_MODELS: [FilterModels; 5] = Default::default();
     /// The picked sound's tags on its panel.
     static PICKED_TAGS: FilterModels = FilterModels::default();
+    /// Each view's own choices on show, changed in place as the filters' are.
+    static CHOICES: Choices = Choices::default();
     static ALIKE: RefCell<Option<Newest<AlikeAsk>>> = const { RefCell::new(None) };
     static REDISCOVERING: RefCell<Option<Newest<RediscoverAsk>>> = const { RefCell::new(None) };
     static FEED: RefCell<Option<Feed>> = const { RefCell::new(None) };
@@ -1283,6 +1301,8 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         p.picked = None;
         p.rediscover.clear();
         p.re_started = false;
+        // The years come with Rediscover's first answer for these sounds.
+        p.re_years.clear();
         galaxy::forget(&mut p.galaxy);
         // An answer still on its way was for the old list: it's dropped.
         p.re_asked += 1;
@@ -1346,7 +1366,6 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.set_tile_rows(ModelRc::from(TILE_ROWS.with(|m| m.clone()) as Rc<dyn Model<Data = TileRow>>));
     data.set_lines(ModelRc::from(LINES.with(|m| m.clone()) as Rc<dyn Model<Data = SoundLine>>));
     data.set_views(strings(VIEWS));
-    data.set_orders(strings(Order::ALL.map(Order::name)));
     show_actions(&data, shortcuts);
     // The filters whose choices don't come from the sounds (length, key, tempo) show from the start, without numbers
     // until the sounds are read, so the rows don't jump when they are.
@@ -1382,8 +1401,12 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     let weak = app.as_weak();
     data.on_pick_order(move |name| {
         let Some(app) = weak.upgrade() else { return };
-        PAGE.with(|p| p.borrow_mut().order = Order::from_name(&name));
-        refresh(&app);
+        // The order already picked stays picked, and the list stays as it is.
+        let order = Order::from_name(&name);
+        let changed = PAGE.with(|p| std::mem::replace(&mut p.borrow_mut().order, order) != order);
+        if changed {
+            refresh(&app);
+        }
     });
     let weak = app.as_weak();
     data.on_shuffle(move || {
@@ -1636,6 +1659,7 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
         }
         p.re_busy = false;
         p.rediscover = a.found;
+        p.re_years = a.years;
         Some((p.rediscover.len(), p.list.knows_use()))
     });
     let Some((found, knows_use)) = fresh else { return };
@@ -1651,7 +1675,7 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
         })
         .collect();
     data.set_folders(ModelRc::new(VecModel::from(folders)));
-    data.set_re_years(strings(a.years.iter().map(i32::to_string)));
+    show_rediscover_chips(app);
     if found == 0 {
         data.set_re_empty_title("Nothing to suggest".into());
         data.set_re_empty_text(a.why.into());
@@ -1676,17 +1700,66 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
     bring_picked_into_view(app);
 }
 
-/// Rediscover's choices as they are now.
+/// Picks `value` on Rediscover's `what`, saying whether that changed anything. "type" and "year": one at most, so a
+/// click on the one picked unpicks it, as on the filters, and "" (the Year menu's Any) is any. "more-types": the More
+/// types menu's Any, which unpicks a type picked in that menu but keeps one picked on a chip of its own (one of
+/// `chip_types`), as the Type filter's does. "count": one of the counts is always picked.
+fn re_pick(re: &mut rediscover::Options, what: &str, value: &str, chip_types: &[&str]) -> bool {
+    let before = (re.sound_type.clone(), re.year, re.count);
+    match what {
+        "type" => {
+            let mut picked: Vec<String> = re.sound_type.take().into_iter().collect();
+            if value.is_empty() {
+                picked.clear();
+            } else {
+                filters::toggle(&mut picked, value, false);
+            }
+            re.sound_type = picked.pop();
+        }
+        "more-types" => {
+            if re.sound_type.as_ref().is_some_and(|t| !chip_types.iter().any(|c| c.eq_ignore_ascii_case(t))) {
+                re.sound_type = None;
+            }
+        }
+        "year" => {
+            let mut picked: Vec<i32> = re.year.into_iter().collect();
+            if value.is_empty() {
+                picked.clear();
+            } else {
+                filters::toggle_as(&mut picked, value, false, |y| y.to_string(), |w| w.parse().ok());
+            }
+            re.year = picked.pop();
+        }
+        "count" => {
+            if let Some(c) = value.parse().ok().filter(|c| COUNTS.contains(c)) {
+                re.count = c;
+            }
+        }
+        _ => {}
+    }
+    before != (re.sound_type.clone(), re.year, re.count)
+}
+
+/// Rediscover's choices as they are now, each on show: the types as the Type filter shows them (the most used as
+/// chips, the rest in a menu), the years, and how many. Nothing is counted: Rediscover digs out how many it's asked
+/// for.
 fn show_rediscover_chips(app: &AppWindow) {
     let data = app.global::<SoundsData>();
     PAGE.with(|p| {
         let p = p.borrow();
-        data.set_re_types(strings(p.types.iter().map(|t| t.0.as_str())));
-        data.set_re_type(p.re.sound_type.clone().unwrap_or_default().into());
-        data.set_re_year(p.re.year.map(|y| y.to_string()).unwrap_or_default().into());
+        let types: Vec<(String, String)> = p.types.iter().map(|(t, _)| (t.clone(), String::new())).collect();
+        let picked: Vec<String> = p.re.sound_type.iter().cloned().collect();
+        let types = filters::show_split(&types, &picked, list::TYPE_CHIPS);
+        let years: Vec<(String, String)> = p.re_years.iter().map(|y| (y.to_string(), String::new())).collect();
+        let picked: Vec<String> = p.re.year.iter().map(i32::to_string).collect();
+        let years = filters::show(&years, &picked);
+        let counts = filters::one_of(&COUNTS.map(|c| c.to_string()), &p.re.count.to_string());
+        CHOICES.with(|c| {
+            data.set_re_type_filter(c.re_type.view(&types));
+            data.set_re_year_filter(c.re_year.view(&years));
+            data.set_re_count_filter(c.re_count.view(&counts));
+        });
         data.set_re_adventure(p.re.adventure as f32);
-        data.set_re_counts(strings(COUNTS.map(|c| c.to_string())));
-        data.set_re_count(p.re.count.to_string().into());
         data.set_re_rarely(p.re.max_uses > 0);
     });
 }
@@ -1699,18 +1772,10 @@ fn wire_rediscover(app: &AppWindow) {
         let Some(app) = weak.upgrade() else { return };
         let again = PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            let v = value.as_str();
-            match what.as_str() {
-                "type" => p.re.sound_type = (!v.is_empty()).then(|| v.to_owned()),
-                "year" => p.re.year = v.parse().ok(),
-                "count" => {
-                    if let Some(c) = v.parse().ok().filter(|c| COUNTS.contains(c)) {
-                        p.re.count = c;
-                    }
-                }
-                _ => {}
-            }
-            p.re_started
+            let p = &mut *p;
+            let chip_types: Vec<&str> = p.types.iter().take(list::TYPE_CHIPS).map(|(t, _)| t.as_str()).collect();
+            // Picking again only when something changed: a click on the count picked already keeps the list.
+            re_pick(&mut p.re, &what, &value, &chip_types) && p.re_started
         });
         show_rediscover_chips(&app);
         if again {
@@ -1981,7 +2046,8 @@ fn show_chips(app: &AppWindow) {
         data.set_knows_use(p.list.knows_use());
         data.set_favourites(f.favourites);
         data.set_any_filter(f.any());
-        data.set_order(p.order.name().into());
+        let order = filters::one_of(&Order::ALL.map(Order::name), p.order.name());
+        data.set_order_filter(CHOICES.with(|c| c.order.view(&order)));
         data.set_autoplay(p.autoplay);
         show_picked_tags(&data, &p);
     });
@@ -2426,6 +2492,33 @@ fn show_sending(app: &AppWindow, sending: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rediscover_picks_one_type_and_year_at_most_and_always_a_count() {
+        let mut re = rediscover::Options { count: COUNT, ..rediscover::Options::default() };
+        let chips = ["Kick", "Snare"];
+        let mut pick = |what: &str, value: &str| re_pick(&mut re, what, value, &chips);
+        // A type is picked alone; another takes its place; a click on the one picked unpicks it.
+        assert!(pick("type", "Kick"));
+        assert!(pick("type", "Snare"));
+        assert!(pick("type", "snare"));
+        assert!(!pick("type", ""));
+        // The More types menu's Any keeps a type picked on its chip, and unpicks one picked in the menu.
+        assert!(pick("type", "Snare"));
+        assert!(!pick("more-types", ""));
+        assert!(pick("type", "Riser"));
+        assert!(pick("more-types", ""));
+        // A year is kept as a number; the Year menu's Any unpicks it.
+        assert!(pick("year", "2024"));
+        assert!(pick("year", "2023"));
+        assert!(pick("year", ""));
+        assert!(!pick("year", ""));
+        // A count on offer is picked; the one picked already, or one not on offer, changes nothing.
+        assert!(pick("count", "120"));
+        assert!(!pick("count", "120"));
+        assert!(!pick("count", "7"));
+        assert_eq!((re.sound_type, re.year, re.count), (None, None, 120));
+    }
 
     /// A small song library like the C# app's: two songs, a kick in both, a pad with no notes in one, and settings.
     fn song_library(name: &str, settings: &[(&str, &str)]) -> PathBuf {

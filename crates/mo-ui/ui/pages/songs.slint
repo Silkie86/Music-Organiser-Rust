@@ -50,6 +50,8 @@ export struct SaveLine {
     path: string,
     missing: bool,
     newest: bool,
+    // The DAW the save opens in, which its buttons name.
+    daw: string,
 }
 
 // One line of the song panel's Older saves menu: clicking it opens `path`.
@@ -166,6 +168,9 @@ export global SongsData {
     in property <[MenuItem]> save-menu;
     callback save-menu-for(string);
     callback save-menu-chosen(string);
+    // A button on a save's line on the Saves tab: the save's path, and "open", "bitwig", "reveal" or "copy", as the
+    // lines of its right-click menu.
+    callback save-chosen(string, string);
     callback reveal();
     callback copy-path();
     // Opens the Presets page on the picked song's sounds (its newest save's).
@@ -476,8 +481,13 @@ component SongPanel inherits Rectangle {
                                 overflow: elide;
                             }
                         }
-                        // Double-click a save to open it; right-click for its menu.
+                        // Double-click a save to open it, or use the buttons on its line (Solomon, 4 Nov 2026: "makes
+                        // sure things that are useful arent hidden away"); right-click for the same in a menu.
                         if line.run == "": ListLine {
+                          // The buttons show when there's room for them and the save's name; in a narrow panel the
+                          // right-click menu and a double-click do the same.
+                          property <bool> roomy: !line.missing
+                              && self.width - 96px - 160px - 4 * Space.md >= buttons.preferred-width;
                           double-clicked => { SongsData.open-save(line.path); }
                           right-clicked(x, y) => {
                               SongsData.save-menu-for(line.path);
@@ -485,6 +495,7 @@ component SongPanel inherits Rectangle {
                           }
                           HorizontalLayout {
                             padding-left: Space.sm;
+                            padding-right: Space.sm;
                             spacing: Space.md;
                             Text {
                                 text: line.date;
@@ -508,6 +519,42 @@ component SongPanel inherits Rectangle {
                                 color: Theme.missing;
                                 font-size: Type.meta;
                                 vertical-alignment: center;
+                            }
+                            // The buttons' place, so the name stops short of them.
+                            if roomy: Rectangle { width: buttons.preferred-width; }
+                          }
+                          // Always made, so it can be measured; on the right of the line, the same as its menu's lines.
+                          buttons := HorizontalLayout {
+                            visible: roomy;
+                            x: parent.width - self.width - Space.sm;
+                            width: self.preferred-width;
+                            height: parent.height;
+                            spacing: Space.md;
+                            // Only as tall as their words: in the middle of the line, as the words are.
+                            cross-axis-alignment: center;
+                            LinkText {
+                                text: "Open in " + line.daw;
+                                tint: Theme.muted;
+                                font-size: Type.meta;
+                                clicked => { SongsData.save-chosen(line.path, "open"); }
+                            }
+                            if line.daw == "FL Studio": LinkText {
+                                text: "Open in Bitwig";
+                                tint: Theme.muted;
+                                font-size: Type.meta;
+                                clicked => { SongsData.save-chosen(line.path, "bitwig"); }
+                            }
+                            LinkText {
+                                text: "Show in folder";
+                                tint: Theme.muted;
+                                font-size: Type.meta;
+                                clicked => { SongsData.save-chosen(line.path, "reveal"); }
+                            }
+                            LinkText {
+                                text: "Copy path";
+                                tint: Theme.muted;
+                                font-size: Type.meta;
+                                clicked => { SongsData.save-chosen(line.path, "copy"); }
                             }
                           }
                         }

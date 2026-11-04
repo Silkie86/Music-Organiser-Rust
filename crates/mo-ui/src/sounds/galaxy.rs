@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use mo_app::background::{self, Newest};
+use mo_app::filters;
 use mo_app::galaxy_grid::{Crowd, Grid};
 use mo_app::galaxy_look::{self, LightBy};
 use mo_app::galaxy_names::{self as names, NO_KIND, Region};
@@ -26,7 +27,7 @@ use mo_sounds::{SoundsDb, StarPoint};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel};
 
 use super::sky::{Shine, Sky};
-use super::{FEED, HERE, PAGE, pick, play_picked, strings};
+use super::{CHOICES, FEED, HERE, PAGE, pick, play_picked};
 use crate::gpu;
 use crate::{AppWindow, GalaxyLabel, SoundsData, SweptLine, Theme, TrailDot};
 
@@ -386,28 +387,46 @@ fn fly(app: &AppWindow) {
     });
 }
 
+/// The galaxy's choices on show, each as a chip, with what the stars are placed and lit by picked.
+fn show_choices(app: &AppWindow) {
+    let (placing, light_by) = PAGE.with(|p| {
+        let g = &p.borrow().galaxy;
+        (g.placing, g.light_by)
+    });
+    let placing = PLACINGS.iter().find(|p| p.1 == placing).map_or("", |p| p.0);
+    let placings = filters::one_of(&PLACINGS.map(|p| p.0), placing);
+    let lights = filters::one_of(&LightBy::ALL.map(LightBy::name), light_by.name());
+    let data = app.global::<SoundsData>();
+    CHOICES.with(|c| {
+        data.set_placing_filter(c.placing.view(&placings));
+        data.set_light_filter(c.light.view(&lights));
+    });
+}
+
 /// Wires the galaxy's choices and the mouse on the map.
 pub(super) fn wire(app: &AppWindow) {
     let data = app.global::<SoundsData>();
-    data.set_galaxy_placings(strings(PLACINGS.map(|p| p.0)));
-    data.set_galaxy_placing(PLACINGS[0].0.into());
+    show_choices(app);
+    // The choice already picked stays picked, and the map stays as it is.
     let weak = app.as_weak();
     data.on_galaxy_place_by(move |v| {
         let Some(app) = weak.upgrade() else { return };
         let Some(&(_, placing)) = PLACINGS.iter().find(|p| p.0 == v.as_str()) else { return };
-        PAGE.with(|p| p.borrow_mut().galaxy.placing = placing);
-        app.global::<SoundsData>().set_galaxy_placing(v);
-        load(&app, false);
+        let changed = PAGE.with(|p| std::mem::replace(&mut p.borrow_mut().galaxy.placing, placing) != placing);
+        if changed {
+            show_choices(&app);
+            load(&app, false);
+        }
     });
-    data.set_galaxy_lights(strings(LightBy::ALL.map(LightBy::name)));
-    data.set_galaxy_light(LightBy::default().name().into());
     let weak = app.as_weak();
     data.on_galaxy_light_by(move |v| {
         let Some(app) = weak.upgrade() else { return };
         let Some(by) = LightBy::from_name(v.as_str()) else { return };
-        PAGE.with(|p| p.borrow_mut().galaxy.light_by = by);
-        app.global::<SoundsData>().set_galaxy_light(v);
-        draw(&app);
+        let changed = PAGE.with(|p| std::mem::replace(&mut p.borrow_mut().galaxy.light_by, by) != by);
+        if changed {
+            show_choices(&app);
+            draw(&app);
+        }
     });
     let weak = app.as_weak();
     data.on_galaxy_lay_out(move || {
