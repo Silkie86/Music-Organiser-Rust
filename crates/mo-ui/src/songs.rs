@@ -7,15 +7,17 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{LazyLock, Mutex, mpsc};
+use std::sync::{Arc, LazyLock, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::bitwig_convert::{self as bitwig, Converted};
+use mo_app::finder::{self, Kind};
 use mo_app::live::{Live, LiveDetails};
 use mo_app::log;
+use mo_app::places::Place;
 use mo_app::shell;
 use mo_app::song_panel::{self as panel, Go, SaveLine as PanelSaveLine, Tab};
 use mo_app::songs::{Entry, Filters, SongRow, Songs, View};
@@ -26,6 +28,7 @@ use mo_library::watch::{Changes, FolderWatch};
 use mo_library::{Library, STATUSES, SaveDetail};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
+use crate::finder::How;
 use crate::{
     AppWindow, CountLine, DetailPair, HealthLine, MenuItem, OlderLine, PanelSong, PluginLine, SampleLine, SaveLine,
     SongLine, SongsData, YearBar,
@@ -130,6 +133,24 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
             "copy" => copy_path(&s.path),
             _ => {}
         });
+    });
+    crate::finder::on_open(Kind::Song, |app, hit, how| {
+        let Some(row) = PAGE.with(|p| p.borrow().songs.rows.iter().position(|r| r.song.key == hit.id)) else {
+            return false;
+        };
+        match how {
+            How::InDaw => PAGE.with(|p| {
+                let p = p.borrow();
+                if let Some(r) = p.songs.rows.get(row) {
+                    open_main(&p, &r.song.latest);
+                }
+            }),
+            How::Open | How::Play => {
+                crate::go_to(app, Place::Songs.index() as i32);
+                show_song(app, row);
+            }
+        }
+        true
     });
     data.on_reveal(|| with_picked(|_, r| reveal(&r.song.latest)));
     data.on_copy_path(|| with_picked(|_, r| copy_path(&r.song.latest.path)));
@@ -243,6 +264,7 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
         };
         let read_in = began.elapsed();
         let songs = live.songs();
+        let found = Arc::new(finder::songs(&songs, Local::now().naive_local()));
         log::info(
             "Songs",
             &format!(
@@ -253,7 +275,10 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
                 (began.elapsed() - read_in).as_secs_f32()
             ),
         );
-        let _ = weak.upgrade_in_event_loop(move |app| show(&app, songs));
+        let _ = weak.upgrade_in_event_loop(move |app| {
+            show(&app, songs);
+            crate::finder::add_source(&app, "songs", found);
+        });
         watch(&mut live, &weak);
     });
     if let Err(e) = started {
@@ -313,8 +338,10 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
             ),
         );
         let songs = live.songs();
+        let found = Arc::new(finder::songs(&songs, Local::now().naive_local()));
         let _ = weak.upgrade_in_event_loop(move |app| {
             show_again(&app, songs);
+            crate::finder::add_source(&app, "songs", found);
             let (title, line) = updated.card();
             FEED.with(|f| {
                 if let Some(feed) = f.borrow().as_ref() {
@@ -428,13 +455,12 @@ fn refresh(app: &AppWindow) {
         let bars: Vec<YearBar> = p
             .years
             .iter()
-            .map(|&(year, n)| YearBar {
-                year: year.to_string().into(),
-                share: n as f32 / most,
-                picked: f.years.is_some_and(|(a, b)| year >= a && year <= b),
-            })
+            .map(|&(year, n)| YearBar { year: year.to_string().into(), share: n as f32 / most })
             .collect();
         data.set_years(ModelRc::new(VecModel::from(bars)));
+        let (from, to) = year_strip::picked_places(&p.years, f.years).unwrap_or((-1, -1));
+        data.set_years_from(from);
+        data.set_years_to(to);
         data.set_count(view.count.as_str().into());
         data.set_daw(f.daw.clone().unwrap_or_default().into());
         data.set_status(f.status.clone().unwrap_or_default().into());

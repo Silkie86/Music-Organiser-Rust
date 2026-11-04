@@ -2,7 +2,7 @@
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
 import { ListView } from "std-widgets.slint";
 import { ArrangementPreview } from "arrangement.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Stars, YearRange, YearBar, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, MenuChip, ListLine, Stars, YearRange, YearBar, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
 export struct SongLine {
@@ -93,6 +93,9 @@ export global SongsData {
     in property <[SongLine]> lines;
     // The year strip beside the list: each year with how many songs; drag over years to show only those.
     in property <[YearBar]> years;
+    // The places in `years` of the first and last years picked, top first (-1 when none are).
+    in property <int> years-from: -1;
+    in property <int> years-to: -1;
     callback years-picked(int, int);
     callback years-cleared();
     in property <string> count;
@@ -331,59 +334,34 @@ component SongPanel inherits Rectangle {
                 clicked => { SongsData.copy-path(); }
             }
         }
-        if SongsData.health-summary != "": Rectangle {
-            vertical-stretch: 0;
-            border-radius: Theme.radius;
-            border-width: 1px;
-            border-color: Theme.warning.transparentize(60%);
-            background: Theme.warning.transparentize(92%);
-            height: strip.preferred-height;
-            strip := VerticalLayout {
-                padding: Space.sm;
-                padding-left: Space.md;
+        if SongsData.health-summary != "": NoticeStrip {
+            text: SongsData.health-summary;
+            open <=> SongsData.health-open;
+            if SongsData.health-open: VerticalLayout {
                 spacing: Space.sm;
-                HorizontalLayout {
+                for h[i] in SongsData.health: HorizontalLayout {
                     spacing: Space.sm;
-                    Text {
-                        text: SongsData.health-summary;
-                        color: Theme.warning;
-                        font-size: Type.body;
-                        font-weight: 500;
-                    }
-                    Rectangle { horizontal-stretch: 1; }
-                    LinkText {
-                        text: SongsData.health-open ? "Hide" : "Show";
-                        tint: Theme.muted;
-                        font-size: Type.meta;
-                        clicked => { SongsData.health-open = !SongsData.health-open; }
-                    }
-                }
-                if SongsData.health-open: VerticalLayout {
-                    spacing: Space.sm;
-                    for h[i] in SongsData.health: HorizontalLayout {
-                        spacing: Space.sm;
-                        VerticalLayout {
-                            horizontal-stretch: 1;
-                            alignment: center;
-                            Text {
-                                text: h.text;
-                                color: Theme.text;
-                                font-size: Type.body;
-                                wrap: word-wrap;
-                            }
-                            if h.why != "": Text {
-                                text: h.why;
-                                color: Theme.muted;
-                                font-size: Type.meta;
-                                wrap: word-wrap;
-                            }
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        Text {
+                            text: h.text;
+                            color: Theme.text;
+                            font-size: Type.body;
+                            wrap: word-wrap;
                         }
-                        if h.action != "": VerticalLayout {
-                            alignment: center;
-                            StudioButton {
-                                text: h.action;
-                                clicked => { SongsData.health-go(i); }
-                            }
+                        if h.why != "": Text {
+                            text: h.why;
+                            color: Theme.muted;
+                            font-size: Type.meta;
+                            wrap: word-wrap;
+                        }
+                    }
+                    if h.action != "": VerticalLayout {
+                        alignment: center;
+                        StudioButton {
+                            text: h.action;
+                            clicked => { SongsData.health-go(i); }
                         }
                     }
                 }
@@ -840,6 +818,8 @@ export component SongsPage inherits Rectangle {
                     if SongsData.years.length > 1: YearRange {
                         width: 56px;
                         years: SongsData.years;
+                        picked-from: SongsData.years-from;
+                        picked-to: SongsData.years-to;
                         picked(a, b) => { SongsData.years-picked(a, b); }
                         cleared => { SongsData.years-cleared(); }
                     }

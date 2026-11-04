@@ -4,6 +4,7 @@
 //! (rule 21). Call [`SoundList::view`] off the window's thread; it takes well under a second for 357,000 sounds.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::Datelike;
 use mo_sounds::usage::Usage;
@@ -102,6 +103,30 @@ impl Filters {
         }
     }
 
+    /// Turns one of the on/off chips on or off, by the name the page gives it: "mix-well", "unused", "used" or
+    /// "favourites" (any other name changes nothing). Used and Unused are never both on. When Used goes on or off,
+    /// the years picked on the year strip go too: its years then mean something else (the years of the songs that
+    /// use each sound, or the year each was added), so a span picked for one isn't kept for the other.
+    pub fn toggle(&mut self, chip: &str) {
+        let by_use = self.used;
+        match chip {
+            "mix-well" => self.mix_well = !self.mix_well,
+            "unused" => {
+                self.unused = !self.unused;
+                self.used &= !self.unused;
+            }
+            "used" => {
+                self.used = !self.used;
+                self.unused &= !self.used;
+            }
+            "favourites" => self.favourites = !self.favourites,
+            _ => {}
+        }
+        if self.used != by_use {
+            self.years = None;
+        }
+    }
+
     /// Whether any filter is set (for the Clear chip). The search box doesn't count: it has its own ×.
     pub fn any(&self) -> bool {
         let none = Filters { search: self.search.clone(), ..Filters::default() };
@@ -109,15 +134,25 @@ impl Filters {
     }
 }
 
-/// Every sound the page can show (hidden copies left out: they only hide in the app, rule 2), with what's worked out
-/// once per sound for searching and sorting. Cloning copies every sound, so it's only done off the window's thread.
-#[derive(Clone, Default)]
-pub struct SoundList {
+/// What every list made from the same sounds shares: the sounds and what's worked out once from them.
+#[derive(Default)]
+struct Shared {
     sounds: Vec<Sound>,
     /// Lower-cased path, type, tags and character, one per line: what the search words are looked for in.
     hay: Vec<String>,
     /// Lower-cased names, for the name order and every order's tie-break.
     names: Vec<String>,
+}
+
+/// Every sound the page can show (hidden copies left out: they only hide in the app, rule 2), with what's worked out
+/// once per sound for searching and sorting.
+///
+/// The sounds and what's worked out from them ([`Shared`]) are shared, not copied, by a clone: a big library's list is
+/// most of a gigabyte, and the page makes a second list once it knows how your songs use each sound. Only what that
+/// adds (use, Most liked) is each list's own.
+#[derive(Clone, Default)]
+pub struct SoundList {
+    shared: Arc<Shared>,
     /// How your projects use each sound, by sound id, once known (sounds no project uses are left out).
     used: Option<HashMap<i64, Usage>>,
     /// Each sound's Most liked score, in `sounds` order, once known.
@@ -126,13 +161,50 @@ pub struct SoundList {
     liked_best: f64,
 }
 
+/// A list of at least this many sounds is freed off the thread that lets it go ([`crate::background::free_later`]):
+/// freeing a few thousand takes a few milliseconds, half a million over a second.
+const FREE_LATER_FROM: usize = 2_000;
+
+impl Drop for Shared {
+    /// The last list sharing a big library's sounds is often let go on the window's thread (when the use counts
+    /// arrive, the page swaps its list for one that has them, and whichever part of the page held the old one last
+    /// lets it go there), so the sounds go to the freeing thread whole, all they hold with them, and are freed there.
+    fn drop(&mut self) {
+        if self.sounds.len() >= FREE_LATER_FROM && !crate::background::freeing_here() {
+            crate::background::free_later(std::mem::take(self));
+        }
+    }
+}
+
+impl Drop for SoundList {
+    /// A list's own use counts (one per sound your songs use, each with its years) go the same way when there are many.
+    fn drop(&mut self) {
+        if self.used.as_ref().is_some_and(|u| u.len() >= FREE_LATER_FROM) && !crate::background::freeing_here() {
+            crate::background::free_later(self.used.take());
+        }
+    }
+}
+
 impl SoundList {
     /// The list from the library's sounds.
     pub fn new(sounds: Vec<Sound>) -> SoundList {
-        let sounds: Vec<Sound> = sounds.into_iter().filter(|s| !s.hidden).collect();
+        let mut sounds: Vec<Sound> = sounds.into_iter().filter(|s| !s.hidden).collect();
+        // Leaving out the hidden copies keeps the room they took: give it back.
+        sounds.shrink_to_fit();
         let hay = sounds.par_iter().map(hay_of).collect();
         let names = sounds.par_iter().map(|s| s.name().to_lowercase()).collect();
-        SoundList { sounds, hay, names, ..SoundList::default() }
+        SoundList { shared: Arc::new(Shared { sounds, hay, names }), used: None, liked: None, liked_best: 0.0 }
+    }
+
+    /// A list of the same sounds, sharing them, without this one's use or Most liked yet: what a list with the use
+    /// counted in starts from.
+    pub fn sharing(&self) -> SoundList {
+        SoundList { shared: self.shared.clone(), used: None, liked: None, liked_best: 0.0 }
+    }
+
+    /// Whether `other` shares this list's sounds (it was cloned from it, or made with [`SoundList::sharing`]).
+    pub fn shares_with(&self, other: &SoundList) -> bool {
+        Arc::ptr_eq(&self.shared, &other.shared)
     }
 
     /// How your projects use each sound (by id, as [`mo_sounds::usage::usage`] gives it), for the Used chips and
@@ -143,22 +215,22 @@ impl SoundList {
 
     /// Each sound's Most liked score, from `score`.
     pub fn set_liked(&mut self, score: impl Fn(&Sound) -> f64 + Sync + Send) {
-        let liked: Vec<f64> = self.sounds.par_iter().map(&score).collect();
+        let liked: Vec<f64> = self.shared.sounds.par_iter().map(&score).collect();
         self.liked_best = liked.iter().copied().fold(0.0, f64::max);
         self.liked = Some(liked);
     }
 
     pub fn len(&self) -> usize {
-        self.sounds.len()
+        self.shared.sounds.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.sounds.is_empty()
+        self.shared.sounds.is_empty()
     }
 
     /// Every sound in the list, in its order.
     pub fn sounds(&self) -> &[Sound] {
-        &self.sounds
+        &self.shared.sounds
     }
 
     /// How your projects use every sound (by id; ones no project uses are left out), if that's known yet.
@@ -168,22 +240,22 @@ impl SoundList {
 
     /// How your projects use the sound at `i`, if that's known yet (`None` too when none do).
     pub fn usage(&self, i: usize) -> Option<&Usage> {
-        self.used.as_ref()?.get(&self.sounds.get(i)?.id)
+        self.used.as_ref()?.get(&self.shared.sounds.get(i)?.id)
     }
 
     pub fn sound(&self, i: usize) -> Option<&Sound> {
-        self.sounds.get(i)
+        self.shared.sounds.get(i)
     }
 
     /// The place in the list of the sound with this id.
     pub fn find(&self, id: i64) -> Option<usize> {
-        self.sounds.iter().position(|s| s.id == id)
+        self.shared.sounds.iter().position(|s| s.id == id)
     }
 
     /// How many projects use a sound, if that's known yet.
     pub fn used_in(&self, i: usize) -> Option<u32> {
         let used = self.used.as_ref()?;
-        Some(self.sounds.get(i).and_then(|s| used.get(&s.id)).map_or(0, |u| u.projects))
+        Some(self.shared.sounds.get(i).and_then(|s| used.get(&s.id)).map_or(0, |u| u.projects))
     }
 
     /// The Most liked score, from 0 to 1 against the best liked, if scores are known yet.
@@ -206,11 +278,12 @@ impl SoundList {
     /// same seed gives the same order, and the page takes a new one each time it opens or Shuffle is pressed.
     pub fn view(&self, filters: &Filters, order: Order, seed: u64) -> Vec<usize> {
         let test = Test::new(filters);
-        let mut shown: Vec<usize> = (0..self.sounds.len()).into_par_iter().filter(|&i| self.allows(i, &test)).collect();
+        let mut shown: Vec<usize> =
+            (0..self.shared.sounds.len()).into_par_iter().filter(|&i| self.allows(i, &test)).collect();
         if order == Order::Shuffled {
             // Each sound's place worked out once, not on every comparison.
             let mut keyed: Vec<(u64, usize)> =
-                shown.par_iter().map(|&i| (shuffle_key(seed, self.sounds[i].id), i)).collect();
+                shown.par_iter().map(|&i| (shuffle_key(seed, self.shared.sounds[i].id), i)).collect();
             keyed.par_sort_unstable();
             return keyed.into_iter().map(|(_, i)| i).collect();
         }
@@ -221,7 +294,7 @@ impl SoundList {
     /// Each type and how many sounds have it, most first (the type chips), counting every sound the list holds.
     pub fn type_counts(&self) -> Vec<(String, usize)> {
         let mut counts: HashMap<&str, usize> = HashMap::new();
-        for s in &self.sounds {
+        for s in self.shared.sounds.iter() {
             *counts.entry(s.sound_type.as_str()).or_default() += 1;
         }
         let mut counts: Vec<(String, usize)> = counts.into_iter().map(|(t, n)| (t.to_string(), n)).collect();
@@ -234,14 +307,14 @@ impl SoundList {
 
     /// Every tag on a sound, sorted, for the Tag menu.
     pub fn tags(&self) -> Vec<String> {
-        let mut tags: Vec<String> = self.sounds.iter().flat_map(|s| s.tags.iter().cloned()).collect();
+        let mut tags: Vec<String> = self.shared.sounds.iter().flat_map(|s| s.tags.iter().cloned()).collect();
         tags.sort_by_key(|t| t.to_lowercase());
         tags.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         tags
     }
 
     fn allows(&self, i: usize, t: &Test) -> bool {
-        let s = &self.sounds[i];
+        let s = &self.shared.sounds[i];
         let analysis = s.analysis.as_ref();
         let is_loop = analysis.is_some_and(|a| a.is_loop);
         if (!t.sound_types.is_empty() && !t.sound_types.contains(&s.sound_type))
@@ -286,7 +359,7 @@ impl SoundList {
                 return false;
             }
         }
-        t.words.iter().all(|w| self.hay[i].contains(w.as_str()))
+        t.words.iter().all(|w| self.shared.hay[i].contains(w.as_str()))
     }
 
     /// How many sounds there are in each year, newest first, as the year filter reads them: by the years of the songs
@@ -295,7 +368,7 @@ impl SoundList {
         let mut counts: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
         match (&self.used, by_use) {
             (Some(used), true) => {
-                for s in &self.sounds {
+                for s in self.shared.sounds.iter() {
                     let mut years = used.get(&s.id).map(|u| u.years.clone()).unwrap_or_default();
                     years.dedup();
                     for y in years {
@@ -304,7 +377,7 @@ impl SoundList {
                 }
             }
             _ => {
-                for s in &self.sounds {
+                for s in self.shared.sounds.iter() {
                     *counts.entry(s.added.year()).or_default() += 1;
                 }
             }
@@ -314,7 +387,7 @@ impl SoundList {
     }
 
     fn compare(&self, a: usize, b: usize, order: Order) -> std::cmp::Ordering {
-        let (sa, sb) = (&self.sounds[a], &self.sounds[b]);
+        let (sa, sb) = (&self.shared.sounds[a], &self.shared.sounds[b]);
         let by = match order {
             Order::Shuffled => std::cmp::Ordering::Equal,
             Order::MostLiked => match &self.liked {
@@ -326,7 +399,7 @@ impl SoundList {
             Order::Key => key_order(sa).cmp(&key_order(sb)),
             Order::Newest => sb.added.cmp(&sa.added),
         };
-        by.then_with(|| self.names[a].cmp(&self.names[b])).then(a.cmp(&b))
+        by.then_with(|| self.shared.names[a].cmp(&self.shared.names[b])).then(a.cmp(&b))
     }
 }
 
@@ -549,6 +622,26 @@ mod tests {
     }
 
     #[test]
+    fn a_big_list_is_freed_off_the_thread_that_lets_it_go() {
+        let sounds = |n: usize| (0..n as i64).map(|i| sound(i, &format!(r"I:\S\{i}.wav"), "Kick", None)).collect();
+        let (big, small) = (SoundList::new(sounds(FREE_LATER_FROM)), SoundList::new(sounds(10)));
+        // A copy still in use keeps the list: only the last copy's going frees it.
+        let shared = std::sync::Arc::new(big);
+        let copy = shared.clone();
+        let before = crate::background::handed_over();
+        drop(small);
+        drop(shared);
+        assert_eq!(
+            crate::background::handed_over(),
+            before,
+            "a small list is freed here; one still in use isn't freed"
+        );
+        assert_eq!(copy.len(), FREE_LATER_FROM);
+        drop(copy);
+        assert_eq!(crate::background::handed_over(), before + 1, "the big one goes to the freeing thread");
+    }
+
+    #[test]
     fn waveforms_are_one_line_per_peak() {
         assert_eq!(wave_path(&[]), "");
         // The loudest fills the height, a silent one is a sliver, and a negative peak counts by its size.
@@ -572,6 +665,33 @@ mod tests {
         assert_eq!(list.year_counts(true), [(2026, 1), (2025, 1), (2020, 1)]);
         let used_then = Filters { used: true, years: Some((2025, 2026)), ..Filters::default() };
         assert_eq!(by(&list, used_then), [1]);
+    }
+
+    #[test]
+    fn turning_used_on_or_off_lets_go_of_the_years_picked() {
+        let picked = Filters { years: Some((2020, 2022)), ..Filters::default() };
+        // Used on: the strip counts the songs' years now, so years picked from the years added go.
+        let mut f = picked.clone();
+        f.toggle("used");
+        assert!(f.used);
+        assert_eq!(f.years, None);
+        // And off again: years picked from the songs' years go too.
+        f.years = Some((2025, 2026));
+        f.toggle("used");
+        assert!(!f.used);
+        assert_eq!(f.years, None);
+        // Unused on turns Used off, so it lets go of them as well.
+        let mut f = Filters { used: true, ..picked.clone() };
+        f.toggle("unused");
+        assert!(f.unused && !f.used);
+        assert_eq!(f.years, None);
+        // Unused with Used off and the other chips keep them: the strip still reads the years added.
+        let mut f = picked.clone();
+        for chip in ["unused", "mix-well", "favourites", "unused", "no such chip"] {
+            f.toggle(chip);
+        }
+        assert!(!f.unused && !f.used && f.mix_well && f.favourites);
+        assert_eq!(f.years, Some((2020, 2022)));
     }
 
     #[test]
@@ -697,5 +817,17 @@ mod tests {
         assert!(Filters { favourites: true, ..Filters::default() }.any());
         assert_eq!(Order::from_name("Most liked"), Order::MostLiked);
         assert_eq!(Order::from_name("whatever"), Order::Shuffled);
+    }
+
+    #[test]
+    fn a_list_with_the_use_shares_the_sounds_rather_than_copying_them() {
+        let mut list = SoundList::new((1..=3).map(|i| sound(i, &format!("{i}.wav"), "Kick", None)).collect());
+        list.set_liked(|s| s.id as f64);
+        let used = list.sharing();
+        assert!(used.shares_with(&list) && list.clone().shares_with(&list));
+        assert!(std::ptr::eq(used.sounds().as_ptr(), list.sounds().as_ptr()));
+        // Only the sounds: what the first list worked out from its use isn't carried over.
+        assert!(!used.knows_liked() && list.knows_liked());
+        assert!(!SoundList::new(Vec::new()).shares_with(&list));
     }
 }

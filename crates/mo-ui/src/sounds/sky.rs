@@ -8,7 +8,16 @@
 //! 2. stamp them again onto a quarter-size layer;
 //! 3. blur that layer, across and then down, into the glow;
 //! 4. squeeze the brightness of the stamps and the glow into the picture, over the page's background;
-//! 5. close up, draw each star crisply over it: a bright core in a soft halo, the left-out stars as faint dust.
+//! 5. draw the stars as stars over it: a core in the star's colour, white-hot in its very middle, in a soft glow.
+//!    On a dark page their light is screened on (as the processor's picture does), so a cluster glows where they crowd
+//!    but keeps its colour; on a light page (Paper) they're laid over it, as the processor's picture is laid over the
+//!    page. Close up every star is drawn so, the left-out ones as faint dust; far out only the stars "Light by" lights
+//!    most, each a bright point of its own with a short, faint glow, so they stand out at every zoom. The very
+//!    brightest get faint four-point spikes, and every star twinkles very slightly (only in brightness, and not while
+//!    the mouse sweeps, drags or glides, so it never gets in the way of picking a sound).
+//!
+//! A twinkle only changes step 5, so for a twinkle the card keeps the picture of steps 1 to 4 and draws the stars
+//! over it again.
 
 use mo_app::galaxy_look::{self as look, Look, STAMP};
 use mo_app::galaxy_view::View;
@@ -35,6 +44,20 @@ struct Camera {
     strength: f32,
     // Crisp stars: a left-out star's radius in pixels.
     dust: f32,
+    // How painted the view is (1 far out, 0 close up).
+    painted: f32,
+    // 1 when Light by lights the stars (some of the shown ones are lit), 0 when they're all alike.
+    light_on: f32,
+    // The twinkle: the time in seconds, and how much (0 for none).
+    time: f32,
+    twinkle: f32,
+    // From which star (in the order mo_app::galaxy_look::pack sorts them, the best lit last) they show as points of
+    // their own far out, and get spikes; and how many stars there are (mo_app::galaxy_look::glint_starts).
+    glint_start: f32,
+    spike_start: f32,
+    count: f32,
+    // Pixels per point.
+    scale: f32,
     _a: f32,
     _b: f32,
     _c: f32,
@@ -72,42 +95,142 @@ fn stamp_fragment(in: Stamp) -> @location(0) vec4<f32> {
     return vec4(c, max(c.r, max(c.g, c.b)));
 }
 
+// The numbers below are mo_app::galaxy_look's, which the processor's picture uses too (a test checks they match).
+const UNLIT_SIZE: f32 = 0.7;
+const MIN_LIT: f32 = 1.6;
+const SPIKE_MIN: f32 = 10.0;
+const GLOW: f32 = 0.36;
+const GLOW_LIT: f32 = 0.3;
+const HOT: f32 = 0.08;
+const WHITE: f32 = 0.4;
+const FAR_GLOW: f32 = 0.2;
+const FAR_HALO: f32 = 2.2;
+const HALO: f32 = 2.8;
+const FALLOFF: f32 = 1.3;
+const LIT_BRIGHTEST: f32 = 1.5;
+const DUST_LIT: f32 = 0.5;
+
 struct Crisp {
     @builtin(position) position: vec4<f32>,
+    // The pixel's place from the star's middle, in pixels.
     @location(0) local: vec2<f32>,
+    // The star's colour, times how strongly it shows and its twinkle.
     @location(1) colour: vec3<f32>,
-    // The core's radius in pixels, and 1 for a shown star, 0 for a left-out one.
+    // The core's radius, how far its glow reaches and how long its spikes are (0 for none), in pixels.
     @location(2) radius: f32,
-    @location(3) shown: f32,
+    @location(3) halo: f32,
+    @location(4) spikes: f32,
+    // 1 for a shown star, 0 for a left-out one; how lit it is (0 to 1, 0 with Light by off).
+    @location(5) shown: f32,
+    @location(6) lit: f32,
+    // How strong its glow is: all of it close up, a little far out, where many glints would add up to white.
+    @location(7) glow: f32,
+    // How strongly it shows (what its colour was multiplied by), for laying it over a light page.
+    @location(8) strength: f32,
 };
 
+// A steady number from 0 to 1 for each star, for its twinkle.
+fn hash(n: u32) -> f32 {
+    var x = n * 747796405u + 2891336453u;
+    x = ((x >> ((x >> 28u) + 4u)) ^ x) * 277803737u;
+    return f32((x >> 22u) ^ x) / 4294967295.0;
+}
+
 @vertex
-fn crisp_vertex(@builtin(vertex_index) v: u32, @location(0) at: vec2<f32>, @location(1) colour: u32,
-                @location(2) weight: f32) -> Crisp {
+fn crisp_vertex(@builtin(vertex_index) v: u32, @builtin(instance_index) star: u32, @location(0) at: vec2<f32>,
+                @location(1) colour: u32, @location(2) weight: f32) -> Crisp {
     let c = unpack4x8unorm(colour);
     // 0 for a left-out star; 1 to 255 for a shown one, by how lit it is.
     let shown = c.a > 0.5 / 255.0;
-    let lit = max(c.a * 255.0 - 1.0, 0.0) / 254.0;
-    // As C#: a well lit star is up to nearly three times as big (mo_app::galaxy_look::lit_size, the same curve).
-    let radius = select(camera.dust, camera.size * (1.0 + 1.8 * sqrt(lit)), shown);
-    // A shown star's halo reaches 2.8 times its core.
-    let local = corner(v) * (select(radius, radius * 2.8, shown) + 1.0);
+    let lighting = camera.light_on > 0.5;
+    let lit = select(0.0, max(c.a * 255.0 - 1.0, 0.0) / 254.0, lighting);
+    // Close up every star shows; far out, where the stars are only painted, the best lit still show as points. By rank:
+    // the light byte can't tell the top few hundred of a big library apart. It rises along the ones that glint, and
+    // the last, the best lit, shows fully, even when it's the only one (mo_app::galaxy_look::glint_at).
+    let rank = f32(star);
+    let glint = select(0.0, smoothstep(0.0, 1.0, (rank - camera.glint_start + 1.0) / max(camera.count - camera.glint_start, 1.0)),
+                       lighting && rank >= camera.glint_start);
+    // A left-out star is faint dust, fainter still with Light by on, when the unlit stars on show are dimmed too.
+    let show = select(0.15 * camera.strength * select(1.0, DUST_LIT, lighting), max(camera.strength, camera.painted * glint),
+                      shown);
+    // A well lit star is up to nearly three times as big (mo_app::galaxy_look::lit_size, the same curve); with Light by
+    // on, an unlit one is smaller than an all-alike star, so the lit ones stand out.
+    let size = (1.0 + 1.8 * sqrt(lit)) * select(1.0, UNLIT_SIZE, lighting);
+    let near = camera.size * size;
+    // With Light by on, far out a star that glints is a small bright point, never smaller than one you can see, and it
+    // goes to its close-up size as the view flies in. The others shrink towards such a point with it, though never
+    // past their own size, so a star that glints is never smaller than a less lit one beside it. (Far out only the
+    // ones that glint are drawn; the processor's picture draws every star at every zoom, so there the ones that glint
+    // keep at least their own size instead: mo_app::galaxy_look::glint_point.)
+    let point = select(min(near, MIN_LIT * camera.scale), MIN_LIT * camera.scale * (1.0 + 0.6 * glint), glint > 0.0);
+    let radius = select(camera.dust, select(near, mix(point, near, camera.strength), lighting), shown);
+    // A shown star's glow reaches 2.8 times its core close up, a well lit one's up to twice that; far out, where
+    // only a little of the glow shows, it's kept short.
+    let halo = select(radius * 1.5, radius * mix(FAR_HALO, HALO + HALO * lit, camera.strength), shown);
+    // The brightest few get faint four-point spikes, growing along them as the glints do.
+    let spiky = smoothstep(0.0, 1.0, (rank - camera.spike_start + 1.0) / max(camera.count - camera.spike_start, 1.0));
+    let spikes = select(0.0, spiky * max(radius * 7.0, SPIKE_MIN * camera.scale),
+                        shown && lighting && rank >= camera.spike_start);
+    // A very slight twinkle, only in brightness, each star at its own pace: by where it is on the map, so it keeps its
+    // pace when the stars are packed again in another order. Each pace is a whole number of rounds an hour, so when
+    // the clock wraps round each hour no star jumps.
+    let id = (bitcast<u32>(at.x) * 73856093u) ^ (bitcast<u32>(at.y) * 19349663u);
+    let pace = round((1.1 + 1.6 * hash(id)) * 3600.0 / 6.2831853) * 6.2831853 / 3600.0;
+    let twinkle = 1.0 + camera.twinkle * sin(camera.time * pace + 6.2831853 * hash(id ^ 0x9e3779b9u));
+    let local = corner(v) * (max(halo, spikes) + 1.0);
     var out: Crisp;
-    out.position = vec4((at - camera.centre) * camera.unit + local * camera.pixel, 0.0, 1.0);
+    // A star that doesn't show costs next to nothing: its corners all fall on one point, off the picture, so it has no
+    // pixels to draw.
+    out.position = select(vec4((at - camera.centre) * camera.unit + local * camera.pixel, 0.0, 1.0),
+                          vec4(2.0, 2.0, 0.0, 1.0), show < 0.004);
     out.local = local;
-    out.colour = c.rgb;
+    // With Light by on, a shown star's core is as bright as it's lit, with its steady variety (its weight, as `pack`
+    // made it; the processor's picture does the same); a left-out one stays faint dust.
+    let strength = show * twinkle * select(1.0, weight / LIT_BRIGHTEST, lighting && shown);
+    out.colour = c.rgb * strength;
+    out.strength = strength;
     out.radius = radius;
+    out.halo = halo;
+    out.spikes = spikes;
     out.shown = select(0.0, 1.0, shown);
+    out.lit = lit;
+    out.glow = mix(FAR_GLOW, 1.0, camera.strength);
     return out;
 }
 
 @fragment
 fn crisp_fragment(in: Crisp) -> @location(0) vec4<f32> {
     let d = length(in.local);
-    let core = clamp(in.radius + 0.5 - d, 0.0, 1.0);
-    let halo = 0.43 * clamp(1.0 - d / (in.radius * 2.8), 0.0, 1.0);
-    let a = select(0.15 * core, core + halo * (1.0 - core), in.shown > 0.5) * camera.strength;
-    return vec4(in.colour * a, a);
+    let r = in.radius;
+    // The core: a crisp disc in the star's colour, white-hot only in its very middle.
+    let core = clamp(r + 0.5 - d, 0.0, 1.0);
+    let hot = exp(-d * d / (HOT * r * r + 0.15));
+    // The glow: light falling off softly from the core, gone by the halo's edge.
+    let edge = clamp(1.0 - d / in.halo, 0.0, 1.0);
+    let glow = (GLOW + GLOW_LIT * in.lit) * pow(edge, FALLOFF) * in.glow;
+    // The spikes: two thin lines through the middle, fading along their length.
+    var spike = 0.0;
+    if (in.spikes > 0.0) {
+        let a = abs(in.local);
+        let fade = clamp(1.0 - d / in.spikes, 0.0, 1.0);
+        spike = 0.3 * (exp(-a.y * 1.8) + exp(-a.x * 1.8)) * fade * fade;
+    }
+    let shown = in.shown > 0.5;
+    // The glow (with the spikes) and the core are screened together, as the processor's picture screens a star's core
+    // over its glow: where the glow is under the core it lights it a little more, and nothing goes past 1, so the core
+    // keeps the star's own colour (light past 1 would be cut channel by channel, turning a blue star cyan).
+    let around = select(0.0, min(glow + spike, 1.0), shown);
+    let g = in.colour * around;
+    let k = in.colour * core;
+    let white = select(0.0, WHITE * hot * core * in.glow, shown) * max(in.colour.r, max(in.colour.g, in.colour.b));
+    // How strongly it shows, the same way (its alpha, at least each of its colours, so it stays premultiplied).
+    let ga = in.strength * around;
+    let ka = in.strength * core;
+    // On a dark page the light is screened onto what's there (as the processor's picture does): where stars crowd
+    // their glows build up, but a crowd keeps its colour longer than if the light were simply added, which burns a
+    // dense cluster to white. On a light page screened light wouldn't show, so there it's laid over the picture by how
+    // strongly it shows (its alpha), as the processor's picture is laid over the page.
+    return vec4(min(g + k - g * k + vec3(white), vec3(1.0)), min(ga + ka - ga * ka + white, 1.0));
 }
 
 // A triangle over the whole picture, for the steps that work pixel by pixel.
@@ -176,6 +299,16 @@ fn shade_fragment(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
 }
 "#;
 
+/// What else lights the stars on one picture.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(super) struct Shine {
+    /// Light by lights them (not Nothing, and the measure is known).
+    pub light_on: bool,
+    /// The twinkle's clock, in seconds, and how much the stars twinkle (0 for not at all).
+    pub time: f32,
+    pub twinkle: f32,
+}
+
 /// The layers a frame is drawn through, made for one size of picture.
 struct Layers {
     width: u32,
@@ -187,9 +320,21 @@ struct Layers {
     blur_across: wgpu::BindGroup,
     blur_down: wgpu::BindGroup,
     shade: wgpu::BindGroup,
+    /// The painted picture (steps 1 to 4), kept so a twinkle only draws the stars over it again, and what it was drawn
+    /// for.
+    base: wgpu::Texture,
+    base_for: Option<Painted>,
     /// Two pictures, so one is drawn into while Slint shows the other.
     pictures: [wgpu::Texture; 2],
     next: usize,
+}
+
+/// What the painted picture depends on: the two stamps' cameras, the squeeze's numbers and which stars were sent.
+#[derive(Clone, Copy, PartialEq)]
+struct Painted {
+    cameras: [[f32; 8]; 2],
+    shade: [f32; 8],
+    stars: u64,
 }
 
 /// The galaxy's painter on one graphics card.
@@ -197,7 +342,9 @@ pub(super) struct Sky {
     device: wgpu::Device,
     queue: wgpu::Queue,
     stamp: wgpu::RenderPipeline,
+    /// The stars as stars, screened on (a dark page) or laid over (a light one).
     crisp: wgpu::RenderPipeline,
+    crisp_over: wgpu::RenderPipeline,
     blur_across: wgpu::RenderPipeline,
     blur_down: wgpu::RenderPipeline,
     shade: wgpu::RenderPipeline,
@@ -209,11 +356,17 @@ pub(super) struct Sky {
     shade_numbers: wgpu::Buffer,
     stars: Option<wgpu::Buffer>,
     count: u32,
+    /// How many of the stars, at the end, are lit by the measure: far out only the best lit of them are drawn as stars.
+    lit: u32,
+    /// Counts the stars sent, so the painted picture kept for a twinkle is never one of stars sent before.
+    sent: u64,
     layers: Option<Layers>,
 }
 
 const LAYER: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const PICTURE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
+/// The camera as the shader reads it (`Camera`): 20 f32.
+const CAMERA_BYTES: u64 = 80;
 
 impl Sky {
     pub(super) fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Sky {
@@ -304,15 +457,34 @@ impl Sky {
             LAYER,
             Some(wgpu::BlendState { color: add, alpha: add }),
         );
-        let crisp = pipeline(
-            "galaxy crisp stars",
-            &camera_layout,
-            "crisp_vertex",
-            &stars_in,
-            "crisp_fragment",
-            PICTURE,
-            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
-        );
+        // The picture stays opaque: the stars only change its colour.
+        let keep_alpha = wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::Add,
+        };
+        let crisp_with = |label: &str, dst_factor| {
+            pipeline(
+                label,
+                &camera_layout,
+                "crisp_vertex",
+                &stars_in,
+                "crisp_fragment",
+                PICTURE,
+                Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: keep_alpha,
+                }),
+            )
+        };
+        // A dark page: screened on (what's there times one minus the star's light, plus the light). A light page:
+        // laid over (what's there times one minus how strongly the star shows, plus its light).
+        let crisp = crisp_with("galaxy crisp stars", wgpu::BlendFactor::OneMinusSrc);
+        let crisp_over = crisp_with("galaxy crisp stars over a light page", wgpu::BlendFactor::OneMinusSrcAlpha);
         let blur_across =
             pipeline("galaxy glow across", &texture_layout, "whole_vertex", &[], "blur_across", LAYER, None);
         let blur_down = pipeline("galaxy glow down", &texture_layout, "whole_vertex", &[], "blur_down", LAYER, None);
@@ -326,7 +498,7 @@ impl Sky {
             })
         };
         let camera = || {
-            let b = buffer("galaxy camera", 48);
+            let b = buffer("galaxy camera", CAMERA_BYTES);
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("galaxy camera"),
                 layout: &camera_layout,
@@ -346,6 +518,7 @@ impl Sky {
             queue: queue.clone(),
             stamp,
             crisp,
+            crisp_over,
             blur_across,
             blur_down,
             shade,
@@ -357,15 +530,19 @@ impl Sky {
             shade_numbers: buffer("galaxy squeeze", 32),
             stars: None,
             count: 0,
+            lit: 0,
+            sent: 0,
             layers: None,
         }
     }
 
-    /// Sends the stars to the card (as `mo_app::galaxy_look::pack` made them).
-    pub(super) fn set_stars(&mut self, bytes: &[u8]) {
+    /// Sends the stars to the card (as `mo_app::galaxy_look::pack` made them: the last `lit` of them lit by the
+    /// measure).
+    pub(super) fn set_stars(&mut self, bytes: &[u8], lit: u32) {
         let count = (bytes.len() / look::STAR_BYTES) as u32;
+        self.sent += 1;
         if count == 0 {
-            (self.stars, self.count) = (None, 0);
+            (self.stars, self.count, self.lit) = (None, 0, 0);
             return;
         }
         let fits = self.stars.as_ref().is_some_and(|b| b.size() >= bytes.len() as u64);
@@ -381,11 +558,21 @@ impl Sky {
             self.queue.write_buffer(b, 0, bytes);
         }
         self.count = count;
+        self.lit = lit.min(count);
     }
 
     /// Forgets the stars (a new library is coming).
     pub(super) fn clear_stars(&mut self) {
-        (self.stars, self.count) = (None, 0);
+        (self.stars, self.count, self.lit) = (None, 0, 0);
+        self.sent += 1;
+    }
+
+    /// Paints the next picture afresh, even if nothing it's painted from has changed (to time whole frames).
+    #[cfg(test)]
+    fn repaint(&mut self) {
+        if let Some(layers) = self.layers.as_mut() {
+            layers.base_for = None;
+        }
     }
 
     pub(super) fn has_stars(&self) -> bool {
@@ -404,10 +591,11 @@ impl Sky {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format,
-                    // Copying out is for the look test.
+                    // Copying in is the painted picture under the stars; copying out is for it, and the look test.
                     usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                         | wgpu::TextureUsages::TEXTURE_BINDING
-                        | wgpu::TextureUsages::COPY_SRC,
+                        | wgpu::TextureUsages::COPY_SRC
+                        | wgpu::TextureUsages::COPY_DST,
                     view_formats: &[],
                 })
             };
@@ -444,43 +632,74 @@ impl Sky {
                 small,
                 across,
                 glow,
+                base: make("galaxy painted", width, height, PICTURE),
+                base_for: None,
                 pictures: [make("galaxy", width, height, PICTURE), make("galaxy", width, height, PICTURE)],
                 next: 0,
             });
         }
     }
 
-    /// Draws `view` at `scale` pixels per point, with `look`, over `background` (red, green, blue, 0 to 1), and
-    /// returns the picture for Slint to show.
-    pub(super) fn draw(&mut self, view: &View, scale: f32, look: &Look, background: [f32; 3]) -> wgpu::Texture {
+    /// Draws `view` at `scale` pixels per point, with `look` and `shine`, over `background` (red, green, blue, 0 to 1),
+    /// and returns the picture for Slint to show.
+    pub(super) fn draw(
+        &mut self,
+        view: &View,
+        scale: f32,
+        look: &Look,
+        shine: Shine,
+        background: [f32; 3],
+    ) -> wgpu::Texture {
         let (width, height) =
             (((view.width * scale).round() as u32).max(1), ((view.height * scale).round() as u32).max(1));
         let (sw, sh) = (width.div_ceil(4), height.div_ceil(4));
         // The quarter-size stamps hold a sixteenth of the light, as C#'s, spread over the bigger blur.
         let small = STAMP * (SIGMA * SIGMA) / (SIGMA_SMALL * SIGMA_SMALL) / 16.0;
         let crisp = 1.0 - look.painted;
-        let cameras = [
+        let count = self.count;
+        // Which stars glint far out and get spikes, by rank (see `glint_starts`); none with nothing lit.
+        let (glint_start, spike_start) =
+            if shine.light_on { look::glint_starts(look, self.lit, count) } else { (count, count) };
+        let stamps = [
             look::camera(view, scale, width, height, SIGMA, STAMP),
             look::camera(view, scale, sw, sh, SIGMA_SMALL, small),
-            look::camera(view, scale, width, height, look.radius * scale, crisp),
         ];
+        let cameras = [stamps[0], stamps[1], look::camera(view, scale, width, height, look.radius * scale, crisp)];
         for (i, c) in cameras.iter().enumerate() {
             let mut numbers = c.to_vec();
-            numbers.extend([DUST * scale, 0.0, 0.0, 0.0]);
+            numbers.extend([
+                DUST * scale,
+                look.painted,
+                if shine.light_on { 1.0 } else { 0.0 },
+                shine.time,
+                shine.twinkle,
+                glint_start as f32,
+                spike_start as f32,
+                count as f32,
+                scale,
+                0.0,
+                0.0,
+                0.0,
+            ]);
             self.queue.write_buffer(&self.cameras[i].0, 0, &look::bytes(&numbers));
         }
         let [r, g, b] = background;
-        self.queue.write_buffer(
-            &self.shade_numbers,
-            0,
-            &look::bytes(&[look.core, look.glow, look.gain, 0.0, r, g, b, 1.0]),
-        );
+        let shade = [look.core, look.glow, look.gain, 0.0, r, g, b, 1.0];
+        let painted = Painted { cameras: stamps, shade, stars: self.sent };
 
         self.make_layers(width, height);
         let Some(layers) = self.layers.as_mut() else { unreachable!("made just above") };
-        let (count, stars) = (self.count, &self.stars);
-        let (stamp, crisp_pipeline, blur_across, blur_down, shade) =
-            (&self.stamp, &self.crisp, &self.blur_across, &self.blur_down, &self.shade);
+        let stars = &self.stars;
+        // Far out, only the stars lit enough to glint are drawn as stars: the last ones, as `pack` sorts them.
+        let as_stars = if crisp > 0.01 { 0..count } else { glint_start..count };
+        // On a light page (Paper) the stars are laid over the picture; on a dark one their light is screened onto it.
+        // Light as the app judges a colour light (`themes::is_light`).
+        let light_page = mo_app::themes::is_light(
+            [r, g, b].iter().fold(0, |rgb, c| (rgb << 8) | (c.clamp(0.0, 1.0) * 255.0).round() as u32),
+        );
+        let crisp_pipeline = if light_page { &self.crisp_over } else { &self.crisp };
+        let (stamp, blur_across, blur_down, shade_pipeline) =
+            (&self.stamp, &self.blur_across, &self.blur_down, &self.shade);
         let groups = [&self.cameras[0].1, &self.cameras[1].1, &self.cameras[2].1];
         let device = &self.device;
         let picture = layers.pictures[layers.next].clone();
@@ -508,41 +727,49 @@ impl Sky {
                 })
                 .forget_lifetime()
         };
-        // 1 and 2: the stamps, full and quarter size.
-        for (to, group) in [(&layers.stamps, groups[0]), (&layers.small, groups[1])] {
-            let mut p = pass(&mut encoder, to, Some(wgpu::Color::TRANSPARENT));
-            if let Some(stars) = stars {
-                p.set_pipeline(stamp);
-                p.set_bind_group(0, group, &[]);
-                p.set_vertex_buffer(0, stars.slice(..));
-                p.draw(0..6, 0..count);
+        // Steps 1 to 4 paint the picture under the stars. Nothing they're painted from changes for a twinkle (only the
+        // stars' brightness does), so the one kept from last time is used as it is.
+        if layers.base_for != Some(painted) {
+            self.queue.write_buffer(&self.shade_numbers, 0, &look::bytes(&shade));
+            // 1 and 2: the stamps, full and quarter size.
+            for (to, group) in [(&layers.stamps, groups[0]), (&layers.small, groups[1])] {
+                let mut p = pass(&mut encoder, to, Some(wgpu::Color::TRANSPARENT));
+                if let Some(stars) = stars {
+                    p.set_pipeline(stamp);
+                    p.set_bind_group(0, group, &[]);
+                    p.set_vertex_buffer(0, stars.slice(..));
+                    p.draw(0..6, 0..count);
+                }
             }
+            // 3: the glow.
+            for (to, pipeline, group) in
+                [(&layers.across, blur_across, &layers.blur_across), (&layers.glow, blur_down, &layers.blur_down)]
+            {
+                let mut p = pass(&mut encoder, to, None);
+                p.set_pipeline(pipeline);
+                p.set_bind_group(0, group, &[]);
+                p.draw(0..3, 0..1);
+            }
+            // 4: the squeeze, into the painted picture.
+            {
+                let base = layers.base.create_view(&wgpu::TextureViewDescriptor::default());
+                let mut p = pass(&mut encoder, &base, None);
+                p.set_pipeline(shade_pipeline);
+                p.set_bind_group(0, &layers.shade, &[]);
+                p.draw(0..3, 0..1);
+            }
+            layers.base_for = Some(painted);
         }
-        // 3: the glow.
-        for (to, pipeline, group) in
-            [(&layers.across, blur_across, &layers.blur_across), (&layers.glow, blur_down, &layers.blur_down)]
-        {
-            let mut p = pass(&mut encoder, to, None);
-            p.set_pipeline(pipeline);
-            p.set_bind_group(0, group, &[]);
-            p.draw(0..3, 0..1);
-        }
-        // 4: the squeeze, into the picture.
-        {
-            let mut p = pass(&mut encoder, &target, None);
-            p.set_pipeline(shade);
-            p.set_bind_group(0, &layers.shade, &[]);
-            p.draw(0..3, 0..1);
-        }
-        // 5: close up, the crisp stars.
-        if crisp > 0.01
+        encoder.copy_texture_to_texture(layers.base.as_image_copy(), picture.as_image_copy(), picture.size());
+        // 5: the stars as stars: every one close up, only the best lit far out.
+        if (crisp > 0.01 || shine.light_on)
             && let Some(stars) = stars
         {
             let mut p = pass(&mut encoder, &target, None);
             p.set_pipeline(crisp_pipeline);
             p.set_bind_group(0, groups[2], &[]);
             p.set_vertex_buffer(0, stars.slice(..));
-            p.draw(0..6, 0..count);
+            p.draw(0..6, as_stars);
         }
         self.queue.submit(Some(encoder.finish()));
         picture
@@ -564,21 +791,44 @@ mod tests {
             .expect("the shader is valid");
     }
 
-    /// Draws 450,000 made-up stars in clumps on whatever graphics card there is (a software one will do) to PNGs in
-    /// the folder GALAXY_GPU_LOOK names, at a few zooms, to judge the look by eye and to check the card takes every
-    /// step.
+    #[test]
+    fn the_shader_uses_the_processor_pictures_numbers() {
+        for (name, value) in [
+            ("UNLIT_SIZE", look::UNLIT_SIZE),
+            ("MIN_LIT", look::MIN_LIT),
+            ("SPIKE_MIN", look::SPIKE_MIN),
+            ("GLOW", look::GLOW),
+            ("GLOW_LIT", look::GLOW_LIT),
+            ("HOT", look::HOT),
+            ("WHITE", look::WHITE),
+            ("FAR_GLOW", look::FAR_GLOW),
+            ("FAR_HALO", look::FAR_HALO),
+            ("HALO", look::HALO),
+            ("FALLOFF", look::FALLOFF),
+            ("LIT_BRIGHTEST", look::LIT_BRIGHTEST),
+            ("DUST_LIT", look::DUST_LIT),
+        ] {
+            assert!(SHADER.contains(&format!("const {name}: f32 = {value:?};")), "{name} isn't {value} in the shader");
+        }
+    }
+
+    /// Draws 450,000 made-up stars in clumps on whatever graphics card there is (a software one will do), made the way
+    /// Slint makes the window's, to PNGs in the folder GALAXY_GPU_LOOK names, at a few zooms (GALAXY_GPU_SCALE pixels
+    /// per point, 1 if not set), lit by a measure every sound has (as Length), by one only a few have (as Liked) and by
+    /// nothing, over a dark page and a light one (as Paper), to judge the look by eye and to check the card takes every
+    /// step. With GALAXY_GPU_TIME set it also times each view: whole frames, and a twinkle's frames, which only draw the
+    /// stars again (on a software card that's the processor's time, far slower than a real card, but fine for before
+    /// and after).
     #[test]
     #[ignore]
     fn render() {
-        use mo_app::galaxy_look::{look, pack};
+        use crate::canvas::testing::{card, read_back};
+        use mo_app::galaxy_look::{lit_order, lit_share, look, pack};
         use mo_sounds::StarPoint;
         let Ok(out) = std::env::var("GALAXY_GPU_LOOK") else { return };
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
-        let adapter =
-            crate::gpu::wait(instance.request_adapter(&wgpu::RequestAdapterOptions::default())).expect("a card");
-        eprintln!("{:?}", adapter.get_info());
-        let (device, queue) =
-            crate::gpu::wait(adapter.request_device(&wgpu::DeviceDescriptor::default())).expect("a device");
+        let scale: f32 = std::env::var("GALAXY_GPU_SCALE").ok().and_then(|s| s.parse().ok()).unwrap_or(1.0);
+        let timed = std::env::var("GALAXY_GPU_TIME").is_ok();
+        let (device, queue) = card().expect("a graphics card, a software one at least");
         let mut seed = 12345u64;
         let mut rnd = || {
             seed ^= seed << 13;
@@ -609,52 +859,64 @@ mod tests {
             [220, 220, 110],
             [110, 110, 110],
         ];
-        // Every other star left out by the filters, as a filter would.
+        // Every third star left out by the filters, as a filter would.
         let shown: Vec<usize> = (0..stars.len()).filter(|i| i % 3 != 0).collect();
         let grid = mo_app::galaxy_grid::Grid::new(&stars, &shown);
         let mut sky = Sky::new(&device, &queue);
-        // Half the clumps lit, so close up they're the bigger, brighter stars.
-        let light: Vec<f32> = (0..stars.len()).map(|i| if i % 2 == 0 { 1.0 } else { 0.0 }).collect();
-        sky.set_stars(&pack(&stars, &colours, &palette, &shown, &light));
-        for zoom in [1.0f32, 6.0, 60.0, 400.0] {
-            let mut view = View::default();
-            (view.width, view.height, view.zoom) = (1100.0, 800.0, zoom);
-            (view.cx, view.cy) = (clumps[3].0, clumps[3].1);
-            let (l, t, r, b) = mo_app::galaxy_look::on_view(&view);
-            let lk = look(&view, grid.count_in(l, t, r, b));
-            eprintln!("zoom {zoom}: {lk:?}");
-            let started = std::time::Instant::now();
-            let picture = sky.draw(&view, 1.0, &lk, [18.0 / 255.0; 3]);
-            let (w, h) = (picture.width(), picture.height());
-            let row = (w * 4).div_ceil(256) * 256;
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: None,
-                size: u64::from(row * h),
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-            let mut encoder = device.create_command_encoder(&Default::default());
-            encoder.copy_texture_to_buffer(
-                picture.as_image_copy(),
-                wgpu::TexelCopyBufferInfo {
-                    buffer: &buffer,
-                    layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: None },
-                },
-                picture.size(),
-            );
-            queue.submit(Some(encoder.finish()));
-            buffer.slice(..).map_async(wgpu::MapMode::Read, |r| r.expect("read back"));
-            device.poll(wgpu::PollType::wait_indefinitely()).expect("the card finishes");
-            eprintln!("drawn and read back in {:?}", started.elapsed());
-            let data = buffer.slice(..).get_mapped_range().expect("mapped");
-            let mut img = image::RgbaImage::new(w, h);
-            for y in 0..h {
-                for x in 0..w {
-                    let at = (y * row + x * 4) as usize;
-                    img.put_pixel(x, y, image::Rgba([data[at], data[at + 1], data[at + 2], 255]));
+        // Lit as Length lights them: every sound has a length, so each has a rank from 0 to 1. As Liked: about one
+        // in two hundred, ranked among themselves, the rest without the measure.
+        let length: Vec<f32> = (0..stars.len()).map(|_| rnd().max(f32::MIN_POSITIVE)).collect();
+        let liked: Vec<f32> = (0..stars.len()).map(|_| if rnd() < 0.005 { rnd().max(0.01) } else { 0.0 }).collect();
+        // The page's well behind the map: Graphite's and Paper's.
+        let pages = [("dark", [18.0 / 255.0; 3]), ("paper", [241.0 / 255.0, 239.0 / 255.0, 235.0 / 255.0])];
+        for (lit_by, light) in [("length", length), ("liked", liked), ("nothing", Vec::new())] {
+            let order = lit_order(&stars, &shown, &light);
+            let share = lit_share(&stars, &shown, &light);
+            let shine = Shine { light_on: share > 0.0, ..Shine::default() };
+            let (packed, lit) = pack(&stars, &colours, &palette, &shown, &light, &order);
+            sky.set_stars(&packed, lit);
+            for zoom in [1.0f32, 6.0, 12.0, 60.0, 400.0] {
+                let mut view = View::default();
+                (view.width, view.height, view.zoom) = (1100.0, 800.0, zoom);
+                (view.cx, view.cy) = (clumps[3].0, clumps[3].1);
+                let (l, t, r, b) = mo_app::galaxy_look::on_view(&view);
+                let lk = look(&view, grid.count_in(l, t, r, b), share);
+                eprintln!("{lit_by}, zoom {zoom}: {lk:?}");
+                if timed {
+                    // Each drawn 5 times and waited for, taking turns with a twinkle's frames, so what else the
+                    // computer is doing hits both alike.
+                    let mut time = |whole: bool, t: f32| {
+                        if whole {
+                            sky.repaint();
+                        }
+                        let started = std::time::Instant::now();
+                        let twinkle = Shine { time: t, twinkle: 0.07, ..shine };
+                        let _ = sky.draw(&view, scale, &lk, twinkle, pages[0].1);
+                        device.poll(wgpu::PollType::wait_indefinitely()).expect("the card finishes");
+                        started.elapsed().as_secs_f64() * 1000.0
+                    };
+                    time(true, 0.0);
+                    let (mut whole, mut twinkle) = (0.0, 0.0);
+                    for i in 0..5 {
+                        whole += time(true, i as f32);
+                        twinkle += time(false, i as f32 + 0.5);
+                    }
+                    eprintln!(
+                        "TIMING lit by {lit_by}, zoom {zoom}: {:.1} ms a whole frame, {:.1} ms a twinkle's frame",
+                        whole / 5.0,
+                        twinkle / 5.0
+                    );
+                }
+                for (page, background) in pages {
+                    let picture = sky.draw(&view, scale, &lk, shine, background);
+                    let mut img = read_back(&device, &queue, &picture);
+                    // Saved solid, as the window shows it.
+                    for pixel in img.pixels_mut() {
+                        pixel[3] = 255;
+                    }
+                    img.save(format!("{out}/galaxy-gpu-{lit_by}-{page}-{zoom}.png")).expect("saved");
                 }
             }
-            img.save(format!("{out}/galaxy-gpu-{zoom}.png")).expect("saved");
         }
     }
 }

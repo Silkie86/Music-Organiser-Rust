@@ -2,7 +2,8 @@
 // grow): the backup drive and its last run, How much, the format, the list of folders (each whole or slimmed), and
 // what goes and what's left out, and why. Only shared parts from studio.slint; mo-app decides every word
 // (mo_app::backup), mo-ui/src/backup.rs fills it.
-import { Theme, Type, Space, StudioButton, Segmented, FolderRow, PageHeader, Caps, Well, Groove, ProgressLine, EmptyState } from "../studio.slint";
+import { ListView } from "std-widgets.slint";
+import { Theme, Type, Space, StudioButton, MenuButton, MenuItem, Segmented, FolderRow, PageHeader, Caps, Well, Groove, ProgressLine, EmptyState, NoticeStrip, ListLine } from "../studio.slint";
 
 export struct BackupFolderLine {
     path: string,
@@ -16,6 +17,14 @@ export struct LeftOutLine {
     why: string,
     note: string,
     size: string,
+}
+
+// A file the backup keeps that's gone from your folders.
+export struct GoneLine {
+    // Where it was.
+    was: string,
+    // Its size, when it was backed up, and where the backup keeps it.
+    note: string,
 }
 
 export global BackupData {
@@ -40,6 +49,24 @@ export global BackupData {
     in property <[LeftOutLine]> left-out;
     // Shown instead of the totals while they're worked out, or when they can't be.
     in property <string> plan-note: "Add a folder to see what goes";
+    // The backup drive's older versions (Solomon, 3 Nov 2026: kept for ever, with a way to remove them): the room they
+    // take and how many, or empty; the words under them; and the Remove menu, empty when there's nothing to remove.
+    in property <string> older-size;
+    in property <string> older-count;
+    in property <string> older-note: "Pick a backup drive to see the older versions it keeps.";
+    in property <[MenuItem]> older-choices;
+    // The question asked before older versions are removed, with what goes; empty when nothing is asked.
+    in property <string> older-ask;
+    // What the last removal did.
+    in property <string> older-done;
+    // Files the backup keeps that are gone from your folders (Solomon, 3 Nov 2026: a file deleted from your music stays
+    // on the backup, with a warning): the strip's line, empty when there are none; quiet when they're only autosaves
+    // your DAWs cleared away; what it means; and each file.
+    in property <string> gone-line;
+    in property <bool> gone-quiet;
+    in property <string> gone-note;
+    in property <[GoneLine]> gone;
+    in-out property <bool> gone-open;
     callback pick-drive();
     callback run();
     callback stop();
@@ -49,6 +76,13 @@ export global BackupData {
     callback add-library-folders();
     callback mode-picked(int, int);
     callback remove-folder(int);
+    // A line of the Remove older versions menu (its id): the page asks before anything goes.
+    callback older-picked(string);
+    // Yes to the question: they're removed.
+    callback older-remove();
+    callback older-cancel();
+    // Show on the backup: the copy of that file (its line's number), or the song zip it's in.
+    callback gone-show(int);
 }
 
 export component BackupPage inherits Rectangle {
@@ -126,12 +160,65 @@ export component BackupPage inherits Rectangle {
                 }
             }
 
+            // Files the backup keeps that are gone from your folders, folded to one line until opened.
+            if BackupData.gone-line != "": NoticeStrip {
+                text: BackupData.gone-line;
+                quiet: BackupData.gone-quiet;
+                open <=> BackupData.gone-open;
+                if BackupData.gone-open: Text {
+                    text: BackupData.gone-note;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    wrap: word-wrap;
+                }
+                if BackupData.gone-open && BackupData.gone.length > 0: ListView {
+                    // Up to six lines show; the rest scroll. A click on a line shows that file on the backup.
+                    height: min(BackupData.gone.length, 6) * 48px;
+                    for g[i] in BackupData.gone: ListLine {
+                        height: 48px;
+                        tip: "Show it on the backup";
+                        clicked => { BackupData.gone-show(i); }
+                        HorizontalLayout {
+                            width: 100%;
+                            height: 100%;
+                            padding-left: Space.sm;
+                            padding-right: Space.sm;
+                            spacing: Space.md;
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: Space.xs;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: g.was;
+                                    color: Theme.text;
+                                    font-size: Type.body;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: g.note;
+                                    color: Theme.muted;
+                                    font-size: Type.meta;
+                                    overflow: elide;
+                                }
+                            }
+                            Text {
+                                text: "Show on the backup";
+                                color: Theme.muted;
+                                font-size: Type.meta;
+                                vertical-alignment: center;
+                            }
+                        }
+                    }
+                }
+            }
+
             HorizontalLayout {
                 spacing: Space.xl;
-                // How, and which folders.
+                // How, and which folders. Kept to the top when the right column is the taller one.
                 VerticalLayout {
                     spacing: Space.lg;
                     horizontal-stretch: 3;
+                    alignment: start;
                     VerticalLayout {
                         spacing: Space.sm;
                         Caps { text: "HOW MUCH"; }
@@ -219,81 +306,154 @@ export component BackupPage inherits Rectangle {
                     }
                 }
 
-                // What goes.
+                // What goes, and the older versions the backup keeps.
                 VerticalLayout {
                     horizontal-stretch: 2;
                     max-width: 440px;
                     alignment: start;
+                    spacing: Space.lg;
                     Rectangle {
-                    background: Theme.surface;
-                    border-radius: Theme.radius;
-                    border-width: 1px;
-                    border-color: Theme.stroke;
-                    VerticalLayout {
-                        padding: Space.lg;
-                        spacing: Space.md;
-                        alignment: start;
-                        Caps { text: "WHAT GOES"; }
-                        if BackupData.goes == "": Text {
-                            text: BackupData.plan-note;
-                            color: Theme.muted;
-                            font-size: Type.body;
-                            wrap: word-wrap;
-                        }
-                        if BackupData.goes != "": HorizontalLayout {
-                            spacing: Space.sm;
-                            alignment: start;
-                            Text {
-                                text: BackupData.goes;
-                                color: Theme.text;
-                                font-size: Type.panel-title;
-                                font-weight: 600;
-                            }
-                            Text {
-                                text: "of " + BackupData.of-all + " in your folders";
-                                color: Theme.muted;
-                                font-size: Type.meta;
-                                vertical-alignment: bottom;
-                            }
-                        }
-                        if BackupData.goes != "": ProgressLine {
-                            text: "";
-                            done: BackupData.goes-part;
-                        }
-                        if BackupData.left-out.length > 0: Groove { }
-                        if BackupData.left-out.length > 0: Caps { text: "LEFT OUT, AND WHY"; }
-                        for o in BackupData.left-out: HorizontalLayout {
+                        background: Theme.surface;
+                        border-radius: Theme.radius;
+                        border-width: 1px;
+                        border-color: Theme.stroke;
+                        VerticalLayout {
+                            padding: Space.lg;
                             spacing: Space.md;
-                            VerticalLayout {
-                                horizontal-stretch: 1;
+                            alignment: start;
+                            Caps { text: "WHAT GOES"; }
+                            if BackupData.goes == "": Text {
+                                text: BackupData.plan-note;
+                                color: Theme.muted;
+                                font-size: Type.body;
+                                wrap: word-wrap;
+                            }
+                            if BackupData.goes != "": HorizontalLayout {
+                                spacing: Space.sm;
+                                alignment: start;
                                 Text {
-                                    text: o.why;
+                                    text: BackupData.goes;
                                     color: Theme.text;
-                                    font-size: Type.body;
-                                    overflow: elide;
+                                    font-size: Type.panel-title;
+                                    font-weight: 600;
                                 }
                                 Text {
-                                    text: o.note;
+                                    text: "of " + BackupData.of-all + " in your folders";
                                     color: Theme.muted;
                                     font-size: Type.meta;
-                                    overflow: elide;
+                                    vertical-alignment: bottom;
+                                }
+                            }
+                            if BackupData.goes != "": ProgressLine {
+                                text: "";
+                                done: BackupData.goes-part;
+                            }
+                            if BackupData.left-out.length > 0: Groove { }
+                            if BackupData.left-out.length > 0: Caps { text: "LEFT OUT, AND WHY"; }
+                            for o in BackupData.left-out: HorizontalLayout {
+                                spacing: Space.md;
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: o.why;
+                                        color: Theme.text;
+                                        font-size: Type.body;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: o.note;
+                                        color: Theme.muted;
+                                        font-size: Type.meta;
+                                        overflow: elide;
+                                    }
+                                }
+                                Text {
+                                    text: o.size;
+                                    color: Theme.muted;
+                                    font-family: Theme.number-font;
+                                    font-size: Type.meta;
+                                    vertical-alignment: center;
                                 }
                             }
                             Text {
-                                text: o.size;
+                                text: "Your newest save of each song, and any save you mark, always go.";
                                 color: Theme.muted;
-                                font-family: Theme.number-font;
                                 font-size: Type.meta;
-                                vertical-alignment: center;
+                                wrap: word-wrap;
                             }
                         }
-                        Text {
-                            text: "Your newest save of each song, and any save you mark, always go.";
-                            color: Theme.muted;
-                            font-size: Type.meta;
-                            wrap: word-wrap;
-                        }
                     }
+
+                    // The older versions on the backup drive.
+                    Rectangle {
+                        background: Theme.surface;
+                        border-radius: Theme.radius;
+                        border-width: 1px;
+                        border-color: Theme.stroke;
+                        VerticalLayout {
+                            padding: Space.lg;
+                            spacing: Space.md;
+                            alignment: start;
+                            Caps { text: "OLDER VERSIONS"; }
+                            if BackupData.older-size != "": HorizontalLayout {
+                                spacing: Space.sm;
+                                alignment: start;
+                                Text {
+                                    text: BackupData.older-size;
+                                    color: Theme.text;
+                                    font-size: Type.panel-title;
+                                    font-weight: 600;
+                                }
+                                Text {
+                                    text: BackupData.older-count;
+                                    color: Theme.muted;
+                                    font-size: Type.meta;
+                                    vertical-alignment: bottom;
+                                }
+                            }
+                            Text {
+                                text: BackupData.older-note;
+                                color: Theme.muted;
+                                font-size: Type.meta;
+                                wrap: word-wrap;
+                            }
+                            if BackupData.older-ask == "" && BackupData.older-choices.length > 0: HorizontalLayout {
+                                alignment: start;
+                                MenuButton {
+                                    text: "Remove older versions…";
+                                    // Not while a backup (or a removal) runs.
+                                    enabled: BackupData.busy == "";
+                                    items: BackupData.older-choices;
+                                    chosen(id) => { BackupData.older-picked(id); }
+                                }
+                            }
+                            if BackupData.older-ask != "": Text {
+                                text: BackupData.older-ask;
+                                color: Theme.text;
+                                font-size: Type.body;
+                                wrap: word-wrap;
+                            }
+                            if BackupData.older-ask != "": HorizontalLayout {
+                                spacing: Space.sm;
+                                alignment: start;
+                                StudioButton {
+                                    text: "Remove them";
+                                    danger: true;
+                                    enabled: BackupData.busy == "";
+                                    clicked => { BackupData.older-remove(); }
+                                }
+                                StudioButton {
+                                    text: "Cancel";
+                                    clicked => { BackupData.older-cancel(); }
+                                }
+                            }
+                            if BackupData.older-done != "": Text {
+                                text: BackupData.older-done;
+                                color: Theme.muted;
+                                font-size: Type.meta;
+                                wrap: word-wrap;
+                            }
+                        }
                     }
                 }
             }

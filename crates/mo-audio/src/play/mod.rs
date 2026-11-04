@@ -45,6 +45,8 @@ pub struct OutputInfo {
     pub channels: u16,
     /// How long sound takes from being mixed to coming out, in milliseconds, as the system last said.
     pub delay_ms: Option<f64>,
+    /// How often the output mixes, in milliseconds (a sound handed over waits half this, on average, to be mixed in).
+    pub mix_every_ms: Option<f64>,
     /// Why sound isn't going where it was wanted ("Focusrite USB isn't connected"…), or `None` when it is.
     pub problem: Option<String>,
 }
@@ -61,6 +63,7 @@ struct Shared {
     now: Mutex<Option<Now>>,
     info: Mutex<OutputInfo>,
     delay: Mutex<Option<Arc<AtomicU64>>>,
+    period: Mutex<Option<Arc<AtomicU64>>>,
     /// Where the open output's mixer says the sound is. Each output has its own, so two never write to one.
     place: Mutex<Option<Arc<Place>>>,
     quit: AtomicBool,
@@ -182,11 +185,11 @@ impl Player {
     /// Where sound is going now.
     pub fn info(&self) -> OutputInfo {
         let mut info = lock(&self.shared.info).clone();
-        info.delay_ms = lock(&self.shared.delay)
-            .as_ref()
-            .map(|d| d.load(Ordering::Relaxed))
-            .filter(|us| *us > 0)
-            .map(|us| us as f64 / 1000.0);
+        let ms = |d: &Mutex<Option<Arc<AtomicU64>>>| {
+            lock(d).as_ref().map(|d| d.load(Ordering::Relaxed)).filter(|us| *us > 0).map(|us| us as f64 / 1000.0)
+        };
+        info.delay_ms = ms(&self.shared.delay);
+        info.mix_every_ms = ms(&self.shared.period);
         info
     }
 
@@ -422,6 +425,7 @@ impl Keeper {
         self.note_place();
         self.open = None;
         *lock(&self.shared.delay) = None;
+        *lock(&self.shared.period) = None;
         *lock(&self.shared.place) = None;
         *lock(&self.shared.info) = OutputInfo { problem: why, ..OutputInfo::default() };
     }
@@ -476,9 +480,11 @@ impl Keeper {
             sample_rate: open.output.sample_rate,
             channels: open.output.channels,
             delay_ms: None,
+            mix_every_ms: None,
             problem,
         };
         *lock(&self.shared.delay) = Some(Arc::clone(&open.output.delay));
+        *lock(&self.shared.period) = Some(Arc::clone(&open.output.period));
         *lock(&self.shared.place) = Some(Arc::clone(&open.place));
         self.open = Some(open);
         if let Some(p) = &self.playing {

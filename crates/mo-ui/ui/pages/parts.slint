@@ -1,6 +1,6 @@
 // Every shared part on one page, for the screenshots (mo-screens): each new part shows here in every theme before any
 // page uses it, so its look can be judged on its own.
-import { Theme, Type, Space, Caps, Well, StudioButton, Dot, PageHeader, Segmented, MoreButton, OptionsButton, MenuItem, MenuItems, SidePanel, PanelDivider, EmptyState, Waveform, FolderRow, TickBox, ToggleChip, ListLine, RightClickMenu } from "../studio.slint";
+import { Theme, Type, Space, Caps, Well, StudioButton, Dot, PageHeader, Segmented, MoreButton, MenuButton, OptionsButton, MenuItem, MenuItems, CardAction, CardActions, SidePanel, PanelDivider, EmptyState, Waveform, FolderRow, TickBox, ToggleChip, ListLine, RightClickMenu, NoticeStrip, YearRange, YearBar } from "../studio.slint";
 
 export component PartsGallery inherits Rectangle {
     background: Theme.background;
@@ -14,6 +14,35 @@ export component PartsGallery inherits Rectangle {
         { what: "", key: "", id: "", enabled: true },
         { what: "Show in folder", key: "Ctrl+Shift+E", id: "reveal", enabled: true },
         { what: "Copy path", key: "Ctrl+Shift+C", id: "copy", enabled: false },
+    ];
+    // Made-up years for the year strip: a few with room, and thirty squeezed into the same height.
+    property <[YearBar]> years-roomy: [
+        { year: "2026", share: 0.55 }, { year: "2025", share: 1 },
+        { year: "2024", share: 0.8 }, { year: "2023", share: 0.35 },
+        { year: "2022", share: 0.6 }, { year: "2021", share: 0.2 },
+    ];
+    property <[YearBar]> years-squeezed: [
+        { year: "2026", share: 0.48 }, { year: "2025", share: 0.89 },
+        { year: "2024", share: 0.94 }, { year: "2023", share: 0.62 },
+        { year: "2022", share: 0.19 }, { year: "2021", share: 0.66 },
+        { year: "2020", share: 0.87 }, { year: "2019", share: 0.73 },
+        { year: "2018", share: 0.34 }, { year: "2017", share: 0.42 },
+        { year: "2016", share: 0.72 }, { year: "2015", share: 0.75 },
+        { year: "2014", share: 0.5 }, { year: "2013", share: 0.19 },
+        { year: "2012", share: 0.54 }, { year: "2011", share: 0.68 },
+        { year: "2010", share: 0.57 }, { year: "2009", share: 0.28 },
+        { year: "2008", share: 0.35 }, { year: "2007", share: 0.55 },
+        { year: "2006", share: 0.56 }, { year: "2005", share: 0.38 },
+        { year: "2004", share: 0.19 }, { year: "2003", share: 0.41 },
+        { year: "2002", share: 0.49 }, { year: "2001", share: 0.41 },
+        { year: "2000", share: 0.22 }, { year: "1999", share: 0.27 },
+        { year: "1998", share: 0.38 }, { year: "1997", share: 0.37 },
+    ];
+    // A side card's buttons after its main one (they wrap when the card is narrow).
+    property <[CardAction]> card-actions: [
+        { text: "To Bitwig", tip: "Put the picked sound into Bitwig", key: "Ctrl+B", id: "bitwig", enabled: true },
+        { text: "Show in folder", tip: "Show the sound's file in Explorer", key: "Ctrl+Shift+E", id: "reveal", enabled: true },
+        { text: "Copy path", tip: "Copy where the sound's file is", key: "Ctrl+Shift+C", id: "copy", enabled: false },
     ];
     property <length> panel-width: 380px;
     VerticalLayout {
@@ -34,9 +63,9 @@ export component PartsGallery inherits Rectangle {
                 keys: ["", "", "", ""];
                 current: 0;
             }
-            StudioButton {
+            MenuButton {
                 text: "Order: Shuffled";
-                menu: true;
+                items: root.menu;
             }
             ToggleChip {
                 text: "Autoplay";
@@ -53,6 +82,10 @@ export component PartsGallery inherits Rectangle {
             StudioButton {
                 text: "Play";
                 main: true;
+            }
+            StudioButton {
+                text: "Remove them";
+                danger: true;
             }
         }
         area := HorizontalLayout {
@@ -106,6 +139,28 @@ export component PartsGallery inherits Rectangle {
                             Dot { tint: Theme.bitwig; }
                         }
                     }
+                    // The year strip with room, and squeezed into a short window: thirty years in the same height,
+                    // every third one named and the ends of the years picked, All years still in sight. No taller
+                    // than the menu beside it, so the row keeps its height.
+                    VerticalLayout {
+                        spacing: Space.sm;
+                        Caps { text: "Year strip"; }
+                        HorizontalLayout {
+                            spacing: Space.sm;
+                            alignment: start;
+                            height: 160px;
+                            YearRange {
+                                years: root.years-roomy;
+                                picked-from: 2;
+                                picked-to: 3;
+                            }
+                            YearRange {
+                                years: root.years-squeezed;
+                                picked-from: 14;
+                                picked-to: 17;
+                            }
+                        }
+                    }
                 }
                 VerticalLayout {
                     spacing: Space.xs;
@@ -133,6 +188,19 @@ export component PartsGallery inherits Rectangle {
                             font-size: Type.body;
                             vertical-alignment: center;
                         }
+                    }
+                    NoticeStrip {
+                        text: "2 samples are missing";
+                        open: true;
+                        Text {
+                            text: "What it means, once opened.";
+                            color: Theme.muted;
+                            font-size: Type.meta;
+                        }
+                    }
+                    NoticeStrip {
+                        text: "News that needs no care";
+                        quiet: true;
                     }
                 }
                 Well {
@@ -162,6 +230,13 @@ export component PartsGallery inherits Rectangle {
                     color: Theme.muted;
                     font-size: Type.body;
                     wrap: word-wrap;
+                }
+                CardActions {
+                    actions: root.card-actions;
+                    StudioButton {
+                        text: "Play";
+                        main: true;
+                    }
                 }
                 Rectangle { vertical-stretch: 1; }
             }

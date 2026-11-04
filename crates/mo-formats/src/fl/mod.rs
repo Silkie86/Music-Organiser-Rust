@@ -30,8 +30,11 @@ pub const DAW: &str = "FL Studio";
 /// recorded into patterns), whose points count towards the song's automation limit and its warning; 15 reads the
 /// plugins FL 7 and 8 hosted in their wrapper (version 4), whose names, ids and settings were left out; 16 reads FL
 /// 8.5's notes as 24 bytes (they were read as 20 when they divided by both), the playlists of FL 9.0 to 9.5 saves that
-/// mix pattern rows with clips (they read empty), and FL 6 to 8's pattern clips.
-pub const VERSION: u32 = 16;
+/// mix pattern rows with clips (they read empty), and FL 6 to 8's pattern clips; 17 reads text before FL 11.5 in
+/// Windows' code page 1252, not Latin-1, counts the patterns named rather than new-pattern events, lists no unplayed
+/// samples in a save cut short, reads damaged FL 3.5 to 8.0 notes at 20 bytes (with a warning), and leaves out notes
+/// above MIDI's top key.
+pub const VERSION: u32 = 17;
 pub const EXTENSIONS: [&str; 1] = ["flp"];
 
 /// The Fruity Wrapper (FL's VST host) keeps a VST's details as records: u32 version, then (u32 id, u64 size, data).
@@ -146,7 +149,7 @@ fn read_with(raw: &[u8], resolve: &mut dyn FnMut(&str) -> String) -> ProjectInfo
     let mut channel_types: BTreeMap<u32, u32> = BTreeMap::new();
     let mut rack = Rack::default();
     let mut pending_internal = String::new();
-    let (mut patterns, mut notes) = (0, 0);
+    let (mut patterns, mut notes) = (HashSet::new(), 0);
     let known = channels(&flp);
     // Plugins that saved nothing, by name; letter case aside, each once, in order.
     let mut nothing_saved: BTreeMap<String, String> = BTreeMap::new();
@@ -167,11 +170,12 @@ fn read_with(raw: &[u8], resolve: &mut dyn FnMut(&str) -> String) -> ProjectInfo
                     channel_types.insert(c, e.int());
                 }
             }
-            EV_PATTERN_NEW => patterns += 1,
+            // FL 9 and older name the pattern again in each channel's events, before its step dots.
+            EV_PATTERN_NEW => _ = patterns.insert(e.int()),
             EV_SAMPLE_PATH => info.samples.push(resolve(&flp.text(&e.data))),
             EV_PATTERN_NOTES => {
-                notes +=
-                    e.data.len() / notes::note_size(&e.data, (flp.major, flp.minor), e.offset.is_none(), Some(&known))
+                let size = notes::note_size(&e.data, (flp.major, flp.minor), e.offset.is_none(), Some(&known));
+                notes += notes::decode(&e.data, size).len();
             }
             EV_PROJECT_TIME if e.data.len() >= 16 => {
                 let (created, spent) = project_time(&e.data);
@@ -244,7 +248,11 @@ fn read_with(raw: &[u8], resolve: &mut dyn FnMut(&str) -> String) -> ProjectInfo
         ));
     }
     info.details.insert("Channels".into(), info.tracks.len().to_string());
-    info.details.insert("Patterns".into(), patterns.to_string());
+    info.details.insert("Patterns".into(), patterns.len().to_string());
+    info.warnings.extend(notes::trouble(&flp));
+    if flp.cut_short && flp.warning != Some(CUT_SHORT) {
+        info.warnings.push(CUT_SHORT.to_owned());
+    }
     info.details.insert("Notes".into(), notes.to_string());
     // Only a song with samples has any to leave unplayed.
     if !info.samples.is_empty() {
@@ -252,8 +260,12 @@ fn read_with(raw: &[u8], resolve: &mut dyn FnMut(&str) -> String) -> ProjectInfo
         if let Some(w) = song.warning {
             info.warnings.push(w.to_owned());
         }
-        // A song cut short would list samples played only after the cut as unplayed: none are listed instead.
-        if song.warning != Some(song::TOO_MANY_NOTES) {
+        // A song cut short (too many notes to place, or a save that ends early, perhaps before its playlist) would
+        // list samples played only after the cut as unplayed: none are listed instead. Too many automation points
+        // leaves the notes and clips whole.
+        let cut_short =
+            song.warning == Some(song::TOO_MANY_NOTES) || flp.cut_short || flp.warning == Some(STOPPED_PART_WAY);
+        if !cut_short {
             note_unplayed(&song, resolve, &mut info);
         }
     }
@@ -324,7 +336,7 @@ impl Rack {
 }
 
 /// The song's channels, by their number in the Channel Rack.
-pub(crate) fn channels(flp: &Flp<'_>) -> HashSet<u32> {
+pub fn channels(flp: &Flp<'_>) -> HashSet<u32> {
     flp.events.iter().filter(|e| e.id == EV_CHANNEL_NEW).map(Event::int).collect()
 }
 
@@ -399,11 +411,11 @@ fn old_wrapper_fields(blob: &[u8]) -> Option<BTreeMap<u32, &[u8]>> {
     }
     let name = blob.get(21..21 + len)?;
     let state_at = 25 + len;
-    let state_len = usize::try_from(u32_at(blob, 21 + len)).ok()?;
+    let state_len = usize::try_from(u32::from_le_bytes(bytes_at(blob, 21 + len)?)).ok()?;
     let state = blob.get(state_at..state_at.checked_add(state_len)?)?;
     let after = state_at + state_len;
     let mut fields = BTreeMap::from([(VST_NAME, name), (VST_STATE, state)]);
-    if u32_at(blob, after) == 4
+    if bytes_at(blob, after).map(u32::from_le_bytes) == Some(4)
         && let Some(four_cc) = blob.get(after + 4..after + 8)
     {
         fields.insert(VST_FOUR_CC, four_cc);
@@ -582,6 +594,11 @@ mod tests {
         assert_eq!(fields.get(&VST_STATE).copied(), Some(&state[..]));
         assert_eq!(wrapper_four_cc(&fields), Some(1_263_289_174));
         assert_eq!(vst2_header(&state), Some((13, 3, 2)));
+        // Cut short before the four letters' u32, or before the state's length: read, not past the end.
+        let short = &blob[..blob.len() - 6];
+        let fields = wrapper_fields(short);
+        assert_eq!((fields.get(&VST_STATE).copied(), wrapper_four_cc(&fields)), (Some(&state[..]), None));
+        assert!(old_wrapper_fields(&blob[..21 + name.len() + 2]).is_none());
         // A length that doesn't add up isn't taken for the old layout.
         blob[16] += 1;
         assert!(wrapper_plugin_name(&wrapper_fields(&blob)).is_empty());

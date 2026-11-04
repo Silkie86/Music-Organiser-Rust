@@ -28,6 +28,8 @@ pub struct Opened {
     pub channels: u16,
     /// How long sound takes from being mixed to coming out, in microseconds, as the system last said (0 until then).
     pub delay: Arc<AtomicU64>,
+    /// How often it mixes (the length of the buffer it last asked for), in microseconds (0 until it has).
+    pub period: Arc<AtomicU64>,
     /// The open stream, kept only so that dropping this closes it.
     pub stream: Box<dyn Any + Send>,
 }
@@ -99,6 +101,7 @@ impl Outputs for SystemOutputs {
         let rate = supported.sample_rate();
         let channels = supported.channels();
         let delay = Arc::new(AtomicU64::new(0));
+        let period = Arc::new(AtomicU64::new(0));
         let events = Arc::new(events);
         let mut config = supported.config();
         // About 10 ms a buffer, inside what the output allows: sweeping through sounds wants them heard at once.
@@ -109,14 +112,15 @@ impl Outputs for SystemOutputs {
         let mut render = Some(render);
         let mut build = |config: cpal::StreamConfig| -> Result<cpal::Stream, String> {
             let Some(r) = render.take() else { return Err("The output couldn't be opened".into()) };
-            let (delay, events) = (Arc::clone(&delay), Arc::clone(&events));
+            let timing = (Arc::clone(&delay), Arc::clone(&period));
+            let events = Arc::clone(&events);
             match format {
-                cpal::SampleFormat::F32 => stream::<f32>(&device, config, r, delay, events),
-                cpal::SampleFormat::F64 => stream::<f64>(&device, config, r, delay, events),
-                cpal::SampleFormat::I16 => stream::<i16>(&device, config, r, delay, events),
-                cpal::SampleFormat::I24 => stream::<cpal::I24>(&device, config, r, delay, events),
-                cpal::SampleFormat::I32 => stream::<i32>(&device, config, r, delay, events),
-                cpal::SampleFormat::U16 => stream::<u16>(&device, config, r, delay, events),
+                cpal::SampleFormat::F32 => stream::<f32>(&device, config, r, timing, events),
+                cpal::SampleFormat::F64 => stream::<f64>(&device, config, r, timing, events),
+                cpal::SampleFormat::I16 => stream::<i16>(&device, config, r, timing, events),
+                cpal::SampleFormat::I24 => stream::<cpal::I24>(&device, config, r, timing, events),
+                cpal::SampleFormat::I32 => stream::<i32>(&device, config, r, timing, events),
+                cpal::SampleFormat::U16 => stream::<u16>(&device, config, r, timing, events),
                 other => Err((format!("The output wants {other} samples, which the app doesn't make"), Some(r))),
             }
             .map_err(|(e, r)| {
@@ -138,9 +142,17 @@ impl Outputs for SystemOutputs {
             sample_rate: rate,
             channels,
             delay,
+            period,
             stream: Box::new(stream),
         })
     }
+}
+
+/// How long a buffer of `samples` samples (`channels` to a frame) lasts at `rate` frames a second, in microseconds:
+/// how often the output mixes. `None` for a rate of 0.
+pub(crate) fn period_us(samples: usize, channels: usize, rate: u32) -> Option<u64> {
+    let frames = (samples / channels.max(1)) as u64;
+    (rate > 0).then(|| frames * 1_000_000 / u64::from(rate))
 }
 
 /// Builds a stream that renders in f32 and hands the output its own kind of sample. On failure, gives back `render`
@@ -149,7 +161,7 @@ fn stream<T>(
     device: &cpal::Device,
     config: cpal::StreamConfig,
     render: Render,
-    delay: Arc<AtomicU64>,
+    (delay, period): (Arc<AtomicU64>, Arc<AtomicU64>),
     events: Arc<Events>,
 ) -> Result<cpal::Stream, (String, Option<Render>)>
 where
@@ -178,6 +190,10 @@ where
             }
             for (o, m) in out.iter_mut().zip(mixed.iter()) {
                 *o = T::from_sample(*m);
+            }
+            // How long this buffer lasts is how often the output mixes.
+            if let Some(us) = period_us(out.len(), channels, rate) {
+                period.store(us, Ordering::Relaxed);
             }
             let ts = info.timestamp();
             if let Some(d) = ts.playback.checked_duration_since(ts.callback) {

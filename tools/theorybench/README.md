@@ -143,7 +143,8 @@ with a mode read from its chords, so the home note is the fairer score), and mo-
 - **Hand cases.** Every model fitted (each fold's, the one `--final` tests, the one `--write` writes) is read on the
   design's hand cases (`keyfind::cases`: a relative-key loop, a blues, a Dorian vamp, whole-tone scales and so on).
   The report says how many models keep each case's gate and meet its target, and what broke a gate. `--write` won't
-  write weights that break one.
+  write weights that break one. A rescale's models are pulled back until they keep every gate (see Solomon's packs,
+  below), so they're read as pulled back.
 - **What `--write` writes.** The weights and the calibration; the thresholds, fitted on every fold's held-out
   chances; the share of notes in one scale a key needs, as built in (0.75); and a hash of every number with the
   finder version those numbers were first given with. When any number changed, that's the next version, so the tests
@@ -213,13 +214,89 @@ cargo run -p mo-theorybench --release -- keyfit D:\Bench\packs.jsonl --inputs fu
     pay for it.
   - It stops if his pieces fall in fewer than two of folds 1 to 4. The ranges draw a pack's files again together, as
     one, since they're alike.
-  - `--write` keeps the credits of the weights it scales, adds the rescale and its scales after them, and adds
-    `packs` to `LEARNED_FROM`. A `--dump` of a run that read his pieces names his files, so it can't be written inside
-    a copy of this repository either.
+  - **Pulled back.** Every finder a rescale scores or writes (each fold's in a choosing run, the one `--final` scores,
+    the one `--write` writes, and each fold's in `--write`'s report) is pulled back toward the finder built in: each
+    weight and calibration number goes a share t of the way from its built-in value to the one fitted, the same t for
+    all of them, and the thresholds stay as built in. t is the largest of 1, 0.95, 0.9 and so on down to 0 at which
+    every hand case keeps its gate, so a fit that keeps every gate stays as it is (t = 1). The run prints t for each
+    finder, with the scales it was pulled back to and the gates it broke one step further, then scores the pieces held
+    out with the numbers pulled back. A calibration is fitted on scores of the fits, as before, then pulled back with
+    the weights it goes with: the one a choosing run prints for all four folds is as fitted, before the pull-back, as
+    `--write` fits the one it writes, and the answers printed are the thresholds built in as they come out on the
+    chances the pieces were scored with, pulled back. Why: on his packs (2026-11-03, folds 1 to 4), nearly all minor
+    (81% of the whole loops), the plain rescale moved the minor weight from -0.49 to between 1.6 and 1.9 and the scales
+    of the tune, harmony, bass and chord streams to between 0.25 and 0.64, and broke the gates of 12 of the 29 hand
+    cases that have one (mostly a major key pushed below a minor one, C major below A or D minor, Eb major below F
+    minor, and the answer turned to no clear key). Pulled back (t 0.50 or 0.55 in each fold), every gate held, and the
+    whole loops were right 56.0% of the time, against 53.3% for the plain rescale and 46.1% for the finder built in;
+    every set got better beyond its range. Each number pulled back lies between its built-in value and the one fitted on
+    his packs, so it's still one of the numbers rule 5's exception allows.
+  - What to watch for. t is found from the fit back, so a finder can keep every gate at t and break one again further
+    back, nearer the finder built in: the run says so ("but further back, at 0.40, nearer the finder built in, a gate
+    breaks again"), and the finder it stopped at still keeps every gate. How sure a reading is comes from the weights
+    and the calibration multiplied, so a finder part of the way can be surer than either end; the held-out report
+    measures each finder as pulled back, so it would show there (in that trial, the whole loops' calibration error was
+    0.037 pulled back, against 0.107 for the plain rescale and 0.119 for the finder built in). Pulled back part of the
+    way, the numbers written are a step from breaking a gate, so a later change to the finder or to a hand case may
+    break one: mo-harmony's tests say which, and the rescale is run again.
+  - `--write` keeps the credits of the weights it scales, adds the rescale, how far it was pulled back and the scales
+    of the numbers written after them, and adds `packs` to `LEARNED_FROM`. Pulled back all the way (t = 0), it writes
+    nothing, since only the numbers built in keep every gate. A `--dump` of a run that read his pieces names his
+    files, so it can't be written inside a copy of this repository either.
 - **Keep rule**, as for a design change: on folds 1 to 4 against `--shipped`, the whole loops' accuracy rises with its
-  range above 0, or their log-loss falls by 0.01 or more; no set gets worse beyond its range; no gate breaks. Then
-  `--final` once, and `--write`. Back in the cloud, the public sets are scored with `--shipped` before and after the
-  new weights, to see what the rescale costs songs.
+  range above 0, or their log-loss falls by 0.01 or more; no set gets worse beyond its range; no gate breaks (the
+  pull-back sees to that one). Then `--final` once, and `--write`. Back in the cloud, the public sets are scored with
+  `--shipped` before and after the new weights, to see what the rescale costs songs.
+- **Shipped as version 5** (2026-11-03): whole loops 46.1% to 56.0% right on folds 1 to 4, every set better beyond its
+  range, though the loops labelled major fell from 45.9% to 29.9%. On the public songs, whole songs lose little
+  (POP909-CL nothing, RS200 1.2 points, Billboard 4.4), but stretches of 1 to 16 bars lose 3 to 22 points, and a tune
+  alone more. The numbers, and who pays, are in `docs/harmony/key-finder-experiments.md`.
+- **Rescaling again.** `--rescale` won't start while the weights built in were rescaled already: it would scale the
+  scales, and `--final` would spend a look at fold 0 on weights `--write` won't write. So a later rescale starts from
+  version 4's, the plain fit: put them back first (`git show 3be3d26:crates/mo-harmony/src/keyfind/weights.rs >
+  crates/mo-harmony/src/keyfind/weights.rs`), build, then run the steps above. The runs then name the finder built in
+  "version 5, with version 4's numbers", in the report and in `test-runs.md`. Their `--shipped` scores version 4; to
+  compare with what ships, make the dump before putting version 4's weights back.
+
+### Checking the finder on his packs (`keycheck`)
+
+Until the MIDI page shows keys, this is how Solomon can see for himself what version 5 changed, on his computer. It
+reads MIDI files as the page does and sets the old finder (version 4, before the rescale on his packs) beside the one
+built in, part by part. It only prints: nothing is written.
+
+```
+cargo run -p mo-theorybench --release -- keycheck "L:\New Midi\Some Pack"
+cargo run -p mo-theorybench --release -- keycheck "L:\New Midi" --changed
+cargo run -p mo-theorybench --release -- keycheck "L:\New Midi" --counts
+```
+
+- Give folders, MIDI files, or both. Each part that isn't drums gets a line under its file: what the old finder says,
+  then the new one, each with the chance it gives ("C minor 93%", "A minor or C major 81%", "unsure, leaning Eb major
+  37%"). The file's line says the key its name gives, read as `packs` reads names. A file whose name says nothing
+  takes the key of the nearest folder above it (up to three up) that names one. The folder given counts too, so a
+  pack reads the same whether it or the folder of all the packs is given. A part's kind is guessed as the MIDI page
+  guesses it, from its notes and the names of its track, its file and the three folders nearest it.
+- "better": only the new finder gives the name's key, or leans to it. "worse": only the old one does. "changed": they
+  say different things, neither nearer the name. `--changed` prints only the parts the two answer differently;
+  `--counts` prints only the counts.
+- The counts are of the parts whose names give one key: every name, then the minor and the major names apart. They
+  say how often each finder gives the name's key or leans to it (of every part, of the whole loops, and of the pieces
+  the page cut from longer parts); how often it's sure of one key, and how often that key is the name's; how often it
+  gives a key or its relative, and how often the name's key is one of the two.
+- On `L:\New Midi`, the whole loops' line should come out near the refit report's 46.1% (version 4) and 56.0%
+  (version 5). It counts nearly what the report calls right, on all his packs where the report had 4 of every 5. The
+  report also counts the likeliest key of a part the finder gives no key at all (too few notes, or not in one scale),
+  which this doesn't. Version 5 learned about twenty of its numbers from these packs, so on them it looks a little
+  better than it would on packs it hasn't heard.
+- Version 4's numbers are kept for this in `src/keyfind_v4.rs`, copied from 3be3d26 with their credits. A test checks
+  them against the hash version 4 shipped with, so the old finder stays version 4 as it shipped.
+- What it prints names his files. To keep it, save it outside this folder: `... --counts > D:\Bench\keycheck.txt`.
+- A folder typed with a backslash at the end (`"L:\New Midi\" --changed`) reaches the program as one piece with a
+  quote where the folder ended, joined to whatever was typed after it, because Windows reads `\"` as a quote. No name
+  on Windows can hold a quote, so keycheck cuts what it's given at its quotes there: the folder and the rest are
+  still found.
+- A path with `..` in it (`keycheck "..\Other Pack"`) is read as the folders it names: a file takes its key only from
+  folders it's really in.
 
 ## Chords
 
@@ -237,8 +314,9 @@ with. The chords are scored exactly as `mir_eval.chord` scores chord recognition
 ones mean: each stretch of time weighted by its length in beats, pooled over all the songs. `--per-segment` scores
 them per labelled chord too (each counts once, right when right for more than half its time).
 
-The C# app is scored by the name it shows (and mo-harmony by the name its chart shows), read back with mo-harmony
-(`Chord::parse`, on the root and over the bass it gives), not by the notes it heard: "C7" names a G even when none
+The C# app is scored by the name it shows (and mo-harmony by its chart's chord, named as the labels write chords:
+`Chord::slash_name`, D/C where the chart writes D7), read back with mo-harmony (`Chord::parse`, on the root and over
+the bass it gives), not by the notes it heard: "C7" names a G even when none
 sounds, and "Gsus4" for C/G leaves the E out, as its page shows them. A name stands for a few notes a chord may leave
 out, as players read names and as mo-harmony's own names do: the plain fifth, the 9 under an 11 or 13, and the 11 of a
 minor 13. Those count only where the label has them, so "Cm13" is right for a minor 13 with no 11 and "Cm11" for a minor
@@ -252,8 +330,9 @@ where it would change chord. Give the bench the same `--part` as the helper, so 
 `--engine rust` runs mo-harmony's chord reader in the bench, on the same notes: the parts `--part` gives (all but
 drums when left out), each with the role its dataset gives (melody, bass, chords), as the MIDI page hears a file's
 parts. `--roles off` hears them all as one part with no role, as the C# app does. Each piece is read whole, as a song
-(or as a loop or a window: Solomon's packs), and each stretch's chord is scored by the name its chart shows, as the C#
-app's are, with its next two readings as its list. `--oracle-cuts` gives it the labelled changes (a pin at each
+(or as a loop or a window: Solomon's packs), and each stretch's chord is scored by its name as the labels write
+chords, its bass after a slash (`Chord::slash_name`: the app's names have none since 2026-11-03, so the bench still
+tells D over C from D7 over C as the labels do), as the C# app's are, with its next two readings as its list. `--oracle-cuts` gives it the labelled changes (a pin at each
 label's ends, so each label is read as one chord), as the helper's `--oracle-cuts` does for the C# app. `--timing`
 reads on one core, one piece after another, and says how long a read takes, a piece and 16 bars of it (the design's
 budget: 3 ms for a dense 16-bar part, 99 reads in 100):
@@ -390,12 +469,37 @@ w_N, what a stretch read as no chord scores. The counted tables stay as `tables`
   among the numbers that keep every rule the weights keep (`chordread::RULES`: signs and orders, such as T2 between 0
   and T1), and moves towards it as far as the loss falls enough. Every point it reads keeps the rules. The pieces'
   sums are added in their order, so a run gives the same bits on any number of threads. At most 40 steps
-  (`--steps`); `--fix P1,P2` holds numbers where they start; `--from` starts from a file a fit wrote.
+  (`--steps`), fewer when the loss falls by less than a hundred-thousandth of itself three steps running;
+  `--fix P1,P2` holds numbers where they start; `--from` starts from a file a fit wrote.
 - **The report.** The loss at each step; each number at the start and fitted, and which sit on a rule's bound; the
   loss per bar of each source and way of hearing, at the start and fitted, on the pieces learned from and on those
   held out; and a `SET=` line that reads the hand cases with the fitted numbers (`cargo test -p mo-harmony --release
   show_the_cases_read_whole -- --ignored --nocapture`, and `show_the_grid`). `--out` writes the numbers, by name, for
   `chords --weights` and `chordfit --from`.
+- **The hand cases' gates.** After every fit, mo-harmony's hand cases (`chordread::cases`) are read with the numbers it
+  started from and the fitted ones, one stretch at a time, read whole and named: the report gives how many gates break
+  at each step, every gate the fitted numbers break (with what they read), and how many of the design's targets are met
+  (naming those the fit newly meets or loses); the `--out` file says which gates break ("gates"), as weights that break
+  one aren't shipped. The cases the design holds out (G\*: 6, 15, 32, 34 and 35, gates and the target 15e) are never
+  learned from nor looked at here, nor counted among the targets; the tests check them.
+- **Learning from the hand cases.** `--hand μ` adds the hand cases to the aim: each music the cases read whole (but
+  the held-out ones) is one piece, labelled where its gates say what to read: what a stretch must read (the cases
+  only a whole read decides, and each stretch case's first reading), or the two readings that must come first (one
+  label accepting either: it makes the two likelier between them, which is less than the gate asks, as one of them
+  may still be starved). A gate that only asks for readings to be kept says nothing about what's read, so it's
+  checked but not learned from. The aim adds μ times the pieces' mean −ln P(labels) to the data's loss per bar, its
+  slope and curvature added the same way. `--hold n` keeps the gates as straight-line rules instead: at the start,
+  each piece's labels must keep a chance of at least 0.5 (or what they have, if less) as the slope there sees it (a
+  half-space, kept by the projection with the signs and orders). After each fit, for at most n more rounds, every
+  rule is drawn again where the fit got to: a piece whose gates still break (found by its music, whichever way the
+  gate reads it) must get likelier, to a chance of 0.75, then 0.875, but never more than it had at the start (from
+  the hand-set weights every gate holds there; starting `--from` numbers that break gates, it says so, as those may
+  stay broken); every other keeps that chance, or what it has if less. The rounds stop early when every gate holds,
+  when no gate that breaks reads music the fit learns from (8 named cases have music of their own, and cases 12, 13
+  and 20 only ask for readings to be kept: their gates are checked, never held), when the pieces whose gates break
+  are already as likely as they're asked to be (a gate wanting two readings on top can break that way), or when the
+  rules leave no numbers that keep them all. Each round takes at most `--steps` steps; the `--out` file says how
+  many rounds were fitted and why they stopped. The two can go together.
 
 ## Charts played as music (`convert/voice.py`)
 
@@ -674,3 +778,107 @@ Scored with `chords --weights` (fold 1 of POP909-CL and Billboard; RS200 and the
 - **So these numbers aren't shipped.** Next, the fit keeps the hand cases' gates (on a stretch read whole, a gate is
   a margin between two readings' scores, a straight-line rule in the numbers, which the fit's projection can keep as
   it keeps the signs and orders), and the training mix is tried (the design's C12).
+
+## The hand cases in the fit (2026-11-03)
+
+The first fit run again (POP909-CL heard four ways and Billboard set A, learning from folds 2 to 4 and measuring fold 1,
+from the hand-set numbers, `--lambda 1e-3`, 40 steps a round), now with every gate read: the 229 the fit looks at (66
+one stretch at a time, 92 read whole, 71 named; the 15 the design holds out aren't). Three ways: plain (the first fit
+with the code review's fixes), learning from the hand cases (`--hand 1`), and learning from them while holding their
+gates (`--hand 1 --hold 3`). On 4 cores of a cloud machine a reading of every piece took 70 to 80 s, so a 40-step round
+took about an hour; the third fit took 64 steps over two rounds (an hour and 40 minutes). The plain and `--hand 1` fits
+ran before the second code review's fixes, which change only `--hold` and the targets counted (the design's held-out
+15e, which no fit met, is now left out). The third fit's first try ended its second round crawling (steps a thousandth
+long, each taking a millionth off the loss), so a round now stops once the loss falls by less than a hundred-thousandth
+of itself three steps running: the same fit, bit for bit, then stops at its 24th step there.
+
+| | plain | `--hand 1` | `--hand 1 --hold 3` |
+|---|---|---|---|
+| gates that break (of 229) | 58 (16, 24 and 18) | 3 (1, 1 and 1) | none (3 after its first round) |
+| targets met (of 14) | 3: 22, 41 and 46 (the hand-set numbers meet 36, 39 and 46) | 4: the hand-set 3 and 41 (Cadd9 arpeggiated) | 5: those 4 and 13 (G not yet) |
+| loss per bar held out: POP909-CL piano, set A | 0.883, 0.417 | 0.960, 0.413 | 0.979, 0.444 |
+| the hand cases' mean −ln P | 0.34 to 1.83 | 0.34 to 0.079 | 0.34 to 0.073 |
+
+Scored with `chords --weights` as before (fold 1 of POP909-CL and Billboard; RS200 and the sweep whole; the C# app's
+scores are in the first fit's table):
+
+| set | majmin: hand / plain / `--hand 1` / both | name: hand / plain / `--hand 1` / both | extensions' macro F1: hand / plain / `--hand 1` / both | inversions read in root position: hand / plain / `--hand 1` / both |
+|---|---|---|---|---|
+| POP909-CL piano | 85.3 / 89.3 / 88.8 / 88.7 | 73.3 / 77.1 / 76.3 / 76.3 | - | 78.0 / 69.3 / 76.2 / 76.0 |
+| POP909-CL with the tune | 85.4 / 90.3 / 90.0 / 89.8 | 68.3 / 77.1 / 76.3 / 76.2 | - | 77.2 / 69.4 / 76.7 / 76.2 |
+| Billboard block chords | 98.1 / 98.8 / 98.9 / 98.9 | 92.4 / 91.6 / 92.7 / 92.8 | 71.0 / 69.5 / 77.2 / 77.6 | 27.2 / 18.0 / 20.2 / 19.7 |
+| Billboard set A | 92.7 / 95.6 / 96.3 / 96.3 | 84.5 / 86.7 / 87.9 / 87.9 | 56.4 / 47.9 / 61.6 / 62.8 | 37.4 / 28.4 / 34.9 / 34.2 |
+| Billboard set B | 88.0 / 95.6 / 95.8 / 96.1 | 79.2 / 87.0 / 86.8 / 87.8 | 44.8 / 49.0 / 55.4 / 56.8 | 19.6 / 7.3 / 14.1 / 14.0 |
+| RS200 block chords | 98.5 / 99.6 / 99.0 / 98.9 | 98.2 / 99.2 / 98.6 / 98.4 | (too few) | 30.7 / 6.8 / 22.7 / 24.0 |
+| RS200 set A | 96.0 / 97.7 / 97.1 / 97.1 | 90.9 / 92.8 / 92.1 / 91.9 | (too few) | 28.1 / 17.9 / 25.1 / 24.9 |
+| RS200 set B | 91.9 / 98.0 / 97.0 / 97.3 | 87.4 / 94.7 / 92.8 / 93.7 | (too few) | 17.0 / 2.7 / 11.2 / 10.4 |
+| The sweep | 77.1 / 77.6 / 82.9 / 83.2 | 69.4 / 66.8 / 73.9 / 75.1 | 61.1 / 52.2 / 66.7 / 67.1 | 40.6 / 23.4 / 38.5 / 35.6 |
+
+- **Learning from the hand cases does most of it.** `--hand 1` keeps nearly all the plain fit's gains on roots and chord
+  kinds, and wins back what it lost on extensions: set A's extensions' F1 is 61.6% (plain 47.9%, hand 56.4%), its held
+  chords' 80.3% (plain 59.5%, hand 84.4%), and the 13 is found again (recall 97.6%; plain 36.1%, hand 96.0%). The sweep,
+  never learned from, is named 73.9% of its time (plain 66.8%, hand 69.4%, the C# app 59.1%). Three gates still break:
+  Dm11 read as G7sus4 one stretch at a time (33), and G7sus4 read as G7 (w31 and 31).
+- **Holding the gates puts those three right, for almost nothing.** The third fit breaks the same three after its first
+  round; its second asks the cases they're in to be as likely as they were at the start (w31 a chance of 0.574, w33
+  0.655), and every gate holds. Its scores are within a point of `--hand 1`'s, a little ahead on Billboard set B (named
+  87.8%) and the sweep (75.1%), and it meets one more target (13, G not yet). 2 of its 68 rules are met with nothing to
+  spare.
+- **What the hand cases cost.** Against the plain fit, a little on POP909-CL (majmin 88.7% against 89.3%, name 76.3%
+  against 77.1%, still ahead of the hand-set numbers and the C# app) and on RS200 (set B named 93.7% against 94.7%), and
+  some inversions: POP909-CL's piano reads 76.0% of its inversions in root position (plain 69.3%, hand 78.0%, the C# app
+  74.3%). The loss held out is a little higher (0.979 a bar on POP909-CL's piano, against 0.883), the price of the hand
+  cases' own: their mean −ln P falls to 0.073 (the plain fit takes it from 0.34 to 1.83).
+- **Why, in the numbers.** The hand cases keep T2 (tensions) up, at 3.23 beside T1's 4.98 (the plain fit 0.38 beside
+  5.28), so a reading that names a tension (Cmaj9) is no longer beaten by one that makes every note its own (Em7). R1 (a
+  played root) stays above 0 (0.14). Starting mid-bar costs about as much as in the plain fit (E5 −2.93 against −3.10,
+  E6 and E7 −4.48 against −4.25), so chords change as often (1.17 times a bar on POP909-CL's piano, hand 1.32; the
+  sweep's segmentation 93.9, hand 84.8). 8 of the 39 numbers sit on a rule's bound (T7, R3, R4, B4, B5, B6, E6 and E7;
+  the plain fit 12).
+- **So.** `--hand 1 --hold 3` is the first fit that breaks no gate, and it scores at or above the hand-set numbers on
+  every line above (set A's held chords lose a little: extensions' F1 80.1% against 84.4%). Read with its numbers, every
+  hand case holds read whole and one stretch at a time, the held-out G cases too (`show_the_grid`, with its `SET=` line
+  and its own pair value as the one point of `AXES`). Shipping its numbers is a pull request of its own: `SHIPPED`
+  changes, so `CHORD_READER_VERSION` goes up, and the fit is run once more on what's merged then (it ran on this
+  branch's `7dd1183`).
+- **Its numbers** (to three places): T1 4.977, T2 3.233, T3 −4.926, T4 −1.219, T5 −1.181, T6 0.441, T7 0.000, T8 −0.218,
+  T9 −0.530, T10 −0.763, T11 −0.640, T12 −0.355, T15 0.259, R1 0.145, R2 0.448, R3 0.000, R4 0.000, L1 0.696, B1 1.098,
+  B2 0.393, B3 0.163, B4 0.000, B5 −0.609, B6 −0.609, B7 1.072, B8 0.238, B9 −1.812, E1 1.436, E2 0.490, E3 −1.900, E4
+  −1.901, E5 −2.934, E6 −4.478, E7 −4.478, E8 −1.545, P1 0.286, P2 0.222, pair 0.417, none −2.466.
+
+## Chord names with no slash (2026-11-04)
+
+The naming PR writes chords as Solomon chose on 2026-11-03: no slash chords (a chord is named from all its notes, the
+bass among them: D over C is D7, F over G is G9sus4), altered notes with no brackets (C7b9#11, C13#11), and no 7alt
+(C7#9#5). Readings named the same are one now, their chances added (Fmaj7 over D and Dm9 are both Dm9). The bench
+still scores each chord by its slash name, as the labels write chords. On the 15,234 stretches of the hand cases, the
+targets and 4,000 pieces made at random, the first reading's chord, bass and label are as before, and 295 answers go
+from the same notes to one chord. Scored with the hand-set numbers, before and after (`chords`, as the first fit's table:
+fold 1 of POP909-CL and Billboard, RS200 and the sweep whole; inversions read in root position are the same on every
+set):
+
+| set | majmin | name | extensions' macro F1 | the labelled chord among the first three |
+|---|---|---|---|---|
+| POP909-CL piano | 85.3 / 85.3 | 73.3 / 73.3 | - | 80.4 / 80.5 |
+| POP909-CL with the tune | 85.4 / 85.4 | 68.3 / 68.3 | - | 80.8 / 80.8 |
+| Billboard block chords | 98.1 / 98.1 | 92.4 / 92.4 | 71.0 / 71.0 | 94.8 / 94.8 |
+| Billboard set A | 92.7 / 92.7 | 84.5 / 84.5 | 56.4 / 56.5 | 90.5 / 90.1 |
+| Billboard set B | 88.0 / 88.0 | 79.2 / 79.2 | 44.8 / 45.1 | 86.8 / 86.4 |
+| RS200 block chords | 98.5 / 98.5 | 98.2 / 98.2 | 74.8 / 74.8 | 99.7 / 99.7 |
+| RS200 set A | 96.0 / 96.0 | 90.9 / 90.9 | 26.4 / 26.4 | 94.2 / 93.8 |
+| RS200 set B | 91.9 / 91.9 | 87.4 / 87.4 | 26.8 / 26.8 | 91.8 / 91.3 |
+| The sweep | 77.1 / 78.3 | 69.4 / 70.3 | 61.1 / 61.7 | 80.2 / 80.0 |
+
+- **The sweep gains** where its ninth chords with a #11 and no fifth played are written C9#11 now, not C9(b5): a name
+  stands for its fifth, so they count as the major chords they are (majmin), and #11's F1 goes from 55.8% to 69.8%.
+  Its altered dominants (labelled 7(#9,b13) and 7(b9,b13), played with no fifth) were written C7alt, which the bench
+  reads as every altered note, and are written out now (C7#9#5, C7b9#5, as Solomon chose): the altered notes they don't
+  have no longer count against them (b9's precision 84.0% to 91.9%, #9's 73.3% to 88.8%, #11's 58.9% to 76.6%), but
+  their G# is a #5 now where the labels say b13, so b13's F1 falls from 61.9% to 42.6%.
+- **The readings after the first** move where two named the same became one, so the labelled chord is among the first
+  three a little less often: the labels tell Fmaj7/D from Dm9, and the app's names don't.
+- **The review fixes after it** (`CHORD_READER_VERSION` 3: a note played a little early is held as long as it was
+  played, the bass a chord's root moves from is only what's struck or sounds a quarter of a unit, and a 9 carried in
+  that passes by costs nothing) leave every number in the table the same: a few chords in POP909-CL and Billboard read
+  differently, too few to move one by a tenth.
+- The fits' tables above were scored before; score them again before comparing with these.

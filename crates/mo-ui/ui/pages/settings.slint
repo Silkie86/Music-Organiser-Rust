@@ -1,0 +1,747 @@
+// The Settings page (spec 3.9, folded to five tabs, 3A): General, Folders, DAWs, Shortcuts and Developer, with the
+// "Made with Slint" credit in General's About part (Slint's royalty-free licence, decided 2026-10-30). Only shared
+// parts from studio.slint; mo-app decides every word (mo_app::settings), mo-ui/src/settings.rs fills it.
+import { AboutSlint } from "std-widgets.slint";
+import { Theme, Type, Space, StudioButton, Segmented, MenuChip, PageHeader, Caps, Well, TabBar, EmptyState, Dot } from "../studio.slint";
+
+// One theme to pick, drawn as a little picture of it in its own colours.
+export struct ThemeCardInfo {
+    name: string,
+    description: string,
+    background: color,
+    sidebar: color,
+    surface: color,
+    text: color,
+    muted: color,
+    accent: color,
+    square: bool,
+    picked: bool,
+}
+
+export struct AccentInfo {
+    name: string,
+    colour: color,
+    picked: bool,
+}
+
+// A line of facts: what it is and its value.
+export struct SettingsFact {
+    what: string,
+    value: string,
+    // Its button ("Open", "Show"), or empty for none.
+    button: string,
+}
+
+// A line of the Shortcuts tab: a page's heading (only `page`), or an action and its key.
+export struct KeyLineInfo {
+    page: string,
+    id: string,
+    what: string,
+    key: string,
+    changed: bool,
+    starts: string,
+}
+
+// A DAW's row on the DAWs tab: how its link stands, and the facts under that.
+export struct DawRowInfo {
+    daw: string,
+    state: string,
+    // Whether the link answers and the app could send to it now (its own colour then, grey when not).
+    ok: bool,
+    // Whether this is Bitwig (its colour, and its Check again button).
+    bitwig: bool,
+    // Its Install button's words, or empty for none.
+    install: string,
+    facts: [SettingsFact],
+}
+
+export struct FolderGroupInfo {
+    title: string,
+    // Whether its folders can be added and removed here.
+    editable: bool,
+    note: string,
+    folders: [string],
+    empty: string,
+}
+
+export global SettingsData {
+    // The tab on show (mo_app::settings::Tab's order).
+    in-out property <int> tab;
+    in property <[string]> tabs: ["General", "Folders", "DAWs", "Shortcuts", "Developer"];
+    in property <string> summary: "How the app looks and behaves everywhere";
+    // Where your changes are kept, under the tabs.
+    in property <string> kept-note;
+
+    // General: the look.
+    in property <[ThemeCardInfo]> themes;
+    in property <string> theme-note;
+    in property <[AccentInfo]> accents;
+    in property <[string]> fonts;
+    in property <int> font;
+    in property <[string]> sizes;
+    in property <int> size: 3;
+    in property <string> size-note;
+    // General: the start page, the pace and the sound output.
+    in property <[string]> start-pages;
+    in property <string> start-page;
+    in property <[string]> paces: ["Gentle", "Balanced", "Fast"];
+    in property <int> pace;
+    in property <string> pace-note;
+    in property <[string]> outputs;
+    in property <string> output;
+    in property <string> output-note;
+    in property <bool> output-busy;
+    // About.
+    in property <string> version;
+    in property <string> credit;
+
+    // Folders.
+    in property <string> folders-note;
+    in property <[FolderGroupInfo]> folder-groups;
+    // What the last change did, or why it couldn't; and whether one is being kept now.
+    in property <string> folders-message;
+    in property <bool> folders-busy;
+    // By the group's number: pick a folder to add, or take one off.
+    callback add-folder(int);
+    callback remove-folder(int, string);
+
+    // DAWs: each DAW's link, whether Bitwig is being checked, and the note under them.
+    in property <[DawRowInfo]> daws;
+    in property <bool> daws-checking;
+    in property <string> daws-note;
+    callback check-daws();
+    // What the last Install did; whether one is running now.
+    in property <string> daws-message;
+    in property <bool> daws-installing;
+    // Install on a row: Bitwig's extension (true) or FL Studio's script.
+    callback install-daw(bool);
+
+    // Developer.
+    in property <[SettingsFact]> facts;
+
+    // Shortcuts: every action with its key; the one listening for a new key (its id), or empty; what the last change
+    // did; and whether any key isn't the one it started with.
+    in property <[KeyLineInfo]> key-lines;
+    in property <string> listening;
+    in property <string> keys-note;
+    in property <string> keys-message;
+    in property <bool> keys-changed;
+    callback listen(string);
+    callback clear-key(string);
+    callback default-key(string);
+    callback reset-keys();
+
+    callback tab-picked(int);
+    callback theme-picked(int);
+    callback accent-picked(int);
+    callback font-picked(int);
+    callback size-picked(int);
+    callback start-picked(string);
+    callback pace-picked(int);
+    callback output-picked(string);
+    callback refresh-outputs();
+    // The look back to the app's own: Graphite, its accent and font, at 100%.
+    callback back-to-normal();
+    // Developer: a fact's button (open its folder, show the log in its folder), by the fact's number; try an activity card.
+    callback open-fact(int);
+    callback try-job();
+}
+
+// A card on a tab: its title, a line on what it's for, and its parts.
+component SettingsCard inherits Rectangle {
+    in property <string> title;
+    in property <string> intro;
+    background: Theme.surface;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.stroke;
+    VerticalLayout {
+        padding: Space.lg;
+        spacing: Space.md;
+        Text {
+            text: root.title;
+            color: Theme.text;
+            font-size: Type.row-title;
+            font-weight: 600;
+        }
+        if root.intro != "": Text {
+            text: root.intro;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        @children
+    }
+}
+
+// A labelled row of choices: the label in capitals, the choices, and a note under them.
+component ChoiceRow inherits VerticalLayout {
+    in property <string> label;
+    in property <string> note;
+    spacing: Space.sm;
+    Caps { text: root.label; }
+    HorizontalLayout {
+        alignment: start;
+        @children
+    }
+    if root.note != "": Text {
+        text: root.note;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+}
+
+// A theme, drawn in its own colours: a rail, a panel with lines of text and an accent button, and its name.
+component ThemePicture inherits Rectangle {
+    in property <ThemeCardInfo> info;
+    callback picked();
+    width: 156px;
+    height: 118px;
+    border-radius: Theme.radius;
+    border-width: root.info.picked ? 2px : 1px;
+    border-color: root.info.picked ? Theme.accent : Theme.stroke;
+    background: root.info.background;
+    clip: true;
+    // The rail.
+    Rectangle {
+        x: 0;
+        width: 34px;
+        height: parent.height;
+        background: root.info.sidebar;
+    }
+    // A panel with two lines of text and a button.
+    Rectangle {
+        x: 42px;
+        y: 10px;
+        width: parent.width - 52px;
+        height: 56px;
+        background: root.info.surface;
+        border-radius: root.info.square ? 1px : 4px;
+        Rectangle {
+            x: 8px;
+            y: 9px;
+            width: 60px;
+            height: 6px;
+            border-radius: 3px;
+            background: root.info.text;
+        }
+        Rectangle {
+            x: 8px;
+            y: 21px;
+            width: 44px;
+            height: 5px;
+            border-radius: 2.5px;
+            background: root.info.muted;
+        }
+        Rectangle {
+            x: 8px;
+            y: 34px;
+            width: 34px;
+            height: 13px;
+            border-radius: root.info.square ? 1px : 3px;
+            background: root.info.accent;
+        }
+    }
+    Text {
+        x: 42px;
+        y: 76px;
+        width: parent.width - 48px;
+        text: root.info.name;
+        color: root.info.text;
+        font-size: Type.meta;
+        font-weight: 600;
+        overflow: elide;
+    }
+    Text {
+        x: 42px;
+        y: 96px;
+        width: parent.width - 48px;
+        text: root.info.picked ? "In use" : "";
+        color: root.info.muted;
+        font-size: Type.tiny;
+    }
+    touch := TouchArea {
+        clicked => { root.picked(); }
+    }
+}
+
+// An accent to pick: its colour as a dot and its name, ringed when picked.
+component AccentDot inherits VerticalLayout {
+    in property <AccentInfo> info;
+    callback picked();
+    spacing: Space.xs;
+    width: 84px;
+    HorizontalLayout {
+        alignment: center;
+        Rectangle {
+            width: 30px;
+            height: 30px;
+            border-radius: 15px;
+            border-width: root.info.picked ? 2px : 0px;
+            border-color: Theme.text;
+            Rectangle {
+                width: 22px;
+                height: 22px;
+                border-radius: 11px;
+                background: root.info.colour;
+            }
+            TouchArea {
+                clicked => { root.picked(); }
+            }
+        }
+    }
+    Text {
+        text: root.info.name;
+        color: root.info.picked ? Theme.text : Theme.muted;
+        font-size: Type.small;
+        horizontal-alignment: center;
+        overflow: elide;
+    }
+}
+
+// A fact on a line: what it is, its value, and a button when it's a folder or file to open.
+component FactLine inherits HorizontalLayout {
+    in property <SettingsFact> fact;
+    // Its value is words, not a path or a number: the page's own font then.
+    in property <bool> words;
+    callback clicked();
+    spacing: Space.md;
+    Text {
+        width: 140px;
+        text: root.fact.what;
+        color: Theme.muted;
+        font-size: Type.meta;
+        vertical-alignment: center;
+    }
+    Text {
+        horizontal-stretch: 1;
+        min-width: 0px;
+        text: root.fact.value;
+        color: Theme.text;
+        font-family: root.words ? Theme.text-font : Theme.number-font;
+        font-size: Type.meta;
+        vertical-alignment: center;
+        wrap: word-wrap;
+    }
+    if root.fact.button != "": StudioButton {
+        horizontal-stretch: 0;
+        text: root.fact.button;
+        clicked => { root.clicked(); }
+    }
+}
+
+component GeneralTab inherits VerticalLayout {
+    spacing: Space.lg;
+    alignment: start;
+    SettingsCard {
+        title: "Appearance";
+        intro: "How the app looks. Changes show straight away.";
+        Caps { text: "THEME"; }
+        FlexboxLayout {
+            spacing: Space.sm;
+            for t[i] in SettingsData.themes: ThemePicture {
+                info: t;
+                picked => { SettingsData.theme-picked(i); }
+            }
+        }
+        // The picked theme's own words.
+        Text {
+            text: SettingsData.theme-note;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        Caps { text: "ACCENT COLOUR"; }
+        HorizontalLayout {
+            alignment: start;
+            spacing: Space.sm;
+            for a[i] in SettingsData.accents: AccentDot {
+                info: a;
+                picked => { SettingsData.accent-picked(i); }
+            }
+        }
+        HorizontalLayout {
+            spacing: Space.xl;
+            alignment: start;
+            ChoiceRow {
+                label: "FONT";
+                Segmented {
+                    choices: SettingsData.fonts;
+                    current: SettingsData.font;
+                    picked(i) => { SettingsData.font-picked(i); }
+                }
+            }
+            ChoiceRow {
+                label: "SIZE OF EVERYTHING";
+                Segmented {
+                    choices: SettingsData.sizes;
+                    current: SettingsData.size;
+                    picked(i) => { SettingsData.size-picked(i); }
+                }
+            }
+        }
+        Text {
+            text: SettingsData.size-note;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            alignment: start;
+            StudioButton {
+                text: "Back to the app's own look";
+                tip: "Graphite, its own accent and font, at 100%";
+                clicked => { SettingsData.back-to-normal(); }
+            }
+        }
+    }
+    HorizontalLayout {
+        spacing: Space.lg;
+        SettingsCard {
+            horizontal-stretch: 1;
+            title: "When the app opens";
+            intro: "The page you land on each time you start Music Organiser.";
+            HorizontalLayout {
+                alignment: start;
+                MenuChip {
+                    name: "Start on";
+                    value: SettingsData.start-page;
+                    choices: SettingsData.start-pages;
+                    has-any: false;
+                    picked(c) => { SettingsData.start-picked(c); }
+                }
+            }
+            Rectangle { vertical-stretch: 1; }
+        }
+        SettingsCard {
+            horizontal-stretch: 1;
+            title: "Pace";
+            intro: "How hard scans, reading your sounds and other background work may push your computer. Gentle keeps the app smooth while they run; Fast finishes sooner.";
+            ChoiceRow {
+                label: "PACE";
+                note: SettingsData.pace-note;
+                Segmented {
+                    choices: SettingsData.paces;
+                    current: SettingsData.pace;
+                    picked(i) => { SettingsData.pace-picked(i); }
+                }
+            }
+            Rectangle { vertical-stretch: 1; }
+        }
+    }
+    SettingsCard {
+        title: "Sound output";
+        intro: "Where the app plays sounds. Choose your audio interface to hear them through it, or keep the computer's default output and the app follows it when it changes.";
+        HorizontalLayout {
+            alignment: start;
+            spacing: Space.sm;
+            MenuChip {
+                name: "Play through";
+                value: SettingsData.output;
+                choices: SettingsData.outputs;
+                has-any: false;
+                picked(c) => { SettingsData.output-picked(c); }
+            }
+            StudioButton {
+                text: SettingsData.output-busy ? "Looking…" : "Look again";
+                enabled: !SettingsData.output-busy;
+                tip: "List the outputs there are now, for one just plugged in";
+                clicked => { SettingsData.refresh-outputs(); }
+            }
+        }
+        Text {
+            text: SettingsData.output-note;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+    }
+    SettingsCard {
+        title: "About";
+        intro: SettingsData.credit;
+        HorizontalLayout {
+            spacing: Space.xl;
+            alignment: start;
+            Rectangle {
+                width: 280px;
+                height: about.min-height;
+                about := AboutSlint { }
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: Space.xs;
+                Text {
+                    text: "Music Organiser";
+                    color: Theme.text;
+                    font-size: Type.row-title;
+                    font-weight: 600;
+                }
+                Text {
+                    text: SettingsData.version;
+                    color: Theme.muted;
+                    font-family: Theme.number-font;
+                    font-size: Type.meta;
+                }
+            }
+        }
+    }
+}
+
+component FoldersTab inherits VerticalLayout {
+    spacing: Space.lg;
+    alignment: start;
+    Text {
+        text: SettingsData.folders-note;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    if SettingsData.folders-message != "": Text {
+        text: SettingsData.folders-message;
+        color: Theme.text;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    for g[gi] in SettingsData.folder-groups: SettingsCard {
+        title: g.title;
+        intro: g.note;
+        if g.folders.length == 0: Text {
+            text: g.empty;
+            color: Theme.faint;
+            font-size: Type.meta;
+        }
+        for f in g.folders: HorizontalLayout {
+            spacing: Space.md;
+            Text {
+                horizontal-stretch: 1;
+                min-width: 0px;
+                text: f;
+                color: Theme.text;
+                font-family: Theme.number-font;
+                font-size: Type.meta;
+                vertical-alignment: center;
+                wrap: word-wrap;
+            }
+            if g.editable: StudioButton {
+                horizontal-stretch: 0;
+                text: "Remove";
+                tip: "Takes the folder off this list. Nothing on disk is moved or deleted.";
+                enabled: !SettingsData.folders-busy;
+                clicked => { SettingsData.remove-folder(gi, f); }
+            }
+        }
+        if g.editable: HorizontalLayout {
+            alignment: start;
+            StudioButton {
+                text: "Add folder\u{2026}";
+                enabled: !SettingsData.folders-busy;
+                clicked => { SettingsData.add-folder(gi); }
+            }
+        }
+    }
+}
+
+// An action and its key: click the key to give it another.
+component KeyLineRow inherits HorizontalLayout {
+    in property <KeyLineInfo> line;
+    spacing: Space.sm;
+    Text {
+        horizontal-stretch: 1;
+        min-width: 0px;
+        text: root.line.what;
+        color: Theme.text;
+        font-size: Type.body;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    StudioButton {
+        horizontal-stretch: 0;
+        width: 150px;
+        main: SettingsData.listening == root.line.id;
+        text: SettingsData.listening == root.line.id ? "Press a key…" : root.line.key;
+        tip: "Click, then press the key you want";
+        clicked => { SettingsData.listen(root.line.id); }
+    }
+    StudioButton {
+        horizontal-stretch: 0;
+        text: "No key";
+        enabled: root.line.key != "None";
+        tip: "Take its key away";
+        clicked => { SettingsData.clear-key(root.line.id); }
+    }
+    StudioButton {
+        horizontal-stretch: 0;
+        text: "Default";
+        enabled: root.line.changed;
+        tip: root.line.starts;
+        clicked => { SettingsData.default-key(root.line.id); }
+    }
+}
+
+component ShortcutsTab inherits VerticalLayout {
+    spacing: Space.lg;
+    alignment: start;
+    Text {
+        text: SettingsData.keys-note;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    HorizontalLayout {
+        spacing: Space.md;
+        Text {
+            horizontal-stretch: 1;
+            text: SettingsData.keys-message;
+            color: Theme.warning;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            wrap: word-wrap;
+        }
+        StudioButton {
+            horizontal-stretch: 0;
+            text: "Every key back to the start";
+            enabled: SettingsData.keys-changed;
+            clicked => { SettingsData.reset-keys(); }
+        }
+    }
+    Rectangle {
+        background: Theme.surface;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: Theme.stroke;
+        VerticalLayout {
+            padding: Space.lg;
+            spacing: Space.xs;
+            for l in SettingsData.key-lines: VerticalLayout {
+                if l.page != "": VerticalLayout {
+                    padding-top: Space.md;
+                    Caps { text: l.page; }
+                }
+                if l.page == "": KeyLineRow { line: l; }
+            }
+        }
+    }
+}
+
+component DawsTab inherits VerticalLayout {
+    spacing: Space.lg;
+    alignment: start;
+    Text {
+        text: SettingsData.daws-note;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    if SettingsData.daws-message != "": Text {
+        text: SettingsData.daws-message;
+        color: Theme.text;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    for d in SettingsData.daws: SettingsCard {
+        title: d.daw;
+        HorizontalLayout {
+            spacing: Space.sm;
+            Dot {
+                y: (parent.height - self.height) / 2;
+                tint: !d.ok ? Theme.faint : d.bitwig ? Theme.bitwig : Theme.fl-studio;
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: d.state;
+                color: Theme.text;
+                font-size: Type.body;
+                font-weight: 600;
+                vertical-alignment: center;
+            }
+            if d.bitwig: StudioButton {
+                horizontal-stretch: 0;
+                text: SettingsData.daws-checking ? "Checking\u{2026}" : "Check again";
+                tip: "Asks the link in Bitwig how it stands. Only reads: nothing goes into the project.";
+                enabled: !SettingsData.daws-checking;
+                clicked => { SettingsData.check-daws(); }
+            }
+            if d.install != "": StudioButton {
+                horizontal-stretch: 0;
+                text: SettingsData.daws-installing ? "Installing\u{2026}" : d.install;
+                tip: d.bitwig ? "Puts the app's extension in Bitwig's folders and takes out the older script. Close Bitwig first." : "Puts the app's script in FL Studio's folders, keeping your setting for letting the app make changes";
+                enabled: !SettingsData.daws-installing;
+                clicked => { SettingsData.install-daw(d.bitwig); }
+            }
+        }
+        for f in d.facts: FactLine {
+            fact: f;
+            words: true;
+        }
+    }
+}
+
+component DeveloperTab inherits VerticalLayout {
+    spacing: Space.lg;
+    alignment: start;
+    SettingsCard {
+        title: "This build";
+        intro: "Which app is running, and where it keeps its files. Claude reads the logs from these folders.";
+        for f[i] in SettingsData.facts: FactLine {
+            fact: f;
+            clicked => { SettingsData.open-fact(i); }
+        }
+    }
+    SettingsCard {
+        title: "Activity cards";
+        intro: "A made-up job, to see how a card looks bottom right while it runs, and once it's done.";
+        HorizontalLayout {
+            alignment: start;
+            StudioButton {
+                text: "Try an activity card";
+                clicked => { SettingsData.try-job(); }
+            }
+        }
+    }
+    SettingsCard {
+        title: "Coming here";
+        intro: "The self-check (the app checking itself with your real library) and the live tests with Bitwig, once the Bitwig link is in.";
+    }
+}
+
+export component SettingsPage inherits Rectangle {
+    VerticalLayout {
+        padding: Space.xl;
+        spacing: Space.lg;
+        PageHeader {
+            title: "Settings";
+            summary: SettingsData.summary;
+        }
+        HorizontalLayout {
+            spacing: Space.lg;
+            TabBar {
+                tabs: SettingsData.tabs;
+                current <=> SettingsData.tab;
+                changed current => { SettingsData.tab-picked(self.current); }
+            }
+            Text {
+                horizontal-stretch: 1;
+                text: SettingsData.kept-note;
+                color: Theme.faint;
+                font-size: Type.meta;
+                horizontal-alignment: right;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+        }
+        Flickable {
+            vertical-stretch: 1;
+            content-width: self.width;
+            content-height: shown.preferred-height;
+            shown := VerticalLayout {
+                alignment: start;
+                if SettingsData.tab == 0: GeneralTab { }
+                if SettingsData.tab == 1: FoldersTab { }
+                if SettingsData.tab == 2: DawsTab { }
+                if SettingsData.tab == 3: ShortcutsTab { }
+                if SettingsData.tab == 4: DeveloperTab { }
+            }
+        }
+    }
+}

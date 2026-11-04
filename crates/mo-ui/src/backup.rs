@@ -1,24 +1,32 @@
 //! Fills the Backup page from `mo_app::backup` and answers its buttons. Everything slow (walking the folders,
-//! reading the library, the backup itself) runs on low-priority threads (rule 21); the window only ever shows what
-//! they send back (rule 12). Working out what goes is redone after every change, newest ask first.
+//! reading the library, the backup itself, reading and removing older versions) runs on low-priority threads (rule
+//! 21); the window only ever shows what they send back (rule 12). Working out what goes is redone after every change,
+//! newest ask first, and then the files the backup keeps that are gone from your folders are looked for (not while a
+//! backup runs: it's writing what's looked at); the drive's older versions are read again when the drive changes and
+//! after a run that kept some, or a removal.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use chrono::Local;
+use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::backup::{
     self, BackedUp, DriveRoom, PageLines, PlanState, Prepared, Progress, Settings, level_at, library_folders,
     page_lines,
 };
+use mo_app::backup_gone::{self, Warning};
+use mo_app::backup_older::{self, KeptState};
 use mo_app::log;
 use mo_backup::folders::Mode;
+use mo_backup::gone::Holdings;
+use mo_backup::older::{self, Kept, Run};
 use mo_library::Library;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 
-use crate::{AppWindow, BackupData, BackupFolderLine, LeftOutLine};
+use crate::{AppWindow, BackupData, BackupFolderLine, GoneLine, LeftOutLine, MenuItem};
 
 /// What the page knows, on the window's thread.
 #[derive(Default)]
@@ -36,25 +44,49 @@ struct Section {
     /// Counts the asks, so a plan made for an older folder list is dropped.
     asked: u64,
     running: Option<Arc<AtomicBool>>,
-    /// Stops the plan being worked out when a newer one is asked for.
+    /// Set while a backup runs, so the planner doesn't look for gone files on the drive it's writing.
+    drive_busy: Arc<AtomicBool>,
+    /// Stops the plan being worked out (and the look for gone files after it) when a newer one is asked for, or a
+    /// backup starts.
     plan_stop: Arc<AtomicBool>,
     /// The page has been shown, so its folders are walked (not before: nobody may open it).
     shown: bool,
+    /// The older versions on the drive as last read, and the drive they were read from; or why they couldn't be.
+    kept: Option<(PathBuf, Result<Arc<Kept>, String>)>,
+    /// Counts the reads of the older versions, so one for a drive picked before is dropped.
+    older_asked: u64,
+    /// Stops the read of the older versions when a newer one is asked for.
+    older_stop: Arc<AtomicBool>,
+    /// The question asked before older versions go: the drive, and exactly what goes on a yes.
+    older_ask: Option<(PathBuf, backup_older::Ask)>,
+    /// What the last removal did.
+    older_done: String,
+    /// The removal of older versions running now: what stops it.
+    removing: Option<Arc<AtomicBool>>,
+    /// The files the backup keeps that are gone from your folders, and the drive they were looked for on.
+    gone: Option<(PathBuf, Warning)>,
+    /// Where Show on the backup reports a file it couldn't show.
+    feed: Feed,
 }
 
 /// A job for the planner: the ask's number, the settings then, the library's file, and what stops it.
 type Job = (u64, Settings, PathBuf, Arc<AtomicBool>);
 
+/// A job for the older versions' reader: the ask's number, the drive, and what stops it.
+type OlderJob = (u64, PathBuf, Arc<AtomicBool>);
+
 thread_local! {
     static SECTION: RefCell<Section> = RefCell::default();
     static PLANNER: RefCell<Option<Newest<Job>>> = const { RefCell::new(None) };
+    static OLDER: RefCell<Option<Newest<OlderJob>>> = const { RefCell::new(None) };
 }
 
-pub fn connect(app: &AppWindow, library: PathBuf) {
+pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
     let settings_file = mo_app::paths::data_dir().join(backup::SETTINGS_FILE);
     let settings = Settings::load(&settings_file);
     let backed_file = mo_app::paths::data_dir().join(backup::SONGS_FILE);
     let backed = BackedUp::load(&backed_file);
+    let drive_busy = Arc::new(AtomicBool::new(false));
     SECTION.with(|s| {
         let mut s = s.borrow_mut();
         s.settings = settings;
@@ -62,30 +94,38 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
         s.backed = backed;
         s.backed_file = backed_file;
         s.library = library;
+        s.feed = feed;
+        s.drive_busy = drive_busy.clone();
     });
     let weak = app.as_weak();
+    // What the backup holds as last read, so each look only reads again what changed on the drive.
+    let mut holdings = Holdings::default();
     let planner = Newest::start("Backup plan", move |(asked, settings, library, stop): Job| {
         let room = settings.drive.as_ref().and_then(|d| {
             mo_space::app_files::drive_space(d).map(|r| (d.clone(), DriveRoom { free: r.free, total: r.total }))
         });
         // Nothing to walk yet: only the drive's room is wanted.
         let result = (!settings.folders.is_empty()).then(|| {
-            background::on_pool(|| {
+            background::on_bulk_pool(|| {
                 let lib = Library::open_read_only(&library).map_err(|e| e.to_string())?;
-                backup::prepare(&lib, &settings, &stop)
+                backup::prepare(&lib, &settings, &stop).map(Arc::new)
             })
         });
-        let weak = weak.clone();
+        let ready = match &result {
+            Some(Ok(p)) => Some(Arc::clone(p)),
+            _ => None,
+        };
+        let plan_weak = weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
-            SECTION.with(|s| {
+            let planned = SECTION.with(|s| {
                 let mut s = s.borrow_mut();
                 if s.asked != asked {
-                    return;
+                    return true;
                 }
                 s.room = room;
                 match result {
                     Some(Ok(p)) => {
-                        s.prepared = Some(Arc::new(p));
+                        s.prepared = Some(p);
                         s.failed = None;
                     }
                     Some(Err(e)) => {
@@ -94,13 +134,65 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
                     }
                     None => {}
                 }
+                s.prepared.is_some()
             });
-            show(&weak);
+            // No plan, so no look for gone files: the strip from before goes.
+            if !planned {
+                put_gone(&plan_weak, None);
+            }
+            show(&plan_weak);
+        });
+        // Then the files the backup keeps that are gone from the folders just walked: slower (the backup's record and
+        // every song zip are read), so the plan is shown first. Not while a backup is writing them: the plan asked for
+        // after it looks.
+        let (Some(prepared), Some(drive)) = (ready, settings.drive.clone()) else { return };
+        if drive_busy.load(Ordering::Relaxed) {
+            return;
+        }
+        let warning = match background::on_bulk_pool(|| backup_gone::find(&prepared, &drive, &mut holdings, &stop)) {
+            Ok(gone) => backup_gone::warning(&gone),
+            // A newer plan is on its way, and looks again.
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return,
+            Err(e) => {
+                log::warning("Backup", &format!("Couldn't look for the files gone from your folders: {e}"));
+                return;
+            }
+        };
+        let weak = weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            let current = SECTION.with(|s| s.borrow().asked == asked);
+            if current {
+                put_gone(&weak, Some((drive, warning)));
+            }
         });
     });
     match planner {
         Ok(p) => PLANNER.with(|slot| *slot.borrow_mut() = Some(p)),
         Err(e) => log::error("Backup", &format!("Couldn't start the backup planner: {e}")),
+    }
+    // The older versions on the drive, and the drive's room (which a removal changes).
+    let weak = app.as_weak();
+    let reader = Newest::start("Backup older versions", move |(asked, drive, stop): OlderJob| {
+        let room = mo_space::app_files::drive_space(&drive).map(|r| DriveRoom { free: r.free, total: r.total });
+        let read = background::on_bulk_pool(|| older::read(&drive, &stop));
+        let weak = weak.clone();
+        let _ = slint::invoke_from_event_loop(move || {
+            SECTION.with(|s| {
+                let mut s = s.borrow_mut();
+                if s.older_asked != asked {
+                    return;
+                }
+                if let Some(room) = room {
+                    s.room = Some((drive.clone(), room));
+                }
+                s.kept = Some((drive, read.map(Arc::new).map_err(|e| kept_error(&e))));
+            });
+            show(&weak);
+        });
+    });
+    match reader {
+        Ok(r) => OLDER.with(|slot| *slot.borrow_mut() = Some(r)),
+        Err(e) => log::error("Backup", &format!("Couldn't start reading the older versions: {e}")),
     }
 
     let data = app.global::<BackupData>();
@@ -128,7 +220,18 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
     let weak = app.as_weak();
     data.on_pick_drive(move || {
         let weak = weak.clone();
-        pick_folder("Pick the backup drive (or a folder on it)", move |path| change(&weak, |s| s.drive = Some(path)));
+        pick_folder("Pick the backup drive (or a folder on it)", move |path| {
+            // A question asked about the old drive's older versions isn't for this one.
+            SECTION.with(|s| {
+                let mut s = s.borrow_mut();
+                s.older_ask = None;
+                s.older_done.clear();
+            });
+            // Nor are the files the old drive keeps.
+            put_gone(&weak, None);
+            change(&weak, |s| s.drive = Some(path));
+            reread_older();
+        });
     });
     let weak = app.as_weak();
     data.on_add_library_folders(move || {
@@ -149,10 +252,47 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
     data.on_run(move || start_run(&weak));
     data.on_stop(|| {
         SECTION.with(|s| {
-            if let Some(stop) = &s.borrow().running {
+            let s = s.borrow();
+            for stop in [&s.running, &s.removing].into_iter().flatten() {
                 stop.store(true, Ordering::Relaxed);
             }
         });
+    });
+    let weak = app.as_weak();
+    data.on_older_picked(move |id| {
+        let now = Local::now().naive_local();
+        SECTION.with(|s| {
+            let mut s = s.borrow_mut();
+            if s.running.is_some() || s.removing.is_some() {
+                return;
+            }
+            let Some(drive) = s.settings.drive.clone() else { return };
+            let ask = match &s.kept {
+                Some((d, Ok(kept))) if *d == drive => backup_older::ask(kept, &id, now),
+                _ => None,
+            };
+            s.older_ask = ask.map(|a| (drive, a));
+            s.older_done.clear();
+        });
+        show(&weak);
+    });
+    let weak = app.as_weak();
+    data.on_older_cancel(move || {
+        SECTION.with(|s| s.borrow_mut().older_ask = None);
+        show(&weak);
+    });
+    let weak = app.as_weak();
+    data.on_older_remove(move || start_removal(&weak));
+    data.on_gone_show(|i| {
+        let found = SECTION.with(|s| {
+            let s = s.borrow();
+            let line = usize::try_from(i).ok().and_then(|i| s.gone.as_ref()?.1.lines.get(i).cloned());
+            line.map(|l| (l.show, s.feed.clone()))
+        });
+        if let Some((path, feed)) = found {
+            let folder = path.parent().map(|f| f.display().to_string()).unwrap_or_default();
+            crate::files::reveal(&feed, &path.display().to_string(), &folder);
+        }
     });
     show(&app.as_weak());
     // The app opened on the page.
@@ -161,16 +301,51 @@ pub fn connect(app: &AppWindow, library: PathBuf) {
     }
 }
 
-/// The page is on show: the first time, its folders are walked to work out what goes.
+/// The page is on show: the first time, its folders are walked to work out what goes, and the drive's older versions
+/// are read. They're read again each time it's shown after a read that failed (the drive may be plugged in now).
 pub fn shown() {
-    let first = SECTION.with(|s| !std::mem::replace(&mut s.borrow_mut().shown, true));
+    let (first, failed) = SECTION.with(|s| {
+        let mut s = s.borrow_mut();
+        (!std::mem::replace(&mut s.shown, true), matches!(s.kept, Some((_, Err(_)))))
+    });
     if first {
         replan();
+    }
+    if first || failed {
+        reread_older();
+    }
+}
+
+/// Asks for the drive's older versions (and its room) to be read again.
+fn reread_older() {
+    let job = SECTION.with(|s| {
+        let mut s = s.borrow_mut();
+        s.older_asked += 1;
+        // A read still going is for a drive picked before, or is out of date: it stops.
+        s.older_stop.store(true, Ordering::Relaxed);
+        s.older_stop = Arc::new(AtomicBool::new(false));
+        s.settings.drive.clone().map(|d| (s.older_asked, d, s.older_stop.clone()))
+    });
+    if let Some(job) = job {
+        OLDER.with(|r| {
+            if let Some(r) = r.borrow().as_ref() {
+                r.ask(job);
+            }
+        });
+    }
+}
+
+/// Why the older versions couldn't be read, as the card says it.
+fn kept_error(e: &std::io::Error) -> String {
+    if e.kind() == std::io::ErrorKind::NotFound {
+        "The backup drive isn't plugged in, so its older versions can't be seen.".to_owned()
+    } else {
+        format!("Couldn't read the older versions on the backup drive: {e}")
     }
 }
 
 /// Opens the system's folder picker without holding up the window, and hands on the folder picked.
-fn pick_folder(title: &'static str, then: impl FnOnce(PathBuf) + 'static) {
+pub(crate) fn pick_folder(title: &'static str, then: impl FnOnce(PathBuf) + 'static) {
     let asked = slint::spawn_local(async move {
         if let Some(folder) = rfd::AsyncFileDialog::new().set_title(title).pick_folder().await {
             then(folder.path().to_path_buf());
@@ -224,12 +399,18 @@ fn replan() {
 fn start_run(weak: &Weak<AppWindow>) {
     let Some((prepared, settings, stop)) = SECTION.with(|s| {
         let mut s = s.borrow_mut();
-        if s.running.is_some() {
+        // Not while older versions are being removed: one job on the drive at a time.
+        if s.running.is_some() || s.removing.is_some() {
             return None;
         }
         let prepared = s.prepared.clone()?;
         let stop = Arc::new(AtomicBool::new(false));
         s.running = Some(stop.clone());
+        // The run changes the drive: a question about its older versions would be out of date, and a look for gone
+        // files still going stops.
+        s.older_ask = None;
+        s.drive_busy.store(true, Ordering::Relaxed);
+        s.plan_stop.store(true, Ordering::Relaxed);
         Some((prepared, s.settings.clone(), stop))
     }) else {
         return;
@@ -239,6 +420,8 @@ fn start_run(weak: &Weak<AppWindow>) {
         &Progress::Copying { files: prepared.plan.copy.len(), bytes: prepared.plan.copy_bytes() }.line(),
         0.0,
     );
+    // The question about older versions goes from the page at once.
+    show(weak);
     let run_weak = weak.clone();
     let started = background::spawn("Backup", move || {
         let weak = run_weak;
@@ -247,16 +430,27 @@ fn start_run(weak: &Weak<AppWindow>) {
             let weak = progress_weak.clone();
             let _ = slint::invoke_from_event_loop(move || set_busy(&weak, &p.line(), p.done()));
         };
-        let ran = background::on_pool(|| backup::run(&prepared, &settings, &stop, &progress));
+        // A run that breaks part way still ends here, so the page lets go of it and says so, instead of staying busy
+        // with Run and Stop doing nothing (the panic hook has logged what broke).
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            background::on_bulk_pool(|| backup::run(&prepared, &settings, &stop, &progress))
+        }))
+        .unwrap_or_else(|_| backup::Ran::broke(Local::now().naive_local()));
         let drive = settings.drive.clone();
         let _ = slint::invoke_from_event_loop(move || {
             let last = ran.last;
             if !last.ok {
                 log::warning("Backup", &last.line);
             }
-            let (saved, backed_saved) = SECTION.with(|s| {
+            let (saved, backed_saved, reread) = SECTION.with(|s| {
                 let mut s = s.borrow_mut();
                 s.running = None;
+                s.drive_busy.store(false, Ordering::Relaxed);
+                // The older versions as read are still right unless the run kept more, or they weren't read from
+                // this drive (or couldn't be).
+                let read = matches!(&s.kept, Some((d, Ok(_))) if Some(d) == s.settings.drive.as_ref());
+                // A run that broke may have kept some before it stopped.
+                let reread = ran.kept_older > 0 || !last.ok || !read;
                 // The drive the run went to, which may not be the one picked now.
                 let backed_saved = match &drive {
                     Some(d) if !ran.went.is_empty() => {
@@ -266,7 +460,7 @@ fn start_run(weak: &Weak<AppWindow>) {
                     _ => Ok(()),
                 };
                 s.settings.last_run = Some(last);
-                (s.settings.save(&s.settings_file), backed_saved)
+                (s.settings.save(&s.settings_file), backed_saved, reread)
             });
             if let Err(e) = saved {
                 log::warning("Backup", &format!("Couldn't keep the backup settings: {e}"));
@@ -275,15 +469,103 @@ fn start_run(weak: &Weak<AppWindow>) {
                 log::warning("Backup", &format!("Couldn't keep which songs are backed up: {e}"));
             }
             set_busy(&weak, "", 0.0);
-            // The drive's room and what's new have changed.
+            // The drive's room and what's new have changed (the planner measures the room again).
             replan();
+            if reread {
+                reread_older();
+            }
             show(&weak);
         });
     });
     if let Err(e) = started {
         log::error("Backup", &format!("Couldn't start the backup: {e}"));
-        SECTION.with(|s| s.borrow_mut().running = None);
+        SECTION.with(|s| {
+            let mut s = s.borrow_mut();
+            s.running = None;
+            s.drive_busy.store(false, Ordering::Relaxed);
+        });
         set_busy(weak, "", 0.0);
+        // The look for gone files that was stopped is asked for again.
+        replan();
+        show(weak);
+    }
+}
+
+/// The most removals the log lists one by one.
+const LOGGED_LEFT: usize = 20;
+
+/// Yes to the question: removes exactly what it named, on a low-priority thread, then reads the older versions again.
+fn start_removal(weak: &Weak<AppWindow>) {
+    let Some((drive, ask, stop)) = SECTION.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.running.is_some() || s.removing.is_some() {
+            return None;
+        }
+        let (drive, ask) = s.older_ask.take()?;
+        // Only on the drive it was asked about, which is still the one picked.
+        if s.settings.drive.as_ref() != Some(&drive) {
+            return None;
+        }
+        let stop = Arc::new(AtomicBool::new(false));
+        s.removing = Some(stop.clone());
+        s.older_done.clear();
+        Some((drive, ask, stop))
+    }) else {
+        show(weak);
+        return;
+    };
+    let total: usize = ask.runs().iter().map(|r| r.versions.len()).sum();
+    set_busy(weak, &backup_older::removing_line(0, total), 0.0);
+    show(weak);
+    let run_weak = weak.clone();
+    let started = background::spawn("Backup remove older versions", move || {
+        let weak = run_weak;
+        let progress_weak = weak.clone();
+        // The window hears each hundredth of the way, not every file.
+        let heard = Cell::new(usize::MAX);
+        let progress = move |done: usize, of: usize| {
+            let step = done.saturating_mul(100) / of.max(1);
+            if heard.replace(step) != step {
+                let weak = progress_weak.clone();
+                let part = done as f32 / of.max(1) as f32;
+                let _ = slint::invoke_from_event_loop(move || {
+                    set_busy(&weak, &backup_older::removing_line(done, of), part);
+                });
+            }
+        };
+        let removed = older::remove(&drive, &ask.runs(), &stop, &progress);
+        let line = match &removed {
+            Ok(r) => {
+                for (path, why) in r.left.iter().take(LOGGED_LEFT) {
+                    log::warning("Backup", &format!("Kept an older version: {}: {why}", path.display()));
+                }
+                if r.left.len() > LOGGED_LEFT {
+                    log::warning("Backup", &format!("…and {} more kept", r.left.len() - LOGGED_LEFT));
+                }
+                backup_older::removed_line(r)
+            }
+            Err(_) => "The backup drive isn't there, so nothing was removed".to_owned(),
+        };
+        log::info("Backup", &format!("Older versions on {}: {line}", drive.display()));
+        let _ = slint::invoke_from_event_loop(move || {
+            SECTION.with(|s| {
+                let mut s = s.borrow_mut();
+                s.removing = None;
+                s.older_done = line;
+                // The listing from before is out of date: the card says it's looking until the new one is read, so
+                // nothing in it can be asked about again.
+                s.kept = None;
+            });
+            set_busy(&weak, "", 0.0);
+            reread_older();
+            show(&weak);
+        });
+    });
+    if let Err(e) = started {
+        log::error("Backup", &format!("Couldn't start removing older versions: {e}"));
+        SECTION.with(|s| s.borrow_mut().removing = None);
+        set_busy(weak, "", 0.0);
+        show(weak);
     }
 }
 
@@ -298,7 +580,8 @@ fn set_busy(weak: &Weak<AppWindow>, text: &str, done: f32) {
 /// Puts the words on the page.
 fn show(weak: &Weak<AppWindow>) {
     let Some(app) = weak.upgrade() else { return };
-    let lines: PageLines = SECTION.with(|s| {
+    let now = Local::now().naive_local();
+    let (lines, older): (PageLines, OlderCard) = SECTION.with(|s| {
         let s = s.borrow();
         let state = match (&s.prepared, &s.failed) {
             (Some(p), _) => PlanState::Ready(p),
@@ -308,11 +591,77 @@ fn show(weak: &Weak<AppWindow>) {
         };
         // The room of the drive picked now, not of one picked before.
         let room = s.room.as_ref().filter(|(d, _)| Some(d) == s.settings.drive.as_ref()).map(|(_, r)| *r);
-        page_lines(&s.settings, room, state, Local::now().naive_local())
+        // And its older versions, not another drive's.
+        let kept = match (&s.kept, &s.settings.drive) {
+            (Some((d, Ok(kept))), Some(drive)) if d == drive => KeptState::Ready(kept),
+            (Some((d, Err(why))), Some(drive)) if d == drive => KeptState::Failed(why),
+            _ => KeptState::Waiting,
+        };
+        let older = OlderCard {
+            lines: backup_older::lines(s.settings.drive.is_some(), kept, now),
+            ask: s.older_ask.as_ref().map(|(_, a)| a.question.clone()).unwrap_or_default(),
+            done: s.older_done.clone(),
+        };
+        (page_lines(&s.settings, room, state, now), older)
     });
     show_lines(&app, lines);
+    show_older(&app, older);
     // The song panel's "Backed up" line follows the drive and the last run.
     crate::songs::backup_changed(&app);
+}
+
+/// What the Older versions card shows: its words, the question being asked (or none) and the last removal's line.
+pub struct OlderCard {
+    pub lines: backup_older::Lines,
+    pub ask: String,
+    pub done: String,
+}
+
+/// Puts the Older versions card's words on the page.
+pub fn show_older(app: &AppWindow, card: OlderCard) {
+    let data = app.global::<BackupData>();
+    data.set_older_size(card.lines.size.into());
+    data.set_older_count(card.lines.count.into());
+    data.set_older_note(card.lines.note.into());
+    let choices: Vec<MenuItem> = card
+        .lines
+        .choices
+        .into_iter()
+        .map(|c| MenuItem { what: c.what.into(), key: SharedString::new(), id: c.id.into(), enabled: c.enabled })
+        .collect();
+    data.set_older_choices(ModelRc::new(VecModel::from(choices)));
+    data.set_older_ask(card.ask.into());
+    data.set_older_done(card.done.into());
+}
+
+/// Keeps the files gone from your folders that were found on a drive (or none), and puts them on the page when that's
+/// the drive picked now. Only when they change, as the list can be long (and a new list goes back to its top).
+fn put_gone(weak: &Weak<AppWindow>, gone: Option<(PathBuf, Warning)>) {
+    let shown = SECTION.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.gone == gone {
+            return None;
+        }
+        s.gone = gone;
+        Some(match (&s.gone, &s.settings.drive) {
+            (Some((d, w)), Some(drive)) if d == drive => w.clone(),
+            _ => Warning::default(),
+        })
+    });
+    if let (Some(shown), Some(app)) = (shown, weak.upgrade()) {
+        show_gone(&app, &shown);
+    }
+}
+
+/// Puts the warning about files gone from your folders on the page (an empty one hides the strip).
+pub fn show_gone(app: &AppWindow, warning: &Warning) {
+    let data = app.global::<BackupData>();
+    data.set_gone_line(warning.line.as_str().into());
+    data.set_gone_quiet(warning.quiet);
+    data.set_gone_note(warning.note.as_str().into());
+    let lines: Vec<GoneLine> =
+        warning.lines.iter().map(|l| GoneLine { was: l.was.as_str().into(), note: l.note.as_str().into() }).collect();
+    data.set_gone(ModelRc::new(VecModel::from(lines)));
 }
 
 /// The song panel's "Backed up" line for a song (empty until a backup drive is picked).
@@ -396,4 +745,59 @@ pub fn sample_lines() -> PageLines {
     };
     let room = Some(DriveRoom { free: 1100 * GB, total: 1862 * GB });
     page_lines(&settings, room, PlanState::Ready(&prepared), now)
+}
+
+/// Made-up older versions for the screenshots: 38 backups' worth over the past year, and (with `asking`) the question
+/// asked before the ones more than 6 months old go.
+pub fn sample_older(asking: bool) -> OlderCard {
+    use mo_backup::older::Version;
+    let now = Local::now().naive_local();
+    let runs: Vec<Run> = (0..38u32)
+        .rev()
+        .map(|i| {
+            let when = now - chrono::Duration::days(i64::from(10 * i + 1));
+            let versions = (0..20 + i)
+                .map(|n| Version { path: PathBuf::from(format!("x{n}")), size: 700_000, modified: None, shared: None })
+                .collect();
+            Run { stamp: older::stamp(when), when, versions }
+        })
+        .collect();
+    let kept = Arc::new(Kept { runs, others: 0 });
+    let ask = if asking { backup_older::ask(&kept, "older-6", now).map(|a| a.question) } else { None };
+    OlderCard {
+        lines: backup_older::lines(true, KeptState::Ready(&kept), now),
+        ask: ask.unwrap_or_default(),
+        done: String::new(),
+    }
+}
+
+/// Made-up files gone from your folders for the screenshots: three of yours (one kept in a song zip too) and two
+/// autosaves FL Studio cleared away.
+pub fn sample_gone() -> Warning {
+    use mo_backup::gone::{Gone, Kept};
+    let now = Local::now();
+    let saved = |days: i64| i128::from((now - chrono::Duration::days(days)).timestamp()) * 1_000_000_000;
+    let on_backup = |path: &str| PathBuf::from(format!(r"E:\Music Backup\{}", path.replacen(":", "", 1)));
+    let gone = |was: &str, size: u64, days: i64, zip: Option<&str>| {
+        let mut kept = vec![Kept::Copy(on_backup(was))];
+        kept.extend(zip.map(|z| Kept::InZip(PathBuf::from(format!(r"E:\Music Backup\Songs\{z}")))));
+        Gone { was: PathBuf::from(was), size, time: saved(days), kept }
+    };
+    backup_gone::warning(&[
+        gone(r"I:\FL Studio Data\Projects\Night Drive\Night Drive_3.flp", 412_000, 40, Some("Night Drive.zip")),
+        gone(r"I:\Samples\Drums\Kicks\Kick Deep 04.wav", 1_180_000, 120, None),
+        gone(r"I:\Samples\Vocals\Chop Ah.wav", 2_640_000, 200, None),
+        gone(
+            r"I:\FL Studio Data\Projects\Night Drive\Backup\Night Drive (overwritten at 2213h05).flp",
+            400_000,
+            3,
+            None,
+        ),
+        gone(
+            r"I:\FL Studio Data\Projects\Night Drive\Backup\Night Drive (overwritten at 2240h11).flp",
+            401_000,
+            3,
+            None,
+        ),
+    ])
 }

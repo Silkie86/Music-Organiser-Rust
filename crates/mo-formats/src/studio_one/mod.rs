@@ -31,8 +31,10 @@ pub const DAW: &str = "Studio One";
 /// Goes up by one whenever the reader finds more (or different) things in the same files (rule 7). 2 is the C#
 /// reader's: each insert's plugin by its own name and id, not the name the insert shows; Studio One's own effects
 /// and Note FX. 3 is what the Rust reader finds differently (DIFFERENCES.md): a song with a file that won't come out
-/// of the zip whole is read on, with a warning.
-pub const VERSION: u32 = 3;
+/// of the zip whole is read on, with a warning. 4 reads a TempoMapSegment's seconds per beat as such when the
+/// metainfo has no tempo (it was taken for BPM), gives "NaN" velocities the quietest MIDI 1.0 value in the MIDI as in
+/// the preview, and keeps a network share's server in a media pool url.
+pub const VERSION: u32 = 4;
 pub const EXTENSIONS: [&str; 1] = ["song"];
 
 const PRESET_EXTENSIONS: [&str; 6] = [".vstpreset", ".fxp", ".fxb", ".aupreset", ".preset", ".multipreset"];
@@ -165,14 +167,14 @@ impl<'a> Song<'a> {
                             info.tracks.push(track.to_owned());
                         }
                     }
-                    if info.tempo.is_none() {
-                        info.tempo = num(attr(e, "tempo"));
-                    }
                     if tag == "NoteEvent" && e != song.root_element() {
                         notes += 1;
                     }
                 }
                 info.details.insert("Notes".into(), notes.to_string());
+                if info.tempo.is_none() {
+                    info.tempo = song_tempo(song.root_element());
+                }
             }
             _ => info.warnings.push("Song/song.xml is missing or unreadable.".into()),
         }
@@ -197,8 +199,7 @@ impl<'a> Song<'a> {
         let Some(text) = self.xml("Song/song.xml") else { return Vec::new() };
         let Ok(song) = parse(&text) else { return Vec::new() };
         // The song's tempo as the project list reads it: the metainfo's, the song's own after that, or 120.
-        let tempo =
-            from_meta.or_else(|| elements(song.root_element()).find_map(|e| num(attr(e, "tempo")))).unwrap_or(120.0);
+        let tempo = from_meta.or_else(|| song_tempo(song.root_element())).unwrap_or(120.0);
         let mut clips = Vec::new();
         for track in elements(song.root_element()).filter(|e| e.tag_name().name() == "MusicTrack") {
             let track_name = match attr(track, "name") {
@@ -220,14 +221,7 @@ impl<'a> Song<'a> {
                     let Some(start) = num(attr(ev, "start")) else { continue };
                     let length = num(attr(ev, "length")).unwrap_or(0.25);
                     let key = num(attr(ev, "pitch")).unwrap_or(60.0) as i32;
-                    let vel = num(attr(ev, "velocity")).unwrap_or(0.8);
-                    // 0 to 1 in newer songs, MIDI 1.0's 0 to 127 in older ones; kept in MIDI 2.0's 16 bits. "NaN" is
-                    // the quietest (MIDI 1.0's 1), as in the C# app.
-                    let velocity = if vel > 1.0 {
-                        velocity::from_7(vel.round_ties_even().min(127.0) as u8)
-                    } else {
-                        velocity::from_unit(vel)
-                    };
+                    let velocity = velocity_of(num(attr(ev, "velocity")));
                     notes.push(NoteEvent {
                         start: (beats(start) * MIDI_PPQ as f64).round_ties_even() as i64,
                         length: ((beats(length) * MIDI_PPQ as f64).round_ties_even() as i64).max(1),
@@ -406,15 +400,54 @@ fn num(s: &str) -> Option<f64> {
     t.parse().ok()
 }
 
+/// A velocity as Studio One saves it: 0 to 1 in newer songs, kept in MIDI 2.0's 16 bits (rule 22), or MIDI 1.0's 0 to
+/// 127 in older ones. "NaN" is the quietest (MIDI 1.0's 1), as in the C# app. The song's MIDI and its arrangement
+/// preview both read it here, so they agree.
+pub(crate) fn velocity_of(v: Option<f64>) -> u16 {
+    match v.unwrap_or(0.8) {
+        v if v.is_nan() => velocity::from_7(1),
+        v if v > 1.0 => velocity::from_7(v.round_ties_even().min(127.0) as u8),
+        v => velocity::from_unit(v),
+    }
+}
+
+/// The song's own tempo in song.xml, in beats per minute, for when the metainfo has none: its first TempoMapSegment
+/// (Studio One 6.5 on), whose tempo is seconds per beat as the arrangement reader reads it (0.4615 is 130 BPM), else
+/// the first `tempo` any other element gives, as the C# app took it.
+fn song_tempo(song: Node<'_, '_>) -> Option<f64> {
+    let segment = |e: &Node<'_, '_>| e.tag_name().name() == "TempoMapSegment";
+    elements(song)
+        .filter(segment)
+        .filter_map(|e| num(attr(e, "tempo")))
+        .find_map(|t| match t {
+            t if t > 0.05 && t < 6.0 => Some(60.0 / t),
+            t if (10.0..=999.0).contains(&t) => Some(t),
+            _ => None,
+        })
+        .or_else(|| elements(song).filter(|e| !segment(e)).find_map(|e| num(attr(e, "tempo"))))
+}
+
 /// A media pool url as a path: `file:///C:/Samples/Kick%20A.wav` is `C:\Samples\Kick A.wav`, `file:///Users/...` is
-/// `/Users/...`.
+/// `/Users/...`, and a network share's `file://NAS/Samples/Kick.wav` (or `file:////NAS/...`) is
+/// `\\NAS\Samples\Kick.wav`.
 fn url_to_path(url: &str) -> String {
     let Some(rest) = url.get(..5).filter(|s| s.eq_ignore_ascii_case("file:")).and(url.get(5..)) else {
         return unescape(url);
     };
-    let p = unescape(rest.trim_start_matches('/'));
+    let mut after = rest.trim_start_matches('/');
+    let mut slashes = rest.len() - after.len();
+    // `file://localhost/...` is this computer, as `file:///...` is.
+    if slashes == 2
+        && let Some(local) = after.get(..10).filter(|h| h.eq_ignore_ascii_case("localhost/")).and(after.get(9..))
+    {
+        after = local.trim_start_matches('/');
+        slashes = 3;
+    }
+    let p = unescape(after);
     if matches!(p.as_bytes(), [d, b':', b'/', ..] if d.is_ascii_alphabetic()) {
         p.replace('/', "\\")
+    } else if slashes != 1 && slashes != 3 && !p.is_empty() {
+        format!("\\\\{}", p.replace('/', "\\"))
     } else {
         format!("/{p}")
     }
@@ -467,9 +500,24 @@ mod tests {
         assert_eq!(url_to_path("file:///C:/Users/Sol/Samples/Vox%20Chop.wav"), r"C:\Users\Sol\Samples\Vox Chop.wav");
         assert_eq!(url_to_path("FILE:///Users/sol/Kick.wav"), "/Users/sol/Kick.wav");
         assert_eq!(url_to_path("Samples/Caf%C3%A9.wav"), "Samples/Café.wav");
+        // A network share keeps its server.
+        assert_eq!(url_to_path("file://NAS/Samples/Kick%20A.wav"), r"\\NAS\Samples\Kick A.wav");
+        assert_eq!(url_to_path("file:////NAS/Samples/Kick.wav"), r"\\NAS\Samples\Kick.wav");
+        assert_eq!(url_to_path("file://///NAS/Samples/Kick.wav"), r"\\NAS\Samples\Kick.wav");
+        assert_eq!(url_to_path("file://localhost/C:/Samples/Kick.wav"), r"C:\Samples\Kick.wav");
+        assert_eq!(url_to_path("file://localhost/Users/sol/Kick.wav"), "/Users/sol/Kick.wav");
         // An escape that isn't a whole letter stays as written.
         assert_eq!(unescape("a%FFb%2"), "a%FFb%2");
         assert_eq!(unescape("%e2%82%ac and %41"), "€ and A");
+    }
+
+    #[test]
+    fn a_tempo_map_segment_keeps_seconds_per_beat() {
+        let tempo = |xml: &str| song_tempo(parse(xml).expect("XML").root_element());
+        assert_eq!(tempo(r#"<Song><Other tempo="0.46"/><TempoMapSegment tempo="0.5"/></Song>"#), Some(120.0));
+        assert_eq!(tempo(r#"<Song><TempoMapSegment tempo="92"/></Song>"#), Some(92.0), "a BPM there too");
+        assert_eq!(tempo(r#"<Song><TempoMapSegment tempo="0"/><Other tempo="95"/></Song>"#), Some(95.0));
+        assert_eq!(tempo("<Song/>"), None);
     }
 
     #[test]

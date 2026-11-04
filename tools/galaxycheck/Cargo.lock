@@ -300,9 +300,9 @@ dependencies = [
 
 [[package]]
 name = "async-executor"
-version = "1.14.0"
+version = "1.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c96bf972d85afc50bf5ab8fe2d54d1586b4e0b46c97c50a0c9e71e2f7bcd812a"
+checksum = "f426a31126c735126297bc5ea7a521263c9faff4f63ca415267ee625651c4f37"
 dependencies = [
  "async-task",
  "concurrent-queue",
@@ -1217,8 +1217,6 @@ dependencies = [
 [[package]]
 name = "femtovg"
 version = "0.27.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31eebf3ab1b76359ccd5f850c07a7c6b2722c64d9127c40e02358e83f3ff9b1a"
 dependencies = [
  "bitflags 2.13.2",
  "bytemuck",
@@ -2895,8 +2893,12 @@ dependencies = [
  "chrono",
  "mo-backup",
  "mo-convert",
+ "mo-dawlink",
  "mo-formats",
+ "mo-harmony",
  "mo-library",
+ "mo-midi",
+ "mo-presets",
  "mo-sounds",
  "mo-space",
  "rayon",
@@ -2923,6 +2925,7 @@ dependencies = [
  "mo-space",
  "rayon",
  "sha2",
+ "winapi-util",
  "zip",
 ]
 
@@ -2939,21 +2942,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-dawlink"
+version = "0.1.0"
+dependencies = [
+ "mo-formats",
+ "serde_json",
+ "zip",
+]
+
+[[package]]
 name = "mo-formats"
 version = "0.1.0"
 dependencies = [
  "chrono",
  "flate2",
+ "indexmap",
  "regex",
  "roxmltree",
  "zip",
 ]
 
 [[package]]
+name = "mo-harmony"
+version = "0.1.0"
+
+[[package]]
 name = "mo-library"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "known-folders",
  "mo-formats",
  "notify",
  "rayon",
@@ -2965,10 +2983,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-midi"
+version = "0.1.0"
+dependencies = [
+ "mo-formats",
+ "mo-harmony",
+ "mo-library",
+ "rayon",
+ "regex",
+ "rusqlite",
+ "sha2",
+]
+
+[[package]]
+name = "mo-presets"
+version = "0.1.0"
+dependencies = [
+ "flate2",
+ "mo-formats",
+ "rayon",
+ "rusqlite",
+ "sha2",
+ "zip",
+]
+
+[[package]]
 name = "mo-sounds"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "half",
  "mo-audio",
  "mo-formats",
  "mo-library",
@@ -2998,6 +3042,7 @@ dependencies = [
  "sysinfo",
  "trash",
  "windows-registry",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3907,9 +3952,9 @@ checksum = "3d595e54a326bc53c1c197b32d295e14b169e3cfeaa8dc82b529f947fba6bcf5"
 
 [[package]]
 name = "pulldown-cmark"
-version = "0.13.5"
+version = "0.13.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "278e9268c93b9e498a2da46c34d90ba93a3255eb99009646398f34bc73ab36eb"
+checksum = "3db2be46835f013dd3f4fa7f5f7402c537787b54ebb6fe2b94bbdd7e2669bb7b"
 dependencies = [
  "bitflags 2.13.2",
  "memchr",

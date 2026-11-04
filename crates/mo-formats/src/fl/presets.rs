@@ -40,9 +40,13 @@ pub(super) fn wrapper_preset(f: &BTreeMap<u32, &[u8]>, state: &[u8], name: &str,
                 ..PresetBlob::new(name, plugin, ".fxp", fxp::wrap_params(&values, shown, id))
             };
         }
-        if let Some(c) = start.checked_add(length as usize).and_then(|end| state.get(start..end)) {
-            chunk = c;
-        }
+        // A length that runs past the state (an odd plugin, or a damaged save) still leaves FL's header out: the
+        // plugin's chunk is what follows it, as far as it goes.
+        chunk = start
+            .checked_add(length as usize)
+            .and_then(|end| state.get(start..end))
+            .or_else(|| state.get(start..))
+            .unwrap_or_default();
     }
     PresetBlob { program: selected, ..PresetBlob::new(name, plugin, ".fxp", fxp::wrap_chunk(chunk, plugin, id)) }
 }

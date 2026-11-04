@@ -7,6 +7,7 @@
 //!
 //! What's here so far:
 //! - [`SoundsDb`]: the database, read-only.
+//! - [`compact`]: the Rust app's own compact copy of it (`sounds-rust.db`), made and kept up to date from it.
 //! - [`SoundAnalysis`]: what the C# analyser stored for each sound (length, level, pitch, key, chords, waveform…).
 //! - [`classify`]: the sound type classifier, learned from your own library (reads the C# app's saved model).
 //! - [`index`]: sounds that sound alike ("Sounds like this").
@@ -19,6 +20,7 @@
 pub mod analyse;
 mod analysis;
 pub mod classify;
+pub mod compact;
 mod db;
 mod dotnet_random;
 pub mod duplicates;
@@ -34,13 +36,13 @@ pub mod types;
 pub mod usage;
 
 pub use analysis::{ChordSpan, SoundAnalysis};
-pub use db::{KnownSound, SoundMatch, SoundsDb, SoundsError, StarPoint, TagCount};
+pub use db::{Everything, KnownSound, SoundMatch, SoundsDb, SoundsError, StarPoint, TagCount};
 
 use chrono::NaiveDateTime;
 pub(crate) use mo_formats::paths::file_name;
 
 /// One sample in your sound library, as the list shows it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Sound {
     pub id: i64,
     pub path: String,
