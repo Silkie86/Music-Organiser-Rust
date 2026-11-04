@@ -5,6 +5,7 @@
 //! (rule 12). Nothing here changes a file, and the library is only read.
 
 use std::cell::RefCell;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,7 +19,7 @@ use mo_app::space::{self, Drive, Fill, Holds};
 use mo_app::space_bitwig::{self, BITWIG_COPIES, Copies};
 use mo_app::{backup, log, paths};
 use mo_space::app_files::{self, AppFilesPart};
-use mo_space::bitwig::LibraryIndex;
+use mo_space::bitwig::{self, LibraryIndex};
 use slint::{ComponentHandle, ModelRc, VecModel};
 
 use crate::{AppWindow, CardAction, CardPart, DriveCard, RoomLine, SpaceData};
@@ -26,6 +27,9 @@ use crate::{AppWindow, CardAction, CardPart, DriveCard, RoomLine, SpaceData};
 /// How long what the page shows stays fresh: shown again after this, it looks again (the C# app looked every five
 /// minutes).
 const FRESH: Duration = Duration::from_secs(5 * 60);
+
+/// How often a look for Bitwig copies tells the window how far it is, at most (rule 12).
+const PROGRESS_EVERY: Duration = Duration::from_millis(100);
 
 /// The buttons' ids, from the one shortcut list (rule 15): Measure again and Show in folder are the page's own
 /// (`mo_app::shortcuts::SPACE_ACTIONS`); the Recycle Bin is the app-wide action, so its button shows the same key.
@@ -52,12 +56,50 @@ struct BitwigAsk {
 }
 
 /// What a look brings back, a step at a time: the drives first (quick), then the app's files once they're measured;
-/// and from the look for Bitwig copies, how far it is, then what it found.
+/// and from the look for Bitwig copies, how far it is, then what it found. A look that crashed (the crash is logged)
+/// says so, so the page doesn't wait for it for ever.
 enum Step {
     Drives(u64, Vec<Drive>),
     AppFiles(u64, Vec<AppFilesPart>),
+    Crashed(u64),
     BitwigLooking(u64, (usize, usize)),
     Bitwig(u64, Copies),
+    BitwigCrashed(u64),
+}
+
+/// One of the page's looks: its low-priority thread (started the first time a look is asked for), how many looks were
+/// asked for, so an answer to an older one that arrives late is dropped, and the stop of the one still on.
+struct Looks<J: Send + 'static> {
+    worker: Option<Newest<J>>,
+    asked: u64,
+    stop: Arc<AtomicBool>,
+}
+
+impl<J: Send + 'static> Default for Looks<J> {
+    fn default() -> Self {
+        Looks { worker: None, asked: 0, stop: Arc::default() }
+    }
+}
+
+impl<J: Send + 'static> Looks<J> {
+    /// A new look's number and stop. The one still on stops: the newest wins (rule 12).
+    fn next(&mut self) -> (u64, Arc<AtomicBool>) {
+        self.stop.store(true, Ordering::Relaxed);
+        self.stop = Arc::new(AtomicBool::new(false));
+        self.asked += 1;
+        (self.asked, self.stop.clone())
+    }
+
+    /// Gives `job` to the thread, which is started called `name`, doing `work`, the first time.
+    fn ask(&mut self, name: &str, work: impl FnMut(J) + Send + 'static, job: J) -> std::io::Result<()> {
+        if self.worker.is_none() {
+            self.worker = Some(Newest::start(name, work)?);
+        }
+        if let Some(worker) = &self.worker {
+            worker.ask(job);
+        }
+        Ok(())
+    }
 }
 
 #[derive(Default)]
@@ -66,36 +108,25 @@ struct Page {
     /// Set once the page is wired; it looks at nothing before.
     feed: Option<Feed>,
     shortcuts: Shortcuts,
-    worker: Option<Newest<Ask>>,
+    /// The look at the drives and the app's files.
+    look: Looks<Ask>,
     /// When the newest look was asked for: none before the page first shows.
     looked: Option<Instant>,
-    /// Counts the looks, so an answer to an older one that arrives late is dropped.
-    asked: u64,
-    /// Stops the look still measuring when a newer one is asked for.
-    stop: Arc<AtomicBool>,
     /// Whether a look is still measuring the app's files: Measure again waits for it.
     measuring: bool,
     drives: Vec<Drive>,
     /// The app's own files, once measured. A new look keeps the last sizes on show until its own are in.
     parts: Option<Vec<AppFilesPart>>,
-    /// The look for Bitwig copies, as the look at the drives above: its thread, how many were asked for, and its stop.
-    bitwig_worker: Option<Newest<BitwigAsk>>,
-    bitwig_asked: u64,
-    bitwig_stop: Arc<AtomicBool>,
+    /// The look for Bitwig copies. Measure again doesn't wait for it: it starts it again, and as every fingerprint
+    /// it read is kept, the new one goes quickly over what the last one read.
+    bitwig_look: Looks<BitwigAsk>,
     /// What the last look for Bitwig copies found; it stays on show while the next one looks.
     bitwig: Option<Copies>,
     /// While a look for Bitwig copies is on: the project folders looked through, of how many (0 while they're still
-    /// being found). Measure again waits for it too.
+    /// being found).
     bitwig_looking: Option<(usize, usize)>,
     /// The picked line's id, or "" when none is.
     picked: String,
-}
-
-impl Page {
-    /// Whether a look is still on, so Measure again waits.
-    fn busy(&self) -> bool {
-        self.measuring || self.bitwig_looking.is_some()
-    }
 }
 
 thread_local! {
@@ -157,12 +188,12 @@ pub fn shown(app: &AppWindow) {
 /// Runs one of the page's own shortcuts ([`mo_app::shortcuts::SPACE_ACTIONS`]). Returns whether it did anything,
 /// so an unused key goes on.
 pub fn run_action(app: &AppWindow, id: &str) -> bool {
-    let (busy, picked) = PAGE.with(|p| {
+    let (measuring, picked) = PAGE.with(|p| {
         let p = p.borrow();
-        (p.busy(), p.picked.clone())
+        (p.measuring, p.picked.clone())
     });
     match id {
-        MEASURE if !busy => chosen(app, MEASURE),
+        MEASURE if !measuring => chosen(app, MEASURE),
         REVEAL if picked == space::APP_FILES => chosen(app, REVEAL),
         _ => return false,
     }
@@ -184,7 +215,7 @@ fn chosen(app: &AppWindow, id: &str) {
 }
 
 /// The buttons with their words, each with its tooltip and key from the shortcut list (rule 15). Measure again
-/// waits while a look is on.
+/// waits while the drives and the app's files are being measured.
 fn actions(p: &Page, buttons: &[(&str, &str)]) -> ModelRc<CardAction> {
     let actions: Vec<CardAction> = buttons
         .iter()
@@ -193,7 +224,7 @@ fn actions(p: &Page, buttons: &[(&str, &str)]) -> ModelRc<CardAction> {
             tip: what_of(id).into(),
             key: p.shortcuts.key_of(id).into(),
             id: id.into(),
-            enabled: !(id == MEASURE && p.busy()),
+            enabled: !(id == MEASURE && p.measuring),
         })
         .collect();
     ModelRc::new(VecModel::from(actions))
@@ -204,24 +235,20 @@ fn actions(p: &Page, buttons: &[(&str, &str)]) -> ModelRc<CardAction> {
 fn look_again(app: &AppWindow) {
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        p.stop.store(true, Ordering::Relaxed);
-        p.stop = Arc::new(AtomicBool::new(false));
-        p.asked += 1;
+        let (id, stop) = p.look.next();
         p.looked = Some(Instant::now());
         p.measuring = true;
-        Ask { id: p.asked, library: p.library.clone(), app_folder: paths::data_dir(), stop: p.stop.clone() }
+        Ask { id, library: p.library.clone(), app_folder: paths::data_dir(), stop }
     });
     let weak = app.as_weak();
-    let started = PAGE.with(|p| {
-        let mut p = p.borrow_mut();
-        if p.worker.is_none() {
-            p.worker = Some(Newest::start("Space", move |ask: Ask| look(ask, &weak))?);
+    // A crash in a look (logged as one) leaves the thread for the next look, and Measure again for trying again.
+    let work = move |ask: Ask| {
+        let id = ask.id;
+        if catch_unwind(AssertUnwindSafe(|| look(ask, &weak))).is_err() {
+            arrive(&weak, Step::Crashed(id));
         }
-        if let Some(worker) = &p.worker {
-            worker.ask(ask);
-        }
-        Ok::<(), std::io::Error>(())
-    });
+    };
+    let started = PAGE.with(|p| p.borrow_mut().look.ask("Space", work, ask));
     if let Err(e) = started {
         log::error("Space", &format!("Couldn't start looking at the drives: {e}"));
         // Measure again can try again, and so can the page the next time it shows.
@@ -254,27 +281,24 @@ fn look_for_copies(app: &AppWindow) {
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let feed = p.feed.clone()?;
-        p.bitwig_stop.store(true, Ordering::Relaxed);
-        p.bitwig_stop = Arc::new(AtomicBool::new(false));
-        p.bitwig_asked += 1;
+        let (id, stop) = p.bitwig_look.next();
         p.bitwig_looking = Some((0, 0));
-        Some(BitwigAsk { id: p.bitwig_asked, library: p.library.clone(), stop: p.bitwig_stop.clone(), feed })
+        Some(BitwigAsk { id, library: p.library.clone(), stop, feed })
     });
     let Some(ask) = ask else { return };
     let weak = app.as_weak();
-    let started = PAGE.with(|p| {
-        let mut p = p.borrow_mut();
-        if p.bitwig_worker.is_none() {
-            // The Library as the last look read it, kept on the thread so a file isn't read again while it's unchanged.
-            let mut index = None;
-            let work = move |ask: BitwigAsk| look_for_copies_now(ask, &mut index, &weak);
-            p.bitwig_worker = Some(Newest::start("Space Bitwig", work)?);
+    // The Library as the last look read it, kept on the thread so a file isn't read again while it's unchanged. A
+    // crash in a look (logged as one) leaves the thread for the next look; the Library is read again then, in case
+    // the crash came from what was kept.
+    let mut index = None;
+    let work = move |ask: BitwigAsk| {
+        let id = ask.id;
+        if catch_unwind(AssertUnwindSafe(|| look_for_copies_now(ask, &mut index, &weak))).is_err() {
+            index = None;
+            arrive(&weak, Step::BitwigCrashed(id));
         }
-        if let Some(worker) = &p.bitwig_worker {
-            worker.ask(ask);
-        }
-        Ok::<(), std::io::Error>(())
-    });
+    };
+    let started = PAGE.with(|p| p.borrow_mut().bitwig_look.ask("Space Bitwig", work, ask));
     if let Err(e) = started {
         log::error("Space", &format!("Couldn't start looking for Bitwig copies: {e}"));
         // Measure again can try again, and so can the page the next time it shows.
@@ -287,15 +311,20 @@ fn look_for_copies(app: &AppWindow) {
 /// project's copies, with an activity card saying how far it is.
 fn look_for_copies_now(ask: BitwigAsk, index: &mut Option<LibraryIndex>, weak: &slint::Weak<AppWindow>) {
     let roots: Vec<PathBuf> = project_roots(&ask.library).into_iter().map(PathBuf::from).collect();
-    let documents = space_bitwig::documents();
+    let documents = bitwig::documents();
     let job = ask.feed.start(space_bitwig::LOOKING, "");
+    // How far it is reaches the window at most every PROGRESS_EVERY, and always at the start and the end.
+    let mut told: Option<Instant> = None;
     // Spread over the low-priority pool's threads (rule 21).
     let found = background::on_pool(|| {
         space_bitwig::look(&roots, documents.as_deref(), index, &ask.stop, |done, of| {
             if of > 0 {
-                job.progress(done as f32 / of as f32, Some(&format!("{done} of {of} projects")));
+                job.progress(done as f32 / of as f32, Some(&space_bitwig::progress_words(done, of)));
             }
-            arrive(weak, Step::BitwigLooking(ask.id, (done, of)));
+            if done == 0 || done == of || told.is_none_or(|at| at.elapsed() >= PROGRESS_EVERY) {
+                told = Some(Instant::now());
+                arrive(weak, Step::BitwigLooking(ask.id, (done, of)));
+            }
         })
     });
     match found {
@@ -361,23 +390,22 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
         let (all, wins) = PAGE.with(|p| {
             let mut p = p.borrow_mut();
             match step {
-                Step::Drives(id, drives) if id == p.asked => p.drives = drives,
-                Step::AppFiles(id, parts) if id == p.asked => {
+                Step::Drives(id, drives) if id == p.look.asked => p.drives = drives,
+                Step::AppFiles(id, parts) if id == p.look.asked => {
                     p.parts = Some(parts);
                     p.measuring = false;
                 }
-                Step::BitwigLooking(id, at) if id == p.bitwig_asked => {
+                Step::Crashed(id) if id == p.look.asked => p.measuring = false,
+                Step::BitwigLooking(id, at) if id == p.bitwig_look.asked => {
                     p.bitwig_looking = Some(at);
                     return (false, true);
                 }
-                Step::Bitwig(id, copies) if id == p.bitwig_asked => {
-                    // A card whose line has gone (none found this time) closes.
-                    if copies.projects.is_empty() && p.picked == BITWIG_COPIES {
-                        p.picked.clear();
-                    }
+                Step::Bitwig(id, copies) if id == p.bitwig_look.asked => {
                     p.bitwig = Some(copies);
                     p.bitwig_looking = None;
                 }
+                // Shown again, the page looks again.
+                Step::BitwigCrashed(id) if id == p.bitwig_look.asked => p.bitwig_looking = None,
                 _ => return (false, false),
             }
             (true, false)
@@ -427,13 +455,17 @@ pub fn show(app: &AppWindow) {
     show_wins(app);
 }
 
-/// Shows Biggest wins first and the picked line's card: all that changes while a look for Bitwig copies goes on.
+/// Shows Biggest wins first and the picked line's card: all that changes while a look for Bitwig copies goes on. A
+/// picked line that's gone from the list (no copies found this time) has its card closed.
 fn show_wins(app: &AppWindow) {
     let data = app.global::<SpaceData>();
     PAGE.with(|p| {
-        let p = p.borrow();
-        let wins: Vec<RoomLine> =
-            space_bitwig::line(p.bitwig.as_ref(), p.bitwig_looking).into_iter().map(room_line).collect();
+        let mut p = p.borrow_mut();
+        let line = space_bitwig::line(p.bitwig.as_ref(), p.bitwig_looking);
+        if line.is_none() && p.picked == BITWIG_COPIES {
+            p.picked.clear();
+        }
+        let wins: Vec<RoomLine> = line.into_iter().map(room_line).collect();
         data.set_wins(ModelRc::new(VecModel::from(wins)));
         data.set_wins_note(space_bitwig::wins_note(p.bitwig.as_ref()).into());
     });

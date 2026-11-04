@@ -260,6 +260,14 @@ fn the_project_folders_are_the_ones_with_a_bitwig_project_and_its_copies() {
     folder_link(&moved, &linked);
     let found = project_folders(std::slice::from_ref(&linked), &stop).unwrap();
     assert_eq!(found.iter().map(|p| key(&s(p))).collect::<Vec<_>>(), [key(&s(&linked.join("Song")))]);
+    // A folder reached two ways is listed once: through the link and where it really is, and through roots inside
+    // each other.
+    let twice = [moved.clone(), linked.clone(), projects.clone(), projects.join("2024")];
+    let found: Vec<String> = project_folders(&twice, &stop).unwrap().iter().map(|p| key(&s(p))).collect();
+    let mut wanted =
+        [moved.join("Song"), projects.join("2024/Garage"), projects.join("Night Drive")].map(|p| key(&s(&p))).to_vec();
+    wanted.sort();
+    assert_eq!(found, wanted);
 
     // A stop stops it.
     assert!(project_folders(&roots, &AtomicBool::new(true)).is_err());

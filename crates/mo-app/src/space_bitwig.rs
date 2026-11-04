@@ -120,7 +120,7 @@ pub fn look(
 
 /// Bitwig's Library folders for these project folders: the Library folder in each "Bitwig Studio" folder above one
 /// (Solomon keeps his Bitwig Studio folder on K:), and the one in `documents`' Bitwig Studio folder, where Bitwig
-/// keeps it unless told otherwise. Only the ones that are there, each once.
+/// keeps it unless told otherwise (`mo_space::bitwig::documents`). Only the ones that are there, each once.
 pub fn library_folders(projects: &[PathBuf], documents: Option<&Path>) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();
     let mut add = |studio: &Path| {
@@ -140,13 +140,6 @@ pub fn library_folders(projects: &[PathBuf], documents: Option<&Path>) -> Vec<Pa
     found
 }
 
-/// Where Bitwig keeps its Bitwig Studio folder unless told otherwise: Documents in your home folder (on Linux, the
-/// home folder itself).
-pub fn documents() -> Option<PathBuf> {
-    let home = crate::bitwig_convert::home()?;
-    Some(if cfg!(target_os = "linux") { home } else { home.join("Documents") })
-}
-
 /// "1 copy", "1,204 copies".
 fn copies_words(n: usize) -> String {
     if n == 1 { "1 copy".to_owned() } else { format!("{} copies", thousands(n)) }
@@ -159,6 +152,11 @@ pub fn looking_words((done, of): (usize, usize)) -> String {
     } else {
         format!("Looking through your Bitwig projects: {} of {}", thousands(done), thousands(of))
     }
+}
+
+/// The activity card's line while a look goes on: "1,204 of 5,000 projects".
+pub fn progress_words(done: usize, of: usize) -> String {
+    format!("{} of {}", thousands(done), plural(of, "project"))
 }
 
 /// The Bitwig copies line under Biggest wins first, once a look has found copies; or, while the first look is on
@@ -347,7 +345,9 @@ mod tests {
     }
 
     #[test]
-    fn the_activity_card_says_what_was_found() {
+    fn the_activity_card_says_how_far_it_is_and_what_was_found() {
+        assert_eq!(progress_words(1204, 5000), "1,204 of 5,000 projects");
+        assert_eq!(progress_words(0, 1), "0 of 1 project");
         assert_eq!(found_words(&sample()), "272 MB in 2 projects");
         assert_eq!(found_words(&Copies::default()), "None found");
     }

@@ -145,8 +145,10 @@ impl LibraryIndex {
 
 /// The project folders under `roots` that hold a Bitwig project and a `multi-samples` folder, each once, in the order
 /// of their paths: the folders [`LibraryIndex::copies_in`] looks in. A root moved to another drive with a link in its
-/// place is read where it really is, and its folders keep the paths you know, as for the Library. Folders in an
-/// "… (old copy)" folder that a move left behind are left out: that goes as a whole. Call it off the window's thread.
+/// place is read where it really is, and its folders keep the paths you know, as for the Library. A folder reached two
+/// ways (roots inside each other, spelled in another case, or one through a link) is listed once, so its copies count
+/// once. Folders in an "… (old copy)" folder that a move left behind are left out: that goes as a whole. Call it off
+/// the window's thread.
 pub fn project_folders(roots: &[PathBuf], stop: &AtomicBool) -> Result<Vec<PathBuf>, Stopped> {
     let mut found = Vec::new();
     for root in roots {
@@ -163,8 +165,27 @@ pub fn project_folders(roots: &[PathBuf], stop: &AtomicBool) -> Result<Vec<PathB
         })?);
     }
     found.sort_unstable();
-    found.dedup();
+    let mut seen = HashSet::new();
+    found.retain(|folder| {
+        let shown = text(folder);
+        seen.insert(key(&real_path(&shown).unwrap_or(shown)))
+    });
     Ok(found)
+}
+
+/// Documents, where Bitwig keeps its Bitwig Studio folder unless told otherwise: on Windows where Windows says it is
+/// (it may have been moved, to OneDrive say), on a Mac the one in your home folder, and on Linux the home folder
+/// itself.
+pub fn documents() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        known_folders::get_known_folder_path(known_folders::KnownFolder::Documents)
+    }
+    #[cfg(not(windows))]
+    {
+        let home = crate::home_folder()?;
+        Some(if cfg!(target_os = "macos") { home.join("Documents") } else { home })
+    }
 }
 
 /// Whether a folder is in (or is) a folder a move left behind as "… (old copy)".
