@@ -109,5 +109,8 @@ pub use words::Words;
 
 /// Bumped whenever the reader can read the same notes differently (new weights, a new rule for hearing, decoding,
 /// naming or grading), so the chords the app keeps (the MIDI page's index) know to be read again. Version 1 is the
-/// first reader, on hand-set weights; the fit's first weights will be version 2.
-pub const CHORD_READER_VERSION: u32 = 1;
+/// first reader, on hand-set weights; version 2 names chords as Solomon chose on 2026-11-03 (no slash, altered notes
+/// with no brackets, no 7alt: [`crate::chord`]); version 3 has the whole-app review's fixes of 2026-11-03 (a note
+/// played a little early is held as long as it was played, a bass let go a little late isn't the bass a chord's root
+/// moves from, and a 9 carried in costs nothing for passing by); the fit's first weights will be the next.
+pub const CHORD_READER_VERSION: u32 = 3;

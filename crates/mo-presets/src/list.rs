@@ -207,6 +207,21 @@ pub fn from_bitwig(project: &Project, limits: &Thresholds) -> Vec<SongPreset> {
     from_bitwig_parts(project.presets(), &project.midi(), limits)
 }
 
+/// Said about a Bitwig project whose body didn't decode, so its notes couldn't be read.
+pub const NOTES_UNREAD: &str =
+    "This project's tracks couldn't all be read, so its notes are unknown: each sound's part is guessed from its name.";
+
+/// Sounds from a project whose notes couldn't be read: none "plays no notes", and each guess says why it had none.
+pub fn notes_unread(mut sounds: Vec<SongPreset>) -> Vec<SongPreset> {
+    for s in &mut sounds {
+        s.plays_nothing = false;
+        if let Some(rest) = s.guess.reason.strip_prefix("Plays no notes") {
+            s.guess.reason = format!("Its notes couldn't be read{rest}");
+        }
+    }
+    sounds
+}
+
 /// [`from_bitwig`], from what the reader took out.
 pub fn from_bitwig_parts(presets: Vec<PresetBlob>, clips: &[MidiClip], limits: &Thresholds) -> Vec<SongPreset> {
     // Each track's notes, its clips laid one after another so they don't overlap, and where the last one ends.
@@ -223,15 +238,26 @@ pub fn from_bitwig_parts(presets: Vec<PresetBlob>, clips: &[MidiClip], limits: &
                 }
             };
             let (Some((_, all, ppq)), Some(end)) = (tracks.get_mut(at), ends.get_mut(at)) else { continue };
-            let scale =
-                |t: i64| if clip.ppq == *ppq || clip.ppq == 0 { t } else { t * i64::from(*ppq) / i64::from(clip.ppq) };
+            // In 128 bits, then held within 64: a damaged project's note can last i64::MAX ticks, and later ticks
+            // must still come out later.
+            let scale = |t: i64| {
+                if clip.ppq == *ppq || clip.ppq == 0 {
+                    t
+                } else {
+                    let scaled = i128::from(t) * i128::from(*ppq) / i128::from(clip.ppq);
+                    i64::try_from(scaled).unwrap_or(if scaled < 0 { i64::MIN } else { i64::MAX })
+                }
+            };
             let offset = *end;
             all.extend(notes.iter().map(|n| NoteEvent {
-                start: offset + scale(n.start),
+                start: offset.saturating_add(scale(n.start)),
                 length: scale(n.length),
                 ..*n
             }));
-            *end = notes.iter().map(|n| offset + scale(n.start) + scale(n.length).max(0)).fold(*end, i64::max);
+            *end = notes
+                .iter()
+                .map(|n| offset.saturating_add(scale(n.start)).saturating_add(scale(n.length).max(0)))
+                .fold(*end, i64::max);
         }
     }
     // Longest names first, so "Bass 2" isn't taken for "Bass".

@@ -431,11 +431,14 @@ pub fn runs<'a>(saves: impl IntoIterator<Item = &'a Save>, gap_months: u32) -> V
 
 /// Whether `later` is quite different from `earlier`, not just saved again: plugins added or removed (a newer
 /// version of the same one doesn't count), channels added or removed, the number of notes changed by more than a
-/// fifth, or more than 8 bars longer or shorter. What isn't known about either save is left out.
+/// fifth, or more than 8 bars longer or shorter. What isn't known about either save is left out: a save that couldn't
+/// be read has no plugin list to compare (the C# app compared it as an empty one, so a damaged last save made a
+/// "rework").
 pub fn is_reworked(earlier: &Save, later: &Save) -> bool {
+    let unread = earlier.error.is_some() || later.error.is_some();
     let before: HashSet<String> = earlier.plugin_names.iter().map(|p| plugin_family(p)).collect();
     let after: HashSet<String> = later.plugin_names.iter().map(|p| plugin_family(p)).collect();
-    if before != after {
+    if !unread && before != after {
         return true;
     }
     if earlier.track_count >= 0 && later.track_count >= 0 && earlier.track_count != later.track_count {

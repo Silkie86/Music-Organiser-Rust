@@ -596,3 +596,43 @@ fn a_part_that_cant_be_read_keeps_the_folder() {
 fn file_name(p: &str) -> &str {
     Path::new(p).file_name().unwrap().to_str().unwrap()
 }
+
+#[test]
+fn a_sounds_folder_found_only_by_the_makers_name_isnt_ticked() {
+    // Documents\Output holds your renders; Output's Arcade is installed and unused. It's listed for Arcade, but not
+    // ticked: only a folder named after the plugin, or one you added, is.
+    let dir = fixtures("mo-space-plugin-clean-maker");
+    let docs = dir.join("Documents");
+    write(&docs, "Output/Render 1.wav", 900);
+    write(&docs, "Arcade Library/Loop.wav", 500);
+    write(&docs, "Mine/Arcade bits.wav", 300);
+    let mut added = folder(&docs.join("Mine"), SpaceKind::Sounds, 300, &[]);
+    added.added = true;
+    let arcade = PluginSpace {
+        key: "arcade".into(),
+        name: "Arcade".into(),
+        vendor: "Output".into(),
+        folders: vec![
+            folder(&docs.join("Output"), SpaceKind::Sounds, 900, &[]),
+            folder(&docs.join("Arcade Library"), SpaceKind::Sounds, 500, &[]),
+            added,
+        ],
+    };
+    let all = vec![arcade.clone()];
+    let uses: HashMap<String, PluginUse> = [("arcade".to_owned(), PluginUse { projects: 0, unused: true })].into();
+    let sample_at = |_: &str| None;
+    let sample_named = |_: &str| false;
+    let names = |k: &str| k.to_owned();
+    let library = Library {
+        protected_roots: &[],
+        kept_folders: &[],
+        uses: &uses,
+        sample_at: &sample_at,
+        sample_named: &sample_named,
+        names: &names,
+    };
+    let card = lines(&arcade, &all, &library, &AtomicBool::new(false)).unwrap();
+    let said: Vec<(&str, bool, bool)> =
+        card.iter().map(|l| (file_name(&l.folder.path), l.stays.is_none(), l.ticked)).collect();
+    assert_eq!(said, [("Output", true, false), ("Arcade Library", true, true), ("Mine", true, true)]);
+}

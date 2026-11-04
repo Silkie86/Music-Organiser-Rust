@@ -273,7 +273,15 @@ fn an_fl_songs_sounds_get_their_channels_parts_and_effects_their_inserts() {
     // the same settings, so only the plugin and the notes tell them apart.
     assert_ne!(out[0].hash, out[2].hash, "another plugin");
     assert_ne!(out[1].hash, out[3].hash, "other notes");
-    assert_ne!(out[4].hash, out[6].hash, "the same effect on inserts fed by other notes");
+    // One effect with the same settings: told apart by the notes that feed its insert, the same when they're the same.
+    let delay = |insert| blob("Fruity Delay", "Fruity Delay", PluginKind::Effect, None, insert, true);
+    let delays = list::from_fl(
+        &song,
+        vec![delay("Insert 2 · Synths"), delay("Insert 3"), delay("Insert 2 · Synths")],
+        &Thresholds::default(),
+    );
+    assert_ne!(delays[0].hash, delays[1].hash, "the same effect on inserts fed by other notes");
+    assert_eq!(delays[0].hash, delays[2].hash, "the same effect fed by the same notes");
     let fixes = std::collections::HashMap::from([(out[2].hash.clone(), Role::Pad)]);
     list::apply_fixes(&mut out, &fixes);
     assert_eq!(
@@ -317,6 +325,26 @@ fn a_bitwig_tracks_presets_share_its_part() {
     assert_eq!(out[2].guess.role, Some(Role::Lead));
     // No clips: from its track's name.
     assert_eq!((out[3].guess.role, out[3].guess.basis, out[3].plays_nothing), (Some(Role::Pad), Basis::Name, false));
+}
+
+#[test]
+fn a_huge_bitwig_note_doesnt_lose_the_save() {
+    // A damaged project's note lasting i64::MAX ticks, then another clip laid after it.
+    let mut first = MidiClip { name: "Bass 1".into(), ppq: 480, ..MidiClip::default() };
+    first.track("Bass").push(note(i64::MAX - 10, i64::MAX, 36));
+    let mut second = MidiClip { name: "Bass 2".into(), ppq: 960, ..MidiClip::default() };
+    second.track("Bass").push(note(i64::MAX, 400, 36));
+    let presets = vec![PresetBlob::new("Bass - Deep", "Pigments", ".vstpreset", vec![1])];
+    let out = list::from_bitwig_parts(presets, &[first, second], &Thresholds::default());
+    assert_eq!(out.len(), 1);
+}
+
+#[test]
+fn a_bitwig_project_whose_notes_couldnt_be_read_says_so_on_each_sound() {
+    let presets = vec![PresetBlob::new("Keys - Pigments", "Pigments", ".vstpreset", vec![1])];
+    let out = list::notes_unread(list::from_bitwig_parts(presets, &[], &Thresholds::default()));
+    assert!(!out[0].plays_nothing);
+    assert!(out[0].guess.reason.starts_with("Its notes couldn't be read"), "{}", out[0].guess.reason);
 }
 
 #[test]

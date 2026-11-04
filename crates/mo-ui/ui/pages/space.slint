@@ -1,8 +1,9 @@
-// The Space page (phase 4), part 1: the drives your projects, samples, backup and the app's own files are on, how full
-// each is, and what the app's own files take. Agreed layout: the design canvas's Space board (2026-11-03): the drives
+// The Space page (phase 4): the drives your projects, samples, backup and the app's own files are on, how full each
+// is, what the app's own files take, and (part 2) Bitwig's copies of Library multisamples, with Fix for the saves you
+// tick. Agreed layout: the design canvas's Space board (2026-11-03): the drives
 // across the top, Biggest wins first, Also taking room, and the picked line's card beside them. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::space), mo-ui/src/space.rs fills it.
-import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, CardAction, CardActions } from "../studio.slint";
+import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, CardAction, CardActions, TickBox, LinkText } from "../studio.slint";
 
 // One drive across the top.
 export struct DriveCard {
@@ -29,17 +30,29 @@ export struct RoomLine {
     size: string,
 }
 
-// One part on the picked line's card: its name, what it holds and its size.
+// One part on the picked line's card: its name, what it holds and its size. On the Bitwig copies card a part can also
+// have a tick, a line saying how it's doing, and links to open it or show more; a save under its project is a step in.
 export struct CardPart {
     name: string,
     what: string,
     size: string,
+    under: bool,
+    can-tick: bool,
+    ticked: bool,
+    status: string,
+    // Shows `status` as a problem.
+    problem: bool,
+    // It has a fixed project to open in Bitwig.
+    can-open: bool,
+    // The words of its link that shows or hides more under it; "" for none.
+    more: string,
 }
 
 export global SpaceData {
     in property <string> summary;
     in property <[DriveCard]> drives;
-    // What Biggest wins first will list, while it lists nothing yet.
+    // What can be freed, biggest first; then what's still to come (and why a kind isn't listed when it isn't).
+    in property <[RoomLine]> wins;
     in property <string> wins-note;
     in property <[RoomLine]> also;
     // The buttons beside Biggest wins first: Measure again, Open Recycle Bin.
@@ -51,7 +64,11 @@ export global SpaceData {
     in property <string> card-big;
     in property <string> card-big-note;
     in property <string> card-lead;
+    // Whether the card's parts have ticks: each keeps room for its tick, so the names line up.
+    in property <bool> card-ticks;
     in property <[CardPart]> card-parts;
+    // What to know about the parts, above them with the buttons.
+    in property <string> card-note;
     in property <string> card-room;
     in property <string> card-warning;
     in property <[CardAction]> card-actions;
@@ -61,6 +78,10 @@ export global SpaceData {
     // A button on the page or the card (its id).
     callback chosen(string);
     callback panel-resized(length);
+    // A part on the card (its place in the list): its tick changed, its Open in Bitwig link, its link that shows more.
+    callback tick-part(int, bool);
+    callback open-part(int);
+    callback more-part(int);
 }
 
 // A drive: its name and room, a bar of how full it is, what of yours it holds, and why it needs room when it does.
@@ -123,7 +144,7 @@ component DriveView inherits Rectangle {
     }
 }
 
-// A line of Also taking room (and, once there are some, Biggest wins first): picked, it opens its card.
+// A line of Biggest wins first or Also taking room: picked, it opens its card.
 component RoomLineView inherits ListLine {
     in property <RoomLine> line;
     height: 56px;
@@ -195,26 +216,70 @@ component SpaceCard inherits SidePanel {
         font-size: Type.body;
         wrap: word-wrap;
     }
+    // What to know about the parts and what the buttons do, then the buttons, above the parts: a long list of parts
+    // can't push the main button out of sight.
+    if SpaceData.card-note != "": Text {
+        text: SpaceData.card-note;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+    }
+    CardActions {
+        actions: SpaceData.card-actions;
+        chosen(id) => { SpaceData.chosen(id); }
+    }
     if SpaceData.card-parts.length > 0: VerticalLayout {
-        spacing: Space.sm;
-        for part in SpaceData.card-parts: HorizontalLayout {
-            spacing: Space.md;
+        spacing: Space.md;
+        for part[i] in SpaceData.card-parts: HorizontalLayout {
+            spacing: Space.sm;
+            padding-left: part.under ? Space.xl : 0px;
+            // Room for a tick, ticked or not, so the names line up. Ticking re-lists the parts from mo-app.
+            if SpaceData.card-ticks: VerticalLayout {
+                alignment: start;
+                width: 26px;
+                if part.can-tick: TickBox {
+                    height: 20px;
+                    checked: part.ticked;
+                    changed checked => { SpaceData.tick-part(i, self.checked); }
+                }
+            }
             VerticalLayout {
                 spacing: Space.xs;
                 horizontal-stretch: 1;
                 Text {
                     text: part.name;
                     color: Theme.text;
-                    font-size: Type.body;
+                    font-size: part.under ? Type.meta : Type.body;
                     wrap: word-wrap;
                     min-width: 0px;
                 }
-                Text {
+                if part.what != "": Text {
                     text: part.what;
                     color: Theme.muted;
                     font-size: Type.meta;
                     wrap: word-wrap;
                     min-width: 0px;
+                }
+                if part.status != "": Text {
+                    text: part.status;
+                    color: part.problem ? Theme.warning : Theme.muted;
+                    font-size: Type.meta;
+                    wrap: word-wrap;
+                    min-width: 0px;
+                }
+                if part.can-open || part.more != "": HorizontalLayout {
+                    spacing: Space.md;
+                    alignment: start;
+                    if part.can-open: LinkText {
+                        text: "Open in Bitwig";
+                        font-size: Type.meta;
+                        clicked => { SpaceData.open-part(i); }
+                    }
+                    if part.more != "": LinkText {
+                        text: part.more;
+                        font-size: Type.meta;
+                        clicked => { SpaceData.more-part(i); }
+                    }
                 }
             }
             Text {
@@ -236,10 +301,6 @@ component SpaceCard inherits SidePanel {
         color: Theme.warning;
         font-size: Type.meta;
         wrap: word-wrap;
-    }
-    CardActions {
-        actions: SpaceData.card-actions;
-        chosen(id) => { SpaceData.chosen(id); }
     }
     // The room left over goes below everything, not between the parts.
     Rectangle {
@@ -289,10 +350,14 @@ export component SpacePage inherits Rectangle {
                         chosen(id) => { SpaceData.chosen(id); }
                     }
                 }
+                for line in SpaceData.wins: RoomLineView {
+                    line: line;
+                }
+                // Smaller once there are lines above it.
                 Well {
-                    min-height: 96px;
+                    min-height: SpaceData.wins.length > 0 ? 0px : 96px;
                     VerticalLayout {
-                        padding: Space.xl;
+                        padding: SpaceData.wins.length > 0 ? Space.lg : Space.xl;
                         alignment: center;
                         Text {
                             text: SpaceData.wins-note;

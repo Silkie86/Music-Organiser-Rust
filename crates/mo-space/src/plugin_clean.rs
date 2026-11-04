@@ -567,7 +567,17 @@ pub fn lines(
     let mut out = Vec::new();
     for f in folders {
         let (stays, look) = checker.check(f, &space.key, stop)?;
-        out.push(CleanLine { ticked: stays.is_none() && f.kind == SpaceKind::Sounds, folder: f.clone(), stays, look });
+        // Ticked at first only when it's surely the plugin's: named after it ("Arcade Library"), or one you added. A
+        // folder given to it only by its maker's name ("Documents\Output" for Output's Arcade) may hold your own
+        // renders: it's listed, not ticked.
+        let surely =
+            f.added || crate::plugin_space::name_matches(file_name(&f.path), &crate::plugins::family(&space.name));
+        out.push(CleanLine {
+            ticked: stays.is_none() && f.kind == SpaceKind::Sounds && surely,
+            folder: f.clone(),
+            stays,
+            look,
+        });
     }
     Ok(out)
 }

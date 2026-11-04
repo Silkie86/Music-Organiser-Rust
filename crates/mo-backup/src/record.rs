@@ -93,7 +93,7 @@ impl Record {
         }
         let folder = backup.join(FOLDER);
         fs::create_dir_all(&folder)?;
-        let part = folder.join(format!("{FILE}.mo-part"));
+        let part = folder.join(format!("{FILE}{}", crate::copy::PART));
         let mut lines: Vec<&Entry> = self.entries.values().collect();
         lines.sort_by(|a, b| a.path.cmp(&b.path));
         let mut out = io::BufWriter::new(fs::File::create(&part)?);

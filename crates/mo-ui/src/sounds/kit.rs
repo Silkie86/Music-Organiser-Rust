@@ -6,7 +6,7 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -509,19 +509,9 @@ fn send_to_bitwig(app: &AppWindow) {
 fn kits_folder(setting: Option<&str>) -> PathBuf {
     let root = match setting.filter(|f| !f.trim().is_empty()) {
         Some(f) => PathBuf::from(f),
-        None => documents().join("Music Organiser Exports"),
+        None => crate::files::documents().join("Music Organiser Exports"),
     };
     root.join("Kits")
-}
-
-/// The Documents folder, where Windows really keeps it (it may have moved, to OneDrive say).
-fn documents() -> PathBuf {
-    #[cfg(windows)]
-    if let Some(d) = known_folders::get_known_folder_path(known_folders::KnownFolder::Documents) {
-        return d;
-    }
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
-    home.map_or_else(|| Path::new(".").to_owned(), |h| h.join("Documents"))
 }
 
 /// The pads and choices as they are now; also when what's picked or playing changes.
@@ -602,6 +592,7 @@ fn pad_line(p: &Page, slot: &KitSlot) -> PadLine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn new_pads_get_names_no_pad_has() {

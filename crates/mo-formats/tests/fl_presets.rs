@@ -63,6 +63,30 @@ fn exports_vst2_as_fxp_with_the_plugin_id() {
 }
 
 #[test]
+fn a_vst2_chunk_length_past_the_state_still_leaves_fls_header_out() {
+    // FL's -8 header (the chunk flag, a length of 100, program 0), then only 3 bytes of the plugin's chunk.
+    let mut state = (-8i32).to_le_bytes().to_vec();
+    state.push(0x08);
+    state.extend(100u32.to_le_bytes());
+    state.extend(0u32.to_le_bytes());
+    state.extend([7, 8, 9]);
+    let wrapper =
+        Wrapper { kind: Some(0), four_cc: Some("Abcd"), ..Wrapper::new("Odd", r"C:\VST\Odd.dll", "", &state) };
+    let bytes = Flp::new()
+        .ascii(199, "21.2.2.3914")
+        .word(64, 0)
+        .byte(21, 2)
+        .text(201, "Fruity Wrapper")
+        .text(203, "Odd")
+        .data(213, &wrapper.build())
+        .build();
+    let presets = presets_of(&bytes);
+    let odd = presets.iter().find(|p| p.plugin == "Odd").expect("its state");
+    assert_eq!(be_i32(&odd.data, 56), 3, "the chunk as far as it goes");
+    assert_eq!(odd.data[odd.data.len() - 3..], [7, 8, 9]);
+}
+
+#[test]
 fn exports_parameter_plugins_as_parameter_presets() {
     let presets = presets_of(&fl_studio_25_project());
     let d = &presets.iter().find(|p| p.plugin == "Predator 2").expect("Predator's state").data;

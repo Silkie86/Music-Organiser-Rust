@@ -101,7 +101,8 @@ const HEAD: u64 = 64 * 1024;
 pub fn read(path: &Path) -> std::io::Result<Result<PresetFile, NotAPreset>> {
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     match FileFormat::of(&name) {
-        Some(FileFormat::BwPreset) => Ok(read_bytes(&std::fs::read(path)?, &name)),
+        // The file's bytes handed to the decoder as they are, not copied (rule 24).
+        Some(FileFormat::BwPreset) => Ok(read_bwpreset(std::fs::read(path)?, paths::stem(&name))),
         Some(FileFormat::VstPreset) => {
             let mut file = std::fs::File::open(path)?;
             let mut head = Vec::new();
@@ -117,7 +118,9 @@ pub fn read(path: &Path) -> std::io::Result<Result<PresetFile, NotAPreset>> {
                 let from = list.saturating_sub(info_room).max(HEAD);
                 file.seek(SeekFrom::Start(from))?;
                 let mut tail = Vec::new();
-                file.take(len - from).read_to_end(&mut tail)?;
+                // Up to the list's end: a damaged offset far inside a big file reads only what the list can be.
+                let to = list.saturating_add(8 + 64 * 20).min(len);
+                file.take(to.saturating_sub(from)).read_to_end(&mut tail)?;
                 if from == head.len() as u64 {
                     // Straight on from the first part: one piece, so a chunk across the join is read whole.
                     head.extend(tail);
@@ -313,7 +316,7 @@ pub(crate) const STATES: &str = "plugin-states/";
 
 /// A Bitwig preset: the device it loads (from its metadata, else its first named device), what it is, and for a
 /// plugin, the plugin's id from its settings file in the zip.
-fn read_bwpreset(raw: &[u8], stem: &str) -> Result<PresetFile, NotAPreset> {
+fn read_bwpreset(raw: impl bitwig::FileBytes, stem: &str) -> Result<PresetFile, NotAPreset> {
     let doc =
         bitwig::decode(raw).map_err(|_| NotAPreset("it doesn't start as a Bitwig file does (\"BtWg\")".into()))?;
     let mut file = PresetFile {

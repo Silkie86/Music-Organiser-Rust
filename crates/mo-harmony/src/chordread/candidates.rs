@@ -218,7 +218,7 @@ mod tests {
 
     #[test]
     fn a_triad_lets_in_its_own_chord() {
-        // C E G: C and C5 played on C; E G with C over them is an Em(b13); G with C is a Gsus4; and with no D, C E G
+        // C E G: C and C5 played on C; E G with C over them is an Emaddb13; G with C is a Gsus4; and with no D, C E G
         // are a D9sus4's 7th, 9th and 4th (a C triad over a D bass is one). The escape is the label with the most
         // notes of the rest: C7, whose own C E G sound (its B♭ doesn't; the scoring will see that). The list runs
         // from the lowest note up, by root and then by core.

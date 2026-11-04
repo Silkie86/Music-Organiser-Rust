@@ -78,6 +78,10 @@ pub(crate) fn sounds_in(
             Err(_) => Err(events::DAMAGED.to_owned()),
         },
         _ => match Project::open(raw) {
+            // A body that didn't decode has no notes to read: its sounds are guessed from their names, and it says so.
+            Ok(project) if project.doc.body_error.is_some() => {
+                Ok((list::notes_unread(list::from_bitwig(&project, limits)), Some(list::NOTES_UNREAD)))
+            }
             Ok(project) => Ok((list::from_bitwig(&project, limits), None)),
             Err(_) => Err("it isn't a Bitwig project that can be decoded".to_owned()),
         },

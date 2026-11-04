@@ -511,3 +511,17 @@ fn a_renamed_save_is_asked_about_when_its_plugins_channels_tempo_and_notes_match
         .collect();
     assert!(songs::doubts(&group(&template), &SongChoices::default(), false, 200).is_empty());
 }
+
+#[test]
+fn a_save_that_couldnt_be_read_isnt_judged_a_rework_by_its_plugins() {
+    // Not one of the C# cases: the C# app compared a damaged save's empty plugin list and called it a rework.
+    let mut earlier = fl("Didums_1", "K:\\Music", day(2023, 1, 1));
+    earlier.plugin_names = vec!["Serum".into(), "Pro-Q 3".into()];
+    let mut damaged = fl("Didums_77", "K:\\Music", day(2024, 8, 3));
+    damaged.error = Some("Couldn't read it".into());
+    assert!(!songs::is_reworked(&earlier, &damaged));
+    // A save that was read, with other plugins, still is.
+    let mut read = fl("Didums_78", "K:\\Music", day(2024, 8, 4));
+    read.plugin_names = vec!["Vital".into()];
+    assert!(songs::is_reworked(&earlier, &read));
+}

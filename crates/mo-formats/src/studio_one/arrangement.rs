@@ -10,11 +10,11 @@ use std::collections::HashMap;
 
 use roxmltree::Node;
 
-use super::{Song, attr, elements, id, num, parse, unescape, url_to_path};
+use super::{Song, attr, elements, id, num, parse, unescape, url_to_path, velocity_of};
 use crate::arrangement::{
     Arrangement, AudioPart, LaneKind, NoteBudget, PreviewClip, PreviewLane, PreviewMarker, PreviewNote, TOO_MANY_NOTES,
 };
-use crate::{paths, velocity};
+use crate::paths;
 
 pub const VIEW: &str = "Studio One arrangement";
 
@@ -126,7 +126,8 @@ impl Song<'_> {
                         });
                     }
                     "MusicPart" | "NotePart" => {
-                        let transpose = num(attr(ev, "transpose")).unwrap_or(0.0) as i32;
+                        // A damaged song's huge transpose ("1e10") is cut to a whole keyboard's worth either way.
+                        let transpose = num(attr(ev, "transpose")).unwrap_or(0.0).clamp(-128.0, 128.0) as i32;
                         let all = match pool.music.get(&clip_id.to_lowercase()) {
                             Some(file) => self.musicx_notes(file),
                             None => inline_notes(ev),
@@ -172,17 +173,22 @@ impl Song<'_> {
                         if loop_beats > 0.0 && length.is_finite() {
                             let mut at = 0.0;
                             // Stops when the arrangement holds all the notes it can, however short the loop.
+                            // A pass that places nothing ends it too: `at` only grows, so no later pass can (a
+                            // damaged pattern's steps all past the part, or a loop too short to move `at` on).
                             'passes: while at < length - 1e-9 {
+                                let mut placed = false;
                                 for n in steps.iter().filter(|n| at + n.start < length) {
                                     if !budget.take() {
                                         break 'passes;
                                     }
                                     notes.push(PreviewNote { start: at + n.start, ..*n });
+                                    placed = true;
                                 }
-                                if steps.is_empty() {
+                                let next = at + loop_beats;
+                                if !placed || next <= at {
                                     break;
                                 }
-                                at += loop_beats;
+                                at = next;
                             }
                         }
                         let name = if name.is_empty() { "Pattern" } else { name };
@@ -316,9 +322,11 @@ impl Song<'_> {
         };
         let step = num(attr(p, "stepLength")).filter(|s| *s > 0.0).unwrap_or(0.25);
         let count = num(attr(p, "stepCount")).unwrap_or(16.0);
+        // Steps past the pattern's length (left from when it was longer) aren't played.
         let notes = p
             .children()
             .filter(|n| n.is_element() && n.tag_name().name() == "PatternStep")
+            .filter(|n| num(attr(*n, "start")).unwrap_or(0.0) < count)
             .map(|n| PreviewNote {
                 start: num(attr(n, "start")).unwrap_or(0.0) * step,
                 length: step,
@@ -342,16 +350,6 @@ fn colour(argb: &str) -> Option<u32> {
     }
     let rgb = argb.get(2..)?;
     rgb.bytes().all(|b| b.is_ascii_hexdigit()).then(|| u32::from_str_radix(rgb, 16).ok()).flatten()
-}
-
-/// A velocity as Studio One saves it, as the song reader reads it: 0 to 1 in newer songs, kept in MIDI 2.0's 16 bits
-/// (rule 22), or MIDI 1.0's 0 to 127 in older ones. "NaN" is the quietest (MIDI 1.0's 1), as in the C# app.
-fn velocity_of(v: Option<f64>) -> u16 {
-    match v.unwrap_or(0.8) {
-        v if v.is_nan() => velocity::from_7(1),
-        v if v > 1.0 => velocity::from_7(v.round_ties_even().min(127.0) as u8),
-        v => velocity::from_unit(v),
-    }
 }
 
 /// Notes written straight into a part (as some older songs, and the tests, do).
@@ -456,6 +454,7 @@ impl Ubjson {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::velocity;
 
     #[test]
     fn reads_ubjson_as_studio_one_writes_it() {

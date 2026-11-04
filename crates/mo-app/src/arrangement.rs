@@ -72,7 +72,11 @@ impl Peaks {
 /// folders first, then the DAW's own, then the Sounds library at `sounds_db` when given). Reads the disk, so never on the window's thread. An error is the message to
 /// show instead.
 pub fn read(project: &Path, sounds_db: Option<&Path>) -> Result<Preview, String> {
-    let views = mo_formats::arrangement::read(project).map_err(|e| format!("Couldn't read the arrangement: {e}."))?;
+    // A reader that trips on a damaged save (overflow checks stay on) says so here, as the library's scan does,
+    // instead of ending the page's reader with the arrangement never shown.
+    let views = std::panic::catch_unwind(|| mo_formats::arrangement::read(project))
+        .map_err(|_| "Couldn't read the arrangement: the save holds something the reader didn't expect.".to_owned())?
+        .map_err(|e| format!("Couldn't read the arrangement: {e}."))?;
     let locator = crate::sound_library::locator(sounds_db);
     let project_path = project.to_string_lossy();
     let mut found = HashMap::new();
@@ -273,9 +277,9 @@ fn lane_height(lane: &PreviewLane) -> f64 {
 
 impl View {
     pub fn new(arrangement: Arc<Arrangement>, found: Arc<HashMap<String, PathBuf>>) -> View {
+        // Never past the readers' longest song (mo_formats::arrangement::MOST_BEATS), so the bar numbers can count it.
         let length = arrangement.length();
-        let song_beats =
-            (arrangement.beats_per_bar.max(1) as f64).max(if length.is_finite() { length * 1.02 } else { 0.0 });
+        let song_beats = (arrangement.beats_per_bar.max(1) as f64).max(length * 1.02);
         let content_height = arrangement.lanes.iter().map(lane_height).sum();
         let keys = arrangement
             .lanes
@@ -433,7 +437,7 @@ impl View {
         let a = &self.arrangement;
         let beat = self.beat(px).max(0.0);
         let bpb = a.beats_per_bar.max(1) as f64;
-        let mut text = format!("Bar {}.{}", (beat / bpb) as u64 + 1, (beat % bpb) as u64 + 1);
+        let mut text = format!("Bar {}.{}", ((beat / bpb) as u64).saturating_add(1), (beat % bpb) as u64 + 1);
         if py >= ruler {
             let scale = self.lane_scale();
             let mut y = ruler - self.top;
@@ -456,7 +460,7 @@ impl View {
     fn bar_step(&self) -> u64 {
         let bar = self.zoom() * self.arrangement.beats_per_bar.max(1) as f64;
         let mut step = 1;
-        while (step as f64) * bar < 44.0 && step < 4096 {
+        while (step as f64) * bar < 44.0 && step < 1 << 40 {
             step *= 2;
         }
         step
@@ -469,10 +473,11 @@ impl View {
         if !(zoom > 0.0 && zoom.is_finite()) {
             return Vec::new();
         }
-        let first = ((self.left / bpb / step as f64).floor().max(0.0) as u64) * step;
+        let first = ((self.left / bpb / step as f64).floor().max(0.0) as u64).saturating_mul(step);
         let mut out = Vec::new();
         let mut bar = first;
-        loop {
+        // At most so many turns, whatever is pushed: far to the right the numbers stop moving.
+        for _ in 0..8192 {
             let x = self.x(bar as f64 * bpb);
             if x > self.width || out.len() > 4096 {
                 break;
@@ -480,7 +485,8 @@ impl View {
             if x >= self.header_width() {
                 out.push((bar, x));
             }
-            bar += step;
+            let Some(next) = bar.checked_add(step) else { break };
+            bar = next;
         }
         out
     }
@@ -1090,6 +1096,25 @@ mod tests {
         v.resize(900.0, 300.0);
         let shapes = v.frame(&palette(), 2.0).scene.shapes.len();
         assert!(shapes < 500, "{shapes} shapes for 100,000 notes");
+    }
+
+    #[test]
+    fn a_clip_ending_at_1e20_beats_neither_panics_nor_hangs() {
+        let mut song = song();
+        song.lanes[0].clips[1].start = 1e20;
+        let mut v = View::new(Arc::new(song), Arc::default());
+        v.resize(900.0, 300.0);
+        v.moved(880.0, 10.0);
+        assert!(v.hover().is_some_and(|h| h.text.starts_with("Bar ")));
+        v.frame(&palette(), 1.0);
+        // Zoomed in and scrolled far to the right, where the bars are drawn.
+        for _ in 0..40 {
+            v.wheel(800.0, 0.0, 5.0, true, false);
+        }
+        v.wheel(800.0, -1e12, 0.0, false, true);
+        v.moved(880.0, 10.0);
+        let _ = v.hover();
+        v.frame(&palette(), 1.0);
     }
 
     #[test]

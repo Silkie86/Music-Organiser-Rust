@@ -25,7 +25,6 @@ use mo_backup::plan::{self, Folders, LeftOut, Level, Plan, Rules, SongInfo, Used
 use mo_formats::case;
 use mo_formats::paths::{file_name, stem};
 use mo_library::Library;
-use mo_library::scan::is_inside;
 use mo_library::songs::{Song, group_songs, marked};
 use mo_space::size::{FileEntry, size_text};
 use mo_space::song::{CompactSettings, DEFAULT_KEEP_BACKUPS, Elsewhere, SongSave, SongSpaceReport, measure};
@@ -33,6 +32,18 @@ use rayon::prelude::*;
 
 /// The settings file's name, in the app's folder.
 pub const SETTINGS_FILE: &str = "backup.txt";
+
+/// What a settings file is first written as ([`Settings::save`], [`BackedUp::save`], and the app's own settings,
+/// [`crate::app_settings::save`]): its name and then this, renamed once it's whole, so a crash part way leaves the old
+/// one whole. The start-up sweep (rule 28) clears one a crash left.
+pub const PART_ENDING: &str = ".mo-part";
+
+/// Where `path` is written first: its name with [`PART_ENDING`] after it (`backup.txt.mo-part`).
+fn part_of(path: &Path) -> PathBuf {
+    let mut part = path.as_os_str().to_owned();
+    part.push(PART_ENDING);
+    PathBuf::from(part)
+}
 
 /// The two formats.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -128,7 +139,7 @@ impl Settings {
 
     /// Writes `backup.txt`: under a temporary name first, then renamed, so a crash part way leaves the old one whole.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let part = path.with_extension("txt.mo-part");
+        let part = part_of(path);
         fs::write(&part, self.to_text())?;
         fs::rename(&part, path).inspect_err(|_| {
             let _ = fs::remove_file(&part);
@@ -220,7 +231,7 @@ impl BackedUp {
 
     /// Writes `backup-songs.txt`: under a temporary name first, then renamed.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        let part = path.with_extension("txt.mo-part");
+        let part = part_of(path);
         fs::write(&part, self.to_text())?;
         fs::rename(&part, path).inspect_err(|_| {
             let _ = fs::remove_file(&part);
@@ -276,8 +287,6 @@ pub struct Prepared {
     pub plan: Plan,
     /// The songs in the folders, with the files of each that go (for the zip format).
     pub songs: Vec<SongFiles>,
-    /// The whole folders.
-    pub always: Vec<PathBuf>,
     /// Folders on the list that aren't there now.
     pub missing: Vec<PathBuf>,
     /// Everything in the folders (and the samples outside them the songs use), before anything is left out.
@@ -324,7 +333,7 @@ fn shapes(saves: &[&mo_library::Save]) -> Vec<plan::SaveShape> {
 /// makes the plan. Reads only. Slow: on the app's low-priority pool, never the window's thread.
 pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Result<Prepared, String> {
     let backup = settings.drive.clone().ok_or("Pick a backup drive first")?;
-    let gathered = folders::gather(&settings.folders, stop).map_err(|_| "Stopped".to_owned())?;
+    let gathered = folders::gather(&settings.folders, &backup, stop).map_err(|_| "Stopped".to_owned())?;
     let saves = library.saves().map_err(|e| e.to_string())?;
     let choices = library.song_choices().map_err(|e| e.to_string())?;
     let samples = library.sample_paths().map_err(|e| e.to_string())?;
@@ -442,17 +451,14 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
     let infos: Vec<SongInfo<'_>> =
         measured.iter().map(|m| SongInfo { report: &m.report, saves: &m.saves, milestones: &m.milestones }).collect();
     let rules = Rules { level: settings.level, ..Rules::default() };
-    let plan = plan::plan(files, &infos, &used, Folders { backup: &backup, always: &gathered.always }, rules);
+    // A file follows the nearest folder on the list it's in (a Slimmed one inside a Whole one keeps its choice).
+    let listed = plan::Listed::new(&settings.folders);
+    let plan = plan::plan(files, &infos, &used, Folders { backup: &backup, listed: &listed }, rules);
 
     // Each song's files that go: its saves, the samples it uses, and (when it has a folder to itself) the rest of it.
     // Files in whole folders stay out of the zips: they go as plain folders.
     let going: HashMap<String, &FileEntry> =
         plan.copy.iter().map(|f| (case::key(&f.path.to_string_lossy()), f)).collect();
-    let always: Vec<String> = gathered.always.iter().map(|w| w.to_string_lossy().into_owned()).collect();
-    let in_whole = |p: &Path| {
-        let p = p.to_string_lossy();
-        always.iter().any(|w| is_inside(&p, w))
-    };
     // The files in each song's own folder, found in one pass over the plan: each file's folders, looked up.
     let own_folders: HashMap<String, usize> = measured
         .iter()
@@ -483,8 +489,8 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
             let mut take = |p: &Path| {
                 let k = case::key(&p.to_string_lossy());
                 if let Some(f) = going.get(&k)
-                    && !in_whole(&f.path)
                     && seen.insert(k)
+                    && !listed.whole(&f.path)
                 {
                     list.push(f.path.clone());
                 }
@@ -505,7 +511,6 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
     Ok(Prepared {
         plan,
         songs: song_files,
-        always: gathered.always,
         missing: gathered.missing,
         all_bytes,
         folder_bytes,
@@ -554,6 +559,15 @@ pub struct Ran {
     pub went: Vec<(u64, NaiveDateTime)>,
     /// How many replaced files were kept in Older versions (the Older versions card is read again only when some were).
     pub kept_older: usize,
+}
+
+impl Ran {
+    /// A run that broke part way, at `when`: nothing counts as gone, so the next run checks everything again.
+    pub fn broke(when: NaiveDateTime) -> Ran {
+        let line = "The backup stopped part way on something it didn't expect (the log says what). The next run checks it all again."
+            .to_owned();
+        Ran { last: LastRun { when, ok: false, line }, went: Vec::new(), kept_older: 0 }
+    }
 }
 
 /// Copies the plan to the drive (or, for the zip format, packs each song and copies the whole folders), and says how
