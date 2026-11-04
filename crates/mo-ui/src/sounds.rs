@@ -1697,43 +1697,90 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     }
     let ask = PLAYS.fetch_add(1, Ordering::SeqCst) + 1;
     NEWEST_PLAY.fetch_max(ask, Ordering::SeqCst);
-    let weak = app.as_weak();
-    // The sweep's timings (`mo_app::sweep_timing`) hear when it's being opened, and when it's handed to the output,
-    // overtaken by a newer sound or dropped, by this play's number; for a sound the sweep didn't ask for they count
-    // nothing.
-    let started = background::spawn("Read sound", move || {
-        sweep_timing::opening(&path, ask);
-        let read = mo_audio::read(Path::new(&path), most);
-        match read {
-            // A newer play came while this one was reading: overtaken. A stop (the mouse let go, say): dropped.
-            _ if NEWEST_PLAY.load(Ordering::SeqCst) != ask => sweep_timing::overtaken(&path, ask),
-            _ if PLAYS.load(Ordering::SeqCst) != ask => sweep_timing::dropped(&path, ask),
-            Ok(audio) => {
-                let player = player();
-                player.play(Arc::new(audio), path.clone(), from * seconds);
-                let output = player.info();
-                sweep_timing::output(output.mix_every_ms.map(|m| m / 2.0), output.delay_ms);
-                sweep_timing::started(&path, ask);
-            }
-            Err(e) => {
-                sweep_timing::dropped(&path, ask);
-                log::warning("Sounds", &format!("Couldn't play {path}: {e}"));
-                let why = e.to_string();
-                let _ = slint::invoke_from_event_loop(move || {
-                    if let Some(feed) = FEED.with(|f| f.borrow().clone()) {
-                        feed.start("Couldn't play the sound", "").failed(&why);
-                    }
-                    if let Some(app) = weak.upgrade() {
-                        stop(&app);
-                    }
-                });
-            }
-        }
-    });
-    if let Err(e) = started {
+    let job = PlayJob { ask, path, from, seconds, most, window: app.as_weak() };
+    match READER.get_or_init(|| Newest::start("Read sound", read_and_play)) {
+        // One reader for every play (rule 12): plays asked while it reads replace each other, so after a held arrow
+        // key or a fast sweep only the newest is read next, and the ones passed over are never opened.
+        Ok(reader) => reader.ask(job),
         // Never opened: the sweep's timings forget it by themselves.
-        log::error("Sounds", &format!("Couldn't start reading the sound: {e}"));
+        Err(e) => log::error("Sounds", &format!("Couldn't start reading the sound: {e}")),
     }
+}
+
+/// A sound to read and play: play number `ask`, `from` this far through its `seconds`, reading at most `most`.
+struct PlayJob {
+    ask: u64,
+    path: String,
+    from: f64,
+    seconds: f64,
+    most: f64,
+    window: slint::Weak<AppWindow>,
+}
+
+/// The thread that reads each sound before it plays, started at the first play.
+static READER: OnceLock<std::io::Result<Newest<PlayJob>>> = OnceLock::new();
+
+/// Reads one sound and plays it, if it's still the newest play when the read ends. The sweep's timings
+/// (`mo_app::sweep_timing`) hear when it's being opened, and when it's handed to the output, overtaken by a newer sound
+/// or dropped, by this play's number; for a sound the sweep didn't ask for they count nothing.
+fn read_and_play(job: PlayJob) {
+    let PlayJob { ask, path, from, seconds, most, window } = job;
+    let overtaken = || NEWEST_PLAY.load(Ordering::SeqCst) != ask;
+    let stopped = || PLAYS.load(Ordering::SeqCst) != ask;
+    // Passed over since it was asked for (it waited behind another read): never opened, so the sweep's timings
+    // forget it by themselves.
+    if overtaken() || stopped() {
+        return;
+    }
+    sweep_timing::opening(&path, ask);
+    let read = mo_audio::read(Path::new(&path), most);
+    match read {
+        // A newer play came while this one was reading: overtaken. A stop (the mouse let go, say): dropped.
+        _ if overtaken() => sweep_timing::overtaken(&path, ask),
+        _ if stopped() => sweep_timing::dropped(&path, ask),
+        Ok(audio) => {
+            let player = player();
+            player.play(Arc::new(audio), path.clone(), from * seconds);
+            let output = player.info();
+            sweep_timing::output(output.mix_every_ms.map(|m| m / 2.0), output.delay_ms);
+            sweep_timing::started(&path, ask);
+        }
+        Err(e) => {
+            sweep_timing::dropped(&path, ask);
+            log::warning("Sounds", &format!("Couldn't play {path}: {e}"));
+            let why = e.to_string();
+            let _ = slint::invoke_from_event_loop(move || {
+                // Only while this is still the sound asked for: a newer one asked meanwhile keeps playing.
+                if PLAYS.load(Ordering::SeqCst) != ask {
+                    return;
+                }
+                // One card at a time: stepping or sweeping over many sounds that won't play (a drive unplugged)
+                // says so once, the log has each of them.
+                let now = Instant::now();
+                let new_card = FAILED_CARD.with(|c| {
+                    let fresh = c.get().is_none_or(|at| now.duration_since(at) >= FAILED_CARD_GAP);
+                    if fresh {
+                        c.set(Some(now));
+                    }
+                    fresh
+                });
+                if new_card && let Some(feed) = FEED.with(|f| f.borrow().clone()) {
+                    feed.start("Couldn't play the sound", "").failed(&why);
+                }
+                if let Some(app) = window.upgrade() {
+                    stop(&app);
+                }
+            });
+        }
+    }
+}
+
+/// The least time between two "Couldn't play the sound" cards: as long as one stays.
+const FAILED_CARD_GAP: Duration = mo_app::activity::FAILED_STAYS;
+
+thread_local! {
+    /// When the last "Couldn't play the sound" card went up.
+    static FAILED_CARD: std::cell::Cell<Option<Instant>> = const { std::cell::Cell::new(None) };
 }
 
 fn stop(app: &AppWindow) {

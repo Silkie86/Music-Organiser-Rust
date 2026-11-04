@@ -106,7 +106,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
         });
         // Nothing to walk yet: only the drive's room is wanted.
         let result = (!settings.folders.is_empty()).then(|| {
-            background::on_pool(|| {
+            background::on_bulk_pool(|| {
                 let lib = Library::open_read_only(&library).map_err(|e| e.to_string())?;
                 backup::prepare(&lib, &settings, &stop).map(Arc::new)
             })
@@ -149,7 +149,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
         if drive_busy.load(Ordering::Relaxed) {
             return;
         }
-        let warning = match background::on_pool(|| backup_gone::find(&prepared, &drive, &mut holdings, &stop)) {
+        let warning = match background::on_bulk_pool(|| backup_gone::find(&prepared, &drive, &mut holdings, &stop)) {
             Ok(gone) => backup_gone::warning(&gone),
             // A newer plan is on its way, and looks again.
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => return,
@@ -174,7 +174,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
     let weak = app.as_weak();
     let reader = Newest::start("Backup older versions", move |(asked, drive, stop): OlderJob| {
         let room = mo_space::app_files::drive_space(&drive).map(|r| DriveRoom { free: r.free, total: r.total });
-        let read = background::on_pool(|| older::read(&drive, &stop));
+        let read = background::on_bulk_pool(|| older::read(&drive, &stop));
         let weak = weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
             SECTION.with(|s| {
@@ -430,7 +430,12 @@ fn start_run(weak: &Weak<AppWindow>) {
             let weak = progress_weak.clone();
             let _ = slint::invoke_from_event_loop(move || set_busy(&weak, &p.line(), p.done()));
         };
-        let ran = background::on_pool(|| backup::run(&prepared, &settings, &stop, &progress));
+        // A run that breaks part way still ends here, so the page lets go of it and says so, instead of staying busy
+        // with Run and Stop doing nothing (the panic hook has logged what broke).
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            background::on_bulk_pool(|| backup::run(&prepared, &settings, &stop, &progress))
+        }))
+        .unwrap_or_else(|_| backup::Ran::broke(Local::now().naive_local()));
         let drive = settings.drive.clone();
         let _ = slint::invoke_from_event_loop(move || {
             let last = ran.last;

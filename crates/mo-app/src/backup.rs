@@ -556,6 +556,15 @@ pub struct Ran {
     pub kept_older: usize,
 }
 
+impl Ran {
+    /// A run that broke part way, at `when`: nothing counts as gone, so the next run checks everything again.
+    pub fn broke(when: NaiveDateTime) -> Ran {
+        let line = "The backup stopped part way on something it didn't expect (the log says what). The next run checks it all again."
+            .to_owned();
+        Ran { last: LastRun { when, ok: false, line }, went: Vec::new(), kept_older: 0 }
+    }
+}
+
 /// Copies the plan to the drive (or, for the zip format, packs each song and copies the whole folders), and says how
 /// it went. Never on the window's thread. A run that stops part way still says which songs went before it stopped.
 pub fn run(prepared: &Prepared, settings: &Settings, stop: &AtomicBool, progress: &dyn Fn(Progress)) -> Ran {
