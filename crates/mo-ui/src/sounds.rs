@@ -92,7 +92,9 @@ struct Page {
     shown: Arc<Vec<usize>>,
     /// The year strip's years, newest first, with how many sounds each holds.
     years: YearCounts,
-    /// What History shows: the sounds played, newest first, as places in `list`, with when.
+    /// Every sound played, newest first, as places in `list`, with when.
+    played: Arc<Vec<(usize, NaiveDateTime)>>,
+    /// What History shows: the sounds played that the filters let through (the year strip's years aside).
     history: Vec<(usize, NaiveDateTime)>,
     /// How many tiles fit side by side.
     columns: usize,
@@ -140,6 +142,7 @@ impl Default for Page {
             view: TILES,
             shown: Arc::default(),
             years: Vec::new(),
+            played: Arc::default(),
             history: Vec::new(),
             columns: 4,
             picked: None,
@@ -201,6 +204,7 @@ struct Ask {
     filters: Filters,
     order: Order,
     seed: u64,
+    played: Arc<Vec<(usize, NaiveDateTime)>>,
 }
 
 thread_local! {
@@ -834,7 +838,9 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         // "Reading your sounds…" stays until the list of them is worked out, so "No sounds match" never flashes up
         // in between ([`listed`]).
         p.read = true;
-        p.history = library.played;
+        // History lists them once the filters have been through them ([`listed`]).
+        p.played = Arc::new(library.played);
+        p.history.clear();
         p.list = library.list;
         p.to_pick = None;
         p.places = library.places;
@@ -1358,12 +1364,20 @@ fn refresh(app: &AppWindow) {
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.asked += 1;
-        Ask { id: p.asked, list: p.list.clone(), filters: p.filters.clone(), order: p.order, seed: p.seed }
+        Ask {
+            id: p.asked,
+            list: p.list.clone(),
+            filters: p.filters.clone(),
+            order: p.order,
+            seed: p.seed,
+            played: p.played.clone(),
+        }
     });
     if HERE.with(|h| *h.borrow()) {
         let shown = ask.list.view(&ask.filters, ask.order, ask.seed);
         let years = ask.list.year_counts(ask.filters.used);
-        listed(app, ask.id, shown, years);
+        let history = ask.list.played(&ask.played, &ask.filters);
+        listed(app, ask.id, Listed { shown, years, history });
         return;
     }
     WORKER.with(|w| {
@@ -1383,15 +1397,16 @@ fn refresh(app: &AppWindow) {
                         std::ptr::eq(list.as_ptr(), Arc::as_ptr(&ask.list)) && *used == ask.filters.used
                     })
                     .map(|(_, _, years)| years.clone());
-                let (shown, years) = background::on_pool(|| {
+                let new = background::on_pool(|| {
                     let years = kept.unwrap_or_else(|| ask.list.year_counts(ask.filters.used));
-                    (ask.list.view(&ask.filters, ask.order, ask.seed), years)
+                    let history = ask.list.played(&ask.played, &ask.filters);
+                    Listed { shown: ask.list.view(&ask.filters, ask.order, ask.seed), years, history }
                 });
-                counted = Some((Arc::downgrade(&ask.list), ask.filters.used, years.clone()));
+                counted = Some((Arc::downgrade(&ask.list), ask.filters.used, new.years.clone()));
                 let weak = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(app) = weak.upgrade() {
-                        listed(&app, ask.id, shown, years);
+                        listed(&app, ask.id, new);
                     }
                 });
             }) {
@@ -1405,16 +1420,27 @@ fn refresh(app: &AppWindow) {
     });
 }
 
+/// What the filters let through, worked out off the window's thread.
+struct Listed {
+    /// For Tiles, List and the galaxy, as places in the page's list, in order.
+    shown: Vec<usize>,
+    /// The year strip's years.
+    years: YearCounts,
+    /// For History: the sounds played, newest first, with when.
+    history: Vec<(usize, NaiveDateTime)>,
+}
+
 /// A new list has been worked out: shows it, unless a newer one has been asked for since.
-fn listed(app: &AppWindow, id: u64, shown: Vec<usize>, years: YearCounts) {
+fn listed(app: &AppWindow, id: u64, new: Listed) {
     let _doing = crate::watchdog::doing("Sounds: show the filtered list");
     let current = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         if p.asked != id {
             return false;
         }
-        p.shown = Arc::new(shown);
-        p.years = years;
+        p.shown = Arc::new(new.shown);
+        p.years = new.years;
+        p.history = new.history;
         true
     });
     if current {
@@ -1487,6 +1513,8 @@ fn show_lists(app: &AppWindow) {
         let total = p.list.len();
         let summary = if p.list.is_empty() {
             String::new()
+        } else if p.view == HISTORY && p.history.len() < p.played.len() {
+            format!("{} of {} played", thousands(p.history.len()), thousands(p.played.len()))
         } else if p.view != HISTORY && p.view != REDISCOVER && (p.filters.any() || !p.filters.search.trim().is_empty())
         {
             format!("{} of {} sounds", thousands(p.shown.len()), thousands(total))
