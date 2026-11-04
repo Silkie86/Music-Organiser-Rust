@@ -18,7 +18,9 @@ use mo_library::Save;
 use mo_library::songs::Song;
 use mo_presets::curves::{Curve, SourceKind};
 use mo_presets::export::Exported;
-use mo_presets::filter::{self, Choice, Counts, Maker, Type};
+use mo_presets::filter::{self, Choice, Maker, Type};
+
+use crate::filters::{self as chips, Filter};
 use mo_presets::library::{PresetRow, Source};
 use mo_presets::role::{Basis, Role};
 
@@ -205,8 +207,9 @@ impl Item {
 
     /// Every word of a search (already in lower case) is in the line's texts or its part.
     fn found(&self, search: &[String]) -> bool {
-        let part = self.role().map(|r| r.label().to_lowercase()).unwrap_or_default();
-        search.iter().all(|w| self.words.contains(w.as_str()) || part.contains(w.as_str()))
+        // The part's words only when a word isn't in the line's own: this runs for every line, several times a key.
+        let in_part = |w: &str| self.role().is_some_and(|r| r.label().to_lowercase().contains(w));
+        search.iter().all(|w| self.words.contains(w.as_str()) || in_part(w))
     }
 
     /// The part shown: yours when you set one, else the guess.
@@ -307,6 +310,18 @@ impl PartPick {
     }
 }
 
+/// Picks or unpicks a one-or-none filter's choice, kept as a value whose default (All) means none picked.
+fn toggle_one<T: Copy + Default + PartialEq>(
+    value: &mut T,
+    choice: &str,
+    words: impl Fn(T) -> &'static str,
+    from_words: impl Fn(&str) -> T,
+) {
+    let mut picked: Vec<T> = if *value == T::default() { Vec::new() } else { vec![*value] };
+    chips::toggle_as(&mut picked, choice, false, words, |w| Some(from_words(w)).filter(|v| *v != T::default()));
+    *value = picked.first().copied().unwrap_or_default();
+}
+
 /// The maker chip's words. A song's sounds come from FL Studio and Bitwig, so "the DAW's own" covers both.
 pub fn maker_label(m: Maker) -> &'static str {
     match m {
@@ -337,10 +352,11 @@ pub fn type_from(l: &str) -> Type {
 pub struct Filters {
     pub search: String,
     pub choice: Choice,
-    pub part: PartPick,
+    /// Only these parts' sounds (any of them); every part when none is picked. Never holds [`PartPick::Any`].
+    pub parts: Vec<PartPick>,
     pub from: From,
-    /// Only this plugin's sounds.
-    pub plugin: Option<String>,
+    /// Only these plugins' sounds (any of them), as the list names them; every plugin when none is picked.
+    pub plugins: Vec<String>,
     /// Only one song's sounds (a song's Presets tab), by its save's path.
     pub song: Option<String>,
     /// Only these years, first to last.
@@ -354,11 +370,38 @@ impl Filters {
     /// an option, not a filter.
     pub fn any(&self) -> bool {
         self.choice != Choice::default()
-            || self.part != PartPick::Any
+            || !self.parts.is_empty()
             || self.from != From::All
-            || self.plugin.is_some()
+            || !self.plugins.is_empty()
             || self.song.is_some()
             || self.years.is_some()
+    }
+
+    /// Picks or unpicks `choice` (as its chip or menu line says it) on the filter `chip` ([`PART`], [`PLUGIN`],
+    /// [`MAKER`], [`TYPE`], [`FROM`]). More than one part or plugin can be picked; the maker, the type and where the
+    /// sounds are from are one or none, as each has only two choices.
+    pub fn toggle(&mut self, chip: &str, choice: &str) {
+        let part = |l: &str| Some(PartPick::from_label(l)).filter(|p| *p != PartPick::Any);
+        match chip {
+            PART => chips::toggle_as(&mut self.parts, choice, true, PartPick::label, part),
+            PLUGIN => chips::toggle(&mut self.plugins, choice, true),
+            MAKER => toggle_one(&mut self.choice.maker, choice, maker_label, maker_from),
+            TYPE => toggle_one(&mut self.choice.kind, choice, type_label, type_from),
+            FROM => toggle_one(&mut self.from, choice, From::label, From::from_label),
+            _ => {}
+        }
+    }
+
+    /// Picks nothing on the filter `chip`: its menu's Any.
+    pub fn clear_chip(&mut self, chip: &str) {
+        match chip {
+            PART => self.parts.clear(),
+            PLUGIN => self.plugins.clear(),
+            MAKER => self.choice.maker = Maker::All,
+            TYPE => self.choice.kind = Type::All,
+            FROM => self.from = From::All,
+            _ => {}
+        }
     }
 
     /// Every chip off, the search and the option kept.
@@ -371,24 +414,34 @@ impl Filters {
         self.search.split_whitespace().map(str::to_lowercase).collect()
     }
 
-    /// Everything but the maker and type (which the counts beside those choices go over) lets `i` through. `words` is
-    /// [`Filters::words`].
-    fn passes_rest(&self, i: &Item, words: &[String]) -> bool {
+    /// Everything but the five chips lets `i` through: the unused synths, the song, the years and the search. `words`
+    /// is [`Filters::words`].
+    fn passes_others(&self, i: &Item, words: &[String]) -> bool {
         (self.unused || !i.row.plays_nothing)
-            && self.part.matches(i.role())
-            && match self.from {
-                From::All => true,
-                From::Songs => !i.is_file(),
-                From::Files => i.is_file(),
-            }
-            && self.plugin.as_ref().is_none_or(|p| i.row.plugin.eq_ignore_ascii_case(p))
             && self.song.as_ref().is_none_or(|s| !i.is_file() && i.path() == s)
             && self.years.is_none_or(|(a, b)| i.year.is_some_and(|y| y >= a && y <= b))
             && i.found(words)
     }
 
+    /// Which of the five chips let `i` through: the maker, the type, the part, where it's from and the plugin.
+    fn chips_pass(&self, i: &Item) -> [bool; 5] {
+        let maker = Choice { kind: Type::All, ..self.choice };
+        let kind = Choice { maker: Maker::All, ..self.choice };
+        [
+            maker.matches(i.row.native, i.row.kind),
+            kind.matches(i.row.native, i.row.kind),
+            self.parts.is_empty() || self.parts.iter().any(|p| p.matches(i.role())),
+            match self.from {
+                From::All => true,
+                From::Songs => !i.is_file(),
+                From::Files => i.is_file(),
+            },
+            self.plugins.is_empty() || self.plugins.iter().any(|p| i.row.plugin.eq_ignore_ascii_case(p)),
+        ]
+    }
+
     fn passes_with(&self, i: &Item, words: &[String]) -> bool {
-        self.choice.matches(i.row.native, i.row.kind) && self.passes_rest(i, words)
+        self.chips_pass(i) == [true; 5] && self.passes_others(i, words)
     }
 
     pub fn passes(&self, i: &Item) -> bool {
@@ -409,32 +462,128 @@ pub fn shown(items: &[Item], f: &Filters) -> Vec<usize> {
     out
 }
 
-/// How many lines each maker and type choice would show, with the rest of the filters as they are.
-pub fn counts(items: &[Item], f: &Filters) -> Counts {
-    let words = f.words();
-    filter::counts(f.choice, items.iter().filter(|i| f.passes_rest(i, &words)).map(|i| (i.row.native, i.row.kind)))
+/// How many lines each choice of each filter would show, with the other filters as they are: the numbers beside the
+/// choices, so each filter says what its choices hold (Solomon's note, 4 Nov 2026).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChoiceCounts {
+    pub third_party: usize,
+    pub native: usize,
+    pub synths: usize,
+    pub effects: usize,
+    /// By part, in [`PartPick::choices`]' order: each part, then no guess.
+    pub parts: Vec<usize>,
+    pub songs: usize,
+    pub files: usize,
+    /// By plugin, its name in lower case (ASCII letters only, as the plugin filter matches).
+    pub plugins: HashMap<String, usize>,
 }
 
-/// The maker and type chips' choices, each with its count: ("Third-party (120)", "Third-party").
-pub fn maker_choices(c: &Counts) -> Vec<(String, &'static str)> {
+/// Counts every filter's choices in one pass. A line counts beside every filter when all five let it through, and
+/// beside the one that doesn't when only one doesn't: picking another choice there could show it.
+pub fn counts(items: &[Item], f: &Filters) -> ChoiceCounts {
+    let words = f.words();
+    let no_guess = Role::ALL.len();
+    let mut c = ChoiceCounts { parts: vec![0; no_guess + 1], ..ChoiceCounts::default() };
+    let synths = Choice { kind: Type::Synths, ..Choice::default() };
+    let effects = Choice { kind: Type::Effects, ..Choice::default() };
+    let mut by_plugin: HashMap<&str, usize> = HashMap::new();
+    for i in items.iter().filter(|i| f.passes_others(i, &words)) {
+        let ok = f.chips_pass(i);
+        let fails = ok.iter().filter(|&&o| !o).count();
+        let counts_on = |chip: usize| fails == 0 || (fails == 1 && !ok[chip]);
+        if counts_on(0) {
+            *if i.row.native { &mut c.native } else { &mut c.third_party } += 1;
+        }
+        if counts_on(1) {
+            c.synths += usize::from(synths.matches(i.row.native, i.row.kind));
+            c.effects += usize::from(effects.matches(i.row.native, i.row.kind));
+        }
+        if counts_on(2) {
+            let at = i.role().and_then(|r| Role::ALL.iter().position(|&x| x == r)).unwrap_or(no_guess);
+            c.parts[at] += 1;
+        }
+        if counts_on(3) {
+            *if i.is_file() { &mut c.files } else { &mut c.songs } += 1;
+        }
+        if counts_on(4) && !i.row.plugin.is_empty() {
+            *by_plugin.entry(i.row.plugin.as_str()).or_default() += 1;
+        }
+    }
+    for (name, n) in by_plugin {
+        *c.plugins.entry(name.to_ascii_lowercase()).or_default() += n;
+    }
+    c
+}
+
+/// The filters' names, as the page calls them when one is picked.
+pub const PART: &str = "part";
+pub const PLUGIN: &str = "plugin";
+pub const MAKER: &str = "maker";
+pub const TYPE: &str = "type";
+pub const FROM: &str = "from";
+/// The Curves section's Found in filter.
+pub const FOUND_IN: &str = "found-in";
+
+/// The maker and type filters' choices, each with how many lines it would show: ("Third-party", "120").
+pub fn maker_choices(c: &ChoiceCounts) -> Vec<(String, String)> {
     [(Maker::ThirdParty, c.third_party), (Maker::Native, c.native)]
         .into_iter()
-        .map(|(m, n)| (format!("{} ({})", maker_label(m), thousands(n)), maker_label(m)))
+        .map(|(m, n)| (maker_label(m).to_owned(), thousands(n)))
         .collect()
 }
 
-pub fn type_choices(c: &Counts) -> Vec<(String, &'static str)> {
+pub fn type_choices(c: &ChoiceCounts) -> Vec<(String, String)> {
     [(Type::Synths, c.synths), (Type::Effects, c.effects)]
         .into_iter()
-        .map(|(t, n)| (format!("{} ({})", type_label(t), thousands(n)), type_label(t)))
+        .map(|(t, n)| (type_label(t).to_owned(), thousands(n)))
         .collect()
+}
+
+/// The page's filters as their chips and menus show them, with what's picked and how many lines each choice would
+/// show: the maker, the type and where the sounds are from (two choices each, so chips of their own), the part and the
+/// plugin (menus that scroll, where more than one can be picked). `plugins` is [`plugins`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FilterChips {
+    pub maker: Filter,
+    pub kind: Filter,
+    pub from: Filter,
+    pub part: Filter,
+    pub plugin: Filter,
+}
+
+pub fn filter_chips(c: &ChoiceCounts, plugins: &[(String, usize)], f: &Filters) -> FilterChips {
+    let one = |label: &str| if label.is_empty() { Vec::new() } else { vec![label.to_owned()] };
+    let from = [(From::Songs, c.songs), (From::Files, c.files)].map(|(w, n)| (w.label().to_owned(), thousands(n)));
+    let parts: Vec<(String, String)> =
+        PartPick::choices().into_iter().zip(&c.parts).map(|(l, n)| (l.to_owned(), thousands(*n))).collect();
+    // The most used first, as `plugins` has them: an order the other filters don't change, so a line doesn't move
+    // under the mouse when they do.
+    let mut by_plugin: Vec<(String, usize)> = plugins
+        .iter()
+        .map(|(name, _)| (name.clone(), c.plugins.get(&name.to_ascii_lowercase()).copied().unwrap_or(0)))
+        .collect();
+    // One picked that no line has any more (after a new look at the songs) stays, to be unpicked.
+    for gone in f.plugins.iter().filter(|p| !plugins.iter().any(|(name, _)| name.eq_ignore_ascii_case(p))) {
+        by_plugin.push((gone.clone(), 0));
+    }
+    FilterChips {
+        maker: chips::show(&maker_choices(c), &one(maker_label(f.choice.maker))),
+        kind: chips::show(&type_choices(c), &one(type_label(f.choice.kind))),
+        from: chips::show(&from, &one(f.from.label())),
+        part: chips::show(&parts, &f.parts.iter().map(|p| p.label().to_owned()).collect::<Vec<_>>()),
+        plugin: chips::show(
+            &by_plugin.into_iter().map(|(name, n)| (name, thousands(n))).collect::<Vec<_>>(),
+            &f.plugins,
+        ),
+    }
 }
 
 /// The plugins in the list, most used first (ties by name), each with how many lines it has; for the plugin chip.
+/// Names that differ only in ASCII capitals are one plugin, as the plugin filter matches them.
 pub fn plugins(items: &[Item]) -> Vec<(String, usize)> {
     let mut by: HashMap<String, (String, usize)> = HashMap::new();
     for i in items.iter().filter(|i| !i.row.plugin.is_empty()) {
-        by.entry(i.row.plugin.to_lowercase()).or_insert_with(|| (i.row.plugin.clone(), 0)).1 += 1;
+        by.entry(i.row.plugin.to_ascii_lowercase()).or_insert_with(|| (i.row.plugin.clone(), 0)).1 += 1;
     }
     let mut out: Vec<(String, usize)> = by.into_values().collect();
     out.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.to_lowercase().cmp(&b.0.to_lowercase())));
@@ -879,8 +1028,8 @@ pub mod curve_act {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CurveFilters {
     pub search: String,
-    /// Only curves found this way.
-    pub kind: Option<SourceKind>,
+    /// Only curves found in one of these ways; none for every way.
+    pub kinds: Vec<SourceKind>,
     /// Show the curves you hid.
     pub hidden: bool,
 }
@@ -901,13 +1050,27 @@ pub fn kind_from(l: &str) -> Option<SourceKind> {
 
 impl CurveFilters {
     pub fn passes(&self, c: &Curve) -> bool {
+        self.passes_rest(c) && self.found_in(c)
+    }
+
+    /// Whether the search and Show hidden let it through, whichever way it was found.
+    fn passes_rest(&self, c: &Curve) -> bool {
         (self.hidden || !c.hidden)
-            && self.kind.is_none_or(|k| c.sources.iter().any(|s| s.kind == k))
             && filter::search_matches(&self.search, &curve_texts(c).iter().map(String::as_str).collect::<Vec<_>>())
     }
 
+    /// Whether it was found in one of the ways picked (or none is picked).
+    fn found_in(&self, c: &Curve) -> bool {
+        self.kinds.is_empty() || c.sources.iter().any(|s| self.kinds.contains(&s.kind))
+    }
+
     pub fn any(&self) -> bool {
-        self.kind.is_some()
+        !self.kinds.is_empty()
+    }
+
+    /// Picks or unpicks a way curves are found, by its words: more than one can be picked.
+    pub fn toggle_kind(&mut self, label: &str) {
+        chips::toggle_as(&mut self.kinds, label, true, kind_label, kind_from);
     }
 }
 
@@ -919,16 +1082,32 @@ fn curve_texts(c: &Curve) -> Vec<String> {
     out
 }
 
-/// The curves shown, as places in `curves`: newest found first (by their newest place), then by name.
-pub fn shown_curves(curves: &[Curve], f: &CurveFilters) -> Vec<usize> {
+/// The curves shown, as places in `curves`: newest found first (by their newest place), then by name. With them, the
+/// Found in filter as its chips show it: each way curves are found, with how many of them the search and Show hidden
+/// let through. Both come from one look at each curve, as this runs with each key typed in the search.
+pub fn shown_curves(curves: &[Curve], f: &CurveFilters) -> (Vec<usize>, Filter) {
     let newest = |c: &Curve| c.sources.iter().map(|s| s.modified).max().unwrap_or(0);
-    let mut out: Vec<usize> = (0..curves.len()).filter(|&i| f.passes(&curves[i])).collect();
+    let mut found = [0usize; KINDS.len()];
+    let mut out = Vec::new();
+    for (i, c) in curves.iter().enumerate().filter(|(_, c)| f.passes_rest(c)) {
+        for (n, k) in found.iter_mut().zip(KINDS) {
+            if c.sources.iter().any(|s| s.kind == k) {
+                *n += 1;
+            }
+        }
+        if f.found_in(c) {
+            out.push(i);
+        }
+    }
     out.sort_by(|&a, &b| {
         newest(&curves[b])
             .cmp(&newest(&curves[a]))
             .then_with(|| curves[a].name.to_lowercase().cmp(&curves[b].name.to_lowercase()))
     });
-    out
+    let choices: Vec<(String, String)> =
+        KINDS.iter().zip(found).map(|(&k, n)| (kind_label(k).to_owned(), thousands(n))).collect();
+    let picked: Vec<String> = f.kinds.iter().map(|&k| kind_label(k).to_owned()).collect();
+    (out, chips::show(&choices, &picked))
 }
 
 /// One line of the curves list, in words.
@@ -1212,16 +1391,82 @@ mod tests {
         assert_eq!(shown(&all, &synths), [0, 1, 3]);
         // The type counts beside the chip keep the maker as it is, and ignore the type itself.
         assert_eq!(counts(&all, &synths).effects, 1);
-        assert_eq!(shown(&all, &Filters { part: PartPick::Role(Role::Bass), ..f.clone() }), [0]);
-        assert_eq!(shown(&all, &Filters { part: PartPick::NoGuess, ..f.clone() }), [2, 3]);
+        // Every filter's counts keep the others as they are: with Bass picked, the part counts ignore it, and the
+        // rest count only the bass line.
+        let bass = Filters { parts: vec![PartPick::Role(Role::Bass)], ..f.clone() };
+        let c = counts(&all, &bass);
+        let at = |r: Role| Role::ALL.iter().position(|&x| x == r).unwrap();
+        assert_eq!((c.parts[at(Role::Bass)], c.parts[at(Role::Lead)], c.parts[Role::ALL.len()]), (1, 1, 2));
+        assert_eq!((c.third_party, c.native, c.songs, c.files), (1, 0, 1, 0));
+        assert_eq!(c.plugins.get("serum"), Some(&1));
+        assert_eq!(c.plugins.get("fruity limiter"), None);
+        // A line two filters leave out counts beside neither.
+        let two = Filters { from: From::Files, ..bass.clone() };
+        assert_eq!(counts(&all, &two).parts[Role::ALL.len()], 1);
+        assert_eq!(counts(&all, &two).third_party, 0);
+        assert_eq!(shown(&all, &Filters { parts: vec![PartPick::Role(Role::Bass)], ..f.clone() }), [0]);
+        assert_eq!(shown(&all, &Filters { parts: vec![PartPick::NoGuess], ..f.clone() }), [2, 3]);
+        // More than one part: any of them.
+        let bass_or_none = vec![PartPick::Role(Role::Bass), PartPick::NoGuess];
+        assert_eq!(shown(&all, &Filters { parts: bass_or_none, ..f.clone() }), [0, 2, 3]);
         assert_eq!(shown(&all, &Filters { from: From::Files, ..f.clone() }), [3]);
-        assert_eq!(shown(&all, &Filters { plugin: Some("serum".into()), ..f.clone() }), [0, 1]);
+        assert_eq!(shown(&all, &Filters { plugins: vec!["serum".into()], ..f.clone() }), [0, 1]);
+        let serum_or_limiter = vec!["Serum".into(), "fruity limiter".into()];
+        assert_eq!(shown(&all, &Filters { plugins: serum_or_limiter, ..f.clone() }), [0, 1, 2]);
         assert_eq!(shown(&all, &Filters { song: Some("/s/Old.flp".into()), ..f.clone() }), [2]);
         assert_eq!(shown(&all, &Filters { years: Some((2024, 2026)), ..f.clone() }), [0, 1, 3]);
         assert_eq!(shown(&all, &Filters { search: "didums hook".into(), ..f.clone() }), [1]);
         // The part is searched too.
         assert_eq!(shown(&all, &Filters { search: "bass".into(), ..f.clone() }), [0]);
         assert!(!f.any() && Filters { from: From::Songs, ..f.clone() }.any());
+    }
+
+    #[test]
+    fn the_chips_pick_one_and_the_menus_more() {
+        let all = items();
+        let mut f = Filters::default();
+        // Two choices each: chips of their own, picking one or none.
+        f.toggle(TYPE, "Synths");
+        assert_eq!(f.choice.kind, Type::Synths);
+        f.toggle(TYPE, "Effects");
+        assert_eq!(f.choice.kind, Type::Effects);
+        f.toggle(TYPE, "Effects");
+        assert_eq!(f.choice.kind, Type::All);
+        f.toggle(FROM, From::Files.label());
+        assert_eq!(f.from, From::Files);
+        // The part and the plugin: more than one.
+        f.toggle(PART, Role::Bass.label());
+        f.toggle(PART, NO_PART);
+        assert_eq!(f.parts, [PartPick::Role(Role::Bass), PartPick::NoGuess]);
+        f.toggle(PLUGIN, "Serum");
+        f.toggle(PLUGIN, "Vital");
+        f.toggle(PLUGIN, "serum");
+        assert_eq!(f.plugins, ["Vital"]);
+        let shown = filter_chips(&counts(&all, &f), &plugins(&all), &f);
+        assert_eq!(shown.kind.chips.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), ["Synths", "Effects"]);
+        assert_eq!(shown.from.chips.iter().map(|c| c.on).collect::<Vec<_>>(), [false, true]);
+        // Each choice says how many lines it would show with the other filters as they are. No line is Vital's, so
+        // with it picked no other filter's choice shows any; the plugin's own count without it: of the preset files
+        // with Bass or no guess, Polysynth's Warm Pad.
+        let counted = |c: &Filter| -> Vec<(String, String, bool)> {
+            c.chips.iter().chain(&c.more).map(|s| (s.text.clone(), s.count.clone(), s.on)).collect()
+        };
+        assert!(counted(&shown.from).iter().all(|(_, n, _)| n == "0"));
+        // The most used first (Serum), whatever the counts say now.
+        let plugin = counted(&shown.plugin);
+        assert_eq!(plugin[0], ("Serum".to_owned(), "0".to_owned(), false));
+        assert!(plugin.contains(&("Polysynth".to_owned(), "1".to_owned(), false)));
+        // A picked plugin that no line has (after a new look at the songs) stays on show, picked, to be unpicked.
+        assert!(counted(&shown.plugin).contains(&("Vital".to_owned(), "0".to_owned(), true)));
+        // The parts fit as chips of their own (there's room for them all), the two picked ones lit.
+        assert!(shown.part.more.is_empty() && shown.part.chips.len() == Role::ALL.len() + 1);
+        let lit: Vec<&str> = shown.part.chips.iter().filter(|c| c.on).map(|c| c.text.as_str()).collect();
+        assert_eq!(lit, [Role::Bass.label(), NO_PART]);
+        f.clear_chip(PART);
+        assert!(f.parts.is_empty() && f.any());
+        f.clear_chip(PLUGIN);
+        f.clear_chip(FROM);
+        assert!(!f.any());
     }
 
     #[test]
@@ -1414,10 +1659,26 @@ mod tests {
         ];
         list[2].hidden = true;
         let f = CurveFilters::default();
-        assert_eq!(shown_curves(&list, &f), [1, 0]);
-        assert_eq!(shown_curves(&list, &CurveFilters { hidden: true, ..f.clone() }), [1, 0, 2]);
-        assert_eq!(shown_curves(&list, &CurveFilters { kind: Some(SourceKind::FlKnobMoves), ..f.clone() }), [0]);
-        assert_eq!(shown_curves(&list, &CurveFilters { search: "cutoff b".into(), ..f.clone() }), [1]);
+        let shown = |f: &CurveFilters| shown_curves(&list, f).0;
+        assert_eq!(shown(&f), [1, 0]);
+        assert_eq!(shown(&CurveFilters { hidden: true, ..f.clone() }), [1, 0, 2]);
+        assert_eq!(shown(&CurveFilters { kinds: vec![SourceKind::FlKnobMoves], ..f.clone() }), [0]);
+        assert_eq!(shown(&CurveFilters { search: "cutoff b".into(), ..f.clone() }), [1]);
+        // Found in picks more than one way, and its chips count what the other filters let through.
+        let mut both = CurveFilters { hidden: true, ..f.clone() };
+        both.toggle_kind("FL knob moves");
+        both.toggle_kind("Bitwig's library");
+        let (two, chips) = shown_curves(&list, &both);
+        assert_eq!(two, [0, 2]);
+        let words: Vec<(&str, &str, bool)> =
+            chips.chips.iter().map(|c| (c.text.as_str(), c.count.as_str(), c.on)).collect();
+        assert_eq!(
+            words,
+            [("FL knob moves", "1", true), ("Bitwig clips", "1", false), ("Bitwig's library", "1", true)]
+        );
+        both.toggle_kind("FL knob moves");
+        assert_eq!(both.kinds, [SourceKind::BitwigCurve]);
+        assert!(shown_curves(&list, &f).1.chips.iter().all(|c| !c.on));
         assert_eq!(curves_summary(3, 2, 1), "2 curves, 1 hidden");
     }
 
