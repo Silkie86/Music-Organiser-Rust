@@ -17,9 +17,9 @@ use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
-use mo_app::log;
 use mo_app::midi::{self as page, Filters, Order, Roll, Target};
 use mo_app::shortcuts::{Shortcuts, what_of};
+use mo_app::{log, to_bitwig};
 use mo_formats::NoteEvent;
 use mo_harmony::KeyFact;
 use mo_library::Library;
@@ -211,7 +211,8 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
 fn wire(app: &AppWindow) {
     let data = app.global::<MidiData>();
     data.set_lines(ModelRc::from(LINES.with(Rc::clone) as Rc<dyn Model<Data = MidiLine>>));
-    data.set_froms(strings(["Your projects", "MIDI files"]));
+    data.set_froms(strings(page::FROM_CHOICES.map(page::from_name)));
+    data.set_from(page::from_name(None).into());
     data.set_keys(strings(page::key_choices()));
     data.set_orders(strings(Order::ALL.map(Order::name)));
     data.set_order(Order::default().name().into());
@@ -312,7 +313,7 @@ fn wire(app: &AppWindow) {
             });
             let data = app.global::<MidiData>();
             data.set_search("".into());
-            data.set_from("".into());
+            data.set_from(page::from_name(None).into());
             data.set_key("".into());
             show_kinds(&app);
             show_years(&app);
@@ -873,24 +874,34 @@ enum Reader {
     Old(MidiIndex),
 }
 
-fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, Reader)>) -> Result<NotesRead, String> {
-    let notes = match &ask.from {
-        NotesFrom::Made(made) => made.get(&ask.hash).cloned().unwrap_or_default(),
+/// A part's notes, from wherever the index is; `open` keeps the index open for the next ask.
+fn notes_of(
+    from: &NotesFrom,
+    phrase_id: i64,
+    hash: &str,
+    open: &mut Option<(PathBuf, Reader)>,
+) -> Result<Vec<NoteEvent>, String> {
+    Ok(match from {
+        NotesFrom::Made(made) => made.get(hash).cloned().unwrap_or_default(),
         NotesFrom::Store(path) | NotesFrom::Old(path) => {
             if open.as_ref().is_none_or(|(p, _)| p != path) {
-                let reader = match &ask.from {
+                let reader = match from {
                     NotesFrom::Store(_) => Reader::Store(MidiStore::open_read_only(path).map_err(|e| e.to_string())?),
                     _ => Reader::Old(MidiIndex::open_read_only(path).map_err(|e| e.to_string())?),
                 };
                 *open = Some((path.clone(), reader));
             }
             match open.as_ref().map(|(_, r)| r) {
-                Some(Reader::Store(s)) => s.notes(ask.phrase_id, &ask.hash).map_err(|e| e.to_string())?,
-                Some(Reader::Old(o)) => o.notes(ask.phrase_id, Some(&ask.hash)).map_err(|e| e.to_string())?,
+                Some(Reader::Store(s)) => s.notes(phrase_id, hash).map_err(|e| e.to_string())?,
+                Some(Reader::Old(o)) => o.notes(phrase_id, Some(hash)).map_err(|e| e.to_string())?,
                 None => Vec::new(),
             }
         }
-    };
+    })
+}
+
+fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, Reader)>) -> Result<NotesRead, String> {
+    let notes = notes_of(&ask.from, ask.phrase_id, &ask.hash, open)?;
     let fact = if ask.read_key {
         mo_midi::keys::with_reader(|r| mo_midi::keys::read(r, &notes, ask.role, ask.cut)).1
     } else {
@@ -1020,7 +1031,8 @@ fn card(e: &mo_midi::Entry, old: bool) -> PickedPart {
 
 /// The card's buttons and the line's right-click menu: one list (rule 15: each shows its key).
 fn actions(e: &mo_midi::Entry, shortcuts: &Shortcuts) -> (Vec<CardAction>, Vec<MenuItem>) {
-    let mut list: Vec<(&str, &str, bool)> = vec![("midi.moreLike", "More like this", true)];
+    let mut list: Vec<(&str, &str, bool)> =
+        vec![("midi.moreLike", "More like this", true), ("midi.toBitwig", "Send to Bitwig", true)];
     if !e.within.is_empty() {
         list.push(("midi.within", "Show the whole phrase", true));
     }
@@ -1086,6 +1098,10 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             }
             true
         }
+        ("midi.toBitwig", Some((at, _))) => {
+            send_to_bitwig(at);
+            true
+        }
         ("midi.copyPath", Some((_, path))) => {
             if let Some(feed) = feed {
                 crate::files::copy_path(&feed, &path);
@@ -1094,6 +1110,93 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// What a send to Bitwig needs, taken from the page so it can go on a thread of its own.
+struct Sending {
+    library: PathBuf,
+    from: NotesFrom,
+    phrase_id: i64,
+    hash: String,
+    name: String,
+    bars: i32,
+}
+
+/// Send to Bitwig: the picked part as a new MIDI file in the export folder's "MIDI browser" folder, then as a clip
+/// on a new track in the project open in Bitwig (as the C# MIDI page did). The part's own file is never touched.
+/// Its card shows at once and says how it went.
+fn send_to_bitwig(at: usize) {
+    let Some((sending, feed)) = PAGE.with(|p| {
+        let p = p.borrow();
+        let e = p.cat.entry(at)?;
+        let sending = Sending {
+            library: p.library.clone(),
+            from: p.notes.clone()?,
+            phrase_id: e.phrase.id,
+            hash: e.phrase.hash.clone(),
+            name: page::title(e),
+            bars: e.phrase.bars,
+        };
+        Some((sending, p.feed.clone()?))
+    }) else {
+        return;
+    };
+    let job = to_bitwig::part_card(&feed, &sending.name);
+    let started = background::spawn("Send to Bitwig", move || {
+        let export = export_dir(&sending.library);
+        // A panic in it is logged as a crash and fails the card as it goes.
+        let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
+            send_part(job, &to_bitwig::Bitwig::default(), &sending, export.as_deref())
+        }));
+    });
+    // Its card was taken into the thread, so it fails by itself ("It stopped before it finished").
+    if let Err(e) = started {
+        log::error("MIDI", &format!("Couldn't start sending to Bitwig: {e}"));
+    }
+}
+
+/// Where parts sent to Bitwig are written: "MIDI browser" in the export folder (the one picked in Settings, else
+/// "Music Organiser Exports" in Documents).
+fn export_dir(library: &Path) -> Option<PathBuf> {
+    let setting = Library::open_read_only(library)
+        .ok()
+        .and_then(|lib| lib.setting(mo_app::bitwig_convert::EXPORT_FOLDER_KEY).ok().flatten());
+    let root = mo_app::bitwig_convert::export_root(setting.as_deref(), mo_app::bitwig_convert::home().as_deref())?;
+    Some(root.join(page::EXPORT_SUBFOLDER))
+}
+
+/// Reads the part's notes, writes them as a new MIDI file in `export`, and sends that to `to`, ending `job`'s card
+/// with how it went. Returns the file written, if it was. Waits for Bitwig, so never on the window's thread.
+fn send_part(
+    job: mo_app::activity::Job,
+    to: &to_bitwig::Bitwig,
+    part: &Sending,
+    export: Option<&Path>,
+) -> Option<PathBuf> {
+    let failed = |job: mo_app::activity::Job, why: String| {
+        log::warning("MIDI", &format!("Sending {} to Bitwig failed: {why}", part.name));
+        job.failed_as(mo_dawlink::bitwig::PART_FAILED, &why);
+        None
+    };
+    let Some(dir) = export else {
+        return failed(job, "There's no export folder: pick one in Settings, Folders.".to_owned());
+    };
+    let notes = match notes_of(&part.from, part.phrase_id, &part.hash, &mut None) {
+        Ok(notes) if notes.iter().any(|n| !n.muted) => notes,
+        Ok(_) => return failed(job, "It has no notes to send (every note in it is muted).".to_owned()),
+        Err(e) => return failed(job, format!("Its notes couldn't be read: {e}.")),
+    };
+    let clip = page::part_clip(&part.name, &notes, part.bars);
+    let bytes = match mo_formats::midi::write::write_clip(&clip) {
+        Ok(written) => written.bytes,
+        Err(e) => return failed(job, format!("Its MIDI file couldn't be made: {e}.")),
+    };
+    let file = match page::write_part(dir, &part.name, &bytes) {
+        Ok(file) => file,
+        Err(e) => return failed(job, format!("Its MIDI file couldn't be saved in {}: {e}.", dir.display())),
+    };
+    to_bitwig::send_part(job, to, &file.to_string_lossy(), &part.name);
+    Some(file)
 }
 
 /// For the screenshots: everything is worked out in place.
@@ -1314,6 +1417,42 @@ mod tests {
         let Ok(read) = read_notes(&ask, &mut None) else { panic!("the made-up notes should read") };
         assert_eq!(read.roll.notes.len(), 12);
         assert!(read.fact.is_some());
+    }
+
+    #[test]
+    fn a_part_goes_to_bitwig_as_a_new_midi_file_on_a_new_track() {
+        let s = sample();
+        let e = &s.cat.entries[0];
+        let part = Sending {
+            library: PathBuf::new(),
+            from: s.notes.clone(),
+            phrase_id: e.phrase.id,
+            hash: e.phrase.hash.clone(),
+            name: page::title(e),
+            bars: e.phrase.bars,
+        };
+        let dir = std::env::temp_dir().join(format!("mo-ui-midi-to-bitwig-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let bitwig = mo_dawlink::bitwig::fake::FakeBitwig::start().unwrap();
+        let feed = mo_app::activity::Feed::default();
+        let file = send_part(feed.start("Sending", ""), &bitwig.bitwig(), &part, Some(&dir)).unwrap();
+        // A real MIDI file of the part, beside nothing else.
+        let bytes = std::fs::read(&file).unwrap();
+        assert!(bytes.starts_with(b"MThd"));
+        assert!(file.starts_with(&dir));
+        let world = bitwig.world();
+        assert_eq!(world.commands(), ["newtrack", "clip"]);
+        let track = world.tracks.iter().find(|t| t.name == part.name).unwrap();
+        assert_eq!(track.clips, [file.to_string_lossy().into_owned()]);
+        let cards = feed.visible(Instant::now());
+        assert!(cards.iter().any(|c| c.title == format!("{} is in Bitwig", part.name)), "{cards:?}");
+        drop(world);
+
+        // No export folder: nothing is written or sent, and the card says why.
+        let feed = mo_app::activity::Feed::default();
+        assert!(send_part(feed.start("Sending", ""), &bitwig.bitwig(), &part, None).is_none());
+        assert_eq!(bitwig.world().commands(), ["newtrack", "clip"]);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// A Standard MIDI File of one track: a C major scale up and down, a beat a note, at 96 ticks a beat.

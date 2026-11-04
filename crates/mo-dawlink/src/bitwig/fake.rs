@@ -100,6 +100,9 @@ impl Drop for FakeBitwig {
     }
 }
 
+/// The clip launcher slots on a track the link reaches, as its `SCENES`.
+const CLIP_SLOTS: usize = 8;
+
 /// What the stand-in does when the app connects.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum OnConnect {
@@ -232,11 +235,13 @@ pub struct FakeTrack {
     pub devices: Vec<FakeDevice>,
     /// The ID Bitwig keeps it under.
     pub id: String,
+    /// Its clip launcher slots, from the first: the file each clip was made from, "" for an empty slot.
+    pub clips: Vec<String>,
 }
 
 impl FakeTrack {
     pub fn new(name: &str, kind: &str, devices: Vec<FakeDevice>) -> FakeTrack {
-        FakeTrack { name: name.into(), kind: kind.into(), devices, id: String::new() }
+        FakeTrack { name: name.into(), kind: kind.into(), devices, id: String::new(), clips: Vec::new() }
     }
 }
 
@@ -349,7 +354,7 @@ impl World {
         let cmd = map.get("cmd");
         let changes = match cmd.and_then(Value::as_str) {
             Some("hello") => false,
-            Some("newtrack" | "insert" | "pads") => true,
+            Some("newtrack" | "insert" | "pads" | "clip") => true,
             _ => return Err(format!("Unknown command: {}", js(cmd))),
         };
         self.check_allowed(map, changes)?;
@@ -360,6 +365,7 @@ impl World {
             },
             Some("newtrack") => self.new_track(map),
             Some("insert") => self.insert(map),
+            Some("clip") => self.add_clip(map),
             _ => self.fill_pads(map),
         }
     }
@@ -427,6 +433,32 @@ impl World {
         self.selected_track = Some(at);
         self.selected_device = None;
         Ok(answer)
+    }
+
+    /// A file in a track's first empty clip launcher slot (of the first 8 the link reaches), as the link's `addClip`.
+    fn add_clip(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
+        let at = self.check_track(request.get("track").unwrap_or(&Value::Null))?;
+        let path = given(request.get("path"), "file")?.to_owned();
+        let file = file_name(&path);
+        let midi = file
+            .rsplit_once('.')
+            .is_some_and(|(_, ext)| ext.eq_ignore_ascii_case("mid") || ext.eq_ignore_ascii_case("midi"));
+        let loads = self.loads(&path) || (midi && !self.unloadable.iter().any(|u| u == file));
+        let track = self.tracks.get_mut(at).ok_or("Bitwig didn't add the track.")?;
+        let slot = track.clips.iter().position(String::is_empty).unwrap_or(track.clips.len());
+        if slot >= CLIP_SLOTS {
+            return Err(format!("The track's first {CLIP_SLOTS} clip slots are full."));
+        }
+        if !loads {
+            return Err(format!("Bitwig didn't make a clip from {path}."));
+        }
+        if slot == track.clips.len() {
+            track.clips.push(path);
+        } else if let Some(empty) = track.clips.get_mut(slot) {
+            *empty = path;
+        }
+        self.next_step("clip", request)?;
+        Ok(json!({ "slot": slot }))
     }
 
     fn insert(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
