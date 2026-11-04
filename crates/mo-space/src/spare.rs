@@ -266,7 +266,18 @@ fn usable(path: &str, stop: &AtomicBool) -> Result<bool, Stopped> {
 /// The copy is still what was found: there, a plugin file or bundle of its format, not a link, somewhere the Recycle
 /// Bin can keep it, and holding just what it held then.
 fn still_the_copy(copy: &SpareCopy, stop: &AtomicBool) -> Result<(), String> {
-    let path = Path::new(&copy.path);
+    still_the_file(&copy.path, &copy.format, copy.stamp.as_deref(), stop)
+}
+
+/// A plugin file or bundle is still what [`look`] found: there, a plugin of `format`, not a link, somewhere the Recycle
+/// Bin can keep it, and holding just what it held then (`stamp`, `None` when it couldn't be read then).
+pub(crate) fn still_the_file(
+    path_text: &str,
+    format: &str,
+    stamp: Option<&str>,
+    stop: &AtomicBool,
+) -> Result<(), String> {
+    let path = Path::new(path_text);
     let meta = match fs::symlink_metadata(path) {
         Ok(meta) => meta,
         Err(e) if e.kind() == ErrorKind::NotFound => return Err("It isn't there any more.".to_owned()),
@@ -275,17 +286,17 @@ fn still_the_copy(copy: &SpareCopy, stop: &AtomicBool) -> Result<(), String> {
     if meta.file_type().is_symlink() {
         return Err(format!("{} It stays.", Refused::Link.text()));
     }
-    if !format_of(&copy.path).is_some_and(|f| case::key(&f) == case::key(&copy.format)) {
-        return Err(format!("It isn't a {} plugin, so it stays.", copy.format));
+    if !format_of(path_text).is_some_and(|f| case::key(&f) == case::key(format)) {
+        return Err(format!("It isn't a {format} plugin, so it stays."));
     }
     // A network drive first, so a bundle there isn't walked for nothing.
-    let real = real_path(&copy.path).ok_or_else(|| "It isn't there any more.".to_owned())?;
-    if let Some(why) = cant_keep(&copy.path, &real, stop) {
+    let real = real_path(path_text).ok_or_else(|| "It isn't there any more.".to_owned())?;
+    if let Some(why) = cant_keep(path_text, &real, stop) {
         return Err(why.to_owned());
     }
-    match &copy.stamp {
+    match stamp {
         None => Err("Some of it couldn't be read when it was found, so it can't be checked now. It stays.".to_owned()),
-        Some(was) if stamp_of(&copy.path).as_ref() != Some(was) => {
+        Some(was) if stamp_of(path_text).as_deref() != Some(was) => {
             Err("It changed since it was found (an update?), so it stays.".to_owned())
         }
         Some(_) => Ok(()),

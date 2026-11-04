@@ -1282,6 +1282,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 pub mod clean;
+pub mod uninstall;
 
 #[cfg(test)]
 mod tests;

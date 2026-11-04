@@ -10,7 +10,6 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use mo_library::plugins::SampleIndex;
-use mo_library::scan::is_inside;
 use mo_library::{Library, LibraryError};
 use mo_space::admin::Admin;
 use mo_space::clean::{Bin, Done, NOT_IN_BIN, Problem, Removed, What};
@@ -19,7 +18,7 @@ use mo_space::plugin_clean::{self, CleanLine, PluginUse as CleanUse};
 use mo_space::plugin_space::{PluginSpace, SpaceKind};
 use mo_space::size::size_text;
 
-use super::{Plugins, plural, unused};
+use super::{Plugins, plural};
 
 /// What Clean up looks at for one plugin: its room, everyone's (to see what each folder holds), and how your projects
 /// use each plugin. Made on the window's thread from the page; the library's part is read on a worker
@@ -135,22 +134,8 @@ impl Plugins {
     /// Leaves out what a clean-up sent to the Recycle Bin (and what went inside it), until the old app measures again.
     pub fn forget_removed(&mut self, done: &Done) {
         // What went with another went inside it, so the folders sent cover it.
-        let gone: Vec<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
-        if gone.is_empty() {
-            return;
-        }
-        let keep = |path: &str| !gone.iter().any(|g| is_inside(path, g));
-        for s in &mut self.spaces {
-            s.folders.retain(|f| keep(&f.path));
-        }
-        let cutoff = self.cutoff();
-        for r in &mut self.rows {
-            if let Some(room) = r.room.as_mut() {
-                room.folders.retain(|f| keep(&f.path));
-            }
-            r.unused = unused(r, cutoff);
-        }
-        self.refilter();
+        let gone: Vec<String> = done.removed.iter().map(|r| r.path.clone()).collect();
+        self.forget_paths(&gone);
     }
 }
 
@@ -340,18 +325,25 @@ impl<'a> Watched<'a> {
     /// What went to the bin, as the lines picked had it, found in the bin so it can be put back. For a clean-up that
     /// stopped part way: one that finished says this itself.
     pub fn went(&self, picked: &[CleanLine]) -> Done {
+        let lines: Vec<(&str, u64, SpaceKind)> =
+            picked.iter().map(|l| (l.folder.path.as_str(), l.bytes(), l.folder.kind)).collect();
+        self.went_of(&lines)
+    }
+
+    /// [`Watched::went`] for any lines picked: each one's path, the room it takes, and what it is.
+    pub fn went_of(&self, picked: &[(&str, u64, SpaceKind)]) -> Done {
         let sent = self.sent.lock().map(|s| s.clone()).unwrap_or_else(|e| e.into_inner().clone());
         let mut removed: Vec<Removed> = sent
             .into_iter()
             .map(|(real, when)| {
-                let line = picked.iter().find(|l| key(&l.folder.path) == key(&real)).or_else(|| {
+                let line = picked.iter().find(|l| key(l.0) == key(&real)).or_else(|| {
                     let real = std::fs::canonicalize(Path::new(&real)).ok();
-                    picked.iter().find(|l| std::fs::canonicalize(&l.folder.path).ok() == real && real.is_some())
+                    picked.iter().find(|l| std::fs::canonicalize(l.0).ok() == real && real.is_some())
                 });
                 Removed {
-                    path: line.map_or_else(|| real.clone(), |l| l.folder.path.clone()),
-                    bytes: line.map_or(0, CleanLine::bytes),
-                    what: What::Plugin(line.map_or(SpaceKind::Sounds, |l| l.folder.kind)),
+                    path: line.map_or_else(|| real.clone(), |l| l.0.to_owned()),
+                    bytes: line.map_or(0, |l| l.1),
+                    what: What::Plugin(line.map_or(SpaceKind::Sounds, |l| l.2)),
                     real,
                     when,
                     bin_id: None,
