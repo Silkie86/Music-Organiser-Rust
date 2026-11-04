@@ -349,19 +349,18 @@ fn of_two_identical_saves_the_one_ending_a_sitting_stays() {
 }
 
 #[test]
-fn your_own_versions_in_a_backups_folder_arent_autosaves() {
+fn only_the_daws_own_autosaves_are_autosaves() {
     let root = fixtures("mo-space-own-backups");
     let song = root.join("MySong");
     let newest = write(&song, "MySong.flp", b"newest", 20);
-    for n in 1..=7 {
-        write(&song, &format!("Backups/MySong v{n}.flp"), b"mine", n);
-    }
-    // FL Studio's own copies, and Studio One's History, still are.
+    // FL Studio's own copies, Studio One's History and Bitwig's auto-backups are.
     write(&song, "Backup/MySong (overwritten at 2213h05).flp", b"fl", 8);
     write(&song, "History/MySong (Autosaved).song", b"s1", 9);
-    write(&song, "Backups/Other.song", b"s1b", 9);
+    write(&song, "auto-backups/MySong 3.bwproject", b"bw", 10);
     let settings = CompactSettings { keep_backups: 0, sitting_hours: 3 };
-    let report = measure(&[save(&newest, 20)], &[s(&root)], &[], settings, None, &AtomicBool::new(false)).unwrap();
+    let measure_it = || measure(&[save(&newest, 20)], &[s(&root)], &[], settings, None, &AtomicBool::new(false));
+    let report = measure_it().unwrap();
+    assert!(report.own_folder);
     let mut backups: Vec<&str> = report
         .items
         .iter()
@@ -369,7 +368,18 @@ fn your_own_versions_in_a_backups_folder_arent_autosaves() {
         .map(|i| Path::new(&i.path).file_name().unwrap().to_str().unwrap())
         .collect();
     backups.sort_unstable();
-    assert_eq!(backups, ["MySong (Autosaved).song", "MySong (overwritten at 2213h05).flp"]);
-    assert_eq!(report.backups, 2 + 2);
-    assert_eq!(report.other, 7 * 4 + 3);
+    assert_eq!(backups, ["MySong (Autosaved).song", "MySong (overwritten at 2213h05).flp", "MySong 3.bwproject"]);
+
+    // Your own versions in a Backups folder are yours: they aren't autosaves, and the folder isn't the song's alone
+    // any more (they may use audio its saves don't), so nothing in it is offered: only FL Studio's autosaves of the
+    // song, which are looked for in a Backup folder beside it either way.
+    for n in 1..=3 {
+        write(&song, &format!("Backups/MySong v{n}.flp"), b"mine", n);
+    }
+    write(&song, "Backups/take.wav", &[0; 10], 0);
+    let report = measure_it().unwrap();
+    assert!(!report.own_folder);
+    let lines: Vec<(CompactKind, &str)> =
+        report.items.iter().map(|i| (i.kind, Path::new(&i.path).file_name().unwrap().to_str().unwrap())).collect();
+    assert_eq!(lines, [(CompactKind::Backup, "MySong (overwritten at 2213h05).flp")]);
 }

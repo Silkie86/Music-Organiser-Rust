@@ -286,17 +286,19 @@ fn still_the_copy(copy: &SpareCopy, stop: &AtomicBool) -> Result<(), String> {
     }
 }
 
-/// Whether two families are the same plugin: equal, or one with its maker in front of the other ("fabfilterproq" and
-/// "proq") when both are at least four letters and what's in front is a maker's name ([`MAKERS`]): "Valhalla
-/// Supermassive" isn't NI's Massive. C# took one anywhere inside the other, which gave "Serum FX" Serum's projects.
-fn close(a: &str, b: &str) -> bool {
-    if a == b {
+/// Whether a family your projects use (`used`) is the installed one (`installed`): equal, or one with its maker in
+/// front of the other ("fabfilterproq" and "proq") when both are at least four letters. Text in front of the installed
+/// name in a project counts whatever it is (it's nearly always the maker, and counting it only keeps more copies). Text
+/// in front of the used name in the installed one must be a maker's name ([`MAKERS`]): "Valhalla Supermassive" isn't
+/// NI's Massive. C# took one anywhere inside the other, which gave "Serum FX" Serum's projects.
+fn close(used: &str, installed: &str) -> bool {
+    if used == installed {
         return true;
     }
-    let (long, short) = if a.len() >= b.len() { (a, b) } else { (b, a) };
-    long.chars().count() >= 4
-        && short.chars().count() >= 4
-        && long.strip_suffix(short).is_some_and(|maker| MAKERS.contains(&maker))
+    if used.chars().count() < 4 || installed.chars().count() < 4 {
+        return false;
+    }
+    used.ends_with(installed) || installed.strip_suffix(used).is_some_and(|maker| MAKERS.contains(&maker))
 }
 
 /// Makers whose name a project or an installed file may put in front of a plugin's ("FabFilter Pro-Q 3", "Xfer
@@ -443,6 +445,10 @@ mod tests {
         let spare = find(&files, &supermassive, false, |_| (0, None));
         let names: Vec<(&str, &str)> = spare.iter().map(|s| (s.name.as_str(), s.format.as_str())).collect();
         assert_eq!(names, [("Valhalla Supermassive", "VST2")]);
+        // A project naming the plugin with any maker in front still uses it: its VST2 isn't spare.
+        let files = [file("Pro-Q 3", "VST2"), file("Pro-Q 3", "VST3")];
+        let both = used(&[("Pro-Q 3", &[("VST3", 5)]), ("SomeMaker Pro-Q 3", &[("VST2", 3)])]);
+        assert!(find(&files, &both, false, |_| (0, None)).is_empty());
     }
 
     #[test]

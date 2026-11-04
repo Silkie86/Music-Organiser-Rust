@@ -13,7 +13,7 @@ use chrono::{NaiveDateTime, TimeDelta};
 use mo_formats::case;
 use mo_formats::paths::{extension, file_name, stem};
 use mo_formats::textscan::is_audio_path;
-use mo_library::scan::{daw_of, is_autosave_dir, is_autosave_file, is_inside, is_project_file};
+use mo_library::scan::{daw_of, is_autosave_file, is_inside, is_project_file};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -377,9 +377,11 @@ pub fn owns_folder(
         if !is_project_file(&p) || save_keys.contains(&key(&p)) {
             return None;
         }
+        // Only the DAW's own autosaves don't count: a project of yours in a "Backups" folder (an old version, or
+        // another song) may use audio here that this song's saves don't.
         let rel = relative_parts(dir, path);
-        let in_autosaves = rel.split_last().is_some_and(|(_, folders)| folders.iter().any(|d| is_autosave_dir(d)));
-        (!in_autosaves).then_some(())
+        let autosave = rel.split_last().is_some_and(|(name, folders)| is_daws_autosave(folders, name));
+        (!autosave).then_some(())
     })?;
     Ok(others.is_empty())
 }
