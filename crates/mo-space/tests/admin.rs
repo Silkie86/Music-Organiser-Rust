@@ -779,7 +779,7 @@ mod guarded {
         assert_eq!(unlock.asked(), 1);
         assert_eq!(fs::read_link(c.join("NI").join("Reaktor 6")).unwrap(), was);
 
-        // The step takes the link away, and doesn't make it again.
+        // The step takes the link away, and is cut off before it makes it again: it says which link to make.
         let (moved, c, _) = inner_moved_home(&dir.join("gone"));
         let old = PathBuf::from(&moved[1].old_copy);
         let takes_it = Meanwhile(|_: &[String]| {
@@ -789,9 +789,150 @@ mod guarded {
         });
         let stopped = back(&moved, &takes_it);
         lock(&old, false);
-        assert!(matches!(stopped, Err(CantMove::LeftHalfway(_))), "{stopped:?}");
+        let Err(CantMove::LeftHalfway(why)) = &stopped else { panic!("{stopped:?}") };
+        let make = format!(
+            "There's no link at {} now: make one there to {} yourself.",
+            s(&old.join("Reaktor 6")),
+            moved[0].to
+        );
+        assert!(why.contains("didn't finish") && why.contains(&make), "{why}");
         assert!(fs::symlink_metadata(c.join("NI")).unwrap().file_type().is_symlink());
         assert!(old.join("k.nki").exists() && fs::symlink_metadata(old.join("Reaktor 6")).is_err());
+    }
+
+    /// Moving back that folder, as a plugin update puts a real folder where the link was while it copies: it isn't
+    /// swapped, and Windows isn't asked about the old copy's links for nothing: they stay as they were.
+    #[test]
+    fn moving_back_doesnt_ask_about_an_inner_moved_folders_link_when_it_wont_swap() {
+        let dir = fixtures("mo-space-admin-inner-link-back-update");
+        if !locking_works(&dir) {
+            return;
+        }
+        let stop = AtomicBool::new(false);
+        let (moved, c, _) = inner_moved_home(&dir);
+        let old = PathBuf::from(&moved[1].old_copy);
+        let was = fs::read_link(old.join("Reaktor 6")).unwrap();
+        // Something saved through the link since, in a folder of the old copy Windows doesn't guard, so the first pass
+        // copies something.
+        lock(&old, false);
+        fs::create_dir(old.join("Sub")).unwrap();
+        lock(&old, true);
+        write(Path::new(&moved[1].to), "Sub/new.nki", "n");
+        let ni = c.join("NI");
+        let once = AtomicBool::new(false);
+        let progress = |_: u64| {
+            if !once.swap(true, Ordering::SeqCst) {
+                unlink(&ni);
+                write(&c, "NI/Update.db", "new");
+            }
+        };
+        let unlock = Unlock::new(&[old.as_path()]);
+        let result = mo_space::folder_move::move_back(&moved[1], &moved, &OtherDrive(&unlock), &progress, &stop);
+        lock(&old, false);
+        let Err(CantMove::LeftHalfway(why)) = &result else { panic!("{result:?}") };
+        assert!(why.contains("became a real folder again") && why.contains("brought up to date"), "{why}");
+        assert_eq!(unlock.asked(), 0);
+        assert_eq!(fs::read_link(old.join("Reaktor 6")).unwrap(), was);
+        assert_eq!(fs::read_to_string(old.join("Sub/new.nki")).unwrap(), "n");
+        assert_eq!(fs::read_to_string(ni.join("Update.db")).unwrap(), "new");
+    }
+
+    /// A folder moved to D, with its old copy deleted since. Gives the move, and the folders C and D.
+    fn moved_without_old_copy(dir: &Path) -> (mo_space::folder_move::MovedFolder, PathBuf, PathBuf) {
+        let (c, d) = (dir.join("C"), dir.join("D"));
+        let library = c.join("Library");
+        write(&library, "0.db", "x");
+        fs::create_dir_all(&d).unwrap();
+        let whose = ("omnisphere", mo_space::plugin_space::SpaceKind::Sounds, &[] as &[String]);
+        let (drives, stop) = (OtherDrive(&NoAdmin), AtomicBool::new(false));
+        let moved =
+            mo_space::folder_move::move_folder(&s(&library), &s(&d), 1, whose, &drives, &[], &[], &nothing, &stop);
+        let moved = moved.unwrap();
+        fs::remove_dir_all(&moved.old_copy).unwrap();
+        (moved, c, d)
+    }
+
+    /// Moving back that folder: the copy made to come back is made as you, then Windows guards the link (its folder is
+    /// locked as it copies), so Windows asks about the swap. You say no: the copy made to come back goes, as the other
+    /// drive still has everything. The other drive goes as Windows asks: the swap didn't happen, so the copy made to
+    /// come back is only a copy, but the only one that can be reached then. It stays, its marker saying it isn't going
+    /// into use, and it says so; once the drive is back, trying again clears it first and moves the folder back. The
+    /// link goes as Windows asks: the copy made to come back stays too, for you to rename.
+    #[test]
+    fn what_moving_back_leaves_when_windows_asks_about_the_swap_with_the_old_copy_deleted() {
+        let dir = fixtures("mo-space-admin-back-drive-gone-at-swap");
+        if !locking_works(&dir) {
+            return;
+        }
+        let stop = AtomicBool::new(false);
+
+        // You say no.
+        let (moved, c, _) = moved_without_old_copy(&dir.join("no"));
+        let library = c.join("Library");
+        let kept = c.join("Library (moving back)");
+        let progress = |_: u64| {
+            if kept.exists() {
+                lock(&c, true);
+            }
+        };
+        let no = Unlock { yes_to: 0, ..Unlock::new(&[c.as_path()]) };
+        let result = mo_space::folder_move::move_back(&moved, &[], &OtherDrive(&no), &progress, &stop);
+        lock(&c, false);
+        assert_eq!(result.unwrap_err().text(), "You said no to Windows' administrator question. Nothing was moved.");
+        assert_eq!(no.asked(), 1);
+        assert!(fs::symlink_metadata(&library).unwrap().file_type().is_symlink());
+        // What's in the copy made to come back goes. The folder itself stays here, empty but for its marker, as the
+        // test's lock on the link's folder keeps every name in it; the marker says it isn't in use, so the next try
+        // clears it.
+        assert!(!kept.join("0.db").exists());
+        mo_space::folder_move::move_back(&moved, &[], &OtherDrive(&NoAdmin), &nothing, &stop).unwrap();
+        assert!(!fs::symlink_metadata(&library).unwrap().file_type().is_symlink() && !kept.exists());
+        assert_eq!(fs::read_to_string(library.join("0.db")).unwrap(), "x");
+
+        // The other drive goes.
+        let (moved, c, d) = moved_without_old_copy(&dir.join("drive"));
+        let library = c.join("Library");
+        let kept = c.join("Library (moving back)");
+        let progress = |_: u64| {
+            if kept.exists() {
+                lock(&c, true);
+            }
+        };
+        let unplugged = d.with_file_name("D unplugged");
+        let asks = Meanwhile(|_: &[String]| fs::rename(&d, &unplugged).unwrap());
+        let result = mo_space::folder_move::move_back(&moved, &[], &OtherDrive(&asks), &progress, &stop);
+        lock(&c, false);
+        let Err(CantMove::LeftHalfway(why)) = &result else { panic!("{result:?}") };
+        assert!(why.contains(&format!("{} couldn't be reached any more", moved.to)), "{why}");
+        assert!(why.contains(&format!("stays beside it, as {}", s(&kept))) && !why.contains("still has all"), "{why}");
+        assert!(fs::symlink_metadata(&library).unwrap().file_type().is_symlink());
+        assert_eq!(fs::read_to_string(kept.join("0.db")).unwrap(), "x");
+        // The drive is back: trying again clears the copy that stayed first (it never went into use), and moves the
+        // folder back.
+        fs::rename(&unplugged, &d).unwrap();
+        mo_space::folder_move::move_back(&moved, &[], &OtherDrive(&NoAdmin), &nothing, &stop).unwrap();
+        assert!(!fs::symlink_metadata(&library).unwrap().file_type().is_symlink() && !kept.exists());
+        assert_eq!(fs::read_to_string(library.join("0.db")).unwrap(), "x");
+
+        // The link goes as Windows asks (the step is cut off once it took it away).
+        let (moved, c, _) = moved_without_old_copy(&dir.join("link"));
+        let library = c.join("Library");
+        let kept = c.join("Library (moving back)");
+        let progress = |_: u64| {
+            if kept.exists() {
+                lock(&c, true);
+            }
+        };
+        let takes_it = Meanwhile(|_: &[String]| {
+            lock(&c, false);
+            unlink(&library);
+            lock(&c, true);
+        });
+        let result = mo_space::folder_move::move_back(&moved, &[], &OtherDrive(&takes_it), &progress, &stop);
+        lock(&c, false);
+        assert!(matches!(result, Err(CantMove::LeftHalfway(_))), "{result:?}");
+        assert!(fs::symlink_metadata(&library).is_err());
+        assert_eq!(fs::read_to_string(kept.join("0.db")).unwrap(), "x");
     }
 
     #[test]

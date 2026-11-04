@@ -2160,6 +2160,40 @@ fn moving_back_doesnt_name_a_link_deleted_just_before_its_turn_in_the_last_pass(
     }
 }
 
+/// Moving back with the old copy there, as the first pass copies: the plugin deletes a link in the folder (to make it
+/// again, say) once the folder was listed, just before the link's turn comes, where the old copy has a folder of its
+/// own. The old copy's folder stays as it was, and isn't named: the other drive has nothing there now, and nothing is
+/// said of what goes, as for a file.
+#[test]
+fn moving_back_doesnt_name_a_folder_of_the_old_copy_where_a_link_was_deleted_just_before_its_turn() {
+    let dir = fixtures("mo-space-move-back-link-deleted-over-a-folder");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let library = c.join("Library");
+    write(&library, "Patch.db", "x");
+    fs::create_dir_all(library.join("Sub")).unwrap();
+    fs::create_dir_all(dir.join("KitsA")).unwrap();
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let moved = move_folder(&s(&library), &s(&d), 1, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
+    // In the copy: a file saved since, listed before a link made since, where the old copy has a folder of that name.
+    let (file, kits) = listed_before_a_link(&d.join("Library").join("Sub"), &dir.join("KitsA"));
+    let name = kits.file_name().unwrap();
+    write(&PathBuf::from(&moved.old_copy).join("Sub").join(name), "old.kit", "old");
+    // As the first pass copies the file, the plugin deletes the link.
+    let progress = |bytes: u64| {
+        if bytes == 1 {
+            unlink(&kits);
+        }
+    };
+    let back = move_back(&moved, &[], &ROOMY, &progress, &stop).unwrap();
+    assert!(back.links_left.is_empty(), "{:?}", back.links_left);
+    assert!(!is_link(&library));
+    let kept = library.join("Sub").join(name);
+    assert!(!is_link(&kept));
+    assert_eq!(fs::read_to_string(kept.join("old.kit")).unwrap(), "old");
+    assert_eq!(fs::read_to_string(library.join("Sub").join(file.file_name().unwrap())).unwrap(), "x");
+}
+
 /// Moving back with the old copy there, with a link in the folder worded from where it sits, into the folder ("Sub"):
 /// the copy's leads into the copy (through the folder's link), and the old copy's into the old copy, which is the same
 /// place in each, so it isn't named, and stays as it was (a Mac and Linux: a junction on Windows is never worded that

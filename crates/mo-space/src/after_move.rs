@@ -11,7 +11,7 @@ use mo_formats::paths::file_name;
 use mo_library::scan::is_inside;
 use serde::{Deserialize, Serialize};
 
-use crate::admin::{Admin, Step, ask_for, real_spot, reason};
+use crate::admin::{Admin, Outcome, Step, ask_for, real_spot, reason};
 use crate::clean::{Bin, Done, Problem, Sending, What};
 use crate::folder_move::{
     CantMove, Drives, Fill, KEPT_SUFFIX, MovedFolder, Tree, check_rename, check_rename_or_ask, clear_failed_link,
@@ -21,7 +21,7 @@ use crate::folder_move::{
 use crate::half_copy::{busy_now, claim, clear_own, going_into_use, unmark};
 use crate::plugin_space::{PluginSpace, SpaceKind};
 use crate::size::{self, is_link};
-use crate::{is_dir, key, real_folder, text};
+use crate::{is_dir, key, not_there, real_folder, text};
 
 /// The folder a plugin update made where the link was, once it's set aside and the link is back.
 pub const UPDATE_SUFFIX: &str = " (after update)";
@@ -654,9 +654,7 @@ pub fn repoint(
         }
         let asked: Vec<(String, PathBuf)> =
             guarded.iter().map(|&n| (moved[links[n].0].from.clone(), links[n].1.clone())).collect();
-        let still =
-            |_: &str, to: &Path| format!("After the administrator step, the link still doesn't lead to {}.", text(to));
-        for (&n, done) in guarded.iter().zip(relink_as_admin(admin, &asked, &still)) {
+        for (&n, done) in guarded.iter().zip(relink_as_admin(admin, &asked)) {
             let (i, new_to) = &links[n];
             match done {
                 Ok(()) => now[*i].to = text(new_to),
@@ -746,18 +744,29 @@ pub(crate) fn relink(at: &str, target: &Path, check: bool) -> Result<(), NotReli
 
 /// Points links Windows guards at where they're to lead as administrator, Windows asking you once for all of them:
 /// each of `links` is a link's place and where it's to lead. What's there afterwards decides, whatever the step said:
-/// `Ok` for each that leads there now, or else why not, as the step said it, or `otherwise` (given the link's place and
-/// where it was to lead) when what it said doesn't explain it.
-pub(crate) fn relink_as_admin(
-    admin: &dyn Admin,
-    links: &[(String, PathBuf)],
-    otherwise: &dyn Fn(&str, &Path) -> String,
-) -> Vec<Result<(), String>> {
+/// `Ok` for each that leads there now, or else why not, as the step said it, or that it still doesn't lead there when
+/// what the step said doesn't explain it. For one that's gone (the step was cut off as it made it again, say), that
+/// ends with which link to make yourself, unless the step said so already (it does when it couldn't make it again).
+pub(crate) fn relink_as_admin(admin: &dyn Admin, links: &[(String, PathBuf)]) -> Vec<Result<(), String>> {
     let lines: Vec<Vec<String>> = links.iter().map(|(at, to)| vec![real_spot(at), text(to)]).collect();
     let said = ask_for(admin, Step::Relink, &lines);
     links
         .iter()
         .enumerate()
-        .map(|(k, (at, to))| if leads_to(at, to) { Ok(()) } else { Err(reason(&said, k, &otherwise(at, to))) })
+        .map(|(k, (at, to))| {
+            if leads_to(at, to) {
+                return Ok(());
+            }
+            let why = reason(
+                &said,
+                k,
+                &format!("After the administrator step, the link still doesn't lead to {}.", text(to)),
+            );
+            let told = said.as_ref().is_ok_and(|s| matches!(s.get(k), Some(Outcome::Halfway(_))));
+            if !told && not_there(Path::new(at)) {
+                return Err(format!("{why} There's no link at {at} now: make one there to {} yourself.", text(to)));
+            }
+            Err(why)
+        })
         .collect()
 }

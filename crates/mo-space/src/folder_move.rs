@@ -734,9 +734,10 @@ pub fn move_back(
         .map_err(partly)?;
         write_through(&[&first, &again], stop).map_err(partly)?;
         let mut links_left = [first.links_left, again.links_left].concat();
-        point_inner_links(moved, all, &mut links_left, &changed, drives.admin()).map_err(partly)?;
-        // The copying took a while: a plugin update may have put a real folder where the link was meanwhile.
-        if let Some((now, files)) = not_the_link_now(moved) {
+        // The copying took a while: a plugin update may have put a real folder where the link was meanwhile. That's
+        // looked at before the old copy's links are pointed (Windows may ask you about those, for nothing then), and
+        // again just before the swap.
+        let not_swapped = |found: NotTheLink| {
             let kept = if kept_in.exists() {
                 format!(" Its own newer files are kept in {}.", text(&kept_in))
             } else {
@@ -750,7 +751,14 @@ pub fn move_back(
             } else {
                 format!("The old copy ({}) stays beside it, as it was.", moved.old_copy)
             };
-            return Err(CantMove::LeftHalfway(format!("{now} {updated}{kept} {files}")));
+            CantMove::LeftHalfway(format!("{} {updated}{kept} {}", found.now, found.files))
+        };
+        if let Some(found) = not_the_link_now(moved) {
+            return Err(not_swapped(found));
+        }
+        point_inner_links(moved, all, &mut links_left, &changed, drives.admin()).map_err(partly)?;
+        if let Some(found) = not_the_link_now(moved) {
+            return Err(not_swapped(found));
         }
         unswap_or_ask(from, &moved.old_copy, to, drives.admin()).map_err(partly)?;
         return Ok(MovedBack {
@@ -775,28 +783,43 @@ pub fn move_back(
     let (first, again) = copy_fresh(&tree, progress, stop)?;
     // The copying took a while: a plugin update may have put a real folder where the link was meanwhile. The copy
     // made to come back is only a copy of what's still on the other drive, so it goes; but not while the other drive
-    // can't be reached (its drive went just now, say): then it's the only copy that can be. It stays a half copy,
-    // which the next try clears first, once the other drive can be reached again ([`clear_own`]).
-    if let Some((now, files)) = not_the_link_now(moved) {
-        if !is_dir(&moved.to) {
-            return Err(CantMove::LeftHalfway(format!(
-                "{now} The copy made to bring it back stays beside it, as {back}: it has all the folder's files, as \
-                 they were when it was made. {files}"
-            )));
+    // can't be reached (its drive went just now, say): then it's the only copy that can be. It stays a half copy then,
+    // its marker saying it isn't going into use, which the next try clears first, once the other drive can be reached
+    // again ([`clear_own`]).
+    let not_swapped = |found: NotTheLink| {
+        if found.reached {
+            remove_copy(Path::new(&back));
+            return CantMove::Failed(format!(
+                "{} The copy made to bring it back was removed; {}",
+                found.now, found.files
+            ));
         }
-        remove_copy(Path::new(&back));
-        return Err(CantMove::Failed(format!("{now} The copy made to bring it back was removed; {files}")));
+        not_in_use(Path::new(&back));
+        CantMove::LeftHalfway(format!(
+            "{} The copy made to bring it back stays beside it, as {back}: it has all the folder's files, as they were \
+             when it was made. {}",
+            found.now, found.files
+        ))
+    };
+    if let Some(found) = not_the_link_now(moved) {
+        return Err(not_swapped(found));
     }
     going_into_use(Path::new(&back)).then_some(()).ok_or_else(|| not_noted(Path::new(&back)))?;
     if let Err(why) = unswap_or_ask(from, &back, to, drives.admin()) {
-        // As it was (the plugin still uses the other drive), or a real folder is there now and the other drive still
-        // has everything: either way the copy made to come back is only a copy, so it goes.
-        if link_reaches(moved) || (real_folder(from) && fs::metadata(to).is_ok_and(|m| m.is_dir())) {
-            remove_copy(Path::new(&back));
+        // While the link is there (as it was, or put back) or a real folder is (a plugin update put it there just
+        // now), nothing leads to the copy made to come back: the swap didn't happen, so it's only a copy, as above.
+        // When the link still leads to the other drive, it goes, and `why` says why it didn't swap. Anything else (the
+        // link went, and the copy didn't take its name) is said in `why` (what to rename, say), and the copy stays as
+        // it is, still noted as going into use.
+        if !is_link(Path::new(from)) && !real_folder(from) {
+            return Err(why);
         }
         return Err(match not_the_link_now(moved) {
-            Some((now, files)) if real_folder(from) => CantMove::Failed(format!("{now} {files}")),
-            _ => why,
+            Some(found) => not_swapped(found),
+            None => {
+                remove_copy(Path::new(&back));
+                why
+            }
         });
     }
     // In place now, as the plugin's own folder: it's no half copy.
@@ -848,13 +871,7 @@ fn point_inner_links(
         return Ok(());
     }
     let asked: Vec<(String, PathBuf)> = guarded.iter().map(|(_, mine, now)| (text(mine), now.clone())).collect();
-    let went = |at: &str, to: &Path| {
-        format!(
-            "The link at {at} went as administrator, and wasn't made again: make a link there to {} yourself.",
-            text(to)
-        )
-    };
-    for ((rest, mine, _), done) in guarded.into_iter().zip(crate::after_move::relink_as_admin(admin, &asked, &went)) {
+    for ((rest, mine, _), done) in guarded.into_iter().zip(crate::after_move::relink_as_admin(admin, &asked)) {
         match done {
             Ok(()) => {
                 changed.store(true, Ordering::Relaxed);
@@ -912,7 +929,7 @@ fn not_real_on_the_way<'a>(folder: &Path, parts: impl IntoIterator<Item = Compon
 /// back does; or the link leads somewhere else (it was pointed at another place); or nothing is there. Only a real
 /// folder can be linked again ([`crate::after_move::link_again`]). The copy is said to have all the folder's files only
 /// while it can be reached.
-fn not_the_link_now(moved: &MovedFolder) -> Option<(String, String)> {
+fn not_the_link_now(moved: &MovedFolder) -> Option<NotTheLink> {
     if link_reaches(moved) {
         return None;
     }
@@ -929,7 +946,7 @@ fn not_the_link_now(moved: &MovedFolder) -> Option<(String, String)> {
         fs::read_link(link)
             .is_ok_and(|words| key(&text(&worded_place(link, &words))) == key(&text(&plainly(&tidy(Path::new(to))))))
     };
-    Some(if real_folder(from) {
+    let (now, files) = if real_folder(from) {
         (
             format!(
                 "While it was moving back, {from} became a real folder again (a plugin update may have put it there), \
@@ -954,7 +971,18 @@ fn not_the_link_now(moved: &MovedFolder) -> Option<(String, String)> {
         )
     } else {
         (format!("While it was moving back, the link at {from} went, so it wasn't swapped."), files)
-    })
+    };
+    Some(NotTheLink { now, files, reached })
+}
+
+/// What [`not_the_link_now`] found: why the place a moved folder was isn't its link to the copy any more (`now`), where
+/// the folder's files are and what to do (`files`, the end of what the app says), and whether the copy can be reached
+/// now. That's looked at once, so what's done with the copy made to come back goes by what's said, also on a drive
+/// that's slow to wake up.
+struct NotTheLink {
+    now: String,
+    files: String,
+    reached: bool,
 }
 
 /// A copy whose marker couldn't be told it's going into use goes (it isn't in use), and nothing has moved: a copy whose
@@ -2010,9 +2038,11 @@ pub(crate) fn copy_tree(
                     (Some(_), true) => as_file_now(&source),
                     // Something at its place already (in a folder of yours, a file or a folder of yours) stays as it
                     // is. Freshening, it's named, as a link of yours is where the folder has a file or a folder (the
-                    // plugin, or you, put a link in its place since): which is the one to keep can't be told.
+                    // plugin, or you, put a link in its place since): which is the one to keep can't be told. Not
+                    // when the folder's link went just now (deleted to be made again, say): the other drive has
+                    // nothing there then, and nothing is said of what goes, as for a file.
                     (Some(_), false) => {
-                        if fill == Fill::Freshen {
+                        if fill == Fill::Freshen && !went(&source, tree) {
                             copied.links_left.push(inside(&copy));
                         }
                         Ok(None)
