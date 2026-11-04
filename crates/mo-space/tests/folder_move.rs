@@ -30,11 +30,17 @@ fn fixtures(name: &str) -> PathBuf {
     dir
 }
 
-/// Makes the read-only files a test left writable again, so its folder can be cleared.
+/// Makes the read-only files (and, on a Mac or Linux, the folders a test locked, also one that stopped before it could
+/// unlock them) a test left writable again, so its folder can be cleared.
 fn writable(dir: &Path) {
     for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
         let Ok(kind) = entry.file_type() else { continue };
         if kind.is_dir() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o755));
+            }
             writable(&entry.path());
         } else if kind.is_file()
             && let Ok(meta) = entry.metadata()
@@ -960,6 +966,31 @@ fn a_file_that_goes_while_the_folder_copies_is_passed_over() {
     assert!(moved.has_old_copy());
 }
 
+/// A folder in it that goes while the folder copies (a plugin's cache, cleared) is passed over too, as its turn comes
+/// and once all of it was read: it didn't turn into a link or a file.
+#[test]
+fn a_folder_that_goes_while_the_folder_copies_is_passed_over() {
+    let dir = fixtures("mo-space-move-cache-goes");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let library = c.join("Library");
+    write(&library, "A/a.tmp", "x");
+    write(&library, "B/b.tmp", "x");
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    // The plugin clears both as the first file is copied: one of them was read whole just then, and the other's turn
+    // is still to come.
+    let cleared = AtomicBool::new(false);
+    let progress = |_| {
+        if !cleared.swap(true, Ordering::Relaxed) {
+            fs::remove_dir_all(library.join("A")).unwrap();
+            fs::remove_dir_all(library.join("B")).unwrap();
+        }
+    };
+    let moved = move_folder(&s(&library), &s(&d), 2, whose(), &ROOMY, &[], &[], &progress, &stop).unwrap();
+    assert!(is_link(&library) && moved.has_old_copy());
+    assert!(cleared.load(Ordering::Relaxed));
+}
+
 #[test]
 fn a_file_that_changes_while_the_folder_copies_is_copied_as_it_is_by_its_turn() {
     let dir = fixtures("mo-space-move-changed-meanwhile");
@@ -1543,6 +1574,9 @@ fn the_drive_the_copys_link_leads_to_going_once_all_of_it_came_back_isnt_taken_f
     let result = move_back(&moved, &[], &ROOMY, &progress, &stop);
     let Err(CantMove::Failed(why)) = &result else { panic!("{result:?}") };
     assert!(why.contains("wasn't swapped") && !why.contains("while it was being copied"), "{why}");
+    // Its link wasn't changed: the copy can't be reached now, and linking again wouldn't take a link.
+    assert!(why.contains(&format!("{} couldn't be reached any more", moved.to)), "{why}");
+    assert!(why.contains("Once it can be reached again, try again.") && !why.contains("link it again"), "{why}");
     assert!(is_link(&library) && !c.join("Library (moving back)").exists());
     assert_eq!(fs::read_dir(dir.join("E unplugged").join("Library")).unwrap().count(), 10);
 }
@@ -1998,6 +2032,29 @@ fn moving_back_names_a_link_the_plugin_pointed_elsewhere_after_the_move() {
     assert_eq!(real(&library.join("Same")), real(&dir.join("KitsA")));
 }
 
+/// Moving back with the old copy there, after a folder in it was put somewhere else with a link in its place (by you,
+/// or the plugin, through the folder's link): the old copy's folder stays as it was, and is named, as a link left is
+/// (which of the two to keep can't be told). The kits put elsewhere stay where they are.
+#[test]
+fn moving_back_names_a_folder_the_other_drive_has_a_link_in_the_place_of() {
+    let dir = fixtures("mo-space-move-back-folder-now-a-link");
+    let (c, d, f) = (dir.join("C"), dir.join("D"), dir.join("F"));
+    let library = c.join("Library");
+    write(&library, "Patch.db", "x");
+    write(&library, "Kits/kick.wav", "old");
+    write(&f, "Kits/kick.wav", "new");
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let moved = move_folder(&s(&library), &s(&d), 1, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
+    fs::remove_dir_all(library.join("Kits")).unwrap();
+    folder_link(&f.join("Kits"), &library.join("Kits"));
+    let back = move_back(&moved, &[], &ROOMY, &nothing, &stop).unwrap();
+    assert_eq!(back.links_left, ["Kits"]);
+    assert!(!is_link(&library) && !is_link(&library.join("Kits")));
+    assert_eq!(fs::read_to_string(library.join("Kits/kick.wav")).unwrap(), "old");
+    assert_eq!(fs::read_to_string(f.join("Kits/kick.wav")).unwrap(), "new");
+}
+
 /// A link the plugin points elsewhere just before the swap (after the last pass made it again) leads there only from
 /// the old copy: the old copy stays until you're sure.
 #[test]
@@ -2329,6 +2386,7 @@ fn moving_back_while_an_update_puts_a_real_folder_back_says_so_and_keeps_nothing
         let said = move_back(&moved, &[], &ROOMY, &update, &stop).unwrap_err();
         let text = said.text();
         assert!(text.contains("became a real folder again"), "{text}");
+        assert!(text.contains(&format!("Look at what's in {} now, then link it again", s(&library))), "{text}");
         // What the update made stays, and so does the copy on the other drive.
         assert_eq!(fs::read_to_string(library.join("new.nki")).unwrap(), "new");
         assert_eq!(fs::read_to_string(Path::new(&moved.to).join("a.nki")).unwrap(), "a");
@@ -2340,5 +2398,46 @@ fn moving_back_while_an_update_puts_a_real_folder_back_says_so_and_keeps_nothing
             assert!(matches!(said, CantMove::Failed(_)));
             assert!(!c.join("Binned (moving back)").exists());
         }
+    }
+}
+
+/// Moving back as the plugin's folder's link is pointed at another folder, or goes: it says so, and where the folder's
+/// files are, but not to link it again (that only takes a real folder put where the link was).
+#[test]
+fn moving_back_as_the_link_is_pointed_elsewhere_or_goes_says_so() {
+    let dir = fixtures("mo-space-move-back-link-changed");
+    let (c, d) = (dir.join("C"), dir.join("D"));
+    let other = dir.join("Other");
+    fs::create_dir_all(&other).unwrap();
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    for (n, (with_old_copy, elsewhere)) in
+        [(true, true), (true, false), (false, true), (false, false)].into_iter().enumerate()
+    {
+        let library = c.join(format!("Library {n}"));
+        write(&library, "a.nki", "a");
+        let moved = move_folder(&s(&library), &s(&d), 1, whose(), &ROOMY, &[], &[], &nothing, &stop).unwrap();
+        if with_old_copy {
+            // Something saved through the link, to bring back.
+            write(Path::new(&moved.to), "b.nki", "b");
+        } else {
+            fs::remove_dir_all(&moved.old_copy).unwrap();
+        }
+        let changed = AtomicBool::new(false);
+        let change = |_| {
+            if !changed.swap(true, Ordering::Relaxed) {
+                unlink(&library);
+                if elsewhere {
+                    folder_link(&other, &library);
+                }
+            }
+        };
+        let text = move_back(&moved, &[], &ROOMY, &change, &stop).unwrap_err().text();
+        let what = if elsewhere { "was changed to lead somewhere else" } else { "went" };
+        assert!(text.contains(&format!("the link at {} {what}, so it wasn't swapped", s(&library))), "{text}");
+        assert!(text.contains(&format!("{} still has all the folder's files.", moved.to)), "{text}");
+        assert!(!text.contains("link it again"), "{text}");
+        assert_eq!(is_link(&library), elsewhere);
+        assert_eq!(fs::read_to_string(Path::new(&moved.to).join("a.nki")).unwrap(), "a");
     }
 }

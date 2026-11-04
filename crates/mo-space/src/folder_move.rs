@@ -31,7 +31,7 @@ use crate::half_copy::{
 };
 use crate::plugin_space::SpaceKind;
 use crate::size::{self, is_link, is_online_only, size_text};
-use crate::{key, not_there, real_folder, real_path, really, text};
+use crate::{is_dir, key, not_there, real_folder, real_path, really, text};
 
 /// What the original is called while its link stands in for it.
 pub const OLD_SUFFIX: &str = " (old copy)";
@@ -641,19 +641,20 @@ pub struct MovedBack {
     /// The folder they're kept in, beside the plugin's folder.
     pub kept_in: String,
     /// Links in the old copy where the other drive has a file or folder now, or a link leading somewhere else (the
-    /// plugin pointed it elsewhere since, or just before the move's swap), as paths inside the folder: left as they
-    /// were, for you to look at. So is the link of a folder moved from inside it before that Windows wouldn't let be
-    /// pointed where that folder is now.
+    /// plugin pointed it elsewhere since, or just before the move's swap), and files and folders in it where the other
+    /// drive has a link now, as paths inside the folder: left as they were, for you to look at. So is the link of a
+    /// folder moved from inside it before that Windows wouldn't let be pointed where that folder is now.
     pub links_left: Vec<String>,
 }
 
 /// Undoes a move: the link goes and the old copy takes its place again, with what changed on the other drive since the
 /// move copied into it first (presets the plugin wrote through the link live only there). The old copy's own newer
 /// files are kept aside, never replaced, and its links stay as they are: one that leads somewhere else than the other
-/// drive's is named ([`MovedBack::links_left`]). But the links of folders moved from inside it before (`all` is every
-/// moved folder) are the app's own: once both passes are done, one whose twin on the other drive leads where its
-/// folder is now is pointed there too (the old copy's may lead where it was before the folder the moved folders live
-/// in moved). Once the old copy is deleted, the folder is copied back instead.
+/// drive's is named ([`MovedBack::links_left`]), as is a file or folder of its where the other drive has a link now
+/// (it stays too). But the links of folders moved from inside it before (`all` is every moved folder) are the app's
+/// own: once both passes are done, one whose twin on the other drive leads where its folder is now is pointed there
+/// too (the old copy's may lead where it was before the folder the moved folders live in moved). Once the old copy is
+/// deleted, the folder is copied back instead.
 /// Either way only with room to spare on this drive, and only while the link still leads to the copy the move made.
 /// Close the DAW first: what it saves meanwhile is caught by a second pass, but not after the swap. Stopped or failing
 /// part way, it says what's where ([`CantMove::LeftHalfway`]); the copy it makes when the old copy is gone holds a
@@ -736,7 +737,7 @@ pub fn move_back(
         let mut links_left = [first.links_left, again.links_left].concat();
         point_inner_links(moved, all, &mut links_left, &changed).map_err(partly)?;
         // The copying took a while: a plugin update may have put a real folder where the link was meanwhile.
-        if let Some(now) = not_the_link_now(moved) {
+        if let Some((now, files)) = not_the_link_now(moved) {
             let kept = if kept_in.exists() {
                 format!(" Its own newer files are kept in {}.", text(&kept_in))
             } else {
@@ -750,11 +751,7 @@ pub fn move_back(
             } else {
                 format!("The old copy ({}) stays beside it, as it was.", moved.old_copy)
             };
-            return Err(CantMove::LeftHalfway(format!(
-                "{now} {updated}{kept} {} still has all the folder's files. Look at what's in {from} now, then link it \
-                 again from the Space page.",
-                moved.to
-            )));
+            return Err(CantMove::LeftHalfway(format!("{now} {updated}{kept} {files}")));
         }
         unswap_or_ask(from, &moved.old_copy, to, drives.admin()).map_err(partly)?;
         return Ok(MovedBack {
@@ -779,13 +776,9 @@ pub fn move_back(
     let (first, again) = copy_fresh(&tree, progress, stop)?;
     // The copying took a while: a plugin update may have put a real folder where the link was meanwhile. The copy
     // made to come back is only a copy of what's still on the other drive, so it goes.
-    if let Some(now) = not_the_link_now(moved) {
+    if let Some((now, files)) = not_the_link_now(moved) {
         remove_copy(Path::new(&back));
-        return Err(CantMove::Failed(format!(
-            "{now} The copy made to bring it back was removed; {} still has all the folder's files. Look at what's in \
-             {from} now, then link it again from the Space page.",
-            moved.to
-        )));
+        return Err(CantMove::Failed(format!("{now} The copy made to bring it back was removed; {files}")));
     }
     going_into_use(Path::new(&back)).then_some(()).ok_or_else(|| not_noted(Path::new(&back)))?;
     if let Err(why) = unswap_or_ask(from, &back, to, drives.admin()) {
@@ -795,11 +788,7 @@ pub fn move_back(
             remove_copy(Path::new(&back));
         }
         return Err(match not_the_link_now(moved) {
-            Some(now) if real_folder(from) => CantMove::Failed(format!(
-                "{now} {} still has all the folder's files. Look at what's in {from} now, then link it again from the \
-                 Space page.",
-                moved.to
-            )),
+            Some((now, files)) if real_folder(from) => CantMove::Failed(format!("{now} {files}")),
             _ => why,
         });
     }
@@ -827,7 +816,7 @@ fn point_inner_links(
         let (mine, theirs, now) = (old.join(&rest), copy.join(&rest), Path::new(&inner.to));
         // As the passes named it: by its name in the copy, maybe in other capitals than the move noted.
         let named = |p: &PathBuf| key(&text(p)) == key(&text(&rest));
-        if !is_link(&mine) || !in_itself(old, &rest) || leads_to(&text(&mine), now) || !leads_to(&text(&theirs), now) {
+        if !in_itself(old, &rest) || !is_link(&mine) || leads_to(&text(&mine), now) || !leads_to(&text(&theirs), now) {
             continue;
         }
         match crate::after_move::relink(&text(&mine), now, true) {
@@ -848,37 +837,62 @@ fn point_inner_links(
 }
 
 /// Whether `rest` (a path inside `folder`, by names only: never "..") is in `folder` itself: `folder` is a real folder,
-/// and so is every one on the way to it, so changing what's at `rest` changes nothing anywhere else.
+/// and so is every one on the way to it ([`not_real_on_the_way`]), so changing what's at `rest` changes nothing
+/// anywhere else. Looked at before anything at `rest` is, so a link on the way (to a network drive that's asleep, say)
+/// is never followed.
 fn in_itself(folder: &Path, rest: &Path) -> bool {
     let parts: Vec<Component> = rest.components().collect();
-    let mut at = folder.to_path_buf();
-    real_folder(&text(&at))
+    fs::symlink_metadata(folder).is_ok_and(|m| m.is_dir())
         && parts.iter().all(|part| matches!(part, Component::Normal(_)))
-        && parts.split_last().is_some_and(|(_, up)| {
-            up.iter().all(|part| {
-                at.push(part);
-                real_folder(&text(&at))
-            })
-        })
+        && parts.split_last().is_some_and(|(_, up)| not_real_on_the_way(folder, up.iter().copied()).is_none())
 }
 
-/// Why the place a moved folder was isn't its link to the copy any more, if it isn't: a real folder is there (a plugin
-/// update may have made it), or the link leads somewhere else, or nothing is there.
-fn not_the_link_now(moved: &MovedFolder) -> Option<String> {
-    let from = &moved.from;
+/// The first folder on the way down `parts` from `folder`, looked at name by name, that isn't a real folder now: a link,
+/// a file, or nothing there. Never through a link: each is looked at only once every one above it is a real folder.
+fn not_real_on_the_way<'a>(folder: &Path, parts: impl IntoIterator<Item = Component<'a>>) -> Option<PathBuf> {
+    let mut at = folder.to_path_buf();
+    parts.into_iter().find_map(|part| {
+        at.push(part);
+        (!fs::symlink_metadata(&at).is_ok_and(|m| m.is_dir())).then(|| at.clone())
+    })
+}
+
+/// Why the place a moved folder was isn't its link to the copy any more, if it isn't, and then where the folder's files
+/// are and what to do (the end of what the app says): a real folder is there (a plugin update may have made it), which
+/// linking it again from the Space page puts right; or the copy can't be reached now (its drive went, or a link of
+/// yours it is leads nowhere: the link may be just as the move made it), which trying again once it's back does; or
+/// the link leads somewhere else; or nothing is there. Only a real folder can be linked again
+/// ([`crate::after_move::link_again`]).
+fn not_the_link_now(moved: &MovedFolder) -> Option<(String, String)> {
+    let (from, to) = (&moved.from, &moved.to);
+    let files = format!("{to} still has all the folder's files.");
     if link_reaches(moved) {
         None
     } else if real_folder(from) {
-        Some(format!(
-            "While it was moving back, {from} became a real folder again (a plugin update may have put it there), so it \
-             wasn't swapped."
+        Some((
+            format!(
+                "While it was moving back, {from} became a real folder again (a plugin update may have put it there), \
+                 so it wasn't swapped."
+            ),
+            format!("{files} Look at what's in {from} now, then link it again from the Space page."),
+        ))
+    } else if is_link(Path::new(from)) && !is_dir(to) {
+        Some((
+            format!(
+                "While it was moving back, {to} couldn't be reached any more (its drive may have gone), so it wasn't \
+                 swapped."
+            ),
+            format!("{files} Once it can be reached again, try again."),
         ))
     } else if is_link(Path::new(from)) {
-        Some(format!(
-            "While it was moving back, the link at {from} was changed to lead somewhere else, so it wasn't swapped."
+        Some((
+            format!(
+                "While it was moving back, the link at {from} was changed to lead somewhere else, so it wasn't swapped."
+            ),
+            format!("{files} Look at where the link at {from} leads now."),
         ))
     } else {
-        Some(format!("While it was moving back, the link at {from} went, so it wasn't swapped."))
+        Some((format!("While it was moving back, the link at {from} went, so it wasn't swapped."), files))
     }
 }
 
@@ -1917,7 +1931,7 @@ pub(crate) fn copy_tree(
             let as_file = kind.is_symlink() && there.is_some() && tree.as_files.binary_search(&inside(&copy)).is_ok();
             // Any other link where a copy the move made has a real file or folder: the pass before copied a real one
             // there, which turned into a link since. The copy can't take it as it is now, as for a folder above. (In a
-            // folder of yours, what's there stays.)
+            // folder of yours, what's there stays, and is named.)
             if kind.is_symlink() && there.is_some() && !as_file && fill == Fill::Freshen && tree.keep_in.is_none() {
                 return Err(changing(&source, "turned into a link"));
             }
@@ -1928,8 +1942,15 @@ pub(crate) fn copy_tree(
                 let leads = match (&there, as_file) {
                     (None, _) => linked_file(&source, &kind, &copy, fill, tree, &source_real),
                     (Some(_), true) => as_file_now(&source),
-                    // Something at its place already (in a folder of yours, a file of yours, say) stays as it is.
-                    (Some(_), false) => Ok(None),
+                    // Something at its place already (in a folder of yours, a file or a folder of yours) stays as it
+                    // is. Freshening, it's named, as a link of yours is where the folder has a file or a folder (the
+                    // plugin, or you, put a link in its place since): which is the one to keep can't be told.
+                    (Some(_), false) => {
+                        if fill == Fill::Freshen {
+                            copied.links_left.push(inside(&copy));
+                        }
+                        Ok(None)
+                    }
                 };
                 match leads {
                     Ok(Some(real)) => {
@@ -2132,11 +2153,8 @@ fn led_elsewhere(dir: &Path, tree: &Tree, source_real: &Path, from_was_link: boo
         Err(_) if !from_was_link && is_link(tree.from) => return Some(changing(tree.from, "turned into a link")),
         Err(e) => return tree.keep_in.is_some().then(|| failed(tree.from, &e)),
     }
-    let mut at = tree.from.to_path_buf();
-    let turned = rest.components().find_map(|part| {
-        at.push(part);
-        fs::symlink_metadata(&at).is_ok_and(|m| !m.is_dir()).then(|| at.clone())
-    });
+    // The topmost one that isn't a real folder now, if it's there: it turned into a link or a file.
+    let turned = not_real_on_the_way(tree.from, rest.components()).filter(|at| fs::symlink_metadata(at).is_ok());
     match (turned, now) {
         (Some(at), _) => Some(changing(&at, "turned into a link or a file")),
         (None, _) if not_there(dir) => None,

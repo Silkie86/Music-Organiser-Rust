@@ -25,9 +25,25 @@ use common::{folder_link, is_link, unlink};
 
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    unlocked(&dir);
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+/// On a Mac or Linux, opens again the folders a test locked (also one that stopped before it could unlock them), so its
+/// folder can be cleared. Never through a link.
+fn unlocked(dir: &Path) {
+    for entry in fs::read_dir(dir).into_iter().flatten().flatten() {
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = fs::set_permissions(entry.path(), fs::Permissions::from_mode(0o755));
+            }
+            unlocked(&entry.path());
+        }
+    }
 }
 
 fn write(dir: &Path, rel: &str, text: &str) {
@@ -214,6 +230,31 @@ fn a_folder_an_update_made_in_other_capitals_is_linked_again() {
     assert!(is_link(&steam) && replaced(&all).is_empty());
     assert_eq!(read(&steam.join("Pad.db")), "pad 2");
     assert_eq!(linked.replaced, ["Pad.db"]);
+}
+
+/// The update's folder has a link where the copy has a real folder (the installer put the kits somewhere else): the
+/// copy's folder stays as it was, and is listed back, as a link left is (which of the two to keep can't be told). The
+/// kits the link leads to stay where they are.
+#[test]
+fn linking_again_names_a_folder_the_update_has_a_link_in_the_place_of() {
+    let dir = fixtures("mo-space-after-update-link-for-folder");
+    let (c, d, f) = (dir.join("C"), dir.join("D"), dir.join("F"));
+    let steam = c.join("STEAM");
+    write(&steam, "Pad.db", "pad");
+    write(&steam, "Kits/kick.wav", "mine");
+    write(&f, "Kits/kick.wav", "the update's");
+    fs::create_dir_all(&d).unwrap();
+    let moved = move_it(&steam, &d, &[]);
+    let all = vec![moved.clone()];
+    unlink(&steam);
+    fs::create_dir_all(&steam).unwrap();
+    folder_link(&f.join("Kits"), &steam.join("Kits"));
+    let stop = AtomicBool::new(false);
+    let linked = link_again(&moved, &all, 5, false, &OtherDrive, &nothing, &stop).unwrap();
+    assert_eq!(linked.links_left, ["Kits"]);
+    assert!(is_link(&steam) && !is_link(&d.join("STEAM").join("Kits")));
+    assert_eq!(read(&steam.join("Kits/kick.wav")), "mine");
+    assert_eq!(read(&f.join("Kits/kick.wav")), "the update's");
 }
 
 #[test]
@@ -516,7 +557,8 @@ fn moving_back_lets_an_inner_moved_folders_link_be_where_it_leads_there_already(
 
 /// Reaktor 6 moved, then Native Instruments around it, and the old copy has a real folder where the copy has Reaktor
 /// 6's link (Reaktor 6's files, copied following the link, as the C# app's older move did): moving back leaves that
-/// folder as it is, and has nothing to name.
+/// folder as it is, and names it, as any file or folder where the other drive has a link. Reaktor 6 then shows as
+/// replaced, as by an update: linking it again puts it right.
 #[test]
 fn moving_back_leaves_a_real_folder_where_the_copy_has_an_inner_moved_folders_link() {
     let dir = fixtures("mo-space-after-inner-real-in-old-copy");
@@ -532,10 +574,12 @@ fn moving_back_leaves_a_real_folder_where_the_copy_has_an_inner_moved_folders_li
     copy_all(&data.join("Reaktor 6"), &old.join("Reaktor 6"));
     let stop = AtomicBool::new(false);
     let back = move_back(&all[1], &all, &OtherDrive, &nothing, &stop).unwrap();
-    assert!(back.links_left.is_empty(), "{:?}", back.links_left);
+    assert_eq!(back.links_left, ["Reaktor 6"]);
     let inner = c.join("NI").join("Reaktor 6");
     assert!(!is_link(&inner) && !is_link(&c.join("NI")));
     assert_eq!(read(&inner.join("r.ens")), "r");
+    // Native Instruments' move is over (the app drops its record): Reaktor 6's is left.
+    assert_eq!(replaced(&all[..1]), [&all[0]]);
 }
 
 /// As above, with Reaktor 6 in a folder in Native Instruments that the old copy has a link of yours in the place of
