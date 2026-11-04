@@ -146,8 +146,9 @@ export global PluginsData {
     in property <[RoomBar]> room-bars;
     in property <[RoomFolder]> room-folders;
     in property <string> sizes-note;
-    // Clean up, on the On disk tab: 0 checking the folders, 1 the list to tick, 2 sending to the Recycle Bin, 3 done,
-    // 4 putting back.
+    // Clean up or Uninstall, on the On disk tab: 0 looking (checking the folders, or for its uninstaller), 1 the list to
+    // tick (for Uninstall, its uninstallers to pick one of, or its plugin files), 2 working (sending to the Recycle Bin,
+    // or waiting for its uninstaller), 3 done, 4 putting back.
     in property <bool> clean-shown;
     in property <int> clean-stage;
     in property <string> clean-title;
@@ -158,6 +159,13 @@ export global PluginsData {
     in property <string> clean-result;
     in property <[string]> clean-problems;
     in property <bool> clean-can-put-back;
+    in property <string> clean-warning;
+    in property <string> clean-busy-text;
+    in property <bool> clean-can-stop;
+    in property <string> clean-go-text;
+    in property <string> clean-keep-text;
+    // Uninstall finished: Clean up is offered for what it left.
+    in property <bool> clean-offer-clean;
     // What this session's clean-ups sent to the Recycle Bin for the picked plugin, with Put back.
     in property <string> binned-text;
     callback clean-ticked(int, bool);
@@ -165,6 +173,7 @@ export global PluginsData {
     callback clean-close();
     callback clean-stop();
     callback put-back();
+    callback clean-leftovers();
     in property <[CopyRow]> copies;
     in property <string> copies-note;
     in property <string> scanner-note;
@@ -395,6 +404,13 @@ component PluginPanel inherits SidePanel {
             wrap: word-wrap;
             min-width: 0px;
         }
+        if PluginsData.clean-warning != "": Text {
+            text: PluginsData.clean-warning;
+            color: Theme.warning;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
         if PluginsData.clean-intro != "": Text {
             text: PluginsData.clean-intro;
             color: Theme.muted;
@@ -431,7 +447,7 @@ component PluginPanel inherits SidePanel {
                             vertical-alignment: center;
                         }
                     }
-                    Text {
+                    if row.path != "": Text {
                         text: row.path;
                         color: Theme.faint;
                         font-size: Type.small;
@@ -439,7 +455,7 @@ component PluginPanel inherits SidePanel {
                         min-width: 0px;
                     }
                     if row.why != "": Text {
-                        text: "Stays: " + row.why;
+                        text: row.can ? row.why : "Stays: " + row.why;
                         color: Theme.warning;
                         font-size: Type.small;
                         wrap: word-wrap;
@@ -447,7 +463,7 @@ component PluginPanel inherits SidePanel {
                     }
                 }
             }
-            Text {
+            if PluginsData.clean-freed != "": Text {
                 text: PluginsData.clean-freed;
                 color: Theme.text;
                 font-size: Type.meta;
@@ -458,28 +474,29 @@ component PluginPanel inherits SidePanel {
                 spacing: Space.sm;
                 alignment: start;
                 StudioButton {
-                    text: "Send to the Recycle Bin";
+                    text: PluginsData.clean-go-text;
                     main: true;
                     enabled: PluginsData.clean-can-go;
                     clicked => { PluginsData.clean-confirm(); }
                 }
                 StudioButton {
-                    text: "Keep everything";
+                    text: PluginsData.clean-keep-text;
                     clicked => { PluginsData.clean-close(); }
                 }
             }
         }
         if PluginsData.clean-stage == 0 || PluginsData.clean-stage == 2 || PluginsData.clean-stage == 4: HorizontalLayout {
             spacing: Space.sm;
-            alignment: start;
             Text {
-                text: PluginsData.clean-stage == 0 ? "Checking the folders for samples your songs use…"
-                    : PluginsData.clean-stage == 2 ? "Sending to the Recycle Bin…" : "Putting back…";
+                text: PluginsData.clean-busy-text;
+                wrap: word-wrap;
+                min-width: 0px;
+                horizontal-stretch: 1;
                 color: Theme.muted;
                 font-size: Type.meta;
                 vertical-alignment: center;
             }
-            if PluginsData.clean-stage == 0 || PluginsData.clean-stage == 2: StudioButton {
+            if PluginsData.clean-can-stop: StudioButton {
                 text: "Stop";
                 clicked => { PluginsData.clean-stop(); }
             }
@@ -503,6 +520,11 @@ component PluginPanel inherits SidePanel {
             HorizontalLayout {
                 spacing: Space.sm;
                 alignment: start;
+                if PluginsData.clean-offer-clean: StudioButton {
+                    text: "Clean up what it left…";
+                    main: true;
+                    clicked => { PluginsData.clean-leftovers(); }
+                }
                 if PluginsData.clean-can-put-back: StudioButton {
                     text: "Put back";
                     clicked => { PluginsData.put-back(); }

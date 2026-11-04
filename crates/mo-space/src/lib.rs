@@ -38,6 +38,7 @@ pub mod half_copy;
 pub mod in_bin;
 pub mod old_copies;
 pub mod plugin_clean;
+pub mod plugin_files;
 pub mod plugin_space;
 pub mod plugins;
 pub mod size;

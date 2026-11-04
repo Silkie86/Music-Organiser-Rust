@@ -3,53 +3,94 @@
 //! `mo_space::plugin_clean`'s, run on worker threads (rule 12): the folders are read for samples your songs use before
 //! the list shows, and every picked folder is checked again just before it goes. Nothing goes anywhere but the
 //! Recycle Bin, and nothing is written to library.db: the page leaves out what went until the old app measures again.
+//! Uninstall's card ([`super::uninstall`]) is shown the same way, in the same place.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use mo_app::log;
 use mo_app::plugins::clean::{self, Inputs, Watched};
+use mo_app::plugins::uninstall;
 use mo_library::Library;
 use mo_space::clean::{Done, SystemBin, undo};
 use mo_space::plugin_clean::{CleanLine, apply, lines};
+use mo_space::plugin_files::FileLine;
 use mo_space::size::size_text;
+use mo_space::uninstallers::Uninstaller;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 
 use super::{PAGE, fill_panel, refresh, shown};
 use crate::{AppWindow, CleanRow, PluginsData};
 
-/// A clean-up under way, for the plugin with this row key (name key and own).
+/// A clean-up or uninstall under way, for the plugin with this row key (name key and own).
 pub(super) struct Cleaning {
-    row_key: (String, String),
-    name: String,
-    /// Counts the clean-ups, so a result for one closed meanwhile is dropped.
-    id: u64,
-    stop: Arc<AtomicBool>,
-    stage: Stage,
+    pub(super) row_key: (String, String),
+    pub(super) name: String,
+    /// The card's title, and what it warns of first ("" for nothing).
+    pub(super) title: String,
+    pub(super) warning: String,
+    /// Counts the cards, so a result for one closed meanwhile is dropped.
+    pub(super) id: u64,
+    pub(super) stop: Arc<AtomicBool>,
+    pub(super) stage: Stage,
 }
 
-enum Stage {
+pub(super) enum Stage {
     Checking,
-    Ready { inputs: Arc<Inputs>, lines: Vec<CleanLine>, ticks: Vec<bool> },
+    Ready {
+        inputs: Arc<Inputs>,
+        lines: Vec<CleanLine>,
+        ticks: Vec<bool>,
+    },
     Removing,
-    Done { head: String, problems: Vec<String> },
+    /// What happened; `offer_clean`: Clean up is offered next (for what an uninstaller left).
+    Done {
+        head: String,
+        problems: Vec<String>,
+        offer_clean: bool,
+    },
     PuttingBack,
+    /// Uninstall: looking for its uninstaller.
+    Finding,
+    /// Uninstall: which uninstaller to run (`None` until you pick, when they look like another version's).
+    Pick {
+        intro: String,
+        found: Vec<Uninstaller>,
+        /// Which of them look like another version's.
+        others: Vec<bool>,
+        files: Vec<String>,
+        picked: Option<usize>,
+    },
+    /// Uninstall without an uninstaller: its plugin files, to tick.
+    Files {
+        intro: String,
+        lines: Vec<FileLine>,
+        ticks: Vec<bool>,
+    },
+    /// Uninstall: its uninstaller is open, and the app waits for the plugin's files to go.
+    Waiting,
+}
+
+impl Stage {
+    pub(super) fn done(head: String) -> Stage {
+        Stage::Done { head, problems: Vec::new(), offer_clean: false }
+    }
 }
 
 /// What a clean-up sent to the Recycle Bin this session and wasn't put back: the page leaves it out of every read.
 pub(super) struct Binned {
-    row_key: (String, String),
+    pub(super) row_key: (String, String),
     pub(super) done: Done,
 }
 
 impl Cleaning {
-    fn busy(&self) -> bool {
-        matches!(self.stage, Stage::Removing | Stage::PuttingBack)
+    pub(super) fn busy(&self) -> bool {
+        matches!(self.stage, Stage::Removing | Stage::PuttingBack | Stage::Waiting)
     }
 }
 
 /// How a clean-up went.
-enum Outcome {
+pub(super) enum Outcome {
     Done(Done),
     /// The library couldn't be read again just before: nothing went.
     NotChecked(String),
@@ -71,7 +112,7 @@ fn kept() -> Vec<String> {
 pub(super) fn start(app: &AppWindow) {
     let started = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        if p.clean.as_ref().is_some_and(Cleaning::busy) {
+        if held(&p) {
             return None;
         }
         let ask = p.plugins.as_ref()?.clean_ask(p.picked?)?;
@@ -83,6 +124,8 @@ pub(super) fn start(app: &AppWindow) {
         p.clean = Some(Cleaning {
             row_key: ask.row_key.clone(),
             name: ask.name.clone(),
+            title: format!("Clean up {}", ask.name),
+            warning: String::new(),
             id: p.clean_asked,
             stop: stop.clone(),
             stage: Stage::Checking,
@@ -117,7 +160,7 @@ pub(super) fn start(app: &AppWindow) {
     }
 }
 
-fn back(weak: &Weak<AppWindow>, f: impl FnOnce(&AppWindow) + Send + 'static) {
+pub(super) fn back(weak: &Weak<AppWindow>, f: impl FnOnce(&AppWindow) + Send + 'static) {
     let weak = weak.clone();
     let _ = slint::invoke_from_event_loop(move || {
         if let Some(app) = weak.upgrade() {
@@ -137,37 +180,87 @@ fn checked(app: &AppWindow, id: u64, found: Result<(Inputs, Vec<CleanLine>), Str
             }
             Err(why) => {
                 log::warning("Plugins", &format!("Clean up {}: couldn't check its folders: {why}", c.name));
-                c.stage = Stage::Done { head: clean::check_failed_text(&c.name, &why), problems: Vec::new() };
+                c.stage = Stage::done(clean::check_failed_text(&c.name, &why));
             }
         }
     });
     fill(app);
 }
 
-/// A line ticked or unticked.
+/// A line ticked or unticked (for Uninstall's uninstallers, the one picked).
 pub(super) fn tick(app: &AppWindow, at: usize, on: bool) {
-    PAGE.with(|p| {
-        if let Some(Cleaning { stage: Stage::Ready { lines, ticks, .. }, .. }) = p.borrow_mut().clean.as_mut()
-            && let Some(t) = ticks.get_mut(at)
-            && lines.get(at).is_some_and(|l| l.stays.is_none())
-        {
-            *t = on;
+    let refill = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let Some(c) = p.clean.as_mut() else { return false };
+        match &mut c.stage {
+            Stage::Ready { lines, ticks, .. } => {
+                set_tick(ticks, at, on, lines.get(at).is_some_and(|l| l.stays.is_none()));
+                false
+            }
+            Stage::Files { lines, ticks, .. } => {
+                set_tick(ticks, at, on, lines.get(at).is_some_and(|l| l.stays.is_none()));
+                false
+            }
+            // One at a time: the others untick.
+            Stage::Pick { found, picked, .. } => {
+                if on && at < found.len() {
+                    *picked = Some(at);
+                } else if *picked == Some(at) {
+                    *picked = None;
+                }
+                true
+            }
+            _ => false,
         }
     });
+    if refill {
+        fill(app);
+        return;
+    }
     // Only the words under the lines: the lines stay as they are, so the box clicked keeps its place.
     let data = app.global::<PluginsData>();
     PAGE.with(|p| {
-        if let Some(Cleaning { stage: Stage::Ready { lines, ticks, .. }, .. }) = p.borrow().clean.as_ref() {
-            data.set_clean_freed(clean::freed_text(lines, ticks).into());
-            data.set_clean_can_go(!clean::picked(lines, ticks).is_empty());
+        if let Some(c) = p.borrow().clean.as_ref()
+            && let Some((freed, can_go)) = go_state(&c.stage)
+        {
+            data.set_clean_freed(freed.into());
+            data.set_clean_can_go(can_go);
         }
     });
+}
+
+/// Ticks or unticks line `at`, when it may go.
+fn set_tick(ticks: &mut [bool], at: usize, on: bool, may_go: bool) {
+    if let Some(t) = ticks.get_mut(at).filter(|_| may_go) {
+        *t = on;
+    }
+}
+
+/// The words under the lines and whether the main button may be pressed, for a card with lines.
+fn go_state(stage: &Stage) -> Option<(String, bool)> {
+    match stage {
+        Stage::Ready { lines, ticks, .. } => {
+            Some((clean::freed_text(lines, ticks), !clean::picked(lines, ticks).is_empty()))
+        }
+        Stage::Files { lines, ticks, .. } => {
+            Some((uninstall::files_freed_text(lines, ticks), uninstall::ticked_files(lines, ticks).next().is_some()))
+        }
+        Stage::Pick { picked, .. } => Some((String::new(), picked.is_some())),
+        _ => None,
+    }
 }
 
 /// Sends the ticked lines to the Recycle Bin on a worker. Just before, it reads again what the library knows (your
 /// folders, the samples your projects use) and takes how the page sees the plugins now (the years you picked, a
 /// new read), so each folder is checked against things as they are when it goes, not when the card opened.
 pub(super) fn confirm(app: &AppWindow) {
+    let theirs = PAGE.with(|p| {
+        p.borrow().clean.as_ref().is_some_and(|c| matches!(c.stage, Stage::Pick { .. } | Stage::Files { .. }))
+    });
+    if theirs {
+        super::uninstall::confirm(app);
+        return;
+    }
     let job = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let feed = p.feed.clone();
@@ -183,10 +276,7 @@ pub(super) fn confirm(app: &AppWindow) {
             return None;
         }
         let Some(ask) = ask else {
-            c.stage = Stage::Done {
-                head: format!("{} isn't on the page as it was any more. Nothing was removed.", c.name),
-                problems: Vec::new(),
-            };
+            c.stage = Stage::done(format!("{} isn't on the page as it was any more. Nothing was removed.", c.name));
             return None;
         };
         c.stage = Stage::Removing;
@@ -219,12 +309,7 @@ pub(super) fn confirm(app: &AppWindow) {
                 }
             }
         };
-        match &outcome {
-            Outcome::Done(d) if !d.removed.is_empty() => card.done(&clean::done_text(d).0),
-            Outcome::Done(d) => card.failed(d.problems.first().map_or("Nothing was removed.", |p| p.why.as_str())),
-            Outcome::NotChecked(why) => card.failed(why),
-            Outcome::Stopped(_) => card.failed(clean::STOPPED_PART_WAY),
-        }
+        report(card, &outcome);
         back(&weak, move |app| removed(app, id, row_key, outcome));
     });
     if let Err(e) = spawned {
@@ -234,7 +319,27 @@ pub(super) fn confirm(app: &AppWindow) {
     }
 }
 
-fn removed(app: &AppWindow, id: u64, row_key: (String, String), outcome: Outcome) {
+/// Says on its activity card how sending to the Recycle Bin went.
+pub(super) fn report(card: mo_app::activity::Job, outcome: &Outcome) {
+    match outcome {
+        Outcome::Done(d) if !d.removed.is_empty() => card.done(&clean::done_text(d).0),
+        Outcome::Done(d) => card.failed(d.problems.first().map_or("Nothing was removed.", |p| p.why.as_str())),
+        Outcome::NotChecked(why) => card.failed(why),
+        Outcome::Stopped(_) => card.failed(clean::STOPPED_PART_WAY),
+    }
+}
+
+/// Whether a card that's working (sending, putting back, waiting for an uninstaller) holds the page: then nothing new
+/// starts, and an activity card says why.
+pub(super) fn held(p: &super::Page) -> bool {
+    let Some(c) = p.clean.as_ref().filter(|c| c.busy()) else { return false };
+    p.feed
+        .start(&format!("{} is still under way", c.title.trim_end_matches('?')), "")
+        .failed("One clean-up or uninstall at a time: this starts once it's done (or once you press Stop on it).");
+    true
+}
+
+pub(super) fn removed(app: &AppWindow, id: u64, row_key: (String, String), outcome: Outcome) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let (head, problems, done) = match outcome {
@@ -263,7 +368,7 @@ fn removed(app: &AppWindow, id: u64, row_key: (String, String), outcome: Outcome
             p.binned.push(Binned { row_key, done });
         }
         if let Some(c) = p.clean.as_mut().filter(|c| c.id == id) {
-            c.stage = Stage::Done { head, problems };
+            c.stage = Stage::Done { head, problems, offer_clean: false };
         }
     });
     refresh(app);
@@ -275,7 +380,7 @@ fn removed(app: &AppWindow, id: u64, row_key: (String, String), outcome: Outcome
 pub(super) fn put_back(app: &AppWindow) {
     let job = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        if p.clean.as_ref().is_some_and(Cleaning::busy) {
+        if held(&p) {
             return None;
         }
         let r = p.plugins.as_ref()?.rows.get(p.picked?)?;
@@ -291,11 +396,13 @@ pub(super) fn put_back(app: &AppWindow) {
         p.clean = Some(Cleaning {
             row_key: row_key.clone(),
             name: name.clone(),
+            title: format!("Put back what went from {name}"),
+            warning: String::new(),
             id: p.clean_asked,
             stop: Arc::new(AtomicBool::new(false)),
             stage: Stage::PuttingBack,
         });
-        let card = p.feed.start(&format!("Putting back {name}'s folders"), "From the Recycle Bin");
+        let card = p.feed.start(&format!("Putting back what went from {name}"), "From the Recycle Bin");
         Some((done, row_key, p.clean_asked, card))
     });
     let Some((done, row_key, id, card)) = job else { return };
@@ -350,7 +457,7 @@ fn put_back_done(
             p.binned.push(Binned { row_key, done });
         }
         if let Some(c) = p.clean.as_mut().filter(|c| c.id == id) {
-            c.stage = Stage::Done { head, problems };
+            c.stage = Stage::Done { head, problems, offer_clean: false };
         }
     });
     fill(app);
@@ -359,13 +466,13 @@ fn put_back_done(
 }
 
 /// Stop: a check closes; sending to the Recycle Bin stops after the folder going now (what went stays in the bin, with
-/// Put back).
+/// Put back); waiting for an uninstaller stops waiting (it carries on in its own window).
 pub(super) fn stop(app: &AppWindow) {
     let checking = PAGE.with(|p| {
         let p = p.borrow();
         let Some(c) = p.clean.as_ref() else { return false };
         c.stop.store(true, Ordering::Relaxed);
-        matches!(c.stage, Stage::Checking)
+        matches!(c.stage, Stage::Checking | Stage::Finding)
     });
     if checking {
         close(app);
@@ -398,12 +505,15 @@ pub(super) fn picked_now(key: Option<(String, String)>) {
     });
 }
 
-/// Leaves out of a fresh read what this session's clean-ups sent to the Recycle Bin.
+/// Leaves out of a fresh read what this session's clean-ups sent to the Recycle Bin, and the plugin files this
+/// session's uninstalls removed.
 pub(super) fn forget_binned(plugins: &mut mo_app::plugins::Plugins) {
     PAGE.with(|p| {
-        for b in &p.borrow().binned {
+        let p = p.borrow();
+        for b in &p.binned {
             plugins.forget_removed(&b.done);
         }
+        plugins.forget_paths(&p.uninstalled);
     });
 }
 
@@ -418,14 +528,26 @@ pub(super) fn fill(app: &AppWindow) {
         let c = p.clean.as_ref().filter(|c| Some(&c.row_key) == picked_key.as_ref());
         data.set_clean_shown(c.is_some());
         let Some(c) = c else { return };
-        data.set_clean_title(format!("Clean up {}", c.name).into());
+        data.set_clean_title(c.title.as_str().into());
+        data.set_clean_warning(c.warning.as_str().into());
         data.set_clean_stage(match c.stage {
-            Stage::Checking => 0,
-            Stage::Ready { .. } => 1,
-            Stage::Removing => 2,
+            Stage::Checking | Stage::Finding => 0,
+            Stage::Ready { .. } | Stage::Pick { .. } | Stage::Files { .. } => 1,
+            Stage::Removing | Stage::Waiting => 2,
             Stage::Done { .. } => 3,
             Stage::PuttingBack => 4,
         });
+        let (busy, can_stop) = match c.stage {
+            Stage::Checking => ("Checking the folders for samples your songs use…", true),
+            Stage::Finding => ("Looking for its uninstaller…", true),
+            Stage::Removing => ("Sending to the Recycle Bin…", true),
+            Stage::Waiting => ("Its uninstaller is open in its own window. Waiting for its files to go…", true),
+            Stage::PuttingBack => ("Putting back…", false),
+            _ => ("", false),
+        };
+        data.set_clean_busy_text(busy.into());
+        data.set_clean_can_stop(can_stop);
+        let model = |rows: Vec<CleanRow>| ModelRc::new(VecModel::from(rows));
         match &c.stage {
             Stage::Ready { inputs, lines, ticks } => {
                 data.set_clean_intro(clean::intro(inputs, lines).into());
@@ -441,19 +563,68 @@ pub(super) fn fill(app: &AppWindow) {
                         ticked: *t && r.can,
                     })
                     .collect();
-                data.set_clean_rows(ModelRc::new(VecModel::from(rows)));
-                data.set_clean_freed(clean::freed_text(lines, ticks).into());
-                data.set_clean_can_go(!clean::picked(lines, ticks).is_empty());
+                data.set_clean_rows(model(rows));
+                data.set_clean_go_text("Send to the Recycle Bin".into());
+                data.set_clean_keep_text("Keep everything".into());
             }
-            Stage::Done { head, problems } => {
+            Stage::Files { intro, lines, ticks, .. } => {
+                data.set_clean_intro(intro.as_str().into());
+                let rows: Vec<CleanRow> = lines
+                    .iter()
+                    .zip(ticks)
+                    .map(|(l, t)| CleanRow {
+                        path: mo_app::shell::wrappable_path(&l.path).into(),
+                        kind: uninstall::file_kind(l).into(),
+                        size: size_text(l.bytes).into(),
+                        why: l.stays.clone().unwrap_or_default().into(),
+                        can: l.stays.is_none(),
+                        ticked: *t && l.stays.is_none(),
+                    })
+                    .collect();
+                data.set_clean_rows(model(rows));
+                data.set_clean_go_text("Send to the Recycle Bin".into());
+                data.set_clean_keep_text("Keep it".into());
+            }
+            Stage::Pick { intro, found, others, picked, .. } => {
+                data.set_clean_intro(intro.as_str().into());
+                let rows: Vec<CleanRow> = found
+                    .iter()
+                    .enumerate()
+                    .map(|(i, u)| {
+                        let (name, detail) = uninstall::uninstaller_text(u);
+                        // The maker and size under the name, where a long one wraps.
+                        CleanRow {
+                            path: detail.into(),
+                            kind: name.into(),
+                            size: SharedString::new(),
+                            why: if others.get(i).copied().unwrap_or(false) {
+                                uninstall::OTHER_VERSION.into()
+                            } else {
+                                SharedString::new()
+                            },
+                            can: true,
+                            ticked: *picked == Some(i),
+                        }
+                    })
+                    .collect();
+                data.set_clean_rows(model(rows));
+                data.set_clean_go_text("Uninstall".into());
+                data.set_clean_keep_text("Keep it".into());
+            }
+            Stage::Done { head, problems, offer_clean } => {
                 data.set_clean_intro(SharedString::new());
                 data.set_clean_result(head.as_str().into());
                 data.set_clean_problems(ModelRc::new(VecModel::from(
                     problems.iter().map(|s| SharedString::from(s.as_str())).collect::<Vec<_>>(),
                 )));
                 data.set_clean_can_put_back(!binned.is_empty());
+                data.set_clean_offer_clean(*offer_clean);
             }
             _ => data.set_clean_intro(SharedString::new()),
+        }
+        if let Some((freed, can_go)) = go_state(&c.stage) {
+            data.set_clean_freed(freed.into());
+            data.set_clean_can_go(can_go);
         }
     });
 }
