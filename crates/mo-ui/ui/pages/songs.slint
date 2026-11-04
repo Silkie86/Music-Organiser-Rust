@@ -112,6 +112,8 @@ export global SongsData {
     in property <bool> missing;
     in property <bool> hide-archived;
     in property <bool> any-filter;
+    // "Using Serum", while the list shows only the songs of one plugin (the Plugins page's Show in Songs).
+    in property <string> only;
     in property <int> selected: -1;
     // Bring a song into view: its line's top in the list, and a count that goes up each time it's asked.
     in property <length> show-y;
@@ -696,6 +698,11 @@ export component SongsPage inherits Rectangle {
                 text: "Hide archived";
                 on: SongsData.hide-archived;
                 clicked => { SongsData.toggle("hide-archived"); }
+            }
+            if SongsData.only != "": ToggleChip {
+                text: SongsData.only + "  ×";
+                on: true;
+                clicked => { SongsData.toggle("only"); }
             }
             if SongsData.any-filter: ToggleChip {
                 text: "Clear";

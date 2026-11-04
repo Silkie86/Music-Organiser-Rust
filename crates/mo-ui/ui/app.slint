@@ -1,6 +1,6 @@
 // The window shell: the rail on the left and the page on show. Agreed map (2026-10-29): Songs, Sounds, Presets, MIDI,
 // Plugins and Space, with Settings at the bottom.
-import { Theme, Type, Space, Icons, RailItem, Groove, Caps, ActionKey, TipLayer, TipState } from "studio.slint";
+import { Theme, Type, Space, Icons, RailItem, Groove, Caps, ActionKey, TipLayer, TipState, StudioButton } from "studio.slint";
 import { ComingPage } from "pages/coming.slint";
 import { PartsGallery } from "pages/parts.slint";
 import { SoundsPage, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, TypeChipInfo, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook } from "pages/sounds.slint";
@@ -8,6 +8,7 @@ import { MenuItem, CardAction, YearBar } from "studio.slint";
 import { SongsPage, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine } from "pages/songs.slint";
 import { ArrangementData, ArrLabel, ArrKind } from "pages/arrangement.slint";
 import { BackupPage, BackupData, BackupFolderLine, LeftOutLine } from "pages/backup.slint";
+import { PluginsPage, PluginsData, PluginListLine, NeededCard, RoomBar, RoomFolder, UseRow, CopyRow } from "pages/plugins.slint";
 import { PresetsPage, PresetsData, PresetLine, PresetFact, PartChip, PresetCard, CurveLineInfo, CurvePlace, CurveCardInfo } from "pages/presets.slint";
 import { MidiPage, MidiData, MidiLine, KindChip, RollNote, RollKey, MidiFact, PickedPart } from "pages/midi.slint";
 // The waveforms drawn on the graphics card (mo-ui's waves.rs).
@@ -39,7 +40,7 @@ export { PresetsData, PresetLine, PresetFact, PartChip, PresetCard, CurveLineInf
 export { MidiData, MidiLine, KindChip, RollNote, RollKey, MidiFact, PickedPart }
 export { FinderData, FinderLine }
 export { Palette, SettingsData, ThemeCardInfo, AccentInfo, SettingsFact, FolderGroupInfo, KeyLineInfo, DawRowInfo }
-export { Theme, Icons, ActionKey, MenuItem, CardAction, YearBar, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, TypeChipInfo, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook, BackupData, BackupFolderLine, LeftOutLine, SpaceData, DriveCard, RoomLine, CardPart, ArrangementData, ArrLabel, ArrKind, CardInfo, KeyRow, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
+export { Theme, Icons, ActionKey, MenuItem, CardAction, YearBar, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, TypeChipInfo, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook, BackupData, BackupFolderLine, LeftOutLine, SpaceData, DriveCard, RoomLine, CardPart, PluginsData, PluginListLine, NeededCard, RoomBar, RoomFolder, UseRow, CopyRow, ArrangementData, ArrLabel, ArrKind, CardInfo, KeyRow, SongsData, SongLine, PanelSong, CountLine, PluginLine, SampleLine, SaveLine, DetailPair, HealthLine, OlderLine }
 
 export struct PlaceInfo {
     name: string,
@@ -69,6 +70,8 @@ export component AppWindow inherits Window {
     in property <int> sounds-place: 1;
     // Backup: a lean copy of your music on another drive.
     in property <int> backup-place: -1;
+    // Plugins: every plugin your songs use, and what to install to open more of them.
+    in property <int> plugins-place: -1;
     // Presets: the sounds in your songs and your preset files, and the curves.
     in property <int> presets-place: -1;
     // MIDI: every MIDI part in your projects and MIDI folders.
@@ -154,6 +157,14 @@ export component AppWindow inherits Window {
                         height: 40px;
                         x: 10px;
                     }
+                    // Ctrl+K in sight, not only on a key (Solomon, 4 Nov: nothing useful hidden away).
+                    StudioButton {
+                        text: "Jump to anything…";
+                        tip: "Jump to a song, sound, page or action";
+                        key: FinderData.jump-key;
+                        clicked => { FinderData.open-asked(); }
+                    }
+                    Rectangle { height: 4px; }
                     // The rail's places are the first ones in `places`; Settings sits apart at the bottom.
                     for p[i] in root.rail: RailItem {
                         text: p.name;
@@ -198,6 +209,9 @@ export component AppWindow inherits Window {
             if root.place == root.backup-place: BackupPage {
                 horizontal-stretch: 1;
             }
+            if root.place == root.plugins-place: PluginsPage {
+                horizontal-stretch: 1;
+            }
             if root.place == root.presets-place: PresetsPage {
                 horizontal-stretch: 1;
             }
@@ -212,7 +226,8 @@ export component AppWindow inherits Window {
             }
             if root.place != root.songs-place && root.place != root.sounds-place && root.place != root.backup-place
                 && root.place != root.midi-place && root.place != root.space-place
-                && !(root.place == root.settings-place && root.settings-built) && root.place != root.presets-place: ComingPage {
+                && !(root.place == root.settings-place && root.settings-built) && root.place != root.presets-place
+                && root.place != root.plugins-place: ComingPage {
                 horizontal-stretch: 1;
                 title: root.places[root.place].name;
                 coming: root.places[root.place].coming;

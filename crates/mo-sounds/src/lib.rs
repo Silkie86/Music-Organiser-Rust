@@ -37,7 +37,7 @@ pub mod usage;
 pub mod word;
 
 pub use analysis::{ChordSpan, Peaks, SoundAnalysis};
-pub use db::{Everything, KnownSound, SoundMatch, SoundsDb, SoundsError, StarPoint, TagCount};
+pub use db::{Everything, KnownSound, SoundMatch, SoundsDb, SoundsError, StarPoint, TagCount, count_analysed};
 pub use word::Word;
 
 use chrono::NaiveDateTime;

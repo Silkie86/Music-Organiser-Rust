@@ -24,10 +24,11 @@
 //! sees samples put back since, and the trees aren't kept between scans. It asks the disk, so never on the window's
 //! thread.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use mo_formats::case;
 use mo_formats::paths::{extension, file_name};
@@ -55,6 +56,17 @@ const NOT_SOUNDS: [&str; 2] = ["AppData", "node_modules"];
 /// The most folder trees a locator keeps at once.
 const MOST_TREES: usize = 4096;
 
+/// The most folder tree reads a locator remembers for [`SampleLocator::tree_reads`]: the latest.
+const MOST_TREE_READS: usize = 64;
+
+/// How FL Studio saves a path into its own content: from the folder it's installed in
+/// ("%FLStudioFactoryData%\Data\Patches\Packs\Drums\Kick.wav").
+const FL_FACTORY_DATA: &str = "%FLStudioFactoryData%";
+
+/// The folders below FL Studio's own that hold its packs, which its content folder ends with (see
+/// [`daw_content_folders`]).
+const FL_PACKS: [&str; 3] = ["Data", "Patches", "Packs"];
+
 /// Where the DAW's own content folders are for a project, by its path.
 type ContentFolders = dyn Fn(&str) -> Vec<String> + Send + Sync;
 
@@ -69,18 +81,36 @@ pub struct SampleLocator {
     content: Box<ContentFolders>,
     trees: Mutex<HashMap<(String, usize), Tree>>,
     library: Option<LibrarySlot>,
+    /// How many folder trees it has read, and the latest of those reads (at most [`MOST_TREE_READS`]).
+    tree_reads: Mutex<(usize, VecDeque<TreeRead>)>,
+}
+
+/// A folder tree a locator read: which of its reads it was (from 0), its folder, how many files and folders were looked
+/// at, and how long it took. For a log line when looking for a project's samples is slow.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TreeRead {
+    pub number: usize,
+    pub folder: String,
+    pub entries: usize,
+    pub took: Duration,
 }
 
 /// The Sounds library, read the first time a sample isn't found anywhere else (rule 7 above).
 struct LibrarySlot {
     read: Box<ReadLibrary>,
-    library: OnceLock<Arc<SoundLibrary>>,
+    /// The library, and how long getting it took.
+    library: OnceLock<(Arc<SoundLibrary>, Duration)>,
 }
 
 impl LibrarySlot {
     /// The library, read now if it hasn't been yet: another thread wanting it meanwhile waits for this read.
     fn get(&self) -> &SoundLibrary {
-        self.library.get_or_init(|| (self.read)())
+        let (library, _) = self.library.get_or_init(|| {
+            let started = Instant::now();
+            let library = (self.read)();
+            (library, started.elapsed())
+        });
+        library
     }
 }
 
@@ -93,7 +123,22 @@ impl Default for SampleLocator {
 impl SampleLocator {
     /// A locator that looks in `content` for a DAW's own folders (tests give their own).
     pub fn new(content: Box<ContentFolders>) -> SampleLocator {
-        SampleLocator { content, trees: Mutex::new(HashMap::new()), library: None }
+        SampleLocator { content, trees: Mutex::new(HashMap::new()), library: None, tree_reads: Mutex::default() }
+    }
+
+    /// How many folder trees this locator has read so far.
+    pub fn trees_read(&self) -> usize {
+        self.tree_reads.lock().map(|r| r.0).unwrap_or_default()
+    }
+
+    /// The latest folder tree reads, in the order they ended: at most the last [`MOST_TREE_READS`], each numbered.
+    pub fn tree_reads(&self) -> Vec<TreeRead> {
+        self.tree_reads.lock().map(|r| r.1.iter().cloned().collect()).unwrap_or_default()
+    }
+
+    /// How long getting the Sounds library took, once it has been wanted.
+    pub fn library_read(&self) -> Option<Duration> {
+        self.library.as_ref()?.library.get().map(|(_, took)| *took)
     }
 
     /// The same locator, looking in the Sounds library last (rule 7 above).
@@ -108,16 +153,20 @@ impl SampleLocator {
         self
     }
 
-    /// Whether this sample is on this computer, by the rules above. FL Studio's own content
-    /// ("%FLStudioFactoryData%…") always is; as in the C# app, so is any path that starts with a "%" setting.
+    /// Whether this sample is on this computer, by the rules above. The DAW's own content ([`is_daw_content`])
+    /// always is.
     pub fn found(&self, sample: &str, project: &str) -> bool {
-        sample.starts_with('%') || self.locate(sample, project).is_some()
+        is_daw_content(sample) || self.locate(sample, project).is_some()
     }
 
-    /// Where this sample is on this computer, by the rules above, or `None` when it's missing.
+    /// Where this sample is on this computer, by the rules above, or `None` when it's missing. FL Studio's own content
+    /// is looked for first where an FL Studio on this computer keeps it.
     pub fn locate(&self, sample: &str, project: &str) -> Option<String> {
         if sample.is_empty() {
             return None;
+        }
+        if let Some(c) = self.fl_factory_file(sample, project) {
+            return Some(c);
         }
         if let Some(c) = candidates(sample, project).into_iter().find(|c| Path::new(c).is_file()) {
             return Some(c);
@@ -161,6 +210,24 @@ impl SampleLocator {
         in_content.or_else(|| self.library.as_ref()?.get().find(name, folder))
     }
 
+    /// A sample of FL Studio's own content ("%FLStudioFactoryData%\Data\Patches\Packs\…"), where an FL Studio this
+    /// project's DAW folders name keeps it (the folder its packs folder is in): no folder tree is read for it.
+    fn fl_factory_file(&self, sample: &str, project: &str) -> Option<String> {
+        let setting = sample.get(..FL_FACTORY_DATA.len()).filter(|p| case::eq_ignore_case(p, FL_FACTORY_DATA))?;
+        // The rest of its path a folder at a time, as it's saved with either slash, so the file's path has this
+        // computer's.
+        let rest: Vec<&str> = sample[setting.len()..].split(['\\', '/']).filter(|p| !p.is_empty()).collect();
+        (self.content)(project).iter().find_map(|folder| {
+            let packs = Path::new(folder);
+            let ends: Vec<&str> = packs.iter().rev().take(FL_PACKS.len()).filter_map(|p| p.to_str()).collect();
+            let is_packs = ends.len() == FL_PACKS.len()
+                && ends.iter().rev().zip(FL_PACKS).all(|(a, b)| case::eq_ignore_case(a, b));
+            let fl = packs.ancestors().nth(FL_PACKS.len()).filter(|_| is_packs)?;
+            let file = rest.iter().fold(fl.to_path_buf(), |path, part| path.join(part));
+            file.is_file().then(|| file.to_str().map(str::to_owned)).flatten()
+        })
+    }
+
     /// A file called `name` in the tree under `root` (in a folder called `folder`, when given), reading the tree the
     /// first time it's asked for.
     fn find_in(&self, root: &str, depth: usize, name: &str, folder: Option<&str>) -> Option<String> {
@@ -186,7 +253,24 @@ impl SampleLocator {
             slot
         };
         // Read outside the lock, once: another thread wanting the same tree waits for this read.
-        slot.get_or_init(|| FolderIndex::read(folder, depth));
+        slot.get_or_init(|| {
+            let started = Instant::now();
+            let index = FolderIndex::read(folder, depth);
+            if let Ok(mut reads) = self.tree_reads.lock() {
+                let number = reads.0;
+                reads.0 += 1;
+                if reads.1.len() >= MOST_TREE_READS {
+                    reads.1.pop_front();
+                }
+                reads.1.push_back(TreeRead {
+                    number,
+                    folder: folder.to_owned(),
+                    entries: index.entries,
+                    took: started.elapsed(),
+                });
+            }
+            index
+        });
         slot
     }
 }
@@ -195,6 +279,8 @@ impl SampleLocator {
 #[derive(Default)]
 struct FolderIndex {
     by_name: HashMap<String, Vec<String>>,
+    /// How many files and folders were looked at.
+    entries: usize,
 }
 
 impl FolderIndex {
@@ -255,6 +341,7 @@ impl FolderIndex {
                 todo.extend(dirs.into_iter().map(|d| (PathBuf::from(d), level + 1)));
             }
         }
+        index.entries = entries_seen.min(MOST_ENTRIES);
         index
     }
 
@@ -462,6 +549,13 @@ fn split(path: &str) -> (&str, Vec<&str>) {
     };
     let (root, rest) = path.split_at(root_len);
     (root, rest.split(['\\', '/']).filter(|p| !p.is_empty()).collect())
+}
+
+/// Whether a sample is the DAW's own content as the DAW saves it: FL Studio's "%FLStudioFactoryData%…", and as in the
+/// C# app any path that starts with a "%" setting. It always counts as on this computer, even where it isn't found at a
+/// path of its own.
+pub fn is_daw_content(sample: &str) -> bool {
+    sample.starts_with('%')
 }
 
 /// The paths to try for a sample before searching folders, best first: as saved, then moved with a drive or a folder

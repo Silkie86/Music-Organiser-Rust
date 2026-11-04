@@ -31,6 +31,9 @@ const NOT_YET: &str = "Arrangements can be drawn for FL Studio, Bitwig and Studi
 /// point, and whether the graphics card draws it (else the processor does, on the drawing thread).
 type DrawJob = (u64, u64, View, Palette, f64, bool);
 
+/// The audio files to look for: for which song, its save, and the views read from it.
+type FindJob = (u64, PathBuf, Vec<Arc<mo_formats::arrangement::Arrangement>>);
+
 #[derive(Default)]
 struct State {
     /// Counts the songs shown, so a read or a picture that arrives after another song was picked is dropped.
@@ -130,15 +133,40 @@ pub fn connect(app: &AppWindow) {
         });
     });
 
+    // Looking for a save's audio files can take far longer than reading it (whole folder trees, the Sounds library), so
+    // it has a thread of its own: the arrangement shows as soon as its save is read, and the next song picked is read
+    // meanwhile. The folders read are kept for the next song for a minute. Then the files' waveforms.
     let weak = app.as_weak();
-    let reader = Newest::start("Arrangement", move |(asked, path): (u64, PathBuf)| {
-        let read = arr::read(&path, Some(&mo_app::paths::data_dir().join("sounds.db")));
-        let found = read.as_ref().ok().map(|p| p.found.clone()).filter(|f| !f.is_empty());
-        let _ = weak.upgrade_in_event_loop(move |app| arrived(&app, asked, read));
-        // Then the waveforms: the arrangement is up meanwhile.
-        if let Some(found) = found {
+    let mut samples = arr::SampleFinder::new(Some(mo_app::paths::data_dir().join("sounds.db")));
+    let finder = Newest::start("Arrangement samples", move |(asked, path, views): FindJob| {
+        let wanted = || SHOWN.load(Ordering::Relaxed) == asked;
+        if !wanted() {
+            return;
+        }
+        let locator = samples.locator(std::time::Instant::now());
+        let Some(found) = arr::find_samples(&views, &path, &locator, wanted) else { return };
+        let found = Arc::new(found);
+        let shown = found.clone();
+        let _ = weak.upgrade_in_event_loop(move |app| samples_found(&app, asked, shown));
+        if !found.is_empty() && wanted() {
             let peaks = background::on_pool(|| read_peaks(&found, asked));
             let _ = weak.upgrade_in_event_loop(move |app| waves_arrived(&app, asked, peaks));
+        }
+    });
+    let finder = match finder {
+        Ok(f) => Some(f),
+        Err(e) => {
+            log::error("Arrangement", &format!("Couldn't start looking for the arrangement's audio files: {e}"));
+            None
+        }
+    };
+    let weak = app.as_weak();
+    let reader = Newest::start("Arrangement", move |(asked, path): (u64, PathBuf)| {
+        let read = arr::read(&path);
+        let looking = read.as_ref().ok().filter(|p| p.found.is_none()).map(|p| p.views.clone());
+        let _ = weak.upgrade_in_event_loop(move |app| arrived(&app, asked, read));
+        if let (Some(views), Some(finder)) = (looking, &finder) {
+            finder.ask((asked, path, views));
         }
     });
     match reader {
@@ -197,8 +225,16 @@ pub fn show_song(app: &AppWindow, path: Option<&str>, missing: bool) {
     data.set_message(READING.into());
     let path = PathBuf::from(path);
     if here {
-        // The screenshots: their made-up songs, without the real Sounds library.
-        arrived(app, asked, arr::read(&path, None));
+        // The screenshots: their made-up songs, with their audio files looked for at once, without the real Sounds
+        // library.
+        let mut read = arr::read(&path);
+        if let Ok(p) = read.as_mut()
+            && p.found.is_none()
+        {
+            let locator = mo_app::sound_library::locator(None);
+            p.found = arr::find_samples(&p.views, &path, &locator, || true).map(Arc::new);
+        }
+        arrived(app, asked, read);
         return;
     }
     READER.with(|slot| {
@@ -268,7 +304,7 @@ fn read_peaks(found: &HashMap<String, PathBuf>, asked: u64) -> Arc<HashMap<Strin
                 return None;
             }
             // A sound that trips the reader is drawn without its wave; the others still come.
-            std::panic::catch_unwind(|| {
+            mo_catch::catch(|| {
                 let audio = mo_audio::read(file, mo_audio::MAX_SECONDS).ok()?;
                 Some((saved.clone(), Arc::new(Peaks::of(audio.sample_rate, &audio.channels, audio.file_seconds))))
             })
@@ -277,6 +313,30 @@ fn read_peaks(found: &HashMap<String, PathBuf>, asked: u64) -> Arc<HashMap<Strin
         })
         .collect();
     Arc::new(peaks)
+}
+
+/// The save's audio files have been looked for: the clips whose files aren't here are marked so (in the picture and
+/// the label under the mouse), and the page says how many, if their song is still the one picked.
+fn samples_found(app: &AppWindow, asked: u64, found: Arc<HashMap<String, PathBuf>>) {
+    let shown = STATE.with(|s| {
+        let mut s = s.borrow_mut();
+        let s = &mut *s;
+        if s.asked != asked {
+            return None;
+        }
+        s.preview.as_mut()?.found = Some(found.clone());
+        let view = s.view.as_mut()?;
+        view.set_found(found.clone());
+        let a = view.arrangement().clone();
+        let notes = arr::notes(&a, Some(&found));
+        Some((a, notes, view.hover()))
+    });
+    let Some((a, notes, hover)) = shown else { return };
+    let data = app.global::<ArrangementData>();
+    show_hover(&data, hover);
+    if show_notes(&data, &a, notes) {
+        redraw(app);
+    }
 }
 
 /// The waveforms came: drawn, if their song is still the one picked.
@@ -304,29 +364,40 @@ fn pick_view(app: &AppWindow, index: usize) {
         let mut s = s.borrow_mut();
         let p = s.preview.as_ref()?;
         let a = p.views.get(index)?.clone();
-        let mut view = View::new(a.clone(), p.found.clone());
+        let mut view = match &p.found {
+            Some(found) => View::new(a.clone(), found.clone()),
+            None => View::new(a.clone(), Arc::default()).looking_for_files(),
+        };
+        let notes = arr::notes(&a, p.found.as_deref());
         view.set_peaks(s.peaks.clone());
         view.resize(s.size.0, s.size.1);
         s.view = Some(view);
-        Some(a)
+        Some((a, notes))
     });
-    let Some(a) = shown else { return };
+    let Some((a, notes)) = shown else { return };
     data.set_view(i32::try_from(index).unwrap_or(0));
     data.set_summary(arr::summary(&a).into());
+    if show_notes(&data, &a, notes) {
+        redraw(app);
+    }
+}
+
+/// Puts a view's notes under its picture; or, for a view with nothing to draw, the reason in the picture's place.
+/// Whether there's a picture to draw.
+fn show_notes(data: &ArrangementData, a: &mo_formats::arrangement::Arrangement, notes: Vec<String>) -> bool {
     if a.lanes.is_empty() {
-        // Nothing to draw: the reason, when there is one, takes the picture's place.
-        let why = a.notes.join(" ");
+        let why = notes.join(" ");
         data.set_notes(ModelRc::default());
         data.set_message(if why.is_empty() {
             "Nothing has been placed in this arrangement yet.".into()
         } else {
             why.into()
         });
-        return;
+        return false;
     }
-    data.set_notes(strings(a.notes.iter().cloned()));
+    data.set_notes(strings(notes.into_iter()));
     data.set_message(SharedString::new());
-    redraw(app);
+    true
 }
 
 /// Changes what the view knows and draws it again.
@@ -702,7 +773,7 @@ pub fn sample_preview() -> Preview {
     let mut bitwig = playlist.clone();
     bitwig.view = "As it opens in Bitwig";
     let found = HashMap::from([(SAMPLE_TAKE.to_owned(), PathBuf::from(SAMPLE_TAKE))]);
-    Preview { views: vec![Arc::new(playlist), Arc::new(bitwig)], found: Arc::new(found) }
+    Preview { views: vec![Arc::new(playlist), Arc::new(bitwig)], found: Some(Arc::new(found)) }
 }
 
 /// The made-up song's vocal take that's on this computer.
@@ -780,7 +851,7 @@ mod tests {
             ("paper-zoomed-2x", paper, 2.0, |v| v.wheel(560.0, 0.0, 6.0, true, false)),
         ];
         for (name, palette, scale, setup) in views {
-            let mut view = View::new(preview.views[0].clone(), preview.found.clone());
+            let mut view = View::new(preview.views[0].clone(), preview.found.clone().unwrap_or_default());
             view.set_peaks(peaks.clone());
             view.resize(900.0, 300.0);
             setup(&mut view);

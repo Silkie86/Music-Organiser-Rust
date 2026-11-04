@@ -1106,6 +1106,30 @@ pub(super) fn forget(g: &mut Galaxy) {
     g.note = String::new();
 }
 
+/// The page's list was read again with the same sounds in the same places: the stars stay, and what was worked out
+/// from the old list (how lit each star is, what the stars were packed for) is let go, and the old list with it. It's
+/// worked out again for the new one when the galaxy's next drawn.
+pub(super) fn list_changed(g: &mut Galaxy) {
+    g.light = None;
+    g.set_for = None;
+    // Stars still being packed for the old list would bring it back (with how lit they are): too old to use. The ones
+    // in use stay until new ones come.
+    g.set_asked += 1;
+    g.set_got = g.set_asked;
+}
+
+/// The page's list was read again with sounds new or gone (`to`: each old place's new one, `None` for a sound that's
+/// gone): the star a sweep last played and the one waiting its turn move with their sounds. One that's gone isn't
+/// waited for, and the pointer isn't held to it.
+pub(super) fn places_moved(g: &mut Galaxy, to: impl Fn(usize) -> Option<usize>) {
+    let s = &mut g.sweep;
+    s.played = s.played.and_then(|(at, when)| Some((to(at)?, when)));
+    s.waiting = s.waiting.and_then(&to);
+    if s.waiting.is_none() {
+        s.held = None;
+    }
+}
+
 /// The view came on show (or a new library did while it was): reads the map the first time.
 pub(super) fn shown(app: &AppWindow) {
     let _doing = crate::watchdog::doing("Galaxy: came on show");
@@ -1732,5 +1756,41 @@ pub(super) fn show_picked(app: &AppWindow) {
     if let Some((x, y)) = at {
         data.set_galaxy_picked_x(x);
         data.set_galaxy_picked_y(y);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stars_packed_for_a_list_read_again_are_dropped() {
+        // A pack asked for (3) while the one in use is 2.
+        let mut g = Galaxy { set_asked: 3, set_got: 2, ..Galaxy::default() };
+        list_changed(&mut g);
+        assert!(g.set_for.is_none() && g.light.is_none());
+        // The pack still on its way is 3: [`packed`] takes only one newer than `set_got` and no newer than asked.
+        assert!(3 <= g.set_got && g.set_got == g.set_asked, "{} {}", g.set_got, g.set_asked);
+    }
+
+    #[test]
+    fn a_sweeps_stars_move_with_their_sounds() {
+        // The sound at 0 is gone, 1 is now at 0 and 2 at 3.
+        let moved = [None, Some(0), Some(3)];
+        let to = |at: usize| moved.get(at).copied().flatten();
+        let when = Instant::now();
+        let mut g = Galaxy::default();
+        g.sweep.played = Some((1, when));
+        g.sweep.waiting = Some(2);
+        g.sweep.held = Some((5.0, 6.0));
+        places_moved(&mut g, to);
+        assert_eq!(g.sweep.played, Some((0, when)));
+        assert_eq!(g.sweep.waiting, Some(3));
+        assert_eq!(g.sweep.held, Some((5.0, 6.0)));
+        // The one waiting is gone (and so is the one played): nothing's waited for, and the pointer isn't held.
+        g.sweep.played = Some((0, when));
+        g.sweep.waiting = Some(0);
+        places_moved(&mut g, to);
+        assert_eq!((g.sweep.played, g.sweep.waiting, g.sweep.held), (None, None, None));
     }
 }

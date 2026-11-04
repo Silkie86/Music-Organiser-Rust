@@ -203,7 +203,7 @@ fn do_file_jobs(jobs: &Receiver<FileJob>) {
     let folder = note::notes_dir();
     for job in jobs {
         // One job going wrong (it's logged as a crash) mustn't lose the jobs after it.
-        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| do_file_job(&folder, job, Turn::Wait)));
+        let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| do_file_job(&folder, job, Turn::Wait)));
     }
 }
 

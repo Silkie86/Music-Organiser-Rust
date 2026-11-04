@@ -130,7 +130,7 @@ impl Gathered {
 
     /// The most common length, and how many vectors have it; on a tie, the longer (newer analysers give more
     /// numbers). (0, 0) with none.
-    fn common_length(&self) -> (usize, usize) {
+    pub(crate) fn common_length(&self) -> (usize, usize) {
         let mut lengths: HashMap<usize, usize> = HashMap::new();
         for &(_, _, len) in &self.places {
             *lengths.entry(len).or_default() += 1;

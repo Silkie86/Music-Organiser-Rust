@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 chrono.workspace = true
+# How much room the disk has, so making the compact library never fills it.
+fs4 = "1.1"
 # Half-precision numbers: CLAP's fingerprints are held at half size (Solomon, 2026-11-03).
 half = "2.7"
 # Without playing sounds: reading and analysing them needs no sound output.

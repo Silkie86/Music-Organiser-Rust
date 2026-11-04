@@ -78,11 +78,11 @@ fn install<T: Send>(pool: Option<&rayon::ThreadPool>, work: impl FnOnce() -> T +
     }
 }
 
-/// Runs `work`, and if it panics (the panic hook has already logged what broke) gives the words to show instead, so
-/// a page that asked for it hears back rather than staying busy. For work that may trip on a damaged file or an odd
-/// database row; never for work that leaves something half-changed.
+/// Runs `work`, and if it panics (the panic hook has already logged what broke, as a crash: `mo_catch::catch_crash`)
+/// gives the words to show instead, so a page that asked for it hears back rather than staying busy. For work that
+/// may trip on a damaged file or an odd database row; never for work that leaves something half-changed.
 pub fn guarded<T>(work: impl FnOnce() -> T) -> Result<T, String> {
-    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+    mo_catch::catch_crash(std::panic::AssertUnwindSafe(work))
         .map_err(|_| "it stopped on something it didn't expect (the log says what)".to_owned())
 }
 
@@ -159,7 +159,7 @@ pub fn free_later<T: Send + 'static>(value: T) {
             for value in freeing {
                 // A part that panics as it's let go is logged (the panic hook does that) and the thread goes on, so
                 // what comes after is still freed here, not on the window's thread.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(value)));
+                let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| drop(value)));
             }
         })
         .ok()
@@ -243,7 +243,7 @@ impl<J: Send + 'static> Newest<J> {
                     }
                 };
                 // `work` keeps nothing half-changed that the next job relies on: each job starts from its own ask.
-                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(job)));
+                let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| work(job)));
             }
         })?;
         Ok(Newest { slot })

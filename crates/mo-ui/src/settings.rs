@@ -989,7 +989,7 @@ fn show(app: &AppWindow) {
         data.set_size_note(page::size_note(size_from_setting(s.get(SIZE_KEY))).into());
 
         let start = page::start_index(s.get(START_PAGE_KEY));
-        data.set_start_page(page::start_setting(start).unwrap_or_default().into());
+        data.set_start_index(start as i32);
         let pace = Pace::from_setting(s.get(PACE_KEY));
         data.set_pace(Pace::ALL.iter().position(|x| *x == pace).unwrap_or(2) as i32);
         data.set_pace_note(page::pace_note(pace, p.running_pace, background::cores()).into());
