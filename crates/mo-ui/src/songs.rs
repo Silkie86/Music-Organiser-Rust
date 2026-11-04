@@ -242,9 +242,14 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
         };
         let read = match opened {
             Ok(lib) => {
-                let read = lib.detail(id).map_err(|e| e.to_string());
-                library = Some(lib);
-                read
+                // A row that trips the reader says so in the panel; the library is opened again at the next pick.
+                match background::guarded(|| lib.detail(id).map_err(|e| e.to_string())) {
+                    Ok(read) => {
+                        library = Some(lib);
+                        read
+                    }
+                    Err(broke) => Err(broke),
+                }
             }
             Err(e) => Err(format!("the library can't be opened ({e})")),
         };

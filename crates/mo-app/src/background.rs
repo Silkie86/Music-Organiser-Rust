@@ -78,6 +78,14 @@ fn install<T: Send>(pool: Option<&rayon::ThreadPool>, work: impl FnOnce() -> T +
     }
 }
 
+/// Runs `work`, and if it panics (the panic hook has already logged what broke) gives the words to show instead, so
+/// a page that asked for it hears back rather than staying busy. For work that may trip on a damaged file or an odd
+/// database row; never for work that leaves something half-changed.
+pub fn guarded<T>(work: impl FnOnce() -> T) -> Result<T, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(work))
+        .map_err(|_| "it stopped on something it didn't expect (the log says what)".to_owned())
+}
+
 /// How many threads the pool gets, from Settings' pace; 0 for one per core. Read once, when the pool starts (the bulk
 /// pool takes no more than this either).
 static POOL_THREADS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -325,6 +333,13 @@ mod tests {
         drop(worker);
         // The thread stops and its sender goes with it.
         assert!(done.recv_timeout(Duration::from_secs(5)).is_err());
+    }
+
+    #[test]
+    fn guarded_work_says_when_it_broke() {
+        assert_eq!(guarded(|| 2 + 2), Ok(4));
+        let broke: Result<(), String> = guarded(|| panic!("a job that breaks (the test means it)"));
+        assert!(broke.unwrap_err().contains("didn't expect"));
     }
 
     #[test]

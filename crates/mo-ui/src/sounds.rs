@@ -252,6 +252,11 @@ pub fn player() -> &'static Player {
     })
 }
 
+/// Whether a Galaxy sweep holds the pointer to the star that's playing (Settings › General).
+pub fn hold_sweeps(on: bool) {
+    galaxy::hold_sweeps(on);
+}
+
 /// Plays through this output from now on (`None`: the computer's default), as Settings › Sound output chose. Before
 /// the player is made it's only remembered.
 pub fn choose_output(name: Option<String>) {
