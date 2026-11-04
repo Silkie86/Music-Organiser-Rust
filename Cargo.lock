@@ -3209,6 +3209,7 @@ dependencies = [
  "mo-app",
  "mo-audio",
  "mo-backup",
+ "mo-dawlink",
  "mo-formats",
  "mo-library",
  "mo-sounds",

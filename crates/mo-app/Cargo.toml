@@ -15,7 +15,7 @@ chrono.workspace = true
 mo-backup = { path = "../mo-backup" }
 # FL Studio songs converted for Bitwig ("Open in Bitwig").
 mo-convert = { path = "../mo-convert" }
-# The link to Bitwig: Send to Bitwig from the Sounds page.
+# The link to Bitwig: Send to Bitwig from the Sounds page, and Settings › DAWs saying how it stands.
 mo-dawlink = { path = "../mo-dawlink" }
 mo-formats = { path = "../mo-formats" }
 mo-library = { path = "../mo-library" }
