@@ -21,13 +21,19 @@ use mo_space::size::size_text;
 use mo_space::{Stopped, key};
 
 use crate::songs::{plural, thousands};
-use crate::space::{Card, Line, Part};
+use crate::space::{Card, Line, Opens, Part};
 
 /// The Bitwig copies line's id.
 pub const BITWIG_COPIES: &str = "bitwig-copies";
 
-/// The activity card's title while a look is on.
-pub const LOOKING: &str = "Looking for Bitwig copies";
+/// The activity card's headline while a look is on, in words that say what it's for (Solomon, 4 Nov 2026: "what
+/// does looking for bitwig copies mean?"), and its line until it can say how far it is.
+pub const LOOKING: &str = "Finding Bitwig's copies of your Library sounds";
+pub const LOOKING_WHY: &str = "Bitwig copies a Library multisample into each project that uses it. The Space page \
+    shows the room those copies take.";
+
+/// The activity card's headline and line when a look stops because a newer one took its place.
+pub const LOOK_STOPPED: (&str, &str) = ("Stopped finding Bitwig's copies", "A newer look took its place.");
 
 /// What the card says about Fix, under the projects.
 pub const NEXT: &str = "Fix writes a \"(fixed)\" project beside each ticked save, using the Library's own files \
@@ -183,23 +189,25 @@ pub fn progress_words(done: usize, of: usize) -> String {
     format!("{} of {}", thousands(done), plural(of, "project"))
 }
 
-/// The Bitwig copies line under Biggest wins first, once a look has found copies; or, while the first look is on
-/// (`looking`), how far it is. None when there are none.
-pub fn line(found: Option<&Copies>, looking: Option<(usize, usize)>) -> Option<Line> {
+/// The Bitwig copies line under Biggest wins first, with the room the copies take (what the wins are sorted by), once
+/// a look has found copies; or, while the first look is on (`looking`), how far it is. None when there are none.
+pub fn line(found: Option<&Copies>, looking: Option<(usize, usize)>) -> Option<(u64, Line)> {
     let line = |why: String, size: String| Line { id: BITWIG_COPIES, title: "Bitwig multisample copies", why, size };
     match (found, looking) {
-        (Some(c), _) if !c.projects.is_empty() => Some(line(
-            format!("Copies of your Library's multisamples in {}", plural(c.projects.len(), "project")),
-            size_text(c.bytes()),
+        (Some(c), _) if !c.projects.is_empty() => Some((
+            c.bytes(),
+            line(
+                format!("Copies of your Library's multisamples in {}", plural(c.projects.len(), "project")),
+                size_text(c.bytes()),
+            ),
         )),
-        (None, Some(at)) => Some(line(looking_words(at), "Measuring…".to_owned())),
+        (None, Some(at)) => Some((0, line(looking_words(at), "Measuring…".to_owned()))),
         _ => None,
     }
 }
 
 /// What can still be freed, as the page says it under Biggest wins first.
-pub const STILL_TO_COME: &str = "Still to come: old copies left after moving folders and spare plugin copies, then \
-    songs, then plugins you haven't used.";
+pub const STILL_TO_COME: &str = "Still to come: spare plugin copies, then songs, then plugins you haven't used.";
 
 /// What the page says under Biggest wins first: why there's no Bitwig line when a look found none, and what's still
 /// to come.
@@ -470,7 +478,7 @@ pub fn card(found: Option<&Copies>, looking: Option<(usize, usize)>, fixes: &Fix
             (line.status, line.problem) = state_words(p, newest, &state, true);
             line.tick = fixes.tick(p, newest).map(|t| (newest.path.clone(), t));
             if let State::Fixed(f) = state {
-                line.open = Some(f.to_path_buf());
+                line.open = Some((Opens::InBitwig, f.to_path_buf()));
             }
         } else {
             line.status = NO_SAVE.to_owned();
@@ -499,7 +507,7 @@ pub fn card(found: Option<&Copies>, looking: Option<(usize, usize)>, fixes: &Fix
                 tick: fixes.tick(p, save).map(|t| (save.path.clone(), t)),
                 status,
                 problem,
-                open: if let State::Fixed(f) = state { Some(f.to_path_buf()) } else { None },
+                open: if let State::Fixed(f) = state { Some((Opens::InBitwig, f.to_path_buf())) } else { None },
                 ..Part::default()
             });
         }
@@ -549,12 +557,19 @@ pub fn fixed_words(written: usize, failed: usize) -> Result<String, String> {
     }
 }
 
-/// The activity card's line once a look is done: what it found.
-pub fn found_words(found: &Copies) -> String {
+/// The activity card's headline and line once a look is done: what it found, and where it's shown.
+pub fn found_words(found: &Copies) -> (&'static str, String) {
     if found.projects.is_empty() {
-        "None found".to_owned()
+        ("No Bitwig copies of your Library sounds", "None of your Bitwig projects keeps a copy of one.".to_owned())
     } else {
-        format!("{} in {}", size_text(found.bytes()), plural(found.projects.len(), "project"))
+        (
+            "Found Bitwig's copies of your Library sounds",
+            format!(
+                "{} in {}. The Space page lists them under Biggest wins first.",
+                size_text(found.bytes()),
+                plural(found.projects.len(), "project")
+            ),
+        )
     }
 }
 
@@ -595,20 +610,22 @@ mod tests {
     #[test]
     fn the_line_shows_once_copies_are_found_and_while_the_first_look_is_on() {
         let found = sample();
-        let line = line(Some(&found), None).unwrap();
-        assert_eq!(line.id, BITWIG_COPIES);
+        let (bytes, line) = line(Some(&found), None).unwrap();
+        assert_eq!((bytes, line.id), (found.bytes(), BITWIG_COPIES));
         assert_eq!(
             (line.why.as_str(), line.size.as_str()),
             ("Copies of your Library's multisamples in 2 projects", "272 MB")
         );
         // Looking again keeps what was found on show.
-        assert_eq!(super::line(Some(&found), Some((1, 3))).unwrap().size, "272 MB");
-        let first = super::line(None, Some((1, 3))).unwrap();
+        assert_eq!(super::line(Some(&found), Some((1, 3))).unwrap().1.size, "272 MB");
+        // While the first look is on it frees nothing yet, so it sorts below any line that does.
+        let (bytes, first) = super::line(None, Some((1, 3))).unwrap();
+        assert_eq!(bytes, 0);
         assert_eq!(
             (first.why.as_str(), first.size.as_str()),
             ("Looking through your Bitwig projects: 1 of 3", "Measuring…")
         );
-        assert_eq!(super::line(None, Some((0, 0))).unwrap().why, "Looking for your Bitwig projects…");
+        assert_eq!(super::line(None, Some((0, 0))).unwrap().1.why, "Looking for your Bitwig projects…");
         // None found, or not looked yet: no line.
         assert_eq!(super::line(Some(&Copies::default()), None), None);
         assert_eq!(super::line(None, None), None);
@@ -738,7 +755,7 @@ mod tests {
             line.status,
             "Fixed: \"GARAGE FOR BW 1 (fixed 2).bwproject\". Open it in Bitwig and check it plays."
         );
-        assert_eq!((line.tick, line.open), (None, Some(fixed.clone())));
+        assert_eq!((line.tick, line.open), (None, Some((Opens::InBitwig, fixed.clone()))));
         assert_eq!(fixes.button(Some(&found(&p))), Some(("Fixing…".to_owned(), false)));
         // Unless it found that very file older than the save: saved again meanwhile.
         p.saves[0].fixed = Some((fixed.clone(), false));
@@ -749,7 +766,7 @@ mod tests {
         p.saves[0].fixed = Some((fixed.clone(), true));
         fixes.looked();
         assert!(!fixes.busy() && fixes.fixing.is_empty());
-        assert_eq!(status(&p, &fixes).open, Some(fixed.clone()));
+        assert_eq!(status(&p, &fixes).open, Some((Opens::InBitwig, fixed.clone())));
         // The older save is the only one left to fix, and it isn't ticked.
         assert_eq!(fixes.button(Some(&found(&p))), Some(("Fix".to_owned(), false)));
 
@@ -836,7 +853,13 @@ mod tests {
     fn the_activity_card_says_how_far_it_is_and_what_was_found() {
         assert_eq!(progress_words(1204, 5000), "1,204 of 5,000 projects");
         assert_eq!(progress_words(0, 1), "0 of 1 project");
-        assert_eq!(found_words(&sample()), "272 MB in 2 projects");
-        assert_eq!(found_words(&Copies::default()), "None found");
+        assert_eq!(
+            found_words(&sample()),
+            (
+                "Found Bitwig's copies of your Library sounds",
+                "272 MB in 2 projects. The Space page lists them under Biggest wins first.".to_owned()
+            )
+        );
+        assert_eq!(found_words(&Copies::default()).0, "No Bitwig copies of your Library sounds");
     }
 }

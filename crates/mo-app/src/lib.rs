@@ -33,6 +33,7 @@ pub mod sound_library;
 pub mod sounds;
 pub mod space;
 pub mod space_bitwig;
+pub mod space_old;
 pub mod sweep_timing;
 pub mod themes;
 pub mod tidy;
