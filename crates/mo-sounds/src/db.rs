@@ -181,7 +181,40 @@ impl SoundsDb {
             return Err(open_error("it isn't a Music Organiser sound library (it has no sounds table)".into()));
         }
         let copy = tables.contains(compact::INFO_TABLE);
+        // A copy laid out by another version of the app isn't read: its columns may mean something else.
+        if copy && compact::format_of(&conn).map_err(|e| open_error(e.to_string()))? != Some(compact::FORMAT) {
+            return Err(open_error("it's a copy another version of the app made, laid out differently".into()));
+        }
         Ok(SoundsDb { conn, path: path.to_owned(), tables, copy })
+    }
+
+    /// What the sound library at `path` looks like now, as a line of text that changes whenever anything saves into
+    /// it, without opening it (so it never waits): the file's size and time, its log's (`-wal`) when it has anything
+    /// in it, and where the log has got to as SQLite notes it in its index of the log (`-shm`).
+    ///
+    /// The last is what catches every save the C# app makes while it runs. Once SQLite has copied the log into the
+    /// file it writes the log again from the start, so a save can leave both files the size they were; and Windows
+    /// may not move a file's time while a program holds it open for writing, as the C# app holds its log. The index
+    /// notes the log's last frame, its checksum and the log's salt, which every save changes.
+    pub fn stamp(path: &Path) -> String {
+        let side = |end: &str| {
+            let mut p = path.as_os_str().to_owned();
+            p.push(end);
+            PathBuf::from(p)
+        };
+        let look = |p: &Path| match std::fs::metadata(p) {
+            Ok(m) if m.len() > 0 => {
+                let at = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map_or(0, |d| d.as_nanos());
+                format!("{}@{at}", m.len())
+            }
+            // An empty log counts as none: SQLite makes one when a reader opens the file.
+            _ => "-".to_owned(),
+        };
+        format!("{} {} {}", look(path), look(&side("-wal")), wal_index(&side("-shm")))
     }
 
     pub fn path(&self) -> &Path {
@@ -406,11 +439,15 @@ impl SoundsDb {
     /// Each sound's vector in a space: "clap" (once the model has listened) or, for anything else, "features" (the
     /// analyser's own). Sounds without one, or with a damaged one, are left out.
     pub fn vectors(&self, space: &str) -> Result<HashMap<i64, Vec<f32>>, SoundsError> {
-        if self.copy {
-            return self.copied_vectors(if space == "clap" { "sound_clap" } else { "sound_features" });
-        }
-        let column = if space == "clap" { "clap" } else { "features" };
-        let mut st = self.conn.prepare(&format!("SELECT id, {column} FROM sounds WHERE {column} IS NOT NULL"))?;
+        let sql = match (self.copy, space == "clap") {
+            (true, true) => "SELECT sound_id, v FROM sound_clap".to_owned(),
+            (true, false) => "SELECT sound_id, v FROM sound_features".to_owned(),
+            (false, clap) => {
+                let column = if clap { "clap" } else { "features" };
+                format!("SELECT id, {column} FROM sounds WHERE {column} IS NOT NULL")
+            }
+        };
+        let mut st = self.conn.prepare(&sql)?;
         let mut rows = st.query([])?;
         let mut out = HashMap::new();
         while let Some(r) = rows.next()? {
@@ -430,19 +467,6 @@ impl SoundsDb {
         while let Some(r) = rows.next()? {
             if let Ok(ValueRef::Blob(blob)) = r.get_ref(1) {
                 out.push_blob(r.get(0)?, blob);
-            }
-        }
-        Ok(out)
-    }
-
-    /// The vectors in one of the copy's fingerprint tables, by sound.
-    fn copied_vectors(&self, table: &str) -> Result<HashMap<i64, Vec<f32>>, SoundsError> {
-        let mut st = self.conn.prepare(&format!("SELECT sound_id, v FROM {table}"))?;
-        let mut rows = st.query([])?;
-        let mut out = HashMap::new();
-        while let Some(r) = rows.next()? {
-            if let Some(v) = vector_at(r, 1) {
-                out.insert(r.get::<_, i64>(0)?, v);
             }
         }
         Ok(out)
@@ -640,7 +664,7 @@ fn int(n: Option<i64>) -> i32 {
 }
 
 /// A whole number, or `None` for NULL or a value of another kind (the C# app's `Long` reads those as 0).
-fn int_at(r: &Row<'_>, i: usize) -> Option<i64> {
+pub(crate) fn int_at(r: &Row<'_>, i: usize) -> Option<i64> {
     match r.get_ref(i) {
         Ok(ValueRef::Integer(n)) => Some(n),
         _ => None,
@@ -648,7 +672,7 @@ fn int_at(r: &Row<'_>, i: usize) -> Option<i64> {
 }
 
 /// A number, or `None` for NULL or a value of another kind.
-fn real_at(r: &Row<'_>, i: usize) -> Option<f64> {
+pub(crate) fn real_at(r: &Row<'_>, i: usize) -> Option<f64> {
     match r.get_ref(i) {
         Ok(ValueRef::Real(x)) => Some(x),
         Ok(ValueRef::Integer(n)) => Some(n as f64),
@@ -657,11 +681,38 @@ fn real_at(r: &Row<'_>, i: usize) -> Option<f64> {
 }
 
 /// Text, or `None` for NULL or a value of another kind (the C# app's `as string`).
-fn text_at(r: &Row<'_>, i: usize) -> Option<String> {
+pub(crate) fn text_at(r: &Row<'_>, i: usize) -> Option<String> {
     match r.get_ref(i) {
         Ok(ValueRef::Text(t)) => Some(String::from_utf8_lossy(t).into_owned()),
         _ => None,
     }
+}
+
+/// Where the log of a library in WAL mode has got to, from SQLite's index of it (`-shm`, laid out as
+/// <https://sqlite.org/walformat.html> says): the last frame saved, the database's size in pages, the last frame's
+/// checksum and the log's salt. "-" when there's no index or nothing in the log.
+fn wal_index(shm: &Path) -> String {
+    use std::io::Read;
+    let Ok(mut file) = std::fs::File::open(shm) else { return "-".to_owned() };
+    // SQLite writes the header twice, one copy after the other; read again until the two agree (a save caught half
+    // way), a few times at most.
+    let mut header = [0u8; 96];
+    for _ in 0..4 {
+        if file.read_exact(&mut header).is_err() {
+            return "-".to_owned();
+        }
+        let (one, two) = header.split_at(48);
+        if one == two {
+            break;
+        }
+        let _ = std::io::Seek::rewind(&mut file);
+    }
+    let one = &header[..48];
+    // Offset 12: whether the index is set up; 16-19: the last frame saved (0 with nothing in the log).
+    if one[12] == 0 || one[16..20] == [0; 4] {
+        return "-".to_owned();
+    }
+    one[16..40].iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Adds the plays counted on a sound before each one was dated: those beyond the dated ones count as recent.

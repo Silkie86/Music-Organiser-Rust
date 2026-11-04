@@ -2,12 +2,12 @@
 //! time a sample isn't in its project's or its DAW's folders, then kept while `sounds.db` stays as it is, so clicking
 //! through songs or saving every minute doesn't read the database each time.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use mo_library::samples::{SampleLocator, SoundLibrary};
+use mo_sounds::SoundsDb;
 
 /// How long a read is kept at least, even while the C# app keeps saving `sounds.db` (a scan for new sounds saves every
 /// few seconds): sounds added on the Sounds page are seen after this.
@@ -16,7 +16,7 @@ const FRESH: Duration = Duration::from_secs(60);
 /// The last read: of which database, what it looked like just before, and when the read was done.
 struct Kept {
     db: PathBuf,
-    stamp: Stamp,
+    stamp: String,
     at: Instant,
     library: Arc<SoundLibrary>,
 }
@@ -25,8 +25,8 @@ impl Kept {
     /// Whether this read still stands for `db`, which looks like `stamp` now: this read is `age` old, under a minute,
     /// or it read every sound and the database hasn't changed since. One that couldn't read them all (the database
     /// missing, or busy beyond waiting for) is tried again after a minute, as before.
-    fn still_good(&self, db: &Path, stamp: &Stamp, age: Duration) -> bool {
-        self.db == db && (age < FRESH || (self.library.is_complete() && self.stamp == *stamp))
+    fn still_good(&self, db: &Path, stamp: &str, age: Duration) -> bool {
+        self.db == db && (age < FRESH || (self.library.is_complete() && self.stamp == stamp))
     }
 }
 
@@ -36,7 +36,7 @@ static SHARED: Mutex<Option<Kept>> = Mutex::new(None);
 /// otherwise read again. Reads the disk, so never on the window's thread.
 pub fn shared(sounds_db: &Path) -> Arc<SoundLibrary> {
     // Looked at before reading, so a save made while it reads counts as a change next time.
-    let stamp = stamp(sounds_db);
+    let stamp = SoundsDb::stamp(sounds_db);
     if let Ok(slot) = SHARED.lock()
         && let Some(kept) = slot.as_ref()
         && kept.still_good(sounds_db, &stamp, kept.at.elapsed())
@@ -64,20 +64,15 @@ pub fn locator(sounds_db: Option<&Path>) -> SampleLocator {
     }
 }
 
-/// What a database and the log SQLite writes its saves into first (`sounds.db-wal`) look like: their sizes and when
-/// each last changed. Every save the C# app makes changes one of them.
-type Stamp = [Option<(u64, Option<SystemTime>)>; 2];
-
-fn stamp(db: &Path) -> Stamp {
-    let look = |p: &Path| fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()));
-    let mut wal = db.as_os_str().to_owned();
-    wal.push("-wal");
-    [look(db), look(Path::new(&wal))]
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use super::*;
+
+    fn stamp(db: &Path) -> String {
+        SoundsDb::stamp(db)
+    }
 
     #[test]
     fn a_read_is_kept_until_the_database_changes() {
@@ -89,7 +84,7 @@ mod tests {
         let before = stamp(&db);
         assert_eq!(stamp(&db), before);
         let library = Arc::new(SoundLibrary::from_files(Vec::<(String, i64)>::new()));
-        let kept = Kept { db: db.clone(), stamp: before, at: Instant::now(), library };
+        let kept = Kept { db: db.clone(), stamp: before.clone(), at: Instant::now(), library };
         let old = FRESH * 10;
         // Kept for as long as the database stays as it is, however long that is.
         assert!(kept.still_good(&db, &stamp(&db), old));

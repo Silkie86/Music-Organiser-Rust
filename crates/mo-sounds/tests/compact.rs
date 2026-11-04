@@ -3,6 +3,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 use mo_sounds::compact::{self, Synced};
@@ -552,20 +553,32 @@ fn a_copy_of_another_format_or_half_made_is_made_again() {
     let dir = folder("again");
     let old = library(&dir, 50);
     let copy = compact::copy_of(&old);
-    // Left from copies that stopped half way (this app's and others', by an older version too), and a log beside
-    // where the copy goes that isn't its own: none may end up in the new copy, or be left behind.
+    // Left from copies that stopped half way (this app's, and others' long since), and a log beside where the copy
+    // goes that isn't its own: none may end up in the new copy, or be left behind. One another copy of the app is
+    // making just now stays.
+    let an_hour_ago = SystemTime::now() - Duration::from_secs(3600);
     for name in [
         "sounds-rust.db.part".to_owned(),
         "sounds-rust.db.part-99999".to_owned(),
         "sounds-rust.db.part-99999-wal".to_owned(),
         format!("sounds-rust.db.part-{}", std::process::id()),
+        format!("sounds-rust.db.part-{}0", std::process::id()),
+        "sounds-rust.db.part-88888".to_owned(),
     ] {
-        std::fs::write(dir.join(name), b"half a copy").unwrap();
+        std::fs::write(dir.join(&name), b"half a copy").unwrap();
+        if !name.ends_with("88888") && !name.ends_with('0') {
+            std::fs::File::options().write(true).open(dir.join(&name)).unwrap().set_modified(an_hour_ago).unwrap();
+        }
     }
     std::fs::write(dir.join("sounds-rust.db-wal"), vec![0x37u8; 4096]).unwrap();
     let synced = compact::sync(&old, &copy).unwrap();
     assert!(synced.made);
-    assert_eq!(half_made(&dir), Vec::<String>::new());
+    let mut others = vec![format!("sounds-rust.db.part-{}0", std::process::id()), "sounds-rust.db.part-88888".into()];
+    others.sort();
+    assert_eq!(half_made(&dir), others, "only others' half-made copies being made just now are left");
+    for name in &others {
+        std::fs::remove_file(dir.join(name)).unwrap();
+    }
     same_answers(&old, &copy);
     // A copy an older version made, in another format: made again from the start.
     Connection::open(&copy).unwrap().execute("UPDATE copy_info SET value = 0 WHERE key = 'format'", []).unwrap();
@@ -574,9 +587,104 @@ fn a_copy_of_another_format_or_half_made_is_made_again() {
     assert!(synced.made);
     assert_eq!(synced.added, 53);
     same_answers(&old, &copy);
-    // Something else where the copy goes: made again too.
-    std::fs::write(&copy, b"not a database").unwrap();
-    assert!(compact::sync(&old, &copy).unwrap().made);
+    // One a newer version made is left as it is (that version would only have to make it again), and isn't read.
+    Connection::open(&copy).unwrap().execute("UPDATE copy_info SET value = 99 WHERE key = 'format'", []).unwrap();
+    let newer = std::fs::read(&copy).unwrap();
+    let left = compact::sync(&old, &copy).unwrap_err().to_string();
+    assert!(left.contains("a newer version of the app made it"), "{left}");
+    assert!(!compact::in_step(&old, &copy));
+    assert_eq!(std::fs::read(&copy).unwrap(), newer);
+    let unread = SoundsDb::open_read_only(&copy).err().expect("a copy of another format isn't read").to_string();
+    assert!(unread.contains("another version of the app"), "{unread}");
+    // Something nothing can be read from where the copy goes: made again too.
+    for junk in [&b"not a database"[..], &[]] {
+        std::fs::write(&copy, junk).unwrap();
+        assert!(compact::sync(&old, &copy).unwrap().made);
+        same_answers(&old, &copy);
+    }
+}
+
+/// Nothing but a copy is ever removed: not a database of something else where the copy goes, nor the library itself.
+#[test]
+fn only_a_copy_is_ever_replaced() {
+    let dir = folder("foreign");
+    let old = library(&dir, 20);
+    let copy = compact::copy_of(&old);
+    let other = Connection::open(&copy).unwrap();
+    other.execute_batch("CREATE TABLE songs (name TEXT); INSERT INTO songs VALUES ('mine');").unwrap();
+    drop(other);
+    let before = std::fs::read(&copy).unwrap();
+    let left = compact::sync(&old, &copy).unwrap_err().to_string();
+    assert!(left.contains("isn't a copy of the library"), "{left}");
+    assert_eq!(std::fs::read(&copy).unwrap(), before);
+    // The library itself, by its own name or another spelling of it.
+    let library_before = std::fs::read(&old).unwrap();
+    for same in [old.clone(), dir.join(".").join("sounds.db")] {
+        let left = compact::sync(&old, &same).unwrap_err().to_string();
+        assert!(left.contains("the library itself"), "{left}");
+    }
+    assert_eq!(std::fs::read(&old).unwrap(), library_before);
+}
+
+/// Two brought up to date at once in one app take turns: the second finds the first one's copy and has nothing to do.
+#[test]
+fn two_syncs_at_once_take_turns() {
+    let dir = folder("turns");
+    let old = library(&dir, 200);
+    let copy = compact::copy_of(&old);
+    let both: Vec<Synced> = std::thread::scope(|s| {
+        let a = s.spawn(|| compact::sync(&old, &copy).unwrap());
+        let b = s.spawn(|| compact::sync(&old, &copy).unwrap());
+        vec![a.join().unwrap(), b.join().unwrap()]
+    });
+    assert_eq!(both.iter().filter(|s| s.made).count(), 1, "{both:?}");
+    assert!(both.iter().any(|s| *s == Synced { sounds: 203, ..Synced::default() }), "{both:?}");
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+    same_answers(&old, &copy);
+}
+
+/// Each save the C# app makes is noticed, even one that leaves `sounds.db` and its log the size they were with the
+/// times they had: SQLite writes its log again from the start once it has copied it into the file, and Windows may
+/// not move a file's time while the C# app holds it open.
+#[test]
+fn a_save_that_moves_no_size_or_time_is_noticed() {
+    let dir = folder("unmoved");
+    let old = library(&dir, 100);
+    let copy = compact::copy_of(&old);
+    let wal = dir.join("sounds.db-wal");
+    // The C# app, open all along, as it is while it runs.
+    let c = cs(&old);
+    let rate = |stars: i64| {
+        c.execute("UPDATE sounds SET rating = ?1 WHERE id = (SELECT MIN(id) FROM sounds)", [stars]).unwrap();
+    };
+    let checkpoint = || {
+        let busy: i64 = c.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| r.get(0)).unwrap();
+        assert_eq!(busy, 0, "nothing else holds the library");
+    };
+    c.execute_batch("PRAGMA wal_autocheckpoint = 0;").unwrap();
+    // Two stars, then three: a 2 and a 3 take the same room in a row (a 0 or a 1 takes none), so from the second
+    // save on the file keeps its size. The first may have moved the row.
+    rate(2);
+    checkpoint();
+    rate(3);
+    compact::sync(&old, &copy).unwrap();
+    assert!(compact::in_step(&old, &copy));
+    let looks = |p: &Path| {
+        let m = std::fs::metadata(p).unwrap();
+        (m.len(), m.modified().unwrap())
+    };
+    let (db_was, wal_was) = (looks(&old), looks(&wal));
+    // Copied into the file, then the same save again: the log is written again from its start.
+    checkpoint();
+    rate(2);
+    for (p, (_, at)) in [(&old, db_was), (&wal, wal_was)] {
+        std::fs::File::options().write(true).open(p).unwrap().set_modified(at).unwrap();
+    }
+    assert_eq!((looks(&old), looks(&wal)), (db_was, wal_was), "the save left sizes and times as they were");
+    assert!(!compact::in_step(&old, &copy), "the save is noticed all the same");
+    let s = compact::sync(&old, &copy).unwrap();
+    assert_eq!((s.added, s.changed, s.removed), (0, 1, 0));
+    assert!(compact::in_step(&old, &copy));
     same_answers(&old, &copy);
 }
 
@@ -597,9 +705,22 @@ fn a_copy_busy_just_then_is_kept() {
         .unwrap();
     let busy = compact::sync(&old, &copy).unwrap_err();
     assert!(busy.to_string().contains("couldn't be read just now"), "{busy}");
+    // Asking whether it's up to date never waits.
+    let asked = Instant::now();
+    assert!(!compact::in_step(&old, &copy));
+    assert!(asked.elapsed() < Duration::from_secs(2), "{:?}", asked.elapsed());
     drop(holder);
     assert!(compact::in_step(&old, &copy), "still the copy it was");
     assert_eq!(compact::sync(&old, &copy).unwrap(), Synced { sounds: 33, ..Synced::default() });
+    same_answers(&old, &copy);
+    // An update while the page is reading the copy doesn't wait for the page.
+    let page = Connection::open(&copy).unwrap();
+    page.execute_batch("BEGIN; SELECT COUNT(*) FROM sounds;").unwrap();
+    cs(&old).execute_batch("UPDATE sounds SET plays = plays + 1 WHERE id = (SELECT MIN(id) FROM sounds);").unwrap();
+    let updated = Instant::now();
+    assert_eq!(compact::sync(&old, &copy).unwrap().changed, 1);
+    assert!(updated.elapsed() < Duration::from_secs(3), "{:?}", updated.elapsed());
+    page.execute_batch("COMMIT;").unwrap();
     same_answers(&old, &copy);
 }
 

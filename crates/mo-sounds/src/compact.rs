@@ -22,13 +22,15 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, UNIX_EPOCH};
+use std::sync::{Mutex, PoisonError};
+use std::time::{Duration, SystemTime};
 
 use rusqlite::types::{ToSqlOutput, Value, ValueRef};
 use rusqlite::{
     Connection, OpenFlags, OptionalExtension, Row, Transaction, TransactionBehavior, params, params_from_iter,
 };
 
+use crate::db::{int_at, real_at, text_at};
 use crate::{ChordSpan, SoundAnalysis, SoundsDb, SoundsError};
 
 /// The copy's name, beside `sounds.db`.
@@ -37,8 +39,9 @@ pub const FILE_NAME: &str = "sounds-rust.db";
 /// The copy's own table: what it was made from and how (`format`, `stamp`, and a `hash:` for each table copied whole).
 pub(crate) const INFO_TABLE: &str = "copy_info";
 
-/// Goes up whenever the copy's layout or what goes into it changes: a copy in another format is made afresh.
-const FORMAT: i64 = 1;
+/// Goes up whenever the copy's layout or what goes into it changes: a copy of an older format is made afresh, and one
+/// a newer version of the app made is left alone (that version would only have to make it again).
+pub(crate) const FORMAT: i64 = 1;
 
 /// SQLite's pages are 4 KB unless asked otherwise, and a CLAP fingerprint (512 numbers, 2 KB) can't share one with
 /// another, so each took a whole page, half of it empty. Fifteen share a 32 KB page.
@@ -118,6 +121,12 @@ const PRINTS: &str = "CREATE TABLE sound_prints (sound_id INTEGER PRIMARY KEY, e
 /// How long a save to the copy waits for another one (a second copy of the app bringing it up to date too).
 const WAIT: Duration = Duration::from_secs(5);
 
+/// A half-made copy whose file hasn't changed for this long was left by an app that stopped while making it.
+const STALE: Duration = Duration::from_secs(10 * 60);
+
+/// One [`sync`] at a time in this app: two at once would make the same half-made copy.
+static SYNCING: Mutex<()> = Mutex::new(());
+
 /// Why making or updating the copy failed, in words.
 struct Failed(String);
 
@@ -160,11 +169,12 @@ pub fn copy_of(sounds_db: &Path) -> PathBuf {
     sounds_db.with_file_name(FILE_NAME)
 }
 
-/// Whether `copy` is up to date with `sounds_db`: made by this version of the app from `sounds_db` as it is now. Only
-/// looks at the files' sizes and times and the copy's own note of them, so it's quick.
+/// Whether `copy` is up to date with `sounds_db`: made by this version of the app from `sounds_db` as it is now. Looks
+/// only at the files' sizes and times, SQLite's note of its log ([`SoundsDb::stamp`]) and the copy's own note, and
+/// never waits: a copy that's busy just then counts as not up to date.
 pub fn in_step(sounds_db: &Path, copy: &Path) -> bool {
-    let now = stamp(sounds_db);
-    matches!(look_at(copy), Ok(Found::Copy { stamp: Some(made_from) }) if made_from == now)
+    let now = SoundsDb::stamp(sounds_db);
+    matches!(look_at(copy, Duration::ZERO), Ok(Found::Copy { format: FORMAT, stamp: Some(made_from) }) if made_from == now)
 }
 
 /// Brings `copy` up to date with the sound library at `sounds_db`, making it when there's none (or one of an older
@@ -172,9 +182,17 @@ pub fn in_step(sounds_db: &Path, copy: &Path) -> bool {
 ///
 /// A new copy is made under another name, checked, and only then given its own name, so a copy that's there is
 /// always whole. An update happens in one transaction: if anything goes wrong, the copy stays as it was.
+///
+/// Nothing but a copy is ever removed or replaced: a database of anything else where the copy goes (or the library
+/// itself) is left as it is, and this says so.
 pub fn sync(sounds_db: &Path, copy: &Path) -> Result<Synced, SoundsError> {
+    let _one_at_a_time = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
+    let failed = |why: String| SoundsError::Copy { path: copy.to_owned(), why };
+    if same_file(sounds_db, copy) {
+        return Err(failed("that's the library itself".into()));
+    }
     // Looked at before reading, so a save the C# app makes while this reads counts as a change next time.
-    let stamp = stamp(sounds_db);
+    let stamp = SoundsDb::stamp(sounds_db);
     let old = SoundsDb::open_read_only(sounds_db)?;
     if old.is_copy() {
         return Err(SoundsError::Open {
@@ -183,21 +201,32 @@ pub fn sync(sounds_db: &Path, copy: &Path) -> Result<Synced, SoundsError> {
         });
     }
     // A copy that can't be read just now (another program holding it) is left as it is, for the next time.
-    let found = look_at(copy).map_err(|why| SoundsError::Copy {
-        path: copy.to_owned(),
-        why: format!("it couldn't be read just now ({why})"),
-    })?;
+    let found = look_at(copy, WAIT).map_err(|why| failed(format!("it couldn't be read just now ({why})")))?;
     match found {
-        Found::Copy { .. } => update(&old, copy, &stamp),
-        Found::Nothing | Found::Other => make(&old, copy, &stamp),
+        Found::Copy { format: FORMAT, .. } => update(&old, copy, &stamp),
+        Found::Copy { format, .. } if format > FORMAT => {
+            Err(failed(format!("a newer version of the app made it (format {format}), so it's left as it is")))
+        }
+        Found::Nothing | Found::Unreadable | Found::Copy { .. } => make(&old, copy, &stamp),
+        Found::Foreign => {
+            Err(failed("a database that isn't a copy of the library is there, so it's left as it is".into()))
+        }
+    }
+}
+
+/// Whether `a` and `b` are one file (by two names, or two spellings of one).
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (fs::canonicalize(a), fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
     }
 }
 
 /// A new copy, made under a name of its own beside the copy's and then renamed.
 fn make(old: &SoundsDb, copy: &Path, stamp: &str) -> Result<Synced, SoundsError> {
     let failed = |why: String| SoundsError::Copy { path: copy.to_owned(), why };
-    // A copy of an older format goes first, with SQLite's files beside it: a log left beside the new one would be
-    // read into it as if it were its own.
+    // A copy of an older format (or a file that can't be read) goes first, with SQLite's files beside it: a log left
+    // beside the new one would be read into it as if it were its own.
     remove_database(copy).map_err(|e| failed(format!("the old copy couldn't be removed ({e})")))?;
     remove_parts(copy);
     let part = part_of(copy);
@@ -241,8 +270,11 @@ fn update(old: &SoundsDb, copy: &Path, stamp: &str) -> Result<Synced, SoundsErro
     conn.pragma_update(None, "synchronous", "NORMAL").map_err(|e| failed(e.into()))?;
     let synced = fill(old, &conn, stamp, false).map_err(failed)?;
     // What this update wrote goes into the file itself, and the log beside it back to nothing: the disk the
-    // library is on may be nearly full. Not done if the page is reading just then; SQLite does it later.
-    let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    // library is on may be nearly full. Not done if the page is reading just then (without waiting for it): SQLite
+    // does it with a later save.
+    if conn.busy_timeout(Duration::ZERO).is_ok() {
+        let _ = conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()));
+    }
     Ok(synced)
 }
 
@@ -521,18 +553,20 @@ fn info_value(conn: &Connection, key: &str) -> rusqlite::Result<Option<i64>> {
 #[derive(Debug, PartialEq, Eq)]
 enum Found {
     Nothing,
-    /// A copy this version of the app made, and the stamp of the `sounds.db` it was last brought up to date with.
+    /// A copy, laid out in `format`, and the stamp of the `sounds.db` it was last brought up to date with.
     Copy {
+        format: i64,
         stamp: Option<String>,
     },
-    /// Anything else: a copy in another format, a database that isn't a copy, a file that isn't a database or is
-    /// damaged. Made again.
-    Other,
+    /// Something nothing can be read from: a file that isn't a database, a damaged one, or an empty one. Made again.
+    Unreadable,
+    /// A database of something else, which is never thrown away.
+    Foreign,
 }
 
-/// Looks at what's where the copy goes. An error when it couldn't be looked at just now (busy beyond waiting for, or
-/// the disk failing): that's no reason to throw it away.
-fn look_at(copy: &Path) -> Result<Found, String> {
+/// Looks at what's where the copy goes, waiting up to `wait` for another program that holds it. An error when it
+/// couldn't be looked at just then (busy beyond waiting for, or the disk failing): that's no reason to throw it away.
+fn look_at(copy: &Path, wait: Duration) -> Result<Found, String> {
     match fs::metadata(copy) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Found::Nothing),
         Err(e) => return Err(e.to_string()),
@@ -541,57 +575,51 @@ fn look_at(copy: &Path) -> Result<Found, String> {
     let found = (|| -> rusqlite::Result<Found> {
         let conn =
             Connection::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-        conn.busy_timeout(WAIT)?;
-        let is_copy: bool = conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        conn.busy_timeout(wait)?;
+        let (tables, is_copy): (i64, bool) = conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(name = ?1), 0) > 0 FROM sqlite_master WHERE type = 'table'",
             [INFO_TABLE],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
-        if !is_copy {
-            return Ok(Found::Other);
+        if tables == 0 {
+            return Ok(Found::Unreadable);
         }
-        let info = |key: &str| {
-            conn.query_row("SELECT value FROM copy_info WHERE key = ?1", [key], |r| {
+        if !is_copy {
+            return Ok(Found::Foreign);
+        }
+        let Some(format) = format_of(&conn)? else { return Ok(Found::Unreadable) };
+        let stamp = conn
+            .query_row("SELECT value FROM copy_info WHERE key = 'stamp'", [], |r| {
                 Ok(match r.get_ref(0)? {
-                    ValueRef::Integer(n) => Some(Value::Integer(n)),
-                    ValueRef::Text(t) => std::str::from_utf8(t).ok().map(|t| Value::Text(t.to_owned())),
+                    ValueRef::Text(t) => std::str::from_utf8(t).ok().map(str::to_owned),
                     _ => None,
                 })
             })
-            .optional()
-            .map(Option::flatten)
-        };
-        if info("format")? != Some(Value::Integer(FORMAT)) {
-            return Ok(Found::Other);
-        }
-        let stamp = match info("stamp")? {
-            Some(Value::Text(stamp)) => Some(stamp),
-            _ => None,
-        };
-        Ok(Found::Copy { stamp })
+            .optional()?
+            .flatten();
+        Ok(Found::Copy { format, stamp })
     })();
     match found {
         Err(rusqlite::Error::SqliteFailure(e, _))
             if matches!(e.code, rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt) =>
         {
-            Ok(Found::Other)
+            Ok(Found::Unreadable)
         }
         found => found.map_err(|e| e.to_string()),
     }
 }
 
-/// What `sounds.db` and the log SQLite writes its saves into first (`sounds.db-wal`) look like: their sizes and when
-/// each last changed. Every save the C# app makes changes one of them. An empty log counts as none: SQLite makes one
-/// when a reader opens the file, and removes it when the C# app closes.
-fn stamp(db: &Path) -> String {
-    let look = |p: &Path| match fs::metadata(p) {
-        Ok(m) if m.len() > 0 => {
-            let at = m.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
-            format!("{}@{at}", m.len())
-        }
-        _ => "-".to_owned(),
-    };
-    format!("{} {}", look(db), look(&side(db, "-wal")))
+/// The format a copy notes it's laid out in; `None` when it notes none.
+pub(crate) fn format_of(conn: &Connection) -> rusqlite::Result<Option<i64>> {
+    Ok(conn
+        .query_row("SELECT value FROM copy_info WHERE key = 'format'", [], |r| {
+            Ok(match r.get_ref(0)? {
+                ValueRef::Integer(n) => Some(n),
+                _ => None,
+            })
+        })
+        .optional()?
+        .flatten())
 }
 
 /// Where this app makes a new copy before giving it its name: `sounds-rust.db.part-` and the app's process number,
@@ -600,16 +628,29 @@ fn part_of(copy: &Path) -> PathBuf {
     side(copy, &format!(".part-{}", std::process::id()))
 }
 
-/// Removes the copies left half made (by an app that stopped while making one), and SQLite's files beside them. Not
-/// one another copy of the app is still making: Windows won't remove a file that's open.
+/// Removes the copies left half made by an app that stopped while making one, and SQLite's files beside them: this
+/// app's own, and others' once they haven't changed for [`STALE`]. Not one another copy of the app is still making
+/// (and Windows won't remove a file that's open anyway).
 fn remove_parts(copy: &Path) {
     let (Some(dir), Some(name)) = (copy.parent(), copy.file_name()) else { return };
     let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
     let start = format!("{}.part", name.to_string_lossy());
+    let own = part_of(copy);
     let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
-        if entry.file_name().to_string_lossy().starts_with(&start) {
-            let _ = fs::remove_file(entry.path());
+        let path = entry.path();
+        if !entry.file_name().to_string_lossy().starts_with(&start) {
+            continue;
+        }
+        let ours = ["", "-wal", "-shm", "-journal"].iter().any(|end| path == side(&own, end));
+        let stale = || {
+            entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .is_ok_and(|t| SystemTime::now().duration_since(t).is_ok_and(|age| age > STALE))
+        };
+        if ours || stale() {
+            let _ = fs::remove_file(path);
         }
     }
 }
@@ -667,20 +708,11 @@ fn analysis_values(a: Option<&SoundAnalysis>) -> Vec<Value> {
 
 /// The analysis from a row of the copy whose analysis columns start at `at`; `None` when the sound has none.
 pub(crate) fn analysis_at(r: &Row<'_>, at: usize) -> Option<SoundAnalysis> {
+    // Each value read as the rest of the library is read (crate::db), so the copy can't read one differently.
     let get = |i: usize| r.get_ref(at + i).ok();
-    let real = |i: usize| match get(i) {
-        Some(ValueRef::Real(x)) => Some(x),
-        Some(ValueRef::Integer(n)) => Some(n as f64),
-        _ => None,
-    };
-    let int = |i: usize| match get(i) {
-        Some(ValueRef::Integer(n)) => i32::try_from(n).ok(),
-        _ => None,
-    };
-    let text = |i: usize| match get(i) {
-        Some(ValueRef::Text(t)) => Some(String::from_utf8_lossy(t).into_owned()),
-        _ => None,
-    };
+    let real = |i: usize| real_at(r, at + i);
+    let int = |i: usize| int_at(r, at + i).and_then(|n| i32::try_from(n).ok());
+    let text = |i: usize| text_at(r, at + i);
     let blob = |i: usize| match get(i) {
         Some(ValueRef::Blob(b)) => b,
         _ => &[],
@@ -786,10 +818,9 @@ fn unpacked_chords(bytes: &[u8]) -> Vec<ChordSpan> {
 /// A number type the analysis keeps lists of: the waveform's points (`f32`) and the chroma (`f64`).
 trait Packable: Copy + 'static {
     const SIZE: usize;
-    /// Each whole number of thousandths from 0 to 1023 as this kind of number ([`F64_THOUSANDTHS`]).
+    /// Each whole number of thousandths from 0 to 1023 as this kind of number, as the C# analyser makes it
+    /// (`Math.Round(x, 3)`): see [`F64_THOUSANDTHS`].
     const THOUSANDTHS: &'static [Self; 1024];
-    /// This number made from a whole number of thousandths, as the C# analyser makes it (`Math.Round(x, 3)`).
-    fn from_thousandths(k: u16) -> Self;
     fn as_f64(self) -> f64;
     fn bits(self) -> u64;
     fn put(self, out: &mut Vec<u8>);
@@ -821,9 +852,6 @@ const F32_THOUSANDTHS: [f32; 1024] = {
 impl Packable for f32 {
     const SIZE: usize = 4;
     const THOUSANDTHS: &'static [f32; 1024] = &F32_THOUSANDTHS;
-    fn from_thousandths(k: u16) -> f32 {
-        F32_THOUSANDTHS.get(usize::from(k)).copied().unwrap_or_else(|| (f64::from(k) / 1000.0) as f32)
-    }
     fn as_f64(self) -> f64 {
         f64::from(self)
     }
@@ -843,9 +871,6 @@ impl Packable for f32 {
 impl Packable for f64 {
     const SIZE: usize = 8;
     const THOUSANDTHS: &'static [f64; 1024] = &F64_THOUSANDTHS;
-    fn from_thousandths(k: u16) -> f64 {
-        F64_THOUSANDTHS.get(usize::from(k)).copied().unwrap_or_else(|| f64::from(k) / 1000.0)
-    }
     fn as_f64(self) -> f64 {
         self
     }
@@ -869,7 +894,7 @@ fn thousandths<T: Packable>(x: T) -> Option<u16> {
         return None;
     }
     let k = k as u16;
-    (T::from_thousandths(k).bits() == x.bits()).then_some(k)
+    (T::THOUSANDTHS[usize::from(k)].bits() == x.bits()).then_some(k)
 }
 
 /// A list of numbers packed for the copy: 10 bits for each when every one is a whole number of thousandths (160
@@ -1018,7 +1043,7 @@ mod tests {
     #[test]
     fn thousandths_pack_into_ten_bits_each_and_come_back_the_same() {
         for n in [1usize, 2, 3, 4, 5, 7, 8, 12, 159, 160, 161] {
-            let list: Vec<f32> = (0..n).map(|i| f32::from_thousandths(((i * 389) % 1001) as u16)).collect();
+            let list: Vec<f32> = (0..n).map(|i| F32_THOUSANDTHS[(i * 389) % 1001]).collect();
             let Value::Blob(bytes) = packed(&list) else { panic!("no blob for {n}") };
             assert_eq!(bytes[0], THOUSANDTHS);
             assert_eq!(bytes.len(), 1 + (n * 10).div_ceil(8), "{n} numbers");
@@ -1101,10 +1126,10 @@ mod tests {
     #[test]
     fn the_tables_hold_what_dividing_gives() {
         for k in 0..1024u16 {
-            assert_eq!(f64::from_thousandths(k).to_bits(), (f64::from(k) / 1000.0).to_bits(), "{k}");
-            assert_eq!(f32::from_thousandths(k).to_bits(), ((f64::from(k) / 1000.0) as f32).to_bits(), "{k}");
+            let i = usize::from(k);
+            assert_eq!(F64_THOUSANDTHS[i].to_bits(), (f64::from(k) / 1000.0).to_bits(), "{k}");
+            assert_eq!(F32_THOUSANDTHS[i].to_bits(), ((f64::from(k) / 1000.0) as f32).to_bits(), "{k}");
         }
-        assert_eq!(f64::from_thousandths(1024), 1.024);
     }
 
     #[test]
