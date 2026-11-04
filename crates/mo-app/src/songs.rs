@@ -304,6 +304,13 @@ pub enum Other {
 /// The settings that turn the questions off, or on across folders: the C# app's.
 pub const ASK_DOUBTS: &str = "ask_song_doubts";
 pub const DOUBTS_ACROSS_FOLDERS: &str = "song_doubts_across_folders";
+/// The months between two saves that start a new run (the C# app's Settings choice: 1, 2, 3, 6 or 12).
+pub const RUN_GAP: &str = "version_gap_months";
+
+/// The run gap the library's settings give, as the C# app reads it: a whole number above 0, else `fallback`.
+pub fn run_gap(setting: Option<&str>, fallback: u32) -> u32 {
+    setting.and_then(|v| v.trim().parse::<u32>().ok()).filter(|&g| g > 0).unwrap_or(fallback)
+}
 
 /// At most this many questions. The C# app stopped at 200, which in a big library left songs with no question; the
 /// questions are only places and a line each, so far more fit without a cost.
@@ -493,6 +500,15 @@ mod tests {
 
     fn songs(saves: &[Save]) -> Songs {
         Songs::from_saves(saves, &SongChoices::default(), Vec::new(), 3, Some(false))
+    }
+
+    #[test]
+    fn the_run_gap_is_read_as_the_c_sharp_app_reads_it() {
+        assert_eq!(run_gap(Some("6"), 3), 6);
+        assert_eq!(run_gap(Some(" 12 "), 3), 12);
+        for odd in [None, Some(""), Some("0"), Some("-2"), Some("six")] {
+            assert_eq!(run_gap(odd, 3), 3, "{odd:?}");
+        }
     }
 
     #[test]

@@ -403,7 +403,12 @@ impl SoundList {
                 None => std::cmp::Ordering::Equal,
             },
             Order::Name => std::cmp::Ordering::Equal,
-            Order::Type => sa.sound_type.to_lowercase().cmp(&sb.sound_type.to_lowercase()),
+            // Letter by letter, lower-cased as it goes: no new strings for each of a big list's comparisons.
+            Order::Type => sa
+                .sound_type
+                .chars()
+                .flat_map(char::to_lowercase)
+                .cmp(sb.sound_type.chars().flat_map(char::to_lowercase)),
             Order::Key => key_order(sa).cmp(&key_order(sb)),
             Order::Newest => sb.added.cmp(&sa.added),
         };

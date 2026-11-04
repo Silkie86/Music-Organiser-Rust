@@ -18,6 +18,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // Before the log starts, so a crash while it starts still gets its crash file.
     log_crashes();
     let session = log::start_session();
+    // Programs the app opens (DAWs, folders) start at the window's priority, not a background thread's.
+    mo_app::shell::get_ready();
     // Rule 28: what an earlier run or a stopped tool left behind is cleared, a little later, at low priority.
     mo_app::tidy::start();
     let feed = Feed::default();

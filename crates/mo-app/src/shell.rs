@@ -135,7 +135,7 @@ pub fn wrappable_path(path: &str) -> String {
 pub fn run(l: &Launch) -> io::Result<()> {
     let mut command = Command::new(&l.program);
     command.args(&l.args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    let mut child = detached(&mut command)?;
+    let mut child = detached(command)?;
     match l.check {
         Check::Started => {
             // Collected when it closes, on a thread of its own, so it doesn't linger after it ends.
@@ -151,7 +151,7 @@ pub fn run(l: &Launch) -> io::Result<()> {
 }
 
 #[cfg(windows)]
-fn detached(command: &mut Command) -> io::Result<std::process::Child> {
+fn detached(mut command: Command) -> io::Result<std::process::Child> {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x8;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x200;
@@ -164,15 +164,53 @@ fn detached(command: &mut Command) -> io::Result<std::process::Child> {
     }
 }
 
+/// A program to start, and where to say how it went.
 #[cfg(unix)]
-fn detached(command: &mut Command) -> io::Result<std::process::Child> {
+type Start = (Command, std::sync::mpsc::Sender<io::Result<std::process::Child>>);
+
+/// The thread programs are started from, at the window's priority (see [`get_ready`]).
+#[cfg(unix)]
+static STARTER: std::sync::OnceLock<std::sync::mpsc::Sender<Start>> = std::sync::OnceLock::new();
+
+/// Makes the thread that starts DAWs and other programs. Call it once from the main thread, before any background
+/// work: on Linux and the Mac a program takes the priority of the thread that starts it, and one started from a
+/// low-priority background thread would run at the lowest priority for its whole life, with no way back up.
+pub fn get_ready() {
+    #[cfg(unix)]
+    STARTER.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<Start>();
+        let made = std::thread::Builder::new().name("Starter".to_owned()).spawn(move || {
+            for (command, back) in rx {
+                let _ = back.send(spawn_detached(command));
+            }
+        });
+        if let Err(e) = made {
+            crate::log::warning("Open", &format!("Couldn't make the thread programs start from: {e}"));
+        }
+        tx
+    });
+}
+
+#[cfg(unix)]
+fn detached(command: Command) -> io::Result<std::process::Child> {
+    let Some(starter) = STARTER.get() else { return spawn_detached(command) };
+    let (back, answer) = std::sync::mpsc::channel();
+    match starter.send((command, back)) {
+        Ok(()) => answer.recv().unwrap_or_else(|_| Err(io::Error::other("the thread that starts programs stopped"))),
+        // The starter is gone: start it from here, at this thread's priority.
+        Err(std::sync::mpsc::SendError((command, _))) => spawn_detached(command),
+    }
+}
+
+#[cfg(unix)]
+fn spawn_detached(mut command: Command) -> io::Result<std::process::Child> {
     use std::os::unix::process::CommandExt;
     // Its own process group, so Ctrl+C in the launcher's terminal doesn't reach it.
     command.process_group(0).spawn()
 }
 
 #[cfg(not(any(windows, unix)))]
-fn detached(command: &mut Command) -> io::Result<std::process::Child> {
+fn detached(mut command: Command) -> io::Result<std::process::Child> {
     command.spawn()
 }
 
@@ -235,5 +273,33 @@ mod tests {
         assert_eq!(wrappable_path("Boom Kick.wav"), "Boom Kick.wav");
         // Taking the marks out gives the path back.
         assert_eq!(wrappable_path(SONG).replace(wrap, ""), SONG);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod starter_tests {
+    use super::*;
+
+    /// The nice value a program started by `run` gets, read back from what it prints.
+    fn nice_of_a_started_program() -> Option<i32> {
+        let out = std::env::temp_dir().join(format!("mo-app-starter-{}.txt", std::process::id()));
+        let l = Launch {
+            program: "sh".to_owned(),
+            args: vec!["-c".to_owned(), format!("cut -d' ' -f19 /proc/self/stat > '{}'", out.display())],
+            check: Check::ExitCode,
+        };
+        run(&l).ok()?;
+        let nice = std::fs::read_to_string(&out).ok()?.trim().parse().ok();
+        let _ = std::fs::remove_file(&out);
+        nice
+    }
+
+    #[test]
+    fn a_program_started_from_a_background_thread_keeps_the_app_s_priority() {
+        get_ready();
+        let ours = nice_of_a_started_program();
+        assert!(ours.is_some(), "the program didn't say its priority");
+        let theirs = crate::background::spawn("Open", nice_of_a_started_program).unwrap().join().unwrap();
+        assert_eq!(theirs, ours, "started at a background thread's priority");
     }
 }
