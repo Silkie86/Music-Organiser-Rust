@@ -329,6 +329,7 @@ mod windows_x64 {
     static LAST_MISS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
     /// How the symbol helper is doing, for a test that fails: "set up: (true, 0), last miss: 126".
+    #[cfg(test)]
     pub fn symbol_state() -> String {
         format!("set up: {:?}, last miss: {}", SET_UP.get(), LAST_MISS.load(std::sync::atomic::Ordering::Relaxed))
     }
