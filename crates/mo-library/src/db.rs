@@ -231,7 +231,16 @@ impl Library {
 
     /// Every save, the most recently written first.
     pub fn saves(&self) -> Result<Vec<Save>, LibraryError> {
-        self.summaries("", [])
+        // For the app's own library, from its small copy of the list when the library hasn't changed since.
+        crate::list_copy::saves(
+            &self.path,
+            &self.summaries,
+            |each| self.summaries_each("", [], each),
+            |st| {
+                let cols = SaveColumns::of(st);
+                st.query_map([], |r| Ok(cols.save(r)))?.collect()
+            },
+        )
     }
 
     /// The save at this path (ignoring case, as the library does), if the library has it.
@@ -240,9 +249,22 @@ impl Library {
     }
 
     pub(crate) fn summaries<P: rusqlite::Params>(&self, filter: &str, args: P) -> Result<Vec<Save>, LibraryError> {
+        self.summaries_each(filter, args, &mut |_| {})
+    }
+
+    /// The saves the list query finds, newest first, handing `each` every row as it's read.
+    fn summaries_each<P: rusqlite::Params>(
+        &self,
+        filter: &str,
+        args: P,
+        each: &mut dyn FnMut(&Row<'_>),
+    ) -> Result<Vec<Save>, LibraryError> {
         let mut st = self.conn.prepare(&format!("{} {filter} ORDER BY p.mtime DESC", self.summaries))?;
         let cols = SaveColumns::of(&st);
-        let rows = st.query_map(args, |r| Ok(cols.save(r)))?;
+        let rows = st.query_map(args, |r| {
+            each(r);
+            Ok(cols.save(r))
+        })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
