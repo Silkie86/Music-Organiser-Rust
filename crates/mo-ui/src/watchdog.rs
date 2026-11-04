@@ -227,6 +227,11 @@ fn busy_with() -> String {
 pub fn start(feed: Feed) {
     let _ = WINDOW.set(std::thread::current().id());
     crate::stuck::remember_this_thread();
+    // The app's debugging names are read now, away from the window and at low priority, not at the first freeze: on a
+    // busy disk that took over 5 s, which held up the watchdog's look at 5 s (Solomon's PC, 2026-11-04).
+    if let Err(e) = mo_app::background::spawn("Freeze names", crate::stuck::get_names_ready) {
+        log::info("Freeze", &format!("Couldn't read the app's debugging names ahead of time: {e}"));
+    }
     let spawned = std::thread::Builder::new().name("Freeze watchdog".into()).spawn(move || watch(&feed));
     if let Err(e) = spawned {
         log::warning("Freeze", &format!("Couldn't start the freeze watchdog: {e}"));
