@@ -291,6 +291,17 @@ pub fn biggest_first(mut lines: Vec<(u64, Line)>) -> Vec<Line> {
     lines.into_iter().map(|(_, line)| line).collect()
 }
 
+/// What can still be freed, as the page says it under Biggest wins first.
+pub const STILL_TO_COME: &str = "Still to come: songs, then plugins you haven't used.";
+
+/// What the page says under Biggest wins first: why a kind has no line when a look found none of it (each kind's own
+/// sentence, ending in a space; "" for one with nothing to say), then what's still to come.
+pub fn wins_note(nones: &[&str]) -> String {
+    let mut note: String = nones.concat();
+    note.push_str(STILL_TO_COME);
+    note
+}
+
 /// The App files line's id.
 pub const APP_FILES: &str = "app-files";
 
@@ -316,8 +327,10 @@ pub fn app_bytes(parts: &[AppFilesPart]) -> u64 {
 pub enum Opens {
     /// Opens a fixed project in Bitwig.
     InBitwig,
-    /// Shows it (an old copy) in its folder.
+    /// Shows it (an old copy, a spare plugin copy) in its folder.
     InFolder,
+    /// Opens the folder itself (the one a format's spare copies are all in).
+    Folder,
 }
 
 impl Opens {
@@ -326,6 +339,7 @@ impl Opens {
         match self {
             Opens::InBitwig => "Open in Bitwig",
             Opens::InFolder => "Show in folder",
+            Opens::Folder => "Open folder",
         }
     }
 }
@@ -580,5 +594,14 @@ mod tests {
         let ids: Vec<&str> = lines.iter().map(|l| l.id).collect();
         // The two that free the same stay in the order they came.
         assert_eq!(ids, ["big", "small", "also small"]);
+    }
+
+    #[test]
+    fn the_note_under_the_wins_ends_with_whats_still_to_come() {
+        assert_eq!(wins_note(&[]), STILL_TO_COME);
+        assert_eq!(
+            wins_note(&["", "No spare plugin copies were found. "]),
+            format!("No spare plugin copies were found. {STILL_TO_COME}")
+        );
     }
 }

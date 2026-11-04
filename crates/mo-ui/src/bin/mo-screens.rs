@@ -86,15 +86,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     // The Space page, from made-up drives: it only reads the real ones when it's shown in the app.
     mo_ui::space::connect(&app, out.join("no library.db"), feed.clone());
-    mo_ui::space::show_sample(
-        &app,
-        sample_drives(),
-        sample_app_files(),
-        sample_bitwig_copies(),
-        Default::default(),
-        sample_old_copies(),
-        "",
-    );
+    mo_ui::space::show_sample(&app, sample_space(), "");
 
     let mut shots = Vec::new();
     for place in Place::ALL {
@@ -174,15 +166,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     settings_shots(&app, &window, &graphite, &mut shots);
     // Space with the App files card open: what each part of the app's folder takes, and C: nearly full.
     app.set_place(Place::Space.index() as i32);
-    mo_ui::space::show_sample(
-        &app,
-        sample_drives(),
-        sample_app_files(),
-        sample_bitwig_copies(),
-        Default::default(),
-        sample_old_copies(),
-        mo_app::space::APP_FILES,
-    );
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space::APP_FILES);
     capture(&window);
     shots.push(("space-app-files.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &Look::from_settings(Some("Paper"), None));
@@ -192,25 +176,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The Bitwig copies card: each project's copies of Library multisamples, biggest first, with Fix's ticks: one
     // project fixed with its other saves on show (one of them ticked), one that couldn't be fixed.
     let bitwig = mo_app::space_bitwig::BITWIG_COPIES;
-    let (copies, fixes) = (sample_bitwig_copies(), sample_fixes());
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), copies, fixes, sample_old_copies(), bitwig);
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { fixes: sample_fixes(), ..sample_space() }, bitwig);
     capture(&window);
     shots.push(("space-bitwig.png".into(), capture(&window)));
     // The old copies card: what moving plugin folders to another drive left, biggest first, with one that can't go yet.
-    let (copies, old) = (sample_bitwig_copies(), sample_old_copies());
-    let old_copies = mo_app::space_old::OLD_COPIES;
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), copies, Default::default(), old, old_copies);
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space_old::OLD_COPIES);
     capture(&window);
     shots.push(("space-old.png".into(), capture(&window)));
-    mo_ui::space::show_sample(
-        &app,
-        sample_drives(),
-        sample_app_files(),
-        sample_bitwig_copies(),
-        Default::default(),
-        sample_old_copies(),
-        "",
-    );
+    // The spare copies card: AAX copies (Pro Tools isn't installed) and VST2 copies whose VST3 your saves use, by
+    // format, with one that can't go.
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space_spare::SPARE_COPIES);
+    capture(&window);
+    let top = capture(&window);
+    shots.push(("space-spare.png".into(), top.clone()));
+    // The card turned down to its end: the VST2 copies, in two folders, each with its own, and the one that can't go
+    // (its last lines once couldn't be scrolled to).
+    let (x, y, turn) = SPARE_CARD_WHEEL;
+    scroll(&window, x, y, turn);
+    let down = capture(&window);
+    hover(&window, -1.0, -1.0);
+    if down == top {
+        return Err(
+            format!("space-spare-down.png: the wheel at {x}, {y} moved nothing; is it still on the card?").into()
+        );
+    }
+    shots.push(("space-spare-down.png".into(), down));
+    mo_ui::space::show_sample(&app, sample_space(), "");
     presets_shots(&app, &window, &mut shots)?;
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
@@ -697,6 +688,62 @@ fn sample_bitwig_copies() -> mo_app::space_bitwig::Copies {
     }
 }
 
+/// The Space page's made-up finds: the drives, the app's files, Bitwig copies, old copies and spare plugin copies.
+fn sample_space() -> mo_ui::space::Sample {
+    mo_ui::space::Sample {
+        drives: sample_drives(),
+        parts: sample_app_files(),
+        bitwig: sample_bitwig_copies(),
+        old: sample_old_copies(),
+        spare: sample_spare_copies(),
+        ..Default::default()
+    }
+}
+
+/// Made-up spare plugin copies, written as on Windows, biggest first: AAX copies in Avid's folder (Pro Tools isn't
+/// installed), and VST2 copies in two folders whose VST3 or CLAP your saves use, one of them a link that can't go.
+fn sample_spare_copies() -> mo_app::space_spare::Found {
+    use mo_space::spare::{SpareCopy, Why};
+    const MB: u64 = 1 << 20;
+    let avid = r"C:\Program Files\Common Files\Avid\Audio\Plug-Ins";
+    let aax = |name: &str, mb: u64| SpareCopy {
+        name: name.to_owned(),
+        format: "AAX".to_owned(),
+        path: format!(r"{avid}\{name}.aaxplugin"),
+        bytes: mb * MB,
+        stamp: Some(String::new()),
+        why: Why::NoProTools,
+    };
+    let vst2 = |name: &str, file: &str, folder: &str, mb: u64, used: &[&str], saves: u32| SpareCopy {
+        name: name.to_owned(),
+        format: "VST2".to_owned(),
+        path: format!(r"{folder}\{file}"),
+        bytes: mb * MB,
+        stamp: Some(String::new()),
+        why: Why::OtherFormatsUsed {
+            used: used.iter().map(|u| (*u).to_owned()).collect(),
+            projects: saves,
+            used_copies: Vec::new(),
+        },
+    };
+    let plugins = r"C:\Program Files\VSTPlugins";
+    let steinberg = r"C:\Program Files\Steinberg\VSTPlugins";
+    let mut copies = vec![
+        aax("Kontakt 7", 212),
+        aax("Pigments", 148),
+        aax("Omnisphere", 64),
+        aax("Serum", 58),
+        aax("FabFilter Pro-Q 3", 31),
+        aax("Valhalla VintageVerb", 12),
+        vst2("Kontakt 7", "Kontakt 7.dll", plugins, 186, &["VST3"], 212),
+        vst2("Pigments", "Pigments.dll", steinberg, 139, &["VST3", "CLAP"], 64),
+        vst2("Serum", "Serum_x64.dll", plugins, 24, &["VST3"], 412),
+        SpareCopy { stamp: None, ..vst2("Diva", "Diva(x64).dll", steinberg, 21, &["VST3"], 37) },
+    ];
+    copies.sort_by_key(|c| std::cmp::Reverse(c.bytes));
+    mo_app::space_spare::Found { copies }
+}
+
 /// Made-up old copies left after moving plugin folders to I:, written as on Windows, biggest first: two that can go,
 /// the old place of the folder the moved folders live in, and one that can't go yet.
 fn sample_old_copies() -> mo_app::space_old::Found {
@@ -1162,6 +1209,8 @@ const PAGE_DOWN: f32 = 300.0;
 /// doesn't scroll on its own, as the lists and the arrangement in it do.
 const NARROW_PANEL_WHEEL: (f32, f32, f32) = (760.0, 404.0, -2.0 * PAGE_DOWN);
 const OLDER_BUTTON: (f32, f32) = (1005.0, 368.0);
+/// Where the wheel turns the Space page's card down to its end, and by more than enough: on its list of parts.
+const SPARE_CARD_WHEEL: (f32, f32, f32) = (1240.0, 600.0, -10.0 * PAGE_DOWN);
 /// The Lock chip on the kit's second pad (Snare).
 const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
 /// The first tile's liked bar on Sounds, under the Order line and the three lines of filters.

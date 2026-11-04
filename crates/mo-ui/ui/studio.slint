@@ -1891,7 +1891,11 @@ export component SidePanel inherits Rectangle {
     // right side (Solomon's F12 note, 2026-11-02 03:28), so it's cut at the edge instead, and the parts wrap.
     flick := Flickable {
         content-width: flick.width;
-        content-height: content.height;
+        // To where what it holds really ends (`end`), when that's lower than the content's own height. Slint measures
+        // a part inside an `if` or a `for` as if none of its lines wrapped, so where they do the content's own height
+        // falls short, and the panel stopped scrolling before its last lines (a long Space card's last parts). Laid
+        // out, each part gets its real height, so `end` lands below the last one.
+        content-height: max(content.height, end.y + Space.xl);
         // The wheel scrolls it (and a finger on a touch screen); a drag with the mouse is for what's in it, such as a
         // sound dragged out to a DAW, as in the app's lists.
         mouse-drag-pan-enabled: false;
@@ -1902,6 +1906,9 @@ export component SidePanel inherits Rectangle {
             padding: Space.xl;
             spacing: Space.md;
             @children
+            end := Rectangle {
+                height: 0px;
+            }
         }
     }
     CloseButton {

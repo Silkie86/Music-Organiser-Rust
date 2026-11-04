@@ -181,6 +181,8 @@ component RoomLineView inherits ListLine {
 
 // The picked line's card: what it is, its size in big figures, its parts, the room on its drive, and what to do.
 component SpaceCard inherits SidePanel {
+    // Where the parts really end, from where the last one is laid out (see `parts-end` below).
+    property <length> parts-end;
     close => { SpaceData.close-card(); }
     Caps { text: SpaceData.card-kind; }
     Text {
@@ -225,8 +227,13 @@ component SpaceCard inherits SidePanel {
         actions: SpaceData.card-actions;
         chosen(id) => { SpaceData.chosen(id); }
     }
+    // The parts are measured as if none of their lines wrapped (Slint measures what's in a `for` so), but each is laid
+    // out at its real height: so the box is at least as tall as where the last one ends, or the card's own height (and
+    // what follows the parts) fell short of it, and a long card's last parts couldn't be scrolled to.
     if SpaceData.card-parts.length > 0: VerticalLayout {
         spacing: Space.md;
+        alignment: start;
+        min-height: root.parts-end;
         for part[i] in SpaceData.card-parts: HorizontalLayout {
             spacing: Space.sm;
             padding-left: part.under ? Space.xl : 0px;
@@ -285,6 +292,12 @@ component SpaceCard inherits SidePanel {
                 font-family: Theme.number-font;
                 font-size: Type.meta;
             }
+        }
+        // Where the last part ends: here, less the gap before this.
+        Rectangle {
+            height: 0px;
+            init => { root.parts-end = self.y - Space.md; }
+            changed y => { root.parts-end = self.y - Space.md; }
         }
     }
     if SpaceData.card-room != "": Text {
