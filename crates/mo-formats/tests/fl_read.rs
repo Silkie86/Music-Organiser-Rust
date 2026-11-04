@@ -31,6 +31,14 @@ fn reads_tempo_version_and_channels() {
     assert_eq!(info.details["Patterns"], "2");
     assert_eq!(info.details["Channels"], "3");
     assert_eq!(info.details["PPQ"], "96");
+    // In the order the reader found them, as the C# reader lists them (and library.db keeps them).
+    let order: Vec<&str> = info
+        .details
+        .keys()
+        .map(String::as_str)
+        .filter(|k| ["PPQ", "Channels", "Patterns", "Notes"].contains(k))
+        .collect();
+    assert_eq!(order, ["PPQ", "Channels", "Patterns", "Notes"]);
     assert_eq!(info.confidence, Confidence::Full);
     assert!(info.warnings.is_empty());
 }

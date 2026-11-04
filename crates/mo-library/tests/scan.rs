@@ -138,3 +138,78 @@ fn the_folder_watch_reports_a_new_save_once_things_are_quiet() {
     let names: Vec<&str> = heard.iter().map(|f| f.rsplit(['/', '\\']).next().unwrap()).collect();
     assert_eq!(names, ["Night Drive_15.flp"]);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_folder_link_that_points_nowhere_keeps_the_saves_under_it() {
+    // K:\Music\Old Projects as a junction onto a drive that's unplugged: the saves under it aren't taken for gone.
+    let dir = folder("mo-library-scan-dangling-link");
+    let link = dir.join("Old Projects");
+    std::os::unix::fs::symlink(dir.join("unplugged drive/Old Projects"), &link).unwrap();
+    let root = dir.to_str().unwrap().to_owned();
+    let found = find_projects(std::slice::from_ref(&root));
+    assert_eq!(found.files.len(), 4);
+    assert_eq!(found.unreadable, [link.to_str().unwrap().to_owned()]);
+    let under = mo_library::scan::KnownFile {
+        id: 7,
+        path: link.join("Copper Lines.flp").to_str().unwrap().to_owned(),
+        size: 1,
+        mtime: 1,
+        missing: false,
+        reread: false,
+    };
+    // A save beside the link that has really gone still is.
+    let really = mo_library::scan::KnownFile { id: 8, path: format!("{root}/Gone.flp"), ..under.clone() };
+    assert_eq!(plan(&found, &[under, really], &[root], &|_| false, false).gone, [8]);
+}
+
+#[test]
+fn an_empty_folder_entry_names_no_folder() {
+    let dir = folder("mo-library-scan-empty-entry");
+    let root = dir.to_str().unwrap().to_owned();
+    let found = find_projects(&[String::new(), root.clone(), "  ".into()]);
+    assert_eq!(found.files.len(), 4);
+    assert!(found.unreadable.is_empty(), "{:?}", found.unreadable);
+    // A save outside every real folder isn't "inside" the empty one.
+    let outside = mo_library::scan::KnownFile {
+        id: 1,
+        path: "/elsewhere/Song.flp".into(),
+        size: 1,
+        mtime: 1,
+        missing: false,
+        reread: false,
+    };
+    assert!(plan(&found, &[outside], &[String::new(), root], &|_| false, false).gone.is_empty());
+}
+
+#[test]
+fn the_folder_watch_hears_a_root_inside_a_folder_the_outer_one_skips() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-library-watch-inner-root");
+    let _ = fs::remove_dir_all(&dir);
+    let backup = dir.join("Old").join("Backup");
+    fs::create_dir_all(&backup).unwrap();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let watch = mo_library::watch::FolderWatch::start(
+        &[dir.to_str().unwrap().to_owned(), backup.to_str().unwrap().to_owned(), String::new()],
+        mo_library::scan::is_project_file,
+        std::time::Duration::from_millis(300),
+        move |c| {
+            let _ = tx.send(c);
+        },
+    )
+    .unwrap();
+    assert_eq!(watch.count(), 1, "the inner folder is watched as part of the outer one");
+    let song = backup.join("Song_3.flp");
+    let mut heard: Vec<String> = Vec::new();
+    for round in 0..15 {
+        fs::write(&song, format!("save {round}")).unwrap();
+        if let Ok(changes) = rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            heard.extend(changes.files);
+            if !heard.is_empty() {
+                break;
+            }
+        }
+    }
+    let names: Vec<&str> = heard.iter().map(|f| f.rsplit(['/', '\\']).next().unwrap()).collect();
+    assert_eq!(names, ["Song_3.flp"]);
+}

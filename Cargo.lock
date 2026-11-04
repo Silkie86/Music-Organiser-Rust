@@ -3070,6 +3070,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "flate2",
+ "indexmap",
  "proptest",
  "regex",
  "roxmltree",
@@ -3085,6 +3086,7 @@ name = "mo-library"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "known-folders",
  "mo-formats",
  "notify",
  "rayon",

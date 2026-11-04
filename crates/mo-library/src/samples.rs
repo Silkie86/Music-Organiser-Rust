@@ -36,12 +36,21 @@ use mo_formats::textscan::is_audio_path;
 /// The most files read from one folder tree: a project kept at the top of a big drive stops there.
 pub const MOST_FILES: usize = 200_000;
 
+/// The most entries (files and folders of every kind) looked at in one folder tree: a project saved in a big folder
+/// with few sounds in it (C:\Users\Solomon) isn't walked to the end either.
+pub const MOST_ENTRIES: usize = 1_000_000;
+
 /// The project's own folder and the folders beside it that DAWs collect samples into.
 const BESIDE: [&str; 6] = ["", "samples", "recordings", "Media", "Audio", "audio"];
 
 /// Folders inside a DAW's folders that hold projects, autosaves or history rather than sounds.
 const NOT_CONTENT: [&str; 8] =
     ["Projects", "Songs", "Shows", "auto-backups", "Backup", "History", "$RECYCLE.BIN", "System Volume Information"];
+
+/// Folders below a tree's top that hold programs' own files, never sounds, so a sketch saved in the profile folder
+/// doesn't walk all of AppData. A DAW folder that is itself in AppData is still read: only the folders below the one
+/// asked for are left out.
+const NOT_SOUNDS: [&str; 2] = ["AppData", "node_modules"];
 
 /// The most folder trees a locator keeps at once.
 const MOST_TREES: usize = 4096;
@@ -130,16 +139,38 @@ impl SampleLocator {
             return Some(found);
         }
         let folder = parts.len().checked_sub(2).and_then(|i| parts.get(i)).copied();
-        (self.content)(project)
-            .iter()
-            .find_map(|c| self.find_in(c, usize::MAX, name, folder))
-            .or_else(|| self.library.as_ref()?.get().find(name, folder))
+        let content = (self.content)(project);
+        let in_content = match folder {
+            Some(_) => content.iter().find_map(|c| self.find_in(c, usize::MAX, name, folder)),
+            // A sample saved as a bare file name has no folder to match: those folders hold thousands of sounds, so
+            // the name alone counts only when one file in them has it.
+            None => {
+                // Each file once, across every folder: they can hold one another (Bitwig Studio and its Library), and
+                // the same file can be reached with its slashes leaning either way.
+                let mut seen = HashSet::new();
+                let mut all = content
+                    .iter()
+                    .flat_map(|c| self.named_in(c, name))
+                    .filter(|f| seen.insert(case::key(&f.replace('\\', "/"))) && Path::new(f.as_str()).is_file());
+                match (all.next(), all.next()) {
+                    (Some(only), None) => Some(only),
+                    _ => None,
+                }
+            }
+        };
+        in_content.or_else(|| self.library.as_ref()?.get().find(name, folder))
     }
 
     /// A file called `name` in the tree under `root` (in a folder called `folder`, when given), reading the tree the
     /// first time it's asked for.
     fn find_in(&self, root: &str, depth: usize, name: &str, folder: Option<&str>) -> Option<String> {
         self.tree(root, depth).get()?.find(name, folder)
+    }
+
+    /// Every file called `name` the tree under `root` had when it was read.
+    fn named_in(&self, root: &str, name: &str) -> Vec<String> {
+        let tree = self.tree(root, usize::MAX);
+        tree.get().and_then(|index| index.by_name.get(&case::key(name)).cloned()).unwrap_or_default()
     }
 
     fn tree(&self, folder: &str, depth: usize) -> Tree {
@@ -170,17 +201,22 @@ impl FolderIndex {
     fn read(root: &str, depth: usize) -> FolderIndex {
         let mut index = FolderIndex::default();
         let mut files = 0;
+        let mut entries_seen = 0;
         let mut todo: Vec<(PathBuf, usize)> = vec![(PathBuf::from(root), 0)];
         // Where linked folders really go, so a link back up the tree, or two links to one folder, is walked once.
         let real_root = fs::canonicalize(root).ok();
         let mut linked: HashSet<PathBuf> = HashSet::new();
         while let Some((dir, level)) = todo.pop() {
-            if files >= MOST_FILES {
+            if files >= MOST_FILES || entries_seen >= MOST_ENTRIES {
                 break;
             }
             let Ok(entries) = fs::read_dir(&dir) else { continue };
             let mut dirs = Vec::new();
             for entry in entries.flatten() {
+                entries_seen += 1;
+                if entries_seen > MOST_ENTRIES {
+                    break;
+                }
                 let path = entry.path();
                 let Some(p) = path.to_str() else { continue };
                 let Ok(kind) = entry.file_type() else { continue };
@@ -203,7 +239,7 @@ impl FolderIndex {
                     let name = file_name(p);
                     if level < depth
                         && !name.starts_with('.')
-                        && !NOT_CONTENT.iter().any(|n| case::eq_ignore_case(n, name))
+                        && !NOT_CONTENT.iter().chain(&NOT_SOUNDS).any(|n| case::eq_ignore_case(n, name))
                     {
                         dirs.push(p.to_owned());
                     }
@@ -509,8 +545,14 @@ fn fixed_content_folders(ext: &str) -> Vec<String> {
 fn look_for_content_folders(ext: &str) -> Vec<String> {
     let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty()).map(PathBuf::from);
     let home = env(if cfg!(windows) { "USERPROFILE" } else { "HOME" });
-    // Windows and a Mac keep the DAWs' user folders in Documents; on Linux they sit in the home folder.
-    let documents = home.as_ref().map(|h| if cfg!(target_os = "linux") { h.clone() } else { h.join("Documents") });
+    // Windows and a Mac keep the DAWs' user folders in Documents; on Linux they sit in the home folder. Windows says
+    // where Documents really is: it may have moved (to OneDrive by its Documents backup, or to another drive).
+    #[cfg(windows)]
+    let moved = known_folders::get_known_folder_path(known_folders::KnownFolder::Documents);
+    #[cfg(not(windows))]
+    let moved: Option<PathBuf> = None;
+    let documents = moved
+        .or_else(|| home.as_ref().map(|h| if cfg!(target_os = "linux") { h.clone() } else { h.join("Documents") }));
     let mut folders: Vec<PathBuf> = Vec::new();
     match ext {
         ".flp" => {

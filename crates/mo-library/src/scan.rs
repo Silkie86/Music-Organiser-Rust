@@ -170,6 +170,10 @@ pub fn find_files(
     skip: &(dyn Fn(&str, &str) -> bool + Sync),
 ) -> Found {
     let mut found = Found::default();
+    // An empty entry (a blank line in a list) names no folder: as a key it would be "/", with every other root
+    // inside it on a Mac or Linux.
+    let roots: Vec<String> = roots.iter().filter(|r| !r.trim().is_empty()).cloned().collect();
+    let roots = roots.as_slice();
     let keys: Vec<String> = roots.iter().map(|r| path_key(r)).collect();
     let mut level: Vec<String> = Vec::new();
     let mut outer: Vec<String> = Vec::new();
@@ -252,13 +256,21 @@ fn list(dir: &str, wanted: &(dyn Fn(&str) -> bool + Sync), skip: &(dyn Fn(&str, 
             continue;
         };
         if kind.is_symlink() {
-            // A link is followed to what it points at, as Windows' own listing does for a folder junction; one that
-            // points nowhere is left out.
-            let Ok(meta) = fs::metadata(&path) else { continue };
+            // A link is followed to what it points at, as Windows' own listing does for a folder junction. One that
+            // points nowhere just now (a junction onto a drive that's unplugged) counts as unreadable, as an unplugged
+            // root does, so the saves under it aren't taken for gone: it only covers the link's own path.
+            let Ok(meta) = fs::metadata(&path) else {
+                if !skip(file_name(&path), parent) || wanted(&path) {
+                    out.unreadable.push(path);
+                }
+                continue;
+            };
             if meta.is_dir() {
-                if !skip(file_name(&path), parent)
-                    && let Some(real) = fs::canonicalize(&path).ok().and_then(|r| r.to_str().map(path_key))
-                {
+                if !skip(file_name(&path), parent) {
+                    // One that works but can't be worked out (some virtual drives) is walked as it's written: the
+                    // depth limit still stops a link back up its own tree.
+                    let real = fs::canonicalize(&path).ok().and_then(|r| r.to_str().map(path_key));
+                    let real = real.unwrap_or_else(|| path_key(&path));
                     out.links.push((path, real));
                 }
             } else if wanted(&path) {
@@ -343,6 +355,9 @@ pub fn plan(found: &Found, known: &[KnownFile], roots: &[String], reread: &dyn F
         }
         present.insert(key);
     }
+    // An empty entry names no folder (as a key it would hold every save there is), as in find_files.
+    let roots: Vec<String> = roots.iter().filter(|r| !r.trim().is_empty()).cloned().collect();
+    let roots = roots.as_slice();
     let roots_keys: Vec<String> = roots.iter().map(|r| path_key(r)).collect();
     let unreadable: Vec<String> = found.unreadable.iter().map(|d| path_key(d)).collect();
     for (key, k) in by_path.iter().filter(|(_, k)| !k.missing) {
