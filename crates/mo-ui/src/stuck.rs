@@ -99,7 +99,8 @@ mod windows_x64 {
     use windows_sys::Win32::System::Diagnostics::Debug::{
         CONTEXT, CONTEXT_FULL_AMD64, GetThreadContext, IMAGEHLP_LINEW64, RtlLookupFunctionEntry, RtlVirtualUnwind,
         SYMBOL_INFOW, SYMOPT_DEFERRED_LOADS, SYMOPT_LOAD_LINES, SYMOPT_UNDNAME, SymFromAddrW, SymGetLineFromAddrW64,
-        SymGetOptions, SymInitializeW, SymLoadModuleExW, SymSetOptions, UNW_FLAG_NHANDLER,
+        SymGetOptions, SymGetSearchPathW, SymInitializeW, SymLoadModuleExW, SymRefreshModuleList, SymSetOptions,
+        SymSetSearchPathW, UNW_FLAG_NHANDLER,
     };
     use windows_sys::Win32::System::LibraryLoader::{
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, GetModuleFileNameW,
@@ -313,13 +314,41 @@ mod windows_x64 {
             }
             SET_UP.get_or_init(|| {
                 SymSetOptions(SymGetOptions() | SYMOPT_UNDNAME | SYMOPT_DEFERRED_LOADS | SYMOPT_LOAD_LINES);
-                let ok = SymInitializeW(GetCurrentProcess(), std::ptr::null(), 1) != 0;
-                (ok, if ok { 0 } else { GetLastError() })
+                let ok = SymInitializeW(GetCurrentProcess(), std::ptr::null(), 0) != 0;
+                let error = if ok { 0 } else { GetLastError() };
+                // Left to itself the symbol helper looks for the app's debugging info (its .pdb) only in the folder
+                // the app was started from, not the app's own folder: add that (and keep what was there, as Rust's
+                // backtraces may have set it up already). Then it lists the modules loaded, which it reads as it's
+                // asked about each.
+                search_beside_the_app(GetCurrentProcess());
+                SymRefreshModuleList(GetCurrentProcess());
+                (ok, error)
             });
             let process = GetCurrentProcess();
             let named = frames.iter().map(|&at| name(process, at)).collect();
             ReleaseMutex(lock as HANDLE);
             named
+        }
+    }
+
+    /// Adds the app's own folder to where the symbol helper looks for debugging info.
+    unsafe fn search_beside_the_app(process: HANDLE) {
+        let Some(folder) = std::env::current_exe().ok().and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+        else {
+            return;
+        };
+        // SAFETY: the documented calls, with the buffer's size passed and NUL-ended text.
+        unsafe {
+            let mut was = [0u16; 4096];
+            let had = SymGetSearchPathW(process, was.as_mut_ptr(), was.len() as u32) != 0;
+            let len = if had { was.iter().position(|&c| c == 0).unwrap_or(0) } else { 0 };
+            let mut path: Vec<u16> = was[..len].to_vec();
+            if !path.is_empty() {
+                path.push(u16::from(b';'));
+            }
+            path.extend(std::os::windows::ffi::OsStrExt::encode_wide(folder.as_os_str()));
+            path.push(0);
+            SymSetSearchPathW(process, path.as_ptr());
         }
     }
 
@@ -329,9 +358,28 @@ mod windows_x64 {
     static LAST_MISS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
     /// How the symbol helper is doing, for a test that fails: "set up: (true, 0), last miss: 126".
+    /// With what it knows of the module at `at`: its kind of symbols (3 is a .pdb, 4 only its exports), how many,
+    /// and the .pdb it read.
     #[cfg(test)]
-    pub fn symbol_state() -> String {
-        format!("set up: {:?}, last miss: {}", SET_UP.get(), LAST_MISS.load(std::sync::atomic::Ordering::Relaxed))
+    pub fn symbol_state(at: u64) -> String {
+        use windows_sys::Win32::System::Diagnostics::Debug::{IMAGEHLP_MODULEW64, SymGetModuleInfoW64};
+        let mut module =
+            IMAGEHLP_MODULEW64 { SizeOfStruct: std::mem::size_of::<IMAGEHLP_MODULEW64>() as u32, ..Default::default() };
+        // SAFETY: the documented call with a struct of the size it's told.
+        let known = unsafe { SymGetModuleInfoW64(GetCurrentProcess(), at, &mut module) } != 0;
+        let pdb = String::from_utf16_lossy(&module.LoadedPdbName).trim_end_matches('\0').to_owned();
+        // SAFETY: reads the thread's last error number.
+        let error = if known { 0 } else { unsafe { GetLastError() } };
+        format!(
+            "set up: {:?}, last miss: {}, module known: {known} ({error}), symbols: {} x{}, pdb: {pdb:?}, unmatched: {}, \
+             search: {:?}",
+            SET_UP.get(),
+            LAST_MISS.load(std::sync::atomic::Ordering::Relaxed),
+            module.SymType,
+            module.NumSyms,
+            module.PdbUnmatched,
+            std::env::current_exe().ok(),
+        )
     }
 
     /// Room for a name of up to 500 UTF-16 units after SYMBOL_INFOW's own fields.
@@ -484,7 +532,7 @@ mod tests {
         assert!(
             frames.iter().any(|f| f.contains("spin_here_for_the_test")),
             "{frames:#?} ({})",
-            windows_x64::symbol_state()
+            windows_x64::symbol_state(spin_here_for_the_test as *const () as usize as u64)
         );
     }
 }
