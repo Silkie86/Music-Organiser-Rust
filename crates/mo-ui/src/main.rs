@@ -77,6 +77,8 @@ fn main() -> Result<(), slint::PlatformError> {
     );
     // Presets: the library is only read; part fixes and curves go in the app's own presets.db and curves.db.
     mo_ui::presets::connect(&app, library.clone(), feed.clone(), &shortcuts);
+    // Plugins: read from the C# app's library, read-only.
+    mo_ui::plugins::connect(&app, library.clone(), feed.clone(), &shortcuts);
     // Space: the drives your folders are on and the app's own files, looked at once the page shows.
     mo_ui::space::connect(&app, library.clone(), feed.clone());
     app.window().set_maximized(true);

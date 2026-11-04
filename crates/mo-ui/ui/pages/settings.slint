@@ -2,7 +2,7 @@
 // "Made with Slint" credit in General's About part (Slint's royalty-free licence, decided 2026-10-30). Only shared
 // parts from studio.slint; mo-app decides every word (mo_app::settings), mo-ui/src/settings.rs fills it.
 import { AboutSlint } from "std-widgets.slint";
-import { Theme, Type, Space, StudioButton, Segmented, MenuChip, PageHeader, Caps, Well, TabBar, EmptyState, Dot } from "../studio.slint";
+import { Theme, Type, Space, StudioButton, Segmented, MenuChip, PageHeader, Caps, Well, TabBar, EmptyState, Dot, ToggleChip } from "../studio.slint";
 
 // One theme to pick, drawn as a little picture of it in its own colours.
 export struct ThemeCardInfo {
@@ -91,6 +91,8 @@ export global SettingsData {
     in property <string> output;
     in property <string> output-note;
     in property <bool> output-busy;
+    // Whether a Galaxy sweep holds the pointer to the star that's playing.
+    in property <bool> sweep-hold;
     // About.
     in property <string> version;
     in property <string> credit;
@@ -140,6 +142,7 @@ export global SettingsData {
     callback pace-picked(int);
     callback output-picked(string);
     callback refresh-outputs();
+    callback toggle-sweep-hold();
     // The look back to the app's own: Graphite, its accent and font, at 100%.
     callback back-to-normal();
     // Developer: a fact's button (open its folder, show the log in its folder), by the fact's number; try an activity card.
@@ -455,6 +458,18 @@ component GeneralTab inherits VerticalLayout {
             color: Theme.muted;
             font-size: Type.meta;
             wrap: word-wrap;
+        }
+    }
+    SettingsCard {
+        title: "Galaxy sweep";
+        intro: "A quick sweep over a crowded part of the Galaxy passes stars faster than they can be heard. Hold the pointer to keep it on each star until it has played, so every star along the way is heard: the pointer then moves slower than your hand there. Letting go of the button frees it at once.";
+        HorizontalLayout {
+            alignment: start;
+            ToggleChip {
+                text: "Hold the pointer to the sound";
+                on: SettingsData.sweep-hold;
+                clicked => { SettingsData.toggle-sweep-hold(); }
+            }
         }
     }
     SettingsCard {

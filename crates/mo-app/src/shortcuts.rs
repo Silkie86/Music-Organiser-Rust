@@ -75,6 +75,12 @@ pub const SOUNDS_ACTIONS: &[Action] = &[
     action("sounds.copyPath", "Copy where the sound's file is", "Ctrl+Shift+C"),
 ];
 
+/// The Plugins page's own actions, with the C# ids. Clean up and Uninstall join with the page's second part.
+pub const PLUGINS_ACTIONS: &[Action] = &[
+    action("plugins.projects", "Show the songs that use the picked plugin", "Ctrl+O"),
+    action("plugins.searchOnline", "Search the web for the picked plugin", "Ctrl+Shift+O"),
+];
+
 /// The Presets page's own actions on its Sounds section. Send to Bitwig takes the C# Sound Lab's key.
 pub const PRESETS_ACTIONS: &[Action] = &[
     action("presets.export", "Export the picked sound as a preset file", "Ctrl+E"),
@@ -123,7 +129,7 @@ pub const SPACE_ACTIONS: &[Action] = &[
 
 /// Every page's own list. A page's keys only work on that page, so two pages may share a key.
 pub const PAGE_ACTIONS: &[&[Action]] =
-    &[SONGS_ACTIONS, SOUNDS_ACTIONS, PRESETS_ACTIONS, CURVES_ACTIONS, MIDI_ACTIONS, SPACE_ACTIONS];
+    &[SONGS_ACTIONS, SOUNDS_ACTIONS, PRESETS_ACTIONS, CURVES_ACTIONS, MIDI_ACTIONS, PLUGINS_ACTIONS, SPACE_ACTIONS];
 
 /// Every page's own list with the page's name, in the order Settings › Shortcuts shows them (after the keys that work
 /// everywhere).
@@ -133,6 +139,7 @@ pub const PAGES: &[(&str, &[Action])] = &[
     ("Presets", PRESETS_ACTIONS),
     ("Curves", CURVES_ACTIONS),
     ("MIDI", MIDI_ACTIONS),
+    ("Plugins", PLUGINS_ACTIONS),
     ("Space", SPACE_ACTIONS),
 ];
 

@@ -111,6 +111,20 @@ pub fn connect(app: &AppWindow) {
         show_kind(&app, only);
     });
     let weak = app.as_weak();
+    data.on_play(move |line| {
+        if let Some(app) = weak.upgrade() {
+            choose(&app, usize::try_from(line).ok(), How::Play);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_open_asked(move || {
+        if let Some(app) = weak.upgrade()
+            && !app.global::<FinderData>().get_open()
+        {
+            toggle(&app);
+        }
+    });
+    let weak = app.as_weak();
     data.on_close(move || {
         if let Some(app) = weak.upgrade() {
             close(&app);
@@ -239,6 +253,8 @@ fn finder_line(app: &AppWindow, line: &Line) -> FinderLine {
             detail: h.detail.as_str().into(),
             key: h.key.as_str().into(),
             icon: icon(app, h),
+            plays: h.plays,
+            daw: h.opens_in_daw,
         },
     }
 }
