@@ -226,6 +226,9 @@ pub fn read_for_page(sounds_db: &Path, now: NaiveDateTime) -> Result<PageRead, S
         && db.is_copy()
         && let Ok(sounds) = db.all(now)
     {
+        // A copy left half made by an app closed while it made one goes now, not only the next time one is made: that
+        // may be never, and it's most of the copy's size (on a disk that was nearly full).
+        remove_parts(&copy, false);
         return Ok(PageRead::Copy { db, sounds, behind });
     }
     // None, or none this version can read: made (or brought up to date) on the page's own read.
@@ -279,6 +282,8 @@ fn run(
     }
     // A copy that can't be read just now (another program holding it) is left as it is, for the next time.
     let found = look_at(copy, WAIT).map_err(|why| failed(format!("it couldn't be read just now ({why})")))?;
+    // Half-made copies left by an app that stopped while making one, whatever this pass does.
+    remove_parts(copy, true);
     let pass = Pass { stamp: &stamp, read_for, read };
     match found {
         Found::Copy { format: FORMAT, .. } => update(&old, copy, pass),
@@ -321,7 +326,6 @@ fn make(old: &SoundsDb, copy: &Path, pass: Pass<'_>) -> Result<Synced, SoundsErr
     // A copy of an older format (or a file that can't be read) goes first, with SQLite's files beside it: a log left
     // beside the new one would be read into it as if it were its own.
     remove_database(copy).map_err(|e| failed(format!("the old copy couldn't be removed ({e})")))?;
-    remove_parts(copy);
     let part = part_of(copy);
     remove_database(&part).map_err(|e| failed(format!("a half-made copy couldn't be removed ({e})")))?;
     let made = (|| -> Result<Synced, Failed> {
@@ -762,10 +766,11 @@ fn part_of(copy: &Path) -> PathBuf {
     side(copy, &format!(".part-{}", std::process::id()))
 }
 
-/// Removes the copies left half made by an app that stopped while making one, and SQLite's files beside them: this
-/// app's own, and others' once they haven't changed for [`STALE`]. Not one another copy of the app is still making
-/// (and Windows won't remove a file that's open anyway).
-fn remove_parts(copy: &Path) {
+/// Removes the copies left half made by an app that stopped while making one, and SQLite's files beside them: others'
+/// once they haven't changed for [`STALE`], and with `ours_too` this app's own (only while [`SYNCING`] is held: this
+/// app makes none meanwhile). Not one another copy of the app is still making (and Windows won't remove a file that's
+/// open anyway).
+fn remove_parts(copy: &Path, ours_too: bool) {
     let (Some(dir), Some(name)) = (copy.parent(), copy.file_name()) else { return };
     let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
     let start = format!("{}.part", name.to_string_lossy());
@@ -776,7 +781,7 @@ fn remove_parts(copy: &Path) {
         if !entry.file_name().to_string_lossy().starts_with(&start) {
             continue;
         }
-        let ours = ["", "-wal", "-shm", "-journal"].iter().any(|end| path == side(&own, end));
+        let ours = ours_too && ["", "-wal", "-shm", "-journal"].iter().any(|end| path == side(&own, end));
         let stale = || {
             entry
                 .metadata()

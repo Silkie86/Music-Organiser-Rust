@@ -582,6 +582,39 @@ fn the_copy_follows_each_kind_of_save() {
     assert!(known.iter().any(|k| k.has_clap) && known.iter().any(|k| !k.has_clap));
 }
 
+/// A copy left half made by an app closed while it made one (minutes on Solomon's disk) goes at the next start, even
+/// though no copy is made then: it's most of a copy's size.
+#[test]
+fn a_copy_left_half_made_goes_at_the_next_start() {
+    let dir = folder("left");
+    let old = library(&dir, 30);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    let an_hour_ago = SystemTime::now() - Duration::from_secs(3600);
+    let left_long_ago = |path: &Path| {
+        std::fs::File::options().write(true).open(path).unwrap().set_modified(an_hour_ago).unwrap();
+    };
+    // Left by an app closed while it made a copy, an hour ago; and one another app is making just now.
+    let (left, making) = (dir.join("sounds-rust.db.part-77777"), dir.join("sounds-rust.db.part-66666"));
+    for path in [&left, &making] {
+        std::fs::write(path, b"half a copy").unwrap();
+    }
+    left_long_ago(&left);
+    // The page's read of the copy clears what was left, and only that.
+    let Ok(compact::PageRead::Copy { .. }) = compact::read_for_page(&old, now()) else {
+        panic!("the copy is read");
+    };
+    assert_eq!(half_made(&dir), vec!["sounds-rust.db.part-66666".to_owned()]);
+    // So does bringing the copy up to date, once the other has been left long enough too.
+    left_long_ago(&making);
+    cs(&old)
+        .execute_batch("UPDATE sounds SET plays = COALESCE(plays, 0) + 1 WHERE id = (SELECT MIN(id) FROM sounds);")
+        .unwrap();
+    assert_eq!(compact::sync(&old, &copy).unwrap().changed, 1);
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+    same_answers(&old, &copy);
+}
+
 #[test]
 fn a_copy_of_another_format_or_half_made_is_made_again() {
     let dir = folder("again");
