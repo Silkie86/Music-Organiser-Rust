@@ -31,25 +31,16 @@ export struct MidiLine {
     picked: bool,
 }
 
-// A note on the piano roll: left, top, width, height, each 0 to 1 of the roll, how hard it's played (0.4 to 1), and
-// its name ("C4").
-export struct RollNote {
-    x: float,
-    y: float,
-    w: float,
-    h: float,
-    strength: float,
-    name: string,
-}
-
-// One key of the roll's keyboard, top to bottom: its row (top and height, 0 to 1 of the roll), whether it's black,
-// whether it's a C (named even without note names), and its name.
-export struct RollKey {
-    y: float,
-    h: float,
-    black: bool,
-    c: bool,
-    name: string,
+// A name laid on the piano roll's picture ("C4"): the box it goes in, from the roll's top left, its colour, and whether
+// it's a key's name, at the bottom of its box on the right, or a note's, halfway down from the left.
+export struct RollLabel {
+    x: length,
+    y: length,
+    width: length,
+    height: length,
+    text: string,
+    color: color,
+    key: bool,
 }
 
 // One of the card's facts: BARS 8.
@@ -141,9 +132,13 @@ export global MidiData {
     callback panel-resized(length);
     callback close-panel();
     in property <PickedPart> picked;
-    in property <[RollNote]> roll;
-    in property <[float]> roll-bars;
-    in property <[RollKey]> roll-keys;
+    // The picked part's piano roll: how many keys it shows top to bottom (none while its notes are read), its picture
+    // (rows, keyboard, bar lines and notes, drawn off the window's thread by mo-ui's piano_roll) and the names on it.
+    in property <int> roll-keys;
+    in property <image> roll-picture;
+    in property <[RollLabel]> roll-labels;
+    // The roll's size, each time it or one of its choices changes, so its picture is drawn again to fit.
+    callback roll-laid-out(length, length);
     // The roll's choices: a keyboard down its side, and each note's name on it.
     in-out property <bool> roll-keyboard: true;
     in-out property <bool> roll-names: false;
@@ -268,99 +263,55 @@ component MidiLineView inherits ListLine {
 
 // The picked part's notes: a row for each key (the black keys' rows darker), a line at each bar, each note a bar of
 // the accent colour, as strong as it's played. A keyboard down the side and the notes' names are choices; with
-// names on, the roll grows so a row has room for its name.
+// names on, the roll grows so a row has room for its name. The rows, keys, lines and notes are one picture, drawn off
+// the window's thread on the graphics card or the processor (mo-ui's piano_roll, from mo_app::piano_roll, which lays
+// it out with this roll's margins, Space.xs at the left and Space.sm round the rest); the names are laid on it here.
 component PianoRoll inherits Well {
-    private property <int> keys: MidiData.roll-keys.length;
     private property <length> name-row: Type.tiny + 2px;
-    private property <length> side: MidiData.roll-keyboard ? 52px : 28px;
-    // A piano's keys in either theme: white keys light and black keys dark.
-    private property <color> white-key: Theme.light ? Theme.surface : Theme.muted;
-    private property <color> black-key: Theme.light ? Theme.text : Theme.background;
-    // How tall a key's row is, and whether a name fits in it.
-    private property <length> key-row: (self.height - 2 * Space.sm) / max(1, self.keys);
-    private property <bool> names-fit: MidiData.roll-names && self.key-row >= Type.tiny;
+    // The choices and the window's scale, watched, so the picture is drawn again when one changes.
+    private property <bool> keyboard: MidiData.roll-keyboard;
+    private property <bool> names: MidiData.roll-names;
+    private property <float> scale: 1px / 1phx;
     height: MidiData.roll-names
-        ? clamp(self.keys * self.name-row + 2 * Space.sm, 200px, 520px)
+        ? clamp(MidiData.roll-keys * self.name-row + 2 * Space.sm, 200px, 520px)
         : 200px;
     clip: true;
-    // The rows behind the notes, as long as the roll, and the keyboard beside them.
-    Rectangle {
-        y: Space.sm;
-        height: parent.height - 2 * Space.sm;
-        for k in MidiData.roll-keys: Rectangle {
-            y: parent.height * k.y;
-            height: parent.height * k.h;
-            // The keyboard: white keys light, black keys dark and shorter.
-            if MidiData.roll-keyboard: Rectangle {
-                x: Space.xs;
-                width: root.side - Space.sm;
-                background: k.black ? root.black-key : root.white-key;
-                Rectangle {
-                    x: 0;
-                    width: k.black ? parent.width * 0.6 : parent.width;
-                    height: 1px;
-                    y: parent.height - 1px;
-                    background: Theme.edge;
-                }
-            }
-            if MidiData.roll-keyboard && k.black: Rectangle {
-                x: Space.xs + (root.side - Space.sm) * 0.6;
-                width: (root.side - Space.sm) * 0.4;
-                background: root.white-key;
-            }
-            if MidiData.roll-keyboard && (k.c || root.names-fit): Text {
-                // A black key's name sits on the black part, a white key's at the end of the key.
-                x: Space.xs + 2px;
-                width: (root.side - Space.sm) * (k.black ? 0.6 : 1) - 4px;
-                y: parent.height - self.height;
-                text: k.name;
-                color: k.black ? root.white-key : root.black-key;
-                font-family: Theme.number-font;
-                font-size: Type.tiny;
-                horizontal-alignment: right;
-            }
-            // The row across the roll: the white keys' rows lighter, so the black keys show as darker rows.
-            Rectangle {
-                x: root.side;
-                width: parent.width - root.side - Space.sm;
-                background: k.black ? transparent : Theme.shine;
-                // A line under each C, where an octave starts.
-                if k.c: Rectangle {
-                    y: parent.height - 1px;
-                    height: 1px;
-                    background: Theme.edge;
-                }
-            }
-        }
+    init => {
+        MidiData.roll-laid-out(self.width, self.height);
     }
-    notes := Rectangle {
-        x: root.side;
+    changed width => {
+        MidiData.roll-laid-out(self.width, self.height);
+    }
+    changed height => {
+        MidiData.roll-laid-out(self.width, self.height);
+    }
+    changed keyboard => {
+        MidiData.roll-laid-out(self.width, self.height);
+    }
+    changed names => {
+        MidiData.roll-laid-out(self.width, self.height);
+    }
+    changed scale => {
+        MidiData.roll-laid-out(self.width, self.height);
+    }
+    // Shown pixel for pixel, as sharp as it was drawn: it's made for the roll's size at the window's scale, a whole
+    // number of pixels each way (so it may go up to a pixel into the margin, which is the well's colour too).
+    Image {
+        x: Space.xs;
         y: Space.sm;
-        width: parent.width - self.x - Space.sm;
-        height: parent.height - 2 * Space.sm;
-        for b in MidiData.roll-bars: Rectangle {
-            x: parent.width * b;
-            width: 1px;
-            background: Theme.edge;
-        }
-        for n in MidiData.roll: Rectangle {
-            x: parent.width * n.x;
-            y: parent.height * n.y;
-            width: max(2px, parent.width * n.w - 1px);
-            height: max(2px, parent.height * n.h - 1px);
-            border-radius: 1px;
-            background: Theme.accent.transparentize(1 - n.strength);
-            if root.names-fit && notes.width * n.w >= 20px: Text {
-                x: 2px;
-                width: parent.width - 4px;
-                text: n.name;
-                color: Theme.accent-text;
-                font-family: Theme.number-font;
-                font-size: Type.tiny;
-                vertical-alignment: center;
-                overflow: clip;
-            }
-        }
+        width: self.source.width * 1phx;
+        height: self.source.height * 1phx;
+        source: MidiData.roll-picture;
+    }
+    for l in MidiData.roll-labels: Text {
+        x: l.x;
+        y: l.key ? l.y + l.height - self.height : l.y + (l.height - self.height) / 2;
+        width: l.width;
+        text: l.text;
+        color: l.color;
+        font-family: Theme.number-font;
+        font-size: Type.tiny;
+        horizontal-alignment: l.key ? TextHorizontalAlignment.right : TextHorizontalAlignment.left;
     }
     if !MidiData.roll-keyboard: Text {
         x: Space.xs;
@@ -443,7 +394,7 @@ component PartPanel inherits SidePanel {
         min-width: 0px;
     }
     PianoRoll { }
-    if MidiData.roll.length > 0: RollChoices { }
+    if MidiData.roll-keys > 0: RollChoices { }
     if MidiData.picked.roll-note != "": Text {
         text: MidiData.picked.roll-note;
         color: Theme.muted;
