@@ -24,6 +24,7 @@ pub mod log;
 pub mod midi;
 pub mod note;
 pub mod paths;
+pub mod piano_roll;
 pub mod places;
 pub mod plugins;
 pub mod presets;

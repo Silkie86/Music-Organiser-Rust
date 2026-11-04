@@ -16,9 +16,9 @@ use mo_app::background::{self, Newest};
 use mo_app::log;
 use mo_app::themes::Look;
 use rayon::prelude::*;
-use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, SharedString, VecModel};
+use slint::{ComponentHandle, Image, ModelRc, SharedString, VecModel};
 
-use crate::canvas::{Canvas, Kind};
+use crate::canvas::{self, Canvas, Kind};
 use crate::gpu;
 use crate::{AppWindow, ArrKind, ArrLabel, ArrangementData};
 
@@ -599,46 +599,16 @@ pub fn graphics_gone(app: &AppWindow) {
     });
 }
 
-/// Draws the shapes on the card, now, and gives the picture for Slint to show; `None` when there's no card to draw on
-/// any more (it went since the shapes were asked for).
-fn draw_on_card(shapes: &Shapes) -> Result<Option<Image>, String> {
-    let Some((gpu, generation)) = usable_card() else { return Ok(None) };
-    let image = CARD.with(|c| -> Result<_, String> {
-        let mut c = c.borrow_mut();
-        let canvas = c.on(&gpu, generation, |gpu| {
-            // Set up when the card was handed over (`graphics_ready`), so only if that couldn't start does the card
-            // build the shader here, which can take a moment.
-            let _doing = crate::watchdog::doing("Arrangement: set up the GPU painter");
-            Canvas::new(&gpu.device, &gpu.queue, Kind::Picture)
-        })?;
-        let _doing = crate::watchdog::doing("Arrangement: draw on the GPU");
-        let texture = gpu::checked(&gpu.device, || {
-            canvas.draw(shapes.size, shapes.scale, shapes.background, &shapes.bytes, 0.0)
-        })?;
-        Image::try_from(texture).map_err(|e| format!("Slint wouldn't show the picture: {e}"))
-    });
-    // If the card or Slint said no, the processor draws it from now on, on this card.
-    image.map(Some).inspect_err(|_| CARD.with(|c| c.borrow_mut().refused(generation)))
-}
-
-/// The shapes of a view for the graphics card, packed on the drawing thread.
-struct Shapes {
-    bytes: Vec<u8>,
-    /// The picture's size in pixels, and pixels to a point.
-    size: (u32, u32),
-    scale: f32,
-    background: u32,
-}
-
-/// What's drawn of a view on the drawing thread: the picture itself (by the processor), or the shapes for the card.
-enum Drawing {
-    Pixels(SharedPixelBuffer<Rgba8Pixel>),
-    Shapes(Shapes),
-}
+/// What the arrangement's steps on the window's thread are called in the freeze lines.
+const STEPS: canvas::Steps = canvas::Steps {
+    set_up: "Arrangement: set up the GPU painter",
+    draw: "Arrangement: draw on the GPU",
+    show: "Arrangement: show the CPU picture",
+};
 
 /// A worked out view, ready for the window: made on the drawing thread.
 struct Picture {
-    drawing: Drawing,
+    drawing: canvas::Drawing,
     header: Vec<ArrLabel>,
     timeline: Vec<ArrLabel>,
     ruler: Vec<ArrLabel>,
@@ -649,17 +619,7 @@ struct Picture {
 impl Picture {
     fn new(frame: Frame, scale: f64, on_card: bool) -> Picture {
         let Frame { scene, labels, header_width, ruler_height, .. } = frame;
-        let scale = mo_app::shapes::usable_scale(scale);
-        let drawing = if on_card {
-            Drawing::Shapes(Shapes {
-                bytes: scene.pack(scale),
-                size: scene.pixel_size(scale),
-                scale: scale as f32,
-                background: scene.background,
-            })
-        } else {
-            Drawing::Pixels(paint(&scene, scale))
-        };
+        let drawing = canvas::Drawing::new(&scene, scale, on_card);
         let (mut header, mut timeline, mut ruler) = (Vec::new(), Vec::new(), Vec::new());
         for l in labels {
             let (kind, muted) = kind(l.style);
@@ -689,12 +649,6 @@ impl Picture {
     }
 }
 
-/// The scene drawn on the processor, in the window's kind of buffer.
-fn paint(scene: &mo_app::shapes::Scene, scale: f64) -> SharedPixelBuffer<Rgba8Pixel> {
-    let pixmap = scene.paint(scale);
-    SharedPixelBuffer::<Rgba8Pixel>::clone_from_slice(pixmap.data(), pixmap.width(), pixmap.height())
-}
-
 /// A picture has been worked out (picture `number`, or here and now): drawn on the card if it's for the card, and put
 /// on the page with its words, unless another song has been picked since or a newer picture is on its way already.
 fn drawn(app: &AppWindow, asked: u64, number: Option<u64>, picture: Picture) {
@@ -702,55 +656,32 @@ fn drawn(app: &AppWindow, asked: u64, number: Option<u64>, picture: Picture) {
         return;
     }
     let data = app.global::<ArrangementData>();
-    match picture.drawing {
-        Drawing::Shapes(shapes) => match draw_on_card(&shapes) {
-            Ok(Some(image)) => data.set_picture(image),
-            // The card went since this was asked for: drawn again, on the processor.
-            Ok(None) => {
-                redraw(app);
-                return;
-            }
-            Err(e) => {
-                log::error(
-                    "Arrangement",
-                    &format!("The graphics card couldn't draw the arrangement, so the processor does: {e}"),
-                );
-                redraw(app);
-                return;
-            }
-        },
-        Drawing::Pixels(pixels) => {
-            let _doing = crate::watchdog::doing("Arrangement: show the CPU picture");
-            data.set_picture(Image::from_rgba8_premultiplied(pixels));
+    match canvas::show(picture.drawing, &CARD, &STEPS) {
+        Ok(Some(image)) => data.set_picture(image),
+        // The card went since this was asked for: drawn again, on the processor.
+        Ok(None) => {
+            redraw(app);
+            return;
+        }
+        Err(e) => {
+            log::error(
+                "Arrangement",
+                &format!("The graphics card couldn't draw the arrangement, so the processor does: {e}"),
+            );
+            redraw(app);
+            return;
         }
     }
     let _doing = crate::watchdog::doing("Arrangement: place the words");
     data.set_header_width(picture.header_width);
     data.set_ruler_height(picture.ruler_height);
     WORDS.with(|w| {
-        refill(&w.header, picture.header);
-        refill(&w.timeline, picture.timeline);
-        refill(&w.ruler, picture.ruler);
+        canvas::refill(&w.header, picture.header);
+        canvas::refill(&w.timeline, picture.timeline);
+        canvas::refill(&w.ruler, picture.ruler);
     });
     // What's under the mouse now, which may have moved on since this picture was asked for.
     show_hover(&data, STATE.with(|s| s.borrow().view.as_ref().and_then(View::hover)));
-}
-
-/// Puts `rows` in `model` in place of what's there, changing only the lines that differ, so the window keeps the words
-/// it has instead of making them all again.
-fn refill(model: &VecModel<ArrLabel>, rows: Vec<ArrLabel>) {
-    let old = model.row_count();
-    let keep = old.min(rows.len());
-    let mut rows = rows.into_iter();
-    for (i, row) in rows.by_ref().take(keep).enumerate() {
-        if model.row_data(i).as_ref() != Some(&row) {
-            model.set_row_data(i, row);
-        }
-    }
-    model.extend(rows);
-    for i in (keep..old).rev() {
-        model.remove(i);
-    }
 }
 
 /// A label's look, and whether it's greyed out.
@@ -918,18 +849,6 @@ mod tests {
     use crate::canvas::testing::{card, read_back};
     use mo_app::themes::Look;
     use slint::wgpu_30::wgpu;
-
-    #[test]
-    fn the_words_change_line_by_line() {
-        let label = |text: &str| ArrLabel { text: text.into(), ..ArrLabel::default() };
-        let model = VecModel::from(vec![label("a"), label("b"), label("c")]);
-        refill(&model, vec![label("a"), label("x")]);
-        assert_eq!(model.iter().map(|l| l.text.to_string()).collect::<Vec<_>>(), ["a", "x"]);
-        refill(&model, vec![label("a"), label("x"), label("y"), label("z")]);
-        assert_eq!(model.iter().map(|l| l.text.to_string()).collect::<Vec<_>>(), ["a", "x", "y", "z"]);
-        refill(&model, Vec::new());
-        assert_eq!(model.row_count(), 0);
-    }
 
     /// Draws the made-up song on whatever graphics card there is (a software one will do) and on the processor, in a
     /// few views (fitted, zoomed in on the vocal's waveform, every lane squeezed in, on Paper, at 1, 1.5 and 2 pixels

@@ -119,6 +119,7 @@ pub fn connect(app: &AppWindow) {
                 if let Some(app) = weak.upgrade() {
                     crate::sounds::graphics_ready(&app);
                     crate::arrangement::graphics_ready(&app);
+                    crate::piano_roll::graphics_ready(&app);
                     crate::waves::graphics_ready(&app);
                 }
             });
@@ -154,11 +155,13 @@ pub fn connect(app: &AppWindow) {
             // goes, when there's no window left to show anything on.
             crate::sounds::card_gone();
             crate::arrangement::card_gone();
+            crate::piano_roll::card_gone();
             crate::waves::card_gone();
             // The pictures on show go too, and are drawn again on the next card or the processor.
             if let Some(app) = weak.upgrade() {
                 crate::sounds::graphics_gone(&app);
                 crate::arrangement::graphics_gone(&app);
+                crate::piano_roll::graphics_gone(&app);
                 crate::waves::graphics_gone(&app);
             }
         }

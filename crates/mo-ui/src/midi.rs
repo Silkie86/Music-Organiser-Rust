@@ -30,9 +30,7 @@ use mo_midi::{Catalogue, Hit, MidiIndex, Role, StoredPhrase};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, VecModel};
 
 use crate::sounds::{new_seed, strings};
-use crate::{
-    AppWindow, CardAction, KindChip, MenuItem, MidiData, MidiFact, MidiLine, PickedPart, RollKey, RollNote, YearBar,
-};
+use crate::{AppWindow, CardAction, KindChip, MenuItem, MidiData, MidiFact, MidiLine, PickedPart, YearBar};
 
 /// Where a part's notes are read from.
 #[derive(Clone)]
@@ -200,6 +198,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         p.shortcuts = shortcuts.clone();
     });
     wire(app);
+    crate::piano_roll::connect(app);
     let data = app.global::<MidiData>();
     data.set_empty_title("Reading your MIDI…".into());
     data.set_empty_text("".into());
@@ -821,9 +820,7 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
         data.set_facts(ModelRc::new(VecModel::from(facts)));
         data.set_actions(ModelRc::new(VecModel::from(actions)));
         data.set_menu(ModelRc::new(VecModel::from(menu)));
-        data.set_roll(ModelRc::new(VecModel::from(Vec::<RollNote>::new())));
-        data.set_roll_bars(ModelRc::new(VecModel::from(Vec::<f32>::new())));
-        data.set_roll_keys(ModelRc::new(VecModel::from(Vec::<RollKey>::new())));
+        crate::piano_roll::show(app, None);
         Some(NotesAsk {
             id,
             from: notes,
@@ -919,21 +916,9 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
     match read {
         Ok(read) => {
             let roll = &read.roll;
-            let notes: Vec<RollNote> = roll
-                .notes
-                .iter()
-                .map(|n| RollNote {
-                    x: n.x,
-                    y: n.y,
-                    w: n.w,
-                    h: n.h,
-                    strength: n.strength,
-                    name: page::note_name(n.key).into(),
-                })
-                .collect();
             if read.read == 0 {
                 picked.roll_note = "Its notes aren't in the index any more.".into();
-            } else if notes.is_empty() {
+            } else if roll.notes.is_empty() {
                 picked.roll_note = "Every note in it is muted.".into();
             } else {
                 picked.roll_low = page::note_name(roll.low).into();
@@ -941,31 +926,16 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
                 picked.roll_note = if roll.left_off > 0 {
                     format!(
                         "The first {} notes shown, of {}",
-                        thousands(notes.len()),
-                        thousands(notes.len() + roll.left_off)
+                        thousands(roll.notes.len()),
+                        thousands(roll.notes.len() + roll.left_off)
                     )
                     .into()
                 } else {
                     "".into()
                 };
             }
-            data.set_roll(ModelRc::new(VecModel::from(notes)));
-            data.set_roll_bars(ModelRc::new(VecModel::from(roll.bars.clone())));
-            let keys: Vec<RollKey> = if roll.notes.is_empty() {
-                Vec::new()
-            } else {
-                page::roll_keys(roll.low, roll.high)
-                    .into_iter()
-                    .map(|k| RollKey {
-                        y: k.y,
-                        h: k.h,
-                        black: k.black,
-                        c: k.name.starts_with('C'),
-                        name: k.name.into(),
-                    })
-                    .collect()
-            };
-            data.set_roll_keys(ModelRc::new(VecModel::from(keys)));
+            // Drawn off the window's thread, as up to 4,000 notes would be a lot for it to lay out.
+            crate::piano_roll::show(app, Some(read.roll));
             let drums = picked.kind == page::role_label(Role::Drums);
             if let Some(fact) = read.fact {
                 let words = page::key_card(Some(&fact), drums);
@@ -1202,6 +1172,7 @@ fn send_part(
 /// For the screenshots: everything is worked out in place.
 pub fn work_here() {
     HERE.with(|h| *h.borrow_mut() = true);
+    crate::piano_roll::draw_here();
 }
 
 /// For the screenshots: picks the line at `row` of the list on show.
