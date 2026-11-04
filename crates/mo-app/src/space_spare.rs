@@ -6,7 +6,6 @@
 //! only) and says every word of the line and the card. Nothing is removed yet: sending the ones you pick to the Recycle
 //! Bin, with Put back, comes next.
 
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -15,11 +14,11 @@ use mo_library::plugins::PluginUse;
 use mo_space::Stopped;
 use mo_space::plugins::scan_files;
 use mo_space::size::size_text;
-use mo_space::spare::{self, SpareCopy, Why};
+use mo_space::spare::{self, SpareCopy, Used, Why};
 
 use crate::shell::{folder_of, wrappable_path};
 use crate::songs::{plural, thousands};
-use crate::space::{Card, Line, Opens, Part};
+use crate::space::{Card, Line, Opens, Part, and_list};
 
 /// The spare copies line's id.
 pub const SPARE_COPIES: &str = "spare-copies";
@@ -47,22 +46,22 @@ pub struct Found {
 impl Found {
     /// The room the ones that can go take.
     pub fn bytes(&self) -> u64 {
-        self.copies.iter().filter(|c| c.can_remove()).fold(0u64, |sum, c| sum.saturating_add(c.bytes))
+        free_bytes(&self.copies)
     }
 }
 
-/// Each plugin your saves use (a DAW's own devices left out), with how many saves use each format: what
-/// [`spare::find`] takes, counted as the C# app counted it for its spare copies (`PluginFormatsUsed`). A save whose
+/// The room the copies that can go take, of `copies`.
+fn free_bytes<'a>(copies: impl IntoIterator<Item = &'a SpareCopy>) -> u64 {
+    copies.into_iter().filter(|c| c.can_remove()).fold(0u64, |sum, c| sum.saturating_add(c.bytes))
+}
+
+/// Each plugin your saves use (a DAW's own devices left out), with the saves that use each format: what
+/// [`spare::find`] takes, as the C# app worked it out for its spare copies (`PluginFormatsUsed`). A save whose
 /// plugin's format isn't known ("" or an old FL Studio save's "VST") is counted too, so that plugin keeps every copy.
-pub fn formats_used(uses: &[PluginUse]) -> HashMap<String, HashMap<String, u32>> {
-    let mut saves: HashMap<(&str, &str), HashSet<i64>> = HashMap::new();
-    for u in uses.iter().filter(|u| u.format != "Native" && !u.name.trim().is_empty()) {
-        saves.entry((u.name.as_str(), u.format.as_str())).or_default().insert(u.save);
-    }
-    let mut out: HashMap<String, HashMap<String, u32>> = HashMap::new();
-    for ((name, format), s) in saves {
-        let n = u32::try_from(s.len()).unwrap_or(u32::MAX);
-        out.entry(name.to_owned()).or_default().insert(format.to_owned(), n);
+pub fn formats_used(uses: &[PluginUse]) -> Used {
+    let mut out = Used::new();
+    for u in uses.iter().filter(|u| !u.format.eq_ignore_ascii_case("Native") && !u.name.trim().is_empty()) {
+        out.entry(u.name.clone()).or_default().entry(u.format.clone()).or_default().insert(u.save);
     }
     out
 }
@@ -81,12 +80,7 @@ pub fn plugin_folders(chosen: &[String], standard: Vec<PathBuf>, aax: Vec<PathBu
 /// Looks for spare copies: every plugin file in `folders`, then each one in a format `used` (from [`formats_used`])
 /// says none of your saves use, measured. `pro_tools` says whether Pro Tools is installed. Reads and measures plugin
 /// files: call it away from the window's thread. Stopped, it says so and finds nothing.
-pub fn look(
-    folders: &[PathBuf],
-    used: &HashMap<String, HashMap<String, u32>>,
-    pro_tools: bool,
-    stop: &AtomicBool,
-) -> Result<Found, Stopped> {
+pub fn look(folders: &[PathBuf], used: &Used, pro_tools: bool, stop: &AtomicBool) -> Result<Found, Stopped> {
     let files = scan_files(folders, stop)?;
     let copies = spare::find(&files, used, pro_tools, |path| spare::look(path, stop));
     if stop.load(Ordering::Relaxed) {
@@ -104,13 +98,14 @@ struct Group<'a> {
 
 impl Group<'_> {
     fn bytes(&self) -> u64 {
-        self.copies.iter().filter(|c| c.can_remove()).fold(0u64, |sum, c| sum.saturating_add(c.bytes))
+        free_bytes(self.copies.iter().copied())
     }
 
-    /// The folder every copy is in, when they're all in one.
+    /// The folder every copy is in, when they're all in one. Letter case counts: on Linux "Foo" and "foo" are two
+    /// folders, and on Windows the copies found in one folder all come with the same letters.
     fn one_folder(&self) -> Option<&str> {
         let first = folder_of(trimmed(&self.copies.first()?.path));
-        let same = self.copies.iter().all(|c| case::eq_ignore_case(folder_of(trimmed(&c.path)), first));
+        let same = self.copies.iter().all(|c| folder_of(trimmed(&c.path)) == first);
         (same && !first.is_empty()).then_some(first)
     }
 }
@@ -143,11 +138,14 @@ fn copies_words(n: usize, format: &str) -> String {
 /// The formats, as a sentence says them: "90 AAX copies", "90 AAX and 40 VST2 copies", "90 AAX, 40 VST2 and 1 CLAP
 /// copies".
 fn formats_words(groups: &[Group<'_>]) -> String {
-    let counts: Vec<String> = groups.iter().map(|g| format!("{} {}", thousands(g.copies.len()), g.format)).collect();
-    match counts.as_slice() {
+    match groups {
         [] => String::new(),
-        [_] => groups.first().map(|g| copies_words(g.copies.len(), g.format)).unwrap_or_default(),
-        [rest @ .., last] => format!("{} and {last} copies", rest.join(", ")),
+        [g] => copies_words(g.copies.len(), g.format),
+        _ => {
+            let counts: Vec<String> =
+                groups.iter().map(|g| format!("{} {}", thousands(g.copies.len()), g.format)).collect();
+            format!("{} copies", and_list(&counts))
+        }
     }
 }
 
@@ -205,13 +203,10 @@ fn status_words(copy: &SpareCopy) -> (String, bool) {
     }
     match &copy.why {
         Why::NoProTools => (String::new(), false),
+        // Never with none: a copy is only spare beside a used format's copy.
+        Why::OtherFormatsUsed { used, .. } if used.is_empty() => (String::new(), false),
         Why::OtherFormatsUsed { used, projects, .. } => {
-            let formats = match used.as_slice() {
-                // Never so: a copy is only spare beside a used format's copy.
-                [] => return (String::new(), false),
-                [one] => one.clone(),
-                [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-            };
+            let formats = and_list(used);
             let saves = usize::try_from(*projects).unwrap_or(usize::MAX);
             (format!("Used as {formats} in {}.", plural(saves, "save")), false)
         }
@@ -237,7 +232,8 @@ pub fn card(found: Option<&Found>, looking: bool) -> Card {
         parts.push(Part {
             name: copies_words(g.copies.len(), g.format),
             what: group_why(g.format).to_owned(),
-            size: size_text(g.bytes()),
+            // None for a format whose copies all can't go: it frees nothing (as the card's big figure says).
+            size: if g.bytes() == 0 { String::new() } else { size_text(g.bytes()) },
             status: folder.map(|f| format!("All in {}", wrappable_path(f))).unwrap_or_default(),
             open: folder.map(|f| (Opens::Folder, PathBuf::from(f))),
             ..Part::default()
@@ -288,6 +284,7 @@ pub fn card(found: Option<&Found>, looking: bool) -> Card {
 mod tests {
     use super::*;
     use mo_library::PluginKind;
+    use std::collections::{HashMap, HashSet};
 
     const MB: u64 = 1 << 20;
 
@@ -358,12 +355,17 @@ mod tests {
             uses(2, "Serum", "VST2"),
             // A DAW's own device has no files, and a nameless row says nothing.
             uses(3, "Delay", "Native"),
+            uses(3, "Reverb", "native"),
             uses(3, " ", "VST3"),
             // A format no one knows is kept, so that plugin keeps every copy.
             uses(4, "Sylenth1", "VST"),
         ]);
-        assert_eq!(used["Serum"], HashMap::from([("VST3".to_owned(), 2), ("VST2".to_owned(), 1)]));
-        assert_eq!(used["Sylenth1"], HashMap::from([("VST".to_owned(), 1)]));
+        let saves = |ids: &[i64]| ids.iter().copied().collect::<HashSet<i64>>();
+        assert_eq!(
+            used["Serum"],
+            HashMap::from([("VST3".to_owned(), saves(&[1, 2])), ("VST2".to_owned(), saves(&[2]))])
+        );
+        assert_eq!(used["Sylenth1"], HashMap::from([("VST".to_owned(), saves(&[4]))]));
         assert_eq!(used.len(), 2);
     }
 
@@ -459,6 +461,8 @@ mod tests {
         let stuck = Found { copies: found.copies.iter().map(|c| SpareCopy { stamp: None, ..c.clone() }).collect() };
         let card = super::card(Some(&stuck), false);
         assert_eq!((card.big.as_str(), card.big_note.as_str()), ("Nothing to free", "4 spare copies can't go"));
+        // And each format's own line shows no size, as it frees nothing either.
+        assert!(card.parts.iter().filter(|p| !p.under).all(|p| p.size.is_empty()));
     }
 
     #[test]

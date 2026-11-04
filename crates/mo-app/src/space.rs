@@ -234,14 +234,22 @@ pub fn room_line(d: &Drive) -> String {
     if d.here { format!("{} free of {}", size_text(d.free), size_text(d.total)) } else { "Not plugged in".to_owned() }
 }
 
+/// Things as a sentence lists them: "A", "A and B", "A, B and C" ("" for none).
+pub fn and_list<S: AsRef<str>>(items: &[S]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.as_ref().to_owned(),
+        [rest @ .., last] => {
+            let rest: Vec<&str> = rest.iter().map(AsRef::as_ref).collect();
+            format!("{} and {}", rest.join(", "), last.as_ref())
+        }
+    }
+}
+
 /// What of yours a drive holds: "Projects, samples and the app's files".
 pub fn holds_line(d: &Drive) -> String {
     let words: Vec<&str> = d.holds.iter().map(|h| h.words()).collect();
-    let joined = match words.as_slice() {
-        [] => String::new(),
-        [one] => (*one).to_owned(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    };
+    let joined = and_list(&words);
     let mut chars = joined.chars();
     chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }
@@ -594,6 +602,14 @@ mod tests {
         let ids: Vec<&str> = lines.iter().map(|l| l.id).collect();
         // The two that free the same stay in the order they came.
         assert_eq!(ids, ["big", "small", "also small"]);
+    }
+
+    #[test]
+    fn a_list_reads_as_a_sentence() {
+        assert_eq!(and_list::<&str>(&[]), "");
+        assert_eq!(and_list(&["VST3"]), "VST3");
+        assert_eq!(and_list(&["VST3", "CLAP"]), "VST3 and CLAP");
+        assert_eq!(and_list(&["VST2".to_owned(), "VST3".to_owned(), "CLAP".to_owned()]), "VST2, VST3 and CLAP");
     }
 
     #[test]

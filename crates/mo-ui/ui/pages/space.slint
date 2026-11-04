@@ -229,7 +229,8 @@ component SpaceCard inherits SidePanel {
     }
     // The parts are measured as if none of their lines wrapped (Slint measures what's in a `for` so), but each is laid
     // out at its real height: so the box is at least as tall as where the last one ends, or the card's own height (and
-    // what follows the parts) fell short of it, and a long card's last parts couldn't be scrolled to.
+    // what follows the parts) fell short of it, and a long card's last parts couldn't be scrolled to. `alignment:
+    // start` keeps the parts at the top of the box, so where the last one ends doesn't move with the box's height.
     if SpaceData.card-parts.length > 0: VerticalLayout {
         alignment: start;
         min-height: root.parts-end;

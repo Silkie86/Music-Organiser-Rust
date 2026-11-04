@@ -21,7 +21,7 @@ use mo_space::size::size_text;
 use mo_space::{Stopped, key};
 
 use crate::songs::{plural, thousands};
-use crate::space::{Card, Line, Opens, Part};
+use crate::space::{Card, Line, Opens, Part, and_list};
 
 /// The Bitwig copies line's id.
 pub const BITWIG_COPIES: &str = "bitwig-copies";
@@ -222,11 +222,7 @@ pub fn none_note(found: Option<&Copies>) -> &'static str {
 /// The Library folders, as a sentence says them: "K:\Bitwig Studio\Library", "A and B", "A, B and C".
 fn library_words(library: &[PathBuf]) -> String {
     let names: Vec<String> = library.iter().map(|l| l.to_string_lossy().into_owned()).collect();
-    match names.as_slice() {
-        [] => "your Bitwig Library".to_owned(),
-        [one] => one.clone(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    }
+    if names.is_empty() { "your Bitwig Library".to_owned() } else { and_list(&names) }
 }
 
 /// What Fix did to a save.

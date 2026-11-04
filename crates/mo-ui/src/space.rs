@@ -86,8 +86,9 @@ struct SpareAsk {
 
 /// What a look brings back, a step at a time: the drives first (quick), then the app's files once they're measured;
 /// from the look for Bitwig copies, how far it is, then what it found; and what the looks for old copies and spare
-/// plugin copies found. A look that crashed (the crash is logged) says so, so the page doesn't wait for it for ever.
-/// Fix brings back how each save went, then that it has finished, always, even when it crashed.
+/// plugin copies found. A look that crashed (the crash is logged) says so, so the page doesn't wait for it for ever;
+/// so does a look for spare copies that couldn't read the library (said in the log). Fix brings back how each save
+/// went, then that it has finished, always, even when it crashed.
 enum Step {
     Drives(u64, Vec<Drive>),
     AppFiles(u64, Vec<AppFilesPart>),
@@ -98,7 +99,7 @@ enum Step {
     Old(u64, Found),
     OldCrashed(u64),
     Spare(u64, space_spare::Found),
-    SpareCrashed(u64),
+    SpareNone(u64),
     Fixed(PathBuf, Fixing),
     FixDone,
 }
@@ -642,14 +643,13 @@ fn look_for_spare(app: &AppWindow) {
     });
     let Some(ask) = ask else { return };
     let weak = app.as_weak();
-    // A crash in a look (logged as one) leaves the thread for the next look. A look stopped for a newer one says
-    // nothing: the newer one's finds follow.
+    // A crash in a look (logged as one) leaves the thread for the next look. One that found nothing to show says so
+    // too; one stopped for a newer one is passed over then, as the newer one's finds follow.
     let work = move |ask: SpareAsk| {
         let id = ask.id;
         match catch_crash(AssertUnwindSafe(|| look_for_spare_now(&ask))) {
             Ok(Some(found)) => arrive(&weak, Step::Spare(id, found)),
-            Ok(None) => {}
-            Err(_) => arrive(&weak, Step::SpareCrashed(id)),
+            Ok(None) | Err(_) => arrive(&weak, Step::SpareNone(id)),
         }
     };
     let started = PAGE.with(|p| p.borrow_mut().spare_look.ask("Space spare copies", work, ask));
@@ -664,28 +664,30 @@ fn look_for_spare(app: &AppWindow) {
 
 /// One look for spare plugin copies, off the window's thread: your plugin folders and the formats your saves use, from
 /// the library (read-only, and closed again before any plugin file is read), then every plugin file in those folders
-/// and the AAX ones, with each spare one measured. With no library, or none that can be read, no format counts as
-/// used, so only AAX copies can be spare (when Pro Tools isn't installed). None when it was stopped for a newer look.
+/// and the AAX ones, with each spare one measured. None when it was stopped for a newer look, or the library couldn't
+/// be read (said in the log): without what your saves use, every copy would look unused, and the page would say none
+/// are spare. The page looks again the next time it shows.
 fn look_for_spare_now(ask: &SpareAsk) -> Option<space_spare::Found> {
-    let (chosen, used) = match open_library(&ask.library) {
-        Some(lib) => {
-            let chosen = FolderList::Plugins
-                .setting_key()
-                .map(|key| {
-                    lib.list_setting(key).unwrap_or_else(|e| {
-                        log::warning("Space", &format!("Couldn't read the plugin folders: {e}"));
-                        Vec::new()
-                    })
-                })
-                .unwrap_or_default();
-            let uses = lib.plugin_uses().unwrap_or_else(|e| {
-                log::warning("Space", &format!("Couldn't read which plugins your saves use: {e}"));
-                Vec::new()
-            });
-            (chosen, space_spare::formats_used(&uses))
+    let lib = open_library(&ask.library)?;
+    let chosen = match FolderList::Plugins.setting_key().map(|key| lib.list_setting(key)) {
+        Some(Ok(chosen)) => chosen,
+        None => Vec::new(),
+        Some(Err(e)) => {
+            log::warning("Space", &format!("Couldn't read your plugin folders, so no look for spare copies: {e}"));
+            return None;
         }
-        None => (Vec::new(), Default::default()),
     };
+    let used = match lib.plugin_uses() {
+        Ok(uses) => space_spare::formats_used(&uses),
+        Err(e) => {
+            log::warning(
+                "Space",
+                &format!("Couldn't read which plugins your saves use, so no look for spare copies: {e}"),
+            );
+            return None;
+        }
+    };
+    drop(lib);
     let folders = space_spare::plugin_folders(&chosen, plugins::default_folders(), plugins::aax_folders());
     let pro_tools = plugins::pro_tools_installed();
     // On the pool for long work that waits on a disk (a plugin bundle can hold thousands of files), so the pages'
@@ -789,7 +791,7 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     Changed::Wins
                 }
                 // Shown again with nothing found yet, the page looks again; what the last look found stays on show.
-                Step::SpareCrashed(id) if id == p.spare_look.asked => {
+                Step::SpareNone(id) if id == p.spare_look.asked => {
                     p.spare_looking = false;
                     Changed::Wins
                 }

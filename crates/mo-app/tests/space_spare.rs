@@ -2,13 +2,13 @@
 //! fixtures folder under fixed names: never the computer's real plugin folders. The plugin files are made-up bytes.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use mo_app::space_spare::{Found, look, plugin_folders};
-use mo_space::spare::Why;
+use mo_space::spare::{Used, Why};
 
 fn fixtures(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -47,10 +47,12 @@ fn copies_in_formats_your_saves_dont_use_are_found_and_measured() {
     write(&vst2, "Sylenth1.dll", 30);
     write(&vst3, "Vital.vst3", 20);
     write(&vst2, "Vital.dll", 10);
-    let used: HashMap<String, HashMap<String, u32>> = HashMap::from([
-        ("Serum".to_owned(), HashMap::from([("VST3".to_owned(), 412)])),
-        ("Diva".to_owned(), HashMap::from([("VST2".to_owned(), 7)])),
-        ("Sylenth1".to_owned(), HashMap::from([("VST".to_owned(), 3)])),
+    // The saves (by their ids in the library) that use each format.
+    let saves = |ids: std::ops::Range<i64>| ids.collect::<HashSet<i64>>();
+    let used: Used = HashMap::from([
+        ("Serum".to_owned(), HashMap::from([("VST3".to_owned(), saves(0..412))])),
+        ("Diva".to_owned(), HashMap::from([("VST2".to_owned(), saves(412..419))])),
+        ("Sylenth1".to_owned(), HashMap::from([("VST".to_owned(), saves(419..422))])),
     ]);
     let folders = plugin_folders(&[], vec![vst3.clone(), vst2.clone()], vec![avid.clone()]);
     let stop = AtomicBool::new(false);
