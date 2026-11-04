@@ -182,484 +182,532 @@ export global SongsData {
     out property <length> line-height: 62px;
 }
 
+// A tab's content in the song panel. It says how tall it wants to be at the panel's real width, because the `if`
+// round it is measured at its widest: in a narrow window, where its lines wrap, the panel then scrolls far enough.
+component TabRoom inherits VerticalLayout {
+    in-out property <length> wants;
+    init => { self.wants = self.preferred-height; }
+    changed preferred-height => { self.wants = self.preferred-height; }
+}
+
 // The picked song: what it is, its counts and its tabs. Read-only until the Rust app's database is trusted.
 component SongPanel inherits Rectangle {
+    // How tall the tab on show wants to be, which it says itself (see TabRoom).
+    property <length> tab-height;
+    // The song on show, by its place in the library's list. When another is picked, the panel goes back to its top,
+    // so the new song opens at its name, as it opens on Overview. A new tab keeps the place, as the tabs are in sight.
+    property <int> song-row: SongsData.selected;
+    changed song-row => { flick.content-y = 0; }
     background: Theme.surface;
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: Theme.edge;
 
-    VerticalLayout {
-        padding: Space.lg;
-        padding-bottom: Space.md;
-        spacing: Space.sm;
-        HorizontalLayout {
+    // Scrolls when what it holds is taller than the panel, as the other pages' panels do: in a narrow window its
+    // rows wrap, and the tab below keeps the room it needs. Otherwise it fills the panel, and the tab's well takes
+    // the room that's left.
+    flick := Flickable {
+        content-width: flick.width;
+        content-height: content.height;
+        // The wheel scrolls it; a drag with the mouse is for what's in it, such as a clip dragged out to a DAW.
+        mouse-drag-pan-enabled: false;
+        content := VerticalLayout {
+            x: 0;
+            width: flick.width;
+            height: max(flick.height, self.preferred-height);
+            padding: Space.lg;
+            padding-bottom: Space.md;
             spacing: Space.sm;
-            vertical-stretch: 0;
-            Text {
-                text: SongsData.song.daw;
-                color: Theme.daw(SongsData.song.daw);
-                font-size: Type.meta;
-                font-weight: 600;
-                vertical-alignment: center;
+            HorizontalLayout {
+                spacing: Space.sm;
+                vertical-stretch: 0;
+                Text {
+                    text: SongsData.song.daw;
+                    color: Theme.daw(SongsData.song.daw);
+                    font-size: Type.meta;
+                    font-weight: 600;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: SongsData.song.facts;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    vertical-alignment: center;
+                    horizontal-stretch: 1;
+                    overflow: elide;
+                }
+                CloseButton {
+                    clicked => { SongsData.close-panel(); }
+                }
             }
             Text {
-                text: SongsData.song.facts;
-                color: Theme.muted;
-                font-size: Type.meta;
-                vertical-alignment: center;
-                horizontal-stretch: 1;
+                text: SongsData.song.name;
+                color: Theme.text;
+                font-size: Type.panel-title;
+                font-weight: 600;
                 overflow: elide;
             }
-            CloseButton {
-                clicked => { SongsData.close-panel(); }
+            if SongsData.song.saves != "": Text {
+                text: SongsData.song.saves;
+                color: Theme.muted;
+                font-size: Type.meta;
+                overflow: elide;
             }
-        }
-        Text {
-            text: SongsData.song.name;
-            color: Theme.text;
-            font-size: Type.panel-title;
-            font-weight: 600;
-            overflow: elide;
-        }
-        if SongsData.song.saves != "": Text {
-            text: SongsData.song.saves;
-            color: Theme.muted;
-            font-size: Type.meta;
-            overflow: elide;
-        }
-        if SongsData.song.backed != "": Text {
-            text: SongsData.song.backed;
-            color: Theme.muted;
-            font-size: Type.meta;
-            overflow: elide;
-        }
-        HorizontalLayout {
-            spacing: Space.md;
-            alignment: start;
-            padding-top: Space.xs;
-            padding-bottom: Space.sm;
-            vertical-stretch: 0;
-            Text {
-                text: SongsData.song.status;
-                color: Theme.text;
-                font-size: Type.body;
-                vertical-alignment: center;
+            if SongsData.song.backed != "": Text {
+                text: SongsData.song.backed;
+                color: Theme.muted;
+                font-size: Type.meta;
+                overflow: elide;
             }
-            if SongsData.song.rating > 0: VerticalLayout {
-                alignment: center;
-                Stars { rating: SongsData.song.rating; }
-            }
-            if SongsData.song.favourite: HorizontalLayout {
-                spacing: Space.xs;
-                VerticalLayout {
-                    alignment: center;
-                    Heart { }
-                }
+            // Its status, stars, key and tags, and its buttons below: each row wraps in a narrow panel, so nothing runs past
+            // its edge.
+            FlexboxLayout {
+                spacing-horizontal: Space.md;
+                spacing-vertical: Space.sm;
+                cross-axis-alignment: center;
+                padding-top: Space.xs;
+                padding-bottom: Space.sm;
+                vertical-stretch: 0;
                 Text {
-                    text: "Favourite";
-                    color: Theme.muted;
-                    font-size: Type.body;
-                    vertical-alignment: center;
-                }
-            }
-            if SongsData.song.key != "": HorizontalLayout {
-                spacing: Space.sm;
-                Caps {
-                    text: "KEY";
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: SongsData.song.key + (SongsData.song.key-heard ? " (from the notes)" : "");
+                    text: SongsData.song.status;
                     color: Theme.text;
                     font-size: Type.body;
                     vertical-alignment: center;
                 }
-            }
-            if SongsData.song.tags != "": Text {
-                text: SongsData.song.tags;
-                color: Theme.muted;
-                font-size: Type.body;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-        }
-        HorizontalLayout {
-            spacing: Space.sm;
-            alignment: start;
-            vertical-stretch: 0;
-            padding-bottom: Space.xs;
-            StudioButton {
-                text: SongsData.song.daw == "FL Studio" ? "Open in Bitwig" : "Open in " + SongsData.song.daw;
-                main: true;
-                tip: SongsData.open-key.what;
-                key: SongsData.open-key.key;
-                clicked => { SongsData.open(); }
-            }
-            if SongsData.song.daw == "FL Studio": StudioButton {
-                text: "Open in FL Studio";
-                tip: "Open the newest save in FL Studio itself";
-                clicked => { SongsData.open-own(); }
-            }
-            if SongsData.older.length > 0: HorizontalLayout {
-                older-button := StudioButton {
-                    text: "Older saves";
-                    menu: true;
-                    clicked => { older-menu.show(); }
+                if SongsData.song.rating > 0: Stars { rating: SongsData.song.rating; }
+                if SongsData.song.favourite: HorizontalLayout {
+                    spacing: Space.xs;
+                    VerticalLayout {
+                        alignment: center;
+                        Heart { }
+                    }
+                    Text {
+                        text: "Favourite";
+                        color: Theme.muted;
+                        font-size: Type.body;
+                        vertical-alignment: center;
+                    }
                 }
-                older-menu := PopupWindow {
-                    x: 0;
-                    y: older-button.height + Space.xs;
-                    width: max(older-button.width, 320px);
-                    MenuCard {
-                        HorizontalLayout {
-                            padding-left: Space.md;
-                            Caps {
-                                text: SongsData.older-heading;
-                                height: self.preferred-height + Space.sm;
-                                vertical-alignment: center;
+                if SongsData.song.key != "": HorizontalLayout {
+                    spacing: Space.sm;
+                    Caps {
+                        text: "KEY";
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        text: SongsData.song.key + (SongsData.song.key-heard ? " (from the notes)" : "");
+                        color: Theme.text;
+                        font-size: Type.body;
+                        vertical-alignment: center;
+                    }
+                }
+                if SongsData.song.tags != "": Text {
+                    text: SongsData.song.tags;
+                    color: Theme.muted;
+                    font-size: Type.body;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+            }
+            FlexboxLayout {
+                spacing: Space.sm;
+                vertical-stretch: 0;
+                padding-bottom: Space.xs;
+                StudioButton {
+                    text: SongsData.song.daw == "FL Studio" ? "Open in Bitwig" : "Open in " + SongsData.song.daw;
+                    main: true;
+                    tip: SongsData.open-key.what;
+                    key: SongsData.open-key.key;
+                    clicked => { SongsData.open(); }
+                }
+                if SongsData.song.daw == "FL Studio": StudioButton {
+                    text: "Open in FL Studio";
+                    tip: "Open the newest save in FL Studio itself";
+                    clicked => { SongsData.open-own(); }
+                }
+                if SongsData.older.length > 0: HorizontalLayout {
+                    older-button := StudioButton {
+                        text: "Older saves";
+                        menu: true;
+                        clicked => { older-menu.show(); }
+                    }
+                    older-menu := PopupWindow {
+                        x: 0;
+                        y: older-button.height + Space.xs;
+                        width: max(older-button.width, 320px);
+                        MenuCard {
+                            HorizontalLayout {
+                                padding-left: Space.md;
+                                Caps {
+                                    text: SongsData.older-heading;
+                                    height: self.preferred-height + Space.sm;
+                                    vertical-alignment: center;
+                                }
+                            }
+                            for line in SongsData.older: MenuLine {
+                                text: line.text;
+                                clicked => { SongsData.open-save(line.path); }
+                            }
+                            Groove { }
+                            MenuLine {
+                                text: SongsData.older-see-all;
+                                clicked => { SongsData.tab = SongsData.saves-tab; }
                             }
                         }
-                        for line in SongsData.older: MenuLine {
-                            text: line.text;
-                            clicked => { SongsData.open-save(line.path); }
-                        }
-                        Groove { }
-                        MenuLine {
-                            text: SongsData.older-see-all;
-                            clicked => { SongsData.tab = SongsData.saves-tab; }
-                        }
                     }
                 }
-            }
-            StudioButton {
-                text: "Show in folder";
-                tip: SongsData.reveal-key.what;
-                key: SongsData.reveal-key.key;
-                clicked => { SongsData.reveal(); }
-            }
-            StudioButton {
-                text: "Copy path";
-                tip: SongsData.copy-key.what;
-                key: SongsData.copy-key.key;
-                clicked => { SongsData.copy-path(); }
-            }
-        }
-        if SongsData.health-summary != "": NoticeStrip {
-            text: SongsData.health-summary;
-            open <=> SongsData.health-open;
-            if SongsData.health-open: VerticalLayout {
-                spacing: Space.sm;
-                for h[i] in SongsData.health: HorizontalLayout {
-                    spacing: Space.sm;
-                    VerticalLayout {
-                        horizontal-stretch: 1;
-                        alignment: center;
-                        Text {
-                            text: h.text;
-                            color: Theme.text;
-                            font-size: Type.body;
-                            wrap: word-wrap;
-                        }
-                        if h.why != "": Text {
-                            text: h.why;
-                            color: Theme.muted;
-                            font-size: Type.meta;
-                            wrap: word-wrap;
-                        }
-                    }
-                    if h.action != "": VerticalLayout {
-                        alignment: center;
-                        StudioButton {
-                            text: h.action;
-                            clicked => { SongsData.health-go(i); }
-                        }
-                    }
+                StudioButton {
+                    text: "Show in folder";
+                    tip: SongsData.reveal-key.what;
+                    key: SongsData.reveal-key.key;
+                    clicked => { SongsData.reveal(); }
+                }
+                StudioButton {
+                    text: "Copy path";
+                    tip: SongsData.copy-key.what;
+                    key: SongsData.copy-key.key;
+                    clicked => { SongsData.copy-path(); }
                 }
             }
-        }
-        if SongsData.song.notes != "": Text {
-            text: SongsData.song.notes;
-            color: Theme.muted;
-            font-size: Type.body;
-            wrap: word-wrap;
-            max-height: 60px;
-            overflow: elide;
-        }
-        TabBar {
-            vertical-stretch: 0;
-            tabs: SongsData.tabs;
-            current <=> SongsData.tab;
-        }
-        Well {
-            vertical-stretch: 1;
-            // Overview: the counts, each opening its tab, the arrangement, then the song's runs.
-            if SongsData.tab == 0: VerticalLayout {
-                padding: Space.lg;
-                spacing: Space.sm;
-                HorizontalLayout {
-                    vertical-stretch: 0;
+            if SongsData.health-summary != "": NoticeStrip {
+                text: SongsData.health-summary;
+                open <=> SongsData.health-open;
+                if SongsData.health-open: VerticalLayout {
                     spacing: Space.sm;
-                    alignment: start;
-                    for c[i] in SongsData.counts: HorizontalLayout {
+                    for h[i] in SongsData.health: HorizontalLayout {
                         spacing: Space.sm;
-                        if i > 0: Text {
-                            text: "·";
-                            color: Theme.faint;
-                            font-size: Type.body;
-                        }
-                        LinkText {
-                            text: c.text;
-                            clicked => { SongsData.tab = c.tab; }
-                        }
-                        if c.missing != "": LinkText {
-                            text: "(" + c.missing + ")";
-                            tint: Theme.missing;
-                            clicked => { SongsData.tab = c.tab; }
-                        }
-                    }
-                    if SongsData.counts.length > 0: Text {
-                        text: "·";
-                        color: Theme.faint;
-                        font-size: Type.body;
-                    }
-                    LinkText {
-                        text: "Its sounds on Presets";
-                        clicked => { SongsData.show-presets(); }
-                    }
-                }
-                if SongsData.detail-message != "": Text {
-                    text: SongsData.detail-message;
-                    color: Theme.muted;
-                    font-size: Type.meta;
-                    wrap: word-wrap;
-                }
-                ArrangementPreview {
-                    vertical-stretch: 1;
-                }
-                if SongsData.runs.length > 1: Caps {
-                    text: "RUNS";
-                }
-                for run in SongsData.runs.length > 1 ? SongsData.runs : []: Text {
-                    text: run;
-                    color: Theme.text;
-                    font-size: Type.body;
-                }
-                for w in SongsData.warnings: Text {
-                    text: w;
-                    color: Theme.warning;
-                    font-size: Type.meta;
-                    wrap: word-wrap;
-                }
-            }
-            if SongsData.tab == 1: VerticalLayout {
-                padding: Space.md;
-                spacing: Space.sm;
-                save-menu := RightClickMenu {
-                    items: SongsData.save-menu;
-                    chosen(id) => { SongsData.save-menu-chosen(id); }
-                }
-                Caps { text: SongsData.saves-heading; }
-                ListView {
-                    for line in SongsData.saves: Rectangle {
-                        height: line.run != "" ? 40px : 30px;
-                        if line.run != "": HorizontalLayout {
-                            padding-top: Space.md;
-                            spacing: Space.sm;
+                        VerticalLayout {
+                            horizontal-stretch: 1;
+                            alignment: center;
                             Text {
-                                text: line.run;
+                                text: h.text;
                                 color: Theme.text;
                                 font-size: Type.body;
-                                font-weight: 600;
-                                vertical-alignment: center;
+                                wrap: word-wrap;
                             }
-                            Text {
-                                text: line.details;
+                            if h.why != "": Text {
+                                text: h.why;
                                 color: Theme.muted;
                                 font-size: Type.meta;
-                                vertical-alignment: center;
-                                overflow: elide;
+                                wrap: word-wrap;
                             }
                         }
-                        // Double-click a save to open it, or use the buttons on its line (Solomon, 4 Nov 2026: "makes
-                        // sure things that are useful arent hidden away"); right-click for the same in a menu.
-                        if line.run == "": ListLine {
-                          // The buttons show when there's room for them and the save's name; in a narrow panel the
-                          // right-click menu and a double-click do the same.
-                          property <bool> roomy: !line.missing
-                              && self.width - 96px - 160px - 4 * Space.md >= buttons.preferred-width;
-                          double-clicked => { SongsData.open-save(line.path); }
-                          right-clicked(x, y) => {
-                              SongsData.save-menu-for(line.path);
-                              save-menu.open-at(x, y);
-                          }
-                          HorizontalLayout {
+                        if h.action != "": VerticalLayout {
+                            alignment: center;
+                            StudioButton {
+                                text: h.action;
+                                clicked => { SongsData.health-go(i); }
+                            }
+                        }
+                    }
+                }
+            }
+            if SongsData.song.notes != "": Text {
+                text: SongsData.song.notes;
+                color: Theme.muted;
+                font-size: Type.body;
+                wrap: word-wrap;
+                max-height: 60px;
+                overflow: elide;
+            }
+            TabBar {
+                vertical-stretch: 0;
+                tabs: SongsData.tabs;
+                current <=> SongsData.tab;
+            }
+            Well {
+                vertical-stretch: 1;
+                // As tall as the tab on show says it wants to be at the panel's width, so in a narrow window the panel
+                // scrolls rather than squeeze it.
+                preferred-height: root.tab-height;
+                // Overview: the counts, each opening its tab, the arrangement, then the song's runs.
+                if SongsData.tab == 0: TabRoom {
+                    wants <=> root.tab-height;
+                    padding: Space.lg;
+                    spacing: Space.sm;
+                    // They wrap in a narrow panel, each count with the dot before it.
+                    FlexboxLayout {
+                        vertical-stretch: 0;
+                        spacing: Space.sm;
+                        for c[i] in SongsData.counts: HorizontalLayout {
+                            spacing: Space.sm;
+                            if i > 0: Text {
+                                text: "·";
+                                color: Theme.faint;
+                                font-size: Type.body;
+                            }
+                            LinkText {
+                                text: c.text;
+                                clicked => { SongsData.tab = c.tab; }
+                            }
+                            if c.missing != "": LinkText {
+                                text: "(" + c.missing + ")";
+                                tint: Theme.missing;
+                                clicked => { SongsData.tab = c.tab; }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: Space.sm;
+                            if SongsData.counts.length > 0: Text {
+                                text: "·";
+                                color: Theme.faint;
+                                font-size: Type.body;
+                            }
+                            LinkText {
+                                text: "Its sounds on Presets";
+                                clicked => { SongsData.show-presets(); }
+                            }
+                        }
+                    }
+                    if SongsData.detail-message != "": Text {
+                        text: SongsData.detail-message;
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                        wrap: word-wrap;
+                    }
+                    ArrangementPreview {
+                        vertical-stretch: 1;
+                    }
+                    if SongsData.runs.length > 1: Caps {
+                        text: "RUNS";
+                    }
+                    for run in SongsData.runs.length > 1 ? SongsData.runs : []: Text {
+                        text: run;
+                        color: Theme.text;
+                        font-size: Type.body;
+                    }
+                    for w in SongsData.warnings: Text {
+                        text: w;
+                        color: Theme.warning;
+                        font-size: Type.meta;
+                        wrap: word-wrap;
+                    }
+                }
+                if SongsData.tab == 1: TabRoom {
+                    wants <=> root.tab-height;
+                    padding: Space.md;
+                    spacing: Space.sm;
+                    save-menu := RightClickMenu {
+                        items: SongsData.save-menu;
+                        chosen(id) => { SongsData.save-menu-chosen(id); }
+                    }
+                    Caps { text: SongsData.saves-heading; }
+                    ListView {
+                        // A few lines, and never fewer: in a narrow window the panel scrolls instead. As tall as the
+                        // room left otherwise.
+                        min-height: 160px;
+                        preferred-height: 160px;
+                        for line in SongsData.saves: Rectangle {
+                            height: line.run != "" ? 40px : 30px;
+                            if line.run != "": HorizontalLayout {
+                                padding-top: Space.md;
+                                spacing: Space.sm;
+                                Text {
+                                    text: line.run;
+                                    color: Theme.text;
+                                    font-size: Type.body;
+                                    font-weight: 600;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: line.details;
+                                    color: Theme.muted;
+                                    font-size: Type.meta;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
+                            }
+                            // Double-click a save to open it, or use the buttons on its line (Solomon, 4 Nov 2026: "makes
+                            // sure things that are useful arent hidden away"); right-click for the same in a menu.
+                            if line.run == "": ListLine {
+                              // The buttons show when there's room for them and the save's name; in a narrow panel the
+                              // right-click menu and a double-click do the same.
+                              property <bool> roomy: !line.missing
+                                  && self.width - 96px - 160px - 4 * Space.md >= buttons.preferred-width;
+                              double-clicked => { SongsData.open-save(line.path); }
+                              right-clicked(x, y) => {
+                                  SongsData.save-menu-for(line.path);
+                                  save-menu.open-at(x, y);
+                              }
+                              HorizontalLayout {
+                                padding-left: Space.sm;
+                                padding-right: Space.sm;
+                                spacing: Space.md;
+                                Text {
+                                    text: line.date;
+                                    width: 96px;
+                                    color: Theme.muted;
+                                    font-family: Theme.number-font;
+                                    font-size: Type.meta;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: line.name;
+                                    color: line.newest ? Theme.text : Theme.muted;
+                                    font-weight: line.newest ? 600 : 400;
+                                    font-size: Type.body;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    horizontal-stretch: 1;
+                                }
+                                if line.missing: Text {
+                                    text: "File moved";
+                                    color: Theme.missing;
+                                    font-size: Type.meta;
+                                    vertical-alignment: center;
+                                }
+                                // The buttons' place, so the name stops short of them.
+                                if roomy: Rectangle { width: buttons.preferred-width; }
+                              }
+                              // Always made, so it can be measured; on the right of the line, the same as its menu's lines.
+                              buttons := HorizontalLayout {
+                                visible: roomy;
+                                x: parent.width - self.width - Space.sm;
+                                width: self.preferred-width;
+                                height: parent.height;
+                                spacing: Space.md;
+                                // Only as tall as their words: in the middle of the line, as the words are.
+                                cross-axis-alignment: center;
+                                LinkText {
+                                    text: "Open in " + line.daw;
+                                    tint: Theme.muted;
+                                    font-size: Type.meta;
+                                    clicked => { SongsData.save-chosen(line.path, "open"); }
+                                }
+                                if line.daw == "FL Studio": LinkText {
+                                    text: "Open in Bitwig";
+                                    tint: Theme.muted;
+                                    font-size: Type.meta;
+                                    clicked => { SongsData.save-chosen(line.path, "bitwig"); }
+                                }
+                                LinkText {
+                                    text: "Show in folder";
+                                    tint: Theme.muted;
+                                    font-size: Type.meta;
+                                    clicked => { SongsData.save-chosen(line.path, "reveal"); }
+                                }
+                                LinkText {
+                                    text: "Copy path";
+                                    tint: Theme.muted;
+                                    font-size: Type.meta;
+                                    clicked => { SongsData.save-chosen(line.path, "copy"); }
+                                }
+                              }
+                            }
+                        }
+                    }
+                }
+                if SongsData.tab == 2: TabRoom {
+                    wants <=> root.tab-height;
+                    padding: Space.md;
+                    spacing: Space.sm;
+                    Caps { text: SongsData.detail-message != "" ? SongsData.detail-message : SongsData.plugins-heading; }
+                    ListView {
+                        min-height: 160px;
+                        preferred-height: 160px;
+                        for p in SongsData.plugins: HorizontalLayout {
+                            height: 48px;
                             padding-left: Space.sm;
                             padding-right: Space.sm;
                             spacing: Space.md;
-                            Text {
-                                text: line.date;
-                                width: 96px;
-                                color: Theme.muted;
-                                font-family: Theme.number-font;
-                                font-size: Type.meta;
-                                vertical-alignment: center;
-                            }
-                            Text {
-                                text: line.name;
-                                color: line.newest ? Theme.text : Theme.muted;
-                                font-weight: line.newest ? 600 : 400;
-                                font-size: Type.body;
-                                vertical-alignment: center;
-                                overflow: elide;
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: Space.xs;
                                 horizontal-stretch: 1;
+                                Text {
+                                    text: p.name;
+                                    color: Theme.text;
+                                    font-size: Type.body;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: p.about;
+                                    color: Theme.muted;
+                                    font-size: Type.meta;
+                                    overflow: elide;
+                                }
                             }
-                            if line.missing: Text {
-                                text: "File moved";
+                            if !p.installed: Text {
+                                text: "Not installed";
                                 color: Theme.missing;
                                 font-size: Type.meta;
                                 vertical-alignment: center;
                             }
-                            // The buttons' place, so the name stops short of them.
-                            if roomy: Rectangle { width: buttons.preferred-width; }
-                          }
-                          // Always made, so it can be measured; on the right of the line, the same as its menu's lines.
-                          buttons := HorizontalLayout {
-                            visible: roomy;
-                            x: parent.width - self.width - Space.sm;
-                            width: self.preferred-width;
-                            height: parent.height;
+                        }
+                    }
+                }
+                if SongsData.tab == 3: TabRoom {
+                    wants <=> root.tab-height;
+                    padding: Space.md;
+                    spacing: Space.sm;
+                    Caps { text: SongsData.detail-message != "" ? SongsData.detail-message : SongsData.samples-heading; }
+                    ListView {
+                        min-height: 160px;
+                        preferred-height: 160px;
+                        for sm in SongsData.samples: HorizontalLayout {
+                            height: 48px;
+                            padding-left: Space.sm;
+                            padding-right: Space.sm;
                             spacing: Space.md;
-                            // Only as tall as their words: in the middle of the line, as the words are.
-                            cross-axis-alignment: center;
-                            LinkText {
-                                text: "Open in " + line.daw;
-                                tint: Theme.muted;
-                                font-size: Type.meta;
-                                clicked => { SongsData.save-chosen(line.path, "open"); }
+                            VerticalLayout {
+                                alignment: center;
+                                spacing: Space.xs;
+                                horizontal-stretch: 1;
+                                Text {
+                                    text: sm.name;
+                                    color: Theme.text;
+                                    font-size: Type.body;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: sm.folder;
+                                    color: Theme.muted;
+                                    font-size: Type.meta;
+                                    overflow: elide;
+                                }
                             }
-                            if line.daw == "FL Studio": LinkText {
-                                text: "Open in Bitwig";
-                                tint: Theme.muted;
+                            if sm.missing || sm.unplayed: Text {
+                                text: sm.missing ? "Can't be found" : "Loaded, never played";
+                                color: sm.missing ? Theme.missing : Theme.faint;
                                 font-size: Type.meta;
-                                clicked => { SongsData.save-chosen(line.path, "bitwig"); }
+                                vertical-alignment: center;
                             }
-                            LinkText {
-                                text: "Show in folder";
-                                tint: Theme.muted;
-                                font-size: Type.meta;
-                                clicked => { SongsData.save-chosen(line.path, "reveal"); }
-                            }
-                            LinkText {
-                                text: "Copy path";
-                                tint: Theme.muted;
-                                font-size: Type.meta;
-                                clicked => { SongsData.save-chosen(line.path, "copy"); }
-                            }
-                          }
                         }
                     }
                 }
-            }
-            if SongsData.tab == 2: VerticalLayout {
-                padding: Space.md;
-                spacing: Space.sm;
-                Caps { text: SongsData.detail-message != "" ? SongsData.detail-message : SongsData.plugins-heading; }
-                ListView {
-                    for p in SongsData.plugins: HorizontalLayout {
-                        height: 48px;
-                        padding-left: Space.sm;
-                        padding-right: Space.sm;
-                        spacing: Space.md;
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: Space.xs;
-                            horizontal-stretch: 1;
-                            Text {
-                                text: p.name;
-                                color: Theme.text;
-                                font-size: Type.body;
-                                overflow: elide;
-                            }
-                            Text {
-                                text: p.about;
-                                color: Theme.muted;
-                                font-size: Type.meta;
-                                overflow: elide;
-                            }
-                        }
-                        if !p.installed: Text {
-                            text: "Not installed";
-                            color: Theme.missing;
-                            font-size: Type.meta;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-            }
-            if SongsData.tab == 3: VerticalLayout {
-                padding: Space.md;
-                spacing: Space.sm;
-                Caps { text: SongsData.detail-message != "" ? SongsData.detail-message : SongsData.samples-heading; }
-                ListView {
-                    for sm in SongsData.samples: HorizontalLayout {
-                        height: 48px;
-                        padding-left: Space.sm;
-                        padding-right: Space.sm;
-                        spacing: Space.md;
-                        VerticalLayout {
-                            alignment: center;
-                            spacing: Space.xs;
-                            horizontal-stretch: 1;
-                            Text {
-                                text: sm.name;
-                                color: Theme.text;
-                                font-size: Type.body;
-                                overflow: elide;
-                            }
-                            Text {
-                                text: sm.folder;
-                                color: Theme.muted;
-                                font-size: Type.meta;
-                                overflow: elide;
-                            }
-                        }
-                        if sm.missing || sm.unplayed: Text {
-                            text: sm.missing ? "Can't be found" : "Loaded, never played";
-                            color: sm.missing ? Theme.missing : Theme.faint;
-                            font-size: Type.meta;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-            }
-            if SongsData.tab == 4: VerticalLayout {
-                padding: Space.lg;
-                spacing: Space.sm;
-                alignment: start;
-                if SongsData.detail-message != "": Caps { text: SongsData.detail-message; }
-                if SongsData.tracks != "": Caps { text: "TRACKS"; }
-                if SongsData.tracks != "": Text {
-                    text: SongsData.tracks;
-                    color: Theme.text;
-                    font-size: Type.body;
-                    wrap: word-wrap;
-                }
-                if SongsData.details.length > 0: Caps { text: "FROM THE FILE"; }
-                for d in SongsData.details: HorizontalLayout {
-                    spacing: Space.md;
-                    Text {
-                        text: d.name;
-                        width: 160px;
-                        color: Theme.muted;
-                        font-size: Type.body;
-                    }
-                    Text {
-                        text: d.value;
+                if SongsData.tab == 4: TabRoom {
+                    wants <=> root.tab-height;
+                    padding: Space.lg;
+                    spacing: Space.sm;
+                    alignment: start;
+                    if SongsData.detail-message != "": Caps { text: SongsData.detail-message; }
+                    if SongsData.tracks != "": Caps { text: "TRACKS"; }
+                    if SongsData.tracks != "": Text {
+                        text: SongsData.tracks;
                         color: Theme.text;
                         font-size: Type.body;
                         wrap: word-wrap;
-                        horizontal-stretch: 1;
+                    }
+                    if SongsData.details.length > 0: Caps { text: "FROM THE FILE"; }
+                    for d in SongsData.details: HorizontalLayout {
+                        spacing: Space.md;
+                        // At most two fifths of the room inside the panel (its padding and this tab's), its words wrapping,
+                        // so in a narrow panel the value keeps room beside it. The panel's own width, which is set by
+                        // hand, so this line's width doesn't depend on itself.
+                        Text {
+                            text: d.name;
+                            width: clamp((root.width - 4 * Space.lg) * 0.4, 0px, 160px);
+                            color: Theme.muted;
+                            font-size: Type.body;
+                            wrap: word-wrap;
+                        }
+                        Text {
+                            text: d.value;
+                            color: Theme.text;
+                            font-size: Type.body;
+                            wrap: word-wrap;
+                            horizontal-stretch: 1;
+                        }
                     }
                 }
             }

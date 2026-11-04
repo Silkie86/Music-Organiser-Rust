@@ -100,16 +100,16 @@ component Words inherits Rectangle {
 // The drawn arrangement, with its view chips, summary and notes above it.
 export component ArrangementPreview inherits VerticalLayout {
     spacing: Space.sm;
-    HorizontalLayout {
+    // In a narrow panel the chips and the summary wrap onto lines of their own, so none runs past its edge. Chips
+    // only when there's more than one view.
+    FlexboxLayout {
         spacing: Space.sm;
+        cross-axis-alignment: center;
         vertical-stretch: 0;
-        if ArrangementData.views.length > 1: HorizontalLayout {
-            spacing: Space.xs;
-            for v[i] in ArrangementData.views: ToggleChip {
-                text: v;
-                on: i == ArrangementData.view;
-                clicked => { ArrangementData.pick-view(i); }
-            }
+        for v[i] in ArrangementData.views.length > 1 ? ArrangementData.views : []: ToggleChip {
+            text: v;
+            on: i == ArrangementData.view;
+            clicked => { ArrangementData.pick-view(i); }
         }
         Text {
             horizontal-stretch: 1;
