@@ -554,13 +554,17 @@ export component MidiPage inherits Rectangle {
                     false
                 }
             }
-            VerticalLayout {
+            // Where the parts come from, each choice on show (Solomon: nothing useful hidden in a menu).
+            HorizontalLayout {
+                spacing: Space.xs;
                 alignment: center;
-                MenuChip {
-                    name: "From";
-                    value: MidiData.from;
-                    choices: MidiData.froms;
-                    picked(v) => { MidiData.pick("from", v); }
+                for f in MidiData.froms: VerticalLayout {
+                    alignment: center;
+                    ToggleChip {
+                        text: f;
+                        on: MidiData.from == f;
+                        clicked => { MidiData.pick("from", f); }
+                    }
                 }
             }
             VerticalLayout {
@@ -570,25 +574,6 @@ export component MidiPage inherits Rectangle {
                     value: MidiData.key;
                     choices: MidiData.keys;
                     picked(v) => { MidiData.pick("key", v); }
-                }
-            }
-            VerticalLayout {
-                alignment: center;
-                MenuChip {
-                    name: "Order";
-                    value: MidiData.order;
-                    choices: MidiData.orders;
-                    has-any: false;
-                    picked(v) => { MidiData.pick("order", v); }
-                }
-            }
-            VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: "Shuffle";
-                    tip: "A random order: press again for another";
-                    clicked => { MidiData.shuffle(); }
                 }
             }
             Rectangle { horizontal-stretch: 1; }
@@ -627,8 +612,9 @@ export component MidiPage inherits Rectangle {
         HorizontalLayout {
             spacing: Space.sm;
             vertical-stretch: 0;
-            height: 24px;
             if MidiData.target != "": Rectangle {
+                height: 24px;
+                y: (parent.height - self.height) / 2;
                 width: target-row.preferred-width + 2 * Space.sm;
                 border-radius: 12px;
                 background: Theme.surface-raised;
@@ -657,6 +643,34 @@ export component MidiPage inherits Rectangle {
                 vertical-alignment: center;
                 overflow: elide;
                 horizontal-stretch: 1;
+                min-width: 0px;
+            }
+            // The list's order, each on show, and Shuffle beside them.
+            Text {
+                text: "Order";
+                color: Theme.muted;
+                font-size: Type.meta;
+                vertical-alignment: center;
+            }
+            HorizontalLayout {
+                spacing: Space.xs;
+                for o in MidiData.orders: VerticalLayout {
+                    alignment: center;
+                    ToggleChip {
+                        text: o;
+                        on: MidiData.order == o;
+                        clicked => { MidiData.pick("order", o); }
+                    }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "Shuffle";
+                    tip: "A random order: press again for another";
+                    clicked => { MidiData.shuffle(); }
+                }
             }
         }
         area := Rectangle {

@@ -50,15 +50,19 @@ impl Order {
     }
 }
 
-/// Where the parts come from, as the From chip names it.
+/// Where the parts come from, as its chip names it: both, your projects' parts, or the MIDI folders' files.
 pub fn from_name(from: Option<From>) -> &'static str {
     match from {
-        None => "",
+        None => "Both",
         Some(From::Projects) => "Your projects",
-        Some(From::Files) => "MIDI files",
+        Some(From::Files) => "MIDI folders",
     }
 }
 
+/// The From chips, in the order they show.
+pub const FROM_CHOICES: [Option<From>; 3] = [None, Some(From::Projects), Some(From::Files)];
+
+/// The choice a From chip's name stands for; "Both" (or a name it doesn't know) is none.
 pub fn from_of_name(name: &str) -> Option<From> {
     [From::Projects, From::Files].into_iter().find(|f| from_name(Some(*f)) == name)
 }
@@ -639,6 +643,66 @@ impl ReadProgress {
     }
 }
 
+/// The folder in the export folder where parts sent to Bitwig are written, as the C# MIDI page's.
+pub const EXPORT_SUBFOLDER: &str = "MIDI browser";
+
+/// A part as a MIDI clip for Bitwig: its heard notes (muted ones left out) at [`mo_midi::PPQ`], on one track named
+/// after it, lasting `bars` (or to its last note, if that's later), starting where its first bar starts.
+pub fn part_clip(name: &str, notes: &[NoteEvent], bars: i32) -> mo_formats::MidiClip {
+    let heard: Vec<NoteEvent> = notes.iter().filter(|n| !n.muted).copied().collect();
+    let first = heard.iter().map(|n| n.start).min().unwrap_or(0).min(0);
+    let moved: Vec<NoteEvent> = heard.into_iter().map(|n| NoteEvent { start: n.start - first, ..n }).collect();
+    let last = moved.iter().map(|n| n.start + n.length).max().unwrap_or(0);
+    let end = (i64::from(bars.max(1)) * BAR).max(last);
+    let mut clip = mo_formats::MidiClip {
+        name: name.to_owned(),
+        ppq: u16::try_from(mo_midi::PPQ).unwrap_or(96),
+        tracks: Vec::new(),
+        end: Some(end),
+    };
+    clip.track(name).extend(moved);
+    clip
+}
+
+/// Writes a part's MIDI file into `dir` under `name` (made safe for a file name) as a new file: never over another.
+/// "Keys · Pattern 3.mid", or "Keys · Pattern 3 (2).mid" when that's taken. Written beside it first and only then
+/// given its name, so Bitwig never sees half a file.
+pub fn write_part(dir: &std::path::Path, name: &str, bytes: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    use std::io::Write;
+    std::fs::create_dir_all(dir)?;
+    let stem = mo_formats::textscan::safe_file_name(name);
+    // A name of its own for the half-written file, so two sends of the same part at once don't meet.
+    static WRITING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = WRITING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let part = dir.join(format!("{stem}.{}-{n}.part", std::process::id()));
+    let written = std::fs::OpenOptions::new().write(true).create_new(true).open(&part).and_then(|mut f| {
+        f.write_all(bytes)?;
+        f.sync_all()
+    });
+    if let Err(e) = written {
+        // Only a file this made is taken away; one already there under that name belongs to someone else.
+        if e.kind() != std::io::ErrorKind::AlreadyExists {
+            let _ = std::fs::remove_file(&part);
+        }
+        return Err(e);
+    }
+    for n in 1..1000 {
+        let file = if n == 1 { dir.join(format!("{stem}.mid")) } else { dir.join(format!("{stem} ({n}).mid")) };
+        if file.exists() {
+            continue;
+        }
+        return match std::fs::rename(&part, &file) {
+            Ok(()) => Ok(file),
+            Err(e) => {
+                let _ = std::fs::remove_file(&part);
+                Err(e)
+            }
+        };
+    }
+    let _ = std::fs::remove_file(&part);
+    Err(std::io::Error::other(format!("there are already 999 files called {stem} in {}", dir.display())))
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -872,6 +936,57 @@ mod tests {
         assert!((r.notes[0].strength - 1.0).abs() < 1e-6);
         assert_eq!(roll(&[], 4), Roll::default());
         assert_eq!(r.notes[0].key, 60);
+    }
+
+    #[test]
+    fn from_says_both_when_nothing_is_picked() {
+        let names: Vec<&str> = FROM_CHOICES.iter().map(|f| from_name(*f)).collect();
+        assert_eq!(names, ["Both", "Your projects", "MIDI folders"]);
+        for f in FROM_CHOICES {
+            assert_eq!(from_of_name(from_name(f)), f);
+        }
+    }
+
+    #[test]
+    fn a_part_for_bitwig_is_its_heard_notes_from_its_first_bar() {
+        let n = |start, key| NoteEvent {
+            start,
+            length: 96,
+            key,
+            velocity: 65_535,
+            muted: false,
+            step: false,
+            attribute: mo_formats::NoteAttribute::NONE,
+        };
+        let clip = part_clip("Keys", &[n(-96, 60), n(384, 64), NoteEvent { muted: true, ..n(96, 90) }], 2);
+        assert_eq!(clip.ppq, 96);
+        assert_eq!(clip.tracks.len(), 1);
+        let starts: Vec<i64> = clip.tracks[0].1.iter().map(|n| n.start).collect();
+        assert_eq!(starts, [0, 480]);
+        assert_eq!(clip.end, Some(2 * BAR));
+        assert!(mo_formats::midi::write::write_clip(&clip).is_ok());
+    }
+
+    #[test]
+    fn a_part_is_written_as_a_new_file_never_over_another() {
+        let dir = std::env::temp_dir().join(format!("mo-app-midi-write-part-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let first = write_part(&dir, "Keys · Pattern 3", b"one").unwrap();
+        let second = write_part(&dir, "Keys · Pattern 3", b"two").unwrap();
+        assert_eq!(mo_formats::paths::file_name(&first.to_string_lossy()), "Keys · Pattern 3.mid");
+        assert_eq!(mo_formats::paths::file_name(&second.to_string_lossy()), "Keys · Pattern 3 (2).mid");
+        assert_eq!(std::fs::read(&first).unwrap(), b"one");
+        assert_eq!(std::fs::read(&second).unwrap(), b"two");
+        let unsafe_name = write_part(&dir, "A/B: C?", b"x").unwrap();
+        assert!(unsafe_name.starts_with(&dir));
+        // Nothing half-written is left beside them.
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "part"))
+            .collect();
+        assert!(left.is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

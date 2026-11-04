@@ -14,6 +14,7 @@ pub mod backup;
 mod canvas;
 pub mod cards;
 pub mod files;
+pub mod filters;
 pub mod finder;
 pub mod gpu;
 pub mod midi;
