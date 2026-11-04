@@ -331,6 +331,8 @@ export global SoundsData {
     callback play-row(int);
     // Arrow keys: -1 or 1 across, -2 or 2 up and down.
     callback step(int);
+    // An arrow key was let go: its next press is a fresh one, not the key repeating.
+    callback step-let-go();
 
     in property <bool> panel-shown;
     in property <PickedSound> picked;
@@ -1240,6 +1242,13 @@ export component SoundsPage inherits Rectangle {
             keys := FocusScope {
                 x: 0;
                 width: area.list-width - area.folders-width - area.years-width;
+                key-released(event) => {
+                    if (event.text == Key.LeftArrow || event.text == Key.RightArrow || event.text == Key.UpArrow
+                        || event.text == Key.DownArrow) {
+                        SoundsData.step-let-go();
+                    }
+                    reject
+                }
                 key-pressed(event) => {
                     if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
                         return reject;
