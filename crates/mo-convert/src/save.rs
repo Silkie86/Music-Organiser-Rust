@@ -205,7 +205,8 @@ pub fn bitwig_from_fl(
     std::fs::create_dir_all(dir).map_err(|e| format!("Couldn't make {}: {e}", dir.display()))?;
     let name = safe_file_name(name);
     let notes_file = dir.join(format!("{name} - not carried over.txt"));
-    // The notes go first, so a failure there leaves the earlier convert as it was.
+    // The notes are written and checked first, so a failure there leaves the earlier convert as it was; they're put
+    // in place only once the project is, so an earlier convert that's kept keeps its own list.
     // As the C# app lays it out: the list with a blank line under its heading, then each further section under its
     // own heading, a blank line between.
     let sections = [
@@ -214,7 +215,7 @@ pub fn bitwig_from_fl(
         (FOUND_HEADER.to_owned(), false, &found),
     ];
     let has_notes = sections.iter().any(|(_, _, lines)| !lines.is_empty());
-    if has_notes {
+    let notes = if has_notes {
         let mut text = String::new();
         for (header, blank, lines) in sections.iter().filter(|(_, _, lines)| !lines.is_empty()) {
             if !text.is_empty() {
@@ -228,8 +229,10 @@ pub fn bitwig_from_fl(
                 text.push_str(&format!("  {n}\r\n"));
             }
         }
-        save_checked(&notes_file, text.as_bytes(), |_| None)?;
-    }
+        Some(Staged::checked(&notes_file, text.as_bytes(), |_| None)?)
+    } else {
+        None
+    };
     // Reading the samples can take minutes: the earlier convert may have been saved in Bitwig meanwhile.
     if !can_save_over(project, &file, written_before) {
         return Err(kept());
@@ -238,12 +241,18 @@ pub fn bitwig_from_fl(
         Ok(doc) => doc.body_error,
         Err(_) => Some("not a Bitwig project".to_owned()),
     })?;
-    let written = written(project, &file).map_err(|e| e.to_string())?;
-    // This convert's own folder: an older list would be wrong now. The project is saved, so a list that can't be
-    // removed is only left behind.
-    if !has_notes && notes_file.exists() {
+    // This convert's own folder: an older list would be wrong now. The project is saved, so a list that can't be put
+    // in place (or removed) is said, and an older one goes rather than stay beside a project it doesn't describe.
+    let list_put = match notes {
+        Some(staged) => staged.put_in_place(&notes_file),
+        None if notes_file.exists() => std::fs::remove_file(&notes_file).map_err(|e| e.to_string()),
+        None => Ok(()),
+    };
+    if let Err(e) = list_put {
         let _ = std::fs::remove_file(&notes_file);
+        converted.notes.push(format!("This list couldn't be saved beside the Bitwig project ({e})"));
     }
+    let written = written(project, &file).map_err(|e| e.to_string())?;
     Ok(Saved { file, notes: converted.notes, taken, found, written })
 }
 
@@ -267,47 +276,116 @@ fn save(file: &Path, bytes: &[u8], problem: impl Fn(&[u8]) -> Option<String>, re
     if !replace && file.exists() {
         return Ok(false);
     }
-    // Unique to this save, even with two converts running at once.
-    static SAVES: AtomicU64 = AtomicU64::new(0);
-    let name = file.file_name().ok_or("no file name")?.to_string_lossy();
-    let count = SAVES.fetch_add(1, Ordering::Relaxed);
-    let temporary = file.with_file_name(format!("{name}.{}-{count}.saving", std::process::id()));
+    let staged = Staged::checked(file, bytes, problem)?;
+    if replace {
+        return staged.put_in_place(file).map(|()| true);
+    }
     let saving = |e: std::io::Error| format!("Couldn't save {}: {e}", file.display());
-    let result = (|| {
-        let mut out = std::fs::File::create(&temporary).map_err(saving)?;
+    // A second name for the checked file fails when the name is taken, so nothing is ever replaced. A drive with
+    // no second names (FAT) gets the name claimed first instead: an empty file, made only if nothing's there.
+    match std::fs::hard_link(&staged.0, file) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(_) => match std::fs::OpenOptions::new().write(true).create_new(true).open(file) {
+            Ok(_) => staged.put_in_place(file).map(|()| true).inspect_err(|_| {
+                let _ = std::fs::remove_file(file);
+            }),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(saving(e)),
+        },
+    }
+}
+
+/// A file written under a temporary name beside where it goes, flushed to the disk, read back and checked; it goes
+/// when dropped, unless it's been put in place (after a second name, the saved file keeps the bytes).
+struct Staged(PathBuf);
+
+impl Staged {
+    /// Writes `bytes` for `file` and checks them: the same bytes back, and `problem` finds nothing wrong.
+    fn checked(file: &Path, bytes: &[u8], problem: impl Fn(&[u8]) -> Option<String>) -> Result<Staged, String> {
+        // Unique to this save, even with two converts running at once.
+        static SAVES: AtomicU64 = AtomicU64::new(0);
+        let name = file.file_name().ok_or("no file name")?.to_string_lossy().into_owned();
+        let folder = file.parent().unwrap_or(Path::new("."));
+        // What a crash part way through an earlier save of this file left (rule 28).
+        clear_left_behind(folder, &name, std::time::SystemTime::now());
+        let saving = |e: std::io::Error| format!("Couldn't save {}: {e}", file.display());
+        // A name that's taken (an earlier run's with this process number) is passed over, never written into.
+        let mut made = None;
+        for _ in 0..100 {
+            let count = SAVES.fetch_add(1, Ordering::Relaxed);
+            let path = file.with_file_name(format!("{name}.{}-{count}{SAVING}", std::process::id()));
+            match std::fs::File::create_new(&path) {
+                Ok(out) => {
+                    made = Some((Staged(path), out));
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(saving(e)),
+            }
+        }
+        let (staged, mut out) =
+            made.ok_or_else(|| format!("Couldn't save {}: every temporary name was taken", file.display()))?;
         out.write_all(bytes).map_err(saving)?;
         out.sync_all().map_err(saving)?;
         drop(out);
-        let back = std::fs::read(&temporary).map_err(|e| format!("Couldn't check {}: {e}", file.display()))?;
+        let back = std::fs::read(&staged.0).map_err(|e| format!("Couldn't check {}: {e}", file.display()))?;
         if back != bytes {
             return Err(format!("{} didn't save as written, so it's left as it was", file.display()));
         }
         if let Some(p) = problem(&back) {
             return Err(format!("{} came out wrong ({p}), so it's left as it was", file.display()));
         }
-        if replace {
-            return std::fs::rename(&temporary, file).map(|_| true).map_err(saving);
-        }
-        // A second name for the checked file fails when the name is taken, so nothing is ever replaced. A drive with
-        // no second names (FAT) gets the name claimed first instead: an empty file, made only if nothing's there.
-        match std::fs::hard_link(&temporary, file) {
-            Ok(()) => Ok(true),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-            Err(_) => match std::fs::OpenOptions::new().write(true).create_new(true).open(file) {
-                Ok(_) => std::fs::rename(&temporary, file).map(|_| true).map_err(|e| {
-                    let _ = std::fs::remove_file(file);
-                    saving(e)
-                }),
-                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
-                Err(e) => Err(saving(e)),
-            },
-        }
-    })();
-    // The temporary file goes either way (after a second name, the saved file keeps the bytes).
-    if temporary.exists() {
-        let _ = std::fs::remove_file(&temporary);
+        Ok(staged)
     }
-    result
+
+    /// Renames it to `file`, over what's there.
+    fn put_in_place(self, file: &Path) -> Result<(), String> {
+        std::fs::rename(&self.0, file).map_err(|e| format!("Couldn't save {}: {e}", file.display()))
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        if self.0.exists() {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+}
+
+/// What a save puts after a file's name while writing it: "<name>.<app>-<save>.saving".
+const SAVING: &str = ".saving";
+
+/// Whether `name` is the whole name a save gives `target` while writing it: "<target>.<digits>-<digits>.saving".
+pub fn is_left_behind(name: &str, target: &str) -> bool {
+    let Some(middle) = name.strip_prefix(target).and_then(|n| n.strip_prefix('.')).and_then(|n| n.strip_suffix(SAVING))
+    else {
+        return false;
+    };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    middle.split_once('-').is_some_and(|(app, save)| digits(app) && digits(save))
+}
+
+/// How old a half-written file must be before it's taken as a crash's rather than another save's still going.
+const LEFT_BEHIND_AGE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+/// Removes from `folder` the half-written files earlier saves of `target` left (a crash or power cut part way): only
+/// plain files (never a folder or a link) whose whole name is one a save gives it, and only old ones. Anything that
+/// can't be looked at is left.
+fn clear_left_behind(folder: &Path, target: &str, now: std::time::SystemTime) {
+    let Ok(entries) = std::fs::read_dir(folder) else { return };
+    for e in entries.flatten() {
+        let Some(name) = e.file_name().to_str().map(str::to_owned) else { continue };
+        if !is_left_behind(&name, target) {
+            continue;
+        }
+        // The entry's own type and time, not what a link points at.
+        let Ok(m) = std::fs::symlink_metadata(e.path()) else { continue };
+        let old = m.modified().ok().and_then(|t| now.duration_since(t).ok()).is_some_and(|age| age >= LEFT_BEHIND_AGE);
+        if m.file_type().is_file() && old {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
 }
 
 #[cfg(test)]
