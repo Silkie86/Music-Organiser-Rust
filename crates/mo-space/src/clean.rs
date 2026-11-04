@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, Metadata};
 use std::io::Read;
 use std::panic::AssertUnwindSafe;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1473,14 +1473,14 @@ fn remove_placeholder(_spot: &Path) {}
 /// `…/Trash/files/Name`), as the trash crate finds it; on Windows, it's what the bin calls it
 /// (`C:\$Recycle.Bin\S-1-5-…\$R2X4KQ7.vst3`).
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
-fn in_bin_path(item: &trash::TrashItem) -> Option<PathBuf> {
+fn in_bin_path(item: &trash::TrashItem) -> Option<std::path::PathBuf> {
     let info = Path::new(&item.id);
     Some(info.parent()?.parent()?.join("files").join(info.file_stem()?))
 }
 
 #[cfg(windows)]
-fn in_bin_path(item: &trash::TrashItem) -> Option<PathBuf> {
-    Some(PathBuf::from(&item.id))
+fn in_bin_path(item: &trash::TrashItem) -> Option<std::path::PathBuf> {
+    Some(std::path::PathBuf::from(&item.id))
 }
 
 /// A Mac's Trash can't be read by a program: nothing to check.
