@@ -36,9 +36,10 @@ light that means something. It should feel like a rack unit on a desk, not a web
   face in `PageHeader`, `Meter` (job lines and activity cards), the sliding lit block in `Segmented` and underline in
   `TabBar`, hover and press easing on chips, menu lines and list lines.
 
+- Step 2: Space's drive bars on `Meter`; `EmptyState` shows the place's icon in its colour (`Icons.place(i)`); Ctrl+K
+  results' icons in the colour of the place they live on (`FinderLine.place`).
+
 ## Next steps
 
-- Space drive bars, Plugins room bars and Backup's share bars on `Meter`.
-- Empty pages show their place's icon in its colour, with the one thing to do.
-- Ctrl+K results and activity cards carry the colour of the place they belong to.
 - A visible focus ring (accent) for keyboard use, on every shared control.
+- Activity cards carry the colour of the place their job belongs to.
