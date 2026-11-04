@@ -5,6 +5,7 @@
 //! Rediscover (unused sounds that fit your taste) is dug out on its own low-priority thread too.
 
 mod galaxy;
+mod grid;
 mod kit;
 mod sky;
 
@@ -403,17 +404,20 @@ pub fn compute_here() {
 /// A graphics card came (the window is up, or came back): the galaxy is drawn on it.
 pub fn graphics_ready(app: &AppWindow) {
     galaxy::draw(app);
+    grid::graphics_ready(app);
 }
 
-/// The graphics card went (the window closed, or the card was reset): the galaxy's painter goes too, at once, even as
-/// the window itself goes.
+/// The graphics card went (the window closed, or the card was reset): the galaxy's and the tiles' painters go too, at
+/// once, even as the window itself goes.
 pub fn card_gone() {
     galaxy::painter_gone();
+    grid::card_gone();
 }
 
-/// The graphics card went: the galaxy's picture on show goes too.
+/// The graphics card went: the galaxy's picture on show goes too, and the tiles draw their own shapes.
 pub fn graphics_gone(app: &AppWindow) {
     galaxy::card_gone(app);
+    grid::graphics_gone(app);
 }
 
 /// Wires the page and starts reading the sound library at `sounds_db` in the background, then how much your songs use
@@ -1010,6 +1014,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         }
     });
     wire_rediscover(app);
+    grid::connect(app);
     kit::wire(app);
     galaxy::wire(app);
     let weak = app.as_weak();
@@ -1019,6 +1024,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         let changed = PAGE.with(|p| std::mem::replace(&mut p.borrow_mut().columns, n) != n);
         if changed {
             TILE_ROWS.with(|m| m.notify.reset());
+            grid::changed();
             bring_picked_into_view(&app);
         }
     });
@@ -1532,6 +1538,7 @@ fn show_lists(app: &AppWindow) {
 /// The tiles and lines again (a pick or what's playing changed what they show).
 fn redraw() {
     TILE_ROWS.with(|m| m.notify.reset());
+    grid::changed();
     LINES.with(|m| m.notify.reset());
     kit::redraw();
 }

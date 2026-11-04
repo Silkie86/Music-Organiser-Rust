@@ -734,6 +734,8 @@ export component ListLine inherits Rectangle {
     // A right click, after the line is picked, with the mouse's place in the window: the page opens its
     // `RightClickMenu` there.
     callback right-clicked(length, length);
+    // Whether the mouse is over it (it's shaded then).
+    out property <bool> hovered: touch.has-hover;
     border-radius: Theme.radius;
     background: selected ? Theme.surface-raised : touch.has-hover ? Theme.hover : transparent;
     // The accent bar on the picked line.
