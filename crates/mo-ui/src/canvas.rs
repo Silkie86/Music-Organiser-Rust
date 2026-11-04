@@ -15,8 +15,9 @@ struct Frame {
     size: vec2<f32>,
     scale: f32,
     fit: f32,
-    // For a waveform's picture, how wide the window's drawing library makes the soft edges of a path's lines, in
-    // pixels (lines are then drawn as it draws them, `stroked`); 0 for the arrangement's, soft as the processor's.
+    // For a picture drawn as the window draws (a waveform's, the Sounds tiles'), how wide the window's drawing library
+    // makes the soft edges of what it draws, in pixels (lines are then drawn as it draws a path's, `stroked`, and
+    // rounded rectangles as soft as its fills); 0 for the arrangement's, soft as the processor's.
     fringe: f32,
     // Unused: a frame is 32 bytes.
     unused_a: f32,
@@ -137,9 +138,12 @@ fn shape_fragment(in: Shape) -> @location(0) vec4<f32> {
     let r = in.size;
     let q = abs(p - middle) - half + vec2(r);
     let out_by = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;
-    let fill = in.fill * clamp(0.5 - out_by, 0.0, 1.0);
+    // Soft over a pixel, or, for a picture drawn as the window draws (the Sounds tiles'), over the width of the
+    // window's soft edges, which it gives a shape's fill and its edge alike (femtovg's `fringe_width`).
+    let f = select(1.0, frame.fringe, frame.fringe > 0.0);
+    let fill = in.fill * clamp(0.5 - out_by / f, 0.0, 1.0);
     // The edge: a line a point wide along the border, over the fill.
-    let edge = in.edge * clamp(0.5 * frame.scale + 0.5 - abs(out_by), 0.0, 1.0);
+    let edge = in.edge * clamp((0.5 * frame.scale + 0.5 * f - abs(out_by)) / f, 0.0, 1.0);
     return edge + fill * (1.0 - edge.a);
 }
 "#;
@@ -317,13 +321,22 @@ impl Canvas {
     /// Draws `shapes` (as `mo_app::shapes::Scene::pack` packed them for `scale`) at `scale` pixels to a point, on a
     /// picture `width` by `height` pixels, over `background` (0xRRGGBB), and gives the picture for Slint to show. A
     /// picture bigger than the card can hold is drawn as big as it can, at a scale to fit, and Slint stretches it.
-    /// Drawn into one of two pictures in turn, so the one drawn before is the one to show until this one is.
-    pub(crate) fn draw(&mut self, size: (u32, u32), scale: f32, background: u32, shapes: &[u8]) -> wgpu::Texture {
+    /// Drawn into one of two pictures in turn, so the one drawn before is the one to show until this one is. `fringe`
+    /// is as for [`Canvas::draw_new`]: 0 for lines soft as the processor's, or the width of the window's soft edges, in
+    /// pixels, for lines drawn as it draws a path's.
+    pub(crate) fn draw(
+        &mut self,
+        size: (u32, u32),
+        scale: f32,
+        background: u32,
+        shapes: &[u8],
+        fringe: f32,
+    ) -> wgpu::Texture {
         let (width, height, fit) = self.fit(size);
         let pictures = self.pictures(width, height);
         let picture = pictures.textures[pictures.next].clone();
         pictures.next = 1 - pictures.next;
-        self.draw_on(&picture, (scale, fit), background, shapes, 0.0);
+        self.draw_on(&picture, (scale, fit), background, shapes, fringe * fit);
         picture
     }
 
@@ -503,11 +516,11 @@ mod tests {
         let bytes = scene.pack(1.5);
         let size = scene.pixel_size(1.5);
         let mut canvas = Canvas::new(&device, &queue, Kind::Picture);
-        let whole = read_back(&device, &queue, &canvas.draw(size, 1.5, scene.background, &bytes));
+        let whole = read_back(&device, &queue, &canvas.draw(size, 1.5, scene.background, &bytes, 0.0));
         // 7 at a time: 172 parts.
         let mut small = Canvas::new(&device, &queue, Kind::Picture);
         small.most = 7;
-        let parts = read_back(&device, &queue, &small.draw(size, 1.5, scene.background, &bytes));
+        let parts = read_back(&device, &queue, &small.draw(size, 1.5, scene.background, &bytes, 0.0));
         assert!(whole == parts, "drawn a part at a time, the picture came out different");
         assert_eq!(small.shapes.as_ref().map(wgpu::Buffer::size), Some(7 * SHAPE_BYTES as u64), "room for one part");
     }
