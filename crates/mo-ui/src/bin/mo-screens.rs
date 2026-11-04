@@ -16,7 +16,7 @@ use mo_app::song_panel::Tab;
 use mo_app::themes::{Look, THEMES};
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Platform, WindowAdapter};
-use slint::{ComponentHandle, PhysicalSize, Rgb8Pixel};
+use slint::{ComponentHandle, Model, PhysicalSize, Rgb8Pixel};
 
 const WIDTH: u32 = 1440;
 const HEIGHT: u32 = 900;
@@ -225,18 +225,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("songs-filters.png".into(), after));
     songs.invoke_clear();
     // The narrowest window the app allows: a filter too long for a line of its own wraps inside, so every chip stays
-    // in sight. Saved here, at its own width.
-    window.set_size(PhysicalSize::new(NARROW, HEIGHT));
-    let narrow = capture(&window);
-    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
-    let row = WIDTH as usize * 3;
-    let narrow: Vec<u8> = narrow.chunks(row).flat_map(|line| &line[..NARROW as usize * 3]).copied().collect();
-    let path = out.join("songs-narrow.png");
-    image::save_buffer(&path, &narrow, NARROW, HEIGHT, image::ExtendedColorType::Rgb8)?;
-    println!("{}", path.display());
+    // in sight.
+    save_narrow(&window, &out, "songs-narrow.png")?;
     shots.push(("sounds-empty.png".into(), sounds_empty));
     shots.push(("sounds-reading.png".into(), sounds_reading));
     sounds_shots(&app, &window, &graphite, &mut shots)?;
+    // The Sounds filters in the narrowest window, every one in sight.
+    app.set_place(Place::Sounds.index() as i32);
+    save_narrow(&window, &out, "sounds-narrow.png")?;
+    app.set_place(Place::Songs.index() as i32);
 
     // The song panel, on the first song, on Overview and on Plugins.
     for tab in [Tab::Overview, Tab::Plugins, Tab::Saves] {
@@ -438,9 +435,14 @@ fn sounds_shots(
 ) -> Result<(), String> {
     app.set_place(Place::Sounds.index() as i32);
     let data = app.global::<mo_ui::SoundsData>();
-    // The first tile's liked bar, saying why.
-    hover(window, 350.0, 330.0);
-    shots.push(("sounds-liked-tip.png".into(), capture_after(window, Duration::from_millis(750))));
+    // The first tile's liked bar, saying why (its note comes up a moment after the mouse stops on it).
+    hover(window, LIKED_BAR.0, LIKED_BAR.1);
+    let hovered = capture_after(window, Duration::from_millis(80));
+    let tip = capture_after(window, Duration::from_millis(750));
+    if tip == hovered {
+        return Err(format!("sounds-liked-tip.png: no tip came up at {}, {}", LIKED_BAR.0, LIKED_BAR.1));
+    }
+    shots.push(("sounds-liked-tip.png".into(), tip));
     hover(window, -1.0, -1.0);
     // Autoplay is on, so picking a sound plays it.
     data.invoke_select(6);
@@ -462,13 +464,27 @@ fn sounds_shots(
     data.set_search("".into());
     data.invoke_search_edited("".into());
     // Two types at once, with the Clear types chip.
-    data.invoke_pick_type(0);
-    data.invoke_pick_type(1);
-    shots.push(("sounds-types.png".into(), capture(window)));
-    data.invoke_pick_type(1);
-    data.invoke_pick("key".into(), "A minor".into());
+    let type_at = |i: usize| data.get_type_filter().chips.row_data(i).map(|c| c.text).unwrap_or_default();
+    let (first, second) = (type_at(0), type_at(1));
+    let before = capture(window);
+    data.invoke_toggle_choice("type".into(), first);
+    data.invoke_toggle_choice("type".into(), second.clone());
+    let after = capture(window);
+    if before == after {
+        return Err("sounds-types.png: picking two types changed nothing; are the type chips wired?".into());
+    }
+    shots.push(("sounds-types.png".into(), after));
+    // One type, a key and the keys that mix well with it, and two tempos.
+    data.invoke_toggle_choice("type".into(), second);
+    data.invoke_toggle_choice("key".into(), "A minor".into());
     data.invoke_toggle("mix-well".into());
-    shots.push(("sounds-filtered.png".into(), capture(window)));
+    data.invoke_toggle_choice("tempo".into(), "110 to 130".into());
+    data.invoke_toggle_choice("tempo".into(), "130 to 150".into());
+    let filtered = capture(window);
+    if filtered == before {
+        return Err("sounds-filtered.png: the key and tempo picks changed nothing".into());
+    }
+    shots.push(("sounds-filtered.png".into(), filtered));
     data.invoke_clear();
     // A tile dragged out to a DAW: dimmed while it's carried, with the card that follows the mouse a little way on
     // from it, then lit for a moment once it has landed.
@@ -1116,6 +1132,8 @@ const PAGE_DOWN: f32 = 300.0;
 const OLDER_BUTTON: (f32, f32) = (1005.0, 368.0);
 /// The Lock chip on the kit's second pad (Snare).
 const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
+/// The first tile's liked bar on Sounds, under the three lines of filters.
+const LIKED_BAR: (f32, f32) = (350.0, 370.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
 const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 
@@ -1275,6 +1293,23 @@ fn with_card(mut pixels: Vec<u8>, payload: &mo_app::drag_out::Payload, look: &Lo
         }
     }
     pixels
+}
+
+/// The window at the narrowest the app allows, saved at that width as `name` in `out`; the window is set back after.
+fn save_narrow(
+    window: &MinimalSoftwareWindow,
+    out: &std::path::Path,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    window.set_size(PhysicalSize::new(NARROW, HEIGHT));
+    let narrow = capture(window);
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    let row = WIDTH as usize * 3;
+    let narrow: Vec<u8> = narrow.chunks(row).flat_map(|line| &line[..NARROW as usize * 3]).copied().collect();
+    let path = out.join(name);
+    image::save_buffer(&path, &narrow, NARROW, HEIGHT, image::ExtendedColorType::Rgb8)?;
+    println!("{}", path.display());
+    Ok(())
 }
 
 fn capture(window: &MinimalSoftwareWindow) -> Vec<u8> {
