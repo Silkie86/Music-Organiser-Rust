@@ -202,7 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         sample_old_copies(),
         "",
     );
-    presets_shots(&app, &window, &mut shots);
+    presets_shots(&app, &window, &mut shots)?;
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
         mo_ui::apply_look(&app, &Look::from_settings(Some(theme.name), None));
@@ -212,7 +212,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::apply_look(&app, &graphite);
     shots.push(("sounds-empty.png".into(), sounds_empty));
     shots.push(("sounds-reading.png".into(), sounds_reading));
-    sounds_shots(&app, &window, &graphite, &mut shots);
+    sounds_shots(&app, &window, &graphite, &mut shots)?;
 
     // The song panel, on the first song, on Overview and on Plugins.
     for tab in [Tab::Overview, Tab::Plugins, Tab::Saves] {
@@ -225,7 +225,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.global::<mo_ui::SongsData>().set_tab(Tab::Overview.index() as i32);
     let arrangement = app.global::<mo_ui::ArrangementData>();
     arrangement.invoke_moved(ARRANGEMENT_CLIP.0, ARRANGEMENT_CLIP.1);
-    shots.push(("arrangement-hover.png".into(), capture(&window)));
+    let hovered = capture(&window);
+    shots.push(("arrangement-hover.png".into(), hovered.clone()));
+    // The clip under the mouse dragged out to a DAW: dimmed while it's carried, with the card that follows the mouse
+    // (and, as in the app, nothing said about what's under the mouse meanwhile), then lit once it has landed.
+    let Some(card) = mo_ui::arrangement::show_lifted(&app, ARRANGEMENT_CLIP.0, ARRANGEMENT_CLIP.1, false) else {
+        return Err(
+            "arrangement-drag-lifted.png: no clip to drag at the hover point; has the sample song moved?".into()
+        );
+    };
+    let lifted = capture(&window);
+    let (x, y, w, h) = changed_box(&hovered, &lifted).ok_or("arrangement-drag-lifted.png: the clip didn't dim")?;
+    arrangement.set_hover_text("".into());
+    let lifted = capture(&window);
+    shots.push((
+        "arrangement-drag-lifted.png".into(),
+        with_card(lifted, &card, &graphite, (x + w / 2 + 36, y + h / 2 + 22)),
+    ));
+    mo_ui::arrangement::show_lifted(&app, ARRANGEMENT_CLIP.0, ARRANGEMENT_CLIP.1, true);
+    shots.push(("arrangement-drag-landed.png".into(), capture_after(&window, Duration::from_millis(150))));
+    arrangement.set_landed(false);
+    capture_after(&window, Duration::from_millis(700));
     arrangement.invoke_wheel(ARRANGEMENT_CLIP.0, 0.0, 4.0, true, false);
     shots.push(("arrangement-zoomed.png".into(), capture(&window)));
     arrangement.invoke_left();
@@ -319,11 +339,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// The Presets page: made-up sounds with one picked, then the Curves section with a curve picked.
-fn presets_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &mut Vec<(String, Vec<u8>)>) {
+fn presets_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), Box<dyn std::error::Error>> {
     use mo_app::presets::Section;
     app.set_place(Place::Presets.index() as i32);
     mo_ui::presets::show_sample(app);
     shots.push(("presets-list.png".into(), capture(window)));
+    // The Plugin filter's menu, open, with two plugins picked and ticked, and the Synths chip lit; then a click beside
+    // the menu closes it, and the filters are cleared again.
+    let data = app.global::<mo_ui::PresetsData>();
+    data.invoke_toggle("plugin".into(), "Serum".into());
+    data.invoke_toggle("plugin".into(), "Vital".into());
+    data.invoke_toggle("type".into(), "Synths".into());
+    let before = capture(window);
+    click(window, PLUGIN_CHIP.0, PLUGIN_CHIP.1);
+    let after = capture(window);
+    if before == after {
+        return Err("filter-menu.png: the Plugin menu didn't open; has its chip moved?".into());
+    }
+    shots.push(("filter-menu.png".into(), after));
+    click(window, 1000.0, 40.0);
+    data.invoke_clear();
     mo_ui::presets::pick_row(app, 3);
     shots.push(("presets-picked.png".into(), capture(window)));
     mo_ui::presets::show_section(app, Section::Curves);
@@ -332,6 +371,7 @@ fn presets_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: 
     shots.push(("presets-curve-picked.png".into(), capture(window)));
     mo_ui::presets::show_section(app, Section::Sounds);
     mo_ui::presets::pick_row(app, usize::MAX);
+    Ok(())
 }
 
 /// Ctrl+K: opened from the Songs page with nothing typed, a search that finds a song and a sound, only the sounds
@@ -371,7 +411,7 @@ fn sounds_shots(
     window: &MinimalSoftwareWindow,
     graphite: &Look,
     shots: &mut Vec<(String, Vec<u8>)>,
-) {
+) -> Result<(), String> {
     app.set_place(Place::Sounds.index() as i32);
     let data = app.global::<mo_ui::SoundsData>();
     // The first tile's liked bar, saying why.
@@ -406,6 +446,20 @@ fn sounds_shots(
     data.invoke_toggle("mix-well".into());
     shots.push(("sounds-filtered.png".into(), capture(window)));
     data.invoke_clear();
+    // A tile dragged out to a DAW: dimmed while it's carried, with the card that follows the mouse a little way on
+    // from it, then lit for a moment once it has landed.
+    let still = capture(window);
+    data.set_lifted_row(2);
+    let lifted = capture(window);
+    let card = mo_ui::sounds::card_at_row(app, 2).ok_or("sounds-drag-lifted.png: no sound in the third tile")?;
+    let (x, y, w, h) = changed_box(&still, &lifted).ok_or("sounds-drag-lifted.png: the third tile didn't dim")?;
+    shots.push(("sounds-drag-lifted.png".into(), with_card(lifted, &card, graphite, (x + w / 2 + 40, y + h / 2 + 24))));
+    data.set_lifted_row(-1);
+    data.set_landed_row(2);
+    shots.push(("sounds-drag-landed.png".into(), capture_after(window, Duration::from_millis(150))));
+    data.set_landed_row(-1);
+    // Its glow fades before the next picture.
+    capture_after(window, Duration::from_millis(700));
     data.invoke_pick_view(1);
     shots.push(("sounds-list.png".into(), capture(window)));
     // Two years picked on the year strip.
@@ -487,6 +541,7 @@ fn sounds_shots(
     shots.push(("sounds-paper.png".into(), capture(window)));
     mo_ui::apply_look(app, graphite);
     app.set_place(Place::Songs.index() as i32);
+    Ok(())
 }
 
 /// Made-up drives for the Space page: C: nearly full with the app's files, a big drive of projects and samples, the
@@ -1024,6 +1079,8 @@ fn sample_plugins() -> (mo_app::plugins::Plugins, Vec<mo_library::plugins::Scann
 
 /// The Backup page's Remove older versions button, and how far the page is turned down to show the question it asks.
 const REMOVE_OLDER_BUTTON: (f32, f32) = (1127.0, 820.0);
+/// The Presets page's Plugin chip: the first in its filter row, so the other chips' words don't move it.
+const PLUGIN_CHIP: (f32, f32) = (262.0, 156.0);
 const PAGE_DOWN: f32 = 300.0;
 const OLDER_BUTTON: (f32, f32) = (1005.0, 328.0);
 /// The Lock chip on the kit's second pad (Snare).
@@ -1148,6 +1205,47 @@ fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
 }
 
 /// Lets hover and slide-in animations finish, then draws the window.
+/// The box (x, y, width, height, in pixels) round every pixel that differs between two pictures of the window, or
+/// None when none does.
+fn changed_box(a: &[u8], b: &[u8]) -> Option<(i32, i32, i32, i32)> {
+    let (mut x0, mut y0, mut x1, mut y1) = (i32::MAX, i32::MAX, i32::MIN, i32::MIN);
+    for (i, (pa, pb)) in a.as_chunks::<3>().0.iter().zip(b.as_chunks::<3>().0).enumerate() {
+        if pa != pb {
+            let (x, y) = ((i as u32 % WIDTH) as i32, (i as u32 / WIDTH) as i32);
+            (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+        }
+    }
+    (x1 >= x0).then_some((x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+}
+
+/// Lays the card that follows the mouse over a picture of the window, with the mouse's point at `at`: as it's drawn
+/// over every app while something is dragged out, a moment after it was picked up.
+fn with_card(mut pixels: Vec<u8>, payload: &mo_app::drag_out::Payload, look: &Look, at: (i32, i32)) -> Vec<u8> {
+    let start = std::time::Instant::now();
+    let mut flight = mo_app::drag_card::Flight::new(payload, look, mo_ui::drag::card_fonts(look.theme.font), start);
+    let Some(card) = flight.frame(start + Duration::from_millis(400), 1.0) else { return pixels };
+    // On a screen the card goes past the window's edge; here it's kept inside the picture.
+    let at = (
+        at.0.min(WIDTH as i32 - (card.width as i32 - card.hot_x)),
+        at.1.min(HEIGHT as i32 - (card.height as i32 - card.hot_y)),
+    );
+    for (row, line) in card.rgba.chunks_exact(card.width as usize * 4).enumerate() {
+        for (column, p) in line.as_chunks::<4>().0.iter().enumerate() {
+            let (x, y) = (at.0 - card.hot_x + column as i32, at.1 - card.hot_y + row as i32);
+            if x < 0 || y < 0 || x >= WIDTH as i32 || y >= HEIGHT as i32 {
+                continue;
+            }
+            let under = (y as usize * WIDTH as usize + x as usize) * 3;
+            let see_through = 255 - u32::from(p[3]);
+            for (c, &over) in pixels.get_mut(under..under + 3).unwrap_or_default().iter_mut().zip(p) {
+                // The card's colours are already times its alpha.
+                *c = (u32::from(over) + (u32::from(*c) * see_through + 127) / 255).min(255) as u8;
+            }
+        }
+    }
+    pixels
+}
+
 fn capture(window: &MinimalSoftwareWindow) -> Vec<u8> {
     capture_after(window, Duration::from_millis(400))
 }

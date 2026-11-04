@@ -1,7 +1,8 @@
-//! Send to Bitwig from the Sounds page: the picked sound, or the kit on show, into the project open in Bitwig, through
-//! the Music Organiser extension there (`mo_dawlink::bitwig` does the sending, and has the words, the C# app's). Each
-//! waits for Bitwig, so the page calls them on a thread of their own, never the window's (rule 12). Each has an
-//! activity card from the moment it's asked for, which says how it went once Bitwig answers.
+//! Send to Bitwig from the Sounds page (the picked sound, or the kit on show) and the MIDI page (the picked part), into
+//! the project open in Bitwig, through the Music Organiser extension there (`mo_dawlink::bitwig` does the sending, and
+//! has the words, the C# app's). Each waits for Bitwig, so the page calls them on a thread of their own, never the
+//! window's (rule 12). Each has an activity card from the moment it's asked for, which says how it went once Bitwig
+//! answers.
 //!
 //! What the C# app also did and this doesn't yet: count each send for Most liked (that writes to `sounds.db`, which
 //! the Rust app only reads for now), and write the Drum Machine's ID into `library.db` (the Rust app knows Bitwig's
@@ -38,6 +39,32 @@ pub fn send_sound(job: Job, to: &Bitwig, path: &str, name: &str) -> bool {
         // Nothing changed in Bitwig.
         Err(e) => {
             job.failed_as(bitwig::SOUND_FAILED, &e.to_string());
+            false
+        }
+    }
+}
+
+/// The card for a MIDI part on its way, shown at once: "Putting Keys · Pattern 3 into Bitwig", "As a clip on a new
+/// track".
+pub fn part_card(feed: &Feed, name: &str) -> Job {
+    feed.start(&bitwig::sending_part(name), bitwig::PART_PLACE)
+}
+
+/// Puts the MIDI file at `path` as a clip on a new track named `name` in the project open in Bitwig, and ends `job`'s
+/// card ([`part_card`]) with how it went. Returns whether it went in as asked. Waits for Bitwig, so never call it on
+/// the window's thread.
+pub fn send_part(job: Job, to: &Bitwig, path: &str, name: &str) -> bool {
+    match to.send_part(path, name) {
+        Ok(sent) if sent.went_in() => {
+            job.done_as(&sent.title(), &sent.detail());
+            true
+        }
+        Ok(sent) => {
+            job.failed_as(&sent.title(), &sent.detail());
+            false
+        }
+        Err(e) => {
+            job.failed_as(bitwig::PART_FAILED, &e.to_string());
             false
         }
     }

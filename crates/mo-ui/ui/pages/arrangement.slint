@@ -45,14 +45,26 @@ export global ArrangementData {
     in property <length> hover-x;
     in property <length> hover-y;
     in property <bool> dragging;
+    // A clip or a track dragged out of the app, to a DAW (mo-ui's arrangement.rs): where it is on the view, dimmed
+    // while it's carried (`lifted`) and with a glow round it for a moment once it has landed.
+    in property <length> lifted-x;
+    in property <length> lifted-y;
+    in property <length> lifted-width;
+    in property <length> lifted-height;
+    in property <bool> lifted;
+    in property <bool> landed;
 
     callback pick-view(int);
     callback resized(length, length);
     // The wheel, in notches (positive away from you), with Ctrl and Shift.
     callback wheel(length, float, float, bool, bool);
+    // The left button: on a clip or a track's name it drags that out of the app, elsewhere it moves the view.
     callback grab(length, length);
     callback moved(length, length);
     callback let-go();
+    // The right or middle button moves the view wherever it's pressed.
+    callback side-grab(length, length);
+    callback side-let-go();
     callback double-clicked();
     callback left();
 }
@@ -181,11 +193,42 @@ export component ArrangementPreview inherits VerticalLayout {
                 from-y: 0;
                 labels: ArrangementData.ruler-labels;
             }
+            // The clip or track being dragged out: dimmed in the view's own colour, then the landing glow.
+            if ArrangementData.lifted || ArrangementData.landed: Rectangle {
+                x: ArrangementData.lifted-x;
+                y: ArrangementData.lifted-y;
+                width: ArrangementData.lifted-width;
+                height: ArrangementData.lifted-height;
+                background: ArrangementData.lifted ? Theme.surface.with-alpha(0.6) : transparent;
+            }
+            Rectangle {
+                x: ArrangementData.lifted-x - 1px;
+                y: ArrangementData.lifted-y - 1px;
+                width: ArrangementData.lifted-width + 2px;
+                height: ArrangementData.lifted-height + 2px;
+                border-radius: 3px;
+                border-width: 2px;
+                border-color: Theme.accent;
+                opacity: 0;
+                states [
+                    landed when ArrangementData.landed: {
+                        opacity: 1;
+                        in {
+                            animate opacity { duration: 90ms; }
+                        }
+                        out {
+                            animate opacity { duration: 600ms; easing: ease-out; }
+                        }
+                    }
+                ]
+            }
             PointerPad {
                 grabbing: ArrangementData.dragging;
                 down(x, y) => { ArrangementData.grab(x, y); }
                 move(x, y) => { ArrangementData.moved(x, y); }
                 up => { ArrangementData.let-go(); }
+                side-down(x, y) => { ArrangementData.side-grab(x, y); }
+                side-up => { ArrangementData.side-let-go(); }
                 double => { ArrangementData.double-clicked(); }
                 wheel(x, across, down, ctrl, shift) => { ArrangementData.wheel(x, across, down, ctrl, shift); }
                 gone => { ArrangementData.left(); }

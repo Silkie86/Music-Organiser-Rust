@@ -11,8 +11,8 @@ use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::log;
 use mo_app::plugins::{
-    self, Chip, Filters, NEEDED_COUNT_CHOICES, Plugins, Sort, State, UNUSED_YEARS_CHOICES, copy_lines, no_copies_note,
-    search_url,
+    self, Chip, Filters, Group, NEEDED_COUNT_CHOICES, Plugins, Sort, State, UNUSED_YEARS_CHOICES, copy_lines,
+    no_copies_note, search_url,
 };
 use mo_app::shell;
 use mo_app::shortcuts::{PLUGINS_ACTIONS, Shortcuts};
@@ -21,6 +21,7 @@ use mo_library::Library;
 use mo_library::plugins::ScannedPlugin;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 
+use crate::filters::FilterModels;
 use crate::{
     AppWindow, CardAction, CopyRow, MenuItem, NeededCard, PluginListLine, PluginsData, RoomBar, RoomFolder, UseRow,
     YearBar,
@@ -55,6 +56,18 @@ thread_local! {
     static PAGE: RefCell<Page> = RefCell::default();
     static READER: RefCell<Option<Newest<ReadJob>>> = const { RefCell::new(None) };
     static COPIES: RefCell<Option<Newest<CopiesJob>>> = const { RefCell::new(None) };
+    static FILTER_MODELS: FilterChips = FilterChips::default();
+}
+
+/// The filters' chips and menus on screen, kept from one showing to the next.
+#[derive(Default)]
+struct FilterChips {
+    show: FilterModels,
+    kind: FilterModels,
+    format: FilterModels,
+    daw: FilterModels,
+    /// The card's songs tab: one DAW or every one.
+    use_daw: FilterModels,
 }
 
 /// Wires the page. The library at `library` is read when the page is first shown.
@@ -66,7 +79,6 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         p.shortcuts = shortcuts.clone();
     });
     let data = app.global::<PluginsData>();
-    data.set_chips(strings(Chip::ALL.iter().map(|c| c.name())));
     data.set_sorts(strings(Sort::ALL.iter().map(|s| s.name())));
     data.set_tabs(strings(TABS));
     data.set_card_counts(strings(
@@ -101,10 +113,19 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     let weak = app.as_weak();
     data.on_show_unused(move || change(&weak, |f| f.show(Chip::BigUnused)));
     let weak = app.as_weak();
-    data.on_chip_picked(move |c| {
-        if let Some(chip) = Chip::from_name(&c) {
+    data.on_toggle(move |filter, c| {
+        if filter == "daw" {
+            change(&weak, |f| f.pick_daw(&c));
+        } else if let Some(chip) = Chip::from_name(&c) {
             change(&weak, |f| f.pick(chip));
         }
+    });
+    let weak = app.as_weak();
+    data.on_clear_filter(move |filter| {
+        change(&weak, |f| match group_named(&filter) {
+            Some(g) => f.clear_group(g),
+            None => f.daws.clear(),
+        });
     });
     let weak = app.as_weak();
     data.on_sort_picked(move |s| {
@@ -144,7 +165,13 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     let weak = app.as_weak();
     data.on_use_daw_picked(move |d| {
         let Some(app) = weak.upgrade() else { return };
-        PAGE.with(|p| p.borrow_mut().use_daw = d.to_string());
+        // One DAW or every one: picking the one that's on shows every DAW again.
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            let mut picked: Vec<String> = if p.use_daw.is_empty() { Vec::new() } else { vec![p.use_daw.clone()] };
+            mo_app::filters::toggle(&mut picked, &d, false);
+            p.use_daw = picked.pop().unwrap_or_default();
+        });
         fill_uses(&app);
     });
     let weak = app.as_weak();
@@ -362,7 +389,12 @@ fn refresh(app: &AppWindow) {
         data.set_lines(ModelRc::new(VecModel::from(lines)));
         data.set_summary(pl.summary().into());
         data.set_count(pl.count_text().into());
-        data.set_chip(pl.filters.chip.name().into());
+        FILTER_MODELS.with(|m| {
+            data.set_show_filter(m.show.view(&pl.filter(Group::Show)));
+            data.set_kind_filter(m.kind.view(&pl.filter(Group::Kind)));
+            data.set_format_filter(m.format.view(&pl.filter(Group::Format)));
+            data.set_daw_filter(m.daw.view(&pl.daw_filter()));
+        });
         data.set_sort(pl.filters.sort.name().into());
         data.set_sort_index(Sort::ALL.iter().position(|&s| s == pl.filters.sort).map_or(-1, |i| i as i32));
         data.set_has_sizes(pl.has_sizes());
@@ -525,7 +557,9 @@ fn fill_uses(app: &AppWindow) {
     });
     let Some((uses, daw, every)) = uses else { return };
     PAGE.with(|p| p.borrow_mut().uses = uses.lines.iter().map(|l| l.save).collect());
-    data.set_use_daws(strings(uses.daws.iter().map(String::as_str)));
+    let choices: Vec<(String, String)> = uses.daws.iter().map(|d| (d.clone(), String::new())).collect();
+    let picked: Vec<String> = if daw.is_empty() { Vec::new() } else { vec![daw.clone()] };
+    FILTER_MODELS.with(|m| data.set_use_daws(m.use_daw.view(&mo_app::filters::show(&choices, &picked))));
     data.set_use_daw(daw.into());
     data.set_every_save(every);
     data.set_uses_note(uses.note.into());
@@ -590,6 +624,11 @@ fn copies_arrived(app: &AppWindow, asked: u64, found: &[ScannedPlugin]) {
         })
         .collect();
     data.set_copies(ModelRc::new(VecModel::from(rows)));
+}
+
+/// The chip filter a page name means ("show", "kind", "format"); `None` for the DAWs.
+fn group_named(name: &str) -> Option<Group> {
+    Group::ALL.into_iter().find(|g| g.name().eq_ignore_ascii_case(name))
 }
 
 fn strings<S: AsRef<str>>(items: impl IntoIterator<Item = S>) -> ModelRc<SharedString> {

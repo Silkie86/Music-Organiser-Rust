@@ -178,7 +178,7 @@ struct Options {
     by: Vec<String>,
     rust: RustRun,
     timing: bool,
-    /// The weights a fit wrote, for mo-harmony to read with (`--weights`); the hand-set ones when none is given.
+    /// The weights a fit wrote, for mo-harmony to read with (`--weights`); the built-in ones when none is given.
     weights: Option<PathBuf>,
     /// Only the pieces in these folds, as the chord fit draws them (`--folds`).
     folds: Option<Vec<usize>>,
@@ -280,8 +280,8 @@ pub fn run(args: &[String]) -> Result<(), String> {
     println!("The labels change chord {:.2} times a bar.", label_changes as f64 / bars);
     if engines.iter().any(Option::is_none) {
         println!("{}", rust.how());
-        if let Some(path) = &weights_path {
-            println!("It reads with the weights in {}.", path.display());
+        if let (Some(path), Some((_, named))) = (&weights_path, &weights) {
+            println!("It reads with the weights in {}.", chordfit::weights_named(path, *named));
         }
     }
 
@@ -294,7 +294,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
         .map(|e| match e {
             Some(answers) => Ok(answers),
             None => {
-                let model = Model { weights: weights.as_ref().unwrap_or(SHIPPED.weights), ..SHIPPED };
+                let model = Model { weights: weights.as_ref().map_or(SHIPPED.weights, |(w, _)| w), ..SHIPPED };
                 let (engine, times) = read_rust(&items, &parts, rust, &model, timing)?;
                 if timing {
                     print_timing(&items, &times);

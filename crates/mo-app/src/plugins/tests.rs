@@ -203,9 +203,34 @@ fn chips_search_and_years_filter_the_list() {
     p.filters.pick(Chip::Missing);
     p.refilter();
     assert_eq!(shown(&p), ["Massive", "Nexus", "Ozone 9", "Sylenth1"]);
-    // Picking it again goes back to All.
+    // Two in one filter: either. Counts are with the other filters as they are.
+    p.filters.pick(Chip::Effects);
+    p.refilter();
+    assert_eq!(shown(&p), ["Ozone 9"]);
+    p.filters.pick(Chip::Instruments);
+    p.refilter();
+    assert_eq!(shown(&p), ["Massive", "Nexus", "Ozone 9", "Sylenth1"]);
+    let show = p.filter(Group::Show);
+    assert_eq!(
+        show.chips.iter().map(|c| (c.text.as_str(), c.on)).collect::<Vec<_>>()[..2],
+        [("Missing", true), ("Installed", false)]
+    );
+    assert_eq!(show.chips[0].count, "4");
+    let kind = p.filter(Group::Kind);
+    assert_eq!((kind.chips[0].count.as_str(), kind.chips[1].count.as_str()), ("3", "1"));
+    // Picking it again unpicks it.
     p.filters.pick(Chip::Missing);
-    assert_eq!(p.filters.chip, Chip::All);
+    assert!(!p.filters.chips.contains(&Chip::Missing));
+    p.filters = Filters::default();
+
+    // The DAW filter: Bitwig's songs only.
+    p.filters.pick_daw("Bitwig");
+    p.refilter();
+    assert!(p.shown.iter().all(|&i| p.rows[i].daws.contains(&"Bitwig".to_owned())));
+    let daws = p.daw_filter();
+    assert_eq!(daws.chips.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(), ["Bitwig", "FL Studio"]);
+    assert!(daws.chips[0].on && !daws.chips[1].on);
+    p.filters = Filters::default();
 
     p.filters.pick(Chip::BigUnused);
     p.refilter();
@@ -222,7 +247,7 @@ fn chips_search_and_years_filter_the_list() {
     p.refilter();
     assert_eq!(shown(&p), ["Massive"]);
 
-    p.filters = Filters { chip: Chip::Effects, sort: Sort::Name, ..Filters::default() };
+    p.filters = Filters { chips: vec![Chip::Effects], sort: Sort::Name, ..Filters::default() };
     p.refilter();
     assert_eq!(shown(&p), ["Delay", "Delay", "Ozone 9", "Pro-Q 3"]);
     assert!(p.filters.any());
@@ -338,7 +363,8 @@ fn review_fixes_hold() {
 
     // "Show them" turns Big and unused on, and keeps it on.
     let mut f = Filters::default();
+    f.pick(Chip::Missing);
     f.show(Chip::BigUnused);
     f.show(Chip::BigUnused);
-    assert_eq!((f.chip, f.sort), (Chip::BigUnused, Sort::Biggest));
+    assert_eq!((f.chips.as_slice(), f.sort), ([Chip::BigUnused].as_slice(), Sort::Biggest));
 }

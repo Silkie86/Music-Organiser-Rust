@@ -363,6 +363,8 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
                     key: (key as i32).clamp(0, 127) as u8,
                     velocity,
                     muted: n.num(F_MUTED).is_some_and(|m| m > 0.0),
+                    step: false,
+                    part: 0,
                 });
             }
         }
