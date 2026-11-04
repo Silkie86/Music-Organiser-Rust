@@ -554,6 +554,8 @@ fn fill_actions(app: &AppWindow) {
             key: shortcuts.key_of(a.id).into(),
             id: a.id.into(),
             enabled: enabled(a.id),
+            main: false,
+            danger: false,
         })
         .collect();
     data.set_actions(ModelRc::new(VecModel::from(actions)));

@@ -357,6 +357,7 @@ impl<'a> Watched<'a> {
                     bin_id: None,
                     binned: None,
                     binned_zone: None,
+                    stamp: None,
                 }
             })
             .collect();

@@ -3003,10 +3003,12 @@ dependencies = [
  "mo-space",
  "rayon",
  "rusqlite",
+ "serde",
  "serde_json",
  "swash",
  "thread-priority",
  "tiny-skia 0.12.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

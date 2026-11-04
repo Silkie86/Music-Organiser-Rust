@@ -217,6 +217,7 @@ fn what_didnt_come_back_stays_to_try_again() {
         bin_id: None,
         binned: None,
         binned_zone: None,
+        stamp: None,
     };
     let a = mo_space::clean::Done { removed: vec![removed("D:/A")], ..Default::default() };
     let b = mo_space::clean::Done {

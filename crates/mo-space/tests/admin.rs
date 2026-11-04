@@ -239,10 +239,11 @@ mod guarded {
     use std::sync::{Arc, Mutex};
 
     use mo_space::admin::{Admin, NoAdmin, run_step_with};
-    use mo_space::clean::{Bin, NEEDS_ADMIN, Problem, Removed};
+    use mo_space::clean::{BACK_NEEDS_ADMIN, Bin, Check, NEEDS_ADMIN, Problem, Removed, undo};
     use mo_space::folder_move::{CantMove, Drives};
     use mo_space::key;
 
+    use super::common::kept_at;
     use super::{fixtures, folder_link, real, s, unlink};
 
     fn write(dir: &Path, rel: &str, text: &str) {
@@ -252,7 +253,7 @@ mod guarded {
     }
 
     /// A Recycle Bin that's a folder in the fixtures. A file it isn't allowed to move (in a locked folder) needs
-    /// administrator rights, as Windows says of one it guards.
+    /// administrator rights, as Windows says of one it guards, both to go and to come back.
     struct FolderBin {
         dir: PathBuf,
         held: Arc<Mutex<Vec<(String, PathBuf)>>>,
@@ -296,8 +297,34 @@ mod guarded {
             }
             Vec::new()
         }
-        fn put_back(&self, _removed: &[Removed]) -> Vec<Problem> {
-            Vec::new()
+        fn put_back(&self, removed: &[Removed]) -> Vec<Problem> {
+            let mut problems = Vec::new();
+            self.put_back_checked(removed, &|_, _| Ok(()), &mut |n, why| {
+                problems.extend(why.map(|why| Problem { path: removed[n].path.clone(), why }));
+            });
+            problems
+        }
+        fn put_back_checked(
+            &self,
+            removed: &[Removed],
+            check: &Check<'_>,
+            each: &mut dyn FnMut(usize, Option<String>),
+        ) {
+            for (n, r) in removed.iter().enumerate() {
+                let back = match kept_at(r) {
+                    None => Err("It isn't in the bin.".to_owned()),
+                    Some(at) => check(r, &at).and_then(|()| {
+                        fs::rename(at, &r.real).map_err(|e| match e.kind() {
+                            std::io::ErrorKind::PermissionDenied => BACK_NEEDS_ADMIN.to_owned(),
+                            _ => e.to_string(),
+                        })
+                    }),
+                };
+                each(n, back.err());
+            }
+        }
+        fn holds(&self, removed: &[Removed]) -> Option<Vec<bool>> {
+            Some(removed.iter().map(|r| kept_at(r).is_some()).collect())
         }
     }
 
@@ -1131,12 +1158,26 @@ mod guarded {
         let mut bin = FolderBin::new(&dir);
         bin.admin = Some(Box::new(Unlock { bin: Some(bin.twin()), ..Unlock::new(&[&vst2]) }));
         let done = remove(&picked, &picked, &bin, &AtomicBool::new(false));
-        lock(&vst2, false);
         assert!(done.problems.is_empty(), "{:?}", done.problems);
         assert_eq!(done.removed.len(), 2);
-        assert!(done.removed.iter().all(|r| r.bin_id.is_some()));
+        assert!(done.removed.iter().all(|r| r.bin_id.is_some() && r.stamp.is_some()));
         assert_eq!(bin.admin.as_deref().map(Unlock::asked), Some(1));
         assert!(!vst2.join("Serum_x64.dll").exists() && !vst2.join("Massive.dll").exists());
+
+        // Put back where nothing can ask Windows: they stay in the bin, as Windows needs administrator rights for them.
+        let problems = undo(&done, &bin.twin());
+        assert_eq!(problems.len(), 2);
+        assert!(problems.iter().all(|p| p.why == BACK_NEEDS_ADMIN), "{problems:?}");
+        assert!(!vst2.join("Serum_x64.dll").exists() && !vst2.join("Massive.dll").exists());
+
+        // Put back asks Windows once, and both come back as they went.
+        bin.admin = Some(Box::new(Unlock { bin: Some(bin.twin()), ..Unlock::new(&[&vst2]) }));
+        let problems = undo(&done, &bin);
+        lock(&vst2, false);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(bin.admin.as_deref().map(Unlock::asked), Some(1));
+        assert_eq!(fs::read_to_string(vst2.join("Serum_x64.dll")).unwrap(), "serum");
+        assert_eq!(fs::read_to_string(vst2.join("Massive.dll")).unwrap(), "massive");
     }
 
     #[test]

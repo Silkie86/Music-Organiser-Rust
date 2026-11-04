@@ -1,16 +1,17 @@
 //! The administrator step: one step the app needs administrator rights for (a plugin folder Windows guards, such as
 //! Spectrasonics' in ProgramData, checked before a move and renamed for it; a link it guards pointed somewhere else;
-//! a file it guards sent to the Recycle Bin). The app starts itself again as administrator for just that step, Windows
-//! asks you (once for each step: a move asks before copying and again for the swap), and the app waits for it, the
-//! same as Explorer's "You'll need to provide administrator permission". The C# app's `AdminStep`.
+//! a file it guards sent to the Recycle Bin, or put back from it). The app starts itself again as administrator for
+//! just that step, Windows asks you (once for each step: a move asks before copying and again for the swap), and the
+//! app waits for it, the same as Explorer's "You'll need to provide administrator permission". The C# app's
+//! `AdminStep`.
 //!
 //! How the two copies of the app talk: the app writes what the step is to do in a list in your Temp folder, and starts
-//! itself again with [`MOVE_FOLDER`] or [`RECYCLE_BIN`], the list, where to write how it went, and the list's
-//! fingerprint (its SHA-256). Any program of yours could change the list while Windows asks, but not the fingerprint,
-//! which is on the step's command line: a list that doesn't match does nothing. The step checks each line again before
-//! it acts (a path reached through a link is left alone, so a link put in meanwhile can't steer it somewhere else), and
-//! writes how it went only into a new file, never over one. The app then looks at what's there now rather than taking
-//! the step's word for it.
+//! itself again with [`MOVE_FOLDER`], [`RECYCLE_BIN`] or [`PUT_BACK`], the list, where to write how it went, and the
+//! list's fingerprint (its SHA-256). Any program of yours could change the list while Windows asks, but not the
+//! fingerprint, which is on the step's command line: a list that doesn't match does nothing. The step checks each line
+//! again before it acts (a path reached through a link is left alone, so a link put in meanwhile can't steer it
+//! somewhere else), and writes how it went only into a new file, never over one. The app then looks at what's there
+//! now rather than taking the step's word for it.
 //!
 //! The app's start-up hands what it was started with to [`run_step`] before anything else, and stops when it says so.
 //! Until it does, Windows is never asked: the copy started as administrator wouldn't know the step.
@@ -25,7 +26,7 @@ use rayon::prelude::*;
 use sha2::{Digest, Sha256};
 
 use crate::after_move::relink;
-use crate::clean::{Bin, NEEDS_ADMIN, SystemBin};
+use crate::clean::{BACK_NEEDS_ADMIN, Bin, NAME_TAKEN, NEEDS_ADMIN, Removed, SystemBin};
 use crate::folder_move::{CantMove, check_rename, leads_to, swap, unswap};
 use crate::plugin_clean::made_by_the_system;
 use crate::size::is_link;
@@ -38,6 +39,10 @@ pub const MOVE_FOLDER: &str = "--move-folder";
 /// The flag the app is started with to send files Windows guards to the Recycle Bin: `--recycle-bin <list> <result>
 /// <fingerprint>`.
 pub const RECYCLE_BIN: &str = "--recycle-bin";
+
+/// The flag the app is started with to put back from the Recycle Bin what went there as administrator: `--put-back
+/// <list> <result> <fingerprint>`.
+pub const PUT_BACK: &str = "--put-back";
 
 /// What the step says when even administrator rights weren't enough. Windows says no to administrators too while a
 /// program has something inside open, so that's the likely reason.
@@ -178,10 +183,13 @@ pub(crate) enum Step {
     Relink,
     /// `path`, `stamp`: it goes to the Recycle Bin, if it still holds what it did when the app checked it ([`stamp`]).
     Bin,
+    /// `real`, `removed`: it comes back from the Recycle Bin to `real`, where it was, if the bin item it is still holds
+    /// what went (`removed` is what the app keeps of it, [`Removed`] as JSON, with its [`stamp`]).
+    PutBack,
 }
 
 impl Step {
-    const ALL: [Step; 5] = [Step::Check, Step::Swap, Step::Unswap, Step::Relink, Step::Bin];
+    const ALL: [Step; 6] = [Step::Check, Step::Swap, Step::Unswap, Step::Relink, Step::Bin, Step::PutBack];
 
     /// What the app is started with for this step, before the list, the result and the fingerprint.
     fn flags(self) -> &'static [&'static str] {
@@ -191,6 +199,7 @@ impl Step {
             Step::Unswap => &[MOVE_FOLDER, "unswap"],
             Step::Relink => &[MOVE_FOLDER, "relink"],
             Step::Bin => &[RECYCLE_BIN],
+            Step::PutBack => &[PUT_BACK],
         }
     }
 
@@ -382,8 +391,8 @@ fn read_outcome(line: &str) -> Option<(String, Outcome)> {
 }
 
 /// Runs the administrator step when the app was started for one: `args` is what the app was started with, its own
-/// path left out (`std::env::args().skip(1)`). Returns `true` when it was started with [`MOVE_FOLDER`] or
-/// [`RECYCLE_BIN`] (the app then stops at once, whether or not the step did anything), `false` when it wasn't (the app
+/// path left out (`std::env::args().skip(1)`). Returns `true` when it was started with [`MOVE_FOLDER`], [`RECYCLE_BIN`]
+/// or [`PUT_BACK`] (the app then stops at once, whether or not the step did anything), `false` when it wasn't (the app
 /// starts as usual). It never shows a window. Started with the flag but not as the app starts it, or with a list that
 /// was changed, it does nothing at all.
 pub fn run_step(args: &[String]) -> bool {
@@ -393,7 +402,7 @@ pub fn run_step(args: &[String]) -> bool {
 
 /// [`run_step`], with the bin files go to (tests stand in a folder for the Recycle Bin).
 pub fn run_step_with(args: &[String], bin: &dyn Bin) -> bool {
-    if !args.first().is_some_and(|a| a == MOVE_FOLDER || a == RECYCLE_BIN) {
+    if !args.first().is_some_and(|a| a == MOVE_FOLDER || a == RECYCLE_BIN || a == PUT_BACK) {
         return false;
     }
     let starts = |flags: &[&str]| args.len() >= flags.len() && args.iter().zip(flags).all(|(a, f)| a == f);
@@ -407,11 +416,18 @@ pub fn run_step_with(args: &[String], bin: &dyn Bin) -> bool {
     }
     let Ok(file) = OpenOptions::new().write(true).create_new(true).open(result) else { return true };
     let mut out = BufWriter::new(file);
-    for line in &lines {
-        let fields: Vec<&str> = line.split('\t').collect();
-        let outcome = do_line(step, &fields, bin);
-        let _ = writeln!(out, "{}", outcome_line(fields.first().copied().unwrap_or_default(), &outcome));
+    let rows: Vec<Vec<&str>> = lines.iter().map(|line| line.split('\t').collect()).collect();
+    // Each line is written as soon as it's done, so a step cut off part way still says what it did.
+    let mut tell = |fields: &[&str], outcome: &Outcome| {
+        let _ = writeln!(out, "{}", outcome_line(fields.first().copied().unwrap_or_default(), outcome));
         let _ = out.flush();
+    };
+    if step == Step::PutBack {
+        put_back_here(&rows, bin, &mut tell);
+    } else {
+        for fields in &rows {
+            tell(fields, &do_line(step, fields, bin));
+        }
     }
     true
 }
@@ -424,7 +440,7 @@ fn do_line(step: Step, fields: &[&str], bin: &dyn Bin) -> Outcome {
         (Step::Unswap, [from, restore, to]) => unswap_here(from, restore, to),
         (Step::Relink, [at, target]) => relink_here(at, target),
         (Step::Bin, [path, stamp]) => bin_here(path, stamp, bin),
-        _ => Err("The list wasn't as the app writes it.".to_owned()),
+        _ => Err(NOT_AS_WRITTEN.to_owned()),
     };
     checked.unwrap_or_else(Outcome::Kept)
 }
@@ -488,6 +504,65 @@ fn bin_here(path: &str, stamp_was: &str, bin: &dyn Bin) -> Result<Outcome, Strin
         Err(why) if why == NEEDS_ADMIN => Outcome::Kept(EVEN_AS_ADMIN.to_owned()),
         Err(why) => Outcome::Kept(why),
     })
+}
+
+/// What the step says of a line that isn't as the app writes it.
+const NOT_AS_WRITTEN: &str = "The list wasn't as the app writes it.";
+
+/// What Put back says of what the bin holds under the name of something that went as administrator, when it isn't
+/// what went.
+pub const NOT_AS_IT_WENT: &str = "What's in the Recycle Bin under its name isn't what went, so it's left there.";
+
+/// What Put back says when some of what the bin holds for something that went as administrator can't be read.
+const UNREAD_IN_BIN: &str =
+    "Some of it couldn't be read in the Recycle Bin to check it's what went, so it's left there.";
+
+/// Puts back what went as administrator (each line is where it was and what the app keeps of it), all of it from one
+/// look in the bin, and tells `tell` how each line went as soon as it's done. Each comes back only to where it went
+/// from, into a folder reached through no link, with nothing there now, and only while what the bin keeps for it still
+/// holds what went (its [`stamp`]). That catches something else in the bin under its name, or what's there changed
+/// since; it can't stop a program of yours that sets out to fake one, as what the app keeps is in your own folders,
+/// as the app itself is (Explorer's own Restore checks nothing at all).
+fn put_back_here(rows: &[Vec<&str>], bin: &dyn Bin, tell: &mut dyn FnMut(&[&str], &Outcome)) {
+    let mut asked = Vec::new();
+    for (n, fields) in rows.iter().enumerate() {
+        match put_back_line(fields) {
+            Ok(removed) => asked.push((n, removed)),
+            Err(why) => tell(fields, &Outcome::Kept(why)),
+        }
+    }
+    if asked.is_empty() {
+        return;
+    }
+    let (row_of, removed): (Vec<usize>, Vec<Removed>) = asked.into_iter().unzip();
+    let as_it_went = |r: &Removed, at: &Path| match stamp(at) {
+        Some(now) if Some(now.as_str()) == r.stamp.as_deref() => Ok(()),
+        Some(_) => Err(NOT_AS_IT_WENT.to_owned()),
+        None => Err(UNREAD_IN_BIN.to_owned()),
+    };
+    bin.put_back_checked(&removed, &as_it_went, &mut |k, why| {
+        let outcome = match why {
+            None => Outcome::Done,
+            Some(why) if why == BACK_NEEDS_ADMIN => Outcome::Kept(EVEN_AS_ADMIN.to_owned()),
+            Some(why) => Outcome::Kept(why),
+        };
+        tell(&rows[row_of[k]], &outcome);
+    });
+}
+
+/// One line of Put back, checked again: what the app keeps of it, as it writes it, for where it was, which is in a
+/// folder reached through no link, with nothing there now.
+fn put_back_line(fields: &[&str]) -> Result<Removed, String> {
+    let [real, removed] = fields else { return Err(NOT_AS_WRITTEN.to_owned()) };
+    let removed: Removed = serde_json::from_str(removed).map_err(|_| NOT_AS_WRITTEN.to_owned())?;
+    if key(&removed.real) != key(real) || removed.stamp.is_none() {
+        return Err(NOT_AS_WRITTEN.to_owned());
+    }
+    plain(real)?;
+    if !not_there(Path::new(real)) {
+        return Err(NAME_TAKEN.to_owned());
+    }
+    Ok(removed)
 }
 
 /// What a move's own answer says, as the step says it.

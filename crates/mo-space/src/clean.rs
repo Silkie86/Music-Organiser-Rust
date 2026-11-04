@@ -29,7 +29,7 @@ use mo_formats::textscan::is_audio_path;
 use mo_library::scan::{daw_of, is_inside, is_project_file};
 use serde::{Deserialize, Serialize};
 
-use crate::admin::{Admin, AsAdmin, NoAdmin, Step, ask_for, real_spot, reason, stamp};
+use crate::admin::{Admin, AsAdmin, NoAdmin, Outcome, Step, ask_for, real_spot, reason, stamp};
 use crate::plugin_space::SpaceKind;
 use crate::size::{OnlineOnly, Stopped, is_link, is_online_only, modified_of, online_only_in, total};
 use crate::song::{CompactItem, CompactKind, has_studio_one_song, parent};
@@ -475,6 +475,10 @@ pub struct Removed {
     /// the clock showed it, without the zone, so once the computer is in another zone it reads that much off.
     #[serde(default)]
     pub binned_zone: Option<i32>,
+    /// What it held when it went as administrator (its [`stamp`]): it comes back the same way, Windows asking once for
+    /// all of a clean-up's, and only while what's in the bin still holds this. `None` for what went without asking.
+    #[serde(default)]
+    pub stamp: Option<String>,
 }
 
 /// What something removed was.
@@ -519,6 +523,15 @@ impl Done {
 /// folder it guards). The clean-ups then send all of those in one administrator step ([`Bin::admin`]).
 pub const NEEDS_ADMIN: &str = "Windows needs administrator rights to remove this; remove it in Explorer instead.";
 
+/// What Put back says when Windows wants administrator rights to put something back and the app can't ask for them:
+/// it went without asking (so the app didn't note what it held), or nothing here can ask.
+pub const BACK_NEEDS_ADMIN: &str =
+    "Windows needs administrator rights to put this back; restore it from the Recycle Bin instead.";
+
+/// What the administrator step's Put back looks at just before something comes back ([`Bin::put_back_checked`]): what
+/// went, and the file or folder the bin keeps for it now. `Err` says why it stays in the bin.
+pub type Check<'a> = dyn Fn(&Removed, &Path) -> Result<(), String> + 'a;
+
 /// Where removed things go. The app uses [`SystemBin`]; tests use a folder of their own.
 pub trait Bin {
     /// Puts a file or folder in the bin, or says what stopped it ([`NEEDS_ADMIN`] when Windows wants administrator
@@ -537,6 +550,21 @@ pub trait Bin {
     /// `None` when the bin can't be looked in. By default it can't.
     fn holds(&self, _removed: &[Removed]) -> Option<Vec<bool>> {
         None
+    }
+    /// The administrator step's Put back: puts back from the bin, one by one, those of `removed` that `check` lets
+    /// through, each looked at where the bin keeps it (the file or folder itself) just before it comes back, and tells
+    /// `each` how each went as soon as it's done (by where it is in `removed`): `None` when it came back, or why not.
+    /// The bin is read once for all of it. By default it can't be read, so nothing comes back.
+    fn put_back_checked(&self, removed: &[Removed], _check: &Check<'_>, each: &mut dyn FnMut(usize, Option<String>)) {
+        for n in 0..removed.len() {
+            each(n, Some(CANT_READ_BIN.to_owned()));
+        }
+    }
+    /// Whether the bin `removed` went to can be looked in now: not while the drive it was on isn't plugged in (a USB
+    /// disk keeps its own Recycle Bin), when [`holds`](Self::holds) doesn't see it though it may still be there for when
+    /// the drive is back. By default, always.
+    fn can_look_for(&self, _removed: &Removed) -> bool {
+        true
     }
     /// Why this bin can't take `path` (`bytes` big) quietly: sending it would ask you something first, or remove it for
     /// good. `None` when it can. For what the app clears by itself, with nobody there to answer (the start-up sweep's
@@ -719,6 +747,7 @@ impl<'a> Sending<'a> {
             bin_id: None,
             binned: None,
             binned_zone: None,
+            stamp: None,
         };
         let why = match self.bin.send(Path::new(path)) {
             Ok(()) => {
@@ -791,11 +820,13 @@ impl<'a> Sending<'a> {
                       asked about it."
                 .to_owned(),
         });
-        for (n, r) in sent.into_iter().enumerate() {
+        for (n, (r, line)) in sent.into_iter().zip(lines).enumerate() {
             // What's there now decides, whatever the step said.
             if not_there(Path::new(&r.real)) {
                 self.by_admin.push(key(&r.real));
-                done.removed.push(Removed { when, ..r });
+                // The stamp the step checked before binning it: what's in the bin, for Put back to check.
+                let stamp = line.into_iter().nth(1);
+                done.removed.push(Removed { when, stamp, ..r });
             } else {
                 let why = reason(&said, n, "It's still there: a program may be using some of it.");
                 self.sent.remove(&key(&r.real));
@@ -819,9 +850,54 @@ impl<'a> Sending<'a> {
     }
 }
 
-/// Puts back what a clean-up removed.
+/// Puts back what a clean-up removed. What went as administrator ([`Removed::stamp`]: Windows guards its place) comes
+/// back the same way, all of it in one administrator step, so Windows asks once; the rest comes back as you.
 pub fn undo(done: &Done, bin: &dyn Bin) -> Vec<Problem> {
-    bin.put_back(&done.removed)
+    let asks = bin.admin().can_ask();
+    let (guarded, plain): (Vec<Removed>, Vec<Removed>) =
+        done.removed.iter().cloned().partition(|r| asks && r.stamp.is_some());
+    let mut problems = if plain.is_empty() { Vec::new() } else { bin.put_back(&plain) };
+    if !guarded.is_empty() {
+        problems.extend(put_back_guarded(&guarded, bin));
+    }
+    problems
+}
+
+/// Puts back in one administrator step what went as administrator. Windows is asked only about what can come back:
+/// what the bin still holds (when it can be looked in), with nothing at its place now. Each line is where it was and
+/// what the app keeps of it (as JSON, with its stamp), which the step checks against the bin before putting it back.
+/// Afterwards, what's there decides what came back, as long as the step didn't say it left it in the bin.
+fn put_back_guarded(guarded: &[Removed], bin: &dyn Bin) -> Vec<Problem> {
+    let problem = |r: &Removed, why: &str| Problem { path: r.path.clone(), why: why.to_owned() };
+    let mut problems = Vec::new();
+    let held = bin.holds(guarded);
+    let mut asking = Vec::new();
+    for (n, r) in guarded.iter().enumerate() {
+        if held.as_ref().is_some_and(|held| held.get(n) == Some(&false)) {
+            problems.push(problem(r, GONE_FROM_BIN));
+        } else if !not_there(Path::new(&r.real)) {
+            problems.push(problem(r, NAME_TAKEN));
+        } else {
+            asking.push(r.clone());
+        }
+    }
+    if asking.is_empty() {
+        return problems;
+    }
+    // A line the step can't read (none the app writes) is one it leaves, saying so.
+    let lines: Vec<Vec<String>> =
+        asking.iter().map(|r| vec![r.real.clone(), serde_json::to_string(r).unwrap_or_default()]).collect();
+    let said = ask_for(bin.admin(), Step::PutBack, &lines);
+    let held = bin.holds(&asking);
+    for (n, r) in asking.iter().enumerate() {
+        let left = matches!(&said, Ok(outcomes) if outcomes.get(n) != Some(&Outcome::Done));
+        let here = !not_there(Path::new(&r.real));
+        let out_of_bin = held.as_ref().is_none_or(|held| held.get(n) == Some(&false));
+        if left || !here || !out_of_bin {
+            problems.push(problem(r, &reason(&said, n, COULDNT_PUT_BACK)));
+        }
+    }
+    problems
 }
 
 fn now_seconds() -> i64 {
@@ -853,16 +929,39 @@ impl Bin for SystemBin {
     }
 
     fn put_back(&self, removed: &[Removed]) -> Vec<Problem> {
-        put_back_from_system_bin(removed)
+        let mut problems = Vec::new();
+        put_back_from_system_bin(removed, None, &mut |n, why| {
+            if let Some(why) = why {
+                problems.push(Problem { path: removed[n].path.clone(), why });
+            }
+        });
+        problems
+    }
+
+    fn put_back_checked(&self, removed: &[Removed], check: &Check<'_>, each: &mut dyn FnMut(usize, Option<String>)) {
+        put_back_from_system_bin(removed, Some(check), each);
     }
 
     fn holds(&self, removed: &[Removed]) -> Option<Vec<bool>> {
         held_in_system_bin(removed)
     }
 
+    fn can_look_for(&self, removed: &Removed) -> bool {
+        drive_is_here(&removed.real)
+    }
+
     fn refuses_quietly(&self, path: &Path, bytes: u64) -> Option<String> {
         refuses_quietly(path, bytes).map(str::to_owned)
     }
+}
+
+/// Whether the drive `real` is on is plugged in, so its Recycle Bin can be looked in: on Windows, the drive's own top
+/// folder (I: itself); elsewhere, where drives have no letters, the folder it was in (a USB disk's folders are only
+/// there while it is).
+fn drive_is_here(real: &str) -> bool {
+    let real = Path::new(real);
+    let at = if cfg!(windows) { real.ancestors().last() } else { real.parent() };
+    at.is_some_and(|at| !at.as_os_str().is_empty() && at.exists())
 }
 
 /// Why the computer's own Recycle Bin can't take `path` (`bytes` big) without a word: what [`cant_keep`] looks for (a
@@ -1133,11 +1232,6 @@ fn problem_with(e: &trash::Error, path: &Path) -> String {
 /// What an error from `trash` means here. Windows' own errors (HRESULTs) are told apart by their whole number, as
 /// which part of Windows a code comes from counts too.
 fn bin_problem(e: &trash::Error) -> String {
-    /// Access denied, or it needs administrator rights: Windows' own word, and the copy engine's
-    /// (COPYENGINE_E_ACCESS_DENIED_SRC, COPYENGINE_E_REQUIRES_ELEVATION), so these go to the administrator step.
-    /// (`trash` asks Windows' newer file operations, whose errors are all HRESULTs: the bare 0x78 that its older one
-    /// gave for access denied never comes.)
-    const ACCESS_DENIED: [u32; 3] = [0x8007_0005, 0x8027_0021, 0x8027_0002];
     /// A program has it open and won't let it go (the sharing and lock violations, and the copy engine's own word).
     const SHARING_VIOLATION: [u32; 3] = [0x8007_0020, 0x8007_0021, 0x8027_0027];
     /// Windows didn't move it: it was told no or cancelled (ERROR_CANCELLED, E_ABORT, COPYENGINE_E_USER_CANCELLED,
@@ -1149,7 +1243,10 @@ fn bin_problem(e: &trash::Error) -> String {
     match e {
         trash::Error::Os { code, .. } => {
             let code = code.cast_unsigned();
-            if ACCESS_DENIED.contains(&code) {
+            // Access denied, or it needs administrator rights: these go to the administrator step. (`trash` asks
+            // Windows' newer file operations, whose errors are all HRESULTs: the bare 0x78 that its older one gave
+            // for access denied never comes.)
+            if NEEDS_RIGHTS.contains(&code) {
                 NEEDS_ADMIN.to_owned()
             } else if SHARING_VIOLATION.contains(&code) {
                 IN_USE.to_owned()
@@ -1268,44 +1365,88 @@ fn find_in_system_bin(removed: &mut [Removed]) -> Vec<Problem> {
     problems
 }
 
+/// Puts back from the bin those of `removed` that `check` lets through (each looked at where the bin keeps it; all of
+/// them when there's no check), and tells `each` how each went ([`Bin::put_back_checked`]). The bin is read once.
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
-fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
-    let problem = |r: &Removed, why: &str| Problem { path: r.path.clone(), why: why.to_owned() };
+fn put_back_from_system_bin(
+    removed: &[Removed],
+    check: Option<&Check<'_>>,
+    each: &mut dyn FnMut(usize, Option<String>),
+) {
     let Some(items) = bin_items() else {
-        return removed.iter().map(|r| problem(r, "The Recycle Bin couldn't be read.")).collect();
+        for n in 0..removed.len() {
+            each(n, Some(CANT_READ_BIN.to_owned()));
+        }
+        return;
     };
-    let mut problems = Vec::new();
     // An item that's gone means it was put back already, or the bin was emptied: anything there now from its place
     // went later, so it isn't put back instead.
-    for (r, item) in removed.iter().zip(matched(&items, removed)) {
+    for (n, (r, item)) in removed.iter().zip(matched(&items, removed)).enumerate() {
         let Some(item) = item else {
-            problems.push(problem(r, "It isn't in the Recycle Bin any more."));
+            each(n, Some(GONE_FROM_BIN.to_owned()));
             continue;
         };
-        // It comes back under its own full name, even when Windows listed it without its ending.
-        let mut item = item.clone();
-        if let Some(name) = Path::new(&r.real).file_name().filter(|_| same_name(&item, Path::new(&r.real))) {
-            item.name = name.to_owned();
-        }
-        let spot = item.original_path();
-        let was_there = fs::symlink_metadata(&spot).is_ok();
-        let in_bin = in_bin_path(&item);
-        match mo_catch::catch(AssertUnwindSafe(|| trash::os_limited::restore_all([item]))) {
-            Ok(Ok(())) => {}
-            Ok(Err(trash::Error::RestoreCollision { .. })) => {
-                problems.push(problem(r, "Something new has its name now, so it's left in the Recycle Bin."))
+        let checked = match check {
+            None => Ok(()),
+            Some(check) => in_bin_path(item).ok_or_else(|| CANT_READ_BIN.to_owned()).and_then(|at| check(r, &at)),
+        };
+        each(n, checked.and_then(|()| put_back_item(r, item).map_err(str::to_owned)).err());
+    }
+}
+
+/// What Put back says of something no longer in the bin.
+pub const GONE_FROM_BIN: &str = "It isn't in the Recycle Bin any more.";
+
+/// What Put back says when the bin can't be read.
+const CANT_READ_BIN: &str = "The Recycle Bin couldn't be read.";
+
+/// What Put back says when something stays in the bin for no reason Windows gave.
+const COULDNT_PUT_BACK: &str = "It couldn't be put back; it's still in the Recycle Bin.";
+
+/// What Put back says when something new has the name of what it would put back.
+pub const NAME_TAKEN: &str = "Something new has its name now, so it's left in the Recycle Bin.";
+
+/// Puts one thing back from the bin item it is ([`matched`]), or says why it stays there.
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn put_back_item(r: &Removed, item: &trash::TrashItem) -> Result<(), &'static str> {
+    // It comes back under its own full name, even when Windows listed it without its ending.
+    let mut item = item.clone();
+    if let Some(name) = Path::new(&r.real).file_name().filter(|_| same_name(&item, Path::new(&r.real))) {
+        item.name = name.to_owned();
+    }
+    let spot = item.original_path();
+    let was_there = fs::symlink_metadata(&spot).is_ok();
+    let in_bin = in_bin_path(&item);
+    match mo_catch::catch(AssertUnwindSafe(|| trash::os_limited::restore_all([item]))) {
+        // Windows can say it's done when it stopped without saying why: what's there decides.
+        Ok(Ok(())) if fs::symlink_metadata(&spot).is_ok() => Ok(()),
+        Ok(Err(trash::Error::RestoreCollision { .. })) => Err(NAME_TAKEN),
+        said => {
+            // Only while it's still in the bin: one that came back (and only the bin's own note of it couldn't be
+            // cleared) is the thing itself, however empty.
+            if !was_there && in_bin.as_deref().is_some_and(|b| fs::symlink_metadata(b).is_ok()) {
+                remove_placeholder(&spot);
             }
-            _ => {
-                // Only while it's still in the bin: one that came back (and only the bin's own note of it couldn't
-                // be cleared) is the thing itself, however empty.
-                if !was_there && in_bin.as_deref().is_some_and(|b| fs::symlink_metadata(b).is_ok()) {
-                    remove_placeholder(&spot);
-                }
-                problems.push(problem(r, "It couldn't be put back; it's still in the Recycle Bin."))
-            }
+            Err(match said {
+                Ok(Err(e)) if needs_admin_back(&e) => BACK_NEEDS_ADMIN,
+                _ => COULDNT_PUT_BACK,
+            })
         }
     }
-    problems
+}
+
+/// Access denied, or it needs administrator rights, as Windows says it of a file of yours: its own word, and the copy
+/// engine's (COPYENGINE_E_ACCESS_DENIED_SRC, COPYENGINE_E_REQUIRES_ELEVATION).
+const NEEDS_RIGHTS: [u32; 3] = [0x8007_0005, 0x8027_0021, 0x8027_0002];
+
+/// Whether Windows wouldn't put something back for want of administrator rights ([`NEEDS_RIGHTS`]), or wouldn't let
+/// it into its place (COPYENGINE_E_ACCESS_DENIED_DEST: there, the place is where it goes back to, a folder Windows
+/// guards; sending, it's your own Recycle Bin, where administrator rights wouldn't help).
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+fn needs_admin_back(e: &trash::Error) -> bool {
+    const ACCESS_DENIED_DEST: u32 = 0x8027_0022;
+    matches!(e, trash::Error::Os { code, .. }
+        if NEEDS_RIGHTS.contains(&code.cast_unsigned()) || code.cast_unsigned() == ACCESS_DENIED_DEST)
 }
 
 /// On Linux, putting something back first makes an empty file or folder in its place, then moves it there from the
@@ -1328,8 +1469,9 @@ fn remove_placeholder(spot: &Path) {
 #[cfg(windows)]
 fn remove_placeholder(_spot: &Path) {}
 
-/// Linux: where a Trash item itself is kept, from its note (`…/Trash/info/Name.trashinfo` keeps
-/// `…/Trash/files/Name`), as the trash crate finds it.
+/// Where a bin item itself is kept. On Linux, from its note (`…/Trash/info/Name.trashinfo` keeps
+/// `…/Trash/files/Name`), as the trash crate finds it; on Windows, it's what the bin calls it
+/// (`C:\$Recycle.Bin\S-1-5-…\$R2X4KQ7.vst3`).
 #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]
 fn in_bin_path(item: &trash::TrashItem) -> Option<std::path::PathBuf> {
     let info = Path::new(&item.id);
@@ -1337,8 +1479,8 @@ fn in_bin_path(item: &trash::TrashItem) -> Option<std::path::PathBuf> {
 }
 
 #[cfg(windows)]
-fn in_bin_path(_item: &trash::TrashItem) -> Option<std::path::PathBuf> {
-    None
+fn in_bin_path(item: &trash::TrashItem) -> Option<std::path::PathBuf> {
+    Some(std::path::PathBuf::from(&item.id))
 }
 
 /// A Mac's Trash can't be read by a program: nothing to check.
@@ -1406,14 +1548,14 @@ fn held_in_system_bin(_removed: &[Removed]) -> Option<Vec<bool>> {
 
 /// A Mac's Trash can't be asked to put things back by a program: Finder's Put Back does it.
 #[cfg(not(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))))]
-fn put_back_from_system_bin(removed: &[Removed]) -> Vec<Problem> {
-    removed
-        .iter()
-        .map(|r| Problem {
-            path: r.path.clone(),
-            why: "Put it back from the Trash: select it there and choose Put Back.".to_owned(),
-        })
-        .collect()
+fn put_back_from_system_bin(
+    removed: &[Removed],
+    _check: Option<&Check<'_>>,
+    each: &mut dyn FnMut(usize, Option<String>),
+) {
+    for n in 0..removed.len() {
+        each(n, Some("Put it back from the Trash: select it there and choose Put Back.".to_owned()));
+    }
 }
 
 #[cfg(test)]
@@ -1564,7 +1706,7 @@ mod tests {
             let what = What::Plugin(SpaceKind::Presets);
             let bin_id = bin_id.map(str::to_owned);
             let binned = bin_id.as_ref().map(|_| when);
-            Removed { real: path.clone(), path, bytes: 10, what, when, binned, binned_zone: None, bin_id }
+            Removed { real: path.clone(), path, bytes: 10, what, when, binned, binned_zone: None, bin_id, stamp: None }
         };
         let mut items = vec![item("1", "a.fxp", 100), item("2", "b.fxp", 200), item("3", "b.fxp", 300)];
         // What the bin called one of the app's is used again for something else from another folder (Linux does
@@ -1643,5 +1785,28 @@ mod tests {
         }
         assert!(file.exists(), "it was only asked about");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_drive_that_isnt_plugged_in_cant_be_looked_in() {
+        use super::{Removed, What};
+        use crate::plugin_space::SpaceKind;
+        let removed = |real: &std::path::Path| Removed {
+            path: text(real),
+            real: text(real),
+            bytes: 1,
+            what: What::Plugin(SpaceKind::Program),
+            when: 1,
+            bin_id: None,
+            binned: None,
+            binned_zone: None,
+            stamp: None,
+        };
+        let dir = std::env::temp_dir();
+        assert!(SystemBin.can_look_for(&removed(&dir.join("Serum.vst3"))));
+        // A USB disk's folders are only there while it's plugged in; on Windows, its letter is.
+        let gone = dir.join("mo-space-no-such-drive").join("Serum.vst3");
+        assert_eq!(SystemBin.can_look_for(&removed(&gone)), cfg!(windows));
+        assert!(!super::drive_is_here(""));
     }
 }
