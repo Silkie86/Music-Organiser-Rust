@@ -1374,13 +1374,15 @@ fn look_for_copies(app: &AppWindow) {
     let Some(ask) = ask else { return };
     let weak = app.as_weak();
     // The Library as the last look read it, kept on the thread so a file isn't read again while it's unchanged. A
-    // crash in a look (logged as one) leaves the thread for the next look; the Library is read again then, in case
-    // the crash came from what was kept.
+    // crash in a look (logged as one) leaves the thread for the next look; the Library is read again then, and the
+    // fingerprints kept between starts are forgotten, in case the crash came from what was kept.
     let mut index = None;
     let work = move |ask: BitwigAsk| {
         let id = ask.id;
         if catch_crash(AssertUnwindSafe(|| look_for_copies_now(ask, &mut index, &weak))).is_err() {
+            // Let go of the store first, so it can be removed.
             index = None;
+            mo_space::prints::forget(&mo_app::paths::data_dir().join(mo_space::prints::FILE_NAME));
             arrive(&weak, Step::BitwigCrashed(id));
         }
     };
@@ -1403,8 +1405,9 @@ fn look_for_copies_now(ask: BitwigAsk, index: &mut Option<LibraryIndex>, weak: &
     let mut told: Option<Instant> = None;
     // On the pool for long work over a disk (rule 21): it reads every copy, hundreds of gigabytes, so on the shared
     // pool it would hold up the pages' quick jobs, and its threads are low in the system's memory there.
+    let prints = mo_app::paths::data_dir().join(mo_space::prints::FILE_NAME);
     let found = background::on_bulk_pool(|| {
-        space_bitwig::look(&roots, documents.as_deref(), index, &ask.stop, |done, of| {
+        space_bitwig::look(&roots, documents.as_deref(), index, Some(&prints), &ask.stop, |done, of| {
             if of > 0 {
                 job.progress(done as f32 / of as f32, Some(&space_bitwig::progress_words(done, of)));
             }

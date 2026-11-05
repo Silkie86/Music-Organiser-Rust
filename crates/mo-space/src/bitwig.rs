@@ -12,7 +12,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::SystemTime;
 
@@ -21,6 +20,7 @@ use mo_library::songs::is_fixed_copy;
 use rayon::prelude::*;
 
 use crate::clean::{Bin, Done, Problem, STOPPED, Sending, Sent, What, cant_keep};
+use crate::prints::Prints;
 use crate::size::{Stopped, file_hash, file_id, is_link, walk};
 use crate::{key, real_path, really, text};
 
@@ -39,21 +39,13 @@ pub struct LibraryCopy {
     pub bytes: u64,
 }
 
-/// The Library's multisamples, by size, with each one's fingerprint kept once read (and each copy's). Made once and
+/// The Library's multisamples, by size, with each one's fingerprints kept once read (and each copy's). Made once and
 /// used for every project, so a file is read once, and again only if it changed since (rule 12). Kept for the next
-/// look ([`LibraryIndex::list_again`]), a file already read isn't read again then either.
+/// look ([`LibraryIndex::list_again`]), a file already read isn't read again then either; and with a store
+/// ([`LibraryIndex::remember_in`]), not after a restart either.
 pub struct LibraryIndex {
     by_size: HashMap<u64, Vec<PathBuf>>,
     prints: Prints,
-}
-
-/// A Library file's fingerprint, with the size and time it had when it was read: used again only while they still
-/// match.
-#[derive(Clone, Copy)]
-struct Known {
-    len: u64,
-    modified: Option<SystemTime>,
-    print: [u8; 32],
 }
 
 impl LibraryIndex {
@@ -106,6 +98,25 @@ impl LibraryIndex {
         Ok(())
     }
 
+    /// Keeps the fingerprints between runs in the store at `path` (`prints::FILE_NAME` in the app's data folder),
+    /// taking in what it kept: a file read before a restart isn't read again while it's unchanged. Returns how many
+    /// files it knew. An error says why there's no store; the fingerprints are then kept while the app runs only.
+    pub fn remember_in(&mut self, path: &Path) -> Result<usize, String> {
+        self.prints.remember_in(path)
+    }
+
+    /// Writes the fingerprints read since the last time to the store. After a whole look (`whole_look`: one that
+    /// went through every project folder), the files it didn't ask about are forgotten, so the store holds no more
+    /// than one look's files (rule 28). An error says why it couldn't be written.
+    pub fn keep(&self, whole_look: bool) -> Result<(), String> {
+        self.prints.keep(whole_look)
+    }
+
+    /// Whether the fingerprints are kept in a store ([`LibraryIndex::remember_in`] worked).
+    pub fn remembers(&self) -> bool {
+        self.prints.remembers()
+    }
+
     /// The copies in one project folder that are the same as a Library file. A copy that's a link, or that isn't the
     /// same as any, isn't listed. Where more than one Library file is the same, the one with the copy's own name (or
     /// that name with fewer of Bitwig's "-2" endings) is picked, or else the shortest name. Only copies and Library
@@ -120,19 +131,36 @@ impl LibraryIndex {
             (is_multisample(path) && meta.is_file() && self.by_size.contains_key(&meta.len()))
                 .then(|| (path.to_path_buf(), meta.len()))
         })?;
-        // The Library files that could match, each read once (all at the same time), before any copy is compared.
+        // First the prints of each file's ends (64 KB at each end): a copy and a Library file whose ends differ aren't
+        // the same, and neither is read whole. Each Library file that could match is read once (all at the same
+        // time), before any copy is compared.
         let mut wanted: Vec<&PathBuf> =
             found.iter().filter_map(|(_, bytes)| self.by_size.get(bytes)).flatten().collect();
         wanted.sort_unstable();
         wanted.dedup();
-        let prints: HashMap<&PathBuf, [u8; 32]> =
-            wanted.into_par_iter().filter_map(|l| self.prints.of(l, stop).map(|print| (l, print))).collect();
-        let copies: Vec<Option<LibraryCopy>> = found
+        let library_ends: HashMap<&PathBuf, [u8; 32]> =
+            wanted.into_par_iter().filter_map(|l| self.prints.ends(l, stop).map(|print| (l, print))).collect();
+        let maybe: Vec<(&PathBuf, u64, Vec<&PathBuf>)> = found
             .par_iter()
-            .map(|(path, bytes)| {
-                let print = self.prints.of(path, stop)?;
+            .filter_map(|(path, bytes)| {
+                let ends = self.prints.ends(path, stop)?;
                 let same: Vec<&PathBuf> =
-                    self.by_size.get(bytes)?.iter().filter(|l| prints.get(l) == Some(&print)).collect();
+                    self.by_size.get(bytes)?.iter().filter(|l| library_ends.get(l) == Some(&ends)).collect();
+                (!same.is_empty()).then_some((path, *bytes, same))
+            })
+            .collect();
+        // Then the whole prints, only where the ends are the same: each Library file once, then the copies.
+        let mut wanted: Vec<&PathBuf> = maybe.iter().flat_map(|(_, _, same)| same.iter().copied()).collect();
+        wanted.sort_unstable();
+        wanted.dedup();
+        let library_prints: HashMap<&PathBuf, [u8; 32]> =
+            wanted.into_par_iter().filter_map(|l| self.prints.whole(l, stop).map(|print| (l, print))).collect();
+        let copies: Vec<Option<LibraryCopy>> = maybe
+            .par_iter()
+            .map(|(path, bytes, same)| {
+                let print = self.prints.whole(path, stop)?;
+                let same: Vec<&PathBuf> =
+                    same.iter().copied().filter(|l| library_prints.get(l) == Some(&print)).collect();
                 let library = best(path, &same)?;
                 Some(LibraryCopy { in_project: text(path), library_file: text(library), bytes: *bytes })
             })
@@ -260,29 +288,6 @@ fn fixed_from(stem: &str) -> Option<&str> {
 /// Whether a folder is in (or is) a folder a move left behind as "… (old copy)".
 fn in_old_copy(folder: &Path) -> bool {
     folder.components().any(|c| c.as_os_str().to_string_lossy().ends_with(crate::folder_move::OLD_SUFFIX))
-}
-
-/// Fingerprints of files once read, used again only while each file's size and time are as they were.
-#[derive(Default)]
-struct Prints {
-    known: Mutex<HashMap<PathBuf, Known>>,
-}
-
-impl Prints {
-    /// A file's fingerprint: the one kept while its size and time are as they were, or read now. One that can't be
-    /// read now isn't kept (Bitwig may have it open): it's tried again next time.
-    fn of(&self, path: &Path, stop: &AtomicBool) -> Option<[u8; 32]> {
-        let meta = fs::metadata(path).ok()?;
-        let (len, modified) = (meta.len(), meta.modified().ok());
-        let kept = self.known.lock().ok()?.get(path).copied();
-        if let Some(k) = kept.filter(|k| k.len == len && k.modified == modified) {
-            return Some(k.print);
-        }
-        // Changed between the look above and the read: it's kept with the older size and time, so it's read again.
-        let print = file_hash(path, stop)?;
-        self.known.lock().ok()?.insert(path.to_path_buf(), Known { len, modified, print });
-        Some(print)
-    }
 }
 
 /// A "(fixed)" project the converter wrote, and what it changed.
@@ -422,7 +427,7 @@ fn still_a_copy(
     if let Some(why) = (fixed.still_named)(copy, library) {
         return Err(why);
     }
-    let (copy_print, library_print) = (file_hash(copy, stop), prints.of(&real_library, stop));
+    let (copy_print, library_print) = (file_hash(copy, stop), prints.whole(&real_library, stop));
     if stop.load(Ordering::Relaxed) {
         return stays(STOPPED);
     }
