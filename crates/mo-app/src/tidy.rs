@@ -13,7 +13,8 @@
 //!   left alone; and, as old, a file the app wrote once but no longer reads ([`RETIRED`]).
 //! - `Curves\`: a curve file whose writing a crash cut short (`… .mo-part-<number>-<number>`), an hour old.
 //! - `twin\cs\`: the twin test's copy of your library (`library-copy.db`), left when the test was stopped, a day old.
-//! - Your Temp folder: the Space page's lists for the administrator step (`mo-admin-<n>-<n>-<n>.txt`), a day old.
+//! - Your Temp folder: the Space page's lists for the administrator step (`mo-admin-<n>-<n>-<n>.txt`), a day old;
+//!   and the MIDI page's Play in Bitwig files (`MO Play <n>-<n>.mid`, removed once Bitwig has read one), a day old.
 //! - `notes\`: F12 notes (`note-<time>.md`) and their pictures (`note-<time>.png`), as both apps save them, about 3
 //!   months after they were saved (Solomon, 2026-11-03: "remove older ones"), to the Recycle Bin: see below.
 //!

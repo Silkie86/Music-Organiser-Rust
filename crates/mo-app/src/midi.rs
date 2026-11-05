@@ -954,8 +954,8 @@ pub fn is_play_file(name: &str) -> bool {
     let Some(numbers) = name.strip_prefix(PLAY_FILE_PREFIX).and_then(|r| r.strip_suffix(".mid")) else {
         return false;
     };
-    let parts: Vec<&str> = numbers.split('-').collect();
-    parts.len() == 2 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+    let digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
+    numbers.split_once('-').is_some_and(|(pid, n)| digits(pid) && digits(n))
 }
 
 /// A part as FL Studio plays it on its selected channel ([`mo_dawlink::fl`]): its heard notes, round and round over
@@ -1438,6 +1438,7 @@ mod tests {
         assert_ne!(play_file_name(), name);
         assert!(is_play_file("MO Play 4120-3.mid"));
         assert!(!is_play_file("MO Play 4120.mid"));
+        assert!(!is_play_file("MO Play 4120-3-1.mid"));
         assert!(!is_play_file("MO Play Bass.mid"));
         assert!(!is_play_file("MO Play 4120-3.mid.part"));
         assert!(!is_play_file("Keys \u{b7} Pattern 3.mid"));

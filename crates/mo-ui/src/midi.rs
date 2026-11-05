@@ -394,8 +394,10 @@ fn wire(app: &AppWindow) {
     });
     let weak = app.as_weak();
     data.on_daw_play(move |daw| {
-        if let Some(app) = weak.upgrade() {
-            toggle_daw(&app, Daw::from_id(&daw));
+        if let Some(app) = weak.upgrade()
+            && let Some(daw) = Daw::from_id(&daw)
+        {
+            toggle_daw(&app, daw);
         }
     });
 }
@@ -881,9 +883,12 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
     let data = app.global::<MidiData>();
     let Some((at, _)) = picked else {
         data.set_panel_shown(false);
-        // The loop's Stop is on the card: closing it stops the loop too.
+        // The loop's Stop is on the card: closing it stops the loop too, and a part playing in a DAW.
         if data.get_playing() {
             stop_playing(app);
+        }
+        if data.get_daw_playing() != "" || data.get_daw_starting() != "" {
+            stop_daw(app);
         }
         return;
     };
@@ -1562,6 +1567,10 @@ fn play(app: &AppWindow, at: usize) {
         return;
     };
     PAGE.with(|p| p.borrow_mut().looping = Some(at));
+    // A part playing in a DAW would play over it.
+    if app.global::<MidiData>().get_daw_playing() != "" || app.global::<MidiData>().get_daw_starting() != "" {
+        stop_daw(app);
+    }
     crate::sounds::stop_for_another(app);
     data.set_playing(true);
     data.set_play_note("".into());
@@ -1661,8 +1670,12 @@ enum Daw {
 }
 
 impl Daw {
-    fn from_id(id: &str) -> Daw {
-        if id == "fl" { Daw::Fl } else { Daw::Bitwig }
+    fn from_id(id: &str) -> Option<Daw> {
+        match id {
+            "bitwig" => Some(Daw::Bitwig),
+            "fl" => Some(Daw::Fl),
+            _ => None,
+        }
     }
 
     /// What the page's buttons call it.
@@ -1711,16 +1724,10 @@ fn stop_in_daw(playing: InDaw) {
 /// (stopping one playing in the other first). False when there's nothing to play or stop.
 fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
     let data = app.global::<MidiData>();
-    if data.get_daw_starting() != "" {
-        return true;
-    }
-    let was = data.get_daw_playing();
-    let asked = DAW_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    if let Some(playing) = in_daw().take() {
-        stop_in_daw(playing);
-    }
-    data.set_daw_playing("".into());
-    data.set_daw_note("".into());
+    // What's playing or starting now: pressing its button again stops it (a start still on its way stops what it
+    // started as soon as it's in).
+    let was = if data.get_daw_starting() != "" { data.get_daw_starting() } else { data.get_daw_playing() };
+    stop_daw(app);
     if was == daw.id() {
         return true;
     }
@@ -1737,6 +1744,7 @@ fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
     };
     // The loop with a General MIDI sound would play over it.
     stop_playing(app);
+    let asked = DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst);
     data.set_daw_starting(daw.id().into());
     if HERE.with(|h| *h.borrow()) {
         data.set_daw_starting("".into());
@@ -1772,15 +1780,19 @@ fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
         };
         let _ = slint::invoke_from_event_loop(move || {
             let Some(app) = weak.upgrade() else { return };
-            let data = app.global::<MidiData>();
-            data.set_daw_starting("".into());
+            // A Stop since cleared the buttons itself.
             if DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst) != asked {
                 return;
             }
+            let data = app.global::<MidiData>();
+            data.set_daw_starting("".into());
             match note {
                 Ok(note) => {
                     data.set_daw_playing(daw.id().into());
                     data.set_daw_note(note.into());
+                    if daw == Daw::Fl {
+                        watch_fl(&app);
+                    }
                 }
                 Err(why) => data.set_daw_note(why.into()),
             }
@@ -1791,6 +1803,62 @@ fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
         log::error("MIDI", &format!("Couldn't start playing in a DAW: {e}"));
     }
     true
+}
+
+/// Stops what plays (or is starting) in a DAW, and the buttons say so at once. A start still on its way sees the
+/// newer ask and stops what it started.
+fn stop_daw(app: &AppWindow) {
+    DAW_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if let Some(playing) = in_daw().take() {
+        stop_in_daw(playing);
+    }
+    let data = app.global::<MidiData>();
+    data.set_daw_starting("".into());
+    data.set_daw_playing("".into());
+    data.set_daw_note("".into());
+}
+
+thread_local! {
+    /// Looks every second whether FL's notes still play: they stop by themselves when the MIDI port goes.
+    static FL_WATCH: slint::Timer = slint::Timer::default();
+}
+
+fn watch_fl(app: &AppWindow) {
+    let weak = app.as_weak();
+    FL_WATCH.with(|t| {
+        t.start(slint::TimerMode::Repeated, Duration::from_secs(1), move || {
+            let gone = matches!(&*in_daw(), Some(InDaw::Fl(fl)) if !fl.is_playing());
+            let playing_fl = matches!(&*in_daw(), Some(InDaw::Fl(_)));
+            if !playing_fl {
+                FL_WATCH.with(slint::Timer::stop);
+                return;
+            }
+            if gone && let Some(app) = weak.upgrade() {
+                stop_daw(&app);
+                app.global::<MidiData>().set_daw_note("It stopped: the Music Organiser MIDI port went away.".into());
+                FL_WATCH.with(slint::Timer::stop);
+            }
+        });
+    });
+}
+
+/// When the app closes: stops a part playing in a DAW, so Bitwig's clip doesn't loop on and no note hangs in FL.
+/// Waits a moment at most (Bitwig answers on this computer).
+pub fn finish_up() {
+    DAW_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    match in_daw().take() {
+        Some(InDaw::Fl(fl)) => fl.finish(),
+        Some(InDaw::Bitwig(bitwig)) => {
+            let to = mo_dawlink::bitwig::Bitwig {
+                change_timeout: Duration::from_secs(3),
+                ..mo_dawlink::bitwig::Bitwig::default()
+            };
+            if let Err(e) = to.stop_playing(&bitwig) {
+                log::warning("MIDI", &format!("The part playing in Bitwig couldn't be stopped as the app closed: {e}"));
+            }
+        }
+        None => {}
+    }
 }
 
 /// Starts the part in the DAW, and says where it plays. Waits for Bitwig, so never on the window's thread.
