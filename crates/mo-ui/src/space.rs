@@ -27,7 +27,7 @@ use mo_app::space_bin::{self, BIN, CAN_PUT_BACK, PutBacks};
 use mo_app::space_bitwig::{self, BITWIG_COPIES, Copies, Fixes, Fixing, ToFix};
 use mo_app::space_old::{self, Found, OLD_COPIES};
 use mo_app::space_plugins::{self, UNUSED_PLUGINS};
-use mo_app::space_removing::{self, Removable};
+use mo_app::space_removing::{self, Counting, Removable};
 use mo_app::space_songs::{self, COMPACT, FromLibrary, SongItem};
 use mo_app::space_spare::{self, Removing, SPARE_COPIES, Stage};
 use mo_app::{backup, log, paths, shell};
@@ -35,7 +35,7 @@ use mo_catch::catch_crash;
 use mo_library::folders::FolderList;
 use mo_space::app_files::{self, AppFilesPart};
 use mo_space::bitwig::{self, LibraryIndex};
-use mo_space::clean::{self, Done, Problem, SystemBin, What};
+use mo_space::clean::{self, Bin, Done, Problem, SystemBin, What};
 use mo_space::old_copies::Leftover;
 use mo_space::song::CompactSettings;
 use mo_space::spare::{SpareCopy, Used};
@@ -907,22 +907,20 @@ fn remove_ticked(app: &AppWindow, feed: Feed) {
         Some((picked, p.library.clone()))
     });
     let Some((picked, library)) = job else { return };
-    send_to_bin(app, feed, &SPARE, picked, move |picked| remove_now(picked, &library));
+    send_to_bin(app, feed, &SPARE, picked, move |picked, bin| remove_now(picked, &library, bin));
 }
 
 /// Remove's own work, off the window's thread: your plugin folders and which plugins your saves use, from the library
 /// (read-only, and closed again first), then each picked copy checked again and sent. When those can't be read, every
-/// copy stays (said in the log): what's spare can't be checked.
-fn remove_now(picked: &[SpareCopy], library: &Path) -> Done {
+/// copy stays (said in the log): what's spare can't be checked. What goes, goes to `bin`.
+fn remove_now(picked: &[SpareCopy], library: &Path, bin: &(dyn Bin + Sync)) -> Done {
     let Some((folders, used)) = plugin_folders_and_uses(library) else {
         return space_removing::stayed(picked, space_spare::CANT_CHECK);
     };
     let pro_tools = plugins::pro_tools_installed();
     // On the pool for long work that waits on a disk, as the look is (rule 21). Nothing stops it once it's on: each
     // copy is checked just before it goes, and the one administrator step asks Windows once, at the end.
-    background::on_bulk_pool(|| {
-        space_spare::remove(picked, &folders, &used, pro_tools, &SystemBin, &AtomicBool::new(false))
-    })
+    background::on_bulk_pool(|| space_spare::remove(picked, &folders, &used, pro_tools, bin, &AtomicBool::new(false)))
 }
 
 /// Remove for old copies: sends the ticked ones to the Recycle Bin together ([`send_to_bin`]), each found again in the
@@ -947,7 +945,7 @@ fn remove_old_ticked(app: &AppWindow, feed: Feed) {
         Some((picked, found, p.library.clone(), stop))
     });
     let Some((picked, found, library, stop)) = job else { return };
-    send_to_bin(app, feed, &OLD, picked, move |picked| remove_old_now(picked, &found, &library, &stop));
+    send_to_bin(app, feed, &OLD, picked, move |picked, bin| remove_old_now(picked, &found, &library, bin, &stop));
 }
 
 /// Remove for your songs' old autosaves and caches: sends the ticked ones to the Recycle Bin together ([`send_to_bin`]),
@@ -972,14 +970,21 @@ fn remove_songs_ticked(app: &AppWindow, feed: Feed) {
         Some((picked, settings, p.library.clone(), stop))
     });
     let Some((picked, settings, library, stop)) = job else { return };
-    send_to_bin(app, feed, &SONGS, picked, move |picked| remove_songs_now(picked, settings, &library, &stop));
+    send_to_bin(app, feed, &SONGS, picked, move |picked, bin| remove_songs_now(picked, settings, &library, bin, &stop));
 }
 
 /// Remove's own work for your songs' things, off the window's thread: the saves, the samples they use and your folders
 /// as the library has them now (read-only, and closed again first), then each song picked from measured again (with
 /// the `settings` the look had) and each one checked and sent. When the library can't be read, every one stays (said
-/// in the log): what's old can't be told without it. `stop` (Stop) leaves what hasn't gone yet where it is.
-fn remove_songs_now(picked: &[SongItem], settings: CompactSettings, library: &Path, stop: &AtomicBool) -> Done {
+/// in the log): what's old can't be told without it. What goes, goes to `bin`; `stop` (Stop) leaves what hasn't gone
+/// yet where it is.
+fn remove_songs_now(
+    picked: &[SongItem],
+    settings: CompactSettings,
+    library: &Path,
+    bin: &(dyn Bin + Sync),
+    stop: &AtomicBool,
+) -> Done {
     let from = match open_library(library).map(|lib| FromLibrary::read(&lib)) {
         Some(Ok(from)) => from,
         Some(Err(e)) => {
@@ -995,13 +1000,20 @@ fn remove_songs_now(picked: &[SongItem], settings: CompactSettings, library: &Pa
         }
     };
     // On the pool for long work that waits on a disk (it walks each song's folder again), as the look is (rule 21).
-    background::on_bulk_pool(|| space_songs::remove(picked, &from, settings, &SystemBin, stop))
+    background::on_bulk_pool(|| space_songs::remove(picked, &from, settings, bin, stop))
 }
 
 /// Remove's own work for old copies, off the window's thread: the moves as the library keeps them now (read-only, and
 /// closed again first), then each picked one found again in them, checked and sent. When they can't be read, every one
-/// stays (said in the log): it can't be checked against them. `stop` (Stop) leaves what isn't checked yet where it is.
-fn remove_old_now(picked: &[Leftover], found: &Found, library: &Path, stop: &AtomicBool) -> Done {
+/// stays (said in the log): it can't be checked against them. What goes, goes to `bin`; `stop` (Stop) leaves what isn't
+/// checked yet where it is.
+fn remove_old_now(
+    picked: &[Leftover],
+    found: &Found,
+    library: &Path,
+    bin: &(dyn Bin + Sync),
+    stop: &AtomicBool,
+) -> Done {
     let now = match open_library(library) {
         Some(lib) => {
             let read = |key: &str| lib.setting(key);
@@ -1019,9 +1031,7 @@ fn remove_old_now(picked: &[Leftover], found: &Found, library: &Path, stop: &Ato
     };
     // On the pool for long work that waits on a disk (it compares every file with its copy), as the look is (rule 21).
     // Each one is checked just before it goes, and the one administrator step asks Windows once, at the end.
-    background::on_bulk_pool(|| {
-        space_old::remove(picked, found, (now.0.as_deref(), now.1.as_deref()), &SystemBin, stop)
-    })
+    background::on_bulk_pool(|| space_old::remove(picked, found, (now.0.as_deref(), now.1.as_deref()), bin, stop))
 }
 
 /// Remove's own thread for one clean-up (`clean`): sends `picked` to the Recycle Bin with `work` on a low-priority
@@ -1033,16 +1043,23 @@ fn send_to_bin<T: Removable + Send + 'static>(
     feed: Feed,
     clean: &'static Clean<T>,
     picked: Vec<T>,
-    work: impl FnOnce(&[T]) -> Done + Send + 'static,
+    work: impl FnOnce(&[T], &(dyn Bin + Sync)) -> Done + Send + 'static,
 ) {
     let weak = app.as_weak();
     let folder = paths::data_dir();
     let (when, sending) = (binned::now(), picked.clone());
     let started = background::spawn(clean.thread, move || {
         let card = feed.start(clean.title, &(clean.words)());
+        // The card says how many are in the bin so far (thousands of autosaves can take minutes).
+        let of = sending.len();
+        let each = |sent: usize| {
+            let fraction = sent as f32 / of.max(1) as f32;
+            card.progress(fraction, Some(&space_removing::progress_words(sent, of)));
+        };
+        let bin = Counting::new(&SystemBin, &each);
         // A crash (logged as one) still finishes Remove, so the page isn't busy for ever: what went before it is in the
         // bin, but which isn't known.
-        let done = catch_crash(AssertUnwindSafe(|| work(&sending)))
+        let done = catch_crash(AssertUnwindSafe(|| work(&sending, &bin)))
             .unwrap_or_else(|_| space_removing::stayed(&sending, &space_removing::crashed_words()));
         for (warning, line) in space_removing::log_lines(&done, clean.one, clean.many) {
             if warning { log::warning("Space", &line) } else { log::info("Space", &line) }

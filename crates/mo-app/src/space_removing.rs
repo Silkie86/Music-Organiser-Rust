@@ -5,9 +5,11 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
-use mo_space::clean::{Done, Problem, Removed};
+use mo_space::admin::Admin;
+use mo_space::clean::{Bin, Check, Done, Problem, Removed};
 use mo_space::size::size_text;
 
 use crate::songs::thousands;
@@ -20,6 +22,57 @@ pub const ADMIN: &str = "The ones in Program Files go together at the end, so Wi
 /// What a card says, once they went, of putting back the ones from Program Files: Put back asks Windows once for all
 /// of them, as Remove did.
 pub const ADMIN_BACK: &str = "For the ones from Program Files, Windows asks once for administrator rights.";
+
+/// What a clean-up's card says while Remove runs: how many of those picked are in the Recycle Bin so far.
+pub fn progress_words(sent: usize, of: usize) -> String {
+    format!("{} of {} in the Recycle Bin", thousands(sent), thousands(of))
+}
+
+/// A Recycle Bin that counts what it takes, so a clean-up's card can say how far Remove has got
+/// ([`progress_words`]): each thing goes to `bin`, and `each` hears how many have gone so far. Everything else is
+/// `bin`'s own.
+pub struct Counting<'a> {
+    bin: &'a (dyn Bin + Sync),
+    sent: AtomicUsize,
+    each: &'a (dyn Fn(usize) + Sync),
+}
+
+impl<'a> Counting<'a> {
+    pub fn new(bin: &'a (dyn Bin + Sync), each: &'a (dyn Fn(usize) + Sync)) -> Self {
+        Counting { bin, sent: AtomicUsize::new(0), each }
+    }
+}
+
+impl Bin for Counting<'_> {
+    fn send(&self, path: &Path) -> Result<(), String> {
+        let sent = self.bin.send(path);
+        if sent.is_ok() {
+            (self.each)(self.sent.fetch_add(1, Ordering::Relaxed) + 1);
+        }
+        sent
+    }
+    fn admin(&self) -> &dyn Admin {
+        self.bin.admin()
+    }
+    fn find(&self, removed: &mut [Removed]) -> Vec<Problem> {
+        self.bin.find(removed)
+    }
+    fn put_back(&self, removed: &[Removed]) -> Vec<Problem> {
+        self.bin.put_back(removed)
+    }
+    fn holds(&self, removed: &[Removed]) -> Option<Vec<bool>> {
+        self.bin.holds(removed)
+    }
+    fn put_back_checked(&self, removed: &[Removed], check: &Check<'_>, each: &mut dyn FnMut(usize, Option<String>)) {
+        self.bin.put_back_checked(removed, check, each);
+    }
+    fn can_look_for(&self, removed: &Removed) -> bool {
+        self.bin.can_look_for(removed)
+    }
+    fn refuses_quietly(&self, path: &Path, bytes: u64) -> Option<String> {
+        self.bin.refuses_quietly(path, bytes)
+    }
+}
 
 /// Something a clean-up lists, that Remove can send to the Recycle Bin.
 pub trait Removable: Clone + Debug + PartialEq + Eq {
@@ -548,6 +601,43 @@ mod tests {
 
     fn problem(path: &str, why: &str) -> Problem {
         Problem { path: path.to_owned(), why: why.to_owned() }
+    }
+
+    /// A bin for tests that takes every path but one called "stuck", and keeps nothing: never the computer's bin.
+    struct Taking;
+
+    impl Bin for Taking {
+        fn send(&self, path: &Path) -> Result<(), String> {
+            if path.ends_with("stuck") { Err("It's in use.".to_owned()) } else { Ok(()) }
+        }
+        fn find(&self, _: &mut [Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+        fn put_back(&self, _: &[Removed]) -> Vec<Problem> {
+            Vec::new()
+        }
+        fn refuses_quietly(&self, _: &Path, bytes: u64) -> Option<String> {
+            (bytes > 10).then(|| "Too big.".to_owned())
+        }
+    }
+
+    #[test]
+    fn the_card_hears_how_many_have_gone_to_the_bin_so_far() {
+        let heard = std::sync::Mutex::new(Vec::new());
+        let each = |n: usize| {
+            if let Ok(mut heard) = heard.lock() {
+                heard.push(n);
+            }
+        };
+        let bin = Counting::new(&Taking, &each);
+        let sent: Vec<bool> = ["a", "stuck", "b", "c"].iter().map(|p| bin.send(Path::new(p)).is_ok()).collect();
+        assert_eq!(sent, [true, false, true, true]);
+        // Only what went counts.
+        assert_eq!(heard.lock().map(|h| h.clone()).unwrap_or_default(), [1, 2, 3]);
+        // The rest is the bin's own.
+        assert_eq!(bin.refuses_quietly(Path::new("a"), 20), Some("Too big.".to_owned()));
+        assert_eq!(bin.refuses_quietly(Path::new("a"), 5), None);
+        assert_eq!(progress_words(1234, 5000), "1,234 of 5,000 in the Recycle Bin");
     }
 
     #[test]
