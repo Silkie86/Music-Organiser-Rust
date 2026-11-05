@@ -482,14 +482,15 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         // The picked part stays picked when the index is read again, found by its notes.
         let hash = p.picked.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.hash.clone());
         p.years = loaded.years;
-        p.cat = Arc::new(loaded.cat);
+        // The old index goes on the freeing thread: tens of thousands of parts take a while to let go.
+        background::free_later(std::mem::replace(&mut p.cat, Arc::new(loaded.cat)));
         p.old = loaded.old;
         p.notes = Some(loaded.notes);
         p.picked = hash.and_then(|h| p.cat.find(&h));
         p.picked_row = None;
         p.target = None;
         // The old list points into the old index: nothing shows until the new one is worked out.
-        p.shown = Arc::new(Vec::new());
+        background::free_later(std::mem::replace(&mut p.shown, Arc::new(Vec::new())));
         let read_now = !p.read_once && !HERE.with(|h| *h.borrow());
         p.read_once = true;
         (p.picked, read_now)
@@ -760,7 +761,8 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
         }
         // The picked part's row in the new list: one look, here, rather than at every step.
         p.picked_row = p.picked.and_then(|at| hits.iter().position(|h| h.entry == at));
-        p.shown = Arc::new(hits);
+        // The old list (one line per part shown) is let go on the freeing thread.
+        background::free_later(std::mem::replace(&mut p.shown, Arc::new(hits)));
         p.counts = counts;
         let target = p.target.and_then(|t| {
             let at = match t {

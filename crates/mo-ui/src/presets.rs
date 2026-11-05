@@ -263,6 +263,10 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
             read_sounds(app);
         }
     });
+    // The app may start on this page: it was shown before the page knew where the library is.
+    if app.get_place() == Place::Presets.index() as i32 {
+        shown(app);
+    }
 }
 
 /// Shows one line of the Sounds section, by its place in the lines (Ctrl+K): when the filters hide it, they go.
@@ -437,6 +441,10 @@ fn wire(app: &AppWindow) {
 
 /// The page came into view: the sounds are read the first time.
 pub fn shown(app: &AppWindow) {
+    // Not connected yet (the app starting on this page, before `connect`): `connect` shows it once it's wired.
+    if APP.with(|a| a.borrow().is_none()) {
+        return;
+    }
     let start = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         !std::mem::replace(&mut p.started, true)
