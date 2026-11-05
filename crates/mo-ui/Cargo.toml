@@ -24,7 +24,8 @@ mo-midi = { path = "../mo-midi" }
 mo-formats = { path = "../mo-formats" }
 mo-space = { path = "../mo-space" }
 mo-sounds = { path = "../mo-sounds" }
-mo-audio = { path = "../mo-audio" }
+# Playing sounds, and MIDI parts with a SoundFont (gm).
+mo-audio = { path = "../mo-audio", features = ["gm"] }
 mo-backup = { path = "../mo-backup" }
 mo-presets = { path = "../mo-presets" }
 # Send to Bitwig (Presets), and Settings › DAWs checks the Bitwig link.

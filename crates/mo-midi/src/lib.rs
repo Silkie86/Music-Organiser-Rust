@@ -10,6 +10,7 @@ pub mod analyser;
 pub mod catalogue;
 pub mod chord;
 pub mod extract;
+pub mod gm;
 pub mod index;
 pub mod indexer;
 pub mod instruments;

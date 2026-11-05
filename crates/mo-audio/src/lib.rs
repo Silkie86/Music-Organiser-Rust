@@ -9,6 +9,8 @@
 
 mod adpcm;
 pub mod dsp;
+#[cfg(feature = "gm")]
+pub mod gm;
 mod other;
 #[cfg(feature = "play")]
 pub mod play;

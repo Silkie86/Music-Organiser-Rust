@@ -75,7 +75,7 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 enum Order {
-    Play { id: u64, sound: Arc<AudioData>, start: f64 },
+    Play { id: u64, sound: Arc<AudioData>, start: f64, looping: bool },
     Seek { id: u64, new_id: u64, seconds: f64 },
     Stop,
     Choose(Option<String>),
@@ -136,6 +136,17 @@ impl Player {
         let _ = self.play_if(sound, key, start_seconds, || Ok::<(), std::convert::Infallible>(()));
     }
 
+    /// [`Player::play`] going round and round: at its end it starts again with no gap, until it's stopped or
+    /// replaced. `on_end` is never called for it.
+    pub fn play_looped(&self, sound: Arc<AudioData>, key: impl Into<String>, start_seconds: f64) {
+        let key = key.into();
+        let start = start_seconds.max(0.0);
+        let mut now = lock(&self.shared.now);
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        *now = Some(Now { id, key, start });
+        self.send(Order::Play { id, sound, start, looping: true });
+    }
+
     /// [`Player::play`], only if `wanted` still says so as the sound starts, with no other play or stop able to come
     /// in between: so a stop or a newer sound asked for just before can't be undone by this one starting after it.
     /// Gives back what `wanted` said. `wanted` should only take a quick look (a stop waits for it).
@@ -154,7 +165,7 @@ impl Player {
         wanted()?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         *now = Some(Now { id, key, start });
-        self.send(Order::Play { id, sound, start });
+        self.send(Order::Play { id, sound, start, looping: false });
         Ok(())
     }
 
@@ -238,6 +249,7 @@ struct Playing {
     id: u64,
     sound: Arc<AudioData>,
     start: f64,
+    looping: bool,
 }
 
 struct Open {
@@ -296,11 +308,11 @@ impl Keeper {
 
     fn obey(&mut self, order: Order) {
         match order {
-            Order::Play { id, sound, start } => {
+            Order::Play { id, sound, start, looping } => {
                 self.reopens = 0;
-                self.playing = Some(Playing { id, sound: Arc::clone(&sound), start });
+                self.playing = Some(Playing { id, sound: Arc::clone(&sound), start, looping });
                 if self.open.is_some() {
-                    self.tell(ToMixer::Play { id, from: start * f64::from(sound.sample_rate), sound });
+                    self.tell(ToMixer::Play { id, from: start * f64::from(sound.sample_rate), sound, looping });
                     // After it has started, so a look that finds nothing to do (or can't move) doesn't hold it up.
                     self.look(false);
                 } else if !self.waiting() {
@@ -509,7 +521,7 @@ impl Keeper {
         self.open = Some(open);
         if let Some(p) = &self.playing {
             let from = p.start * f64::from(p.sound.sample_rate);
-            self.tell(ToMixer::Play { id: p.id, sound: Arc::clone(&p.sound), from });
+            self.tell(ToMixer::Play { id: p.id, sound: Arc::clone(&p.sound), from, looping: p.looping });
         }
     }
 
