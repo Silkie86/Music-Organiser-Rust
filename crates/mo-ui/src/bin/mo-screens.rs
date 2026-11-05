@@ -103,6 +103,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.global::<mo_ui::MidiData>().set_playing(true);
     shots.push(("midi-playing.png".into(), capture(&window)));
     app.global::<mo_ui::MidiData>().set_playing(false);
+    // A part dragged out to a DAW from its line: dimmed while it's carried, with the card that follows the mouse.
+    let still = capture(&window);
+    app.global::<mo_ui::MidiData>().set_lifted_row(1);
+    let lifted = capture(&window);
+    let card = mo_ui::midi::card_at_row(&app, 1).ok_or("midi-drag.png: no part on the second line")?;
+    let (x, y, w, h) = changed_box(&still, &lifted).ok_or("midi-drag.png: the second line didn't dim")?;
+    shots.push(("midi-drag.png".into(), with_card(lifted, &card, &graphite, (x + w / 3, y + h / 2 + 20))));
+    app.global::<mo_ui::MidiData>().set_lifted_row(-1);
     // The roll with each note's name on it (it grows so each row has room).
     app.global::<mo_ui::MidiData>().set_roll_names(true);
     shots.push(("midi-note-names.png".into(), capture(&window)));

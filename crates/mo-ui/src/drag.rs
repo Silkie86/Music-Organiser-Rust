@@ -136,7 +136,9 @@ pub fn start(app: &AppWindow, drag: Drag) -> bool {
     let weak = app.as_weak();
     let make = drag.make;
     let started = mo_app::background::spawn("Drag out", move || {
-        let made = make();
+        // A bug in the making is logged as a crash and ends the drag, rather than leaving it waiting for ever.
+        let made = mo_catch::catch_crash(std::panic::AssertUnwindSafe(make))
+            .unwrap_or_else(|_| Err("Something went wrong making what's dragged.".to_owned()));
         let _ = weak.upgrade_in_event_loop(move |app| made_ready(&app, id, made));
     });
     if let Err(e) = started {
