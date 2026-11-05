@@ -735,6 +735,11 @@ fn sounds_shots(
     shots.push(("sounds-galaxy-mini.png".into(), capture(window)));
     data.invoke_pick_view(4);
     shots.push(("sounds-rediscover.png".into(), capture(window)));
+    // A forgotten folder clicked on Rediscover: the List shows its own sounds, with a chip saying which folder.
+    data.invoke_pick_folder(r"D:\Samples\Drums".into());
+    capture(window);
+    shots.push(("sounds-folder.png".into(), capture(window)));
+    data.invoke_toggle("folder".into());
     data.invoke_pick_view(5);
     data.invoke_kit_roll();
     data.invoke_pad_lock(0);

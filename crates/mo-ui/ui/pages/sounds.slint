@@ -301,8 +301,10 @@ export global SoundsData {
     // The use counts are in, so the Used and Unused chips can work.
     in property <bool> knows-use;
     in property <bool> favourites;
+    // The forgotten folder clicked on Rediscover that the list is narrowed to (its own sounds), or none.
+    in property <string> folder;
     in property <bool> any-filter;
-    // "mix-well", "unused", "used" or "favourites".
+    // "mix-well", "unused", "used", "favourites" or "folder".
     callback toggle(string);
     callback clear();
 
@@ -1372,6 +1374,12 @@ export component SoundsPage inherits Rectangle {
                 text: "Favourites";
                 on: SoundsData.favourites;
                 clicked => { SoundsData.toggle("favourites"); }
+            }
+            // Only while a forgotten folder narrows the list: a click shows every folder's sounds again.
+            if SoundsData.folder != "": ToggleChip {
+                text: "In " + SoundsData.folder;
+                on: true;
+                clicked => { SoundsData.toggle("folder"); }
             }
             if SoundsData.any-filter: ToggleChip {
                 text: "Clear";
