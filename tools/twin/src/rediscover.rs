@@ -133,11 +133,11 @@ fn queries() -> Vec<Options> {
         Options { seed: 7, count: 10, ..o.clone() },
         Options { sound_type: Some("Kick".into()), count: 5, adventure: 0.0, seed: 3, ..o.clone() },
         Options { sound_type: Some("Closed hat".into()), count: 8, adventure: 0.6, seed: 11, max_uses: 1, ..o.clone() },
-        Options { year: Some(2020), count: 6, seed: 5, ..o.clone() },
+        Options { years: Some((2020, 2020)), count: 6, seed: 5, ..o.clone() },
         Options { sound_type: Some("808".into()), count: 60, seed: 13, ..o.clone() },
         Options { sound_type: Some("Vocal".into()), seed: 2, ..o.clone() },
-        Options { year: Some(1999), seed: 2, ..o.clone() },
-        Options { sound_type: Some("Snare".into()), year: Some(2018), max_uses: 99, count: 4, seed: 17, ..o },
+        Options { years: Some((1999, 1999)), seed: 2, ..o.clone() },
+        Options { sound_type: Some("Snare".into()), years: Some((2018, 2018)), max_uses: 99, count: 4, seed: 17, ..o },
     ]
 }
 
@@ -180,7 +180,8 @@ fn query_json(o: &Options) -> Value {
         "Adventure": o.adventure,
         "Seed": o.seed,
         "MaxUses": o.max_uses,
-        "Year": o.year,
+        // The C# app picked one year: each question here asks for one (a span of one year on the Rust strip).
+        "Year": o.years.map(|(first, _)| first),
     })
 }
 
@@ -249,7 +250,8 @@ fn rust_side(db: &Path, uses: &[Value]) -> Result<Value, String> {
         "answers": answers,
         "kits": kits,
         "duplicates": duplicates,
-        "years": years(&sounds),
+        // The years alone, newest first, as the C# app listed them (the Rust strip also counts each one's sounds).
+        "years": years(&sounds, chrono::Datelike::year(&Local::now())).iter().map(|y| y.0).collect::<Vec<_>>(),
         "folders": folders(&sounds, &usage)
             .iter()
             .map(|f| json!({ "Folder": f.folder, "Sounds": f.sounds, "Used": f.used, "Share": f.share }))
