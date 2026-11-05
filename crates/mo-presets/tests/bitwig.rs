@@ -143,6 +143,17 @@ fn finds_templates_among_found_presets_and_matches_by_format() {
     let vst3 = PresetBlob::new("A", "Serum", ".vstpreset", vec![1]);
     assert!(send::template_for(&vst3, &templates).is_none());
     assert!(send::template_for(&serum_sound("A", "Diva"), &templates).is_none());
+
+    // The list kept between runs gives the same files and templates, read from their files and then kept.
+    let store = dir.join("data").join(mo_presets::file_store::FILE_NAME);
+    let roots = std::slice::from_ref(&dir);
+    for run in 0..2 {
+        let (found, why) = mo_presets::file_store::find(roots, &store);
+        assert_eq!(why, None);
+        assert_eq!(found.read, if run == 0 { 3 } else { 0 });
+        assert_eq!(found.files, library::find_preset_files(roots));
+        assert_eq!(found.templates, templates);
+    }
 }
 
 #[test]

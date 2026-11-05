@@ -1191,8 +1191,13 @@ fn export_setup() -> (Option<PathBuf>, Option<Arc<Templates>>, Vec<PathBuf>, Fee
 fn templates_now(have: Option<Arc<Templates>>, bitwig: &[PathBuf]) -> Arc<Templates> {
     have.unwrap_or_else(|| {
         let roots = logic::preset_folders(&plib::default_folders(), bitwig);
+        // The same folder the page keeps the store in (`Page::data_dir` is set from it).
         let store = mo_app::paths::data_dir().join(file_store::FILE_NAME);
-        Arc::new(background::on_pool(|| file_store::find(&roots, &store).0.templates))
+        let (found, why) = background::on_pool(|| file_store::find(&roots, &store));
+        if let Some(why) = why.or(found.not_kept) {
+            log::warning("Presets", &format!("The preset files read for Send to Bitwig weren't kept: {why}"));
+        }
+        Arc::new(found.templates)
     })
 }
 

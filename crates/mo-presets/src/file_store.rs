@@ -21,8 +21,8 @@ use rayon::prelude::*;
 use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::bitwig::{self as bw, Template, Templates};
-use crate::files::{FileFormat, NotAPreset, PresetFile};
-use crate::library::{FoundPreset, list_preset_files, read_preset_file};
+use crate::files::{self, FileFormat, NotAPreset, PresetFile};
+use crate::library::{FoundPreset, list_preset_files};
 
 /// The store's name, in the app's data folder.
 pub const FILE_NAME: &str = "preset-files.db";
@@ -121,12 +121,42 @@ fn kind_of(n: i64) -> PluginKind {
     }
 }
 
-/// Reads one file, and its template when it may be one (the second read only for those, and only when it changed).
-fn read_entry(path: &Path) -> Entry {
-    let found = read_preset_file(path);
-    let template = if bw::may_be_template(&found) { bw::inspect_caught(path) } else { None };
-    Entry { file: found.file, template }
+/// Reads one file, and its template when it may be one. A Bitwig preset is read from the disk and decoded once for both.
+/// `None` when the file couldn't be read (open elsewhere, or a drive gone just now): it isn't kept, so it's read again
+/// next time. A file that trips a reader is kept as it is: it reads the same way until it changes.
+fn read_entry(path: &Path) -> Option<Entry> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if FileFormat::of(&name) != Some(FileFormat::BwPreset) {
+        return match mo_catch::catch(|| files::read(path)) {
+            Ok(Err(_)) => None,
+            Ok(Ok(file)) => Some(Entry { file, template: None }),
+            Err(_) => Some(Entry { file: Err(NotAPreset(TRIPPED.into())), template: None }),
+        };
+    }
+    let bytes = std::fs::read(path).ok()?;
+    let stem = mo_formats::paths::stem(&name).to_owned();
+    let read = mo_catch::catch(move || {
+        let doc = mo_formats::bitwig::decode(bytes)
+            .map_err(|_| NotAPreset("it doesn't start as a Bitwig file does (\"BtWg\")".into()))?;
+        let file = files::bwpreset_of(&doc, &stem);
+        let template = if file.wraps_plugin { bw::inspect_doc(&doc) } else { None };
+        Ok::<_, NotAPreset>((file, template))
+    });
+    Some(match read {
+        Ok(Ok((file, template))) => {
+            let template = template.map(|mut t| {
+                t.path = path.to_path_buf();
+                t
+            });
+            Entry { file: Ok(file), template }
+        }
+        Ok(Err(e)) => Entry { file: Err(e), template: None },
+        Err(_) => Entry { file: Err(NotAPreset(TRIPPED.into())), template: None },
+    })
 }
+
+/// What a file that trips its reader is listed with (as `library::read_preset_file` lists it).
+const TRIPPED: &str = "the reader stopped on something it didn't expect in this file";
 
 impl FileStore {
     /// Opens the store at `path`, making it (and its folder) if it isn't there. One that's damaged or from another
@@ -154,9 +184,10 @@ impl FileStore {
 
     fn open_as_is(path: &Path) -> Result<FileStore, Damage> {
         let err = |e: rusqlite::Error| {
+            // A row that doesn't read back as written (no SQLite code) is damage too.
             let damaged = matches!(
                 e.sqlite_error_code(),
-                Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt)
+                None | Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt)
             );
             if damaged { Damage::Damaged(e.to_string()) } else { Damage::Busy(e.to_string()) }
         };
@@ -265,7 +296,11 @@ impl FileStore {
                     let found = FoundPreset { path: text, file: entry.file.clone() };
                     return (found, entry.template.clone(), None, false);
                 }
-                let entry = read_entry(path);
+                let Some(entry) = read_entry(path) else {
+                    // Couldn't be read just now: listed as the page always listed it, and read again next time.
+                    let found = crate::library::read_preset_file(path);
+                    return (found, None, None, true);
+                };
                 // A file that couldn't be looked at, or changed while it was read, is read again next time.
                 let keep = now.filter(|(at, size, _)| stamp(path).is_some_and(|(a, s, _)| a == *at && s == *size));
                 let template = entry.template.map(|mut t| {
@@ -277,7 +312,11 @@ impl FileStore {
             })
             .collect();
         let read = done.iter().filter(|d| d.3).count();
-        let not_kept = self.write(&done, &kept).err().map(|e| e.to_string());
+        let listed: std::collections::HashSet<&str> = done.iter().map(|d| d.0.path.as_str()).collect();
+        let gone = kept.keys().any(|p| !listed.contains(p.as_str()));
+        drop(listed);
+        // Nothing read and nothing gone: the store is as it should be, so it isn't written.
+        let not_kept = if read == 0 && !gone { None } else { self.write(&done, &kept).err().map(|e| e.to_string()) };
         let mut files = Vec::with_capacity(done.len());
         let mut templates = Vec::new();
         for (found, template, _, _) in done {
