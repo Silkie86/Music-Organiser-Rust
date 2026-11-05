@@ -15,8 +15,9 @@
 //!    adds up to at least [`Thresholds::same`].
 //! 7. **Unclear:** otherwise, leaning to the first reading.
 //!
-//! The thresholds are set by hand for now ([`super::THRESHOLDS`]): the calibration's fit will set them, each as the
-//! least chance at which that kind of answer is wrong at most one time in ten.
+//! The chances are made true first ([`Calibration`]: how sharp they are, by how much music is heard and its texture),
+//! then the thresholds ([`super::THRESHOLDS`]) are each the least chance at which that kind of answer is wrong at most
+//! one time in ten. The bench fits both (`theorybench chordcal`).
 
 use super::hear::{Hearing, Stream};
 
@@ -119,6 +120,76 @@ impl Thresholds {
     pub fn at(&self, texture: Texture) -> (f64, f64) {
         let at = |t: &[f64; 4]| t.get(texture.index()).copied().unwrap_or(f64::INFINITY);
         (at(&self.one), at(&self.same))
+    }
+}
+
+/// The knots of the sharpness's curve over how much music is heard ([`Calibration`]): 1, 2, 4, 8 and 16 bars, on a log
+/// scale (more than 16 bars takes the last).
+pub const SHARPNESS_KNOTS: usize = 5;
+
+/// How many numbers the calibration is ([`Calibration`]): the sharpness at each knot, then what an accompaniment,
+/// chords alone and one line alone add to it (a full mix adds nothing).
+pub const CALIBRATION_TERMS: usize = SHARPNESS_KNOTS + 3;
+
+/// The least sharpness: however the calibration's numbers come out, the chances never all go flat.
+pub const LEAST_SHARPNESS: f64 = 0.05;
+
+/// How sharp the chances are (harmony/design/chord-reader-design.md, "Calibration": the design's σ). Every score is
+/// multiplied by the sharpness before the decode adds the ways up into chances, so a sharpness under 1 makes the
+/// reader less sure of every reading and over 1 surer, while what it reads (the best way) stays as it is.
+///
+/// The sharpness is a curve over how much music is heard (a straight line between the knots at 1, 2, 4, 8 and 16 bars,
+/// on a log scale of bars), plus what the texture adds: [`Calibration::terms`] gives what each number is multiplied
+/// by, and the sharpness is their sum ([`Calibration::sharpness`]), at least [`LEAST_SHARPNESS`]. The bench fits the
+/// numbers (`theorybench chordcal`), so the chance of the first reading's chord is as often right as it says.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Calibration(pub [f64; CALIBRATION_TERMS]);
+
+/// Writes the weights of a tent curve over `bars` on a log scale into `terms`: 1 on the knot at `bars` (1, 2, 4 …),
+/// split between the two knots around it in between, and the last knot's past them (the first's below 1 bar).
+fn tent(terms: &mut [f64], bars: f64) {
+    let last = terms.len().saturating_sub(1);
+    let bars = if bars.is_finite() { bars.max(1.0) } else { 1.0 };
+    let at = bars.log2().clamp(0.0, last as f64);
+    let below = at.floor() as usize;
+    let above = at - below as f64;
+    if let Some(t) = terms.get_mut(below) {
+        *t = 1.0 - above;
+    }
+    if above > 0.0
+        && let Some(t) = terms.get_mut(below + 1)
+    {
+        *t = above;
+    }
+}
+
+impl Calibration {
+    /// Every score as it is: a sharpness of 1 whatever is heard.
+    pub const NONE: Calibration = Calibration([1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0]);
+
+    /// What each of the calibration's numbers is multiplied by for `bars` bars heard in a texture: the sharpness is
+    /// their sum. The bench fits the numbers through this.
+    pub fn terms(bars: f64, texture: Texture) -> [f64; CALIBRATION_TERMS] {
+        let mut terms = [0.0; CALIBRATION_TERMS];
+        let (curve, textures) = terms.split_at_mut(SHARPNESS_KNOTS);
+        tent(curve, bars);
+        if let Some(t) = texture.index().checked_sub(1).and_then(|i| textures.get_mut(i)) {
+            *t = 1.0;
+        }
+        terms
+    }
+
+    /// The sharpness for `bars` bars heard in a texture: at least [`LEAST_SHARPNESS`] (and that, should a number not
+    /// be one).
+    pub fn sharpness(&self, bars: f64, texture: Texture) -> f64 {
+        self.of_terms(&Calibration::terms(bars, texture))
+    }
+
+    /// The sharpness for some terms ([`Calibration::terms`]): their sum, each times its number, at least
+    /// [`LEAST_SHARPNESS`].
+    pub fn of_terms(&self, terms: &[f64; CALIBRATION_TERMS]) -> f64 {
+        let s: f64 = self.0.iter().zip(terms).map(|(c, t)| c * t).sum();
+        if s.is_finite() { s.max(LEAST_SHARPNESS) } else { LEAST_SHARPNESS }
     }
 }
 

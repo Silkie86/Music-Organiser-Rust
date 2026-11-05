@@ -244,6 +244,7 @@ impl Decoder {
         gold: &mut Gold,
         out: &mut Decoding,
     ) -> bool {
+        self.sharpness = SHARPNESS;
         self.decode_with(hearing, weights, tables, &[], Some(gold), out)
     }
 

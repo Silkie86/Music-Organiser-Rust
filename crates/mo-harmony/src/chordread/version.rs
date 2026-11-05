@@ -8,6 +8,7 @@
 //! - a hash of what the hand cases and the tests' music read, kept for each version, so a change to the code that
 //!   moves a reading (a chord, a name, a chance, an answer) fails too.
 
+use super::answer::LEAST_SHARPNESS;
 use super::decode::{KEEP, SHARPNESS, SPAN_BARS};
 use super::hear::{BASS_GAP, MOST_BAR_BEATS, MOST_UNITS};
 use super::reader::{MOST_READINGS, Model};
@@ -35,11 +36,15 @@ pub fn numbers_hash(model: &Model) -> u64 {
     for x in t.motion.iter().flatten().flatten() {
         h.real(*x);
     }
+    for x in &model.calibration.0 {
+        h.real(*x);
+    }
     let thresholds = model.thresholds;
     for x in thresholds.one.iter().chain(&thresholds.same) {
         h.real(*x);
     }
     h.real(SHARPNESS);
+    h.real(LEAST_SHARPNESS);
     h.real(weights::FLOOR);
     for n in [KEEP, SPAN_BARS, MOST_UNITS, usize::from(BASS_GAP), usize::from(MOST_READINGS)] {
         h.number(i128::try_from(n).unwrap_or(-1));

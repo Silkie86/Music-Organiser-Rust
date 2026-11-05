@@ -685,6 +685,14 @@ Each guess is played with its own root in the bass.
 - Accuracy uses inverse-probability weights for the oversampled disagreements.
 - They are for measuring only, unless he allows the 8 calibration numbers to be refitted on them. A 50-name audit of pack names goes through the same screen.
 
+**As built (calibration PR, 2026-11-05).** `chordread::Calibration` (`answer.rs`) and `theorybench chordcal` (tools/theorybench/README.md, "The chord reader's calibration"). `CHORD_READER_VERSION` 5. Each point is tested (`reader_tests.rs`, and the tests in `chordcal.rs`). The decode's fingerprint reads the hand-set numbers at σ 1, so it is the same.
+
+- σ is 8 numbers as designed: a tent over the bars heard (knots 1, 2, 4, 8 and 16; the units reported over the units in a bar) plus an offset for an accompaniment, chords alone and one line alone, at least 0.05. The reader works it out from the hearing and passes it to the decode (`Decoder::decode_at`); the decode finds the best way on the scores themselves and multiplies by σ only in forward-backward, so σ moves chances, never what is read (tested at 0.4 and 2.5). The fit (`chordfit`) still reads at 1. The hand cases' `Book` reads at the model's σ, as the reader does.
+- Fitted on fold 1 only (the fold `FITTED` never learned from), not cross-fitted over folds 1 to 4: three more fits of two hours each for numbers a fifth of the way from the hand-set ones. Each piece is read whole and cut into stretches of 1 to 16 bars (2 of each a way of hearing), since whole songs alone sit only at the last knot.
+- The event: the first reading's root and core among the label's accept set (lenient on POP909-CL); the bass kind is left out, as names are written with no slash.
+- NLL of the labelled chord over the readings kept (6), on a grid of 64 σ, coordinate descent. σ came out 0.82 to 1.09: the chances were near true.
+- Thresholds by the error itself, not its 95% upper bound (with the bound, chords alone could never be one chord), as the key finder's. Fitted: one chord at 0.59 (full mix), 0.80 (accompaniment) and 0.84 (chords alone); the same notes never meet 10% (the truth is outside the group 11% to 20% of the time), so they are never given. The full mix's 0.59 was 13.2% wrong on Billboard set B, never fitted on, so it ships at the hand-set 0.8.
+
 ## Explanations
 
 `explain` hears the notes again on demand (microseconds), so readings carry no reason data. It returns:

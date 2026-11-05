@@ -7,7 +7,7 @@
 //! [`Weights::check`] lists, so no explanation can ever show a chord's own note counting against it. The reader is
 //! built with [`FITTED`]: the hand-set weights moved part of the way to a fit.
 
-use super::answer::Thresholds;
+use super::answer::{Calibration, Thresholds};
 use super::candidates::Label;
 use super::cores::{Core, Group};
 use super::score::{Feature, PerFeature};
@@ -15,8 +15,8 @@ use super::score::{Feature, PerFeature};
 /// The hash of every number the reader is built from ([`super::numbers_hash`]) that these were written with, and the
 /// version of the reader they were first given with ([`super::CHORD_READER_VERSION`]). A test checks both: change a
 /// number here, in the counted tables or among those set by hand, and it asks for the new hash and a new version.
-pub(super) const SHIPPED_HASH: u64 = 0xeb70_d957_2341_a787;
-pub(super) const HASH_VERSION: u32 = 4;
+pub(super) const SHIPPED_HASH: u64 = 0x8a03_9143_ed40_92df;
+pub(super) const HASH_VERSION: u32 = 5;
 
 /// What each piece of evidence is worth ([`Feature`]), the trust in the pair term, and what a stretch read as no chord
 /// scores.
@@ -175,15 +175,49 @@ pub const FIRST_FIT: Weights = Weights {
     none: -2.4648582008590068, // hand-set -0.5
 };
 
-/// The hand-set thresholds the answers are graded by (texture by texture: a full mix, an accompaniment, chords alone,
-/// one line), until the calibration's fit sets them. Set from the hand cases: keys alone that a player could read
-/// more than one way (cases 13, 20, 22 and 33 with no bass) gave their first reading a chance of 0.63 to 0.76 with
-/// the hand-set weights, and must not be one chord, while the chords the cases want as one chord read 0.98 or more
-/// (cases 1, 10, 11 and 54). With the built-in weights ([`FITTED`]) those keys give 0.75 to 0.79 and those chords
-/// 0.997 or more: how close the first stays under 0.8 is what keeps the weights from going further towards the fit.
-/// The same notes need their group at 0.9: were the chances true, the chord would be outside it at most one time in
-/// ten, the design's target. One line alone is never one chord or the same notes: it's implied.
-pub const THRESHOLDS: Thresholds = Thresholds { one: [0.8, 0.8, 0.8, 1.0], same: [0.9, 0.9, 0.9, 1.0] };
+/// The thresholds the answers are graded by, texture by texture (a full mix, an accompaniment, chords alone, one line),
+/// fitted by `theorybench chordcal` on the chances [`CALIBRATION`] makes (tools/theorybench/README.md, "The chord
+/// reader's calibration (2026-11-05)"): each is the least chance, on a 0.01 grid from an even chance, at which the
+/// stretches given one chord on fold 1 of POP909-CL and Billboard set A are wrong (their root and core not the
+/// label's) at most one time in ten.
+///
+/// - **One chord:** 0.80 for an accompaniment and 0.84 for chords alone, as fitted. A full mix keeps the hand-set 0.8:
+///   the fit's 0.59 met the target on the music it was fitted on, but on Billboard set B's voicings, never fitted on,
+///   13% of the chords it gave as one chord were wrong (at 0.8, 8%), and harmony must be very precise.
+/// - **The same notes** are never given (1): the label was outside the first reading's same-notes group more than one
+///   time in ten at every threshold (a fifth of the time in a full mix and an accompaniment, 11% to 13% for chords
+///   alone), so those stretches are unclear, leaning to the first reading (the hand-set threshold was 0.9).
+/// - **One line alone** is never one chord: it's implied.
+///
+/// As the key finder's, each is judged by the error itself, not by the upper end of its likely range (printed beside
+/// it): by the upper end, chords alone could never be given one chord, the surest answers being wrong a little under
+/// one time in ten.
+pub const THRESHOLDS: Thresholds = Thresholds { one: [0.8, 0.8, 0.84, 1.0], same: [1.0, 1.0, 1.0, 1.0] };
+
+/// The thresholds set by hand before the calibration's fit: one chord at 0.8 and the same notes at 0.9, but for one
+/// line alone (never). Set from the hand cases: keys alone that a player could read more than one way (cases 13, 20,
+/// 22 and 33 with no bass) gave their first reading a chance of 0.63 to 0.76 with the hand-set weights, and must not
+/// be one chord, while the chords the cases want as one chord read 0.98 or more (cases 1, 10, 11 and 54).
+pub const HAND_THRESHOLDS: Thresholds = Thresholds { one: [0.8, 0.8, 0.8, 1.0], same: [0.9, 0.9, 0.9, 1.0] };
+
+/// How sharp the reader's chances are ([`Calibration`]), fitted by `theorybench chordcal` on fold 1 of POP909-CL and
+/// Billboard set A (the fold [`FITTED`] was measured on and never learned from), each read whole and cut into
+/// stretches of 1 to 16 bars, by the likelihood of the labelled chords (tools/theorybench/README.md, "The chord
+/// reader's calibration (2026-11-05)").
+///
+/// The chances were near true already: the sharpness comes out between 0.82 and 1.09, a little under 1 for a bar or
+/// two (a short clip is read a little less surely) and for an accompaniment, a little over for 16 bars and more of
+/// chords alone. Only these 8 numbers come from that music.
+pub const CALIBRATION: Calibration = Calibration([
+    0.8729307901619578,   // 1 bar
+    0.912110688074362,    // 2 bars
+    0.97033737366792,     // 4 bars
+    0.9703373736679202,   // 8 bars
+    1.0285868827231934,   // 16 bars or more
+    -0.05820525904419154, // an accompaniment adds
+    0.058241024210110515, // chords alone add
+    0.0,                  // one line alone adds (too few songs to fit: its answers are always implied)
+]);
 
 /// How many numbers a set of weights is ([`Weights::numbers`]), the numbers the fit sets: a weight for each piece of
 /// evidence (the two template priors' trusts among them), the trust in the pair term ([`Weights::PAIR`]), and w_N

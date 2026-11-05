@@ -54,7 +54,7 @@ use crate::ruled::{self, Plan, Plane, Reading};
 
 /// How a piece is heard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-enum Input {
+pub(crate) enum Input {
     /// The parts under the tune (POP909-CL's piano), each with its role.
     Piano,
     /// Every part, the tune with the rest.
@@ -69,9 +69,9 @@ enum Input {
 
 impl Input {
     /// The ways a dataset's song can be heard (`--inputs`); a piece voice.py played is heard as given.
-    const SONG: [Input; 4] = [Input::Piano, Input::Full, Input::Split, Input::Upper];
+    pub(crate) const SONG: [Input; 4] = [Input::Piano, Input::Full, Input::Split, Input::Upper];
 
-    fn short(self) -> &'static str {
+    pub(crate) fn short(self) -> &'static str {
         match self {
             Input::Piano => "piano",
             Input::Full => "full",
@@ -81,18 +81,18 @@ impl Input {
         }
     }
 
-    fn parse(text: &str) -> Option<Input> {
+    pub(crate) fn parse(text: &str) -> Option<Input> {
         Input::SONG.into_iter().find(|i| i.short() == text)
     }
 
     /// The ways a piece is heard: a piece voice.py played as given, a dataset's song each way asked for.
-    fn of(item: &Item, asked: &[Input]) -> Vec<Input> {
+    pub(crate) fn of(item: &Item, asked: &[Input]) -> Vec<Input> {
         if item.render.is_empty() { asked.to_vec() } else { vec![Input::Given] }
     }
 
     /// The piece's parts as this way hears them, each in order of start; none left empty. `split` is the piano's bass
     /// line and the rest ([`bass_line`]), for the ways that hear them apart.
-    fn parts(self, item: &Item, split: Option<&Split>) -> Vec<(Role, Vec<mo_harmony::Note>)> {
+    pub(crate) fn parts(self, item: &Item, split: Option<&Split>) -> Vec<(Role, Vec<mo_harmony::Note>)> {
         let parts = match (self, split) {
             (Input::Given | Input::Full, _) => SongNotes::of(item, &Parts::Pitched).by_part(),
             (Input::Piano, _) => SongNotes::of(item, &Parts::Accompaniment).by_part(),
@@ -106,19 +106,19 @@ impl Input {
     }
 
     /// Whether this way hears the piano's bass line apart from the rest.
-    fn splits(self) -> bool {
+    pub(crate) fn splits(self) -> bool {
         matches!(self, Input::Split | Input::Upper)
     }
 }
 
 /// The piano's bass line and the rest of its notes, as mo-harmony takes them.
-struct Split {
+pub(crate) struct Split {
     bass: Vec<mo_harmony::Note>,
     upper: Vec<mo_harmony::Note>,
 }
 
 impl Split {
-    fn of(item: &Item) -> Split {
+    pub(crate) fn of(item: &Item) -> Split {
         let piano = item.notes_of(|role| role != "melody" && role != "drums");
         let (bass, upper) = bass_line(&piano);
         Split { bass: keys::harmony_notes(&bass), upper: keys::harmony_notes(&upper) }
@@ -200,7 +200,7 @@ pub(crate) fn accepts(text: &str, lenient: bool) -> Vec<Label> {
 }
 
 /// Whether a source's labels are a template's triads while its piano plays more (POP909 and POP909-CL).
-fn lenient(item: &Item) -> bool {
+pub(crate) fn lenient(item: &Item) -> bool {
     item.source.starts_with("pop909")
 }
 

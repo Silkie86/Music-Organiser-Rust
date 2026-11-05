@@ -10,7 +10,8 @@ use super::decode_tests::{dense, random_pins, small_music, song, the_music, whol
 use super::hear_tests::{BEAT, Dice, Music, VELOCITY, line, random_music};
 use super::score_tests::{bars, hand_cases};
 use super::{
-    BassKind, COUNTED, Decoder, Decoding, HAND, Hearing, Label, Namer, Naming, PinnedSpan, Reading, SHIPPED, SpanFlags,
+    BassKind, COUNTED, Calibration, Decoder, Decoding, HAND, Hearing, Label, Model, Namer, Naming, PinnedSpan, Reading,
+    SHIPPED, SpanFlags,
 };
 use crate::chord::Chord;
 use crate::keyfind::Span as Stretch;
@@ -21,7 +22,8 @@ impl Named {
     /// Some music read whole and named with the hand-set weights, on the counted tables: the namer's tests are on
     /// numbers a fit doesn't move (the hand cases' gates are checked with the built-in ones too).
     fn read(music: &Music, pins: &[PinnedSpan], most: usize) -> Named {
-        Named::of(music, &HAND, &COUNTED, pins, most).expect("nothing read")
+        Named::of(music, &Model { weights: &HAND, calibration: &Calibration::NONE, ..SHIPPED }, pins, most)
+            .expect("nothing read")
     }
 }
 
@@ -375,8 +377,7 @@ fn show_the_targets() {
 #[test]
 #[ignore = "prints the design's hand cases read whole and named, with the built-in weights"]
 fn show_the_cases_named() {
-    let named =
-        |music: Music| Named::of(&music.looped(), SHIPPED.weights, SHIPPED.tables, &[], 4).expect("nothing read");
+    let named = |music: Music| Named::of(&music.looped(), &SHIPPED, &[], 4).expect("nothing read");
     for (name, music, _) in named_cases() {
         println!("{name}\n{}", render(&named(music).spans()));
     }
