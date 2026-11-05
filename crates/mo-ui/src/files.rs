@@ -80,12 +80,8 @@ pub fn copy_path(feed: &Feed, path: &str) {
     }
 }
 
-/// The Documents folder, where Windows really keeps it (it may have moved, to OneDrive say).
+/// The Documents folder, where Windows really keeps it (it may have moved, to OneDrive say): the one exports use
+/// ([`mo_app::bitwig_convert::documents`]).
 pub(crate) fn documents() -> PathBuf {
-    #[cfg(windows)]
-    if let Some(d) = known_folders::get_known_folder_path(known_folders::KnownFolder::Documents) {
-        return d;
-    }
-    let home = std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from);
-    home.map_or_else(|| Path::new(".").to_owned(), |h| h.join("Documents"))
+    mo_app::bitwig_convert::documents().unwrap_or_else(|| Path::new(".").to_owned())
 }

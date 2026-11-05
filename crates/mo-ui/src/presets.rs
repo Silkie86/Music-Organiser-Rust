@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use mo_app::activity::Feed;
+use mo_app::activity::{Feed, Job};
 use mo_app::background::{self, Newest};
 use mo_app::bitwig_convert as bitwig;
 use mo_app::finder::Kind;
@@ -96,10 +96,10 @@ struct Page {
     curves_reading: Option<(usize, usize)>,
     curves_failed: Option<String>,
     curve_message: String,
-    /// Where things are: the library, the app's data folder, the export folder, Bitwig's folders.
+    /// Where things are: the library (exports read the export folder from it as they start), the app's data folder,
+    /// Bitwig's folders.
     library: PathBuf,
     data_dir: PathBuf,
-    export_root: Option<PathBuf>,
     bitwig: Vec<PathBuf>,
     /// The Bitwig presets that Send to Bitwig builds from, once found.
     templates: Option<Arc<Templates>>,
@@ -961,7 +961,7 @@ fn read_all(at: &Where) -> Result<(), String> {
     let choices = lib.song_choices().unwrap_or_default();
     let export_root = bitwig::export_root(
         lib.setting(bitwig::EXPORT_FOLDER_KEY).ok().flatten().as_deref(),
-        bitwig::home().as_deref(),
+        bitwig::documents().as_deref(),
     );
     drop(lib);
     let songs = mo_library::songs::group_songs(&saves, &choices);
@@ -971,11 +971,10 @@ fn read_all(at: &Where) -> Result<(), String> {
     drop(saves);
     let total = newest.len();
     {
-        let (root, folders) = (export_root.clone(), bitwig_folders.clone());
+        let folders = bitwig_folders.clone();
         on_window(move |app| {
             PAGE.with(|p| {
                 let mut p = p.borrow_mut();
-                p.export_root = root;
                 p.bitwig = folders;
                 p.reading = Some((0, total));
             });
@@ -1229,12 +1228,20 @@ fn apply(app: &AppWindow, hash: &str, role: Option<Role>) {
     show_all(app);
 }
 
-/// The export folder and the templates, found now if the page hasn't yet (a click before the preset files were read).
-fn export_setup() -> (Option<PathBuf>, Option<Arc<Templates>>, Vec<PathBuf>, Feed) {
+/// What an export needs: the library to read the export folder from, and the templates (found on the export's thread
+/// if the page hasn't yet: a click before the preset files were read).
+fn export_setup() -> (PathBuf, Option<Arc<Templates>>, Vec<PathBuf>, Feed) {
     PAGE.with(|p| {
         let p = p.borrow();
-        (p.export_root.clone(), p.templates.clone(), p.bitwig.clone(), p.feed.clone())
+        (p.library.clone(), p.templates.clone(), p.bitwig.clone(), p.feed.clone())
     })
+}
+
+/// Ends an export that can't start (its export folder isn't there, say): its card and the page say why.
+fn export_stopped(job: Job, why: String) {
+    log::warning("Presets", &format!("Nothing was exported: {why}"));
+    job.failed(&why);
+    set_exporting(false, Some(why));
 }
 
 fn templates_now(have: Option<Arc<Templates>>, bitwig: &[PathBuf]) -> Arc<Templates> {
@@ -1266,15 +1273,16 @@ fn set_exporting(on: bool, message: Option<String>) {
 /// Exports one sound (and its Bitwig preset where its plugin has a template); with `send`, sends the Bitwig preset.
 fn export_one(app: &AppWindow, item: Item, send: bool) {
     let Source::Song { save, key } = item.row.source.clone() else { return };
-    let (root, templates, bitwig_folders, feed) = export_setup();
-    let Some(root) = root else {
-        set_message(app, "There's no export folder. Pick one in Settings.");
-        return;
-    };
+    let (library, templates, bitwig_folders, feed) = export_setup();
     PAGE.with(|p| p.borrow_mut().exporting = true);
     show_all(app);
     let job = feed.start(if send { "Making a Bitwig preset" } else { "Exporting a preset" }, &item.row.name);
     let started = background::spawn("Preset export", move || {
+        // Checked here, as every export checks it: it looks at the disk.
+        let root = match bitwig::export_folder_in(&library) {
+            Ok(root) => root,
+            Err(why) => return export_stopped(job, why),
+        };
         let templates = templates_now(templates, &bitwig_folders);
         let done = background::on_pool(|| {
             export::export_from_save(
@@ -1382,15 +1390,15 @@ fn export_shown(app: &AppWindow) -> bool {
         }
         return false;
     }
-    let (root, templates, bitwig_folders, feed) = export_setup();
-    let Some(root) = root else {
-        set_message(app, "There's no export folder. Pick one in Settings.");
-        return true;
-    };
+    let (library, templates, bitwig_folders, feed) = export_setup();
     PAGE.with(|p| p.borrow_mut().exporting = true);
     show_all(app);
     let job = feed.start("Exporting presets", &format!("{} songs", logic::thousands(plan.len())));
     let started = background::spawn("Preset export", move || {
+        let root = match bitwig::export_folder_in(&library) {
+            Ok(root) => root,
+            Err(why) => return export_stopped(job, why),
+        };
         let templates = templates_now(templates, &bitwig_folders);
         let (mut done, mut failed) = (Vec::new(), Vec::new());
         let total = plan.len();
@@ -1525,7 +1533,7 @@ fn scan_curves(at: &Where) -> Result<Vec<Curve>, String> {
     let saves = lib.saves().map_err(|e| format!("Couldn't read your library: {e}"))?;
     let export_root = bitwig::export_root(
         lib.setting(bitwig::EXPORT_FOLDER_KEY).ok().flatten().as_deref(),
-        bitwig::home().as_deref(),
+        bitwig::documents().as_deref(),
     );
     drop(lib);
     let mut paths = logic::curve_saves(&saves, export_root.as_deref());

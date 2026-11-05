@@ -1147,10 +1147,10 @@ fn send_to_bitwig(at: usize) {
     };
     let job = to_bitwig::part_card(&feed, &sending.name);
     let started = background::spawn("Send to Bitwig", move || {
-        let export = export_dir(&sending.library);
-        // A panic in it is logged as a crash and fails the card as it goes.
+        // A panic in it (finding the export folder too) is logged as a crash and fails the card as it goes.
         let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
-            send_part(job, &to_bitwig::Bitwig::default(), &sending, export.as_deref())
+            let export = export_dir(&sending.library);
+            send_part(job, &to_bitwig::Bitwig::default(), &sending, export.as_deref().map_err(String::as_str))
         }));
     });
     // Its card was taken into the thread, so it fails by itself ("It stopped before it finished").
@@ -1159,14 +1159,10 @@ fn send_to_bitwig(at: usize) {
     }
 }
 
-/// Where parts sent to Bitwig are written: "MIDI browser" in the export folder (the one picked in Settings, else
-/// "Music Organiser Exports" in Documents).
-fn export_dir(library: &Path) -> Option<PathBuf> {
-    let setting = Library::open_read_only(library)
-        .ok()
-        .and_then(|lib| lib.setting(mo_app::bitwig_convert::EXPORT_FOLDER_KEY).ok().flatten());
-    let root = mo_app::bitwig_convert::export_root(setting.as_deref(), mo_app::bitwig_convert::home().as_deref())?;
-    Some(root.join(page::EXPORT_SUBFOLDER))
+/// Where parts sent to Bitwig are written: "MIDI browser" in the export folder (the one set, else "Music Organiser
+/// Exports" in Documents), or why not ([`mo_app::bitwig_convert::export_folder_in`]).
+fn export_dir(library: &Path) -> Result<PathBuf, String> {
+    Ok(mo_app::bitwig_convert::export_folder_in(library)?.join(page::EXPORT_SUBFOLDER))
 }
 
 /// Reads the part's notes, writes them as a new MIDI file in `export`, and sends that to `to`, ending `job`'s card
@@ -1175,15 +1171,16 @@ fn send_part(
     job: mo_app::activity::Job,
     to: &to_bitwig::Bitwig,
     part: &Sending,
-    export: Option<&Path>,
+    export: Result<&Path, &str>,
 ) -> Option<PathBuf> {
     let failed = |job: mo_app::activity::Job, why: String| {
         log::warning("MIDI", &format!("Sending {} to Bitwig failed: {why}", part.name));
         job.failed_as(mo_dawlink::bitwig::PART_FAILED, &why);
         None
     };
-    let Some(dir) = export else {
-        return failed(job, "There's no export folder: pick one in Settings, Folders.".to_owned());
+    let dir = match export {
+        Ok(dir) => dir,
+        Err(why) => return failed(job, why.to_owned()),
     };
     let notes = match notes_of(&part.from, part.phrase_id, &part.hash, &mut None) {
         Ok(notes) if notes.iter().any(|n| !n.muted) => notes,
@@ -1440,7 +1437,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let bitwig = mo_dawlink::bitwig::fake::FakeBitwig::start().unwrap();
         let feed = mo_app::activity::Feed::default();
-        let file = send_part(feed.start("Sending", ""), &bitwig.bitwig(), &part, Some(&dir)).unwrap();
+        let file = send_part(feed.start("Sending", ""), &bitwig.bitwig(), &part, Ok(dir.as_path())).unwrap();
         // A real MIDI file of the part, beside nothing else.
         let bytes = std::fs::read(&file).unwrap();
         assert!(bytes.starts_with(b"MThd"));
@@ -1453,10 +1450,13 @@ mod tests {
         assert!(cards.iter().any(|c| c.title == format!("{} is in Bitwig", part.name)), "{cards:?}");
         drop(world);
 
-        // No export folder: nothing is written or sent, and the card says why.
+        // An export folder that isn't there: nothing is written or sent, and the card says why.
         let feed = mo_app::activity::Feed::default();
-        assert!(send_part(feed.start("Sending", ""), &bitwig.bitwig(), &part, None).is_none());
+        let gone = "The export folder isn't there.";
+        assert!(send_part(feed.start("Sending", ""), &bitwig.bitwig(), &part, Err(gone)).is_none());
         assert_eq!(bitwig.world().commands(), ["newtrack", "clip"]);
+        let cards = feed.visible(Instant::now());
+        assert!(cards.iter().any(|c| c.detail == gone), "{cards:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
