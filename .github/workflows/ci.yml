@@ -50,6 +50,9 @@ jobs:
     needs: scope
     # Runs even when the scope job failed, and then fails itself, so a broken scope never shows as skipped (green).
     if: ${{ !cancelled() }}
+    # On a pull request Mac is advice only (Solomon, 2026-11-05): GitHub sometimes has no Mac runner for hours, and a
+    # PR may merge once Windows and Linux are green. On main Mac still counts; a Mac failure there is fixed at once.
+    continue-on-error: ${{ matrix.os == 'macos-latest' && github.event_name == 'pull_request' }}
     strategy:
       fail-fast: false
       matrix:
