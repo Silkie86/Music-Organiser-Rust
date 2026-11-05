@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::sync::Mutex;
 use std::task::{Context, Poll, Waker};
 use std::thread::LocalKey;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mo_app::{background, log};
 use slint::wgpu_30::{WGPUConfiguration, WGPUSettings, wgpu};
@@ -75,8 +75,9 @@ static AHEAD: Mutex<Option<std::thread::JoinHandle<Found>>> = Mutex::new(None);
 enum Found {
     /// `MO_DRAW_CPU` is set.
     Asked,
-    /// A card, ready for Slint: the window draws with these, not with a second set Slint would make for itself.
-    Card(Box<WGPUConfiguration>),
+    /// A card, ready for Slint: the window draws with these, not with a second set Slint would make for itself. And
+    /// how long each step of finding it took, for the log.
+    Card(Box<WGPUConfiguration>, String),
     /// Only a software card: the views draw on the processor.
     Software,
     /// None found here (why): Slint looks for one itself, as it did before.
@@ -107,24 +108,60 @@ fn find() -> Found {
     if std::env::var_os("WGPU_ADAPTER_NAME").is_some() {
         return Found::NoCard("a card is named in WGPU_ADAPTER_NAME".to_owned());
     }
-    let mut asked = wgpu::InstanceDescriptor::new_without_display_handle();
-    asked.backends = wgpu::Backends::PRIMARY;
-    asked.flags = wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL;
-    let instance = wgpu::Instance::new(asked.with_env());
-    let options =
-        wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() };
-    let adapter = match wait(instance.request_adapter(&options)) {
-        // A software card only when asked (`SLINT_WGPU_CPU`, as Slint itself takes it): the benches draw with one.
-        Ok(adapter)
-            if adapter.get_info().device_type != wgpu::DeviceType::Cpu
-                || std::env::var_os("SLINT_WGPU_CPU").is_some() =>
-        {
-            adapter
+    // One interface at a time, the one the card is usually drawn with first: starting each of them wakes its own
+    // drivers (on Windows, Vulkan's and DirectX 12's both), and that's most of the time a start waits for the card.
+    let tries: &[wgpu::Backends] =
+        if cfg!(windows) { &[wgpu::Backends::VULKAN, wgpu::Backends::DX12] } else { &[wgpu::Backends::PRIMARY] };
+    let mut steps: Vec<String> = Vec::new();
+    let mut found = Found::NoCard("no graphics interface answered".to_owned());
+    let mut card = None;
+    for &backends in tries {
+        let mut asked = wgpu::InstanceDescriptor::new_without_display_handle();
+        asked.backends = backends;
+        asked.flags = wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL;
+        let asked = asked.with_env();
+        let name = match asked.backends {
+            wgpu::Backends::VULKAN => "Vulkan",
+            wgpu::Backends::DX12 => "DirectX 12",
+            wgpu::Backends::METAL => "Metal",
+            _ => "wgpu",
+        };
+        let began = Instant::now();
+        let instance = wgpu::Instance::new(asked);
+        let started = began.elapsed();
+        let options = wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            ..Default::default()
+        };
+        let picked = wait(instance.request_adapter(&options));
+        steps.push(format!(
+            "{name} started in {} ms, a card picked in {} ms",
+            started.as_millis(),
+            (began.elapsed() - started).as_millis()
+        ));
+        match picked {
+            // A software card only when asked (`SLINT_WGPU_CPU`, as Slint itself takes it): the benches draw with one.
+            Ok(adapter)
+                if adapter.get_info().device_type != wgpu::DeviceType::Cpu
+                    || std::env::var_os("SLINT_WGPU_CPU").is_some() =>
+            {
+                card = Some((instance, adapter));
+                break;
+            }
+            Ok(_) => found = Found::Software,
+            // None of them (an old card, with only OpenGL): Slint looks, as it did before.
+            Err(e) => {
+                if !matches!(found, Found::Software) {
+                    found = Found::NoCard(e.to_string());
+                }
+            }
         }
-        Ok(_) => return Found::Software,
-        // None of them (an old card, with only OpenGL): Slint looks, as it did before.
-        Err(e) => return Found::NoCard(e.to_string()),
-    };
+        // `WGPU_BACKEND` names the interfaces itself: every try would be the same one.
+        if std::env::var_os("WGPU_BACKEND").is_some() {
+            break;
+        }
+    }
+    let Some((instance, adapter)) = card else { return found };
     // What Slint itself asks for (its default settings): no extra features, and pictures as big as the screen.
     let settings = WGPUSettings::default();
     let wanted = wgpu::DeviceDescriptor {
@@ -135,8 +172,13 @@ fn find() -> Found {
         memory_hints: settings.device_memory_hints.clone(),
         trace: wgpu::Trace::default(),
     };
-    match wait(adapter.request_device(&wanted)) {
-        Ok((device, queue)) => Found::Card(Box::new(WGPUConfiguration::Manual { instance, adapter, device, queue })),
+    let began = Instant::now();
+    let made = wait(adapter.request_device(&wanted));
+    steps.push(format!("its device made in {} ms", began.elapsed().as_millis()));
+    match made {
+        Ok((device, queue)) => {
+            Found::Card(Box::new(WGPUConfiguration::Manual { instance, adapter, device, queue }), steps.join(", "))
+        }
         Err(e) => Found::NoCard(format!("the card wouldn't give a device ({e})")),
     }
 }
@@ -156,7 +198,10 @@ pub fn choose() {
             log::warning("Graphics", "Only a software graphics card here, so the views draw on the processor");
             return;
         }
-        Found::Card(config) => *config,
+        Found::Card(config, steps) => {
+            log::info("Graphics", &format!("Found the graphics card: {steps}"));
+            *config
+        }
         Found::NoCard(why) => {
             log::info("Graphics", &format!("Slint looks for the graphics card itself: {why}"));
             let mut settings = WGPUSettings::default();
