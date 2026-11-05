@@ -396,7 +396,7 @@ fn another_page_can_show_one_plugin_or_every_unused_one() {
     p.filters = Filters { search: "serum".into(), chips: vec![Chip::Missing], ..Filters::default() };
     p.show_only_unused();
     assert_eq!(shown(&p), ["Kontakt 7", "Pro-Q 3"]);
-    let space = crate::space_plugins::look(library(), now());
+    let space = crate::space_plugins::look(library(), now(), &[]);
     assert_eq!(space.plugins.iter().map(|u| u.name.clone()).collect::<Vec<_>>(), shown(&p));
     // And the same when the years change on the page.
     p.set_unused_years(10);
@@ -408,5 +408,19 @@ fn another_page_can_show_one_plugin_or_every_unused_one() {
     let sizes: Vec<(String, u64)> = p.shown.iter().map(|&i| (p.rows[i].name.clone(), p.rows[i].bytes())).collect();
     let left = space.without(&gone);
     assert_eq!(left.plugins.iter().map(|u| (u.name.clone(), u.bytes())).collect::<Vec<_>>(), sizes);
+    assert_eq!(sizes, [("Kontakt 7".to_owned(), 100_000_000), ("Pro-Q 3".to_owned(), 40_000_000)]);
+    // And when you rule out a folder on the page ("Not its"): Space's look counts it out the same way.
+    let mut p = plugins();
+    p.show_only_unused();
+    let kontakt = mo_library::read::name_key("Kontakt 7");
+    let fixes = [folder_fixes::FolderFix::Removed {
+        key: kontakt,
+        path: r"D:\Libraries".into(),
+        measured: Some(self::at(2026, 10)),
+    }];
+    assert_eq!(p.apply_folder_fixes(&fixes), fixes);
+    let sizes: Vec<(String, u64)> = p.shown.iter().map(|&i| (p.rows[i].name.clone(), p.rows[i].bytes())).collect();
+    let space = crate::space_plugins::look(library(), now(), &fixes);
+    assert_eq!(space.plugins.iter().map(|u| (u.name.clone(), u.bytes())).collect::<Vec<_>>(), sizes);
     assert_eq!(sizes, [("Kontakt 7".to_owned(), 100_000_000), ("Pro-Q 3".to_owned(), 40_000_000)]);
 }
