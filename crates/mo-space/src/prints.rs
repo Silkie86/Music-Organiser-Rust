@@ -275,7 +275,11 @@ fn check_id(conn: &Connection) -> rusqlite::Result<bool> {
 
 /// Whether an error says the file is damaged (or isn't a database at all), rather than busy or unreadable just now.
 fn is_damage(e: &rusqlite::Error) -> bool {
-    matches!(e.sqlite_error_code(), Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt))
+    // A row that doesn't read back as written (no SQLite code) is damage too.
+    matches!(
+        e.sqlite_error_code(),
+        None | Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt)
+    )
 }
 
 /// Forgets every print kept at `path` (after a look crashed, in case what was kept is why): the store and the files
