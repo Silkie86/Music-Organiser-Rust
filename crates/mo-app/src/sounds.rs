@@ -9,6 +9,7 @@ use std::sync::Arc;
 use chrono::Datelike;
 use mo_library::ProjectFile;
 use mo_sounds::compact::Synced;
+use mo_sounds::copies::SameAudio;
 use mo_sounds::usage::Usage;
 use mo_sounds::{Sound, SoundsError, music, rediscover, types};
 use mo_space::size::size_text;
@@ -77,6 +78,8 @@ pub const LENGTH: &str = "length";
 pub const KEY: &str = "key";
 pub const TEMPO: &str = "tempo";
 pub const TAG: &str = "tag";
+/// The Hide duplicates chip's name, as the page gives it to [`Filters::toggle`]; also the setting it's kept in.
+pub const HIDE_COPIES: &str = "hide-copies";
 
 /// The Tempo chips' choices, and the tempos each lets through (lowest, highest).
 pub const TEMPOS: [(&str, Option<f64>, Option<f64>); 5] = [
@@ -117,6 +120,10 @@ pub struct Filters {
     /// Only sounds from these years, first to last: the years of the songs that use them when Used is on (and the
     /// use counts are in), otherwise the year the file was added.
     pub years: Option<(i32, i32)>,
+    /// Hide duplicates: of sounds whose audio is exactly the same ([`mo_sounds::copies`]), only one shows, the one to
+    /// keep of those the other filters let through ([`SoundList::set_copies`]). Not a filter the Clear chip takes off:
+    /// it stays as you set it.
+    pub hide_copies: bool,
 }
 
 impl Filters {
@@ -187,6 +194,7 @@ impl Filters {
                 self.unused &= !self.used;
             }
             "favourites" => self.favourites = !self.favourites,
+            HIDE_COPIES => self.hide_copies = !self.hide_copies,
             // Its chip shows only while it's on: a click takes it off.
             "folder" => self.folder = None,
             _ => {}
@@ -197,11 +205,18 @@ impl Filters {
     }
 
     /// Whether any filter is set (for the Clear chip). The search box doesn't count: it has its own ×. Nor does Keys
-    /// that mix well with no key picked: it changes nothing then, and its chip isn't shown.
+    /// that mix well with no key picked: it changes nothing then, and its chip isn't shown. Nor Hide duplicates: Clear
+    /// leaves it as it is.
     pub fn any(&self) -> bool {
         let mix_well = self.mix_well && self.keys.is_empty();
-        let none = Filters { search: self.search.clone(), mix_well, ..Filters::default() };
+        let none =
+            Filters { search: self.search.clone(), mix_well, hide_copies: self.hide_copies, ..Filters::default() };
         *self != none
+    }
+
+    /// No filters, as the Clear chip leaves them: the search box and Hide duplicates stay as they are.
+    pub fn cleared(&self) -> Filters {
+        Filters { search: self.search.clone(), hide_copies: self.hide_copies, ..Filters::default() }
     }
 }
 
@@ -225,13 +240,45 @@ struct Shared {
 pub struct SoundList {
     shared: Arc<Shared>,
     /// How your projects use each sound, by sound id, once known (sounds no project uses are left out).
-    used: Option<HashMap<i64, Usage>>,
+    used: Option<Arc<HashMap<i64, Usage>>>,
     /// Each project's file, by id, once known: the projects a sound is used in are named from it. Shared by a clone.
     projects: Option<Arc<HashMap<i64, ProjectFile>>>,
     /// Each sound's Most liked score, in `sounds` order, once known.
-    liked: Option<Vec<f64>>,
+    liked: Option<Arc<Vec<f64>>>,
     /// The best of `liked`, worked out once, as every tile asks for its share of it.
     liked_best: f64,
+    /// Which sounds are copies of each other (the same audio), once known: shared by a clone, and kept by
+    /// [`SoundList::sharing`], as it's of the same sounds.
+    copies: Option<Arc<Copies>>,
+}
+
+/// The sounds whose audio is exactly the same as another's, by their places in a list ([`SoundList::copies_in`]): the
+/// same for every list sharing its sounds.
+#[derive(Debug, Default)]
+pub struct Copies {
+    /// Each such sound's group, by place.
+    group_of: HashMap<usize, u32>,
+    /// How many sounds are copies of another (each group's sounds but one).
+    copies: usize,
+}
+
+impl Copies {
+    /// How many sounds are copies of another: what Hide duplicates leaves out.
+    pub fn count(&self) -> usize {
+        self.copies
+    }
+}
+
+/// Knows which sounds a list holds without keeping them ([`SoundList::sounds_of`]): while it's held, no other list's
+/// sounds can be taken for them.
+#[derive(Clone, Default)]
+pub struct SoundsOf(std::sync::Weak<Shared>);
+
+impl SoundsOf {
+    /// Whether `list` holds these sounds (it shares them: a clone, or a list with the use counts in).
+    pub fn is_of(&self, list: &SoundList) -> bool {
+        self.0.upgrade().is_some_and(|s| Arc::ptr_eq(&s, &list.shared))
+    }
 }
 
 /// A list of at least this many sounds is freed off the thread that lets it go ([`crate::background::free_later`]):
@@ -250,9 +297,12 @@ impl Drop for Shared {
 }
 
 impl Drop for SoundList {
-    /// A list's own use counts (one per sound your songs use, each with its years) go the same way when there are many.
+    /// A list's use counts (one per sound your songs use, each with its years) go the same way when there are many and
+    /// no other list shares them.
     fn drop(&mut self) {
-        if self.used.as_ref().is_some_and(|u| u.len() >= FREE_LATER_FROM) && !crate::background::freeing_here() {
+        if self.used.as_ref().is_some_and(|u| u.len() >= FREE_LATER_FROM && Arc::strong_count(u) == 1)
+            && !crate::background::freeing_here()
+        {
             crate::background::free_later(self.used.take());
         }
     }
@@ -272,13 +322,26 @@ impl SoundList {
             projects: None,
             liked: None,
             liked_best: 0.0,
+            copies: None,
         }
     }
 
     /// A list of the same sounds, sharing them, without this one's use or Most liked yet: what a list with the use
     /// counted in starts from.
     pub fn sharing(&self) -> SoundList {
-        SoundList { shared: self.shared.clone(), used: None, projects: None, liked: None, liked_best: 0.0 }
+        SoundList {
+            shared: self.shared.clone(),
+            used: None,
+            projects: None,
+            liked: None,
+            liked_best: 0.0,
+            copies: self.copies.clone(),
+        }
+    }
+
+    /// Knows this list's sounds without keeping them.
+    pub fn sounds_of(&self) -> SoundsOf {
+        SoundsOf(Arc::downgrade(&self.shared))
     }
 
     /// Whether `other` shares this list's sounds (it was cloned from it, or made with [`SoundList::sharing`]).
@@ -297,7 +360,7 @@ impl SoundList {
     /// How your projects use each sound (by id, as [`mo_sounds::usage::usage`] gives it), for the Used chips and
     /// column.
     pub fn set_used(&mut self, used: HashMap<i64, Usage>) {
-        self.used = Some(used);
+        self.used = Some(Arc::new(used));
     }
 
     /// The file of each project that uses a sound, by id ([`mo_library::Library::sample_usage_with_projects`]), to
@@ -317,11 +380,99 @@ impl SoundList {
         Some(of)
     }
 
+    /// Which sounds are copies of each other (groups of ids, as [`mo_sounds::copies::find`] gives them), for Hide
+    /// duplicates. Sounds not in this list are left out of their group; a group left with one sound is none.
+    pub fn set_copies(&mut self, same: &SameAudio) {
+        self.copies = Some(self.copies_in(same));
+    }
+
+    /// The copies of [`SoundList::set_copies`], worked out (off the window's thread) for [`SoundList::with_copies`].
+    pub fn copies_in(&self, same: &SameAudio) -> Arc<Copies> {
+        let places: HashMap<i64, usize> = self.shared.sounds.iter().enumerate().map(|(i, s)| (s.id, i)).collect();
+        let mut group_of = HashMap::new();
+        let mut copies = 0;
+        let mut n = 0u32;
+        for group in &same.groups {
+            let here: Vec<usize> = group.iter().filter_map(|id| places.get(id).copied()).collect();
+            if here.len() < 2 {
+                continue;
+            }
+            copies += here.len() - 1;
+            group_of.extend(here.into_iter().map(|i| (i, n)));
+            n += 1;
+        }
+        Arc::new(Copies { group_of, copies })
+    }
+
+    /// This list with `copies` (from [`SoundList::copies_in`] on a list sharing its sounds). What it holds is shared,
+    /// not copied (a few pointers).
+    pub fn with_copies(&self, copies: Arc<Copies>) -> SoundList {
+        let mut list = self.clone();
+        list.copies = Some(copies);
+        list
+    }
+
+    /// The copies `other` knows, when it shares this list's sounds and this list doesn't know them yet: a list made
+    /// from the same sounds before they were found (with the use counts in) keeps what was found since.
+    pub fn keep_copies_of(&mut self, other: &SoundList) {
+        if self.copies.is_none() && self.shares_with(other) {
+            self.copies = other.copies.clone();
+        }
+    }
+
+    /// Whether the sound at `i` has a copy (the same audio) that Hide duplicates may show instead.
+    pub fn has_copies(&self, i: usize) -> bool {
+        self.copies.as_ref().is_some_and(|c| c.group_of.contains_key(&i))
+    }
+
+    /// How many sounds Hide duplicates leaves out (every copy but one of each sound), once the copies are known.
+    pub fn copies(&self) -> Option<usize> {
+        self.copies.as_ref().map(|c| c.copies)
+    }
+
+    /// The copies, when `filters` hide them and they're known.
+    fn hiding(&self, filters: &Filters) -> Option<&Copies> {
+        self.copies.as_deref().filter(|c| filters.hide_copies && !c.group_of.is_empty())
+    }
+
+    /// Of two copies of the same sound, the one to keep showing first: the one your projects use most, then a
+    /// favourite, more stars, more plays, more tags, the older file (the first, most likely), and then by path.
+    fn keep_first(&self, a: usize, b: usize) -> std::cmp::Ordering {
+        let (sa, sb) = (&self.shared.sounds[a], &self.shared.sounds[b]);
+        let used = |s: &Sound| self.used.as_ref().and_then(|u| u.get(&s.id)).map_or(0, |u| u.projects);
+        used(sb)
+            .cmp(&used(sa))
+            .then(sb.favourite.cmp(&sa.favourite))
+            .then(sb.rating.cmp(&sa.rating))
+            .then(sb.plays.cmp(&sa.plays))
+            .then(sb.tags.len().cmp(&sa.tags.len()))
+            .then(sa.added.cmp(&sb.added))
+            .then_with(|| sa.path.cmp(&sb.path))
+            .then(a.cmp(&b))
+    }
+
+    /// The best to keep of each group's sounds in `places` (by [`SoundList::keep_first`]), by group.
+    fn kept<'p>(&self, copies: &Copies, places: impl IntoIterator<Item = &'p usize>) -> HashMap<u32, usize> {
+        let mut best: HashMap<u32, usize> = HashMap::new();
+        for &i in places {
+            if let Some(&g) = copies.group_of.get(&i) {
+                best.entry(g)
+                    .and_modify(|b| {
+                        if self.keep_first(i, *b).is_lt() {
+                            *b = i;
+                        }
+                    })
+                    .or_insert(i);
+            }
+        }
+        best
+    }
+
     /// Each sound's Most liked score, from `score`.
     pub fn set_liked(&mut self, score: impl Fn(&Sound) -> f64 + Sync + Send) {
         let liked: Vec<f64> = self.shared.sounds.par_iter().map(&score).collect();
         self.liked_best = liked.iter().copied().fold(0.0, f64::max);
-        self.liked = Some(liked);
+        self.liked = Some(Arc::new(liked));
     }
 
     pub fn len(&self) -> usize {
@@ -339,7 +490,7 @@ impl SoundList {
 
     /// How your projects use every sound (by id; ones no project uses are left out), if that's known yet.
     pub fn usage_map(&self) -> Option<&HashMap<i64, Usage>> {
-        self.used.as_ref()
+        self.used.as_deref()
     }
 
     /// How your projects use the sound at `i`, if that's known yet (`None` too when none do).
@@ -382,42 +533,66 @@ impl SoundList {
     /// same seed gives the same order, and the page takes a new one each time it opens or Shuffle is pressed.
     pub fn view(&self, filters: &Filters, order: Order, seed: u64) -> Vec<usize> {
         let test = Test::new(filters);
-        let shown = (0..self.shared.sounds.len()).into_par_iter().filter(|&i| self.allows(i, &test)).collect();
+        let mut shown: Vec<usize> =
+            (0..self.shared.sounds.len()).into_par_iter().filter(|&i| self.allows(i, &test)).collect();
+        if let Some(copies) = self.hiding(filters) {
+            let kept = self.kept(copies, &shown);
+            shown.retain(|i| copies.group_of.get(i).is_none_or(|g| kept[g] == *i));
+        }
         self.ordered(shown, order, seed)
     }
 
     /// [`SoundList::view`], and how many sounds each choice of the chips' filters would show with the other filters
     /// as they are, counted in the same pass: a sound counts beside every chip when all five let it through, and
-    /// beside the one that doesn't when only one doesn't.
+    /// beside the one that doesn't when only one doesn't. With Hide duplicates on, the copies of a sound count once
+    /// beside each choice, as picking it would show one of them.
     pub fn view_counted(&self, filters: &Filters, order: Order, seed: u64) -> (Vec<usize>, SoundCounts) {
         let test = Test::new(filters);
-        let (shown, tally) = (0..self.shared.sounds.len())
+        let copies = self.hiding(filters);
+        let (mut shown, mut tally, held) = (0..self.shared.sounds.len())
             .into_par_iter()
             .fold(
-                || (Vec::new(), Tally::default()),
-                |(mut shown, mut tally), i| {
+                || (Vec::new(), Tally::default(), Vec::new()),
+                |(mut shown, mut tally, mut held), i| {
                     let s = &self.shared.sounds[i];
                     let ok = facets(s, &test);
                     let fails = ok.iter().filter(|&&o| !o).count();
                     // The chips first, as they're quick: a sound two of them leave out is neither shown nor counted,
                     // so the search (the slow part) isn't tried on it.
                     if fails <= 1 && self.passes_others(i, s, &test) {
-                        tally.count(s, ok, fails);
-                        if fails == 0 {
-                            shown.push(i);
+                        if copies.is_some_and(|c| c.group_of.contains_key(&i)) {
+                            // Counted with its copies, below.
+                            held.push((i, ok, fails));
+                        } else {
+                            tally.count(s, ok, fails);
+                            if fails == 0 {
+                                shown.push(i);
+                            }
                         }
                     }
-                    (shown, tally)
+                    (shown, tally, held)
                 },
             )
             .reduce(
-                || (Vec::new(), Tally::default()),
-                |(mut a, mut tally), (b, other)| {
+                || (Vec::new(), Tally::default(), Vec::new()),
+                |(mut a, mut tally, mut held), (b, other, more)| {
                     a.extend(b);
                     tally.add(other);
-                    (a, tally)
+                    held.extend(more);
+                    (a, tally, held)
                 },
             );
+        if let Some(copies) = copies {
+            let kept = self.kept(copies, held.iter().filter(|h| h.2 == 0).map(|h| &h.0));
+            shown.extend(kept.values());
+            let mut by_group: HashMap<u32, Tally> = HashMap::new();
+            for (i, ok, fails) in held {
+                by_group.entry(copies.group_of[&i]).or_default().count(&self.shared.sounds[i], ok, fails);
+            }
+            for group in by_group.into_values() {
+                tally.add(group.once());
+            }
+        }
         (self.ordered(shown, order, seed), tally.counts())
     }
 
@@ -698,6 +873,21 @@ impl<'a> Tally<'a> {
         }
     }
 
+    /// Every count of one at most: the counts of a sound's copies, as one sound. Types and tags that differ only in
+    /// capitals are one, as the filters match them.
+    fn once(mut self) -> Tally<'a> {
+        let one_each = |words: HashMap<&'a str, usize>| {
+            let mut seen = std::collections::HashSet::new();
+            words.into_keys().filter(|w| seen.insert(w.to_ascii_lowercase())).map(|w| (w, 1)).collect()
+        };
+        self.types = one_each(std::mem::take(&mut self.types));
+        self.tags = one_each(std::mem::take(&mut self.tags));
+        for n in self.lengths.iter_mut().chain(self.keys.iter_mut()).chain(self.tempos.iter_mut()) {
+            *n = (*n).min(1);
+        }
+        self
+    }
+
     /// Adds another part of the list's counts.
     fn add(&mut self, other: Tally<'a>) {
         for (t, n) in other.types {
@@ -813,6 +1003,36 @@ fn hay_of(s: &Sound) -> String {
 /// Keys in note order, major before minor; sounds with no key last (C# `KeyOrder`).
 fn key_order(s: &Sound) -> i32 {
     s.analysis.as_ref().and_then(|a| a.key_tonic.map(|t| t * 2 + i32::from(a.key_minor))).unwrap_or(i32::MAX)
+}
+
+/// The setting Hide duplicates is kept in, in the app's own settings ("on" or "off").
+pub const HIDE_COPIES_KEY: &str = "sounds_hide_duplicates";
+
+/// How far finding the copies for Hide duplicates has got.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum CopiesFound {
+    /// Not looked for: Hide duplicates hasn't been on with these sounds.
+    #[default]
+    NotLooked,
+    /// Files being read: `done` of `of` (both 0 while what's known already is being looked up).
+    Looking { done: usize, of: usize },
+    /// Found: how many sounds are copies of another (what the switch hides).
+    Found(usize),
+    /// The files couldn't be looked at (the log says why).
+    Failed,
+}
+
+/// The Hide duplicates chip's words: what it does, then how far finding the copies has got.
+pub fn hide_copies_text(found: CopiesFound) -> String {
+    const NAME: &str = "Hide duplicates";
+    match found {
+        CopiesFound::NotLooked => NAME.to_owned(),
+        CopiesFound::Looking { of: 0, .. } => format!("{NAME} · checking"),
+        CopiesFound::Looking { done, of } => format!("{NAME} · checking {}%", done * 100 / of),
+        CopiesFound::Found(0) => format!("{NAME} · none"),
+        CopiesFound::Found(n) => format!("{NAME} · {}", short_count(n)),
+        CopiesFound::Failed => format!("{NAME} · couldn't check"),
+    }
 }
 
 /// Of the sounds with these `ids`, the `n` that [`Order::Shuffled`] puts first for `seed`, in that order: shown at
@@ -1275,6 +1495,69 @@ mod tests {
         }
         assert!(!f.unused && !f.used && f.mix_well && f.favourites);
         assert_eq!(f.years, Some((2020, 2022)));
+    }
+
+    #[test]
+    fn hide_duplicates_shows_one_of_each_sounds_copies_the_best_to_keep_of_those_the_filters_let_through() {
+        let mut sounds: Vec<Sound> = (1..=5).map(|i| sound(i, &format!(r"I:\S\{i} Kick.wav"), "Kick", None)).collect();
+        // 1, 2 and 3 are the same audio; 3 is the favourite; 2 is a snare by its name (its type differs).
+        sounds[2].favourite = true;
+        sounds[1].sound_type = "Snare".into();
+        let mut list = SoundList::new(sounds);
+        assert_eq!(list.copies(), None);
+        list.set_copies(&SameAudio { groups: vec![vec![1, 2, 3], vec![5, 99]] });
+        // The group with a sound not in the list is none.
+        assert_eq!(list.copies(), Some(2));
+        let ids = |v: &[usize]| v.iter().map(|&i| list.sound(i).unwrap().id).collect::<Vec<_>>();
+        let off = Filters::default();
+        let on = Filters { hide_copies: true, ..Filters::default() };
+        assert_eq!(ids(&list.view(&off, Order::Name, 0)), [1, 2, 3, 4, 5]);
+        assert_eq!(ids(&list.view(&on, Order::Name, 0)), [3, 4, 5]);
+        let (shown, counts) = list.view_counted(&on, Order::Name, 0);
+        assert_eq!(ids(&shown), [3, 4, 5]);
+        // Kick: 1 and 3 count once, with 4 and 5; Snare: 2 would show if picked.
+        assert_eq!(counts.types.get("kick"), Some(&3));
+        assert_eq!(counts.types.get("snare"), Some(&1));
+        assert_eq!(counts.lengths, [3, 0]);
+        // Only snares: 2 shows, though 3 is the one kept when all show.
+        let snares = Filters { sound_types: vec!["Snare".into()], ..on.clone() };
+        assert_eq!(ids(&list.view(&snares, Order::Name, 0)), [2]);
+        assert_eq!(ids(&list.view_counted(&snares, Order::Name, 0).0), [2]);
+        // The search finds the copy its words are in.
+        let two = Filters { search: "2 kick".into(), ..on.clone() };
+        assert_eq!(ids(&list.view(&two, Order::Name, 0)), [2]);
+        // A list sharing these sounds keeps their copies; Clear leaves the switch on.
+        assert_eq!(list.sharing().copies(), Some(2));
+        let mut busy = Filters { favourites: true, ..on.clone() };
+        assert!(busy.any());
+        busy = busy.cleared();
+        assert!(busy.hide_copies && !busy.any());
+        busy.toggle(HIDE_COPIES);
+        assert!(!busy.hide_copies);
+    }
+
+    #[test]
+    fn copies_count_once_beside_a_tag_however_its_capitals_go_and_a_list_with_use_keeps_them() {
+        let mut sounds: Vec<Sound> = (1..=2).map(|i| sound(i, &format!("{i}.wav"), "Kick", None)).collect();
+        sounds[0].tags = vec!["Dark".into()];
+        sounds[1].tags = vec!["dark".into()];
+        let mut list = SoundList::new(sounds);
+        let with_use = list.sharing();
+        list.set_copies(&SameAudio { groups: vec![vec![1, 2]] });
+        let on = Filters { hide_copies: true, ..Filters::default() };
+        let (shown, counts) = list.view_counted(&on, Order::Name, 0);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(counts.tags.get("dark"), Some(&1));
+        assert_eq!(counts.types.get("kick"), Some(&1));
+        assert!(list.has_copies(0) && list.has_copies(1));
+        // A list made from the same sounds before the copies were found takes them from the one that knows them.
+        let mut with_use = with_use;
+        assert_eq!(with_use.copies(), None);
+        with_use.keep_copies_of(&list);
+        assert_eq!(with_use.copies(), Some(1));
+        let mut other = SoundList::new(vec![sound(1, "1.wav", "Kick", None), sound(2, "2.wav", "Kick", None)]);
+        other.keep_copies_of(&list);
+        assert_eq!(other.copies(), None);
     }
 
     #[test]

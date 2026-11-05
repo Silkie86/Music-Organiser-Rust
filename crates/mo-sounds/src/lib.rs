@@ -15,12 +15,14 @@
 //! - [`usage`] and [`liking`]: how many of your projects use each sound, and Most liked.
 //! - [`types`]: the sound type a sample's name or folder gives ("Kick", "Pad"…), and loop, tempo and key from names.
 //! - [`music`]: note and key names, and Camelot codes.
+//! - [`copies`]: sounds whose audio is exactly the same, for the Sounds page's Hide duplicates.
 //! - [`scan`]: finding the sounds in your sample folders, and what a scan has to do (listen, follow moves, forget).
 
 pub mod analyse;
 mod analysis;
 pub mod classify;
 pub mod compact;
+pub mod copies;
 mod db;
 mod dotnet_random;
 pub mod duplicates;

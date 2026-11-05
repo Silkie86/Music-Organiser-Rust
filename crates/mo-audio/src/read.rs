@@ -57,6 +57,59 @@ pub fn read_from(path: &Path, max_seconds: f64, from_frame: u64) -> Result<Audio
     }
 }
 
+/// Whether [`read_from`] gives this WAV or AIFF file's samples exactly as the file holds them, and its sample rate as
+/// it is: so two files that read the same hold the same audio. Not for 32-bit whole-number or 64-bit float samples
+/// (they're read as 32-bit floats, which lose their last bits), nor an AIFF whose rate isn't a whole number (it's
+/// rounded). False too when the file can't be read or isn't a WAV or AIFF.
+pub fn reads_exactly(path: &Path) -> bool {
+    exact_layout(path).unwrap_or(false)
+}
+
+fn exact_layout(path: &Path) -> Result<bool, AudioError> {
+    if !can_read_from(path) {
+        return Ok(false);
+    }
+    let mut f = File::open(path)?;
+    let len = f.metadata()?.len();
+    let head = take(&mut f, 12)?;
+    let (riff, aiff) = match head.get(..4) {
+        Some(b"RIFF" | b"RF64") => (true, false),
+        Some(b"FORM") => (false, true),
+        _ => return Ok(false),
+    };
+    let mut pos = 12u64;
+    while pos + 8 <= len {
+        f.seek(SeekFrom::Start(pos))?;
+        let hdr = take(&mut f, 8)?;
+        let id = hdr.get(..4).unwrap_or_default();
+        let size = u64::from(if riff { u32_le(&hdr, 4) } else { u32_be(&hdr, 4) }.unwrap_or(0));
+        if riff && id == b"fmt " {
+            let b = take(&mut f, size.min(40))?;
+            let mut format = u16_le(&b, 0).unwrap_or(0);
+            if format == 0xFFFE && size >= 40 {
+                format = u16_le(&b, 24).unwrap_or(0);
+            }
+            let bits = u16_le(&b, 14).unwrap_or(0);
+            return Ok(match format {
+                1 => (1..=24).contains(&bits),
+                3 => bits == 32,
+                // ADPCM is decoded by the same steps every time.
+                f => f == adpcm::MS || f == adpcm::IMA,
+            });
+        }
+        if aiff && id == b"COMM" {
+            let c = take(&mut f, size.min(64))?;
+            let bits = u16_be(&c, 6).unwrap_or(0);
+            let rate = c.get(8..18).map_or(0.0, extended80);
+            let float = c.get(18..22).is_some_and(|comp| matches!(comp, b"fl32" | b"FL32" | b"fl64" | b"FL64"));
+            let whole_rate = rate > 0.0 && rate.fract() == 0.0;
+            return Ok(whole_rate && if float { bits == 32 } else { (1..=24).contains(&bits) });
+        }
+        pos = pos + 8 + size + (size & 1);
+    }
+    Ok(false)
+}
+
 /// Reads up to `n` bytes at the file's position: fewer at its end.
 fn take(f: &mut File, n: u64) -> Result<Vec<u8>, AudioError> {
     let mut buf = Vec::new();
