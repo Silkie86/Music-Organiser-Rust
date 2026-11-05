@@ -323,6 +323,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let top = capture(&window);
     shots.push(("space-plugins.png".into(), top.clone()));
     shots.push(("space-plugins-down.png".into(), card_down(&window, &top, "space-plugins-down.png")?));
+    // The copies of the same sound in your sample folders, as information: the sounds whose copies take most first,
+    // each with its files, the one to keep first, one hidden in the app; then those with only a very similar copy.
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space_sounds::SOUND_COPIES);
+    let top = capture(&window);
+    shots.push(("space-copies.png".into(), top.clone()));
+    shots.push(("space-copies-down.png".into(), card_down(&window, &top, "space-copies-down.png")?));
+    // The page turned down to Also taking room: the app's own files, then the copies of the same sound.
+    mo_ui::space::show_sample(&app, sample_space(), "");
+    capture(&window);
+    scroll(&window, 700.0, 600.0, -10.0 * PAGE_DOWN);
+    hover(&window, -1.0, -1.0);
+    shots.push(("space-also.png".into(), capture(&window)));
+    scroll(&window, 700.0, 600.0, 10.0 * PAGE_DOWN);
+    hover(&window, -1.0, -1.0);
+    capture(&window);
     mo_ui::space::show_sample(&app, sample_space(), "");
     presets_shots(&app, &window, &mut shots)?;
     app.set_place(Place::Songs.index() as i32);
@@ -830,8 +845,83 @@ fn sample_space() -> mo_ui::space::Sample {
         spare: sample_spare_copies(),
         songs: sample_song_room(),
         plugins: sample_unused_plugins(),
+        copies: sample_sound_copies(),
         ..Default::default()
     }
+}
+
+/// Made-up copies of the same sound, as the old app's duplicate finder found them, grouped by the Space page's own
+/// look: a pad with a 48 kHz copy and a trimmed one, a kick your songs use with an exact copy, one hidden in the app
+/// and an MP3, a vocal chop copied and renamed, a snare with only a very similar copy, and small hats.
+fn sample_sound_copies() -> mo_app::space_sounds::Found {
+    use std::collections::HashMap;
+
+    use mo_app::space_sounds::{Finds, look};
+    use mo_sounds::usage::Usage;
+    use mo_sounds::{Sound, SoundAnalysis, SoundMatch};
+    const KB: i64 = 1024;
+    let sound = |id: i64, path: &str, seconds: f64, rate: i32, peak_db: f64| {
+        let mut s = Sound::new(id, path);
+        s.analysis = Some(SoundAnalysis { seconds, sample_rate: rate, peak_db, ..SoundAnalysis::default() });
+        s
+    };
+    let matched = |a: i64, b: i64, kind: &str, apart: f64| SoundMatch {
+        a,
+        b,
+        kind: kind.to_owned(),
+        score: 0.9,
+        offset: 0.0,
+        apart: Some(apart),
+        typical: Some(apart),
+    };
+    let mut sounds = vec![
+        sound(1, r"D:\Samples\Drums\Kicks\Kick 808 Long.wav", 1.8, 44_100, -0.5),
+        sound(2, r"D:\Samples\Packs\Trap Essentials\Kicks\Kick 808 Long.wav", 1.8, 44_100, -0.5),
+        sound(4, r"D:\Downloads\Kick 808 Long.mp3", 1.82, 44_100, -0.5),
+        sound(5, r"D:\Samples\Pads\Warm Pad C.wav", 12.0, 44_100, -3.0),
+        sound(6, r"E:\Sample Packs\Ambient Worlds\Warm Pad C 48k.wav", 12.0, 48_000, -3.0),
+        sound(7, r"D:\Samples\Pads\Warm Pad C short.wav", 5.0, 44_100, -3.0),
+        sound(8, r"D:\Samples\Vocals\Vox Chop 03.wav", 0.9, 44_100, -1.0),
+        sound(9, r"D:\Samples\Vox\Vox Chop 03 copy.wav", 0.9, 44_100, -1.0),
+        sound(10, r"D:\Samples\Drums\Snares\Snare Tight.wav", 0.4, 44_100, -1.0),
+        sound(11, r"D:\Samples\Packs\Lo-Fi Kit\Snare Tight.wav", 0.4, 44_100, -7.0),
+    ];
+    let mut hidden = sound(3, r"E:\Old Backup\Samples\Kicks\Kick 808 Long.wav", 1.8, 44_100, -0.5);
+    hidden.hidden = true;
+    let mut finds = Finds {
+        matches: vec![
+            matched(1, 4, "Converted", 0.6),
+            matched(5, 6, "Converted", 0.05),
+            matched(5, 7, "Trimmed", 0.1),
+            matched(10, 11, "Converted", 0.9),
+        ],
+        exact: [(1, "A1"), (2, "A1"), (3, "A1"), (8, "B2"), (9, "B2")].map(|(id, hash)| (id, hash.to_owned())).into(),
+        sizes: HashMap::from([
+            (1, 310 * KB),
+            (2, 310 * KB),
+            (3, 310 * KB),
+            (4, 45 * KB),
+            (5, 4_140 * KB),
+            (6, 4_500 * KB),
+            (7, 1_720 * KB),
+            (8, 160 * KB),
+            (9, 160 * KB),
+            (10, 70 * KB),
+            (11, 70 * KB),
+        ]),
+        hidden: vec![hidden],
+    };
+    // Small hats, each with an exact copy in a pack you downloaded.
+    for n in 0..6 {
+        for (copy, folder) in [r"D:\Samples\Drums\Hats", r"E:\Downloads\Hat Pack"].into_iter().enumerate() {
+            let id = 100 + n * 2 + copy as i64;
+            sounds.push(sound(id, &format!(r"{folder}\Hat {:02}.wav", n + 1), 0.2, 44_100, -2.0));
+            finds.exact.push((id, format!("H{n}")));
+            finds.sizes.insert(id, 18 * KB);
+        }
+    }
+    let usage = HashMap::from([(1, Usage { projects: 4, ..Usage::default() })]);
+    look(&sounds, Some(&usage), &finds)
 }
 
 /// Made-up plugins no song has used lately, as the old app measured them: some never used, some not in over 2 years.

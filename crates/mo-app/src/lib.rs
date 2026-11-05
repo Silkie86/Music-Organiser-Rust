@@ -45,6 +45,7 @@ pub mod space_old;
 pub mod space_plugins;
 pub mod space_removing;
 pub mod space_songs;
+pub mod space_sounds;
 pub mod space_spare;
 pub mod sweep_timing;
 pub mod themes;

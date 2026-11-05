@@ -165,6 +165,20 @@ fn reads_the_rest() {
     let known = db.known_files().unwrap();
     assert_eq!(known.len(), 3);
     assert!(known.iter().any(|k| k.has_clap && k.size == 50));
+
+    // The hidden copy alone, as every sound is read but without its tags or plays.
+    let hidden = db.hidden_sounds().unwrap();
+    let pad = db.all(now()).unwrap().into_iter().find(|s| s.hidden).unwrap();
+    let bare = mo_sounds::Sound { tags: Vec::new(), activity: SoundActivity::default(), ..pad };
+    assert_eq!(format!("{hidden:?}"), format!("{:?}", [bare]));
+
+    // All of it at one moment, with only the sizes of the sounds with copies: the broken one has none.
+    let mut finds = db.finds().unwrap();
+    assert_eq!(finds.matches, db.matches().unwrap());
+    finds.exact.sort();
+    assert_eq!(finds.exact, exact);
+    assert_eq!(finds.sizes, std::collections::HashMap::from([(1, 100), (2, 50)]));
+    assert_eq!(format!("{:?}", finds.hidden), format!("{hidden:?}"));
 }
 
 #[test]
@@ -188,6 +202,7 @@ fn an_older_library_reads_with_what_it_has() {
     assert!(db.tagged("warm", "you").unwrap().is_empty());
     assert_eq!(db.setting("x").unwrap(), None);
     assert_eq!(db.matches().unwrap()[0].apart, None);
+    assert!(db.hidden_sounds().unwrap().is_empty());
 }
 
 #[test]
