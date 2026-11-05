@@ -45,6 +45,8 @@ pub(super) struct Kit {
     pub(super) export_folder: Option<String>,
     /// The kit is on its way to Bitwig: Send to Bitwig waits meanwhile, as in the C# app.
     pub(super) sending: bool,
+    /// The kit is being copied into its folder: Export kit waits meanwhile, so a second click doesn't copy it again.
+    pub(super) exporting: bool,
     /// The Drum Machine's ID the C# app kept in `library.db`, if it kept one.
     pub(super) drum_machine: Option<String>,
 }
@@ -66,6 +68,7 @@ impl Default for Kit {
             status: "Roll a kit to fill the pads.".to_owned(),
             export_folder: None,
             sending: false,
+            exporting: false,
             drum_machine: None,
         }
     }
@@ -119,7 +122,7 @@ impl Kit {
         let mut pads = Vec::new();
         let mut keep_clear = Vec::new();
         for (slot, &id) in self.slots.iter().zip(&self.ids) {
-            let rolls = (self.full && !slot.locked) || self.pending.contains(&id);
+            let rolls = (self.full && !slot.kept()) || self.pending.contains(&id);
             if rolls {
                 slots.push(KitSlot { locked: false, sound: None, ..slot.clone() });
                 pads.push(Some(id));
@@ -136,6 +139,44 @@ impl Kit {
             pads.push(None);
         }
         (slots, pads)
+    }
+
+    /// Locks pad `i`, or unlocks it. Gives whether a full roll on its way must be asked again: it was worked out with
+    /// the pads locked as they were, so it could give another pad the sound this one keeps now, or leave this one as
+    /// it was though it's unlocked now. An empty pad is filled either way, so its lock changes nothing there.
+    fn toggle_lock(&mut self, i: usize) -> bool {
+        let Some(slot) = self.slots.get_mut(i) else { return false };
+        slot.locked = !slot.locked;
+        self.busy && self.full && slot.sound.is_some()
+    }
+
+    /// Takes in roll `r`'s sounds, if it's the newest roll asked for.
+    fn take_rolled(&mut self, r: Rolled) {
+        if self.asked != r.id {
+            return;
+        }
+        self.busy = false;
+        for (id, sound) in r.sounds {
+            let Some(i) = self.ids.iter().position(|&x| x == id) else { continue };
+            let waited = self.pending.remove(&id);
+            // A pad locked with a sound while it rolled keeps it; a re-roll with nothing new keeps the old one.
+            if let Some(slot) = self.slots.get_mut(i)
+                && (waited || !slot.kept())
+                && (sound.is_some() || !waited)
+            {
+                slot.sound = sound;
+            }
+        }
+        if r.full {
+            self.full = false;
+            self.seed = r.seed;
+        }
+        let empty = self.slots.iter().filter(|s| s.sound.is_none()).count();
+        self.status = if empty > 0 {
+            format!("{empty} pad{} found no sound of the right type yet.", if empty == 1 { "" } else { "s" })
+        } else {
+            to_bitwig::kit_name(self.seed)
+        };
     }
 
     /// A name for a new pad of type `t` that no pad has: "Kick", else "Kick 2", "Kick 3"…
@@ -232,13 +273,13 @@ pub(super) fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_pad_lock(move |i| {
         let Some(app) = weak.upgrade() else { return };
-        PAGE.with(|p| {
-            let mut p = p.borrow_mut();
-            if let Some(s) = usize::try_from(i).ok().and_then(|i| p.kit.slots.get_mut(i)) {
-                s.locked = !s.locked;
-            }
-        });
-        show(&app);
+        let Ok(i) = usize::try_from(i) else { return };
+        // The newest roll wins: one asked again as the pads are locked now takes the place of the one on its way.
+        if PAGE.with(|p| p.borrow_mut().kit.toggle_lock(i)) {
+            roll(&app, None);
+        } else {
+            show(&app);
+        }
     });
     let weak = app.as_weak();
     data.on_pad_pick(move |i| {
@@ -362,82 +403,56 @@ pub(super) fn roll(app: &AppWindow, pad: Option<u64>) {
 }
 
 fn rolled_in(app: &AppWindow, r: Rolled) {
-    PAGE.with(|p| {
-        let mut p = p.borrow_mut();
-        let k = &mut p.kit;
-        if k.asked != r.id {
-            return;
-        }
-        k.busy = false;
-        for (id, sound) in r.sounds {
-            let Some(i) = k.ids.iter().position(|&x| x == id) else { continue };
-            let waited = k.pending.remove(&id);
-            // A pad locked while it rolled keeps its sound; a re-roll with nothing new keeps the old one.
-            if let Some(slot) = k.slots.get_mut(i)
-                && (waited || !slot.locked)
-                && (sound.is_some() || !waited)
-            {
-                slot.sound = sound;
-            }
-        }
-        if r.full {
-            k.full = false;
-            k.seed = r.seed;
-        }
-        let empty = k.slots.iter().filter(|s| s.sound.is_none()).count();
-        k.status = if empty > 0 {
-            format!("{empty} pad{} found no sound of the right type yet.", if empty == 1 { "" } else { "s" })
-        } else {
-            to_bitwig::kit_name(k.seed)
-        };
-    });
+    PAGE.with(|p| p.borrow_mut().kit.take_rolled(r));
     show(app);
 }
+
+/// What an export copies: the pads, the sounds they're from, the export folder setting, the new folder's name, and
+/// how the samples are written.
+type ToExport = (Vec<KitSlot>, Arc<SoundList>, Option<String>, String, ExportOptions);
 
 /// Copies the kit into a new folder under the export folder's Kits, off the window's thread, saying on a card how it
 /// went. Never writes over a kit already there.
 fn export(app: &AppWindow) {
-    let Some((slots, list, folder, name, options)) = PAGE.with(|p| {
-        let p = p.borrow();
-        let k = &p.kit;
-        if k.slots.iter().all(|s| s.sound.is_none()) {
-            return None;
-        }
-        let name = format!("Kit {} #{}", Local::now().format("%Y-%m-%d %H%M"), k.seed);
-        Some((k.slots.clone(), p.list.clone(), kits_folder(k.export_folder.as_deref()), name, k.export))
-    }) else {
-        PAGE.with(|p| p.borrow_mut().kit.status = "Roll a kit first.".to_owned());
-        show(app);
-        return;
-    };
-    let feed = FEED.with(|f| f.borrow().clone());
-    PAGE.with(|p| p.borrow_mut().kit.status = "Exporting the kit…".to_owned());
+    let ready = PAGE.with(|p| ready_to_export(&mut p.borrow_mut()));
     show(app);
+    let Some((slots, list, setting, name, options)) = ready else { return };
+    let feed = FEED.with(|f| f.borrow().clone());
     let weak = app.as_weak();
     let started = background::spawn("Kit export", move || {
         let job = feed.map(|f| f.start("Exporting a kit", &name));
-        let done = background::on_pool(|| {
-            let get = |id: i64| list.find(id).and_then(|i| list.sound(i));
-            kits::export(&slots, get, &folder, &name, options)
-        });
-        let status = match done {
-            Ok(e) => {
-                let shown = e.folder.display().to_string();
-                if let Some(job) = job {
-                    job.done(&shown);
+        // A panic in it is logged as a crash and fails the card as it goes; Export kit still comes back.
+        let status = mo_catch::catch_crash(AssertUnwindSafe(|| {
+            // Worked out here: finding the Documents folder can wait on the disk.
+            let folder = kits_folder(setting.as_deref());
+            let done = background::on_pool(|| {
+                let get = |id: i64| list.find(id).and_then(|i| list.sound(i));
+                kits::export(&slots, get, &folder, &name, options)
+            });
+            match done {
+                Ok(e) => {
+                    let shown = e.folder.display().to_string();
+                    if let Some(job) = job {
+                        job.done(&shown);
+                    }
+                    format!("Exported to {shown}")
                 }
-                format!("Exported to {shown}")
-            }
-            Err(e) => {
-                log::warning("Sounds", &format!("Kit export failed: {e}"));
-                if let Some(job) = job {
-                    job.failed(&e.to_string());
+                Err(e) => {
+                    log::warning("Sounds", &format!("Kit export failed: {e}"));
+                    if let Some(job) = job {
+                        job.failed(&e.to_string());
+                    }
+                    format!("Export failed: {e}")
                 }
-                format!("Export failed: {e}")
             }
-        };
+        }))
+        .unwrap_or_else(|_| "The kit couldn't be exported: see the log.".to_owned());
         let _ = slint::invoke_from_event_loop(move || {
-            PAGE.with(|p| p.borrow_mut().kit.status = status);
+            PAGE.with(|p| {
+                let k = &mut p.borrow_mut().kit;
+                k.exporting = false;
+                k.status = status;
+            });
             if let Some(app) = weak.upgrade() {
                 show(&app);
             }
@@ -445,7 +460,31 @@ fn export(app: &AppWindow) {
     });
     if let Err(e) = started {
         log::error("Sounds", &format!("Couldn't start the kit export: {e}"));
+        PAGE.with(|p| {
+            let k = &mut p.borrow_mut().kit;
+            k.exporting = false;
+            k.status = "The kit couldn't be exported: see the log.".to_owned();
+        });
+        show(app);
     }
+}
+
+/// What an export of the kit on show copies, with the kit marked as exporting; or `None`, with the kit's line saying
+/// why where there's something to say: there's nothing on the pads, or the kit is being exported already.
+fn ready_to_export(p: &mut Page) -> Option<ToExport> {
+    let k = &mut p.kit;
+    // A second click while the kit is copied would copy it again, into a second folder.
+    if k.exporting {
+        return None;
+    }
+    if k.slots.iter().all(|s| s.sound.is_none()) {
+        k.status = "Roll a kit first.".to_owned();
+        return None;
+    }
+    k.exporting = true;
+    k.status = "Exporting the kit…".to_owned();
+    let name = format!("Kit {} #{}", Local::now().format("%Y-%m-%d %H%M"), k.seed);
+    Some((k.slots.clone(), p.list.clone(), k.export_folder.clone(), name, k.export))
 }
 
 /// Puts the kit on a Drum Machine in the project open in Bitwig, off the window's thread: on a new track named after
@@ -536,6 +575,7 @@ pub(super) fn show(app: &AppWindow) {
         data.set_kit_status(k.status.clone().into());
         data.set_kit_busy(k.busy);
         data.set_kit_sending(k.sending);
+        data.set_kit_exporting(k.exporting);
         data.set_kit_unused(k.options.prefer_unused);
         data.set_kit_pack(k.options.same_pack);
         data.set_kit_elektron(k.export.elektron_ready);
@@ -640,6 +680,62 @@ mod tests {
         let (slots, pads) = k.to_roll();
         assert_eq!(pads.iter().filter(|p| p.is_some()).count(), k.slots.len() - 1);
         assert_eq!(slots.iter().filter(|s| s.locked).map(|s| s.sound).collect::<Vec<_>>(), vec![Some(11)]);
+    }
+
+    #[test]
+    fn a_locked_empty_pad_is_filled_by_a_roll() {
+        let mut k = Kit::default();
+        k.slots[0].locked = true;
+        k.slots[1].locked = true;
+        k.slots[1].sound = Some(11);
+        k.full = true;
+        let (_, pads) = k.to_roll();
+        // The empty pad rolls though it's locked; the one locked with a sound doesn't.
+        assert!(pads.contains(&Some(k.ids[0])));
+        assert!(!pads.contains(&Some(k.ids[1])));
+        // Its sound comes in; the pad locked with a sound keeps its own, whatever the answer says.
+        k.asked = 3;
+        k.take_rolled(Rolled { id: 3, sounds: vec![(k.ids[0], Some(20)), (k.ids[1], Some(21))], seed: 7, full: true });
+        assert_eq!((k.slots[0].sound, k.slots[1].sound), (Some(20), Some(11)));
+        assert!(!k.full);
+        assert_eq!(k.seed, 7);
+        // An older roll's answer changes nothing.
+        k.take_rolled(Rolled { id: 2, sounds: vec![(k.ids[0], Some(30))], seed: 8, full: true });
+        assert_eq!(k.slots[0].sound, Some(20));
+    }
+
+    #[test]
+    fn a_lock_changed_while_a_full_roll_is_on_its_way_asks_it_again() {
+        let mut k = Kit::default();
+        k.slots[0].sound = Some(10);
+        // No roll on its way: only the lock changes.
+        assert!(!k.toggle_lock(0));
+        assert!(k.slots[0].locked);
+        // A full roll on its way was worked out with pad 0 locked: unlocked now, it's asked again; so it is when
+        // pad 0 is locked again, so no other pad gets its sound. An empty pad's lock changes nothing in a roll.
+        (k.busy, k.full) = (true, true);
+        assert!(k.toggle_lock(0));
+        assert!(k.toggle_lock(0));
+        assert!(!k.toggle_lock(1));
+        // A re-roll of one pad already keeps clear of every sound on show.
+        k.full = false;
+        assert!(!k.toggle_lock(0));
+        assert!(!k.toggle_lock(99));
+    }
+
+    #[test]
+    fn a_kit_is_exported_once_at_a_time() {
+        let mut p = Page::default();
+        assert!(ready_to_export(&mut p).is_none());
+        assert_eq!(p.kit.status, "Roll a kit first.");
+        p.kit.slots[0].sound = Some(10);
+        p.kit.export_folder = Some(r"E:\Exports".into());
+        let Some((slots, _, setting, _, _)) = ready_to_export(&mut p) else { panic!("nothing to export") };
+        assert_eq!((slots[0].sound, setting.as_deref()), (Some(10), Some(r"E:\Exports")));
+        assert!(p.kit.exporting);
+        // A second click while it's copied does nothing.
+        assert!(ready_to_export(&mut p).is_none());
+        assert_eq!(p.kit.status, "Exporting the kit…");
     }
 
     #[test]
