@@ -146,6 +146,17 @@ export global MidiData {
     // The roll's choices: a keyboard down its side, and each note's name on it.
     in-out property <bool> roll-keyboard: true;
     in-out property <bool> roll-names: false;
+    // Playing the picked part as a loop with a General MIDI sound matched to it: whether it plays, the sound and why
+    // ("Electric Piano 1 · from its name: rhodes · 120 BPM"), what went wrong, and the key that plays or stops it.
+    in property <bool> playing;
+    in property <string> sound-line;
+    in property <string> play-note;
+    in property <string> play-key;
+    // No SoundFont to play with yet: what to do, and a button to choose one.
+    in property <bool> soundfont-missing;
+    in property <string> soundfont-note;
+    callback play-toggled();
+    callback choose-soundfont();
     in property <[MidiFact]> facts;
     in property <[CardAction]> actions;
     in property <[MenuItem]> menu;
@@ -413,6 +424,55 @@ component PartPanel inherits SidePanel {
         text: MidiData.picked.roll-note;
         color: Theme.muted;
         font-size: Type.meta;
+    }
+    // Play: the part round and round with a General MIDI sound matched to it.
+    HorizontalLayout {
+        spacing: Space.sm;
+        alignment: start;
+        StudioButton {
+            main: true;
+            horizontal-stretch: 0;
+            enabled: !MidiData.soundfont-missing || MidiData.playing;
+            text: MidiData.playing ? "Stop" : "Play loop";
+            tip: MidiData.playing ? "Stop the loop" : "Play the part round and round with a General MIDI sound matched to it";
+            key: MidiData.play-key;
+            clicked => { MidiData.play-toggled(); }
+        }
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: MidiData.sound-line;
+                color: Theme.muted;
+                font-size: Type.meta;
+                overflow: elide;
+                min-width: 0px;
+            }
+        }
+    }
+    if MidiData.play-note != "": Text {
+        text: MidiData.play-note;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    if MidiData.soundfont-missing: VerticalLayout {
+        spacing: Space.xs;
+        Text {
+            text: MidiData.soundfont-note;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+        HorizontalLayout {
+            alignment: start;
+            StudioButton {
+                horizontal-stretch: 0;
+                text: "Choose a SoundFont…";
+                clicked => { MidiData.choose-soundfont(); }
+            }
+        }
     }
     CardActions {
         actions: MidiData.actions;

@@ -481,6 +481,18 @@ fn change(key: &str, value: &str) {
     }
 }
 
+/// A setting as it stands: this app's change, else the C# app's choice (for the pages that remember things).
+pub fn value(key: &str) -> Option<String> {
+    PAGE.with(|p| p.borrow().as_ref().and_then(|p| p.settings.get(key).map(str::to_owned)))
+}
+
+/// Changes a setting and keeps it in the app's own settings file (never in `library.db`). False when it can't be
+/// kept past this run (the file couldn't be read at the start, so it isn't written over).
+pub fn remember(key: &str, value: &str) -> bool {
+    change(key, value);
+    PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.writable))
+}
+
 /// Whether Settings › Shortcuts is listening for a new key, so the next key press is that key.
 pub fn listening() -> bool {
     PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.listening.is_some()))
