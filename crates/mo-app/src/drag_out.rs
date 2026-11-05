@@ -104,17 +104,21 @@ pub struct SoundItem {
 /// The most peaks a card's waveform keeps: the card draws it about 44 points wide.
 const THUMB_PEAKS: usize = 96;
 
-/// A sound's line on the card: its name, the facts its tile shows ("Kick · C · 0.4 s"), its waveform, in its type's
-/// colour (`tint`, 0xRRGGBB).
-pub fn sound_card(s: &mo_sounds::Sound, tint: u32) -> Card {
-    let wave = s.analysis.as_ref().map(|a| a.waveform.to_vec()).unwrap_or_default();
+/// A sound's line on the card: its name, the facts its tile shows ("Kick · C · 0.4 s"), its waveform (`wave`: the
+/// page's list may come without them, [`mo_sounds::SoundsDb::waves_apart`]), in its type's colour (`tint`, 0xRRGGBB).
+pub fn sound_card(s: &mo_sounds::Sound, wave: &mo_sounds::Peaks, tint: u32) -> Card {
     Card {
         title: s.name().to_owned(),
         detail: crate::sounds::facts_line(s),
         kind: Kind::Audio,
         tint,
-        thumb: if wave.is_empty() { Thumb::None } else { Thumb::Wave(fewer_peaks(&wave, THUMB_PEAKS)) },
+        thumb: wave_thumb(wave),
     }
+}
+
+/// A sound's waveform as its line on the card draws it: none when it has none.
+pub fn wave_thumb(wave: &mo_sounds::Peaks) -> Thumb {
+    if wave.is_empty() { Thumb::None } else { Thumb::Wave(fewer_peaks(&wave.to_vec(), THUMB_PEAKS)) }
 }
 
 /// Sounds to drag out, as they are on disk: each file once (the first time it's given), in the order given. None when

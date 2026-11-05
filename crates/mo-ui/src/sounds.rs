@@ -9,6 +9,7 @@ pub use drag_out::card_at_row;
 mod galaxy;
 mod grid;
 mod kit;
+mod peaks;
 mod sky;
 
 use std::cell::RefCell;
@@ -466,13 +467,35 @@ fn when(at: NaiveDateTime, now: NaiveDateTime) -> String {
     }
 }
 
-/// A sound's waveform for the screens: every stored peak, one thin line each.
+/// A sound's waveform for the screens: every stored peak, one thin line each. Empty while it's read ([`peaks`]).
 fn wave(s: &Sound) -> String {
-    s.analysis.as_ref().map(|a| list::wave_path_of(a.waveform.iter())).unwrap_or_default()
+    peaks::with(s, |w| list::wave_path_of(w.iter())).unwrap_or_default()
 }
 
+/// How many peaks across a sound's waveform is: none while it's read ([`peaks`]).
 fn points(s: &Sound) -> i32 {
-    s.analysis.as_ref().map_or(0, |a| a.waveform.len() as i32)
+    peaks::with(s, |w| w.len() as i32).unwrap_or(0)
+}
+
+/// The waveforms of the sounds on show with these ids are back ([`peaks`]): the tiles show them, and so does the
+/// picked sound's card when it's one of them.
+fn waves_arrived(app: &AppWindow, ids: &[i64]) {
+    let (tiles, card) = PAGE.with(|p| {
+        let p = p.borrow();
+        let s = p.picked.and_then(|at| p.list.sound(at)).filter(|s| ids.contains(&s.id));
+        (p.view == TILES, s.map(|s| (wave(s), points(s))))
+    });
+    if tiles {
+        TILE_ROWS.with(|m| m.notify.reset());
+        grid::changed();
+    }
+    if let Some((wave, points)) = card {
+        let data = app.global::<SoundsData>();
+        let mut picked = data.get_picked();
+        picked.wave = wave.into();
+        picked.points = points;
+        data.set_picked(picked);
+    }
 }
 
 pub(crate) fn new_seed() -> u64 {
@@ -514,6 +537,7 @@ pub fn graphics_gone(app: &AppWindow) {
 pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
     let cards = feed.clone();
     wire(app, feed, shortcuts);
+    peaks::connect(app);
     crate::finder::on_open(Kind::Sound, |app, hit, how| {
         let Ok(id) = hit.id.parse::<i64>() else { return false };
         match how {
@@ -1590,6 +1614,11 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
         }
     };
     let count = read.count.and_then(|c| c.parse().ok()).filter(|c| COUNTS.contains(c)).unwrap_or(COUNT);
+    if read.partial.is_some() {
+        // The first sounds come with their waveforms, the rest without them, these among them: kept, so the tiles on
+        // show keep theirs whatever list they're in.
+        peaks::keep_own(&read.source, read.library.list.sounds());
+    }
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.galaxy.db = Some(read.source);
@@ -3230,6 +3259,12 @@ mod tests {
         for id in 10..260 {
             add_sound(&sounds_db, id, &format!("hit {id}"));
         }
+        // One in ten analysed, each with a waveform of its own.
+        for id in (10..260).step_by(10) {
+            let analysis = format!(r#"{{"Seconds": 0.5, "Waveform": [0.25, {}, 1.0]}}"#, f64::from(id) / 1000.0);
+            let set = c_sharp(&sounds_db).execute("UPDATE sounds SET analysis = ?1 WHERE id = ?2", (analysis, id));
+            assert!(set.is_ok(), "{set:?}");
+        }
         let library_db = song_library("first-songs.db", &[]);
         // The first start reads sounds.db, making the app's own library on the same pass: all at once.
         let made = one_start_shuffled(&sounds_db, &library_db, &Feed::default(), Some(7));
@@ -3269,6 +3304,29 @@ mod tests {
                 .collect()
         };
         assert_eq!(ids(&first), ids(&rest)[..200]);
+        // The first come with their waveforms, the rest without: each is read as its sound shows, as sounds.db has it.
+        let waves = |list: &SoundList| -> Vec<(i64, mo_sounds::Peaks)> {
+            let mut waves: Vec<_> = list
+                .sounds()
+                .iter()
+                .filter_map(|s| Some((s.id, s.analysis.as_ref()?.waveform.clone())))
+                .filter(|(_, w)| !w.is_empty())
+                .collect();
+            waves.sort_unstable_by_key(|w| w.0);
+            waves
+        };
+        let wanted = waves(&SoundList::new(
+            SoundsDb::open_read_only(&sounds_db).unwrap().all(Local::now().naive_local()).unwrap(),
+        ));
+        assert_eq!(wanted.len(), 25);
+        let first_wanted: Vec<_> =
+            wanted.iter().filter(|w| first.sounds().iter().any(|s| s.id == w.0)).cloned().collect();
+        assert!(!first_wanted.is_empty());
+        assert_eq!(waves(&first), first_wanted);
+        assert!(waves(&rest).is_empty());
+        let mut read = peaks::read(&copy, &ids(&rest)).unwrap();
+        read.sort_unstable_by_key(|w| w.0);
+        assert_eq!(read, wanted);
         // Opening on the galaxy (it needs every star), or with no shuffle to go by (the screenshots): all at once.
         let galaxy = song_library("first-galaxy-songs.db", &[(VIEW_KEY, "Galaxy")]);
         let said = one_start_shuffled(&sounds_db, &galaxy, &Feed::default(), Some(7));

@@ -225,8 +225,8 @@ fn shapes_of<T>(
 
 /// A sound's waveform lines, kept for the next frame.
 fn lines_of(p: &Page, i: usize, s: &mo_sounds::Sound) -> Option<(Rc<[WaveLine]>, u32)> {
-    let points = s.analysis.as_ref().map_or(0, |a| a.waveform.len());
-    let points = u32::try_from(points).ok().filter(|n| *n > 0)?;
+    // Not kept while it's read (`peaks`): drawn once it's back.
+    let points = u32::try_from(super::points(s)).ok().filter(|n| *n > 0)?;
     let lines = LINES.with(|l| {
         let mut l = l.borrow_mut();
         if !std::ptr::eq(l.list.as_ptr(), std::sync::Arc::as_ptr(&p.list)) || l.sounds.len() >= KEEP_LINES {

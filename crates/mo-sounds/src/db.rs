@@ -11,7 +11,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
 use crate::duplicates::Finds;
 use crate::index::Gathered;
-use crate::{Sound, SoundActivity, SoundAnalysis, Word, compact, event, types};
+use crate::{Peaks, Sound, SoundActivity, SoundAnalysis, Word, compact, event, types};
 
 /// What went wrong reading the sound library.
 #[derive(Debug)]
@@ -161,12 +161,13 @@ const fn columns(list: &str) -> usize {
 const SOUND_SQL: &str = concat!("SELECT ", sound_columns!(), " FROM sounds");
 
 /// Every sound in the Rust app's copy of the library, in the order the rows are stored: the columns [`copy_sound_at`]
-/// takes, the analysis's (and the waveform straight after them, from its own table) as [`compact::analysis_at`]
-/// takes them.
+/// takes, the analysis's as [`compact::analysis_at`] takes them. Not the waveforms, which sit in a table of their own
+/// and are read for the sounds on show ([`SoundsDb::waves`]): a third of the reading, and of the memory the list
+/// takes, for a waveform few of the sounds are ever shown with. (`NULL` where the analysis has its waveform.)
 const COPY_SOUND_SQL: &str = concat!(
     "SELECT id, path, mtime, error, name_type, user_type, type, type_source, type_conf, favourite, rating, plays, ",
     compact::analysis_columns!(),
-    ", w.v FROM sounds LEFT JOIN sound_waves w ON w.sound_id = sounds.id"
+    ", NULL FROM sounds"
 );
 
 /// The same from a copy of the format before ([`compact::FORMERLY`]), which keeps the waveform in each sound's row.
@@ -376,7 +377,8 @@ impl SoundsDb {
 
     /// The sounds with these ids (any it doesn't have are left out), each just as [`SoundsDb::all`] gives it, in the
     /// same order: for showing a few at once while the rest are read. Only what's theirs is read (their rows, tags,
-    /// plays and hidden marks), so it's quick for a few hundred whatever the size of the library.
+    /// plays and hidden marks), so it's quick for a few hundred whatever the size of the library. With their
+    /// waveforms, even where the whole list comes without them ([`SoundsDb::waves_apart`]): they show at once.
     pub fn some(&self, ids: &[i64], now: NaiveDateTime) -> Result<Vec<Sound>, SoundsError> {
         let snapshot = self.conn.unchecked_transaction()?;
         let mut sounds = Vec::with_capacity(ids.len());
@@ -388,6 +390,14 @@ impl SoundsDb {
             let mut rows = st.query(rusqlite::params_from_iter(ids))?;
             while let Some(r) = rows.next()? {
                 reading.add_listed(self.is_copy(), r)?;
+            }
+            if self.waves_apart() {
+                let mut waves: HashMap<i64, Peaks> = self.waves_of(ids)?.into_iter().collect();
+                for s in &mut reading.out.sounds {
+                    if let (Some(a), Some(wave)) = (s.analysis.as_mut(), waves.remove(&s.id)) {
+                        a.waveform = wave;
+                    }
+                }
             }
             sounds.append(&mut reading.out.sounds);
         }
@@ -679,6 +689,47 @@ impl SoundsDb {
         let mut st = self.conn.prepare("SELECT sound_id FROM sound_tags WHERE tag = ?1 AND source = ?2")?;
         let rows = st.query_map([tag, source], |r| r.get::<_, Option<i64>>(0))?;
         Ok(rows.filter_map(|r| r.transpose()).collect::<Result<_, _>>()?)
+    }
+
+    /// Whether the sounds read from this library come without their waveforms ([`Peaks::is_empty`]), which are read
+    /// for the ones on show instead ([`SoundsDb::waves`]): the Rust app's copy, in this version's format.
+    pub fn waves_apart(&self) -> bool {
+        self.layout == Layout::Copy
+    }
+
+    /// The waveforms of the sounds with these ids, by id: any it doesn't have (no sound with that id, or one never
+    /// analysed) is left out. Only theirs are read, a few hundred bytes each.
+    pub fn waves(&self, ids: &[i64]) -> Result<Vec<(i64, Peaks)>, SoundsError> {
+        let snapshot = self.conn.unchecked_transaction()?;
+        let waves = self.waves_of(ids)?;
+        snapshot.finish()?;
+        Ok(waves)
+    }
+
+    /// [`SoundsDb::waves`], in the transaction the caller holds.
+    fn waves_of(&self, ids: &[i64]) -> Result<Vec<(i64, Peaks)>, SoundsError> {
+        let sql = match self.layout {
+            Layout::Copy => "SELECT sound_id, v FROM sound_waves WHERE sound_id",
+            Layout::Formerly => "SELECT id, waveform FROM sounds WHERE id",
+            Layout::Library => "SELECT id, analysis FROM sounds WHERE id",
+        };
+        let mut waves = Vec::new();
+        for ids in ids.chunks(SOME_AT_ONCE) {
+            let mut st = self.conn.prepare(&format!("{sql} IN ({})", places_for(ids.len())))?;
+            let mut rows = st.query(rusqlite::params_from_iter(ids))?;
+            while let Some(r) = rows.next()? {
+                let id: i64 = r.get(0)?;
+                let wave = match (self.layout, r.get_ref(1)?) {
+                    (Layout::Library, _) => analysis_at(r, 1).map(|a| a.waveform),
+                    (_, ValueRef::Blob(b)) => Some(compact::unpacked_peaks(b)),
+                    _ => None,
+                };
+                if let Some(wave) = wave.filter(|w| !w.is_empty()) {
+                    waves.push((id, wave));
+                }
+            }
+        }
+        Ok(waves)
     }
 
     /// The sounds you've hidden as duplicates.
