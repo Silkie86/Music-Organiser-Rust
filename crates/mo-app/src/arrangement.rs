@@ -405,6 +405,7 @@ pub struct View {
     keys: Arc<Vec<(u8, u8)>>,
 }
 
+pub mod peaks_store;
 /// What a drag out of the app picks up from the view, and what it carries (`drag_out`).
 mod pick;
 

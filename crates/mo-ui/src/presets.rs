@@ -57,7 +57,12 @@ struct Page {
     section: Section,
     /// The Sounds section: every line, those shown (places in `items`), and the picked one (a place in `items`).
     /// Shared with the filtering worker, which works out what's shown off the window's thread.
+    /// Never copied on the window's thread (100k lines or more): part fixes are laid over it (`fixed_now`), and lines
+    /// read while a filtering holds it wait in `pending` until it lets go ([`take_waiting`]).
     items: Arc<Vec<Item>>,
+    pending: Vec<Item>,
+    /// Whether Ctrl+K has been handed the lines (once they're all read).
+    finder_has: bool,
     shown: Vec<usize>,
     /// Counts the filterings asked for, so an older one finishing late is dropped (newest wins).
     asked: u64,
@@ -102,9 +107,9 @@ struct Page {
     shortcuts: Shortcuts,
     /// The last time the list was shown afresh while sounds are still coming in.
     shown_at: Option<Instant>,
-    /// Part fixes made since the sounds started being read, by fingerprint (None: the fix was taken away), so the
-    /// sounds read after one was made get it too.
-    fixed_now: HashMap<String, Option<Role>>,
+    /// Part fixes made since the sounds started being read, by fingerprint (None: the fix was taken away): laid over
+    /// the lines wherever they're shown, filtered or found, and given to the sounds read after one was made.
+    fixed_now: logic::Fixes,
     /// A line Ctrl+K asked for, picked once the filtering asked for with it is done; and that line, to pick once the
     /// list is on show.
     to_pick: Option<usize>,
@@ -126,6 +131,7 @@ thread_local! {
 struct FilterAsk {
     id: u64,
     items: Arc<Vec<Item>>,
+    fixes: logic::Fixes,
     filters: Filters,
     plugins: Option<Vec<(String, usize)>>,
 }
@@ -144,7 +150,7 @@ struct FilterAnswer {
 impl FilterAsk {
     fn answer(self) -> FilterAnswer {
         let plugins = self.plugins.unwrap_or_else(|| logic::plugins(&self.items));
-        let found = logic::filtered(&self.items, &self.filters);
+        let found = logic::filtered_with(&self.items, &self.filters, &self.fixes);
         let chips = logic::filter_chips(&found.counts, &plugins, &self.filters);
         let format_note = logic::format_note(&self.items, &found.shown);
         FilterAnswer { id: self.id, shown: found.shown, years: found.years, chips, format_note, plugins }
@@ -179,7 +185,7 @@ impl Model for Lines {
         PAGE.with(|p| {
             let p = p.try_borrow().ok()?;
             let at = *p.shown.get(row)?;
-            let l = logic::line(p.items.get(at)?);
+            let l = logic::line(&p.items.get(at)?.as_fixed(&p.fixed_now));
             Some(PresetLine {
                 row: row as i32,
                 name: l.name.into(),
@@ -505,10 +511,13 @@ fn refilter(p: &mut Page) {
 }
 
 fn ask_filter(p: &mut Page, count_plugins: bool) {
+    // Lines left waiting (a filtering that never answered) go in now, if nothing holds the list.
+    take_waiting(p);
     p.asked += 1;
     let ask = FilterAsk {
         id: p.asked,
         items: Arc::clone(&p.items),
+        fixes: p.fixed_now.clone(),
         filters: p.filters.clone(),
         plugins: (!count_plugins).then(|| p.plugins.clone()),
     };
@@ -520,9 +529,22 @@ fn ask_filter(p: &mut Page, count_plugins: bool) {
         let mut w = w.borrow_mut();
         if w.is_none() {
             match Newest::start("Presets filter", |ask: FilterAsk| {
-                let answer = background::on_pool(|| ask.answer());
+                // The ask (and its hold on the lines) is let go here, before the window takes the answer: the
+                // window can then put in the lines read meanwhile.
+                let answer = background::on_pool(move || ask.answer());
                 on_window(move |app| {
-                    let current = PAGE.with(|p| take_filtered(&mut p.borrow_mut(), answer));
+                    let current = PAGE.with(|p| {
+                        let mut p = p.borrow_mut();
+                        let current = take_filtered(&mut p, answer);
+                        // The filtering has let go of the lines: those read meanwhile go in, filtered next. An older
+                        // answer leaves that to the newer filtering, which holds the lines still.
+                        if current && take_waiting(&mut p) && (p.reading.is_none() || due(&p)) {
+                            p.shown_at = Some(Instant::now());
+                            ask_filter(&mut p, true);
+                        }
+                        current
+                    });
+                    give_finder(app);
                     if current {
                         show_all(app);
                     }
@@ -545,6 +567,37 @@ fn ask_filter(p: &mut Page, count_plugins: bool) {
     });
     if let Some(ask) = ask {
         take_filtered(p, ask.answer());
+    }
+}
+
+/// Whether the list may be filtered afresh while reading: at most four times a second (the plugin list and the
+/// filtering go over every line).
+fn due(p: &Page) -> bool {
+    p.shown_at.is_none_or(|t| t.elapsed() >= Duration::from_millis(250))
+}
+
+/// Puts the lines read while a filtering held the list ([`Page::pending`]) in, in place, once nothing else holds it.
+/// Whether any went in.
+fn take_waiting(p: &mut Page) -> bool {
+    if p.pending.is_empty() {
+        return false;
+    }
+    let Page { items, pending, .. } = p;
+    let Some(all) = Arc::get_mut(items) else { return false };
+    all.append(pending);
+    true
+}
+
+/// Ctrl+K gets the lines once they're all read and in: handed over while reading, it would hold the list.
+fn give_finder(app: &AppWindow) {
+    let items = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let ready = p.started && p.reading.is_none() && p.pending.is_empty() && !p.finder_has;
+        p.finder_has |= ready;
+        ready.then(|| Arc::clone(&p.items))
+    });
+    if let Some(items) = items {
+        crate::finder::add_source(app, "presets", Arc::new(mo_app::finder::Presets(items)));
     }
 }
 
@@ -607,7 +660,8 @@ fn show_everything(app: &AppWindow) {
         data.set_unused(f.unused);
         data.set_shown(p.shown.len() as i32);
         let reading = p.reading.is_some();
-        let (title, text) = logic::empty_words(p.items.len(), p.shown.len(), reading, f.any(), p.failed.as_deref());
+        let (title, text) =
+            logic::empty_words(p.items.len() + p.pending.len(), p.shown.len(), reading, f.any(), p.failed.as_deref());
         data.set_empty_title(title.into());
         data.set_empty_text(text.into());
         data.set_format_note(p.format_note.as_str().into());
@@ -652,7 +706,7 @@ fn show_header(app: &AppWindow) {
         let hidden = p.curves.iter().filter(|c| c.hidden).count();
         let (summary, busy, done) = match p.section {
             Section::Sounds => (
-                logic::summary(p.items.len(), p.shown.len(), p.songs, p.files, reading),
+                logic::summary(p.items.len() + p.pending.len(), p.shown.len(), p.songs, p.files, reading),
                 p.reading.map(|(d, t)| logic::sounds_busy(d, t)).unwrap_or_default(),
                 p.reading.map_or(0.0, |(d, t)| if t == 0 { -1.0 } else { d as f32 / t as f32 }),
             ),
@@ -677,6 +731,7 @@ fn show_card(app: &AppWindow) {
             data.set_panel_shown(false);
             return;
         };
+        let item = &*item.as_fixed(&p.fixed_now);
         let c = logic::card(item);
         data.set_panel_shown(true);
         data.set_card(PresetCard {
@@ -887,11 +942,10 @@ fn read_sounds(_app: &AppWindow) {
                 if let Err(e) = &result {
                     p.failed = Some(e.clone());
                 }
-                refilter(&mut p);
+                take_waiting(&mut p);
+                ask_filter(&mut p, true);
             });
-            // Ctrl+K finds them once they're all read: handed over while reading, every batch added would copy them.
-            let items = PAGE.with(|p| Arc::clone(&p.borrow().items));
-            crate::finder::add_source(app, "presets", Arc::new(mo_app::finder::Presets(items)));
+            give_finder(app);
             show_all(app);
         });
     });
@@ -1055,22 +1109,17 @@ fn add(items: Vec<Item>, songs: usize, files: usize, reading: Option<(usize, usi
     on_window(move |app| {
         let show = PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            let mut items = items;
-            for i in &mut items {
-                if let Some(fix) = p.fixed_now.get(&i.row.hash) {
-                    i.row.fixed = *fix;
-                }
-            }
-            // While a filtering still holds the old lines, they're copied once for this (they're seldom both at once:
-            // the lines come at most four times a second, and a filtering takes a moment).
-            Arc::make_mut(&mut p.items).extend(items);
+            // Fixes made since the reading began are laid over these lines too (`fixed_now`): they're never written
+            // into them. While a filtering holds the lines, the new ones wait: its answer puts them in (`take_waiting`).
+            p.pending.extend(items);
+            take_waiting(&mut p);
             p.songs += songs;
             p.files += files;
             if reading.is_some() {
                 p.reading = reading;
             }
             // At most four times a second while reading: the plugin list and the filtering go over every line.
-            let due = p.shown_at.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) || reading.is_none();
+            let due = due(&p) || reading.is_none();
             if due {
                 p.shown_at = Some(Instant::now());
                 // Every plugin, counted again with the filtering: the menu scrolls, and only makes the lines in sight.
@@ -1112,7 +1161,7 @@ fn run_sound_action(app: &AppWindow, id: &str) -> bool {
     }
     let Some(item) = PAGE.with(|p| {
         let p = p.borrow();
-        p.picked.and_then(|i| p.items.get(i).cloned())
+        p.picked.and_then(|i| p.items.get(i)).map(|i| i.as_fixed(&p.fixed_now).into_owned())
     }) else {
         return false;
     };
@@ -1172,7 +1221,7 @@ fn set_fix(app: &AppWindow, item: &Item, role: Option<Role>) {
 fn apply(app: &AppWindow, hash: &str, role: Option<Role>) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        logic::apply_fix(Arc::make_mut(&mut p.items).as_mut_slice(), hash, role);
+        // Laid over the lines, not written into them: they're shared, and one change would copy them all.
         p.fixed_now.insert(hash.to_owned(), role);
         // A part filter may drop it from the list; the card stays on it.
         refilter(&mut p);
@@ -1309,8 +1358,13 @@ fn export_shown(app: &AppWindow) -> bool {
     let (plan, files, items) = PAGE.with(|p| {
         let p = p.borrow();
         let (plan, files) = logic::export_plan(&p.items, &p.shown);
-        let items: Vec<Item> =
-            p.shown.iter().filter_map(|&i| p.items.get(i).cloned()).filter(|i| !i.is_file()).collect();
+        let items: Vec<Item> = p
+            .shown
+            .iter()
+            .filter_map(|&i| p.items.get(i))
+            .filter(|i| !i.is_file())
+            .map(|i| i.as_fixed(&p.fixed_now).into_owned())
+            .collect();
         (plan, files, items)
     });
     if plan.is_empty() || PAGE.with(|p| p.borrow().exporting) {
@@ -1925,4 +1979,51 @@ fn sample_curves() -> Vec<Curve> {
             vec![source(SourceKind::FlKnobMoves, "sly_17", "Sylenth1", "Mix A/B", 32.0, 15)],
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lines_read_while_a_filtering_holds_the_list_wait_and_are_never_copied_in() {
+        let mut p = Page { items: Arc::new(sample_items()), ..Page::default() };
+        let first = p.items.len();
+        // A filtering holds the list.
+        let held = Arc::clone(&p.items);
+        p.pending.extend(sample_items());
+        assert!(!take_waiting(&mut p), "the held list isn't copied to add lines");
+        assert_eq!(p.items.len(), first);
+        assert!(Arc::ptr_eq(&p.items, &held));
+        // Once it lets go, they go in, in the order read, into the very same list.
+        drop(held);
+        let at = Arc::as_ptr(&p.items);
+        assert!(take_waiting(&mut p));
+        assert_eq!(p.items.len(), first * 2);
+        assert!(p.pending.is_empty());
+        assert_eq!(Arc::as_ptr(&p.items), at);
+        assert_eq!(p.items[first..], sample_items()[..]);
+    }
+
+    #[test]
+    fn a_part_fix_is_laid_over_the_shared_lines_not_written_into_them() {
+        let items = Arc::new(sample_items());
+        let shared = Arc::clone(&items);
+        let at = items.iter().position(|i| !i.row.hash.is_empty() && i.row.fixed.is_none()).unwrap();
+        let hash = items[at].row.hash.clone();
+        let mut fixes = logic::Fixes::new();
+        fixes.insert(hash, Some(Role::Pad));
+        // The lines aren't touched (nor copied); the line, the card and the filter all see the fix.
+        assert_eq!(items[at].row.fixed, None);
+        assert!(Arc::ptr_eq(&items, &shared));
+        let shown = items[at].as_fixed(&fixes);
+        assert_eq!(shown.row.fixed, Some(Role::Pad));
+        assert!(logic::line(&shown).fixed);
+        let pads = Filters { parts: vec![logic::PartPick::Role(Role::Pad)], ..Filters::default() };
+        assert!(logic::filtered_with(&items, &pads, &fixes).shown.contains(&at));
+        // A fix taken away goes back to the guess.
+        let mut taken = logic::Fixes::new();
+        taken.insert(items[at].row.hash.clone(), None);
+        assert!(matches!(items[at].as_fixed(&taken), std::borrow::Cow::Borrowed(_)));
+    }
 }

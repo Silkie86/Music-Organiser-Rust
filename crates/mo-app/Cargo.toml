@@ -40,13 +40,14 @@ tiny-skia.workspace = true
 # brings it in.
 swash = "0.2"
 
+# The arrangement's waveforms, kept between runs (arrangement::peaks_store); also the backup test's small library.
+rusqlite = { version = "0.41", features = ["bundled"] }
+
 # Long work over a disk is put low in the system's memory (background::on_bulk_pool).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
 
 [dev-dependencies]
-# A small library made by the backup test.
-rusqlite = { version = "0.41", features = ["bundled"] }
 # The stand-in Bitwig, for the Send to Bitwig tests: no test reaches a real Bitwig (rule 11).
 mo-dawlink = { path = "../mo-dawlink", features = ["fake-bitwig"] }
 # The made-up Bitwig projects the Space Fix test writes (mo-formats' test projects pack a part with it).
