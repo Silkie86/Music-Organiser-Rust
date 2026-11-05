@@ -631,7 +631,9 @@ fn read_into_index(
     // Only a full path can be an unplugged drive; anything else in the list is never found and so never counted as away.
     let (folders, away): (Vec<String>, Vec<String>) =
         listed.into_iter().filter(|f| mo_formats::paths::is_absolute(f)).partition(|f| Path::new(f).is_dir());
-    let found = background::on_pool(|| {
+    // The folder walk and the reading run on the bulk pool: a few threads keep one drive (L:, holding every pack) busy,
+    // where one per core made it jump between files, and the pages' quick jobs on the main pool aren't held up.
+    let found = background::on_bulk_pool(|| {
         mo_library::scan::find_files(
             &folders,
             &|path: &str| mo_formats::midi::is_midi_path(path),
@@ -648,15 +650,12 @@ fn read_into_index(
         "MIDI",
         &format!("{} files wanted, {} to read, {} to forget", wanted.len(), plan.todo.len(), plan.forget.len()),
     );
-    // Half the cores of the app's low-priority pool: reading songs is heavy, and the app and your DAW come first
-    // (rule 21).
-    let threads = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).max(1));
     let own;
-    let pool = match background::pool() {
+    let pool = match background::bulk_pool() {
         Some(pool) => pool,
         None => {
             own = rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
+                .num_threads(2)
                 .thread_name(|i| format!("MIDI reader {i}"))
                 .start_handler(|_| background::lower_priority())
                 .build()
@@ -664,7 +663,11 @@ fn read_into_index(
             &own
         }
     };
-    indexer::run(&mut store, &plan, &folders, pool, threads, stop, progress).map_err(|e| e.to_string())
+    let threads = pool.current_num_threads();
+    let started = std::time::Instant::now();
+    let summary = indexer::run(&mut store, &plan, &folders, pool, threads, stop, progress).map_err(|e| e.to_string());
+    log::info("MIDI", &format!("read with {threads} readers in {:.1} s", started.elapsed().as_secs_f64()));
+    summary
 }
 
 /// Stops the reading at the next file; what's been read is kept, and the next reading carries on from there.
