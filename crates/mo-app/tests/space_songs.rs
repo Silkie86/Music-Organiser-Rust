@@ -263,6 +263,8 @@ fn ticked_autosaves_and_caches_go_to_the_bin_each_checked_again_and_come_back() 
     fs::remove_file(backup(7)).unwrap();
     let mut now = from.clone();
     now.saves.push(studio_one(22, &keys.join("Rhodes Jam.song"), b"jam", "2026-11-01 12:00"));
+    // And Studio One writes more to Tape Echo's cache: it frees what it holds now.
+    write(&tape.join("Cache").join("more.dat"), &[0; 50]);
     removing.start(picked.clone());
     let bin = FolderBin::new(dir.join("Bin"));
     let when = binned::now();
@@ -279,7 +281,7 @@ fn ticked_autosaves_and_caches_go_to_the_bin_each_checked_again_and_come_back() 
     );
     assert!(!tape.join("Cache").exists() && !backup(1).exists());
     assert!(keys.join("Cache").join("peaks.dat").exists() && backup(0).exists() && backup(2).exists());
-    assert_eq!(done.bytes(), 500 + 10);
+    assert_eq!(done.bytes(), 550 + 10);
     let why = |name: &str| done.problems.iter().find(|p| name_of(&p.path) == name).map(|p| p.why.clone()).unwrap();
     assert_eq!(why("auto-backups/Night Drive_2 (0).bwproject"), Refused::Changed.text());
     assert_eq!(
@@ -297,7 +299,7 @@ fn ticked_autosaves_and_caches_go_to_the_bin_each_checked_again_and_come_back() 
     let app = dir.join("App");
     let (kept, kept_at) = binned::record(&app, &bin, COMPACT, when, &done);
     assert!(kept.noted && kept_at == when);
-    assert_eq!((kept.in_bin.items, kept.in_bin.bytes), (2, 510));
+    assert_eq!((kept.in_bin.items, kept.in_bin.bytes), (2, 560));
     let bin_card = space_bin::card(Some(&kept), &PutBacks::default(), true, false);
     assert_eq!(bin_card.parts[0].name, "Songs that can be compacted");
     assert!(bin_card.parts[0].what.starts_with("1 old autosave and 1 cache, removed "), "{}", bin_card.parts[0].what);
@@ -315,7 +317,7 @@ fn ticked_autosaves_and_caches_go_to_the_bin_each_checked_again_and_come_back() 
     );
     assert_eq!(status("Night Drive"), (format!("1 in the {}, and 2 stayed (the log says why).", space_bin::BIN), true));
     let [line, _] = lines(Some(&shown), false, &removing);
-    assert_eq!(line.unwrap().1.size, "Freed 510 bytes");
+    assert_eq!(line.unwrap().1.size, "Freed 560 bytes");
 
     // Put back: both are where they were, the cache with all it held, and nothing of the app's is left in the bin.
     let sent = removing.to_put_back().unwrap();
@@ -323,6 +325,7 @@ fn ticked_autosaves_and_caches_go_to_the_bin_each_checked_again_and_come_back() 
     let problems = undo(&sent.coming_back(), &bin);
     assert!(problems.is_empty(), "{problems:?}");
     assert!(tape.join("Cache").join("Waves").join("wave.cache").exists() && backup(1).exists());
+    assert!(tape.join("Cache").join("more.dat").exists());
     removing.put_back(when, problems);
     let card = compact_card(Some(&shown), &removing, true);
     assert_eq!(card.parts.iter().find(|p| p.name == "Tape Echo").unwrap().status, "Back where it was.");

@@ -20,7 +20,7 @@ use std::sync::atomic::AtomicBool;
 
 use chrono::{Datelike, NaiveDate};
 use mo_formats::paths::file_name;
-use mo_library::scan::is_project_file;
+use mo_library::scan::{is_inside, is_project_file};
 use mo_library::songs::group_songs;
 use mo_library::{Library, LibraryError, Save, Song, SongChoices};
 use mo_space::Stopped;
@@ -36,7 +36,7 @@ use crate::songs::thousands;
 use crate::space::{Card, Line, Opens, Part, and_list};
 use crate::space_bin::BIN;
 use crate::space_removing::{
-    self, ADMIN, Looked, Removable, back_words, clauses, freed_words, result_figures, sent_words, stayed,
+    self, ADMIN, Looked, Noun, Removable, back_words, clauses, freed_words, result_figures, sent_words, stayed,
 };
 
 /// The Songs that can be compacted line's id, and its clean-up's kind in what the app put in the Recycle Bin.
@@ -253,7 +253,24 @@ pub fn remove(
     let mut done = clean::apply(&plan, &guard, bin, stop);
     let refused = plan.refused.into_iter().map(|(item, why)| Problem { path: item.path, why: why.text().to_owned() });
     done.problems.splice(0..0, problems.into_iter().chain(refused));
+    went_inside(&going, &mut done);
     done
+}
+
+/// What the clean-up passed over as inside a folder that went too (a line inside a cache folder that went, say) went
+/// with that folder: `done` says so, so its line says it went (its room is in the folder's) and it comes back with it.
+/// Usually there's none, so only what `done` says nothing of is looked for in what went.
+fn went_inside(going: &[CompactItem], done: &mut Done) {
+    let said: HashSet<&str> =
+        done.removed.iter().map(|r| r.path.as_str()).chain(done.problems.iter().map(|p| p.path.as_str())).collect();
+    let with: Vec<(String, String)> = going
+        .iter()
+        .filter(|i| !said.contains(i.path.as_str()))
+        .filter_map(|i| {
+            done.removed.iter().find(|r| is_inside(&i.path, &r.path)).map(|r| (i.path.clone(), r.path.clone()))
+        })
+        .collect();
+    done.went_with.extend(with);
 }
 
 /// Of `picked`, what goes on to be checked and sent: what can go from here that measuring its song again (as `from`
@@ -285,17 +302,26 @@ fn still_offered(
         .collect();
     let measured: Vec<Option<SongRoom>> =
         again.par_iter().map(|song| measure_song(song, from, others, settings, stop)).collect::<Result<_, _>>()?;
-    let offered: HashMap<String, CompactKind> =
-        measured.iter().flatten().flat_map(|s| s.report.items.iter().map(|i| (key(&i.path), i.kind))).collect();
+    let offered: HashMap<String, &CompactItem> =
+        measured.iter().flatten().flat_map(|s| s.report.items.iter().map(|i| (key(&i.path), i))).collect();
     let mut going = Vec::new();
     for p in can {
-        if offered.get(&key(&p.item.path)) == Some(&p.item.kind) {
-            going.push(p.item.clone());
-        } else {
-            problems.push(Problem { path: p.item.path.clone(), why: not_offered(&p.item) });
+        match offered.get(&key(&p.item.path)) {
+            Some(now) if now.kind == p.item.kind => going.push(as_measured_now(&p.item, now)),
+            _ => problems.push(Problem { path: p.item.path.clone(), why: not_offered(&p.item) }),
         }
     }
     Ok((going, problems))
+}
+
+/// What goes on to the guard for one picked that measuring again offers again (`now`): an autosave as you saw it, so
+/// the guard keeps one written again since (it compares a file's size and time); a cache folder at its size now, as
+/// the guard doesn't compare a folder's size, and what it frees is what it holds now.
+fn as_measured_now(picked: &CompactItem, now: &CompactItem) -> CompactItem {
+    match picked.kind {
+        CompactKind::Cache => CompactItem { bytes: now.bytes, ..picked.clone() },
+        _ => picked.clone(),
+    }
 }
 
 /// Why one picked stays when measuring its song again doesn't offer it now: it's gone; or it's one of its song's
@@ -395,16 +421,32 @@ fn things_words<'a>(removed: impl IntoIterator<Item = &'a Removed>) -> String {
     and_list(&said)
 }
 
-/// How a removal's lines count: what's in the bin by kind, when `n` is how many are (`in_bin`, said as `in_bin_words`:
-/// "61 old autosaves and 1 cache"); any other count by `kinds`' noun ([`noun_of`]).
-fn bin_noun(in_bin: usize, in_bin_words: String, kinds: Option<CompactKind>) -> impl Fn(usize) -> String {
-    let other = noun_of(kinds);
-    move |n| if n == in_bin && n > 0 { in_bin_words.clone() } else { other(n) }
+/// How a removal's lines count what it sent: those in the bin by kind (`in_bin`: "61 old autosaves and 1 cache"), the
+/// rest by the kind of what went when it's all one ([`noun_of`]).
+struct Counted {
+    in_bin: String,
+    went: Option<CompactKind>,
 }
 
-/// How the lines of a removal that ran count ([`bin_noun`]).
-fn sent_noun(sent: &Sent) -> impl Fn(usize) -> String + use<> {
-    bin_noun(sent.binned().count(), things_words(sent.binned()), one_kind(sent.picked.iter().map(|i| i.item.kind)))
+impl Counted {
+    /// For what `done` says went, of which `in_bin` are in the bin.
+    fn of<'a>(done: &Done, in_bin: impl IntoIterator<Item = &'a Removed>) -> Counted {
+        let went = done.removed.iter().filter_map(|r| match r.what {
+            What::Song(kind) => Some(kind),
+            _ => None,
+        });
+        Counted { in_bin: things_words(in_bin), went: one_kind(went) }
+    }
+}
+
+impl Noun for Counted {
+    fn count(&self, n: usize) -> String {
+        noun_of(self.went)(n)
+    }
+    /// Those in the bin, as counted when this was made: all of them.
+    fn in_bin(&self, _n: usize) -> String {
+        self.in_bin.clone()
+    }
 }
 
 /// The activity card's line while Remove is on.
@@ -415,14 +457,9 @@ pub fn removing_words() -> String {
 /// The activity card's line once Remove is done: what was freed, what's in the bin, what went but wasn't found there,
 /// and what stayed. Err when nothing went (the card then fails).
 pub fn removed_words(done: &Done) -> Result<String, String> {
-    let kinds = done.removed.iter().filter_map(|r| match r.what {
-        What::Song(kind) => Some(kind),
-        _ => None,
-    });
     let said: HashSet<&str> = done.problems.iter().map(|p| p.path.as_str()).collect();
-    let in_bin: Vec<&Removed> = done.removed.iter().filter(|r| !said.contains(r.path.as_str())).collect();
-    let noun = bin_noun(in_bin.len(), things_words(in_bin.iter().copied()), one_kind(kinds));
-    space_removing::removed_words(done, &noun)
+    let in_bin = done.removed.iter().filter(|r| !said.contains(r.path.as_str()));
+    space_removing::removed_words(done, &Counted::of(done, in_bin))
 }
 
 /// "autosaves past the newest 5", as the cards say what of the autosaves goes.
@@ -708,10 +745,11 @@ pub struct Shown {
     /// Where those in Program Files are in `items` (Windows guards them): Remove sends them together at the end, so
     /// Windows asks once.
     guarded: Vec<usize>,
-    /// What Compact frees, in how many songs, and how many of each song's newest autosaves stay.
+    /// What Compact frees, in how many songs, and the choices they were measured with (how many of each song's newest
+    /// autosaves stay): Remove measures them again with the same.
     bytes: u64,
     songs: usize,
-    keep: usize,
+    settings: CompactSettings,
     compact: Option<(u64, Line)>,
     thin: Option<(u64, Line)>,
     thin_card: Card,
@@ -734,12 +772,19 @@ impl Shown {
             rows,
             bytes: found.compact_bytes(),
             songs: found.songs.iter().filter(|s| s.report.freeable() > 0).count(),
-            keep: found.settings.keep_backups,
+            settings: found.settings,
             compact: compact_line(Some(found), false),
             thin: thin_line(Some(found)),
             thin_card: thin_card_of(Some(found), today),
             none_note: none_note(Some(found)),
         }
+    }
+}
+
+impl Shown {
+    /// The choices the songs were measured with, for Remove to measure them again with ([`remove`]).
+    pub fn settings(&self) -> CompactSettings {
+        self.settings
     }
 }
 
@@ -755,7 +800,9 @@ impl Looked for Shown {
 /// is on show (`removing`), the compact line says how that went instead, freeing nothing more, until Measure again.
 pub fn lines(shown: Option<&Shown>, looking: bool, removing: &Removing) -> [Option<(u64, Line)>; 2] {
     let compact = match removing.stage() {
-        Stage::Sent(sent) => Some((0, line(sent_words(sent, &sent_noun(sent)), freed_words(sent)))),
+        Stage::Sent(sent) => {
+            Some((0, line(sent_words(sent, &Counted::of(sent.done(), sent.binned())), freed_words(sent))))
+        }
         Stage::PuttingBack(sent) => Some((0, line("Putting them back…".to_owned(), freed_words(sent)))),
         Stage::PutBack(sent, problems) => Some((0, line(back_words(sent, problems), String::new()))),
         Stage::Picking | Stage::Sending(_) => match shown {
@@ -773,7 +820,7 @@ pub fn lines(shown: Option<&Shown>, looking: bool, removing: &Removing) -> [Opti
 /// songs past the first few for theirs. Once a removal has run, the card shows how it went instead ([`Removing`]),
 /// until Measure again. `can_put_back` says whether the app can put things back here (a Mac's Trash doesn't let it).
 pub fn compact_card(shown: Option<&Shown>, removing: &Removing, can_put_back: bool) -> Card {
-    let keep = shown.map_or(CompactSettings::default().keep_backups, |s| s.keep);
+    let keep = shown.map_or(CompactSettings::default(), |s| s.settings).keep_backups;
     match removing.stage() {
         Stage::Sent(sent) | Stage::PuttingBack(sent) | Stage::PutBack(sent, _) => {
             result_card(sent, removing.stage(), can_put_back, keep)
@@ -898,11 +945,10 @@ struct Tally<'a> {
 }
 
 impl<'a> Tally<'a> {
-    fn add(&mut self, item: &SongItem, went: Went<'a>) {
+    /// One more, that went `went`, freeing `freed` ([`Sent::freed`]).
+    fn add(&mut self, freed: u64, went: Went<'a>) {
         self.picked += 1;
-        if !matches!(went, Went::Stayed(_)) {
-            self.freed = self.freed.saturating_add(item.bytes());
-        }
+        self.freed = self.freed.saturating_add(freed);
         match went {
             Went::Stayed(why) => self.stayed.push(why),
             Went::Lost(why) => self.lost.push(why),
@@ -977,10 +1023,16 @@ impl<'a> Tally<'a> {
 /// freed, and under it its songs, the first few each with how its things went, then the rest in one line), and what
 /// Put back does; then, once Put back has run, what came back.
 fn result_card(sent: &Sent, stage: &Stage, can_put_back: bool, keep: usize) -> Card {
-    let back: HashMap<&str, &str> = match stage {
+    let mut back: HashMap<&str, &str> = match stage {
         Stage::PutBack(_, problems) => problems.iter().map(|p| (p.path.as_str(), p.why.as_str())).collect(),
         _ => HashMap::new(),
     };
+    // One that went inside a folder comes back with it, or doesn't.
+    for (inner, outer) in &sent.done().went_with {
+        if let Some(why) = back.get(outer.as_str()).copied() {
+            back.entry(inner.as_str()).or_insert(why);
+        }
+    }
     let mut parts = Vec::new();
     // What was picked comes in the card's order: kind by kind, and in each, song by song.
     for of_kind in sent.picked.chunk_by(|a, b| a.item.kind == b.item.kind) {
@@ -990,11 +1042,11 @@ fn result_card(sent: &Sent, stage: &Stage, can_put_back: bool, keep: usize) -> C
             let Some(first) = of_song.first() else { continue };
             let mut song = Tally::default();
             for item in of_song {
-                let went = went(item, sent, stage, &back);
-                song.add(item, went);
-                all.add(item, went);
+                let (went, freed) = (went(item, sent, stage, &back), sent.freed(item));
+                song.add(freed, went);
+                all.add(freed, went);
                 if listed >= SONGS_LISTED {
-                    rest.add(item, went);
+                    rest.add(freed, went);
                 }
             }
             if listed < SONGS_LISTED {
@@ -1013,7 +1065,7 @@ fn result_card(sent: &Sent, stage: &Stage, can_put_back: bool, keep: usize) -> C
             parts.push(Part { status, problem, ..rest_part(rest_songs, rest.freed, true) });
         }
     }
-    let (big, big_note, note) = result_figures(sent, stage, can_put_back, &sent_noun(sent));
+    let (big, big_note, note) = result_figures(sent, stage, can_put_back, &Counted::of(sent.done(), sent.binned()));
     Card {
         kind: KIND,
         title: TITLE,
@@ -1483,13 +1535,75 @@ mod tests {
     }
 
     #[test]
+    fn each_songs_newest_saves_and_the_one_it_opens_are_kept_from_remove() {
+        let save = |name: &str, modified: NaiveDateTime| Save {
+            path: format!(r"D:\Projects\Night Drive\{name}.bwproject"),
+            name: name.to_owned(),
+            modified,
+            ..Save::default()
+        };
+        // It opens its second save; its third and fourth were saved at the same moment, the newest; its fifth is gone
+        // (so isn't the newest), and its sixth isn't a project the app knows.
+        let song = Song {
+            name: "Night Drive".to_owned(),
+            latest: save("Night Drive_2", at(10, "10:00")),
+            older: vec![
+                save("Night Drive_3", at(12, "18:00")),
+                save("Night Drive_4", at(12, "18:00")),
+                save("Night Drive_1", at(9, "09:00")),
+                Save { file_missing: true, ..save("Night Drive_5", at(13, "10:00")) },
+                Save { path: r"D:\Projects\Night Drive\Night Drive_6.txt".to_owned(), ..save("x", at(14, "10:00")) },
+            ],
+            key: String::new(),
+            copies: Vec::new(),
+        };
+        let kept = kept_saves(&[song]);
+        let want: HashSet<String> = ["Night Drive_2", "Night Drive_3", "Night Drive_4"]
+            .iter()
+            .map(|n| key(&format!(r"D:\Projects\Night Drive\{n}.bwproject")))
+            .collect();
+        assert_eq!(kept, want);
+    }
+
+    #[test]
+    fn what_went_inside_a_folder_that_went_went_with_it_and_says_what_the_folder_does() {
+        let cache = item(CompactKind::Cache, r"D:\Projects\Song\Cache", 30 * MB, None);
+        let inside = item(CompactKind::Backup, r"D:\Projects\Song\Cache\History\a.song", MB, None);
+        let stayed = item(CompactKind::Backup, r"D:\Projects\Song\History\b.song", MB, None);
+        let of_song = |item: &CompactItem| SongItem {
+            song: Arc::from("Song"),
+            opens: Arc::from(r"D:\Projects\Song\Song.song"),
+            item: item.clone(),
+        };
+        let mut done = Done {
+            removed: vec![binned(&of_song(&cache))],
+            problems: vec![Problem { path: stayed.path.clone(), why: "It stays.".into() }],
+            went_with: Vec::new(),
+        };
+        went_inside(&[cache.clone(), inside.clone(), stayed.clone()], &mut done);
+        assert_eq!(done.went_with, [(inside.path.clone(), cache.path.clone())]);
+        // It went (its room is in the folder's), is in the bin with it, and comes back with it.
+        let picked: Vec<SongItem> = [&cache, &inside, &stayed].into_iter().map(of_song).collect();
+        let sent = Sent::new(picked.clone(), 0, done.clone());
+        let [folder, within, other] = [0, 1, 2].map(|n| picked.get(n).cloned().unwrap_or_else(|| of_song(&cache)));
+        assert!(sent.went(&within) && sent.in_bin(&within) && !sent.went(&other));
+        assert_eq!((sent.freed(&folder), sent.freed(&within), sent.freed(&other)), (30 * MB, 0, 0));
+        assert_eq!(sent.stayed(), 1);
+        assert_eq!(sent.coming_back().went_with, done.went_with);
+        // When the folder isn't found in the bin, nor is what's in it.
+        let mut lost = done;
+        lost.problems.push(Problem { path: cache.path.clone(), why: clean::NOT_IN_BIN.into() });
+        let sent = Sent::new(picked, 0, lost);
+        assert!(sent.went(&within) && !sent.in_bin(&within));
+        assert_eq!(sent.why(&within), Some(clean::NOT_IN_BIN));
+    }
+
+    #[test]
     fn a_lines_words_say_how_its_things_went() {
-        let one =
-            SongItem { song: Arc::from("Song"), opens: Arc::from("x"), item: item(CompactKind::Backup, "a", MB, None) };
         let tally = |went: &[Went<'static>]| {
             let mut t = Tally::default();
             for w in went {
-                t.add(&one, *w);
+                t.add(MB, *w);
             }
             t.words()
         };

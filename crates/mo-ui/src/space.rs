@@ -903,7 +903,8 @@ fn remove_songs_ticked(app: &AppWindow, feed: Feed) {
         if busy(&p) || p.songs_looking {
             return None;
         }
-        let picked = p.songs_removing.ticked_copies(p.songs.as_ref());
+        let shown = p.songs.as_ref()?;
+        let (picked, settings) = (p.songs_removing.ticked_copies(Some(shown)), shown.settings());
         if picked.is_empty() {
             return None;
         }
@@ -911,27 +912,33 @@ fn remove_songs_ticked(app: &AppWindow, feed: Feed) {
         hold_looks(&mut p, COMPACT);
         let stop = Arc::new(AtomicBool::new(false));
         p.songs_stop = Some(stop.clone());
-        Some((picked, p.library.clone(), stop))
+        Some((picked, settings, p.library.clone(), stop))
     });
-    let Some((picked, library, stop)) = job else { return };
-    send_to_bin(app, feed, &SONGS, picked, move |picked| remove_songs_now(picked, &library, &stop));
+    let Some((picked, settings, library, stop)) = job else { return };
+    send_to_bin(app, feed, &SONGS, picked, move |picked| remove_songs_now(picked, settings, &library, &stop));
 }
 
 /// Remove's own work for your songs' things, off the window's thread: the saves, the samples they use and your folders
-/// as the library has them now (read-only, and closed again first), then each song picked from measured again and
-/// each one checked and sent. When the library can't be read, every one stays (said in the log): what's old can't be
-/// told without it. `stop` (Stop) leaves what hasn't gone yet where it is.
-fn remove_songs_now(picked: &[SongItem], library: &Path, stop: &AtomicBool) -> Done {
+/// as the library has them now (read-only, and closed again first), then each song picked from measured again (with
+/// the `settings` the look had) and each one checked and sent. When the library can't be read, every one stays (said
+/// in the log): what's old can't be told without it. `stop` (Stop) leaves what hasn't gone yet where it is.
+fn remove_songs_now(picked: &[SongItem], settings: CompactSettings, library: &Path, stop: &AtomicBool) -> Done {
     let from = match open_library(library).map(|lib| FromLibrary::read(&lib)) {
         Some(Ok(from)) => from,
         Some(Err(e)) => {
             log::warning("Space", &format!("Couldn't read your songs from the library to check them again: {e}"));
             return space_removing::stayed(picked, space_songs::CANT_CHECK);
         }
-        None => return space_removing::stayed(picked, space_songs::CANT_CHECK),
+        None => {
+            // When it's there but couldn't be opened, `open_library` said why.
+            if !library.exists() {
+                log::warning("Space", "The library isn't there any more, so your songs couldn't be checked again.");
+            }
+            return space_removing::stayed(picked, space_songs::CANT_CHECK);
+        }
     };
     // On the pool for long work that waits on a disk (it walks each song's folder again), as the look is (rule 21).
-    background::on_bulk_pool(|| space_songs::remove(picked, &from, CompactSettings::default(), &SystemBin, stop))
+    background::on_bulk_pool(|| space_songs::remove(picked, &from, settings, &SystemBin, stop))
 }
 
 /// Remove's own work for old copies, off the window's thread: the moves as the library keeps them now (read-only, and
@@ -980,11 +987,8 @@ fn send_to_bin<T: Removable + Send + 'static>(
         // bin, but which isn't known.
         let done = catch_crash(AssertUnwindSafe(|| work(&sending)))
             .unwrap_or_else(|_| space_removing::stayed(&sending, &space_removing::crashed_words()));
-        for r in &done.removed {
-            log::info("Space", &format!("Sent {} to the {BIN}: {}", clean.one.0, r.path));
-        }
-        for problem in &done.problems {
-            log::warning("Space", &format!("{} stayed: {}: {}", clean.one.1, problem.path, problem.why));
+        for (warning, line) in space_removing::log_lines(&done, clean.one, clean.many) {
+            if warning { log::warning("Space", &line) } else { log::info("Space", &line) }
         }
         match (clean.removed_words)(&done) {
             Ok(words) => card.done(&words),

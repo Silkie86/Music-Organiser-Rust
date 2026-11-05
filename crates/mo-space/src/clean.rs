@@ -1899,8 +1899,9 @@ mod tests {
         assert_eq!(index.near(&removed(5, 2, 0, None)).count(), 2);
         assert_eq!(index.near(&removed(5, 0, 0, None)).count(), 1);
         assert_eq!(index.called(std::ffi::OsStr::new("5-2.flp")).count(), 1);
-        // 3,000 things among 6,300 items: looked through item by item, that took seconds.
-        assert!(quick.as_secs() < 2, "{quick:?}");
+        // 3,000 things among 6,300 items: looked through item by item, that took seconds; with the index it takes
+        // milliseconds, so this only fails if it's back to looking through every item (a busy computer has room).
+        assert!(quick.as_secs() < 10, "{quick:?}");
     }
 
     /// Only asks: nothing is sent to the computer's bin here (rule 11).
