@@ -607,7 +607,7 @@ pub fn filtered_with(items: &[Item], f: &Filters, fixes: &Fixes) -> Filtered {
     if !shown.is_sorted_by(|a, b| order(a, b).is_le()) {
         shown.sort_by(order);
     }
-    Filtered { shown, years: by_year.into_iter().rev().collect(), counts: tally.done() }
+    Filtered { shown, years: crate::year_strip::strip(by_year), counts: tally.done() }
 }
 
 /// Puts preset files in the list's order (by folder, then name), so the filtering finds them in order and doesn't have

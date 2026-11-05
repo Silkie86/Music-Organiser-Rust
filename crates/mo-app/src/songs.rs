@@ -380,7 +380,7 @@ impl Songs {
         for r in &self.rows {
             *counts.entry(r.saved.year()).or_default() += 1;
         }
-        counts.into_iter().rev().collect()
+        crate::year_strip::strip(counts)
     }
 
     /// The rows the filters let through, under their headings, with where each year starts; and how many songs each

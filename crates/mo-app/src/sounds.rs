@@ -500,8 +500,7 @@ impl SoundList {
                 }
             }
         }
-        // A file with no date reads as 1970: it isn't a year anyone picks.
-        counts.into_iter().rev().filter(|&(y, _)| y > 1980).collect()
+        crate::year_strip::strip(counts)
     }
 
     fn compare(&self, a: usize, b: usize, order: Order) -> std::cmp::Ordering {
