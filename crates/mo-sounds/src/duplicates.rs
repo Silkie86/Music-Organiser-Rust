@@ -54,6 +54,17 @@ pub struct DuplicateMember {
     pub same_set: i64,
 }
 
+/// What the duplicate finder found, read at one moment ([`SoundsDb::finds`]): its matches, the sounds sharing an audio
+/// hash, the sizes of the sounds with copies, and the sounds you've hidden as copies, for a list of the sounds that
+/// leaves those out (the Sounds page's).
+#[derive(Clone, Debug, Default)]
+pub struct Finds {
+    pub matches: Vec<SoundMatch>,
+    pub exact: Vec<(i64, String)>,
+    pub sizes: HashMap<i64, i64>,
+    pub hidden: Vec<Sound>,
+}
+
 /// Sounds that are copies of each other, the one to keep first.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DuplicateGroup {
@@ -197,15 +208,18 @@ pub fn read(db: &SoundsDb, sounds: &[Sound], usage: &HashMap<i64, Usage>) -> Res
 }
 
 /// Groups the copies found, biggest saving first: `matches` and `exact` (sounds sharing an audio hash) as the
-/// duplicate finder kept them, `sizes` each file's size.
-pub fn groups(
-    sounds: &[Sound],
+/// duplicate finder kept them, `sizes` each file's size. `sounds` is the whole library, from one list or several (the
+/// Space page passes the Sounds page's list, which leaves hidden copies out, then the hidden ones).
+pub fn groups<'a>(
+    sounds: impl IntoIterator<Item = &'a Sound>,
     usage: &HashMap<i64, Usage>,
     matches: &[SoundMatch],
     exact: &[(i64, String)],
     sizes: &HashMap<i64, i64>,
 ) -> Vec<DuplicateGroup> {
-    let by_id: HashMap<i64, &Sound> = sounds.iter().map(|s| (s.id, s)).collect();
+    // Only the sounds the finder found copies of are looked up: the rest of a big library isn't kept by id.
+    let found: HashSet<i64> = matches.iter().flat_map(|m| [m.a, m.b]).chain(exact.iter().map(|(id, _)| *id)).collect();
+    let by_id: HashMap<i64, &Sound> = sounds.into_iter().filter(|s| found.contains(&s.id)).map(|s| (s.id, s)).collect();
     // A damaged size (below 0) counts as unknown.
     let size = |id: i64| sizes.get(&id).copied().unwrap_or(0).max(0);
     let mut copies = Sets::default();

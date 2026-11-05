@@ -142,6 +142,30 @@ impl Library {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// Your own folders, which Clean up never touches (nor a folder holding one, nor one inside): the project folders
+    /// and the sample folders, as the C# app's `ProtectedRoots`.
+    pub fn protected_roots(&self) -> Result<Vec<String>, LibraryError> {
+        let mut out = self.roots()?;
+        out.extend(self.strict_list_setting("sample_folders")?);
+        let mut seen = HashSet::new();
+        out.retain(|p| !p.trim().is_empty() && seen.insert(crate::scan::path_key(p)));
+        Ok(out)
+    }
+
+    /// Every sample any project uses, for Clean up: a folder holding one never goes. Reads the samples table once, so
+    /// call it away from the window's thread.
+    pub fn sample_index(&self) -> Result<SampleIndex, LibraryError> {
+        let mut index = SampleIndex::default();
+        if !self.has("samples") {
+            return Ok(index);
+        }
+        let mut st = self.conn.prepare("SELECT DISTINCT path FROM samples")?;
+        for path in st.query_map([], |r| Ok(text(r, "path")))? {
+            index.add(&path?);
+        }
+        Ok(index)
+    }
+
     /// The names of the plugins on this computer, as the C# app last found them in the plugin folders.
     pub fn installed_names(&self) -> Result<Vec<String>, LibraryError> {
         if !self.has("installed_plugins") {
@@ -293,6 +317,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_sample_holds_its_folder_on_any_drive_letter_and_by_name() {
+        let mut index = SampleIndex::default();
+        index.add(r"F:\Splice\Kicks\Kick 1.WAV");
+        index.add("/Users/me/Samples/snare.wav");
+        assert_eq!(index.inside(r"K:\Splice").as_deref(), Some(r"F:\Splice\Kicks\Kick 1.WAV"));
+        assert!(index.inside(r"K:\Splice\Kicks\").is_some());
+        // Not a folder that only starts the same.
+        assert!(index.inside(r"K:\Spl").is_none());
+        assert!(index.inside(r"K:\Splice\Kicks\Kick 1.WAV\x").is_none());
+        assert!(index.inside("/Users/me/Samples").is_some());
+        assert!(index.inside("/Users/me/Sample").is_none());
+        assert!(index.named("kick 1.wav") && index.named("SNARE.WAV") && !index.named("hat.wav"));
+        assert!(index.inside("").is_none());
+        // Windows' long-path prefix is the same folder.
+        assert!(index.inside(r"\\?\D:\Splice\Kicks").is_some());
+    }
+
+    #[test]
     fn keys_match_with_or_without_the_maker() {
         assert!(keys_match("serum", "serum"));
         assert!(keys_match("proq3", "fabfilterproq3"));
@@ -315,4 +357,72 @@ mod tests {
         assert_eq!((f[2].kind, f[2].bytes), (2, 0));
         assert!(folders("not json").is_empty());
     }
+}
+
+/// The samples projects use, as Clean up asks about them: is one inside this folder, and does any project use a file
+/// of this name (projects keep the paths of the PC that saved them, so a name counts too).
+#[derive(Clone, Debug, Default)]
+pub struct SampleIndex {
+    /// Each sample's path in [`sample_key`]'s form, with its path as stored.
+    paths: Vec<(String, String)>,
+    /// Each sample's file name, in small letters.
+    names: HashSet<String>,
+}
+
+impl SampleIndex {
+    pub fn add(&mut self, path: &str) {
+        let k = sample_key(path);
+        if k.is_empty() {
+            return;
+        }
+        if let Some(name) = k.rsplit('/').next().filter(|n| !n.is_empty()) {
+            self.names.insert(name.to_owned());
+        }
+        self.paths.push((k, path.to_owned()));
+    }
+
+    pub fn len(&self) -> usize {
+        self.paths.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.paths.is_empty()
+    }
+
+    /// A sample some project uses that's inside `folder`, if any, as the C# `SampleInside`: the same folder on another
+    /// drive letter counts too (a project saved when the drive was F: finds its samples now it's K:).
+    pub fn inside(&self, folder: &str) -> Option<String> {
+        let f = sample_key(folder);
+        if f.is_empty() {
+            return None;
+        }
+        let f = format!("{f}/");
+        self.paths.iter().find(|(k, _)| k.starts_with(&f)).map(|(_, p)| p.clone())
+    }
+
+    /// Whether any project uses a file of this name (in any letter case).
+    pub fn named(&self, name: &str) -> bool {
+        self.names.contains(&mo_formats::case::key(name))
+    }
+}
+
+/// A path to compare samples by: as the library compares paths (`/` between folders, no `/` at the end, letter case
+/// ignored), without Windows' long-path prefix, and with a drive letter left out (`c:/beats/kick.wav` and
+/// `k:/beats/kick.wav` are both `:/beats/kick.wav`).
+fn sample_key(path: &str) -> String {
+    let slashes = path.trim().replace('\\', "/");
+    let plain = match (slashes.strip_prefix("//?/UNC/"), slashes.strip_prefix("//?/")) {
+        (Some(network), _) => format!("//{network}"),
+        (None, Some(local)) => local.to_owned(),
+        (None, None) => slashes,
+    };
+    let mut k = mo_formats::case::key(&plain);
+    while k.len() > 1 && k.ends_with('/') {
+        k.pop();
+    }
+    let b = k.as_bytes();
+    if b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() {
+        k.remove(0);
+    }
+    k
 }

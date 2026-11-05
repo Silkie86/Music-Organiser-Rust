@@ -15,7 +15,7 @@ use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::bitwig_convert::{self as bitwig, Converted};
 use mo_app::finder::{self, Kind};
-use mo_app::live::{Live, LiveDetails};
+use mo_app::live::{Live, LiveDetails, Updated};
 use mo_app::log;
 use mo_app::places::Place;
 use mo_app::shell;
@@ -129,14 +129,10 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     });
     data.on_save_menu_chosen(|id| {
         let path = MENU_SAVE.with(|m| m.borrow().clone());
-        with_save(&path, |p, s| match id.as_str() {
-            "open" => open_save(p, s),
-            "bitwig" => open_in_bitwig(p, s),
-            "reveal" => reveal(s),
-            "copy" => copy_path(&s.path),
-            _ => {}
-        });
+        do_to_save(&path, &id);
     });
+    // The same, from the buttons on the save's line.
+    data.on_save_chosen(|path, id| do_to_save(&path, &id));
     crate::finder::on_open(Kind::Song, |app, hit, how| {
         let Some(row) = PAGE.with(|p| p.borrow().songs.rows.iter().position(|r| r.song.key == hit.id)) else {
             return false;
@@ -233,7 +229,12 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
         let read = Library::open_read_only(&path)
             .and_then(|lib| Live::load(&lib, DEFAULT_RUN_GAP_MONTHS, details))
             // Missing samples are looked for in the Sounds library beside it last (rule 13).
-            .map(|live| live.with_sounds(path.with_file_name("sounds.db")));
+            .map(|live| live.with_sounds(sound_library::database_beside(&path)))
+            // What's read is kept in the app's own songs.db; library.db is never written.
+            .map(|live| match mo_library::songs_db::own_since(&path) {
+                Some(_) => live.with_writes(path.clone()),
+                None => live,
+            });
         let mut live = match read {
             Ok(live) => live,
             Err(e) => {
@@ -250,10 +251,11 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
         log::info(
             "Songs",
             &format!(
-                "{} songs from {} saves (library read in {:.1} s, grouped in {:.1} s)",
+                "{} songs from {} saves (library read in {:.1} s{}, grouped in {:.1} s)",
                 songs.rows.len(),
                 songs.saves,
                 read_in.as_secs_f32(),
+                live.source().map(|from| format!(", {from}")).unwrap_or_default(),
                 (began.elapsed() - read_in).as_secs_f32()
             ),
         );
@@ -275,55 +277,119 @@ const WATCH_QUIET: Duration = Duration::from_secs(3);
 /// How long after a save couldn't be read it's tried again.
 const RETRY_AFTER: Duration = Duration::from_secs(5);
 
+/// How long after the list is up every project folder is walked to catch up with what changed while the app was
+/// closed: the pages read what they show first.
+const CATCH_UP_AFTER: Duration = Duration::from_secs(20);
+
+/// How long after what was read couldn't be kept in songs.db (another copy of the app holding it) it's tried again.
+const KEEP_AGAIN_AFTER: Duration = Duration::from_secs(60);
+
 /// What the page says when the library has no songs.
 const NO_SONGS: &str = "No songs in the library yet.";
 
 /// Watches the project folders while the app is open and keeps the list up to date, on this background thread: each
-/// time saves change, the list is made again and put on the page with a card.
+/// time saves change, the list is made again and put on the page with a card. A little after the start every folder is
+/// walked once to catch up with what changed while the app was closed (even when the folders can't be watched), and
+/// what's read is kept in the app's own songs.db.
 fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
     let (tx, rx) = mpsc::channel::<Changes>();
+    let to_watch = tx.clone();
     let watching = FolderWatch::start(live.roots(), is_project_file, WATCH_QUIET, move |c| {
-        let _ = tx.send(c);
+        let _ = to_watch.send(c);
     });
+    // Held so the loop below waits rather than ends if the watch can't start: the catch-up and the retries still run.
+    let _still_here = tx;
     let _watch = match watching {
         Ok(w) => {
             log::info("Songs", &format!("Watching {} project folders", w.count()));
-            w
+            Some(w)
         }
         Err(e) => {
-            log::warning("Songs", &format!("Can't watch the project folders: {e}"));
-            return;
+            log::warning("Songs", &format!("Can't watch the project folders: {e}; they're walked once a little later"));
+            None
         }
     };
+    let mut catch_up_at = Some(Instant::now() + CATCH_UP_AFTER);
+    let mut keep_again_at: Option<Instant> = None;
     loop {
+        let now = Instant::now();
+        let due = |at: Option<Instant>| at.map_or(RETRY_AFTER, |at| at.saturating_duration_since(now));
         // A save that couldn't be read (still being written, or locked) is tried again after a quiet moment.
-        let changes = match rx.recv_timeout(RETRY_AFTER) {
-            Ok(changes) => changes,
-            Err(mpsc::RecvTimeoutError::Timeout) => match live.retries() {
-                Some(changes) => changes,
-                None => continue,
-            },
+        let wait = due(catch_up_at).min(due(keep_again_at)).min(RETRY_AFTER);
+        let changes = match rx.recv_timeout(wait) {
+            Ok(changes) => Some(changes),
+            Err(mpsc::RecvTimeoutError::Timeout) => live.retries(),
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
-        let updated = live.update(&changes);
-        if updated.is_empty() {
+        let mut updated = Updated::default();
+        if let Some(changes) = &changes {
+            updated = live.update(changes);
+            if !updated.is_empty() {
+                log::info(
+                    "Watch",
+                    &format!(
+                        "Project folders: {} read, {} moved, {} gone ({} changes seen)",
+                        updated.read.len(),
+                        updated.moved.len(),
+                        updated.gone,
+                        changes.files.len()
+                    ),
+                );
+            }
+        }
+        // Looked at after every batch too, so a folder that keeps changing (a DAW saving every few seconds) can't put
+        // it off.
+        if catch_up_at.is_some_and(|at| Instant::now() >= at) {
+            catch_up_at = None;
+            let began = Instant::now();
+            let caught = live.catch_up();
+            log::info(
+                "Songs",
+                &format!(
+                    "Caught up with the project folders in {:.1} s: {} read, {} moved, {} gone",
+                    began.elapsed().as_secs_f32(),
+                    caught.read.len(),
+                    caught.moved.len(),
+                    caught.gone
+                ),
+            );
+            updated = updated.and(caught);
+        }
+        // Kept in songs.db with each change, or a while after it couldn't be kept.
+        let mut renumbered = false;
+        if !updated.is_empty() || keep_again_at.is_some_and(|at| Instant::now() >= at) {
+            keep_again_at = match live.keep() {
+                Some(Ok(kept)) => {
+                    let w = &kept.written;
+                    log::info(
+                        "Songs",
+                        &format!("Kept in songs.db: {} saves read, {} marked missing", w.put, w.missing),
+                    );
+                    for (path, why) in &kept.not_kept {
+                        log::warning("Songs", &format!("Couldn't keep {path} in songs.db: {why}"));
+                    }
+                    renumbered = !w.ids.is_empty();
+                    None
+                }
+                Some(Err(e)) => {
+                    log::warning("Songs", &format!("{e}; it's kept with the next change, or in a minute"));
+                    Some(Instant::now() + KEEP_AGAIN_AFTER)
+                }
+                None => None,
+            };
+        }
+        if updated.is_empty() && !renumbered {
             continue;
         }
-        log::info(
-            "Watch",
-            &format!(
-                "Project folders: {} read, {} moved, {} gone ({} changes seen)",
-                updated.read.len(),
-                updated.moved.len(),
-                updated.gone,
-                changes.files.len()
-            ),
-        );
+        // Made again when a save's id changed too, so the page picks it by the id the library has.
         let songs = live.songs();
         let found = Arc::new(finder::songs(&songs, Local::now().naive_local()));
         let _ = weak.upgrade_in_event_loop(move |app| {
             show_again(&app, songs);
             crate::finder::add_source(&app, "songs", found);
+            if updated.is_empty() {
+                return;
+            }
             let (title, line) = updated.card();
             FEED.with(|f| {
                 if let Some(feed) = f.borrow().as_ref() {
@@ -352,7 +418,8 @@ fn show_again(app: &AppWindow, songs: Songs) {
         let new = row.and_then(|i| songs.rows.get(i)).map(|r| &r.song.latest);
         let same = matches!((old, new), (Some(a), Some(b)) if a.id == b.id && a.mtime == b.mtime && a.size == b.size
             && a.file_missing == b.file_missing);
-        p.songs = songs;
+        // The old list (thousands of songs) is let go on the freeing thread, not the window's.
+        background::free_later(std::mem::replace(&mut p.songs, songs));
         p.picked = if same { row } else { None };
         same
     });
@@ -424,7 +491,8 @@ pub fn show(app: &AppWindow, songs: Songs) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.years = songs.year_counts();
-        p.songs = songs;
+        // The old list (thousands of songs) is let go on the freeing thread, not the window's.
+        background::free_later(std::mem::replace(&mut p.songs, songs));
     });
     pick(app, None);
     data.set_lines(LINES.with(|l| ModelRc::from(l.clone() as Rc<dyn Model<Data = SongLine>>)));
@@ -630,7 +698,7 @@ fn fill_panel(app: &AppWindow) {
             PanelSaveLine::Run { label, details } => {
                 SaveLine { run: label.into(), details: details.into(), ..SaveLine::default() }
             }
-            PanelSaveLine::Save { name, date, path, missing, newest } => SaveLine {
+            PanelSaveLine::Save { name, date, path, missing, newest, daw } => SaveLine {
                 run: SharedString::new(),
                 details: SharedString::new(),
                 name: name.into(),
@@ -638,6 +706,7 @@ fn fill_panel(app: &AppWindow) {
                 path: path.into(),
                 missing,
                 newest,
+                daw: daw.into(),
             },
         })));
     });
@@ -759,6 +828,18 @@ fn with_save(path: &str, f: impl FnOnce(&Page, &mo_library::Save)) {
         if let Some(s) = r.song.saves().find(|s| s.path == path) {
             f(p, s);
         }
+    });
+}
+
+/// Does `what` to the save at `path`: "open" (in its own DAW), "bitwig" (an FL Studio save in Bitwig), "reveal" or
+/// "copy" (its path), from its right-click menu or the buttons on its line.
+fn do_to_save(path: &str, what: &str) {
+    with_save(path, |p, s| match what {
+        "open" => open_save(p, s),
+        "bitwig" => open_in_bitwig(p, s),
+        "reveal" => reveal(s),
+        "copy" => copy_path(&s.path),
+        _ => {}
     });
 }
 
@@ -907,7 +988,7 @@ fn convert_save(db: &Path, project: &Path) -> Result<Converted, String> {
         .ok_or(bitwig::NO_TEMPLATE)?;
     let steps = setting(bitwig::STEPS_UNTIL_NEXT_NOTE_KEY)?.as_deref() == Some("1");
     let opened = OPENED.lock().map(|o| o.clone()).unwrap_or_default();
-    let locator = sound_library::locator(Some(&db.with_file_name("sounds.db")));
+    let locator = sound_library::locator(Some(&sound_library::database_beside(db)));
     let at = project.to_string_lossy().into_owned();
     background::on_pool(move || {
         let written_of = |file: &Path| lib.setting(&bitwig::convert_key(file)).ok().flatten();

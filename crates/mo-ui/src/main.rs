@@ -16,26 +16,57 @@ fn main() -> Result<(), slint::PlatformError> {
     if mo_space::admin::run_step(&std::env::args().skip(1).collect::<Vec<_>>()) {
         return Ok(());
     }
+    mo_ui::startup::begin();
     // Before the log starts, so a crash while it starts still gets its crash file.
     log_crashes();
+    // The graphics card takes a while to wake up: it's looked for while the log and the settings start.
+    mo_ui::gpu::look_ahead();
+    // A data folder copied to another drive last run is caught up and switched to now, before any of the app's files is
+    // opened (Settings, Move to another drive).
+    let moved = mo_app::data_move::finish_at_start();
     let session = log::start_session();
+    if let Some(moved) = &moved {
+        match moved {
+            mo_app::data_move::AtStart::Switched { .. } => log::info("Data folder", &moved.line()),
+            _ => log::warning("Data folder", &moved.line()),
+        }
+    }
+    if let Some(problem) = mo_app::paths::problem() {
+        log::warning("Data folder", &problem);
+    }
+    // While this copy runs, another started meanwhile never switches folders under it.
+    mo_app::data_move::hold_open_lock();
+    // Programs the app opens (DAWs, folders) start at the window's priority, not a background thread's.
+    mo_app::shell::get_ready();
     // Rule 28: what an earlier run or a stopped tool left behind is cleared, a little later, at low priority.
     mo_app::tidy::start();
+    mo_ui::startup::step("log");
     let feed = Feed::default();
     // This app's own settings over the C# app's, which library.db keeps and the app only reads.
     let data = mo_app::paths::data_dir();
-    let library = data.join("library.db");
+    // The app's own song library, songs.db, once it's been made and checked; the C# app's library.db until then (and
+    // songs.db is made from it in the background, for the next start).
+    let songs_db = mo_library::songs_db::at_start(&data, &mo_app::version::version());
+    log::info("Song library", &songs_db.line());
+    let library = songs_db.library.clone();
+    if !songs_db.is_songs_db() {
+        // The saves list is read from a small copy of the app's own while library.db hasn't changed (it's slow to
+        // read out of library.db itself; songs.db needs no copy).
+        mo_library::list_copy::keep(&library, &data.join(mo_library::list_copy::FILE_NAME));
+    }
     let (settings, writable) = mo_ui::settings::load(&data, &library);
     let shortcuts = Shortcuts::from_setting(settings.get(mo_app::shortcuts::SETTING_KEY));
     // Settings' pace: how many low-priority threads background work gets, from now until the app closes.
     let pace = Pace::from_setting(settings.get(mo_app::app_settings::PACE_KEY));
     mo_app::background::set_pace(pace);
+    mo_ui::startup::step("settings");
     log::info(
         "Settings",
         &format!("Pace {}: {} background threads", pace.name(), pace.threads(mo_app::background::cores())),
     );
     // The graphics card draws the window and the galaxy; without one, the processor does.
     mo_ui::gpu::choose();
+    mo_ui::startup::step("graphics card");
     let look = mo_ui::settings::look_of(&settings);
     let start = mo_app::app_settings::start_place(&settings);
     let app = match mo_ui::new_app(&look, shortcuts.clone(), start, feed.clone()) {
@@ -47,6 +78,7 @@ fn main() -> Result<(), slint::PlatformError> {
             return Err(e);
         }
     };
+    mo_ui::startup::step("window");
     mo_ui::gpu::connect(&app);
     // The window's moves, resizes and hiding, for the freeze lines.
     mo_ui::watchdog::watch_window(&app);
@@ -54,6 +86,7 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::drag::connect(feed.clone());
     // The Songs page reads the C# app's library, read-only (CLAUDE.md: until the Rust page is trusted).
     mo_ui::songs::connect(&app, library.clone(), feed.clone());
+    mo_ui::startup::step("Songs page");
     mo_ui::sounds::connect(
         &app,
         mo_app::paths::data_dir().join("sounds.db"),
@@ -61,16 +94,19 @@ fn main() -> Result<(), slint::PlatformError> {
         feed.clone(),
         &shortcuts,
     );
+    mo_ui::startup::step("Sounds page");
     // MIDI: the MIDI index beside the library, read-only (the C# app's midi.db until the Rust one holds parts).
-    mo_ui::midi::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone(), &shortcuts);
+    mo_ui::midi::connect(&app, library.clone(), feed.clone(), &shortcuts);
+    mo_ui::startup::step("MIDI page");
     // Space, Backup: the backup settings live in a file of their own; the library is only read.
     mo_ui::backup::connect(&app, library.clone(), feed.clone());
+    mo_ui::startup::step("Backup page");
     // Settings: changes are kept in the app's own file, never in library.db.
     mo_ui::settings::connect(
         &app,
         mo_ui::settings::Setup {
             settings,
-            folder: data,
+            folder: data.clone(),
             library: library.clone(),
             running_pace: pace,
             live: true,
@@ -78,15 +114,23 @@ fn main() -> Result<(), slint::PlatformError> {
             feed: feed.clone(),
         },
     );
+    mo_ui::startup::step("Settings page");
     // Presets: the library is only read; part fixes and curves go in the app's own presets.db and curves.db.
     mo_ui::presets::connect(&app, library.clone(), feed.clone(), &shortcuts);
+    mo_ui::startup::step("Presets page");
     // Plugins: read from the C# app's library, read-only.
     mo_ui::plugins::connect(&app, library.clone(), feed.clone(), &shortcuts);
+    mo_ui::startup::step("Plugins page");
     // Space: the drives your folders are on and the app's own files, looked at once the page shows.
     mo_ui::space::connect(&app, library.clone(), feed.clone());
+    mo_ui::startup::step("Space page");
     app.window().set_maximized(true);
     // A little after start, the MIDI files older drags left in Temp (rule 28).
     mo_ui::drag::sweep_later();
+    // A little after start too, songs.db made from library.db, for the next start.
+    if songs_db.make_wanted() {
+        mo_app::song_library::make_later(data, feed.clone());
+    }
     // The watchdog starts once the window is up, so opening it doesn't count as a freeze.
     let watched = feed.clone();
     let sized = app.as_weak();

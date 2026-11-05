@@ -71,7 +71,7 @@ impl Peaks {
     pub fn loudest(&self, from: f64, to: f64) -> Option<f32> {
         let (from, to) = (from.min(to), from.max(to));
         let first = (from / self.step).floor().max(0.0) as usize;
-        let last = ((to / self.step).ceil() as usize).max(first + 1).min(self.values.len());
+        let last = ((to / self.step).ceil() as usize).max(first.saturating_add(1)).min(self.values.len());
         (first < last).then(|| self.values[first..last].iter().fold(0.0f32, |m, &v| m.max(v)))
     }
 }
@@ -248,7 +248,7 @@ pub fn notes(a: &Arrangement, found: Option<&HashMap<String, PathBuf>>) -> Vec<S
 
 /// "140 BPM · 32 bars · 0:55 · 6 tracks · 18 clips · 412 notes".
 pub fn summary(a: &Arrangement) -> String {
-    let mut parts = vec![format!("{} BPM", trim(a.tempo))];
+    let mut parts = vec![format!("{} BPM", crate::songs::tempo_text(a.tempo))];
     let length = a.length();
     if length > 0.0 {
         let bars = (a.bars() - 1e-6).ceil().max(0.0) as u64;
@@ -267,12 +267,6 @@ pub fn summary(a: &Arrangement) -> String {
         parts.push(count(notes as u64, "note"));
     }
     parts.join(" · ")
-}
-
-/// A tempo as it's written: up to two places, no trailing zeros.
-fn trim(v: f64) -> String {
-    let s = format!("{v:.2}");
-    s.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 /// "1 bar", "1,204 notes".
@@ -411,6 +405,7 @@ pub struct View {
     keys: Arc<Vec<(u8, u8)>>,
 }
 
+pub mod peaks_store;
 /// What a drag out of the app picks up from the view, and what it carries (`drag_out`).
 mod pick;
 
@@ -970,7 +965,9 @@ impl<'a> Draw<'a> {
         if clip.points.len() > 1 {
             self.curve(clip, inner, visible, fill);
         }
-        if clip.muted && r.w > 40.0 && r.right() <= area.right() {
+        // Only where the clip has room for it, and counted with the clip names, so squeezed lanes aren't covered over.
+        if clip.muted && r.w > 40.0 && r.h >= 14.0 && r.right() <= area.right() && self.clip_labels < MOST_CLIP_LABELS {
+            self.clip_labels += 1;
             self.label(
                 Area::Timeline,
                 Box2::new(r.right() - 36.0, r.bottom() - 13.0, 34.0, 12.0),
@@ -1050,7 +1047,9 @@ impl<'a> Draw<'a> {
         fade: f64,
     ) -> bool {
         let rate = part.rate(peaks.file_seconds);
-        if rate <= 0.0 {
+        // A damaged save can give a length or a place in the file that isn't a number ("NaN", "Infinity"): such a
+        // part is drawn without its waveform rather than stopping the drawing.
+        if !(rate > 0.0 && rate.is_finite() && part.length.is_finite() && part.length >= 0.0 && part.from.is_finite()) {
             return false;
         }
         let v = self.v;
@@ -1155,6 +1154,9 @@ mod tests {
         assert_eq!(p.loudest(0.0, 0.02), Some(0.9));
         // Past what was read.
         assert_eq!(p.loudest(0.03, 0.04), None);
+        // A place in the file no number can hold (a damaged save's "1e300" or "Infinity") is just past the end.
+        assert_eq!(p.loudest(1e300, f64::INFINITY), None);
+        assert_eq!(p.loudest(f64::NAN, f64::NAN), Some(0.1));
     }
     use mo_formats::arrangement::{PreviewMarker, PreviewNote, PreviewPoint};
 

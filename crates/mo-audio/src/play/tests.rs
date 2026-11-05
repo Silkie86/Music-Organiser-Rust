@@ -166,6 +166,19 @@ fn stopped_and_replaced_sounds_dont_count_as_ended() {
 }
 
 #[test]
+fn a_sound_no_longer_wanted_as_it_starts_leaves_the_one_playing_alone() {
+    let outputs = FakeOutputs::new(&["Speakers"]);
+    let (player, _ended) = player(&outputs);
+    assert_eq!(player.play_if(ramp(), "1", 2.0, || Ok::<(), &str>(())), Ok(()));
+    // A newer sound or a stop was asked for while this one was read: it isn't started, and the first plays on.
+    assert_eq!(player.play_if(ramp(), "2", 0.0, || Err("overtaken")), Err("overtaken"));
+    assert_eq!(player.playing().as_deref(), Some("1"));
+    settle(&player);
+    let heard = outputs.pull(200);
+    assert!((heard[100] - 0.21).abs() < 1e-4, "{}", heard[100]);
+}
+
+#[test]
 fn seek_plays_on_from_there() {
     let outputs = FakeOutputs::new(&["Speakers"]);
     let (player, _ended) = player(&outputs);

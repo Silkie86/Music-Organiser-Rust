@@ -247,6 +247,33 @@ fn thinning_keeps_the_first_save_the_newest_and_the_last_of_each_sitting() {
 }
 
 #[test]
+fn saves_a_copy_wrote_all_at_once_are_not_thinned() {
+    let at = |hour: i64, seconds: i64| day() + TimeDelta::hours(hour) + TimeDelta::seconds(seconds);
+    let one = |name: &str, modified| SongSave { path: format!("C:/Song/{name}.flp"), size: 1, modified };
+    let thinned = |saves: &[SongSave]| -> Vec<String> { thin(saves, 3).iter().map(|s| s.path.clone()).collect() };
+    // A copied folder: the copy wrote its six saves within a few seconds, so by time alone four would be thinned.
+    let copied: Vec<SongSave> = (1..=6).map(|n| one(&format!("S{n}"), at(9, n))).collect();
+    assert_eq!(thinned(&copied), Vec::<String>::new());
+    // Saved twice more that morning: the first of those is from the middle of a sitting; the last save the copy wrote
+    // stays, as its time is the copy's.
+    let mut more = copied.clone();
+    more.extend([one("S7", at(10, 0)), one("S8", at(10, 1800))]);
+    assert_eq!(thinned(&more), ["C:/Song/S7.flp"]);
+    // Three saves in a sitting, then the last two fixed at once: the last save you made stays, and so do the fixed ones.
+    let fixed = [
+        one("A", at(10, 0)),
+        one("B", at(10, 1800)),
+        one("C", at(11, 0)),
+        one("B (fixed)", at(11, 1200)),
+        one("C (fixed)", at(11, 1201)),
+    ];
+    assert_eq!(thinned(&fixed), ["C:/Song/B.flp"]);
+    // A minute apart is you saving again.
+    let quick: Vec<SongSave> = (0..4).map(|n| one(&format!("Q{n}"), at(9, n * mo_space::song::COPY_SECONDS))).collect();
+    assert_eq!(thinned(&quick), ["C:/Song/Q1.flp", "C:/Song/Q2.flp"]);
+}
+
+#[test]
 fn a_thinned_save_that_is_a_copy_or_kept_for_one_is_not_thinned() {
     let root = fixtures("mo-space-thin-copies");
     let song = root.join("Song");

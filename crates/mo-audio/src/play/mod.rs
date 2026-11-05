@@ -130,13 +130,32 @@ impl Player {
         let _ = self.orders.try_send(order);
     }
 
-    /// Plays `sound` from `start_seconds`, replacing whatever is playing. `key` names it (its path, or a key for sound
-    /// made in memory), as [`Player::playing`] gives back.
+    /// Plays `sound` from `start_seconds`, replacing whatever is playing. `key` names it (its path, the number a page
+    /// gave the play, or a key for sound made in memory), as [`Player::playing`] and `on_end` give it back.
     pub fn play(&self, sound: Arc<AudioData>, key: impl Into<String>, start_seconds: f64) {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let _ = self.play_if(sound, key, start_seconds, || Ok::<(), std::convert::Infallible>(()));
+    }
+
+    /// [`Player::play`], only if `wanted` still says so as the sound starts, with no other play or stop able to come
+    /// in between: so a stop or a newer sound asked for just before can't be undone by this one starting after it.
+    /// Gives back what `wanted` said. `wanted` should only take a quick look (a stop waits for it).
+    pub fn play_if<E>(
+        &self,
+        sound: Arc<AudioData>,
+        key: impl Into<String>,
+        start_seconds: f64,
+        wanted: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        let key = key.into();
         let start = start_seconds.max(0.0);
-        *lock(&self.shared.now) = Some(Now { id, key: key.into(), start });
+        // Held until the order is sent, as `seek` and `stop` hold it, so the player's thread gets the orders in the
+        // order they were decided in.
+        let mut now = lock(&self.shared.now);
+        wanted()?;
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        *now = Some(Now { id, key, start });
         self.send(Order::Play { id, sound, start });
+        Ok(())
     }
 
     /// Plays on from `seconds` in the sound playing.
@@ -153,7 +172,8 @@ impl Player {
     }
 
     pub fn stop(&self) {
-        *lock(&self.shared.now) = None;
+        let mut now = lock(&self.shared.now);
+        *now = None;
         self.send(Order::Stop);
     }
 

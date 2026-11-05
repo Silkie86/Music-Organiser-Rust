@@ -4,7 +4,7 @@
 // there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
 // fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, TickBox, FilterPicks, FilterView, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
 
 // One line of the list.
 export struct PluginListLine {
@@ -49,6 +49,9 @@ export struct RoomFolder {
     // "Shared with Kontakt 7".
     shared: string,
     added: bool,
+    // "Not its" (or "Take off") can leave it out; `at` is its place in the list.
+    can-say: bool,
+    at: int,
 }
 
 // A song (or a save) using the picked plugin.
@@ -62,6 +65,16 @@ export struct UseRow {
 }
 
 // One installed copy of the picked plugin, as the plugin scanner read it.
+// One of the picked plugin's folders on its Clean up list: ticked to go, or why it stays.
+export struct CleanRow {
+    path: string,
+    kind: string,
+    size: string,
+    why: string,
+    can: bool,
+    ticked: bool,
+}
+
 export struct CopyRow {
     format: string,
     name: string,
@@ -135,7 +148,39 @@ export global PluginsData {
     in property <string> room-shared;
     in property <[RoomBar]> room-bars;
     in property <[RoomFolder]> room-folders;
+    // "Add a folder…" can add one the guess missed.
+    in property <bool> can-add-folder;
+    callback folder-not-its(int);
+    callback add-folder();
     in property <string> sizes-note;
+    // Clean up or Uninstall, on the On disk tab: 0 looking (checking the folders, or for its uninstaller), 1 the list to
+    // tick (for Uninstall, its uninstallers to pick one of, or its plugin files), 2 working (sending to the Recycle Bin,
+    // or waiting for its uninstaller), 3 done, 4 putting back.
+    in property <bool> clean-shown;
+    in property <int> clean-stage;
+    in property <string> clean-title;
+    in property <string> clean-intro;
+    in property <[CleanRow]> clean-rows;
+    in property <string> clean-freed;
+    in property <bool> clean-can-go;
+    in property <string> clean-result;
+    in property <[string]> clean-problems;
+    in property <bool> clean-can-put-back;
+    in property <string> clean-warning;
+    in property <string> clean-busy-text;
+    in property <bool> clean-can-stop;
+    in property <string> clean-go-text;
+    in property <string> clean-keep-text;
+    // Uninstall finished: Clean up is offered for what it left.
+    in property <bool> clean-offer-clean;
+    // What this session's clean-ups sent to the Recycle Bin for the picked plugin, with Put back.
+    in property <string> binned-text;
+    callback clean-ticked(int, bool);
+    callback clean-confirm();
+    callback clean-close();
+    callback clean-stop();
+    callback put-back();
+    callback clean-leftovers();
     in property <[CopyRow]> copies;
     in property <string> copies-note;
     in property <string> scanner-note;
@@ -255,6 +300,7 @@ component PluginPanel inherits SidePanel {
     if PluginsData.has-pick: Text {
         text: PluginsData.name;
         color: Theme.text;
+        font-family: Theme.title-font;
         font-size: Type.panel-title;
         font-weight: 600;
         wrap: word-wrap;
@@ -354,8 +400,170 @@ component PluginPanel inherits SidePanel {
         }
     }
     // Its room on disk.
-    if PluginsData.has-pick && PluginsData.tab == 1: VerticalLayout {
+    // Clean up: the folders that may go, ticked or not, and why the rest stay; then what went, with Put back.
+    if PluginsData.has-pick && PluginsData.tab == 1 && PluginsData.clean-shown: VerticalLayout {
         spacing: Space.md;
+        Text {
+            text: PluginsData.clean-title;
+            color: Theme.text;
+            font-size: Type.body;
+            font-weight: 600;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+        if PluginsData.clean-warning != "": Text {
+            text: PluginsData.clean-warning;
+            color: Theme.warning;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+        if PluginsData.clean-intro != "": Text {
+            text: PluginsData.clean-intro;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+        if PluginsData.clean-stage == 1: VerticalLayout {
+            spacing: Space.sm;
+            for row[i] in PluginsData.clean-rows: Well {
+                height: line.preferred-height;
+                line := VerticalLayout {
+                    padding: Space.md;
+                    spacing: Space.xs;
+                    HorizontalLayout {
+                        spacing: Space.sm;
+                        if row.can: TickBox {
+                            text: row.kind;
+                            checked: row.ticked;
+                            changed checked => { PluginsData.clean-ticked(i, self.checked); }
+                        }
+                        if !row.can: Text {
+                            text: row.kind;
+                            color: Theme.muted;
+                            font-size: Type.meta;
+                            vertical-alignment: center;
+                        }
+                        Rectangle { horizontal-stretch: 1; }
+                        Text {
+                            text: row.size;
+                            color: Theme.muted;
+                            font-family: Theme.number-font;
+                            font-size: Type.meta;
+                            vertical-alignment: center;
+                        }
+                    }
+                    if row.path != "": Text {
+                        text: row.path;
+                        color: Theme.faint;
+                        font-size: Type.small;
+                        wrap: word-wrap;
+                        min-width: 0px;
+                    }
+                    if row.why != "": Text {
+                        text: row.can ? row.why : "Stays: " + row.why;
+                        color: Theme.warning;
+                        font-size: Type.small;
+                        wrap: word-wrap;
+                        min-width: 0px;
+                    }
+                }
+            }
+            if PluginsData.clean-freed != "": Text {
+                text: PluginsData.clean-freed;
+                color: Theme.text;
+                font-size: Type.meta;
+                wrap: word-wrap;
+                min-width: 0px;
+            }
+            HorizontalLayout {
+                spacing: Space.sm;
+                alignment: start;
+                StudioButton {
+                    text: PluginsData.clean-go-text;
+                    main: true;
+                    enabled: PluginsData.clean-can-go;
+                    clicked => { PluginsData.clean-confirm(); }
+                }
+                StudioButton {
+                    text: PluginsData.clean-keep-text;
+                    clicked => { PluginsData.clean-close(); }
+                }
+            }
+        }
+        if PluginsData.clean-stage == 0 || PluginsData.clean-stage == 2 || PluginsData.clean-stage == 4: HorizontalLayout {
+            spacing: Space.sm;
+            Text {
+                text: PluginsData.clean-busy-text;
+                wrap: word-wrap;
+                min-width: 0px;
+                horizontal-stretch: 1;
+                color: Theme.muted;
+                font-size: Type.meta;
+                vertical-alignment: center;
+            }
+            if PluginsData.clean-can-stop: StudioButton {
+                text: "Stop";
+                clicked => { PluginsData.clean-stop(); }
+            }
+        }
+        if PluginsData.clean-stage == 3: VerticalLayout {
+            spacing: Space.sm;
+            Text {
+                text: PluginsData.clean-result;
+                color: Theme.text;
+                font-size: Type.meta;
+                wrap: word-wrap;
+                min-width: 0px;
+            }
+            for p in PluginsData.clean-problems: Text {
+                text: p;
+                color: Theme.warning;
+                font-size: Type.small;
+                wrap: word-wrap;
+                min-width: 0px;
+            }
+            HorizontalLayout {
+                spacing: Space.sm;
+                alignment: start;
+                if PluginsData.clean-offer-clean: StudioButton {
+                    text: "Clean up what it left…";
+                    main: true;
+                    clicked => { PluginsData.clean-leftovers(); }
+                }
+                if PluginsData.clean-can-put-back: StudioButton {
+                    text: "Put back";
+                    clicked => { PluginsData.put-back(); }
+                }
+                StudioButton {
+                    text: "Done";
+                    clicked => { PluginsData.clean-close(); }
+                }
+            }
+        }
+    }
+    if PluginsData.has-pick && PluginsData.tab == 1 && !PluginsData.clean-shown: VerticalLayout {
+        spacing: Space.md;
+        if PluginsData.binned-text != "": HorizontalLayout {
+            spacing: Space.sm;
+            Text {
+                text: PluginsData.binned-text;
+                color: Theme.muted;
+                font-size: Type.meta;
+                wrap: word-wrap;
+                min-width: 0px;
+                horizontal-stretch: 1;
+            }
+            VerticalLayout {
+                alignment: center;
+                LinkText {
+                    text: "Put back";
+                    font-size: Type.meta;
+                    clicked => { PluginsData.put-back(); }
+                }
+            }
+        }
         Text {
             text: PluginsData.room-summary;
             color: Theme.text;
@@ -418,6 +626,12 @@ component PluginPanel inherits SidePanel {
                     font-family: Theme.number-font;
                     font-size: Type.meta;
                 }
+                if f.can-say: LinkText {
+                    text: f.added ? "Take off" : "Not its";
+                    tint: Theme.muted;
+                    font-size: Type.meta;
+                    clicked => { PluginsData.folder-not-its(f.at); }
+                }
             }
             Text {
                 text: f.path;
@@ -432,6 +646,13 @@ component PluginPanel inherits SidePanel {
                 font-size: Type.small;
                 wrap: word-wrap;
                 min-width: 0px;
+            }
+        }
+        if PluginsData.can-add-folder: HorizontalLayout {
+            alignment: start;
+            StudioButton {
+                text: "Add a folder…";
+                clicked => { PluginsData.add-folder(); }
             }
         }
         Text {

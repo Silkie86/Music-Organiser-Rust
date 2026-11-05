@@ -6,11 +6,12 @@
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use mo_app::arrangement::peaks_store::{self, PeakStore};
 use mo_app::arrangement::{self as arr, Area, Frame, Hover, Palette, Peaks, Preview, Style, View};
 use mo_app::background::{self, Newest};
 use mo_app::log;
@@ -168,7 +169,7 @@ pub fn connect(app: &AppWindow) {
     // it has a thread of its own: the arrangement shows as soon as its save is read, and the next song picked is read
     // meanwhile. The folders read are kept for the next song for a minute. Then the files' waveforms.
     let weak = app.as_weak();
-    let mut samples = arr::SampleFinder::new(Some(mo_app::paths::data_dir().join("sounds.db")));
+    let mut samples = arr::SampleFinder::new(Some(mo_app::sound_library::database_in(&mo_app::paths::data_dir())));
     let finder = Newest::start("Arrangement samples", move |(asked, path, views): FindJob| {
         let wanted = || SHOWN.load(Ordering::Relaxed) == asked;
         if !wanted() {
@@ -180,7 +181,7 @@ pub fn connect(app: &AppWindow) {
         let shown = found.clone();
         let _ = weak.upgrade_in_event_loop(move |app| samples_found(&app, asked, shown));
         if !found.is_empty() && wanted() {
-            let peaks = background::on_pool(|| read_peaks(&found, asked));
+            let peaks = read_peaks(&found, asked);
             let _ = weak.upgrade_in_event_loop(move |app| waves_arrived(&app, asked, peaks));
         }
     });
@@ -324,26 +325,118 @@ fn arrived(app: &AppWindow, asked: u64, read: Result<Preview, String>) {
     pick_view(app, 0);
 }
 
-/// Reads each audio file the arrangement plays (up to its first minute) and boils it down to a waveform, a file per
-/// core on the low-priority pool. Stops early when another song has been picked; a file that can't be read is
-/// drawn as a plain band.
+/// Each audio file the arrangement plays boiled down to a waveform: kept from an earlier pick (or run) while the file is
+/// unchanged, else read (up to its first minute) on the bulk pool, a few files at a time, and kept for next time.
+/// Stops early when another song has been picked; a file that can't be read is drawn as a plain band. Runs on the
+/// page's finder thread, never the window's.
 fn read_peaks(found: &HashMap<String, PathBuf>, asked: u64) -> Arc<HashMap<String, Arc<Peaks>>> {
-    let peaks = found
-        .par_iter()
-        .filter_map(|(saved, file)| {
-            if SHOWN.load(Ordering::Relaxed) != asked {
-                return None;
+    let started = std::time::Instant::now();
+    let wanted = || SHOWN.load(Ordering::Relaxed) == asked;
+    // Each file once, with the names the save gives it.
+    let mut files: HashMap<&PathBuf, Vec<&String>> = HashMap::new();
+    for (saved, file) in found {
+        files.entry(file).or_default().push(saved);
+    }
+    STORE.with(|cell| {
+        let mut cell = cell.borrow_mut();
+        if matches!(*cell, Kept::NotYet) {
+            let at = mo_app::paths::data_dir().join(peaks_store::FILE_NAME);
+            *cell = match PeakStore::open(&at, &format!("mo-audio, {} s", mo_audio::MAX_SECONDS)) {
+                Ok(store) => Kept::Open(store),
+                Err(e) => {
+                    // Said once: the waveforms are read each time until the app starts again.
+                    log::warning("Arrangement", &format!("Waveforms are read each time, not kept: {e}"));
+                    Kept::Never
+                }
+            };
+        }
+        let mut store = match &mut *cell {
+            Kept::Open(store) => Some(store),
+            _ => None,
+        };
+        let mut peaks: HashMap<String, Arc<Peaks>> = HashMap::new();
+        let mut used: Vec<&Path> = Vec::new();
+        let mut todo: Vec<(&PathBuf, Stamp)> = Vec::new();
+        for (&file, names) in &files {
+            if !wanted() {
+                return Arc::new(peaks);
             }
-            // A sound that trips the reader is drawn without its wave; the others still come.
-            mo_catch::catch(|| {
-                let audio = mo_audio::read(file, mo_audio::MAX_SECONDS).ok()?;
-                Some((saved.clone(), Arc::new(Peaks::of(audio.sample_rate, &audio.channels, audio.file_seconds))))
-            })
-            .ok()
-            .flatten()
-        })
-        .collect();
-    Arc::new(peaks)
+            let stamp = peaks_store::stamp(file);
+            match (stamp, store.as_deref()) {
+                (Some(st), Some(store)) if let Some(kept) = store.get(file, st) => {
+                    let kept = Arc::new(kept);
+                    peaks.extend(names.iter().map(|n| ((*n).clone(), kept.clone())));
+                    used.push(file);
+                }
+                _ => todo.push((file, stamp)),
+            }
+        }
+        let kept = used.len();
+        // On the bulk pool, a few at a time: each decodes up to a minute of sound into memory, they're usually on one
+        // drive, and other pages' jobs aren't held up behind them.
+        let read: Vec<(&PathBuf, Stamp, Arc<Peaks>)> = background::on_bulk_pool(|| {
+            todo.par_iter()
+                .filter_map(|&(file, stamp)| {
+                    if !wanted() {
+                        return None;
+                    }
+                    // A sound that trips the reader is drawn without its wave; the others still come.
+                    mo_catch::catch(|| {
+                        let audio = mo_audio::read(file, mo_audio::MAX_SECONDS).ok()?;
+                        Some((file, stamp, Arc::new(Peaks::of(audio.sample_rate, &audio.channels, audio.file_seconds))))
+                    })
+                    .ok()
+                    .flatten()
+                })
+                .collect()
+        });
+        if let Some(store) = store.as_mut() {
+            // Kept only for a file that didn't change while it was read.
+            let keep: Vec<(PathBuf, (i64, i64), &Peaks)> = read
+                .iter()
+                .filter_map(|(file, stamp, p)| {
+                    let st = (*stamp)?;
+                    (peaks_store::stamp(file) == Some(st)).then(|| ((*file).clone(), st, p.as_ref()))
+                })
+                .collect();
+            if let Err(e) = store.put(&keep, &used) {
+                log::warning("Arrangement", &format!("Couldn't keep the waveforms for next time: {e}"));
+            }
+        }
+        let decoded = read.len();
+        for (file, _, p) in read {
+            if let Some(names) = files.get(file) {
+                peaks.extend(names.iter().map(|n| ((*n).clone(), p.clone())));
+            }
+        }
+        if decoded > 0 {
+            log::info(
+                "Arrangement",
+                &format!(
+                    "Waveforms: {kept} kept, {decoded} read from their files in {:.1} s",
+                    started.elapsed().as_secs_f64()
+                ),
+            );
+        }
+        Arc::new(peaks)
+    })
+}
+
+/// An audio file's last-written time and size when it was looked at (`peaks_store::stamp`).
+type Stamp = Option<(i64, i64)>;
+
+/// The waveform store, on the finder's thread.
+enum Kept {
+    /// Not opened yet: opened at the first pick.
+    NotYet,
+    Open(PeakStore),
+    /// It couldn't be opened (said once in the log): not tried again until the app starts again.
+    Never,
+}
+
+thread_local! {
+    /// The waveform store, opened on the finder's thread at its first pick and kept there.
+    static STORE: RefCell<Kept> = const { RefCell::new(Kept::NotYet) };
 }
 
 /// The save's audio files have been looked for: the clips whose files aren't here are marked so (in the picture and

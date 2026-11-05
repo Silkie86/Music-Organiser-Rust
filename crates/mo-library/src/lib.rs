@@ -1,18 +1,25 @@
 //! The library: every project save the app knows, your own fields on them (status, rating, key, notes, tags), and the
 //! saves grouped into songs.
 //!
-//! This reads the C# app's `library.db` (in `%LOCALAPPDATA%\MusicOrganiser`) read-only, so nothing that reads can
-//! change it. The one exception is [`folders`], which adds and removes the folders the app looks in (Solomon's OK,
-//! 2026-11-03), one checked transaction at a time. Other writing comes once the twin test says the Rust app reads your
-//! library as the C# one does (CLAUDE.md, "How work is done").
+//! The app's own library is `songs.db` ([`songs_db`]), made once from the C# app's `library.db` (in
+//! `%LOCALAPPDATA%\MusicOrganiser`); until it's made the app reads `library.db`. Everything that reads opens either
+//! read-only, so nothing that reads can change it. What writes: [`folders`] and its kin (the folders the app looks in,
+//! Solomon's OK 2026-11-03, one checked transaction at a time), and [`song_writes`], which keeps what the app reads of
+//! your saves, only ever in the app's own `songs.db`.
 
 mod db;
 pub mod folders;
+pub mod list_copy;
+pub mod moves;
+pub mod plugin_folders;
 pub mod plugins;
 pub mod read;
 pub mod samples;
 pub mod scan;
+mod setting_list;
+pub mod song_writes;
 pub mod songs;
+pub mod songs_db;
 pub mod watch;
 
 pub use db::{Library, LibraryError, PathSet, ProjectPlugin, ProjectSample, SampleUse, SaveDetail, UsageRules};

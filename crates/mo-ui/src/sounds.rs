@@ -24,10 +24,11 @@ use std::time::{Duration, Instant};
 use chrono::{Local, NaiveDateTime};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
+use mo_app::filters::{self, Filter, Shown};
 use mo_app::finder::{self, Kind};
 use mo_app::places::Place;
 use mo_app::shortcuts::{Shortcuts, what_of};
-use mo_app::sounds::{self as list, Filters, Length, Order, SoundList};
+use mo_app::sounds::{self as list, Filters, Order, SoundCounts, SoundList};
 use mo_app::{log, sweep_timing, to_bitwig, year_strip};
 use mo_audio::play::Player;
 use mo_library::UsageRules;
@@ -37,13 +38,14 @@ use mo_sounds::index::{Gathered, SoundIndex};
 use mo_sounds::liking::{self, LIKED_WEIGHTS_KEY, LikedWeights};
 use mo_sounds::rediscover::{self, FolderUse};
 use mo_sounds::usage::{self, Usage};
-use mo_sounds::{Sound, SoundsDb, SoundsError, music};
+use mo_sounds::{Sound, SoundsDb, SoundsError};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode, VecModel};
 
+use crate::filters::FilterModels;
 use crate::finder::How;
 use crate::{
     AlikeLine, AppWindow, CardAction, FolderLine, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, SoundsData,
-    TileRow, TypeChipInfo, YearBar,
+    TileRow, YearBar,
 };
 
 /// The C# app's settings in `library.db` for the view shown last and autoplay, read (not written: it's read-only).
@@ -73,18 +75,6 @@ const COUNT: usize = 60;
 /// How many forgotten folders Rediscover lists, as in the C# app.
 const FOLDERS: usize = 40;
 
-/// How many type chips show; the other types go in the More types menu.
-const TYPE_CHIPS: usize = 9;
-
-/// The Tempo chip's choices, and the tempos each lets through (lowest, highest).
-const TEMPOS: [(&str, Option<f64>, Option<f64>); 5] = [
-    ("Up to 90", None, Some(90.0)),
-    ("90 to 110", Some(90.0), Some(110.0)),
-    ("110 to 130", Some(110.0), Some(130.0)),
-    ("130 to 150", Some(130.0), Some(150.0)),
-    ("150 and up", Some(150.0), None),
-];
-
 /// The page's sounds, filters and what they let through, kept on the window's thread.
 struct Page {
     list: Arc<SoundList>,
@@ -108,6 +98,10 @@ struct Page {
     /// A sound Ctrl+K jumped to that the filters hid: picked once the list without them arrives.
     to_pick: Option<usize>,
     autoplay: bool,
+    /// You picked a view, or turned Autoplay on or off: when the sounds arrive (or arrive again), the page keeps your
+    /// choice rather than the one you had last ([`Page::open_on`]).
+    chose_view: bool,
+    chose_autoplay: bool,
     /// How long each sound plays while a held arrow key steps through them, and when the pick last moved.
     step: Duration,
     stepping: list::Stepping,
@@ -115,11 +109,25 @@ struct Page {
     asked: u64,
     /// The sounds have been read and handed to the page ([`show`]): the next list shown is of them.
     read: bool,
+    /// There's no sound library, or it couldn't be read: no sounds are coming ([`loaded`]).
+    unread: bool,
     /// The type chips' types with their counts, in chip order, then the rest (the More types menu).
     types: Vec<(String, usize)>,
+    /// Every tag on a sound, for the Tag filter.
+    tags: Vec<String>,
+    /// How many sounds each filter's choices would show, from the newest list worked out (none before the first).
+    counts: Option<SoundCounts>,
+    /// What History's times are told by ("14:05" today, "Tue" this week): taken again each time the lists are shown
+    /// ([`show_lists`]), so a page left open over midnight moves on with the days.
     now: NaiveDateTime,
     /// The sound playing (its place in `list`) and how long the part shown in its waveform lasts.
     playing: Option<(usize, f64)>,
+    /// That play's number: the player knows it by that ([`ended`]), not by its file, so an older play of the same
+    /// sound that ends meanwhile isn't taken for it.
+    play: u64,
+    /// How many seconds of it that play reads at most (a sweep reads only its start): a click on its waveform past
+    /// that reads it again from there ([`seeks`]).
+    play_reads: f64,
     /// Each sound's place in `list`, by id.
     places: Arc<HashMap<i64, usize>>,
     /// Every sound's fingerprint, once read, for Sounds like this and Rediscover.
@@ -134,6 +142,8 @@ struct Page {
     re_started: bool,
     /// The answer to Rediscover's newest ask hasn't come yet.
     re_busy: bool,
+    /// The years Rediscover can dig in, from its newest answer.
+    re_years: Vec<i32>,
     /// The kit builder's pads and choices.
     kit: kit::Kit,
     /// The galaxy's map and the part of it on show.
@@ -156,13 +166,20 @@ impl Default for Page {
             picked: None,
             to_pick: None,
             autoplay: false,
+            chose_view: false,
+            chose_autoplay: false,
             step: Duration::from_millis(list::STEP_MS),
             stepping: list::Stepping::default(),
             asked: 0,
             read: false,
+            unread: false,
             types: Vec::new(),
+            tags: Vec::new(),
+            counts: None,
             now: Local::now().naive_local(),
             playing: None,
+            play: 0,
+            play_reads: 0.0,
             places: Arc::default(),
             index: None,
             rediscover: Vec::new(),
@@ -170,6 +187,7 @@ impl Default for Page {
             re_asked: 0,
             re_started: false,
             re_busy: false,
+            re_years: Vec::new(),
             kit: kit::Kit::default(),
             galaxy: galaxy::Galaxy::default(),
         }
@@ -177,6 +195,31 @@ impl Default for Page {
 }
 
 impl Page {
+    /// Opens on the view and Autoplay you had last (the settings `view` and `autoplay`), unless you chose them while
+    /// the sounds were read.
+    fn open_on(&mut self, view: Option<&str>, autoplay: Option<&str>) {
+        if !self.chose_view {
+            self.view = view.and_then(|v| VIEWS.iter().position(|n| *n == v)).map_or(TILES, |i| i as i32);
+        }
+        // As in the C# app: off unless it was turned on.
+        if !self.chose_autoplay {
+            self.autoplay = autoplay == Some("1");
+        }
+    }
+
+    /// You picked view `v` (an index into [`VIEWS`]).
+    fn pick_view(&mut self, v: i32) {
+        self.view = v;
+        self.chose_view = true;
+    }
+
+    /// You turned Autoplay on or off: on, it says so.
+    fn toggle_autoplay(&mut self) -> bool {
+        self.autoplay = !self.autoplay;
+        self.chose_autoplay = true;
+        self.autoplay
+    }
+
     /// The places in `list` of what the view on show lists, in order.
     fn entry(&self, row: usize) -> Option<usize> {
         match self.view {
@@ -217,11 +260,31 @@ struct Ask {
     played: Arc<Vec<(usize, NaiveDateTime)>>,
 }
 
+/// Each view's own choices, every one on show as chips (Solomon, 4 Nov 2026: "makes sure things that are useful arent
+/// hidden away"): Tiles and List's order, the galaxy's Placed by and Light by, and Rediscover's type, year and how
+/// many.
+#[derive(Default)]
+struct Choices {
+    order: FilterModels,
+    placing: FilterModels,
+    light: FilterModels,
+    re_type: FilterModels,
+    re_year: FilterModels,
+    re_count: FilterModels,
+}
+
 thread_local! {
     static PAGE: Rc<RefCell<Page>> = Rc::default();
     static TILE_ROWS: Rc<TileRows> = PAGE.with(|p| Rc::new(TileRows { page: p.clone(), notify: ModelNotify::default() }));
     static LINES: Rc<Lines> = PAGE.with(|p| Rc::new(Lines { page: p.clone(), notify: ModelNotify::default() }));
     static WORKER: RefCell<Option<Newest<Ask>>> = const { RefCell::new(None) };
+    /// The filters' chips and menu lines (type, length, key, tempo, tag), changed in place so an open menu keeps its
+    /// place.
+    static FILTER_MODELS: [FilterModels; 5] = Default::default();
+    /// The picked sound's tags on its panel.
+    static PICKED_TAGS: FilterModels = FilterModels::default();
+    /// Each view's own choices on show, changed in place as the filters' are.
+    static CHOICES: Choices = Choices::default();
     static ALIKE: RefCell<Option<Newest<AlikeAsk>>> = const { RefCell::new(None) };
     static REDISCOVERING: RefCell<Option<Newest<RediscoverAsk>>> = const { RefCell::new(None) };
     static FEED: RefCell<Option<Feed>> = const { RefCell::new(None) };
@@ -229,7 +292,13 @@ thread_local! {
     static TICKER: Timer = Timer::default();
     /// Works out lists in place, for the screenshots, which have no event loop to send answers back to.
     static HERE: RefCell<bool> = const { RefCell::new(false) };
+    /// Starts reading the sound library, until it has started ([`wanted`]).
+    static START_READ: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
 }
+
+/// How long after the window opens the sounds are read when nothing has asked for them yet: the page on show reads
+/// its own things from the disk first.
+const READ_AFTER: Duration = Duration::from_secs(3);
 
 /// The one player, made the first time something plays or Settings lists the outputs (nothing opens before a sound
 /// plays).
@@ -350,6 +419,7 @@ fn tile(p: &Page, row: usize, at: usize) -> SoundTile {
 fn line(p: &Page, row: usize, at: usize) -> SoundLine {
     let Some(s) = p.list.sound(at) else { return SoundLine::default() };
     let a = s.analysis.as_ref();
+    let used = p.list.used_in(at);
     SoundLine {
         row: row as i32,
         name: s.name().into(),
@@ -358,7 +428,8 @@ fn line(p: &Page, row: usize, at: usize) -> SoundLine {
         key: list::key_text(s).into(),
         bpm: a.and_then(|a| a.bpm).map(list::bpm_text).unwrap_or_default().into(),
         length: a.map(|a| list::length_text(a.seconds)).unwrap_or_default().into(),
-        used: list::used_text(p.list.used_in(at)).into(),
+        used: list::used_text(used).into(),
+        used_words: list::used_words(used).into(),
         folder: s.folder().into(),
         when: p.history.get(row).filter(|_| p.view == HISTORY).map(|h| when(h.1, p.now)).unwrap_or_default().into(),
         reason: p.rediscover.get(row).filter(|_| p.view == REDISCOVER).map(|r| r.1.clone()).unwrap_or_default().into(),
@@ -405,11 +476,6 @@ pub(crate) fn strings<S: AsRef<str>>(items: impl IntoIterator<Item = S>) -> Mode
     ModelRc::new(VecModel::from(items.into_iter().map(|s| SharedString::from(s.as_ref())).collect::<Vec<_>>()))
 }
 
-/// Every key the Key chip offers: the twelve major keys, then the twelve minor ones.
-fn key_choices() -> Vec<String> {
-    [false, true].iter().flat_map(|&minor| (0..12).map(move |t| music::key_name(t, minor, false))).collect()
-}
-
 /// For the screenshots: work lists out on the window's thread, as there's no event loop to send them back with.
 pub fn compute_here() {
     HERE.with(|h| *h.borrow_mut() = true);
@@ -442,18 +508,15 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
     let cards = feed.clone();
     wire(app, feed, shortcuts);
     crate::finder::on_open(Kind::Sound, |app, hit, how| {
-        let Some(at) = hit.id.parse::<i64>().ok().and_then(|id| PAGE.with(|p| p.borrow().places.get(&id).copied()))
-        else {
-            return false;
-        };
+        let Ok(id) = hit.id.parse::<i64>() else { return false };
         match how {
-            How::Play => play_sound(app, at, 0.0, mo_audio::MAX_SECONDS),
-            How::Open | How::InDaw => {
-                crate::go_to(app, Place::Sounds.index() as i32);
-                show_sound(app, at);
+            How::Play => {
+                let Some(at) = PAGE.with(|p| p.borrow().places.get(&id).copied()) else { return false };
+                play_sound(app, at, 0.0, mo_audio::MAX_SECONDS);
+                true
             }
+            How::Open | How::InDaw => show_sound_by_id(app, id),
         }
-        true
     });
     PAGE.with(|p| p.borrow_mut().galaxy.db = Some(sounds_db.clone()));
     reading(app);
@@ -478,18 +541,50 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
         read_all(&sounds_db, &library_db, None, send);
         return;
     }
-    if let Err(e) = background::spawn("Sounds library", move || read_all(&sounds_db, &library_db, Some(cards), send)) {
-        // The sounds would never come: the page says why, rather than reading for ever.
-        loaded(app, Err(format!("its reader couldn't start ({e})")));
+    // Not at once: the first thing on show reads from the disk first. The sounds are read when this page, Space or
+    // Ctrl+K wants them ([`wanted`]), or a few seconds after the window opens, whichever is first.
+    let weak = app.as_weak();
+    START_READ.with(|s| {
+        *s.borrow_mut() = Some(Box::new(move || {
+            let read = move || read_all(&sounds_db, &library_db, Some(cards), send);
+            if let Err(e) = background::spawn("Sounds library", read)
+                && let Some(app) = weak.upgrade()
+            {
+                // The sounds would never come: the page says why, rather than reading for ever.
+                loaded(&app, Err(format!("its reader couldn't start ({e})")));
+            }
+        }))
+    });
+    crate::finder::when_opening(|_| wanted());
+    if [Place::Sounds, Place::Space].iter().any(|p| p.index() as i32 == app.get_place()) {
+        wanted();
+    } else {
+        Timer::single_shot(READ_AFTER, wanted);
     }
 }
+
+/// Something wants the sounds (their page or Space came on show, or Ctrl+K opened): they're read now, if they
+/// haven't been yet.
+pub fn wanted() {
+    if let Some(start) = START_READ.with(|s| s.borrow_mut().take()) {
+        start();
+    }
+}
+
+/// What every view says in the list's place when the sound library has no sounds in it (made, but nothing scanned
+/// into it yet): the words Rediscover has for it (`rediscover::why_nothing`).
+const NO_SOUNDS: (&str, &str) = ("No sounds yet", "Add your sample folders in Settings and let the scan finish.");
 
 /// While the sounds are read, every view shows one word in the list's place: not "No sounds match" (nothing is
 /// filtered out yet), and not the galaxy's own word on top of it (Solomon's F12 note, 2026-11-02 04:25). Said once,
 /// as the Songs page says it, not again in the page's header. The first list of the sounds takes its place once they
 /// arrive ([`listed`]), or why they couldn't be read does ([`loaded`]).
 pub fn reading(app: &AppWindow) {
-    PAGE.with(|p| p.borrow_mut().read = false);
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.read = false;
+        p.unread = false;
+    });
     let data = app.global::<SoundsData>();
     data.set_empty_title("Reading your sounds…".into());
     data.set_empty_text("".into());
@@ -627,7 +722,8 @@ impl Settings {
 /// same pass that reads `sounds.db` for the page. A copy that's behind (the C# app changed `sounds.db` since) is shown
 /// at once, then brought up to date, and the page takes the sounds again from it ([`Step::Refreshed`]).
 fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl Fn(Step)) {
-    if !sounds_db.exists() {
+    // No library at all. Once the copy is the app's own, it's all there is: `sounds.db` may have been archived.
+    if !sounds_db.exists() && (cards.is_none() || !compact::copy_of(sounds_db).exists()) {
         send(Step::Read(Err(String::new())));
         return;
     }
@@ -700,8 +796,9 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
                         let (features, clap) =
                             (std::mem::take(&mut everything.features), std::mem::take(&mut everything.clap));
                         let analysed = everything.analysed();
-                        // Taken in place of the copy's sounds shown, when those were behind: else they're the same.
-                        remade = first.behind.then_some(everything.sounds);
+                        // Taken in place of the copy's sounds shown: those were as the damaged copy had them, which
+                        // (once it's the app's own library) needn't be how sounds.db has them.
+                        remade = Some(everything.sounds);
                         Ok((features, clap, analysed))
                     }
                     Err(e) => Err(e),
@@ -721,11 +818,12 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
     if let Some(uses) = &uses {
         send(Step::Used(Arc::new(with_usage(&list, usage_of(&list, uses), &settings.weights))));
     }
-    if !first.behind {
+    if !first.behind && remade.is_none() {
         return;
     }
-    // The sounds shown were as the copy had them before the C# app's changes: the page takes them again, as they were
-    // read just now to make the copy again, or else from the copy once it's brought up to date.
+    // The sounds shown were as the copy had them before the C# app's changes (or before it was found damaged): the
+    // page takes them again, as they were read just now to make the copy again, or else from the copy once it's
+    // brought up to date.
     let (sounds, db, synced) = match remade {
         Some(sounds) => (sounds, SoundsDb::open_read_only(&first.source), None),
         None => {
@@ -837,13 +935,18 @@ fn read_in_place(sounds_db: &Path, now: NaiveDateTime) -> Result<FirstRead, Soun
 fn read_through_copy(sounds_db: &Path, now: NaiveDateTime, cards: &Feed) -> Result<FirstRead, SoundsError> {
     let copy = compact::copy_of(sounds_db);
     match compact::read_for_page(sounds_db, now)? {
-        PageRead::Copy { db, sounds, behind } => Ok(FirstRead {
-            sounds,
-            played: db.history(HISTORY_LENGTH).unwrap_or_default(),
-            source: copy,
-            prints: Prints::InCopy(db),
-            behind,
-        }),
+        PageRead::Copy { db, sounds, behind, adopted } => {
+            if adopted {
+                say_adopted();
+            }
+            Ok(FirstRead {
+                sounds,
+                played: db.history(HISTORY_LENGTH).unwrap_or_default(),
+                source: copy,
+                prints: Prints::InCopy(db),
+                behind,
+            })
+        }
         PageRead::Library { everything, made } => {
             say_made(&made, &copy, sounds_db, Some(cards), false);
             // The rest is read from the copy made at the moment the sounds were read, or else (when it couldn't be
@@ -867,6 +970,18 @@ fn read_through_copy(sounds_db: &Path, now: NaiveDateTime, cards: &Feed) -> Resu
     }
 }
 
+/// Says in the log, once, that the app's copy of the sound library is its own library from now on (the C# app is
+/// retired, Solomon 2026-11-05): `sounds.db` isn't read again.
+fn say_adopted() {
+    log::info(
+        "Sounds",
+        &format!(
+            "{} is the app's own sound library from now on: sounds.db is no longer read (the C# app is retired)",
+            compact::FILE_NAME
+        ),
+    );
+}
+
 /// Says (in the log, and on `cards`) how making the app's copy of the library beside `sounds_db` went: `again` when
 /// it was made again because it was damaged.
 fn say_made(
@@ -877,6 +992,9 @@ fn say_made(
     again: bool,
 ) {
     let size = |path: &Path| fs::metadata(path).map_or(0, |m| m.len());
+    if made.as_ref().is_ok_and(|synced| synced.adopted) {
+        say_adopted();
+    }
     match made {
         Ok(synced) if synced.made => {
             let line = list::copy_made_line(size(copy), size(sounds_db));
@@ -905,13 +1023,21 @@ fn say_made(
     }
 }
 
-/// Brings the app's copy of the library up to date with `sounds_db` after the C# app changed it, saying so on
-/// `cards`. What changed, or `None` when it couldn't be done (it's tried again at the next start).
+/// Brings the app's copy of the library up to date with `sounds_db` one last time, after the C# app changed it, and
+/// makes it the app's own library ([`compact::last_sync`]), saying so on `cards`. What changed, or `None` when it
+/// couldn't be done (it's tried again at the next start).
 fn bring_up_to_date(sounds_db: &Path, copy: &Path, cards: Option<&Feed>) -> Option<compact::Synced> {
+    // The app's own library already (another read made it so meanwhile): nothing to bring up to date, nor to say.
+    if compact::own_since(copy).is_some() {
+        return None;
+    }
     let job = cards.map(|c| c.start("Bringing your sound library up to date", "With what the C# app changed in it"));
     let began = Instant::now();
-    match compact::sync(sounds_db, copy) {
+    match compact::last_sync(sounds_db, copy) {
         Ok(synced) => {
+            if synced.adopted {
+                say_adopted();
+            }
             let line = list::copy_synced_line(&synced);
             log::info(
                 "Sounds",
@@ -1083,9 +1209,15 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
         rediscover_now(app);
     }
     if let Some(at) = picked {
-        let sound = PAGE.with(|p| picked_sound(&p.borrow(), at));
-        app.global::<SoundsData>().set_picked(sound);
+        let data = app.global::<SoundsData>();
+        PAGE.with(|p| {
+            let p = p.borrow();
+            data.set_picked(picked_sound(&p, at));
+            show_picked_tags(&data, &p);
+        });
     }
+    // The Space page keeps the copies it counts to the one to keep that your songs use.
+    crate::space::sounds_changed(app);
 }
 
 /// The sounds read again once the app's copy of the library was brought up to date: a [`Library`] to show in place of
@@ -1114,7 +1246,6 @@ fn brought_up_to_date(app: &AppWindow, r: Refreshed) {
         return;
     }
     drop(was);
-    app.global::<SoundsData>().set_tags(strings(&library.tags));
     let (after, list) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let after = take_refreshed(&mut p, library, moved.as_deref().map(Vec::as_slice), retyped);
@@ -1129,7 +1260,11 @@ fn brought_up_to_date(app: &AppWindow, r: Refreshed) {
         data.set_panel_shown(false);
         data.set_alike(ModelRc::default());
     } else if let Some(at) = after.picked {
-        data.set_picked(PAGE.with(|p| picked_sound(&p.borrow(), at)));
+        PAGE.with(|p| {
+            let p = p.borrow();
+            data.set_picked(picked_sound(&p, at));
+            show_picked_tags(&data, &p);
+        });
         // The lines shown move with their sounds meanwhile; an answer still on its way was for the old list.
         if let Some(moved) = moved.as_deref() {
             let lines: Vec<AlikeLine> = data
@@ -1156,6 +1291,7 @@ fn brought_up_to_date(app: &AppWindow, r: Refreshed) {
     if after.galaxy_again {
         galaxy::shown(app);
     }
+    crate::space::sounds_changed(app);
 }
 
 /// What the page does once [`take_refreshed`] has put the sounds read again in place: what needs the window.
@@ -1178,6 +1314,7 @@ fn take_refreshed(p: &mut Page, library: Library, moved: Option<&[Option<usize>]
     p.list = library.list;
     p.places = library.places;
     p.types = library.types;
+    p.tags = library.tags;
     // History lists them once the filters have been through them again ([`listed`], asked for by the page next).
     p.played = Arc::new(library.played);
     let gone = moved.map(|moved| move_places(p, moved)).unwrap_or_default();
@@ -1232,6 +1369,8 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
             if !why.is_empty() {
                 log::warning("Sounds", &format!("Couldn't read the sound library: {why}"));
             }
+            PAGE.with(|p| p.borrow_mut().unread = true);
+            crate::space::sounds_changed(app);
             data.set_empty_title("No sound library yet".into());
             data.set_empty_text(
                 if why.is_empty() {
@@ -1258,13 +1397,14 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
 
 /// Shows a `library` on the page, opening on the view and autoplay setting given.
 pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Option<&str>) {
-    let data = app.global::<SoundsData>();
-    data.set_tags(strings(&library.tags));
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         // "Reading your sounds…" stays until the list of them is worked out, so "No sounds match" never flashes up
         // in between ([`listed`]).
         p.read = true;
+        // Read now, whatever came before (the screenshots show a library without reading one): the Space page counts
+        // its copies ([`known`]).
+        p.unread = false;
         // History lists them once the filters have been through them ([`listed`]).
         p.played = Arc::new(library.played);
         p.history.clear();
@@ -1272,12 +1412,15 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         p.to_pick = None;
         p.places = library.places;
         p.types = library.types;
-        p.view = view.and_then(|v| VIEWS.iter().position(|n| *n == v)).map_or(TILES, |i| i as i32);
-        // As in the C# app: off unless it was turned on.
-        p.autoplay = autoplay == Some("1");
+        p.tags = library.tags;
+        // Counted afresh for these sounds: the choices show without numbers until then.
+        p.counts = None;
+        p.open_on(view, autoplay);
         p.picked = None;
         p.rediscover.clear();
         p.re_started = false;
+        // The years come with Rediscover's first answer for these sounds.
+        p.re_years.clear();
         galaxy::forget(&mut p.galaxy);
         // An answer still on its way was for the old list: it's dropped.
         p.re_asked += 1;
@@ -1292,6 +1435,7 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         GALAXY => galaxy::shown(app),
         _ => {}
     }
+    crate::space::sounds_changed(app);
 }
 
 /// What the picked sound offers besides Play: (its words, its id in the shortcut list). The card shows them as
@@ -1327,7 +1471,15 @@ fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
     for &(text, id) in CARD_ACTIONS {
         let key = SharedString::from(shortcuts.key_of(id));
         menu.push(MenuItem { what: text.into(), key: key.clone(), id: id.into(), enabled: true });
-        actions.push(CardAction { text: text.into(), tip: what_of(id).into(), key, id: id.into(), enabled: true });
+        actions.push(CardAction {
+            text: text.into(),
+            tip: what_of(id).into(),
+            key,
+            id: id.into(),
+            enabled: true,
+            main: false,
+            danger: false,
+        });
     }
     data.set_menu(ModelRc::new(VecModel::from(menu)));
     data.set_actions(ModelRc::new(VecModel::from(actions)));
@@ -1341,44 +1493,24 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.set_tile_rows(ModelRc::from(TILE_ROWS.with(|m| m.clone()) as Rc<dyn Model<Data = TileRow>>));
     data.set_lines(ModelRc::from(LINES.with(|m| m.clone()) as Rc<dyn Model<Data = SoundLine>>));
     data.set_views(strings(VIEWS));
-    data.set_orders(strings(Order::ALL.map(Order::name)));
-    data.set_lengths(strings([Length::Hits.name(), Length::Loops.name()]));
-    data.set_keys(strings(key_choices()));
-    data.set_bpms(strings(TEMPOS.map(|t| t.0)));
     show_actions(&data, shortcuts);
+    // The filters whose choices don't come from the sounds (length, key, tempo) show from the start, without numbers
+    // until the sounds are read, so the rows don't jump when they are.
+    show_chips(app);
 
     let weak = app.as_weak();
     data.on_search_edited(move |text| change(&weak, |f| f.search = text.to_string()));
     let weak = app.as_weak();
-    data.on_pick_type(move |i| {
-        let Some(app) = weak.upgrade() else { return };
-        let ty = PAGE.with(|p| p.borrow().types.get(i as usize).map(|t| t.0.clone()));
-        if let Some(ty) = ty {
-            change(&app.as_weak(), |f| f.toggle_type(&ty));
-        }
-    });
+    data.on_toggle_choice(move |chip, choice| change(&weak, |f| f.pick(&chip, &choice)));
     let weak = app.as_weak();
-    data.on_pick(move |kind, value| {
-        let value = value.to_string();
-        // The types on chips (not in the More types menu), read before the filters are borrowed to change.
-        let chips: Vec<String> = PAGE.with(|p| p.borrow().types.iter().take(TYPE_CHIPS).map(|t| t.0.clone()).collect());
-        change(&weak, |f| match kind.as_str() {
-            "length" => {
-                f.length = Length::ALL.into_iter().find(|l| l.name() == value).unwrap_or_default();
-            }
-            "key" => f.key = music::parse_key(&value).filter(|_| !value.is_empty()),
-            "bpm" => {
-                let t = TEMPOS.iter().find(|t| t.0 == value);
-                f.bpm_from = t.and_then(|t| t.1);
-                f.bpm_to = t.and_then(|t| t.2);
-            }
-            "tag" => f.tag = (!value.is_empty()).then_some(value),
-            // From the More types menu: a type picks or unpicks it; "Any" takes off the types the menu holds.
-            "type" if value.is_empty() => f.sound_types.retain(|t| chips.contains(t)),
-            "type" => f.toggle_type(&value),
-            "types" => f.sound_types.clear(),
-            _ => {}
-        });
+    data.on_clear_chip(move |chip| {
+        if chip == "more-types" {
+            // The More types menu's Any: the types on chips of their own stay picked.
+            let types = PAGE.with(|p| p.borrow().types.clone());
+            change(&weak, |f| f.clear_more_types(&types));
+        } else {
+            change(&weak, |f| f.clear_chip(&chip));
+        }
     });
     let weak = app.as_weak();
     data.on_toggle(move |kind| change(&weak, |f| f.toggle(&kind)));
@@ -1396,8 +1528,12 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     let weak = app.as_weak();
     data.on_pick_order(move |name| {
         let Some(app) = weak.upgrade() else { return };
-        PAGE.with(|p| p.borrow_mut().order = Order::from_name(&name));
-        refresh(&app);
+        // The order already picked stays picked, and the list stays as it is.
+        let order = Order::from_name(&name);
+        let changed = PAGE.with(|p| std::mem::replace(&mut p.borrow_mut().order, order) != order);
+        if changed {
+            refresh(&app);
+        }
     });
     let weak = app.as_weak();
     data.on_shuffle(move || {
@@ -1412,17 +1548,13 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     let weak = app.as_weak();
     data.on_toggle_autoplay(move || {
         let Some(app) = weak.upgrade() else { return };
-        let on = PAGE.with(|p| {
-            let mut p = p.borrow_mut();
-            p.autoplay = !p.autoplay;
-            p.autoplay
-        });
+        let on = PAGE.with(|p| p.borrow_mut().toggle_autoplay());
         app.global::<SoundsData>().set_autoplay(on);
     });
     let weak = app.as_weak();
     data.on_pick_view(move |v| {
         let Some(app) = weak.upgrade() else { return };
-        PAGE.with(|p| p.borrow_mut().view = v);
+        PAGE.with(|p| p.borrow_mut().pick_view(v));
         show_lists(&app);
         bring_picked_into_view(&app);
         // Rediscover fills itself the first time it's opened, so it never greets you empty (as in the C# app).
@@ -1441,6 +1573,17 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     kit::wire(app);
     galaxy::wire(app);
     drag_out::wire(app);
+    let weak = app.as_weak();
+    data.on_list_made(move || {
+        // A turn later, once the new list is laid out: an ask made while it's still being made is the one its
+        // `changed show-ask` starts from, so it wouldn't scroll.
+        let weak = weak.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(app) = weak.upgrade() {
+                bring_picked_into_view(&app);
+            }
+        });
+    });
     let weak = app.as_weak();
     data.on_columns_changed(move |n| {
         let Some(app) = weak.upgrade() else { return };
@@ -1502,8 +1645,13 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         });
         match (picked, playing) {
             (Some(i), Some((j, seconds))) if i == j => {
-                if let Some(player) = PLAYER.get() {
-                    player.seek(f64::from(at) * seconds);
+                let to = f64::from(at) * seconds;
+                match PLAYER.get() {
+                    Some(player) if PAGE.with(|p| seeks(&p.borrow(), player.playing().as_deref(), to)) => {
+                        player.seek(to);
+                    }
+                    // Still being read, or read only as far as its start: read again from there (newest wins).
+                    _ => play_picked(&app, f64::from(at)),
                 }
             }
             (Some(_), _) => play_picked(&app, f64::from(at)),
@@ -1516,6 +1664,8 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         PAGE.with(|p| p.borrow_mut().picked = None);
         app.global::<SoundsData>().set_panel_shown(false);
         redraw();
+        // The galaxy's ring leaves the star with it.
+        galaxy::show_picked(&app);
     });
     let weak = app.as_weak();
     data.on_menu_chosen(move |id| {
@@ -1650,6 +1800,7 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
         }
         p.re_busy = false;
         p.rediscover = a.found;
+        p.re_years = a.years;
         Some((p.rediscover.len(), p.list.knows_use()))
     });
     let Some((found, knows_use)) = fresh else { return };
@@ -1665,7 +1816,7 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
         })
         .collect();
     data.set_folders(ModelRc::new(VecModel::from(folders)));
-    data.set_re_years(strings(a.years.iter().map(i32::to_string)));
+    show_rediscover_chips(app);
     if found == 0 {
         data.set_re_empty_title("Nothing to suggest".into());
         data.set_re_empty_text(a.why.into());
@@ -1690,17 +1841,66 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
     bring_picked_into_view(app);
 }
 
-/// Rediscover's choices as they are now.
+/// Picks `value` on Rediscover's `what`, saying whether that changed anything. "type" and "year": one at most, so a
+/// click on the one picked unpicks it, as on the filters, and "" (the Year menu's Any) is any. "more-types": the More
+/// types menu's Any, which unpicks a type picked in that menu but keeps one picked on a chip of its own (one of
+/// `chip_types`), as the Type filter's does. "count": one of the counts is always picked.
+fn re_pick(re: &mut rediscover::Options, what: &str, value: &str, chip_types: &[&str]) -> bool {
+    let before = (re.sound_type.clone(), re.year, re.count);
+    match what {
+        "type" => {
+            let mut picked: Vec<String> = re.sound_type.take().into_iter().collect();
+            if value.is_empty() {
+                picked.clear();
+            } else {
+                filters::toggle(&mut picked, value, false);
+            }
+            re.sound_type = picked.pop();
+        }
+        "more-types" => {
+            if re.sound_type.as_ref().is_some_and(|t| !chip_types.iter().any(|c| c.eq_ignore_ascii_case(t))) {
+                re.sound_type = None;
+            }
+        }
+        "year" => {
+            let mut picked: Vec<i32> = re.year.into_iter().collect();
+            if value.is_empty() {
+                picked.clear();
+            } else {
+                filters::toggle_as(&mut picked, value, false, |y| y.to_string(), |w| w.parse().ok());
+            }
+            re.year = picked.pop();
+        }
+        "count" => {
+            if let Some(c) = value.parse().ok().filter(|c| COUNTS.contains(c)) {
+                re.count = c;
+            }
+        }
+        _ => {}
+    }
+    before != (re.sound_type.clone(), re.year, re.count)
+}
+
+/// Rediscover's choices as they are now, each on show: the types as the Type filter shows them (the most used as
+/// chips, the rest in a menu), the years, and how many. Nothing is counted: Rediscover digs out how many it's asked
+/// for.
 fn show_rediscover_chips(app: &AppWindow) {
     let data = app.global::<SoundsData>();
     PAGE.with(|p| {
         let p = p.borrow();
-        data.set_re_types(strings(p.types.iter().map(|t| t.0.as_str())));
-        data.set_re_type(p.re.sound_type.clone().unwrap_or_default().into());
-        data.set_re_year(p.re.year.map(|y| y.to_string()).unwrap_or_default().into());
+        let types: Vec<(String, String)> = p.types.iter().map(|(t, _)| (t.clone(), String::new())).collect();
+        let picked: Vec<String> = p.re.sound_type.iter().cloned().collect();
+        let types = filters::show_split(&types, &picked, list::TYPE_CHIPS);
+        let years: Vec<(String, String)> = p.re_years.iter().map(|y| (y.to_string(), String::new())).collect();
+        let picked: Vec<String> = p.re.year.iter().map(i32::to_string).collect();
+        let years = filters::show(&years, &picked);
+        let counts = filters::one_of(&COUNTS.map(|c| c.to_string()), &p.re.count.to_string());
+        CHOICES.with(|c| {
+            data.set_re_type_filter(c.re_type.view(&types));
+            data.set_re_year_filter(c.re_year.view(&years));
+            data.set_re_count_filter(c.re_count.view(&counts));
+        });
         data.set_re_adventure(p.re.adventure as f32);
-        data.set_re_counts(strings(COUNTS.map(|c| c.to_string())));
-        data.set_re_count(p.re.count.to_string().into());
         data.set_re_rarely(p.re.max_uses > 0);
     });
 }
@@ -1713,18 +1913,10 @@ fn wire_rediscover(app: &AppWindow) {
         let Some(app) = weak.upgrade() else { return };
         let again = PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            let v = value.as_str();
-            match what.as_str() {
-                "type" => p.re.sound_type = (!v.is_empty()).then(|| v.to_owned()),
-                "year" => p.re.year = v.parse().ok(),
-                "count" => {
-                    if let Some(c) = v.parse().ok().filter(|c| COUNTS.contains(c)) {
-                        p.re.count = c;
-                    }
-                }
-                _ => {}
-            }
-            p.re_started
+            let p = &mut *p;
+            let chip_types: Vec<&str> = p.types.iter().take(list::TYPE_CHIPS).map(|(t, _)| t.as_str()).collect();
+            // Picking again only when something changed: a click on the count picked already keeps the list.
+            re_pick(&mut p.re, &what, &value, &chip_types) && p.re_started
         });
         show_rediscover_chips(&app);
         if again {
@@ -1764,16 +1956,17 @@ fn wire_rediscover(app: &AppWindow) {
             rediscover_now(&app);
         }
     });
-    // A forgotten folder: its sounds in the List, with the other filters cleared so all of them show.
+    // A forgotten folder: its own sounds in the List (the ones its card counts, not its subfolders' nor a folder whose
+    // name starts the same way), with the other filters and the search cleared so all of them show.
     let weak = app.as_weak();
     data.on_pick_folder(move |folder| {
         let Some(app) = weak.upgrade() else { return };
         PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            p.filters = Filters { search: folder.to_string(), ..Filters::default() };
-            p.view = LIST;
+            p.filters = Filters { folder: Some(folder.to_string()), ..Filters::default() };
+            p.pick_view(LIST);
         });
-        app.global::<SoundsData>().set_search(folder);
+        app.global::<SoundsData>().set_search(SharedString::new());
         refresh(&app);
         show_lists(&app);
     });
@@ -1804,10 +1997,10 @@ fn refresh(app: &AppWindow) {
         }
     });
     if HERE.with(|h| *h.borrow()) {
-        let shown = ask.list.view(&ask.filters, ask.order, ask.seed);
+        let (shown, counts) = ask.list.view_counted(&ask.filters, ask.order, ask.seed);
         let years = ask.list.year_counts(ask.filters.used);
         let history = ask.list.played(&ask.played, &ask.filters);
-        listed(app, ask.id, Listed { shown, years, history });
+        listed(app, ask.id, Listed { shown, counts, years, history });
         return;
     }
     WORKER.with(|w| {
@@ -1830,7 +2023,8 @@ fn refresh(app: &AppWindow) {
                 let new = background::on_pool(|| {
                     let years = kept.unwrap_or_else(|| ask.list.year_counts(ask.filters.used));
                     let history = ask.list.played(&ask.played, &ask.filters);
-                    Listed { shown: ask.list.view(&ask.filters, ask.order, ask.seed), years, history }
+                    let (shown, counts) = ask.list.view_counted(&ask.filters, ask.order, ask.seed);
+                    Listed { shown, counts, years, history }
                 });
                 counted = Some((Arc::downgrade(&ask.list), ask.filters.used, new.years.clone()));
                 let weak = weak.clone();
@@ -1854,6 +2048,8 @@ fn refresh(app: &AppWindow) {
 struct Listed {
     /// For Tiles, List and the galaxy, as places in the page's list, in order.
     shown: Vec<usize>,
+    /// How many sounds each filter's choices would show.
+    counts: SoundCounts,
     /// The year strip's years.
     years: YearCounts,
     /// For History: the sounds played, newest first, with when.
@@ -1869,16 +2065,27 @@ fn listed(app: &AppWindow, id: u64, new: Listed) {
             return false;
         }
         p.shown = Arc::new(new.shown);
+        p.counts = Some(new.counts);
         p.years = new.years;
         p.history = new.history;
         true
     });
     if current {
+        // The counts beside the filters' choices, for the filters as they are now.
+        show_chips(app);
         show_years(app);
         show_lists(app);
-        // Once the sounds are read, the list (or "No sounds match") takes the place of the word saying so.
-        if PAGE.with(|p| p.borrow().read) {
-            app.global::<SoundsData>().set_empty_title("".into());
+        // Once the sounds are read, the list (or "No sounds match") takes the place of the word saying so. A library
+        // with no sounds in it says so on every view instead, as the word did.
+        let (read, none) = PAGE.with(|p| {
+            let p = p.borrow();
+            (p.read, p.list.is_empty())
+        });
+        if read {
+            let (title, text) = if none { NO_SOUNDS } else { ("", "") };
+            let data = app.global::<SoundsData>();
+            data.set_empty_title(title.into());
+            data.set_empty_text(text.into());
         }
         // The filters dim the stars they leave out.
         galaxy::draw(app);
@@ -1916,6 +2123,38 @@ fn show_sound(app: &AppWindow, at: usize) {
     refresh(app);
 }
 
+/// Opens the page on the sound with id `id` and picks it, as Ctrl+K does: the Space page's links to it. False when the
+/// list doesn't have it (it's hidden, or gone since).
+pub fn show_sound_by_id(app: &AppWindow, id: i64) -> bool {
+    let Some(at) = PAGE.with(|p| p.borrow().places.get(&id).copied()) else { return false };
+    crate::go_to(app, Place::Sounds.index() as i32);
+    show_sound(app, at);
+    true
+}
+
+/// The sounds as the page has them, for the Space page, which counts their copies ([`known`]).
+pub enum Known {
+    /// Still being read.
+    Reading,
+    /// There's no sound library, or it couldn't be read.
+    Unread,
+    /// The sounds the page lists (hidden copies left out), with how your songs use them once that's known, and the
+    /// sound library they were read from.
+    Read(Arc<SoundList>, PathBuf),
+}
+
+/// The sounds as the page has them now. The Space page is told each time that changes (`space::sounds_changed`).
+pub fn known() -> Known {
+    PAGE.with(|p| {
+        let p = p.borrow();
+        match (p.read, p.unread, &p.galaxy.db) {
+            (_, true, _) | (true, false, None) => Known::Unread,
+            (true, false, Some(db)) => Known::Read(p.list.clone(), db.clone()),
+            (false, false, _) => Known::Reading,
+        }
+    })
+}
+
 /// The year strip: each year, how full it is, and whether the filter has it.
 fn show_years(app: &AppWindow) {
     let (bars, (from, to)) = PAGE.with(|p| {
@@ -1936,6 +2175,7 @@ fn show_years(app: &AppWindow) {
 
 fn show_lists(app: &AppWindow) {
     let data = app.global::<SoundsData>();
+    PAGE.with(|p| p.borrow_mut().now = Local::now().naive_local());
     PAGE.with(|p| {
         let p = p.borrow();
         data.set_view(p.view);
@@ -1967,46 +2207,49 @@ fn redraw() {
     kit::redraw();
 }
 
+/// The filters' chips and menus as the filters are now, each choice with the counts from the newest list worked out
+/// (a pick shows at once; its counts come with the list it asked for).
 fn show_chips(app: &AppWindow) {
     let data = app.global::<SoundsData>();
     PAGE.with(|p| {
         let p = p.borrow();
         let f = &p.filters;
-        let counts = &p.types;
-        let chips: Vec<TypeChipInfo> = counts
-            .iter()
-            .take(TYPE_CHIPS)
-            .map(|(t, n)| TypeChipInfo {
-                name: t.clone().into(),
-                count: list::short_count(*n).into(),
-                colour: list::type_colour(t),
-                on: f.sound_types.contains(t),
-            })
-            .collect();
-        data.set_types(ModelRc::new(VecModel::from(chips)));
-        data.set_more_types(strings(counts.iter().skip(TYPE_CHIPS).map(|(t, _)| t.as_str())));
-        let more: Vec<&str> = counts
-            .iter()
-            .skip(TYPE_CHIPS)
-            .map(|(t, _)| t.as_str())
-            .filter(|t| f.sound_types.iter().any(|picked| picked == t))
-            .collect();
-        data.set_more_type(more.join(", ").into());
+        let chips = list::chips(f, p.counts.as_ref(), &p.types, &p.tags);
+        FILTER_MODELS.with(|m| {
+            data.set_type_filter(m[0].view(&chips.types));
+            data.set_length_filter(m[1].view(&chips.length));
+            data.set_key_filter(m[2].view(&chips.key));
+            data.set_tempo_filter(m[3].view(&chips.tempo));
+            data.set_tag_filter(m[4].view(&chips.tag));
+        });
         data.set_any_type(!f.sound_types.is_empty());
-        data.set_length(if f.length == Length::All { "" } else { f.length.name() }.into());
-        data.set_key(f.key.map(|(t, m)| music::key_name(t, m, false)).unwrap_or_default().into());
         data.set_mix_well(f.mix_well);
-        let tempo = TEMPOS.iter().find(|t| t.1 == f.bpm_from && t.2 == f.bpm_to && (t.1.is_some() || t.2.is_some()));
-        data.set_bpm(tempo.map_or("", |t| t.0).into());
-        data.set_tag(f.tag.clone().unwrap_or_default().into());
         data.set_unused(f.unused);
         data.set_used(f.used);
         data.set_knows_use(p.list.knows_use());
         data.set_favourites(f.favourites);
+        data.set_folder(f.folder.as_deref().unwrap_or_default().into());
         data.set_any_filter(f.any());
-        data.set_order(p.order.name().into());
+        let order = filters::one_of(&Order::ALL.map(Order::name), p.order.name());
+        data.set_order_filter(CHOICES.with(|c| c.order.view(&order)));
         data.set_autoplay(p.autoplay);
+        show_picked_tags(&data, &p);
     });
+}
+
+/// The picked sound's tags on its panel, each lit while the Tag filter has it.
+fn show_picked_tags(data: &SoundsData, p: &Page) {
+    let tags = p.picked.and_then(|at| p.list.sound(at)).map(|s| s.tags.as_slice()).unwrap_or_default();
+    let shown: Vec<Shown> = tags
+        .iter()
+        .map(|t| Shown {
+            text: t.clone(),
+            count: String::new(),
+            on: p.filters.tags.iter().any(|picked| picked.eq_ignore_ascii_case(t)),
+        })
+        .collect();
+    let view = PICKED_TAGS.with(|m| m.view(&Filter { chips: shown, ..Filter::default() }));
+    data.set_picked_tags(view.chips);
 }
 
 /// Picks the sound on `row` of the view on show, opens its panel, and plays it when autoplay is on and `autoplay` asks.
@@ -2021,12 +2264,12 @@ fn select_row(app: &AppWindow, row: i32, autoplay: bool) {
 
 fn pick(app: &AppWindow, at: usize) {
     let data = app.global::<SoundsData>();
-    let picked = PAGE.with(|p| {
-        let mut p = p.borrow_mut();
-        p.picked = Some(at);
-        picked_sound(&p, at)
+    PAGE.with(|p| {
+        p.borrow_mut().picked = Some(at);
+        let p = p.borrow();
+        data.set_picked(picked_sound(&p, at));
+        show_picked_tags(&data, &p);
     });
-    data.set_picked(picked);
     data.set_panel_shown(true);
     find_alike(app, at);
     galaxy::show_picked(app);
@@ -2084,7 +2327,6 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
         points: points(s),
         seconds: a.map_or(0.0, |a| a.seconds.min(mo_audio::MAX_SECONDS)) as f32,
         facts: ModelRc::new(VecModel::from(facts)),
-        tags: strings(&s.tags),
         favourite: s.favourite,
         character: a.map(|a| a.character.join(", ")).unwrap_or_default().into(),
         liked_why: liked_why(p, at).into(),
@@ -2144,9 +2386,8 @@ fn play_picked(app: &AppWindow, from: f64) {
 }
 
 /// Plays the sound at `at` in the list from `from` (0 to 1 of the way through), whether it's picked or not (the
-/// galaxy's sweep plays the stars it passes without picking them).
-/// Plays the sound at `at` from `from` (0 to 1 of the way through), reading at most `most` seconds of it: a sweep
-/// only needs its start, which reads far quicker than a whole loop.
+/// galaxy's sweep plays the stars it passes without picking them), reading at most `most` seconds of it: a sweep only
+/// needs its start, which reads far quicker than a whole loop.
 fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     let Some((at, path, seconds)) = PAGE.with(|p| {
         let p = p.borrow();
@@ -2156,14 +2397,21 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     }) else {
         return;
     };
-    PAGE.with(|p| p.borrow_mut().playing = Some((at, seconds.max(0.001))));
-    playing_changed(app);
     // The screenshots show a sound playing without a sound card.
-    if HERE.with(|h| *h.borrow()) {
+    let here = HERE.with(|h| *h.borrow());
+    let ask = if here { 0 } else { PLAYS.fetch_add(1, Ordering::SeqCst) + 1 };
+    // Straight after, so a read this one overtakes never takes it for a stop.
+    NEWEST_PLAY.fetch_max(ask, Ordering::SeqCst);
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.playing = Some((at, seconds.max(0.001)));
+        p.play = ask;
+        p.play_reads = most;
+    });
+    playing_changed(app);
+    if here {
         return;
     }
-    let ask = PLAYS.fetch_add(1, Ordering::SeqCst) + 1;
-    NEWEST_PLAY.fetch_max(ask, Ordering::SeqCst);
     let job = PlayJob { ask, path, from, seconds, most, window: app.as_weak(), held: Arc::default() };
     ask_reader(job);
 }
@@ -2232,57 +2480,84 @@ impl Drop for PlayJob {
 fn read_and_play(job: PlayJob) {
     let PlayJob { ask, ref path, from, seconds, most, ref window, .. } = job;
     let (path, window) = (path.clone(), window.clone());
-    let overtaken = || NEWEST_PLAY.load(Ordering::SeqCst) != ask;
-    let stopped = || PLAYS.load(Ordering::SeqCst) != ask;
+    // Still the newest play, with no stop since.
+    let wanted = || {
+        if NEWEST_PLAY.load(Ordering::SeqCst) != ask {
+            Err(Unwanted::Overtaken)
+        } else if PLAYS.load(Ordering::SeqCst) != ask {
+            Err(Unwanted::Stopped)
+        } else {
+            Ok(())
+        }
+    };
     // Passed over since it was asked for (it waited behind another read): never opened, so the sweep's timings
     // forget it by themselves.
-    if overtaken() || stopped() {
+    if wanted().is_err() {
         return;
     }
     sweep_timing::opening(&path, ask);
-    let read = mo_audio::read(Path::new(&path), most);
-    match read {
-        // A newer play came while this one was reading: overtaken. A stop (the mouse let go, say): dropped.
-        _ if overtaken() => sweep_timing::overtaken(&path, ask),
-        _ if stopped() => sweep_timing::dropped(&path, ask),
-        Ok(audio) => {
-            let player = player();
-            player.play(Arc::new(audio), path.clone(), from * seconds);
-            let output = player.info();
+    let went = match mo_audio::read(Path::new(&path), most) {
+        // Looked at again as it starts, with no stop or other sound able to come in between: one asked for since
+        // wins, rather than this sound starting after it and playing on while the page shows another or none.
+        Ok(audio) => player().play_if(Arc::new(audio), ask.to_string(), from * seconds, wanted),
+        Err(e) => match wanted() {
+            Err(unwanted) => Err(unwanted),
+            Ok(()) => {
+                couldnt_play(&path, ask, &e.to_string(), window);
+                return;
+            }
+        },
+    };
+    match went {
+        Ok(()) => {
+            let output = player().info();
             sweep_timing::output(output.mix_every_ms.map(|m| m / 2.0), output.delay_ms);
             sweep_timing::started(&path, ask);
         }
-        Err(e) => {
-            sweep_timing::dropped(&path, ask);
-            log::warning("Sounds", &format!("Couldn't play {path}: {e}"));
-            let why = e.to_string();
-            let _ = slint::invoke_from_event_loop(move || {
-                // Only while this is still the sound asked for: a newer one asked meanwhile keeps playing.
-                if PLAYS.load(Ordering::SeqCst) != ask {
-                    return;
-                }
-                // Stepping or sweeping over many sounds that won't play for the same reason (a drive unplugged)
-                // says so once; the log has each of them.
-                let now = Instant::now();
-                let new_card = FAILED_CARD.with(|c| {
-                    let mut c = c.borrow_mut();
-                    let fresh = c
-                        .as_ref()
-                        .is_none_or(|(at, before)| *before != why || now.duration_since(*at) >= FAILED_CARD_GAP);
-                    if fresh {
-                        *c = Some((now, why.clone()));
-                    }
-                    fresh
-                });
-                if new_card && let Some(feed) = FEED.with(|f| f.borrow().clone()) {
-                    feed.start("Couldn't play the sound", "").failed(&why);
-                }
-                if let Some(app) = window.upgrade() {
-                    stop(&app);
-                }
-            });
-        }
+        // A newer play came while this one was reading: overtaken. A stop (the mouse let go, say): dropped.
+        Err(Unwanted::Overtaken) => sweep_timing::overtaken(&path, ask),
+        Err(Unwanted::Stopped) => sweep_timing::dropped(&path, ask),
     }
+}
+
+/// Why a sound that was read isn't played.
+enum Unwanted {
+    /// A newer sound was asked for.
+    Overtaken,
+    /// A stop was asked for.
+    Stopped,
+}
+
+/// Says that the sound of play `ask` couldn't be read (`why`), once for many that fail the same way, and stops it on
+/// the page.
+fn couldnt_play(path: &str, ask: u64, why: &str, window: slint::Weak<AppWindow>) {
+    sweep_timing::dropped(path, ask);
+    log::warning("Sounds", &format!("Couldn't play {path}: {why}"));
+    let why = why.to_owned();
+    let _ = slint::invoke_from_event_loop(move || {
+        // Only while this is still the sound asked for: a newer one asked meanwhile keeps playing.
+        if PLAYS.load(Ordering::SeqCst) != ask {
+            return;
+        }
+        // Stepping or sweeping over many sounds that won't play for the same reason (a drive unplugged) says so once;
+        // the log has each of them.
+        let now = Instant::now();
+        let new_card = FAILED_CARD.with(|c| {
+            let mut c = c.borrow_mut();
+            let fresh =
+                c.as_ref().is_none_or(|(at, before)| *before != why || now.duration_since(*at) >= FAILED_CARD_GAP);
+            if fresh {
+                *c = Some((now, why.clone()));
+            }
+            fresh
+        });
+        if new_card && let Some(feed) = FEED.with(|f| f.borrow().clone()) {
+            feed.start("Couldn't play the sound", "").failed(&why);
+        }
+        if let Some(app) = window.upgrade() {
+            stop(&app);
+        }
+    });
 }
 
 /// The least time between two "Couldn't play the sound" cards for the same reason: as long as one stays.
@@ -2294,6 +2569,8 @@ thread_local! {
 }
 
 fn stop(app: &AppWindow) {
+    // Counted first: a read that looks after this ([`read_and_play`]) doesn't start its sound, and one that looked
+    // before has started it by the time the player takes the stop.
     PLAYS.fetch_add(1, Ordering::SeqCst);
     if let Some(player) = PLAYER.get() {
         player.stop();
@@ -2302,11 +2579,20 @@ fn stop(app: &AppWindow) {
     playing_changed(app);
 }
 
-/// A sound played to its end by itself.
+/// Whether a click `to` seconds into the waveform of the sound shown playing can move the play the player has
+/// (`player_has`: its key), rather than reading the sound again from there: only when the player has that very play
+/// (not an older one, nor none while it's still being read) and the play read that far (a sweep reads only its start).
+fn seeks(p: &Page, player_has: Option<&str>, to: f64) -> bool {
+    p.playing.is_some() && player_has.is_some_and(|key| key.parse() == Ok(p.play)) && to < p.play_reads
+}
+
+/// A sound played to its end by itself: `key` is its play's number.
 fn ended(key: &str) {
     let ours = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        let ours = p.playing.and_then(|(i, _)| p.list.sound(i)).is_some_and(|s| s.path == key);
+        // By the play's number, not its file: played again near its end, the same sound's older play ends while the
+        // new one is still being read, and the page goes on showing the new one.
+        let ours = p.playing.is_some() && key.parse() == Ok(p.play);
         if ours {
             p.playing = None;
         }
@@ -2434,6 +2720,33 @@ fn show_sending(app: &AppWindow, sending: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rediscover_picks_one_type_and_year_at_most_and_always_a_count() {
+        let mut re = rediscover::Options { count: COUNT, ..rediscover::Options::default() };
+        let chips = ["Kick", "Snare"];
+        let mut pick = |what: &str, value: &str| re_pick(&mut re, what, value, &chips);
+        // A type is picked alone; another takes its place; a click on the one picked unpicks it.
+        assert!(pick("type", "Kick"));
+        assert!(pick("type", "Snare"));
+        assert!(pick("type", "snare"));
+        assert!(!pick("type", ""));
+        // The More types menu's Any keeps a type picked on its chip, and unpicks one picked in the menu.
+        assert!(pick("type", "Snare"));
+        assert!(!pick("more-types", ""));
+        assert!(pick("type", "Riser"));
+        assert!(pick("more-types", ""));
+        // A year is kept as a number; the Year menu's Any unpicks it.
+        assert!(pick("year", "2024"));
+        assert!(pick("year", "2023"));
+        assert!(pick("year", ""));
+        assert!(!pick("year", ""));
+        // A count on offer is picked; the one picked already, or one not on offer, changes nothing.
+        assert!(pick("count", "120"));
+        assert!(!pick("count", "120"));
+        assert!(!pick("count", "7"));
+        assert_eq!((re.sound_type, re.year, re.count), (None, None, 120));
+    }
 
     /// A small song library like the C# app's: two songs, a kick in both, a pad with no notes in one, and settings.
     fn song_library(name: &str, settings: &[(&str, &str)]) -> PathBuf {
@@ -2586,15 +2899,16 @@ mod tests {
     }
 
     #[test]
-    fn the_page_reads_the_apps_copy_and_brings_it_up_to_date() {
+    fn the_page_makes_the_apps_own_sound_library_and_reads_only_that_after() {
         let sounds_db = sound_library("copy");
         let library_db = song_library("copy-songs.db", &[]);
         let copy = sounds_db.with_file_name("sounds-rust.db");
-        // The first start: sounds.db is read once, and the copy made on the same pass.
+        // The first start: sounds.db is read once, and the copy made on the same pass: the app's own library now.
         let cards = Feed::default();
         let first = one_start(&sounds_db, &library_db, &cards);
         assert_eq!(first, ["5 sounds from sounds-rust.db, 0 plays", "5 fingerprints", "used: true"]);
         assert!(copy.exists());
+        assert!(compact::own_since(&copy).is_some());
         let said = cards_said(&cards);
         assert_eq!(said.len(), 1, "{said:?}");
         assert!(said[0].starts_with("Made the app's own copy of your sound library: "), "{said:?}");
@@ -2602,10 +2916,89 @@ mod tests {
         let cards = Feed::default();
         assert_eq!(one_start(&sounds_db, &library_db, &cards), first);
         assert_eq!(cards_said(&cards), Vec::<String>::new());
-        // The C# app plays a sound: the page shows the copy as it was at once, then the sounds again in place.
+        // The retired C# app plays a sound and finds a new one: never read into the app's own library.
         let played = c_sharp(&sounds_db)
             .execute_batch("UPDATE sounds SET plays = 2, last_played = 1780000000 WHERE id = 3; INSERT INTO sound_events VALUES (3, 'play', 1780000000);");
         assert!(played.is_ok(), "{played:?}");
+        add_sound(&sounds_db, 9, "rim");
+        let cards = Feed::default();
+        assert_eq!(one_start(&sounds_db, &library_db, &cards), first);
+        assert_eq!(cards_said(&cards), Vec::<String>::new());
+        // Its fingerprints damaged (a bad sector): it's made again from sounds.db while that's still there (all it can
+        // be made from), and stays the app's own. The page takes the sounds it was made with in place of those shown.
+        damage_first_page(&copy, "sound_features");
+        let cards = Feed::default();
+        assert_eq!(
+            one_start(&sounds_db, &library_db, &cards),
+            [
+                "5 sounds from sounds-rust.db, 0 plays",
+                "6 fingerprints",
+                "used: true",
+                "again: other sounds, 6 sounds, 2 plays, used: true",
+            ]
+        );
+        let said = cards_said(&cards);
+        assert!(said.iter().any(|c| c.starts_with("Made the app's own copy of your sound library again")), "{said:?}");
+        assert!(compact::own_since(&copy).is_some());
+        assert_eq!(
+            one_start(&sounds_db, &library_db, &Feed::default()),
+            ["6 sounds from sounds-rust.db, 2 plays", "6 fingerprints", "used: true"]
+        );
+        // Damaged, and it can't be made again (a folder in the way of the new copy): the rest comes from sounds.db,
+        // as it does without a copy, and the sounds as sounds.db has them.
+        let part = PathBuf::from(format!("{}.part-{}", copy.display(), std::process::id()));
+        assert!(std::fs::create_dir_all(&part).is_ok());
+        damage_first_page(&copy, "sound_features");
+        let cards = Feed::default();
+        assert_eq!(
+            one_start(&sounds_db, &library_db, &cards),
+            [
+                "6 sounds from sounds-rust.db, 2 plays".to_owned(),
+                format!("the rest from {}", sounds_db.display()),
+                "6 fingerprints".to_owned(),
+                "used: true".to_owned(),
+                "again: the same sounds, 6 sounds, 2 plays, used: true".to_owned(),
+            ]
+        );
+        let said = cards_said(&cards);
+        assert!(
+            said.iter().any(|c| c.starts_with("Couldn't make the app's own copy of your sound library")),
+            "{said:?}"
+        );
+        assert!(std::fs::remove_dir(&part).is_ok());
+        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default())[1], "6 fingerprints", "made whole again");
+        // sounds.db archived: the app's own library is all the page needs.
+        for end in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{end}", sounds_db.display()));
+        }
+        assert_eq!(
+            one_start(&sounds_db, &library_db, &Feed::default()),
+            ["6 sounds from sounds-rust.db, 2 plays", "6 fingerprints", "used: true"]
+        );
+    }
+
+    #[test]
+    fn a_copy_made_before_the_c_sharp_app_retired_is_brought_up_to_date_one_last_time() {
+        let sounds_db = sound_library("last-sync");
+        let library_db = song_library("last-sync-songs.db", &[]);
+        let copy = sounds_db.with_file_name("sounds-rust.db");
+        // Made by an earlier version, which kept it following sounds.db.
+        assert!(compact::sync(&sounds_db, &copy).is_ok_and(|s| !s.adopted));
+        // The C# app played a sound since, and sounds.db can't be read into the copy just now (it isn't a library
+        // any more): the page keeps what it showed, and tries again at the next start.
+        let played = c_sharp(&sounds_db)
+            .execute_batch("UPDATE sounds SET plays = 2, last_played = 1780000000 WHERE id = 3; INSERT INTO sound_events VALUES (3, 'play', 1780000000);");
+        assert!(played.is_ok(), "{played:?}");
+        assert!(c_sharp(&sounds_db).execute_batch("ALTER TABLE sounds RENAME TO gone;").is_ok());
+        let cards = Feed::default();
+        let kept = one_start(&sounds_db, &library_db, &cards);
+        assert_eq!(kept.first().map(String::as_str), Some("5 sounds from sounds-rust.db, 0 plays"));
+        assert!(!kept.iter().any(|k| k.starts_with("again")), "{kept:?}");
+        let said = cards_said(&cards);
+        assert!(said.iter().any(|c| c.starts_with("Couldn't bring your sound library up to date: ")), "{said:?}");
+        assert_eq!(compact::own_since(&copy), None);
+        // Readable again: shown as it was at once, then brought up to date one last time, and the app's own after.
+        assert!(c_sharp(&sounds_db).execute_batch("ALTER TABLE gone RENAME TO sounds;").is_ok());
         let cards = Feed::default();
         assert_eq!(
             one_start(&sounds_db, &library_db, &cards),
@@ -2618,93 +3011,13 @@ mod tests {
             ]
         );
         assert_eq!(cards_said(&cards), ["Brought your sound library up to date: 1 changed"]);
-        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default()).len(), 3, "up to date since");
-        // A scan finds a new sound: the library is shown again, with its fingerprint.
+        assert!(compact::own_since(&copy).is_some());
+        // A scan in the C# app after that: not read in.
         add_sound(&sounds_db, 9, "rim");
         assert_eq!(
             one_start(&sounds_db, &library_db, &Feed::default()),
-            [
-                "5 sounds from sounds-rust.db, 2 plays",
-                "5 fingerprints",
-                "used: true",
-                "again: other sounds, 6 sounds, 2 plays, used: true",
-                "6 fingerprints",
-            ]
+            ["5 sounds from sounds-rust.db, 2 plays", "5 fingerprints", "used: true"]
         );
-        // The copy's fingerprints damaged (a bad sector): it's made again from sounds.db, which gives them.
-        damage_first_page(&copy, "sound_features");
-        let cards = Feed::default();
-        assert_eq!(
-            one_start(&sounds_db, &library_db, &cards),
-            ["6 sounds from sounds-rust.db, 2 plays", "6 fingerprints", "used: true"]
-        );
-        let said = cards_said(&cards);
-        assert!(said.iter().any(|c| c.starts_with("Made the app's own copy of your sound library again")), "{said:?}");
-        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default())[1], "6 fingerprints", "made whole again");
-        // A sound given another type in the C# app: the same sounds in place, the galaxy coloured again.
-        assert!(c_sharp(&sounds_db).execute_batch("UPDATE sounds SET type = 'Snare' WHERE id = 1;").is_ok());
-        assert_eq!(
-            one_start(&sounds_db, &library_db, &Feed::default()),
-            [
-                "6 sounds from sounds-rust.db, 2 plays",
-                "6 fingerprints",
-                "used: true",
-                "again: the same sounds, retyped, 6 sounds, 2 plays, used: true",
-            ]
-        );
-        // Damaged while it's behind (the C# app played a sound since): the sounds come from making it again, with
-        // nothing to bring up to date after.
-        let played = c_sharp(&sounds_db).execute_batch(
-            "UPDATE sounds SET plays = 3 WHERE id = 3; INSERT INTO sound_events VALUES (3, 'play', 1780000100);",
-        );
-        assert!(played.is_ok(), "{played:?}");
-        damage_first_page(&copy, "sound_features");
-        let cards = Feed::default();
-        assert_eq!(
-            one_start(&sounds_db, &library_db, &cards),
-            [
-                "6 sounds from sounds-rust.db, 2 plays",
-                "6 fingerprints",
-                "used: true",
-                "again: the same sounds, 6 sounds, 3 plays, used: true",
-            ]
-        );
-        let said = cards_said(&cards);
-        assert!(said.iter().any(|c| c.starts_with("Made the app's own copy of your sound library again")), "{said:?}");
-        assert!(!said.iter().any(|c| c.starts_with("Brought")), "{said:?}");
-        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default()).len(), 3, "up to date since");
-        // Damaged, and it can't be made again (a folder in the way of the new copy): the rest comes from sounds.db,
-        // as it does without a copy.
-        let part = PathBuf::from(format!("{}.part-{}", copy.display(), std::process::id()));
-        assert!(std::fs::create_dir_all(&part).is_ok());
-        damage_first_page(&copy, "sound_features");
-        let cards = Feed::default();
-        assert_eq!(
-            one_start(&sounds_db, &library_db, &cards),
-            [
-                "6 sounds from sounds-rust.db, 3 plays".to_owned(),
-                format!("the rest from {}", sounds_db.display()),
-                "6 fingerprints".to_owned(),
-                "used: true".to_owned(),
-            ]
-        );
-        let said = cards_said(&cards);
-        assert!(
-            said.iter().any(|c| c.starts_with("Couldn't make the app's own copy of your sound library")),
-            "{said:?}"
-        );
-        assert!(std::fs::remove_dir(&part).is_ok());
-        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default())[0], "6 sounds from sounds-rust.db, 3 plays");
-        assert!(copy.exists(), "made at the next start");
-        // The copy can't be brought up to date (sounds.db isn't a library any more): the page keeps what it showed.
-        let cards = Feed::default();
-        assert!(c_sharp(&sounds_db).execute_batch("UPDATE sounds SET rating = 4 WHERE id = 1;").is_ok());
-        assert!(c_sharp(&sounds_db).execute_batch("ALTER TABLE sounds RENAME TO gone;").is_ok());
-        let kept = one_start(&sounds_db, &library_db, &cards);
-        assert_eq!(kept.first().map(String::as_str), Some("6 sounds from sounds-rust.db, 3 plays"));
-        assert!(!kept.iter().any(|k| k.starts_with("again")), "{kept:?}");
-        let said = cards_said(&cards);
-        assert!(said.iter().any(|c| c.starts_with("Couldn't bring your sound library up to date: ")), "{said:?}");
     }
 
     #[test]
@@ -2766,6 +3079,54 @@ mod tests {
         let mut p = Page { picked: Some(2), playing: Some((2, 1.0)), ..Page::default() };
         assert_eq!(move_places(&mut p, &moved), Gone { picked: true, playing: true });
         assert_eq!((p.picked, p.playing), (None, None));
+    }
+
+    #[test]
+    fn an_older_play_of_the_same_sound_ending_leaves_the_new_one_on_show() {
+        // The sound at 4 played (play 5), then played again near its end (play 6): play 5 ends while play 6 is read.
+        PAGE.with(|p| *p.borrow_mut() = Page { playing: Some((4, 2.5)), play: 6, ..Page::default() });
+        ended("5");
+        assert_eq!(PAGE.with(|p| p.borrow().playing), Some((4, 2.5)));
+        // A key that isn't a play's number is never the page's.
+        ended(r"C:\s\kick.wav");
+        assert_eq!(PAGE.with(|p| p.borrow().playing), Some((4, 2.5)));
+        // Play 6 ending by itself does stop it on the page.
+        ended("6");
+        assert_eq!(PAGE.with(|p| p.borrow().playing), None);
+    }
+
+    #[test]
+    fn a_click_on_the_waveform_moves_only_the_play_the_player_has_as_far_as_it_was_read() {
+        // Play 6 of the sound at 4 is a sweep's: only its first 4 s were read.
+        let p = Page { playing: Some((4, 30.0)), play: 6, play_reads: 4.0, ..Page::default() };
+        assert!(seeks(&p, Some("6"), 2.0));
+        // Past what was read, the sound is read again from there; so it is while play 6 is still being read (the
+        // player has nothing, or an older play of the same sound).
+        assert!(!seeks(&p, Some("6"), 15.0));
+        assert!(!seeks(&p, None, 2.0));
+        assert!(!seeks(&p, Some("5"), 2.0));
+    }
+
+    #[test]
+    fn a_view_and_autoplay_chosen_while_the_sounds_are_read_stay_when_they_arrive() {
+        // Nothing chosen: the page opens on the settings, and on Tiles with Autoplay off without them.
+        let mut p = Page::default();
+        p.open_on(Some("List"), Some("1"));
+        assert_eq!((p.view, p.autoplay), (LIST, true));
+        let mut p = Page::default();
+        p.open_on(None, None);
+        assert_eq!((p.view, p.autoplay), (TILES, false));
+        // Galaxy picked and Autoplay turned on while the sounds were read: they stay, over the settings.
+        let mut p = Page::default();
+        p.pick_view(GALAXY);
+        assert!(p.toggle_autoplay());
+        p.open_on(Some("List"), Some("0"));
+        assert_eq!((p.view, p.autoplay), (GALAXY, true));
+        // Only what was chosen stays: a view picked leaves Autoplay to its setting.
+        let mut p = Page::default();
+        p.pick_view(KITS);
+        p.open_on(Some("List"), Some("1"));
+        assert_eq!((p.view, p.autoplay), (KITS, true));
     }
 
     #[test]
@@ -2853,7 +3214,6 @@ mod tests {
         assert_eq!(when(now - chrono::Duration::minutes(5), now), "11:55");
         assert_eq!(when(now - chrono::Duration::days(2), now), "Fri");
         assert_eq!(when(now - chrono::Duration::days(30), now), "2 Oct");
-        assert_eq!(key_choices().len(), 24);
     }
 
     /// Each button on the card is a page action in the shortcut list, so it has a tooltip and a key, and its key and

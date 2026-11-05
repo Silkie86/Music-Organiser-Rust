@@ -1,5 +1,5 @@
 // The parts of the window shell that sit over every page: activity cards, the key sheet and the F12 note.
-import { Theme, Type, Space, StudioButton, Well, Caps, Groove, CloseButton, Chip, TickBox } from "studio.slint";
+import { Theme, Type, Space, Meter, StudioButton, Well, Caps, Groove, CloseButton, Chip, TickBox } from "studio.slint";
 
 export struct CardInfo {
     id: int,
@@ -29,49 +29,70 @@ component ActivityCard inherits Rectangle {
     drop-shadow-blur: 18px;
     drop-shadow-color: Theme.shadow;
     drop-shadow-offset-y: 6px;
+    // How wide the words are: inside the padding, and the title beside the dot and the ×. Worked out here, not left to
+    // the layouts: the column of cards measures each card before its layouts say how wide things are, so a title or
+    // detail that wraps would count as one line there.
+    property <length> inside: root.width - Space.md - Space.sm;
+    property <length> title-width: root.inside - 8px - 2 * Space.sm - 20px;
     VerticalLayout {
         padding: Space.md;
         padding-right: Space.sm;
         spacing: Space.sm;
+        // The title wraps rather than being cut off (Solomon's note, 4 Nov 2026: "Finding Bitwig's copies of your
+        // Libr…"). The dot and the × stay beside its first line.
         HorizontalLayout {
             spacing: Space.sm;
-            Rectangle {
-                width: 8px;
-                height: 8px;
-                y: (parent.height - self.height) / 2;
-                border-radius: 4px;
-                background: root.mark;
+            VerticalLayout {
+                alignment: start;
+                // As tall as a line of the title (and the ×), with the dot in its middle.
+                Rectangle {
+                    width: 8px;
+                    height: 20px;
+                    Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        border-radius: 4px;
+                        background: root.mark;
+                    }
+                }
             }
             Text {
+                width: root.title-width;
                 text: root.card.title;
                 color: Theme.text;
                 font-size: Type.body;
                 font-weight: 500;
-                overflow: elide;
-                horizontal-stretch: 1;
+                wrap: word-wrap;
             }
-            CloseButton {
-                clicked => { root.dismiss(); }
+            VerticalLayout {
+                alignment: start;
+                CloseButton {
+                    clicked => { root.dismiss(); }
+                }
             }
         }
         if root.card.detail != "": Text {
+            width: root.inside;
             text: root.card.detail;
             color: Theme.muted;
             font-size: Type.meta;
             wrap: word-wrap;
         }
-        if root.running: Rectangle {
-            height: 4px;
-            border-radius: 2px;
+        // A known amount lights the meter; an unknown one sweeps back and forth.
+        if root.running && root.card.progress >= 0: Meter {
+            height: 6px;
+            level: root.card.progress;
+        }
+        if root.running && root.card.progress < 0: Rectangle {
+            height: 6px;
+            border-radius: 1px;
             background: Theme.well;
             clip: true;
-            // A known amount fills the bar; an unknown one sweeps back and forth.
             Rectangle {
-                x: root.card.progress >= 0 ? 0 : (parent.width - self.width) * (0.5 + 0.5 * sin(animation-tick() / 900ms * 180deg));
-                width: root.card.progress >= 0 ? parent.width * root.card.progress : parent.width * 0.3;
-                border-radius: 2px;
+                x: (parent.width - self.width) * (0.5 + 0.5 * sin(animation-tick() / 900ms * 180deg));
+                width: parent.width * 0.3;
+                border-radius: 1px;
                 background: Theme.accent;
-                animate width { duration: 200ms; }
             }
         }
     }
@@ -87,6 +108,8 @@ export component ActivityCards inherits VerticalLayout {
     spacing: Space.sm;
     alignment: end;
     for c in root.cards: ActivityCard {
+        // Given, not left to the column, so each card knows how wide it is when the column measures it.
+        width: root.width;
         card: c;
         dismiss => { root.dismiss(c.id); }
     }
@@ -133,6 +156,7 @@ export component KeySheet inherits Rectangle {
                 Text {
                     text: "Keys";
                     color: Theme.text;
+                    font-family: Theme.title-font;
                     font-size: Type.heading;
                     font-weight: 600;
                     horizontal-stretch: 1;
@@ -207,6 +231,7 @@ export component NoteDialog inherits Rectangle {
             Text {
                 text: "Note for Claude";
                 color: Theme.text;
+                font-family: Theme.title-font;
                 font-size: Type.heading;
                 font-weight: 600;
             }

@@ -79,6 +79,17 @@ pub const SOUNDS_ACTIONS: &[Action] = &[
 pub const PLUGINS_ACTIONS: &[Action] = &[
     action("plugins.projects", "Show the songs that use the picked plugin", "Ctrl+O"),
     action("plugins.searchOnline", "Search the web for the picked plugin", "Ctrl+Shift+O"),
+    action("plugins.cleanUp", "Clean up the picked plugin's presets and sounds (asks first)", "Ctrl+Shift+L"),
+    action(
+        "plugins.uninstall",
+        "Uninstall the picked plugin: its own uninstaller, or its plugin files to the Recycle Bin (asks first)",
+        "Ctrl+Shift+U",
+    ),
+    action(
+        "plugins.move",
+        "Move one of the picked plugin's folders to another drive, leaving a link behind (asks first)",
+        "Ctrl+Shift+M",
+    ),
 ];
 
 /// The Presets page's own actions on its Sounds section. Send to Bitwig takes the C# Sound Lab's key.
@@ -120,12 +131,19 @@ pub const MIDI_ACTIONS: &[Action] = &[
 ];
 
 /// The Space page's own actions (new: the C# app had no Space page). F5 measures again on this page; elsewhere it
-/// looks for new and changed projects. Show in folder has the key it has on the other pages. Fix writes new files, so
-/// it has no key until you give it one.
+/// looks for new and changed projects. Show in folder has the key it has on the other pages. Fix writes new files, and
+/// Remove and Put back move them, so they have no key until you give them one.
 pub const SPACE_ACTIONS: &[Action] = &[
     action("space.measure", "Look at the drives and measure the app's files again", "F5"),
     action("space.reveal", "Show the picked line's folder", "Ctrl+Shift+E"),
     action("space.fix", "Write a \"(fixed)\" Bitwig project beside each ticked save", ""),
+    action(
+        "space.remove",
+        "Send the ticked old copies or spare plugin copies to the Recycle Bin, each checked again first",
+        "",
+    ),
+    action("space.stop", "Stop removing old copies: the ones not checked yet stay where they are", ""),
+    action("space.putBack", "Put back what the last clean-up sent to the Recycle Bin", ""),
 ];
 
 /// Every page's own list. A page's keys only work on that page, so two pages may share a key.

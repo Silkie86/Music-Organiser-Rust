@@ -17,7 +17,9 @@ use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
+use mo_app::finder::Kind;
 use mo_app::midi::{self as page, Filters, Order, Roll, Target};
+use mo_app::places::Place;
 use mo_app::shortcuts::{Shortcuts, what_of};
 use mo_app::{log, to_bitwig};
 use mo_formats::NoteEvent;
@@ -53,13 +55,16 @@ pub struct Loaded {
     /// Worked out with the reading, off the window's thread: the summary and the year strip.
     pub summary: String,
     pub years: Vec<(i32, usize)>,
+    /// What Ctrl+K finds: every part.
+    pub found: Arc<mo_app::finder::Lines>,
 }
 
 impl Loaded {
     pub fn new(cat: Catalogue, old: bool, notes: NotesFrom) -> Loaded {
         let summary = page::summary(&cat, old);
         let years = page::year_counts(&cat);
-        Loaded { cat, old, notes, summary, years }
+        let found = Arc::new(mo_app::finder::midi_parts(&cat));
+        Loaded { cat, old, notes, summary, years, found }
     }
 }
 
@@ -91,6 +96,12 @@ struct Page {
     library: PathBuf,
     feed: Option<Feed>,
     shortcuts: Shortcuts,
+    /// A part Ctrl+K asked for before the index was read, by its notes' fingerprint: shown once it is.
+    wanted: Option<String>,
+    /// The list scrolls to the picked part once it's worked out (Ctrl+K picked it).
+    scroll_to_pick: bool,
+    /// Ctrl+K read the index for its own list before the page was first shown.
+    finder_read: bool,
 }
 
 struct Ask {
@@ -193,6 +204,36 @@ fn why_text(p: &StoredPhrase) -> String {
 
 /// Wires the page up; the index is read the first time the page is shown ([`shown`]).
 pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
+    crate::finder::on_open(Kind::MidiPart, |app, hit, _| {
+        crate::go_to(app, Place::Midi.index() as i32);
+        show_part(app, &hit.id);
+        true
+    });
+    // Ctrl+K finds your parts before this page is first shown: the index is read once for its list, in the
+    // background, without the reading of your MIDI the page itself starts.
+    crate::finder::when_opening(|app| {
+        let library = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            let first = !p.started && !p.library.as_os_str().is_empty() && !std::mem::replace(&mut p.finder_read, true);
+            first.then(|| p.library.clone())
+        });
+        let Some(library) = library else { return };
+        let weak = app.as_weak();
+        let started = background::spawn("MIDI index for Ctrl+K", move || {
+            let Ok(loaded) = load(&library) else { return };
+            let _ = slint::invoke_from_event_loop(move || {
+                // The page's own read, if it has started since, hands over its list itself.
+                if let Some(app) = weak.upgrade()
+                    && !PAGE.with(|p| p.borrow().started)
+                {
+                    crate::finder::add_source(&app, "midi", loaded.found);
+                }
+            });
+        });
+        if let Err(e) = started {
+            log::error("MIDI", &format!("Couldn't start reading the index for Ctrl+K: {e}"));
+        }
+    });
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.library = library;
@@ -432,6 +473,7 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
             return;
         }
     };
+    crate::finder::add_source(app, "midi", loaded.found.clone());
     let summary = loaded.summary;
     let empty = loaded.cat.entries.is_empty();
     log::info("MIDI", &format!("{summary} ({})", if loaded.old { "the C# app's midi.db" } else { "midi-index.db" }));
@@ -440,14 +482,15 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         // The picked part stays picked when the index is read again, found by its notes.
         let hash = p.picked.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.hash.clone());
         p.years = loaded.years;
-        p.cat = Arc::new(loaded.cat);
+        // The old index goes on the freeing thread: tens of thousands of parts take a while to let go.
+        background::free_later(std::mem::replace(&mut p.cat, Arc::new(loaded.cat)));
         p.old = loaded.old;
         p.notes = Some(loaded.notes);
         p.picked = hash.and_then(|h| p.cat.find(&h));
         p.picked_row = None;
         p.target = None;
         // The old list points into the old index: nothing shows until the new one is worked out.
-        p.shown = Arc::new(Vec::new());
+        background::free_later(std::mem::replace(&mut p.shown, Arc::new(Vec::new())));
         let read_now = !p.read_once && !HERE.with(|h| *h.borrow());
         p.read_once = true;
         (p.picked, read_now)
@@ -472,6 +515,9 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
     match picked {
         Some(at) => pick(app, Some((at, None))),
         None => data.set_panel_shown(false),
+    }
+    if let Some(hash) = PAGE.with(|p| p.borrow_mut().wanted.take()) {
+        show_part(app, &hash);
     }
     if read_now {
         read_midi(app, false);
@@ -586,7 +632,9 @@ fn read_into_index(
     // Only a full path can be an unplugged drive; anything else in the list is never found and so never counted as away.
     let (folders, away): (Vec<String>, Vec<String>) =
         listed.into_iter().filter(|f| mo_formats::paths::is_absolute(f)).partition(|f| Path::new(f).is_dir());
-    let found = background::on_pool(|| {
+    // The folder walk and the reading run on the bulk pool: a few threads keep one drive (L:, holding every pack) busy,
+    // where one per core made it jump between files, and the pages' quick jobs on the main pool aren't held up.
+    let found = background::on_bulk_pool(|| {
         mo_library::scan::find_files(
             &folders,
             &|path: &str| mo_formats::midi::is_midi_path(path),
@@ -603,15 +651,12 @@ fn read_into_index(
         "MIDI",
         &format!("{} files wanted, {} to read, {} to forget", wanted.len(), plan.todo.len(), plan.forget.len()),
     );
-    // Half the cores of the app's low-priority pool: reading songs is heavy, and the app and your DAW come first
-    // (rule 21).
-    let threads = std::thread::available_parallelism().map_or(2, |n| (n.get() / 2).max(1));
     let own;
-    let pool = match background::pool() {
+    let pool = match background::bulk_pool() {
         Some(pool) => pool,
         None => {
             own = rayon::ThreadPoolBuilder::new()
-                .num_threads(threads)
+                .num_threads(2)
                 .thread_name(|i| format!("MIDI reader {i}"))
                 .start_handler(|_| background::lower_priority())
                 .build()
@@ -619,7 +664,11 @@ fn read_into_index(
             &own
         }
     };
-    indexer::run(&mut store, &plan, &folders, pool, threads, stop, progress).map_err(|e| e.to_string())
+    let threads = pool.current_num_threads();
+    let started = std::time::Instant::now();
+    let summary = indexer::run(&mut store, &plan, &folders, pool, threads, stop, progress).map_err(|e| e.to_string());
+    log::info("MIDI", &format!("read with {threads} readers in {:.1} s", started.elapsed().as_secs_f64()));
+    summary
 }
 
 /// Stops the reading at the next file; what's been read is kept, and the next reading carries on from there.
@@ -715,7 +764,8 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
         }
         // The picked part's row in the new list: one look, here, rather than at every step.
         p.picked_row = p.picked.and_then(|at| hits.iter().position(|h| h.entry == at));
-        p.shown = Arc::new(hits);
+        // The old list (one line per part shown) is let go on the freeing thread.
+        background::free_later(std::mem::replace(&mut p.shown, Arc::new(hits)));
         p.counts = counts;
         let target = p.target.and_then(|t| {
             let at = match t {
@@ -739,6 +789,48 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
     data.set_shown(shown as i32);
     data.set_result(result.into());
     data.set_target(target.into());
+    let scroll = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let row = p.picked_row.filter(|_| p.scroll_to_pick);
+        if row.is_some() {
+            p.scroll_to_pick = false;
+        }
+        row
+    });
+    if let Some(row) = scroll {
+        data.set_show_row(row as i32);
+        data.set_show_ask(data.get_show_ask() + 1);
+    }
+}
+
+/// Shows one part, by its notes' fingerprint (Ctrl+K): picked, and in sight; when the filters hide it, they go. Before
+/// the index is read it's shown once it is.
+fn show_part(app: &AppWindow, hash: &str) {
+    let Some(at) = PAGE.with(|p| p.borrow().cat.find(hash)) else {
+        PAGE.with(|p| p.borrow_mut().wanted = Some(hash.to_owned()));
+        return;
+    };
+    let row = PAGE.with(|p| p.borrow().shown.iter().position(|h| h.entry == at));
+    if let Some(row) = row {
+        select_row(app, row);
+        let data = app.global::<MidiData>();
+        data.set_show_row(row as i32);
+        data.set_show_ask(data.get_show_ask() + 1);
+        return;
+    }
+    // Hidden by the filters (or the list isn't worked out yet): every part shows, and the list finds it.
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.filters = Filters::default();
+        p.target = None;
+        p.seed = None;
+        p.scroll_to_pick = true;
+    });
+    app.global::<MidiData>().set_search("".into());
+    show_chips(app);
+    show_years(app);
+    pick(app, Some((at, None)));
+    relist(app);
 }
 
 fn select_row(app: &AppWindow, row: usize) {
@@ -1002,6 +1094,8 @@ fn actions(e: &mo_midi::Entry, shortcuts: &Shortcuts) -> (Vec<CardAction>, Vec<M
             key: shortcuts.key_of(id).into(),
             id: id.into(),
             enabled,
+            main: false,
+            danger: false,
         })
         .collect();
     let menu = list

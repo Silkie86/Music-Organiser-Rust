@@ -26,6 +26,9 @@
                               folder inside it. Remembered, so it's only needed once (the Desktop shortcut then uses
                               it). -BuildDir default goes back to building beside the code. With -Repo it's for that
                               run only, and the remembered one isn't used.
+            -Release          a release build: what Solomon will get in the end, quicker to run but slower to
+                              build (several minutes after each push, as cargo keeps no incremental cache for it).
+                              The "Music Organiser Rust (release)" shortcut on the Desktop runs it.
 
   Plain ASCII on purpose: Windows PowerShell 5.1 misreads anything else in a file without a BOM.
 #>
@@ -34,11 +37,12 @@ param(
     [int]$PullEvery = 20,
     [switch]$NoWatch,
     [string]$Repo,
-    [string]$BuildDir
+    [string]$BuildDir,
+    [switch]$Release
 )
 
 # Raised whenever this script changes, so an older branch's copy never replaces a newer installed one.
-$LauncherVersion = 6
+$LauncherVersion = 8
 
 $ErrorActionPreference = 'Continue'   # git and cargo write progress to stderr, which Windows PowerShell treats as failure
 $GitHubRepo = 'Silkie86/Music-Organiser-Rust'
@@ -47,7 +51,24 @@ $OnWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
 $Exe = if ($OnWindows) { "$AppName.exe" } else { $AppName }
 $DataRoot = [Environment]::GetFolderPath('LocalApplicationData')
 $Home_ = Join-Path (Join-Path $DataRoot 'MusicOrganiser') 'run-latest-rust'
+# The app's data folder: the first one, or the one Settings moved it to (named in MusicOrganiser-folder.txt beside the
+# first, which the app writes as UTF-8). Looked up each time: the app switches at a start the launcher makes. The
+# launcher itself stays in the first one.
+function Get-AppData {
+    $first = Join-Path $DataRoot 'MusicOrganiser'
+    $pointer = Join-Path $DataRoot 'MusicOrganiser-folder.txt'
+    if (Test-Path -LiteralPath $pointer) {
+        $moved = ((Get-Content -LiteralPath $pointer -Raw -Encoding UTF8 -ErrorAction SilentlyContinue) + '').Trim()
+        if ($moved -and [IO.Path]::IsPathRooted($moved) -and (Test-Path -LiteralPath (Join-Path $moved 'moved-in.json'))) { return $moved }
+    }
+    return $first
+}
 $Installed = Join-Path $Home_ 'run-latest.ps1'
+# Which build cargo makes, and the folder it puts it in inside the build folder.
+$BuildKind = if ($Release) { 'release' } else { 'debug' }
+# (Built up step by step: an if that gives back an array gives back its one item, or nothing, instead.)
+$KindArgs = @()
+if ($Release) { $KindArgs += '--release' }
 $LastChoice = Join-Path $Home_ 'last-branch.txt'
 # Each build is copied here before it runs, so the next build never has to replace a file the open app is using.
 $RunDir = Join-Path $Home_ 'run'
@@ -187,6 +208,18 @@ function Get-LauncherVersion([string]$Path) {
     if ($line) { [int]$line.Matches[0].Groups[1].Value } else { 0 }
 }
 
+# A Desktop shortcut to the launcher, given its name and what to pass it.
+$LauncherCmd = Join-Path $Home_ 'Run latest.cmd'
+function Set-Shortcut([string]$Name, [string]$Arguments, [string]$Description) {
+    $shell = New-Object -ComObject WScript.Shell
+    $link = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) "$Name.lnk"))
+    $link.TargetPath = $LauncherCmd
+    $link.Arguments = $Arguments
+    $link.WorkingDirectory = $Home_
+    $link.Description = $Description
+    $link.Save()
+}
+
 # --- First run: set up home -------------------------------------------------------------------------------------
 New-Item -ItemType Directory -Force -Path $Home_ | Out-Null
 New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
@@ -194,20 +227,23 @@ New-Item -ItemType Directory -Force -Path $RunDir | Out-Null
 if ($PSCommandPath -ne $Installed -and
     (-not (Test-Path $Installed) -or (Get-LauncherVersion $Installed) -le $LauncherVersion)) {
     Copy-Item -Force $PSCommandPath $Installed
-    $cmd = Join-Path $Home_ 'Run latest.cmd'
-    Set-Content -Path $cmd -Encoding Ascii -Value "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0run-latest.ps1`" %*`r`nif errorlevel 1 pause"
+    Set-Content -Path $LauncherCmd -Encoding Ascii -Value "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0run-latest.ps1`" %*`r`nif errorlevel 1 pause"
     if ($OnWindows) {
         try {
-            $shell = New-Object -ComObject WScript.Shell
-            $link = $shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Desktop')) 'Music Organiser Rust (latest).lnk'))
-            $link.TargetPath = $cmd
-            $link.WorkingDirectory = $Home_
-            $link.Description = 'Runs the newest Rust Music Organiser from GitHub and keeps it up to date'
-            $link.Save()
+            Set-Shortcut 'Music Organiser Rust (latest)' '' 'Runs the newest Rust Music Organiser from GitHub and keeps it up to date'
             Say 'Set up. From now on, double-click "Music Organiser Rust (latest)" on your Desktop.' 'Green'
         }
         catch { Say "Set up in $Home_ (couldn't put a shortcut on the Desktop: $($_.Exception.Message))." 'Yellow' }
     }
+}
+# The release shortcut came with launcher 8, so an older set-up gets it on its first run of this one.
+$ReleaseLink = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Music Organiser Rust (release).lnk'
+if ($OnWindows -and (Test-Path -LiteralPath $LauncherCmd) -and -not (Test-Path -LiteralPath $ReleaseLink)) {
+    try {
+        Set-Shortcut 'Music Organiser Rust (release)' '-Release' 'Runs the newest Rust Music Organiser from GitHub as a release build (quicker to run, slower to build)'
+        Say 'Added "Music Organiser Rust (release)" to your Desktop: it runs a release build.' 'Green'
+    }
+    catch { Say "Couldn't put the release shortcut on the Desktop ($($_.Exception.Message)): 'Run latest.cmd -Release' does the same." 'Yellow' }
 }
 
 # --- One launcher per copy of the code ---------------------------------------------------------------------------
@@ -531,7 +567,7 @@ function Build-App {
     # it's cleared and the build tried once more.
     $crashed = $false
     $full = $false
-    & $CargoExe build --manifest-path (Join-Path $Repo 'Cargo.toml') --target-dir $targetDir --bin $AppName --color never 2>&1 |
+    & $CargoExe build --manifest-path (Join-Path $Repo 'Cargo.toml') --target-dir $targetDir --bin $AppName @KindArgs --color never 2>&1 |
         ForEach-Object {
             if ("$_" -match 'rustc.*\(exit code: 101\)') { $crashed = $true }
             if ("$_" -match 'no space (left )?on device|not enough space on the disk') { $full = $true }
@@ -543,15 +579,15 @@ function Build-App {
     }
     if ($LASTEXITCODE -ne 0 -and $crashed) {
         Say 'The compiler crashed. Clearing its incremental cache and trying once more...' 'Yellow'
-        if (Test-BuildFolder $targetDir) { Remove-Tree ([IO.Path]::Combine($targetDir, 'debug', 'incremental')) }
-        & $CargoExe build --manifest-path (Join-Path $Repo 'Cargo.toml') --target-dir $targetDir --bin $AppName --color never 2>&1 |
+        if (Test-BuildFolder $targetDir) { Remove-Tree ([IO.Path]::Combine($targetDir, $BuildKind, 'incremental')) }
+        & $CargoExe build --manifest-path (Join-Path $Repo 'Cargo.toml') --target-dir $targetDir --bin $AppName @KindArgs --color never 2>&1 |
             ForEach-Object { Say "  $_" 'DarkGray' }
     }
     if ($LASTEXITCODE -ne 0) {
         Say 'The build failed (what cargo said is above). The app keeps the version it has; the next push is tried again.' 'Red'
         return $null
     }
-    $built = [IO.Path]::Combine($targetDir, 'debug', $Exe)
+    $built = [IO.Path]::Combine($targetDir, $BuildKind, $Exe)
     # Each build gets a folder of its own, so its debugging info can sit beside it under the name it looks for.
     $folder = Join-Path $RunDir (Get-Date -Format 'yyyyMMdd-HHmmss')
     $copy = Join-Path $folder $Exe
@@ -570,11 +606,11 @@ function Build-App {
         $pdbName = Get-PdbName $copy
         $plain = ($AppName -replace '-', '_') + '.pdb'
         $from = $null
-        if ($pdbName -and [IO.File]::Exists([IO.Path]::Combine($targetDir, 'debug', 'deps', $pdbName))) {
-            $from = [IO.Path]::Combine($targetDir, 'debug', 'deps', $pdbName)
+        if ($pdbName -and [IO.File]::Exists([IO.Path]::Combine($targetDir, $BuildKind, 'deps', $pdbName))) {
+            $from = [IO.Path]::Combine($targetDir, $BuildKind, 'deps', $pdbName)
         }
-        elseif ([IO.File]::Exists([IO.Path]::Combine($targetDir, 'debug', $plain))) {
-            $from = [IO.Path]::Combine($targetDir, 'debug', $plain)
+        elseif ([IO.File]::Exists([IO.Path]::Combine($targetDir, $BuildKind, $plain))) {
+            $from = [IO.Path]::Combine($targetDir, $BuildKind, $plain)
         }
         if ($from) {
             $to = Join-Path $folder $(if ($pdbName) { $pdbName } else { $plain })
@@ -669,7 +705,7 @@ function Stop-App($Process) {
 function Wait-ForNote {
     # The app puts notes\writing.lock up while an F12 note is open (holding its process id). A restart then would
     # close the note half-written, so new code waits until the note is saved or cancelled.
-    $lock = Join-Path (Join-Path (Join-Path $DataRoot 'MusicOrganiser') 'notes') 'writing.lock'
+    $lock = Join-Path (Join-Path (Get-AppData) 'notes') 'writing.lock'
     $said = $false
     while (Test-Path $lock) {
         $id = 0
@@ -684,6 +720,7 @@ function Wait-ForNote {
 
 Say ''
 Say 'Building and starting the app. The first build takes a few minutes; after that it''s quicker.' 'Cyan'
+if ($Release) { Say 'A release build: quicker to run, but each build takes several minutes (cargo keeps no incremental cache for it).' 'Cyan' }
 if (-not $NoWatch) {
     Say 'Leave this window open: changes pushed to GitHub show up in the app by themselves.' 'Cyan'
 }
@@ -731,7 +768,7 @@ try {
         if ($app -and $app.HasExited -and -not $saidClosed) {
             $saidClosed = $true
             if ($app.ExitCode -eq 0) { Say 'The app was closed. The next change from GitHub opens it again.' 'DarkGray' }
-            else { Say "The app stopped with exit code $($app.ExitCode). Its log is in $DataRoot\MusicOrganiser\logs. The next change opens it again." 'Yellow' }
+            else { Say "The app stopped with exit code $($app.ExitCode). Its log is in $(Get-AppData)\logs. The next change opens it again." 'Yellow' }
         }
         if ((Get-Date) -lt $next) { continue }
         $next = (Get-Date).AddSeconds($PullEvery)

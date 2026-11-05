@@ -15,13 +15,29 @@ export global Theme {
     in-out property <color> hover: #2A2A2A;
     in-out property <color> text: #F0F0F0;
     in-out property <color> muted: #A3A3A3;
-    in-out property <color> faint: #6E6E6E;
+    in-out property <color> faint: #7C7C7C;
     in-out property <color> accent: #3DDC97;
     in-out property <color> accent-text: #06180F;
     in-out property <bool> light: false;
     in-out property <bool> square: false;
     in-out property <string> text-font: "IBM Plex Sans";
     in-out property <string> number-font: "IBM Plex Mono";
+    // Page names and other big titles: the app's own title face (mo-app's `ThemeFont::title_family`).
+    in-out property <string> title-font: "Space Grotesk";
+
+    // Each place's own colour, in rail order (mo-app's `themes::place_colours`), like the coloured strips on a mixing
+    // desk: the place's icon on the rail and the mark beside its page's name wear it, so you can tell where you are at
+    // a glance. Nothing else does: what's picked, playing or working stays in the accent.
+    in-out property <[color]> places: [#FF8F5E, #46C8E8, #C08CF0, #F0CF4F, #7F95FF, #8BD45A, #F07FB0, #A3A3A3];
+    // The place on show (the window sets it), and its colour.
+    in-out property <int> here;
+    out property <color> here-colour: place(here);
+    public pure function place(i: int) -> color {
+        if (i < 0 || i >= places.length) {
+            return muted;
+        }
+        return places[i];
+    }
 
     // Derived: the dark edge under raised things and the well behind pressed-in fields. Light themes get softer ones.
     out property <color> edge: light ? stroke.darker(25%) : #0B0B0B;
@@ -74,6 +90,18 @@ export global Theme {
         }
         return muted;
     }
+}
+
+// How long things take to move, the same everywhere, so the whole app moves at one pace. Motion only ever shows where
+// something went (the rail's light slides to the place you picked, a view's lit button slides to the view): small
+// shapes move, never a whole page, and nothing moves on its own unless a job is working, so it never costs a frame.
+export global Motion {
+    // Under the mouse: hover and press, so a control answers at once.
+    out property <duration> tap: 90ms;
+    // Something lit sliding to where you picked.
+    out property <duration> move: 180ms;
+    // Something arriving or settling: a mark growing in, a glow fading out.
+    out property <duration> settle: 260ms;
 }
 
 // Text sizes (the agreed scale, nearer the C# app at 125%). Pages use these, never a size of their own.
@@ -277,7 +305,7 @@ export component StudioButton inherits Rectangle {
     background: !enabled ? Theme.surface : main
         ? (touch.pressed ? Theme.accent.darker(15%) : @linear-gradient(180deg, Theme.accent.brighter(12%) 0%, Theme.accent.darker(6%) 100%))
         : (touch.pressed ? Theme.well : @linear-gradient(180deg, (touch.has-hover ? Theme.hover : Theme.surface-raised).brighter(8%) 0%, Theme.surface-raised.darker(6%) 100%));
-    animate background { duration: 90ms; }
+    animate background { duration: Motion.tap; }
     // The top-lit edge.
     Rectangle {
         y: 1px;
@@ -331,25 +359,34 @@ export component StudioButton inherits Rectangle {
     }
 }
 
-// One line on the left-hand rail.
+// One line on the left-hand rail. Its icon wears the place's own colour (`tint`), dimmed until it's picked or under
+// the mouse. The light on the picked line is drawn by the rail itself (`lit-bar` off), so it can slide from place to
+// place; a line on its own (Settings) lights its own.
 export component RailItem inherits Rectangle {
     in property <string> text;
     // The place's icon (a 16 by 16 path from Icons), beside its name.
     in property <string> icon;
     in property <bool> selected;
+    // The place's colour (Theme.place).
+    in property <color> tint: Theme.muted;
+    // Whether this line draws its own light when picked.
+    in property <bool> lit-bar: true;
     // The key that goes here, from the shortcut list.
     in property <string> key;
     callback clicked;
     height: 40px;
     border-radius: Theme.radius;
-    background: selected ? Theme.surface-raised : touch.has-hover ? Theme.hover : transparent;
-    animate background { duration: 120ms; }
-    // The accent bar on the picked place.
+    background: selected ? Theme.surface-raised : touch.pressed ? Theme.well : touch.has-hover ? Theme.hover : transparent;
+    animate background { duration: Motion.tap; }
+    // The light on the picked place, in its colour.
     Rectangle {
         x: 0;
-        width: root.selected ? 2px : 0;
-        background: Theme.accent;
-        animate width { duration: 120ms; }
+        y: (parent.height - self.height) / 2;
+        width: 3px;
+        height: root.selected && root.lit-bar ? parent.height - 2 * Space.sm : 0;
+        border-radius: 1.5px;
+        background: root.tint;
+        animate height { duration: Motion.move; easing: ease-out; }
     }
     if root.icon != "": Path {
         x: 12px;
@@ -359,17 +396,19 @@ export component RailItem inherits Rectangle {
         viewbox-width: 16;
         viewbox-height: 16;
         commands: root.icon;
-        stroke: name.color;
+        stroke: root.selected || touch.has-hover ? root.tint : root.tint.transparentize(45%);
         stroke-width: 1.5px;
+        animate stroke { duration: Motion.tap; }
     }
     name := Text {
         x: root.icon != "" ? 38px : 12px;
         text: root.text;
-        color: root.selected ? Theme.text : Theme.muted;
+        color: root.selected ? Theme.text : touch.has-hover ? Theme.text.transparentize(15%) : Theme.muted;
         font-size: Type.row-title;
-        font-weight: 500;
+        font-weight: root.selected ? 600 : 500;
         vertical-alignment: center;
         height: parent.height;
+        animate color { duration: Motion.tap; }
     }
     touch := TouchArea {
         clicked => { root.clicked(); }
@@ -420,6 +459,7 @@ export component Chip inherits Rectangle {
     background: touch.has-hover ? Theme.hover : Theme.surface-raised;
     border-width: 1px;
     border-color: Theme.edge;
+    animate background { duration: Motion.tap; }
     label := Text {
         text: root.text;
         color: Theme.text;
@@ -435,6 +475,9 @@ export component Chip inherits Rectangle {
 export component TickBox inherits Rectangle {
     in property <string> text;
     in-out property <bool> checked;
+    // Some of what it's for are ticked, but not all (a format whose copies you've ticked some of): a dash instead of
+    // the tick. Clicking it ticks them all.
+    in property <bool> partly;
     width: label.preferred-width + 26px;
     Rectangle {
         x: 0;
@@ -443,7 +486,7 @@ export component TickBox inherits Rectangle {
         border-radius: Theme.radius;
         border-width: 1px;
         border-color: Theme.stroke;
-        background: root.checked ? Theme.accent : Theme.well;
+        background: root.checked || root.partly ? Theme.accent : Theme.well;
         // The tick is drawn, as the app's fonts have no ✓.
         if root.checked: Path {
             width: 16px;
@@ -451,6 +494,15 @@ export component TickBox inherits Rectangle {
             viewbox-width: 16;
             viewbox-height: 16;
             commands: "M 4 8.5 L 7 11.5 L 12.5 5";
+            stroke: Theme.accent-text;
+            stroke-width: 2px;
+        }
+        if root.partly && !root.checked: Path {
+            width: 16px;
+            height: 16px;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: "M 4.5 8 L 11.5 8";
             stroke: Theme.accent-text;
             stroke-width: 2px;
         }
@@ -560,13 +612,27 @@ export component SearchBox inherits Rectangle {
     // Down, Enter and Esc go to the page first; it returns true when it used the key.
     callback key(string) -> bool;
     forward-focus: input;
-    height: 36px;
+    // One height for every control in a row (buttons, view switches, search): the row lines up.
+    height: 32px;
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: input.has-focus ? Theme.accent : Theme.edge;
     background: Theme.well;
-    Text {
+    animate border-color { duration: Motion.tap; }
+    // The same magnifier as Ctrl+K's, lit while you type, so every search looks like one.
+    Path {
         x: 10px;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: Icons.search;
+        stroke: input.has-focus ? Theme.accent : Theme.faint;
+        stroke-width: 1.6px;
+    }
+    Text {
+        x: 34px;
         text: root.hint;
         visible: input.text == "";
         color: Theme.faint;
@@ -575,8 +641,8 @@ export component SearchBox inherits Rectangle {
         height: parent.height;
     }
     input := TextInput {
-        x: 10px;
-        width: parent.width - 20px;
+        x: 34px;
+        width: parent.width - 44px;
         height: parent.height;
         color: Theme.text;
         font-size: Type.body;
@@ -595,17 +661,87 @@ export component SearchBox inherits Rectangle {
     }
 }
 
+// Ctrl+K in sight at the top of the rail: it looks like a search field (the magnifier, quiet words, the key in a
+// keycap at the right), because that's what it opens, so it reads as "type here" instead of one more button.
+export component JumpField inherits Rectangle {
+    in property <string> text;
+    in property <string> key;
+    in property <string> tip;
+    callback clicked;
+    height: 32px;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: touch.has-hover ? Theme.stroke : Theme.edge;
+    background: touch.pressed ? Theme.well.darker(10%) : Theme.well;
+    animate border-color { duration: Motion.tap; }
+    Path {
+        x: 10px;
+        y: (parent.height - self.height) / 2;
+        width: 16px;
+        height: 16px;
+        viewbox-width: 16;
+        viewbox-height: 16;
+        commands: Icons.search;
+        stroke: touch.has-hover ? Theme.muted : Theme.faint;
+        stroke-width: 1.6px;
+    }
+    Text {
+        x: 34px;
+        width: parent.width - self.x - keycap.width - Space.md;
+        height: parent.height;
+        text: root.text;
+        color: touch.has-hover ? Theme.muted : Theme.faint;
+        font-size: Type.body;
+        vertical-alignment: center;
+        overflow: elide;
+    }
+    keycap := Rectangle {
+        visible: root.key != "";
+        x: parent.width - self.width - 6px;
+        y: (parent.height - self.height) / 2;
+        width: keytext.preferred-width + 10px;
+        height: 20px;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: Theme.stroke;
+        background: Theme.surface-raised;
+        keytext := Text {
+            text: root.key;
+            color: Theme.muted;
+            font-family: Theme.number-font;
+            font-size: Type.tiny;
+        }
+    }
+    touch := TouchArea {
+        mouse-cursor: MouseCursor.pointer;
+        clicked => { root.clicked(); }
+    }
+    Tip {
+        text: root.tip;
+        key: root.key;
+        hovering: touch.has-hover && !touch.pressed;
+        at-y: root.height + Space.xs;
+    }
+}
+
 // A chip that's on or off, like "Favourites".
 export component ToggleChip inherits Rectangle {
     in property <string> text;
     in property <bool> on;
+    // Joined to the chip before or after it in a filter's strip (FilterPicks): that side is square.
+    in property <bool> joined-left;
+    in property <bool> joined-right;
     callback clicked;
     width: label.preferred-width + 24px;
     height: 28px;
-    border-radius: 14px;
-    border-width: 1px;
+    border-top-left-radius: joined-left ? 0 : 14px;
+    border-bottom-left-radius: joined-left ? 0 : 14px;
+    border-top-right-radius: joined-right ? 0 : 14px;
+    border-bottom-right-radius: joined-right ? 0 : 14px;
+    border-width: 2px;
     border-color: on ? Theme.accent : Theme.edge;
     background: on ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
+    animate background, border-color { duration: Motion.tap; }
     label := Text {
         text: root.text;
         color: root.on ? Theme.text : Theme.muted;
@@ -696,13 +832,19 @@ component MenuChipFace inherits Rectangle {
     in property <string> name;
     // What's picked, as the chip says it after its name; "" for none.
     in property <string> value;
+    // Joined to the chip before it in a filter's strip (FilterPicks): its left side is square.
+    in property <bool> joined-left;
     callback clicked;
     width: label.preferred-width + 34px;
     height: 28px;
-    border-radius: 14px;
-    border-width: 1px;
+    border-top-left-radius: joined-left ? 0 : 14px;
+    border-bottom-left-radius: joined-left ? 0 : 14px;
+    border-top-right-radius: 14px;
+    border-bottom-right-radius: 14px;
+    border-width: 2px;
     border-color: value != "" ? Theme.accent : Theme.edge;
     background: value != "" ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
+    animate background, border-color { duration: Motion.tap; }
     label := Text {
         x: 12px;
         text: root.value == "" ? root.name : root.name + ": " + root.value;
@@ -825,21 +967,50 @@ export component PicksChip inherits MenuChipFace {
     }
 }
 
-// A filter, the same on every page (Solomon's note, 4 Nov 2026): a short list's choices as chips of their own, each
-// picked or unpicked by a click, behind the filter's name; or a longer list's in a PicksChip's menu, the chip saying
-// the name and what's picked. mo-app's `filters` decides which, what each says and whether more than one can be
-// picked. Put filters in a row `Space.md` apart, so each one's chips stay together.
+// The name at the start of a filter's strip: a sunken cap, so the chips after it read as its choices.
+component FilterName inherits Rectangle {
+    in property <string> text;
+    width: label.preferred-width + 22px;
+    height: 28px;
+    border-top-left-radius: 14px;
+    border-bottom-left-radius: 14px;
+    border-width: 2px;
+    border-color: Theme.edge;
+    background: Theme.well;
+    label := Text {
+        x: 12px;
+        text: root.text;
+        color: Theme.muted;
+        font-size: Type.meta;
+        font-weight: 500;
+        vertical-alignment: center;
+        height: parent.height;
+    }
+}
+
+// A filter, the same on every page (Solomon's notes, 4 Nov 2026): a short list's choices as chips of their own, each
+// picked or unpicked by a click, joined into one strip behind the filter's name ("Type | Kick | Snare | More"), so
+// it's plain they set the same thing; or a longer list's in a PicksChip's menu, the chip saying the name and what's
+// picked. A long list can also keep its first choices as chips, with the rest in a menu at the strip's end
+// (`more-name`: the sounds' types, the most used first). mo-app's `filters` decides which, what each says and whether
+// more than one can be picked. Put filters in a row `Space.md` apart, so each one's strip stands apart.
 export component FilterPicks inherits FlexboxLayout {
     in property <string> name;
     in property <FilterView> filter;
+    // What the menu after the chips is called, when there are both.
+    in property <string> more-name: "More";
     // A choice was picked or unpicked: its words, as its chip or menu line says them.
     callback toggled(string);
-    // The menu's Any.
+    // The menu's Any: it unpicks what's picked in the menu (all of the filter, unless some choices are chips too).
     callback cleared();
-    spacing: Space.sm;
+    property <bool> has-chips: root.filter.chips.length > 0;
+    property <bool> has-more: root.filter.more.length > 0;
+    // The strip's parts touch; only a strip too long for a line breaks onto a second one.
+    spacing-horizontal: 0;
+    spacing-vertical: Space.sm;
     // As wide as the whole filter on one line, so the row it's in moves it to a line of its own before breaking it; it
     // only wraps inside itself when it's wider than a line on its own (a narrow window, a long list of chips).
-    preferred-width: root.filter.chips.length > 0 ? line.preferred-width : head.preferred-width;
+    preferred-width: root.has-chips ? line.preferred-width : head.preferred-width;
     // The name before the chips, or the menu's chip: always the first thing, so the name never ends a line.
     Rectangle {
         min-width: head.min-width;
@@ -848,13 +1019,10 @@ export component FilterPicks inherits FlexboxLayout {
         min-height: head.min-height;
         preferred-height: head.preferred-height;
         head := HorizontalLayout {
-            if root.filter.chips.length > 0: Text {
+            if root.has-chips: FilterName {
                 text: root.name;
-                color: Theme.muted;
-                font-size: Type.meta;
-                vertical-alignment: center;
             }
-            if root.filter.more.length > 0: PicksChip {
+            if !root.has-chips && root.has-more: PicksChip {
                 name: root.name;
                 value: root.filter.more-picked;
                 choices: root.filter.more;
@@ -862,24 +1030,36 @@ export component FilterPicks inherits FlexboxLayout {
                 cleared => { root.cleared(); }
             }
         }
-        // Never drawn: the chips on one line, to measure it.
+        // Never drawn: the strip on one line, to measure it.
         line := HorizontalLayout {
             visible: false;
-            spacing: Space.sm;
-            Text {
+            FilterName {
                 text: root.name;
-                font-size: Type.meta;
             }
             for c in root.filter.chips: ToggleChip {
                 text: c.count == "" ? c.text : c.text + "  " + c.count;
-                on: c.on;
+            }
+            if root.has-more: MenuChipFace {
+                name: root.more-name;
+                value: root.filter.more-picked;
             }
         }
     }
-    for c in root.filter.chips: ToggleChip {
+    for c[i] in root.filter.chips: ToggleChip {
         text: c.count == "" ? c.text : c.text + "  " + c.count;
         on: c.on;
+        // A chip that starts a new line (the strip broke in a narrow window) rounds its left side again.
+        joined-left: self.x > 0;
+        joined-right: root.has-more || i < root.filter.chips.length - 1;
         clicked => { root.toggled(c.text); }
+    }
+    if root.has-chips && root.has-more: PicksChip {
+        name: root.more-name;
+        value: root.filter.more-picked;
+        choices: root.filter.more;
+        joined-left: self.x > 0;
+        toggled(text) => { root.toggled(text); }
+        cleared => { root.cleared(); }
     }
 }
 
@@ -909,6 +1089,7 @@ export component ListLine inherits Rectangle {
     // This press has started a drag, so letting go isn't a click.
     property <bool> dragged;
     border-radius: Theme.radius;
+    // No easing here: lists reuse their lines as they scroll, and an eased line would trail the scroll.
     background: selected ? Theme.surface-raised : touch.has-hover ? Theme.hover : transparent;
     opacity: root.lifted ? 0.4 : 1;
     // The accent bar on the picked line.
@@ -1011,33 +1192,76 @@ export component Heart inherits Path {
     stroke-width: 0.8px;
 }
 
-// A row of tabs over a panel: the picked one is underlined in the accent colour.
-export component TabBar inherits HorizontalLayout {
+// A row of tabs over a panel: the picked one is underlined in the accent colour. Where there isn't room for them all
+// on one line (a narrow panel), they wrap onto the next, so every tab stays in sight.
+export component TabBar inherits Rectangle {
     in property <[string]> tabs;
     in-out property <int> current;
-    spacing: Space.xs;
-    alignment: start;
-    for name[i] in root.tabs: Rectangle {
-        width: label.preferred-width + 20px;
-        height: 36px;
-        border-radius: Theme.radius;
-        background: touch.has-hover && i != root.current ? Theme.hover : transparent;
-        label := Text {
-            text: name;
-            color: i == root.current ? Theme.text : Theme.muted;
-            font-size: Type.body;
-            font-weight: 500;
+    // False keeps them on one line, beside something that should shorten first (a note that can be cut short).
+    in property <bool> wrap: true;
+    // Where the picked tab is, which each tab reports, so its underline slides from tab to tab, and line to line.
+    property <length> lit-x;
+    property <length> lit-y;
+    property <length> lit-width;
+    // Each tab's height, which the underline sits at the foot of.
+    property <length> tab-height: 36px;
+    // Off until the first frame is drawn, so a page opening on its third view doesn't slide there from the left.
+    property <bool> ready;
+    Timer {
+        interval: 1ms;
+        running: !root.ready;
+        triggered => { root.ready = true; }
+    }
+    // As wide as its row lets it be (never narrower than its widest tab), and as tall as its lines, never taller.
+    min-width: row.min-width;
+    preferred-width: row.preferred-width;
+    min-height: row.min-height;
+    preferred-height: row.preferred-height;
+    max-height: row.preferred-height;
+    vertical-stretch: 0;
+    row := FlexboxLayout {
+        // Set here, as Slint reads a flexbox's `flex-wrap` only where the flexbox is made, not where it's used.
+        flex-wrap: root.wrap ? FlexboxLayoutWrap.wrap : FlexboxLayoutWrap.no-wrap;
+        spacing: Space.xs;
+        for name[i] in root.tabs: Rectangle {
+            property <bool> is-current: i == root.current;
+            width: label.preferred-width + 20px;
+            height: root.tab-height;
+            border-radius: Theme.radius;
+            background: touch.has-hover && !self.is-current ? Theme.hover : transparent;
+            animate background { duration: Motion.tap; }
+            init => { self.report(); }
+            changed is-current => { self.report(); }
+            changed x => { self.report(); }
+            changed y => { self.report(); }
+            changed width => { self.report(); }
+            function report() {
+                if (self.is-current) {
+                    root.lit-x = self.x;
+                    root.lit-y = self.y;
+                    root.lit-width = self.width;
+                }
+            }
+            label := Text {
+                text: name;
+                color: parent.is-current ? Theme.text : Theme.muted;
+                font-size: Type.body;
+                font-weight: 500;
+            }
+            touch := TouchArea {
+                clicked => { root.current = i; }
+            }
         }
-        Rectangle {
-            y: parent.height - 2px;
-            height: 2px;
-            x: 8px;
-            width: parent.width - 16px;
-            background: i == root.current ? Theme.accent : transparent;
-        }
-        touch := TouchArea {
-            clicked => { root.current = i; }
-        }
+    }
+    Rectangle {
+        y: root.lit-y + root.tab-height - 2px;
+        height: 2px;
+        x: root.lit-x + 8px;
+        width: max(0px, root.lit-width - 16px);
+        visible: root.current >= 0 && root.current < root.tabs.length;
+        border-radius: 1px;
+        background: Theme.accent;
+        animate x, y, width { duration: root.ready ? Motion.move : 0ms; easing: ease-out; }
     }
 }
 
@@ -1144,6 +1368,8 @@ export component HoverNote inherits Rectangle {
 export global Icons {
     // Three dots: more things to do with what's picked.
     out property <string> more: "M 2.5 8 A 0.75 0.75 0 1 0 4 8 A 0.75 0.75 0 1 0 2.5 8 M 7.25 8 A 0.75 0.75 0 1 0 8.75 8 A 0.75 0.75 0 1 0 7.25 8 M 12 8 A 0.75 0.75 0 1 0 13.5 8 A 0.75 0.75 0 1 0 12 8";
+    // A magnifier: search (the page's search box and Ctrl+K).
+    out property <string> search: "M 11.5 6.5 A 5 5 0 1 1 1.5 6.5 A 5 5 0 1 1 11.5 6.5 M 10.2 10.2 L 14.5 14.5";
     // Two sliders: the page's own options.
     out property <string> options: "M 2 5 L 14 5 M 2 11 L 14 11 M 5.5 3 L 5.5 7 M 10.5 9 L 10.5 13";
     // The rail's places, one each.
@@ -1163,6 +1389,18 @@ export global Icons {
     out property <string> backup: "M 2 10 L 14 10 L 14 14.5 L 2 14.5 Z M 8 8 L 8 1.5 M 5 4.5 L 8 1.5 L 11 4.5";
     // Settings: a cog.
     out property <string> settings: "M 10.5 8 A 2.5 2.5 0 1 1 5.5 8 A 2.5 2.5 0 1 1 10.5 8 M 8 1 L 8 3.5 M 8 12.5 L 8 15 M 1 8 L 3.5 8 M 12.5 8 L 15 8 M 3 3 L 4.8 4.8 M 11.2 11.2 L 13 13 M 13 3 L 11.2 4.8 M 4.8 11.2 L 3 13";
+    // A place's icon from its place in rail order (mo-app's `Place::ALL`), "" for none.
+    public pure function place(i: int) -> string {
+        if (i == 0) { return songs; }
+        if (i == 1) { return sounds; }
+        if (i == 2) { return presets; }
+        if (i == 3) { return midi; }
+        if (i == 4) { return plugins; }
+        if (i == 5) { return space; }
+        if (i == 6) { return backup; }
+        if (i == 7) { return settings; }
+        return "";
+    }
 }
 
 // A name over a map, like a neighbourhood of the galaxy ("KICK"): it lights up under the mouse, as a click on it flies
@@ -1404,8 +1642,30 @@ export component Dot inherits Rectangle {
     background: tint;
 }
 
-// How far a job on this page has got: a thin bar and a few words, under the page's name. The job's activity card
-// says the same; this keeps it in sight while you work on the page.
+// How full or how far, as a level meter: lit segments like the LEDs on a mixer's channel, the same everywhere a
+// share is shown. Segments 4px wide (one gap of 2px between), as many as fit.
+export component Meter inherits Rectangle {
+    // From 0 to 1.
+    in property <float> level;
+    // The lit colour; `warn-from` turns the segments past it amber, like a meter going into the red.
+    in property <color> tint: Theme.accent;
+    in property <float> warn-from: 2;
+    property <int> segments: max(1, floor((self.width + 2px) / 6px));
+    // A start shows at least one lit segment, and only a finished job lights the last one.
+    property <int> lit: root.level <= 0 ? 0 : root.level >= 1 ? root.segments
+        : clamp(ceil(root.level * root.segments), 1, root.segments - 1);
+    for i in root.segments: Rectangle {
+        x: i * 6px;
+        width: 4px;
+        height: root.height;
+        border-radius: 1px;
+        background: i >= root.lit ? Theme.stroke
+            : (i + 1) / root.segments > root.warn-from ? Theme.warning : root.tint;
+    }
+}
+
+// How far a job on this page has got: a small level meter and a few words, under the page's name. The job's activity
+// card says the same; this keeps it in sight while you work on the page.
 export component ProgressLine inherits HorizontalLayout {
     in property <string> text;
     // From 0 to 1.
@@ -1414,18 +1674,10 @@ export component ProgressLine inherits HorizontalLayout {
     alignment: start;
     VerticalLayout {
         alignment: center;
-        Rectangle {
+        Meter {
             width: 160px;
-            height: 3px;
-            border-radius: 1.5px;
-            background: Theme.surface-raised;
-            Rectangle {
-                x: 0;
-                width: parent.width * clamp(root.done, 0, 1);
-                border-radius: 1.5px;
-                background: Theme.accent;
-                animate width { duration: 200ms; }
-            }
+            height: 6px;
+            level: root.done;
         }
     }
     Text {
@@ -1444,14 +1696,30 @@ export component PageHeader inherits VerticalLayout {
     // The job working on this page, in words; empty when nothing runs.
     in property <string> busy;
     in property <float> done;
+    in property <bool> job-line: true;
     spacing: Space.xs;
     vertical-stretch: 0;
     HorizontalLayout {
         spacing: Space.md;
+        // The place's mark, in its colour, as on the rail: it grows in when the page opens.
+        VerticalLayout {
+            alignment: center;
+            mark := Rectangle {
+                property <bool> shown;
+                width: 4px;
+                height: self.shown ? 24px : 4px;
+                border-radius: 2px;
+                background: Theme.here-colour;
+                animate height { duration: Motion.settle; easing: ease-out; }
+                init => { self.shown = true; }
+            }
+        }
         Text {
             text: root.title;
+            font-family: Theme.title-font;
             font-size: Type.page-title;
             font-weight: 600;
+            letter-spacing: -0.4px;
             color: Theme.text;
             vertical-alignment: center;
         }
@@ -1464,35 +1732,76 @@ export component PageHeader inherits VerticalLayout {
             overflow: elide;
         }
     }
-    // Always there, so the page doesn't jump when a job starts or ends; only seen while one runs.
-    ProgressLine {
+    // Always there, so the page doesn't jump when a job starts or ends; only seen while one runs. A page that never
+    // runs a job of its own (Songs) leaves `job-line` off and keeps the room.
+    if root.job-line: ProgressLine {
         visible: root.busy != "";
         text: root.busy;
         done: root.done;
     }
 }
 
-// Joined buttons where one is picked, like a page's views (Tiles, List, Galaxy, History).
+// Joined buttons where one is picked, like a page's views (Tiles, List, Galaxy, History). The lit block slides from
+// the view you were on to the one you picked.
 export component Segmented inherits Rectangle {
     in property <[string]> choices;
     // Each choice's tooltip key, from the shortcut list, if it has one.
     in property <[string]> keys;
     // The picked one. The page sets it when told of a pick, so a key that changes the view moves it too.
     in property <int> current;
+    // The room either side of each label: less where many choices share a narrow row (Ctrl+K's kinds).
+    in property <length> pad: Space.lg;
     callback picked(int);
+    // Where the picked button is, which each button reports.
+    property <length> lit-x;
+    property <length> lit-width;
+    // Off until the first frame is drawn, so a page opening on its third view doesn't slide there from the left.
+    property <bool> ready;
+    Timer {
+        interval: 1ms;
+        running: !root.ready;
+        triggered => { root.ready = true; }
+    }
     width: row.preferred-width;
     height: 32px;
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: Theme.edge;
     clip: true;
+    background: @linear-gradient(180deg, Theme.surface-raised.brighter(8%) 0%, Theme.surface-raised.darker(6%) 100%);
+    Rectangle {
+        x: root.lit-x;
+        width: root.lit-width;
+        visible: root.current >= 0 && root.current < root.choices.length;
+        // Picked is lifted, not painted: a lighter key with a lit strip along its bottom edge, like a pressed-in
+        // button on a desk with its light on. One accent strip says "on" without turning the row into a block of colour.
+        background: @linear-gradient(180deg, Theme.hover.brighter(Theme.light ? 0% : 30%) 0%, Theme.hover.brighter(Theme.light ? 0% : 12%) 100%);
+        animate x, width { duration: root.ready ? Motion.move : 0ms; easing: ease-out; }
+        Rectangle {
+            x: Space.sm;
+            y: parent.height - 3px;
+            width: parent.width - 2 * Space.sm;
+            height: 2px;
+            border-radius: 1px;
+            background: Theme.accent;
+        }
+    }
     row := HorizontalLayout {
         for name[i] in root.choices: Rectangle {
-            width: label.preferred-width + 2 * Space.lg;
-            background: i == root.current ? Theme.accent
-                : touch.pressed ? Theme.well
-                : @linear-gradient(180deg, (touch.has-hover ? Theme.hover : Theme.surface-raised).brighter(8%) 0%, Theme.surface-raised.darker(6%) 100%);
-            animate background { duration: 90ms; }
+            property <bool> is-current: i == root.current;
+            width: label.preferred-width + 2 * root.pad;
+            background: self.is-current ? transparent : touch.pressed ? Theme.well : touch.has-hover ? Theme.hover.transparentize(40%) : transparent;
+            animate background { duration: Motion.tap; }
+            init => { self.report(); }
+            changed is-current => { self.report(); }
+            changed x => { self.report(); }
+            changed width => { self.report(); }
+            function report() {
+                if (self.is-current) {
+                    root.lit-x = self.x;
+                    root.lit-width = self.width;
+                }
+            }
             // The seam between two buttons.
             Rectangle {
                 x: 0;
@@ -1501,9 +1810,10 @@ export component Segmented inherits Rectangle {
             }
             label := Text {
                 text: name;
-                color: i == root.current ? Theme.accent-text : Theme.text;
+                color: parent.is-current ? Theme.text : Theme.muted;
                 font-size: Type.body;
-                font-weight: 500;
+                font-weight: parent.is-current ? 600 : 500;
+                animate color { duration: Motion.tap; }
             }
             touch := TouchArea {
                 clicked => { root.picked(i); }
@@ -1610,6 +1920,10 @@ export struct CardAction {
     key: string,
     id: string,
     enabled: bool,
+    // The card's main button, in the accent colour (Put back), or one that removes things, in the colour for missing
+    // things (Remove).
+    main: bool,
+    danger: bool,
 }
 
 // A side card's buttons: everything you can do with what's picked, in sight rather than behind a "more" menu
@@ -1626,6 +1940,8 @@ export component CardActions inherits FlexboxLayout {
         tip: a.tip;
         key: a.key;
         enabled: a.enabled;
+        main: a.main;
+        danger: a.danger;
         clicked => { root.chosen(a.id); }
     }
 }
@@ -1695,6 +2011,10 @@ export component OptionsButton inherits StudioButton {
 // The picked thing's panel beside a page's list: a raised card with a × to put it away (Esc does too).
 export component SidePanel inherits Rectangle {
     callback close;
+    // Back to its top: for a page whose one panel shows another card (it would open scrolled as far as the last one).
+    public function to-top() {
+        flick.content-y = 0;
+    }
     background: Theme.surface;
     border-radius: Theme.radius;
     border-width: 1px;
@@ -1704,17 +2024,29 @@ export component SidePanel inherits Rectangle {
     // right side (Solomon's F12 note, 2026-11-02 03:28), so it's cut at the edge instead, and the parts wrap.
     flick := Flickable {
         content-width: flick.width;
-        content-height: content.height;
+        // To where what it holds really ends: `end`, less the gap before it (see `end` below).
+        content-height: max(flick.height, end.y - Space.md + Space.xl);
         // The wheel scrolls it (and a finger on a touch screen); a drag with the mouse is for what's in it, such as a
         // sound dragged out to a DAW, as in the app's lists.
         mouse-drag-pan-enabled: false;
+        // At the top, as the scroll room isn't always as tall as it (it would sit in the middle of it otherwise).
         content := VerticalLayout {
             x: 0;
+            y: 0;
             width: flick.width;
-            height: max(flick.height, self.preferred-height);
+            // Taller than the panel by the gap before `end`: so what's above `end` gets the same room as without it
+            // (a "Pick a plugin" note in the middle stays in the middle).
+            height: max(flick.height + Space.md, self.preferred-height);
             padding: Space.xl;
             spacing: Space.md;
             @children
+            // Where what the panel holds really ends, a gap below its last part. Slint measures a part inside an `if`
+            // or a `for` as if none of its lines wrapped, so where they do the content's own height falls short, and
+            // the panel stopped scrolling before its last lines (a long Space card's last parts). Laid out, each part
+            // gets its real height, so `end` lands below the last one.
+            end := Rectangle {
+                height: 0px;
+            }
         }
     }
     CloseButton {
@@ -1783,9 +2115,24 @@ export component EmptyState inherits VerticalLayout {
     callback act;
     alignment: center;
     spacing: Space.sm;
+    // The place's icon in its colour, so even an empty page says where you are.
+    if Icons.place(Theme.here) != "": HorizontalLayout {
+        alignment: center;
+        padding-bottom: Space.xs;
+        Path {
+            width: 32px;
+            height: 32px;
+            viewbox-width: 16;
+            viewbox-height: 16;
+            commands: Icons.place(Theme.here);
+            stroke: Theme.here-colour.transparentize(25%);
+            stroke-width: 2px;
+        }
+    }
     Text {
         text: root.title;
         color: Theme.text;
+        font-family: Theme.title-font;
         font-size: Type.heading;
         font-weight: 600;
         horizontal-alignment: center;

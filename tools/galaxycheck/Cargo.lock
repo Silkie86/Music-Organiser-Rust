@@ -2891,6 +2891,7 @@ name = "mo-app"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fs4",
  "mo-backup",
  "mo-catch",
  "mo-convert",
@@ -2903,10 +2904,14 @@ dependencies = [
  "mo-sounds",
  "mo-space",
  "rayon",
+ "rusqlite",
+ "serde",
  "serde_json",
+ "sha2",
  "swash",
  "thread-priority",
  "tiny-skia 0.12.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -2978,6 +2983,7 @@ name = "mo-library"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "flate2",
  "known-folders",
  "mo-catch",
  "mo-formats",
@@ -2987,6 +2993,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "thread-priority",
 ]
 
@@ -3047,6 +3054,7 @@ dependencies = [
  "mo-library",
  "rayon",
  "regex",
+ "rusqlite",
  "rustix 1.1.6",
  "serde",
  "serde_json",

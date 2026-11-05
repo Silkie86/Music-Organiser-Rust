@@ -1,12 +1,13 @@
 //! Sound files: reading them into samples, and writing WAV files (for kit exports).
 //!
-//! WAV and AIFF are read here, byte for byte as the C# app's `Sounds/AudioFile.cs` reads them, with the notes some
+//! WAV (PCM, float, and the Microsoft and IMA ADPCM kinds older packs use) and AIFF are read here, byte for byte as the C# app's `Sounds/AudioFile.cs` reads them, with the notes some
 //! sample packs keep inside them (an ACID chunk's tempo and loop flag, a sampler chunk's root note). MP3, FLAC, M4A,
 //! OGG and AAC are decoded with symphonia, on every system. [`play::Player`] plays one sound at a time through the
 //! output chosen, and carries on when that output goes and comes back.
 //!
 //! Every read is bounded: a damaged or cut-short file gives an error or the part that's there, never a crash.
 
+mod adpcm;
 pub mod dsp;
 mod other;
 #[cfg(feature = "play")]
@@ -87,7 +88,7 @@ pub enum AudioError {
     Io(std::io::Error),
     /// It isn't a sound file the app reads, or its header is damaged: says what's wrong.
     Format(String),
-    /// A kind of sound this reader doesn't decode ("WAV format 2 isn't PCM", "WMA files"…).
+    /// A kind of sound this reader doesn't decode ("WAV format 85 isn't PCM", "WMA files"…).
     NotSupported(String),
 }
 

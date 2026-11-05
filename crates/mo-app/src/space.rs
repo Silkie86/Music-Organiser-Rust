@@ -3,7 +3,7 @@
 //! it can be tested without a window; mo-ui's `space.rs` reads the disks (never on the window's thread) and fills the
 //! page. What can be freed comes a part at a time, as agreed in the page's question round (2026-11-03): Bitwig copies
 //! first ([`crate::space_bitwig`], whose Fix writes new "(fixed)" projects), then old copies, spare plugin copies,
-//! songs and plugins. Nothing here changes a file.
+//! songs ([`crate::space_songs`]) and plugins. Nothing here changes a file.
 
 use std::path::{Path, PathBuf};
 
@@ -234,14 +234,22 @@ pub fn room_line(d: &Drive) -> String {
     if d.here { format!("{} free of {}", size_text(d.free), size_text(d.total)) } else { "Not plugged in".to_owned() }
 }
 
+/// Things as a sentence lists them: "A", "A and B", "A, B and C" ("" for none).
+pub fn and_list<S: AsRef<str>>(items: &[S]) -> String {
+    match items {
+        [] => String::new(),
+        [one] => one.as_ref().to_owned(),
+        [rest @ .., last] => {
+            let rest: Vec<&str> = rest.iter().map(AsRef::as_ref).collect();
+            format!("{} and {}", rest.join(", "), last.as_ref())
+        }
+    }
+}
+
 /// What of yours a drive holds: "Projects, samples and the app's files".
 pub fn holds_line(d: &Drive) -> String {
     let words: Vec<&str> = d.holds.iter().map(|h| h.words()).collect();
-    let joined = match words.as_slice() {
-        [] => String::new(),
-        [one] => (*one).to_owned(),
-        [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
-    };
+    let joined = and_list(&words);
     let mut chars = joined.chars();
     chars.next().map_or_else(String::new, |first| first.to_uppercase().chain(chars).collect())
 }
@@ -291,6 +299,17 @@ pub fn biggest_first(mut lines: Vec<(u64, Line)>) -> Vec<Line> {
     lines.into_iter().map(|(_, line)| line).collect()
 }
 
+/// What the page says under Biggest wins first when no look found anything and none says why.
+pub const NOTHING_TO_FREE: &str = "Nothing to free right now.";
+
+/// What the page says under Biggest wins first: why a kind has no line when a look found none of it (each kind's own
+/// sentence, ending in a space; "" for one with nothing to say), and with no `lines` at all, that there's nothing to
+/// free when no kind says why; "" when there's nothing to say (the page then shows no note).
+pub fn wins_note<S: AsRef<str>>(nones: &[S], lines: usize) -> String {
+    let note = nones.iter().map(AsRef::as_ref).collect::<String>().trim_end().to_owned();
+    if note.is_empty() && lines == 0 { NOTHING_TO_FREE.to_owned() } else { note }
+}
+
 /// The App files line's id.
 pub const APP_FILES: &str = "app-files";
 
@@ -316,8 +335,10 @@ pub fn app_bytes(parts: &[AppFilesPart]) -> u64 {
 pub enum Opens {
     /// Opens a fixed project in Bitwig.
     InBitwig,
-    /// Shows it (an old copy) in its folder.
+    /// Shows it (an old copy, a spare plugin copy) in its folder.
     InFolder,
+    /// Opens the folder itself (the one a format's spare copies are all in).
+    Folder,
 }
 
 impl Opens {
@@ -326,12 +347,14 @@ impl Opens {
         match self {
             Opens::InBitwig => "Open in Bitwig",
             Opens::InFolder => "Show in folder",
+            Opens::Folder => "Open folder",
         }
     }
 }
 
 /// One part on a card: its name, what it holds and its size; and for a part you can act on, its tick, what happened to
-/// it, a file it opens and a link that shows more.
+/// it, a file it opens, a link that shows more, one that puts back what a clean-up sent to the Recycle Bin, and one
+/// that shows it on another page.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Part {
     pub name: String,
@@ -339,8 +362,11 @@ pub struct Part {
     pub size: String,
     /// Listed under the part above it (a save under its project), a step in.
     pub under: bool,
-    /// What its tick is for (a save) and whether it's ticked; None when it has no tick.
-    pub tick: Option<(PathBuf, bool)>,
+    /// What its tick is for (a save, a spare copy, or every copy of a format that can go) and whether it's ticked;
+    /// None when it has no tick.
+    pub tick: Option<(Vec<PathBuf>, bool)>,
+    /// Some of what its tick is for are ticked, not all: its tick shows a dash, and ticking it ticks them all.
+    pub partly: bool,
     /// What happened to it, or what to know about it; "" for nothing. `problem` shows it as a problem.
     pub status: String,
     pub problem: bool,
@@ -349,6 +375,35 @@ pub struct Part {
     pub open: Option<(Opens, PathBuf)>,
     /// Its link that shows or hides more under it: its words, and what it's for (a project's folder).
     pub more: Option<(String, PathBuf)>,
+    /// Its Put back link, for a clean-up whose files are in the Recycle Bin: which clean-up (its kind, and when it ran).
+    pub put_back: Option<(String, i64)>,
+    /// Its link to the Plugins page: one plugin's card there, or every plugin no song has used lately.
+    pub plugins: Option<OnPlugins>,
+    /// Its link to the Sounds page: the sound it shows there, by id.
+    pub sound: Option<i64>,
+}
+
+/// The words of a part's link to the Sounds page.
+pub const ON_SOUNDS: &str = "Show on Sounds page";
+
+/// What a part's link to the Plugins page shows there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OnPlugins {
+    /// One plugin's card, by its line's name key and own (the DAW of a DAW's own device), and its name (what that page
+    /// looks for when it's no longer there by those).
+    Plugin { key: String, own: String, name: String },
+    /// Every plugin no song has used lately (the Plugins page's "Big and unused").
+    Unused,
+}
+
+impl OnPlugins {
+    /// The link's words.
+    pub fn words(&self) -> &'static str {
+        match self {
+            OnPlugins::Plugin { .. } => "Show on Plugins page",
+            OnPlugins::Unused => "Show them on Plugins page",
+        }
+    }
 }
 
 /// The picked line's card.
@@ -580,5 +635,24 @@ mod tests {
         let ids: Vec<&str> = lines.iter().map(|l| l.id).collect();
         // The two that free the same stay in the order they came.
         assert_eq!(ids, ["big", "small", "also small"]);
+    }
+
+    #[test]
+    fn a_list_reads_as_a_sentence() {
+        assert_eq!(and_list::<&str>(&[]), "");
+        assert_eq!(and_list(&["VST3"]), "VST3");
+        assert_eq!(and_list(&["VST3", "CLAP"]), "VST3 and CLAP");
+        assert_eq!(and_list(&["VST2".to_owned(), "VST3".to_owned(), "CLAP".to_owned()]), "VST2, VST3 and CLAP");
+    }
+
+    #[test]
+    fn the_note_under_the_wins_says_why_a_kind_has_no_line() {
+        assert_eq!(wins_note::<&str>(&[], 2), "");
+        assert_eq!(wins_note(&["", ""], 1), "");
+        let nones = ["", "No spare plugin copies were found. ", "Your songs have nothing to compact. "];
+        assert_eq!(wins_note(&nones, 1), "No spare plugin copies were found. Your songs have nothing to compact.");
+        assert_eq!(wins_note(&nones, 0), "No spare plugin copies were found. Your songs have nothing to compact.");
+        // No line and no kind says why: the page still says something.
+        assert_eq!(wins_note(&["", ""], 0), NOTHING_TO_FREE);
     }
 }

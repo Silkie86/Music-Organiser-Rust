@@ -319,6 +319,11 @@ pub(crate) const STATES: &str = "plugin-states/";
 fn read_bwpreset(raw: impl bitwig::FileBytes, stem: &str) -> Result<PresetFile, NotAPreset> {
     let doc =
         bitwig::decode(raw).map_err(|_| NotAPreset("it doesn't start as a Bitwig file does (\"BtWg\")".into()))?;
+    Ok(bwpreset_of(&doc, stem))
+}
+
+/// A decoded Bitwig preset, as [`read_bwpreset`] reads it (for a caller that decoded it already, to use it for more).
+pub fn bwpreset_of(doc: &bitwig::Document, stem: &str) -> PresetFile {
     let mut file = PresetFile {
         format: Some(FileFormat::BwPreset),
         name: stem.to_owned(),
@@ -377,7 +382,7 @@ fn read_bwpreset(raw: impl bitwig::FileBytes, stem: &str) -> Result<PresetFile, 
             }
         }
     }
-    Ok(file)
+    file
 }
 
 /// The most of a plugin state in a Bitwig preset that's read for its header.

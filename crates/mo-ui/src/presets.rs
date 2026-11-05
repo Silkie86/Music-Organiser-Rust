@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::bitwig_convert as bitwig;
+use mo_app::finder::Kind;
 use mo_app::log;
+use mo_app::places::Place;
 use mo_app::presets::{self as logic, CurveFilters, Filters, Item, Section, act, curve_act};
 use mo_app::shortcuts::{CURVES_ACTIONS, PRESETS_ACTIONS, Shortcuts, what_of};
 use mo_app::year_strip;
@@ -32,10 +34,12 @@ use mo_library::Library;
 use mo_presets::bitwig::{self as bw, Templates};
 use mo_presets::curves::{self, Curve, CurvesDb};
 use mo_presets::export;
+use mo_presets::file_store;
 use mo_presets::filter::Choice;
 use mo_presets::fixes::{self, RoleFixes};
 use mo_presets::library::{self as plib, Source};
 use mo_presets::role::{Role, Thresholds};
+use mo_presets::sound_store::{self, SoundStore};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel, Weak};
 
 use crate::filters::FilterModels;
@@ -53,7 +57,12 @@ struct Page {
     section: Section,
     /// The Sounds section: every line, those shown (places in `items`), and the picked one (a place in `items`).
     /// Shared with the filtering worker, which works out what's shown off the window's thread.
+    /// Never copied on the window's thread (100k lines or more): part fixes are laid over it (`fixed_now`), and lines
+    /// read while a filtering holds it wait in `pending` until it lets go ([`take_waiting`]).
     items: Arc<Vec<Item>>,
+    pending: Vec<Item>,
+    /// Whether Ctrl+K has been handed the lines (once they're all read).
+    finder_has: bool,
     shown: Vec<usize>,
     /// Counts the filterings asked for, so an older one finishing late is dropped (newest wins).
     asked: u64,
@@ -98,9 +107,13 @@ struct Page {
     shortcuts: Shortcuts,
     /// The last time the list was shown afresh while sounds are still coming in.
     shown_at: Option<Instant>,
-    /// Part fixes made since the sounds started being read, by fingerprint (None: the fix was taken away), so the
-    /// sounds read after one was made get it too.
-    fixed_now: HashMap<String, Option<Role>>,
+    /// Part fixes made since the sounds started being read, by fingerprint (None: the fix was taken away): laid over
+    /// the lines wherever they're shown, filtered or found, and given to the sounds read after one was made.
+    fixed_now: logic::Fixes,
+    /// A line Ctrl+K asked for, picked once the filtering asked for with it is done; and that line, to pick once the
+    /// list is on show.
+    to_pick: Option<usize>,
+    pick_now: Option<usize>,
 }
 
 thread_local! {
@@ -118,6 +131,7 @@ thread_local! {
 struct FilterAsk {
     id: u64,
     items: Arc<Vec<Item>>,
+    fixes: logic::Fixes,
     filters: Filters,
     plugins: Option<Vec<(String, usize)>>,
 }
@@ -136,7 +150,7 @@ struct FilterAnswer {
 impl FilterAsk {
     fn answer(self) -> FilterAnswer {
         let plugins = self.plugins.unwrap_or_else(|| logic::plugins(&self.items));
-        let found = logic::filtered(&self.items, &self.filters);
+        let found = logic::filtered_with(&self.items, &self.filters, &self.fixes);
         let chips = logic::filter_chips(&found.counts, &plugins, &self.filters);
         let format_note = logic::format_note(&self.items, &found.shown);
         FilterAnswer { id: self.id, shown: found.shown, years: found.years, chips, format_note, plugins }
@@ -171,7 +185,7 @@ impl Model for Lines {
         PAGE.with(|p| {
             let p = p.try_borrow().ok()?;
             let at = *p.shown.get(row)?;
-            let l = logic::line(p.items.get(at)?);
+            let l = logic::line(&p.items.get(at)?.as_fixed(&p.fixed_now));
             Some(PresetLine {
                 row: row as i32,
                 name: l.name.into(),
@@ -241,6 +255,43 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
     });
     wire(app);
+    crate::finder::on_open(Kind::Preset, |app, hit, _| {
+        let Some(at) = hit.id.parse::<usize>().ok().filter(|&at| PAGE.with(|p| at < p.borrow().items.len())) else {
+            return false;
+        };
+        crate::go_to(app, Place::Presets.index() as i32);
+        show_preset(app, at);
+        true
+    });
+    // Ctrl+K finds your presets before this page is first shown: they're read once, in the background.
+    crate::finder::when_opening(|app| {
+        let start = PAGE.with(|p| !std::mem::replace(&mut p.borrow_mut().started, true));
+        if start {
+            read_sounds(app);
+        }
+    });
+    // The app may start on this page: it was shown before the page knew where the library is.
+    if app.get_place() == Place::Presets.index() as i32 {
+        shown(app);
+    }
+}
+
+/// Shows one line of the Sounds section, by its place in the lines (Ctrl+K): when the filters hide it, they go.
+fn show_preset(app: &AppWindow, at: usize) {
+    if PAGE.with(|p| p.borrow().section) != Section::Sounds {
+        pick_section(app, Section::Sounds);
+    }
+    if PAGE.with(|p| p.borrow().shown.contains(&at)) {
+        pick(app, Some(at));
+        return;
+    }
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.filters = Filters::default();
+        p.to_pick = Some(at);
+        refilter(&mut p);
+    });
+    show_all(app);
 }
 
 /// A key was changed in Settings: the buttons, card and menu show the new keys at once.
@@ -397,6 +448,10 @@ fn wire(app: &AppWindow) {
 
 /// The page came into view: the sounds are read the first time.
 pub fn shown(app: &AppWindow) {
+    // Not connected yet (the app starting on this page, before `connect`): `connect` shows it once it's wired.
+    if APP.with(|a| a.borrow().is_none()) {
+        return;
+    }
     let start = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         !std::mem::replace(&mut p.started, true)
@@ -456,10 +511,13 @@ fn refilter(p: &mut Page) {
 }
 
 fn ask_filter(p: &mut Page, count_plugins: bool) {
+    // Lines left waiting (a filtering that never answered) go in now, if nothing holds the list.
+    take_waiting(p);
     p.asked += 1;
     let ask = FilterAsk {
         id: p.asked,
         items: Arc::clone(&p.items),
+        fixes: p.fixed_now.clone(),
         filters: p.filters.clone(),
         plugins: (!count_plugins).then(|| p.plugins.clone()),
     };
@@ -471,9 +529,22 @@ fn ask_filter(p: &mut Page, count_plugins: bool) {
         let mut w = w.borrow_mut();
         if w.is_none() {
             match Newest::start("Presets filter", |ask: FilterAsk| {
-                let answer = background::on_pool(|| ask.answer());
+                // The ask (and its hold on the lines) is let go here, before the window takes the answer: the
+                // window can then put in the lines read meanwhile.
+                let answer = background::on_pool(move || ask.answer());
                 on_window(move |app| {
-                    let current = PAGE.with(|p| take_filtered(&mut p.borrow_mut(), answer));
+                    let current = PAGE.with(|p| {
+                        let mut p = p.borrow_mut();
+                        let current = take_filtered(&mut p, answer);
+                        // The filtering has let go of the lines: those read meanwhile go in, filtered next. An older
+                        // answer leaves that to the newer filtering, which holds the lines still.
+                        if current && take_waiting(&mut p) && (p.reading.is_none() || due(&p)) {
+                            p.shown_at = Some(Instant::now());
+                            ask_filter(&mut p, true);
+                        }
+                        current
+                    });
+                    give_finder(app);
                     if current {
                         show_all(app);
                     }
@@ -499,6 +570,37 @@ fn ask_filter(p: &mut Page, count_plugins: bool) {
     }
 }
 
+/// Whether the list may be filtered afresh while reading: at most four times a second (the plugin list and the
+/// filtering go over every line).
+fn due(p: &Page) -> bool {
+    p.shown_at.is_none_or(|t| t.elapsed() >= Duration::from_millis(250))
+}
+
+/// Puts the lines read while a filtering held the list ([`Page::pending`]) in, in place, once nothing else holds it.
+/// Whether any went in.
+fn take_waiting(p: &mut Page) -> bool {
+    if p.pending.is_empty() {
+        return false;
+    }
+    let Page { items, pending, .. } = p;
+    let Some(all) = Arc::get_mut(items) else { return false };
+    all.append(pending);
+    true
+}
+
+/// Ctrl+K gets the lines once they're all read and in: handed over while reading, it would hold the list.
+fn give_finder(app: &AppWindow) {
+    let items = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let ready = p.started && p.reading.is_none() && p.pending.is_empty() && !p.finder_has;
+        p.finder_has |= ready;
+        ready.then(|| Arc::clone(&p.items))
+    });
+    if let Some(items) = items {
+        crate::finder::add_source(app, "presets", Arc::new(mo_app::finder::Presets(items)));
+    }
+}
+
 /// A filtering is done: the page takes it, unless a newer one has been asked for since. Whether it took it.
 fn take_filtered(p: &mut Page, a: FilterAnswer) -> bool {
     if a.id != p.asked {
@@ -509,11 +611,24 @@ fn take_filtered(p: &mut Page, a: FilterAnswer) -> bool {
     p.chips = a.chips;
     p.format_note = a.format_note;
     p.plugins = a.plugins;
+    if let Some(at) = p.to_pick.take()
+        && p.shown.contains(&at)
+    {
+        p.pick_now = Some(at);
+    }
     true
 }
 
-/// Puts everything the page knows on screen.
+/// Puts everything the page knows on screen, then picks the line Ctrl+K asked for once the list shows it.
 fn show_all(app: &AppWindow) {
+    show_everything(app);
+    let pick_now = PAGE.with(|p| p.borrow_mut().pick_now.take());
+    if let Some(at) = pick_now {
+        pick(app, Some(at));
+    }
+}
+
+fn show_everything(app: &AppWindow) {
     let data = app.global::<PresetsData>();
     PAGE.with(|p| {
         let p = p.borrow();
@@ -545,7 +660,8 @@ fn show_all(app: &AppWindow) {
         data.set_unused(f.unused);
         data.set_shown(p.shown.len() as i32);
         let reading = p.reading.is_some();
-        let (title, text) = logic::empty_words(p.items.len(), p.shown.len(), reading, f.any(), p.failed.as_deref());
+        let (title, text) =
+            logic::empty_words(p.items.len() + p.pending.len(), p.shown.len(), reading, f.any(), p.failed.as_deref());
         data.set_empty_title(title.into());
         data.set_empty_text(text.into());
         data.set_format_note(p.format_note.as_str().into());
@@ -590,7 +706,7 @@ fn show_header(app: &AppWindow) {
         let hidden = p.curves.iter().filter(|c| c.hidden).count();
         let (summary, busy, done) = match p.section {
             Section::Sounds => (
-                logic::summary(p.items.len(), p.shown.len(), p.songs, p.files, reading),
+                logic::summary(p.items.len() + p.pending.len(), p.shown.len(), p.songs, p.files, reading),
                 p.reading.map(|(d, t)| logic::sounds_busy(d, t)).unwrap_or_default(),
                 p.reading.map_or(0.0, |(d, t)| if t == 0 { -1.0 } else { d as f32 / t as f32 }),
             ),
@@ -615,6 +731,7 @@ fn show_card(app: &AppWindow) {
             data.set_panel_shown(false);
             return;
         };
+        let item = &*item.as_fixed(&p.fixed_now);
         let c = logic::card(item);
         data.set_panel_shown(true);
         data.set_card(PresetCard {
@@ -643,6 +760,8 @@ fn show_card(app: &AppWindow) {
                     key: key(o.id),
                     id: o.id.into(),
                     enabled: o.enabled,
+                    main: false,
+                    danger: false,
                 })
                 .collect::<Vec<_>>(),
         )));
@@ -703,6 +822,8 @@ fn show_curve_card(app: &AppWindow) {
                     key: key(o.id),
                     id: o.id.into(),
                     enabled: o.enabled,
+                    main: false,
+                    danger: false,
                 })
                 .collect::<Vec<_>>(),
         )));
@@ -821,8 +942,10 @@ fn read_sounds(_app: &AppWindow) {
                 if let Err(e) = &result {
                     p.failed = Some(e.clone());
                 }
-                refilter(&mut p);
+                take_waiting(&mut p);
+                ask_filter(&mut p, true);
             });
+            give_finder(app);
             show_all(app);
         });
     });
@@ -868,11 +991,39 @@ fn read_all(at: &Where) -> Result<(), String> {
         }
     };
     let limits = Thresholds::default();
+    // What was found in each save last time: only new and changed saves are read from their files.
+    let mut store = match SoundStore::open(&at.data_dir.join(sound_store::FILE_NAME), &limits) {
+        Ok(s) => Some(s),
+        Err(e) => {
+            log::warning("Presets", &format!("Couldn't open what the saves held last time, so all are read: {}", e.0));
+            None
+        }
+    };
+    let read_now = |paths: &[String]| background::on_pool(|| plib::read_saves(paths, &limits));
     let mut done = 0;
     let mut failed = 0;
+    let mut from_files = 0;
     for batch in newest.chunks(BATCH) {
         let paths: Vec<String> = batch.iter().map(|s| s.path.clone()).collect();
-        let read = background::on_pool(|| plib::read_saves(&paths, &limits));
+        let kept = store.as_mut().map(|st| background::on_pool(|| st.saves(&paths, |p| plib::read_saves(p, &limits))));
+        let read = match kept {
+            Some(Ok(batch)) => {
+                from_files += batch.read;
+                if let Some(why) = batch.not_kept {
+                    log::warning("Presets", &format!("Couldn't keep what the saves hold for next time: {why}"));
+                    store = None;
+                }
+                batch.saves
+            }
+            other => {
+                if let Some(Err(e)) = other {
+                    log::warning("Presets", &format!("Couldn't read what the saves held last time: {}", e.0));
+                    store = None;
+                }
+                from_files += paths.len();
+                read_now(&paths)
+            }
+        };
         let mut items = Vec::new();
         let mut songs = 0;
         for mut s in read {
@@ -890,13 +1041,37 @@ fn read_all(at: &Where) -> Result<(), String> {
     if failed > 0 {
         log::info("Presets", &format!("{failed} of {total} saves couldn't be read for their sounds"));
     }
+    log::info(
+        "Presets",
+        &format!("{from_files} of {total} saves read from their files, the rest as they were last time"),
+    );
+    if let Some(store) = store.as_mut() {
+        let all: Vec<String> = newest.iter().map(|s| s.path.clone()).collect();
+        if let Err(e) = store.keep_only(&all) {
+            log::warning("Presets", &format!("Couldn't forget saves no longer listed: {}", e.0));
+        }
+    }
     // The preset files, and the Bitwig presets among them that Send to Bitwig builds from.
     let roots = logic::preset_folders(&plib::default_folders(), &bitwig_folders);
-    let (found, templates) = background::on_pool(|| {
-        let found = plib::find_preset_files(&roots);
-        let templates = bw::templates(&found);
-        (found, templates)
-    });
+    // Read only the preset files that are new or changed since the last run; the rest are as they were kept.
+    let started = std::time::Instant::now();
+    let (kept, why) = background::on_pool(|| file_store::find(&roots, &at.data_dir.join(file_store::FILE_NAME)));
+    if let Some(why) = why {
+        log::warning("Presets", &format!("Every preset file is read, none kept for next time: {why}"));
+    }
+    if let Some(why) = &kept.not_kept {
+        log::warning("Presets", &format!("Couldn't keep the preset files read for next time: {why}"));
+    }
+    log::info(
+        "Presets",
+        &format!(
+            "{} of {} preset files read from their files, the rest as they were last time ({:.1} s)",
+            kept.read,
+            kept.files.len(),
+            started.elapsed().as_secs_f64()
+        ),
+    );
+    let (found, templates) = (kept.files, kept.templates);
     let years: HashMap<String, Option<i32>> = background::on_pool(|| {
         use rayon::prelude::*;
         found.par_iter().map(|f| (f.path.clone(), file_year(&f.path))).collect()
@@ -934,22 +1109,17 @@ fn add(items: Vec<Item>, songs: usize, files: usize, reading: Option<(usize, usi
     on_window(move |app| {
         let show = PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            let mut items = items;
-            for i in &mut items {
-                if let Some(fix) = p.fixed_now.get(&i.row.hash) {
-                    i.row.fixed = *fix;
-                }
-            }
-            // While a filtering still holds the old lines, they're copied once for this (they're seldom both at once:
-            // the lines come at most four times a second, and a filtering takes a moment).
-            Arc::make_mut(&mut p.items).extend(items);
+            // Fixes made since the reading began are laid over these lines too (`fixed_now`): they're never written
+            // into them. While a filtering holds the lines, the new ones wait: its answer puts them in (`take_waiting`).
+            p.pending.extend(items);
+            take_waiting(&mut p);
             p.songs += songs;
             p.files += files;
             if reading.is_some() {
                 p.reading = reading;
             }
             // At most four times a second while reading: the plugin list and the filtering go over every line.
-            let due = p.shown_at.is_none_or(|t| t.elapsed() >= Duration::from_millis(250)) || reading.is_none();
+            let due = due(&p) || reading.is_none();
             if due {
                 p.shown_at = Some(Instant::now());
                 // Every plugin, counted again with the filtering: the menu scrolls, and only makes the lines in sight.
@@ -991,7 +1161,7 @@ fn run_sound_action(app: &AppWindow, id: &str) -> bool {
     }
     let Some(item) = PAGE.with(|p| {
         let p = p.borrow();
-        p.picked.and_then(|i| p.items.get(i).cloned())
+        p.picked.and_then(|i| p.items.get(i)).map(|i| i.as_fixed(&p.fixed_now).into_owned())
     }) else {
         return false;
     };
@@ -1051,7 +1221,7 @@ fn set_fix(app: &AppWindow, item: &Item, role: Option<Role>) {
 fn apply(app: &AppWindow, hash: &str, role: Option<Role>) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        logic::apply_fix(Arc::make_mut(&mut p.items).as_mut_slice(), hash, role);
+        // Laid over the lines, not written into them: they're shared, and one change would copy them all.
         p.fixed_now.insert(hash.to_owned(), role);
         // A part filter may drop it from the list; the card stays on it.
         refilter(&mut p);
@@ -1070,7 +1240,13 @@ fn export_setup() -> (Option<PathBuf>, Option<Arc<Templates>>, Vec<PathBuf>, Fee
 fn templates_now(have: Option<Arc<Templates>>, bitwig: &[PathBuf]) -> Arc<Templates> {
     have.unwrap_or_else(|| {
         let roots = logic::preset_folders(&plib::default_folders(), bitwig);
-        Arc::new(background::on_pool(|| bw::templates(&plib::find_preset_files(&roots))))
+        // The same folder the page keeps the store in (`Page::data_dir` is set from it).
+        let store = mo_app::paths::data_dir().join(file_store::FILE_NAME);
+        let (found, why) = background::on_pool(|| file_store::find(&roots, &store));
+        if let Some(why) = why.or(found.not_kept) {
+            log::warning("Presets", &format!("The preset files read for Send to Bitwig weren't kept: {why}"));
+        }
+        Arc::new(found.templates)
     })
 }
 
@@ -1182,8 +1358,13 @@ fn export_shown(app: &AppWindow) -> bool {
     let (plan, files, items) = PAGE.with(|p| {
         let p = p.borrow();
         let (plan, files) = logic::export_plan(&p.items, &p.shown);
-        let items: Vec<Item> =
-            p.shown.iter().filter_map(|&i| p.items.get(i).cloned()).filter(|i| !i.is_file()).collect();
+        let items: Vec<Item> = p
+            .shown
+            .iter()
+            .filter_map(|&i| p.items.get(i))
+            .filter(|i| !i.is_file())
+            .map(|i| i.as_fixed(&p.fixed_now).into_owned())
+            .collect();
         (plan, files, items)
     });
     if plan.is_empty() || PAGE.with(|p| p.borrow().exporting) {
@@ -1798,4 +1979,51 @@ fn sample_curves() -> Vec<Curve> {
             vec![source(SourceKind::FlKnobMoves, "sly_17", "Sylenth1", "Mix A/B", 32.0, 15)],
         ),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn lines_read_while_a_filtering_holds_the_list_wait_and_are_never_copied_in() {
+        let mut p = Page { items: Arc::new(sample_items()), ..Page::default() };
+        let first = p.items.len();
+        // A filtering holds the list.
+        let held = Arc::clone(&p.items);
+        p.pending.extend(sample_items());
+        assert!(!take_waiting(&mut p), "the held list isn't copied to add lines");
+        assert_eq!(p.items.len(), first);
+        assert!(Arc::ptr_eq(&p.items, &held));
+        // Once it lets go, they go in, in the order read, into the very same list.
+        drop(held);
+        let at = Arc::as_ptr(&p.items);
+        assert!(take_waiting(&mut p));
+        assert_eq!(p.items.len(), first * 2);
+        assert!(p.pending.is_empty());
+        assert_eq!(Arc::as_ptr(&p.items), at);
+        assert_eq!(p.items[first..], sample_items()[..]);
+    }
+
+    #[test]
+    fn a_part_fix_is_laid_over_the_shared_lines_not_written_into_them() {
+        let items = Arc::new(sample_items());
+        let shared = Arc::clone(&items);
+        let at = items.iter().position(|i| !i.row.hash.is_empty() && i.row.fixed.is_none()).unwrap();
+        let hash = items[at].row.hash.clone();
+        let mut fixes = logic::Fixes::new();
+        fixes.insert(hash, Some(Role::Pad));
+        // The lines aren't touched (nor copied); the line, the card and the filter all see the fix.
+        assert_eq!(items[at].row.fixed, None);
+        assert!(Arc::ptr_eq(&items, &shared));
+        let shown = items[at].as_fixed(&fixes);
+        assert_eq!(shown.row.fixed, Some(Role::Pad));
+        assert!(logic::line(&shown).fixed);
+        let pads = Filters { parts: vec![logic::PartPick::Role(Role::Pad)], ..Filters::default() };
+        assert!(logic::filtered_with(&items, &pads, &fixes).shown.contains(&at));
+        // A fix taken away goes back to the guess.
+        let mut taken = logic::Fixes::new();
+        taken.insert(items[at].row.hash.clone(), None);
+        assert!(matches!(items[at].as_fixed(&taken), std::borrow::Cow::Borrowed(_)));
+    }
 }

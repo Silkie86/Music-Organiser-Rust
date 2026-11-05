@@ -27,6 +27,7 @@ pub mod settings;
 pub mod songs;
 pub mod sounds;
 pub mod space;
+pub mod startup;
 mod stuck;
 pub mod watchdog;
 mod waves;
@@ -174,10 +175,24 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     Ok(app)
 }
 
-/// Ctrl+K: the pages and actions to jump to, and how to open them. Songs and sounds join from their own pages.
+/// Ctrl+K: the pages, Settings tabs and actions to jump to, and how to open them. Songs, sounds, presets, MIDI parts
+/// and plugins join from their own pages.
 fn connect_finder(app: &AppWindow, shortcuts: &Shortcuts, feed: &Feed) {
     finder::connect(app);
     finder_pages(app, shortcuts);
+    finder::add_source(app, "settings", std::sync::Arc::new(mo_app::finder::settings()));
+    finder::on_open(mo_app::finder::Kind::Setting, |app, hit, _| {
+        let Some(tab) = mo_app::settings::Tab::ALL.into_iter().find(|t| t.name() == hit.id) else { return false };
+        go_to(app, Place::Settings.index() as i32);
+        settings::show_tab(app, tab);
+        true
+    });
+    // The page on show may have changed its own list since (the Presets page's Sounds or Curves).
+    finder::when_opening(|app| {
+        if let Some(place) = place() {
+            finder_actions(app, &crate::shortcuts(), place);
+        }
+    });
     finder::on_open(mo_app::finder::Kind::Page, |app, hit, _| {
         let Some((place, view)) = mo_app::finder::page_of(&hit.id) else { return false };
         go_to(app, place.index() as i32);
@@ -191,11 +206,19 @@ fn connect_finder(app: &AppWindow, shortcuts: &Shortcuts, feed: &Feed) {
     let feed = feed.clone();
     finder::on_open(mo_app::finder::Kind::Action, move |app, hit, _| {
         let id = hit.id.as_str();
-        if SONGS_ACTIONS.iter().any(|a| a.id == id) {
-            return songs::run_action(app, id);
-        }
-        if SOUNDS_ACTIONS.iter().any(|a| a.id == id) {
-            return sounds::run_action(app, id);
+        // A page's own action runs on that page, which the finder was opened on.
+        if let Some(place) = place()
+            && page_actions(place).iter().any(|a| a.id == id)
+        {
+            return match place {
+                Place::Songs => songs::run_action(app, id),
+                Place::Sounds => sounds::run_action(app, id),
+                Place::Plugins => plugins::run_action(app, id),
+                Place::Presets => presets::run_action(app, id),
+                Place::Midi => midi::run_action(app, id),
+                Place::Space => space::run_action(app, id),
+                Place::Backup | Place::Settings => false,
+            };
         }
         run(id, &app.as_weak(), &feed)
     });
@@ -210,11 +233,7 @@ fn finder_pages(app: &AppWindow, shortcuts: &Shortcuts) {
 /// The actions Ctrl+K offers on a place: its page's own, then the app-wide ones that do something so far (not Ctrl+K
 /// itself, and the help key once).
 fn finder_actions(app: &AppWindow, shortcuts: &Shortcuts, place: Place) {
-    let page: &[Action] = match place {
-        Place::Songs => SONGS_ACTIONS,
-        Place::Sounds => SOUNDS_ACTIONS,
-        _ => &[],
-    };
+    let page = page_actions(place);
     let wide = APP_ACTIONS.iter().filter(|a| handles(a.id) && !matches!(a.id, "app.jump" | "app.helpF1"));
     let actions = mo_app::finder::actions(shortcuts, page.iter().chain(wide));
     finder::add_source(app, "actions", std::sync::Arc::new(actions));
@@ -275,9 +294,15 @@ pub(crate) fn go_to(app: &AppWindow, index: i32) {
     if PAGE.swap(place.index(), Ordering::Relaxed) != place.index() || app.get_place() != index {
         log::info("Page", place.name());
     }
+    // The place's colour first, so the new page's mark never shows the old place's colour for a frame (the window's
+    // own `changed place` comes a frame late).
+    app.global::<Theme>().set_here(index);
     app.set_place(index);
     finder::close(app);
     settings::page_shown(place);
+    if matches!(place, Place::Sounds | Place::Space) {
+        sounds::wanted();
+    }
     if place == Place::Backup {
         backup::shown();
     }
@@ -310,18 +335,23 @@ pub(crate) fn refresh_keys(app: &AppWindow) {
     });
 }
 
-/// The key sheet's lines: the page's own actions, then every app-wide action, with the key each has now, and F12,
-/// which the app keeps for itself.
-fn key_rows(shortcuts: &Shortcuts, place: Place) -> Vec<KeyRow> {
-    let page: &[Action] = match place {
+/// A page's own actions: what its keys do, the key sheet lists and Ctrl+K offers on it.
+fn page_actions(place: Place) -> &'static [Action] {
+    match place {
         Place::Songs => SONGS_ACTIONS,
         Place::Sounds => SOUNDS_ACTIONS,
         Place::Plugins => PLUGINS_ACTIONS,
         Place::Presets => presets::page_actions(),
         Place::Midi => MIDI_ACTIONS,
         Place::Space => SPACE_ACTIONS,
-        _ => &[],
-    };
+        Place::Backup | Place::Settings => &[],
+    }
+}
+
+/// The key sheet's lines: the page's own actions, then every app-wide action, with the key each has now, and F12,
+/// which the app keeps for itself.
+fn key_rows(shortcuts: &Shortcuts, place: Place) -> Vec<KeyRow> {
+    let page = page_actions(place);
     let mut rows: Vec<KeyRow> =
         page.iter().map(|a| KeyRow { key: shortcuts.key_of(a.id).into(), what: a.what.into() }).collect();
     // Keys whose action isn't built yet say so, rather than looking broken.
@@ -353,6 +383,9 @@ pub fn apply_look(app: &AppWindow, look: &Look) {
     t.set_square(th.square);
     t.set_text_font(th.font.text_family().into());
     t.set_number_font(th.font.number_family().into());
+    t.set_title_font(th.font.title_family().into());
+    let places: Vec<Color> = mo_app::themes::place_colours(look).iter().map(|c| rgb(*c)).collect();
+    t.set_places(ModelRc::new(VecModel::from(places)));
     app.global::<Palette>().set_color_scheme(if th.light {
         slint::language::ColorScheme::Light
     } else {

@@ -252,6 +252,10 @@ fn report(done: &Tidied) {
 pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     let mut done = Tidied::default();
     done.add(remove_older(&places.data, is_cut_short, WRITING, now, false));
+    // The saves-list copy of library.db goes once songs.db is the app's own library: nothing reads it any more.
+    if mo_library::songs_db::own_since(&places.data.join(mo_library::songs_db::FILE_NAME)).is_some() {
+        done.add(remove_older(&places.data, is_list_copy, Duration::ZERO, now, false));
+    }
     if let Some(curves) = real_folder(&places.data, &[CURVES]) {
         done.add(remove_older(&curves, mo_presets::export::is_half_written, WRITING, now, false));
     }
@@ -497,6 +501,7 @@ fn old_notes_to_bin(folder: &Path, done_file: &Path, kept_for: Duration, now: Sy
                     bin_id: None,
                     binned: None,
                     binned_zone: None,
+                    stamp: None,
                 }
             });
             match tidied.send(bin, path, meta.len()) {
@@ -824,15 +829,28 @@ fn is_report(name: &str, start: &str) -> bool {
 /// A file in the data folder whose writing was cut short, named as the code that writes it names it: the Backup
 /// settings' (`backup.txt.mo-part`, `backup-songs.txt.mo-part`, see [`crate::backup`]), the app's own settings'
 /// (`rust-settings.json.mo-part`, [`crate::app_settings::save`]), the sweep's own (`tidy-notes.txt.mo-part`,
-/// [`write_notes_done`]), or a side database being made (`presets.db.new-<number>`, `curves.db.new-<number>`, with
-/// SQLite's own files beside it; `mo_presets::fixes`).
+/// [`write_notes_done`]), the list of what the Space page put in the Recycle Bin (`space-binned.json.mo-part`,
+/// [`crate::binned::write`]), or a side database being made (`presets.db.new-<number>`, `curves.db.new-<number>`, with
+/// SQLite's own files beside it; `mo_presets::fixes`; the same for `preset-sounds.db.new-<number>`), or the saves
+/// list's copy being made (`library-list-rust.db.new-<number>`, `mo_library::list_copy`).
 fn is_cut_short(name: &str) -> bool {
-    [SETTINGS_FILE, SONGS_FILE, crate::app_settings::FILE, NOTES_DONE_FILE]
+    [SETTINGS_FILE, SONGS_FILE, crate::app_settings::FILE, NOTES_DONE_FILE, crate::binned::FILE]
         .iter()
         .any(|f| name.strip_prefix(f) == Some(PART_ENDING))
-        || [mo_presets::fixes::FILE_NAME, mo_presets::curves::FILE_NAME]
-            .iter()
-            .any(|database| mo_presets::fixes::is_half_made(name, database))
+        || [
+            mo_presets::fixes::FILE_NAME,
+            mo_presets::curves::FILE_NAME,
+            mo_presets::sound_store::FILE_NAME,
+            mo_library::list_copy::FILE_NAME,
+            mo_library::songs_db::FILE_NAME,
+        ]
+        .iter()
+        .any(|database| mo_presets::fixes::is_half_made(name, database))
+}
+
+/// The saves-list copy of library.db ([`mo_library::list_copy`]), or the journal SQLite may leave beside it.
+fn is_list_copy(name: &str) -> bool {
+    name.strip_prefix(mo_library::list_copy::FILE_NAME).is_some_and(|end| ["", "-journal"].contains(&end))
 }
 
 /// The twin test's copy of the library, or SQLite's own files beside it.
@@ -1410,6 +1428,38 @@ mod tests {
     }
 
     #[test]
+    fn the_saves_list_copy_goes_once_songs_db_is_the_apps_own() {
+        let dir = test_folder("list-copy");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let bin = TestBin(dir.join("bin"));
+        let now = SystemTime::now();
+        let copy = places.data.join(mo_library::list_copy::FILE_NAME);
+        changed_at(&copy, now);
+        let half_made = places.data.join("songs.db.new-12");
+        changed_at(&half_made, now);
+        // An hour and more on, the half-made songs.db a crash left is a leftover.
+        let later = now + WRITING * 2;
+        // library.db is still read: the copy stays.
+        rusqlite::Connection::open(places.data.join("library.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                     name TEXT NOT NULL, daw TEXT NOT NULL, info TEXT);",
+            )
+            .unwrap();
+        mo_library::songs_db::make(&places.data.join("library.db"), &places.data.join("songs.db"), &mut |_| {})
+            .unwrap();
+        assert_eq!(sweep(&places, later, &bin).removed, 1);
+        assert!(copy.exists() && !half_made.exists());
+        // songs.db the app's own: nothing reads the copy any more.
+        assert!(mo_library::songs_db::at_start(&places.data, "test").is_songs_db());
+        assert_eq!(sweep(&places, later, &bin).removed, 1);
+        assert!(!copy.exists());
+        assert!(places.data.join("library.db").exists() && places.data.join("songs.db").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn leftovers_dated_far_on_go_and_ones_a_little_ahead_wait() {
         let dir = test_folder("ahead");
         let places = Places { data: dir.join("data"), temp: dir.join("temp") };
@@ -1460,6 +1510,12 @@ mod tests {
             data.join("presets.db"),
             data.join("curves.db"),
             data.join("midi-index.db"),
+            data.join("bitwig-prints.db"),
+            data.join("bitwig-prints.db-wal"),
+            data.join("preset-files.db"),
+            data.join("preset-files.db-wal"),
+            data.join("arrangement-peaks.db"),
+            data.join("arrangement-peaks.db-wal"),
             data.join("backup.txt"),
             data.join("backup-songs.txt"),
             data.join("rust-settings.json"),
@@ -2572,9 +2628,13 @@ mod tests {
         assert!(is_cut_short("presets.db.new-12-wal") && is_cut_short("curves.db.new-3-shm"));
         assert!(is_cut_short("backup.txt.mo-part") && is_cut_short("backup-songs.txt.mo-part"));
         assert!(is_cut_short("rust-settings.json.mo-part") && !is_cut_short("rust-settings.json"));
+        assert!(is_cut_short("space-binned.json.mo-part") && !is_cut_short("space-binned.json"));
         assert!(!is_cut_short("rust-settings.json.unreadable") && !is_cut_short("rust-settings.json.mo-part-2"));
         assert!(!is_cut_short("presets.db.new-12-old") && !is_cut_short("presets.db") && !is_cut_short("backup.txt"));
         assert!(!is_cut_short("library.db.new-12") && !is_cut_short("backup.txt.mo-part.2"));
+        assert!(is_cut_short("library-list-rust.db.new-12") && is_cut_short("library-list-rust.db.new-3-journal"));
+        assert!(!is_cut_short("library-list-rust.db") && !is_cut_short("library-list-rust.db.new-"));
+        assert!(is_cut_short("preset-sounds.db.new-12") && !is_cut_short("preset-sounds.db"));
         assert!(mo_presets::export::is_half_written("A.bwcurve.mo-part-1-0"));
         assert!(!mo_presets::export::is_half_written("A.bwcurve.mo-part-1-x"));
         assert!(!mo_presets::export::is_half_written("A.bwcurve.mo-part-1"));

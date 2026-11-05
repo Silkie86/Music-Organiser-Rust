@@ -78,4 +78,6 @@ Rules 23 to 27 are Solomon's later rules in `docs/handover/memory/rust-rebuild-r
 - CI on a pull request only tests the crates it changes and clippy-checks the crates that use them
   (`tools/dev/ci_scope.py`); pushes to `main` check everything. Before an ultracode review, start a full run by hand
   (Actions, CI, Run workflow on `main`) and make sure it's green.
+- On a pull request the Mac job is advice only (Solomon, 2026-11-05): a PR may merge with Mac red or cancelled
+  (no runner) once every other check is green. On `main` Mac counts: a Mac failure there is fixed straight after.
 - Write for Solomon in plain words: Solomon is new to Rust.

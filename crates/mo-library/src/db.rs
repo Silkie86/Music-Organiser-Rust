@@ -25,6 +25,19 @@ pub enum LibraryError {
     Read(rusqlite::Error),
     /// A change ([`crate::folders`]) wasn't made: why. Nothing was changed.
     Write { path: PathBuf, why: String },
+    /// A setting holds something that isn't what it should be (a folder list that isn't a list of text): what's
+    /// wrong with it. Asked of where reading it as empty could let something of yours be removed.
+    Setting { key: String, why: String },
+    /// A change wasn't made because another app (the C# app saving a scan) held the library for longer than the wait.
+    /// Nothing was changed; trying again later can work.
+    Busy { path: PathBuf },
+}
+
+impl LibraryError {
+    /// Whether trying again in a moment could work: the library was busy.
+    pub fn is_busy(&self) -> bool {
+        matches!(self, LibraryError::Busy { .. })
+    }
 }
 
 impl fmt::Display for LibraryError {
@@ -33,6 +46,14 @@ impl fmt::Display for LibraryError {
             LibraryError::Open { path, why } => write!(f, "Couldn't open the library {}: {why}", path.display()),
             LibraryError::Read(e) => write!(f, "Couldn't read the library: {e}"),
             LibraryError::Write { path, why } => write!(f, "Couldn't change the library {}: {why}", path.display()),
+            LibraryError::Setting { key, why } => write!(f, "The library's {key} setting couldn't be read: {why}"),
+            LibraryError::Busy { path } => {
+                write!(
+                    f,
+                    "The library {} was busy (the old app may be saving a scan), so nothing was changed",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -111,7 +132,7 @@ pub struct Library {
     pub(crate) conn: Connection,
     path: PathBuf,
     /// The tables this library has: one made by an older C# app may lack some, which then read as empty.
-    tables: HashSet<String>,
+    pub(crate) tables: HashSet<String>,
     /// The list query, naming the columns this library has (all but the big `info`, which only the detail needs).
     summaries: String,
     /// The columns `projects` has: an older C# app's lacks some.
@@ -231,7 +252,26 @@ impl Library {
 
     /// Every save, the most recently written first.
     pub fn saves(&self) -> Result<Vec<Save>, LibraryError> {
-        self.summaries("", [])
+        self.saves_and_source().map(|(saves, _)| saves)
+    }
+
+    /// [`Library::saves`], and where they came from for the app's own library ("from the app's copy", or from
+    /// library.db and why: `mo_library::list_copy`), for the log; None for any other library.
+    pub fn saves_and_source(&self) -> Result<(Vec<Save>, Option<String>), LibraryError> {
+        // The app's own songs.db reads its list quickly: no copy of it is needed.
+        if self.has("project_info") {
+            return Ok((self.summaries("", [])?, Some("from songs.db".to_owned())));
+        }
+        // For the C# app's library, from the app's small copy of the list when the library hasn't changed since.
+        crate::list_copy::saves(
+            &self.path,
+            &self.summaries,
+            |each| self.summaries_each("", [], each),
+            |st| {
+                let cols = SaveColumns::of(st);
+                st.query_map([], |r| Ok(cols.save(r)))?.collect()
+            },
+        )
     }
 
     /// The save at this path (ignoring case, as the library does), if the library has it.
@@ -240,9 +280,22 @@ impl Library {
     }
 
     pub(crate) fn summaries<P: rusqlite::Params>(&self, filter: &str, args: P) -> Result<Vec<Save>, LibraryError> {
+        self.summaries_each(filter, args, &mut |_| {})
+    }
+
+    /// The saves the list query finds, newest first, handing `each` every row as it's read.
+    fn summaries_each<P: rusqlite::Params>(
+        &self,
+        filter: &str,
+        args: P,
+        each: &mut dyn FnMut(&Row<'_>),
+    ) -> Result<Vec<Save>, LibraryError> {
         let mut st = self.conn.prepare(&format!("{} {filter} ORDER BY p.mtime DESC", self.summaries))?;
         let cols = SaveColumns::of(&st);
-        let rows = st.query_map(args, |r| Ok(cols.save(r)))?;
+        let rows = st.query_map(args, |r| {
+            each(r);
+            Ok(cols.save(r))
+        })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -254,17 +307,30 @@ impl Library {
         let row = self
             .conn
             .query_row("SELECT * FROM projects WHERE id = ?1", [id], |r| {
-                let mut d = SaveDetail {
+                let d = SaveDetail {
                     title: text(r, "title"),
                     can_extract_midi: int(r, "can_midi") == Some(1),
                     can_extract_presets: int(r, "can_presets") == Some(1),
                     ..SaveDetail::default()
                 };
-                read_info(&text(r, "info"), &mut d);
-                Ok(d)
+                Ok((d, text(r, "info")))
             })
             .optional()?;
-        let Some(mut d) = row else { return Ok(None) };
+        let Some((mut d, info)) = row else { return Ok(None) };
+        // The app's own songs.db keeps them compressed in a table of their own ([`crate::songs_db`]). Ones that can't
+        // be uncompressed (a bad sector) read as none, as JSON that can't be read does.
+        let info = if self.has("project_info") {
+            let blob: Option<Vec<u8>> = self
+                .conn
+                .query_row("SELECT info FROM project_info WHERE project_id = ?1", [id], |r| r.get(0))
+                .optional()?;
+            blob.and_then(|b| crate::songs_db::inflate(&b).ok())
+                .map(|t| String::from_utf8_lossy(&t).into_owned())
+                .unwrap_or_default()
+        } else {
+            info
+        };
+        read_info(&info, &mut d);
         d.save = save;
         if self.has("plugins") {
             let mut st = self.conn.prepare("SELECT * FROM plugins WHERE project_id = ?1")?;
@@ -346,6 +412,41 @@ impl Library {
     pub fn list_setting(&self, key: &str) -> Result<Vec<String>, LibraryError> {
         let Some(json) = self.setting(key)? else { return Ok(Vec::new()) };
         Ok(serde_json::from_str::<Vec<String>>(&json).unwrap_or_default())
+    }
+
+    /// A setting's text, or `None` when it isn't set (or is NULL); a value that isn't text is an error, never no value.
+    pub fn strict_setting(&self, key: &str) -> Result<Option<String>, LibraryError> {
+        if !self.has("settings") {
+            return Ok(None);
+        }
+        let mut st = self.conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+        let mut rows = st.query([key])?;
+        let Some(r) = rows.next()? else { return Ok(None) };
+        match r.get_ref("value")? {
+            ValueRef::Null => Ok(None),
+            ValueRef::Text(t) => Ok(Some(String::from_utf8_lossy(t).into_owned())),
+            _ => Err(LibraryError::Setting { key: key.to_owned(), why: "it isn't text".to_owned() }),
+        }
+    }
+
+    /// A list setting, as [`Library::list_setting`], but one that isn't a list of text is an error rather than no
+    /// folders: for where an empty list would let something of yours be removed.
+    pub fn strict_list_setting(&self, key: &str) -> Result<Vec<String>, LibraryError> {
+        if self.has("settings") {
+            let mut st = self.conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+            let mut rows = st.query([key])?;
+            if let Some(r) = rows.next()? {
+                let bad = |why: String| LibraryError::Setting { key: key.to_owned(), why };
+                return match r.get_ref("value")? {
+                    ValueRef::Null => Ok(Vec::new()),
+                    ValueRef::Text(t) => serde_json::from_str::<Option<Vec<String>>>(&String::from_utf8_lossy(t))
+                        .map(Option::unwrap_or_default)
+                        .map_err(|e| bad(format!("it isn't a list of folders ({e})"))),
+                    _ => Err(bad("it isn't text".to_owned())),
+                };
+            }
+        }
+        Ok(Vec::new())
     }
 
     /// The project folders the app scans.

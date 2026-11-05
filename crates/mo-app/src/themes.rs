@@ -53,6 +53,16 @@ impl ThemeFont {
         }
     }
 
+    /// The family for page names and other big titles: Space Grotesk, the app's own title face, in every theme but
+    /// Terminal, whose mono type is the point of it. Titles stay the same however the words under them look, so every
+    /// page reads as the same app.
+    pub fn title_family(self) -> &'static str {
+        match self {
+            ThemeFont::Plex | ThemeFont::Space => "Space Grotesk",
+            ThemeFont::Mono => "IBM Plex Mono",
+        }
+    }
+
     /// The family for numbers, dates and times.
     pub fn number_family(self) -> &'static str {
         match self {
@@ -122,7 +132,7 @@ pub const THEMES: [Theme; 9] = [
     theme(
         "Graphite",
         "Neutral greys with a mint accent: no colour cast at all. The app's own look.",
-        [0x121212, 0x171717, 0x1D1D1D, 0x252525, 0x323232, 0x2A2A2A, 0xF0F0F0, 0xA3A3A3, 0x6E6E6E, 0x3DDC97, 0x06180F],
+        [0x121212, 0x171717, 0x1D1D1D, 0x252525, 0x323232, 0x2A2A2A, 0xF0F0F0, 0xA3A3A3, 0x7C7C7C, 0x3DDC97, 0x06180F],
         Plex,
         false,
         false,
@@ -204,6 +214,23 @@ pub const ACCENTS: [(&str, Option<u32>); 7] = [
     ("Pink", Some(0xF28CB1)),
 ];
 
+/// Each place's own colour, in rail order (`Place::ALL`): its icon on the rail and the mark beside its page's name,
+/// like the coloured strips on a mixing desk, so you can tell where you are at a glance. Only the place's mark wears
+/// it: what's picked, playing or working stays in the accent. Settings has none of its own (the theme's grey).
+/// Light themes get darker inks so they read on paper; Terminal gives every place its one phosphor green.
+pub fn place_colours(look: &Look) -> [u32; 8] {
+    let t = &look.theme;
+    if t.name == "Terminal" {
+        return [t.accent, t.accent, t.accent, t.accent, t.accent, t.accent, t.accent, t.muted];
+    }
+    if t.light {
+        // Songs, Sounds, Presets, MIDI, Plugins, Space, Backup, Settings.
+        [0xD2581F, 0x0E8FB0, 0x8A4FC8, 0xA88200, 0x4A5FD0, 0x4F9A22, 0xC2457E, t.muted]
+    } else {
+        [0xFF8F5E, 0x46C8E8, 0xC08CF0, 0xF0CF4F, 0x7F95FF, 0x8BD45A, 0xF07FB0, t.muted]
+    }
+}
+
 /// The look in use: a theme with the accent picked on top.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Look {
@@ -284,6 +311,26 @@ mod tests {
         assert_eq!(retro.with_font(Some("Inter")).theme.font, ThemeFont::Space);
         assert_eq!(retro.with_font(None).theme.font, ThemeFont::Space);
         assert_eq!(Look::from_settings(None, None).with_font(Some("Mono (all)")).theme.font, ThemeFont::Mono);
+    }
+
+    #[test]
+    fn every_place_has_a_colour_of_its_own() {
+        for theme in THEMES {
+            let look = Look { theme, accent: theme.accent, accent_text: theme.accent_text };
+            let colours = place_colours(&look);
+            assert_eq!(colours[7], theme.muted, "{}: Settings is the theme's grey", theme.name);
+            if theme.name == "Terminal" {
+                // Its own green, whatever accent is picked.
+                let pink = Look { theme, accent: 0xF28CB1, accent_text: 0 };
+                assert!(place_colours(&pink)[..7].iter().all(|c| *c == theme.accent));
+            } else {
+                for (i, c) in colours[..7].iter().enumerate() {
+                    assert!(colours[i + 1..7].iter().all(|d| d != c), "{}: two places share a colour", theme.name);
+                }
+            }
+        }
+        assert_eq!(ThemeFont::Plex.title_family(), "Space Grotesk");
+        assert_eq!(ThemeFont::Mono.title_family(), "IBM Plex Mono");
     }
 
     #[test]

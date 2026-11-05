@@ -1,6 +1,6 @@
 // Ctrl+K: one box, from anywhere, that jumps to a song, a sound, a page or an action. What it finds and every word on
 // it come from mo-app's `finder`; this only shows them and passes keys and clicks back.
-import { Theme, Type, Space, Caps, Groove, ListLine, Segmented, StudioButton } from "studio.slint";
+import { Theme, Type, Space, Caps, Groove, ListLine, Segmented, StudioButton, Icons } from "studio.slint";
 
 // One line of the list: a group's heading, a thing found, a "12 more songs" line or a quiet note.
 export struct FinderLine {
@@ -10,8 +10,9 @@ export struct FinderLine {
     detail: string,
     // An action's key, at the right like a menu line (rule 15).
     key: string,
-    // The kind's or place's icon, from Icons ("" for none).
+    // The kind's or place's icon, from Icons ("" for none), and that place (rail order, -1 for none) for its colour.
     icon: string,
+    place: int,
     // Whether it has a Play button (sounds) and an Open in its DAW button (songs), shown on the line itself.
     plays: bool,
     daw: bool,
@@ -63,7 +64,7 @@ export component Finder inherits Rectangle {
         }
     }
     card := Rectangle {
-        width: min(720px, root.width - 80px);
+        width: min(960px, root.width - 80px);
         x: (root.width - self.width) / 2;
         y: max(40px, root.height * 0.1);
         height: min(layout.preferred-height, root.height - self.y - 40px);
@@ -91,7 +92,7 @@ export component Finder inherits Rectangle {
                     y: (parent.height - self.height) / 2;
                     viewbox-width: 16;
                     viewbox-height: 16;
-                    commands: "M 11.5 6.5 A 5 5 0 1 1 1.5 6.5 A 5 5 0 1 1 11.5 6.5 M 10.2 10.2 L 14.5 14.5";
+                    commands: Icons.search;
                     stroke: Theme.muted;
                     stroke-width: 1.6px;
                 }
@@ -128,17 +129,21 @@ export component Finder inherits Rectangle {
                     }
                 }
             }
-            if FinderData.kinds.length > 2: HorizontalLayout {
-                padding-left: Space.sm;
-                Segmented {
+            // Every kind fits on a wide window; on a narrow one the row scrolls sideways inside the box, never past it.
+            if FinderData.kinds.length > 2: Flickable {
+                height: kinds.height;
+                content-width: kinds.width + 2 * Space.sm;
+                interactive: self.content-width > self.width;
+                kinds := Segmented {
+                    x: Space.sm;
                     choices: FinderData.kinds;
                     current: FinderData.kind;
+                    pad: Space.md;
                     picked(i) => {
                         FinderData.kind-picked(i);
                         input.focus();
                     }
                 }
-                Rectangle { }
             }
             Groove { }
             if FinderData.note != "": Text {
@@ -209,7 +214,8 @@ export component Finder inherits Rectangle {
                                         viewbox-width: 16;
                                         viewbox-height: 16;
                                         commands: line.icon;
-                                        stroke: FinderData.selected == i ? Theme.accent : Theme.muted;
+                                        // In its place's colour, as on the rail, so you see where it lives.
+                                        stroke: FinderData.selected == i ? Theme.place(line.place) : Theme.place(line.place).transparentize(35%);
                                         stroke-width: 1.4px;
                                     }
                                 }

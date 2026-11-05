@@ -27,6 +27,9 @@ pub enum How {
 /// Opens one of a page's things, by its id. Returns whether it could.
 type Opener = Rc<dyn Fn(&AppWindow, &Hit, How) -> bool>;
 
+/// Run each time the finder opens ([`when_opening`]).
+type Opening = Rc<dyn Fn(&AppWindow)>;
+
 #[derive(Default)]
 struct State {
     /// Every page's source, by the name it was added under, so a list read again replaces its old source.
@@ -57,6 +60,7 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::default();
     static OPENERS: RefCell<HashMap<Kind, Opener>> = RefCell::default();
     static WORKER: RefCell<Option<Newest<Ask>>> = const { RefCell::new(None) };
+    static OPENING: RefCell<Vec<Opening>> = RefCell::default();
 }
 
 /// Hands the finder a page's things, under a name of the page's own; handing them again under the same name replaces
@@ -75,6 +79,12 @@ pub fn add_source(app: &AppWindow, name: &'static str, source: Arc<dyn Source>) 
 /// Says how to open a page's things of one kind.
 pub fn on_open(kind: Kind, open: impl Fn(&AppWindow, &Hit, How) -> bool + 'static) {
     OPENERS.with(|o| o.borrow_mut().insert(kind, Rc::new(open)));
+}
+
+/// Runs `f` each time the finder opens, before it searches: to bring a source up to date (the actions of the page on
+/// show), or to start reading a page's list in the background so its things can be found before it's first visited.
+pub fn when_opening(f: impl Fn(&AppWindow) + 'static) {
+    OPENING.with(|o| o.borrow_mut().push(Rc::new(f)));
 }
 
 /// Searches on the window's thread from now on (the screenshots, which can't wait for the pool).
@@ -148,6 +158,10 @@ pub fn toggle(app: &AppWindow) {
     });
     data.set_query(SharedString::new());
     data.set_open(true);
+    let opening = OPENING.with(|o| o.borrow().clone());
+    for f in opening {
+        f(app);
+    }
     search(app);
 }
 
@@ -253,6 +267,7 @@ fn finder_line(app: &AppWindow, line: &Line) -> FinderLine {
             detail: h.detail.as_str().into(),
             key: h.key.as_str().into(),
             icon: icon(app, h),
+            place: place_of(h).map_or(-1, |p| p.index() as i32),
             plays: h.plays,
             daw: h.opens_in_daw,
         },
@@ -261,7 +276,12 @@ fn finder_line(app: &AppWindow, line: &Line) -> FinderLine {
 
 /// A thing's icon: its page's, from the shared style's Icons; none for an action.
 fn icon(app: &AppWindow, hit: &Hit) -> SharedString {
-    let place = match hit.kind {
+    place_of(hit).map(|p| crate::icon(app, p)).unwrap_or_default()
+}
+
+/// The place a thing lives on: its icon and colour are that place's.
+fn place_of(hit: &Hit) -> Option<mo_app::places::Place> {
+    match hit.kind {
         Kind::Song => Some(mo_app::places::Place::Songs),
         Kind::Sound => Some(mo_app::places::Place::Sounds),
         Kind::Preset => Some(mo_app::places::Place::Presets),
@@ -270,8 +290,7 @@ fn icon(app: &AppWindow, hit: &Hit) -> SharedString {
         Kind::Setting => Some(mo_app::places::Place::Settings),
         Kind::Page => finder::page_of(&hit.id).map(|(p, _)| p),
         Kind::Action => None,
-    };
-    place.map(|p| crate::icon(app, p)).unwrap_or_default()
+    }
 }
 
 /// Marks the picked line, scrolls it into view and says which keys work on it.

@@ -16,7 +16,7 @@ use mo_app::song_panel::Tab;
 use mo_app::themes::{Look, THEMES};
 use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
 use slint::platform::{Platform, WindowAdapter};
-use slint::{ComponentHandle, PhysicalSize, Rgb8Pixel};
+use slint::{ComponentHandle, Model, PhysicalSize, Rgb8Pixel};
 
 const WIDTH: u32 = 1440;
 const HEIGHT: u32 = 900;
@@ -62,6 +62,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::sounds::reading(&app);
     app.global::<mo_ui::SoundsData>().invoke_pick_view(2);
     let sounds_reading = capture(&window);
+    // Tiles picked before the sounds arrive: the page keeps a view picked while they're read.
+    app.global::<mo_ui::SoundsData>().invoke_pick_view(0);
     mo_ui::sounds::show(&app, sample_sounds(), None, Some("1"));
     mo_ui::sounds::index_known(&app, std::sync::Arc::new(sample_fingerprints()));
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.
@@ -86,15 +88,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     // The Space page, from made-up drives: it only reads the real ones when it's shown in the app.
     mo_ui::space::connect(&app, out.join("no library.db"), feed.clone());
-    mo_ui::space::show_sample(
-        &app,
-        sample_drives(),
-        sample_app_files(),
-        sample_bitwig_copies(),
-        Default::default(),
-        sample_old_copies(),
-        "",
-    );
+    mo_ui::space::show_sample(&app, sample_space(), "");
 
     let mut shots = Vec::new();
     for place in Place::ALL {
@@ -171,18 +165,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::plugins::show_sample(&app, plugins, massive, 0, &[]);
     capture(&window);
     shots.push(("plugins-missing.png".into(), capture(&window)));
+    // Kontakt 7's Clean up list: its sound library ticked, its presets waiting for a tick, one library kept.
+    mo_ui::plugins::show_sample(&app, sample_plugins().0, kontakt, 1, &[]);
+    mo_ui::plugins::show_clean_sample(
+        &app,
+        "Kontakt 7",
+        "Tick what to remove. Everything goes to the Recycle Bin, so you can still put it back.",
+        &[
+            (r"D:\Libraries\Kontakt Factory Library 2", "Sounds", "46.2 GB", "", true, true),
+            (
+                r"D:\Libraries\Choir Omnia",
+                "Sounds",
+                "3.10 GB",
+                "A project uses a sample in it (Choir Ah C3.wav).",
+                false,
+                false,
+            ),
+            (r"C:\Users\you\Documents\Native Instruments\Kontakt 7", "Presets and settings", "412 MB", "", true, false),
+        ],
+        "Frees 46.2 GB",
+    );
+    capture(&window);
+    shots.push(("plugins-clean-up.png".into(), capture(&window)));
+    // Kontakt 7's Uninstall card: its own uninstaller picked, the other version's left for you to pick.
+    mo_ui::plugins::show_card_sample(
+        &app,
+        "Uninstall Kontakt 7?",
+        "12 projects use it. They'll open with Kontakt 7 missing.",
+        "This runs its own uninstaller, the same one Windows Settings, Apps uses. It opens in its own window and may \
+         ask questions.",
+        &[
+            ("Native Instruments · 1.20 GB", "Native Instruments Kontakt 7", "", "", true, true),
+            ("Native Instruments · 1.31 GB", "Native Instruments Kontakt 8", "", "", true, false),
+        ],
+        "",
+        ("Uninstall", "Keep it"),
+    );
+    capture(&window);
+    shots.push(("plugins-uninstall.png".into(), capture(&window)));
     settings_shots(&app, &window, &graphite, &mut shots);
     // Space with the App files card open: what each part of the app's folder takes, and C: nearly full.
     app.set_place(Place::Space.index() as i32);
-    mo_ui::space::show_sample(
-        &app,
-        sample_drives(),
-        sample_app_files(),
-        sample_bitwig_copies(),
-        Default::default(),
-        sample_old_copies(),
-        mo_app::space::APP_FILES,
-    );
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space::APP_FILES);
     capture(&window);
     shots.push(("space-app-files.png".into(), capture(&window)));
     mo_ui::apply_look(&app, &Look::from_settings(Some("Paper"), None));
@@ -192,25 +216,131 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The Bitwig copies card: each project's copies of Library multisamples, biggest first, with Fix's ticks: one
     // project fixed with its other saves on show (one of them ticked), one that couldn't be fixed.
     let bitwig = mo_app::space_bitwig::BITWIG_COPIES;
-    let (copies, fixes) = (sample_bitwig_copies(), sample_fixes());
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), copies, fixes, sample_old_copies(), bitwig);
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { fixes: sample_fixes(), ..sample_space() }, bitwig);
     capture(&window);
     shots.push(("space-bitwig.png".into(), capture(&window)));
-    // The old copies card: what moving plugin folders to another drive left, biggest first, with one that can't go yet.
-    let (copies, old) = (sample_bitwig_copies(), sample_old_copies());
-    let old_copies = mo_app::space_old::OLD_COPIES;
-    mo_ui::space::show_sample(&app, sample_drives(), sample_app_files(), copies, Default::default(), old, old_copies);
+    // The old copies card: what moving plugin folders to another drive left, biggest first, with ticks: one that can't
+    // go yet, files a try kept aside that wait for your tick, and one with presets saved since its move, which stays
+    // until you look.
+    let old = mo_app::space_old::OLD_COPIES;
+    mo_ui::space::show_sample(&app, sample_space(), old);
     capture(&window);
-    shots.push(("space-old.png".into(), capture(&window)));
-    mo_ui::space::show_sample(
-        &app,
-        sample_drives(),
-        sample_app_files(),
-        sample_bitwig_copies(),
-        Default::default(),
-        sample_old_copies(),
-        "",
-    );
+    let top = capture(&window);
+    shots.push(("space-old.png".into(), top.clone()));
+    // The card turned down to its end: the one that can't go yet, the kept files with their tick off, and the one with
+    // presets saved since, with no tick.
+    shots.push(("space-old-down.png".into(), card_down(&window, &top, "space-old-down.png")?));
+    // While Remove compares the ticked ones with their copies (a big sound library takes a while): Stop, which leaves
+    // what isn't checked yet where it is.
+    let found = sample_old_copies();
+    let mut old_removing = mo_app::space_old::Removing::default();
+    old_removing.start(old_removing.ticked_copies(Some(&found)));
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { old_removing, ..sample_space() }, old);
+    capture(&window);
+    shots.push(("space-old-removing.png".into(), capture(&window)));
+    // After Remove: what was freed, each old copy in the Trash (the Recycle Bin on Windows) or why it stayed, and Put
+    // back.
+    let (old_removing, old_binned) = sample_old_removed(&sample_old_copies());
+    let kept = Some(sample_kept(old_binned.clone()));
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { old_removing, kept, ..sample_space() }, old);
+    capture(&window);
+    shots.push(("space-old-removed.png".into(), capture(&window)));
+    // The spare copies card: AAX copies (Pro Tools isn't installed) and VST2 copies whose VST3 your saves use, by
+    // format, with one that can't go.
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space_spare::SPARE_COPIES);
+    capture(&window);
+    let top = capture(&window);
+    shots.push(("space-spare.png".into(), top.clone()));
+    // The card turned down to its end: the VST2 copies, in two folders, each with its own, and the one that can't go
+    // (its last lines once couldn't be scrolled to).
+    shots.push(("space-spare-down.png".into(), card_down(&window, &top, "space-spare-down.png")?));
+    // One AAX copy unticked: its format's tick shows a dash, and Remove frees the rest.
+    let spare = mo_app::space_spare::SPARE_COPIES;
+    let mut removing = mo_app::space_spare::Removing::default();
+    removing.tick(&[PathBuf::from(SAMPLE_UNTICKED)], false);
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { removing, ..sample_space() }, spare);
+    capture(&window);
+    shots.push(("space-spare-ticks.png".into(), capture(&window)));
+    // After Remove: what was freed, each copy in the Trash (the Recycle Bin on Windows) or why it stayed, and Put back.
+    // The Recycle Bin line under Also taking room shows what the app put there.
+    let (removing, spare_binned) = sample_removed(&sample_spare_copies());
+    let removed = mo_ui::space::Sample { removing, kept: Some(sample_kept(spare_binned.clone())), ..sample_space() };
+    mo_ui::space::show_sample(&app, removed, spare);
+    capture(&window);
+    shots.push(("space-spare-removed.png".into(), capture(&window)));
+    // The songs card: identical saves, old autosaves and a Studio One cache, biggest first, each with the songs it's
+    // in; then audio no save seems to use, which isn't counted.
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space_songs::COMPACT);
+    capture(&window);
+    let top = capture(&window);
+    shots.push(("space-songs.png".into(), top.clone()));
+    shots.push(("space-songs-down.png".into(), card_down(&window, &top, "space-songs-down.png")?));
+    // Night Drive's old autosaves unticked: its line's tick is off, the old autosaves' tick shows a dash, and Remove
+    // frees the rest.
+    let compact = mo_app::space_songs::COMPACT;
+    let mut songs_removing = mo_app::space_songs::Removing::default();
+    songs_removing.tick(&sample_night_drive_autosaves(), false);
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { songs_removing, ..sample_space() }, compact);
+    capture(&window);
+    shots.push(("space-songs-ticks.png".into(), capture(&window)));
+    // While Remove measures the songs again and checks each ticked one: Stop, which leaves what hasn't gone yet where
+    // it is.
+    let shown = mo_app::space_songs::Shown::of(&sample_song_room(), chrono::Local::now().date_naive());
+    let mut songs_removing = mo_app::space_songs::Removing::default();
+    songs_removing.start(songs_removing.ticked_copies(Some(&shown)));
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { songs_removing, ..sample_space() }, compact);
+    capture(&window);
+    shots.push(("space-songs-removing.png".into(), capture(&window)));
+    // After Remove: what was freed, each song's old autosaves and the cache in the Trash (the Recycle Bin on Windows),
+    // two autosaves that are among their song's newest 5 now, which stayed, and Put back.
+    let (songs_removing, songs_binned) = sample_songs_removed(&shown);
+    let kept = Some(sample_kept(songs_binned.clone()));
+    mo_ui::space::show_sample(&app, mo_ui::space::Sample { songs_removing, kept, ..sample_space() }, compact);
+    capture(&window);
+    shots.push(("space-songs-removed.png".into(), capture(&window)));
+    // The Recycle Bin card: each clean-up still there, newest first, with its Put back: your songs' old autosaves and
+    // caches, the old copies, then the spare copies; the oldest one's put back left a copy behind, which says why.
+    let kept = sample_kept([spare_binned, old_binned, songs_binned].concat());
+    let mut put_backs = mo_app::space_bin::PutBacks::default();
+    let stuck = mo_space::clean::Problem {
+        path: kept.list[0].done.removed[0].path.clone(),
+        why: "It couldn't be put back; it's still in the Recycle Bin.".to_owned(),
+    };
+    put_backs.done(spare, kept.list[0].when, vec![stuck]);
+    let (removing, _) = sample_removed(&sample_spare_copies());
+    let (old_removing, _) = sample_old_removed(&sample_old_copies());
+    let (songs_removing, _) = sample_songs_removed(&shown);
+    let bin =
+        mo_ui::space::Sample { removing, old_removing, songs_removing, kept: Some(kept), put_backs, ..sample_space() };
+    mo_ui::space::show_sample(&app, bin, mo_app::space_bin::RECYCLE_BIN);
+    capture(&window);
+    shots.push(("space-bin.png".into(), capture(&window)));
+    // The older saves card: each song's saves from the middle of a sitting, with the days and what stays.
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space_songs::THIN);
+    capture(&window);
+    shots.push(("space-thin.png".into(), capture(&window)));
+    // The plugins no song has used lately: those never used, then those not in over 2 years, each with its link to its
+    // card on the Plugins page.
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space_plugins::UNUSED_PLUGINS);
+    let top = capture(&window);
+    shots.push(("space-plugins.png".into(), top.clone()));
+    shots.push(("space-plugins-down.png".into(), card_down(&window, &top, "space-plugins-down.png")?));
+    // The copies of the same sound in your sample folders, as information: the sounds whose copies take most first,
+    // each with its files, the one to keep first, one hidden in the app; then those with only a very similar copy.
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space_sounds::SOUND_COPIES);
+    let top = capture(&window);
+    shots.push(("space-copies.png".into(), top.clone()));
+    shots.push(("space-copies-down.png".into(), card_down(&window, &top, "space-copies-down.png")?));
+    // The page turned down to Also taking room: the app's own files, then the copies of the same sound.
+    mo_ui::space::show_sample(&app, sample_space(), "");
+    capture(&window);
+    scroll(&window, 700.0, 600.0, -10.0 * PAGE_DOWN);
+    hover(&window, -1.0, -1.0);
+    shots.push(("space-also.png".into(), capture(&window)));
+    scroll(&window, 700.0, 600.0, 10.0 * PAGE_DOWN);
+    hover(&window, -1.0, -1.0);
+    capture(&window);
+    mo_ui::space::show_sample(&app, sample_space(), "");
     presets_shots(&app, &window, &mut shots)?;
     app.set_place(Place::Songs.index() as i32);
     for theme in THEMES.iter().skip(1) {
@@ -232,26 +362,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("songs-filters.png".into(), after));
     songs.invoke_clear();
     // The narrowest window the app allows: a filter too long for a line of its own wraps inside, so every chip stays
-    // in sight. Saved here, at its own width.
-    window.set_size(PhysicalSize::new(NARROW, HEIGHT));
-    let narrow = capture(&window);
-    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
-    let row = WIDTH as usize * 3;
-    let narrow: Vec<u8> = narrow.chunks(row).flat_map(|line| &line[..NARROW as usize * 3]).copied().collect();
-    let path = out.join("songs-narrow.png");
-    image::save_buffer(&path, &narrow, NARROW, HEIGHT, image::ExtendedColorType::Rgb8)?;
-    println!("{}", path.display());
+    // in sight.
+    save_narrow(&window, &out, "songs-narrow.png")?;
     shots.push(("sounds-empty.png".into(), sounds_empty));
     shots.push(("sounds-reading.png".into(), sounds_reading));
     sounds_shots(&app, &window, &graphite, &mut shots)?;
+    // The Sounds filters in the narrowest window, every one in sight, and each view's own choices too. There the
+    // List, History and Rediscover lines take two lines each and the Kits pads put their names before their sounds',
+    // so every name has room.
+    app.set_place(Place::Sounds.index() as i32);
+    save_narrow(&window, &out, "sounds-narrow.png")?;
+    let sounds = app.global::<mo_ui::SoundsData>();
+    for (view, name) in [
+        (1, "sounds-list-narrow.png"),
+        (2, "sounds-galaxy-narrow.png"),
+        (3, "sounds-history-narrow.png"),
+        (4, "sounds-rediscover-narrow.png"),
+        (5, "sounds-kits-narrow.png"),
+    ] {
+        sounds.invoke_pick_view(view);
+        save_narrow(&window, &out, name)?;
+    }
+    sounds.invoke_pick_view(0);
+    app.set_place(Place::Songs.index() as i32);
 
     // The song panel, on the first song, on Overview and on Plugins.
     for tab in [Tab::Overview, Tab::Plugins, Tab::Saves] {
-        mo_ui::songs::show_picked(&app, 0, sample_detail(), tab);
-        mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
-        mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
+        show_song_panel(&app, 0, tab);
         shots.push((format!("song-panel-{}.png", slug(tab.name())), capture(&window)));
     }
+    // Each tab in the narrowest window, where the panel is at its narrowest: its rows wrap, so nothing runs past its
+    // edge. On Saves, each line's buttons only show with room for them and the save's name.
+    for tab in Tab::ALL {
+        show_song_panel(&app, 0, tab);
+        save_narrow(&window, &out, &format!("song-panel-{}-narrow.png", slug(tab.name())))?;
+    }
+    // There the panel is taller than the window, so it scrolls: the Overview turned down to its arrangement, which
+    // keeps the room it needs.
+    show_song_panel(&app, 0, Tab::Overview);
+    save_narrow_scrolled(&window, &out, "song-panel-overview-narrow-down.png", Some(NARROW_PANEL_WHEEL))?;
+    opens_at_top(&app, &window)?;
     // The arrangement: the mouse on a clip, zoomed in about the mouse, the Bitwig view, and in a light theme.
     app.global::<mo_ui::SongsData>().set_tab(Tab::Overview.index() as i32);
     let arrangement = app.global::<mo_ui::ArrangementData>();
@@ -306,8 +456,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_parts_gallery(false);
 
     // Activity cards: one going, one that can't say how far it is yet, one done and one failed, plus one put away.
-    let going = feed.start("Reading new FL saves", "");
-    going.progress(0.4, Some("212 of 540"));
+    // The one going has a title too long for a line, so its card must wrap it.
+    let going = feed.start(mo_app::space_bitwig::LOOKING, "");
+    going.progress(0.4, Some("148 of 371 projects"));
     let _starting = feed.start("Analysing sounds", "Getting ready");
     feed.start("Finding missing samples", "").done("All 31 found");
     feed.start("Copying Bitwig template", "").failed("The template folder isn't there any more");
@@ -319,9 +470,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_put_away(0);
 
     // Tooltips: the mouse resting on a rail line, the song panel's Show in folder button and a song's date.
-    mo_ui::songs::show_picked(&app, 0, sample_detail(), Tab::Overview);
-    mo_ui::arrangement::show_preview(&app, mo_ui::arrangement::sample_preview());
-    mo_ui::arrangement::show_peaks(&app, mo_ui::arrangement::sample_peaks());
+    show_song_panel(&app, 0, Tab::Overview);
     for (name, x, y) in [
         ("tip-rail.png", 60.0, 125.0),
         ("tip-button.png", SHOW_BUTTON.0, SHOW_BUTTON.1),
@@ -432,6 +581,14 @@ fn finder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     data.invoke_key("\t".into(), false, false);
     typed("full");
     shots.push(("finder-action.png".into(), capture(window)));
+    // Every kind again: a Settings tab found by what's on it, and the MIDI parts the MIDI page's sample has.
+    data.invoke_kind_picked(0);
+    let settings = std::sync::Arc::new(mo_app::finder::settings());
+    finder::add_source(app, "settings", settings);
+    typed("bass");
+    shots.push(("finder-midi.png".into(), capture(window)));
+    typed("theme");
+    shots.push(("finder-settings.png".into(), capture(window)));
     finder::close(app);
 }
 
@@ -445,9 +602,14 @@ fn sounds_shots(
 ) -> Result<(), String> {
     app.set_place(Place::Sounds.index() as i32);
     let data = app.global::<mo_ui::SoundsData>();
-    // The first tile's liked bar, saying why.
-    hover(window, 350.0, 330.0);
-    shots.push(("sounds-liked-tip.png".into(), capture_after(window, Duration::from_millis(750))));
+    // The first tile's liked bar, saying why (its note comes up a moment after the mouse stops on it).
+    hover(window, LIKED_BAR.0, LIKED_BAR.1);
+    let hovered = capture_after(window, Duration::from_millis(80));
+    let tip = capture_after(window, Duration::from_millis(750));
+    if tip == hovered {
+        return Err(format!("sounds-liked-tip.png: no tip came up at {}, {}", LIKED_BAR.0, LIKED_BAR.1));
+    }
+    shots.push(("sounds-liked-tip.png".into(), tip));
     hover(window, -1.0, -1.0);
     // Autoplay is on, so picking a sound plays it.
     data.invoke_select(6);
@@ -469,13 +631,27 @@ fn sounds_shots(
     data.set_search("".into());
     data.invoke_search_edited("".into());
     // Two types at once, with the Clear types chip.
-    data.invoke_pick_type(0);
-    data.invoke_pick_type(1);
-    shots.push(("sounds-types.png".into(), capture(window)));
-    data.invoke_pick_type(1);
-    data.invoke_pick("key".into(), "A minor".into());
+    let type_at = |i: usize| data.get_type_filter().chips.row_data(i).map(|c| c.text).unwrap_or_default();
+    let (first, second) = (type_at(0), type_at(1));
+    let before = capture(window);
+    data.invoke_toggle_choice("type".into(), first);
+    data.invoke_toggle_choice("type".into(), second.clone());
+    let after = capture(window);
+    if before == after {
+        return Err("sounds-types.png: picking two types changed nothing; are the type chips wired?".into());
+    }
+    shots.push(("sounds-types.png".into(), after));
+    // One type, a key and the keys that mix well with it, and two tempos.
+    data.invoke_toggle_choice("type".into(), second);
+    data.invoke_toggle_choice("key".into(), "A minor".into());
     data.invoke_toggle("mix-well".into());
-    shots.push(("sounds-filtered.png".into(), capture(window)));
+    data.invoke_toggle_choice("tempo".into(), "110 to 130".into());
+    data.invoke_toggle_choice("tempo".into(), "130 to 150".into());
+    let filtered = capture(window);
+    if filtered == before {
+        return Err("sounds-filtered.png: the key and tempo picks changed nothing".into());
+    }
+    shots.push(("sounds-filtered.png".into(), filtered));
     data.invoke_clear();
     // A tile dragged out to a DAW: dimmed while it's carried, with the card that follows the mouse a little way on
     // from it, then lit for a moment once it has landed.
@@ -559,6 +735,11 @@ fn sounds_shots(
     shots.push(("sounds-galaxy-mini.png".into(), capture(window)));
     data.invoke_pick_view(4);
     shots.push(("sounds-rediscover.png".into(), capture(window)));
+    // A forgotten folder clicked on Rediscover: the List shows its own sounds, with a chip saying which folder.
+    data.invoke_pick_folder(r"D:\Samples\Drums".into());
+    capture(window);
+    shots.push(("sounds-folder.png".into(), capture(window)));
+    data.invoke_toggle("folder".into());
     data.invoke_pick_view(5);
     data.invoke_kit_roll();
     data.invoke_pad_lock(0);
@@ -660,8 +841,504 @@ fn sample_bitwig_copies() -> mo_app::space_bitwig::Copies {
     }
 }
 
+/// The Space page's made-up finds: the drives, the app's files, Bitwig copies, old copies, spare plugin copies and
+/// what your songs could free.
+fn sample_space() -> mo_ui::space::Sample {
+    mo_ui::space::Sample {
+        drives: sample_drives(),
+        parts: sample_app_files(),
+        bitwig: sample_bitwig_copies(),
+        old: sample_old_copies(),
+        spare: sample_spare_copies(),
+        songs: sample_song_room(),
+        plugins: sample_unused_plugins(),
+        copies: sample_sound_copies(),
+        ..Default::default()
+    }
+}
+
+/// Made-up copies of the same sound, as the old app's duplicate finder found them, grouped by the Space page's own
+/// look: a pad with a 48 kHz copy and a trimmed one, a kick your songs use with an exact copy, one hidden in the app
+/// and an MP3, a vocal chop copied and renamed, a snare with only a very similar copy, and small hats.
+fn sample_sound_copies() -> mo_app::space_sounds::Found {
+    use std::collections::HashMap;
+
+    use mo_app::space_sounds::{Finds, look};
+    use mo_sounds::usage::Usage;
+    use mo_sounds::{Sound, SoundAnalysis, SoundMatch};
+    const KB: i64 = 1024;
+    let sound = |id: i64, path: &str, seconds: f64, rate: i32, peak_db: f64| {
+        let mut s = Sound::new(id, path);
+        s.analysis = Some(SoundAnalysis { seconds, sample_rate: rate, peak_db, ..SoundAnalysis::default() });
+        s
+    };
+    let matched = |a: i64, b: i64, kind: &str, apart: f64| SoundMatch {
+        a,
+        b,
+        kind: kind.to_owned(),
+        score: 0.9,
+        offset: 0.0,
+        apart: Some(apart),
+        typical: Some(apart),
+    };
+    let mut sounds = vec![
+        sound(1, r"D:\Samples\Drums\Kicks\Kick 808 Long.wav", 1.8, 44_100, -0.5),
+        sound(2, r"D:\Samples\Packs\Trap Essentials\Kicks\Kick 808 Long.wav", 1.8, 44_100, -0.5),
+        sound(4, r"D:\Downloads\Kick 808 Long.mp3", 1.82, 44_100, -0.5),
+        sound(5, r"D:\Samples\Pads\Warm Pad C.wav", 12.0, 44_100, -3.0),
+        sound(6, r"E:\Sample Packs\Ambient Worlds\Warm Pad C 48k.wav", 12.0, 48_000, -3.0),
+        sound(7, r"D:\Samples\Pads\Warm Pad C short.wav", 5.0, 44_100, -3.0),
+        sound(8, r"D:\Samples\Vocals\Vox Chop 03.wav", 0.9, 44_100, -1.0),
+        sound(9, r"D:\Samples\Vox\Vox Chop 03 copy.wav", 0.9, 44_100, -1.0),
+        sound(10, r"D:\Samples\Drums\Snares\Snare Tight.wav", 0.4, 44_100, -1.0),
+        sound(11, r"D:\Samples\Packs\Lo-Fi Kit\Snare Tight.wav", 0.4, 44_100, -7.0),
+    ];
+    let mut hidden = sound(3, r"E:\Old Backup\Samples\Kicks\Kick 808 Long.wav", 1.8, 44_100, -0.5);
+    hidden.hidden = true;
+    let mut finds = Finds {
+        matches: vec![
+            matched(1, 4, "Converted", 0.6),
+            matched(5, 6, "Converted", 0.05),
+            matched(5, 7, "Trimmed", 0.1),
+            matched(10, 11, "Converted", 0.9),
+        ],
+        exact: [(1, "A1"), (2, "A1"), (3, "A1"), (8, "B2"), (9, "B2")].map(|(id, hash)| (id, hash.to_owned())).into(),
+        sizes: HashMap::from([
+            (1, 310 * KB),
+            (2, 310 * KB),
+            (3, 310 * KB),
+            (4, 45 * KB),
+            (5, 4_140 * KB),
+            (6, 4_500 * KB),
+            (7, 1_720 * KB),
+            (8, 160 * KB),
+            (9, 160 * KB),
+            (10, 70 * KB),
+            (11, 70 * KB),
+        ]),
+        hidden: vec![hidden],
+    };
+    // Small hats, each with an exact copy in a pack you downloaded.
+    for n in 0..6 {
+        for (copy, folder) in [r"D:\Samples\Drums\Hats", r"E:\Downloads\Hat Pack"].into_iter().enumerate() {
+            let id = 100 + n * 2 + copy as i64;
+            sounds.push(sound(id, &format!(r"{folder}\Hat {:02}.wav", n + 1), 0.2, 44_100, -2.0));
+            finds.exact.push((id, format!("H{n}")));
+            finds.sizes.insert(id, 18 * KB);
+        }
+    }
+    let usage = HashMap::from([(1, Usage { projects: 4, ..Usage::default() })]);
+    look(&sounds, Some(&usage), &finds)
+}
+
+/// Made-up plugins no song has used lately, as the old app measured them: some never used, some not in over 2 years.
+fn sample_unused_plugins() -> mo_app::space_plugins::Found {
+    use mo_app::space_plugins::{Found, Measured};
+    use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
+    const MB: u64 = 1 << 20;
+    let at =
+        |year: i32, month: u32| chrono::NaiveDate::from_ymd_opt(year, month, 14).and_then(|d| d.and_hms_opt(20, 0, 0));
+    let plugin =
+        |name: &str, vendor: &str, used: Option<(chrono::NaiveDateTime, usize)>, held: &[(SpaceKind, &str, u64)]| {
+            Measured {
+                name: name.to_owned(),
+                vendor: vendor.to_owned(),
+                key: name.to_lowercase(),
+                own: String::new(),
+                last_used: used.map(|(t, _)| t),
+                songs: used.map_or(0, |(_, n)| n),
+                room: PluginSpace {
+                    key: name.to_lowercase(),
+                    name: name.to_owned(),
+                    vendor: vendor.to_owned(),
+                    folders: held
+                        .iter()
+                        .map(|(kind, path, mb)| SpaceFolder {
+                            path: (*path).to_owned(),
+                            kind: *kind,
+                            bytes: mb * MB,
+                            shared_with: Vec::new(),
+                            added: false,
+                        })
+                        .collect(),
+                },
+            }
+        };
+    let (program, presets, sounds) = (SpaceKind::Program, SpaceKind::Presets, SpaceKind::Sounds);
+    let mut plugins = vec![
+        plugin(
+            "Omnisphere",
+            "Spectrasonics",
+            at(2022, 3).map(|t| (t, 3)),
+            &[
+                (program, r"C:\Program Files\Common Files\VST3\Omnisphere.vst3", 85),
+                (presets, r"C:\ProgramData\Spectrasonics\Omnisphere\Settings Library", 120),
+                (sounds, r"I:\Spectrasonics\STEAM\Omnisphere", 39_100),
+            ],
+        ),
+        plugin(
+            "Kontakt 6",
+            "Native Instruments",
+            None,
+            &[
+                (program, r"C:\Program Files\Common Files\VST3\Kontakt.vst3", 410),
+                (sounds, r"I:\Kontakt Factory Library", 22_100),
+            ],
+        ),
+        plugin(
+            "Addictive Drums 2",
+            "XLN Audio",
+            at(2021, 8).map(|t| (t, 2)),
+            &[
+                (program, r"C:\Program Files\Common Files\VST3\Addictive Drums 2.vst3", 60),
+                (sounds, r"I:\XLN Audio\Addictive Drums 2", 10_040),
+            ],
+        ),
+        plugin(
+            "Trilian",
+            "Spectrasonics",
+            None,
+            &[
+                (program, r"C:\Program Files\Common Files\VST3\Trilian.vst3", 70),
+                (sounds, r"I:\Spectrasonics\STEAM\Trilian", 8_300),
+            ],
+        ),
+        plugin(
+            "Massive",
+            "Native Instruments",
+            at(2023, 6).map(|t| (t, 12)),
+            &[
+                (program, r"C:\Program Files\VSTPlugins\Massive.dll", 60),
+                (presets, r"C:\Users\Solomon\Documents\Native Instruments\Massive", 410),
+            ],
+        ),
+        plugin(
+            "Ozone 9",
+            "iZotope",
+            None,
+            &[
+                (program, r"C:\Program Files\Common Files\VST3\iZotope Ozone 9.vst3", 610),
+                (presets, r"C:\Users\Solomon\Documents\iZotope\Ozone 9", 40),
+            ],
+        ),
+        plugin(
+            "Sylenth1",
+            "LennarDigital",
+            at(2019, 11).map(|t| (t, 7)),
+            &[(program, r"C:\Program Files\VSTPlugins\Sylenth1.dll", 30)],
+        ),
+    ];
+    plugins.sort_by_key(|p| std::cmp::Reverse(p.bytes()));
+    let measured = chrono::NaiveDate::from_ymd_opt(2026, 11, 3).and_then(|d| d.and_hms_opt(9, 30, 0));
+    // Serum is used this year, so it isn't on the card.
+    let used = vec![plugin(
+        "Serum",
+        "Xfer Records",
+        at(2026, 10).map(|t| (t, 31)),
+        &[(program, r"C:\Program Files\Common Files\VST3\Serum.vst3", 30)],
+    )];
+    Found { plugins, used, years: 2, now: measured.unwrap_or_default(), sizes: true, measured, gone: 0 }
+}
+
+/// Made-up songs with room to free, written as on Windows: Bitwig songs with copies of a save, old auto-backups and
+/// saves from the middle of a sitting; FL Studio songs with old autosaves in their Backup folder and many saves in one
+/// sitting; a Studio One song's cache; and bounces no save names.
+fn sample_song_room() -> mo_app::space_songs::Found {
+    use mo_app::space_songs::{Found, SongRoom};
+    use mo_space::song::{CompactItem, CompactKind, CompactSettings, SongSpaceReport};
+    const MB: u64 = 1 << 20;
+    let at =
+        |day: u32, hour: u32| chrono::NaiveDate::from_ymd_opt(2026, 10, day).and_then(|d| d.and_hms_opt(hour, 12, 0));
+    let item = |kind: CompactKind, path: String, mb: u64, day: u32, hour: u32| CompactItem {
+        kind,
+        path,
+        bytes: mb * MB,
+        modified: at(day, hour),
+        same_as: None,
+    };
+    // `n` things of a kind in a folder, each made on one of `days` in turn.
+    let many = |folder: &str, name: &str, kind: CompactKind, n: u32, mb: u64, days: &[u32]| -> Vec<CompactItem> {
+        (0..n)
+            .map(|i| {
+                let day = days[i as usize % days.len()];
+                let path = match kind {
+                    CompactKind::Backup if name.ends_with(".flp") => {
+                        format!(
+                            r"{folder}\Backup\{} (overwritten at {:02}h{:02}).flp",
+                            &name[..name.len() - 4],
+                            20 + i % 4,
+                            i % 60
+                        )
+                    }
+                    CompactKind::Backup => format!(r"{folder}\auto-backups\{name} ({i}).bwproject"),
+                    _ => format!(
+                        r"{folder}\{name}_{}.{}",
+                        i + 2,
+                        if folder.contains("FL") { "flp" } else { "bwproject" }
+                    ),
+                };
+                item(kind, path, mb, day, 10 + i % 9)
+            })
+            .collect()
+    };
+    let song = |name: &str, opens: &str, saves: usize, items: Vec<CompactItem>| SongRoom {
+        name: name.to_owned(),
+        opens: opens.to_owned(),
+        saves,
+        report: SongSpaceReport { items, ..SongSpaceReport::default() },
+    };
+    let night = r"D:\Music\Projects\Night Drive";
+    let garage = r"D:\Music\Projects\GARAGE FOR BW 1";
+    let fl = r"D:\Music\Projects\FL";
+    let studio_one = r"D:\Music\Projects\Studio One\Tape Echo Idea";
+    let mut night_items = many(night, "Night Drive", CompactKind::SameSave, 3, 96, &[3]);
+    night_items.extend(many(night, "Night Drive", CompactKind::Backup, 12, 88, &[3, 4, 9]));
+    night_items.extend([
+        item(CompactKind::UnusedAudio, format!(r"{night}\Bounces\Night Drive bounce 3.wav"), 412, 9, 23),
+        item(CompactKind::UnusedAudio, format!(r"{night}\Recordings\Vox comp (old).wav"), 186, 4, 21),
+        item(CompactKind::UnusedAudio, format!(r"{night}\Recordings\Vox take 2.wav"), 92, 4, 21),
+    ]);
+    let mut garage_items = many(garage, "GARAGE FOR BW 1", CompactKind::Backup, 20, 21, &[12, 14]);
+    garage_items.extend(many(garage, "GARAGE FOR BW 1", CompactKind::SameSave, 2, 22, &[14]));
+    garage_items.extend(many(garage, "GARAGE FOR BW 1", CompactKind::ThinnedSave, 14, 22, &[3, 4, 9]));
+    let mut bounce_items = many(fl, "Bounce 2.flp", CompactKind::Backup, 31, 2, &[11]);
+    bounce_items.extend(many(fl, "Bounce 2", CompactKind::ThinnedSave, 31, 2, &[11]));
+    let didums_days: Vec<u32> = (2..=29).step_by(2).collect();
+    let didums_items = many(fl, "Didums", CompactKind::ThinnedSave, 46, 3, &didums_days);
+    let studio_items = vec![CompactItem {
+        kind: CompactKind::Cache,
+        path: format!(r"{studio_one}\Cache"),
+        bytes: 418 * MB,
+        modified: None,
+        same_as: None,
+    }];
+    let songs = vec![
+        song("Night Drive", &format!(r"{night}\Night Drive_7.bwproject"), 9, night_items),
+        song("GARAGE FOR BW 1", &format!(r"{garage}\GARAGE FOR BW 1_19.bwproject"), 19, garage_items),
+        song("Bounce 2", &format!(r"{fl}\Bounce 2_33.flp"), 33, bounce_items),
+        song("Didums", &format!(r"{fl}\Didums_77.flp"), 52, didums_items),
+        song("Tape Echo Idea", &format!(r"{studio_one}\Tape Echo Idea.song"), 3, studio_items),
+    ];
+    Found { songs, settings: CompactSettings::default() }
+}
+
+/// Where the made-up Night Drive's old autosaves are, as [`sample_song_room`] has them: unticked in the ticks shot.
+fn sample_night_drive_autosaves() -> Vec<PathBuf> {
+    let night = r"D:\Music\Projects\Night Drive";
+    (0..12).map(|i| PathBuf::from(format!(r"{night}\auto-backups\Night Drive ({i}).bwproject"))).collect()
+}
+
+/// What Remove did with the made-up songs' old autosaves and caches, at 16:00 on 4 Nov 2026 (UTC): everything ticked
+/// out of the box went, but two of GARAGE FOR BW 1's autosaves, which are among its newest 5 now (it was saved again
+/// since the look), stayed. Then what it put in the Recycle Bin.
+fn sample_songs_removed(
+    shown: &mo_app::space_songs::Shown,
+) -> (mo_app::space_songs::Removing, Vec<mo_app::binned::Binned>) {
+    use mo_app::binned::Binned;
+    use mo_space::clean::{Done, Problem, Removed, What};
+    const WHEN: i64 = 1_793_808_000;
+    let mut removing = mo_app::space_songs::Removing::default();
+    let picked = removing.ticked_copies(Some(shown));
+    removing.start(picked.clone());
+    let stays = |i: &&mo_app::space_songs::SongItem| {
+        &*i.song == "GARAGE FOR BW 1"
+            && (i.item.path.ends_with("(0).bwproject") || i.item.path.ends_with("(1).bwproject"))
+    };
+    let done = Done {
+        removed: picked
+            .iter()
+            .filter(|i| !stays(i))
+            .map(|i| Removed {
+                path: i.item.path.clone(),
+                real: i.item.path.clone(),
+                bytes: i.item.bytes,
+                what: What::Song(i.item.kind),
+                when: WHEN,
+                bin_id: Some(String::new()),
+                binned: None,
+                binned_zone: None,
+                stamp: None,
+            })
+            .collect(),
+        problems: picked
+            .iter()
+            .filter(stays)
+            .map(|i| Problem {
+                path: i.item.path.clone(),
+                why: "Measured again just now, it isn't one of its song's old autosaves any more, so it stays.".into(),
+            })
+            .collect(),
+        went_with: Vec::new(),
+    };
+    removing.sent(WHEN, done.clone());
+    let compact = mo_app::space_songs::COMPACT;
+    (removing, vec![Binned { kind: compact.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done } }])
+}
+
+/// Made-up spare plugin copies, written as on Windows, biggest first: AAX copies in Avid's folder (Pro Tools isn't
+/// installed), and VST2 copies in two folders whose VST3 or CLAP your saves use, one of them a link that can't go.
+fn sample_spare_copies() -> mo_app::space_spare::Found {
+    use mo_space::spare::{SpareCopy, Why};
+    const MB: u64 = 1 << 20;
+    let avid = r"C:\Program Files\Common Files\Avid\Audio\Plug-Ins";
+    let aax = |name: &str, mb: u64| SpareCopy {
+        name: name.to_owned(),
+        format: "AAX".to_owned(),
+        path: format!(r"{avid}\{name}.aaxplugin"),
+        bytes: mb * MB,
+        stamp: Some(String::new()),
+        why: Why::NoProTools,
+    };
+    let vst2 = |name: &str, file: &str, folder: &str, mb: u64, used: &[&str], saves: u32| SpareCopy {
+        name: name.to_owned(),
+        format: "VST2".to_owned(),
+        path: format!(r"{folder}\{file}"),
+        bytes: mb * MB,
+        stamp: Some(String::new()),
+        why: Why::OtherFormatsUsed {
+            used: used.iter().map(|u| (*u).to_owned()).collect(),
+            projects: saves,
+            used_copies: Vec::new(),
+        },
+    };
+    let plugins = r"C:\Program Files\VSTPlugins";
+    let steinberg = r"C:\Program Files\Steinberg\VSTPlugins";
+    let mut copies = vec![
+        aax("Kontakt 7", 212),
+        aax("Pigments", 148),
+        aax("Omnisphere", 64),
+        aax("Serum", 58),
+        aax("FabFilter Pro-Q 3", 31),
+        aax("Valhalla VintageVerb", 12),
+        vst2("Kontakt 7", "Kontakt 7.dll", plugins, 186, &["VST3"], 212),
+        vst2("Pigments", "Pigments.dll", steinberg, 139, &["VST3", "CLAP"], 64),
+        vst2("Serum", "Serum_x64.dll", plugins, 24, &["VST3"], 412),
+        SpareCopy { stamp: None, ..vst2("Diva", "Diva(x64).dll", steinberg, 21, &["VST3"], 37) },
+    ];
+    copies.sort_by_key(|c| std::cmp::Reverse(c.bytes));
+    mo_app::space_spare::Found { copies }
+}
+
+/// The made-up AAX copy unticked in the ticks shot.
+const SAMPLE_UNTICKED: &str = r"C:\Program Files\Common Files\Avid\Audio\Plug-Ins\FabFilter Pro-Q 3.aaxplugin";
+
+/// One made-up thing a clean-up sent to the Recycle Bin at `when`: a plugin's folder or file of `kind`.
+fn sample_binned(
+    path: &str,
+    bytes: u64,
+    kind: mo_space::plugin_space::SpaceKind,
+    when: i64,
+) -> mo_space::clean::Removed {
+    mo_space::clean::Removed {
+        path: path.to_owned(),
+        real: path.to_owned(),
+        bytes,
+        what: mo_space::clean::What::Plugin(kind),
+        when,
+        bin_id: Some(String::new()),
+        binned: None,
+        binned_zone: None,
+        stamp: None,
+    }
+}
+
+/// What the app keeps of what the made-up clean-ups in `list` (oldest first) put in the Recycle Bin, all of it on C:.
+fn sample_kept(list: Vec<mo_app::binned::Binned>) -> mo_app::binned::Kept {
+    use mo_app::binned::{Binned, Kept};
+    let items = list.iter().map(|b| b.done.removed.len()).sum();
+    let bytes = list.iter().map(Binned::bytes).sum();
+    let since = list.iter().map(|b| b.when).min();
+    let in_bin = mo_space::in_bin::InBin { items, bytes, since, drives: vec![("C:".to_owned(), bytes)], looked: true };
+    Kept { seq: 1, list, in_bin, noted: true }
+}
+
+/// What Remove did with the made-up spare copies, at 15:20 on 4 Nov 2026 (UTC): every copy that can go was ticked, and
+/// all went but Omnisphere's AAX copy, which changed since it was found. Then what it put in the Recycle Bin, with one
+/// copy an older removal sent the evening before, oldest first.
+fn sample_removed(found: &mo_app::space_spare::Found) -> (mo_app::space_spare::Removing, Vec<mo_app::binned::Binned>) {
+    use mo_app::binned::Binned;
+    use mo_space::clean::{Done, Problem};
+    use mo_space::plugin_space::SpaceKind;
+    const WHEN: i64 = 1_793_805_600;
+    const BEFORE: i64 = 1_793_743_500;
+    let mut removing = mo_app::space_spare::Removing::default();
+    let picked = removing.ticked_copies(Some(found));
+    removing.start(picked.clone());
+    let stays = |c: &&mo_space::spare::SpareCopy| c.name == "Omnisphere" && c.format == "AAX";
+    let done = Done {
+        removed: picked
+            .iter()
+            .filter(|c| !stays(c))
+            .map(|c| sample_binned(&c.path, c.bytes, SpaceKind::Program, WHEN))
+            .collect(),
+        problems: picked
+            .iter()
+            .filter(stays)
+            .map(|c| Problem {
+                path: c.path.clone(),
+                why: "It changed since it was found (an update?), so it stays.".into(),
+            })
+            .collect(),
+        went_with: Vec::new(),
+    };
+    removing.sent(WHEN, done.clone());
+    let older = Done {
+        removed: vec![sample_binned(
+            r"C:\Program Files\Steinberg\VSTPlugins\Massive.dll",
+            96 << 20,
+            SpaceKind::Program,
+            BEFORE,
+        )],
+        ..Done::default()
+    };
+    let spare = mo_app::space_spare::SPARE_COPIES;
+    let list = vec![
+        Binned { kind: spare.to_owned(), when: BEFORE, done: older },
+        Binned { kind: spare.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done } },
+    ];
+    (removing, list)
+}
+
+/// What Remove did with the made-up old copies, at 15:40 on 4 Nov 2026 (UTC): the ones ticked out of the box went, but
+/// Kontakt's factory library, which an instrument was saved into since the look, stayed. Then what it put in the
+/// Recycle Bin.
+fn sample_old_removed(found: &mo_app::space_old::Found) -> (mo_app::space_old::Removing, Vec<mo_app::binned::Binned>) {
+    use mo_app::binned::Binned;
+    use mo_space::clean::{Done, Problem};
+    use mo_space::old_copies::Leftover;
+    use mo_space::plugin_space::SpaceKind;
+    const WHEN: i64 = 1_793_806_800;
+    let mut removing = mo_app::space_old::Removing::default();
+    let picked = removing.ticked_copies(Some(found));
+    removing.start(picked.clone());
+    let stays = |l: &&Leftover| l.path.contains("Kontakt");
+    let done = Done {
+        removed: picked
+            .iter()
+            .filter(|l| !stays(l))
+            .map(|l| sample_binned(&l.path, l.bytes, SpaceKind::Sounds, WHEN))
+            .collect(),
+        problems: picked
+            .iter()
+            .filter(stays)
+            .map(|l| Problem {
+                path: l.path.clone(),
+                why: "Some of it is only in the old copy, newer there, or not the same as on the other drive: \
+                      Instruments\\My Grand.nki. It may have been saved while the move ran, deleted from the other \
+                      drive since, gone bad on the way, or open in a program now. Look before deleting it."
+                    .into(),
+            })
+            .collect(),
+        went_with: Vec::new(),
+    };
+    removing.sent(WHEN, done.clone());
+    let old = mo_app::space_old::OLD_COPIES;
+    (removing, vec![Binned { kind: old.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done } }])
+}
+
 /// Made-up old copies left after moving plugin folders to I:, written as on Windows, biggest first: two that can go,
-/// the old place of the folder the moved folders live in, and one that can't go yet.
+/// the old place of the folder the moved folders live in, one that can't go yet, files a try kept aside (nothing to
+/// check them against, so not ticked), and one with presets saved since the move (so it stays until you look).
 fn sample_old_copies() -> mo_app::space_old::Found {
     use mo_space::after_move::OldHome;
     use mo_space::old_copies::{Left, Leftover, Reminder};
@@ -674,9 +1351,18 @@ fn sample_old_copies() -> mo_app::space_old::Found {
         now_in: now_in.to_owned(),
         since: day.and_then(moved),
         stays: stays.map(str::to_owned),
+        only: stays.is_none().then(Vec::new),
     };
     let stays = "It's the only copy the plugin could use now (the link or the copy on the other drive isn't as the move \
                  left it), so it stays.";
+    let kept = OldHome {
+        path: r"I:\Plugin Data\Spitfire Audio (kept from before)".to_owned(),
+        bytes: 1_240 * MB,
+        note: "replaced by linking again".to_owned(),
+        copy: String::new(),
+        kind: 2,
+    };
+    let saved = [r"Diva.data\Presets\Diva\Bass\Sub Wobble.h2p", r"Diva.data\Presets\Diva\Pads\Night Pad.h2p"];
     let leftovers = vec![
         left(
             r"C:\Program Files\Common Files\Spitfire Audio (old copy)",
@@ -703,6 +1389,18 @@ fn sample_old_copies() -> mo_app::space_old::Found {
             Some(31),
             Some(stays),
         ),
+        Leftover { only: None, ..left(&kept.path, 1_240, Left::Kept(kept.clone()), "", None, None) },
+        Leftover {
+            only: Some(saved.map(str::to_owned).to_vec()),
+            ..left(
+                r"C:\Users\Public\Documents\u-he (old copy)",
+                717,
+                Left::OldCopy(3),
+                r"I:\Plugin Data\u-he",
+                Some(30),
+                None,
+            )
+        },
     ];
     let home = OldHome {
         path: r"C:\Plugin Data".to_owned(),
@@ -1120,9 +1818,17 @@ const REMOVE_OLDER_BUTTON: (f32, f32) = (1127.0, 820.0);
 /// The Presets page's Plugin chip: the first in its filter row, so the other chips' words don't move it.
 const PLUGIN_CHIP: (f32, f32) = (262.0, 156.0);
 const PAGE_DOWN: f32 = 300.0;
+
+/// Where the wheel turns the song panel down in the narrowest window, and by how much: on its status line, which
+/// doesn't scroll on its own, as the lists and the arrangement in it do.
+const NARROW_PANEL_WHEEL: (f32, f32, f32) = (760.0, 404.0, -2.0 * PAGE_DOWN);
 const OLDER_BUTTON: (f32, f32) = (1005.0, 368.0);
+/// Where the wheel turns the Space page's card down to its end, and by more than enough: on its list of parts.
+const SPACE_CARD_WHEEL: (f32, f32, f32) = (1240.0, 600.0, -10.0 * PAGE_DOWN);
 /// The Lock chip on the kit's second pad (Snare).
 const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
+/// The first tile's liked bar on Sounds, under the Order line and the three lines of filters.
+const LIKED_BAR: (f32, f32) = (350.0, 414.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
 const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 
@@ -1234,6 +1940,21 @@ fn scroll(window: &MinimalSoftwareWindow, x: f32, y: f32, dy: f32) {
     window.dispatch_event(slint::platform::WindowEvent::PointerScrolled { position, delta_x: 0.0, delta_y: dy });
 }
 
+/// The Space page's card turned down to its end (`top` is how it looked before; `name` names the shot), then back to its
+/// top for the shots that follow. Err when the wheel moved nothing: is it still on the card?
+fn card_down(window: &MinimalSoftwareWindow, top: &[u8], name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let (x, y, turn) = SPACE_CARD_WHEEL;
+    scroll(window, x, y, turn);
+    let down = capture(window);
+    hover(window, -1.0, -1.0);
+    scroll(window, x, y, -turn);
+    hover(window, -1.0, -1.0);
+    if down == top {
+        return Err(format!("{name}: the wheel at {x}, {y} moved nothing; is it still on the card?").into());
+    }
+    Ok(down)
+}
+
 /// A left click at a point in the window.
 fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
     let position = slint::LogicalPosition::new(x, y);
@@ -1282,6 +2003,84 @@ fn with_card(mut pixels: Vec<u8>, payload: &mo_app::drag_out::Payload, look: &Lo
         }
     }
     pixels
+}
+
+/// The song panel on the song at `row` of the sample library, on `tab`, with the sample arrangement in it.
+fn show_song_panel(app: &mo_ui::AppWindow, row: usize, tab: Tab) {
+    mo_ui::songs::show_picked(app, row, sample_detail(), tab);
+    mo_ui::arrangement::show_preview(app, mo_ui::arrangement::sample_preview());
+    mo_ui::arrangement::show_peaks(app, mo_ui::arrangement::sample_peaks());
+}
+
+/// In the narrowest window, another song picked while the song panel is turned down opens at its top, at the new
+/// song's name: the wheel turned back up there moves nothing. The first song is picked again after, as it was.
+fn opens_at_top(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), Box<dyn std::error::Error>> {
+    let (x, y, turn) = NARROW_PANEL_WHEEL;
+    window.set_size(PhysicalSize::new(NARROW, HEIGHT));
+    let top = capture(window);
+    scroll(window, x, y, turn);
+    let turned = capture(window);
+    show_song_panel(app, 1, Tab::Overview);
+    let picked = capture(window);
+    scroll(window, x, y, -turn);
+    let up = capture(window);
+    // The mouse moved away, as the wheel left it on whatever is there now (a button, whose tip would stay up).
+    hover(window, -1.0, -1.0);
+    show_song_panel(app, 0, Tab::Overview);
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    if turned == top {
+        return Err(
+            format!("song panel: the wheel at {x}, {y} moved nothing; does it still land on what scrolls?").into()
+        );
+    }
+    if up != picked {
+        return Err(
+            "song panel: another song picked while it was turned down kept its place; it should open at its top".into(),
+        );
+    }
+    Ok(())
+}
+
+/// The window at the narrowest the app allows, saved at that width as `name` in `out`; the window is set back after.
+fn save_narrow(
+    window: &MinimalSoftwareWindow,
+    out: &std::path::Path,
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    save_narrow_scrolled(window, out, name, None)
+}
+
+/// [`save_narrow`], with the mouse wheel first turned at a point of the narrow window when `wheel` says where and by
+/// how much (x, y, turn; a negative turn shows what's below), and turned back after, the mouse then moved away. It
+/// stops with an error if the turn moves nothing, so a point that no longer lands on what scrolls can't pass unseen.
+fn save_narrow_scrolled(
+    window: &MinimalSoftwareWindow,
+    out: &std::path::Path,
+    name: &str,
+    wheel: Option<(f32, f32, f32)>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    window.set_size(PhysicalSize::new(NARROW, HEIGHT));
+    let mut narrow = capture(window);
+    if let Some((x, y, turn)) = wheel {
+        scroll(window, x, y, turn);
+        let turned = capture(window);
+        scroll(window, x, y, -turn);
+        hover(window, -1.0, -1.0);
+        if turned == narrow {
+            window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+            return Err(
+                format!("{name}: the wheel at {x}, {y} moved nothing; does it still land on what scrolls?").into()
+            );
+        }
+        narrow = turned;
+    }
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    let row = WIDTH as usize * 3;
+    let narrow: Vec<u8> = narrow.chunks(row).flat_map(|line| &line[..NARROW as usize * 3]).copied().collect();
+    let path = out.join(name);
+    image::save_buffer(&path, &narrow, NARROW, HEIGHT, image::ExtendedColorType::Rgb8)?;
+    println!("{}", path.display());
+    Ok(())
 }
 
 fn capture(window: &MinimalSoftwareWindow) -> Vec<u8> {

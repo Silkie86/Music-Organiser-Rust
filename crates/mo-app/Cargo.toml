@@ -9,6 +9,8 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+# What the Space page's clean-ups put in the Recycle Bin, kept in a small file so Put back works after a restart.
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono.workspace = true
 # Catching a panic on purpose: a damaged file tripping a reader is a warning, not a crash.
@@ -28,6 +30,9 @@ mo-midi = { path = "../mo-midi" }
 mo-presets = { path = "../mo-presets" }
 mo-sounds = { path = "../mo-sounds" }
 mo-space = { path = "../mo-space" }
+# Moving the data folder: each copied file checked by its SHA-256, and the room on the new drive.
+sha2 = "0.10"
+fs4 = "1.1"
 thread-priority.workspace = true
 rayon.workspace = true
 tiny-skia.workspace = true
@@ -35,9 +40,14 @@ tiny-skia.workspace = true
 # brings it in.
 swash = "0.2"
 
-[dev-dependencies]
-# A small library made by the backup test.
+# The arrangement's waveforms, kept between runs (arrangement::peaks_store); also the backup test's small library.
 rusqlite = { version = "0.41", features = ["bundled"] }
+
+# Long work over a disk is put low in the system's memory (background::on_bulk_pool).
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
+
+[dev-dependencies]
 # The stand-in Bitwig, for the Send to Bitwig tests: no test reaches a real Bitwig (rule 11).
 mo-dawlink = { path = "../mo-dawlink", features = ["fake-bitwig"] }
 # The made-up Bitwig projects the Space Fix test writes (mo-formats' test projects pack a part with it).

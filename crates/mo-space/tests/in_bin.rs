@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use mo_space::clean::{Bin, Done, Problem, Removed, What};
-use mo_space::in_bin::{InBin, remind};
+use mo_space::in_bin::{InBin, remind, remind_held};
 use mo_space::plugin_space::SpaceKind;
 use mo_space::song::CompactKind;
 
@@ -46,6 +46,7 @@ fn removed(real: &str, bytes: u64, day: &str, bin_id: &str) -> Removed {
         bin_id: Some(bin_id.to_owned()),
         binned: Some(noon(day)),
         binned_zone: None,
+        stamp: None,
     }
 }
 
@@ -132,4 +133,19 @@ fn nothing_left_in_the_bin_is_nothing_to_remind_you_of() {
     assert!(emptied.is_empty() && emptied.looked);
     assert_eq!((emptied.title(), emptied.note()), (String::new(), String::new()));
     assert!(remind(&[], &MadeUpBin { holding: None }).is_empty());
+}
+
+#[test]
+fn a_look_already_made_is_used_as_it_is() {
+    let removed = [
+        removed(r"C:\Music\Song\Backup\Song 1.flp", MB, "2026-10-20", "a"),
+        removed(r"D:\Plugins\Kontakt Old", 2 * MB, "2026-11-03", "b"),
+    ];
+    // The same as looking in a bin that holds only the second.
+    let held = remind_held(&removed, Some(&[false, true]));
+    assert_eq!(held, remind(&[done(removed.to_vec())], &MadeUpBin { holding: Some(&["b"]) }));
+    assert_eq!((held.items, held.bytes, held.looked), (1, 2 * MB, true));
+    // A bin that couldn't be looked in: all of them.
+    let all = remind_held(&removed, None);
+    assert_eq!((all.items, all.bytes, all.looked), (2, 3 * MB, false));
 }
