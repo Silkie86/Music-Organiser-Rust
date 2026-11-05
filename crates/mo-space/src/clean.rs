@@ -701,12 +701,12 @@ pub const NOT_IN_BIN: &str = "It isn't in the Recycle Bin, so it may have been r
 
 /// What [`Bin::send`] says when Windows didn't put it in the Recycle Bin and didn't say why: it asked first and was
 /// told no, or something stopped it that the app can't see (with nobody to answer, Windows lets an error pass in
-/// silence, and says the same as for a no). A file a program has open, or one that needs administrator rights, is told
-/// apart from this (see [`why_kept`]). Also what's said when Windows did say why, and it was that: the question was
-/// cancelled, or its Recycle Bin couldn't take it (see [`bin_problem`]); that isn't looked into further.
+/// silence, and says the same as for a no). A file or folder a program has open, or one that needs administrator rights,
+/// is told apart from this (see [`why_kept`]). Also what's said when Windows did say why, and it was that: the question
+/// was cancelled, or its Recycle Bin couldn't take it (see [`bin_problem`]); that isn't looked into further.
 pub const KEPT_BY_YOU: &str = "It stays: Windows asked first and was told no, or couldn't move it.";
 
-/// What [`Bin::send`] says of a file a program is using.
+/// What [`Bin::send`] says of a file or folder a program is using.
 pub const IN_USE: &str = "A program is using it. Close your DAW and try again.";
 
 /// What [`Bin::send`] says when Windows said it moved something to the Recycle Bin but it's still there: a program is
@@ -1234,9 +1234,11 @@ fn bin_refuses(_real: &Path, _bytes: u64) -> Option<&'static str> {
     None
 }
 
-/// Windows: why a file Windows didn't move without saying why ([`KEPT_BY_YOU`]) stayed, when the file tells: a program
-/// has it open and won't let it be removed ([`IN_USE`]), or it needs administrator rights ([`NEEDS_ADMIN`]). It's
-/// only opened to see, asking for nothing but the right to remove it, and closed again; nothing in it changes.
+/// Windows: why a file or folder Windows didn't move without saying why ([`KEPT_BY_YOU`]) stayed, when it tells: a
+/// program has it open and won't let it be removed ([`IN_USE`]), or it needs administrator rights ([`NEEDS_ADMIN`]:
+/// a folder in Program Files, say, which then goes in the administrator step). It's only opened to see, asking for
+/// nothing but the right to remove it, and closed again; nothing in it changes. A folder only tells of itself: a file
+/// in use anywhere inside it doesn't show, so that one still counts as Windows having been told no.
 #[cfg(windows)]
 fn why_kept(path: &Path) -> Option<&'static str> {
     use std::os::windows::fs::OpenOptionsExt;
@@ -1244,14 +1246,25 @@ fn why_kept(path: &Path) -> Option<&'static str> {
     // it and won't let it be removed stops this.
     const DELETE: u32 = 0x0001_0000;
     const SHARE_ALL: u32 = 0x1 | 0x2 | 0x4;
-    // What Windows says of a file another program won't let go of, and of one this account may not remove.
+    // A folder can only be opened with this. It asks for no backup rights: the app is never given any.
+    const BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    // A link is opened itself, never followed (none gets this far: links never go to the bin).
+    const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    // What Windows says of something another program won't let go of, and of something this account may not remove.
     const SHARING_VIOLATION: i32 = 32;
     const ACCESS_DENIED: i32 = 5;
-    // A folder can't be told about this way (the file in use may be anywhere inside it).
-    if !fs::symlink_metadata(path).is_ok_and(|m| m.is_file()) {
-        return None;
-    }
-    match fs::OpenOptions::new().access_mode(DELETE).share_mode(SHARE_ALL).open(path) {
+    let kind = fs::symlink_metadata(path).ok()?;
+    let flags = match (kind.is_dir(), kind.is_file()) {
+        (true, _) => BACKUP_SEMANTICS,
+        (_, true) => 0,
+        _ => return None,
+    };
+    let opened = fs::OpenOptions::new()
+        .access_mode(DELETE)
+        .share_mode(SHARE_ALL)
+        .custom_flags(flags | OPEN_REPARSE_POINT)
+        .open(path);
+    match opened {
         Err(e) if e.raw_os_error() == Some(SHARING_VIOLATION) => Some(IN_USE),
         Err(e) if e.raw_os_error() == Some(ACCESS_DENIED) => Some(NEEDS_ADMIN),
         _ => None,
@@ -1264,9 +1277,9 @@ fn why_kept(_path: &Path) -> Option<&'static str> {
     None
 }
 
-/// What stopped `path` going to the Recycle Bin (`e`, from `trash`). When Windows didn't say why, the file may tell
-/// ([`why_kept`]); when it did (the question was cancelled, or its Recycle Bin couldn't take it), that stands, even if
-/// a program has the file open too.
+/// What stopped `path` going to the Recycle Bin (`e`, from `trash`). When Windows didn't say why, the file or folder may
+/// tell ([`why_kept`]); when it did (the question was cancelled, or its Recycle Bin couldn't take it), that stands, even
+/// if a program has it open too.
 fn problem_with(e: &trash::Error, path: &Path) -> String {
     let why = bin_problem(e);
     if why == KEPT_BY_YOU && matches!(e, trash::Error::Unknown { .. }) {
@@ -1878,10 +1891,62 @@ mod tests {
         drop(held);
         // Let go of: nothing tells why, so it counts as Windows having been told no.
         assert_eq!(why_kept(&file), None);
-        // A folder can't be told about this way.
-        assert_eq!(why_kept(&dir), None);
         assert!(file.exists(), "it was only looked at");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Windows: a folder tells too. One a program holds (as its working folder, say) is in use; one this account may
+    /// not remove (as in Program Files) needs administrator rights, so it goes in the administrator step rather than
+    /// staying as if Windows had been told no. The folder this account may not remove is made with icacls: removing
+    /// it, and making things in the folder it's in, are denied to everyone, which holds for administrators too. Only
+    /// opened to see: nothing is sent to the bin (rule 11).
+    #[cfg(windows)]
+    #[test]
+    fn a_folder_a_program_holds_or_windows_guards_is_told_apart() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use std::path::Path;
+        use std::process::Command;
+
+        use super::{problem_with, why_kept};
+        let dir = std::env::temp_dir().join(format!("mo-space-why-kept-folder-{}", std::process::id()));
+        let held = dir.join("held (old copy)");
+        std::fs::create_dir_all(&held).unwrap();
+        std::fs::write(held.join("plugin.dll"), b"x").unwrap();
+        let unknown = trash::Error::Unknown { description: "Some operations were aborted".to_owned() };
+        // Nothing tells why: it counts as Windows having been told no, as before.
+        assert_eq!(why_kept(&held), None);
+        assert_eq!(problem_with(&unknown, &held), KEPT_BY_YOU);
+        // Held as a program's working folder is: others may look in it, but not remove it.
+        let holding =
+            std::fs::OpenOptions::new().read(true).share_mode(0x1 | 0x2).custom_flags(0x0200_0000).open(&held).unwrap();
+        assert_eq!(why_kept(&held), Some(IN_USE));
+        assert_eq!(problem_with(&unknown, &held), IN_USE);
+        drop(holding);
+        // One this account may not remove: removing it is denied, and so is removing what's in the folder it's in.
+        let guarded = dir.join("guarded (old copy)");
+        std::fs::create_dir_all(&guarded).unwrap();
+        let icacls = |path: &Path, args: &[&str]| {
+            let ran = Command::new("icacls").arg(path).args(args).output().unwrap();
+            assert!(ran.status.success(), "icacls {args:?}: {}", String::from_utf8_lossy(&ran.stdout));
+        };
+        // Takes the denies off again, even when the test stops partway, so the folders can be removed.
+        struct Undeny<'a>([&'a Path; 2]);
+        impl Drop for Undeny<'_> {
+            fn drop(&mut self) {
+                for path in self.0 {
+                    let _ = Command::new("icacls").arg(path).args(["/remove:d", "*S-1-1-0"]).output();
+                }
+            }
+        }
+        let undeny = Undeny([&dir, &guarded]);
+        // Everyone (S-1-1-0): DE removes it, DC removes what's in a folder.
+        icacls(&guarded, &["/deny", "*S-1-1-0:(DE)"]);
+        icacls(&dir, &["/deny", "*S-1-1-0:(DC)"]);
+        let said = (why_kept(&guarded), problem_with(&unknown, &guarded));
+        drop(undeny);
+        assert_eq!(said, (Some(NEEDS_ADMIN), NEEDS_ADMIN.to_owned()));
+        assert!(held.join("plugin.dll").exists() && guarded.exists(), "they were only looked at");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
