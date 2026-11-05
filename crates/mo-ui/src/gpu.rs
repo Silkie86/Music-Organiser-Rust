@@ -110,11 +110,14 @@ fn find() -> Found {
     }
     // One interface at a time, the one the card is usually drawn with first: starting each of them wakes its own
     // drivers (on Windows, Vulkan's and DirectX 12's both), and that's most of the time a start waits for the card.
+    // The next is tried only when one has no card that draws, or only a built-in one (a laptop's discrete card may
+    // answer through the other).
     let tries: &[wgpu::Backends] =
         if cfg!(windows) { &[wgpu::Backends::VULKAN, wgpu::Backends::DX12] } else { &[wgpu::Backends::PRIMARY] };
     let mut steps: Vec<String> = Vec::new();
-    let mut found = Found::NoCard("no graphics interface answered".to_owned());
-    let mut card = None;
+    let mut why = "no graphics interface answered".to_owned();
+    let mut software = false;
+    let mut built_in: Option<Box<WGPUConfiguration>> = None;
     for &backends in tries {
         let mut asked = wgpu::InstanceDescriptor::new_without_display_handle();
         asked.backends = backends;
@@ -126,42 +129,61 @@ fn find() -> Found {
             wgpu::Backends::METAL => "Metal",
             _ => "wgpu",
         };
-        let began = Instant::now();
-        let instance = wgpu::Instance::new(asked);
-        let started = began.elapsed();
-        let options = wgpu::RequestAdapterOptions {
-            power_preference: wgpu::PowerPreference::HighPerformance,
-            ..Default::default()
-        };
-        let picked = wait(instance.request_adapter(&options));
-        steps.push(format!(
-            "{name} started in {} ms, a card picked in {} ms",
-            started.as_millis(),
-            (began.elapsed() - started).as_millis()
-        ));
-        match picked {
-            // A software card only when asked (`SLINT_WGPU_CPU`, as Slint itself takes it): the benches draw with one.
-            Ok(adapter)
-                if adapter.get_info().device_type != wgpu::DeviceType::Cpu
-                    || std::env::var_os("SLINT_WGPU_CPU").is_some() =>
-            {
-                card = Some((instance, adapter));
-                break;
+        match try_one(asked, name, &mut steps) {
+            Tried::Card(config, kind) if kind == wgpu::DeviceType::IntegratedGpu && built_in.is_none() => {
+                built_in = Some(config);
             }
-            Ok(_) => found = Found::Software,
-            // None of them (an old card, with only OpenGL): Slint looks, as it did before.
-            Err(e) => {
-                if !matches!(found, Found::Software) {
-                    found = Found::NoCard(e.to_string());
-                }
-            }
+            Tried::Card(config, _) => return Found::Card(config, steps.join("; ")),
+            Tried::Software => software = true,
+            Tried::Failed(e) => why = format!("{name}: {e}"),
         }
         // `WGPU_BACKEND` names the interfaces itself: every try would be the same one.
         if std::env::var_os("WGPU_BACKEND").is_some() {
             break;
         }
     }
-    let Some((instance, adapter)) = card else { return found };
+    match built_in {
+        Some(config) => Found::Card(config, steps.join("; ")),
+        None if software => Found::Software,
+        None => Found::NoCard(format!("{why} ({})", steps.join("; "))),
+    }
+}
+
+/// What one graphics interface gave.
+enum Tried {
+    /// A card and its device, ready for Slint, and what kind of card it is.
+    Card(Box<WGPUConfiguration>, wgpu::DeviceType),
+    /// Only a software card.
+    Software,
+    /// Nothing, and why.
+    Failed(String),
+}
+
+/// Starts one graphics interface (`asked`, called `name` in the log), picks its fastest card and makes its device,
+/// adding how long each took to `steps`.
+fn try_one(asked: wgpu::InstanceDescriptor, name: &str, steps: &mut Vec<String>) -> Tried {
+    let began = Instant::now();
+    let instance = wgpu::Instance::new(asked);
+    let started = began.elapsed();
+    let options =
+        wgpu::RequestAdapterOptions { power_preference: wgpu::PowerPreference::HighPerformance, ..Default::default() };
+    let picked = wait(instance.request_adapter(&options));
+    steps.push(format!(
+        "{name} started in {} ms, a card picked in {} ms",
+        started.as_millis(),
+        (began.elapsed() - started).as_millis()
+    ));
+    let adapter = match picked {
+        // A software card only when asked (`SLINT_WGPU_CPU`, as Slint itself takes it): the benches draw with one.
+        Ok(adapter)
+            if adapter.get_info().device_type != wgpu::DeviceType::Cpu
+                || std::env::var_os("SLINT_WGPU_CPU").is_some() =>
+        {
+            adapter
+        }
+        Ok(_) => return Tried::Software,
+        Err(e) => return Tried::Failed(e.to_string()),
+    };
     // What Slint itself asks for (its default settings): no extra features, and pictures as big as the screen.
     let settings = WGPUSettings::default();
     let wanted = wgpu::DeviceDescriptor {
@@ -177,9 +199,10 @@ fn find() -> Found {
     steps.push(format!("its device made in {} ms", began.elapsed().as_millis()));
     match made {
         Ok((device, queue)) => {
-            Found::Card(Box::new(WGPUConfiguration::Manual { instance, adapter, device, queue }), steps.join(", "))
+            let kind = adapter.get_info().device_type;
+            Tried::Card(Box::new(WGPUConfiguration::Manual { instance, adapter, device, queue }), kind)
         }
-        Err(e) => Found::NoCard(format!("the card wouldn't give a device ({e})")),
+        Err(e) => Tried::Failed(format!("the card wouldn't give a device ({e})")),
     }
 }
 

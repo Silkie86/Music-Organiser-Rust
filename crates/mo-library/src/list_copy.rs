@@ -55,25 +55,26 @@ pub(crate) fn saves(
     query: &str,
     read: impl FnOnce(&mut dyn FnMut(&Row<'_>)) -> Result<Vec<Save>, LibraryError>,
     from_copy: impl FnOnce(&mut Statement<'_>) -> rusqlite::Result<Vec<Save>>,
-) -> Result<Vec<Save>, LibraryError> {
-    let Some(copy) = copy_for(library) else { return read(&mut |_| {}) };
+) -> Result<(Vec<Save>, Option<String>), LibraryError> {
+    let Some(copy) = copy_for(library) else { return read(&mut |_| {}).map(|saves| (saves, None)) };
     let asked = Instant::now();
     let mut last = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
     // A copy made by a read that began after this was asked for is as new as a read now would be, even though the
     // library has changed again since (the C# app scanning): pages asking together share one read.
     let fresh = last.as_ref().filter(|(began, _)| *began >= asked).map(|(_, stamp)| stamp.clone());
     // Before the read: a write during it makes the files differ from this, so the copy made is read again next time.
-    let Some(stamp) = fresh.or_else(|| stamp_of(library)) else { return read(&mut |_| {}) };
+    let Some(stamp) = fresh.or_else(|| stamp_of(library)) else {
+        return read(&mut |_| {}).map(|saves| (saves, Some("from library.db, as it couldn't be looked at".into())));
+    };
     let why = match read_copy(copy, &stamp, query, from_copy) {
-        Ok(Ok(saves)) => {
-            said("from the app's copy");
-            return Ok(saves);
-        }
+        Ok(Ok(saves)) => return Ok((saves, Some("from the app's copy".to_owned()))),
         Ok(Err(why)) => why,
         Err(e) => format!("the copy couldn't be read ({e})"),
     };
     let began = Instant::now();
-    let Some(stamp) = stamp_of(library) else { return read(&mut |_| {}) };
+    let Some(stamp) = stamp_of(library) else {
+        return read(&mut |_| {}).map(|saves| (saves, Some("from library.db, as it couldn't be looked at".into())));
+    };
     let mut making = NewCopy::start(copy).map_err(|e| e.to_string());
     let saves = read(&mut |row| {
         // A row that can't be added (the disk is full) ends the copy, not the read.
@@ -83,40 +84,31 @@ pub(crate) fn saves(
             making = Err(e.to_string());
         }
     })?;
-    match making.and_then(|m| m.finish(copy, &stamp, query)) {
+    let source = match making.and_then(|m| m.finish(copy, &stamp, query)) {
         Ok(()) => {
             *last = Some((began, stamp));
-            said(&format!("from library.db, as {why}; a new copy was made"));
+            format!("from library.db, as {why}; a new copy was made")
         }
-        Err(e) => said(&format!("from library.db, as {why}; no new copy could be made ({e})")),
-    }
-    Ok(saves)
-}
-
-/// Where the last list of the app's library came from, and why, for the log (see [`last_read`]).
-static LAST_READ: Mutex<Option<String>> = Mutex::new(None);
-
-fn said(what: &str) {
-    if let Ok(mut last) = LAST_READ.lock() {
-        *last = Some(what.to_owned());
-    }
-}
-
-/// Where the last list of the app's library came from: "from the app's copy", or from `library.db` and why ("the
-/// library changed since the copy was made (library.db)"...), for the log line that says how long it took. None
-/// before the first list, or when there's no copy kept ([`keep`]).
-pub fn last_read() -> Option<String> {
-    LAST_READ.lock().ok().and_then(|l| l.clone())
+        Err(e) => format!("from library.db, as {why}; no new copy could be made ({e})"),
+    };
+    Ok((saves, Some(source)))
 }
 
 /// Why a copy made at `kept` doesn't fit the library as it is `now` ([`stamp_of`]): which of its files changed.
 fn what_changed(kept: &str, now: &str) -> String {
+    // As `stamp_of` lays it out: library.db's size and time, the -wal's, then the -wal's header.
     let (k, n): (Vec<&str>, Vec<&str>) = (kept.split(';').collect(), now.split(';').collect());
-    let names = ["library.db", "its -wal", "its -wal"];
-    let mut changed: Vec<&str> =
-        names.iter().enumerate().filter(|(i, _)| k.get(*i) != n.get(*i)).map(|(_, name)| *name).collect();
-    changed.dedup();
-    format!("the library changed since the copy was made ({})", changed.join(" and "))
+    if k.len() != 3 || n.len() != 3 {
+        return "the copy recorded the library another way".to_owned();
+    }
+    let main = k[0] != n[0];
+    let wal = k[1] != n[1] || k[2] != n[2];
+    let which = match (main, wal) {
+        (true, true) => "library.db and its -wal",
+        (true, false) => "library.db",
+        _ => "its -wal",
+    };
+    format!("the library changed since the copy was made ({which})")
 }
 
 /// The library's files as they are now: `library.db`'s and its `-wal`'s size and last-written time (to the
@@ -326,18 +318,18 @@ mod tests {
         drop(marked);
         assert!(lib.saves().unwrap().iter().any(|s| s.name == "from the copy"));
 
-        assert_eq!(last_read().as_deref(), Some("from the app's copy"));
+        assert_eq!(lib.saves_and_source().unwrap().1.as_deref(), Some("from the app's copy"));
 
         // A change to the library (here a rating, after the track details) is read from the library again.
         let writer = Connection::open(&path).unwrap();
         writer.execute("UPDATE projects SET rating = 2 WHERE id = 1", []).unwrap();
-        let after = lib.saves().unwrap();
+        let (after, source) = lib.saves_and_source().unwrap();
+        let source = source.unwrap_or_default();
+        assert!(source.starts_with("from library.db, as the library changed since the copy was made ("), "{source}");
+        assert!(source.ends_with("; a new copy was made"), "{source}");
         assert!(after.iter().all(|s| s.name != "from the copy"));
         assert_eq!(after.iter().find(|s| s.id == 1).map(|s| s.rating), Some(2));
-        assert_eq!(
-            last_read().as_deref(),
-            Some("from library.db, as the library changed since the copy was made (its -wal); a new copy was made")
-        );
+
         // And once more as the library has it, now from the new copy.
         assert_eq!(listed(&lib.saves().unwrap()), listed(&after));
         drop(writer);

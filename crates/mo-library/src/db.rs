@@ -252,6 +252,12 @@ impl Library {
 
     /// Every save, the most recently written first.
     pub fn saves(&self) -> Result<Vec<Save>, LibraryError> {
+        self.saves_and_source().map(|(saves, _)| saves)
+    }
+
+    /// [`Library::saves`], and where they came from for the app's own library ("from the app's copy", or from
+    /// library.db and why: `mo_library::list_copy`), for the log; None for any other library.
+    pub fn saves_and_source(&self) -> Result<(Vec<Save>, Option<String>), LibraryError> {
         // For the app's own library, from its small copy of the list when the library hasn't changed since.
         crate::list_copy::saves(
             &self.path,

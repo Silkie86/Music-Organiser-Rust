@@ -250,7 +250,7 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
                 songs.rows.len(),
                 songs.saves,
                 read_in.as_secs_f32(),
-                mo_library::list_copy::last_read().map(|from| format!(", {from}")).unwrap_or_default(),
+                live.source().map(|from| format!(", {from}")).unwrap_or_default(),
                 (began.elapsed() - read_in).as_secs_f32()
             ),
         );
