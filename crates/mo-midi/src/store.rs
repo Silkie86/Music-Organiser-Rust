@@ -75,7 +75,6 @@ const TABLES: &str = "
         chroma BLOB NOT NULL,           -- 12 bytes, the strongest 255
         features BLOB NOT NULL          -- 48 bytes, 0 to 1 as 0 to 255; the scale counts from the key
     );
-    CREATE INDEX IF NOT EXISTS ix_notes_hash ON notes(hash);
     CREATE TABLE IF NOT EXISTS note_data (
         notes INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
         data BLOB NOT NULL              -- NOTE_BYTES a note (encode_notes)
@@ -93,8 +92,6 @@ const TABLES: &str = "
         track_name TEXT NOT NULL,
         members TEXT                    -- PhraseMember::encode, for a phrase joined from clips
     );
-    CREATE INDEX IF NOT EXISTS ix_parts_file ON parts(file);
-    CREATE INDEX IF NOT EXISTS ix_parts_notes ON parts(notes);
     CREATE TABLE IF NOT EXISTS keys (
         notes INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
         version INTEGER NOT NULL,       -- keys::VERSION that read it; 0 not read yet
@@ -102,11 +99,18 @@ const TABLES: &str = "
         cut INTEGER NOT NULL,           -- 1 for a piece cut from a longer stretch, heard as a window
         fact BLOB                       -- mo-harmony's KeyFact (8 bytes); NULL for drums or no pitched notes
     );
-    CREATE INDEX IF NOT EXISTS ix_keys_version ON keys(version);
     -- NULL: back to the app's guess (which wins over the C# app's correction too).
     CREATE TABLE IF NOT EXISTS your_roles (hash TEXT PRIMARY KEY, role INTEGER) WITHOUT ROWID;
     CREATE TABLE IF NOT EXISTS your_octaves (hash TEXT PRIMARY KEY, octaves INTEGER) WITHOUT ROWID;
     CREATE TABLE IF NOT EXISTS about (name TEXT PRIMARY KEY, value) WITHOUT ROWID;
+";
+
+/// The tables' indexes: made after the rows when the index is copied into a new layout, so each is built once.
+const INDEXES: &str = "
+    CREATE INDEX IF NOT EXISTS ix_notes_hash ON notes(hash);
+    CREATE INDEX IF NOT EXISTS ix_parts_file ON parts(file);
+    CREATE INDEX IF NOT EXISTS ix_parts_notes ON parts(notes);
+    CREATE INDEX IF NOT EXISTS ix_keys_version ON keys(version);
 ";
 
 /// The tables' layout this app makes (`PRAGMA user_version`). 2: the notes in `note_data`, a table of their own (1 kept
@@ -122,7 +126,9 @@ const WAIT: Duration = Duration::from_secs(5);
 /// Room always left free on the index's disk when it's copied into a new layout.
 const SPARE_ROOM: u64 = 256 << 20;
 
-/// One copy into a new layout at a time in this app: the page and Ctrl+K can each read the index at once.
+/// One copy into a new layout at a time in this app (the page and Ctrl+K can each read the index at once), and no
+/// reader here opens the index while one is being made: a reader opened after the check that nothing has it open, and
+/// before the copy takes its name, would be left on the old file on a Mac or Linux.
 static BRINGING: Mutex<()> = Mutex::new(());
 
 /// How copying an index of an older layout into this one went ([`copy_to_layout`]).
@@ -144,6 +150,7 @@ enum Copied {
 fn copy_to_layout(path: &Path) -> Result<Copied, String> {
     let part = with_ending(path, &format!(".new-{}", std::process::id()));
     remove_with_sides(&part)?;
+    let _part = Part(part.clone());
     let Some(old) = path.to_str() else { return Err("its folder's name can't be handed to SQLite".into()) };
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
     if let Ok(free) = fs4::available_space(dir) {
@@ -162,29 +169,27 @@ fn copy_to_layout(path: &Path) -> Result<Copied, String> {
             )));
         }
     }
-    let counts = match fill_copy(&part, old) {
-        Ok(Some(counts)) => counts,
-        Ok(None) => {
-            let _ = remove_with_sides(&part);
-            return Ok(Copied::Already);
-        }
-        Err(why) => {
-            let _ = remove_with_sides(&part);
-            return Err(why);
-        }
-    };
+    let Some((notes, parts)) = fill_copy(&part, old)? else { return Ok(Copied::Already) };
     // The last connection to an index to close takes SQLite's files beside it away (once it has put what its log held
     // into the index), and the copy's was the last here: still there, something else has the index open.
     if ["-wal", "-shm"].iter().any(|end| with_ending(path, end).exists()) {
-        let _ = remove_with_sides(&part);
         return Ok(Copied::NotNow("another copy of the app has it open".into()));
     }
     // Windows doesn't let a file another program has open be replaced, so one opened since is never lost either.
     if let Err(e) = fs::rename(&part, path) {
-        let _ = remove_with_sides(&part);
         return Ok(Copied::NotNow(format!("the copy couldn't be given its name ({e})")));
     }
-    Ok(Copied::Done { notes: counts.0, parts: counts.1 })
+    Ok(Copied::Done { notes, parts })
+}
+
+/// The copy being made: removed, with SQLite's files beside it, on every way out (there's nothing left to remove once
+/// it has the index's name).
+struct Part(PathBuf);
+
+impl Drop for Part {
+    fn drop(&mut self) {
+        let _ = remove_with_sides(&self.0);
+    }
 }
 
 /// Fills the new file at `part` from the index at `old` in one read of it, checks it, and puts it on the disk: how many
@@ -222,6 +227,7 @@ fn fill_copy(part: &Path, old: &str) -> Result<Option<(i64, i64)>, String> {
         return Err("it has no files, notes or parts table".into());
     }
     copy_rows(&conn, &has).map_err(sql)?;
+    conn.execute_batch(INDEXES).map_err(sql)?;
     let counts = check_rows(&conn, &has).map_err(sql)??;
     conn.pragma_update(Some("main"), "user_version", LAYOUT).map_err(sql)?;
     conn.execute_batch("COMMIT").map_err(sql)?;
@@ -405,17 +411,26 @@ pub struct BroughtUp {
 
 /// Before the page reads the index at `path`: an index of an older layout is copied into this one's, and the
 /// corrections you made in the C# app are taken in from its `midi.db` beside it, once, so `midi.db` isn't opened again.
-/// One quick look, read-only, once both are done. Nothing to do while there's no index yet: the first reading of your
-/// MIDI makes it, and the next look takes the corrections in. Reads and writes files, so never on the window's thread.
+/// One quick look, read-only, once both are done (or there's no `midi.db`). Nothing to do while there's no index yet:
+/// the first reading of your MIDI makes it, and the next look takes the corrections in. Reads and writes files, so
+/// never on the window's thread.
 pub fn bring_up_to_date(path: &Path) -> BroughtUp {
     let mut up = BroughtUp::default();
     if !path.exists() {
         return up;
     }
     let _one = BRINGING.lock().unwrap_or_else(PoisonError::into_inner);
-    let took_in = match look(path) {
-        Ok((layout, took_in)) if layout == LAYOUT && took_in => return up,
-        Ok((_, took_in)) => took_in,
+    let midi_db = MidiIndex::path_beside(path);
+    // The old app's corrections are taken in from its midi.db, while there's one beside the index (it may come back,
+    // with the data folder put back from a backup): none there is nothing to do yet, not a "none to take in".
+    let take_in = match look(path) {
+        Ok((layout, took_in)) => {
+            let take_in = !took_in && midi_db.exists();
+            if layout == LAYOUT && !take_in {
+                return up;
+            }
+            take_in
+        }
         Err(e) => {
             up.later.push(format!("The MIDI index couldn't be read: {e}"));
             return up;
@@ -433,8 +448,8 @@ pub fn bring_up_to_date(path: &Path) -> BroughtUp {
         }
         Err(e) => {
             up.later.push(e.to_string());
-            if !took_in {
-                match old_corrections(&MidiIndex::path_beside(path)) {
+            if take_in {
+                match old_corrections(&midi_db) {
                     Ok((roles, octaves)) => (up.old_roles, up.old_octaves) = (roles, octaves),
                     Err(e) => up.later.push(format!(
                         "The old app's corrections couldn't be read from midi.db ({e}); they're tried again the next time"
@@ -444,8 +459,8 @@ pub fn bring_up_to_date(path: &Path) -> BroughtUp {
             return up;
         }
     };
-    if !took_in {
-        match old_corrections(&MidiIndex::path_beside(path)) {
+    if take_in {
+        match old_corrections(&midi_db) {
             Ok((roles, octaves)) => match store.take_in_old(&roles, &octaves) {
                 Ok((r, o)) => up.done.push(took_in_text(r, o, roles.len() + octaves.len() - r - o)),
                 Err(e) => {
@@ -468,9 +483,7 @@ pub fn bring_up_to_date(path: &Path) -> BroughtUp {
 /// as this app had its own for those notes.
 fn took_in_text(roles: usize, octaves: usize, kept: usize) -> String {
     if roles + octaves + kept == 0 {
-        return "No corrections from the old app to take in (midi.db has none, or isn't there); it isn't looked at \
-                again"
-            .to_owned();
+        return "The old app's midi.db has no corrections to take in; it isn't opened again".to_owned();
     }
     let n = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
     let mut line = format!(
@@ -507,11 +520,8 @@ fn look(path: &Path) -> Result<(i64, bool), MidiError> {
 /// Kinds and octave moves you gave parts, by note hash.
 type Corrections = (HashMap<String, Role>, HashMap<String, i32>);
 
-/// What you said about parts in the C# app, from its `midi.db` (read-only): none when there's no `midi.db`.
+/// What you said about parts in the C# app, from its `midi.db` (read-only).
 fn old_corrections(midi_db: &Path) -> Result<Corrections, MidiError> {
-    if !midi_db.exists() {
-        return Ok((HashMap::new(), HashMap::new()));
-    }
     let old = MidiIndex::open_read_only(midi_db)?;
     Ok((old.your_roles()?, old.your_octaves()?))
 }
@@ -607,7 +617,7 @@ fn open_for_writing(path: &Path) -> Result<(MidiStore, Option<(i64, i64)>), Midi
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         fs::create_dir_all(dir).map_err(|e| open_error(e.to_string()))?;
     }
-    let mut copied = None;
+    let (mut copied, mut tried) = (None, false);
     loop {
         let conn = Connection::open(path).map_err(|e| open_error(e.to_string()))?;
         conn.busy_timeout(WAIT).map_err(|e| open_error(e.to_string()))?;
@@ -628,15 +638,16 @@ fn open_for_writing(path: &Path) -> Result<(MidiStore, Option<(i64, i64)>), Midi
         if tables > 0 && layout < LAYOUT {
             // The copy reads it on a connection of its own, and needs this one closed.
             drop(conn);
-            if copied.is_some() {
+            if std::mem::replace(&mut tried, true) {
                 return Err(open_error("it's still of an older layout after being copied into this one".into()));
             }
             match copy_to_layout(path) {
                 Ok(Copied::Done { notes, parts }) => copied = Some((notes, parts)),
-                Ok(Copied::Already) => copied = Some((-1, -1)),
+                Ok(Copied::Already) => {}
                 Ok(Copied::NotNow(why)) => {
                     return Err(open_error(format!(
-                        "it's to be copied into this app's layout first, which can't be done just now ({why});                          it's tried again the next time"
+                        "it's to be copied into this app's layout first, which can't be done just now ({why}); \
+                         it's tried again the next time"
                     )));
                 }
                 Err(why) => {
@@ -650,11 +661,12 @@ fn open_for_writing(path: &Path) -> Result<(MidiStore, Option<(i64, i64)>), Midi
         conn.pragma_update(None, "application_id", APPLICATION_ID).map_err(|e| open_error(e.to_string()))?;
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
             .and_then(|()| conn.execute_batch(TABLES))
+            .and_then(|()| conn.execute_batch(INDEXES))
             // A new index: of this layout from the start.
             .and_then(|()| if layout == LAYOUT { Ok(()) } else { conn.pragma_update(None, "user_version", LAYOUT) })
             .map_err(|e| open_error(e.to_string()))?;
         let store = MidiStore { conn, path: path.to_owned(), has_keys: true, layout: LAYOUT };
-        return Ok((store, copied.filter(|&(notes, _)| notes >= 0)));
+        return Ok((store, copied));
     }
 }
 
@@ -676,7 +688,10 @@ impl MidiStore {
     pub fn open_read_only(path: &Path) -> Result<MidiStore, MidiError> {
         let open_error = |why: String| MidiError::Open { path: path.to_owned(), why };
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        // Not while it's being copied into a new layout here: opened once the copy has its name (or was let be).
+        let one = BRINGING.lock().unwrap_or_else(PoisonError::into_inner);
         let conn = Connection::open_with_flags(path, flags).map_err(|e| open_error(e.to_string()))?;
+        drop(one);
         conn.busy_timeout(Duration::from_secs(2)).map_err(|e| open_error(e.to_string()))?;
         conn.pragma_update(None, "query_only", true).map_err(|e| open_error(e.to_string()))?;
         // The list is sorted newest first: in memory, not in a file on the system's disk, with room to read it in
@@ -699,6 +714,12 @@ impl MidiStore {
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Whether it's of this app's layout. One of an older one is best not kept open between reads: it can't be
+    /// copied into this one while it's open.
+    pub fn is_current(&self) -> bool {
+        self.layout == LAYOUT
     }
 
     /// A way to stop this index's current read from another thread (a newer read is wanted, rule 12).
@@ -1021,7 +1042,7 @@ impl MidiStore {
 
     /// Takes in the corrections you made in the C# app (`roles`, `octaves`, by note hash), once: one already kept for
     /// the same notes wins (it was made in this app since), and the index notes that they're in, so the C# app's
-    /// `midi.db` isn't opened again. One transaction, each one read back before it's kept: how many kinds and octave
+    /// `midi.db` isn't opened again. One transaction, so they're all in, noted, or none: how many kinds and octave
     /// moves were taken in.
     pub fn take_in_old(
         &mut self,
@@ -1040,22 +1061,6 @@ impl MidiStore {
             }
             for (hash, o) in octaves {
                 took_octaves += octave.execute(params![hash, o])?;
-            }
-            let mut has_role = tx.prepare("SELECT COUNT(*) FROM your_roles WHERE hash = ?1")?;
-            let mut has_octave = tx.prepare("SELECT COUNT(*) FROM your_octaves WHERE hash = ?1")?;
-            let mut missing = 0;
-            for hash in roles.keys() {
-                missing += usize::from(has_role.query_row([hash], |r| r.get::<_, i64>(0))? != 1);
-            }
-            for hash in octaves.keys() {
-                missing += usize::from(has_octave.query_row([hash], |r| r.get::<_, i64>(0))? != 1);
-            }
-            if missing > 0 {
-                // Dropped unkept with the transaction.
-                return Err(MidiError::Open {
-                    path: self.path.clone(),
-                    why: format!("{missing} of the old app's corrections didn't read back"),
-                });
             }
             let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
             tx.execute(

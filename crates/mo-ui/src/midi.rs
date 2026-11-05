@@ -908,8 +908,9 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
     });
 }
 
-/// A part's notes, from wherever the index is; `open` keeps the index open for the next ask (and lets it go when a
-/// read fails, so the next ask opens it afresh: it may have been copied into a new layout since).
+/// A part's notes, from wherever the index is; `open` keeps the index open for the next ask. Not one of an older
+/// layout, which can't be copied into this app's while it's open (reading your MIDI copies it), nor one a read failed
+/// on: the next ask opens it afresh.
 fn notes_of(
     from: &NotesFrom,
     phrase_id: i64,
@@ -926,7 +927,7 @@ fn notes_of(
                 Some((_, store)) => store.notes(phrase_id, hash).map_err(|e| e.to_string()),
                 None => Ok(Vec::new()),
             };
-            if read.is_err() {
+            if read.is_err() || open.as_ref().is_some_and(|(_, store)| !store.is_current()) {
                 *open = None;
             }
             read?
@@ -1504,6 +1505,11 @@ mod tests {
         assert!(again.is_ok_and(|s| s.read == 0));
 
         let Ok(loaded) = load(&library) else { panic!("the Rust index should read") };
+        // The piano roll keeps the index open from one part to the next.
+        let mut open = None;
+        let (id, hash) = loaded.cat.entries.first().map(|e| (e.phrase.id, e.phrase.hash.clone())).unwrap_or_default();
+        assert!(notes_of(&loaded.notes, id, &hash, &mut open).is_ok_and(|n| n.len() == 15));
+        assert!(open.is_some());
         let Some(e) = loaded.cat.entries.first() else { panic!("the scale should be listed") };
         assert!(e.phrase.key_fact.is_some(), "the new key finder's reading comes with the part");
         // A scale alone can't say which of a pair is home: C major is named, alone or with A minor.
@@ -1512,6 +1518,23 @@ mod tests {
             "{}",
             page::key_text(e)
         );
+        drop(open);
+
+        // An index of an older layout (as one another copy of the app held open when it was to be copied) is read as
+        // it is, and not kept open between parts, so reading your MIDI can copy it.
+        let Ok(c) = rusqlite::Connection::open(MidiStore::path_beside(&library)) else {
+            panic!("the index should open")
+        };
+        let older = c.execute_batch(
+            "ALTER TABLE notes ADD COLUMN data BLOB NOT NULL DEFAULT x'';
+             UPDATE notes SET data = (SELECT d.data FROM note_data d WHERE d.notes = notes.id);
+             DROP TABLE note_data; PRAGMA user_version = 1;",
+        );
+        assert!(older.is_ok(), "{older:?}");
+        drop(c);
+        let mut open = None;
+        assert!(notes_of(&loaded.notes, id, &hash, &mut open).is_ok_and(|n| n.len() == 15));
+        assert!(open.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

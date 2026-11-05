@@ -178,8 +178,8 @@ fn an_index_of_the_older_layout_is_copied_into_this_one_with_every_row_kept() {
             && up.done[0].contains("2 sets of notes, 3 parts"),
         "{up:?}"
     );
-    // No midi.db: nothing to take in, and it isn't looked for again.
-    assert!(up.done[1].starts_with("No corrections from the old app to take in"), "{up:?}");
+    // No midi.db: nothing to take in yet.
+    assert_eq!(up.done.len(), 1, "{up:?}");
     assert!(up.old_roles.is_empty() && up.old_octaves.is_empty());
 
     assert_eq!(layout(&path), store::LAYOUT);
@@ -213,6 +213,11 @@ fn an_index_of_the_older_layout_is_copied_into_this_one_with_every_row_kept() {
     // Once done, nothing more to do.
     let again = bring_up_to_date(&path);
     assert!(again.done.is_empty() && again.later.is_empty(), "{again:?}");
+    // A midi.db that turns up (the data folder put back from a backup) is taken in then, once.
+    cs_midi_db(&dir, &[], &[]);
+    let late = bring_up_to_date(&path);
+    assert_eq!(late.done, ["The old app's midi.db has no corrections to take in; it isn't opened again"]);
+    assert!(bring_up_to_date(&path).done.is_empty());
 }
 
 #[test]
