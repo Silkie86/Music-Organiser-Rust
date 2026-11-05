@@ -250,6 +250,8 @@ export global SoundsData {
     in property <bool> kit-busy;
     // The kit is on its way to Bitwig.
     in property <bool> kit-sending;
+    // The kit is being copied into its folder.
+    in property <bool> kit-exporting;
     // "unused", "pack", "elektron", "mono" or "normalise", and whether each is on.
     callback kit-toggle(string);
     in property <bool> kit-unused;
@@ -1220,7 +1222,8 @@ export component SoundsPage inherits Rectangle {
             }
             StudioButton {
                 horizontal-stretch: 0;
-                text: "Export kit";
+                text: SoundsData.kit-exporting ? "Exporting…" : "Export kit";
+                enabled: !SoundsData.kit-exporting;
                 tip: "Copy the pads into a folder of their own, ready for a sampler";
                 clicked => { SoundsData.kit-export(); }
             }

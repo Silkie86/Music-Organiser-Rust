@@ -34,6 +34,12 @@ impl KitSlot {
             sound: None,
         }
     }
+
+    /// Kept as it is when the kit is rolled again: locked, with a sound on it. A locked empty pad has nothing to keep,
+    /// so a roll fills it, as the C# app's did.
+    pub fn kept(&self) -> bool {
+        self.locked && self.sound.is_some()
+    }
 }
 
 /// How to roll a kit.
@@ -102,8 +108,7 @@ pub fn roll(
     let clap = index.clap.as_ref().filter(|_| index.deep);
     let vibe = o.vibe.as_deref().filter(|_| clap.is_some());
     // A locked pad keeps its sound whatever has happened to it since (hidden, or gone in a rescan), as in C#.
-    let is_locked = |slot: &KitSlot| slot.locked && slot.sound.is_some();
-    let locked_ids: Vec<i64> = slots.iter().filter(|s| is_locked(s)).filter_map(|s| s.sound).collect();
+    let locked_ids: Vec<i64> = slots.iter().filter(|s| s.kept()).filter_map(|s| s.sound).collect();
     let locked_sound = |id: i64| sounds.iter().find(|s| s.id == id);
 
     // The pack everything should come from, when asked.
@@ -118,7 +123,7 @@ pub fn roll(
 
     let mut used = locked_ids;
     for slot in slots.iter_mut() {
-        if is_locked(slot) {
+        if slot.kept() {
             continue;
         }
         let candidates: Vec<(&Sound, Option<String>)> = sounds
