@@ -4,7 +4,7 @@
 use std::path::PathBuf;
 
 use chrono::NaiveDate;
-use mo_library::{Library, SampleUse, UsageRules};
+use mo_library::{Library, ProjectFile, SampleUse, UsageRules};
 use rusqlite::Connection;
 
 fn make(name: &str, unplayed: bool) -> PathBuf {
@@ -79,6 +79,23 @@ fn a_sample_muted_in_a_songs_newest_save_doesnt_count_for_that_song() {
     assert_eq!(by_name(&uses, "kick.wav"), (1, 1, vec![2024]));
     assert_eq!(by_name(&uses, "pad.wav"), (2, 1, vec![2020, 2024]));
     assert_eq!(by_name(&uses, "snare.wav").0, 1);
+}
+
+#[test]
+fn the_projects_counted_come_with_their_files() {
+    let lib = Library::open_read_only(&make("projects.db", true)).unwrap();
+    let got = lib.sample_usage_with_projects(since(), UsageRules::default()).unwrap();
+    assert_eq!(got.uses, lib.sample_usage(since(), UsageRules::default()).unwrap());
+    // Gone's file has gone, so it isn't counted, and isn't here either.
+    let mut ids: Vec<i64> = got.projects.keys().copied().collect();
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 2, 3]);
+    assert_eq!(got.projects[&3], ProjectFile { id: 3, path: r"C:\beats\Other.flp".into(), mtime: 1_717_200_000 });
+    // Each sample says which projects use it.
+    let kick = got.uses.iter().find(|u| u.path.to_lowercase().ends_with("kick.wav")).unwrap();
+    assert_eq!(kick.project_ids, [1, 2, 3]);
+    let pad = got.uses.iter().find(|u| u.path.to_lowercase().ends_with("pad.wav")).unwrap();
+    assert_eq!(pad.project_ids, [1, 3]);
 }
 
 #[test]

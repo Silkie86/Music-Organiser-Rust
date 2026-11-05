@@ -104,7 +104,7 @@ mod tests {
         let mut s = sound(1, "x.wav");
         s.favourite = true;
         s.activity = SoundActivity { plays: 2, older_plays: 4, drags: 1, older_drags: 0, sends: 0, older_sends: 2 };
-        let u = Usage { projects: 3, recent: 1, years: vec![] };
+        let u = Usage { projects: 3, recent: 1, ..Usage::default() };
         // Projects 5 * (1 + 2 * 0.5) + drags 3 * 1 + sends 3 * (2 * 0.5) + plays 1 * (2 + 4 * 0.5) + favourite 10.
         assert_eq!(LikedWeights::default().score(&s, Some(&u)), 10.0 + 3.0 + 3.0 + 4.0 + 10.0);
         assert_eq!(

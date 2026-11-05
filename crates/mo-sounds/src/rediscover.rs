@@ -45,6 +45,8 @@ impl Default for Options {
 pub struct Suggestion {
     pub id: i64,
     pub reason: String,
+    /// The sound the reason says it sounds like, by id, when it names one.
+    pub like: Option<i64>,
     pub score: f64,
 }
 
@@ -176,7 +178,8 @@ pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex
         .into_iter()
         .map(|i| {
             let (s, score, v) = &pool[i];
-            Suggestion { id: s.id, reason: reason(index, usage, s, v, &taste), score: round_to(*score, 3) }
+            let (reason, like) = reason(index, usage, s, v, &taste);
+            Suggestion { id: s.id, reason, like, score: round_to(*score, 3) }
         })
         .collect()
 }
@@ -202,8 +205,15 @@ fn centroid(index: &VectorIndex, items: &[(&Sound, f64)]) -> Vec<f32> {
     c
 }
 
-/// Why a sound was suggested: its own use first, then the liked sound it's most like (when it's like one).
-fn reason(index: &VectorIndex, usage: &HashMap<i64, Usage>, s: &Sound, v: &[f32], taste: &[(&Sound, f64)]) -> String {
+/// Why a sound was suggested: its own use first, then the liked sound it's most like (when it's like one), with that
+/// sound's id.
+fn reason(
+    index: &VectorIndex,
+    usage: &HashMap<i64, Usage>,
+    s: &Sound,
+    v: &[f32],
+    taste: &[(&Sound, f64)],
+) -> (String, Option<i64>) {
     let mut nearest: Option<(&Sound, f64)> = None;
     for (t, _) in taste {
         // Not itself: a starred sound you haven't used yet would be "like" itself (C# names it).
@@ -233,9 +243,9 @@ fn reason(index: &VectorIndex, usage: &HashMap<i64, Usage>, s: &Sound, v: &[f32]
         } else {
             "one you like".to_owned()
         };
-        return format!("{own}. Sounds like {}, {why}", n.name());
+        return (format!("{own}. Sounds like {}, {why}", n.name()), Some(n.id));
     }
-    format!("{own}, from {}", s.folder())
+    (format!("{own}, from {}", s.folder()), None)
 }
 
 /// Why [`suggest`] found nothing, in words for the page.
@@ -365,6 +375,8 @@ mod tests {
             "{}",
             s[0].reason
         );
+        // The one it names, for the card to list its projects.
+        assert_eq!(s[0].like, Some(1));
         // The same seed gives the same list.
         assert_eq!(s, suggest(&sounds, &usage, &index, &o));
     }

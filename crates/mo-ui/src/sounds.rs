@@ -45,8 +45,9 @@ use crate::filters::FilterModels;
 use crate::finder::How;
 use crate::{
     AlikeLine, AppWindow, CardAction, FolderLine, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, SoundsData,
-    TileRow, YearBar,
+    TileRow, UsedInLine, YearBar,
 };
+use mo_library::ProjectFile;
 
 /// The C# app's settings in `library.db` for the view shown last and autoplay, read (not written: it's read-only).
 const VIEW_KEY: &str = "sounds_view";
@@ -142,6 +143,9 @@ struct Page {
     re_busy: bool,
     /// The years Rediscover can dig in, from its newest answer.
     re_years: Vec<i32>,
+    /// The sound each one Rediscover dug out sounds like, by id, when its line names one: the card lists that one's
+    /// projects when none use it.
+    re_likes: HashMap<i64, i64>,
     /// The kit builder's pads and choices.
     kit: kit::Kit,
     /// The galaxy's map and the part of it on show.
@@ -186,6 +190,7 @@ impl Default for Page {
             re_started: false,
             re_busy: false,
             re_years: Vec::new(),
+            re_likes: HashMap::new(),
             kit: kit::Kit::default(),
             galaxy: galaxy::Galaxy::default(),
         }
@@ -654,20 +659,32 @@ impl Library {
         Library { types: list.type_counts(), tags: list.tags(), list: Arc::new(list), played, places: Arc::new(places) }
     }
 
-    /// The same library with how your songs use each sound (by sound id) counted in, for the screenshots.
-    pub fn with_usage(mut self, usage: HashMap<i64, Usage>, weights: &LikedWeights) -> Library {
-        self.list = Arc::new(with_usage(&self.list, usage, weights));
+    /// The same library with how your songs use each sound (by sound id) counted in, and the files of the projects
+    /// that use them (by id), for the screenshots.
+    pub fn with_usage(
+        mut self,
+        usage: HashMap<i64, Usage>,
+        projects: HashMap<i64, ProjectFile>,
+        weights: &LikedWeights,
+    ) -> Library {
+        self.list = Arc::new(with_usage(&self.list, usage, &Arc::new(projects), weights));
         self
     }
 }
 
-/// `list` again, sharing its sounds rather than copying them, with each sound's use in your songs and Most liked
-/// scored with it.
-fn with_usage(list: &SoundList, usage: HashMap<i64, Usage>, weights: &LikedWeights) -> SoundList {
+/// `list` again, sharing its sounds rather than copying them, with each sound's use in your songs (and the files of
+/// the projects that use them, shared) and Most liked scored with it.
+fn with_usage(
+    list: &SoundList,
+    usage: HashMap<i64, Usage>,
+    projects: &Arc<HashMap<i64, ProjectFile>>,
+    weights: &LikedWeights,
+) -> SoundList {
     background::on_pool(|| {
         let mut list = list.sharing();
         list.set_liked(|s| weights.score(s, usage.get(&s.id)));
         list.set_used(usage);
+        list.set_project_files(projects.clone());
         list
     })
 }
@@ -807,14 +824,16 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
     };
     send_index(prints, &send);
     let year_ago = now.checked_sub_months(chrono::Months::new(12)).unwrap_or(now);
-    // How your songs use samples, read once: counted again for the sounds read again after an update.
+    // How your songs use samples, with the file of each project counted (for the card's Used in list), read once:
+    // counted again for the sounds read again after an update.
     let uses = lib.and_then(|lib| {
-        lib.sample_usage(year_ago, settings.rules)
+        lib.sample_usage_with_projects(year_ago, settings.rules)
             .map_err(|e| log::warning("Sounds", &format!("Couldn't count how your songs use sounds: {e}")))
             .ok()
     });
-    if let Some(uses) = &uses {
-        send(Step::Used(Arc::new(with_usage(&list, usage_of(&list, uses), &settings.weights))));
+    let uses = uses.map(|u| (u.uses, Arc::new(u.projects)));
+    if let Some((uses, projects)) = &uses {
+        send(Step::Used(Arc::new(with_usage(&list, usage_of(&list, uses), projects, &settings.weights))));
     }
     if !first.behind && remade.is_none() {
         return;
@@ -853,8 +872,8 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
     });
     let analysed_now = mo_sounds::count_analysed(&sounds);
     let mut library = Library::new(sounds, played, &settings.weights);
-    if let Some(uses) = &uses {
-        library.list = Arc::new(with_usage(&library.list, usage_of(&library.list, uses), &settings.weights));
+    if let Some((uses, projects)) = &uses {
+        library.list = Arc::new(with_usage(&library.list, usage_of(&library.list, uses), projects, &settings.weights));
     }
     // Where each sound on show is in the new list, when they aren't the same sounds in the same order: worked out
     // here, off the window's thread, for the page to move what it holds by place (half a million sounds to look up).
@@ -1418,6 +1437,7 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         p.re_started = false;
         // The years come with Rediscover's first answer for these sounds.
         p.re_years.clear();
+        p.re_likes.clear();
         galaxy::forget(&mut p.galaxy);
         // An answer still on its way was for the old list: it's dropped.
         p.re_asked += 1;
@@ -1520,6 +1540,17 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     });
     let weak = app.as_weak();
     data.on_years_cleared(move || change(&weak, |f| f.years = None));
+    let weak = app.as_weak();
+    data.on_open_project(move |id| {
+        let Some(app) = weak.upgrade() else { return };
+        if id < 0 {
+            return;
+        }
+        crate::go_to(&app, Place::Songs.index() as i32);
+        if !crate::songs::show_save(&app, i64::from(id)) {
+            log::info("Sounds", "The song isn't on the Songs page yet (its list is still being read)");
+        }
+    });
     let weak = app.as_weak();
     data.on_clear(move || change(&weak, |f| *f = Filters { search: f.search.clone(), ..Filters::default() }));
     let weak = app.as_weak();
@@ -1691,6 +1722,8 @@ struct RediscoverAnswer {
     id: u64,
     /// Places in the list, with why, best first.
     found: Vec<(usize, String)>,
+    /// The sound each one sounds like, by id (keyed by the found one's id), when its line names one.
+    likes: HashMap<i64, i64>,
     /// Why nothing was found, when nothing was.
     why: String,
     folders: Vec<FolderUse>,
@@ -1707,16 +1740,17 @@ impl RediscoverAsk {
         let sounds = self.list.sounds();
         let o = &self.options;
         background::on_pool(|| {
-            let found: Vec<(usize, String)> = rediscover::suggest(sounds, usage, &self.index, o)
-                .into_iter()
-                .filter_map(|s| self.places.get(&s.id).map(|&i| (i, s.reason)))
-                .collect();
+            let suggested = rediscover::suggest(sounds, usage, &self.index, o);
+            let likes = suggested.iter().filter_map(|s| Some((s.id, s.like?))).collect();
+            let found: Vec<(usize, String)> =
+                suggested.into_iter().filter_map(|s| self.places.get(&s.id).map(|&i| (i, s.reason))).collect();
             let why = if found.is_empty() { rediscover::why_nothing(sounds, &self.index, o) } else { String::new() };
             let mut folders = rediscover::folders(sounds, usage);
             folders.truncate(FOLDERS);
             RediscoverAnswer {
                 id: self.id,
                 found,
+                likes,
                 why,
                 folders,
                 years: rediscover::years(sounds),
@@ -1795,6 +1829,7 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
         if p.re_asked != a.id {
             return None;
         }
+        p.re_likes = a.likes;
         p.re_busy = false;
         p.rediscover = a.found;
         p.re_years = a.years;
@@ -1803,6 +1838,13 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
     let Some((found, knows_use)) = fresh else { return };
     let data = app.global::<SoundsData>();
     data.set_re_busy(false);
+    // The picked sound's Used in list names the projects of the sound its line now says it sounds like.
+    PAGE.with(|p| {
+        let p = p.borrow();
+        if let Some(at) = p.picked {
+            data.set_picked(picked_sound(&p, at));
+        }
+    });
     let folders: Vec<FolderLine> = a
         .folders
         .iter()
@@ -2307,6 +2349,17 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
             value: if value.is_empty() { "–".into() } else { value.into() },
         })
         .collect();
+    let used = used_in(p, at);
+    let projects: Vec<UsedInLine> = used
+        .lines
+        .iter()
+        .map(|l| UsedInLine {
+            id: i32::try_from(l.id).unwrap_or(-1),
+            name: l.name.as_str().into(),
+            daw: l.daw.as_str().into(),
+            saved: l.saved.as_str().into(),
+        })
+        .collect();
     let type_from = match s.type_source.as_str() {
         "you" => "· you set this",
         "name" => "· from its name",
@@ -2327,7 +2380,23 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
         favourite: s.favourite,
         character: a.map(|a| a.character.join(", ")).unwrap_or_default().into(),
         liked_why: liked_why(p, at).into(),
+        projects: ModelRc::new(VecModel::from(projects)),
+        projects_title: used.title.into(),
+        projects_note: used.note.into(),
     }
+}
+
+/// The picked sound's Used in list: the projects that use it; or, for one Rediscover dug out that none use, those of
+/// the sound its line says it sounds like.
+fn used_in(p: &Page, at: usize) -> list::ProjectsCard {
+    let own = p.list.projects_of(at);
+    let like = p
+        .list
+        .sound(at)
+        .and_then(|s| p.re_likes.get(&s.id))
+        .and_then(|id| p.places.get(id))
+        .and_then(|&i| Some((p.list.sound(i)?.name(), p.list.projects_of(i)?)));
+    list::projects_card(own.as_deref(), like.as_ref().map(|(name, of)| (*name, of.as_slice())))
 }
 
 /// The arrow keys: across a row of tiles (-1, 1) or down and up the list (-2, 2), a row of tiles at a time.
@@ -3165,7 +3234,8 @@ mod tests {
     fn use_counts_change_most_liked_but_not_the_order() {
         let list = SoundList::new(vec![sound(1, "a.wav"), sound(2, "b.wav")]);
         let w = LikedWeights::default();
-        let used = with_usage(&list, HashMap::from([(2, Usage { projects: 3, recent: 3, years: vec![2026] })]), &w);
+        let usage = HashMap::from([(2, Usage { projects: 3, recent: 3, years: vec![2026], ..Usage::default() })]);
+        let used = with_usage(&list, usage, &Arc::default(), &w);
         assert_eq!(used.sounds().iter().map(|s| s.id).collect::<Vec<_>>(), vec![1, 2]);
         assert_eq!(used.used_in(0), Some(0));
         assert_eq!(used.used_in(1), Some(3));
@@ -3179,7 +3249,8 @@ mod tests {
             s.analysis = Some(mo_sounds::SoundAnalysis { seconds: 0.5, ..Default::default() });
         }
         let lib = Library::new(sounds, Vec::new(), &LikedWeights::default()).with_usage(
-            HashMap::from([(2, Usage { projects: 3, recent: 1, years: vec![2026] })]),
+            HashMap::from([(2, Usage { projects: 3, recent: 1, years: vec![2026], ..Usage::default() })]),
+            HashMap::new(),
             &LikedWeights::default(),
         );
         let features = (1..=6i64).map(|id| (id, (0..8).map(|d| ((id + d) % 3) as f32).collect())).collect();
@@ -3202,6 +3273,37 @@ mod tests {
             assert!(!reason.is_empty());
         }
         assert_eq!(a.folders.first().map(|f| (f.sounds, f.used)), Some((6, 1)));
+        // The one a line says it sounds like is the sound your projects use.
+        assert!(a.likes.values().all(|&like| like == 2), "{:?}", a.likes);
+    }
+
+    #[test]
+    fn a_card_lists_its_projects_or_those_of_the_sound_rediscover_says_it_sounds_like() {
+        let sounds = vec![sound(1, "Pack/Boom kick.wav"), sound(2, "Pack/New kick.wav")];
+        let file = ProjectFile { id: 5, path: r"K:\Projects\Night drive.flp".into(), mtime: 1_700_000_000 };
+        let lib = Library::new(sounds, Vec::new(), &LikedWeights::default()).with_usage(
+            HashMap::from([(1, Usage { projects: 1, project_ids: vec![5], ..Usage::default() })]),
+            HashMap::from([(5, file)]),
+            &LikedWeights::default(),
+        );
+        let mut p = Page { list: lib.list.clone(), places: lib.places.clone(), ..Page::default() };
+        // The first sound's own project, which opens on the Songs page by its save's id.
+        let card = picked_sound(&p, 0);
+        assert_eq!(card.projects_title, "Used in 1");
+        let line = card.projects.row_data(0).unwrap_or_default();
+        assert_eq!((line.id, line.name.as_str(), line.daw.as_str()), (5, "Night drive", "FL Studio"));
+        // The second, which no project uses: none, until Rediscover says it sounds like the first.
+        let card = picked_sound(&p, 1);
+        assert_eq!((card.projects_title.as_str(), card.projects.row_count()), ("Used in 0", 0));
+        p.re_likes = HashMap::from([(2, 1)]);
+        let card = picked_sound(&p, 1);
+        assert_eq!(card.projects_title, "Used in 0");
+        assert!(
+            card.projects_note.contains("Boom kick, which it sounds like, is in 1 project"),
+            "{}",
+            card.projects_note
+        );
+        assert_eq!(card.projects.row_count(), 1);
     }
 
     #[test]

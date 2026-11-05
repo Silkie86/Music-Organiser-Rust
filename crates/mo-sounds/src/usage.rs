@@ -21,19 +21,27 @@ pub struct Usage {
     pub recent: u32,
     /// The years those projects were saved in, oldest first (for the "Used in" filter).
     pub years: Vec<i32>,
+    /// The projects, by id, smallest first, each once (the card lists them).
+    pub project_ids: Vec<i64>,
 }
 
 impl Usage {
     fn add(&mut self, u: &SampleUse) {
         self.projects += u.projects;
         self.recent += u.recent;
-        if self.years.is_empty() {
-            self.years.clone_from(&u.years);
-        } else if !u.years.is_empty() {
-            self.years.extend(&u.years);
-            self.years.sort_unstable();
-            self.years.dedup();
-        }
+        merge(&mut self.years, &u.years);
+        merge(&mut self.project_ids, &u.project_ids);
+    }
+}
+
+/// Puts `more` into `sorted`, keeping it sorted with each once.
+fn merge<T: Ord + Copy>(sorted: &mut Vec<T>, more: &[T]) {
+    if sorted.is_empty() {
+        sorted.extend_from_slice(more);
+    } else if !more.is_empty() {
+        sorted.extend_from_slice(more);
+        sorted.sort_unstable();
+        sorted.dedup();
     }
 }
 
@@ -69,7 +77,9 @@ mod tests {
     use crate::test_support::sound;
 
     fn used(path: &str, projects: u32, recent: u32, years: &[i32]) -> SampleUse {
-        SampleUse { path: path.into(), projects, recent, years: years.to_vec() }
+        // Projects numbered from the first year they were saved in, one each.
+        let project_ids = (0..i64::from(projects)).map(|n| i64::from(years[0]) * 100 + n).collect();
+        SampleUse { path: path.into(), projects, recent, years: years.to_vec(), project_ids }
     }
 
     #[test]
@@ -92,8 +102,9 @@ mod tests {
             used("Kick 1.wav", 9, 9, &[2010]),
         ];
         let u = usage(&sounds, &uses);
-        assert_eq!(u[&1], Usage { projects: 2, recent: 1, years: vec![2024, 2025] });
-        assert_eq!(u[&2], Usage { projects: 2, recent: 1, years: vec![2019, 2025] });
+        assert_eq!(u[&1], Usage { projects: 2, recent: 1, years: vec![2024, 2025], project_ids: vec![202400, 202401] });
+        // Which projects too, from both paths.
+        assert_eq!(u[&2], Usage { projects: 2, recent: 1, years: vec![2019, 2025], project_ids: vec![201900, 202500] });
         assert!(!u.contains_key(&3) && !u.contains_key(&4) && !u.contains_key(&5));
     }
 }

@@ -486,8 +486,19 @@ impl Library {
     /// Z); projects whose file has gone don't count. `rules` leave out saves that hold a sample without playing it
     /// (Settings, Sounds).
     pub fn sample_usage(&self, recent_since: NaiveDateTime, rules: UsageRules) -> Result<Vec<SampleUse>, LibraryError> {
+        Ok(self.sample_usage_with_projects(recent_since, rules)?.uses)
+    }
+
+    /// [`Library::sample_usage`], with the file of each project counted and when it was last saved, read in the same
+    /// pass (its path is beside the date the count reads already): the Sounds card names the projects a sound is
+    /// used in.
+    pub fn sample_usage_with_projects(
+        &self,
+        recent_since: NaiveDateTime,
+        rules: UsageRules,
+    ) -> Result<SampleUsage, LibraryError> {
         if !self.has("samples") {
-            return Ok(Vec::new());
+            return Ok(SampleUsage::default());
         }
         // A time the clocks skipped (the hour lost in spring) is read as the hour after; one they went through twice,
         // as the first.
@@ -527,11 +538,10 @@ impl Library {
         // One way of counting whatever the rules: grouped ignoring case, in the order each path first appears, each
         // project once.
         let mut st = self.conn.prepare(&format!(
-            "SELECT s.path, s.project_id, p.mtime FROM samples s JOIN projects p ON p.id = s.project_id
-             WHERE {present} AND (?1 = 0 OR {unplayed} <> 1)"
+            "SELECT s.path, s.project_id, p.mtime, p.path AS project_path FROM samples s
+             JOIN projects p ON p.id = s.project_id WHERE {present} AND (?1 = 0 OR {unplayed} <> 1)"
         ))?;
-        let rows =
-            st.query_map([notes], |r| Ok((text(r, "path"), int(r, "project_id").unwrap_or(0), int(r, "mtime"))))?;
+        let mut rows = st.query([notes])?;
         struct Group {
             path: String,
             projects: HashSet<i64>,
@@ -540,8 +550,9 @@ impl Library {
         }
         let mut order: Vec<String> = Vec::new();
         let mut groups: HashMap<String, Group> = HashMap::new();
-        for row in rows {
-            let (path, project, mtime) = row?;
+        let mut projects: HashMap<i64, ProjectFile> = HashMap::new();
+        while let Some(r) = rows.next()? {
+            let (path, project, mtime) = (text(r, "path"), int(r, "project_id").unwrap_or(0), int(r, "mtime"));
             if !muted.is_empty() {
                 let save = *newest.get(&project).unwrap_or(&project);
                 if muted.contains(&(save, case::to_lower(&path))) {
@@ -564,22 +575,51 @@ impl Library {
                     group.years.push(t.year());
                 }
             }
+            // The project's file, the first time it's met.
+            projects.entry(project).or_insert_with(|| ProjectFile {
+                id: project,
+                path: text(r, "project_path"),
+                mtime: mtime.unwrap_or(0),
+            });
         }
-        Ok(order
+        let uses = order
             .into_iter()
             .filter_map(|key| groups.remove(&key))
             .map(|mut g| {
                 g.years.sort_unstable();
                 g.years.dedup();
+                let mut project_ids: Vec<i64> = g.projects.into_iter().collect();
+                project_ids.sort_unstable();
                 SampleUse {
                     path: g.path,
-                    projects: u32::try_from(g.projects.len()).unwrap_or(u32::MAX),
+                    projects: u32::try_from(project_ids.len()).unwrap_or(u32::MAX),
                     recent: g.recent,
                     years: g.years,
+                    project_ids,
                 }
             })
-            .collect())
+            .collect();
+        Ok(SampleUsage { uses, projects })
     }
+}
+
+/// How your projects use samples, from [`Library::sample_usage_with_projects`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct SampleUsage {
+    /// Each sample path's use, as [`Library::sample_usage`] gives it.
+    pub uses: Vec<SampleUse>,
+    /// The file of each project counted there, by id.
+    pub projects: HashMap<i64, ProjectFile>,
+}
+
+/// A project's file, as [`Library::sample_usage_with_projects`] gives it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectFile {
+    /// The save's id in the library (the Songs page opens it by that).
+    pub id: i64,
+    pub path: String,
+    /// When it was last saved, as the scan saw it: Unix seconds.
+    pub mtime: i64,
 }
 
 /// Which saves count as using a sample (Settings, Sounds), for the DAWs whose reader can tell (FL Studio so far).
@@ -601,6 +641,8 @@ pub struct SampleUse {
     pub recent: u32,
     /// The years those projects were last saved in, oldest first.
     pub years: Vec<i32>,
+    /// The projects themselves, by id, smallest first.
+    pub project_ids: Vec<i64>,
 }
 
 /// The C# app's list query: each save's own columns (as many as this library has, leaving out `info`) with its
