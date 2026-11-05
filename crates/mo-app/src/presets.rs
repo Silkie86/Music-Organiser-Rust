@@ -199,6 +199,8 @@ pub struct Item {
     words: String,
     /// A preset file's path in lower case, which the list sorts the files by, worked out once; "" for a song's sound.
     file_key: String,
+    /// The plugin's format, worked out once.
+    pub format: Format,
 }
 
 impl Item {
@@ -209,7 +211,8 @@ impl Item {
             Source::File { path } => path.to_lowercase(),
             Source::Song { .. } => String::new(),
         };
-        Item { row, song, year, words, file_key }
+        let format = Format::of(&row);
+        Item { row, song, year, words, file_key, format }
     }
 
     /// Your part for the line with `fixes` laid over it: a fix made since the line was read wins.
@@ -288,7 +291,7 @@ impl From {
     pub fn label(self) -> &'static str {
         match self {
             From::All => "",
-            From::Songs => "In my songs",
+            From::Songs => "My songs",
             From::Files => "Preset files",
         }
     }
@@ -351,17 +354,56 @@ fn toggle_one<T: Copy + Default + PartialEq>(
     *value = picked.first().copied().unwrap_or_default();
 }
 
-/// The maker chip's words. A song's sounds come from FL Studio and Bitwig, so "the DAW's own" covers both.
-pub fn maker_label(m: Maker) -> &'static str {
-    match m {
-        Maker::All => "",
-        Maker::ThirdParty => "Third-party",
-        Maker::Native => "The DAW's own",
-    }
+/// The plugin's format (Solomon's note, 5 Nov 2026: "filter by plugin type", which he said is the format). A sound's format comes from the file it exports as; one of the DAW's own plugins (FL Studio's, Bitwig's
+/// devices) is Native whatever its file.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Format {
+    Vst2,
+    Vst3,
+    Clap,
+    Au,
+    Native,
+    /// A format the file doesn't say (a Bitwig preset of a plugin, say).
+    #[default]
+    Other,
 }
 
-pub fn maker_from(l: &str) -> Maker {
-    [Maker::ThirdParty, Maker::Native].into_iter().find(|m| maker_label(*m) == l).unwrap_or_default()
+impl Format {
+    /// In the order the chips show them.
+    pub const ALL: [Format; 6] = [Format::Vst2, Format::Vst3, Format::Clap, Format::Au, Format::Native, Format::Other];
+
+    pub fn of(row: &PresetRow) -> Format {
+        if row.native {
+            return Format::Native;
+        }
+        let ext = row.extension.trim_start_matches('.').to_ascii_lowercase();
+        match ext.as_str() {
+            "fxp" | "fxb" => Format::Vst2,
+            "vstpreset" | "vst3state" => Format::Vst3,
+            "aupreset" => Format::Au,
+            e if e.starts_with("clap") => Format::Clap,
+            _ => Format::Other,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Format::Vst2 => "VST2",
+            Format::Vst3 => "VST3",
+            Format::Clap => "CLAP",
+            Format::Au => "AU",
+            Format::Native => "Native",
+            Format::Other => "Other",
+        }
+    }
+
+    fn from_label(l: &str) -> Option<Format> {
+        Format::ALL.into_iter().find(|f| f.label().eq_ignore_ascii_case(l))
+    }
+
+    fn index(self) -> usize {
+        Format::ALL.iter().position(|f| *f == self).unwrap_or(0)
+    }
 }
 
 pub fn type_label(t: Type) -> &'static str {
@@ -384,6 +426,8 @@ pub struct Filters {
     /// Only these parts' sounds (any of them); every part when none is picked. Never holds [`PartPick::Any`].
     pub parts: Vec<PartPick>,
     pub from: From,
+    /// Only these formats' sounds (any of them); every format when none is picked.
+    pub formats: Vec<Format>,
     /// Only these plugins' sounds (any of them), as the list names them; every plugin when none is picked.
     pub plugins: Vec<String>,
     /// Only one song's sounds (a song's Presets tab), by its save's path.
@@ -399,6 +443,7 @@ impl Filters {
     /// an option, not a filter.
     pub fn any(&self) -> bool {
         self.choice != Choice::default()
+            || !self.formats.is_empty()
             || !self.parts.is_empty()
             || self.from != From::All
             || !self.plugins.is_empty()
@@ -407,14 +452,14 @@ impl Filters {
     }
 
     /// Picks or unpicks `choice` (as its chip or menu line says it) on the filter `chip` ([`PART`], [`PLUGIN`],
-    /// [`MAKER`], [`TYPE`], [`FROM`]). More than one part or plugin can be picked; the maker, the type and where the
+    /// [`FORMAT`], [`TYPE`], [`FROM`]). More than one part, plugin or format can be picked; the type and where the
     /// sounds are from are one or none, as each has only two choices.
     pub fn toggle(&mut self, chip: &str, choice: &str) {
         let part = |l: &str| Some(PartPick::from_label(l)).filter(|p| *p != PartPick::Any);
         match chip {
             PART => chips::toggle_as(&mut self.parts, choice, true, PartPick::label, part),
             PLUGIN => chips::toggle(&mut self.plugins, choice, true),
-            MAKER => toggle_one(&mut self.choice.maker, choice, maker_label, maker_from),
+            FORMAT => chips::toggle_as(&mut self.formats, choice, true, Format::label, Format::from_label),
             TYPE => toggle_one(&mut self.choice.kind, choice, type_label, type_from),
             FROM => toggle_one(&mut self.from, choice, From::label, From::from_label),
             _ => {}
@@ -426,7 +471,7 @@ impl Filters {
         match chip {
             PART => self.parts.clear(),
             PLUGIN => self.plugins.clear(),
-            MAKER => self.choice.maker = Maker::All,
+            FORMAT => self.formats.clear(),
             TYPE => self.choice.kind = Type::All,
             FROM => self.from = From::All,
             _ => {}
@@ -452,12 +497,11 @@ impl Filters {
             && i.found(words, role)
     }
 
-    /// Which of the five chips let `i` through: the maker, the type, the part, where it's from and the plugin.
+    /// Which of the five chips let `i` through: the format, the type, the part, where it's from and the plugin.
     fn chips_pass(&self, i: &Item, role: Option<Role>) -> [bool; 5] {
-        let maker = Choice { kind: Type::All, ..self.choice };
         let kind = Choice { maker: Maker::All, ..self.choice };
         [
-            maker.matches(i.row.native, i.row.kind),
+            self.formats.is_empty() || self.formats.contains(&i.format),
             kind.matches(i.row.native, i.row.kind),
             self.parts.is_empty() || self.parts.iter().any(|p| p.matches(role)),
             match self.from {
@@ -490,8 +534,8 @@ pub fn shown(items: &[Item], f: &Filters) -> Vec<usize> {
 /// choices, so each filter says what its choices hold (Solomon's note, 4 Nov 2026).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChoiceCounts {
-    pub third_party: usize,
-    pub native: usize,
+    /// By format, in [`Format::ALL`]'s order.
+    pub formats: [usize; 6],
     pub synths: usize,
     pub effects: usize,
     /// By part, in [`PartPick::choices`]' order: each part, then no guess.
@@ -595,7 +639,7 @@ impl<'a> Tally<'a> {
         let fails = ok.iter().filter(|&&o| !o).count();
         let counts_on = |chip: usize| fails == 0 || (fails == 1 && !ok[chip]);
         if counts_on(0) {
-            *if i.row.native { &mut c.native } else { &mut c.third_party } += 1;
+            c.formats[i.format.index()] += 1;
         }
         if counts_on(1) {
             c.synths += usize::from(synths.matches(i.row.native, i.row.kind));
@@ -625,20 +669,24 @@ impl<'a> Tally<'a> {
 /// The filters' names, as the page calls them when one is picked.
 pub const PART: &str = "part";
 pub const PLUGIN: &str = "plugin";
-pub const MAKER: &str = "maker";
+pub const FORMAT: &str = "format";
 pub const TYPE: &str = "type";
 pub const FROM: &str = "from";
 /// The Curves section's Found in filter.
 pub const FOUND_IN: &str = "found-in";
 
-/// The maker and type filters' choices, each with how many lines it would show: ("Third-party", "120").
-pub fn maker_choices(c: &ChoiceCounts) -> Vec<(String, String)> {
-    [(Maker::ThirdParty, c.third_party), (Maker::Native, c.native)]
+/// The format filter's choices, each with how many lines it would show: ("VST3", "120"). VST2, VST3, CLAP and Native
+/// are always there; AU and Other only when some line has them.
+pub fn format_choices(c: &ChoiceCounts) -> Vec<(String, String)> {
+    Format::ALL
         .into_iter()
-        .map(|(m, n)| (maker_label(m).to_owned(), thousands(n)))
+        .zip(c.formats)
+        .filter(|(f, n)| *n > 0 || !matches!(f, Format::Au | Format::Other))
+        .map(|(f, n)| (f.label().to_owned(), thousands(n)))
         .collect()
 }
 
+/// The type filter's choices, each with how many lines it would show.
 pub fn type_choices(c: &ChoiceCounts) -> Vec<(String, String)> {
     [(Type::Synths, c.synths), (Type::Effects, c.effects)]
         .into_iter()
@@ -647,11 +695,11 @@ pub fn type_choices(c: &ChoiceCounts) -> Vec<(String, String)> {
 }
 
 /// The page's filters as their chips and menus show them, with what's picked and how many lines each choice would
-/// show: the maker, the type and where the sounds are from (two choices each, so chips of their own), the part and the
-/// plugin (menus that scroll, where more than one can be picked). `plugins` is [`plugins`].
+/// show: the format, the type and where the sounds are from (a few choices each, so chips of their own), the part and
+/// the plugin (menus that scroll). More than one part, plugin or format can be picked. `plugins` is [`plugins`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FilterChips {
-    pub maker: Filter,
+    pub format: Filter,
     pub kind: Filter,
     pub from: Filter,
     pub part: Filter,
@@ -670,7 +718,7 @@ pub fn filter_chips(c: &ChoiceCounts, plugins: &[(String, usize)], f: &Filters) 
         .map(|(name, _)| (name.clone(), c.plugins.get(&name.to_ascii_lowercase()).copied().unwrap_or(0)))
         .collect();
     FilterChips {
-        maker: chips::show(&maker_choices(c), &one(maker_label(f.choice.maker))),
+        format: chips::show(&format_choices(c), &f.formats.iter().map(|x| x.label().to_owned()).collect::<Vec<_>>()),
         kind: chips::show(&type_choices(c), &one(type_label(f.choice.kind))),
         from: chips::show(&from, &one(f.from.label())),
         part: chips::show(&parts, &f.parts.iter().map(|p| p.label().to_owned()).collect::<Vec<_>>()),
@@ -1462,12 +1510,56 @@ mod tests {
     }
 
     #[test]
+    fn a_sounds_format_comes_from_its_file_and_the_daws_own_are_native() {
+        let with = |ext: &str, native: bool| {
+            Format::of(&PresetRow { extension: ext.into(), native, ..row("a", "b", None, "") })
+        };
+        assert_eq!(with(".fxp", false), Format::Vst2);
+        assert_eq!(with(".FXB", false), Format::Vst2);
+        assert_eq!(with(".vstpreset", false), Format::Vst3);
+        assert_eq!(with(".vst3state", false), Format::Vst3);
+        assert_eq!(with(".clap-preset", false), Format::Clap);
+        assert_eq!(with(".aupreset", false), Format::Au);
+        assert_eq!(with(".flstate", true), Format::Native);
+        assert_eq!(with(".bwpreset", true), Format::Native);
+        assert_eq!(with(".bwpreset", false), Format::Other);
+    }
+
+    #[test]
+    fn the_format_filter_picks_any_of_its_formats() {
+        let all = items();
+        let mut f = Filters::default();
+        f.toggle(FORMAT, "VST2");
+        assert_eq!(shown(&all, &f), [0, 1]);
+        f.toggle(FORMAT, "Native");
+        assert_eq!(f.formats, [Format::Vst2, Format::Native]);
+        assert_eq!(shown(&all, &f), [0, 1, 2]);
+        assert!(f.any());
+        // The chips: VST2, VST3, CLAP and Native always; Other because a line has it; AU not, as none has it.
+        let chips = filter_chips(&counts(&all, &f), &plugins(&all), &f);
+        let words: Vec<(&str, &str, bool)> =
+            chips.format.chips.iter().map(|c| (c.text.as_str(), c.count.as_str(), c.on)).collect();
+        assert_eq!(
+            words,
+            [
+                ("VST2", "2", true),
+                ("VST3", "0", false),
+                ("CLAP", "0", false),
+                ("Native", "1", true),
+                ("Other", "1", false)
+            ]
+        );
+        f.clear_chip(FORMAT);
+        assert_eq!(shown(&all, &f), [0, 1, 2, 3]);
+    }
+
+    #[test]
     fn filters_and_counts_go_together() {
         let all = items();
         let f = Filters::default();
         assert_eq!(shown(&all, &f), [0, 1, 2, 3]);
         let c = counts(&all, &f);
-        assert_eq!((c.third_party, c.native, c.synths, c.effects), (3, 1, 3, 1));
+        assert_eq!((c.formats, c.synths, c.effects), ([2, 0, 0, 0, 1, 1], 3, 1));
         let synths = Filters { choice: Choice { kind: Type::Synths, ..Choice::default() }, ..f.clone() };
         assert_eq!(shown(&all, &synths), [0, 1, 3]);
         // The type counts beside the chip keep the maker as it is, and ignore the type itself.
@@ -1478,13 +1570,13 @@ mod tests {
         let c = counts(&all, &bass);
         let at = |r: Role| Role::ALL.iter().position(|&x| x == r).unwrap();
         assert_eq!((c.parts[at(Role::Bass)], c.parts[at(Role::Lead)], c.parts[Role::ALL.len()]), (1, 1, 2));
-        assert_eq!((c.third_party, c.native, c.songs, c.files), (1, 0, 1, 0));
+        assert_eq!((c.formats[0], c.formats[4], c.songs, c.files), (1, 0, 1, 0));
         assert_eq!(c.plugins.get("serum"), Some(&1));
         assert_eq!(c.plugins.get("fruity limiter"), None);
         // A line two filters leave out counts beside neither.
         let two = Filters { from: From::Files, ..bass.clone() };
         assert_eq!(counts(&all, &two).parts[Role::ALL.len()], 1);
-        assert_eq!(counts(&all, &two).third_party, 0);
+        assert_eq!(counts(&all, &two).formats.iter().sum::<usize>(), 0);
         assert_eq!(shown(&all, &Filters { parts: vec![PartPick::Role(Role::Bass)], ..f.clone() }), [0]);
         assert_eq!(shown(&all, &Filters { parts: vec![PartPick::NoGuess], ..f.clone() }), [2, 3]);
         // More than one part: any of them.
