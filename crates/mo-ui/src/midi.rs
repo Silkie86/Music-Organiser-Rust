@@ -3,9 +3,9 @@
 //! each list (newest ask wins); and reading the picked part's notes for its piano roll and its key. Lines are only
 //! made when the list draws them, so 300,000 parts cost what's on screen.
 //!
-//! Where the parts come from: the Rust app's own `midi-index.db` when it holds any (its keys are the new key
-//! finder's), else the C# app's `midi.db`, read-only (its keys are the old app's; the card reads the new key finder's
-//! from the part's notes). Nothing here writes either.
+//! Where the parts come from: the Rust app's own `midi-index.db`, read-only, which reading your MIDI fills. The first
+//! time it's read, it's brought up to this app's layout and the corrections you made in the C# app are taken in from
+//! its `midi.db` ([`mo_midi::store::bring_up_to_date`]); `midi.db` isn't opened after that.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -28,7 +28,7 @@ use mo_library::Library;
 use mo_library::songs::thousands;
 use mo_midi::indexer;
 use mo_midi::store::MidiStore;
-use mo_midi::{Catalogue, Hit, MidiIndex, Role, StoredPhrase};
+use mo_midi::{Catalogue, Hit, Role, StoredPhrase};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, VecModel};
 
 use crate::filters::FilterModels;
@@ -40,8 +40,6 @@ use crate::{AppWindow, CardAction, MenuItem, MidiData, MidiFact, MidiLine, Picke
 pub enum NotesFrom {
     /// The Rust app's `midi-index.db`.
     Store(PathBuf),
-    /// The C# app's `midi.db`.
-    Old(PathBuf),
     /// Made-up notes by hash, for the screenshots.
     Made(Arc<HashMap<String, Vec<NoteEvent>>>),
 }
@@ -49,8 +47,6 @@ pub enum NotesFrom {
 /// The index as read: every part, and where it came from.
 pub struct Loaded {
     pub cat: Catalogue,
-    /// From the C# app's `midi.db`: the list's keys are the old app's.
-    pub old: bool,
     pub notes: NotesFrom,
     /// Worked out with the reading, off the window's thread: the summary and the year strip.
     pub summary: String,
@@ -60,18 +56,17 @@ pub struct Loaded {
 }
 
 impl Loaded {
-    pub fn new(cat: Catalogue, old: bool, notes: NotesFrom) -> Loaded {
-        let summary = page::summary(&cat, old);
+    pub fn new(cat: Catalogue, notes: NotesFrom) -> Loaded {
+        let summary = page::summary(&cat);
         let years = page::year_counts(&cat);
         let found = Arc::new(mo_app::finder::midi_parts(&cat));
-        Loaded { cat, old, notes, summary, years, found }
+        Loaded { cat, notes, summary, years, found }
     }
 }
 
 #[derive(Default)]
 struct Page {
     cat: Arc<Catalogue>,
-    old: bool,
     notes: Option<NotesFrom>,
     filters: Filters,
     order: Order,
@@ -408,46 +403,26 @@ pub fn shown(app: &AppWindow) {
     }
 }
 
-/// The mark saved beside the library once a reading of your MIDI has got to the end.
-fn read_mark(library: &Path) -> std::path::PathBuf {
-    library.with_file_name("midi-index.read")
-}
-
-/// Reads the index beside the library: the Rust app's once a reading has got to the end (or when there's no C# one),
-/// else the C# app's. Both read-only.
+/// Reads the Rust app's MIDI index beside the library, read-only: brought up to this app's layout first, with the
+/// corrections you made in the old app taken in, the first time ([`mo_midi::store::bring_up_to_date`]). No index yet
+/// is an empty list: the page's first showing reads your MIDI into one.
 pub fn load(library: &Path) -> Result<Loaded, String> {
-    let old_path = MidiIndex::path_beside(library);
-    // The C# index only gives your corrections when the Rust one holds the parts: one that won't open (damaged, or
-    // being saved) is passed by, not the end of the page.
-    let old = old_path.exists().then(|| MidiIndex::open_read_only(&old_path)).and_then(|opened| {
-        opened.map_err(|e| log::warning("MIDI", &format!("The old app's MIDI index couldn't be opened: {e}"))).ok()
-    });
-    let store_path = MidiStore::path_beside(library);
-    if store_path.exists() {
-        match MidiStore::open_read_only(&store_path) {
-            Ok(store) => {
-                // Your corrections made in the C# app count until the Rust page takes over.
-                let roles = old.as_ref().and_then(|o| o.your_roles().ok()).unwrap_or_default();
-                let octaves = old.as_ref().and_then(|o| o.your_octaves().ok()).unwrap_or_default();
-                let phrases = store.all(&roles, &octaves).map_err(|e| e.to_string())?;
-                // A reading stopped part way holds only some of your MIDI: the old index shows until one ends.
-                if !phrases.is_empty() && (read_mark(library).exists() || old.is_none()) {
-                    let cat = background::on_pool(|| Catalogue::new(phrases));
-                    return Ok(Loaded::new(cat, false, NotesFrom::Store(store_path)));
-                }
-            }
-            Err(e) => log::warning("MIDI", &format!("The Rust MIDI index couldn't be opened: {e}")),
-        }
+    let path = MidiStore::path_beside(library);
+    let up = mo_midi::store::bring_up_to_date(&path);
+    for line in &up.done {
+        log::info("MIDI", line);
     }
-    let Some(old) = old else {
-        if old_path.exists() {
-            return Err("the old app's MIDI index couldn't be opened (the log says why)".to_owned());
-        }
-        return Ok(Loaded::new(Catalogue::default(), true, NotesFrom::Old(old_path)));
-    };
-    let phrases = old.all().map_err(|e| e.to_string())?;
+    for line in &up.later {
+        log::warning("MIDI", line);
+    }
+    if !path.exists() {
+        return Ok(Loaded::new(Catalogue::default(), NotesFrom::Store(path)));
+    }
+    let store = MidiStore::open_read_only(&path).map_err(|e| e.to_string())?;
+    let phrases = store.all(&up.old_roles, &up.old_octaves).map_err(|e| e.to_string())?;
+    drop(store);
     let cat = background::on_pool(|| Catalogue::new(phrases));
-    Ok(Loaded::new(cat, true, NotesFrom::Old(old_path)))
+    Ok(Loaded::new(cat, NotesFrom::Store(path)))
 }
 
 /// The index has been read: the page shows it.
@@ -476,7 +451,7 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
     crate::finder::add_source(app, "midi", loaded.found.clone());
     let summary = loaded.summary;
     let empty = loaded.cat.entries.is_empty();
-    log::info("MIDI", &format!("{summary} ({})", if loaded.old { "the C# app's midi.db" } else { "midi-index.db" }));
+    log::info("MIDI", &summary);
     let (picked, read_now) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         // The picked part stays picked when the index is read again, found by its notes.
@@ -484,7 +459,6 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         p.years = loaded.years;
         // The old index goes on the freeing thread: tens of thousands of parts take a while to let go.
         background::free_later(std::mem::replace(&mut p.cat, Arc::new(loaded.cat)));
-        p.old = loaded.old;
         p.notes = Some(loaded.notes);
         p.picked = hash.and_then(|h| p.cat.find(&h));
         p.picked_row = None;
@@ -572,20 +546,11 @@ pub fn read_midi(app: &AppWindow, retry: bool) {
             }
         };
         let ran = read_into_index(&library, retry, &stop, &progress);
-        let mut marked = false;
         match &ran {
             Ok(s) => {
                 let (title, detail) = page::read_done_text(s);
                 log::info("MIDI", &format!("{title}: {detail}"));
                 job.done(&format!("{title}: {detail}"));
-                // Once a reading has got to the end, the Rust index holds all your MIDI and the page uses it.
-                let mark = read_mark(&library);
-                if !s.stopped && !mark.exists() {
-                    match std::fs::write(&mark, b"read") {
-                        Ok(()) => marked = true,
-                        Err(e) => log::warning("MIDI", &format!("The MIDI index's 'read' mark couldn't be saved: {e}")),
-                    }
-                }
             }
             Err(e) => {
                 log::warning("MIDI", &format!("Reading MIDI failed: {e}"));
@@ -593,7 +558,7 @@ pub fn read_midi(app: &AppWindow, retry: bool) {
             }
         }
         // What was read shows straight away; after a failed reading too, as it may have saved some before failing.
-        let changed = marked || ran.as_ref().map_or(true, |s| s.read > 0 || s.forgotten > 0 || s.rekeyed > 0);
+        let changed = ran.as_ref().map_or(true, |s| s.read > 0 || s.forgotten > 0 || s.rekeyed > 0);
         let loaded = changed.then(|| load(&library));
         let _ = slint::invoke_from_event_loop(move || {
             let Some(app) = weak.upgrade() else { return };
@@ -887,10 +852,9 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
         p.notes_asked += 1;
         let id = p.notes_asked;
         let notes = p.notes.clone()?;
-        let old = p.old;
         let shortcuts = p.shortcuts.clone();
         let e = p.cat.entry(at)?;
-        let card = card(e, old);
+        let card = card(e);
         let facts: Vec<MidiFact> =
             page::facts(e).into_iter().map(|(n, v)| MidiFact { name: n.into(), value: v.into() }).collect();
         let (actions, menu) = actions(e, &shortcuts);
@@ -923,7 +887,7 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
         if n.is_none() {
             let weak = app.as_weak();
             // The connection stays open from one part to the next.
-            let mut open: Option<(PathBuf, Reader)> = None;
+            let mut open: Option<(PathBuf, MidiStore)> = None;
             match Newest::start("MIDI notes", move |ask: NotesAsk| {
                 let id = ask.id;
                 let read = read_notes(&ask, &mut open);
@@ -944,38 +908,33 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
     });
 }
 
-enum Reader {
-    Store(MidiStore),
-    Old(MidiIndex),
-}
-
-/// A part's notes, from wherever the index is; `open` keeps the index open for the next ask.
+/// A part's notes, from wherever the index is; `open` keeps the index open for the next ask (and lets it go when a
+/// read fails, so the next ask opens it afresh: it may have been copied into a new layout since).
 fn notes_of(
     from: &NotesFrom,
     phrase_id: i64,
     hash: &str,
-    open: &mut Option<(PathBuf, Reader)>,
+    open: &mut Option<(PathBuf, MidiStore)>,
 ) -> Result<Vec<NoteEvent>, String> {
     Ok(match from {
         NotesFrom::Made(made) => made.get(hash).cloned().unwrap_or_default(),
-        NotesFrom::Store(path) | NotesFrom::Old(path) => {
+        NotesFrom::Store(path) => {
             if open.as_ref().is_none_or(|(p, _)| p != path) {
-                let reader = match from {
-                    NotesFrom::Store(_) => Reader::Store(MidiStore::open_read_only(path).map_err(|e| e.to_string())?),
-                    _ => Reader::Old(MidiIndex::open_read_only(path).map_err(|e| e.to_string())?),
-                };
-                *open = Some((path.clone(), reader));
+                *open = Some((path.clone(), MidiStore::open_read_only(path).map_err(|e| e.to_string())?));
             }
-            match open.as_ref().map(|(_, r)| r) {
-                Some(Reader::Store(s)) => s.notes(phrase_id, hash).map_err(|e| e.to_string())?,
-                Some(Reader::Old(o)) => o.notes(phrase_id, Some(hash)).map_err(|e| e.to_string())?,
-                None => Vec::new(),
+            let read = match open.as_ref() {
+                Some((_, store)) => store.notes(phrase_id, hash).map_err(|e| e.to_string()),
+                None => Ok(Vec::new()),
+            };
+            if read.is_err() {
+                *open = None;
             }
+            read?
         }
     })
 }
 
-fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, Reader)>) -> Result<NotesRead, String> {
+fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<NotesRead, String> {
     let notes = notes_of(&ask.from, ask.phrase_id, &ask.hash, open)?;
     let fact = if ask.read_key {
         mo_midi::keys::with_reader(|r| mo_midi::keys::read(r, &notes, ask.role, ask.cut)).1
@@ -1041,18 +1000,13 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
 }
 
 /// The card for a part, before its notes are read (the roll and, without a stored reading, the key follow).
-fn card(e: &mo_midi::Entry, old: bool) -> PickedPart {
+fn card(e: &mo_midi::Entry) -> PickedPart {
     let p = &e.phrase;
     let words = page::key_card(p.key_fact.as_ref(), p.drums || e.role() == Role::Drums);
     let (key, sure, why, from) = if p.key_fact.is_some() || p.drums || e.role() == Role::Drums {
         (words.answer, words.sure, words.why, if p.key_fact.is_some() { "From the new key finder." } else { "" })
     } else {
         (READING.to_owned(), String::new(), String::new(), "")
-    };
-    let old_key = match (old, p.key) {
-        (true, Some(k)) => format!("The old app said {} ({:.0}% sure).", k.name(), k.confidence * 100.0),
-        (true, None) => "The old app found no key.".to_owned(),
-        _ => String::new(),
     };
     let (others, more) = page::other_files(e, 6);
     PickedPart {
@@ -1066,7 +1020,6 @@ fn card(e: &mo_midi::Entry, old: bool) -> PickedPart {
         key_sure: sure.into(),
         key_why: why.into(),
         key_from: from.into(),
-        old_key: old_key.into(),
         instrument: page::instrument_text(e).into(),
         phrase: page::phrase_text(e).into(),
         roll_low: "".into(),
@@ -1436,7 +1389,7 @@ pub fn sample() -> Loaded {
             ..first
         });
     }
-    Loaded::new(Catalogue::new(phrases), true, NotesFrom::Made(Arc::new(notes)))
+    Loaded::new(Catalogue::new(phrases), NotesFrom::Made(Arc::new(notes)))
 }
 
 #[cfg(test)]
@@ -1551,7 +1504,6 @@ mod tests {
         assert!(again.is_ok_and(|s| s.read == 0));
 
         let Ok(loaded) = load(&library) else { panic!("the Rust index should read") };
-        assert!(!loaded.old, "the Rust index is read once it holds parts");
         let Some(e) = loaded.cat.entries.first() else { panic!("the scale should be listed") };
         assert!(e.phrase.key_fact.is_some(), "the new key finder's reading comes with the part");
         // A scale alone can't say which of a pair is home: C major is named, alone or with A minor.

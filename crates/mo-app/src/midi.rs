@@ -639,9 +639,8 @@ pub fn roll(notes: &[NoteEvent], bars: i32) -> Roll {
     Roll { notes: drawn, bars: bar_lines, low, high, left_off: heard.len().saturating_sub(ROLL_NOTES) }
 }
 
-/// The page's summary: "12,345 MIDI parts from 3,210 files · 2,000 copies kept as one", with where the parts and
-/// their keys come from.
-pub fn summary(cat: &Catalogue, from_cs: bool) -> String {
+/// The page's summary: "12,345 MIDI parts from 3,210 files · 2,000 copies kept as one".
+pub fn summary(cat: &Catalogue) -> String {
     if cat.entries.is_empty() {
         return "No MIDI found yet".to_owned();
     }
@@ -656,9 +655,6 @@ pub fn summary(cat: &Catalogue, from_cs: bool) -> String {
     if copies > 0 {
         let word = if copies == 1 { "copy" } else { "copies" };
         text.push_str(&format!(" · {} {word} kept as one", thousands(copies)));
-    }
-    if from_cs {
-        text.push_str(" · keys in the list from the old app");
     }
     text
 }
@@ -985,7 +981,7 @@ mod tests {
         assert_eq!(note_name(60), "C4");
         assert_eq!(note_name(61), "Db4");
         assert_eq!(bars_text(1), "1 bar");
-        assert!(summary(&cat, true).starts_with("3 MIDI parts from 4 files · 1 copy kept as one"));
+        assert_eq!(summary(&cat), "3 MIDI parts from 4 files · 1 copy kept as one");
         assert_eq!(result_text(2, 3, Order::Newest, None, false), "2 of 3 parts, newest first");
     }
 
