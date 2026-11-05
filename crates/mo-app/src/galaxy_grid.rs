@@ -125,6 +125,51 @@ impl Grid {
         best.map(|b| b.1 as usize)
     }
 
+    /// The star an arrow key goes to from map point (`x`, `y`): the nearest one that way (`dx`, `dy`: the arrow's
+    /// direction, such as (1, 0) for Right; y grows down the map). "That way" is within 45 degrees of the arrow, and at
+    /// least `least` (in map units) along it, so each press visibly moves on and never lands on the star it's on, even
+    /// in a crowd far out. Of those, the nearest wins, a star off to the side counting as further: its distance plus
+    /// how far it is off the arrow's line. `None` when there's no star that way.
+    pub fn toward(&self, x: f32, y: f32, (dx, dy): (f32, f32), least: f32) -> Option<usize> {
+        let len = (dx * dx + dy * dy).sqrt();
+        if self.stars.is_empty() || !len.is_finite() || len == 0.0 {
+            return None;
+        }
+        let (ux, uy) = (dx / len, dy / len);
+        let least = least.max(0.0);
+        let score = |sx: f32, sy: f32| {
+            let (ox, oy) = (sx - x, sy - y);
+            let along = ox * ux + oy * uy;
+            let aside = (ox * uy - oy * ux).abs();
+            (along >= least && along > 0.0 && aside <= along).then(|| (ox * ox + oy * oy).sqrt() + aside)
+        };
+        // Squares out to `reach`, doubling until a star is found and nothing further out could beat it: a star outside
+        // the box is more than `reach` away, so it scores more than `reach`.
+        let mut reach = (least * 2.0).max(1.0 / SIDE as f32);
+        loop {
+            let (x0, x1) = (square(x - reach), square(x + reach));
+            let (y0, y1) = (square(y - reach), square(y + reach));
+            let mut best: Option<(f32, u32)> = None;
+            for gy in y0..=y1 {
+                for gx in x0..=x1 {
+                    for &(at, sx, sy) in self.in_square(gx, gy) {
+                        let Some(s) = score(sx, sy) else { continue };
+                        // Ties go to the earlier star, so the answer is the same every time.
+                        if best.is_none_or(|(b, was)| s < b || (s == b && at < was)) {
+                            best = Some((s, at));
+                        }
+                    }
+                }
+            }
+            match best {
+                Some((s, at)) if s <= reach => return Some(at as usize),
+                // The whole map was looked through: the best there is, or none.
+                _ if reach >= 2.0 => return best.map(|b| b.1 as usize),
+                _ => reach *= 2.0,
+            }
+        }
+    }
+
     /// How many stars are in the box from (`left`, `top`) to (`right`, `bottom`) on the map: the squares wholly inside
     /// are counted whole, the ones on its edges star by star.
     pub fn count_in(&self, left: f32, top: f32, right: f32, bottom: f32) -> usize {
@@ -225,6 +270,36 @@ mod tests {
         assert_eq!(grid.nearest(0.9 - 0.006, 0.9, 0.01), Some(3));
         let all = Grid::new(&stars, &[0, 1, 2, 3, 4]);
         assert_eq!(all.nearest(0.5012, 0.5, 0.01), Some(4));
+    }
+
+    #[test]
+    fn an_arrow_goes_to_the_nearest_star_that_way() {
+        let stars = vec![
+            star(0.5, 0.5),   // 0: where it starts
+            star(0.6, 0.5),   // 1: right, on the line
+            star(0.55, 0.53), // 2: right, nearer but off the line
+            star(0.4, 0.5),   // 3: left
+            star(0.5, 0.2),   // 4: up, far
+            star(0.5, 0.501), // 5: down, too close to count as a step
+            star(0.9, 0.95),  // 6: down and right, the only other one down
+            star(0.51, 0.7),  // 7: down
+        ];
+        let shown: Vec<usize> = (0..stars.len()).collect();
+        let grid = Grid::new(&stars, &shown);
+        // Star 2 is 0.058 away and 0.03 off the line (0.088); star 1 is 0.1 away on it.
+        assert_eq!(grid.toward(0.5, 0.5, (1.0, 0.0), 0.005), Some(2));
+        assert_eq!(grid.toward(0.5, 0.5, (-1.0, 0.0), 0.005), Some(3));
+        // Up is far, and found though it's many squares away.
+        assert_eq!(grid.toward(0.5, 0.5, (0.0, -1.0), 0.005), Some(4));
+        // Down: star 5 is less than a step on, so star 7.
+        assert_eq!(grid.toward(0.5, 0.5, (0.0, 1.0), 0.005), Some(7));
+        assert_eq!(grid.toward(0.5, 0.5, (0.0, 1.0), 0.0), Some(5));
+        // Nothing further right of the rightmost star but star 6, which is more down than right.
+        assert_eq!(grid.toward(0.9, 0.95, (1.0, 0.0), 0.005), None);
+        assert_eq!(grid.toward(0.5, 0.5, (0.0, 0.0), 0.005), None);
+        // Only the shown stars count.
+        let some = Grid::new(&stars, &[0, 1, 3]);
+        assert_eq!(some.toward(0.5, 0.5, (1.0, 0.0), 0.005), Some(1));
     }
 
     #[test]

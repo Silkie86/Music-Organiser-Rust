@@ -583,14 +583,8 @@ pub(super) fn wire(app: &AppWindow) {
     });
     let weak = app.as_weak();
     data.on_galaxy_swept_step(move |by| {
-        let Some(app) = weak.upgrade() else { return };
-        let to = PAGE.with(|p| {
-            let g = &p.borrow().galaxy;
-            let last = g.trail.len().checked_sub(1)?;
-            Some((g.trail_at as i64 + i64::from(by)).clamp(0, last as i64) as usize)
-        });
-        if let Some(to) = to {
-            go_to_swept(&app, to);
+        if let Some(app) = weak.upgrade() {
+            swept_step(&app, by);
         }
     });
     let weak = app.as_weak();
@@ -601,6 +595,7 @@ pub(super) fn wire(app: &AppWindow) {
             g.trail.clear();
             g.trail_at = 0;
         });
+        app.global::<SoundsData>().set_galaxy_swept_keys(false);
         show_trail(&app);
     });
     let weak = app.as_weak();
@@ -916,6 +911,18 @@ fn go_to_swept(app: &AppWindow, i: usize) {
     pick(app, at);
     play_picked(app, 0.0);
     fly(app);
+}
+
+/// Goes `by` sounds down the Swept card (1, to the one swept before) or up it (-1), stopping at its ends.
+fn swept_step(app: &AppWindow, by: i32) {
+    let to = PAGE.with(|p| {
+        let g = &p.borrow().galaxy;
+        let last = g.trail.len().checked_sub(1)?;
+        Some((g.trail_at as i64 + i64::from(by)).clamp(0, last as i64) as usize)
+    });
+    if let Some(to) = to {
+        go_to_swept(app, to);
+    }
 }
 
 /// The trail on the map (a line through the swept stars and a dot on each, fainter with age) and on the Swept card.
@@ -1760,6 +1767,64 @@ fn place_picture(app: &AppWindow) {
     show_trail(app);
     show_names(app);
     show_mini(app);
+}
+
+/// The arrow keys on the galaxy (-1 Left, 1 Right, -2 Up, 2 Down). With the Swept card clicked into, Up and Down go
+/// through its sounds, playing each (as Back and Next); otherwise, and Left and Right always, each arrow goes to the
+/// nearest star that way on the map from the picked one (or the middle of the view), picks it, puts it on the trail
+/// and plays it with Autoplay on, as a click on it would; the map glides to keep it in sight.
+pub(super) fn arrow(app: &AppWindow, d: i32) {
+    let data = app.global::<SoundsData>();
+    let on_card = data.get_galaxy_swept_keys() && data.get_galaxy_swept().row_count() > 0;
+    if on_card && d.abs() == 2 {
+        swept_step(app, d.signum());
+        return;
+    }
+    data.set_galaxy_swept_keys(false);
+    let way = match d {
+        -1 => (-1.0, 0.0),
+        1 => (1.0, 0.0),
+        -2 => (0.0, -1.0),
+        2 => (0.0, 1.0),
+        _ => return,
+    };
+    let found = PAGE.with(|p| {
+        let p = p.borrow();
+        let g = &p.galaxy;
+        let from =
+            p.picked.and_then(|at| *g.stars.as_ref()?.get(at)?).map_or_else(|| (g.view.cx, g.view.cy), |s| (s.x, s.y));
+        // A view panned off the map starts from its nearest edge, so the stars on the map are still found.
+        let from = (from.0.clamp(0.0, 1.0), from.1.clamp(0.0, 1.0));
+        // At least a star's width on the view, so each press shows a move.
+        g.grid.as_ref()?.toward(from.0, from.1, way, NEAR / g.view.unit())
+    });
+    let Some(at) = found else { return };
+    on_trail(app, at, false);
+    pick(app, at);
+    keep_in_sight(app, at);
+    if PAGE.with(|p| p.borrow().autoplay) {
+        play_picked(app, 0.0);
+    }
+}
+
+/// Glides the map (keeping the zoom) so the star at `at` is in the middle, when it's off the view or near its edge.
+fn keep_in_sight(app: &AppWindow, at: usize) {
+    let flies = PAGE.with(|p| {
+        let g = &mut p.borrow_mut().galaxy;
+        let star = (*g.stars.as_ref()?.get(at)?)?;
+        let (x, y) = g.view.to_view(star.x, star.y, 1.0);
+        let (w, h) = (g.view.width, g.view.height);
+        let edge = 0.1 * w.min(h);
+        if x >= edge && y >= edge && x <= w - edge && y <= h - edge {
+            return None;
+        }
+        let zoom = g.view.zoom;
+        g.view.fly_to(star.x, star.y, zoom);
+        Some(())
+    });
+    if flies.is_some() {
+        fly(app);
+    }
 }
 
 /// The ring round the picked star, where it is on the view now.
