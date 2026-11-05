@@ -1522,7 +1522,8 @@ fn analysis_values(a: Option<&SoundAnalysis>) -> Vec<Value> {
 }
 
 /// The analysis from a row of the copy whose analysis columns start at `at`, with its packed waveform straight after
-/// them (from its own table, or in the format before its own column); `None` when the sound has none.
+/// them (in the format before, its own column; in this one, none: the list is read without them, and they're read
+/// for the sounds on show, [`SoundsDb::waves`]); `None` when the sound has none.
 pub(crate) fn analysis_at(r: &Row<'_>, at: usize) -> Option<SoundAnalysis> {
     // Each value read as the rest of the library is read (crate::db), so the copy can't read one differently.
     let get = |i: usize| r.get_ref(at + i).ok();
@@ -1795,7 +1796,7 @@ fn packed_peaks(peaks: &Peaks) -> Value {
 }
 
 /// A waveform [`packed_peaks`] packed, kept as the thousandths it was packed as when it was.
-fn unpacked_peaks(bytes: &[u8]) -> Peaks {
+pub(crate) fn unpacked_peaks(bytes: &[u8]) -> Peaks {
     match bytes.split_first() {
         Some((&THOUSANDTHS, rest)) => Peaks::from_thousandths(unpacked_thousandths(rest, |k| k).into()),
         _ => Peaks::new(&unpacked::<f32>(bytes)),

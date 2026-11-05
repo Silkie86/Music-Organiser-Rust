@@ -360,7 +360,8 @@ fn same_answers(old: &Path, copy: &Path) {
     assert!(!a.is_copy());
     assert!(b.is_copy());
     let as_kept = |clap: Gathered| if b.is_formerly() { clap } else { clap.into_held() };
-    let (ea, eb) = (a.everything(now()).unwrap(), b.everything(now()).unwrap());
+    let (ea, mut eb) = (a.everything(now()).unwrap(), b.everything(now()).unwrap());
+    eb.sounds = waved(&b, eb.sounds);
     assert_eq!(ea.sounds.len(), eb.sounds.len());
     for (x, y) in ea.sounds.iter().zip(&eb.sounds) {
         assert_eq!(format!("{x:?}"), format!("{y:?}"));
@@ -373,7 +374,7 @@ fn same_answers(old: &Path, copy: &Path) {
         SoundIndex::from_gathered(ea.features.clone(), ea.clap.clone(), ea.analysed()),
         SoundIndex::from_gathered(eb.features.clone(), eb.clap.clone(), eb.analysed())
     );
-    assert_eq!(format!("{:?}", a.all(now()).unwrap()), format!("{:?}", b.all(now()).unwrap()));
+    assert_eq!(format!("{:?}", a.all(now()).unwrap()), format!("{:?}", all_of(&b)));
     assert_eq!(a.activity(now()).unwrap(), b.activity(now()).unwrap());
     assert_eq!(a.history(500).unwrap(), b.history(500).unwrap());
     for space in ["features", "clap"] {
@@ -400,11 +401,11 @@ fn same_answers(old: &Path, copy: &Path) {
     };
     assert_eq!(ids(&mut hidden.iter()), ids(&mut ea.sounds.iter().filter(|s| s.hidden)));
     assert!(hidden.iter().all(|s| s.hidden));
-    assert_eq!(format!("{hidden:?}"), format!("{:?}", b.hidden_sounds().unwrap()));
+    assert_eq!(format!("{hidden:?}"), format!("{:?}", waved(&b, b.hidden_sounds().unwrap())));
     // Read at one moment, the same in both (the sizes compared as maps: their printed order is random).
     let (fa, fb) = (a.finds().unwrap(), b.finds().unwrap());
     assert_eq!((&fa.matches, &fa.exact, &fa.sizes), (&fb.matches, &fb.exact, &fb.sizes));
-    assert_eq!(format!("{:?}", fa.hidden), format!("{:?}", fb.hidden));
+    assert_eq!(format!("{:?}", fa.hidden), format!("{:?}", waved(&b, fb.hidden.clone())));
     assert_eq!(a.matches().unwrap(), b.matches().unwrap());
     assert_eq!(a.exact_copies().unwrap(), b.exact_copies().unwrap());
     assert_eq!(a.duplicate_finds().unwrap(), b.duplicate_finds().unwrap());
@@ -571,6 +572,30 @@ fn same_files(a: &Path, b: &Path) {
         let sql = format!("SELECT rowid, * FROM {table} ORDER BY rowid");
         assert_eq!(rows(a, &sql), rows(b, &sql), "{table}");
     }
+}
+
+/// Every sound as [`SoundsDb::all`] reads it from `db`, each with its waveform: read apart from the app's own copy
+/// ([`SoundsDb::waves`]), with the sounds from the others.
+fn all_of(db: &SoundsDb) -> Vec<mo_sounds::Sound> {
+    waved(db, db.all(now()).unwrap())
+}
+
+/// `sounds` read from `db`, each given its waveform when `db` keeps them apart.
+fn waved(db: &SoundsDb, mut sounds: Vec<mo_sounds::Sound>) -> Vec<mo_sounds::Sound> {
+    if !db.waves_apart() {
+        return sounds;
+    }
+    let ids: Vec<i64> = sounds.iter().map(|s| s.id).collect();
+    let mut waves: std::collections::HashMap<i64, mo_sounds::Peaks> = db.waves(&ids).unwrap().into_iter().collect();
+    for s in &mut sounds {
+        let a = s.analysis.as_mut();
+        assert!(a.as_ref().is_none_or(|a| a.waveform.is_empty()), "read without its waveform");
+        if let (Some(a), Some(wave)) = (a, waves.remove(&s.id)) {
+            a.waveform = wave;
+        }
+    }
+    assert!(waves.is_empty(), "a waveform for each sound with one");
+    sounds
 }
 
 /// What the page's own read of `sounds.db` gives.
@@ -1139,7 +1164,7 @@ fn the_page_reads_the_copy_whenever_there_is_one() {
     let dir = folder("page-read");
     let old = library(&dir, 120);
     let copy = compact::copy_of(&old);
-    let listed = |path: &Path| format!("{:?}", SoundsDb::open_read_only(path).unwrap().all(now()).unwrap());
+    let listed = |path: &Path| format!("{:?}", all_of(&SoundsDb::open_read_only(path).unwrap()));
     let Ok(PageRead::Library { everything, made }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("no copy yet, so sounds.db is read");
     };
@@ -1155,7 +1180,7 @@ fn the_page_reads_the_copy_whenever_there_is_one() {
     assert_eq!(lay_out(&old).0, None, "of this version's format already");
     assert!(!adopted, "it became the app's own when it was made, on the page's pass");
     assert!(db.is_copy());
-    assert_eq!(format!("{sounds:?}"), listed(&old));
+    assert_eq!(format!("{:?}", waved(&db, sounds)), listed(&old));
     drop(db);
     // A newer version's copy: left alone, and sounds.db is read instead.
     Connection::open(&copy).unwrap().execute("UPDATE copy_info SET value = 99 WHERE key = 'format'", []).unwrap();
@@ -1179,7 +1204,7 @@ fn a_copy_behind_is_brought_up_to_date_one_last_time_and_is_the_apps_own_after()
     let dir = folder("last-sync");
     let old = library(&dir, 90);
     let copy = compact::copy_of(&old);
-    let listed = |path: &Path| format!("{:?}", SoundsDb::open_read_only(path).unwrap().all(now()).unwrap());
+    let listed = |path: &Path| format!("{:?}", all_of(&SoundsDb::open_read_only(path).unwrap()));
     // Made by the app before the C# app was retired: it still follows sounds.db.
     assert!(!compact::sync(&old, &copy).unwrap().adopted);
     assert_eq!(compact::own_since(&copy), None);
@@ -1192,7 +1217,7 @@ fn a_copy_behind_is_brought_up_to_date_one_last_time_and_is_the_apps_own_after()
         panic!("the copy is read even when it's behind");
     };
     assert!(behind && !adopted);
-    assert_eq!(format!("{sounds:?}"), before);
+    assert_eq!(format!("{:?}", waved(&SoundsDb::open_read_only(&copy).unwrap(), sounds)), before);
     assert_eq!(compact::own_since(&copy), None, "not the app's own while it's behind");
     // One last time.
     let last = compact::last_sync(&old, &copy).unwrap();
@@ -1203,7 +1228,7 @@ fn a_copy_behind_is_brought_up_to_date_one_last_time_and_is_the_apps_own_after()
         panic!("the copy is read");
     };
     assert!(!behind && !adopted);
-    assert_eq!(format!("{sounds:?}"), listed(&old));
+    assert_eq!(format!("{:?}", waved(&SoundsDb::open_read_only(&copy).unwrap(), sounds)), listed(&old));
     // A save in the C# app after that: never read into the copy.
     let owned = listed(&copy);
     cs(&old)
@@ -1214,7 +1239,7 @@ fn a_copy_behind_is_brought_up_to_date_one_last_time_and_is_the_apps_own_after()
         panic!("the copy is read");
     };
     assert!(!behind);
-    assert_eq!(format!("{sounds:?}"), owned);
+    assert_eq!(format!("{:?}", waved(&SoundsDb::open_read_only(&copy).unwrap(), sounds)), owned);
     let refused = compact::sync(&old, &copy).unwrap_err().to_string();
     assert!(refused.contains("own sound library"), "{refused}");
     assert_eq!(compact::last_sync(&old, &copy).unwrap(), Synced::default());
@@ -1228,7 +1253,7 @@ fn a_copy_behind_is_brought_up_to_date_one_last_time_and_is_the_apps_own_after()
         panic!("the copy is read without sounds.db");
     };
     assert!(!behind);
-    assert_eq!(format!("{sounds:?}"), owned);
+    assert_eq!(format!("{:?}", waved(&SoundsDb::open_read_only(&copy).unwrap(), sounds)), owned);
 }
 
 /// `sounds.db` gone before the copy became the app's own (archived, or left in the old data folder when it moved): the
@@ -1239,7 +1264,7 @@ fn a_copy_left_without_sounds_db_becomes_the_apps_own_as_it_is() {
     let old = library(&dir, 40);
     let copy = compact::copy_of(&old);
     assert!(!compact::sync(&old, &copy).unwrap().adopted);
-    let listed = |path: &Path| format!("{:?}", SoundsDb::open_read_only(path).unwrap().all(now()).unwrap());
+    let listed = |path: &Path| format!("{:?}", all_of(&SoundsDb::open_read_only(path).unwrap()));
     let made = listed(&copy);
     // The C# app saved once more after that, then sounds.db went.
     cs(&old)
@@ -1254,7 +1279,7 @@ fn a_copy_left_without_sounds_db_becomes_the_apps_own_as_it_is() {
         panic!("the copy is read without sounds.db");
     };
     assert!(!behind && adopted);
-    assert_eq!(format!("{sounds:?}"), made);
+    assert_eq!(format!("{:?}", waved(&SoundsDb::open_read_only(&copy).unwrap(), sounds)), made);
     assert!(compact::own_since(&copy).is_some());
 }
 
@@ -1324,7 +1349,7 @@ fn a_copy_of_the_format_before_is_laid_out_anew_from_itself() {
     let fresh = dir.join("fresh").join(compact::FILE_NAME);
     std::fs::create_dir_all(fresh.parent().unwrap()).unwrap();
     compact::sync(&old, &fresh).unwrap();
-    let listed = format!("{:?}", SoundsDb::open_read_only(&old).unwrap().all(now()).unwrap());
+    let listed = format!("{:?}", all_of(&SoundsDb::open_read_only(&old).unwrap()));
     let before = std::fs::metadata(&copy).unwrap().len();
     // sounds.db archived: the copy is all there is.
     let archived = dir.join("archived.db");
@@ -1346,7 +1371,7 @@ fn a_copy_of_the_format_before_is_laid_out_anew_from_itself() {
     let Some(LaidOut::Done { before: was, after }) = laid_out else { panic!("laid out anew: {laid_out:?}") };
     let db = SoundsDb::open_read_only(&copy).unwrap();
     assert!(db.is_copy() && !db.is_formerly());
-    assert_eq!(format!("{:?}", db.all(now()).unwrap()), listed);
+    assert_eq!(format!("{:?}", all_of(&db)), listed);
     assert_eq!(was, before);
     assert!(after * 100 < before * 85, "{after} from {before}");
     assert_eq!(after, std::fs::metadata(&copy).unwrap().len());
@@ -1423,7 +1448,7 @@ fn a_copy_of_the_format_before_that_is_behind_is_made_afresh() {
     let old = library(&dir, 120);
     let copy = compact::copy_of(&old);
     formerly(&old, &copy, None);
-    let listed = format!("{:?}", SoundsDb::open_read_only(&old).unwrap().all(now()).unwrap());
+    let listed = format!("{:?}", all_of(&SoundsDb::open_read_only(&old).unwrap()));
     cs(&old)
         .execute("UPDATE sounds SET rating = 5 - COALESCE(rating, 0) WHERE id IN (SELECT id FROM sounds LIMIT 4)", [])
         .unwrap();
@@ -1572,7 +1597,8 @@ fn a_few_sounds_read_on_their_own_are_as_the_whole_list_gives_them() {
     formerly(&old, &dir.join("formerly.db"), None);
     for path in [old.clone(), copy, dir.join("formerly.db")] {
         let db = SoundsDb::open_read_only(&path).unwrap();
-        let all = db.all(now()).unwrap();
+        // With their waveforms, which the app's own library reads apart from the list.
+        let all = waved(&db, db.all(now()).unwrap());
         let hidden = db.hidden().unwrap();
         assert!(!hidden.is_empty());
         // Every sound but the hidden copies.
@@ -1596,5 +1622,39 @@ fn a_few_sounds_read_on_their_own_are_as_the_whole_list_gives_them() {
         for (a, b) in some.iter().zip(expected) {
             assert_eq!(format!("{a:?}"), format!("{b:?}"), "{}", path.display());
         }
+    }
+}
+
+/// The app's own library keeps each sound's waveform in a table of its own, and its list comes without them: they're
+/// read for the sounds on show, each as `sounds.db` has it. `sounds.db` and a copy of the format before give them with
+/// the list, and the same ones on their own.
+#[test]
+fn only_the_apps_own_library_reads_the_waveforms_apart_from_the_list() {
+    let dir = folder("waves apart");
+    let old = library(&dir, 1_200);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    formerly(&old, &dir.join("formerly.db"), None);
+    let listed = SoundsDb::open_read_only(&old).unwrap().all(now()).unwrap();
+    let wanted: std::collections::HashMap<i64, mo_sounds::Peaks> = listed
+        .iter()
+        .filter_map(|s| Some((s.id, s.analysis.as_ref()?.waveform.clone())))
+        .filter(|(_, wave)| !wave.is_empty())
+        .collect();
+    // More than SQLite is asked for at once, a sound never analysed and one that isn't there.
+    assert!(wanted.len() > 500 && wanted.len() < listed.len());
+    let mut ids: Vec<i64> = listed.iter().map(|s| s.id).collect();
+    ids.push(999_999);
+    for (path, apart) in [(old.clone(), false), (copy, true), (dir.join("formerly.db"), false)] {
+        let db = SoundsDb::open_read_only(&path).unwrap();
+        assert_eq!(db.waves_apart(), apart, "{}", path.display());
+        let with_waves = |sounds: &[mo_sounds::Sound]| {
+            sounds.iter().filter(|s| s.analysis.as_ref().is_some_and(|a| !a.waveform.is_empty())).count()
+        };
+        assert_eq!(with_waves(&db.all(now()).unwrap()), if apart { 0 } else { wanted.len() }, "{}", path.display());
+        assert_eq!(with_waves(&db.everything(now()).unwrap().sounds), if apart { 0 } else { wanted.len() });
+        let waves: std::collections::HashMap<i64, mo_sounds::Peaks> = db.waves(&ids).unwrap().into_iter().collect();
+        assert_eq!(waves, wanted, "{}", path.display());
+        assert!(db.waves(&[]).unwrap().is_empty());
     }
 }
