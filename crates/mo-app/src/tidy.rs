@@ -1472,6 +1472,8 @@ mod tests {
             data.join("bitwig-prints.db-wal"),
             data.join("preset-files.db"),
             data.join("preset-files.db-wal"),
+            data.join("arrangement-peaks.db"),
+            data.join("arrangement-peaks.db-wal"),
             data.join("backup.txt"),
             data.join("backup-songs.txt"),
             data.join("rust-settings.json"),

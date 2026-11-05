@@ -406,6 +406,7 @@ pub struct View {
 }
 
 /// What a drag out of the app picks up from the view, and what it carries (`drag_out`).
+pub mod peaks_store;
 mod pick;
 
 fn lane_height(lane: &PreviewLane) -> f64 {
