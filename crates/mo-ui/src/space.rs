@@ -13,8 +13,8 @@
 use std::cell::RefCell;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
@@ -27,7 +27,7 @@ use mo_app::space_bin::{self, BIN, CAN_PUT_BACK, PutBacks};
 use mo_app::space_bitwig::{self, BITWIG_COPIES, Copies, Fixes, Fixing, ToFix};
 use mo_app::space_old::{self, Found, OLD_COPIES};
 use mo_app::space_plugins::{self, UNUSED_PLUGINS};
-use mo_app::space_removing::{self, Counting, Removable};
+use mo_app::space_removing::{self, Removable, Tally};
 use mo_app::space_songs::{self, COMPACT, FromLibrary, SongItem};
 use mo_app::space_spare::{self, Removing, SPARE_COPIES, Stage};
 use mo_app::{backup, log, paths, shell};
@@ -35,7 +35,7 @@ use mo_catch::catch_crash;
 use mo_library::folders::FolderList;
 use mo_space::app_files::{self, AppFilesPart};
 use mo_space::bitwig::{self, LibraryIndex};
-use mo_space::clean::{self, Bin, Done, Problem, SystemBin, What};
+use mo_space::clean::{self, Bin, Done, Heard, Problem, SystemBin, What};
 use mo_space::old_copies::Leftover;
 use mo_space::song::CompactSettings;
 use mo_space::spare::{SpareCopy, Used};
@@ -1049,14 +1049,17 @@ fn send_to_bin<T: Removable + Send + 'static>(
     let folder = paths::data_dir();
     let (when, sending) = (binned::now(), picked.clone());
     let started = background::spawn(clean.thread, move || {
-        let card = feed.start(clean.title, &(clean.words)());
-        // The card says how many are in the bin so far (thousands of autosaves can take minutes).
+        let note = (clean.words)();
+        let card = feed.start(clean.title, &note);
+        // The card says how far it has got (thousands of autosaves can take minutes), under what it said at the start.
         let of = sending.len();
-        let each = |sent: usize| {
-            let fraction = sent as f32 / of.max(1) as f32;
-            card.progress(fraction, Some(&space_removing::progress_words(sent, of)));
+        let tally = Mutex::new(Tally::new(SystemBin.admin().can_ask()));
+        let hear = |_: &Path, sent: &Result<(), String>| {
+            let mut tally = tally.lock().unwrap_or_else(PoisonError::into_inner);
+            tally.heard(sent);
+            card.progress(tally.fraction(of), Some(&tally.words(&note, of)));
         };
-        let bin = Counting::new(&SystemBin, &each);
+        let bin = Heard::new(&SystemBin, &hear);
         // A crash (logged as one) still finishes Remove, so the page isn't busy for ever: what went before it is in the
         // bin, but which isn't known.
         let done = catch_crash(AssertUnwindSafe(|| work(&sending, &bin)))
