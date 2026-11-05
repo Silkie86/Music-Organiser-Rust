@@ -229,7 +229,7 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
         let read = Library::open_read_only(&path)
             .and_then(|lib| Live::load(&lib, DEFAULT_RUN_GAP_MONTHS, details))
             // Missing samples are looked for in the Sounds library beside it last (rule 13).
-            .map(|live| live.with_sounds(path.with_file_name("sounds.db")));
+            .map(|live| live.with_sounds(sound_library::database_beside(&path)));
         let mut live = match read {
             Ok(live) => live,
             Err(e) => {
@@ -919,7 +919,7 @@ fn convert_save(db: &Path, project: &Path) -> Result<Converted, String> {
         .ok_or(bitwig::NO_TEMPLATE)?;
     let steps = setting(bitwig::STEPS_UNTIL_NEXT_NOTE_KEY)?.as_deref() == Some("1");
     let opened = OPENED.lock().map(|o| o.clone()).unwrap_or_default();
-    let locator = sound_library::locator(Some(&db.with_file_name("sounds.db")));
+    let locator = sound_library::locator(Some(&sound_library::database_beside(db)));
     let at = project.to_string_lossy().into_owned();
     background::on_pool(move || {
         let written_of = |file: &Path| lib.setting(&bitwig::convert_key(file)).ok().flatten();

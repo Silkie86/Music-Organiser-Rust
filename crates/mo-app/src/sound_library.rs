@@ -1,6 +1,7 @@
-//! The Sounds library as the sample locator sees it (rule 13's last place to look): read from `sounds.db` the first
-//! time a sample isn't in its project's or its DAW's folders, then kept while `sounds.db` stays as it is, so clicking
-//! through songs or saving every minute doesn't read the database each time.
+//! The Sounds library as the sample locator sees it (rule 13's last place to look): read from the app's own sound
+//! library (`sounds-rust.db`, [`database_beside`]) the first time a sample isn't in its project's or its DAW's folders,
+//! then kept while the database stays as it is, so clicking through songs or saving every minute doesn't read the
+//! database each time.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -49,6 +50,21 @@ pub fn shared(sounds_db: &Path) -> Arc<SoundLibrary> {
         *slot = Some(Kept { db: sounds_db.to_path_buf(), stamp, at: Instant::now(), library: library.clone() });
     }
     library
+}
+
+/// The Sounds library's database beside `file` (another of the app's files, in its data folder): the app's own,
+/// `sounds-rust.db`, once the Sounds page has made it; before that (the first start with a C# app's library), the C#
+/// app's `sounds.db` it's made from, read-only. The C# app is retired, so `sounds.db` is never read once the app's own
+/// is there (Solomon, 2026-11-05).
+pub fn database_beside(file: &Path) -> PathBuf {
+    database_in(file.parent().unwrap_or(Path::new("")))
+}
+
+/// [`database_beside`], for the data folder `dir` itself.
+pub fn database_in(dir: &Path) -> PathBuf {
+    let library = dir.join("sounds.db");
+    let own = mo_sounds::compact::copy_of(&library);
+    if own.exists() { own } else { library }
 }
 
 /// A sample locator that also looks in the Sounds library at `sounds_db`, when one is given. The library is read only

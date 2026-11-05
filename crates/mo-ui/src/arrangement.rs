@@ -168,7 +168,7 @@ pub fn connect(app: &AppWindow) {
     // it has a thread of its own: the arrangement shows as soon as its save is read, and the next song picked is read
     // meanwhile. The folders read are kept for the next song for a minute. Then the files' waveforms.
     let weak = app.as_weak();
-    let mut samples = arr::SampleFinder::new(Some(mo_app::paths::data_dir().join("sounds.db")));
+    let mut samples = arr::SampleFinder::new(Some(mo_app::sound_library::database_in(&mo_app::paths::data_dir())));
     let finder = Newest::start("Arrangement samples", move |(asked, path, views): FindJob| {
         let wanted = || SHOWN.load(Ordering::Relaxed) == asked;
         if !wanted() {
