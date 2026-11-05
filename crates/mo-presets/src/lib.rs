@@ -23,6 +23,7 @@
 pub mod bitwig;
 pub mod curves;
 pub mod export;
+pub mod file_store;
 pub mod files;
 pub mod filter;
 pub mod fixes;

@@ -131,12 +131,24 @@ fn one_plugin(doc: &Document) -> Option<(ObjId, String)> {
 /// folder isn't walked twice: each `.bwpreset` that loads a plugin is read over every core, and the newest one per
 /// plugin and format wins (by path when two were saved at the same time, so it's the same every run).
 pub fn templates(found: &[FoundPreset]) -> Templates {
-    let mut all: Vec<Template> = found
-        .par_iter()
-        .filter(|f| f.file.as_ref().is_ok_and(|p| p.format == Some(FileFormat::BwPreset) && p.wraps_plugin))
-        // A damaged file is only not a template.
-        .filter_map(|f| mo_catch::catch(|| inspect(Path::new(&f.path))).ok().flatten())
-        .collect();
+    let all: Vec<Template> =
+        found.par_iter().filter(|f| may_be_template(f)).filter_map(|f| inspect_caught(Path::new(&f.path))).collect();
+    newest_templates(all)
+}
+
+/// Whether a preset file found may be a template: a Bitwig preset that loads a plugin.
+pub fn may_be_template(f: &FoundPreset) -> bool {
+    f.file.as_ref().is_ok_and(|p| p.format == Some(FileFormat::BwPreset) && p.wraps_plugin)
+}
+
+/// [`inspect`], with a reader that trips over a damaged file caught: that file is only not a template.
+pub fn inspect_caught(path: &Path) -> Option<Template> {
+    mo_catch::catch(|| inspect(path)).ok().flatten()
+}
+
+/// The newest template per plugin and format among `all` (by path when two were saved at the same time, so it's the
+/// same every run).
+pub fn newest_templates(mut all: Vec<Template>) -> Templates {
     all.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.path.cmp(&b.path)));
     let mut out = Templates::new();
     for t in all {

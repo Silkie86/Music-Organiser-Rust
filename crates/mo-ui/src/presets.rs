@@ -34,6 +34,7 @@ use mo_library::Library;
 use mo_presets::bitwig::{self as bw, Templates};
 use mo_presets::curves::{self, Curve, CurvesDb};
 use mo_presets::export;
+use mo_presets::file_store;
 use mo_presets::filter::Choice;
 use mo_presets::fixes::{self, RoleFixes};
 use mo_presets::library::{self as plib, Source};
@@ -998,11 +999,25 @@ fn read_all(at: &Where) -> Result<(), String> {
     }
     // The preset files, and the Bitwig presets among them that Send to Bitwig builds from.
     let roots = logic::preset_folders(&plib::default_folders(), &bitwig_folders);
-    let (found, templates) = background::on_pool(|| {
-        let found = plib::find_preset_files(&roots);
-        let templates = bw::templates(&found);
-        (found, templates)
-    });
+    // Read only the preset files that are new or changed since the last run; the rest are as they were kept.
+    let started = std::time::Instant::now();
+    let (kept, why) = background::on_pool(|| file_store::find(&roots, &at.data_dir.join(file_store::FILE_NAME)));
+    if let Some(why) = why {
+        log::warning("Presets", &format!("Every preset file is read, none kept for next time: {why}"));
+    }
+    if let Some(why) = &kept.not_kept {
+        log::warning("Presets", &format!("Couldn't keep the preset files read for next time: {why}"));
+    }
+    log::info(
+        "Presets",
+        &format!(
+            "{} of {} preset files read from their files, the rest as they were last time ({:.1} s)",
+            kept.read,
+            kept.files.len(),
+            started.elapsed().as_secs_f64()
+        ),
+    );
+    let (found, templates) = (kept.files, kept.templates);
     let years: HashMap<String, Option<i32>> = background::on_pool(|| {
         use rayon::prelude::*;
         found.par_iter().map(|f| (f.path.clone(), file_year(&f.path))).collect()
@@ -1176,7 +1191,8 @@ fn export_setup() -> (Option<PathBuf>, Option<Arc<Templates>>, Vec<PathBuf>, Fee
 fn templates_now(have: Option<Arc<Templates>>, bitwig: &[PathBuf]) -> Arc<Templates> {
     have.unwrap_or_else(|| {
         let roots = logic::preset_folders(&plib::default_folders(), bitwig);
-        Arc::new(background::on_pool(|| bw::templates(&plib::find_preset_files(&roots))))
+        let store = mo_app::paths::data_dir().join(file_store::FILE_NAME);
+        Arc::new(background::on_pool(|| file_store::find(&roots, &store).0.templates))
     })
 }
 
