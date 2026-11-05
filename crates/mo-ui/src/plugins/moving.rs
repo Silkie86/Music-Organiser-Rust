@@ -327,6 +327,7 @@ fn moved_done(app: &AppWindow, id: u64, head: String, gone: Option<String>) {
     log::info("Plugins", &format!("Move: {head}"));
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
+        p.moves += 1;
         // A link now: its room is on the other drive, and it can't move again. Kept, so the next read (and Space)
         // leaves it out too.
         if let Some(gone) = gone {
@@ -341,4 +342,6 @@ fn moved_done(app: &AppWindow, id: u64, head: String, gone: Option<String>) {
     });
     refresh(app);
     fill_panel(app);
+    // The old copy it left (or what a move cut short had copied) shows on Space.
+    crate::space::plugin_moved(app);
 }

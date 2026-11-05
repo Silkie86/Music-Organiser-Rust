@@ -263,10 +263,12 @@ struct Page {
     /// What Fix did this time, the saves you ticked or unticked, and the projects whose other saves are on show.
     fixes: Fixes,
     /// The look for old copies, what the last one found (it stays on show while the next one looks), and whether one
-    /// is on.
+    /// is on; and how many of the Plugins page's moves had finished when the newest one was asked for: once another
+    /// has, it looks again ([`plugin_moved`]).
     old_look: Looks<OldAsk>,
     old: Option<Found>,
     old_looking: bool,
+    old_moves: u64,
     /// Remove for old copies: the ticks you changed, and how a removal went.
     old_removing: space_old::Removing,
     /// While old copies are going to the Recycle Bin: what stops their checks (Stop).
@@ -478,20 +480,23 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
 }
 
 /// The page came on show: it looks the first time, and again once what it shows is five minutes old, old copies too,
-/// so the reminder of them keeps up with what's there. It looks for Bitwig copies, spare plugin copies and at your
-/// songs the first time, and again only while no look at them has finished: they read every project, every plugin file
-/// and every song's folder. None of those three is looked for while what it finds is going to the Recycle Bin or
-/// coming back ([`held`]).
+/// so the reminder of them keeps up with what's there; old copies also once a move on the Plugins page has finished
+/// since the last look for them. It looks for Bitwig copies, spare plugin copies and at your songs the first time, and
+/// again only while no look at them has finished: they read every project, every plugin file and every song's folder.
+/// None of those three is looked for while what it finds is going to the Recycle Bin or coming back ([`held`]).
 pub fn shown(app: &AppWindow) {
     let sounds = sounds_page::known();
+    let moves = plugins_page::moves_this_session();
     let (stale, bitwig, old, spare, songs, plugins, plugins_changed, copies) = PAGE.with(|p| {
-        let p = p.borrow();
+        let mut p = p.borrow_mut();
         let wired = p.feed.is_some();
         let stale = wired && p.looked.is_none_or(|at| at.elapsed() >= FRESH);
         let bitwig = wired && p.bitwig.is_none() && p.bitwig_looking.is_none();
         let held = held(&p);
         let spare = wired && p.spare.is_none() && !p.spare_looking && !held.spare;
-        let old = wired && !p.old_looking && !held.old && (stale || p.old.is_none());
+        // While old copies are going or coming back, a move's look waits until that's done.
+        p.look_after.old |= wired && held.old && moves != p.old_moves;
+        let old = wired && old_due(&p, moves, stale, held.old);
         let songs = wired && p.songs.is_none() && !p.songs_looking && !held.songs;
         let fixed = p.plugins.is_some() && plugins_page::folder_fixes_this_session() != p.plugins_fixes;
         let plugins = wired && !p.plugins_looking && (stale || p.plugins.is_none() || fixed);
@@ -553,6 +558,36 @@ fn copies_due(p: &Page, sounds: &Known, stale: bool) -> bool {
     let Known::Read(list, _) = sounds else { return false };
     let other = !Weak::ptr_eq(&p.copies_of, &Arc::downgrade(list));
     other || (!p.copies_looking && (stale || p.copies.is_none()))
+}
+
+/// Whether old copies are due a look as the page comes on show, with `moves` of the Plugins page's moves finished
+/// (`stale`: what's on show is five minutes old; `held`: old copies are going to the Recycle Bin or coming back, so
+/// none is). One is once a move has finished since the newest look was asked for, even while that's on (the newest
+/// wins); else, with none on, when nothing's found yet or what's on show is stale.
+fn old_due(p: &Page, moves: u64, stale: bool, held: bool) -> bool {
+    !held && (moves != p.old_moves || (!p.old_looking && (stale || p.old.is_none())))
+}
+
+/// A move on the Plugins page finished, whatever came of it: it leaves an old copy beside its link, or, cut short,
+/// what it had copied. While the page is on show and has looked, it looks for old copies again now (one still on was
+/// asked for before the move finished: the newest wins), or, while old copies are going to the Recycle Bin or coming
+/// back, once that's done ([`held`]); else it does when it next shows ([`shown`]).
+pub fn plugin_moved(app: &AppWindow) {
+    if app.get_place() != Place::Space.index() as i32 {
+        return;
+    }
+    let now = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.feed.is_none() || p.looked.is_none() {
+            return false;
+        }
+        let held = held(&p).old;
+        p.look_after.old |= held;
+        !held
+    });
+    if now {
+        look_for_old(app);
+    }
 }
 
 /// Runs one of the page's own shortcuts ([`mo_app::shortcuts::SPACE_ACTIONS`]). Returns whether it did anything,
@@ -1431,11 +1466,14 @@ fn look_for_copies_now(ask: BitwigAsk, index: &mut Option<LibraryIndex>, weak: &
 /// Asks for a new look for old copies, on the page's third low-priority thread. One still looking stops: the newest
 /// wins (rule 12).
 fn look_for_old(app: &AppWindow) {
+    let moves = plugins_page::moves_this_session();
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.feed.as_ref()?;
         let (id, stop) = p.old_look.next();
         p.old_looking = true;
+        // Every move that has finished by now is in the library this look reads.
+        p.old_moves = moves;
         Some(OldAsk { id, library: p.library.clone(), stop })
     });
     let Some(ask) = ask else { return };
@@ -2305,5 +2343,25 @@ mod tests {
         let keys = mo_app::shortcuts::Shortcuts::default();
         assert_eq!(keys.page_action_for("F5", mo_app::shortcuts::SPACE_ACTIONS), Some(MEASURE));
         assert_eq!(keys.page_action_for("Ctrl+Shift+E", mo_app::shortcuts::SPACE_ACTIONS), Some(REVEAL));
+    }
+
+    #[test]
+    fn a_finished_move_on_the_plugins_page_makes_old_copies_due_again() {
+        // Nothing found yet: due.
+        let mut p = Page::default();
+        assert!(old_due(&p, 0, false, false));
+        // Found, fresh, and no move since: not due, until it's five minutes old.
+        p.old = Some(Found::default());
+        assert!(!old_due(&p, 0, false, false));
+        assert!(old_due(&p, 0, true, false));
+        // A move finished since: due, even while a look is on (it was asked for before the move ended)...
+        p.old_looking = true;
+        assert!(!old_due(&p, 0, true, false));
+        assert!(old_due(&p, 1, false, false));
+        // ...but not while old copies are going to the Recycle Bin or coming back.
+        assert!(!old_due(&p, 1, false, true));
+        // Asked for after it: not due again.
+        p.old_moves = 1;
+        assert!(!old_due(&p, 1, false, false));
     }
 }
