@@ -815,7 +815,22 @@ fn key_order(s: &Sound) -> i32 {
     s.analysis.as_ref().and_then(|a| a.key_tonic.map(|t| t * 2 + i32::from(a.key_minor))).unwrap_or(i32::MAX)
 }
 
-/// A sound's place in the shuffled order for `seed`: SplitMix64 of the two, a good spread from a cheap sum.
+/// Of the sounds with these `ids`, the `n` that [`Order::Shuffled`] puts first for `seed`, in that order: shown at
+/// once while the rest are read, the list of them is then the start of the whole list's, whatever the filters let
+/// through (a sound they'd let through that comes before the last of these would be one of them). So nothing on
+/// show moves when the rest arrive.
+pub fn first_shuffled(ids: &[i64], seed: u64, n: usize) -> Vec<i64> {
+    let mut keyed: Vec<(u64, i64)> = ids.iter().map(|&id| (shuffle_key(seed, id), id)).collect();
+    if keyed.len() > n {
+        keyed.select_nth_unstable(n);
+        keyed.truncate(n);
+    }
+    keyed.sort_unstable();
+    keyed.into_iter().map(|(_, id)| id).collect()
+}
+
+/// A sound's place in the shuffled order for `seed`: SplitMix64 of the two, a good spread from a cheap sum. Two
+/// sounds never share one: each step turns one number into one other.
 fn shuffle_key(seed: u64, id: i64) -> u64 {
     let mut z = seed.wrapping_add((id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -1472,6 +1487,50 @@ mod tests {
         assert_eq!(first.len(), 4);
         let seen: std::collections::HashSet<_> = (0..20).map(|seed| list.view(&all, Order::Shuffled, seed)).collect();
         assert!(seen.len() > 1);
+    }
+
+    #[test]
+    fn the_sounds_shown_first_are_the_start_of_the_whole_shuffled_list_whatever_the_filters() {
+        let types = ["Kick", "Snare", "Pad", "Loop"];
+        let sounds: Vec<Sound> = (1..=2_000)
+            .map(|id| {
+                let key = (id % 3 != 0).then_some(((id % 12) as i32, id % 2 == 0));
+                let path = format!(r"I:\Samples\Pack {}\Sound {id}.wav", id % 7);
+                let mut s = sound(id * 3 + 1, &path, types[(id % 4) as usize], analysed(id % 5 == 0, None, key));
+                s.added = NaiveDate::from_ymd_opt(2026, 1, 1).and_then(|d| d.and_hms_opt(0, 0, 0)).unwrap_or_default();
+                s
+            })
+            .collect();
+        let every: Vec<i64> = sounds.iter().map(|s| s.id).collect();
+        let whole = SoundList::new(sounds.clone());
+        let mut kicks = Filters::default();
+        kicks.toggle_type("Kick");
+        let mut loops = Filters::default();
+        loops.pick(LENGTH, Length::Loops.name());
+        let searched = Filters { search: "pack 3".into(), ..Filters::default() };
+        for seed in [1, 7, 0xDEAD_BEEF] {
+            let first = first_shuffled(&every, seed, 200);
+            assert_eq!(first.len(), 200);
+            let shown_first: Vec<Sound> = sounds.iter().filter(|s| first.contains(&s.id)).cloned().collect();
+            let part = SoundList::new(shown_first);
+            for filters in [&Filters::default(), &kicks, &loops, &searched] {
+                let start = ids(&part, &part.view(filters, Order::Shuffled, seed));
+                let all = ids(&whole, &whole.view(filters, Order::Shuffled, seed));
+                assert!(!start.is_empty() && start.len() < all.len());
+                assert_eq!(start, all[..start.len()]);
+            }
+            assert_eq!(first, ids(&part, &part.view(&Filters::default(), Order::Shuffled, seed)));
+        }
+        // Fewer sounds than asked for: all of them, in order.
+        let few = first_shuffled(&every[..5], 7, 200);
+        assert_eq!(few.len(), 5);
+        assert_eq!(
+            few,
+            ids(&whole, &whole.view(&Filters::default(), Order::Shuffled, 7))
+                .into_iter()
+                .filter(|id| every[..5].contains(id))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

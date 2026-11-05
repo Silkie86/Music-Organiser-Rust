@@ -110,6 +110,10 @@ struct Page {
     read: bool,
     /// There's no sound library, or it couldn't be read: no sounds are coming ([`loaded`]).
     unread: bool,
+    /// Only the first few sounds are in `list`, shown at once while the rest are read: how many there are in all.
+    /// Their list is the start of the whole one's ([`list::first_shuffled`]), so nothing on show moves when the rest
+    /// arrive ([`Step::Rest`]).
+    partial: Option<usize>,
     /// The type chips' types with their counts, in chip order, then the rest (the More types menu).
     types: Vec<(String, usize)>,
     /// Every tag on a sound, for the Tag filter.
@@ -175,6 +179,7 @@ impl Default for Page {
             asked: 0,
             read: false,
             unread: false,
+            partial: None,
             types: Vec::new(),
             tags: Vec::new(),
             counts: None,
@@ -202,7 +207,7 @@ impl Page {
     /// the sounds were read.
     fn open_on(&mut self, view: Option<&str>, autoplay: Option<&str>) {
         if !self.chose_view {
-            self.view = view.and_then(|v| VIEWS.iter().position(|n| *n == v)).map_or(TILES, |i| i as i32);
+            self.view = opening_view(view);
         }
         // As in the C# app: off unless it was turned on.
         if !self.chose_autoplay {
@@ -545,7 +550,7 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
     };
     if here {
         // The screenshots read their fixture as it is: nothing is written beside it.
-        read_all(&sounds_db, &library_db, None, send);
+        read_all(&sounds_db, &library_db, None, None, send);
         return;
     }
     // Not at once: the first thing on show reads from the disk first. The sounds are read when this page, Space or
@@ -553,7 +558,13 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
     let weak = app.as_weak();
     START_READ.with(|s| {
         *s.borrow_mut() = Some(Box::new(move || {
-            let read = move || read_all(&sounds_db, &library_db, Some(cards), send);
+            // The shuffle the page opens on: the sounds it puts first are read first. Not when you've picked another
+            // order meanwhile.
+            let opening = PAGE.with(|p| {
+                let p = p.borrow();
+                (p.order == Order::Shuffled).then_some(Opening { seed: p.seed, view: p.chose_view.then_some(p.view) })
+            });
+            let read = move || read_all(&sounds_db, &library_db, Some(cards), opening, send);
             if let Err(e) = background::spawn("Sounds library", read)
                 && let Some(app) = weak.upgrade()
             {
@@ -593,13 +604,20 @@ pub fn reading(app: &AppWindow) {
         p.unread = false;
     });
     let data = app.global::<SoundsData>();
-    data.set_empty_title("Reading your sounds…".into());
+    data.set_empty_title(READING.into());
     data.set_empty_text("".into());
 }
 
+/// What every view says in the list's place while the sounds are read ([`reading`]).
+const READING: &str = "Reading your sounds…";
+
 /// What reading brings back, in steps: the sounds first, then the list again with how your songs use them.
 enum Step {
+    /// The sounds: all of them, or (from the app's own library, opening on Tiles or List) the first few to show at
+    /// once ([`Read::partial`]), the rest to follow.
     Read(Result<Box<Read>, String>),
+    /// All the sounds, after the first few: the page takes them in place of those, which keep their places on show.
+    Rest(Refreshed),
     Used(Arc<SoundList>),
     /// Every sound's fingerprint, for Sounds like this.
     Index(Arc<SoundIndex>),
@@ -613,6 +631,7 @@ fn arrive(app: &AppWindow, step: Step) {
     let _doing = crate::watchdog::doing("Sounds: the library arrived");
     match step {
         Step::Read(read) => loaded(app, read),
+        Step::Rest(rest) => rest_arrived(app, rest),
         Step::Used(list) => use_known(app, list),
         Step::Index(index) => index_known(app, index),
         Step::Refreshed(refreshed) => brought_up_to_date(app, refreshed),
@@ -623,6 +642,9 @@ fn arrive(app: &AppWindow, step: Step) {
 /// What reading the library gives: the sounds ready to list, what was played, and the view and autoplay you had last.
 struct Read {
     library: Library,
+    /// These are only the first few sounds, to show at once: how many there are in all, the rest to follow
+    /// ([`Step::Rest`]).
+    partial: Option<usize>,
     /// Where the galaxy's saved maps are read from: the app's copy of the library, or `sounds.db` without one.
     source: PathBuf,
     view: Option<String>,
@@ -736,7 +758,11 @@ impl Settings {
 /// of the library beside `sounds.db` ([`compact`]): a fraction of the reading. With no copy yet, it's made on the
 /// same pass that reads `sounds.db` for the page. A copy that's behind (the C# app changed `sounds.db` since) is shown
 /// at once, then brought up to date, and the page takes the sounds again from it ([`Step::Refreshed`]).
-fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl Fn(Step)) {
+///
+/// With `opening` (how the page opens: shuffled), when it opens on Tiles or List, the first sounds its shuffle puts on
+/// top are read from the copy on their own and sent first ([`FIRST`]), so they show in a moment; all of them follow
+/// ([`Step::Rest`]). Reading half a million takes seconds.
+fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, opening: Option<Opening>, send: impl Fn(Step)) {
     // No library at all. Once the copy is the app's own, it's all there is: `sounds.db` may have been archived.
     if !sounds_db.exists() && (cards.is_none() || !compact::copy_of(sounds_db).exists()) {
         send(Step::Read(Err(String::new())));
@@ -749,8 +775,47 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
     let settings = lib.as_ref().map(Settings::read).unwrap_or_default();
     let now = Local::now().naive_local();
     let began = Instant::now();
+    let read = |library: Library, source: PathBuf, partial: Option<usize>| Read {
+        library,
+        partial,
+        source,
+        view: settings.view.clone(),
+        count: settings.count.clone(),
+        drum_machine: settings.drum_machine.clone(),
+        autoplay: settings.autoplay.clone(),
+        step_ms: settings.step_ms.clone(),
+    };
+    // The list of the first sounds shown, once they're sent: the rest take its place.
+    let mut shown_first: Option<Arc<SoundList>> = None;
+    // Only for Tiles and List, which show the shuffled list from its start: the other views need every sound. The
+    // view you picked while the page waited for its sounds, or else the one you had last.
+    let seed = opening
+        .filter(|o| matches!(o.view.unwrap_or_else(|| opening_view(settings.view.as_deref())), TILES | LIST))
+        .map(|o| o.seed);
     let first = match &cards {
-        Some(cards) => read_through_copy(sounds_db, now, cards),
+        Some(cards) => read_through_copy(sounds_db, now, cards, |db| {
+            let Some(seed) = seed else { return };
+            match db.shown_ids().and_then(|ids| {
+                let first = list::first_shuffled(&ids, seed, FIRST);
+                Ok((db.some(&first, now)?, ids.len()))
+            }) {
+                Ok((sounds, all)) => {
+                    let library = Library::new(sounds, Vec::new(), &settings.weights);
+                    log::info(
+                        "Sounds",
+                        &format!(
+                            "The first {} of {all} sounds read in {:.2} s, the rest to follow",
+                            library.list.len(),
+                            began.elapsed().as_secs_f32()
+                        ),
+                    );
+                    shown_first = Some(library.list.clone());
+                    send(Step::Read(Ok(Box::new(read(library, db.path().to_owned(), Some(all))))));
+                }
+                // They come with the rest.
+                Err(e) => log::warning("Sounds", &format!("Couldn't read the first sounds on their own: {e}")),
+            }
+        }),
         None => read_in_place(sounds_db, now),
     };
     let mut first = match first {
@@ -775,15 +840,16 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
         ),
     );
     let list = library.list.clone();
-    send(Step::Read(Ok(Box::new(Read {
-        library,
-        source: first.source.clone(),
-        view: settings.view.clone(),
-        count: settings.count.clone(),
-        drum_machine: settings.drum_machine.clone(),
-        autoplay: settings.autoplay.clone(),
-        step_ms: settings.step_ms.clone(),
-    }))));
+    match shown_first {
+        // Where each of the first sounds is in the whole list (all of them, but for a copy found damaged and made
+        // again from sounds.db meanwhile): the page moves what it holds by place with its sound.
+        Some(was) => {
+            let moved = Some(Arc::new(places_in(&was, &library.places)));
+            send(Step::Source(first.source.clone()));
+            send(Step::Rest(Refreshed { library, was, moved, retyped: false }));
+        }
+        None => send(Step::Read(Ok(Box::new(read(library, first.source.clone(), None))))),
+    }
     // Sounds like this: every sound's fingerprint, read with the sounds or from the copy after them; their blocks
     // become the index.
     let mut remade = None;
@@ -931,6 +997,23 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
 /// How many plays History lists.
 const HISTORY_LENGTH: usize = 500;
 
+/// How many sounds are read on their own and shown at once, while the rest are read ([`read_all`]): screens of tiles
+/// to look through and pick from meanwhile.
+const FIRST: usize = 200;
+
+/// How the page opens, as its sounds are about to be read ([`read_all`]): shuffled by `seed`, on the view you picked
+/// while it waited for them (`None`: the one you had last).
+#[derive(Clone, Copy, Debug)]
+struct Opening {
+    seed: u64,
+    view: Option<i32>,
+}
+
+/// The view the page opens on, with the one you had last as the song library has it (`name`).
+fn opening_view(name: Option<&str>) -> i32 {
+    name.and_then(|v| VIEWS.iter().position(|n| *n == v)).map_or(TILES, |i| i as i32)
+}
+
 /// Where each sound of `list` is in a list read again (`places`: each sound's place there, by id); `None` for one
 /// that's gone.
 fn places_in(list: &SoundList, places: &HashMap<i64, usize>) -> Vec<Option<usize>> {
@@ -989,9 +1072,15 @@ fn read_in_place(sounds_db: &Path, now: NaiveDateTime) -> Result<FirstRead, Soun
 
 /// The sounds read from the app's own copy of the library beside `sounds_db`, or (with no copy it can read yet) from
 /// `sounds_db` while the copy is made on the same pass ([`compact::read_for_page`]). Making it goes on `cards`.
-fn read_through_copy(sounds_db: &Path, now: NaiveDateTime, cards: &Feed) -> Result<FirstRead, SoundsError> {
+/// `first` is handed the copy before its sounds are read, to send a few at once.
+fn read_through_copy(
+    sounds_db: &Path,
+    now: NaiveDateTime,
+    cards: &Feed,
+    first: impl FnOnce(&SoundsDb),
+) -> Result<FirstRead, SoundsError> {
     let copy = compact::copy_of(sounds_db);
-    match compact::read_for_page(sounds_db, now)? {
+    match compact::read_for_page(sounds_db, now, first)? {
         PageRead::Copy { db, sounds, behind, adopted } => {
             if adopted {
                 say_adopted();
@@ -1465,6 +1554,27 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
             if !why.is_empty() {
                 log::warning("Sounds", &format!("Couldn't read the sound library: {why}"));
             }
+            // The first few were shown, and the rest couldn't be read: none are, so the page says why. Shown empty,
+            // their chips, years and Ctrl+K's list go with them.
+            if PAGE.with(|p| p.borrow_mut().partial.take().is_some()) {
+                data.set_panel_shown(false);
+                stop(app);
+                PAGE.with(|p| {
+                    let mut p = p.borrow_mut();
+                    p.list = Arc::default();
+                    p.places = Arc::default();
+                    p.types.clear();
+                    p.tags.clear();
+                    p.played = Arc::default();
+                    p.history.clear();
+                    p.picked = None;
+                    p.counts = None;
+                    // Not read after all: the list's word ([`listed`]) doesn't take the place of why.
+                    p.read = false;
+                });
+                crate::finder::add_source(app, "sounds", Arc::new(finder::Sounds(Arc::default())));
+                refresh(app);
+            }
             PAGE.with(|p| p.borrow_mut().unread = true);
             crate::space::sounds_changed(app);
             data.set_empty_title("No sound library yet".into());
@@ -1486,8 +1596,26 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
         p.re.count = count;
         p.kit.drum_machine = read.drum_machine;
         p.step = Duration::from_millis(list::step_ms(read.step_ms.as_deref()));
+        p.partial = read.partial;
     });
     show(app, read.library, read.view.as_deref(), read.autoplay.as_deref());
+}
+
+/// All the sounds have arrived after the first few: they take those's place, which keep theirs on show.
+fn rest_arrived(app: &AppWindow, rest: Refreshed) {
+    // Only in place of the first few ([`brought_up_to_date`] checks the same): nothing else gives the page other
+    // sounds meanwhile.
+    let first = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let first = p.list.shares_with(&rest.was);
+        if first {
+            p.partial = None;
+        }
+        first
+    });
+    if first {
+        brought_up_to_date(app, rest);
+    }
 }
 
 /// Shows a `library` on the page, opening on the view and autoplay setting given.
@@ -2206,7 +2334,8 @@ fn listed(app: &AppWindow, id: u64, new: Listed) {
             return false;
         }
         p.shown = Arc::new(new.shown);
-        p.counts = Some(new.counts);
+        // Not while only the first few sounds are in: their counts would be a few of all.
+        p.counts = p.partial.is_none().then_some(new.counts);
         p.years = new.years;
         p.history = new.history;
         true
@@ -2218,12 +2347,20 @@ fn listed(app: &AppWindow, id: u64, new: Listed) {
         show_lists(app);
         // Once the sounds are read, the list (or "No sounds match") takes the place of the word saying so. A library
         // with no sounds in it says so on every view instead, as the word did.
-        let (read, none) = PAGE.with(|p| {
+        let (read, none, waiting) = PAGE.with(|p| {
             let p = p.borrow();
-            (p.read, p.list.is_empty())
+            // Only the first few are in, and none of them on this view: more may be, once the rest arrive. (Kits
+            // lists kits, not sounds.)
+            (p.read, p.list.is_empty(), p.partial.is_some() && p.view != KITS && p.entries() == 0)
         });
         if read {
-            let (title, text) = if none { NO_SOUNDS } else { ("", "") };
+            let (title, text) = if none {
+                NO_SOUNDS
+            } else if waiting {
+                (READING, "")
+            } else {
+                ("", "")
+            };
             let data = app.global::<SoundsData>();
             data.set_empty_title(title.into());
             data.set_empty_text(text.into());
@@ -2290,6 +2427,8 @@ pub fn known() -> Known {
         let p = p.borrow();
         match (p.read, p.unread, &p.galaxy.db) {
             (_, true, _) | (true, false, None) => Known::Unread,
+            // Only the first few so far.
+            _ if p.partial.is_some() => Known::Reading,
             (true, false, Some(db)) => Known::Read(p.list.clone(), db.clone()),
             (false, false, _) => Known::Reading,
         }
@@ -2316,7 +2455,9 @@ fn show_lists(app: &AppWindow) {
         data.set_view(p.view);
         data.set_shown(p.entries() as i32);
         let total = p.list.len();
-        let summary = if p.list.is_empty() {
+        let summary = if let Some(all) = p.partial {
+            format!("Reading the rest of your {} sounds…", thousands(all))
+        } else if p.list.is_empty() {
             String::new()
         } else if p.view == HISTORY
             && (Filters { years: None, ..p.filters.clone() }.any() || !p.filters.search.trim().is_empty())
@@ -3034,13 +3175,24 @@ mod tests {
 
     /// What one start of the page brings back from `sounds_db`, in order, in words.
     fn one_start(sounds_db: &Path, library_db: &Path, cards: &Feed) -> Vec<String> {
+        one_start_shuffled(sounds_db, library_db, cards, None)
+    }
+
+    /// The same for a page that opens shuffled by `seed` (the first sounds come first).
+    fn one_start_shuffled(sounds_db: &Path, library_db: &Path, cards: &Feed, seed: Option<u64>) -> Vec<String> {
         let got = std::sync::Mutex::new(Vec::new());
-        read_all(sounds_db, library_db, Some(cards.clone()), |step| {
+        let opening = seed.map(|seed| Opening { seed, view: None });
+        read_all(sounds_db, library_db, Some(cards.clone()), opening, |step| {
             let said = match step {
                 Step::Read(Ok(read)) => {
                     let plays: i64 = read.library.list.sounds().iter().map(|s| i64::from(s.plays)).sum();
                     let from = read.source.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                    format!("{} sounds from {from}, {plays} plays", read.library.list.len())
+                    let of = read.partial.map(|all| format!(" (the first of {all})")).unwrap_or_default();
+                    format!("{} sounds{of} from {from}, {plays} plays", read.library.list.len())
+                }
+                Step::Rest(r) => {
+                    let kept = r.moved.as_ref().map_or(0, |m| m.iter().flatten().count());
+                    format!("the rest: {} sounds, the first {kept} kept", r.library.list.len())
                 }
                 Step::Read(Err(why)) => format!("couldn't read: {why}"),
                 Step::Index(index) => format!("{} fingerprints", index.features.len()),
@@ -3070,6 +3222,72 @@ mod tests {
     /// The cards' titles and lines, as the feed shows them now.
     fn cards_said(cards: &Feed) -> Vec<String> {
         cards.visible(Instant::now()).iter().map(|c| format!("{}: {}", c.title, c.detail)).collect()
+    }
+
+    #[test]
+    fn the_sounds_the_shuffle_puts_first_show_before_the_rest_and_keep_their_places() {
+        let sounds_db = sound_library("first");
+        for id in 10..260 {
+            add_sound(&sounds_db, id, &format!("hit {id}"));
+        }
+        let library_db = song_library("first-songs.db", &[]);
+        // The first start reads sounds.db, making the app's own library on the same pass: all at once.
+        let made = one_start_shuffled(&sounds_db, &library_db, &Feed::default(), Some(7));
+        assert_eq!(made[0], "255 sounds from sounds-rust.db, 0 plays");
+        // From then on the 200 the page's shuffle puts on top come first, then all of them, those 200 among them.
+        let copy = sounds_db.with_file_name("sounds-rust.db");
+        let said = one_start_shuffled(&sounds_db, &library_db, &Feed::default(), Some(7));
+        assert_eq!(
+            said,
+            [
+                "200 sounds (the first of 255) from sounds-rust.db, 0 plays".to_owned(),
+                format!("the rest from {}", copy.display()),
+                "the rest: 255 sounds, the first 200 kept".to_owned(),
+                "255 fingerprints".to_owned(),
+                "used: true".to_owned(),
+            ]
+        );
+        // They're the start of the whole shuffled list, so nothing on show moves when the rest arrive.
+        let (first, rest) = (std::sync::Mutex::new(None), std::sync::Mutex::new(None));
+        read_all(&sounds_db, &library_db, Some(Feed::default()), Some(Opening { seed: 7, view: None }), |step| {
+            match step {
+                Step::Read(Ok(read)) => {
+                    *first.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(read.library.list)
+                }
+                Step::Rest(r) => *rest.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(r.library.list),
+                _ => {}
+            }
+        });
+        let (Some(first), Some(rest)) = (first.into_inner().ok().flatten(), rest.into_inner().ok().flatten()) else {
+            panic!("the first sounds or the rest didn't come")
+        };
+        let ids = |list: &SoundList| -> Vec<i64> {
+            list.view(&Filters::default(), Order::Shuffled, 7)
+                .iter()
+                .filter_map(|&i| list.sound(i))
+                .map(|s| s.id)
+                .collect()
+        };
+        assert_eq!(ids(&first), ids(&rest)[..200]);
+        // Opening on the galaxy (it needs every star), or with no shuffle to go by (the screenshots): all at once.
+        let galaxy = song_library("first-galaxy-songs.db", &[(VIEW_KEY, "Galaxy")]);
+        let said = one_start_shuffled(&sounds_db, &galaxy, &Feed::default(), Some(7));
+        assert_eq!(said[0], "255 sounds from sounds-rust.db, 0 plays");
+        assert!(!said.iter().any(|s| s.starts_with("the rest")), "{said:?}");
+        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default())[0], "255 sounds from sounds-rust.db, 0 plays");
+        // A view you picked while the page waited counts, not the one you had last.
+        let first_of = |songs: &Path, view: i32| -> Option<usize> {
+            let got = std::sync::Mutex::new(None);
+            let opening = Some(Opening { seed: 7, view: Some(view) });
+            read_all(&sounds_db, songs, Some(Feed::default()), opening, |step| {
+                if let Step::Read(Ok(read)) = step {
+                    *got.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(read.library.list.len());
+                }
+            });
+            got.into_inner().ok().flatten()
+        };
+        assert_eq!(first_of(&galaxy, LIST), Some(200));
+        assert_eq!(first_of(&library_db, GALAXY), Some(255));
     }
 
     #[test]
