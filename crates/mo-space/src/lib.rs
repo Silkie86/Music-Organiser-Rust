@@ -41,6 +41,7 @@ pub mod plugin_clean;
 pub mod plugin_files;
 pub mod plugin_space;
 pub mod plugins;
+pub mod prints;
 pub mod size;
 pub mod song;
 pub mod spare;

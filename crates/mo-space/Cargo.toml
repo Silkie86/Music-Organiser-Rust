@@ -14,6 +14,8 @@ mo-catch = { path = "../mo-catch" }
 mo-formats = { path = "../mo-formats" }
 mo-library = { path = "../mo-library" }
 rayon.workspace = true
+# The Bitwig copies' fingerprints, kept between runs (`prints`).
+rusqlite = { version = "0.41", features = ["bundled"] }
 regex = { version = "1", default-features = false, features = ["std", "unicode", "perf"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

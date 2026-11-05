@@ -1468,6 +1468,8 @@ mod tests {
             data.join("presets.db"),
             data.join("curves.db"),
             data.join("midi-index.db"),
+            data.join("bitwig-prints.db"),
+            data.join("bitwig-prints.db-wal"),
             data.join("backup.txt"),
             data.join("backup-songs.txt"),
             data.join("rust-settings.json"),
