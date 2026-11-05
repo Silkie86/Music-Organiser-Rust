@@ -234,9 +234,10 @@ impl Item {
     }
 
     /// Every word of a search (already in lower case) is in the line's texts or its part.
-    fn found(&self, search: &[String], fixes: &Fixes) -> bool {
+    /// `role`: the part shown ([`Item::role_with`]).
+    fn found(&self, search: &[String], role: Option<Role>) -> bool {
         // The part's words only when a word isn't in the line's own: this runs for every line, several times a key.
-        let in_part = |w: &str| self.role_with(fixes).is_some_and(|r| r.label().to_lowercase().contains(w));
+        let in_part = |w: &str| role.is_some_and(|r| r.label().to_lowercase().contains(w));
         search.iter().all(|w| self.words.contains(w.as_str()) || in_part(w))
     }
 
@@ -444,21 +445,21 @@ impl Filters {
 
     /// Everything but the five chips lets `i` through: the unused synths, the song, the years and the search. `words`
     /// is [`Filters::words`].
-    fn passes_others(&self, i: &Item, words: &[String], fixes: &Fixes) -> bool {
+    fn passes_others(&self, i: &Item, words: &[String], role: Option<Role>) -> bool {
         (self.unused || !i.row.plays_nothing)
             && self.song.as_ref().is_none_or(|s| !i.is_file() && i.path() == s)
             && self.years.is_none_or(|(a, b)| i.year.is_some_and(|y| y >= a && y <= b))
-            && i.found(words, fixes)
+            && i.found(words, role)
     }
 
     /// Which of the five chips let `i` through: the maker, the type, the part, where it's from and the plugin.
-    fn chips_pass(&self, i: &Item, fixes: &Fixes) -> [bool; 5] {
+    fn chips_pass(&self, i: &Item, role: Option<Role>) -> [bool; 5] {
         let maker = Choice { kind: Type::All, ..self.choice };
         let kind = Choice { maker: Maker::All, ..self.choice };
         [
             maker.matches(i.row.native, i.row.kind),
             kind.matches(i.row.native, i.row.kind),
-            self.parts.is_empty() || self.parts.iter().any(|p| p.matches(i.role_with(fixes))),
+            self.parts.is_empty() || self.parts.iter().any(|p| p.matches(role)),
             match self.from {
                 From::All => true,
                 From::Songs => !i.is_file(),
@@ -469,10 +470,11 @@ impl Filters {
     }
 
     fn passes_with(&self, i: &Item, words: &[String]) -> bool {
-        let none = Fixes::new();
-        self.chips_pass(i, &none) == [true; 5] && self.passes_others(i, words, &none)
+        self.chips_pass(i, i.role()) == [true; 5] && self.passes_others(i, words, i.role())
     }
 
+    /// Whether the filters let `i` through, as it was read (no part fixes laid over it: the page uses
+    /// [`filtered_with`]).
     pub fn passes(&self, i: &Item) -> bool {
         self.passes_with(i, &self.words())
     }
@@ -515,6 +517,7 @@ pub struct Filtered {
     pub counts: ChoiceCounts,
 }
 
+/// [`filtered_with`] the lines as they were read, no part fixes laid over them.
 pub fn filtered(items: &[Item], f: &Filters) -> Filtered {
     filtered_with(items, f, &Fixes::new())
 }
@@ -532,10 +535,12 @@ pub fn filtered_with(items: &[Item], f: &Filters, fixes: &Fixes) -> Filtered {
     let mut shown: Vec<usize> = Vec::new();
     let mut by_year: BTreeMap<i32, usize> = BTreeMap::new();
     for (n, i) in items.iter().enumerate() {
-        if !without_years.passes_others(i, &words, fixes) {
+        // Worked out once: each fix laid over the line is found by its fingerprint.
+        let role = i.role_with(fixes);
+        if !without_years.passes_others(i, &words, role) {
             continue;
         }
-        let ok = f.chips_pass(i, fixes);
+        let ok = f.chips_pass(i, role);
         let all = ok == [true; 5];
         // The year strip counts the years with every other filter on.
         if all && let Some(y) = i.year {
@@ -544,7 +549,7 @@ pub fn filtered_with(items: &[Item], f: &Filters, fixes: &Fixes) -> Filtered {
         if !f.years.is_none_or(|(a, b)| i.year.is_some_and(|y| y >= a && y <= b)) {
             continue;
         }
-        tally.add(i, ok, fixes);
+        tally.add(i, ok, role);
         if all {
             shown.push(n);
         }
@@ -583,7 +588,7 @@ impl<'a> Tally<'a> {
     }
 
     /// A line the other filters let through, with which of the five chips let it through.
-    fn add(&mut self, i: &'a Item, ok: [bool; 5], fixes: &Fixes) {
+    fn add(&mut self, i: &'a Item, ok: [bool; 5], role: Option<Role>) {
         let synths = Choice { kind: Type::Synths, ..Choice::default() };
         let effects = Choice { kind: Type::Effects, ..Choice::default() };
         let c = &mut self.c;
@@ -598,7 +603,7 @@ impl<'a> Tally<'a> {
         }
         if counts_on(2) {
             let no_guess = Role::ALL.len();
-            let at = i.role_with(fixes).and_then(|r| Role::ALL.iter().position(|&x| x == r)).unwrap_or(no_guess);
+            let at = role.and_then(|r| Role::ALL.iter().position(|&x| x == r)).unwrap_or(no_guess);
             c.parts[at] += 1;
         }
         if counts_on(3) {
@@ -996,22 +1001,6 @@ pub fn part_offers(i: &Item) -> Vec<(String, String, bool)> {
 /// The part a fix id names ("presets.part.bass" is Bass).
 pub fn part_of(id: &str) -> Option<Role> {
     Role::from_key(id.strip_prefix(act::PART)?)
-}
-
-/// Puts a fix (or takes it away) on every line with this fingerprint: the same sound, playing the same notes, in
-/// every song it's in. Returns how many lines changed.
-pub fn apply_fix(items: &mut [Item], hash: &str, fix: Option<Role>) -> usize {
-    if hash.is_empty() {
-        return 0;
-    }
-    let mut n = 0;
-    for i in items.iter_mut().filter(|i| i.row.hash == hash) {
-        if i.row.fixed != fix {
-            i.row.fixed = fix;
-            n += 1;
-        }
-    }
-    n
 }
 
 /// What to export for the lines shown (Export these): each save with the keys of its sounds shown, songs in list
@@ -1582,17 +1571,19 @@ mod tests {
     }
 
     #[test]
-    fn a_fix_goes_on_every_copy_of_the_sound() {
+    fn a_fix_is_laid_over_every_copy_of_the_sound() {
         let mut all = items();
         all.push(Item::new(row("Sub", "Serum", Some(Role::Bass), "/s/Other.flp"), "Other".into(), None));
-        assert_eq!(apply_fix(&mut all, "h-Sub-Serum", Some(Role::Lead)), 2);
-        assert_eq!(all[0].role(), Some(Role::Lead));
-        assert_eq!(all[4].role(), Some(Role::Lead));
-        assert!(part_reason(&all[0]).starts_with("You set this to Lead. The guess was bass"));
-        assert_eq!(apply_fix(&mut all, "h-Sub-Serum", None), 2);
+        let mut fixes = Fixes::new();
+        fixes.insert("h-Sub-Serum".into(), Some(Role::Lead));
+        assert_eq!(all[0].role_with(&fixes), Some(Role::Lead));
+        assert_eq!(all[4].role_with(&fixes), Some(Role::Lead));
+        // The shared line itself is left as it was.
         assert_eq!(all[0].role(), Some(Role::Bass));
-        // A preset file has no fingerprint, so nothing changes.
-        assert_eq!(apply_fix(&mut all, "", Some(Role::Pad)), 0);
+        assert!(part_reason(&all[0].as_fixed(&fixes)).starts_with("You set this to Lead. The guess was bass"));
+        fixes.insert("h-Sub-Serum".into(), None);
+        assert_eq!(all[0].role_with(&fixes), Some(Role::Bass));
+        assert!(matches!(all[0].as_fixed(&fixes), Cow::Borrowed(_)));
     }
 
     #[test]

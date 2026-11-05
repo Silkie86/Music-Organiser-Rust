@@ -511,6 +511,8 @@ fn refilter(p: &mut Page) {
 }
 
 fn ask_filter(p: &mut Page, count_plugins: bool) {
+    // Lines left waiting (a filtering that never answered) go in now, if nothing holds the list.
+    take_waiting(p);
     p.asked += 1;
     let ask = FilterAsk {
         id: p.asked,
@@ -527,13 +529,16 @@ fn ask_filter(p: &mut Page, count_plugins: bool) {
         let mut w = w.borrow_mut();
         if w.is_none() {
             match Newest::start("Presets filter", |ask: FilterAsk| {
-                let answer = background::on_pool(|| ask.answer());
+                // The ask (and its hold on the lines) is let go here, before the window takes the answer: the
+                // window can then put in the lines read meanwhile.
+                let answer = background::on_pool(move || ask.answer());
                 on_window(move |app| {
                     let current = PAGE.with(|p| {
                         let mut p = p.borrow_mut();
                         let current = take_filtered(&mut p, answer);
-                        // The filtering has let go of the lines: those read meanwhile go in, filtered next.
-                        if take_waiting(&mut p) && (p.reading.is_none() || due(&p)) {
+                        // The filtering has let go of the lines: those read meanwhile go in, filtered next. An older
+                        // answer leaves that to the newer filtering, which holds the lines still.
+                        if current && take_waiting(&mut p) && (p.reading.is_none() || due(&p)) {
                             p.shown_at = Some(Instant::now());
                             ask_filter(&mut p, true);
                         }
@@ -1104,13 +1109,8 @@ fn add(items: Vec<Item>, songs: usize, files: usize, reading: Option<(usize, usi
     on_window(move |app| {
         let show = PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            let mut items = items;
-            for i in &mut items {
-                if let Some(fix) = p.fixed_now.get(&i.row.hash) {
-                    i.row.fixed = *fix;
-                }
-            }
-            // While a filtering holds the lines, the new ones wait: its answer puts them in (`take_waiting`).
+            // Fixes made since the reading began are laid over these lines too (`fixed_now`): they're never written
+            // into them. While a filtering holds the lines, the new ones wait: its answer puts them in (`take_waiting`).
             p.pending.extend(items);
             take_waiting(&mut p);
             p.songs += songs;
