@@ -302,12 +302,17 @@ fn go(app: &AppWindow, ask: Arc<Ask>, at: usize, bytes: u64, destination: String
     }
 }
 
-/// Adds the move to the library's moved folders, trying again a few times while the C# app holds the library (a
-/// scan being saved): the move is done by now, so it's worth the wait.
+/// Adds the move to the library's moved folders ([`kept_when_free`]): the move is done by now, so it's worth the wait.
 fn note(library: &Path, entry: &str) -> Result<(), String> {
+    kept_when_free(|| add_moved_folder(library, entry))
+}
+
+/// Makes one change to library.db, trying again a few times while the C# app holds it (a scan being saved). Call it
+/// away from the window's thread.
+pub(super) fn kept_when_free(change: impl Fn() -> Result<(), mo_library::LibraryError>) -> Result<(), String> {
     let mut tries = 0;
     loop {
-        match add_moved_folder(library, entry) {
+        match change() {
             Ok(()) => return Ok(()),
             Err(e) if tries < 5 && e.is_busy() => {
                 tries += 1;

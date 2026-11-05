@@ -5,6 +5,7 @@
 //! folders you tick to the Recycle Bin, and nowhere else.
 
 mod clean;
+mod folder_fixes;
 mod moving;
 mod uninstall;
 
@@ -58,6 +59,10 @@ struct Page {
     /// The plugin files this session's uninstalls removed: left out of every read until the old app looks again.
     uninstalled: Vec<String>,
     clean_asked: u64,
+    /// The picked plugin's folder lines' paths, as the On disk tab shows them.
+    room_paths: Vec<String>,
+    /// This session's "Not its", "Take off" and "Add a folder": shown over every read until the old app measures.
+    folder_fixes: Vec<mo_app::plugins::folder_fixes::FolderFix>,
 }
 
 type ReadJob = PathBuf;
@@ -240,6 +245,18 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         }
     });
     let weak = app.as_weak();
+    data.on_folder_not_its(move |at| {
+        if let (Some(app), Ok(at)) = (weak.upgrade(), usize::try_from(at)) {
+            folder_fixes::not_its(&app, at);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_add_folder(move || {
+        if let Some(app) = weak.upgrade() {
+            folder_fixes::add(&app);
+        }
+    });
+    let weak = app.as_weak();
     data.on_put_back(move || {
         if let Some(app) = weak.upgrade() {
             clean::put_back(&app);
@@ -301,6 +318,12 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         Ok(c) => COPIES.with(|s| *s.borrow_mut() = Some(c)),
         Err(e) => log::error("Plugins", &format!("Couldn't start reading installed copies: {e}")),
     }
+}
+
+/// This session's "Not its", "Take off" and "Add a folder", for another page's read of the plugins to show too
+/// ([`mo_app::plugins::Plugins::apply_folder_fixes`]).
+pub fn folder_fixes_this_session() -> Vec<mo_app::plugins::folder_fixes::FolderFix> {
+    PAGE.with(|p| p.borrow().folder_fixes.clone())
 }
 
 /// The page came into view: its library is read (again).
@@ -379,6 +402,7 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>) {
                 p.picked.and_then(|i| old.rows.get(i)).map(|r| (r.key.clone(), r.own.clone()))
             });
             clean::forget_binned(&mut fresh);
+            PAGE.with(|p| fresh.apply_folder_fixes(&p.borrow().folder_fixes));
             fresh.refilter();
             let picked = kept.and_then(|(k, o)| fresh.find(&k, &o));
             let empty = fresh.rows.is_empty();
@@ -618,14 +642,22 @@ fn fill_panel(app: &AppWindow) {
         .room
         .folders
         .iter()
-        .map(|f| RoomFolder {
+        .enumerate()
+        .map(|(i, f)| RoomFolder {
             kind: f.kind.into(),
             path: shell::wrappable_path(&f.path).into(),
             size: f.size.as_str().into(),
             shared: f.shared.as_str().into(),
             added: f.added,
+            can_say: f.can_say,
+            at: i as i32,
         })
         .collect();
+    PAGE.with(|p| p.borrow_mut().room_paths = card.room.folders.iter().map(|f| f.path.clone()).collect());
+    data.set_can_add_folder(PAGE.with(|p| {
+        let p = p.borrow();
+        p.picked.is_some_and(|r| p.plugins.as_ref().is_some_and(|pl| pl.can_add_folder(r).is_some()))
+    }));
     data.set_room_folders(ModelRc::new(VecModel::from(folders)));
     data.set_sizes_note(sizes.into());
     data.set_scanner_note(scanner.into());

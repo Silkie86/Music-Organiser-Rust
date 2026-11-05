@@ -896,6 +896,7 @@ impl Plugins {
                         format!("Shared with {}", names(&f.shared_with))
                     },
                     added: f.added,
+                    can_say: f.kind != SpaceKind::Program,
                 })
                 .collect(),
         }
@@ -960,6 +961,8 @@ pub struct FolderLine {
     /// "Shared with Kontakt 7", when it's another plugin's folder too.
     pub shared: String,
     pub added: bool,
+    /// Not its plugin file: "Not its" (or "Take off", when you added it) can leave it out.
+    pub can_say: bool,
 }
 
 /// The side card's songs.
@@ -1282,6 +1285,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 pub mod clean;
+pub mod folder_fixes;
 pub mod moving;
 pub mod uninstall;
 
