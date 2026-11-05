@@ -109,6 +109,11 @@ const DEEPEST: usize = 16;
 /// ".cache"); a root that isn't there is skipped. A file that trips its reader is listed with what went wrong; it
 /// never stops the others.
 pub fn find_preset_files(roots: &[PathBuf]) -> Vec<FoundPreset> {
+    list_preset_files(roots).par_iter().map(|f| read_preset_file(f)).collect()
+}
+
+/// Every preset file under `roots`, in order, walked as [`find_preset_files`] walks; none is read.
+pub fn list_preset_files(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut level: Vec<PathBuf> = Vec::new();
     for r in roots {
@@ -134,20 +139,20 @@ pub fn find_preset_files(roots: &[PathBuf]) -> Vec<FoundPreset> {
     }
     files.sort();
     files
-        .par_iter()
-        .map(|f| {
-            // A reader that trips over a damaged file is caught here, as `read_save` does.
-            let read = mo_catch::catch(|| files::read(f));
-            FoundPreset {
-                path: f.to_string_lossy().into_owned(),
-                file: match read {
-                    Ok(Ok(read)) => read,
-                    Ok(Err(e)) => Err(NotAPreset(e.to_string())),
-                    Err(_) => Err(NotAPreset("the reader stopped on something it didn't expect in this file".into())),
-                },
-            }
-        })
-        .collect()
+}
+
+/// One preset file's header read, as [`find_preset_files`] reads each.
+pub fn read_preset_file(f: &Path) -> FoundPreset {
+    // A reader that trips over a damaged file is caught here, as `read_save` does.
+    let read = mo_catch::catch(|| files::read(f));
+    FoundPreset {
+        path: f.to_string_lossy().into_owned(),
+        file: match read {
+            Ok(Ok(read)) => read,
+            Ok(Err(e)) => Err(NotAPreset(e.to_string())),
+            Err(_) => Err(NotAPreset("the reader stopped on something it didn't expect in this file".into())),
+        },
+    }
 }
 
 /// Where a folder really is, so a link back to one already walked isn't walked again.
