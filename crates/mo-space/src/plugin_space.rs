@@ -296,7 +296,15 @@ fn guess(
         let named_version = hits.first().map(|f| version_after(&norm(name), &f.family)).unwrap_or_default();
         let that_version: Vec<&Fam<'_>> =
             hits.iter().copied().filter(|f| !named_version.is_empty() && f.version == named_version).collect();
-        let chosen = if that_version.is_empty() { hits } else { that_version };
+        // A folder naming another version is none of theirs ("AmpliTube 5" isn't AmpliTube 4's); one naming no
+        // version is theirs together, as is a plugin naming none.
+        let chosen = if !that_version.is_empty() {
+            that_version
+        } else if named_version.is_empty() {
+            hits
+        } else {
+            hits.into_iter().filter(|f| f.version.is_empty()).collect()
+        };
         chosen.iter().map(|f| f.key.to_owned()).collect()
     };
     let mut add = |key: String, folder: &str| result.entry(key).or_default().push(folder.to_owned());

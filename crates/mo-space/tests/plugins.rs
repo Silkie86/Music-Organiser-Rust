@@ -352,3 +352,29 @@ fn a_stopped_scan_says_so() {
     write(&dir, "VST3/A.vst3", 1);
     assert_eq!(scan_files(&[dir.join("VST3")], &AtomicBool::new(true)), Err(mo_space::Stopped));
 }
+
+#[test]
+fn a_folder_naming_another_version_is_not_its() {
+    let dir = fixtures("mo-space-plugin-other-version");
+    let vst3 = dir.join("VST3");
+    write(&vst3, "AmpliTube 4.vst3", 1);
+    let docs = dir.join("Documents");
+    write(&docs, "AmpliTube 5/Presets/a.xml", 300);
+    write(&docs, "AmpliTube 4/Presets/b.xml", 20);
+    write(&docs, "AmpliTube/Settings.xml", 5);
+    let plugin_roots = vec![s(&vst3)];
+    let files = scan_files(std::slice::from_ref(&vst3), &AtomicBool::new(false)).unwrap();
+    let installed = group(&files, &plugin_roots, &HashMap::new());
+    let none = |_: &str| Vec::new();
+    let choices = Choices { added: &none, ruled_out: &none };
+    let spaces =
+        measure(&installed, std::slice::from_ref(&docs), &plugin_roots, &[], &choices, None, &AtomicBool::new(false))
+            .unwrap();
+    let amp = spaces.iter().find(|p| p.name == "AmpliTube 4").unwrap();
+    let names: HashSet<String> = amp.folders.iter().map(|f| mo_formats::paths::file_name(&f.path).to_owned()).collect();
+    // Its own, and the one naming no version; never AmpliTube 5's.
+    assert!(
+        names.contains("AmpliTube 4") && names.contains("AmpliTube") && !names.contains("AmpliTube 5"),
+        "{names:?}"
+    );
+}

@@ -1251,7 +1251,12 @@ fn with_room(rows: &mut Vec<PluginRow>, spaces: &[StoredSpace], cutoff: NaiveDat
     let waves_used = rows.iter().any(|r| is_waves(&r.name, "") || case::to_lower(&r.vendor).starts_with("waves"));
     for s in rest {
         let fam = family(&s.name);
-        let close: Vec<usize> = families.iter().filter(|(_, f)| matched(f, &fam)).map(|(i, _)| *i).collect();
+        // Another version is another plugin: AmpliTube 5's room is never AmpliTube 4's (F12 note, 5 Nov).
+        let close: Vec<usize> = families
+            .iter()
+            .filter(|(i, f)| matched(f, &fam) && !other_versions(&rows[*i].name, &s.name))
+            .map(|(i, _)| *i)
+            .collect();
         if close.is_empty() && waves_used && is_shell(s) {
             continue;
         }
@@ -1292,6 +1297,20 @@ fn with_room(rows: &mut Vec<PluginRow>, spaces: &[StoredSpace], cutoff: NaiveDat
             give(rows, &mut claimed, at, s);
         }
     }
+}
+
+/// The version a plugin's name gives after its family: "4" for "AmpliTube 4", "" for "Serum".
+fn version_of(name: &str) -> String {
+    let lower = case::to_lower(name.trim());
+    let fam = case::to_lower(&family(name));
+    let rest = lower.strip_prefix(fam.as_str()).unwrap_or("");
+    rest.trim_start_matches([' ', '_', '-', 'v']).chars().take_while(char::is_ascii_digit).collect()
+}
+
+/// Whether two names are different versions of one plugin: both name a version, and not the same one.
+fn other_versions(a: &str, b: &str) -> bool {
+    let (va, vb) = (version_of(a), version_of(b));
+    !va.is_empty() && !vb.is_empty() && va != vb
 }
 
 fn matched(a: &str, b: &str) -> bool {

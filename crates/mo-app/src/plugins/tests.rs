@@ -424,3 +424,14 @@ fn another_page_can_show_one_plugin_or_every_unused_one() {
     assert_eq!(space.plugins.iter().map(|u| (u.name.clone(), u.bytes())).collect::<Vec<_>>(), sizes);
     assert_eq!(sizes, [("Kontakt 7".to_owned(), 100_000_000), ("Pro-Q 3".to_owned(), 40_000_000)]);
 }
+
+#[test]
+fn another_version_is_another_plugin() {
+    use super::{other_versions, version_of};
+    assert_eq!(version_of("AmpliTube 4"), "4");
+    assert_eq!(version_of("Serum"), "");
+    assert!(other_versions("AmpliTube 4", "AmpliTube 5"));
+    assert!(!other_versions("Kontakt 7", "Kontakt 7"));
+    // One naming no version may still be the same plugin.
+    assert!(!other_versions("Serum", "Serum 2") && !other_versions("FabFilter Pro-Q 3", "Pro-Q"));
+}
