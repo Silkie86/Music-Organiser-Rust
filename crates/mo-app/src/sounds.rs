@@ -917,25 +917,40 @@ pub fn copy_made_line(copy_bytes: u64, library_bytes: u64) -> String {
 }
 
 /// What the card says once the app's own copy of the sound library has been brought up to date with what the C# app
-/// changed: "3 changed, 1 new, 2 gone".
+/// changed: made afresh from it, or nothing had changed.
 pub fn copy_synced_line(s: &Synced) -> String {
     if s.made {
-        return format!("Made afresh from {} sounds", crate::songs::thousands(s.sounds));
-    }
-    let parts: Vec<String> = [(s.changed, "changed"), (s.added, "new"), (s.removed, "gone")]
-        .into_iter()
-        .filter(|(n, _)| *n > 0)
-        .map(|(n, what)| format!("{} {what}", crate::songs::thousands(n)))
-        .collect();
-    if !parts.is_empty() {
-        parts.join(", ")
-    } else if s.listed_tables > 0 {
-        "Tags, plays or hidden copies changed".to_owned()
-    } else if s.tables > 0 {
-        "Galaxy places, copies or settings changed".to_owned()
+        format!("Made afresh from {} sounds", crate::songs::thousands(s.sounds))
     } else {
         "Nothing had changed".to_owned()
     }
+}
+
+/// What the card says once the app's own sound library has been laid out anew ([`mo_sounds::compact::LaidOut`]): how
+/// big it is now, and was.
+pub fn laid_out_line(before: u64, after: u64) -> String {
+    format!(
+        "{}, from {}. The waveforms and CLAP's fingerprints now sit apart from the list, and the fingerprints take half \
+         the room, so the page reads less. \"Sounds like this\" finds the same sounds as before.",
+        size_text(after),
+        size_text(before)
+    )
+}
+
+/// What the card says when the app's own sound library couldn't be laid out anew just now, and `why` (as
+/// [`mo_sounds::compact::LaidOut::NotNow`] says it).
+pub fn not_laid_out_line(why: &str) -> String {
+    let mut why = why.trim_end_matches('.').to_owned();
+    if let Some(first) = why.get(..1) {
+        why.replace_range(..1, &first.to_uppercase());
+    }
+    format!("{why}. It's tried again the next time Sounds opens, and until then it's read as it is.")
+}
+
+/// What the card says when the app's own sound library was found damaged as it was laid out anew, with no `sounds.db`
+/// left to make it again from.
+pub fn damaged_not_laid_out_line() -> String {
+    "It's damaged, and there's no sounds.db to make it again from, so it's read as it is.".to_owned()
 }
 
 /// Why the app's own copy of the sound library couldn't be made or brought up to date, for a card: what went wrong,
@@ -1438,23 +1453,20 @@ mod tests {
             copy_made_line(1_621_000_000, 4_896_000_000),
             "1.51 GB beside sounds.db's 4.56 GB. Sounds opens from it from now on."
         );
-        let synced = |made, added, changed, removed, (tables, listed_tables)| Synced {
-            made,
-            sounds: 453_885,
-            added,
-            changed,
-            removed,
-            tables,
-            listed_tables,
-            prints: 0,
-            adopted: false,
-        };
-        assert_eq!(copy_synced_line(&synced(false, 1, 3, 2, (1, 1))), "3 changed, 1 new, 2 gone");
-        assert_eq!(copy_synced_line(&synced(false, 0, 1_204, 0, (0, 0))), "1,204 changed");
-        assert_eq!(copy_synced_line(&synced(false, 0, 0, 0, (2, 1))), "Tags, plays or hidden copies changed");
-        assert_eq!(copy_synced_line(&synced(false, 0, 0, 0, (2, 0))), "Galaxy places, copies or settings changed");
-        assert_eq!(copy_synced_line(&synced(false, 0, 0, 0, (0, 0))), "Nothing had changed");
-        assert_eq!(copy_synced_line(&synced(true, 453_885, 0, 0, (7, 3))), "Made afresh from 453,885 sounds");
+        let synced = |made, sounds| Synced { made, sounds, adopted: false };
+        assert_eq!(copy_synced_line(&synced(false, 0)), "Nothing had changed");
+        assert_eq!(copy_synced_line(&synced(true, 453_885)), "Made afresh from 453,885 sounds");
+        assert_eq!(
+            laid_out_line(1_621_000_000, 933_000_000),
+            "890 MB, from 1.51 GB. The waveforms and CLAP's fingerprints now sit apart from the list, and the \
+             fingerprints take half the room, so the page reads less. \"Sounds like this\" finds the same sounds as \
+             before."
+        );
+        assert_eq!(
+            not_laid_out_line("something else has it open (a page reading it, or another copy of the app)"),
+            "Something else has it open (a page reading it, or another copy of the app). It's tried again the next \
+             time Sounds opens, and until then it's read as it is."
+        );
         let full = SoundsError::Copy {
             path: "C:\\Users\\Solomon\\AppData\\Local\\MusicOrganiser\\sounds-rust.db".into(),
             why: "only 3.1 GB is free on its disk".into(),

@@ -22,7 +22,7 @@ use std::sync::{Arc, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDateTime};
-use mo_app::activity::Feed;
+use mo_app::activity::{Feed, Job};
 use mo_app::background::{self, Newest};
 use mo_app::filters::{self, Filter, Shown};
 use mo_app::finder::{self, Kind};
@@ -770,36 +770,34 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
     // Sounds like this: every sound's fingerprint, read with the sounds or from the copy after them; their blocks
     // become the index.
     let mut remade = None;
-    let prints = match first.prints {
+    // The copy made again from sounds.db, which gives the fingerprints, and the sounds as they are now, on the same
+    // pass: for one found damaged inside (a bad sector). The sounds are taken in place of the copy's shown: those were
+    // as the damaged copy had them, which (once it's the app's own library) needn't be how sounds.db has them.
+    let remake = |first: &mut FirstRead, remade: &mut Option<Vec<Sound>>| {
+        let (mut everything, made) = compact::remake_reading(sounds_db, &first.source, now)?;
+        say_made(&made, &first.source, sounds_db, cards.as_ref(), true);
+        if made.is_err() {
+            // Not made again: the rest is read from sounds.db, as it is without a copy.
+            first.source = sounds_db.to_owned();
+            send(Step::Source(first.source.clone()));
+        }
+        let (features, clap) = (std::mem::take(&mut everything.features), std::mem::take(&mut everything.clap));
+        let analysed = everything.analysed();
+        *remade = Some(everything.sounds);
+        Ok((features, clap, analysed))
+    };
+    let prints = match std::mem::replace(&mut first.prints, Prints::Read(Gathered::default(), Gathered::default())) {
         Prints::Read(features, clap) => Ok((features, clap, analysed)),
         Prints::InCopy(db) => match db.fingerprints(analysed) {
             Ok((features, clap)) => Ok((features, clap, analysed)),
-            // Damaged where they're kept (a bad sector): the copy is made again from sounds.db, which gives them, and
-            // the sounds as they are now, on the same pass.
+            // Damaged where they're kept: made again.
             Err(e) if e.damaged() => {
                 drop(db);
                 log::warning(
                     "Sounds",
                     &format!("The app's copy of the sound library is damaged, so it's made again: {e}"),
                 );
-                match compact::remake_reading(sounds_db, &first.source, now) {
-                    Ok((mut everything, made)) => {
-                        say_made(&made, &first.source, sounds_db, cards.as_ref(), true);
-                        if made.is_err() {
-                            // Not made again: the rest is read from sounds.db, as it is without a copy.
-                            first.source = sounds_db.to_owned();
-                            send(Step::Source(first.source.clone()));
-                        }
-                        let (features, clap) =
-                            (std::mem::take(&mut everything.features), std::mem::take(&mut everything.clap));
-                        let analysed = everything.analysed();
-                        // Taken in place of the copy's sounds shown: those were as the damaged copy had them, which
-                        // (once it's the app's own library) needn't be how sounds.db has them.
-                        remade = Some(everything.sounds);
-                        Ok((features, clap, analysed))
-                    }
-                    Err(e) => Err(e),
-                }
+                remake(&mut first, &mut remade)
             }
             Err(e) => Err(e),
         },
@@ -814,6 +812,35 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
     });
     if let Some(uses) = &uses {
         send(Step::Used(Arc::new(with_usage(&list, usage_of(&list, uses), &settings.weights))));
+    }
+    // A copy of the format before, read as it is: laid out anew now that the page has all it needs from it (one that's
+    // behind is made afresh below instead). The page works as usual meanwhile: it holds nothing of it.
+    if first.formerly && !first.behind && remade.is_none() {
+        let job = cards.as_ref().map(|c| {
+            c.start(
+                "Making your sound library smaller",
+                "Once, for this version of the app. Sounds works as usual meanwhile.",
+            )
+        });
+        let began = Instant::now();
+        let laid_out = compact::lay_out(sounds_db);
+        if let Some(compact::LaidOut::Damaged(why)) = &laid_out
+            && sounds_db.exists()
+        {
+            log::warning("Sounds", &format!("The app's own sound library is damaged ({why}), so it's made again"));
+            if let Some(job) = job {
+                job.failed_as(
+                    "Couldn't make your sound library smaller",
+                    "It's damaged, so it's made again from sounds.db, smaller.",
+                );
+            }
+            match remake(&mut first, &mut remade) {
+                Ok(prints) => send_index(Ok(prints), &send),
+                Err(e) => log::warning("Sounds", &format!("Couldn't make the app's own sound library again: {e}")),
+            }
+        } else {
+            say_laid_out(laid_out.as_ref(), job, began);
+        }
     }
     if !first.behind && remade.is_none() {
         return;
@@ -863,10 +890,10 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
     let retyped =
         moved.is_none() && list.sounds().iter().zip(library.list.sounds()).any(|(a, b)| a.sound_type != b.sound_type);
     send(Step::Refreshed(Refreshed { library, was: list, moved, retyped }));
-    // The fingerprints read before stay right unless a sound gained, lost or changed one (or the count that says
-    // whether CLAP has heard enough changed).
+    // The fingerprints read before stay right unless the copy was made afresh (or the count that says whether CLAP
+    // has heard enough changed).
     if let (Some(synced), Ok(db)) = (synced, db)
-        && (synced.prints > 0 || analysed_now != analysed)
+        && (synced.made || analysed_now != analysed)
     {
         send_index(db.fingerprints(analysed_now).map(|(f, c)| (f, c, analysed_now)), &send);
     }
@@ -895,6 +922,9 @@ fn send_index(prints: Result<(Gathered, Gathered, usize), SoundsError>, send: &i
 /// The page's first read of the sound library, wherever it came from.
 struct FirstRead {
     sounds: Vec<Sound>,
+    /// The sounds came from a copy of the format before ([`SoundsDb::is_formerly`]): it's laid out anew once the page
+    /// has all it needs from it ([`compact::lay_out`]).
+    formerly: bool,
     /// What was played (sound id, when), newest first.
     played: Vec<(i64, NaiveDateTime)>,
     /// What the rest is read from: the app's copy of the library, or `sounds.db` without one.
@@ -920,6 +950,7 @@ fn read_in_place(sounds_db: &Path, now: NaiveDateTime) -> Result<FirstRead, Soun
     let everything = db.everything(now)?;
     Ok(FirstRead {
         sounds: everything.sounds,
+        formerly: false,
         played: db.history(HISTORY_LENGTH).unwrap_or_default(),
         source: sounds_db.to_owned(),
         prints: Prints::Read(everything.features, everything.clap),
@@ -938,6 +969,7 @@ fn read_through_copy(sounds_db: &Path, now: NaiveDateTime, cards: &Feed) -> Resu
             }
             Ok(FirstRead {
                 sounds,
+                formerly: db.is_formerly(),
                 played: db.history(HISTORY_LENGTH).unwrap_or_default(),
                 source: copy,
                 prints: Prints::InCopy(db),
@@ -958,12 +990,52 @@ fn read_through_copy(sounds_db: &Path, now: NaiveDateTime, cards: &Feed) -> Resu
             };
             Ok(FirstRead {
                 sounds: everything.sounds,
+                formerly: false,
                 played: played.unwrap_or_default(),
                 source,
                 prints: Prints::Read(everything.features, everything.clap),
                 behind: false,
             })
         }
+    }
+}
+
+/// Says (in the log, and on its card, `job`) how laying the app's own sound library out anew went
+/// ([`compact::lay_out`]), begun at `began`: `None` when there was nothing to do after all (another read did it
+/// meanwhile).
+fn say_laid_out(laid_out: Option<&compact::LaidOut>, job: Option<Job>, began: Instant) {
+    let took = began.elapsed().as_secs_f32();
+    let (title, line, done) = match laid_out {
+        None => ("Made your sound library smaller", String::new(), true),
+        Some(compact::LaidOut::Done { before, after }) => {
+            let line = list::laid_out_line(*before, *after);
+            log::info("Sounds", &format!("Laid the app's own sound library out anew in {took:.1} s: {line}"));
+            ("Made your sound library smaller", line, true)
+        }
+        // Read as it is meanwhile: nothing's different on the page.
+        Some(compact::LaidOut::NotNow(why)) => {
+            log::warning(
+                "Sounds",
+                &format!(
+                    "The app's own sound library is to be laid out anew, which couldn't be done just now ({why}): it's \
+                     read as it is, and laid out anew another time"
+                ),
+            );
+            ("Couldn't make your sound library smaller just now", list::not_laid_out_line(why), false)
+        }
+        Some(compact::LaidOut::Damaged(why)) => {
+            log::warning(
+                "Sounds",
+                &format!(
+                    "The app's own sound library is damaged ({why}), and there's no sounds.db to make it again from: \
+                     it's read as it is"
+                ),
+            );
+            ("Couldn't make your sound library smaller", list::damaged_not_laid_out_line(), false)
+        }
+    };
+    if let Some(job) = job {
+        if done { job.done_as(title, &line) } else { job.failed_as(title, &line) }
     }
 }
 
@@ -3002,6 +3074,71 @@ mod tests {
         );
     }
 
+    /// Makes the app's own sound library at `copy` one of the format before, as the version before this one kept it:
+    /// the waveform in each sound's row, CLAP's fingerprints as `sounds_db` holds them, and a hash of each row.
+    fn of_the_format_before(copy: &Path, sounds_db: &Path) {
+        let c = c_sharp(copy);
+        let Some(lib) = sounds_db.to_str() else { panic!("{}", sounds_db.display()) };
+        let made = c.execute("ATTACH DATABASE ?1 AS lib", [lib]).and_then(|_| {
+            c.execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 ALTER TABLE sounds ADD COLUMN waveform;
+                 UPDATE sounds SET waveform = (SELECT v FROM sound_waves WHERE sound_id = sounds.id);
+                 DROP TABLE sound_waves;
+                 DROP INDEX sounds_clap;
+                 ALTER TABLE sounds DROP COLUMN clap_numbers;
+                 DELETE FROM sound_clap;
+                 INSERT INTO sound_clap SELECT id, clap FROM lib.sounds WHERE clap IS NOT NULL;
+                 CREATE TABLE sound_hashes (sound_id INTEGER PRIMARY KEY, row INTEGER NOT NULL,
+                     features INTEGER NOT NULL, clap INTEGER NOT NULL, clap_len INTEGER);
+                 INSERT INTO sound_hashes SELECT id, id, id, id, length(clap) FROM lib.sounds;
+                 UPDATE copy_info SET value = 1 WHERE key = 'format';
+                 DETACH DATABASE lib;",
+            )
+        });
+        assert!(made.is_ok(), "{made:?}");
+    }
+
+    /// The format the copy at `copy` notes it's laid out in.
+    fn format_of(copy: &Path) -> Option<i64> {
+        c_sharp(copy).query_row("SELECT value FROM copy_info WHERE key = 'format'", [], |r| r.get(0)).ok()
+    }
+
+    #[test]
+    fn the_apps_own_sound_library_of_the_format_before_is_laid_out_anew_after_the_page_has_its_sounds() {
+        let sounds_db = sound_library("lay-out");
+        let library_db = song_library("lay-out-songs.db", &[]);
+        let copy = sounds_db.with_file_name("sounds-rust.db");
+        let first = one_start(&sounds_db, &library_db, &Feed::default());
+        of_the_format_before(&copy, &sounds_db);
+        assert_eq!(format_of(&copy), Some(1));
+        // Something else has it open: the page reads it as it is, and says why it isn't laid out anew yet.
+        let other = c_sharp(&copy);
+        assert!(other.query_row("SELECT COUNT(*) FROM sounds", [], |r| r.get::<_, i64>(0)).is_ok());
+        let cards = Feed::default();
+        assert_eq!(one_start(&sounds_db, &library_db, &cards), first);
+        let said = cards_said(&cards);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(
+            said[0].starts_with("Couldn't make your sound library smaller just now: Something else has it open"),
+            "{said:?}"
+        );
+        assert_eq!(format_of(&copy), Some(1));
+        drop(other);
+        // Then it is, once the page has its sounds and their fingerprints: nothing on the page is different.
+        let cards = Feed::default();
+        assert_eq!(one_start(&sounds_db, &library_db, &cards), first);
+        let said = cards_said(&cards);
+        assert_eq!(said.len(), 1, "{said:?}");
+        assert!(said[0].starts_with("Made your sound library smaller: "), "{said:?}");
+        assert_eq!(format_of(&copy), Some(2));
+        assert!(compact::own_since(&copy).is_some());
+        // Once.
+        let cards = Feed::default();
+        assert_eq!(one_start(&sounds_db, &library_db, &cards), first);
+        assert_eq!(cards_said(&cards), Vec::<String>::new());
+    }
+
     #[test]
     fn a_copy_made_before_the_c_sharp_app_retired_is_brought_up_to_date_one_last_time() {
         let sounds_db = sound_library("last-sync");
@@ -3031,11 +3168,12 @@ mod tests {
                 "5 sounds from sounds-rust.db, 0 plays",
                 "5 fingerprints",
                 "used: true",
-                // No fingerprint changed, so they aren't read again.
                 "again: the same sounds, 5 sounds, 2 plays, used: true",
+                // Made afresh: its fingerprints are read again.
+                "5 fingerprints",
             ]
         );
-        assert_eq!(cards_said(&cards), ["Brought your sound library up to date: 1 changed"]);
+        assert_eq!(cards_said(&cards), ["Brought your sound library up to date: Made afresh from 5 sounds"]);
         assert!(compact::own_since(&copy).is_some());
         // A scan in the C# app after that: not read in.
         add_sound(&sounds_db, 9, "rim");
