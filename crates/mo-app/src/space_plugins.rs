@@ -12,6 +12,7 @@ use mo_space::plugin_space::PluginSpace;
 use mo_space::size::size_text;
 
 use crate::drag_out::count_of;
+use crate::plugins::folder_fixes::FolderFix;
 use crate::plugins::{PluginRow, Plugins, Read, unused_since};
 use crate::space::{Card, Line, OnPlugins, Part};
 
@@ -137,9 +138,12 @@ impl Found {
 }
 
 /// Works out the plugins no song has used lately from what the Plugins page reads (`read`, from the library), as of
-/// `now`, biggest first. Builds the whole plugin list: call it away from the window's thread.
-pub fn look(read: Read, now: NaiveDateTime) -> Found {
-    let plugins = Plugins::new(read, now);
+/// `now`, biggest first, with the Plugins page's `fixes` to plugins' folders this session
+/// ([`Plugins::apply_folder_fixes`]). Builds the whole plugin list: call it away from the window's thread.
+pub fn look(read: Read, now: NaiveDateTime, fixes: &[FolderFix]) -> Found {
+    let mut plugins = Plugins::new(read, now);
+    // Your say on a plugin's folders on the Plugins page (Not its, Take off, Add a folder) counts here too, as there.
+    plugins.apply_folder_fixes(fixes);
     let (mut unused, mut used) = (Vec::new(), Vec::new());
     // What "Big and unused" on the Plugins page picks from: installed, measured, with room of its own.
     for r in plugins.rows.iter().filter(|r| r.installed && r.bytes() > 0) {
@@ -503,7 +507,7 @@ mod tests {
             unused_years: 2,
             needed_count: 6,
         };
-        let f = look(read.clone(), at(2026, 11));
+        let f = look(read.clone(), at(2026, 11), &[]);
         let names: Vec<(&str, usize, u64)> = f.plugins.iter().map(|p| (p.name.as_str(), p.songs, p.bytes())).collect();
         assert_eq!(names, [("Kontakt 7", 0, 100 * MB + 50 * GB), ("Pro-Q 3", 1, 42 * MB)]);
         let kontakt = f.plugins.first().cloned();
@@ -520,13 +524,13 @@ mod tests {
         for years in [1, 2, 5, 10] {
             assert_eq!(
                 f.as_of(years, f.now),
-                look(Read { unused_years: years, ..read.clone() }, at(2026, 11)),
+                look(Read { unused_years: years, ..read.clone() }, at(2026, 11), &[]),
                 "{years}"
             );
         }
         // A look that finds the library as it was moves the time on: ten years later the rest are unused too.
         let ten_on = f.as_of(2, at(2036, 11));
-        assert_eq!(ten_on, look(read.clone(), at(2036, 11)));
+        assert_eq!(ten_on, look(read.clone(), at(2036, 11), &[]));
         assert_eq!(ten_on.plugins.len(), 5);
         // Kontakt's library went to the bin since the old app measured it, and Pro-Q 3 was uninstalled: Kontakt's
         // library isn't counted any more, and Pro-Q 3 goes with nothing left (its presets folder was inside).

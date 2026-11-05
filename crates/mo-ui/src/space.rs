@@ -21,6 +21,7 @@ use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::binned::{self, Kept};
 use mo_app::places::Place;
+use mo_app::plugins::folder_fixes::FolderFix;
 use mo_app::shortcuts::what_of;
 use mo_app::space::{self, Drive, Fill, Holds, OnPlugins, Opens, Part};
 use mo_app::space_bin::{self, BIN, CAN_PUT_BACK, PutBacks};
@@ -113,18 +114,21 @@ struct SongsAsk {
 
 /// One look at the plugins no song has used lately: it reads every plugin your songs use from the library, as the
 /// Plugins page does, so it has a thread of its own. It's asked for on the page's first look, once what it shows is
-/// five minutes old, and on Measure again; it reads the library again only when the library has changed since the
-/// look on show (`stamp`, [`mo_library::list_copy::stamp_of`]). What the app removes since is taken off as it shows.
+/// five minutes old, on Measure again, and when your say on a plugin's folders on the Plugins page has changed
+/// (`fixes`, [`plugins_page::folder_fixes_this_session`]); it reads the library again only when the library has
+/// changed since the look on show (`stamp`, [`mo_library::list_copy::stamp_of`]) or the fixes have. What the app
+/// removes since is taken off as it shows.
 struct PluginsAsk {
     id: u64,
     library: PathBuf,
     stamp: Option<String>,
+    fixes: Vec<FolderFix>,
 }
 
 /// What a look at the plugins no song has used lately brings back.
 enum PluginsLooked {
-    /// What it found, and the library's stamp when it read it.
-    Found(space_plugins::Found, Option<String>),
+    /// What it found, the library's stamp when it read it, and the folder fixes it counted.
+    Found(space_plugins::Found, Option<String>, Vec<FolderFix>),
     /// The library is as the look on show found it: that stands, counted back from now.
     Same(chrono::NaiveDateTime),
 }
@@ -255,8 +259,10 @@ struct Page {
     plugins_look: Looks<PluginsAsk>,
     plugins: Option<space_plugins::Found>,
     plugins_looking: bool,
-    /// The library's stamp when the look on show read it: a look finding the same doesn't read it again.
+    /// The library's stamp when the look on show read it, and the Plugins page's folder fixes it counted: a look
+    /// finding the same of both doesn't read it again.
     plugins_stamp: Option<String>,
+    plugins_fixes: Vec<FolderFix>,
     /// What the plugins line last showed: shown again when the page comes back on show and that has changed (a Clean
     /// up or uninstall on the Plugins page, or the years picked there).
     plugins_shown: Option<space_plugins::Found>,
@@ -431,7 +437,8 @@ pub fn shown(app: &AppWindow) {
         let spare = wired && p.spare.is_none() && !p.spare_looking && !held.spare;
         let old = wired && !p.old_looking && !held.old && (stale || p.old.is_none());
         let songs = wired && p.songs.is_none() && !p.songs_looking && !held.songs;
-        let plugins = wired && !p.plugins_looking && (stale || p.plugins.is_none());
+        let fixed = p.plugins.is_some() && plugins_page::folder_fixes_this_session() != p.plugins_fixes;
+        let plugins = wired && !p.plugins_looking && (stale || p.plugins.is_none() || fixed);
         let plugins_changed = wired && plugins_now(&p) != p.plugins_shown;
         (stale, bitwig, old, spare, songs, plugins, plugins_changed)
     });
@@ -1477,8 +1484,10 @@ fn look_for_plugins(app: &AppWindow) {
         p.feed.as_ref()?;
         let (id, _) = p.plugins_look.next();
         p.plugins_looking = true;
-        let stamp = p.plugins.as_ref().and(p.plugins_stamp.clone());
-        Some(PluginsAsk { id, library: p.library.clone(), stamp })
+        let fixes = plugins_page::folder_fixes_this_session();
+        // The look on show stands only while the fixes it counted are the page's still.
+        let stamp = p.plugins.as_ref().filter(|_| fixes == p.plugins_fixes).and(p.plugins_stamp.clone());
+        Some(PluginsAsk { id, library: p.library.clone(), stamp, fixes })
     });
     let Some(ask) = ask else { return };
     let weak = app.as_weak();
@@ -1522,8 +1531,8 @@ fn look_for_plugins_now(ask: &PluginsAsk) -> Option<PluginsLooked> {
         },
     };
     // On the pool for long work, as the page's other looks are (rule 21): it goes through every plugin of every save.
-    let found = background::on_bulk_pool(|| space_plugins::look(read, now));
-    Some(PluginsLooked::Found(found, stamp))
+    let found = background::on_bulk_pool(|| space_plugins::look(read, now, &ask.fixes));
+    Some(PluginsLooked::Found(found, stamp, ask.fixes.clone()))
 }
 
 /// What the last look at the plugins no song has used lately found, as it is now: with the years the Plugins page has
@@ -1686,9 +1695,10 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                 }
                 Step::Plugins(id, looked) if id == p.plugins_look.asked => {
                     match *looked {
-                        PluginsLooked::Found(found, stamp) => {
+                        PluginsLooked::Found(found, stamp, fixes) => {
                             p.plugins = Some(found);
                             p.plugins_stamp = stamp;
+                            p.plugins_fixes = fixes;
                         }
                         PluginsLooked::Same(now) => {
                             p.plugins = p.plugins.take().map(|f| f.as_of(f.years, now));
