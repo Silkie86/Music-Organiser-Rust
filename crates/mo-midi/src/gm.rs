@@ -4,12 +4,13 @@
 //! 1. A drum part (channel 10, or the kind finder says drums) plays the GM drum kit.
 //! 2. A MIDI file's own program change: its maker said which instrument it's for.
 //! 3. Words in the track's, part's or file's name ("Rhodes", "808", "Warm pad", "Strings").
-//! 4. The kind of part: chords on an electric piano, a melody on a saw lead, a bassline on a synth bass, an arp on a
+//! 4. The instrument the page's instrument finder names (a plugin everyone knows: Keyscape is a piano).
+//! 5. The kind of part: chords on an electric piano, a melody on a saw lead, a bassline on a synth bass, an arp on a
 //!    harp (as the C# app's defaults).
 //!
 //! Nothing here plays: it only says which sound, and why, for the card to show.
 
-use crate::Role;
+use crate::{Family, Role};
 
 /// A sound to play a part with: a General MIDI program (0 to 127), or the drum kit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +31,8 @@ pub enum Why {
     Program,
     /// A word in a name (the word, as it was matched).
     Name(&'static str),
+    /// The instrument the instrument finder names.
+    Instrument(Family),
     /// The kind of part.
     Kind,
 }
@@ -48,14 +51,15 @@ impl GmSound {
             Why::Drums => "a drum part".to_owned(),
             Why::Program => "the file's own instrument".to_owned(),
             Why::Name(word) => format!("from its name: {word}"),
+            Why::Instrument(family) => format!("for its instrument: {}", family.name().to_lowercase()),
             Why::Kind => "for its kind of part".to_owned(),
         }
     }
 }
 
 /// The sound for a part: `drums` when it's on channel 10, `program` its file's program change (a project's channel
-/// gives none), `names` its track's, part's and file's names, best first.
-pub fn sound_for(role: Role, drums: bool, program: Option<u8>, names: &[&str]) -> GmSound {
+/// gives none), `names` its track's, part's and file's names, best first, `family` the instrument finder's answer.
+pub fn sound_for(role: Role, drums: bool, program: Option<u8>, names: &[&str], family: Option<Family>) -> GmSound {
     if drums || role == Role::Drums {
         return GmSound::DRUM_KIT;
     }
@@ -71,7 +75,34 @@ pub fn sound_for(role: Role, drums: bool, program: Option<u8>, names: &[&str]) -
     if program == Some(0) {
         return GmSound { program: 0, drums: false, why: Why::Program };
     }
+    if let Some(family) = family {
+        return match for_family(family) {
+            Some(program) => GmSound { program, drums: false, why: Why::Instrument(family) },
+            None => GmSound { why: Why::Instrument(family), ..GmSound::DRUM_KIT },
+        };
+    }
     GmSound { program: for_kind(role), drums: false, why: Why::Kind }
+}
+
+/// The sound for an instrument family; `None` for the drum kit.
+pub fn for_family(family: Family) -> Option<u8> {
+    Some(match family {
+        Family::Piano => 0,
+        Family::Organ => 16,
+        Family::Bells => 11,
+        Family::Guitar => 27,
+        Family::Bass => 38,
+        Family::Strings => 48,
+        Family::Brass => 61,
+        Family::Woodwind => 73,
+        Family::Vocals => 52,
+        Family::Lead => 81,
+        Family::Pad => 89,
+        Family::Pluck => 45,
+        Family::World => 108,
+        Family::Fx => 99,
+        Family::Drums | Family::Percussion => return None,
+    })
 }
 
 /// The sound a kind of part starts with (the C# app's `GmSounds.DefaultFor`).
@@ -351,22 +382,22 @@ mod tests {
     use super::*;
 
     fn named(role: Role, names: &[&str]) -> GmSound {
-        sound_for(role, false, None, names)
+        sound_for(role, false, None, names, None)
     }
 
     #[test]
     fn drums_play_the_kit_whatever_they_are_called() {
-        assert_eq!(sound_for(Role::Chords, true, Some(4), &["Piano"]), GmSound::DRUM_KIT);
+        assert_eq!(sound_for(Role::Chords, true, Some(4), &["Piano"], None), GmSound::DRUM_KIT);
         assert_eq!(named(Role::Drums, &["Rhodes"]).name(), "Drum kit");
     }
 
     #[test]
     fn a_files_own_program_comes_before_its_name() {
-        let s = sound_for(Role::Chords, false, Some(48), &["Piano"]);
+        let s = sound_for(Role::Chords, false, Some(48), &["Piano"], None);
         assert_eq!((s.program, s.why, s.name()), (48, Why::Program, "String Ensemble 1"));
         // Program 0 is mostly a maker leaving it as it was: the name says more.
-        assert_eq!(sound_for(Role::Bass, false, Some(0), &["808 slide"]).program, 38);
-        assert_eq!(sound_for(Role::Bass, false, Some(0), &["Untitled"]).program, 0);
+        assert_eq!(sound_for(Role::Bass, false, Some(0), &["808 slide"], None).program, 38);
+        assert_eq!(sound_for(Role::Bass, false, Some(0), &["Untitled"], None).program, 0);
     }
 
     #[test]
@@ -398,6 +429,14 @@ mod tests {
         assert_eq!(named(Role::Bass, &["Bass Guitar"]).program, 33);
         assert_eq!(named(Role::Chords, &["House piano"]).program, 0);
         assert_eq!(named(Role::Chords, &["E Piano"]).program, 4);
+    }
+
+    #[test]
+    fn the_instrument_finder_comes_after_names() {
+        let keyscape = sound_for(Role::Chords, false, None, &["Pattern 3"], Some(Family::Piano));
+        assert_eq!((keyscape.program, keyscape.why_text()), (0, "for its instrument: piano".to_owned()));
+        assert_eq!(sound_for(Role::Chords, false, None, &["Warm pad"], Some(Family::Piano)).program, 89);
+        assert!(sound_for(Role::Other, false, None, &[], Some(Family::Percussion)).drums);
     }
 
     #[test]
