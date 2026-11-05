@@ -1,9 +1,9 @@
 //! What the Space page's clean-ups share while the app runs: which of what a look found you ticked, where Remove has
 //! got to, what went and what stayed, and what Put back brought back (the page's question 5: "every clean-up result has
-//! a Put back button"). Spare plugin copies (`crate::space_spare`) and old copies (`crate::space_old`) each say their
-//! own words around it.
+//! a Put back button"). Spare plugin copies (`crate::space_spare`), old copies (`crate::space_old`) and your songs' old
+//! autosaves and caches (`crate::space_songs`) each say their own words around it.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::path::PathBuf;
 
@@ -53,18 +53,56 @@ pub fn free_bytes<'a, T: Removable + 'a>(items: impl IntoIterator<Item = &'a T>)
 pub struct Sent<T> {
     pub picked: Vec<T>,
     pub when: i64,
-    pub done: Done,
+    /// What it did. Kept as it was made: what's worked out of it below is only made once.
+    done: Done,
+    /// Where each one that went was, with the room it freed, and where each one `done` says something of is, with the
+    /// first thing it says (by where that is in `done.problems`): so a card listing thousands asks of each one quickly.
+    went: HashMap<String, u64>,
+    why: HashMap<String, usize>,
 }
 
 impl<T: Removable> Sent<T> {
+    /// A removal of `picked` that ran at `when`, and what it did. One that went inside another that went (`went_with`)
+    /// went too, its room counted in that one's.
+    pub fn new(picked: Vec<T>, when: i64, done: Done) -> Self {
+        let mut went: HashMap<String, u64> = done.removed.iter().map(|r| (r.path.clone(), r.bytes)).collect();
+        for (inner, outer) in &done.went_with {
+            if went.contains_key(outer) {
+                went.entry(inner.clone()).or_insert(0);
+            }
+        }
+        let mut why = HashMap::new();
+        for (n, p) in done.problems.iter().enumerate() {
+            why.entry(p.path.clone()).or_insert(n);
+        }
+        // What's said of the one it went inside is said of it too (it wasn't found in the bin, say).
+        for (inner, outer) in &done.went_with {
+            if let Some(&n) = why.get(outer) {
+                why.entry(inner.clone()).or_insert(n);
+            }
+        }
+        Sent { picked, when, done, went, why }
+    }
+
+    /// What it did.
+    pub fn done(&self) -> &Done {
+        &self.done
+    }
+
     /// Whether `item` went: to the bin, or for good.
     pub fn went(&self, item: &T) -> bool {
-        self.done.removed.iter().any(|r| r.path == item.path())
+        self.went.contains_key(item.path())
+    }
+
+    /// The room `item` freed: as it was when it went (none when it stayed, or went inside another).
+    pub fn freed(&self, item: &T) -> u64 {
+        self.went.get(item.path()).copied().unwrap_or(0)
     }
 
     /// Why `item` stayed, or why it isn't in the bin though it went.
     pub fn why(&self, item: &T) -> Option<&str> {
-        self.done.problems.iter().find(|p| p.path == item.path()).map(|p| p.why.as_str())
+        let n = *self.why.get(item.path())?;
+        self.done.problems.get(n).map(|p| p.why.as_str())
     }
 
     /// Whether `item` is in the bin: it went, and was found there.
@@ -74,7 +112,7 @@ impl<T: Removable> Sent<T> {
 
     /// What went that was found in the bin: what Put back puts back.
     pub fn binned(&self) -> impl Iterator<Item = &Removed> {
-        self.done.removed.iter().filter(|r| !self.done.problems.iter().any(|p| p.path == r.path))
+        self.done.removed.iter().filter(|r| !self.why.contains_key(&r.path))
     }
 
     /// How many went but weren't found in the bin: Windows removed them for good (too big for it), they went to
@@ -92,8 +130,8 @@ impl<T: Removable> Sent<T> {
     /// aren't there any more (put back already, or emptied from the bin since).
     pub fn coming_back(&self) -> Done {
         let removed: Vec<Removed> = self.binned().cloned().collect();
-        let went_with =
-            self.done.went_with.iter().filter(|(_, with)| removed.iter().any(|r| &r.path == with)).cloned().collect();
+        let back: HashSet<&str> = removed.iter().map(|r| r.path.as_str()).collect();
+        let went_with = self.done.went_with.iter().filter(|(_, with)| back.contains(with.as_str())).cloned().collect();
         Done { removed, problems: Vec::new(), went_with }
     }
 }
@@ -179,7 +217,7 @@ impl<T: Removable> Removing<T> {
     pub fn sent(&mut self, when: i64, done: Done) {
         if let Stage::Sending(picked) = &mut self.stage {
             let picked = std::mem::take(picked);
-            self.stage = Stage::Sent(Sent { picked, when, done });
+            self.stage = Stage::Sent(Sent::new(picked, when, done));
         }
     }
 
@@ -272,12 +310,77 @@ pub fn crashed_words() -> String {
     format!("Remove stopped with an error (the log says which). Anything that went before it stopped is in the {BIN}.")
 }
 
+/// How many places the log names of what one removal sent, and of what stayed for each reason (and how many reasons it
+/// gives): the rest are counted, so a clean-up of thousands doesn't fill the log.
+pub const LOGGED: usize = 50;
+
+/// What the log says of a removal (`done`) of things it calls `one` ("an old copy", and "An old copy" to start a line)
+/// and `many` ("old copies"), each line with whether it's a warning: what went, then what stayed or went but isn't in
+/// the bin, by why (in the order the reasons first come, as one line each when only one is said to be so).
+pub fn log_lines(done: &Done, one: (&str, &str), many: &str) -> Vec<(bool, String)> {
+    let mut lines: Vec<(bool, String)> =
+        done.removed.iter().take(LOGGED).map(|r| (false, format!("Sent {} to the {BIN}: {}", one.0, r.path))).collect();
+    if done.removed.len() > LOGGED {
+        lines.push((false, format!("…and sent {} more {many} to the {BIN}", thousands(done.removed.len() - LOGGED))));
+    }
+    let went: HashSet<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
+    let mut groups: Vec<((&str, &str), Vec<&str>)> = Vec::new();
+    let mut at: HashMap<(&str, &str), usize> = HashMap::new();
+    for p in &done.problems {
+        let how = if went.contains(p.path.as_str()) { "went" } else { "stayed" };
+        let n = *at.entry((how, p.why.as_str())).or_insert_with(|| {
+            groups.push(((how, p.why.as_str()), Vec::new()));
+            groups.len() - 1
+        });
+        if let Some((_, paths)) = groups.get_mut(n) {
+            paths.push(p.path.as_str());
+        }
+    }
+    for ((how, why), paths) in groups.iter().take(LOGGED) {
+        if let [path] = paths.as_slice() {
+            lines.push((true, format!("{} {how}: {path}: {why}", one.1)));
+            continue;
+        }
+        lines.push((true, format!("{} {many} {how}: {why}", thousands(paths.len()))));
+        lines.extend(paths.iter().take(LOGGED).map(|path| (true, format!("  {path}"))));
+        if paths.len() > LOGGED {
+            lines.push((true, format!("  …and {} more", thousands(paths.len() - LOGGED))));
+        }
+    }
+    if groups.len() > LOGGED {
+        let rest: usize = groups.iter().skip(LOGGED).map(|(_, paths)| paths.len()).sum();
+        let reasons = thousands(groups.len() - LOGGED);
+        lines.push((
+            true,
+            format!("…and {} more {many} stayed or aren't in the {BIN}, for {reasons} other reasons", thousands(rest)),
+        ));
+    }
+    lines
+}
+
 /// Parts of a sentence, each saying something of its own, as one sentence: "A", "A, and B", "A, B, and C".
 pub fn clauses(said: &[String]) -> String {
     match said {
         [] => String::new(),
         [one] => one.clone(),
         [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
+}
+
+/// How a clean-up counts what it sent, as its lines say it: "10 spare copies". A closure counting `n` of them is one.
+pub trait Noun {
+    /// `n` of them: "10 spare copies".
+    fn count(&self, n: usize) -> String;
+    /// The `n` that are in the bin. A clean-up whose things are of several kinds counts them by kind ("61 old autosaves
+    /// and 1 cache").
+    fn in_bin(&self, n: usize) -> String {
+        self.count(n)
+    }
+}
+
+impl<F: Fn(usize) -> String> Noun for F {
+    fn count(&self, n: usize) -> String {
+        self(n)
     }
 }
 
@@ -289,18 +392,21 @@ pub fn freed_words<T>(sent: &Sent<T>) -> String {
 /// How a removal went, as the card's big figures' note and the line say it, counting with `noun` ("1 spare copy", "10
 /// spare copies"): "10 spare copies are in the Recycle Bin", "8 spare copies are in the Recycle Bin, 1 went but wasn't
 /// found there, and 2 stayed".
-pub fn sent_words<T: Removable>(sent: &Sent<T>, noun: &dyn Fn(usize) -> String) -> String {
+pub fn sent_words<T: Removable>(sent: &Sent<T>, noun: &dyn Noun) -> String {
     let (in_bin, lost, stayed) = (sent.binned().count(), sent.lost(), sent.stayed());
     if in_bin + lost == 0 {
         return if stayed == 0 { String::new() } else { "None could go: each one's line says why".to_owned() };
     }
     let mut said = Vec::new();
     if in_bin > 0 {
-        said.push(format!("{} {} in the {BIN}", noun(in_bin), if in_bin == 1 { "is" } else { "are" }));
+        said.push(format!("{} {} in the {BIN}", noun.in_bin(in_bin), if in_bin == 1 { "is" } else { "are" }));
     }
     if lost > 0 {
-        let (who, there) =
-            if in_bin > 0 { (thousands(lost), "there".to_owned()) } else { (noun(lost), format!("in the {BIN}")) };
+        let (who, there) = if in_bin > 0 {
+            (thousands(lost), "there".to_owned())
+        } else {
+            (noun.count(lost), format!("in the {BIN}"))
+        };
         said.push(format!("{who} went but {} found {there}", if lost == 1 { "wasn't" } else { "weren't" }));
     }
     if stayed > 0 {
@@ -352,11 +458,12 @@ pub fn gone<T: Removable>(item: &T, sent: &Sent<T>, stage: &Stage<T>) -> bool {
 
 /// The activity card's line once Remove is done, counting with `noun` ("1 copy", "10 copies"): what was freed, what's
 /// in the bin, what went but wasn't found there, and what stayed. Err when nothing went (the card then fails).
-pub fn removed_words(done: &Done, noun: &dyn Fn(usize) -> String) -> Result<String, String> {
-    let found = |path: &str| !done.problems.iter().any(|p| p.path == path);
-    let in_bin = done.removed.iter().filter(|r| found(&r.path)).count();
+pub fn removed_words(done: &Done, noun: &dyn Noun) -> Result<String, String> {
+    let said: HashSet<&str> = done.problems.iter().map(|p| p.path.as_str()).collect();
+    let went: HashSet<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
+    let in_bin = done.removed.iter().filter(|r| !said.contains(r.path.as_str())).count();
     let lost = done.removed.len() - in_bin;
-    let stayed = done.problems.iter().filter(|p| !done.removed.iter().any(|r| r.path == p.path)).count();
+    let stayed = done.problems.iter().filter(|p| !went.contains(p.path.as_str())).count();
     match (done.removed.len(), stayed) {
         (0, 0) => return Err("Nothing was removed.".to_owned()),
         (0, 1) => return Err("It couldn't go: the Space page says why.".to_owned()),
@@ -365,11 +472,14 @@ pub fn removed_words(done: &Done, noun: &dyn Fn(usize) -> String) -> Result<Stri
     }
     let mut said = Vec::new();
     if in_bin > 0 {
-        said.push(format!("{} {} in the {BIN}", noun(in_bin), if in_bin == 1 { "is" } else { "are" }));
+        said.push(format!("{} {} in the {BIN}", noun.in_bin(in_bin), if in_bin == 1 { "is" } else { "are" }));
     }
     if lost > 0 {
-        let (who, there) =
-            if in_bin > 0 { (thousands(lost), "there".to_owned()) } else { (noun(lost), format!("in the {BIN}")) };
+        let (who, there) = if in_bin > 0 {
+            (thousands(lost), "there".to_owned())
+        } else {
+            (noun.count(lost), format!("in the {BIN}"))
+        };
         said.push(format!("{who} went but {} found {there}", if lost == 1 { "wasn't" } else { "weren't" }));
     }
     let stayed = match stayed {
@@ -386,7 +496,7 @@ pub fn result_figures<T: Removable>(
     sent: &Sent<T>,
     stage: &Stage<T>,
     can_put_back: bool,
-    noun: &dyn Fn(usize) -> String,
+    noun: &dyn Noun,
 ) -> (String, String, String) {
     if let Stage::PutBack(_, problems) = stage {
         let note = if problems.is_empty() { String::new() } else { yourself_words() };
@@ -413,4 +523,80 @@ pub fn result_figures<T: Removable>(
     let big_note =
         if matches!(stage, Stage::PuttingBack(_)) { "Putting them back…".to_owned() } else { sent_words(sent, noun) };
     (big, big_note, note)
+}
+
+#[cfg(test)]
+mod tests {
+    use mo_space::clean::What;
+    use mo_space::song::CompactKind;
+
+    use super::*;
+
+    fn removed(path: &str) -> Removed {
+        Removed {
+            path: path.to_owned(),
+            real: path.to_owned(),
+            bytes: 1,
+            what: What::Song(CompactKind::Backup),
+            when: 0,
+            bin_id: None,
+            binned: None,
+            binned_zone: None,
+            stamp: None,
+        }
+    }
+
+    fn problem(path: &str, why: &str) -> Problem {
+        Problem { path: path.to_owned(), why: why.to_owned() }
+    }
+
+    #[test]
+    fn the_log_names_the_first_few_and_says_why_the_rest_stayed_once_for_each_reason() {
+        let one = ("an old copy", "An old copy");
+        let lines = |done: &Done| log_lines(done, one, "old copies");
+        let few = Done {
+            removed: vec![removed("a"), removed("b")],
+            problems: vec![problem("b", NOT_THERE), problem("c", CHANGED), problem("d", CHANGED), problem("e", OTHER)],
+            went_with: Vec::new(),
+        };
+        let said: Vec<(bool, String)> = vec![
+            (false, format!("Sent an old copy to the {BIN}: a")),
+            (false, format!("Sent an old copy to the {BIN}: b")),
+            (true, format!("An old copy went: b: {NOT_THERE}")),
+            (true, format!("2 old copies stayed: {CHANGED}")),
+            (true, "  c".to_owned()),
+            (true, "  d".to_owned()),
+            (true, format!("An old copy stayed: e: {OTHER}")),
+        ];
+        assert_eq!(lines(&few), said);
+
+        // Thousands: the first few by name, the rest counted.
+        let many: Vec<String> = (0..LOGGED + 7).map(|n| format!("p{n}")).collect();
+        let lots = Done {
+            removed: many.iter().map(|p| removed(p)).collect(),
+            problems: many.iter().map(|p| problem(&format!("{p}-stayed"), CHANGED)).collect(),
+            went_with: Vec::new(),
+        };
+        let said = lines(&lots);
+        assert_eq!(said.len(), LOGGED + 1 + 1 + LOGGED + 1);
+        assert_eq!(said.get(LOGGED), Some(&(false, format!("…and sent 7 more old copies to the {BIN}"))));
+        assert_eq!(said.get(LOGGED + 1), Some(&(true, format!("{} old copies stayed: {CHANGED}", LOGGED + 7))));
+        assert_eq!(said.last(), Some(&(true, "  …and 7 more".to_owned())));
+
+        // A reason for each: the first few reasons, then the rest counted.
+        let whys = Done {
+            problems: (0..LOGGED + 3).map(|n| problem(&format!("p{n}"), &format!("Reason {n}."))).collect(),
+            ..Done::default()
+        };
+        let said = lines(&whys);
+        assert_eq!(said.len(), LOGGED + 1);
+        assert_eq!(
+            said.last(),
+            Some(&(true, format!("…and 3 more old copies stayed or aren't in the {BIN}, for 3 other reasons")))
+        );
+    }
+
+    const NOT_THERE: &str = "It isn't in the Recycle Bin, so it may have been removed for good.";
+    const CHANGED: &str = "It changed since you looked, so it stays.";
+    const OTHER: &str = "It isn't there any more.";
 }

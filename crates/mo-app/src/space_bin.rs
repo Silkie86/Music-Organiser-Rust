@@ -13,6 +13,7 @@ use crate::binned::{Binned, Kept};
 use crate::songs::thousands;
 use crate::space::{Card, Line, Part};
 use crate::space_old::OLD_COPIES;
+use crate::space_songs::{self, COMPACT};
 use crate::space_spare::SPARE_COPIES;
 
 /// The line's id.
@@ -76,6 +77,7 @@ pub fn kind_title(kind: &str) -> &'static str {
     match kind {
         SPARE_COPIES => "Spare plugin copies",
         OLD_COPIES => "Old copies after moving folders",
+        COMPACT => "Songs that can be compacted",
         _ => "A clean-up",
     }
 }
@@ -85,6 +87,7 @@ pub fn putting_back_title(kind: &str) -> &'static str {
     match kind {
         SPARE_COPIES => "Putting back spare plugin copies",
         OLD_COPIES => "Putting back old copies",
+        COMPACT => "Putting back old autosaves and caches",
         _ => "Putting back what a clean-up removed",
     }
 }
@@ -94,10 +97,11 @@ pub fn put_back_crashed() -> String {
     format!("Put back stopped with an error (the log says which), so it may still be in the {BIN}.")
 }
 
-/// What a clean-up sent, as a count: "10 plugin copies", "1 file or folder".
+/// What a clean-up sent, as a count: "10 plugin copies", "12 old autosaves and 1 cache", "1 file or folder".
 fn things(b: &Binned) -> String {
     let n = b.done.removed.len();
     match b.kind.as_str() {
+        COMPACT => space_songs::sent_things(&b.done.removed),
         SPARE_COPIES if n == 1 => "1 plugin copy".to_owned(),
         SPARE_COPIES => format!("{} plugin copies", thousands(n)),
         OLD_COPIES if n == 1 => "1 old copy".to_owned(),
@@ -352,6 +356,30 @@ mod tests {
         let card = card(Some(&kept(vec![old(3)], true)), &PutBacks::default(), true, false);
         assert_eq!(card.parts[0].name, "Old copies after moving folders");
         assert!(card.parts[0].what.starts_with("3 old copies, removed "), "{}", card.parts[0].what);
+    }
+
+    #[test]
+    fn your_songs_old_autosaves_and_caches_are_named_by_kind() {
+        use mo_space::song::CompactKind;
+        let songs = |kinds: &[CompactKind]| {
+            let paths: Vec<String> =
+                (0..kinds.len()).map(|i| format!(r"C:\Music\Night Drive\Backup\{i}.flp")).collect();
+            let paths: Vec<&str> = paths.iter().map(String::as_str).collect();
+            let mut b = Binned { kind: COMPACT.to_owned(), ..binned(1_762_000_000, &paths) };
+            for (r, kind) in b.done.removed.iter_mut().zip(kinds) {
+                r.what = What::Song(*kind);
+            }
+            b
+        };
+        assert_eq!(kind_title(COMPACT), "Songs that can be compacted");
+        assert_eq!(putting_back_title(COMPACT), "Putting back old autosaves and caches");
+        let (backup, cache) = (CompactKind::Backup, CompactKind::Cache);
+        assert_eq!(things(&songs(&[backup])), "1 old autosave");
+        assert_eq!(things(&songs(&[backup, backup, cache])), "2 old autosaves and 1 cache");
+        assert_eq!(things(&songs(&[cache, cache])), "2 caches");
+        let card = card(Some(&kept(vec![songs(&[backup, backup, cache])], true)), &PutBacks::default(), true, false);
+        assert_eq!(card.parts[0].name, "Songs that can be compacted");
+        assert!(card.parts[0].what.starts_with("2 old autosaves and 1 cache, removed "), "{}", card.parts[0].what);
     }
 
     #[test]
