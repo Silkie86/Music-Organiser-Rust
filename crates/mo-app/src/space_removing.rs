@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::path::PathBuf;
 
-use mo_space::clean::{Done, Problem, Removed};
+use mo_space::clean::{Done, NEEDS_ADMIN, Problem, Removed};
 use mo_space::size::size_text;
 
 use crate::songs::thousands;
@@ -20,6 +20,60 @@ pub const ADMIN: &str = "The ones in Program Files go together at the end, so Wi
 /// What a card says, once they went, of putting back the ones from Program Files: Put back asks Windows once for all
 /// of them, as Remove did.
 pub const ADMIN_BACK: &str = "For the ones from Program Files, Windows asks once for administrator rights.";
+
+/// How far Remove has got, for its card while it runs: of what was sent so far, what went to the Recycle Bin, what
+/// waits for Windows' administrator step (it asks once, at the end) and what stays. [`mo_space::clean::Heard`] tells it
+/// of each send ([`Tally::heard`]). What a clean-up turns away before sending it (changed since the look, say) isn't
+/// heard: that takes no time, and Remove's result says it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Tally {
+    /// Whether Windows can be asked here, so that what it guards waits for the step rather than staying.
+    can_ask: bool,
+    pub went: usize,
+    pub waits: usize,
+    pub stays: usize,
+}
+
+impl Tally {
+    /// A tally for a bin whose administrator step `can_ask` ([`mo_space::admin::Admin::can_ask`]).
+    pub fn new(can_ask: bool) -> Self {
+        Tally { can_ask, went: 0, waits: 0, stays: 0 }
+    }
+
+    /// Notes how one send went.
+    pub fn heard(&mut self, sent: &Result<(), String>) {
+        match sent {
+            Ok(()) => self.went += 1,
+            Err(why) if why == NEEDS_ADMIN && self.can_ask => self.waits += 1,
+            Err(_) => self.stays += 1,
+        }
+    }
+
+    /// How far it has got of `of`, for the card's bar.
+    pub fn fraction(&self, of: usize) -> f32 {
+        (self.went + self.waits + self.stays) as f32 / of.max(1) as f32
+    }
+
+    /// What the card says: its `note` (what it said as Remove started), then how far it has got of `of`.
+    pub fn words(&self, note: &str, of: usize) -> String {
+        let verb = |n: usize, one: &'static str, many: &'static str| if n == 1 { one } else { many };
+        let mut words = format!(
+            "{note} {} of {} {} gone so far",
+            thousands(self.went),
+            thousands(of),
+            verb(self.went, "has", "have")
+        );
+        if self.stays > 0 {
+            words += &format!(" and {} {}", thousands(self.stays), verb(self.stays, "stays", "stay"));
+        }
+        words.push('.');
+        if self.waits > 0 {
+            let wait = verb(self.waits, "waits", "wait");
+            words += &format!(" {} {wait} for Windows to ask, once, at the end.", thousands(self.waits));
+        }
+        words
+    }
+}
 
 /// Something a clean-up lists, that Remove can send to the Recycle Bin.
 pub trait Removable: Clone + Debug + PartialEq + Eq {
@@ -548,6 +602,36 @@ mod tests {
 
     fn problem(path: &str, why: &str) -> Problem {
         Problem { path: path.to_owned(), why: why.to_owned() }
+    }
+
+    #[test]
+    fn the_card_says_how_far_remove_has_got() {
+        let note = "Each one is checked again just before it goes to the Recycle Bin.";
+        let mut tally = Tally::new(true);
+        tally.heard(&Ok(()));
+        assert_eq!(tally.words(note, 5000), format!("{note} 1 of 5,000 has gone so far."));
+        for _ in 0..1233 {
+            tally.heard(&Ok(()));
+        }
+        assert_eq!(tally.words(note, 5000), format!("{note} 1,234 of 5,000 have gone so far."));
+        // A program using it: it stays. Windows guarding it: it waits for the step, which asks once at the end.
+        tally.heard(&Err(mo_space::clean::IN_USE.to_owned()));
+        tally.heard(&Err(NEEDS_ADMIN.to_owned()));
+        assert_eq!(
+            tally.words(note, 5000),
+            format!(
+                "{note} 1,234 of 5,000 have gone so far and 1 stays. 1 waits for Windows to ask, once, at the end."
+            )
+        );
+        // The bar counts each one sent, whichever way it went.
+        assert!((tally.fraction(5000) - 1236.0 / 5000.0).abs() < 1e-6);
+        assert_eq!(Tally::new(true).fraction(0), 0.0);
+        // Where Windows can't be asked, what it guards stays.
+        let mut no_step = Tally::new(false);
+        no_step.heard(&Err(NEEDS_ADMIN.to_owned()));
+        no_step.heard(&Err(NEEDS_ADMIN.to_owned()));
+        assert_eq!((no_step.went, no_step.waits, no_step.stays), (0, 0, 2));
+        assert_eq!(no_step.words(note, 2), format!("{note} 0 of 2 have gone so far and 2 stay."));
     }
 
     #[test]
