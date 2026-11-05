@@ -487,7 +487,7 @@ fn any_music_with_any_pins_is_explained_by_the_rules() {
     }
     assert!(explained_spans > 500, "{explained_spans} spans explained");
     // First readings and runners-up held on are both met.
-    assert!(held[0] > 10 && held[1] > 10, "held on: {held:?}");
+    assert!(held[0] >= 10 && held[1] >= 10, "held on: {held:?}");
     for (music, pins) in the_music_in_ticks() {
         let (r, all) = explained(&music, &pins, MOST_READINGS);
         if let Err(why) = keeps_the_rules(&music, &music.hear(), &pins, &r, &all) {

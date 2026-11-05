@@ -17,9 +17,10 @@ use std::cell::RefCell;
 use std::ops::Range;
 
 use super::fitter::FitLabel;
+use super::reader::bars_heard;
 use super::{
-    BassKind, Core, DecodedSpan, Decoder, Decoding, Evidence, Hearing, Label, Model, NamedSpan, Namer, Naming,
-    PinnedSpan, Priors, Push, Route, Scored, Scorer, SpanFacts, SpanFlags, Tables, Weights,
+    BassKind, Calibration, Core, DecodedSpan, Decoder, Decoding, Evidence, Hearing, Label, Model, NamedSpan, Namer,
+    Naming, PinnedSpan, Priors, Push, Route, Scored, Scorer, SpanFacts, SpanFlags, Tables, Texture, Weights,
 };
 use crate::chord::Chord;
 use crate::keyfind::Span;
@@ -282,11 +283,20 @@ pub struct Whole {
 }
 
 impl Whole {
-    /// Some music heard and read whole; none when nothing is heard or read.
-    pub fn of(music: &Music, weights: &Weights, tables: &Tables, pins: &[PinnedSpan]) -> Option<Whole> {
+    /// Some music heard and read whole, its chances as sharp as `calibration` makes them for what's heard, as the
+    /// reader's are; none when nothing is heard or read.
+    pub fn of(
+        music: &Music,
+        weights: &Weights,
+        tables: &Tables,
+        calibration: &Calibration,
+        pins: &[PinnedSpan],
+    ) -> Option<Whole> {
         let hearing = music.heard()?;
         let (mut decoder, mut out) = (Decoder::new(), Decoding::new());
-        decoder.decode(&hearing, weights, tables, pins, &mut out).then_some(Whole { hearing, decoder, out })
+        let sharpness = calibration.sharpness(bars_heard(&hearing), Texture::of(&hearing));
+        let read = decoder.decode_at(&hearing, weights, tables, pins, sharpness, &mut out);
+        read.then_some(Whole { hearing, decoder, out })
     }
 
     /// The first unit reported: units in the checks count from it.
@@ -456,12 +466,14 @@ pub struct Named {
 }
 
 impl Named {
-    /// Some music heard, read whole and named, each span keeping at most `most` readings; none when nothing is heard
-    /// or read.
-    pub fn of(music: &Music, weights: &Weights, tables: &Tables, pins: &[PinnedSpan], most: usize) -> Option<Named> {
+    /// Some music heard, read whole and named with a model, each span keeping at most `most` readings, its chances as
+    /// sharp as the model's calibration makes them for what's heard, as the reader's are; none when nothing is heard or
+    /// read.
+    pub fn of(music: &Music, model: &Model, pins: &[PinnedSpan], most: usize) -> Option<Named> {
         let hearing = music.heard()?;
         let (mut decoder, mut decoding, mut naming) = (Decoder::new(), Decoding::new(), Naming::new());
-        if !decoder.decode(&hearing, weights, tables, pins, &mut decoding) {
+        let sharpness = model.calibration.sharpness(bars_heard(&hearing), Texture::of(&hearing));
+        if !decoder.decode_at(&hearing, model.weights, model.tables, pins, sharpness, &mut decoding) {
             return None;
         }
         Namer::new().name(&hearing, &decoder, &decoding, most, &mut naming);
@@ -715,7 +727,7 @@ pub fn whole_verdicts(model: &Model) -> Result<Vec<Verdict>, String> {
     let mut out = Vec::new();
     for (name, music, checks) in read_whole_cases()? {
         let music = music.looped();
-        let (wrong, read) = match Whole::of(&music, model.weights, model.tables, &[]) {
+        let (wrong, read) = match Whole::of(&music, model.weights, model.tables, model.calibration, &[]) {
             Some(whole) => {
                 let spans = whole.spans();
                 (checks.iter().filter_map(|c| holds(c, &whole, &spans).err()).collect(), render_whole(&spans))
@@ -735,7 +747,7 @@ pub fn named_verdicts(model: &Model, targets: bool) -> Result<Vec<Verdict>, Stri
     let mut out = Vec::new();
     for (name, music, wants) in cases {
         let music = music.looped();
-        let (wrong, read) = match Named::of(&music, model.weights, model.tables, &[], 6) {
+        let (wrong, read) = match Named::of(&music, model, &[], 6) {
             Some(named) => {
                 let spans = named.spans();
                 (wants.iter().filter_map(|w| named_holds(w, &spans).err()).collect(), render_named(&spans))

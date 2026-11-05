@@ -390,7 +390,8 @@ fn the_summary_holds_what_else_the_chords_have() {
         ("3 D/C", F::SLASH),
         ("9 C | F/C | G/C | C over a pedal", F::PEDAL.with(F::INVERSION).with(F::SLASH)),
         ("44 C | F pushed", F::PUSHED),
-        ("36 a walk under F A C", F::WALKING),
+        // Unclear too: F under the walk is read at under the 0.8 an accompaniment needs.
+        ("36 a walk under F A C", F::WALKING.with(F::UNCLEAR)),
         ("7 G9sus4", F::HYBRID),
     ] {
         assert_eq!(case(name).summary().flags(), want, "{name}");

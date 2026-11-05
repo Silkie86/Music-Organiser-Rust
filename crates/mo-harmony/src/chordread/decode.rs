@@ -18,8 +18,10 @@
 //!   to (that's the same way as holding it on from the plain place), so no way of reading the music is counted twice;
 //!   and it scores only what counts for each felt beat ([`SpanFacts::held_score`]): where it starts was counted where
 //!   it started. So a chord held, or struck again, for eight bars is one chord.
-//! - **Forward-backward** adds up every way, each scored times the sharpness ([`SHARPNESS`]), into each reading's
-//!   chance on each unit and the chance a chord changes at each unit.
+//! - **Forward-backward** adds up every way, each scored times the sharpness (the design's σ, which the reader works
+//!   out from how much music it hears and its texture: [`super::Calibration`]), into each reading's chance on each
+//!   unit and the chance a chord changes at each unit. The sharpness moves only the chances: the best way is found on
+//!   the scores themselves, so it's the same at any sharpness, to the last bit.
 //!
 //! A pushed chord's sound is its own from the unit it's struck in ([`super::Evidence::facts`]), so pushing a chord
 //! and changing early weigh the same notes, and only where the chord starts tells them apart (a push costs E8, a
@@ -59,8 +61,9 @@ pub const SPAN_BARS: usize = 2;
 /// How many readings pass A keeps on each span (the design's K), besides its best rootless one and no chord.
 pub const KEEP: usize = 8;
 
-/// How sharp the chances are (the design's σ): every score is multiplied by it before the chances are worked out.
-/// 1 until the calibration fits it.
+/// The sharpness the fit reads at ([`Decoder::decode`] too): every score as it is. The weights the fit learns are then
+/// as sharp as the labelled music asks; the reader's own sharpness ([`super::Calibration`]) is fitted after them, on
+/// music they didn't learn from.
 pub const SHARPNESS: f64 = 1.0;
 
 /// A stretch whose reading is given, by a Chord check answer or the user's fix: a control, not evidence.
@@ -230,6 +233,8 @@ struct Moves {
     /// Whether the masses of the ways may be added up as masses ([`ln_of_sum`]): every move's sharpness times its pair
     /// term is within [`LINEAR_RANGE`] of 0.
     linear: bool,
+    /// The sharpness every score is multiplied by before the masses are worked out.
+    sharpness: f64,
 }
 
 /// How far from 0 the sharpness times any move's pair term may be for the masses of the ways to be added up as masses:
@@ -239,7 +244,7 @@ struct Moves {
 const LINEAR_RANGE: f64 = 30.0;
 
 impl Moves {
-    fn new(trust: f64, tables: &Tables) -> Moves {
+    fn new(trust: f64, sharpness: f64, tables: &Tables) -> Moves {
         let mut motion = [[[(0.0, 1.0, 0.0); 3]; 12]; 3];
         let mut linear = true;
         for (from, row) in Group::ALL.into_iter().zip(&mut motion) {
@@ -248,8 +253,8 @@ impl Moves {
                     let prior = tables.motion_prior(from, up, to);
                     let pair = trust * prior;
                     // False for a pair term that isn't a number too.
-                    linear &= (SHARPNESS * pair).abs() <= LINEAR_RANGE;
-                    *value = (pair, (SHARPNESS * pair).exp(), prior);
+                    linear &= (sharpness * pair).abs() <= LINEAR_RANGE;
+                    *value = (pair, (sharpness * pair).exp(), prior);
                 }
             }
         }
@@ -257,7 +262,7 @@ impl Moves {
         for (core, group) in Core::ALL.into_iter().zip(&mut groups) {
             *group = core.group().index();
         }
-        Moves { motion, groups, linear }
+        Moves { motion, groups, linear, sharpness }
     }
 
     /// The move from the reading `from` to `to`: its pair term, e to it times the sharpness, and its motion prior.
@@ -565,7 +570,7 @@ fn ready_from(slot: &Slot, entries: &[Entry], first: usize, id: Id, node: &Node,
     }
     out.alpha = ln_of_sum(sum, slot.top, moves.linear, || {
         let ways = entries.iter().filter(|entry| starts(entry));
-        ways.map(|entry| entry.alpha + SHARPNESS * moves.between(entry.id, id).0)
+        ways.map(|entry| entry.alpha + moves.sharpness * moves.between(entry.id, id).0)
     });
     out
 }
@@ -635,9 +640,13 @@ pub struct Decoder {
     /// The longest span, in units.
     cap: usize,
     moves: Moves,
-    /// The weights and priors as the scoring reads them, and the weights and tables they were worked out from.
+    /// The weights and priors as the scoring reads them, and the weights and tables they were worked out from; and the
+    /// sharpness the moves were.
     scorer: Scorer,
     scorer_from: Option<(Weights, Tables)>,
+    moves_from: Option<f64>,
+    /// The sharpness the next decode works the chances out at ([`Decoder::decode_at`]).
+    sharpness: f64,
     evidence: Evidence,
     facts: SpanFacts,
     candidates: Vec<Candidate>,
@@ -682,7 +691,8 @@ impl Decoder {
 
     /// Reads where the chords change in what was heard and which chord each stretch is, into `out`, weighing the
     /// evidence by `weights` and the priors by `tables`; `pins` are stretches whose reading is given (one that
-    /// overlaps an earlier one is left out). False, with nothing in `out`, when nothing was heard.
+    /// overlaps an earlier one is left out). False, with nothing in `out`, when nothing was heard. The chances are
+    /// worked out at the fit's sharpness ([`SHARPNESS`]): the reader passes its own ([`Decoder::decode_at`]).
     pub fn decode(
         &mut self,
         hearing: &Hearing,
@@ -691,11 +701,27 @@ impl Decoder {
         pins: &[PinnedSpan],
         out: &mut Decoding,
     ) -> bool {
+        self.decode_at(hearing, weights, tables, pins, SHARPNESS, out)
+    }
+
+    /// [`Decoder::decode`], every score multiplied by `sharpness` before the chances are worked out. The best way is
+    /// the same at any sharpness; a sharpness that isn't a number above 0 is taken as [`SHARPNESS`].
+    pub fn decode_at(
+        &mut self,
+        hearing: &Hearing,
+        weights: &Weights,
+        tables: &Tables,
+        pins: &[PinnedSpan],
+        sharpness: f64,
+        out: &mut Decoding,
+    ) -> bool {
+        self.sharpness = if sharpness.is_finite() && sharpness > 0.0 { sharpness } else { SHARPNESS };
         self.decode_with(hearing, weights, tables, pins, None, out)
     }
 
-    /// [`Decoder::decode`], and for the fit with labels (`gold`): their readings are kept on every span inside a
-    /// labelled stretch, whatever their rank, after their changes are moved to the places a chord may change.
+    /// [`Decoder::decode`] at the sharpness set ([`Decoder::decode_at`]), and for the fit with labels (`gold`): their
+    /// readings are kept on every span inside a labelled stretch, whatever their rank, after their changes are moved to
+    /// the places a chord may change.
     fn decode_with(
         &mut self,
         hearing: &Hearing,
@@ -705,6 +731,7 @@ impl Decoder {
         gold: Option<&mut Gold>,
         out: &mut Decoding,
     ) -> bool {
+        let sharpness = self.sharpness;
         out.clear();
         self.clear();
         let units = hearing.units();
@@ -712,10 +739,15 @@ impl Decoder {
             return false;
         }
         self.cap = SPAN_BARS * hearing.bar_units().max(1);
-        if self.scorer_from != Some((*weights, *tables)) {
-            self.moves = Moves::new(weights.pair, tables);
+        // The moves are worked out again with the scorer (new weights or tables), or at a new sharpness.
+        let fresh = self.scorer_from != Some((*weights, *tables));
+        if fresh {
             self.scorer = Scorer::new(weights, &Priors::of(tables));
             self.scorer_from = Some((*weights, *tables));
+        }
+        if fresh || self.moves_from != Some(sharpness) {
+            self.moves = Moves::new(weights.pair, sharpness, tables);
+            self.moves_from = Some(sharpness);
         }
         self.evidence.prepare(hearing);
         self.find_regions(hearing, pins);
@@ -939,7 +971,8 @@ impl Decoder {
                         (ready.best + score, ready.from)
                     };
                     // The mass of the ways that start it, and of those that hold it on.
-                    let (started, held_on) = (ready.alpha + SHARPNESS * score, ready.held_alpha + SHARPNESS * held);
+                    let sharp = self.moves.sharpness;
+                    let (started, held_on) = (ready.alpha + sharp * score, ready.held_alpha + sharp * held);
                     if best > f64::NEG_INFINITY {
                         let e = match self.entry_of[id] {
                             Some(e) => e,
@@ -1168,7 +1201,8 @@ impl Decoder {
                 for kept in self.kept.get_mut(span.kept.clone()).unwrap_or_default() {
                     let Some(entry) = kept.entry.and_then(|e| self.entries.get(e)) else { continue };
                     let beta = if span.full { entry.beta_full } else { entry.beta };
-                    let (after, held) = (SHARPNESS * kept.score + beta, SHARPNESS * kept.held + beta);
+                    let sharp = self.moves.sharpness;
+                    let (after, held) = (sharp * kept.score + beta, sharp * kept.held + beta);
                     if !self.seen[kept.id] {
                         self.seen[kept.id] = true;
                         self.touched.push(kept.id);
@@ -1206,7 +1240,7 @@ impl Decoder {
                 }
                 let moved = ln_of_sum(sum, top, self.moves.linear, || {
                     let nexts = self.touched.iter().zip(&self.after_ln).filter(|&(&next, _)| moves_on(entry.id, next));
-                    nexts.map(|(&next, &after)| SHARPNESS * self.moves.between(entry.id, next).0 + after)
+                    nexts.map(|(&next, &after)| self.moves.sharpness * self.moves.between(entry.id, next).0 + after)
                 });
                 (entry.beta, entry.beta_full) = match node.kind {
                     Kind::Edge => (moved, moved),
@@ -1416,7 +1450,7 @@ impl Decoder {
 
 #[cfg(test)]
 mod tests {
-    use super::{Entry, Id, Kind, LnSum, Moves, Node, Slot, add_ln, ln_of_sum, ready_from, scale};
+    use super::{Entry, Id, Kind, LnSum, Moves, Node, SHARPNESS, Slot, add_ln, ln_of_sum, ready_from, scale};
     use crate::chordread::{COUNTED, Core, HAND, Label};
     use crate::pitch::PitchClass;
 
@@ -1426,7 +1460,7 @@ mod tests {
         // ln masses. Where the reading the worst move comes from (A) is far likelier than the one the best comes from
         // (B), B's way can still matter most, though its mass over A's is too small for a float. So with such moves the
         // masses are added up in logarithms, and B's way counts.
-        let moves = Moves::new(160.0, &COUNTED);
+        let moves = Moves::new(160.0, SHARPNESS, &COUNTED);
         assert!(!moves.linear);
         let ids: Vec<Id> = PitchClass::ALL
             .into_iter()
@@ -1482,9 +1516,9 @@ mod tests {
     #[test]
     fn masses_add_up_as_masses_only_while_that_works_out_right() {
         // The hand trust keeps every move's factor near 1; a trust in the hundreds, or one that isn't a number, doesn't.
-        assert!(Moves::new(HAND.pair, &COUNTED).linear);
-        assert!(!Moves::new(400.0, &COUNTED).linear);
-        assert!(!Moves::new(f64::NAN, &COUNTED).linear);
+        assert!(Moves::new(HAND.pair, SHARPNESS, &COUNTED).linear);
+        assert!(!Moves::new(400.0, SHARPNESS, &COUNTED).linear);
+        assert!(!Moves::new(f64::NAN, SHARPNESS, &COUNTED).linear);
         // A sum that keeps its bits is used as it is (the logarithms aren't even made).
         assert_eq!(ln_of_sum(2.0, 1.0, true, std::iter::empty), 1.0 + 2f64.ln());
         // One too small, past the largest float, not a number, or with the factors out of range: in logarithms.

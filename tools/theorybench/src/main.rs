@@ -8,6 +8,7 @@
 mod answerfit;
 mod baseline;
 mod candidates;
+mod chordcal;
 mod chordfit;
 mod chords;
 mod fit;
@@ -38,6 +39,8 @@ theorybench chords <labelled.jsonl>... [--answers <name>=<answers.jsonl>]... [--
 theorybench chordfit <labelled.jsonl>... [--inputs <kinds>] [--weigh <source>=<w>]... [--train <folds>]
                    [--test <folds>] [--lambda <x>] [--steps <n>] [--from <weights.json>] [--fix <numbers>]
                    [--hand <mu>] [--hold <rounds>] [--out <weights.json>]
+theorybench chordcal <labelled.jsonl>... [--weights <weights.json>] [--folds <folds>] [--picks <n>]
+                   [--measure] [--calibration <calibration.json>] [--keep-sharpness] [--out <calibration.json>]
 theorybench candidates <labelled.jsonl>... [--inputs <kinds>] [--misses <file>]
 theorybench tables <labelled.jsonl>... [--write <tables.rs>]
 
@@ -102,6 +105,17 @@ theorybench tables <labelled.jsonl>... [--write <tables.rs>]
              more rounds while some break, each rule drawn again where the fit got to
   --out      writes the fitted numbers to a file, for chords --weights and chordfit --from; after a fit, it and the
              report say which hand cases' gates break
+  chordcal   fits how sharp the chord reader's chances are (8 numbers, by how much music is heard and its texture)
+             and then the thresholds its answers are graded by, on fold 1 of the pieces whose licence lets fitted
+             numbers ship (the fold the built-in weights never learned from), read whole and cut into 1 to 16 bars
+  --weights  reads with the weights a fit wrote (chordfit --out); the built-in ones when left out
+  --folds    the folds fitted on (1)
+  --picks    stretches of each length cut from each piece, each way it's heard (2)
+  --measure  fits nothing: reads every piece given, of any licence and fold, and says how true the chances are and
+             how often each answer is wrong, with the calibration built in (or --calibration's)
+  --calibration  a file --out wrote, read in place of the calibration and thresholds built in
+  --keep-sharpness  fits only the thresholds, on the sharpness built in (or --calibration's)
+  --out      writes the calibration and the thresholds fitted to a file
   candidates how often mo-harmony's chord reader has the labelled chord among the readings it scores (its ceiling),
              with the labelled ends, and moved by up to a unit
   --inputs   the parts heard: piano (all but the tune), full, upper (the accompaniment without its bass line); piano,full
@@ -119,6 +133,7 @@ fn main() -> ExitCode {
         Some("keyfit") => keyfit::run(&args[1..]),
         Some("chords") => chords::run(&args[1..]),
         Some("chordfit") => chordfit::run(&args[1..]),
+        Some("chordcal") => chordcal::run(&args[1..]),
         Some("candidates") => candidates::run(&args[1..]),
         Some("packs") => packs::run(&args[1..]),
         Some("keycheck") => keycheck::run(&args[1..]),

@@ -14,14 +14,14 @@
 
 use std::ops::Range;
 
-use super::answer::{ChordAnswer, Grading, Texture, Thresholds, grade};
+use super::answer::{Calibration, ChordAnswer, Grading, Texture, Thresholds, grade};
 use super::candidates::Label;
 use super::cores::Core;
 use super::decode::{Decoder, Decoding, PinnedSpan};
 use super::hear::{Hearing, Unit};
 use super::name::{Namer, Naming, Reading, SpanFlags};
 use super::tables::COUNTED;
-use super::weights::{FITTED, THRESHOLDS, Tables, Weights};
+use super::weights::{CALIBRATION, FITTED, THRESHOLDS, Tables, Weights};
 use crate::chord::Chord;
 use crate::key::Key;
 use crate::keyfind::Span;
@@ -37,18 +37,20 @@ pub const MOST_READINGS: u8 = 6;
 /// of what the reader's version covers.
 pub const CHOICE_FLOOR: f64 = 0.01;
 
-/// A reader: the weights the evidence is weighed by, the counted tables the priors read, and the thresholds the
-/// answers are graded by. [`SHIPPED`] is the one built in; the bench passes the ones it fits.
+/// A reader: the weights the evidence is weighed by, the counted tables the priors read, how sharp the chances are,
+/// and the thresholds the answers are graded by. [`SHIPPED`] is the one built in; the bench passes the ones it fits.
 #[derive(Clone, Copy, Debug)]
 pub struct Model<'a> {
     pub weights: &'a Weights,
     pub tables: &'a Tables,
+    pub calibration: &'a Calibration,
     pub thresholds: &'a Thresholds,
 }
 
 /// The reader built into the app: the hand-set weights moved part of the way to a fit ([`FITTED`]) and the hand-set
 /// thresholds, on the counted tables.
-pub const SHIPPED: Model<'static> = Model { weights: &FITTED, tables: &COUNTED, thresholds: &THRESHOLDS };
+pub const SHIPPED: Model<'static> =
+    Model { weights: &FITTED, tables: &COUNTED, calibration: &CALIBRATION, thresholds: &THRESHOLDS };
 
 /// What a read is told besides the notes.
 #[derive(Clone, Copy, Debug)]
@@ -108,6 +110,8 @@ pub struct ChordReading {
     pub truncated: bool,
     /// Whether it was read as a loop: its first chord comes after its last.
     pub looped: bool,
+    /// How sharp its chances are ([`Calibration::sharpness`]), for how much music was heard and its texture.
+    pub sharpness: f64,
     /// In a loop, the chord the decode reads just before its first stretch, over the copy of its end heard in front:
     /// the chord before its first as it goes round (usually its last chord; its first, when that's carried round from
     /// its end, held on). None for no chord there, and for music that isn't a loop.
@@ -382,12 +386,14 @@ impl ChordReader {
             return None;
         }
         self.pin(cx.pins);
-        if !self.decoder.decode(&self.hearing, model.weights, model.tables, &self.pins, &mut self.decoding) {
+        let sharpness = model.calibration.sharpness(bars_heard(&self.hearing), Texture::of(&self.hearing));
+        let (weights, tables) = (model.weights, model.tables);
+        if !self.decoder.decode_at(&self.hearing, weights, tables, &self.pins, sharpness, &mut self.decoding) {
             return None;
         }
         // Every reading is named and graded, whatever the caller keeps.
         self.namer.name(&self.hearing, &self.decoder, &self.decoding, usize::MAX, &mut self.naming);
-        Some(self.reading(grid, cx, model))
+        Some(self.reading(grid, cx, model, sharpness))
     }
 
     /// What the last read heard.
@@ -402,7 +408,7 @@ impl ChordReader {
         self.pins.extend(pins.iter().map(|p| pinned(hearing, p)));
     }
 
-    fn reading(&self, grid: Grid, cx: &ChordContext, model: &Model) -> ChordReading {
+    fn reading(&self, grid: Grid, cx: &ChordContext, model: &Model, sharpness: f64) -> ChordReading {
         let hearing = &self.hearing;
         let texture = Texture::of(hearing);
         let reported = hearing.reported();
@@ -454,9 +460,16 @@ impl ChordReader {
             notes: from.notes,
             truncated: hearing.truncated(),
             looped: from.looped,
+            sharpness,
             before: self.decoding.before(),
         }
     }
+}
+
+/// How many bars a read hears, for its sharpness ([`Calibration::sharpness`]): the units reported (a loop's copied
+/// bar left out), in bars of the grid's first metre.
+pub(super) fn bars_heard(hearing: &Hearing) -> f64 {
+    hearing.reported().len() as f64 / hearing.bar_units().max(1) as f64
 }
 
 /// A pin on the units heard, as a read puts it: each end at the nearest unit start within the music (a loop's own
