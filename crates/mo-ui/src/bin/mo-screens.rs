@@ -103,6 +103,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.global::<mo_ui::MidiData>().set_playing(true);
     shots.push(("midi-playing.png".into(), capture(&window)));
     app.global::<mo_ui::MidiData>().set_playing(false);
+    // Playing through the track selected in Bitwig.
+    mo_ui::midi::run_action(&app, "midi.playBitwig");
+    app.global::<mo_ui::MidiData>().set_daw_note("Playing through \u{201c}Bass\u{201d} in Bitwig.".into());
+    shots.push(("midi-playing-in-bitwig.png".into(), capture(&window)));
+    mo_ui::midi::run_action(&app, "midi.playBitwig");
     // A part dragged out to a DAW from its line: dimmed while it's carried, with the card that follows the mouse.
     let still = capture(&window);
     app.global::<mo_ui::MidiData>().set_lifted_row(1);

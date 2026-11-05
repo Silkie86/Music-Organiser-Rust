@@ -160,6 +160,14 @@ export global MidiData {
     in property <string> soundfont-note;
     callback play-toggled();
     callback choose-soundfont();
+    // Playing the picked part in a DAW, through whatever is on the track selected in Bitwig or the channel selected
+    // in FL Studio: which one plays ("" none, "bitwig", "fl"), which is starting, how it went, and their keys.
+    in property <string> daw-playing;
+    in property <string> daw-starting;
+    in property <string> daw-note;
+    in property <string> bitwig-key;
+    in property <string> fl-key;
+    callback daw-play(string);
     // Dragging a part out into a DAW as a MIDI clip (mo-ui's drag.rs): a line of the list by its row, or the picked
     // part by its card's handle; then `drag-let-go` if the button comes up before the drag has got going. The part is
     // dimmed where it was picked up while it's carried, and glows there for a moment once it has landed.
@@ -456,6 +464,20 @@ component PartPanel inherits SidePanel {
             key: MidiData.play-key;
             clicked => { MidiData.play-toggled(); }
         }
+        StudioButton {
+            horizontal-stretch: 0;
+            text: MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig" ? "Stop Bitwig" : "Play in Bitwig";
+            tip: MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig" ? "Stop the part and take its clip out of Bitwig" : "Play the part round and round through what's on the track selected in Bitwig";
+            key: MidiData.bitwig-key;
+            clicked => { MidiData.daw-play("bitwig"); }
+        }
+        StudioButton {
+            horizontal-stretch: 0;
+            text: MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl" ? "Stop FL" : "Play in FL";
+            tip: MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl" ? "Stop the part in FL Studio" : "Play the part round and round through the channel selected in FL Studio";
+            key: MidiData.fl-key;
+            clicked => { MidiData.daw-play("fl"); }
+        }
         VerticalLayout {
             alignment: center;
             Text {
@@ -466,6 +488,13 @@ component PartPanel inherits SidePanel {
                 min-width: 0px;
             }
         }
+    }
+    if MidiData.daw-note != "": Text {
+        text: MidiData.daw-note;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
     }
     if MidiData.play-note != "": Text {
         text: MidiData.play-note;

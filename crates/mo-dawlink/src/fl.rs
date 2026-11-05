@@ -172,6 +172,16 @@ impl Playing {
     /// wait for it.
     pub fn stop(self) {}
 
+    /// Stops the part and waits (a few milliseconds) until every note is let go: for when the app closes, which
+    /// would otherwise end the timing thread before it let go of them.
+    pub fn finish(self) {
+        self.stop.store(true, Ordering::Relaxed);
+        let waited = Instant::now();
+        while !self.thread.is_finished() && waited.elapsed() < Duration::from_millis(500) {
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
     /// Whether it's still playing: false once it was stopped, or the port went.
     pub fn is_playing(&self) -> bool {
         !self.stop.load(Ordering::Relaxed) && !self.thread.is_finished()
