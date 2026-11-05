@@ -665,6 +665,25 @@ fn sounds_shots(
     }
     shots.push(("sounds-filtered.png".into(), filtered));
     data.invoke_clear();
+    // Hide duplicates on, with three sounds the same audio (the first three by id): one of them shows, and the chip
+    // says how many it hides.
+    let mut ids: Vec<i64> = match mo_ui::sounds::known() {
+        mo_ui::sounds::Known::Read(list, _) => list.sounds().iter().map(|s| s.id).collect(),
+        _ => Vec::new(),
+    };
+    ids.sort_unstable();
+    ids.truncate(3);
+    let same = mo_sounds::copies::SameAudio { groups: vec![ids] };
+    mo_ui::sounds::show_copies_for_screens(app, Some(&same));
+    let all = capture(window);
+    data.invoke_toggle("hide-copies".into());
+    let hidden = capture(window);
+    if hidden == all {
+        return Err("sounds-duplicates.png: Hide duplicates changed nothing".into());
+    }
+    shots.push(("sounds-duplicates.png".into(), hidden));
+    data.invoke_toggle("hide-copies".into());
+    mo_ui::sounds::show_copies_for_screens(app, None);
     // A tile dragged out to a DAW: dimmed while it's carried, with the card that follows the mouse a little way on
     // from it, then lit for a moment once it has landed.
     let still = capture(window);

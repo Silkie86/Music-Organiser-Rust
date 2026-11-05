@@ -3166,6 +3166,7 @@ dependencies = [
  "fs4",
  "half",
  "mo-audio",
+ "mo-catch",
  "mo-formats",
  "mo-library",
  "rayon",
@@ -3173,6 +3174,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

@@ -4,6 +4,7 @@
 //! the list draws them, so 357,000 sounds cost what's on screen. Sounds are read and played off the window's thread.
 //! Rediscover (unused sounds that fit your taste) is dug out on its own low-priority thread too.
 
+mod copies;
 mod drag_out;
 pub use drag_out::card_at_row;
 mod galaxy;
@@ -151,6 +152,8 @@ struct Page {
     /// The sound each one Rediscover dug out sounds like, by id, when its line names one: the card lists that one's
     /// projects when none use it.
     re_likes: HashMap<i64, i64>,
+    /// Hide duplicates has been set: by you, or from its setting when the sounds first showed.
+    hide_copies_chosen: bool,
     /// The kit builder's pads and choices.
     kit: kit::Kit,
     /// The galaxy's map and the part of it on show.
@@ -197,6 +200,7 @@ impl Default for Page {
             re_busy: false,
             re_years: Vec::new(),
             re_likes: HashMap::new(),
+            hide_copies_chosen: false,
             kit: kit::Kit::default(),
             galaxy: galaxy::Galaxy::default(),
         }
@@ -552,6 +556,7 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.galaxy.db = Some(sounds_db.clone());
+        copies::connect(&sounds_db);
         // Kits read the export folder from it as they're exported.
         p.kit.library = Some(library_db.clone());
     });
@@ -1668,6 +1673,11 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         // Counted afresh for these sounds: the choices show without numbers until then.
         p.counts = None;
         p.open_on(view, autoplay);
+        // Hide duplicates as you left it, unless you've set it since the app started.
+        if !p.hide_copies_chosen {
+            p.hide_copies_chosen = true;
+            p.filters.hide_copies = crate::settings::value(list::HIDE_COPIES_KEY).as_deref() == Some("on");
+        }
         p.picked = None;
         p.rediscover.clear();
         p.re_started = false;
@@ -1768,7 +1778,18 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         }
     });
     let weak = app.as_weak();
-    data.on_toggle(move |kind| change(&weak, |f| f.toggle(&kind)));
+    data.on_toggle(move |kind| {
+        change(&weak, |f| f.toggle(&kind));
+        if kind == list::HIDE_COPIES {
+            // Kept for next time (rule: the app's own settings file, never library.db).
+            let on = PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.hide_copies_chosen = true;
+                p.filters.hide_copies
+            });
+            crate::settings::remember(list::HIDE_COPIES_KEY, if on { "on" } else { "off" });
+        }
+    });
     let weak = app.as_weak();
     data.on_years_picked(move |a, b| {
         let span = PAGE.with(|p| year_strip::year_span(&p.borrow().years, a, b));
@@ -1790,7 +1811,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         }
     });
     let weak = app.as_weak();
-    data.on_clear(move || change(&weak, |f| *f = Filters { search: f.search.clone(), ..Filters::default() }));
+    data.on_clear(move || change(&weak, |f| *f = f.cleared()));
     let weak = app.as_weak();
     data.on_pick_order(move |name| {
         let Some(app) = weak.upgrade() else { return };
@@ -2279,8 +2300,10 @@ fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
     refresh(&app);
 }
 
-/// Asks for the list again with the filters and order as they are now, and shows the chips meanwhile.
+/// Asks for the list again with the filters and order as they are now, and shows the chips meanwhile. With Hide
+/// duplicates on, the copies are looked for first if they aren't known for these sounds ([`copies::wanted`]).
 fn refresh(app: &AppWindow) {
+    copies::wanted(app);
     show_chips(app);
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -2402,6 +2425,11 @@ fn listed(app: &AppWindow, id: u64, new: Listed) {
     }
 }
 
+/// For the screenshots: the copies Hide duplicates hides, as if they'd been found (`None`: none, not looked for).
+pub fn show_copies_for_screens(app: &AppWindow, same: Option<&mo_sounds::copies::SameAudio>) {
+    copies::show_for_screens(app, same);
+}
+
 /// Shows one of the views by its name (Ctrl+K's "Sounds › Galaxy"), as the view switch does.
 pub fn show_view(app: &AppWindow, name: &str) {
     if let Some(v) = VIEWS.iter().position(|n| *n == name) {
@@ -2493,7 +2521,11 @@ fn show_lists(app: &AppWindow) {
         {
             // The years picked on the year strip don't narrow History, so they don't count here either.
             format!("{} of {} played", thousands(p.history.len()), thousands(p.played.len()))
-        } else if p.view != HISTORY && p.view != REDISCOVER && (p.filters.any() || !p.filters.search.trim().is_empty())
+        } else if p.view != HISTORY
+            && p.view != REDISCOVER
+            && (p.filters.any()
+                || !p.filters.search.trim().is_empty()
+                || (p.filters.hide_copies && p.list.copies().is_some_and(|n| n > 0)))
         {
             format!("{} of {} sounds", thousands(p.shown.len()), thousands(total))
         } else {
@@ -2533,6 +2565,8 @@ fn show_chips(app: &AppWindow) {
         data.set_used(f.used);
         data.set_knows_use(p.list.knows_use());
         data.set_favourites(f.favourites);
+        data.set_hide_copies(f.hide_copies);
+        data.set_hide_copies_text(list::hide_copies_text(copies::found()).into());
         data.set_folder(f.folder.as_deref().unwrap_or_default().into());
         data.set_any_filter(f.any());
         let order = filters::one_of(&Order::ALL.map(Order::name), p.order.name());
