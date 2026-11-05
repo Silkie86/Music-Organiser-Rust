@@ -128,8 +128,11 @@ pub fn look(
     let started = std::time::Instant::now();
     let found = look_through(roots, documents, index, prints, stop, progress);
     if let Some(index) = index.as_ref() {
-        // A look that stopped forgets nothing; a whole one forgets the files it didn't ask about.
-        if let Err(e) = index.keep(found.is_ok()) {
+        // A look that stopped forgets nothing; a whole one forgets the files it didn't ask about. One that found no
+        // Library, or with a project folder away (a drive asleep or unplugged), isn't whole: what's there is kept for
+        // when it's back.
+        let whole = found.as_ref().is_ok_and(|f| !f.library.is_empty()) && roots.iter().all(|r| r.is_dir());
+        if let Err(e) = index.keep(whole) {
             crate::log::warning("Space", &format!("Couldn't keep the Bitwig copies' fingerprints for next time: {e}"));
         }
     }
@@ -166,20 +169,18 @@ fn look_through(
             known.list_again(&found.library, stop)?;
             known
         }
-        None => {
-            let mut made = LibraryIndex::new(&found.library, stop)?;
-            if let Some(store) = prints {
-                match made.remember_in(store) {
-                    Ok(n) => crate::log::info("Space", &format!("Bitwig copies: {n} fingerprints kept from before")),
-                    Err(e) => crate::log::warning(
-                        "Space",
-                        &format!("The Bitwig copies' fingerprints are kept while the app runs only: {e}"),
-                    ),
-                }
-            }
-            index.insert(made)
-        }
+        None => index.insert(LibraryIndex::new(&found.library, stop)?),
     };
+    // Tried at each look until it works (a store busy or unreadable once is tried again).
+    if let Some(store) = prints.filter(|_| !index.remembers()) {
+        match index.remember_in(store) {
+            Ok(n) => crate::log::info("Space", &format!("Bitwig copies: {n} fingerprints kept from before")),
+            Err(e) => crate::log::warning(
+                "Space",
+                &format!("The Bitwig copies' fingerprints are kept while the app runs only, for now: {e}"),
+            ),
+        }
+    }
     for (n, folder) in folders.iter().enumerate() {
         let copies = index.copies_in(folder, stop)?;
         if !copies.is_empty() {

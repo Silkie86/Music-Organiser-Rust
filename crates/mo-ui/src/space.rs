@@ -1279,13 +1279,15 @@ fn look_for_copies(app: &AppWindow) {
     let Some(ask) = ask else { return };
     let weak = app.as_weak();
     // The Library as the last look read it, kept on the thread so a file isn't read again while it's unchanged. A
-    // crash in a look (logged as one) leaves the thread for the next look; the Library is read again then, in case
-    // the crash came from what was kept.
+    // crash in a look (logged as one) leaves the thread for the next look; the Library is read again then, and the
+    // fingerprints kept between starts are forgotten, in case the crash came from what was kept.
     let mut index = None;
     let work = move |ask: BitwigAsk| {
         let id = ask.id;
         if catch_crash(AssertUnwindSafe(|| look_for_copies_now(ask, &mut index, &weak))).is_err() {
+            // Let go of the store first, so it can be removed.
             index = None;
+            mo_space::prints::forget(&mo_app::paths::data_dir().join(mo_space::prints::FILE_NAME));
             arrive(&weak, Step::BitwigCrashed(id));
         }
     };

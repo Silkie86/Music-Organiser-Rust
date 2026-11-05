@@ -23,7 +23,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, params};
 use sha2::{Digest, Sha256};
 
-use crate::size::{file_hash, open_to_read_once, read_once_done};
+use crate::size::file_hash;
 
 /// The store's name, in the app's data folder.
 pub const FILE_NAME: &str = "bitwig-prints.db";
@@ -82,7 +82,7 @@ impl Prints {
         let conn = open(path)?;
         let rows = match load(&conn) {
             Ok(rows) => rows,
-            Err(e) => {
+            Err(e) if is_damage(&e) => {
                 // Read as far as the header (it's ours), but not its rows: damaged. Made again, empty.
                 drop(conn);
                 remove(path);
@@ -90,6 +90,8 @@ impl Prints {
                 self.store = Some(Mutex::new(conn));
                 return Ok(0);
             }
+            // Busy, or a disk that couldn't be read just now: left as it is, and tried again at the next look.
+            Err(e) => return Err(e.to_string()),
         };
         let n = rows.len();
         if let Ok(mut s) = self.state.lock() {
@@ -130,8 +132,8 @@ impl Prints {
                 Kind::Whole => file_hash(path, stop)?,
             },
         };
-        // A file without a time can't be checked next time, so it's read again then.
-        let modified = modified?;
+        // A file without a time can't be checked next time: its print is used now and read again then.
+        let Some(modified) = modified else { return Some(print) };
         // Changed between the look above and the read: it's kept with the older size and time, so it's read again.
         let mut known = same.unwrap_or(Known { len, modified, ends: None, whole: None });
         // A file no longer than both ends is read whole either way: its two prints are the same.
@@ -152,17 +154,30 @@ impl Prints {
     /// ask about are forgotten, in the store and here, so neither grows past one look's files. An error says why the
     /// store couldn't be written (the prints are still kept while the app runs).
     pub fn keep(&self, whole_look: bool) -> Result<(), String> {
-        let Ok(mut s) = self.state.lock() else { return Ok(()) };
-        let s = &mut *s;
-        let read: Vec<(PathBuf, Known)> =
-            s.read.drain().filter_map(|p| s.known.get(&p).copied().map(|k| (p, k))).collect();
-        let asked = std::mem::take(&mut s.asked);
-        if whole_look {
-            s.known.retain(|p, _| asked.contains(p));
+        let (read, asked, forgot) = {
+            let Ok(mut s) = self.state.lock() else { return Ok(()) };
+            let s = &mut *s;
+            let read: Vec<(PathBuf, Known)> =
+                s.read.drain().filter_map(|p| s.known.get(&p).copied().map(|k| (p, k))).collect();
+            let asked = std::mem::take(&mut s.asked);
+            let before = s.known.len();
+            if whole_look {
+                s.known.retain(|p, _| asked.contains(p));
+            }
+            (read, asked, s.known.len() != before)
+        };
+        // Nothing new and nothing forgotten: the store is as it should be.
+        if read.is_empty() && !forgot {
+            return Ok(());
         }
         let Some(store) = &self.store else { return Ok(()) };
         let Ok(mut conn) = store.lock() else { return Ok(()) };
-        write(&mut conn, &read, whole_look.then_some(&asked)).map_err(|e| e.to_string())
+        write(&mut conn, &read, forgot.then_some(&asked)).map_err(|e| e.to_string())
+    }
+
+    /// Whether the prints are kept in a store (an earlier [`Prints::remember_in`] worked).
+    pub fn remembers(&self) -> bool {
+        self.store.is_some()
     }
 
     #[cfg(test)]
@@ -177,7 +192,8 @@ pub fn ends_hash(path: &Path, stop: &AtomicBool) -> Option<[u8; 32]> {
     if stop.load(Ordering::Relaxed) {
         return None;
     }
-    let mut file = open_to_read_once(path).ok()?;
+    // Opened plainly, not as a read straight through: the system would read on well past each end.
+    let mut file = fs::File::open(path).ok()?;
     let before = file.metadata().ok()?;
     let len = before.len();
     if len <= 2 * END_BYTES {
@@ -191,7 +207,6 @@ pub fn ends_hash(path: &Path, stop: &AtomicBool) -> Option<[u8; 32]> {
     file.seek(SeekFrom::Start(len - END_BYTES)).ok()?;
     file.read_exact(&mut buf).ok()?;
     hash.update(&buf);
-    read_once_done(&file);
     let after = fs::metadata(path).ok()?;
     let same = after.len() == len && after.modified().ok() == before.modified().ok();
     same.then(|| hash.finalize().into())
@@ -223,7 +238,7 @@ fn open(path: &Path) -> Result<Connection, String> {
             return Err(format!("{} isn't the app's Bitwig prints store, so it's left as it is", path.display()));
         }
         // Not a database at all (damaged where SQLite keeps its header): only what was read before, made again.
-        Err(_) => {
+        Err(e) if is_damage(&e) => {
             remove(path);
             let conn = Connection::open(path).map_err(err)?;
             if !check_id(&conn).map_err(err)? {
@@ -231,6 +246,8 @@ fn open(path: &Path) -> Result<Connection, String> {
             }
             conn
         }
+        // Busy (another copy of the app writing), or a disk that couldn't be read just now: left as it is.
+        Err(e) => return Err(e.to_string()),
     };
     conn.busy_timeout(Duration::from_secs(2)).map_err(err)?;
     conn.pragma_update(None, "journal_mode", "WAL").map_err(err)?;
@@ -239,12 +256,13 @@ fn open(path: &Path) -> Result<Connection, String> {
     conn.pragma_update(None, "temp_store", "MEMORY").map_err(err)?;
     let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).map_err(err)?;
     if version != VERSION {
+        // The id goes in with the table, in one go: a store cut short between the two would look like another app's.
         conn.execute_batch(&format!(
-            "BEGIN IMMEDIATE; DROP TABLE IF EXISTS prints; {SCHEMA} PRAGMA user_version = {VERSION}; COMMIT;"
+            "BEGIN IMMEDIATE; PRAGMA application_id = {APPLICATION_ID}; DROP TABLE IF EXISTS prints; {SCHEMA}
+             PRAGMA user_version = {VERSION}; COMMIT;"
         ))
         .map_err(err)?;
     }
-    conn.pragma_update(None, "application_id", APPLICATION_ID).map_err(err)?;
     Ok(conn)
 }
 
@@ -253,6 +271,17 @@ fn check_id(conn: &Connection) -> rusqlite::Result<bool> {
     let id: i64 = conn.pragma_query_value(None, "application_id", |r| r.get(0))?;
     let tables: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_master", [], |r| r.get(0))?;
     Ok(id == APPLICATION_ID || (id == 0 && tables == 0))
+}
+
+/// Whether an error says the file is damaged (or isn't a database at all), rather than busy or unreadable just now.
+fn is_damage(e: &rusqlite::Error) -> bool {
+    matches!(e.sqlite_error_code(), Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt))
+}
+
+/// Forgets every print kept at `path` (after a look crashed, in case what was kept is why): the store and the files
+/// SQLite keeps beside it are removed; the next look makes it again.
+pub fn forget(path: &Path) {
+    remove(path);
 }
 
 /// Removes the store and the files SQLite keeps beside it.

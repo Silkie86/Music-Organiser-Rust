@@ -112,6 +112,11 @@ impl LibraryIndex {
         self.prints.keep(whole_look)
     }
 
+    /// Whether the fingerprints are kept in a store ([`LibraryIndex::remember_in`] worked).
+    pub fn remembers(&self) -> bool {
+        self.prints.remembers()
+    }
+
     /// The copies in one project folder that are the same as a Library file. A copy that's a link, or that isn't the
     /// same as any, isn't listed. Where more than one Library file is the same, the one with the copy's own name (or
     /// that name with fewer of Bitwig's "-2" endings) is picked, or else the shortest name. Only copies and Library
