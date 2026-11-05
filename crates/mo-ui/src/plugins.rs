@@ -5,6 +5,7 @@
 //! folders you tick to the Recycle Bin, and nowhere else.
 
 mod clean;
+mod uninstall;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
@@ -53,6 +54,8 @@ struct Page {
     /// Clean up for the picked plugin, if one is open, and what this session's clean-ups sent to the Recycle Bin.
     clean: Option<clean::Cleaning>,
     binned: Vec<clean::Binned>,
+    /// The plugin files this session's uninstalls removed: left out of every read until the old app looks again.
+    uninstalled: Vec<String>,
     clean_asked: u64,
 }
 
@@ -230,6 +233,12 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         }
     });
     let weak = app.as_weak();
+    data.on_clean_leftovers(move || {
+        if let Some(app) = weak.upgrade() {
+            clean::start(&app);
+        }
+    });
+    let weak = app.as_weak();
     data.on_put_back(move || {
         if let Some(app) = weak.upgrade() {
             clean::put_back(&app);
@@ -321,6 +330,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             crate::songs::show_only(app, &label, saves);
         }
         "plugins.cleanUp" => clean::start(app),
+        "plugins.uninstall" => uninstall::start(app),
         "plugins.searchOnline" => {
             let url = search_url(&name, &vendor);
             let started = background::spawn("Search online", move || {
@@ -528,9 +538,14 @@ fn pick(app: &AppWindow, row: Option<usize>) {
 /// The card's buttons and the right-click menu: Clean up only for a plugin with folders it could look at.
 fn fill_actions(app: &AppWindow) {
     let data = app.global::<PluginsData>();
-    let (shortcuts, can_clean) =
-        PAGE.with(|p| (p.borrow().shortcuts.clone(), p.borrow().picked.is_some_and(clean::can_clean)));
-    let enabled = |id: &str| id != "plugins.cleanUp" || can_clean;
+    let (shortcuts, picked) = PAGE.with(|p| (p.borrow().shortcuts.clone(), p.borrow().picked));
+    let (can_clean, can_uninstall) =
+        (picked.is_some_and(clean::can_clean), picked.is_some_and(uninstall::can_uninstall));
+    let enabled = |id: &str| match id {
+        "plugins.cleanUp" => can_clean,
+        "plugins.uninstall" => can_uninstall,
+        _ => true,
+    };
     let menu: Vec<MenuItem> = PLUGINS_ACTIONS
         .iter()
         .map(|a| MenuItem {
@@ -547,6 +562,7 @@ fn fill_actions(app: &AppWindow) {
             text: match a.id {
                 "plugins.projects" => "Show in Songs",
                 "plugins.cleanUp" => "Clean up…",
+                "plugins.uninstall" => "Uninstall…",
                 _ => "Search online",
             }
             .into(),
@@ -555,7 +571,7 @@ fn fill_actions(app: &AppWindow) {
             id: a.id.into(),
             enabled: enabled(a.id),
             main: false,
-            danger: false,
+            danger: a.id == "plugins.uninstall",
         })
         .collect();
     data.set_actions(ModelRc::new(VecModel::from(actions)));
@@ -717,11 +733,34 @@ pub fn show_clean_sample(
     rows: &[(&str, &str, &str, &str, bool, bool)],
     freed: &str,
 ) {
+    show_card_sample(
+        app,
+        &format!("Clean up {name}"),
+        "",
+        intro,
+        rows,
+        freed,
+        ("Send to the Recycle Bin", "Keep everything"),
+    );
+}
+
+/// For the screenshots: the On disk tab's card (Clean up's or Uninstall's) with made-up lines (path, kind, size, why it
+/// stays, may go, ticked) and its two buttons' words.
+pub fn show_card_sample(
+    app: &AppWindow,
+    title: &str,
+    warning: &str,
+    intro: &str,
+    rows: &[(&str, &str, &str, &str, bool, bool)],
+    freed: &str,
+    (go, keep): (&str, &str),
+) {
     let data = app.global::<PluginsData>();
     data.set_tab(1);
     data.set_clean_shown(true);
     data.set_clean_stage(1);
-    data.set_clean_title(format!("Clean up {name}").into());
+    data.set_clean_title(title.into());
+    data.set_clean_warning(warning.into());
     data.set_clean_intro(intro.into());
     let rows: Vec<crate::CleanRow> = rows
         .iter()
@@ -737,4 +776,6 @@ pub fn show_clean_sample(
     data.set_clean_can_go(rows.iter().any(|r| r.ticked));
     data.set_clean_rows(ModelRc::new(VecModel::from(rows)));
     data.set_clean_freed(freed.into());
+    data.set_clean_go_text(go.into());
+    data.set_clean_keep_text(keep.into());
 }

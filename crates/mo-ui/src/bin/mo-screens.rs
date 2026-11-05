@@ -185,6 +185,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     capture(&window);
     shots.push(("plugins-clean-up.png".into(), capture(&window)));
+    // Kontakt 7's Uninstall card: its own uninstaller picked, the other version's left for you to pick.
+    mo_ui::plugins::show_card_sample(
+        &app,
+        "Uninstall Kontakt 7?",
+        "12 projects use it. They'll open with Kontakt 7 missing.",
+        "This runs its own uninstaller, the same one Windows Settings, Apps uses. It opens in its own window and may \
+         ask questions.",
+        &[
+            ("Native Instruments · 1.20 GB", "Native Instruments Kontakt 7", "", "", true, true),
+            ("Native Instruments · 1.31 GB", "Native Instruments Kontakt 8", "", "", true, false),
+        ],
+        "",
+        ("Uninstall", "Keep it"),
+    );
+    capture(&window);
+    shots.push(("plugins-uninstall.png".into(), capture(&window)));
     settings_shots(&app, &window, &graphite, &mut shots);
     // Space with the App files card open: what each part of the app's folder takes, and C: nearly full.
     app.set_place(Place::Space.index() as i32);
