@@ -162,7 +162,7 @@ impl FilterAsk {
 struct ChipModels {
     part: FilterModels,
     plugin: FilterModels,
-    maker: FilterModels,
+    format: FilterModels,
     kind: FilterModels,
     from: FilterModels,
     found_in: FilterModels,
@@ -644,7 +644,7 @@ fn show_everything(app: &AppWindow) {
         FILTER_MODELS.with(|m| {
             data.set_part_filter(m.part.view(&p.chips.part));
             data.set_plugin_filter(m.plugin.view(&p.chips.plugin));
-            data.set_maker_filter(m.maker.view(&p.chips.maker));
+            data.set_format_filter(m.format.view(&p.chips.format));
             data.set_type_filter(m.kind.view(&p.chips.kind));
             data.set_from_filter(m.from.view(&p.chips.from));
             data.set_curve_found_in(m.found_in.view(&p.curve_found_in));
