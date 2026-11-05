@@ -57,6 +57,9 @@ struct Page {
     binned: Vec<clean::Binned>,
     /// The plugin files this session's uninstalls removed: left out of every read until the old app looks again.
     uninstalled: Vec<String>,
+    /// The folders this session's moves swapped for a link: their room is on the other drive now, so they're left out
+    /// of every read too.
+    moved: Vec<String>,
     clean_asked: u64,
     /// What another page asked this one to show (Space's Show on Plugins page) before the library was first read.
     wanted: Option<Wanted>,
@@ -484,13 +487,13 @@ pub fn unused_years() -> Option<u32> {
     PAGE.with(|p| p.borrow().plugins.as_ref().map(|pl| pl.unused_years))
 }
 
-/// Where this session's Clean ups and uninstalls took things from: Space leaves them out of the plugins it counts, as
-/// this page does, until the old app measures again.
+/// Where this session's Clean ups, uninstalls and moves took things from: Space leaves them out of the plugins it
+/// counts, as this page does, until the old app measures again.
 pub fn gone_this_session() -> Vec<String> {
     PAGE.with(|p| {
         let p = p.borrow();
         let binned = p.binned.iter().flat_map(|b| b.done.removed.iter().map(|r| r.path.clone()));
-        binned.chain(p.uninstalled.iter().cloned()).collect()
+        binned.chain(p.uninstalled.iter().cloned()).chain(p.moved.iter().cloned()).collect()
     })
 }
 
