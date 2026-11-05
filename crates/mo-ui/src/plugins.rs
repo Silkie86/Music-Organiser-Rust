@@ -1,6 +1,6 @@
 //! Fills the Plugins page from `mo_app::plugins` and answers its search box, chips, cards and side card. The library
-//! is read on a low-priority thread when the page is shown (rules 12 and 21), each time, so a scan the C# app made
-//! meanwhile shows; until it's back the page shows what it read before. The picked plugin's installed copies are
+//! is read on a low-priority thread when the page is shown (rules 12 and 21), when anything was written to it since
+//! the last read, Space's Recycle Bin changed or the day did; until it's back the page shows what it read before. The picked plugin's installed copies are
 //! read on a thread of their own, newest pick wins. Nothing here writes to library.db; Clean up (`clean`) sends
 //! folders you tick to the Recycle Bin, and nowhere else.
 
@@ -302,18 +302,21 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     data.on_panel_resized(|w| log::info("Plugins", &format!("Panel width {w:.0}")));
 
     let weak = app.as_weak();
-    // What the last read was of: the library, its files then ([`mo_library::list_copy::stamp_of`]) and Space's
-    // Recycle Bin. A visit while all are the same keeps the list on the page rather than read the whole library again.
-    let mut last: Option<(PathBuf, String, Vec<String>)> = None;
+    // What the last read was of: the library, its files then ([`mo_library::list_copy::stamp_of`]), Space's Recycle
+    // Bin and the day (what counts as unused moves with it). A visit while all are the same keeps the list on the page
+    // rather than read the whole library again.
+    type Of = (PathBuf, String, Vec<String>, chrono::NaiveDate);
+    let mut last: Option<Of> = None;
     let reader = Newest::start("Plugins read", move |(path, whatever, in_bin): ReadJob| {
         let started = std::time::Instant::now();
         let stamp = mo_library::list_copy::stamp_of(&path);
-        let same = |(p, s, b): &(PathBuf, String, Vec<String>)| *p == path && Some(s) == stamp.as_ref() && *b == in_bin;
+        let today = Local::now().date_naive();
+        let same = |(p, s, b, d): &Of| *p == path && Some(s) == stamp.as_ref() && *b == in_bin && *d == today;
         if !whatever && last.as_ref().is_some_and(same) {
             log::info("Plugins", "Nothing was written to the library since the last read: the list stays as it is");
             return;
         }
-        last = stamp.map(|s| (path.clone(), s, in_bin));
+        last = stamp.map(|s| (path.clone(), s, in_bin, today));
         let read = background::on_pool(|| {
             let lib = Library::open_read_only(&path).map_err(|e| e.to_string())?;
             plugins::read(&lib).map_err(|e| e.to_string())

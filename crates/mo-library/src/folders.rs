@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use mo_formats::case;
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::LibraryError;
 
@@ -107,7 +107,7 @@ fn change(
 ) -> Result<Changed, LibraryError> {
     let write_error = |why: String| LibraryError::Write { path: library.to_owned(), why };
     let sql = |e: rusqlite::Error| write_error(e.to_string());
-    let mut conn = open(library)?;
+    let mut conn = open_for_settings(library)?;
     let table = if list == FolderList::Projects { "roots" } else { "settings" };
     let has: bool = conn
         .query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)", [table], |r| {
@@ -118,7 +118,7 @@ fn change(
         return Err(write_error(format!("it has no {table} table yet; open the C# app once to make it")));
     }
     // IMMEDIATE takes the write lock at the start, so the list read is the one written over.
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql)?;
+    let tx = conn.begin().map_err(sql)?;
     let before = read_list(&tx, list).map_err(write_error)?;
     let mut folders = before.clone();
     if list == FolderList::Plugins && folders.is_empty() {
@@ -199,50 +199,57 @@ fn read_list(conn: &Connection, list: FolderList) -> Result<Vec<String>, String>
     }
 }
 
-/// Opens an existing library to change it: never makes one. Only for writes to what the saves list doesn't hold
-/// (settings, folder lists): once it's closed, the app's copy of the list is marked as still fitting
-/// ([`crate::list_copy`]), so the next start doesn't read the whole library again.
-pub(crate) fn open(library: &Path) -> Result<Writer, LibraryError> {
+/// Opens an existing library to change its settings or folder lists: never makes one. Only for writes to what the
+/// saves list doesn't hold (the `settings` and `roots` tables, as [`change`] and [`crate::setting_list`] do): once the
+/// connection is closed, the app's copy of the list is marked as still fitting ([`crate::list_copy`]), so the next
+/// start doesn't read the whole library again. A writer of anything the list shows (a save's rating, notes, tags) must
+/// not use this.
+pub(crate) fn open_for_settings(library: &Path) -> Result<SettingsWriter, LibraryError> {
     let open_error = |why: String| LibraryError::Open { path: library.to_owned(), why };
     if !library.is_file() {
         return Err(open_error("it isn't there".to_owned()));
     }
-    // Before anything is written: the copy fitted the library as this says, or it doesn't fit after either.
-    let before = crate::list_copy::stamp_of(library);
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = Connection::open_with_flags(library, flags).map_err(|e| open_error(e.to_string()))?;
     // The C# app may be saving a scan: wait for it rather than fail.
     conn.busy_timeout(Duration::from_secs(5)).map_err(|e| open_error(e.to_string()))?;
-    Ok(Writer { conn, library: library.to_owned(), before })
+    Ok(SettingsWriter { conn, mark: MarkCopy { library: library.to_owned(), before: None } })
 }
 
-/// A connection that changes the library's settings or folder lists ([`open`]). When it's let go, it's closed first
-/// (SQLite may tidy its `-wal` then), and then the saves-list copy is marked as fitting the library as it is now.
-pub(crate) struct Writer {
+/// A connection that changes the library's settings or folder lists ([`open_for_settings`]). Its parts are let go in
+/// this order: the connection is closed first (SQLite may tidy its `-wal` then), and then the saves-list copy is marked.
+pub(crate) struct SettingsWriter {
     conn: Connection,
-    library: PathBuf,
-    before: Option<String>,
+    mark: MarkCopy,
 }
 
-impl std::ops::Deref for Writer {
+impl SettingsWriter {
+    /// Starts the change's one transaction. IMMEDIATE takes the write lock at the start, so what's read is what's
+    /// written over; and the library's files are looked at once the lock is held, when nothing else can write.
+    pub(crate) fn begin(&mut self) -> rusqlite::Result<Transaction<'_>> {
+        let SettingsWriter { conn, mark } = self;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        mark.before = crate::list_copy::stamp_of(&mark.library);
+        Ok(tx)
+    }
+}
+
+impl std::ops::Deref for SettingsWriter {
     type Target = Connection;
     fn deref(&self) -> &Connection {
         &self.conn
     }
 }
 
-impl std::ops::DerefMut for Writer {
-    fn deref_mut(&mut self) -> &mut Connection {
-        &mut self.conn
-    }
+/// Marks the saves-list copy once the writer's connection is closed ([`crate::list_copy::after_own_write`]).
+struct MarkCopy {
+    library: PathBuf,
+    /// The library's files when the write lock was taken; none before [`SettingsWriter::begin`].
+    before: Option<String>,
 }
 
-impl Drop for Writer {
+impl Drop for MarkCopy {
     fn drop(&mut self) {
-        // Closed before the library is looked at again: swapped for an empty in-memory one, which costs nothing.
-        if let Ok(empty) = Connection::open_in_memory() {
-            drop(std::mem::replace(&mut self.conn, empty));
-        }
         if let Some(before) = &self.before {
             crate::list_copy::after_own_write(&self.library, before);
         }

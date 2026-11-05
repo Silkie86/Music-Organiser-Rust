@@ -7,11 +7,11 @@
 use std::path::Path;
 
 use rusqlite::types::ValueRef;
-use rusqlite::{ErrorCode, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{ErrorCode, OptionalExtension, Transaction};
 use serde_json::Value;
 
 use crate::LibraryError;
-use crate::folders::open;
+use crate::folders::open_for_settings;
 
 /// Changes the list kept in setting `key`: `edit` changes it and says whether it did (when not, nothing is written).
 /// Says whether it changed.
@@ -25,7 +25,7 @@ pub(crate) fn change(
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => LibraryError::Busy { path: library.to_owned() },
         _ => write_error(e.to_string()),
     };
-    let mut conn = open(library)?;
+    let mut conn = open_for_settings(library)?;
     let has: bool = conn
         .query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings')", [], |r| {
             r.get(0)
@@ -35,7 +35,7 @@ pub(crate) fn change(
         return Err(write_error("it has no settings table yet; open the C# app once to make it".to_owned()));
     }
     // IMMEDIATE takes the write lock at the start, so the list read is the one written over.
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql)?;
+    let tx = conn.begin().map_err(sql)?;
     let mut list = read(&tx, key).map_err(write_error)?;
     if !edit(&mut list) {
         return Ok(false);
