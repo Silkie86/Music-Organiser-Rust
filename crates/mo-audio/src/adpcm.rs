@@ -154,7 +154,7 @@ impl Layout {
         }
         // Then 4 bytes (8 frames) for each channel in turn, the low nibble first.
         for group in b[4 * ch..].chunks_exact(4 * ch) {
-            for (c, bytes) in group.chunks_exact(4).enumerate() {
+            for (c, bytes) in group.as_chunks::<4>().0.iter().enumerate() {
                 let (s, index) = &mut state[c];
                 for &byte in bytes {
                     for nibble in [byte & 0x0F, byte >> 4] {
