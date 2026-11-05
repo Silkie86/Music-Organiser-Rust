@@ -634,50 +634,58 @@ pub fn key_card(fact: Option<&KeyFact>, drums: bool) -> KeyCard {
     }
 }
 
-/// The most bars the card's chord chart shows; a longer part's chart ends "…".
-pub const CHART_BARS: usize = 16;
-
 /// The card's chord chart, as a lead sheet writes it: "Am7 | Dm9 G7 | Cmaj7 | –", a bar each ("–" where the chord
 /// before holds on, "N.C." for no chord, "?" after a chord the reader isn't sure of), spelled in `key` (the card's
-/// key, for spelling only). With why it reads as it does.
+/// key, for spelling only). With why it reads as it does. Bars are 4/4, as everywhere on the MIDI page.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChordChart {
     pub bars: String,
     pub why: String,
 }
 
-/// The chart of a reading (see [`ChordChart`]); none to show for no reading (drums, or no pitched notes).
-pub fn chord_chart(reading: Option<&mo_harmony::ChordReading>, key: Option<KeyName>) -> ChordChart {
+/// The chart of a chart reading (see [`ChordChart`]): at most [`mo_midi::chart::MOST_BARS`] bars, then "…" for a part
+/// that goes on; none to show for no reading (drums, or no pitched notes).
+pub fn chord_chart(read: Option<&mo_midi::chart::Read>, key: Option<KeyName>) -> ChordChart {
     use mo_harmony::ChordAnswer;
-    let Some(reading) = reading.filter(|r| !r.spans.is_empty()) else { return ChordChart::default() };
+    let Some(read) = read.filter(|r| !r.reading.spans.is_empty()) else { return ChordChart::default() };
+    let reading = &read.reading;
     let names = reading.names(key);
     let bar_of = |at: i64| usize::try_from((at - reading.start).div_euclid(BAR)).unwrap_or(0);
-    let count = bar_of(reading.end - 1) + 1;
-    let mut bars: Vec<Vec<String>> = vec![Vec::new(); count.min(CHART_BARS)];
-    let (mut last, mut unsure, mut implied, mut chords) = (String::new(), 0, 0, 0);
-    for (span, name) in reading.spans.iter().zip(&names) {
-        let written = match (name, span.answer) {
-            (Some(n), ChordAnswer::Unclear) => {
-                unsure += 1;
-                format!("{}?", n.name())
-            }
-            (Some(n), answer) => {
-                implied += usize::from(answer == ChordAnswer::Implied);
-                n.name()
-            }
-            (None, _) => "N.C.".to_owned(),
-        };
-        chords += usize::from(name.is_some());
-        if written == last {
+    let count = (bar_of(reading.end - 1) + 1).min(mo_midi::chart::MOST_BARS);
+    let mut bars: Vec<Vec<String>> = vec![Vec::new(); count];
+    // The chord last written (its name, and whether it's a guess), so one held on isn't written again.
+    let mut last: Option<(String, bool)> = None;
+    let (mut unsure, mut implied, mut chords) = (0, 0, 0);
+    for (at, (span, name)) in reading.spans.iter().zip(&names).enumerate() {
+        // A stretch the reader isn't sure of is written as its likeliest reading, even when the chart shows none there.
+        let guess = span.answer == ChordAnswer::Unclear;
+        let shown = name.map(|n| n.name()).or_else(|| {
+            guess.then(|| span.readings.first().map(|r| reading.spell(&names, at, r.chord, key).name())).flatten()
+        });
+        let this = (shown.clone().unwrap_or_else(|| "N.C.".to_owned()), guess && shown.is_some());
+        if last.as_ref().is_some_and(|(n, _)| *n == this.0) {
             continue;
         }
-        if let Some(bar) = bars.get_mut(bar_of(span.start)) {
-            bar.push(written.clone());
+        let bar = bar_of(span.start);
+        let Some(cell) = bars.get_mut(bar) else { break };
+        // A change after the bar line, with the chord before held over it: that one is written first in the bar.
+        let bar_start = reading.start + bar as i64 * BAR;
+        if cell.is_empty()
+            && span.start > bar_start
+            && let Some((n, g)) = &last
+        {
+            cell.push(if *g { format!("{n}?") } else { n.clone() });
         }
-        last = written;
+        cell.push(if this.1 { format!("{}?", this.0) } else { this.0.clone() });
+        if shown.is_some() {
+            chords += 1;
+            unsure += usize::from(this.1);
+            implied += usize::from(span.answer == ChordAnswer::Implied);
+        }
+        last = Some(this);
     }
     let mut text = bars.iter().map(|b| if b.is_empty() { "–".to_owned() } else { b.join(" ") }).collect::<Vec<_>>();
-    if count > CHART_BARS {
+    if read.goes_on {
         text.push("…".to_owned());
     }
     let why = if chords == 0 {
@@ -1196,10 +1204,23 @@ mod tests {
         let mut notes =
             [chord(0, &[45, 60, 64, 67]), chord(1, &[50, 60, 65, 69]), chord(2, &[43, 59, 62, 65])].concat();
         notes.extend(chord(3, &[43, 59, 62, 65]));
-        let reading = mo_midi::chart::read(&notes, Role::Chords, false);
-        let chart = chord_chart(reading.as_ref(), None);
+        let read = mo_midi::chart::read(&notes, Role::Chords, false);
+        let chart = chord_chart(read.as_ref(), None);
         assert_eq!(chart.bars, "Am7 | Dm7 | G7 | –");
+        assert_eq!(chart.why, "");
         assert_eq!(chord_chart(None, None), ChordChart::default());
+        // A change on beat 3, after Am7 held over the bar line: Am7 is written first in that bar.
+        let half = |bar: i64, beats: i64, keys: &[u8]| -> Vec<NoteEvent> {
+            chord(0, keys)
+                .into_iter()
+                .map(|n| NoteEvent { start: bar * BAR + beats * BAR / 4, length: BAR / 2, ..n })
+                .collect()
+        };
+        let mut notes = chord(0, &[45, 60, 64, 67]);
+        notes.extend(half(1, 0, &[45, 60, 64, 67]));
+        notes.extend(half(1, 2, &[43, 59, 62, 65]));
+        let read = mo_midi::chart::read(&notes, Role::Chords, false);
+        assert_eq!(chord_chart(read.as_ref(), None).bars, "Am7 | Am7 G7");
     }
 
     #[test]

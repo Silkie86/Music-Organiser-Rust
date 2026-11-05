@@ -4,35 +4,50 @@
 use std::cell::RefCell;
 
 use mo_formats::NoteEvent;
-use mo_harmony::{ChordContext, ChordReader, ChordReading, Grid, Note, Part, Span};
+use mo_harmony::{ChordContext, ChordReader, ChordReading, Grid, Part, Span};
 
-use crate::PPQ;
-use crate::keys::heard_as;
+use crate::keys::{heard_as, heard_notes};
 use crate::roles::Role;
+use crate::{BAR, PPQ};
 
 thread_local! {
-    /// Each thread's chord reader, which keeps its working space from part to part.
+    /// Each thread's chord reader, which keeps its working space from part to part (as the key finder's does).
     static READER: RefCell<ChordReader> = RefCell::new(ChordReader::new());
 }
 
-/// Reads the chords of one part (notes at [`PPQ`]), heard as its kind: a whole part as a loop (its first chord comes
-/// after its last), a piece `cut` from a longer stretch as a stretch of a song. None for drums, or with no pitched
-/// notes.
-pub fn read(notes: &[NoteEvent], role: Role, cut: bool) -> Option<ChordReading> {
+/// The most bars a chart is read for: what the card shows. A longer part is read for its first ones only, as a stretch
+/// of music, so a long song piece costs no more than a loop.
+pub const MOST_BARS: usize = 16;
+
+/// A part's chords as the card's chart shows them.
+#[derive(Clone, Debug)]
+pub struct Read {
+    pub reading: ChordReading,
+    /// The part goes on past the [`MOST_BARS`] read.
+    pub goes_on: bool,
+}
+
+/// Reads the chords of one part (notes at [`PPQ`], bars of 4/4), heard as its kind: a whole part as a loop (its first
+/// chord comes after its last), a piece `cut` from a longer stretch, or the first [`MOST_BARS`] of a longer part, as a
+/// stretch of a song. None for drums, or with no pitched notes.
+pub fn read(notes: &[NoteEvent], role: Role, cut: bool) -> Option<Read> {
     if role == Role::Drums {
         return None;
     }
-    let pitched: Vec<Note> = notes
-        .iter()
-        .filter(|n| !n.muted)
-        .map(|n| Note { start: n.start, length: n.length, key: n.key, velocity: n.velocity })
-        .collect();
-    if pitched.is_empty() {
-        return None;
+    let mut heard = heard_notes(notes);
+    let first = heard.iter().map(|n| n.start).min()?;
+    let until = first.div_euclid(BAR) * BAR + MOST_BARS as i64 * BAR;
+    let goes_on = heard.iter().any(|n| n.start >= until);
+    if goes_on {
+        heard.retain(|n| n.start < until);
+        for n in &mut heard {
+            n.length = n.length.min(until - n.start);
+        }
     }
-    let parts = [Part { role: heard_as(role), notes: &pitched }];
-    let span = if cut { Span::Window } else { Span::Loop };
-    READER.with_borrow_mut(|r| r.read(&parts, Grid::four_four(PPQ as u32), &ChordContext::new(span)))
+    let parts = [Part { role: heard_as(role), notes: &heard }];
+    let span = if cut || goes_on { Span::Window } else { Span::Loop };
+    let reading = READER.with_borrow_mut(|r| r.read(&parts, Grid::four_four(PPQ as u32), &ChordContext::new(span)))?;
+    Some(Read { reading, goes_on })
 }
 
 #[cfg(test)]
@@ -65,11 +80,17 @@ mod tests {
             chord(3, &[48, 59, 64, 67]),
         ]
         .concat();
-        let reading = read(&notes, Role::Chords, false).unwrap();
+        let read_ = read(&notes, Role::Chords, false).unwrap();
+        assert!(!read_.goes_on);
         let names: Vec<String> =
-            reading.names(None).into_iter().map(|n| n.map(|s| s.name()).unwrap_or_default()).collect();
+            read_.reading.names(None).into_iter().map(|n| n.map(|s| s.name()).unwrap_or_default()).collect();
         assert_eq!(names, ["Am7", "Dm7", "G7", "Cmaj7"]);
         assert!(read(&notes, Role::Drums, false).is_none());
         assert!(read(&[], Role::Chords, false).is_none());
+        // A long part: its first bars only.
+        let long: Vec<NoteEvent> = (0..40).flat_map(|bar| chord(bar, &[45, 60, 64, 67])).collect();
+        let first = read(&long, Role::Chords, false).unwrap();
+        assert!(first.goes_on);
+        assert!(first.reading.end <= MOST_BARS as i64 * BAR);
     }
 }

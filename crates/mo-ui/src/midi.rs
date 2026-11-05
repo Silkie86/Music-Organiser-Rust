@@ -119,9 +119,7 @@ struct NotesAsk {
     role: Role,
     cut: bool,
     bars: i32,
-    read_key: bool,
-    /// The key the stored reading names, which the chord chart is spelled in (one read just now is used when there's
-    /// none).
+    /// The stored key reading, which the chord chart is spelled in; none: the key is read now, from the notes.
     key: Option<KeyFact>,
 }
 
@@ -909,7 +907,6 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
             role: e.role(),
             cut: page::is_cut(&e.phrase.clip),
             bars: e.phrase.bars,
-            read_key: e.phrase.key_fact.is_none(),
             key: e.phrase.key_fact,
         })
     });
@@ -982,14 +979,14 @@ fn notes_of(
 
 fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<NotesRead, String> {
     let notes = notes_of(&ask.from, ask.phrase_id, &ask.hash, open)?;
-    let fact = if ask.read_key {
+    let fact = if ask.key.is_none() {
         mo_midi::keys::with_reader(|r| mo_midi::keys::read(r, &notes, ask.role, ask.cut)).1
     } else {
         None
     };
-    // The chords too (about a millisecond for a loop), spelled in the part's key.
-    let reading = mo_midi::chart::read(&notes, ask.role, ask.cut);
-    let chart = page::chord_chart(reading.as_ref(), page::chart_key(ask.key.as_ref().or(fact.as_ref())));
+    // The chords too (their first 16 bars: quick even for a long part), spelled in the part's key.
+    let chords = mo_midi::chart::read(&notes, ask.role, ask.cut);
+    let chart = page::chord_chart(chords.as_ref(), page::chart_key(ask.key.as_ref().or(fact.as_ref())));
     Ok(NotesRead { read: notes.len(), roll: page::roll(&notes, ask.bars), fact, chart })
 }
 
@@ -1724,7 +1721,6 @@ mod tests {
             role: e.role(),
             cut: false,
             bars: e.phrase.bars,
-            read_key: true,
             key: None,
         };
         let Ok(read) = read_notes(&ask, &mut None) else { panic!("the made-up notes should read") };
