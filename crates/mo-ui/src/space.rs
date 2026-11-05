@@ -112,11 +112,21 @@ struct SongsAsk {
 }
 
 /// One look at the plugins no song has used lately: it reads every plugin your songs use from the library, as the
-/// Plugins page does, so it has a thread of its own, and is only asked for on the page's first look, on Measure again,
-/// and while no look has finished. It reads only the library: what the app removes since is taken off as it shows.
+/// Plugins page does, so it has a thread of its own. It's asked for on the page's first look, once what it shows is
+/// five minutes old, and on Measure again; it reads the library again only when the library has changed since the
+/// look on show (`stamp`, [`mo_library::list_copy::stamp_of`]). What the app removes since is taken off as it shows.
 struct PluginsAsk {
     id: u64,
     library: PathBuf,
+    stamp: Option<String>,
+}
+
+/// What a look at the plugins no song has used lately brings back.
+enum PluginsLooked {
+    /// What it found, and the library's stamp when it read it.
+    Found(space_plugins::Found, Option<String>),
+    /// The library is as the look on show found it: that stands, counted back from now.
+    Same(chrono::NaiveDateTime),
 }
 
 /// What a look brings back, a step at a time: the drives first (quick), then the app's files once they're measured;
@@ -139,7 +149,7 @@ enum Step {
     SpareNone(u64),
     Songs(u64, Box<space_songs::Shown>),
     SongsNone(u64),
-    Plugins(u64, space_plugins::Found),
+    Plugins(u64, Box<PluginsLooked>),
     PluginsNone(u64),
     Fixed(PathBuf, Fixing),
     FixDone,
@@ -245,6 +255,8 @@ struct Page {
     plugins_look: Looks<PluginsAsk>,
     plugins: Option<space_plugins::Found>,
     plugins_looking: bool,
+    /// The library's stamp when the look on show read it: a look finding the same doesn't read it again.
+    plugins_stamp: Option<String>,
     /// What the plugins line last showed: shown again when the page comes back on show and that has changed (a Clean
     /// up or uninstall on the Plugins page, or the years picked there).
     plugins_shown: Option<space_plugins::Found>,
@@ -369,7 +381,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
         if let (Some(on), Some(app)) = (on_plugins, weak.upgrade()) {
             crate::go_to(&app, Place::Plugins.index() as i32);
             match on {
-                OnPlugins::Plugin { key, own } => plugins_page::show_plugin(&app, &key, &own),
+                OnPlugins::Plugin { key, own, name } => plugins_page::show_plugin(&app, &key, &own, &name),
                 OnPlugins::Unused => plugins_page::show_unused(&app),
             }
             return;
@@ -419,7 +431,7 @@ pub fn shown(app: &AppWindow) {
         let spare = wired && p.spare.is_none() && !p.spare_looking && !held.spare;
         let old = wired && !p.old_looking && !held.old && (stale || p.old.is_none());
         let songs = wired && p.songs.is_none() && !p.songs_looking && !held.songs;
-        let plugins = wired && p.plugins.is_none() && !p.plugins_looking;
+        let plugins = wired && !p.plugins_looking && (stale || p.plugins.is_none());
         let plugins_changed = wired && plugins_now(&p) != p.plugins_shown;
         (stale, bitwig, old, spare, songs, plugins, plugins_changed)
     });
@@ -1445,7 +1457,8 @@ fn look_for_plugins(app: &AppWindow) {
         p.feed.as_ref()?;
         let (id, _) = p.plugins_look.next();
         p.plugins_looking = true;
-        Some(PluginsAsk { id, library: p.library.clone() })
+        let stamp = p.plugins.as_ref().and(p.plugins_stamp.clone());
+        Some(PluginsAsk { id, library: p.library.clone(), stamp })
     });
     let Some(ask) = ask else { return };
     let weak = app.as_weak();
@@ -1454,7 +1467,7 @@ fn look_for_plugins(app: &AppWindow) {
     let work = move |ask: PluginsAsk| {
         let id = ask.id;
         match catch_crash(AssertUnwindSafe(|| look_for_plugins_now(&ask))) {
-            Ok(Some(found)) => arrive(&weak, Step::Plugins(id, found)),
+            Ok(Some(looked)) => arrive(&weak, Step::Plugins(id, Box::new(looked))),
             Ok(None) | Err(_) => arrive(&weak, Step::PluginsNone(id)),
         }
     };
@@ -1469,9 +1482,15 @@ fn look_for_plugins(app: &AppWindow) {
 }
 
 /// One look at the plugins no song has used lately, off the window's thread: every plugin your songs use and the
-/// sizes the old app measured, from the library (read-only, and closed again first), as the Plugins page reads them.
-/// None when the library couldn't be read (said in the log); with no library there are no plugins.
-fn look_for_plugins_now(ask: &PluginsAsk) -> Option<space_plugins::Found> {
+/// sizes the old app measured, from the library (read-only, and closed again first), as the Plugins page reads them;
+/// or, when the library is as the look on show found it, only that. None when the library couldn't be read (said in
+/// the log); with no library there are no plugins.
+fn look_for_plugins_now(ask: &PluginsAsk) -> Option<PluginsLooked> {
+    let now = chrono::Local::now().naive_local();
+    let stamp = mo_library::list_copy::stamp_of(&ask.library);
+    if stamp.is_some() && stamp == ask.stamp {
+        return Some(PluginsLooked::Same(now));
+    }
     let read = match open_library(&ask.library) {
         Some(lib) => mo_app::plugins::read(&lib)
             .map_err(|e| log::warning("Space", &format!("Couldn't read your plugins from the library: {e}")))
@@ -1483,7 +1502,8 @@ fn look_for_plugins_now(ask: &PluginsAsk) -> Option<space_plugins::Found> {
         },
     };
     // On the pool for long work, as the page's other looks are (rule 21): it goes through every plugin of every save.
-    Some(background::on_bulk_pool(|| space_plugins::look(read, chrono::Local::now().naive_local())))
+    let found = background::on_bulk_pool(|| space_plugins::look(read, now));
+    Some(PluginsLooked::Found(found, stamp))
 }
 
 /// What the last look at the plugins no song has used lately found, as it is now: with the years the Plugins page has
@@ -1491,11 +1511,21 @@ fn look_for_plugins_now(ask: &PluginsAsk) -> Option<space_plugins::Found> {
 /// Clean ups and uninstalls took this time.
 fn plugins_now(p: &Page) -> Option<space_plugins::Found> {
     let found = p.plugins.as_ref()?;
-    let binned = p.kept.iter().flat_map(|k| &k.list).flat_map(|b| &b.done.removed);
-    let mut gone: Vec<String> = binned.filter(|r| matches!(r.what, What::Plugin(_))).map(|r| r.path.clone()).collect();
+    let mut gone = binned_plugin_files(p);
     gone.extend(plugins_page::gone_this_session());
     let years = plugins_page::unused_years().unwrap_or(found.years);
-    Some(found.for_years(years).without(&gone))
+    Some(found.as_of(years, found.now).without(&gone))
+}
+
+/// The plugin files the app's clean-ups here sent to the Recycle Bin that are still there (spare plugin copies).
+fn binned_plugin_files(p: &Page) -> Vec<String> {
+    let binned = p.kept.iter().flat_map(|k| &k.list).flat_map(|b| &b.done.removed);
+    binned.filter(|r| matches!(r.what, What::Plugin(_))).map(|r| r.path.clone()).collect()
+}
+
+/// The same, for the Plugins page: it leaves them out of what it counts, as this page does, so the two pages agree.
+pub fn plugin_files_in_bin() -> Vec<String> {
+    PAGE.with(|p| binned_plugin_files(&p.borrow()))
 }
 
 /// The folders to look for spare copies in and which formats your saves use, from the library (read-only, and closed
@@ -1634,8 +1664,16 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     p.songs_looking = false;
                     Changed::Wins
                 }
-                Step::Plugins(id, found) if id == p.plugins_look.asked => {
-                    p.plugins = Some(found);
+                Step::Plugins(id, looked) if id == p.plugins_look.asked => {
+                    match *looked {
+                        PluginsLooked::Found(found, stamp) => {
+                            p.plugins = Some(found);
+                            p.plugins_stamp = stamp;
+                        }
+                        PluginsLooked::Same(now) => {
+                            p.plugins = p.plugins.take().map(|f| f.as_of(f.years, now));
+                        }
+                    }
                     p.plugins_looking = false;
                     Changed::Wins
                 }
@@ -1921,8 +1959,9 @@ fn show_card(app: &AppWindow) {
                 (card, vec![Button { enabled, ..measure }])
             }
             // Read-only: each plugin's link shows it on the Plugins page. Measure again waits while a look is on.
+            // As the line last showed it (the page shows the line again whenever that changes).
             UNUSED_PLUGINS => {
-                let card = space_plugins::card(plugins_now(&p).as_ref(), p.plugins_looking);
+                let card = space_plugins::card(p.plugins_shown.as_ref(), p.plugins_looking);
                 let measure = measure_button(&p);
                 let enabled = measure.enabled && !p.plugins_looking;
                 (card, vec![Button { enabled, ..measure }])

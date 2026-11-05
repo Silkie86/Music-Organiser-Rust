@@ -6,13 +6,13 @@
 //! ever. Its room is its own: a folder it shares with another plugin (a maker's folder) isn't counted, as the Plugins
 //! page doesn't count it.
 
-use chrono::{Months, NaiveDateTime};
+use chrono::NaiveDateTime;
 use mo_library::scan::is_inside;
-use mo_space::plugin_space::SpaceKind;
+use mo_space::plugin_space::PluginSpace;
 use mo_space::size::size_text;
 
 use crate::drag_out::count_of;
-use crate::plugins::{PluginRow, Plugins, Read};
+use crate::plugins::{PluginRow, Plugins, Read, unused_since};
 use crate::space::{Card, Line, OnPlugins, Part};
 
 /// The line's id, and its card's.
@@ -28,13 +28,16 @@ pub const LISTED: usize = 30;
 const KIND: &str = "PLUGINS NOT USED LATELY";
 const TITLE: &str = "Plugins you haven't used";
 
+/// What the page says while the old app hasn't measured any plugin's size.
+const NOT_MEASURED: &str =
+    "Plugins' sizes aren't measured yet: the old app measures them in the background after a scan.";
+
 /// What the card says of where a plugin's Clean up and Uninstall are, and what each takes (Solomon's rules of 25 Oct
 /// 2026, as `mo_space::plugin_clean` checks them).
 const ON_ITS_CARD: &str = "Each plugin's card on the Plugins page has Clean up, which takes its presets, and its sounds \
     when no song has ever used it (the plugin stays installed), and Uninstall, which takes the plugin itself.";
 
-/// One installed plugin the old app measured, with its own room (its files and folders that no other plugin shares)
-/// and when a song last used it.
+/// One installed plugin the old app measured, with its room and when a song last used it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Measured {
     pub name: String,
@@ -45,35 +48,26 @@ pub struct Measured {
     /// When a song last used it, and how many songs ever did (none: it's never been used).
     pub last_used: Option<NaiveDateTime>,
     pub songs: usize,
-    pub folders: Vec<Held>,
-}
-
-/// One of a plugin's own files or folders, as the old app measured it.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Held {
-    pub path: String,
-    pub kind: SpaceKind,
-    pub bytes: u64,
+    /// Its files and folders, as the Plugins page has them: what it counts is its own room, without a folder it shares
+    /// with another plugin (a maker's folder).
+    pub room: PluginSpace,
 }
 
 impl Measured {
-    fn sum(&self, kind: SpaceKind) -> u64 {
-        self.folders.iter().filter(|f| f.kind == kind).fold(0u64, |sum, f| sum.saturating_add(f.bytes))
-    }
-    /// Its plugin files, its presets and settings, and its sounds.
+    /// Its own plugin files, presets and settings, and sounds.
     pub fn program(&self) -> u64 {
-        self.sum(SpaceKind::Program)
+        self.room.program()
     }
     pub fn presets(&self) -> u64 {
-        self.sum(SpaceKind::Presets)
+        self.room.presets()
     }
     pub fn sounds(&self) -> u64 {
-        self.sum(SpaceKind::Sounds)
+        self.room.sounds()
     }
 
     /// Its own room.
     pub fn bytes(&self) -> u64 {
-        self.folders.iter().fold(0u64, |sum, f| sum.saturating_add(f.bytes))
+        self.room.bytes()
     }
 
     /// No song has ever used it.
@@ -88,7 +82,7 @@ impl Measured {
 pub struct Found {
     pub plugins: Vec<Measured>,
     /// The other installed plugins the old app measured that take room of their own: a song used each in those
-    /// years. Kept so the years can change without reading again ([`Found::for_years`]).
+    /// years. Kept so the years can change without reading again ([`Found::as_of`]).
     pub used: Vec<Measured>,
     pub years: u32,
     /// When the look was: the years count back from it.
@@ -96,6 +90,9 @@ pub struct Found {
     pub sizes: bool,
     /// When the sizes were measured (the oldest measure).
     pub measured: Option<NaiveDateTime>,
+    /// How many of those no song has used lately the app has taken off since the old app measured them (cleaned up or
+    /// uninstalled to nothing): [`Found::without`] counts them.
+    pub gone: usize,
 }
 
 impl Found {
@@ -104,58 +101,39 @@ impl Found {
         self.plugins.iter().fold(0u64, |sum, p| sum.saturating_add(p.bytes()))
     }
 
-    /// As it is when `years` make a plugin unused: the Plugins page's pick, which can change while the app runs.
-    /// Quick, nothing is read again; the years count back from the look, as the Plugins page's do from its read.
-    pub fn for_years(&self, years: u32) -> Found {
-        if years == self.years {
-            return self.clone();
-        }
-        let since = unused_since(self.now, years);
+    /// As it is when `years` make a plugin unused, counted back from `now`: the years are the Plugins page's pick,
+    /// which can change while the app runs, and `now` moves on when a look finds the library as it was. Quick, nothing
+    /// is read again; the Plugins page counts back the same way ([`unused_since`]).
+    pub fn as_of(&self, years: u32, now: NaiveDateTime) -> Found {
+        let since = unused_since(now, years);
         let (mut plugins, mut used): (Vec<Measured>, Vec<Measured>) =
             self.plugins.iter().chain(&self.used).cloned().partition(|p| !p.last_used.is_some_and(|t| t >= since));
         biggest_first(&mut plugins);
         biggest_first(&mut used);
-        Found { plugins, used, years, now: self.now, sizes: self.sizes, measured: self.measured }
+        Found { plugins, used, years, now, sizes: self.sizes, measured: self.measured, gone: self.gone }
     }
 
     /// As it is now the app has removed what's at `gone` (sent to the Recycle Bin, or uninstalled) since the old app
     /// measured: what's in there isn't counted, and a plugin with nothing left goes. Quick: the page works it out
-    /// each time it shows what was found, so a clean-up shows at once.
-    pub fn without(&self, gone: &[String]) -> Found {
+    /// each time it shows what was found, so a clean-up shows at once. The Plugins page leaves them out the same way
+    /// (`Plugins::forget_paths`).
+    pub fn without(mut self, gone: &[String]) -> Found {
         if gone.is_empty() {
-            return self.clone();
+            return self;
         }
-        let left = |plugins: &[Measured]| {
-            let mut left: Vec<Measured> = plugins
-                .iter()
-                .map(|p| Measured {
-                    folders: p
-                        .folders
-                        .iter()
-                        .filter(|f| !gone.iter().any(|g| is_inside(&f.path, g)))
-                        .cloned()
-                        .collect(),
-                    ..p.clone()
-                })
-                .filter(|p| p.bytes() > 0)
-                .collect();
-            biggest_first(&mut left);
-            left
+        let left = |plugins: &mut Vec<Measured>| {
+            for p in plugins.iter_mut() {
+                p.room.folders.retain(|f| !gone.iter().any(|g| is_inside(&f.path, g)));
+            }
+            plugins.retain(|p| p.bytes() > 0);
+            biggest_first(plugins);
         };
-        Found {
-            plugins: left(&self.plugins),
-            used: left(&self.used),
-            years: self.years,
-            now: self.now,
-            sizes: self.sizes,
-            measured: self.measured,
-        }
+        let before = self.plugins.len();
+        left(&mut self.plugins);
+        left(&mut self.used);
+        self.gone += before - self.plugins.len();
+        self
     }
-}
-
-/// Before this, no song using a plugin makes it unused: `years` before `now`, as the Plugins page counts back.
-fn unused_since(now: NaiveDateTime, years: u32) -> NaiveDateTime {
-    now.checked_sub_months(Months::new(years.saturating_mul(12))).unwrap_or(now)
 }
 
 /// Works out the plugins no song has used lately from what the Plugins page reads (`read`, from the library), as of
@@ -164,8 +142,9 @@ pub fn look(read: Read, now: NaiveDateTime) -> Found {
     let plugins = Plugins::new(read, now);
     let (mut unused, mut used) = (Vec::new(), Vec::new());
     // What "Big and unused" on the Plugins page picks from: installed, measured, with room of its own.
-    for r in plugins.rows.iter().filter(|r| r.installed && r.room.is_some() && r.bytes() > 0) {
-        if r.unused { unused.push(measured_of(r)) } else { used.push(measured_of(r)) }
+    for r in plugins.rows.iter().filter(|r| r.installed && r.bytes() > 0) {
+        let Some(m) = measured_of(r) else { continue };
+        if r.unused { unused.push(m) } else { used.push(m) }
     }
     biggest_first(&mut unused);
     biggest_first(&mut used);
@@ -176,6 +155,7 @@ pub fn look(read: Read, now: NaiveDateTime) -> Found {
         now,
         sizes: plugins.has_sizes(),
         measured: plugins.measured,
+        gone: 0,
     }
 }
 
@@ -183,22 +163,16 @@ fn biggest_first(plugins: &mut [Measured]) {
     plugins.sort_by(|a, b| b.bytes().cmp(&a.bytes()).then_with(|| a.name.cmp(&b.name)));
 }
 
-fn measured_of(r: &PluginRow) -> Measured {
-    let folders = r.room.as_ref().map(|room| room.folders.as_slice()).unwrap_or_default();
-    Measured {
+fn measured_of(r: &PluginRow) -> Option<Measured> {
+    Some(Measured {
         name: r.name.clone(),
         vendor: r.vendor.clone(),
         key: r.key.clone(),
         own: r.own.clone(),
         last_used: r.last_used,
         songs: r.songs,
-        // Its own room, as the Plugins page counts it: a folder another plugin shares isn't.
-        folders: folders
-            .iter()
-            .filter(|f| !f.shared())
-            .map(|f| Held { path: f.path.clone(), kind: f.kind, bytes: f.bytes })
-            .collect(),
-    }
+        room: r.room.clone()?,
+    })
 }
 
 /// "in over 2 years", "in over a year".
@@ -221,7 +195,9 @@ pub fn line(found: Option<&Found>, looking: bool) -> Option<(u64, Line)> {
             );
             match never {
                 0 => {}
-                n if n == f.plugins.len() => why = format!("{} your songs have never used", plugins_words(n)),
+                n if n == f.plugins.len() => {
+                    why = format!("{} your songs have never used", count_of(n, "plugin", "plugins"))
+                }
                 n => why.push_str(&format!(", {n} of them never")),
             }
             Some((f.bytes(), line(why, size_text(f.bytes()))))
@@ -231,17 +207,13 @@ pub fn line(found: Option<&Found>, looking: bool) -> Option<(u64, Line)> {
     }
 }
 
-/// "1 plugin", "12 plugins".
-fn plugins_words(n: usize) -> String {
-    count_of(n, "plugin", "plugins")
-}
-
-/// What the page says under Biggest wins first about plugins you haven't used: that a look found none, or that the
-/// old app hasn't measured their sizes yet; or nothing.
+/// What the page says under Biggest wins first about plugins you haven't used when there's no line: that the old app
+/// hasn't measured their sizes yet, that the ones a look found have gone since, or that it found none; or nothing.
 pub fn none_note(found: Option<&Found>) -> String {
     match found {
-        Some(f) if !f.sizes => {
-            "Plugins' sizes aren't measured yet: the old app measures them in the background after a scan. ".to_owned()
+        Some(f) if !f.sizes => format!("{NOT_MEASURED} "),
+        Some(f) if f.plugins.is_empty() && f.gone > 0 => {
+            "The plugins your songs haven't used have gone since the old app measured them. ".to_owned()
         }
         Some(f) if f.plugins.is_empty() => {
             let years = if f.years == 1 { "year".to_owned() } else { format!("{} years", f.years) };
@@ -269,12 +241,12 @@ pub fn card(found: Option<&Found>, looking: bool) -> Card {
     for (never, plugins) in &kinds {
         let (name, what) = if *never {
             (
-                format!("{} no song has used", plugins_words(plugins.len())),
+                format!("{} no song has used", count_of(plugins.len(), "plugin", "plugins")),
                 "Installed, but in none of your songs".to_owned(),
             )
         } else {
             (
-                format!("{} not used lately", plugins_words(plugins.len())),
+                format!("{} not used lately", count_of(plugins.len(), "plugin", "plugins")),
                 format!("No song has used them {}", in_years(years)),
             )
         };
@@ -302,7 +274,7 @@ pub fn card(found: Option<&Found>, looking: bool) -> Card {
             (Some(_), Some(b)) => size_text(b),
         },
         big_note: match found {
-            Some(f) if !f.plugins.is_empty() => format!("in {}", plugins_words(f.plugins.len())),
+            Some(f) if !f.plugins.is_empty() => format!("in {}", count_of(f.plugins.len(), "plugin", "plugins")),
             _ => String::new(),
         },
         lead: lead(found, years),
@@ -325,9 +297,7 @@ fn lead(found: Option<&Found>, years: u32) -> String {
 fn note(found: &Found) -> String {
     let when = found.measured.map(|t| format!(", on {}", t.format("%-d %b %Y"))).unwrap_or_default();
     match (found.sizes, found.plugins.is_empty()) {
-        (false, _) => {
-            "Plugins' sizes aren't measured yet: the old app measures them in the background after a scan.".to_owned()
-        }
+        (false, _) => NOT_MEASURED.to_owned(),
         (true, true) => String::new(),
         (true, false) => format!(
             "Sizes are the old app's last measure{when}, without any folder a plugin shares with another. Nothing goes \
@@ -359,7 +329,7 @@ fn plugin_part(p: &Measured) -> Part {
         what: capitalised(&said.join(" · ")),
         size: size_text(p.bytes()),
         under: true,
-        plugins: Some(OnPlugins::Plugin { key: p.key.clone(), own: p.own.clone() }),
+        plugins: Some(OnPlugins::Plugin { key: p.key.clone(), own: p.own.clone(), name: p.name.clone() }),
         ..Part::default()
     }
 }
@@ -373,6 +343,7 @@ fn capitalised(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use chrono::NaiveDate;
+    use mo_space::plugin_space::{SpaceFolder, SpaceKind};
 
     use super::*;
 
@@ -396,7 +367,13 @@ mod tests {
         ]
         .into_iter()
         .filter(|(_, _, bytes)| *bytes > 0)
-        .map(|(kind, what, bytes)| Held { path: format!(r"D:\{name}\{what}"), kind, bytes })
+        .map(|(kind, what, bytes)| SpaceFolder {
+            path: format!(r"D:\{name}\{what}"),
+            kind,
+            bytes,
+            shared_with: Vec::new(),
+            added: false,
+        })
         .collect();
         Measured {
             name: name.to_owned(),
@@ -405,12 +382,20 @@ mod tests {
             own: String::new(),
             last_used: last,
             songs,
-            folders,
+            room: PluginSpace { key: name.to_lowercase(), name: name.to_owned(), vendor: "Maker".to_owned(), folders },
         }
     }
 
     fn found(plugins: Vec<Measured>) -> Found {
-        Found { plugins, used: Vec::new(), years: 2, now: at(2026, 11), sizes: true, measured: Some(at(2026, 11)) }
+        Found {
+            plugins,
+            used: Vec::new(),
+            years: 2,
+            now: at(2026, 11),
+            sizes: true,
+            measured: Some(at(2026, 11)),
+            gone: 0,
+        }
     }
 
     #[test]
@@ -529,22 +514,38 @@ mod tests {
         let used: Vec<&str> = f.used.iter().map(|p| p.name.as_str()).collect();
         assert_eq!(used, ["Massive X", "Serum", "Diva"]);
         // With 1 year, Massive X is unused; Diva, used a year ago to the day, still counts as used.
-        let names_in = |years: u32| f.for_years(years).plugins.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
+        let names_in = |years: u32| f.as_of(years, f.now).plugins.iter().map(|p| p.name.clone()).collect::<Vec<_>>();
         assert_eq!(names_in(1), ["Kontakt 7", "Massive X", "Pro-Q 3"]);
         assert_eq!(names_in(10), ["Kontakt 7"]);
         for years in [1, 2, 5, 10] {
-            assert_eq!(f.for_years(years), look(Read { unused_years: years, ..read.clone() }, at(2026, 11)), "{years}");
+            assert_eq!(
+                f.as_of(years, f.now),
+                look(Read { unused_years: years, ..read.clone() }, at(2026, 11)),
+                "{years}"
+            );
         }
+        // A look that finds the library as it was moves the time on: ten years later the rest are unused too.
+        let ten_on = f.as_of(2, at(2036, 11));
+        assert_eq!(ten_on, look(read.clone(), at(2036, 11)));
+        assert_eq!(ten_on.plugins.len(), 5);
         // Kontakt's library went to the bin since the old app measured it, and Pro-Q 3 was uninstalled: Kontakt's
         // library isn't counted any more, and Pro-Q 3 goes with nothing left (its presets folder was inside).
-        let gone =
-            f.without(&[r"D:\Libraries".to_owned(), r"C:\VST3\Pro-Q 3.vst3".to_owned(), r"C:\Users\me".to_owned()]);
+        let gone = f.clone().without(&[
+            r"D:\Libraries".to_owned(),
+            r"C:\VST3\Pro-Q 3.vst3".to_owned(),
+            r"C:\Users\me".to_owned(),
+        ]);
         let names: Vec<(&str, u64)> = gone.plugins.iter().map(|p| (p.name.as_str(), p.bytes())).collect();
         assert_eq!(names, [("Kontakt 7", 100 * MB)]);
-        assert_eq!(f.without(&[]), f);
-        // Ten years on, the rest are unused too.
-        let later = look(read, at(2036, 11));
-        assert_eq!(later.plugins.len(), 5);
+        assert_eq!(gone.gone, 1);
+        assert_eq!(f.clone().without(&[]), f);
+        // Once every one has gone, the note says so, not that they were used.
+        let all = gone.without(&[r"C:\VST3\Kontakt 7.vst3".to_owned()]);
+        assert!(all.plugins.is_empty() && all.gone == 2);
+        assert_eq!(
+            none_note(Some(&all)),
+            "The plugins your songs haven't used have gone since the old app measured them. "
+        );
     }
 
     fn line_of(f: &Found) -> String {
@@ -578,7 +579,8 @@ mod tests {
                 size_text(38 * GB)
             )
         );
-        assert_eq!(omni.plugins, Some(OnPlugins::Plugin { key: "omnisphere".to_owned(), own: String::new() }));
+        let on = OnPlugins::Plugin { key: "omnisphere".to_owned(), own: String::new(), name: "Omnisphere".to_owned() };
+        assert_eq!(omni.plugins, Some(on));
         assert!(omni.under && omni.open.is_none() && omni.tick.is_none());
         // Never used: the first named (biggest first), the rest added up in one line that shows them all.
         let never = card.parts.get(3).cloned().unwrap_or_default();

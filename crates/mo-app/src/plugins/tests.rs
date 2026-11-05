@@ -379,16 +379,18 @@ fn another_page_can_show_one_plugin_or_every_unused_one() {
     p.filters = Filters { search: "serum".into(), chips: vec![Chip::Missing], sort: Sort::Name, ..Filters::default() };
     p.refilter();
     assert!(!p.shown.contains(&at));
-    assert_eq!(p.show_one(&kontakt.key, &kontakt.own), Some(at));
+    assert_eq!(p.show_one(&kontakt.key, &kontakt.own, &kontakt.name), Some(at));
     assert!(p.shown.contains(&at));
     assert_eq!(p.filters, Filters { sort: Sort::Name, ..Filters::default() });
     // Shown already: the filters stay.
     p.filters = Filters { chips: vec![Chip::Installed], ..Filters::default() };
     p.refilter();
-    assert_eq!(p.show_one(&kontakt.key, &kontakt.own), Some(at));
+    assert_eq!(p.show_one(&kontakt.key, &kontakt.own, &kontakt.name), Some(at));
     assert_eq!(p.filters.chips, [Chip::Installed]);
-    // One that isn't there: nothing to pick.
-    assert_eq!(p.show_one("nothing", ""), None);
+    // One that isn't in the list any more: nothing to pick, and the list shows what has its name.
+    assert_eq!(p.show_one("kontakt 6", "", "Kontakt"), None);
+    assert_eq!((p.filters.search.as_str(), p.filters.chips.as_slice()), ("Kontakt", [].as_slice()));
+    assert_eq!(shown(&p), ["Kontakt 7"]);
 
     // Every unused one, whatever else was on: the ones Space's line counts.
     p.filters = Filters { search: "serum".into(), chips: vec![Chip::Missing], ..Filters::default() };
@@ -398,5 +400,13 @@ fn another_page_can_show_one_plugin_or_every_unused_one() {
     assert_eq!(space.plugins.iter().map(|u| u.name.clone()).collect::<Vec<_>>(), shown(&p));
     // And the same when the years change on the page.
     p.set_unused_years(10);
-    assert_eq!(space.for_years(10).plugins.iter().map(|u| u.name.clone()).collect::<Vec<_>>(), shown(&p));
+    assert_eq!(space.as_of(10, space.now).plugins.iter().map(|u| u.name.clone()).collect::<Vec<_>>(), shown(&p));
+    // And when files went since the old app measured: both leave them out the same way.
+    p.set_unused_years(2);
+    let gone = [r"D:\Libraries".to_owned()];
+    p.forget_paths(&gone);
+    let sizes: Vec<(String, u64)> = p.shown.iter().map(|&i| (p.rows[i].name.clone(), p.rows[i].bytes())).collect();
+    let left = space.without(&gone);
+    assert_eq!(left.plugins.iter().map(|u| (u.name.clone(), u.bytes())).collect::<Vec<_>>(), sizes);
+    assert_eq!(sizes, [("Kontakt 7".to_owned(), 100_000_000), ("Pro-Q 3".to_owned(), 40_000_000)]);
 }

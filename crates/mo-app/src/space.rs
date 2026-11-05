@@ -383,8 +383,9 @@ pub struct Part {
 /// What a part's link to the Plugins page shows there.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OnPlugins {
-    /// One plugin's card, by its line's name key and own (the DAW of a DAW's own device).
-    Plugin { key: String, own: String },
+    /// One plugin's card, by its line's name key and own (the DAW of a DAW's own device), and its name (what that page
+    /// looks for when it's no longer there by those).
+    Plugin { key: String, own: String, name: String },
     /// Every plugin no song has used lately (the Plugins page's "Big and unused").
     Unused,
 }

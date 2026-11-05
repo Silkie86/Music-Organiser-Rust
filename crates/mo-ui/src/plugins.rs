@@ -64,8 +64,8 @@ struct Page {
 /// What another page can ask this one to show.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Wanted {
-    /// One plugin's card, by its line's name key and own.
-    Plugin(String, String),
+    /// One plugin's card, by its line's name key and own, and its name (looked for when it isn't there by those).
+    Plugin { key: String, own: String, name: String },
     /// Every plugin that takes room and no song has used lately ("Big and unused").
     Unused,
 }
@@ -370,12 +370,15 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>) {
     match built {
         Err(e) => {
             log::warning("Plugins", &format!("Couldn't read the library: {e}"));
+            PAGE.with(|p| p.borrow_mut().wanted = None);
             // What was read before stays; only a page with nothing yet says why.
             if PAGE.with(|p| p.borrow().plugins.is_none()) {
                 data.set_message(format!("Couldn't read your plugins: {e}").into());
             }
         }
         Ok(mut fresh) => {
+            // What another page asked for before the library was read (a read that fails drops it too).
+            let wanted = PAGE.with(|p| p.borrow_mut().wanted.take());
             // The filters and the pick carry over a fresh read.
             let kept = PAGE.with(|p| {
                 let p = p.borrow();
@@ -388,10 +391,17 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>) {
                 p.picked.and_then(|i| old.rows.get(i)).map(|r| (r.key.clone(), r.own.clone()))
             });
             clean::forget_binned(&mut fresh);
+            // And the plugin files Space's clean-ups sent to the Recycle Bin, as Space leaves them out.
+            fresh.forget_paths(&crate::space::plugin_files_in_bin());
             fresh.refilter();
-            // What another page asked for before the first read comes first.
-            let wanted = PAGE.with(|p| p.borrow_mut().wanted.take()).and_then(|w| show_in(&mut fresh, &w));
-            let picked = wanted.or_else(|| kept.and_then(|(k, o)| fresh.find(&k, &o)));
+            // What another page asked for before the first read comes first; with every unused plugin asked for, the
+            // plugin picked before stays picked only when it's among them.
+            let kept = kept.and_then(|(k, o)| fresh.find(&k, &o));
+            let picked = match wanted.map(|w| show_in(&mut fresh, &w)) {
+                Some(Some(row)) => Some(row),
+                Some(None) => kept.filter(|row| fresh.shown.contains(row)),
+                None => kept,
+            };
             let empty = fresh.rows.is_empty();
             PAGE.with(|p| {
                 let mut p = p.borrow_mut();
@@ -411,10 +421,10 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>) {
 }
 
 /// Shows one plugin's card (by its line's name key and `own`), for another page (Space's Show on Plugins page): when
-/// the filters hide it, they go (the sort stays). Before the library is first read, it's shown once the read is back.
-/// The caller shows this page.
-pub fn show_plugin(app: &AppWindow, key: &str, own: &str) {
-    show_wanted(app, Wanted::Plugin(key.to_owned(), own.to_owned()));
+/// the filters hide it, they go (the sort stays); when it isn't in the list, the list shows what's found by its `name`.
+/// Before the library is first read, it's shown once the read is back. The caller shows this page.
+pub fn show_plugin(app: &AppWindow, key: &str, own: &str, name: &str) {
+    show_wanted(app, Wanted::Plugin { key: key.to_owned(), own: own.to_owned(), name: name.to_owned() });
 }
 
 /// Shows only the plugins that take room and no song has used lately ("Big and unused", as the list's "Show them"
@@ -436,9 +446,21 @@ fn show_wanted(app: &AppWindow, wanted: Wanted) {
     });
     let Some(row) = now else { return };
     refresh(app);
-    if let Some(row) = row {
-        pick(app, Some(row));
-        app.global::<PluginsData>().set_tab(0);
+    match row {
+        Some(row) => {
+            pick(app, Some(row));
+            app.global::<PluginsData>().set_tab(0);
+        }
+        // The plugin picked before stays picked only when it's among those shown now.
+        None => {
+            let hidden = PAGE.with(|p| {
+                let p = p.borrow();
+                p.picked.is_some_and(|r| p.plugins.as_ref().is_some_and(|pl| !pl.shown.contains(&r)))
+            });
+            if hidden {
+                pick(app, None);
+            }
+        }
     }
 }
 
@@ -446,7 +468,7 @@ fn show_wanted(app: &AppWindow, wanted: Wanted) {
 /// sort stays), or only "Big and unused" on (nothing to pick).
 fn show_in(pl: &mut Plugins, wanted: &Wanted) -> Option<usize> {
     match wanted {
-        Wanted::Plugin(key, own) => pl.show_one(key, own),
+        Wanted::Plugin { key, own, name } => pl.show_one(key, own, name),
         Wanted::Unused => {
             pl.show_only_unused();
             None

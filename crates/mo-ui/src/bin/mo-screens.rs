@@ -828,8 +828,8 @@ fn sample_space() -> mo_ui::space::Sample {
 
 /// Made-up plugins no song has used lately, as the old app measured them: some never used, some not in over 2 years.
 fn sample_unused_plugins() -> mo_app::space_plugins::Found {
-    use mo_app::space_plugins::{Found, Held, Measured};
-    use mo_space::plugin_space::SpaceKind;
+    use mo_app::space_plugins::{Found, Measured};
+    use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind};
     const MB: u64 = 1 << 20;
     let at =
         |year: i32, month: u32| chrono::NaiveDate::from_ymd_opt(year, month, 14).and_then(|d| d.and_hms_opt(20, 0, 0));
@@ -842,10 +842,21 @@ fn sample_unused_plugins() -> mo_app::space_plugins::Found {
                 own: String::new(),
                 last_used: used.map(|(t, _)| t),
                 songs: used.map_or(0, |(_, n)| n),
-                folders: held
-                    .iter()
-                    .map(|(kind, path, mb)| Held { path: (*path).to_owned(), kind: *kind, bytes: mb * MB })
-                    .collect(),
+                room: PluginSpace {
+                    key: name.to_lowercase(),
+                    name: name.to_owned(),
+                    vendor: vendor.to_owned(),
+                    folders: held
+                        .iter()
+                        .map(|(kind, path, mb)| SpaceFolder {
+                            path: (*path).to_owned(),
+                            kind: *kind,
+                            bytes: mb * MB,
+                            shared_with: Vec::new(),
+                            added: false,
+                        })
+                        .collect(),
+                },
             }
         };
     let (program, presets, sounds) = (SpaceKind::Program, SpaceKind::Presets, SpaceKind::Sounds);
@@ -912,7 +923,7 @@ fn sample_unused_plugins() -> mo_app::space_plugins::Found {
             &[(program, r"C:\Program Files\VSTPlugins\Sylenth1.dll", 30)],
         ),
     ];
-    plugins.sort_by(|a, b| b.bytes().cmp(&a.bytes()));
+    plugins.sort_by_key(|p| std::cmp::Reverse(p.bytes()));
     let measured = chrono::NaiveDate::from_ymd_opt(2026, 11, 3).and_then(|d| d.and_hms_opt(9, 30, 0));
     // Serum is used this year, so it isn't on the card.
     let used = vec![plugin(
@@ -921,7 +932,7 @@ fn sample_unused_plugins() -> mo_app::space_plugins::Found {
         at(2026, 10).map(|t| (t, 31)),
         &[(program, r"C:\Program Files\Common Files\VST3\Serum.vst3", 30)],
     )];
-    Found { plugins, used, years: 2, now: measured.unwrap_or_default(), sizes: true, measured }
+    Found { plugins, used, years: 2, now: measured.unwrap_or_default(), sizes: true, measured, gone: 0 }
 }
 
 /// Made-up songs with room to free, written as on Windows: Bitwig songs with copies of a save, old auto-backups and

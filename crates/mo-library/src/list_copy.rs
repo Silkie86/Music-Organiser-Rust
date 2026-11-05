@@ -87,8 +87,9 @@ pub(crate) fn saves(
 /// The library's files as they are now: `library.db`'s and its `-wal`'s size and last-written time (to the
 /// nanosecond, as the disk keeps it), and the `-wal`'s header, whose numbers SQLite changes each time it starts the
 /// file again from the top (where a write would leave its size as it was). None when the library itself can't be
-/// looked at.
-fn stamp_of(library: &Path) -> Option<String> {
+/// looked at. Two the same: nothing has been written to the library in between (the Space page's plugins look uses it
+/// too, to read only a changed library).
+pub fn stamp_of(library: &Path) -> Option<String> {
     let of = |p: &Path| -> Option<String> {
         let m = std::fs::metadata(p).ok()?;
         let at = m.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
