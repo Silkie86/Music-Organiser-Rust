@@ -1121,7 +1121,8 @@ pub fn export_summary(done: &[Exported], without: &[String], failed_saves: &[Str
     if !without.is_empty() {
         let more = if without.len() > 3 { format!(" and {} more", without.len() - 3) } else { String::new() };
         text += &format!(
-            " For a Bitwig preset of {}{more}, save any preset of that plugin once in Bitwig, then export again.",
+            " For a Bitwig preset of {}{more}, save a preset of any plugin of the same kind (VST2 or VST3) once in \
+             Bitwig, then export again.",
             without.iter().take(3).cloned().collect::<Vec<_>>().join(", ")
         );
     }
@@ -1751,8 +1752,8 @@ mod tests {
         let s = export_summary(&[e(&["A.fxp", "B.fxp"])], &["Serum".into()], &[]);
         assert_eq!(
             s,
-            "Exported 2 presets. For a Bitwig preset of Serum, save any preset of that plugin once in Bitwig, then \
-             export again."
+            "Exported 2 presets. For a Bitwig preset of Serum, save a preset of any plugin of the same kind (VST2 or \
+             VST3) once in Bitwig, then export again."
         );
     }
 

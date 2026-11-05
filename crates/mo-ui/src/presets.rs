@@ -1302,11 +1302,18 @@ fn export_one(app: &AppWindow, item: Item, send: bool) {
                             Err(words) => (words, false),
                         },
                         None => (
-                            format!(
-                                "No Bitwig preset could be made for {}: save any preset of it once in Bitwig, then \
-                                 try again.",
-                                item.row.plugin
-                            ),
+                            match bw::state_format(&item.row.extension) {
+                                // FL Studio's own plugins' settings only FL Studio reads.
+                                "" => format!(
+                                    "{} is one of FL Studio's own plugins: Bitwig can't load it.",
+                                    item.row.plugin
+                                ),
+                                format => format!(
+                                    "No Bitwig preset could be made for {}: save a preset of any {format} plugin once \
+                                     in Bitwig (any plugin will do), then try again.",
+                                    item.row.plugin
+                                ),
+                            },
                             false,
                         ),
                     };
@@ -1345,7 +1352,9 @@ fn without_template(items: &[&Item], templates: &Templates) -> Vec<String> {
         if format.is_empty() {
             continue;
         }
-        let has = bw::key(&i.row.plugin, format).is_some_and(|k| templates.contains_key(&k));
+        // Its own template, or another plugin's of the same format to stand in for it.
+        let has = bw::key(&i.row.plugin, format).is_some_and(|k| templates.contains_key(&k))
+            || templates.values().any(|t| t.format() == format);
         if !has && !out.iter().any(|o| o.eq_ignore_ascii_case(&i.row.plugin)) {
             out.push(i.row.plugin.clone());
         }

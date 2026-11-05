@@ -4,8 +4,9 @@
 //! A `.bwpreset` is a Bitwig document like a project: the device and the plugin it loads are in its body, and the
 //! plugin's settings sit in the zip at its end as a plain `.fxp`/`.fxb` (VST2) or `.vstpreset` (VST3) file, named by
 //! the device's state field. So a preset Bitwig itself saved for that plugin is used as a template: its body is kept,
-//! the settings file in its zip is swapped for the new one, and the preset's name is changed. Nothing is made up that
-//! Bitwig didn't write itself.
+//! the settings file in its zip is swapped for the new one, and the preset's name is changed. A plugin with no
+//! template of its own borrows another plugin's of the same format ([`stand_in_for`]), whose device takes the
+//! sound's plugin name and id, as the converter makes plugin devices from the Bitwig template's.
 //!
 //! Unlike the C# app, which swapped names as bytes, the template is decoded, changed field by field and written again
 //! with `mo_formats::bitwig::encode` (the same writer the converter uses), then the new file is decoded again and
@@ -164,6 +165,60 @@ pub fn template_for<'a>(preset: &PresetBlob, templates: &'a Templates) -> Option
     templates.get(&key(&preset.plugin, state_format(&preset.extension))?)
 }
 
+/// A stand-in template for a sound whose plugin has no template of its own: the newest template of the same format
+/// (VST2 or VST3) for another plugin. [`build_for_other`] gives it the sound's plugin. (Solomon, 5 Nov 2026: Send to
+/// Bitwig never sent Hive or WAVESTATION, as he had saved no Bitwig preset of either.)
+pub fn stand_in_for<'a>(preset: &PresetBlob, templates: &'a Templates) -> Option<&'a Template> {
+    let format = state_format(&preset.extension);
+    if format.is_empty() {
+        return None;
+    }
+    // The newest, by path when two were saved at the same time, so it's the same every run.
+    templates
+        .values()
+        .filter(|t| t.format() == format)
+        .min_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.path.cmp(&b.path)))
+}
+
+/// Who a stand-in template's device becomes: the sound's plugin, by its name and its id as its settings say.
+#[derive(Clone, Debug, PartialEq)]
+struct Identity {
+    name: String,
+    id: Value,
+    /// Instrument or effect, where the song says; the stand-in's device is told which (field 0x9d).
+    kind: mo_formats::PluginKind,
+}
+
+/// The plugin the settings are for, as Bitwig's device names it: a VST2's id is its number (from the program's or
+/// bank's head), a VST3's its class id (from the `.vstpreset`'s head). `None` when the settings don't say.
+fn identity(plugin: &str, kind: mo_formats::PluginKind, state: &[u8], extension: &str) -> Option<Identity> {
+    let id = match state_format(extension) {
+        "VST2" if state.get(..4) == Some(b"CcnK") => {
+            let id = i32::from_be_bytes(state.get(16..20)?.try_into().ok()?);
+            (id != 0).then(|| smallest(i64::from(id)))?
+        }
+        "VST3" if state.get(..4) == Some(b"VST3") => {
+            let class = mo_formats::plugins::class_id(std::str::from_utf8(state.get(8..40)?).ok()?);
+            (!class.is_empty()).then(|| Value::Str(Text::new(&class)))?
+        }
+        _ => return None,
+    };
+    Some(Identity { name: plugin.to_owned(), id, kind })
+}
+
+/// The smallest whole-number kind that holds `v`, as Bitwig writes them.
+fn smallest(v: i64) -> Value {
+    if let Ok(b) = u8::try_from(v) {
+        Value::U8(b)
+    } else if let Ok(s) = i16::try_from(v) {
+        Value::I16(s)
+    } else if let Ok(i) = i32::try_from(v) {
+        Value::I32(i)
+    } else {
+        Value::I64(v)
+    }
+}
+
 /// A VST2 program (`.fxp`) as a one-program bank (`.fxb`), the form Bitwig saves VST2 settings in and loads back
 /// (it loaded a plugin's defaults from a `.fxp`), keeping the program the plugin had selected. `None` when it isn't a
 /// program that can be one. (mo-formats' `fxp_to_bank`, shared with the converter.)
@@ -179,6 +234,29 @@ pub fn to_bank(fxp: &[u8], program: u32) -> Option<Vec<u8>> {
 /// a one-program bank ([`to_bank`]). A sound for another plugin than the template's (by the id in its settings) is
 /// refused.
 pub fn build(template: &[u8], template_path: &Path, preset: &PresetBlob, preset_name: &str) -> Result<Vec<u8>, String> {
+    build_any(template, template_path, preset, preset_name, false)
+}
+
+/// [`build`] from a stand-in template ([`stand_in_for`]) saved for another plugin of the same format: the device
+/// takes the sound's plugin, by its name and the id in its settings, as the converter makes a plugin's device from
+/// the Bitwig template's (what only the template's plugin had, its version, outputs, program and file, is left for
+/// Bitwig to read again when it loads the plugin). Refused when the settings don't say which plugin they're for.
+pub fn build_for_other(
+    template: &[u8],
+    template_path: &Path,
+    preset: &PresetBlob,
+    preset_name: &str,
+) -> Result<Vec<u8>, String> {
+    build_any(template, template_path, preset, preset_name, true)
+}
+
+fn build_any(
+    template: &[u8],
+    template_path: &Path,
+    preset: &PresetBlob,
+    preset_name: &str,
+    other: bool,
+) -> Result<Vec<u8>, String> {
     let (state, extension) = match preset.extension.eq_ignore_ascii_case(".fxp") {
         true => match to_bank(&preset.data, preset.program) {
             Some(bank) => (bank, ".fxb"),
@@ -187,7 +265,14 @@ pub fn build(template: &[u8], template_path: &Path, preset: &PresetBlob, preset_
         false => (preset.data.clone(), preset.extension.as_ref()),
     };
     let stem = paths::stem(paths::file_name(&template_path.to_string_lossy())).to_owned();
-    build_from(template, &stem, &state, extension, preset_name)
+    let who = match other {
+        true => Some(
+            identity(&preset.plugin, preset.kind, &state, extension)
+                .ok_or_else(|| format!("{}'s settings don't say which plugin they're for", preset.plugin))?,
+        ),
+        false => None,
+    };
+    build_with(template, &stem, &state, extension, preset_name, who.as_ref())
 }
 
 /// Builds a `.bwpreset` from a template's bytes with `state` as the plugin's settings, then checks it.
@@ -205,13 +290,24 @@ pub fn build_from(
     state_extension: &str,
     preset_name: &str,
 ) -> Result<Vec<u8>, String> {
+    build_with(template, file_stem, state, state_extension, preset_name, None)
+}
+
+fn build_with(
+    template: &[u8],
+    file_stem: &str,
+    state: &[u8],
+    state_extension: &str,
+    preset_name: &str,
+    other: Option<&Identity>,
+) -> Result<Vec<u8>, String> {
     let mut doc = bitwig::decode(template).map_err(|_| "the template isn't a Bitwig file".to_owned())?;
     let t = inspect_doc(&doc).ok_or("the template no longer loads one plugin with its settings")?;
     if state_format(state_extension) != t.format() {
         return Err(format!("the template is for {}, not {state_extension}", t.format()));
     }
     let new_id = files::read_bytes(state, &format!("x{state_extension}")).map(|f| f.plugin_id).unwrap_or_default();
-    if !t.plugin_id.is_empty() && !new_id.is_empty() && !t.plugin_id.eq_ignore_ascii_case(&new_id) {
+    if other.is_none() && !t.plugin_id.is_empty() && !new_id.is_empty() && !t.plugin_id.eq_ignore_ascii_case(&new_id) {
         return Err(format!(
             "the sound is for plugin \"{new_id}\", the template's {} is \"{}\"",
             t.plugin, t.plugin_id
@@ -225,12 +321,20 @@ pub fn build_from(
     let new_field = if paths::extension(&t.state_field).is_empty() { t.state_field.clone() } else { new_name };
     let (device, _) = one_plugin(&doc).ok_or("the template no longer loads one plugin")?;
     doc.obj_mut(device).set(F_PLUGIN_STATE, Value::Str(Text::new(&new_field)));
+    if let Some(who) = other {
+        become_plugin(&mut doc, device, who);
+    }
+    let plugin = other.map_or(t.plugin.as_str(), |w| w.name.as_str());
 
     // The preset's name, wherever the template keeps its own.
     if !preset_name.is_empty() {
         let mut done: Vec<&str> = Vec::new();
         for old in [file_stem, t.preset_name.as_str()] {
-            if old.is_empty() || old.eq_ignore_ascii_case(&t.plugin) || done.contains(&old) {
+            if old.is_empty()
+                || old.eq_ignore_ascii_case(&t.plugin)
+                || old.eq_ignore_ascii_case(plugin)
+                || done.contains(&old)
+            {
                 continue;
             }
             done.push(old);
@@ -240,8 +344,74 @@ pub fn build_from(
 
     let zip = swap_zip_file(doc.zip().unwrap_or_default(), &t.state_file, &new_file, state)?;
     let bytes = bitwig::encode(&doc, Some(&zip))?;
-    check(&bytes, &t.plugin, &new_field, &new_file, state)?;
+    check(&bytes, plugin, &new_field, &new_file, state)?;
     Ok(bytes)
+}
+
+// The plugin device's fields a stand-in template's device changes, as the converter's `plugin` does.
+const F_VENDOR: u32 = 0x9b;
+/// Instrument (2) or audio effect (0), as the converter writes it.
+const F_DEVICE_KIND: u32 = 0x9d;
+const F_PLUGIN_ID: u32 = 0xce4;
+const F_PLUGIN_VERSION: u32 = 0xc5e;
+const F_AUTOMATED: u32 = 0x1318;
+const F_OUTPUTS: u32 = 0x137c;
+const F_OUTPUT_LIST: u32 = 0x8e0;
+const F_PROGRAM: u32 = 0x1b75;
+const F_PROGRAM_NAME: u32 = 0x1b72;
+const F_LOCATION: u32 = 0xc5a;
+const F_LOCATION_FILES: u32 = 0xc5b;
+
+/// A field's value replaced, whatever kind it was (an id can be a number in one preset and text in another), or
+/// added when the object has none.
+fn put(doc: &mut Document, obj: ObjId, id: u32, value: Value) {
+    let o = doc.obj_mut(obj);
+    match o.fields.iter_mut().find(|f| f.id == id) {
+        Some(f) => f.value = value,
+        None => o.fields.push(bitwig::Field { id, value }),
+    }
+}
+
+/// A stand-in template's device becomes the sound's plugin: its name and id, and nothing kept that only the
+/// template's plugin had (its maker, version, automated settings, outputs, program name and file), which Bitwig reads
+/// again from the plugin when it loads it.
+fn become_plugin(doc: &mut Document, device: ObjId, who: &Identity) {
+    put(doc, device, F_DEVICE_NAME, Value::Str(Text::new(&who.name)));
+    put(doc, device, F_PLUGIN_ID, who.id.clone());
+    let kind = match who.kind {
+        mo_formats::PluginKind::Instrument => Some(2),
+        mo_formats::PluginKind::Effect => Some(0),
+        _ => None,
+    };
+    if let Some(kind) = kind
+        && doc.obj(device).has(F_DEVICE_KIND)
+    {
+        put(doc, device, F_DEVICE_KIND, Value::U8(kind));
+    }
+    if doc.obj(device).has(F_VENDOR) {
+        put(doc, device, F_VENDOR, Value::Str(Text::new("")));
+    }
+    if doc.obj(device).has(F_PLUGIN_VERSION) {
+        let blank = match who.id {
+            Value::Str(_) => Value::Str(Text::new("")),
+            _ => Value::U8(0),
+        };
+        put(doc, device, F_PLUGIN_VERSION, blank);
+    }
+    if doc.obj(device).has(F_AUTOMATED) {
+        put(doc, device, F_AUTOMATED, Value::List(Vec::new()));
+    }
+    for (holder, field, blank) in [
+        (F_OUTPUTS, F_OUTPUT_LIST, Value::List(Vec::new())),
+        (F_PROGRAM, F_PROGRAM_NAME, Value::Str(Text::new(""))),
+        (F_LOCATION, F_LOCATION_FILES, Value::List(Vec::new())),
+    ] {
+        if let Some(o) = doc.field_obj(device, holder)
+            && doc.obj(o).has(field)
+        {
+            put(doc, o, field, blank);
+        }
+    }
 }
 
 /// Changes a text that's exactly `old` to `new`, in the metadata and in the body (each looked at on its own), when
