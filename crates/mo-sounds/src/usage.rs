@@ -27,10 +27,17 @@ pub struct Usage {
 
 impl Usage {
     fn add(&mut self, u: &SampleUse) {
-        self.projects += u.projects;
-        self.recent += u.recent;
         merge(&mut self.years, &u.years);
-        merge(&mut self.project_ids, &u.project_ids);
+        if u.project_ids.is_empty() {
+            // A use that doesn't say which projects (the twin tool's, made from the C# app's counts) adds its count.
+            self.projects += u.projects;
+        } else {
+            // Each project once, whichever paths it names the sound by.
+            merge(&mut self.project_ids, &u.project_ids);
+            self.projects = u32::try_from(self.project_ids.len()).unwrap_or(u32::MAX);
+        }
+        // Never more saved lately than in all (a project naming it by two paths can still count twice here).
+        self.recent = (self.recent + u.recent).min(self.projects);
     }
 }
 
@@ -45,8 +52,9 @@ fn merge<T: Ord + Copy>(sorted: &mut Vec<T>, more: &[T]) {
     }
 }
 
-/// Each sound's use, by sound id. As in the C# app, a sound matched by its name adds up every path with that name, so
-/// one project listing it twice (a Bitwig copy and a relative path) counts twice. Sounds no project uses are left out (their use is [`Usage::default`]).
+/// Each sound's use, by sound id. A sound matched by its name adds up every path with that name, each project once:
+/// one project listing it twice (a Bitwig copy and a relative path) counts once (the C# app counted it twice). Sounds
+/// no project uses are left out (their use is [`Usage::default`]).
 pub fn usage(sounds: &[Sound], uses: &[SampleUse]) -> HashMap<i64, Usage> {
     let mut by_path: HashMap<String, Usage> = HashMap::new();
     let mut by_name: HashMap<String, Usage> = HashMap::new();
@@ -106,5 +114,24 @@ mod tests {
         // Which projects too, from both paths.
         assert_eq!(u[&2], Usage { projects: 2, recent: 1, years: vec![2019, 2025], project_ids: vec![201900, 202500] });
         assert!(!u.contains_key(&3) && !u.contains_key(&4) && !u.contains_key(&5));
+    }
+
+    #[test]
+    fn a_project_naming_a_sound_by_two_paths_counts_once() {
+        let sounds = [sound(1, "D:\\Samples\\Pads\\Warm.wav")];
+        let one = |path: &str| SampleUse {
+            path: path.into(),
+            projects: 1,
+            recent: 1,
+            years: vec![2025],
+            project_ids: vec![7],
+        };
+        // Project 7 has a Bitwig copy of the pad and names it by a relative path too.
+        let u = usage(&sounds, &[one("C:\\Bitwig\\Song\\samples\\Warm.wav"), one("samples/warm.wav")]);
+        assert_eq!(u[&1], Usage { projects: 1, recent: 1, years: vec![2025], project_ids: vec![7] });
+        // A use that doesn't say which projects (the twin tool's) adds its count, as before.
+        let counted = |path: &str| SampleUse { project_ids: Vec::new(), ..one(path) };
+        let u = usage(&sounds, &[counted("C:\\Bitwig\\Song\\samples\\Warm.wav"), counted("samples/warm.wav")]);
+        assert_eq!((u[&1].projects, u[&1].recent), (2, 2));
     }
 }

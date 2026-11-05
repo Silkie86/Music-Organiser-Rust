@@ -903,7 +903,6 @@ pub fn facts_line(s: &Sound) -> String {
     parts.join(" · ")
 }
 
-/// "Never", "1 project", "12 projects", or "" when the counts aren't known yet.
 /// The card's "Used in" list shows at most this many projects, the newest: a kick can be in a thousand.
 pub const PROJECTS_SHOWN: usize = 50;
 
@@ -917,7 +916,7 @@ pub struct ProjectsCard {
 }
 
 /// One project on the card: its save's id (the Songs page opens it by that), its name, its DAW and the day it was
-/// last saved.
+/// last saved ("" when that isn't known).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectLine {
     pub id: i64,
@@ -969,11 +968,13 @@ fn project_lines(projects: &[&ProjectFile]) -> Vec<ProjectLine> {
             id: f.id,
             name: mo_formats::paths::stem(mo_formats::paths::file_name(&f.path)).to_owned(),
             daw: mo_library::scan::daw_of(&f.path).unwrap_or_default().to_owned(),
-            saved: crate::midi::date_text(f.mtime),
+            // A save the scan didn't date (0) shows none, rather than 1 Jan 1970.
+            saved: if f.mtime > 0 { crate::midi::date_text(f.mtime) } else { String::new() },
         })
         .collect()
 }
 
+/// "Never", "1 project", "12 projects", or "" when the counts aren't known yet.
 pub fn used_text(used: Option<u32>) -> String {
     match used {
         None => String::new(),
@@ -1591,6 +1592,9 @@ mod tests {
             card.lines.iter().map(|l| (l.id, l.name.as_str(), l.daw.as_str())).collect();
         assert_eq!(names, [(7, "Didums_77", "FL Studio"), (3, "Old one", "Bitwig Studio")]);
         assert_eq!(card.lines[0].saved, crate::midi::date_text(1_760_000_000));
+        // A save the scan didn't date shows no day, rather than 1 Jan 1970.
+        let undated = project(9, r"K:\Projects\Undated.flp", 0);
+        assert_eq!(projects_card(Some(&[&undated][..]), None).lines[0].saved, "");
         // None of its own: the sound it sounds like has some.
         let card = projects_card(Some(&[][..]), Some(("VEH1 FX - 37", &[&a][..])));
         assert_eq!(card.title, "Used in 0");
