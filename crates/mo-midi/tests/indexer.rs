@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 
 use mo_midi::indexer::{self, Wanted};
 use mo_midi::store::MidiStore;
-use mo_midi::{Catalogue, Role, SourceKind};
+use mo_midi::{Catalogue, InKeys, Role, SourceKind};
 
 /// A one-track Standard MIDI File at 96 PPQ playing `keys` as sixteenths... quarter notes, one after another.
 fn smf(keys: &[u8]) -> Vec<u8> {
@@ -327,24 +327,31 @@ fn the_same_loop_in_other_keys_is_one_set_and_old_notes_get_their_shape() {
     std::fs::write(pack.join("Low C.mid"), smf(BASS)).unwrap();
     std::fs::write(pack.join("Low F.mid"), smf(&up)).unwrap();
     std::fs::write(dir.join("Tune.mid"), smf(TUNE)).unwrap();
+    // The same shape in another folder: not the same pack's loop.
+    let g: Vec<u8> = BASS.iter().map(|k| k + 7).collect();
+    std::fs::write(dir.join("Low G.mid"), smf(&g)).unwrap();
     let db = dir.join("midi-index.db");
     let mut store = MidiStore::open(&db).unwrap();
     assert_eq!(run(&mut store, &dir, false).shaped, 0, "new notes get their shape as they're saved");
-    assert_eq!(count(&db, "shapes"), 3);
+    assert_eq!(count(&db, "shapes"), 4);
 
     let catalogue = Catalogue::new(store.all(&HashMap::new(), &HashMap::new()).unwrap());
-    assert_eq!(catalogue.entries.len(), 3, "different notes, so three parts");
-    let low: Vec<_> = catalogue.entries.iter().filter(|e| e.phrase.clip.starts_with("Low")).collect();
+    assert_eq!(catalogue.entries.len(), 4, "different notes, so four parts");
+    assert_eq!(catalogue.line_count, 3, "the pack's loop in two keys is one line");
+    let low: Vec<_> =
+        catalogue.entries.iter().filter(|e| e.phrase.clip == "Low C" || e.phrase.clip == "Low F").collect();
     assert_eq!(low.len(), 2);
-    assert!(low.iter().all(|e| e.in_keys.len() == 2 && e.in_keys_count == Some(("keys", 2))));
-    assert_eq!(low[0].key_group(), low[1].key_group());
-    let tune = catalogue.entries.iter().find(|e| e.phrase.clip == "Tune").unwrap();
-    assert!(tune.in_keys.is_empty() && tune.key_group().is_none());
+    assert!(low.iter().all(|e| e.in_keys == Some(InKeys::Keys(2)) && e.key_group.is_some()));
+    assert_eq!(low[0].key_group, low[1].key_group);
+    for clip in ["Tune", "Low G"] {
+        let e = catalogue.entries.iter().find(|e| e.phrase.clip == clip).unwrap();
+        assert!(e.in_keys.is_none() && e.key_group.is_none(), "{clip}");
+    }
 
     // Notes saved before shapes were kept get theirs at the next read, from the notes in the index.
     rusqlite::Connection::open(&db).unwrap().execute("DELETE FROM shapes", []).unwrap();
     let again = run(&mut store, &dir, false);
-    assert_eq!((again.read, again.shaped), (0, 3));
+    assert_eq!((again.read, again.shaped), (0, 4));
     assert_eq!(run(&mut store, &dir, false).shaped, 0, "worked out once");
 
     // Only an octave up: the same key, so "in 2 octaves".
@@ -353,5 +360,5 @@ fn the_same_loop_in_other_keys_is_one_set_and_old_notes_get_their_shape() {
     run(&mut store, &dir, false);
     let catalogue = Catalogue::new(store.all(&HashMap::new(), &HashMap::new()).unwrap());
     let low = catalogue.entries.iter().find(|e| e.phrase.clip == "Low C").unwrap();
-    assert_eq!(low.in_keys_count, Some(("octaves", 2)));
+    assert_eq!(low.in_keys, Some(InKeys::Octaves(2)));
 }

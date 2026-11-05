@@ -19,6 +19,9 @@
 //!   stretch), so it's read again from the stored notes, without opening any file, when the finder gets better or the
 //!   kind changes (rule 7). It's per set of notes, velocities and all: a stray soft touch isn't heard. A table of its
 //!   own, so the list reads it without going past the notes, and finding what to read again is one index lookup.
+//! - `shapes`: each set of notes' shape in any key (8 bytes, [`crate::analyser::shape_of`]), so a pack's loop in
+//!   every key is one line on the page. A table of its own, added after layout 2 came out: an index made before it
+//!   gets the table when the indexer opens it, and its shapes from the stored notes after the next read.
 //! - `your_roles`, `your_octaves`: what you said about a set of notes, by its note hash, so it holds for every copy: the
 //!   ones you made in the C# app, taken in once, and the Rust app's own, which win (a row with no value says "back to
 //!   the app's guess", which wins too).
@@ -100,7 +103,7 @@ const TABLES: &str = "
         fact BLOB                       -- mo-harmony's KeyFact (8 bytes); NULL for drums or no pitched notes
     );
     -- The notes' shape in any key (analyser::shape_of): a loop and the same loop moved up or down share it. Filled
-    -- when notes are saved, and for notes saved before this table was there, after each read (MidiStore::fill_shapes).
+    -- when notes are saved, and for notes saved before this table was there, after a read (indexer::fill_shapes).
     CREATE TABLE IF NOT EXISTS shapes (
         notes INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
         shape INTEGER NOT NULL
@@ -785,9 +788,8 @@ impl MidiStore {
             // The notes themselves once: `sound` is their hash, so the same notes found again are already there.
             let mut data =
                 tx.prepare_cached("INSERT INTO note_data (notes, data) VALUES (?1, ?2) ON CONFLICT(notes) DO NOTHING")?;
-            let mut shape = tx.prepare_cached(
-                "INSERT INTO shapes (notes, shape) VALUES (?1, ?2) ON CONFLICT(notes) DO UPDATE SET shape = ?2",
-            )?;
+            let mut shape =
+                tx.prepare_cached("INSERT INTO shapes (notes, shape) VALUES (?1, ?2) ON CONFLICT(notes) DO NOTHING")?;
             let mut key = tx.prepare_cached(
                 "INSERT INTO keys (notes, version, role, cut, fact) VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(notes) DO UPDATE SET version = ?2, role = ?3, cut = ?4, fact = ?5",
@@ -920,13 +922,25 @@ impl MidiStore {
         Ok(())
     }
 
-    /// Notes with no shape yet (saved before the `shapes` table was there), up to `limit`: each with its notes.
-    pub fn unshaped(&self, limit: usize) -> Result<Vec<(i64, Vec<NoteEvent>)>, MidiError> {
+    /// How many sets of notes have no shape yet (saved before the `shapes` table was there): two counts, each read
+    /// from a small index, so it's quick when there are none.
+    pub fn unshaped_count(&self) -> Result<usize, MidiError> {
+        let n: i64 =
+            self.conn
+                .query_row("SELECT (SELECT COUNT(*) FROM notes) - (SELECT COUNT(*) FROM shapes)", [], |r| r.get(0))?;
+        Ok(n.max(0) as usize)
+    }
+
+    /// Notes with no shape yet after the set of notes `after` (an id; 0 for the first), in id order, up to `limit`:
+    /// each with its notes. The caller goes on from the last one given, so each row is looked at once.
+    pub fn unshaped(&self, after: i64, limit: usize) -> Result<Vec<(i64, Vec<NoteEvent>)>, MidiError> {
         let mut st = self.conn.prepare_cached(
             "SELECT d.notes, d.data FROM note_data d
-             WHERE NOT EXISTS (SELECT 1 FROM shapes s WHERE s.notes = d.notes) LIMIT ?1",
+             WHERE d.notes > ?1 AND NOT EXISTS (SELECT 1 FROM shapes s WHERE s.notes = d.notes)
+             ORDER BY d.notes LIMIT ?2",
         )?;
-        let rows = st.query_map([limit as i64], |r| Ok((r.get(0)?, decode_notes(&r.get::<_, Vec<u8>>(1)?))))?;
+        let rows =
+            st.query_map(params![after, limit as i64], |r| Ok((r.get(0)?, decode_notes(&r.get::<_, Vec<u8>>(1)?))))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 

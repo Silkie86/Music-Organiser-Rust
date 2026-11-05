@@ -753,7 +753,7 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
             return (None, String::new(), String::new());
         }
         // The picked part's row in the new list: one look, here, rather than at every step.
-        p.picked_row = p.picked.and_then(|at| hits.iter().position(|h| h.entry == at));
+        p.picked_row = p.picked.and_then(|at| page::row_of(&p.cat, &hits, at));
         // The old list (one line per part shown) is let go on the freeing thread.
         background::free_later(std::mem::replace(&mut p.shown, Arc::new(hits)));
         p.counts = counts;
@@ -769,7 +769,7 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
             None => String::new(),
         };
         let shown = p.shown.len();
-        let all = p.cat.entries.len();
+        let all = p.cat.line_count;
         (Some(shown), page::result_text(shown, all, p.order, p.target, p.seed.is_some()), target_text)
     });
     let Some(shown) = shown else { return };
@@ -800,7 +800,10 @@ fn show_part(app: &AppWindow, hash: &str) {
         PAGE.with(|p| p.borrow_mut().wanted = Some(hash.to_owned()));
         return;
     };
-    let row = PAGE.with(|p| p.borrow().shown.iter().position(|h| h.entry == at));
+    let row = PAGE.with(|p| {
+        let p = p.borrow();
+        page::row_of(&p.cat, &p.shown, at)
+    });
     if let Some(row) = row {
         select_row(app, row);
         let data = app.global::<MidiData>();

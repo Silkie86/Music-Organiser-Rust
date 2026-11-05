@@ -261,15 +261,19 @@ const SHAPE_BATCH: usize = 2_000;
 /// in the index: no file is opened. Quick (a hash a set of notes), on `pool`, a batch at a time; `stop` ends it after
 /// the batch it's on. Gives how many were worked out and whether it got to the end.
 fn fill_shapes(store: &mut MidiStore, pool: &rayon::ThreadPool, stop: &AtomicBool) -> Result<(usize, bool), MidiError> {
-    let mut done = 0;
+    if store.unshaped_count()? == 0 {
+        return Ok((0, true));
+    }
+    let (mut done, mut after) = (0, 0);
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok((done, false));
         }
-        let unshaped = store.unshaped(SHAPE_BATCH)?;
-        if unshaped.is_empty() {
+        let unshaped = store.unshaped(after, SHAPE_BATCH)?;
+        let Some(&(last, _)) = unshaped.last() else {
             return Ok((done, true));
-        }
+        };
+        after = last;
         let shapes: Vec<(i64, Option<i64>)> = pool.install(|| {
             use rayon::prelude::*;
             unshaped.par_iter().map(|(id, notes)| (*id, crate::analyser::shape_of(notes))).collect()

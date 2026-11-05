@@ -32,13 +32,12 @@ pub struct Entry {
     pub members: Vec<PhraseMember>,
     /// The longer phrases these notes are part of (as places in [`Catalogue::entries`]), longest first.
     pub within: Vec<usize>,
-    /// The same notes moved up or down (the same [`StoredPhrase::shape`]: a pack's loop in every key), as places in
-    /// [`Catalogue::entries`], newest first, this one among them; empty when there's no other. Never for drums: a
-    /// drum pattern moved is other drums.
-    pub in_keys: Vec<usize>,
-    /// How many keys those are in (12 for a pack's loop in every key), or how many octaves when they're only moved by
-    /// octaves: ("keys", 12) or ("octaves", 2).
-    pub in_keys_count: Option<(&'static str, usize)>,
+    /// The newest of the same notes moved up or down in the same folder of MIDI files (the same
+    /// [`StoredPhrase::shape`]: a pack's loop in every key), as a place in [`Catalogue::entries`]; it stands for them
+    /// all in a list. None when there's no other. See [`Catalogue::new`] for what's grouped.
+    pub key_group: Option<usize>,
+    /// How many keys (or octaves) that set of notes is in.
+    pub in_keys: Option<InKeys>,
     /// Everything search looks in, in small letters.
     search_text: String,
     /// The songs this part is in (see [`song_of`]), worked out the first time they're asked for.
@@ -58,12 +57,6 @@ impl Entry {
 
     pub fn is_project(&self) -> bool {
         self.phrase.source.kind == SourceKind::Project
-    }
-
-    /// The newest of the same notes in other keys (a place in [`Catalogue::entries`]), which stands for them all in a
-    /// list; None when there are no others.
-    pub fn key_group(&self) -> Option<usize> {
-        self.in_keys.first().copied()
     }
 
     pub fn is_joined(&self) -> bool {
@@ -112,6 +105,14 @@ impl Entry {
     pub fn matches(&self, words: &[String]) -> bool {
         words.iter().all(|w| self.search_text.contains(w.as_str()))
     }
+}
+
+/// How many keys the same notes are in, moved up or down: 12 for a pack's loop in every key; or, when they're only
+/// moved by octaves, how many octaves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InKeys {
+    Keys(usize),
+    Octaves(usize),
 }
 
 /// Where parts come from.
@@ -169,6 +170,8 @@ pub struct Catalogue {
     pub entries: Vec<Entry>,
     /// How many parts the index holds, copies counted.
     pub phrase_count: usize,
+    /// How many lines a list of every part has: the same loop in other keys is one ([`Entry::key_group`]).
+    pub line_count: usize,
     by_hash: HashMap<String, usize>,
 }
 
@@ -205,8 +208,8 @@ impl Catalogue {
                     instrument,
                     members,
                     within: Vec::new(),
-                    in_keys: Vec::new(),
-                    in_keys_count: None,
+                    key_group: None,
+                    in_keys: None,
                     search_text,
                     songs: OnceLock::new(),
                 }
@@ -230,24 +233,30 @@ impl Catalogue {
                 e.within.push(phrase);
             }
         }
-        // The same loop in other keys: grouped by shape, newest first as the entries are.
-        let mut by_shape: HashMap<i64, Vec<usize>> = HashMap::new();
+        // The same loop in other keys: a pack's files in one folder with the same shape. Only `.mid` files (a song
+        // playing its riff on another root is another part of the song), only side by side in one folder (a short,
+        // plain shape, such as a held chord, is in many places), never drums (a drum pattern moved is other drums).
+        let mut by_shape: HashMap<(String, i64), Vec<usize>> = HashMap::new();
         for (at, e) in entries.iter().enumerate() {
-            if let Some(shape) = e.phrase.shape.filter(|_| !e.phrase.drums && e.phrase.role != Role::Drums) {
-                by_shape.entry(shape).or_default().push(at);
+            let p = &e.phrase;
+            if let Some(shape) = p.shape.filter(|_| !e.is_project() && !p.drums && e.role() != Role::Drums) {
+                let folder = p.source.path.rfind(['\\', '/']).and_then(|cut| p.source.path.get(..cut)).unwrap_or("");
+                by_shape.entry((case::to_lower(folder), shape)).or_default().push(at);
             }
         }
-        for mut group in by_shape.into_values().filter(|g| g.len() > 1) {
-            group.sort_unstable();
+        let mut line_count = entries.len();
+        for group in by_shape.into_values().filter(|g| g.len() > 1) {
+            // In entries' order, newest first: the first stands for them.
             let mut keys: Vec<u8> =
                 group.iter().filter_map(|&at| entries.get(at)).map(|e| e.phrase.lowest % 12).collect();
             keys.sort_unstable();
             keys.dedup();
-            let count = if keys.len() > 1 { ("keys", keys.len()) } else { ("octaves", group.len()) };
+            let count = if keys.len() > 1 { InKeys::Keys(keys.len()) } else { InKeys::Octaves(group.len()) };
+            line_count -= group.len() - 1;
             for &at in &group {
                 if let Some(e) = entries.get_mut(at) {
-                    e.in_keys.clone_from(&group);
-                    e.in_keys_count = Some(count);
+                    e.key_group = group.first().copied();
+                    e.in_keys = Some(count);
                 }
             }
         }
@@ -256,13 +265,18 @@ impl Catalogue {
             // Longest first; equal lengths keep their order (newest first), as the C# stable sort does.
             e.within.sort_by_key(|&p| std::cmp::Reverse(bars.get(p).copied().unwrap_or(0)));
         }
-        Catalogue { entries, phrase_count, by_hash }
+        Catalogue { entries, phrase_count, line_count, by_hash }
     }
 
     /// The part with these notes. Entries are made again on every reload, so the page holds on to its picks by
     /// their notes and finds them again here.
     pub fn find(&self, hash: &str) -> Option<usize> {
         self.by_hash.get(hash).copied()
+    }
+
+    /// Whether the entry at `at` has a line of its own in a list: it isn't the same loop in another key as a newer one.
+    pub fn is_line(&self, at: usize) -> bool {
+        self.entries.get(at).is_some_and(|e| e.key_group.is_none_or(|g| g == at))
     }
 
     pub fn entry(&self, at: usize) -> Option<&Entry> {

@@ -184,15 +184,23 @@ pub fn view(
     target: Option<Target>,
     seed: Option<u64>,
 ) -> (Vec<Hit>, ChoiceCounts) {
-    let base = searched(cat, f, target);
-    let counts = counts(cat, &base, f);
+    let mut base = searched(cat, f, target);
+    // The same loop in other keys is one line, the first the filters let through ("in 12 keys"); a whole phrase's
+    // list shows each.
+    let one_line = !matches!(target, Some(Target::Within(_)));
+    if let Some(Target::Like(at)) = target {
+        // Not the part's own notes in another key: they're what it's most like.
+        let own = cat.entry(at).and_then(|e| e.key_group);
+        if own.is_some() {
+            base.retain(|h| cat.entry(h.entry).is_none_or(|e| e.key_group != own));
+        }
+    }
+    let counts = counts(cat, &base, f, one_line);
     let mut hits: Vec<Hit> = base
         .into_par_iter()
         .filter(|h| cat.entry(h.entry).is_some_and(|e| in_years(f, e) && chips_pass(f, e) == [true; 3]))
         .collect();
-    // The same loop in other keys is one line, the first the filters let through ("in 12 keys"); a whole phrase's
-    // list shows each.
-    if !matches!(target, Some(Target::Within(_))) {
+    if one_line {
         one_per_key_group(cat, &mut hits);
     }
     // Ranked by likeness, or the longest phrase first: that order is the point.
@@ -209,7 +217,15 @@ pub fn view(
 /// Keeps the first hit of each set of the same notes in other keys ([`Entry::key_group`]), in the order they come.
 fn one_per_key_group(cat: &Catalogue, hits: &mut Vec<Hit>) {
     let mut seen = HashSet::new();
-    hits.retain(|h| cat.entry(h.entry).and_then(Entry::key_group).is_none_or(|g| seen.insert(g)));
+    hits.retain(|h| cat.entry(h.entry).and_then(|e| e.key_group).is_none_or(|g| seen.insert(g)));
+}
+
+/// The row of `hits` that shows the part at `at`: its own, else the line standing for it in another key.
+pub fn row_of(cat: &Catalogue, hits: &[Hit], at: usize) -> Option<usize> {
+    hits.iter().position(|h| h.entry == at).or_else(|| {
+        let group = cat.entry(at).and_then(|e| e.key_group)?;
+        hits.iter().position(|h| cat.entry(h.entry).is_some_and(|e| e.key_group == Some(group)))
+    })
 }
 
 /// How many parts each chip's choices would show, with the other filters as they are.
@@ -251,15 +267,12 @@ impl ChoiceCounts {
 
 /// Counts every chip's choices in one pass over `hits`: a part counts beside every chip when all three let it
 /// through, and beside the one that doesn't when only one doesn't (picking another choice there could show it). The
-/// same loop in other keys is one line, so it counts once beside each choice that would show it.
-fn counts(cat: &Catalogue, hits: &[Hit], f: &Filters) -> ChoiceCounts {
+/// same loop in other keys is one line (`one_line`), so it then counts once beside each choice that would show it.
+fn counts(cat: &Catalogue, hits: &[Hit], f: &Filters, one_line: bool) -> ChoiceCounts {
     let keys = key_list();
-    let (grouped, single): (Vec<&Entry>, Vec<&Entry>) = hits
-        .par_iter()
-        .filter_map(|h| cat.entry(h.entry).filter(|e| in_years(f, e)))
-        .partition(|e| e.key_group().is_some());
-    let mut c = single
-        .into_par_iter()
+    let entries = || hits.par_iter().filter_map(|h| cat.entry(h.entry).filter(|e| in_years(f, e)));
+    let mut c = entries()
+        .filter(|e| !one_line || e.key_group.is_none())
         .fold(ChoiceCounts::empty, |mut c, e| {
             choices_of(e, f, &keys, |chip, at| {
                 if let Some(n) = c.chip(chip).get_mut(at) {
@@ -269,10 +282,14 @@ fn counts(cat: &Catalogue, hits: &[Hit], f: &Filters) -> ChoiceCounts {
             c
         })
         .reduce(ChoiceCounts::empty, ChoiceCounts::add);
+    if !one_line {
+        return c;
+    }
     // Few: a pack's loops in other keys. Each (set, chip, choice) once.
+    let grouped: Vec<&Entry> = entries().filter(|e| e.key_group.is_some()).collect();
     let mut seen = HashSet::new();
     for e in grouped {
-        let group = e.key_group().unwrap_or_default();
+        let group = e.key_group.unwrap_or_default();
         choices_of(e, f, &keys, |chip, at| {
             if seen.insert((group, chip, at))
                 && let Some(n) = c.chip(chip).get_mut(at)
@@ -439,7 +456,8 @@ pub fn year_of(mtime: i64) -> i32 {
 /// How many parts each year holds (by when their newest file was saved), newest first, for the year strip.
 pub fn year_counts(cat: &Catalogue) -> Vec<(i32, usize)> {
     let mut counts: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
-    for e in &cat.entries {
+    // A line each, as the list: the same loop in other keys once.
+    for (_, e) in cat.entries.iter().enumerate().filter(|(at, _)| cat.is_line(*at)) {
         *counts.entry(year_of(e.phrase.source.mtime)).or_insert(0) += 1;
     }
     crate::year_strip::strip(counts)
@@ -481,8 +499,10 @@ pub fn from_text(e: &Entry) -> String {
     if e.copies() > 1 {
         text.push_str(&format!(" · in {} files", thousands(e.copies())));
     }
-    if let Some((what, n)) = e.in_keys_count {
-        text.push_str(&format!(" · in {n} {what}"));
+    match e.in_keys {
+        Some(mo_midi::InKeys::Keys(n)) => text.push_str(&format!(" · in {n} keys")),
+        Some(mo_midi::InKeys::Octaves(n)) => text.push_str(&format!(" · in {n} octaves")),
+        None => {}
     }
     text
 }
@@ -701,8 +721,9 @@ pub fn summary(cat: &Catalogue) -> String {
         .flat_map(|e| std::iter::once(&e.phrase.source).chain(&e.other_sources))
         .map(|s| s.path.as_str())
         .collect();
-    let mut text = format!("{} MIDI parts from {} files", thousands(cat.entries.len()), thousands(files.len()));
-    let copies = cat.phrase_count.saturating_sub(cat.entries.len());
+    let mut text = format!("{} MIDI parts from {} files", thousands(cat.line_count), thousands(files.len()));
+    // The same notes again, and the same loop in other keys.
+    let copies = cat.phrase_count.saturating_sub(cat.line_count);
     if copies > 0 {
         let word = if copies == 1 { "copy" } else { "copies" };
         text.push_str(&format!(" · {} {word} kept as one", thousands(copies)));
@@ -1082,6 +1103,14 @@ mod tests {
         // A key picked shows the loop in that key.
         let f = Filters { keys: key_of_choice("Dm").into_iter().collect(), ..Filters::default() };
         assert_eq!(keys(&list(&cat, &f, Order::Newest, None, None)), ["Dm"]);
+        // A part picked in another key is shown by its line; the year strip and summary count a line each.
+        let dm = cat.find("Dm").unwrap();
+        assert_eq!(row_of(&cat, &hits, dm), Some(0));
+        assert_eq!(year_counts(&cat).iter().map(|(_, n)| n).sum::<usize>(), 2);
+        assert!(summary(&cat).starts_with("2 MIDI parts"));
+        // More like this: not its own notes in another key.
+        let like = list(&cat, &Filters::default(), Order::Newest, Some(Target::Like(dm)), None);
+        assert_eq!(titles(&cat, &like), ["Pad"]);
     }
 
     #[test]

@@ -728,10 +728,13 @@ impl Source for Presets {
 /// Every MIDI part the MIDI page lists, found by its title, then where it's from. Its id is its notes' fingerprint, so
 /// the page finds it again after the index is read again.
 pub fn midi_parts(cat: &mo_midi::Catalogue) -> Lines {
+    // A line each, as the MIDI page lists them: the same loop in other keys once.
     let lines = cat
         .entries
         .iter()
-        .map(|e| {
+        .enumerate()
+        .filter(|(at, _)| cat.is_line(*at))
+        .map(|(_, e)| {
             let from = crate::midi::from_text(e);
             let details = crate::midi::details(e);
             Found {
