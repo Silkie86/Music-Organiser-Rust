@@ -116,6 +116,17 @@ export global SettingsData {
     // By the group's number: pick a folder to add, or take one off.
     callback add-folder(int);
     callback remove-folder(int, string);
+    // Folders: where exports go (mo_app::settings::exports_card): the card's title and what it's for, the folder and a
+    // line under it, whether one was chosen (so Documents can be gone back to) and whether it's there (so Open shows it).
+    in property <string> exports-title;
+    in property <string> exports-note;
+    in property <string> export-folder;
+    in property <string> export-line;
+    in property <bool> export-chosen;
+    in property <bool> export-there;
+    callback choose-export-folder();
+    callback documents-exports();
+    callback open-export-folder();
 
     // DAWs: each DAW's link, whether Bitwig is being checked, and the note under them.
     in property <[DawRowInfo]> daws;
@@ -595,6 +606,45 @@ component FoldersTab inherits VerticalLayout {
                 text: "Add folder\u{2026}";
                 enabled: !SettingsData.folders-busy;
                 clicked => { SettingsData.add-folder(gi); }
+            }
+        }
+    }
+    // Where exports go: the one folder the app writes into, rather than looks in.
+    SettingsCard {
+        title: SettingsData.exports-title;
+        intro: SettingsData.exports-note;
+        if SettingsData.export-folder != "": Text {
+            text: SettingsData.export-folder;
+            color: Theme.text;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        if SettingsData.export-line != "": Text {
+            text: SettingsData.export-line;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            alignment: start;
+            spacing: Space.sm;
+            StudioButton {
+                text: "Choose folder\u{2026}";
+                tip: "Pick where kits, Bitwig converts, MIDI parts and presets go from now on";
+                enabled: !SettingsData.folders-busy;
+                clicked => { SettingsData.choose-export-folder(); }
+            }
+            if SettingsData.export-chosen: StudioButton {
+                text: "Use Documents";
+                tip: "Exports go back into Music Organiser Exports in your Documents folder. What was exported stays where it is.";
+                enabled: !SettingsData.folders-busy;
+                clicked => { SettingsData.documents-exports(); }
+            }
+            if SettingsData.export-there: StudioButton {
+                text: "Open";
+                tip: "Show the folder";
+                clicked => { SettingsData.open-export-folder(); }
             }
         }
     }

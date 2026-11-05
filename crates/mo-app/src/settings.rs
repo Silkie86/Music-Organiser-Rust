@@ -316,8 +316,8 @@ pub fn folder_groups(
 }
 
 /// The line under the Folders tab's title.
-pub const FOLDERS_NOTE: &str = "The folders the app looks in. Adding or removing one never moves or deletes anything \
-    on disk, and a project folder taken off keeps its songs listed. The Songs page takes up a changed project folder \
+pub const FOLDERS_NOTE: &str = "The folders the app looks in, and at the bottom the one it puts exports in. Adding or \
+    removing one never moves or deletes anything on disk, and a project folder taken off keeps its songs listed. The Songs page takes up a changed project folder \
     (one added, or one taken off) at the next start, and reads the saves in a new one then.";
 
 /// The folder picker's title for a list.
@@ -341,6 +341,65 @@ pub fn folder_change_note(added: bool, folder: &str, done: Result<bool, String>)
         Ok(false) if added => Some(format!("{folder} is already on the list.")),
         Ok(false) => None,
         Err(e) => Some(format!("Nothing was changed: {e}")),
+    }
+}
+
+/// The Folders tab's card on where exports go: its title and what it's for.
+pub const EXPORTS_TITLE: &str = "EXPORTS";
+pub const EXPORTS_NOTE: &str = "Where the app puts what it makes for you: kits from Sounds (in Kits), songs converted \
+    for Bitwig and presets exported on Presets (in a folder named after each song), and MIDI parts sent to Bitwig (in \
+    MIDI browser). If the folder you choose isn't there when you export (its drive unplugged, say), the export stops \
+    and says so, rather than going anywhere else.";
+
+/// The folder picker's title for the export folder.
+pub const EXPORTS_PICK_TITLE: &str = "Choose the folder exports go into";
+
+/// What the Exports card shows: the folder exports go into, a line under it, and which buttons it has.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ExportsCard {
+    /// The folder, or empty when there's none to show.
+    pub folder: String,
+    pub note: String,
+    /// A folder was chosen, so "Use Documents" can go back to the app's own.
+    pub chosen: bool,
+    /// The folder is there now, so Open can show it.
+    pub there: bool,
+}
+
+/// The Exports card, from the export folder setting as the library keeps it (`setting`), where an export would write
+/// with it (`checked`, as every export checks it: [`crate::bitwig_convert::export_folder`]), and whether that folder is
+/// there now.
+pub fn exports_card(setting: Option<&str>, checked: &Result<PathBuf, String>, there: bool) -> ExportsCard {
+    let set = setting.map(str::trim).filter(|s| !s.is_empty());
+    let chosen = set.is_some();
+    match checked {
+        Ok(folder) => ExportsCard {
+            folder: folder.display().to_string(),
+            note: match (chosen, there) {
+                (true, _) => String::new(),
+                (false, true) => "The app's own choice: Music Organiser Exports in your Documents folder.".to_owned(),
+                (false, false) => "The app's own choice: Music Organiser Exports in your Documents folder, made the \
+                                   first time something is exported."
+                    .to_owned(),
+            },
+            chosen,
+            there,
+        },
+        // What an export would say now: it would stop.
+        Err(why) => ExportsCard { folder: set.unwrap_or_default().to_owned(), note: why.clone(), chosen, there: false },
+    }
+}
+
+/// What choosing the export folder (`Some`) or going back to Documents (`None`) did, in words: none when it changed
+/// nothing.
+pub fn export_change_note(folder: Option<&str>, done: Result<bool, String>) -> Option<String> {
+    match done {
+        Ok(true) => Some(match folder {
+            Some(folder) => format!("Exports now go into {folder}."),
+            None => "Exports go into Music Organiser Exports in your Documents folder again.".to_owned(),
+        }),
+        Ok(false) => None,
+        Err(e) => Some(format!("The export folder wasn't changed: {e}")),
     }
 }
 
@@ -805,6 +864,48 @@ mod tests {
         assert_eq!(broken.state, "Linked, but not working fully");
         assert!(broken.facts.iter().all(|f| f.what != "Open project"));
         assert!(broken.facts.last().is_some_and(|f| f.value.ends_with("Bitwig said: no MIDI")));
+    }
+
+    #[test]
+    fn the_exports_card_says_where_exports_go_and_what_an_export_would_say() {
+        let documents = PathBuf::from(r"C:\Users\Solomon\Documents\Music Organiser Exports");
+        // Nothing chosen: the app's own, in Documents, made when it's first needed.
+        let card = exports_card(None, &Ok(documents.clone()), false);
+        assert_eq!(card.folder, documents.display().to_string());
+        assert!(card.note.starts_with("The app's own choice") && card.note.contains("made the first time"));
+        assert!(!card.chosen && !card.there);
+        // "" is none too (the C# app's "none"), and once it's there it's only the app's own.
+        let card = exports_card(Some(" "), &Ok(documents.clone()), true);
+        assert_eq!(card.note, "The app's own choice: Music Organiser Exports in your Documents folder.");
+        assert!(!card.chosen && card.there);
+        // One chosen and there: just the folder.
+        let card = exports_card(Some(r"K:\Exports"), &Ok(PathBuf::from(r"K:\Exports")), true);
+        assert_eq!(
+            (card.folder.as_str(), card.note.as_str(), card.chosen, card.there),
+            (r"K:\Exports", "", true, true)
+        );
+        // One chosen that isn't there: what an export would say, and no Open.
+        let why = r"The export folder K:\Exports isn't there. Plug its drive in, then try again.".to_owned();
+        let card = exports_card(Some(r"K:\Exports"), &Err(why.clone()), false);
+        assert_eq!((card.folder.as_str(), card.note, card.chosen, card.there), (r"K:\Exports", why, true, false));
+        // Neither a folder nor Documents.
+        let card = exports_card(None, &Err(crate::bitwig_convert::NO_EXPORT_FOLDER.to_owned()), false);
+        assert_eq!((card.folder.as_str(), card.chosen), ("", false));
+        assert_eq!(card.note, crate::bitwig_convert::NO_EXPORT_FOLDER);
+    }
+
+    #[test]
+    fn export_folder_changes_are_said_plainly() {
+        assert_eq!(
+            export_change_note(Some(r"K:\Exports"), Ok(true)).as_deref(),
+            Some(r"Exports now go into K:\Exports.")
+        );
+        assert!(export_change_note(None, Ok(true)).is_some_and(|n| n.contains("Documents folder again")));
+        assert_eq!(export_change_note(Some(r"K:\Exports"), Ok(false)), None);
+        assert_eq!(
+            export_change_note(None, Err("locked".into())).as_deref(),
+            Some("The export folder wasn't changed: locked")
+        );
     }
 
     #[test]

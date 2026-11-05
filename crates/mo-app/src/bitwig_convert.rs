@@ -14,8 +14,9 @@ use std::path::{Path, PathBuf};
 use mo_convert::Options;
 use mo_convert::save::{Saved, bitwig_file, bitwig_from_fl, bitwig_name, can_save_over};
 
-/// The setting naming the export folder (the C# app's key).
-pub const EXPORT_FOLDER_KEY: &str = "export_folder";
+/// The setting naming the export folder (the C# app's key), set on Settings › Folders
+/// ([`mo_library::folders::set_export_folder`]).
+pub const EXPORT_FOLDER_KEY: &str = mo_library::folders::EXPORT_FOLDER;
 /// The setting naming the Bitwig project picked as the template (the C# app's key).
 pub const BITWIG_TEMPLATE_KEY: &str = "bitwig_template";
 /// The setting that's "1" when FL's steps on a Sampler play until the next note or the clip's end (the C# app's key).

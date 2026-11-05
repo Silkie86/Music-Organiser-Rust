@@ -5,7 +5,7 @@
 use std::path::PathBuf;
 
 use mo_library::Library;
-use mo_library::folders::{Changed, FolderList, add_folder, remove_folder};
+use mo_library::folders::{Changed, EXPORT_FOLDER, FolderList, add_folder, remove_folder, set_export_folder};
 use rusqlite::Connection;
 
 const SCHEMA: &str = r#"
@@ -126,4 +126,53 @@ fn a_list_it_cant_read_is_never_written_over() {
     add_folder(&path, FolderList::Projects, r"E:\Songs", &[]).unwrap();
     let nulls: i64 = c.query_row("SELECT COUNT(*) FROM roots WHERE path IS NULL", [], |r| r.get(0)).unwrap();
     assert_eq!(nulls, 1);
+}
+
+fn export_setting(path: &std::path::Path) -> Option<String> {
+    Library::open_read_only(path).unwrap().setting(EXPORT_FOLDER).unwrap()
+}
+
+#[test]
+fn the_export_folder_is_set_and_taken_back_and_nothing_else_changes() {
+    let path = make("exports.db");
+    assert!(set_export_folder(&path, Some(r"K:\Music Exports")).unwrap());
+    assert_eq!(export_setting(&path).as_deref(), Some(r"K:\Music Exports"));
+    // The same folder again, whatever its letter case or a separator at the end: nothing to do.
+    assert!(!set_export_folder(&path, Some(r"k:\music exports\")).unwrap());
+    assert_eq!(export_setting(&path).as_deref(), Some(r"K:\Music Exports"));
+    assert!(set_export_folder(&path, Some(r"I:\Exports")).unwrap());
+    assert_eq!(export_setting(&path).as_deref(), Some(r"I:\Exports"));
+    // Back to Documents: kept as "", as the C# app keeps "none"; blank is Documents too.
+    assert!(set_export_folder(&path, None).unwrap());
+    assert_eq!(export_setting(&path).as_deref(), Some(""));
+    assert!(!set_export_folder(&path, Some("  ")).unwrap());
+    assert!(!set_export_folder(&path, None).unwrap());
+    // The folders and the other settings are as they were.
+    let lib = Library::open_read_only(&path).unwrap();
+    assert_eq!(lib.setting("theme").unwrap().as_deref(), Some("Paper"));
+    assert_eq!(lib.list_setting("sample_folders").unwrap(), [r"D:\Samples"]);
+    assert_eq!(lib.roots().unwrap(), [r"C:\beats"]);
+}
+
+#[test]
+fn an_export_folder_it_cant_read_or_a_missing_library_is_never_written() {
+    let path = make("exports-unreadable.db");
+    let c = Connection::open(&path).unwrap();
+    c.execute("INSERT INTO settings VALUES (?1, x'00')", [EXPORT_FOLDER]).unwrap();
+    let e = set_export_folder(&path, Some(r"K:\Exports")).unwrap_err();
+    assert!(e.to_string().contains("isn't text"), "{e}");
+    let kind: String =
+        c.query_row("SELECT typeof(value) FROM settings WHERE key = ?1", [EXPORT_FOLDER], |r| r.get(0)).unwrap();
+    assert_eq!(kind, "blob");
+    // No library: none is made. No settings table: none is made.
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-library-folders");
+    let missing = dir.join("exports-not-there.db");
+    let _ = std::fs::remove_file(&missing);
+    assert!(set_export_folder(&missing, Some(r"K:\Exports")).is_err());
+    assert!(!missing.exists());
+    let bare = dir.join("exports-bare.db");
+    let _ = std::fs::remove_file(&bare);
+    Connection::open(&bare).unwrap().execute_batch("CREATE TABLE projects (id INTEGER)").unwrap();
+    let e = set_export_folder(&bare, Some(r"K:\Exports")).unwrap_err();
+    assert!(e.to_string().contains("no settings table"), "{e}");
 }

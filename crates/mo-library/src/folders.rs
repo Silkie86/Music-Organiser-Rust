@@ -1,9 +1,9 @@
 //! Adding and removing the folders the app looks in (Settings › Folders), in the C# app's `library.db`: the project
-//! folders (`roots`) and the sample, MIDI and plugin folders (JSON lists in `settings`). This, [`crate::moves`]
-//! (a folder moved to another drive) and [`crate::plugin_folders`] (your say on a plugin's folders), both from the
-//! Plugins page, are the only places the Rust app writes to `library.db`
-//! (Solomon's OK: folders 2026-11-03, moves and the Plugins page's folder fixes 2026-11-05); everything else opens it
-//! read-only. Once the app's own `songs.db` is the library, these write that instead, and so does
+//! folders (`roots`) and the sample, MIDI and plugin folders (JSON lists in `settings`); and the folder exports go
+//! into ([`set_export_folder`]). This, [`crate::moves`] (a folder moved to another drive) and
+//! [`crate::plugin_folders`] (your say on a plugin's folders), both from the Plugins page, are the only places the Rust
+//! app writes to `library.db` (Solomon's OK: folders 2026-11-03, moves and the Plugins page's folder fixes 2026-11-05,
+//! the export folder 2026-11-05); everything else opens it read-only. Once the app's own `songs.db` is the library, these write that instead, and so does
 //! [`crate::song_writes`] (what the app reads of your saves); `library.db` is then never written.
 //!
 //! Each change is one SQLite transaction: it reads the list as it is now (the C# app may have changed it since the
@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use mo_formats::case;
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::LibraryError;
 
@@ -91,6 +91,78 @@ pub fn remove_folder(
         folders.retain(|f| !same_folder(f, folder));
         folders.len() != before
     })
+}
+
+/// The setting naming the folder every export goes into (the C# app's key). Not set, or blank: "Music Organiser
+/// Exports" in Documents.
+pub const EXPORT_FOLDER: &str = "export_folder";
+
+/// Sets the folder every export goes into (Settings › Folders), or with `None` goes back to "Music Organiser Exports"
+/// in Documents (kept as "", the C# app's way of keeping "none"). The folder itself isn't looked at, made or moved.
+/// Says whether it changed anything: the folder already set (whatever its letter case, or a separator at the end) is
+/// left as it is. As every change here, it's one transaction that reads the setting as it is now, changes it, reads it
+/// back to check, and only then keeps it; a setting that isn't text is left alone rather than written over.
+pub fn set_export_folder(library: &Path, folder: Option<&str>) -> Result<bool, LibraryError> {
+    let folder = folder.map(str::trim).filter(|f| !f.is_empty());
+    let write_error = |why: String| LibraryError::Write { path: library.to_owned(), why };
+    let sql = |e: rusqlite::Error| match e.sqlite_error_code() {
+        Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => LibraryError::Busy { path: library.to_owned() },
+        _ => write_error(e.to_string()),
+    };
+    let mut conn = open_for_settings(library)?;
+    let has: bool = conn
+        .query_row("SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'settings')", [], |r| {
+            r.get(0)
+        })
+        .map_err(sql)?;
+    if !has {
+        return Err(write_error("it has no settings table, so the export folder couldn't be kept".to_owned()));
+    }
+    // IMMEDIATE takes the write lock at the start, so the setting read is the one written over.
+    let tx = conn.begin().map_err(sql)?;
+    let now = read_text(&tx, EXPORT_FOLDER).map_err(write_error)?;
+    let same = match (now.as_deref().map(str::trim).filter(|f| !f.is_empty()), folder) {
+        (None, None) => true,
+        (Some(now), Some(folder)) => same_folder(now, folder),
+        _ => false,
+    };
+    if same {
+        return Ok(false);
+    }
+    let value = folder.unwrap_or("");
+    tx.execute(
+        "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [EXPORT_FOLDER, value],
+    )
+    .map_err(sql)?;
+    if read_text(&tx, EXPORT_FOLDER).map_err(write_error)?.as_deref() != Some(value) {
+        // Dropping the transaction undoes it.
+        return Err(write_error(
+            "the export folder read back wasn't the one written, so nothing was changed".to_owned(),
+        ));
+    }
+    tx.commit().map_err(sql)?;
+    Ok(true)
+}
+
+/// A setting's text as kept now: none when it's missing or NULL. One that isn't text is refused rather than read as
+/// none, so a change never writes over what it couldn't read.
+fn read_text(conn: &Connection, key: &str) -> Result<Option<String>, String> {
+    let value = conn
+        .query_row("SELECT value FROM settings WHERE key = ?1", [key], |r| {
+            Ok(match r.get_ref(0)? {
+                ValueRef::Null => Ok(None),
+                ValueRef::Text(t) => Ok(Some(String::from_utf8_lossy(t).into_owned())),
+                _ => Err(()),
+            })
+        })
+        .optional()
+        .map_err(|e| e.to_string())?;
+    match value {
+        None => Ok(None),
+        Some(Ok(text)) => Ok(text),
+        Some(Err(())) => Err(format!("its {key} setting isn't text, so it was left as it is")),
+    }
 }
 
 /// Whether two folders are one: equal but for letter case and a separator at the end.
