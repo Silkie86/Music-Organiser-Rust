@@ -117,6 +117,8 @@ struct Page {
     tags: Vec<String>,
     /// How many sounds each filter's choices would show, from the newest list worked out (none before the first).
     counts: Option<SoundCounts>,
+    /// What History's times are told by ("14:05" today, "Tue" this week): taken again each time the lists are shown
+    /// ([`show_lists`]), so a page left open over midnight moves on with the days.
     now: NaiveDateTime,
     /// The sound playing (its place in `list`) and how long the part shown in its waveform lasts.
     playing: Option<(usize, f64)>,
@@ -568,6 +570,10 @@ pub fn wanted() {
         start();
     }
 }
+
+/// What every view says in the list's place when the sound library has no sounds in it (made, but nothing scanned
+/// into it yet): the words Rediscover has for it (`rediscover::why_nothing`).
+const NO_SOUNDS: (&str, &str) = ("No sounds yet", "Add your sample folders in Settings and let the scan finish.");
 
 /// While the sounds are read, every view shows one word in the list's place: not "No sounds match" (nothing is
 /// filtered out yet), and not the galaxy's own word on top of it (Solomon's F12 note, 2026-11-02 04:25). Said once,
@@ -1950,16 +1956,17 @@ fn wire_rediscover(app: &AppWindow) {
             rediscover_now(&app);
         }
     });
-    // A forgotten folder: its sounds in the List, with the other filters cleared so all of them show.
+    // A forgotten folder: its own sounds in the List (the ones its card counts, not its subfolders' nor a folder whose
+    // name starts the same way), with the other filters and the search cleared so all of them show.
     let weak = app.as_weak();
     data.on_pick_folder(move |folder| {
         let Some(app) = weak.upgrade() else { return };
         PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            p.filters = Filters { search: folder.to_string(), ..Filters::default() };
+            p.filters = Filters { folder: Some(folder.to_string()), ..Filters::default() };
             p.pick_view(LIST);
         });
-        app.global::<SoundsData>().set_search(folder);
+        app.global::<SoundsData>().set_search(SharedString::new());
         refresh(&app);
         show_lists(&app);
     });
@@ -2068,9 +2075,17 @@ fn listed(app: &AppWindow, id: u64, new: Listed) {
         show_chips(app);
         show_years(app);
         show_lists(app);
-        // Once the sounds are read, the list (or "No sounds match") takes the place of the word saying so.
-        if PAGE.with(|p| p.borrow().read) {
-            app.global::<SoundsData>().set_empty_title("".into());
+        // Once the sounds are read, the list (or "No sounds match") takes the place of the word saying so. A library
+        // with no sounds in it says so on every view instead, as the word did.
+        let (read, none) = PAGE.with(|p| {
+            let p = p.borrow();
+            (p.read, p.list.is_empty())
+        });
+        if read {
+            let (title, text) = if none { NO_SOUNDS } else { ("", "") };
+            let data = app.global::<SoundsData>();
+            data.set_empty_title(title.into());
+            data.set_empty_text(text.into());
         }
         // The filters dim the stars they leave out.
         galaxy::draw(app);
@@ -2160,6 +2175,7 @@ fn show_years(app: &AppWindow) {
 
 fn show_lists(app: &AppWindow) {
     let data = app.global::<SoundsData>();
+    PAGE.with(|p| p.borrow_mut().now = Local::now().naive_local());
     PAGE.with(|p| {
         let p = p.borrow();
         data.set_view(p.view);
@@ -2212,6 +2228,7 @@ fn show_chips(app: &AppWindow) {
         data.set_used(f.used);
         data.set_knows_use(p.list.knows_use());
         data.set_favourites(f.favourites);
+        data.set_folder(f.folder.as_deref().unwrap_or_default().into());
         data.set_any_filter(f.any());
         let order = filters::one_of(&Order::ALL.map(Order::name), p.order.name());
         data.set_order_filter(CHOICES.with(|c| c.order.view(&order)));

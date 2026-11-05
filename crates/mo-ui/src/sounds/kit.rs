@@ -323,30 +323,7 @@ pub(super) fn pad_place(i: i32) -> Option<usize> {
 /// Rolls the kit (every unlocked pad), or adds pad number `pad` to what the next roll fills, on its own thread,
 /// newest ask first: each ask carries everything still waiting, so none is lost.
 pub(super) fn roll(app: &AppWindow, pad: Option<u64>) {
-    let ask = PAGE.with(|p| {
-        let mut p = p.borrow_mut();
-        // The fingerprints are only for the vibe, so rolling doesn't wait for them.
-        let index = p.index.clone().unwrap_or_default();
-        let list = p.list.clone();
-        let k = &mut p.kit;
-        match pad {
-            Some(id) => {
-                k.pending.insert(id);
-            }
-            None => k.full = true,
-        }
-        if list.is_empty() {
-            k.status = "Your sounds are still being read.".to_owned();
-            return None;
-        }
-        k.asked += 1;
-        k.busy = true;
-        let (slots, pads) = k.to_roll();
-        Some((
-            RollAsk { id: k.asked, list, index, slots, pads, options: kits::Options { seed: 0, ..k.options.clone() } },
-            k.full,
-        ))
-    });
+    let ask = PAGE.with(|p| ready_to_roll(&mut p.borrow_mut(), pad));
     show(app);
     let Some((ask, full)) = ask else { return };
     if HERE.with(|h| *h.borrow()) {
@@ -400,6 +377,35 @@ pub(super) fn roll(app: &AppWindow, pad: Option<u64>) {
         });
         show(app);
     }
+}
+
+/// What a roll asks for, and whether it rolls the whole kit; or nothing, saying why, while there are no sounds to roll
+/// from. `pad` is added to what it fills, or with none the whole kit is rolled.
+fn ready_to_roll(p: &mut Page, pad: Option<u64>) -> Option<(RollAsk, bool)> {
+    // The fingerprints are only for the vibe, so rolling doesn't wait for them.
+    let index = p.index.clone().unwrap_or_default();
+    let list = p.list.clone();
+    // A library with no sounds in it (made, but nothing scanned into it yet) isn't one still being read.
+    let reading = !p.read && !p.unread;
+    let k = &mut p.kit;
+    match pad {
+        Some(id) => {
+            k.pending.insert(id);
+        }
+        None => k.full = true,
+    }
+    if list.is_empty() {
+        k.status = if reading { "Your sounds are still being read." } else { "There are no sounds to roll from yet." }
+            .to_owned();
+        return None;
+    }
+    k.asked += 1;
+    k.busy = true;
+    let (slots, pads) = k.to_roll();
+    Some((
+        RollAsk { id: k.asked, list, index, slots, pads, options: kits::Options { seed: 0, ..k.options.clone() } },
+        k.full,
+    ))
 }
 
 fn rolled_in(app: &AppWindow, r: Rolled) {
@@ -736,6 +742,19 @@ mod tests {
         // A second click while it's copied does nothing.
         assert!(ready_to_export(&mut p).is_none());
         assert_eq!(p.kit.status, "Exporting the kit…");
+    }
+
+    #[test]
+    fn a_library_with_no_sounds_is_not_one_still_being_read() {
+        // Before the sounds arrive.
+        let mut p = Page::default();
+        assert!(ready_to_roll(&mut p, None).is_none());
+        assert_eq!(p.kit.status, "Your sounds are still being read.");
+        // Read, with none in it.
+        let mut p = Page { read: true, ..Page::default() };
+        assert!(ready_to_roll(&mut p, None).is_none());
+        assert_eq!(p.kit.status, "There are no sounds to roll from yet.");
+        assert!(!p.kit.busy);
     }
 
     #[test]

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use chrono::Datelike;
 use mo_sounds::compact::Synced;
 use mo_sounds::usage::Usage;
-use mo_sounds::{Sound, SoundsError, music, types};
+use mo_sounds::{Sound, SoundsError, music, rediscover, types};
 use mo_space::size::size_text;
 use rayon::prelude::*;
 
@@ -110,6 +110,9 @@ pub struct Filters {
     pub tags: Vec<String>,
     /// Words that must all be in the path, type, tags or character.
     pub search: String,
+    /// Only the sounds right in this folder (not in a folder inside it), as Rediscover's forgotten folders count them:
+    /// one clicked there.
+    pub folder: Option<String>,
     /// Only sounds from these years, first to last: the years of the songs that use them when Used is on (and the
     /// use counts are in), otherwise the year the file was added.
     pub years: Option<(i32, i32)>,
@@ -183,6 +186,8 @@ impl Filters {
                 self.unused &= !self.used;
             }
             "favourites" => self.favourites = !self.favourites,
+            // Its chip shows only while it's on: a click takes it off.
+            "folder" => self.folder = None,
             _ => {}
         }
         if self.used != by_use {
@@ -447,8 +452,8 @@ impl SoundList {
         facets(s, t) == [true; FACETS] && self.passes_others(i, s, t)
     }
 
-    /// Everything but the chips' filters lets `s` (at `i`) through: favourites, Used and Unused, the years and the
-    /// search (last, as it's the slow one).
+    /// Everything but the chips' filters lets `s` (at `i`) through: favourites, Used and Unused, the folder, the years
+    /// and the search (last, as it's the slow one).
     fn passes_others(&self, i: usize, s: &Sound, t: &Test) -> bool {
         if t.favourites && !s.favourite {
             return false;
@@ -458,6 +463,9 @@ impl SoundList {
             if (t.unused && n > 0) || (t.used && n == 0) {
                 return false;
             }
+        }
+        if t.folder.is_some_and(|folder| !rediscover::in_folder(&s.path, folder)) {
+            return false;
         }
         if let Some((first, last)) = t.years {
             let within = |y: i32| y >= first && y <= last;
@@ -530,6 +538,7 @@ struct Test<'a> {
     /// The tempos picked, lowest and highest of each.
     tempos: Vec<(Option<f64>, Option<f64>)>,
     years: Option<(i32, i32)>,
+    folder: Option<&'a str>,
     words: Vec<String>,
 }
 
@@ -559,6 +568,7 @@ impl<'a> Test<'a> {
             keys,
             tempos: TEMPOS.iter().filter(|t| f.tempos.iter().any(|w| w == t.0)).map(|t| (t.1, t.2)).collect(),
             years: f.years,
+            folder: f.folder.as_deref(),
             words: f.search.split_whitespace().map(str::to_lowercase).collect(),
         }
     }
@@ -1164,6 +1174,35 @@ mod tests {
         assert_eq!(by(tempos(&["90 to 110", "130 to 150"])), vec![4, 2]);
         assert_eq!(by(Filters { search: "samples LOOPS".into(), ..Filters::default() }), vec![2]);
         assert_eq!(by(Filters { search: "kick pad".into(), ..Filters::default() }), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn a_folder_lists_only_its_own_sounds() {
+        let list = SoundList::new(vec![
+            sound(1, r"I:\Samples\Kicks\Punchy.wav", "Kick", None),
+            sound(2, r"i:\samples\KICKS\Deep.wav", "Kick", None),
+            sound(3, r"I:\Samples\Kicks 2\Thud.wav", "Kick", None),
+            sound(4, r"I:\Samples\Kicks\Old\Clap.wav", "Clap", None),
+            sound(5, r"I:\Samples\Kickstarter\Hat.wav", "Hat", None),
+        ]);
+        let folder = |f: &str| Filters { folder: Some(f.to_owned()), ..Filters::default() };
+        // The search the page used to put the folder in lets three other folders' sounds through too.
+        assert_eq!(
+            ids(
+                &list,
+                &list.view(&Filters { search: r"I:\Samples\Kicks".into(), ..Filters::default() }, Order::Name, 0)
+            ),
+            vec![4, 2, 5, 1, 3]
+        );
+        assert_eq!(ids(&list, &list.view(&folder(r"I:\Samples\Kicks"), Order::Name, 0)), vec![2, 1]);
+        // The type chips count within the folder, and its chip takes it off.
+        let (_, counts) = list.view_counted(&folder(r"I:\Samples\Kicks 2"), Order::Name, 0);
+        assert_eq!(counts.types.get("kick"), Some(&1));
+        assert_eq!(counts.types.len(), 1);
+        let mut f = folder(r"I:\Samples\Kicks");
+        assert!(f.any());
+        f.toggle("folder");
+        assert_eq!(f, Filters::default());
     }
 
     #[test]

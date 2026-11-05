@@ -290,9 +290,9 @@ pub fn folders(sounds: &[Sound], usage: &HashMap<i64, Usage>) -> Vec<FolderUse> 
     let mut out: Vec<FolderUse> = Vec::new();
     for s in sounds.iter().filter(|s| !s.hidden) {
         let dir = directory(&s.path);
-        let dir = if cfg!(windows) { dir.replace('/', "\\") } else { dir.to_owned() };
-        let i = *at.entry(case::key(&dir)).or_insert_with(|| {
-            out.push(FolderUse { folder: dir.clone(), sounds: 0, used: 0, share: 0.0 });
+        let i = *at.entry(folder_letters(dir).collect()).or_insert_with(|| {
+            let dir = if cfg!(windows) { dir.replace('/', "\\") } else { dir.to_owned() };
+            out.push(FolderUse { folder: dir, sounds: 0, used: 0, share: 0.0 });
             out.len() - 1
         });
         out[i].sounds += 1;
@@ -306,6 +306,18 @@ pub fn folders(sounds: &[Sound], usage: &HashMap<i64, Usage>) -> Vec<FolderUse> 
     // Stable: equal folders keep the order they were met in, as C#.
     out.sort_by(|a, b| a.share.total_cmp(&b.share).then(b.sounds.cmp(&a.sounds)));
     out
+}
+
+/// Whether the file at `path` is right in `folder` (not in a folder inside it), as [`folders`] counts a folder's
+/// sounds: the Sounds page lists a forgotten folder clicked on by this.
+pub fn in_folder(path: &str, folder: &str) -> bool {
+    folder_letters(directory(path)).eq(folder_letters(folder))
+}
+
+/// A folder's path letter by letter, as [`folders`] tells folders apart: capitals aside, and on Windows with `/` taken
+/// for `\\` (a library can hold paths written either way).
+fn folder_letters(dir: &str) -> impl Iterator<Item = char> + '_ {
+    dir.chars().map(|c| if cfg!(windows) && c == '/' { '\\' } else { c }).map(case::upper)
 }
 
 #[cfg(test)]
@@ -412,6 +424,34 @@ mod tests {
             [r"D:\Packs\Hats", r"E:\", r"D:\Packs\Kicks"]
         );
         assert_eq!((f[2].sounds, f[2].used, f[2].share), (11, 1, 0.091));
+    }
+
+    #[test]
+    fn a_folder_holds_the_sounds_it_counts_and_no_others() {
+        let paths = [
+            r"I:\Samples\Kicks\a.wav",
+            r"i:\samples\KICKS\b.wav",
+            r"I:\Samples\Kicks 2\c.wav",
+            r"I:\Samples\Kicks\Old\d.wav",
+            r"I:\Samples\Kickstarter\e.wav",
+            r"I:\Samples\Drum Kit\f.wav",
+            r"I:\Samples\Drum Loops\Kit stuff.wav",
+            r"D:\top.wav",
+        ];
+        let sounds: Vec<Sound> = paths.iter().zip(1..).map(|(p, id)| sound(id, p)).collect();
+        let found = folders(&sounds, &HashMap::new());
+        assert_eq!(found.len(), 7);
+        for f in &found {
+            assert_eq!(sounds.iter().filter(|s| in_folder(&s.path, &f.folder)).count(), f.sounds, "{}", f.folder);
+        }
+        // Only the folder's own sounds: not a folder inside it, nor one whose name starts the same way.
+        assert!(in_folder(r"i:\samples\KICKS\b.wav", r"I:\Samples\Kicks"));
+        for other in [r"I:\Samples\Kicks 2\c.wav", r"I:\Samples\Kicks\Old\d.wav", r"I:\Samples\Kickstarter\e.wav"] {
+            assert!(!in_folder(other, r"I:\Samples\Kicks"), "{other}");
+        }
+        assert!(!in_folder(r"I:\Samples\Drum Loops\Kit stuff.wav", r"I:\Samples\Drum Kit"));
+        assert!(in_folder(r"D:\top.wav", r"D:\"));
+        assert_eq!(cfg!(windows), in_folder("I:/Samples/Kicks/z.wav", r"I:\Samples\Kicks"));
     }
 
     #[test]
