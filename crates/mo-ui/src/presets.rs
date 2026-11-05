@@ -24,7 +24,9 @@ use std::time::{Duration, Instant};
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::bitwig_convert as bitwig;
+use mo_app::finder::Kind;
 use mo_app::log;
+use mo_app::places::Place;
 use mo_app::presets::{self as logic, CurveFilters, Filters, Item, Section, act, curve_act};
 use mo_app::shortcuts::{CURVES_ACTIONS, PRESETS_ACTIONS, Shortcuts, what_of};
 use mo_app::year_strip;
@@ -102,6 +104,10 @@ struct Page {
     /// Part fixes made since the sounds started being read, by fingerprint (None: the fix was taken away), so the
     /// sounds read after one was made get it too.
     fixed_now: HashMap<String, Option<Role>>,
+    /// A line Ctrl+K asked for, picked once the filtering asked for with it is done; and that line, to pick once the
+    /// list is on show.
+    to_pick: Option<usize>,
+    pick_now: Option<usize>,
 }
 
 thread_local! {
@@ -242,10 +248,43 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
     });
     wire(app);
+    crate::finder::on_open(Kind::Preset, |app, hit, _| {
+        let Some(at) = hit.id.parse::<usize>().ok().filter(|&at| PAGE.with(|p| at < p.borrow().items.len())) else {
+            return false;
+        };
+        crate::go_to(app, Place::Presets.index() as i32);
+        show_preset(app, at);
+        true
+    });
+    // Ctrl+K finds your presets before this page is first shown: they're read once, in the background.
+    crate::finder::when_opening(|app| {
+        let start = PAGE.with(|p| !std::mem::replace(&mut p.borrow_mut().started, true));
+        if start {
+            read_sounds(app);
+        }
+    });
     // The app may start on this page: it was shown before the page knew where the library is.
-    if app.get_place() == mo_app::places::Place::Presets.index() as i32 {
+    if app.get_place() == Place::Presets.index() as i32 {
         shown(app);
     }
+}
+
+/// Shows one line of the Sounds section, by its place in the lines (Ctrl+K): when the filters hide it, they go.
+fn show_preset(app: &AppWindow, at: usize) {
+    if PAGE.with(|p| p.borrow().section) != Section::Sounds {
+        pick_section(app, Section::Sounds);
+    }
+    if PAGE.with(|p| p.borrow().shown.contains(&at)) {
+        pick(app, Some(at));
+        return;
+    }
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.filters = Filters::default();
+        p.to_pick = Some(at);
+        refilter(&mut p);
+    });
+    show_all(app);
 }
 
 /// A key was changed in Settings: the buttons, card and menu show the new keys at once.
@@ -518,11 +557,24 @@ fn take_filtered(p: &mut Page, a: FilterAnswer) -> bool {
     p.chips = a.chips;
     p.format_note = a.format_note;
     p.plugins = a.plugins;
+    if let Some(at) = p.to_pick.take()
+        && p.shown.contains(&at)
+    {
+        p.pick_now = Some(at);
+    }
     true
 }
 
-/// Puts everything the page knows on screen.
+/// Puts everything the page knows on screen, then picks the line Ctrl+K asked for once the list shows it.
 fn show_all(app: &AppWindow) {
+    show_everything(app);
+    let pick_now = PAGE.with(|p| p.borrow_mut().pick_now.take());
+    if let Some(at) = pick_now {
+        pick(app, Some(at));
+    }
+}
+
+fn show_everything(app: &AppWindow) {
     let data = app.global::<PresetsData>();
     PAGE.with(|p| {
         let p = p.borrow();
@@ -836,6 +888,9 @@ fn read_sounds(_app: &AppWindow) {
                 }
                 refilter(&mut p);
             });
+            // Ctrl+K finds them once they're all read: handed over while reading, every batch added would copy them.
+            let items = PAGE.with(|p| Arc::clone(&p.borrow().items));
+            crate::finder::add_source(app, "presets", Arc::new(mo_app::finder::Presets(items)));
             show_all(app);
         });
     });

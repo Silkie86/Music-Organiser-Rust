@@ -575,6 +575,52 @@ pub trait Bin {
     }
 }
 
+/// What a clean-up hears of each send ([`Heard`]): where, and how it went.
+pub type Hear<'a> = dyn Fn(&Path, &Result<(), String>) + Sync + 'a;
+
+/// A bin that tells `hear` how each send went, so a clean-up's card can count what has gone so far. Everything else is
+/// `bin`'s own: each of [`Bin`]'s ways is passed on to it (a test checks each one), so a way added to [`Bin`] later must
+/// be passed on here too, or its default would stand in for `bin`'s own.
+pub struct Heard<'a> {
+    bin: &'a (dyn Bin + Sync),
+    hear: &'a Hear<'a>,
+}
+
+impl<'a> Heard<'a> {
+    pub fn new(bin: &'a (dyn Bin + Sync), hear: &'a Hear<'a>) -> Self {
+        Heard { bin, hear }
+    }
+}
+
+impl Bin for Heard<'_> {
+    fn send(&self, path: &Path) -> Result<(), String> {
+        let sent = self.bin.send(path);
+        (self.hear)(path, &sent);
+        sent
+    }
+    fn admin(&self) -> &dyn Admin {
+        self.bin.admin()
+    }
+    fn find(&self, removed: &mut [Removed]) -> Vec<Problem> {
+        self.bin.find(removed)
+    }
+    fn put_back(&self, removed: &[Removed]) -> Vec<Problem> {
+        self.bin.put_back(removed)
+    }
+    fn holds(&self, removed: &[Removed]) -> Option<Vec<bool>> {
+        self.bin.holds(removed)
+    }
+    fn put_back_checked(&self, removed: &[Removed], check: &Check<'_>, each: &mut dyn FnMut(usize, Option<String>)) {
+        self.bin.put_back_checked(removed, check, each);
+    }
+    fn can_look_for(&self, removed: &Removed) -> bool {
+        self.bin.can_look_for(removed)
+    }
+    fn refuses_quietly(&self, path: &Path, bytes: u64) -> Option<String> {
+        self.bin.refuses_quietly(path, bytes)
+    }
+}
+
 /// Sends each line of the plan to the bin, checking each again just before: one that changed, or that the guard now
 /// refuses, stays. A copy only goes while the save it copies is still there and still the same. Once you press Stop,
 /// what hasn't gone yet stays.
@@ -1610,6 +1656,117 @@ fn put_back_from_system_bin(
 #[cfg(test)]
 mod tests {
     use super::{Bin, IN_USE, KEPT_BY_YOU, NEEDS_ADMIN, SystemBin, bin_problem, on_network, text};
+
+    #[test]
+    fn a_heard_bin_tells_each_send_and_passes_every_way_on() {
+        use super::{Admin, Check, Heard, Problem, Removed, What};
+        use crate::plugin_space::SpaceKind;
+        use std::path::Path;
+        use std::sync::Mutex;
+
+        struct Asks;
+        impl Admin for Asks {
+            fn can_ask(&self) -> bool {
+                true
+            }
+            fn ask(&self, _: &[String]) -> Result<(), String> {
+                Ok(())
+            }
+        }
+        /// Answers each way unlike its default, and notes each it's asked: never the computer's bin.
+        #[derive(Default)]
+        struct Noting(Mutex<Vec<&'static str>>);
+        impl Noting {
+            fn note(&self, way: &'static str) {
+                self.0.lock().unwrap().push(way);
+            }
+        }
+        impl Bin for Noting {
+            fn send(&self, path: &Path) -> Result<(), String> {
+                self.note("send");
+                if path.ends_with("in use") { Err("It's in use.".to_owned()) } else { Ok(()) }
+            }
+            fn admin(&self) -> &dyn Admin {
+                self.note("admin");
+                &Asks
+            }
+            fn find(&self, removed: &mut [Removed]) -> Vec<Problem> {
+                self.note("find");
+                removed[0].bin_id = Some("1".to_owned());
+                vec![Problem { path: "a".to_owned(), why: "find".to_owned() }]
+            }
+            fn put_back(&self, _: &[Removed]) -> Vec<Problem> {
+                self.note("put_back");
+                vec![Problem { path: "a".to_owned(), why: "put back".to_owned() }]
+            }
+            fn holds(&self, _: &[Removed]) -> Option<Vec<bool>> {
+                self.note("holds");
+                Some(vec![true])
+            }
+            fn put_back_checked(&self, _: &[Removed], _: &Check<'_>, each: &mut dyn FnMut(usize, Option<String>)) {
+                self.note("put_back_checked");
+                each(0, None);
+            }
+            fn can_look_for(&self, _: &Removed) -> bool {
+                self.note("can_look_for");
+                false
+            }
+            fn refuses_quietly(&self, _: &Path, _: u64) -> Option<String> {
+                self.note("refuses_quietly");
+                Some("quietly".to_owned())
+            }
+        }
+
+        let inner = Noting::default();
+        let heard = Mutex::new(Vec::new());
+        let hear = |path: &Path, sent: &Result<(), String>| {
+            heard.lock().unwrap().push((path.to_string_lossy().into_owned(), sent.clone()));
+        };
+        let bin = Heard::new(&inner, &hear);
+        let one = Removed {
+            path: "a".to_owned(),
+            real: "a".to_owned(),
+            bytes: 1,
+            what: What::Plugin(SpaceKind::Sounds),
+            when: 0,
+            bin_id: None,
+            binned: None,
+            binned_zone: None,
+            stamp: None,
+        };
+        assert_eq!(bin.send(Path::new("a")), Ok(()));
+        assert_eq!(bin.send(Path::new("in use")), Err("It's in use.".to_owned()));
+        assert_eq!(
+            *heard.lock().unwrap(),
+            [("a".to_owned(), Ok(())), ("in use".to_owned(), Err("It's in use.".to_owned()))]
+        );
+        assert!(bin.admin().can_ask());
+        let mut found = vec![one.clone()];
+        assert_eq!(bin.find(&mut found)[0].why, "find");
+        assert_eq!(found[0].bin_id.as_deref(), Some("1"));
+        assert_eq!(bin.put_back(std::slice::from_ref(&one))[0].why, "put back");
+        assert_eq!(bin.holds(std::slice::from_ref(&one)), Some(vec![true]));
+        let mut back = Vec::new();
+        bin.put_back_checked(std::slice::from_ref(&one), &|_, _| Ok(()), &mut |n, why| back.push((n, why)));
+        assert_eq!(back, [(0, None)]);
+        assert!(!bin.can_look_for(&one));
+        assert_eq!(bin.refuses_quietly(Path::new("a"), 1).as_deref(), Some("quietly"));
+        // Each way reached the bin inside, none of them a default.
+        assert_eq!(
+            *inner.0.lock().unwrap(),
+            [
+                "send",
+                "send",
+                "admin",
+                "find",
+                "put_back",
+                "holds",
+                "put_back_checked",
+                "can_look_for",
+                "refuses_quietly"
+            ]
+        );
+    }
 
     /// A failed Undo on Linux takes away the empty file or folder it made, and nothing else.
     #[cfg(all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android")))]

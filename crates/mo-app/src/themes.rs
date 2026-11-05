@@ -132,7 +132,7 @@ pub const THEMES: [Theme; 9] = [
     theme(
         "Graphite",
         "Neutral greys with a mint accent: no colour cast at all. The app's own look.",
-        [0x121212, 0x171717, 0x1D1D1D, 0x252525, 0x323232, 0x2A2A2A, 0xF0F0F0, 0xA3A3A3, 0x6E6E6E, 0x3DDC97, 0x06180F],
+        [0x121212, 0x171717, 0x1D1D1D, 0x252525, 0x323232, 0x2A2A2A, 0xF0F0F0, 0xA3A3A3, 0x7C7C7C, 0x3DDC97, 0x06180F],
         Plex,
         false,
         false,

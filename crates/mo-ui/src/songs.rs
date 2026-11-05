@@ -246,10 +246,11 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
         log::info(
             "Songs",
             &format!(
-                "{} songs from {} saves (library read in {:.1} s, grouped in {:.1} s)",
+                "{} songs from {} saves (library read in {:.1} s{}, grouped in {:.1} s)",
                 songs.rows.len(),
                 songs.saves,
                 read_in.as_secs_f32(),
+                live.source().map(|from| format!(", {from}")).unwrap_or_default(),
                 (began.elapsed() - read_in).as_secs_f32()
             ),
         );
