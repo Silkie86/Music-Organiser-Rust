@@ -132,7 +132,7 @@ pub struct Library {
     pub(crate) conn: Connection,
     path: PathBuf,
     /// The tables this library has: one made by an older C# app may lack some, which then read as empty.
-    tables: HashSet<String>,
+    pub(crate) tables: HashSet<String>,
     /// The list query, naming the columns this library has (all but the big `info`, which only the detail needs).
     summaries: String,
     /// The columns `projects` has: an older C# app's lacks some.
@@ -258,7 +258,11 @@ impl Library {
     /// [`Library::saves`], and where they came from for the app's own library ("from the app's copy", or from
     /// library.db and why: `mo_library::list_copy`), for the log; None for any other library.
     pub fn saves_and_source(&self) -> Result<(Vec<Save>, Option<String>), LibraryError> {
-        // For the app's own library, from its small copy of the list when the library hasn't changed since.
+        // The app's own songs.db reads its list quickly: no copy of it is needed.
+        if self.has("project_info") {
+            return Ok((self.summaries("", [])?, Some("from songs.db".to_owned())));
+        }
+        // For the C# app's library, from the app's small copy of the list when the library hasn't changed since.
         crate::list_copy::saves(
             &self.path,
             &self.summaries,
@@ -303,17 +307,30 @@ impl Library {
         let row = self
             .conn
             .query_row("SELECT * FROM projects WHERE id = ?1", [id], |r| {
-                let mut d = SaveDetail {
+                let d = SaveDetail {
                     title: text(r, "title"),
                     can_extract_midi: int(r, "can_midi") == Some(1),
                     can_extract_presets: int(r, "can_presets") == Some(1),
                     ..SaveDetail::default()
                 };
-                read_info(&text(r, "info"), &mut d);
-                Ok(d)
+                Ok((d, text(r, "info")))
             })
             .optional()?;
-        let Some(mut d) = row else { return Ok(None) };
+        let Some((mut d, info)) = row else { return Ok(None) };
+        // The app's own songs.db keeps them compressed in a table of their own ([`crate::songs_db`]). Ones that can't
+        // be uncompressed (a bad sector) read as none, as JSON that can't be read does.
+        let info = if self.has("project_info") {
+            let blob: Option<Vec<u8>> = self
+                .conn
+                .query_row("SELECT info FROM project_info WHERE project_id = ?1", [id], |r| r.get(0))
+                .optional()?;
+            blob.and_then(|b| crate::songs_db::inflate(&b).ok())
+                .map(|t| String::from_utf8_lossy(&t).into_owned())
+                .unwrap_or_default()
+        } else {
+            info
+        };
+        read_info(&info, &mut d);
         d.save = save;
         if self.has("plugins") {
             let mut st = self.conn.prepare("SELECT * FROM plugins WHERE project_id = ?1")?;

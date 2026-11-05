@@ -252,6 +252,10 @@ fn report(done: &Tidied) {
 pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     let mut done = Tidied::default();
     done.add(remove_older(&places.data, is_cut_short, WRITING, now, false));
+    // The saves-list copy of library.db goes once songs.db is the app's own library: nothing reads it any more.
+    if mo_library::songs_db::own_since(&places.data.join(mo_library::songs_db::FILE_NAME)).is_some() {
+        done.add(remove_older(&places.data, is_list_copy, Duration::ZERO, now, false));
+    }
     if let Some(curves) = real_folder(&places.data, &[CURVES]) {
         done.add(remove_older(&curves, mo_presets::export::is_half_written, WRITING, now, false));
     }
@@ -838,9 +842,15 @@ fn is_cut_short(name: &str) -> bool {
             mo_presets::curves::FILE_NAME,
             mo_presets::sound_store::FILE_NAME,
             mo_library::list_copy::FILE_NAME,
+            mo_library::songs_db::FILE_NAME,
         ]
         .iter()
         .any(|database| mo_presets::fixes::is_half_made(name, database))
+}
+
+/// The saves-list copy of library.db ([`mo_library::list_copy`]), or the journal SQLite may leave beside it.
+fn is_list_copy(name: &str) -> bool {
+    name.strip_prefix(mo_library::list_copy::FILE_NAME).is_some_and(|end| ["", "-journal"].contains(&end))
 }
 
 /// The twin test's copy of the library, or SQLite's own files beside it.
@@ -1414,6 +1424,38 @@ mod tests {
             assert_eq!(done, Tidied { failed: 1, ..Tidied::default() });
             assert!(both_stay);
         }
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_saves_list_copy_goes_once_songs_db_is_the_apps_own() {
+        let dir = test_folder("list-copy");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let bin = TestBin(dir.join("bin"));
+        let now = SystemTime::now();
+        let copy = places.data.join(mo_library::list_copy::FILE_NAME);
+        changed_at(&copy, now);
+        let half_made = places.data.join("songs.db.new-12");
+        changed_at(&half_made, now);
+        // An hour and more on, the half-made songs.db a crash left is a leftover.
+        let later = now + WRITING * 2;
+        // library.db is still read: the copy stays.
+        rusqlite::Connection::open(places.data.join("library.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                     name TEXT NOT NULL, daw TEXT NOT NULL, info TEXT);",
+            )
+            .unwrap();
+        mo_library::songs_db::make(&places.data.join("library.db"), &places.data.join("songs.db"), &mut |_| {})
+            .unwrap();
+        assert_eq!(sweep(&places, later, &bin).removed, 1);
+        assert!(copy.exists() && !half_made.exists());
+        // songs.db the app's own: nothing reads the copy any more.
+        assert!(mo_library::songs_db::at_start(&places.data).is_songs_db());
+        assert_eq!(sweep(&places, later, &bin).removed, 1);
+        assert!(!copy.exists());
+        assert!(places.data.join("library.db").exists() && places.data.join("songs.db").exists());
         let _ = fs::remove_dir_all(&dir);
     }
 

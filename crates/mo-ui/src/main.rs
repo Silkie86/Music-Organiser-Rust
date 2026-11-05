@@ -44,10 +44,16 @@ fn main() -> Result<(), slint::PlatformError> {
     let feed = Feed::default();
     // This app's own settings over the C# app's, which library.db keeps and the app only reads.
     let data = mo_app::paths::data_dir();
-    let library = data.join("library.db");
-    // The saves list is read from a small copy of the app's own while the library hasn't changed (it's slow to read
-    // out of the library itself).
-    mo_library::list_copy::keep(&library, &data.join(mo_library::list_copy::FILE_NAME));
+    // The app's own song library, songs.db, once it's been made and checked; the C# app's library.db until then (and
+    // songs.db is made from it in the background, for the next start).
+    let songs_db = mo_library::songs_db::at_start(&data);
+    log::info("Song library", &songs_db.line());
+    let library = songs_db.library.clone();
+    if !songs_db.is_songs_db() {
+        // The saves list is read from a small copy of the app's own while library.db hasn't changed (it's slow to
+        // read out of library.db itself; songs.db needs no copy).
+        mo_library::list_copy::keep(&library, &data.join(mo_library::list_copy::FILE_NAME));
+    }
     let (settings, writable) = mo_ui::settings::load(&data, &library);
     let shortcuts = Shortcuts::from_setting(settings.get(mo_app::shortcuts::SETTING_KEY));
     // Settings' pace: how many low-priority threads background work gets, from now until the app closes.
@@ -90,7 +96,7 @@ fn main() -> Result<(), slint::PlatformError> {
     );
     mo_ui::startup::step("Sounds page");
     // MIDI: the MIDI index beside the library, read-only (the C# app's midi.db until the Rust one holds parts).
-    mo_ui::midi::connect(&app, mo_app::paths::data_dir().join("library.db"), feed.clone(), &shortcuts);
+    mo_ui::midi::connect(&app, library.clone(), feed.clone(), &shortcuts);
     mo_ui::startup::step("MIDI page");
     // Space, Backup: the backup settings live in a file of their own; the library is only read.
     mo_ui::backup::connect(&app, library.clone(), feed.clone());
@@ -100,7 +106,7 @@ fn main() -> Result<(), slint::PlatformError> {
         &app,
         mo_ui::settings::Setup {
             settings,
-            folder: data,
+            folder: data.clone(),
             library: library.clone(),
             running_pace: pace,
             live: true,
@@ -121,6 +127,10 @@ fn main() -> Result<(), slint::PlatformError> {
     app.window().set_maximized(true);
     // A little after start, the MIDI files older drags left in Temp (rule 28).
     mo_ui::drag::sweep_later();
+    // A little after start too, songs.db made from library.db, for the next start.
+    if songs_db.make_wanted() {
+        mo_app::song_library::make_later(data, feed.clone());
+    }
     // The watchdog starts once the window is up, so opening it doesn't count as a freeze.
     let watched = feed.clone();
     let sized = app.as_weak();

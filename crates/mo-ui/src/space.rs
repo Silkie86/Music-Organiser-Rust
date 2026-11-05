@@ -1385,7 +1385,9 @@ fn look(ask: Ask, weak: &slint::Weak<AppWindow>) {
     let drives = space::drives(&folders, space::look);
     arrive(weak, Step::Drives(ask.id, drives));
     let data = &ask.app_folder;
-    let databases = app_files::databases(data.join("library.db"), data.join("sounds.db"), data.join("midi.db"));
+    // The song and sound libraries the app reads (its own songs.db and sounds-rust.db once they're made).
+    let databases =
+        app_files::databases(ask.library.clone(), mo_app::sound_library::database_in(data), data.join("midi.db"));
     // Spread over the low-priority pool's threads (rule 21). A look stopped for a newer one says nothing: the newer
     // one's sizes follow.
     if let Ok(parts) = background::on_pool(|| app_files::measure(data, &databases, &ask.stop)) {

@@ -17,6 +17,7 @@ pub mod samples;
 pub mod scan;
 mod setting_list;
 pub mod songs;
+pub mod songs_db;
 pub mod watch;
 
 pub use db::{Library, LibraryError, PathSet, ProjectPlugin, ProjectSample, SampleUse, SaveDetail, UsageRules};
