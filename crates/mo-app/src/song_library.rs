@@ -145,7 +145,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mo-song-library-failing-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        rusqlite::Connection::open(dir.join("library.db")).unwrap().execute_batch("CREATE TABLE mystery (x);").unwrap();
+        rusqlite::Connection::open(dir.join("library.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                     name TEXT NOT NULL, daw TEXT NOT NULL, folder TEXT, mtime INTEGER, info TEXT);
+                 CREATE TABLE mystery (x);",
+            )
+            .unwrap();
         let feed = Feed::default();
         assert!(make_now(&dir, &feed).is_err());
         assert_eq!(feed.visible(Instant::now())[0].title, "Couldn't make the app's own song library");

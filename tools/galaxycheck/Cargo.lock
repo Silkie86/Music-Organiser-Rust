@@ -2904,6 +2904,7 @@ dependencies = [
  "mo-sounds",
  "mo-space",
  "rayon",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
