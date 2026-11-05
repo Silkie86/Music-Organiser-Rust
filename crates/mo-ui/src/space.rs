@@ -47,7 +47,7 @@ use mo_space::old_copies::Leftover;
 use mo_space::song::CompactSettings;
 use mo_space::spare::{SpareCopy, Used};
 use mo_space::{plugin_space, plugins};
-use slint::{ComponentHandle, ModelRc, VecModel};
+use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::plugins as plugins_page;
 use crate::sounds::{self as sounds_page, Known};
@@ -260,6 +260,8 @@ struct Page {
     /// While a look for Bitwig copies is on: the project folders looked through, of how many (0 while they're still
     /// being found).
     bitwig_looking: Option<(usize, usize)>,
+    /// Something arrived while the page was off show, so it wasn't drawn: it is when the page comes back ([`shown`]).
+    redraw: bool,
     /// What Fix did this time, the saves you ticked or unticked, and the projects whose other saves are on show.
     fixes: Fixes,
     /// The look for old copies, what the last one found (it stays on show while the next one looks), and whether one
@@ -337,8 +339,11 @@ struct LookAfter {
 enum Changed {
     /// The drives, the lists and the card.
     All,
-    /// Biggest wins first and the card: what a look for Bitwig copies found or how far it is, or how Fix is doing.
+    /// Biggest wins first and the card: what a look for Bitwig copies found, or how Fix is doing.
     Wins,
+    /// How far a look for Bitwig copies is, while nothing it found is on show yet: only its own line, and its card
+    /// when that's open ([`show_bitwig_looking`]).
+    BitwigLooking,
     /// Fix has finished: the page looks for copies again, to see what Fix wrote as it is on disk.
     LookAgain,
     /// Also taking room and the card: what the app put in the Recycle Bin that's still there.
@@ -526,6 +531,10 @@ pub fn shown(app: &AppWindow) {
     }
     if copies {
         look_for_sound_copies(app, sounds, false);
+    }
+    // What arrived while the page was off show, unless a look above has drawn it all since.
+    if PAGE.with(|p| p.borrow().redraw) {
+        show(app);
     }
 }
 
@@ -1862,7 +1871,7 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                 // Only the first look's progress is on the page; the activity card has a later one's.
                 Step::BitwigLooking(id, at) if id == p.bitwig_look.asked => {
                     p.bitwig_looking = Some(at);
-                    if p.bitwig.is_none() { Changed::Wins } else { Changed::Nothing }
+                    if p.bitwig.is_none() { Changed::BitwigLooking } else { Changed::Nothing }
                 }
                 Step::Bitwig(id, copies) if id == p.bitwig_look.asked => {
                     p.fixes.looked();
@@ -1996,9 +2005,32 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                 _ => Changed::Nothing,
             }
         });
+        // Off show the page draws nothing, as what arrives can take tens of milliseconds to draw and some comes
+        // several times a second (rule 12): it's drawn once when it comes back ([`shown`]). The looks a step asks
+        // for still start.
+        if !matches!(changed, Changed::Nothing) && app.get_place() != Place::Space.index() as i32 {
+            PAGE.with(|p| p.borrow_mut().redraw = true);
+            match changed {
+                Changed::LookAgain => look_for_copies(&app),
+                Changed::Bin { spare, old, songs } => {
+                    if spare {
+                        look_for_spare(&app);
+                    }
+                    if old {
+                        look_for_old(&app);
+                    }
+                    if songs {
+                        look_for_songs(&app);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         match changed {
             Changed::All => show(&app),
             Changed::Wins => show_wins(&app),
+            Changed::BitwigLooking => show_bitwig_looking(&app),
             Changed::LookAgain => look_for_copies(&app),
             Changed::Also => {
                 show_also(&app);
@@ -2041,6 +2073,8 @@ fn room_line(line: space::Line) -> RoomLine {
 /// Shows what the page knows now: the summary, the drives, the lists and the picked line's card.
 pub fn show(app: &AppWindow) {
     let data = app.global::<SpaceData>();
+    // It draws it all, so nothing waits to be drawn.
+    PAGE.with(|p| p.borrow_mut().redraw = false);
     PAGE.with(|p| {
         let p = p.borrow();
         let app_bytes = p.parts.as_deref().map_or(0, space::app_bytes);
@@ -2128,6 +2162,34 @@ fn show_wins(app: &AppWindow) {
         data.set_wins_note(space::wins_note(&nones, shown).into());
     });
     show_card(app);
+}
+
+/// Shows how far a look for Bitwig copies is: only its own line's words change (it stays where it is, measured as
+/// nothing until the look ends), and its card's when that's open. Every line was made again for each step before,
+/// about 40 ms on the window's thread, several times a second, and on whatever page was on show (F12 note's log, 5 Nov
+/// 2026); off show nothing is drawn now ([`arrive`]).
+fn show_bitwig_looking(app: &AppWindow) {
+    let (line, picked) = PAGE.with(|p| {
+        let p = p.borrow();
+        (space_bitwig::line(p.bitwig.as_ref(), p.bitwig_looking), p.picked == BITWIG_COPIES)
+    });
+    let shown = line.is_some_and(|(_, line)| replace_line(&app.global::<SpaceData>().get_wins(), room_line(line)));
+    if !shown {
+        // Its line isn't on show yet, or is gone: every line is made again.
+        return show_wins(app);
+    }
+    if picked {
+        show_card(app);
+    }
+}
+
+/// Puts `line` in place of the line with its id among `lines`, where that is. Whether it was there.
+fn replace_line(lines: &ModelRc<RoomLine>, line: RoomLine) -> bool {
+    let Some(at) = (0..lines.row_count()).find(|&i| lines.row_data(i).is_some_and(|l| l.id == line.id)) else {
+        return false;
+    };
+    lines.set_row_data(at, line);
+    true
 }
 
 /// Shows which line is picked and its card; picking a line or closing its card changes only this.
@@ -2346,6 +2408,18 @@ mod tests {
         let keys = mo_app::shortcuts::Shortcuts::default();
         assert_eq!(keys.page_action_for("F5", mo_app::shortcuts::SPACE_ACTIONS), Some(MEASURE));
         assert_eq!(keys.page_action_for("Ctrl+Shift+E", mo_app::shortcuts::SPACE_ACTIONS), Some(REVEAL));
+    }
+
+    #[test]
+    fn how_far_a_look_for_bitwig_copies_is_changes_only_its_own_line() {
+        let line = |id: &str, why: &str| RoomLine { id: id.into(), why: why.into(), ..RoomLine::default() };
+        let lines = ModelRc::new(VecModel::from(vec![line(OLD_COPIES, "Old"), line(BITWIG_COPIES, "1 of 9")]));
+        assert!(replace_line(&lines, line(BITWIG_COPIES, "2 of 9")));
+        let whys: Vec<String> = lines.iter().map(|l| l.why.to_string()).collect();
+        assert_eq!(whys, ["Old", "2 of 9"]);
+        // One that isn't on show: the lines are made again instead.
+        assert!(!replace_line(&lines, line(SPARE_COPIES, "Spare")));
+        assert_eq!(lines.row_count(), 2);
     }
 
     #[test]
