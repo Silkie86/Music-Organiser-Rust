@@ -714,7 +714,9 @@ pub fn summary(total: usize, shown: usize, songs: usize, files: usize, reading: 
         thousands(files),
         if files == 1 { "" } else { "s" }
     );
-    if shown == total { what } else { format!("Showing {} of {what}", thousands(shown)) }
+    // Shown counts preset files too, so it's set against everything listed, not the sounds alone: "Showing 62,318 of
+    // 61,725 sounds..." read as more shown than there are.
+    if shown == total { what } else { format!("Showing {} of {}: {what}", thousands(shown), thousands(total)) }
 }
 
 /// The list's words when it shows nothing: a title and a line, or ("", "") when there are lines.
@@ -1761,6 +1763,9 @@ mod tests {
         assert_eq!(both.kinds, [SourceKind::BitwigCurve]);
         assert!(shown_curves(&list, &f).1.chips.iter().all(|c| !c.on));
         assert_eq!(curves_summary(3, 2, 1), "2 curves, 1 hidden");
+        // What's shown is set against every line, preset files too (5 sounds from 2 songs and 3 preset files).
+        assert_eq!(summary(8, 8, 2, 3, false), "5 sounds from 2 songs, 3 preset files");
+        assert_eq!(summary(8, 6, 2, 3, false), "Showing 6 of 8: 5 sounds from 2 songs, 3 preset files");
     }
 
     #[test]
