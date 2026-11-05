@@ -50,6 +50,9 @@ jobs:
     needs: scope
     # Runs even when the scope job failed, and then fails itself, so a broken scope never shows as skipped (green).
     if: ${{ !cancelled() }}
+    # On a pull request Mac is advice only (Solomon, 2026-11-05): GitHub sometimes has no Mac runner for hours, and a
+    # PR may merge once Windows and Linux are green. On main Mac still counts; a Mac failure there is fixed at once.
+    continue-on-error: ${{ matrix.os == 'macos-latest' && github.event_name == 'pull_request' }}
     strategy:
       fail-fast: false
       matrix:
@@ -63,13 +66,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      # The galaxy check is a workspace of its own with its own target folder: cache both, or Windows builds wgpu
-      # from scratch every time (about 17 of its 20 minutes).
+      # Only main saves the cache (every PR starts from main's): a PR's own cache is no use to any other PR, saving it
+      # took Windows about 4 minutes at the end of each run, and PR caches pushed main's out of GitHub's 10 GB.
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: |
-            . -> target
-            tools/galaxycheck -> target
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Linux libraries for the window
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libasound2-dev
@@ -97,13 +98,31 @@ jobs:
       - name: Tests (and the crates that use them)
         if: needs.scope.outputs.rust == 'true' && runner.os == 'Linux'
         run: cargo test ${{ needs.scope.outputs.check }}
-      # The galaxy check is a workspace of its own (so its wgpu stays out of the app); checked on Windows, where it runs.
+
+  # The galaxy check is a workspace of its own (so its wgpu stays out of the app); checked on Windows, where it runs.
+  # A job of its own so it runs beside the Windows tests instead of after them (it added about 5 minutes to Windows).
+  galaxy:
+    name: Galaxy check
+    needs: scope
+    if: ${{ !cancelled() && (needs.scope.result != 'success' || needs.scope.outputs.galaxy == 'true') }}
+    runs-on: windows-latest
+    steps:
+      - name: Stop if working out what changed failed
+        if: needs.scope.result != 'success'
+        run: exit 1
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      # Its own target folder: without the cache Windows builds wgpu from scratch every time.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: tools/galaxycheck -> target
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Galaxy check clippy
-        if: runner.os == 'Windows' && needs.scope.outputs.galaxy == 'true'
         working-directory: tools/galaxycheck
         run: cargo clippy --all-targets
       - name: Galaxy check tests
-        if: runner.os == 'Windows' && needs.scope.outputs.galaxy == 'true'
         working-directory: tools/galaxycheck
         run: cargo test
 
@@ -131,6 +150,8 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
       - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libasound2-dev
       - name: Draw every page
         run: cargo run --bin mo-screens -- screenshots
@@ -162,6 +183,8 @@ jobs:
           dotnet-version: '10.0.x'
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Write the test files
         run: MO_TWIN_FIXTURES="$RUNNER_TEMP/twin" cargo test -p mo-formats --test twin_fixtures
       - name: Build the C# half
