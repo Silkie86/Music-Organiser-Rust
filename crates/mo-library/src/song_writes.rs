@@ -1,12 +1,11 @@
 //! The app keeping what it reads of your saves in its own song library, `songs.db` (step 3 of the new databases): a
-//! save the folder watch or the start's catch-up read ([`Put`]), one whose file has gone (marked missing), and one the
-//! scan now leaves out (dropped, as the C# app's scan drops them). Only a `songs.db` that's the app's own
-//! ([`crate::songs_db::own_since`]) is ever written here; never `library.db`, and never a `songs.db` that may yet be
-//! made again.
+//! save the folder watch or the start's catch-up read ([`Put`]), and one whose file has gone ([`Missing`]). Only a
+//! `songs.db` that's the app's own ([`crate::songs_db::own_since`]) is ever written here; never `library.db`, and never
+//! a `songs.db` that may yet be made again. No save's row is ever removed: one the scan now leaves out (an autosave, or
+//! in a folder it skips) stays, with what you gave it, and is only left off the list ([`crate::scan::is_ignored`]).
 //!
 //! Each batch is one SQLite transaction, IMMEDIATE so nothing else writes meanwhile: the rows are written, read back
-//! and checked, and only then kept. If anything goes wrong nothing is changed, and the caller tries the batch again
-//! with the next one.
+//! and checked, and only then kept. If anything goes wrong nothing is changed, and the caller tries again.
 //!
 //! A save keeps its id: a row with the save's path is the save (whatever id the app gave it), else the row with its
 //! id when it isn't new. A new one takes the id the app gave it while that's free, or the next free one, and
@@ -31,19 +30,24 @@ pub struct Put {
     pub new: bool,
 }
 
+/// A save the library has, whose file has gone (moved somewhere the app doesn't look, or deleted): it stays, marked
+/// missing. Only the row with both its id and its path is marked, so a row that's another save's by now never is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Missing {
+    pub id: i64,
+    pub path: String,
+}
+
 /// One batch of changes, kept together or not at all.
 #[derive(Clone, Debug, Default)]
 pub struct Batch {
     pub put: Vec<Put>,
-    /// Saves whose file has gone (moved somewhere the app doesn't look, or deleted): they stay, marked missing.
-    pub missing: Vec<i64>,
-    /// Saves the scan leaves out now (an autosave, or in a folder it skips): they go.
-    pub dropped: Vec<i64>,
+    pub missing: Vec<Missing>,
 }
 
 impl Batch {
     pub fn is_empty(&self) -> bool {
-        self.put.is_empty() && self.missing.is_empty() && self.dropped.is_empty()
+        self.put.is_empty() && self.missing.is_empty()
     }
 }
 
@@ -51,8 +55,8 @@ impl Batch {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Written {
     pub put: usize,
+    /// How many saves were marked missing (one the library no longer has as it was isn't).
     pub missing: usize,
-    pub dropped: usize,
     /// Saves kept under another id than the app gave them, as (given, kept): the file was in the library already
     /// under another, or the id was taken meanwhile (another copy of the app).
     pub ids: Vec<(i64, i64)>,
@@ -68,21 +72,27 @@ pub fn write(songs_db: &Path, batch: &Batch) -> Result<Written, LibraryError> {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => LibraryError::Busy { path: songs_db.to_owned() },
         _ => write_error(e.to_string()),
     };
-    if crate::songs_db::own_since(songs_db).is_none() {
-        return Err(write_error("it isn't the app's own song library (yet), so it isn't written".to_owned()));
+    let not_own = || write_error("it isn't the app's own song library (yet), so it isn't written".to_owned());
+    if !songs_db.is_file() {
+        return Err(write_error("it isn't there".to_owned()));
     }
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let mut conn = Connection::open_with_flags(songs_db, flags).map_err(sql)?;
     conn.busy_timeout(WAIT).map_err(sql)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;").map_err(sql)?;
+    let id: i32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0)).map_err(sql)?;
+    let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(sql)?;
+    if id != crate::songs_db::APPLICATION_ID || version != crate::songs_db::VERSION {
+        return Err(not_own());
+    }
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql)?;
-    // Looked at again under the write lock: only the app's own library is written.
+    // Looked at under the write lock: only the app's own library is written.
     let own: Option<rusqlite::types::Value> = tx
         .query_row("SELECT value FROM songs_info WHERE key = 'own_since'", [], |r| r.get(0))
         .optional()
         .map_err(sql)?;
     if own.is_none() {
-        return Err(write_error("it isn't the app's own song library, so it isn't written".to_owned()));
+        return Err(not_own());
     }
     let mut written = Written::default();
     let mut kept = Vec::with_capacity(batch.put.len());
@@ -94,14 +104,10 @@ pub fn write(songs_db: &Path, batch: &Batch) -> Result<Written, LibraryError> {
         kept.push((id, &put.detail));
         written.put += 1;
     }
-    for id in &batch.missing {
-        written.missing += tx.execute("UPDATE projects SET file_missing = 1 WHERE id = ?1", [id]).map_err(sql)?;
-    }
-    for id in &batch.dropped {
-        for table in ["plugins", "samples", "tags", "project_info"] {
-            tx.execute(&format!("DELETE FROM {table} WHERE project_id = ?1"), [id]).map_err(sql)?;
-        }
-        written.dropped += tx.execute("DELETE FROM projects WHERE id = ?1", [id]).map_err(sql)?;
+    for m in &batch.missing {
+        written.missing += tx
+            .execute("UPDATE projects SET file_missing = 1 WHERE id = ?1 AND path = ?2", params![m.id, m.path])
+            .map_err(sql)?;
     }
     check(&tx, &kept, batch).map_err(|e| match e {
         Checked::Sql(e) => sql(e),
@@ -254,7 +260,7 @@ impl From<rusqlite::Error> for Checked {
 }
 
 /// Reads back what was written: each save's row and how many plugins, samples and tags it has; each save marked
-/// missing, missing; each one dropped, gone.
+/// missing, missing.
 fn check(tx: &Transaction<'_>, kept: &[(i64, &SaveDetail)], batch: &Batch) -> Result<(), Checked> {
     let mut row = tx.prepare(
         "SELECT path, size, mtime, file_missing,
@@ -286,19 +292,14 @@ fn check(tx: &Transaction<'_>, kept: &[(i64, &SaveDetail)], batch: &Batch) -> Re
             return Err(Checked::Differs(format!("the save {}", d.save.path)));
         }
     }
-    let gone = |id: &i64| -> rusqlite::Result<Option<i64>> {
-        tx.query_row("SELECT file_missing FROM projects WHERE id = ?1", [id], |r| r.get(0)).optional()
-    };
-    for id in &batch.missing {
-        if let Some(missing) = gone(id)?
-            && missing != 1
-        {
-            return Err(Checked::Differs(format!("save {id} marked missing")));
-        }
-    }
-    for id in &batch.dropped {
-        if gone(id)?.is_some() {
-            return Err(Checked::Differs(format!("save {id} left out")));
+    for m in &batch.missing {
+        let back: Option<i64> = tx
+            .query_row("SELECT file_missing FROM projects WHERE id = ?1 AND path = ?2", params![m.id, m.path], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        if back.is_some_and(|missing| missing != 1) {
+            return Err(Checked::Differs(format!("{} marked missing", m.path)));
         }
     }
     Ok(())

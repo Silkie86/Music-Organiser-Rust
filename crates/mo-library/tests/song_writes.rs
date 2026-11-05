@@ -1,10 +1,10 @@
-//! The app keeping what it reads in its own songs.db: saves read, read again, moved, gone missing and left out, each
-//! batch all or nothing, only ever in the app's own songs.db.
+//! The app keeping what it reads in its own songs.db: saves read, read again, moved and gone missing, each batch all
+//! or nothing, only ever in the app's own songs.db, and no save's row ever removed.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use std::path::PathBuf;
 
-use mo_library::song_writes::{self, Batch, Put};
+use mo_library::song_writes::{self, Batch, Missing, Put};
 use mo_library::songs_db::{self, State};
 use mo_library::{Library, PluginKind, ProjectPlugin, ProjectSample, Save, SaveDetail};
 use rusqlite::Connection;
@@ -157,24 +157,24 @@ fn a_moved_save_keeps_its_row_and_a_file_the_library_has_keeps_its_id() {
 }
 
 #[test]
-fn gone_saves_are_marked_missing_and_left_out_ones_go_with_all_theirs() {
+fn a_gone_save_is_marked_missing_and_keeps_all_it_had() {
     let songs = library("gone");
     song_writes::write(&songs, &put(read(2, "C:\\Music\\Night\\Night_12.flp"), true)).unwrap();
-    let batch = Batch { missing: vec![1], dropped: vec![2], ..Batch::default() };
+    let missing = |id: i64, path: &str| Missing { id, path: path.to_owned() };
+    // Only the row with both its id and its path: one that's another save's by now is left alone.
+    let batch = Batch {
+        missing: vec![missing(2, "c:\\music\\night\\NIGHT_12.flp"), missing(1, "C:\\Somewhere\\Else.flp")],
+        ..Batch::default()
+    };
     let written = song_writes::write(&songs, &batch).unwrap();
-    assert_eq!((written.missing, written.dropped), (1, 1));
+    assert_eq!(written.missing, 1);
     let lib = Library::open_read_only(&songs).unwrap();
     let saves = lib.saves().unwrap();
-    assert_eq!(saves.len(), 1);
-    assert!(saves[0].file_missing);
-    assert_eq!(saves[0].rating, 4, "a missing save keeps what you gave it");
-    drop(lib);
-    let conn = Connection::open(&songs).unwrap();
-    for table in ["plugins", "samples", "tags", "project_info"] {
-        let left: i64 =
-            conn.query_row(&format!("SELECT COUNT(*) FROM {table} WHERE project_id = 2"), [], |r| r.get(0)).unwrap();
-        assert_eq!(left, 0, "{table}");
-    }
+    assert_eq!(saves.len(), 2);
+    let night_12 = saves.iter().find(|s| s.id == 2).unwrap();
+    assert!(night_12.file_missing);
+    assert_eq!((night_12.plugin_count, night_12.sample_count), (2, 1), "a missing save keeps what it had");
+    assert!(!saves.iter().find(|s| s.id == 1).unwrap().file_missing);
 }
 
 #[test]

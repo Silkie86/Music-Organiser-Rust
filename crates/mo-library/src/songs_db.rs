@@ -45,7 +45,7 @@ pub const FILE_NAME: &str = "songs.db";
 pub const OLD_FILE_NAME: &str = "library.db";
 
 /// SQLite's `application_id` for `songs.db` ("MOSG"): a file without it isn't one.
-const APPLICATION_ID: i32 = 0x4D4F_5347;
+pub(crate) const APPLICATION_ID: i32 = 0x4D4F_5347;
 /// The layout of `songs.db` (SQLite's `user_version`). One of a newer layout, made by a newer version of the app, is
 /// left alone, and `library.db` read.
 pub const VERSION: i32 = 1;
