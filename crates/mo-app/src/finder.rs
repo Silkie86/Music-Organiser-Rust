@@ -211,19 +211,19 @@ impl Folded {
         if best.is_some() || !fuzzy || w < 3 || !word.iter().all(|c| c.is_alphabetic()) {
             return best;
         }
-        // Letters in order, the first at the start of a word.
+        // Letters in order, the first at the start of a word, and close together: "khrd" finds "Kick Hard", but "bass"
+        // isn't spread over a long line like "Bin, where … app removes goes".
         let first = word[0];
-        let from = (0..n.len()).find(|&i| self.starts[i] && n[i] == first)?;
-        let mut rest = word[1..].iter();
-        let mut want = rest.next();
-        for &c in &n[from + 1..] {
-            match want {
-                Some(&x) if x == c => want = rest.next(),
-                Some(_) => {}
-                None => break,
+        let close = |from: usize| {
+            let mut rest = word[1..].iter().peekable();
+            for &c in &n[from + 1..n.len().min(from + 3 * w)] {
+                if rest.peek() == Some(&&c) {
+                    rest.next();
+                }
             }
-        }
-        want.is_none().then_some(12)
+            rest.peek().is_none()
+        };
+        (0..n.len()).any(|i| self.starts[i] && n[i] == first && close(i)).then_some(12)
     }
 
     /// Whether the name, letters and digits only, is exactly `whole`.
@@ -656,6 +656,131 @@ impl Source for Sounds {
     }
 }
 
+/// Every plugin the Plugins page lists, found by its name, its maker and its format. Its id is its line's name key and
+/// own ([`plugin_of`] splits it), so the page can find it again after a fresh read.
+pub fn plugins(plugins: &crate::plugins::Plugins) -> Lines {
+    let most = plugins.rows.iter().map(|r| r.songs).max().unwrap_or(0).max(1) as f32;
+    let lines = plugins
+        .rows
+        .iter()
+        .map(|r| {
+            let songs = match r.songs {
+                0 => "No song uses it".to_owned(),
+                n => format!("used in {}", plural(n, "song")),
+            };
+            let own = if r.own.is_empty() { String::new() } else { format!("{}'s own", r.own) };
+            let installed = if r.installed { "" } else { "not installed here" };
+            let detail = [r.vendor.as_str(), r.format.as_str(), own.as_str(), songs.as_str(), installed]
+                .into_iter()
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join(" · ");
+            Found {
+                name: r.name.clone(),
+                also: [r.vendor.as_str(), r.format.as_str(), r.own.as_str()].join(" "),
+                detail,
+                key: String::new(),
+                id: format!("{}\u{1f}{}", r.key, r.own),
+                // The plugins your songs use most first among equals.
+                weight: r.songs as f32 / most,
+            }
+        })
+        .collect();
+    Lines { kind: Some(Kind::Plugin), lines, ..Lines::default() }
+}
+
+/// A plugin's name key and own, from its id in [`plugins`].
+pub fn plugin_of(id: &str) -> (&str, &str) {
+    id.split_once('\u{1f}').unwrap_or((id, ""))
+}
+
+/// Every sound and preset file the Presets page lists, shared with it rather than copied: found by its name, then its
+/// plugin. Its id is its place in the page's lines, which only ever grow while the app runs.
+pub struct Presets(pub Arc<Vec<crate::presets::Item>>);
+
+impl Source for Presets {
+    fn kind(&self) -> Kind {
+        Kind::Preset
+    }
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+    fn name(&self, at: usize) -> &str {
+        self.0.get(at).map_or("", |i| i.row.name.as_str())
+    }
+    fn also(&self, at: usize) -> &str {
+        self.0.get(at).map_or("", |i| i.row.plugin.as_str())
+    }
+    fn detail(&self, at: usize) -> String {
+        let Some(i) = self.0.get(at) else { return String::new() };
+        let from = if i.is_file() { "Preset file".to_owned() } else { format!("in {}", i.song) };
+        [i.row.plugin.as_str(), from.as_str(), i.row.place.as_str()]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    }
+    fn id(&self, at: usize) -> String {
+        at.to_string()
+    }
+}
+
+/// Every MIDI part the MIDI page lists, found by its title, then where it's from. Its id is its notes' fingerprint, so
+/// the page finds it again after the index is read again.
+pub fn midi_parts(cat: &mo_midi::Catalogue) -> Lines {
+    let lines = cat
+        .entries
+        .iter()
+        .map(|e| {
+            let from = crate::midi::from_text(e);
+            let details = crate::midi::details(e);
+            Found {
+                name: crate::midi::title(e),
+                detail: [details.as_str(), from.as_str()]
+                    .into_iter()
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+                also: from,
+                key: String::new(),
+                id: e.phrase.hash.clone(),
+                // Notes found in many files first among equals.
+                weight: ((e.copies() as f32 - 1.0) / 10.0).clamp(0.0, 1.0),
+            }
+        })
+        .collect();
+    Lines { kind: Some(Kind::MidiPart), lines, ..Lines::default() }
+}
+
+/// The Settings page's tabs, each found by what's on it too ("theme" finds General). The id is the tab's name.
+pub fn settings() -> Lines {
+    use crate::settings::Tab;
+    let lines = Tab::ALL
+        .into_iter()
+        .map(|t| Found {
+            name: format!("Settings › {}", t.name()),
+            also: format!("{} {}", t.name(), settings_words(t)),
+            detail: t.summary().to_owned(),
+            key: String::new(),
+            id: t.name().to_owned(),
+            weight: 0.6,
+        })
+        .collect();
+    Lines { kind: Some(Kind::Setting), lines, ..Lines::default() }
+}
+
+/// What's set on a Settings tab, in words you might type for it.
+fn settings_words(t: crate::settings::Tab) -> &'static str {
+    use crate::settings::Tab;
+    match t {
+        Tab::General => "theme colour accent font text size start page sound output pace speed pointer",
+        Tab::Folders => "folders projects samples sounds midi plugins add remove",
+        Tab::Daws => "bitwig fl studio script extension link install",
+        Tab::Shortcuts => "keys keyboard hotkeys",
+        Tab::Developer => "version logs files",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -694,6 +819,10 @@ mod tests {
         let s = lines(Kind::Sound, &["Kick Hard", "khrd loop"]);
         let g = find(&[s], "khrd", None, 10);
         assert_eq!(titles(&g[0]), ["khrd loop", "Kick Hard"]);
+        // Letters spread over a long name don't count.
+        assert!(
+            find(&[lines(Kind::Action, &["Open the Recycle Bin, where everything goes"])], "bass", None, 10).is_empty()
+        );
         // Two letters are too few to guess at.
         assert!(find(&[lines(Kind::Sound, &["Kick Hard"])], "kh", None, 10).is_empty());
     }
@@ -862,5 +991,21 @@ mod tests {
     fn nothing_found_says_what_was_looked_for() {
         assert_eq!(nothing_found(" zzz ", None), "Nothing matches “zzz”.");
         assert_eq!(nothing_found("zzz", Some(Kind::Sound)), "No sounds match “zzz”.");
+    }
+
+    #[test]
+    fn a_settings_tab_is_found_by_what_is_on_it() {
+        let g = find(&[Arc::new(settings()) as Arc<dyn Source>], "theme", None, 4);
+        assert_eq!(g[0].kind, Kind::Setting);
+        assert_eq!(g[0].hits[0].id, "General");
+        let g = find(&[Arc::new(settings()) as Arc<dyn Source>], "bitwig", None, 4);
+        assert_eq!(g[0].hits[0].id, "DAWs");
+    }
+
+    #[test]
+    fn a_plugins_id_gives_back_its_key_and_own() {
+        assert_eq!(plugin_of("serum\u{1f}"), ("serum", ""));
+        assert_eq!(plugin_of("arpeggiator\u{1f}Bitwig"), ("arpeggiator", "Bitwig"));
+        assert_eq!(plugin_of("old"), ("old", ""));
     }
 }
