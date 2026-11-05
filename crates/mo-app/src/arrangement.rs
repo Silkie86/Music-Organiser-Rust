@@ -405,8 +405,8 @@ pub struct View {
     keys: Arc<Vec<(u8, u8)>>,
 }
 
-/// What a drag out of the app picks up from the view, and what it carries (`drag_out`).
 pub mod peaks_store;
+/// What a drag out of the app picks up from the view, and what it carries (`drag_out`).
 mod pick;
 
 fn lane_height(lane: &PreviewLane) -> f64 {

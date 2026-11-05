@@ -21,6 +21,7 @@ use super::Peaks;
 pub const FILE_NAME: &str = "arrangement-peaks.db";
 
 /// What the store keeps (`PRAGMA user_version`). Bump it when [`Peaks::of`] boils a file down differently (rule 7).
+/// What reads the audio is the caller's to say ([`PeakStore::open`]'s `reader`).
 const VERSION: i64 = 1;
 
 /// Marks the file as this app's waveform store (`PRAGMA application_id`): "MOAP".
@@ -29,7 +30,9 @@ const APPLICATION_ID: i64 = 0x4D4F_4150;
 /// The most bytes of peaks kept: about 5,000 one-minute files.
 pub const LIMIT: i64 = 64 * 1024 * 1024;
 
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS peaks (path TEXT PRIMARY KEY NOT NULL, size INTEGER NOT NULL,
+const SCHEMA: &str =
+    "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY NOT NULL, value TEXT NOT NULL) WITHOUT ROWID;
+    CREATE TABLE IF NOT EXISTS peaks (path TEXT PRIMARY KEY NOT NULL, size INTEGER NOT NULL,
     modified INTEGER NOT NULL, used INTEGER NOT NULL, file_seconds REAL NOT NULL, step REAL NOT NULL,
     peaks BLOB NOT NULL) WITHOUT ROWID;";
 
@@ -40,9 +43,10 @@ pub fn stamp(path: &Path) -> Option<(i64, i64)> {
     Some((i64::try_from(at.as_nanos()).unwrap_or(i64::MAX), i64::try_from(m.len()).unwrap_or(i64::MAX)))
 }
 
+/// Now, in milliseconds since 1970: when a waveform was last used.
 fn now() -> i64 {
     let at = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or(Duration::ZERO);
-    i64::try_from(at.as_secs()).unwrap_or(i64::MAX)
+    i64::try_from(at.as_millis()).unwrap_or(i64::MAX)
 }
 
 fn to_bytes(values: &[f32]) -> Vec<u8> {
@@ -64,17 +68,18 @@ pub struct PeakStore {
 
 impl PeakStore {
     /// Opens the store at `path`, making it (and its folder) if it isn't there. One SQLite says is damaged, or from
-    /// another version, is made again empty; one with another app's id is left as it is. An error says why there's no
-    /// store.
-    pub fn open(path: &Path) -> Result<PeakStore, String> {
-        match Self::open_as_is(path) {
+    /// another version, is made again empty; one with another app's id is left as it is. `reader` names what reads
+    /// the audio (its version, how much of a file it reads): kept waveforms read another way are forgotten. An error
+    /// says why there's no store.
+    pub fn open(path: &Path, reader: &str) -> Result<PeakStore, String> {
+        match Self::open_as_is(path, reader) {
             Err(e) if is_damage(&e) => {
                 for end in ["", "-wal", "-shm", "-journal"] {
                     let mut p = path.as_os_str().to_owned();
                     p.push(end);
                     let _ = std::fs::remove_file(PathBuf::from(p));
                 }
-                match Self::open_as_is(path) {
+                match Self::open_as_is(path, reader) {
                     Ok(Some(store)) => Ok(store),
                     Ok(None) => Err(format!("{e}; it couldn't be made again")),
                     Err(again) => Err(format!("{e}; made again, {again}")),
@@ -86,7 +91,7 @@ impl PeakStore {
         }
     }
 
-    fn open_as_is(path: &Path) -> rusqlite::Result<Option<PeakStore>> {
+    fn open_as_is(path: &Path, reader: &str) -> rusqlite::Result<Option<PeakStore>> {
         if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
             let _ = std::fs::create_dir_all(dir);
         }
@@ -101,21 +106,33 @@ impl PeakStore {
         // Only what was read before: a write lost to a power cut is read again, so no wait for the disk at each one.
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.pragma_update(None, "temp_store", "MEMORY")?;
+        // The WAL file doesn't stay bigger than this after a big write (rule 28).
+        conn.pragma_update(None, "journal_size_limit", 4 * 1024 * 1024)?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version != VERSION {
             // The id goes in with the table, in one go: a store cut short between the two would look like another
             // app's.
+            // Pages freed when old waveforms go are given back to the disk ([`PeakStore::put`]); set before any
+            // table is made in a new file.
+            conn.pragma_update(None, "auto_vacuum", "INCREMENTAL")?;
             conn.execute_batch(&format!(
-                "BEGIN IMMEDIATE; PRAGMA application_id = {APPLICATION_ID}; DROP TABLE IF EXISTS peaks; {SCHEMA}
-                 PRAGMA user_version = {VERSION}; COMMIT;"
+                "BEGIN IMMEDIATE; PRAGMA application_id = {APPLICATION_ID}; DROP TABLE IF EXISTS peaks;
+                 DROP TABLE IF EXISTS meta; {SCHEMA} PRAGMA user_version = {VERSION}; COMMIT;"
             ))?;
+        }
+        let kept: Option<String> =
+            conn.query_row("SELECT value FROM meta WHERE key = 'reader'", [], |r| r.get(0)).optional()?;
+        if kept.as_deref() != Some(reader) {
+            conn.execute_batch("BEGIN IMMEDIATE; DELETE FROM peaks;")?;
+            conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('reader', ?1)", [reader])?;
+            conn.execute_batch("COMMIT;")?;
         }
         // A quick look at one row, so a damaged table shows now (and is made again) rather than at each pick.
         conn.query_row("SELECT COUNT(*) FROM peaks", [], |r| r.get::<_, i64>(0))?;
         Ok(Some(PeakStore { conn }))
     }
 
-    /// A file's waveform, if it's kept for the file as it is now (`stamp`); marked as just used.
+    /// A file's waveform, if it's kept for the file as it is now (`stamp`). Mark the ones used with [`PeakStore::put`].
     pub fn get(&self, path: &Path, stamp: (i64, i64)) -> Option<Peaks> {
         let text = path.to_str()?;
         let row: Option<(f64, f64, Vec<u8>)> = self
@@ -129,18 +146,24 @@ impl PeakStore {
             .ok()
             .flatten();
         let (file_seconds, step, bytes) = row?;
-        let _ = self.conn.execute("UPDATE peaks SET used = ?2 WHERE path = ?1", params![text, now()]);
         Some(Peaks { file_seconds, step, values: from_bytes(&bytes) })
     }
 
-    /// Keeps the waveforms read now, each for its file as it was (`stamp`), in one go; then the files picked longest
-    /// ago go until the store is under [`LIMIT`].
-    pub fn put(&mut self, read: &[(PathBuf, (i64, i64), &Peaks)]) -> rusqlite::Result<()> {
-        if read.is_empty() {
+    /// Keeps the waveforms read now, each for its file as it was (`stamp`), and marks the kept ones `used` now, in one
+    /// go; then the files picked longest ago go until the store is under [`LIMIT`].
+    pub fn put(&mut self, read: &[(PathBuf, (i64, i64), &Peaks)], used: &[&Path]) -> rusqlite::Result<()> {
+        if read.is_empty() && used.is_empty() {
             return Ok(());
         }
         let tx = self.conn.transaction()?;
+        let mut freed = false;
         {
+            let mut touch = tx.prepare_cached("UPDATE peaks SET used = ?2 WHERE path = ?1")?;
+            for path in used {
+                if let Some(text) = path.to_str() {
+                    touch.execute(params![text, now()])?;
+                }
+            }
             let mut put = tx.prepare_cached(
                 "INSERT OR REPLACE INTO peaks (path, size, modified, used, file_seconds, step, peaks)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -165,10 +188,16 @@ impl PeakStore {
                     }
                     gone.execute([&path])?;
                     over -= bytes;
+                    freed = true;
                 }
             }
         }
-        tx.commit()
+        tx.commit()?;
+        if freed {
+            // Gives the freed pages back to the disk, so the file stays near the limit too.
+            self.conn.execute_batch("PRAGMA incremental_vacuum;")?;
+        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -196,12 +225,12 @@ mod tests {
         std::fs::write(&audio, b"pretend audio").expect("write");
         let stamp = stamp(&audio).expect("stamp");
         let peaks = Peaks { file_seconds: 2.0, step: 0.005, values: vec![0.0, 0.5, 1.0, 0.25] };
-        let mut store = PeakStore::open(&store_path).expect("open");
+        let mut store = PeakStore::open(&store_path, "test 60 s").expect("open");
         assert_eq!(store.get(&audio, stamp), None);
-        store.put(&[(audio.clone(), stamp, &peaks)]).expect("put");
+        store.put(&[(audio.clone(), stamp, &peaks)], &[]).expect("put");
         drop(store);
 
-        let store = PeakStore::open(&store_path).expect("open again");
+        let store = PeakStore::open(&store_path, "test 60 s").expect("open again");
         let kept = store.get(&audio, stamp).expect("kept");
         assert_eq!((kept.file_seconds, kept.step, kept.values.len()), (2.0, 0.005, 4));
         for (a, b) in kept.values.iter().zip(&peaks.values) {
@@ -209,19 +238,23 @@ mod tests {
         }
         // The file changed: not used.
         assert_eq!(store.get(&audio, (stamp.0 + 1, stamp.1)), None);
+        drop(store);
+        // Read another way: forgotten.
+        let store = PeakStore::open(&store_path, "test 120 s").expect("open with another reader");
+        assert_eq!(store.get(&audio, stamp), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn the_store_stays_under_its_limit_by_dropping_the_oldest() {
         let dir = folder("limit");
-        let mut store = PeakStore::open(&dir.join(FILE_NAME)).expect("open");
+        let mut store = PeakStore::open(&dir.join(FILE_NAME), "test").expect("open");
         // Each a quarter of the limit: the fifth pushes out the first.
         let big = Peaks { file_seconds: 1.0, step: 0.005, values: vec![0.5; (LIMIT / 4) as usize] };
         for n in 0..5 {
             let path = dir.join(format!("{n}.wav"));
             store.conn.execute("UPDATE peaks SET used = used - 10", []).expect("age the ones before");
-            store.put(&[(path, (n, 1), &big)]).expect("put");
+            store.put(&[(path, (n, 1), &big)], &[]).expect("put");
         }
         assert_eq!(store.count(), 4);
         assert_eq!(store.get(&dir.join("0.wav"), (0, 1)), None, "the oldest went");
@@ -234,12 +267,12 @@ mod tests {
         let dir = folder("damaged");
         let path = dir.join(FILE_NAME);
         std::fs::write(&path, vec![3u8; 4096]).expect("write");
-        assert!(PeakStore::open(&path).is_ok());
+        assert!(PeakStore::open(&path, "test").is_ok());
         let other = dir.join("other.db");
         let conn = Connection::open(&other).expect("open");
         conn.execute_batch("CREATE TABLE mine (x); INSERT INTO mine VALUES (1);").expect("make");
         drop(conn);
-        assert!(PeakStore::open(&other).is_err());
+        assert!(PeakStore::open(&other, "test").is_err());
         let n: i64 = Connection::open(&other)
             .and_then(|c| c.query_row("SELECT COUNT(*) FROM mine", [], |r| r.get(0)))
             .expect("still there");
