@@ -25,6 +25,12 @@ use mo_space::size::size_text;
 /// How many years without a song using it make an installed plugin "unused", as the C# app offers.
 pub const UNUSED_YEARS_CHOICES: [u32; 4] = [1, 2, 3, 5];
 pub const DEFAULT_UNUSED_YEARS: u32 = 2;
+
+/// Before this, no song using a plugin makes it unused: `years` before `now`. Space's plugins you haven't used count
+/// back the same way.
+pub fn unused_since(now: NaiveDateTime, years: u32) -> NaiveDateTime {
+    now.checked_sub_months(Months::new(years.saturating_mul(12))).unwrap_or(now)
+}
 /// How many "Install these" cards to show; 0 hides them.
 pub const NEEDED_COUNT_CHOICES: [usize; 5] = [0, 3, 6, 9, 12];
 pub const DEFAULT_NEEDED_COUNT: usize = 6;
@@ -481,7 +487,7 @@ impl Plugins {
         rows.sort_by(|a, b| (b.songs, b.saves.len()).cmp(&(a.songs, a.saves.len())).then_with(|| a.name.cmp(&b.name)));
 
         let measured = spaces.iter().filter_map(|s| s.measured).min();
-        let cutoff = now.checked_sub_months(Months::new(unused_years * 12)).unwrap_or(now);
+        let cutoff = unused_since(now, unused_years);
         with_room(&mut rows, &spaces, cutoff);
         let spaces: Vec<PluginSpace> = spaces.iter().map(space_of).collect();
 
@@ -560,7 +566,7 @@ impl Plugins {
 
     /// Before this, no song using a plugin makes it unused.
     fn cutoff(&self) -> NaiveDateTime {
-        self.now.checked_sub_months(Months::new(self.unused_years * 12)).unwrap_or(self.now)
+        unused_since(self.now, self.unused_years)
     }
 
     /// Changes how many years make a plugin unused, from what was read (nothing is read again).
@@ -745,6 +751,28 @@ impl Plugins {
     /// The row whose plugin has this name and DAW (for keeping the pick after a reload).
     pub fn find(&self, key: &str, own: &str) -> Option<usize> {
         self.rows.iter().position(|r| r.key == key && r.own == own)
+    }
+
+    /// Shows one plugin's row for another page (Space's Show on Plugins page), by its line's name key and `own`, and
+    /// gives the row to pick: when the filters hide it they go, and the sort stays. When it isn't in the list (it went,
+    /// or the old app has read it differently since that page looked), the list shows the plugins found by its `name`,
+    /// so the link always shows something.
+    pub fn show_one(&mut self, key: &str, own: &str, name: &str) -> Option<usize> {
+        let row = self.find(key, own);
+        if row.is_none_or(|r| !self.shown.contains(&r)) {
+            let search = if row.is_some() { String::new() } else { name.to_owned() };
+            self.filters = Filters { search, sort: self.filters.sort, ..Filters::default() };
+            self.refilter();
+        }
+        row
+    }
+
+    /// Shows only the plugins that take room and no song has used lately, for another page (Space's Show them on
+    /// Plugins page): "Big and unused" and no other filter, so the list has each one that page counted.
+    pub fn show_only_unused(&mut self) {
+        self.filters = Filters::default();
+        self.filters.show(Chip::BigUnused);
+        self.refilter();
     }
 
     /// The picked plugin's card.

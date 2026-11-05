@@ -299,15 +299,15 @@ pub fn biggest_first(mut lines: Vec<(u64, Line)>) -> Vec<Line> {
     lines.into_iter().map(|(_, line)| line).collect()
 }
 
-/// What can still be freed, as the page says it under Biggest wins first.
-pub const STILL_TO_COME: &str = "Still to come: plugins you haven't used.";
+/// What the page says under Biggest wins first when no look found anything and none says why.
+pub const NOTHING_TO_FREE: &str = "Nothing to free right now.";
 
 /// What the page says under Biggest wins first: why a kind has no line when a look found none of it (each kind's own
-/// sentence, ending in a space; "" for one with nothing to say), then what's still to come.
-pub fn wins_note(nones: &[&str]) -> String {
-    let mut note: String = nones.concat();
-    note.push_str(STILL_TO_COME);
-    note
+/// sentence, ending in a space; "" for one with nothing to say), and with no `lines` at all, that there's nothing to
+/// free when no kind says why; "" when there's nothing to say (the page then shows no note).
+pub fn wins_note<S: AsRef<str>>(nones: &[S], lines: usize) -> String {
+    let note = nones.iter().map(AsRef::as_ref).collect::<String>().trim_end().to_owned();
+    if note.is_empty() && lines == 0 { NOTHING_TO_FREE.to_owned() } else { note }
 }
 
 /// The App files line's id.
@@ -376,6 +376,28 @@ pub struct Part {
     pub more: Option<(String, PathBuf)>,
     /// Its Put back link, for a clean-up whose files are in the Recycle Bin: which clean-up (its kind, and when it ran).
     pub put_back: Option<(String, i64)>,
+    /// Its link to the Plugins page: one plugin's card there, or every plugin no song has used lately.
+    pub plugins: Option<OnPlugins>,
+}
+
+/// What a part's link to the Plugins page shows there.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OnPlugins {
+    /// One plugin's card, by its line's name key and own (the DAW of a DAW's own device), and its name (what that page
+    /// looks for when it's no longer there by those).
+    Plugin { key: String, own: String, name: String },
+    /// Every plugin no song has used lately (the Plugins page's "Big and unused").
+    Unused,
+}
+
+impl OnPlugins {
+    /// The link's words.
+    pub fn words(&self) -> &'static str {
+        match self {
+            OnPlugins::Plugin { .. } => "Show on Plugins page",
+            OnPlugins::Unused => "Show them on Plugins page",
+        }
+    }
 }
 
 /// The picked line's card.
@@ -618,11 +640,13 @@ mod tests {
     }
 
     #[test]
-    fn the_note_under_the_wins_ends_with_whats_still_to_come() {
-        assert_eq!(wins_note(&[]), STILL_TO_COME);
-        assert_eq!(
-            wins_note(&["", "No spare plugin copies were found. "]),
-            format!("No spare plugin copies were found. {STILL_TO_COME}")
-        );
+    fn the_note_under_the_wins_says_why_a_kind_has_no_line() {
+        assert_eq!(wins_note::<&str>(&[], 2), "");
+        assert_eq!(wins_note(&["", ""], 1), "");
+        let nones = ["", "No spare plugin copies were found. ", "Your songs have nothing to compact. "];
+        assert_eq!(wins_note(&nones, 1), "No spare plugin copies were found. Your songs have nothing to compact.");
+        assert_eq!(wins_note(&nones, 0), "No spare plugin copies were found. Your songs have nothing to compact.");
+        // No line and no kind says why: the page still says something.
+        assert_eq!(wins_note(&["", ""], 0), NOTHING_TO_FREE);
     }
 }
