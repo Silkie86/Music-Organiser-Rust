@@ -62,6 +62,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::sounds::reading(&app);
     app.global::<mo_ui::SoundsData>().invoke_pick_view(2);
     let sounds_reading = capture(&window);
+    // Tiles picked before the sounds arrive: the page keeps a view picked while they're read.
+    app.global::<mo_ui::SoundsData>().invoke_pick_view(0);
     mo_ui::sounds::show(&app, sample_sounds(), None, Some("1"));
     mo_ui::sounds::index_known(&app, std::sync::Arc::new(sample_fingerprints()));
     // Once to lay the page out (the tiles' width tells the page how many fit in a row), then for real.

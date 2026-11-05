@@ -322,6 +322,9 @@ export global SoundsData {
     // The place of the picked sound's line or tile row, to bring it into view, and a count that changes each time.
     in property <int> show-row;
     in property <int> show-ask;
+    // The tiles or the lines were made afresh (the view switched between them, say): the page brings the picked sound
+    // into view in them once they're laid out.
+    callback list-made();
 
     callback select(int);
     callback play-row(int);
@@ -1513,7 +1516,10 @@ export component SoundsPage inherits Rectangle {
                             property <int> columns: max(1, floor((self.visible-width - Space.sm) / (TileSize.width + Space.sm)));
                             property <int> show-ask: SoundsData.show-ask;
                             changed columns => { SoundsData.columns-changed(self.columns); }
-                            init => { SoundsData.columns-changed(self.columns); }
+                            init => {
+                                SoundsData.columns-changed(self.columns);
+                                SoundsData.list-made();
+                            }
                             changed show-ask => {
                                 // Scrolls only when the picked tile's row is out of sight.
                                 if (SoundsData.show-row * (TileSize.height + Space.sm) < -self.content-y
@@ -1558,6 +1564,7 @@ export component SoundsPage inherits Rectangle {
                         }
                         lines := ListView {
                             property <int> show-ask: SoundsData.show-ask;
+                            init => { SoundsData.list-made(); }
                             // The top of the line to bring into view.
                             property <length> show-top: SoundsData.show-row * list-box.line-height;
                             changed show-ask => {

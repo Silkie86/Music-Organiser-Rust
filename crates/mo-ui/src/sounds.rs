@@ -98,6 +98,10 @@ struct Page {
     /// A sound Ctrl+K jumped to that the filters hid: picked once the list without them arrives.
     to_pick: Option<usize>,
     autoplay: bool,
+    /// You picked a view, or turned Autoplay on or off: when the sounds arrive (or arrive again), the page keeps your
+    /// choice rather than the one you had last ([`Page::open_on`]).
+    chose_view: bool,
+    chose_autoplay: bool,
     /// How long each sound plays while a held arrow key steps through them, and when the pick last moved.
     step: Duration,
     stepping: list::Stepping,
@@ -160,6 +164,8 @@ impl Default for Page {
             picked: None,
             to_pick: None,
             autoplay: false,
+            chose_view: false,
+            chose_autoplay: false,
             step: Duration::from_millis(list::STEP_MS),
             stepping: list::Stepping::default(),
             asked: 0,
@@ -187,6 +193,31 @@ impl Default for Page {
 }
 
 impl Page {
+    /// Opens on the view and Autoplay you had last (the settings `view` and `autoplay`), unless you chose them while
+    /// the sounds were read.
+    fn open_on(&mut self, view: Option<&str>, autoplay: Option<&str>) {
+        if !self.chose_view {
+            self.view = view.and_then(|v| VIEWS.iter().position(|n| *n == v)).map_or(TILES, |i| i as i32);
+        }
+        // As in the C# app: off unless it was turned on.
+        if !self.chose_autoplay {
+            self.autoplay = autoplay == Some("1");
+        }
+    }
+
+    /// You picked view `v` (an index into [`VIEWS`]).
+    fn pick_view(&mut self, v: i32) {
+        self.view = v;
+        self.chose_view = true;
+    }
+
+    /// You turned Autoplay on or off: on, it says so.
+    fn toggle_autoplay(&mut self) -> bool {
+        self.autoplay = !self.autoplay;
+        self.chose_autoplay = true;
+        self.autoplay
+    }
+
     /// The places in `list` of what the view on show lists, in order.
     fn entry(&self, row: usize) -> Option<usize> {
         match self.view {
@@ -1378,9 +1409,7 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         p.tags = library.tags;
         // Counted afresh for these sounds: the choices show without numbers until then.
         p.counts = None;
-        p.view = view.and_then(|v| VIEWS.iter().position(|n| *n == v)).map_or(TILES, |i| i as i32);
-        // As in the C# app: off unless it was turned on.
-        p.autoplay = autoplay == Some("1");
+        p.open_on(view, autoplay);
         p.picked = None;
         p.rediscover.clear();
         p.re_started = false;
@@ -1513,17 +1542,13 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     let weak = app.as_weak();
     data.on_toggle_autoplay(move || {
         let Some(app) = weak.upgrade() else { return };
-        let on = PAGE.with(|p| {
-            let mut p = p.borrow_mut();
-            p.autoplay = !p.autoplay;
-            p.autoplay
-        });
+        let on = PAGE.with(|p| p.borrow_mut().toggle_autoplay());
         app.global::<SoundsData>().set_autoplay(on);
     });
     let weak = app.as_weak();
     data.on_pick_view(move |v| {
         let Some(app) = weak.upgrade() else { return };
-        PAGE.with(|p| p.borrow_mut().view = v);
+        PAGE.with(|p| p.borrow_mut().pick_view(v));
         show_lists(&app);
         bring_picked_into_view(&app);
         // Rediscover fills itself the first time it's opened, so it never greets you empty (as in the C# app).
@@ -1542,6 +1567,17 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     kit::wire(app);
     galaxy::wire(app);
     drag_out::wire(app);
+    let weak = app.as_weak();
+    data.on_list_made(move || {
+        // A turn later, once the new list is laid out: an ask made while it's still being made is the one its
+        // `changed show-ask` starts from, so it wouldn't scroll.
+        let weak = weak.clone();
+        Timer::single_shot(Duration::ZERO, move || {
+            if let Some(app) = weak.upgrade() {
+                bring_picked_into_view(&app);
+            }
+        });
+    });
     let weak = app.as_weak();
     data.on_columns_changed(move |n| {
         let Some(app) = weak.upgrade() else { return };
@@ -1622,6 +1658,8 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         PAGE.with(|p| p.borrow_mut().picked = None);
         app.global::<SoundsData>().set_panel_shown(false);
         redraw();
+        // The galaxy's ring leaves the star with it.
+        galaxy::show_picked(&app);
     });
     let weak = app.as_weak();
     data.on_menu_chosen(move |id| {
@@ -1919,7 +1957,7 @@ fn wire_rediscover(app: &AppWindow) {
         PAGE.with(|p| {
             let mut p = p.borrow_mut();
             p.filters = Filters { search: folder.to_string(), ..Filters::default() };
-            p.view = LIST;
+            p.pick_view(LIST);
         });
         app.global::<SoundsData>().set_search(folder);
         refresh(&app);
@@ -3050,6 +3088,28 @@ mod tests {
         assert!(!seeks(&p, Some("6"), 15.0));
         assert!(!seeks(&p, None, 2.0));
         assert!(!seeks(&p, Some("5"), 2.0));
+    }
+
+    #[test]
+    fn a_view_and_autoplay_chosen_while_the_sounds_are_read_stay_when_they_arrive() {
+        // Nothing chosen: the page opens on the settings, and on Tiles with Autoplay off without them.
+        let mut p = Page::default();
+        p.open_on(Some("List"), Some("1"));
+        assert_eq!((p.view, p.autoplay), (LIST, true));
+        let mut p = Page::default();
+        p.open_on(None, None);
+        assert_eq!((p.view, p.autoplay), (TILES, false));
+        // Galaxy picked and Autoplay turned on while the sounds were read: they stay, over the settings.
+        let mut p = Page::default();
+        p.pick_view(GALAXY);
+        assert!(p.toggle_autoplay());
+        p.open_on(Some("List"), Some("0"));
+        assert_eq!((p.view, p.autoplay), (GALAXY, true));
+        // Only what was chosen stays: a view picked leaves Autoplay to its setting.
+        let mut p = Page::default();
+        p.pick_view(KITS);
+        p.open_on(Some("List"), Some("1"));
+        assert_eq!((p.view, p.autoplay), (KITS, true));
     }
 
     #[test]
