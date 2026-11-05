@@ -159,7 +159,9 @@ impl Prints {
             let s = &mut *s;
             let read: Vec<(PathBuf, Known)> =
                 s.read.drain().filter_map(|p| s.known.get(&p).copied().map(|k| (p, k))).collect();
-            let asked = std::mem::take(&mut s.asked);
+            // Only a whole look uses (and starts again) the files asked about: one kept part way through, or stopped,
+            // leaves them for the whole look's end, so what it asked about before then isn't forgotten.
+            let asked = if whole_look { std::mem::take(&mut s.asked) } else { HashSet::new() };
             let before = s.known.len();
             if whole_look {
                 s.known.retain(|p, _| asked.contains(p));
@@ -407,6 +409,32 @@ mod tests {
         // A look that stopped forgets nothing.
         third.keep(false).expect("kept");
         assert_eq!(third.known(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn prints_kept_part_way_through_a_look_are_kept_and_not_forgotten_at_its_end() {
+        let dir = folder("part-way");
+        let store = dir.join(FILE_NAME);
+        let stop = AtomicBool::new(false);
+        let (a, b) = (dir.join("a.multisample"), dir.join("b.multisample"));
+        fs::write(&a, b"ay").expect("write");
+        fs::write(&b, b"bee").expect("write");
+        let mut look = Prints::default();
+        assert_eq!(look.remember_in(&store), Ok(0));
+        assert!(look.whole(&a, &stop).is_some());
+        // Kept part way through: already in the store, so an app closed now doesn't read `a` again.
+        look.keep(false).expect("kept");
+        let mut meanwhile = Prints::default();
+        assert_eq!(meanwhile.remember_in(&store), Ok(1));
+        drop(meanwhile);
+        assert!(look.whole(&b, &stop).is_some());
+        // The whole look's end still counts `a` as asked about.
+        look.keep(true).expect("kept");
+        assert_eq!(look.known(), 2);
+        drop(look);
+        let mut next = Prints::default();
+        assert_eq!(next.remember_in(&store), Ok(2));
         let _ = fs::remove_dir_all(&dir);
     }
 
