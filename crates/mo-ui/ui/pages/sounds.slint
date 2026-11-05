@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // Read-only for now (favourites, tags and types are shown, not changed), like the C# app's sounds.db until it's trusted.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, DragHandle, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -331,13 +331,16 @@ export global SoundsData {
     callback select(int);
     callback play-row(int);
     // Dragging a sound out of the app, to a DAW or a folder (mo-ui's sounds/drag_out.rs): a tile or a line by its row,
-    // a pad by its place, a "Sounds like this" or a Galaxy's swept line by its sound's place in the library; then
-    // `drag-let-go` if the button comes up before the drag has got going. The one carried is dimmed (`lifted-…`) and
-    // glows for a moment once it has landed (`landed-…`); -1 for none.
+    // a pad by its place, a "Sounds like this" or a Galaxy's swept line by its sound's place in the library, or the
+    // picked sound by its card's handle; then `drag-let-go` if the button comes up before the drag has got going. The
+    // one carried is dimmed (`lifted-…`) and glows for a moment once it has landed (`landed-…`); -1 for none.
     callback drag-row(int);
     callback drag-pad(int);
     callback drag-alike(int);
+    callback drag-picked();
     callback drag-let-go();
+    in property <bool> lifted-picked;
+    in property <bool> landed-picked;
     in property <int> lifted-row: -1;
     in property <int> landed-row: -1;
     in property <int> lifted-pad: -1;
@@ -950,6 +953,16 @@ component SoundPanel inherits SidePanel {
             can-seek: true;
             seek(at) => { SoundsData.seek(at); }
         }
+    }
+    // Where to take the sound from to drag it into a DAW or a folder: a handle of its own, as a click on the waveform
+    // seeks there (Solomon's F12 note, 5 Nov 2026: the card had no plain place to drag it from).
+    DragHandle {
+        text: "Drag into your DAW or a folder";
+        tip: "Drag the sound out as its own file, where it is on disk";
+        lifted: SoundsData.lifted-picked;
+        landed: SoundsData.landed-picked;
+        drag-out => { SoundsData.drag-picked(); }
+        drag-let-go => { SoundsData.drag-let-go(); }
     }
     CardActions {
         actions: SoundsData.actions;
