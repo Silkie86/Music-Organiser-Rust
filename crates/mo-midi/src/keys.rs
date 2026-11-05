@@ -33,7 +33,7 @@ pub fn with_reader<T>(f: impl FnOnce(&mut KeyReader) -> T) -> T {
 }
 
 /// How the key finder hears a part of this kind.
-fn heard_as(role: Role) -> mo_harmony::Role {
+pub(crate) fn heard_as(role: Role) -> mo_harmony::Role {
     match role {
         Role::Melody => mo_harmony::Role::Melody,
         Role::Chords | Role::Arp => mo_harmony::Role::Harmony,
@@ -65,14 +65,19 @@ pub fn hear(reader: &mut KeyReader, notes: &[NoteEvent], role: Role, cut: bool) 
     if role == Role::Drums {
         return None;
     }
-    let pitched: Vec<Note> = notes
-        .iter()
-        .filter(|n| !n.muted)
-        .map(|n| Note { start: n.start, length: n.length, key: n.key, velocity: n.velocity })
-        .collect();
+    let pitched = heard_notes(notes);
     let parts = [Part { role: heard_as(role), notes: &pitched }];
     let span = if cut { Span::Window } else { Span::Loop };
     Some((reader.hear(&parts, Grid::four_four(PPQ as u32))?, span))
+}
+
+/// A part's notes as `mo-harmony` hears them (the key finder and the chord reader alike): muted ones left out.
+pub(crate) fn heard_notes(notes: &[NoteEvent]) -> Vec<Note> {
+    notes
+        .iter()
+        .filter(|n| !n.muted)
+        .map(|n| Note { start: n.start, length: n.length, key: n.key, velocity: n.velocity })
+        .collect()
 }
 
 /// The key a stored reading names for sure (one key, or the likelier of a pair), for the page to show and search by.

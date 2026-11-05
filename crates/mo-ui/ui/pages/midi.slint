@@ -3,7 +3,7 @@
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Caps, StudioButton, CloseButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, StudioButton, CloseButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
 
 // One part in the list.
 export struct MidiLine {
@@ -68,6 +68,9 @@ export struct PickedPart {
     key-why: string,
     // Where the reading comes from ("Read now from its notes by the key finder").
     key-from: string,
+    // The chord chart, a bar each ("Am7 | Dm9 G7 | Cmaj7"), read from the notes once they're read; "" for none.
+    chords: string,
+    chords-why: string,
     instrument: string,
     phrase: string,
     // The roll's lowest and highest key: "C2", "G4".
@@ -165,6 +168,16 @@ export global MidiData {
     in property <string> bitwig-key;
     in property <string> fl-key;
     callback daw-play(string);
+    // Dragging a part out into a DAW as a MIDI clip (mo-ui's drag.rs): a line of the list by its row, or the picked
+    // part by its card's handle; then `drag-let-go` if the button comes up before the drag has got going. The part is
+    // dimmed where it was picked up while it's carried, and glows there for a moment once it has landed.
+    callback drag-row(int);
+    callback drag-picked();
+    callback drag-let-go();
+    in property <int> lifted-row: -1;
+    in property <int> landed-row: -1;
+    in property <bool> lifted-picked;
+    in property <bool> landed-picked;
     in property <[MidiFact]> facts;
     in property <[CardAction]> actions;
     in property <[MenuItem]> menu;
@@ -203,6 +216,11 @@ component MidiLineView inherits ListLine {
     selected: line.picked;
     tip: line.why;
     tip-below: 26px;
+    draggable: true;
+    lifted: root.line.row == MidiData.lifted-row;
+    landed: root.line.row == MidiData.landed-row;
+    drag-out => { MidiData.drag-row(root.line.row); }
+    drag-let-go => { MidiData.drag-let-go(); }
     clicked => {
         root.chosen();
         MidiData.select(root.line.row);
@@ -503,6 +521,16 @@ component PartPanel inherits SidePanel {
             }
         }
     }
+    // Where to take the part from to drag it into a DAW: it goes as a MIDI clip of its own (a new .mid file; the part's
+    // own file is never touched).
+    DragHandle {
+        text: "Drag into your DAW as a MIDI clip";
+        tip: "Drag the part out as a new MIDI file of its notes";
+        lifted: MidiData.lifted-picked;
+        landed: MidiData.landed-picked;
+        drag-out => { MidiData.drag-picked(); }
+        drag-let-go => { MidiData.drag-let-go(); }
+    }
     CardActions {
         actions: MidiData.actions;
         chosen(id) => { MidiData.menu-chosen(id); }
@@ -539,6 +567,24 @@ component PartPanel inherits SidePanel {
         Text {
             text: MidiData.picked.key-from;
             color: Theme.faint;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+    }
+    if MidiData.picked.chords != "": VerticalLayout {
+        spacing: Space.xs;
+        Caps { text: "CHORDS"; }
+        Text {
+            text: MidiData.picked.chords;
+            color: Theme.text;
+            font-size: Type.body;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+        if MidiData.picked.chords-why != "": Text {
+            text: MidiData.picked.chords-why;
+            color: Theme.muted;
             font-size: Type.meta;
             wrap: word-wrap;
             min-width: 0px;

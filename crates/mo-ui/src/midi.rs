@@ -119,7 +119,8 @@ struct NotesAsk {
     role: Role,
     cut: bool,
     bars: i32,
-    read_key: bool,
+    /// The stored key reading, which the chord chart is spelled in; none: the key is read now, from the notes.
+    key: Option<KeyFact>,
 }
 
 struct NotesRead {
@@ -127,6 +128,8 @@ struct NotesRead {
     read: usize,
     roll: Roll,
     fact: Option<KeyFact>,
+    /// The chord chart, read just now from the notes.
+    chart: page::ChordChart,
 }
 
 /// The card's key while the part's notes are read.
@@ -378,6 +381,27 @@ fn wire(app: &AppWindow) {
     data.on_menu_chosen(move |id| {
         if let Some(app) = weak.upgrade() {
             run_action(&app, &id);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_drag_row(move |row| {
+        let Some(app) = weak.upgrade() else { return };
+        let at = PAGE.with(|p| usize::try_from(row).ok().and_then(|r| p.borrow().shown.get(r).map(|h| h.entry)));
+        if let Some(at) = at {
+            carry(&app, at, Spot::Row(row));
+        }
+    });
+    let weak = app.as_weak();
+    data.on_drag_picked(move || {
+        let Some(app) = weak.upgrade() else { return };
+        if let Some(at) = PAGE.with(|p| p.borrow().picked) {
+            carry(&app, at, Spot::Picked);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_drag_let_go(move || {
+        if let Some(app) = weak.upgrade() {
+            crate::drag::let_go(&app);
         }
     });
     let weak = app.as_weak();
@@ -917,7 +941,7 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
             role: e.role(),
             cut: page::is_cut(&e.phrase.clip),
             bars: e.phrase.bars,
-            read_key: e.phrase.key_fact.is_none(),
+            key: e.phrase.key_fact,
         })
     });
     data.set_panel_shown(true);
@@ -989,12 +1013,15 @@ fn notes_of(
 
 fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<NotesRead, String> {
     let notes = notes_of(&ask.from, ask.phrase_id, &ask.hash, open)?;
-    let fact = if ask.read_key {
+    let fact = if ask.key.is_none() {
         mo_midi::keys::with_reader(|r| mo_midi::keys::read(r, &notes, ask.role, ask.cut)).1
     } else {
         None
     };
-    Ok(NotesRead { read: notes.len(), roll: page::roll(&notes, ask.bars), fact })
+    // The chords too (their first 16 bars: quick even for a long part), spelled in the part's key.
+    let chords = mo_midi::chart::read(&notes, ask.role, ask.cut);
+    let chart = page::chord_chart(chords.as_ref(), page::chart_key(ask.key.as_ref().or(fact.as_ref())));
+    Ok(NotesRead { read: notes.len(), roll: page::roll(&notes, ask.bars), fact, chart })
 }
 
 fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
@@ -1024,6 +1051,8 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
                     "".into()
                 };
             }
+            picked.chords = read.chart.bars.into();
+            picked.chords_why = read.chart.why.into();
             // Drawn off the window's thread, as up to 4,000 notes would be a lot for it to lay out.
             crate::piano_roll::show(app, Some(read.roll));
             let drums = picked.kind == page::role_label(Role::Drums);
@@ -1078,6 +1107,8 @@ fn card(e: &mo_midi::Entry) -> PickedPart {
         roll_low: "".into(),
         roll_high: "".into(),
         roll_note: "".into(),
+        chords: "".into(),
+        chords_why: "".into(),
         others: strings(others),
         others_more: if more > 0 { format!("and {} more", thousands(more)).into() } else { "".into() },
     }
@@ -1935,6 +1966,90 @@ fn choose_soundfont(app: &AppWindow) {
     }
 }
 
+// ---- Dragging a part out into a DAW (`crate::drag` runs the drag) ------------------------------------------------
+
+/// Where a part was picked up, so it's dimmed there while it's carried and glows there once it has landed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spot {
+    /// A line of the list, by its row.
+    Row(i32),
+    /// The picked part's card, by its handle.
+    Picked,
+}
+
+/// Drags the part at `at` in the catalogue out as a new MIDI file of its notes, written to a drag folder in Temp
+/// (cleared later, rule 28). Its notes are read and the file written off the window's thread, as the drag gets going.
+fn carry(app: &AppWindow, at: usize, spot: Spot) {
+    let Some((from, phrase_id, hash, name, bars, colour)) = PAGE.with(|p| {
+        let p = p.borrow();
+        let e = p.cat.entry(at)?;
+        Some((p.notes.clone()?, e.phrase.id, e.phrase.hash.clone(), page::title(e), e.phrase.bars, colour(e.role())))
+    }) else {
+        return;
+    };
+    let tint = tint(app, colour);
+    let under_way = crate::drag::start(
+        app,
+        crate::drag::Drag {
+            make: Box::new(move || {
+                let notes = notes_of(&from, phrase_id, &hash, &mut None).map_err(|e| {
+                    log::warning("MIDI", &format!("A dragged part's notes couldn't be read: {e}"));
+                    format!("Its notes couldn't be read: {e}.")
+                })?;
+                mo_app::drag_out::from_part(&name, &notes, bars, tint)?
+                    .write(&std::env::temp_dir())
+                    .map_err(|e| format!("Couldn't write the MIDI file in Temp: {e}."))
+            }),
+            done: Box::new(move |app, outcome| {
+                lift(app, spot, false);
+                if outcome == crate::drag::Outcome::Landed {
+                    crate::drag::glow(app, move |app, on| glow(app, spot, on));
+                }
+            }),
+        },
+    );
+    if under_way {
+        lift(app, spot, true);
+    }
+}
+
+/// For the screenshots: what dragging the line at `row` carries (its card), without writing anything. None when
+/// there's no part there or its notes can't be read.
+pub fn card_at_row(app: &AppWindow, row: usize) -> Option<mo_app::drag_out::Payload> {
+    let (from, phrase_id, hash, name, bars, colour) = PAGE.with(|p| {
+        let p = p.borrow();
+        let e = p.cat.entry(p.shown.get(row)?.entry)?;
+        Some((p.notes.clone()?, e.phrase.id, e.phrase.hash.clone(), page::title(e), e.phrase.bars, colour(e.role())))
+    })?;
+    let notes = notes_of(&from, phrase_id, &hash, &mut None).ok()?;
+    let out = mo_app::drag_out::from_part(&name, &notes, bars, tint(app, colour)).ok()?;
+    Some(mo_app::drag_out::Payload { files: Vec::new(), cards: out.cards, caption: out.caption, numbered: false })
+}
+
+/// A kind's colour as the drag card takes it: 0xRRGGBB.
+fn tint(app: &AppWindow, colour: i32) -> u32 {
+    let c = app.global::<crate::Theme>().invoke_sound_type(colour);
+    u32::from_be_bytes([0, c.red(), c.green(), c.blue()])
+}
+
+/// Dims the part at `spot` while it's carried, or brings it back.
+fn lift(app: &AppWindow, spot: Spot, on: bool) {
+    let data = app.global::<MidiData>();
+    match spot {
+        Spot::Row(i) => data.set_lifted_row(if on { i } else { -1 }),
+        Spot::Picked => data.set_lifted_picked(on),
+    }
+}
+
+/// Lights the glow round the part at `spot` once it has landed, or lets it fade.
+fn glow(app: &AppWindow, spot: Spot, on: bool) {
+    let data = app.global::<MidiData>();
+    match spot {
+        Spot::Row(i) => data.set_landed_row(if on { i } else { -1 }),
+        Spot::Picked => data.set_landed_picked(on),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1959,11 +2074,12 @@ mod tests {
             role: e.role(),
             cut: false,
             bars: e.phrase.bars,
-            read_key: true,
+            key: None,
         };
         let Ok(read) = read_notes(&ask, &mut None) else { panic!("the made-up notes should read") };
         assert_eq!(read.roll.notes.len(), 12);
         assert!(read.fact.is_some());
+        assert!(!read.chart.bars.is_empty(), "its chords are read too");
     }
 
     #[test]

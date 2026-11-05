@@ -8,6 +8,7 @@
 
 pub mod analyser;
 pub mod catalogue;
+pub mod chart;
 pub mod chord;
 pub mod extract;
 pub mod gm;
