@@ -1097,6 +1097,33 @@ fn a_copy_behind_is_brought_up_to_date_one_last_time_and_is_the_apps_own_after()
     assert_eq!(format!("{sounds:?}"), owned);
 }
 
+/// `sounds.db` gone before the copy became the app's own (archived, or left in the old data folder when it moved): the
+/// copy is all there is, so the page reads it as it is, nothing behind, and it becomes the app's own library.
+#[test]
+fn a_copy_left_without_sounds_db_becomes_the_apps_own_as_it_is() {
+    let dir = folder("library-gone");
+    let old = library(&dir, 40);
+    let copy = compact::copy_of(&old);
+    assert!(!compact::sync(&old, &copy).unwrap().adopted);
+    let listed = |path: &Path| format!("{:?}", SoundsDb::open_read_only(path).unwrap().all(now()).unwrap());
+    let made = listed(&copy);
+    // The C# app saved once more after that, then sounds.db went.
+    cs(&old)
+        .execute("UPDATE sounds SET rating = 5 - COALESCE(rating, 0) WHERE id IN (SELECT id FROM sounds)", [])
+        .unwrap();
+    assert!(!compact::in_step(&old, &copy));
+    for end in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{end}", old.display()));
+    }
+    assert!(compact::in_step(&old, &copy), "nothing to bring it up to date with");
+    let Ok(compact::PageRead::Copy { sounds, behind, adopted, .. }) = compact::read_for_page(&old, now()) else {
+        panic!("the copy is read without sounds.db");
+    };
+    assert!(!behind && adopted);
+    assert_eq!(format!("{sounds:?}"), made);
+    assert!(compact::own_since(&copy).is_some());
+}
+
 /// A copy that's up to date becomes the app's own on the page's first read, once; made again because it's damaged, it
 /// keeps the time it became so. Without `sounds.db` to make it again from, the damage is said, not hidden.
 #[test]

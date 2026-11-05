@@ -62,8 +62,9 @@ pub fn database_beside(file: &Path) -> PathBuf {
 
 /// [`database_beside`], for the data folder `dir` itself.
 pub fn database_in(dir: &Path) -> PathBuf {
-    let own = dir.join(mo_sounds::compact::FILE_NAME);
-    if own.exists() { own } else { dir.join("sounds.db") }
+    let library = dir.join("sounds.db");
+    let own = mo_sounds::compact::copy_of(&library);
+    if own.exists() { own } else { library }
 }
 
 /// A sample locator that also looks in the Sounds library at `sounds_db`, when one is given. The library is read only

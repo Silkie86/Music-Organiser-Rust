@@ -216,13 +216,16 @@ pub fn copy_of(sounds_db: &Path) -> PathBuf {
 }
 
 /// Whether `copy` is up to date with `sounds_db`: made by this version of the app from `sounds_db` as it is now, or
-/// the app's own sound library already ([`own_since`]), which has nothing more to take from `sounds_db`. Looks only at
+/// the app's own sound library already ([`own_since`]), which has nothing more to take from `sounds_db` (nor has any
+/// copy once `sounds_db` has gone). Looks only at
 /// the files' sizes and times, SQLite's note of its log ([`SoundsDb::stamp`]) and the copy's own note, and never
 /// waits: a copy that's busy just then counts as not up to date.
 pub fn in_step(sounds_db: &Path, copy: &Path) -> bool {
     match look_at(copy, Duration::ZERO) {
         Ok(Found::Copy { format: FORMAT, own: Some(_), .. }) => true,
-        Ok(Found::Copy { format: FORMAT, stamp: Some(made_from), .. }) => made_from == SoundsDb::stamp(sounds_db),
+        Ok(Found::Copy { format: FORMAT, stamp: made_from, .. }) => {
+            library_gone(sounds_db) || made_from == Some(SoundsDb::stamp(sounds_db))
+        }
         _ => false,
     }
 }
@@ -277,12 +280,19 @@ pub enum PageRead {
 /// `now` is the page's "now", for what counts as recent.
 pub fn read_for_page(sounds_db: &Path, now: NaiveDateTime) -> Result<PageRead, SoundsError> {
     let copy = copy_of(sounds_db);
-    // The app's own library is never left for `sounds.db` when it can't be read just now: only when it's damaged
-    // (made again from `sounds.db`, while that's still there). Nor is it ever behind: looked at here waiting its turn,
-    // not as [`in_step`] does, which a copy busy just then would fool into a needless last sync.
-    let own = own_since(&copy).is_some();
+    // One look at the copy's own note, waiting its turn: a copy busy just then isn't taken for one that's behind.
     // Looked at before reading, so a save the C# app makes while this reads counts as one next time.
-    let behind = !own && !in_step(sounds_db, &copy);
+    let (own, behind) = match look_at(&copy, WAIT) {
+        Ok(Found::Copy { format: FORMAT, own: Some(_), .. }) => (true, false),
+        // With `sounds.db` gone (archived, or left in the old data folder when it moved), the copy is all there is:
+        // there's nothing to bring it up to date with.
+        Ok(Found::Copy { format: FORMAT, stamp: made_from, .. }) => {
+            (false, !library_gone(sounds_db) && made_from != Some(SoundsDb::stamp(sounds_db)))
+        }
+        _ => (false, true),
+    };
+    // The app's own library is never left for `sounds.db` when it can't be read just now: only when it's damaged
+    // (made again from `sounds.db`, while that's still there).
     let mut damaged = false;
     match SoundsDb::open_read_only(&copy) {
         Ok(db) if db.is_copy() => match db.all(now) {
@@ -309,14 +319,16 @@ pub fn read_for_page(sounds_db: &Path, now: NaiveDateTime) -> Result<PageRead, S
     Ok(PageRead::Library { everything, made })
 }
 
-/// Notes that the copy at `copy`, up to date with `sounds_db`, is the app's own sound library from now on. Whether
-/// this made it so: not when it was already, or when it isn't a whole copy of this version up to date with
-/// `sounds_db` as it is now (it's looked at again here, under the same lock as every update).
+/// Notes that the copy at `copy`, up to date with `sounds_db` (or the only library left, with `sounds_db` gone), is
+/// the app's own sound library from now on. Whether this made it so: not when it was already, or when it isn't a
+/// whole copy of this version up to date with `sounds_db` as it is now (it's looked at again here, under the same lock
+/// as every update).
 fn adopt(sounds_db: &Path, copy: &Path) -> Result<bool, String> {
     let _one_at_a_time = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
-    let stamp = SoundsDb::stamp(sounds_db);
+    // `None`: `sounds.db` has gone, so the copy is taken as it is.
+    let wanted = (!library_gone(sounds_db)).then(|| SoundsDb::stamp(sounds_db));
     match look_at(copy, WAIT)? {
-        Found::Copy { format: FORMAT, own: None, stamp: Some(made_from) } if made_from == stamp => {}
+        Found::Copy { format: FORMAT, own: None, stamp } if wanted.is_none() || stamp == wanted => {}
         _ => return Ok(false),
     }
     let noted = (|| -> rusqlite::Result<bool> {
@@ -326,7 +338,7 @@ fn adopt(sounds_db: &Path, copy: &Path) -> Result<bool, String> {
         // Looked at again inside the write: another copy of the app may have brought it up to date meanwhile.
         let made_from: Option<String> =
             tx.query_row("SELECT value FROM copy_info WHERE key = 'stamp'", [], |r| r.get(0)).optional()?.flatten();
-        if made_from.as_deref() != Some(stamp.as_str()) {
+        if wanted.is_some() && made_from != wanted {
             return Ok(false);
         }
         let added =
@@ -335,6 +347,11 @@ fn adopt(sounds_db: &Path, copy: &Path) -> Result<bool, String> {
         Ok(added == 1)
     })();
     noted.map_err(|e| e.to_string())
+}
+
+/// Whether there's no `sounds.db` at `sounds_db` at all (not only one that can't be looked at just now).
+fn library_gone(sounds_db: &Path) -> bool {
+    matches!(fs::metadata(sounds_db), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// The time now, in Unix seconds.

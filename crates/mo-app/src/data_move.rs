@@ -56,8 +56,20 @@ pub const OPEN_LOCK_FILE: &str = "app-open.lock";
 /// Folders at the top of the data folder that are the launchers', not the app's data: never copied.
 pub const LAUNCHER_FOLDERS: [&str; 2] = ["run-latest-rust", "run-latest"];
 /// Files at the top of the data folder the app no longer opens, so not copied (the old databases once the Rust ones
-/// replace them: they stay in the old folder for the archive step).
-pub const LEFT_BEHIND: &[&str] = &[];
+/// replace them: they stay in the old folder for the archive step), each with the file that replaced it: one is left
+/// behind only while that's there to go instead, so a folder without it keeps the old file. `sounds.db` (the C# app's
+/// sound library, with its log) once `sounds-rust.db` has taken over (Solomon, 2026-11-05): with `sounds.db` gone, the
+/// Sounds page takes the copy as it is for the app's own library ([`mo_sounds::compact::read_for_page`]).
+pub const LEFT_BEHIND: &[(&str, &str)] = &[
+    ("sounds.db", mo_sounds::compact::FILE_NAME),
+    ("sounds.db-wal", mo_sounds::compact::FILE_NAME),
+    ("sounds.db-shm", mo_sounds::compact::FILE_NAME),
+];
+
+/// Whether `name`, at the top of the data folder `dir`, is left behind ([`LEFT_BEHIND`]).
+fn left_behind(dir: &Path, name: &str) -> bool {
+    LEFT_BEHIND.iter().any(|&(old, instead)| old == name && dir.join(instead).is_file())
+}
 /// What a file is written as before it's checked.
 const PART: &str = ".mo-move";
 /// Room kept free on the new drive beyond the copy itself.
@@ -182,7 +194,7 @@ fn walk(from: &Path, inside: &[&Path], notes: &mut Vec<String>, stop: &AtomicBoo
                 continue;
             };
             if top
-                && (LEFT_BEHIND.contains(&name.as_str())
+                && (left_behind(&dir, &name)
                     || [MOVING_IN_FILE, MOVED_IN_FILE, MOVED_OUT_FILE, OPEN_LOCK_FILE].contains(&name.as_str()))
             {
                 continue;
@@ -879,6 +891,25 @@ mod tests {
         assert!(fs::read_to_string(s.first.join(MOVED_OUT_FILE)).unwrap().contains(&s.to.display().to_string()));
         // Nothing more to do.
         assert!(finish_in(&s.first).is_none());
+    }
+
+    #[test]
+    fn sounds_db_stays_behind_once_the_apps_own_sound_library_is_there() {
+        let s = Setup::new("sounds");
+        for name in ["sounds.db", "sounds.db-wal", "sounds.db-shm"] {
+            fs::write(s.first.join(name), b"C#").unwrap();
+        }
+        // No sounds-rust.db yet: sounds.db is the only sound library, so it goes.
+        assert_eq!(s.copy().unwrap().files, 9);
+        assert!(s.to.join("sounds.db").is_file());
+        // There: sounds.db stays in the old folder for the archive step (and leaves the copy, as a file gone does).
+        fs::write(s.first.join(mo_sounds::compact::FILE_NAME), b"Rust").unwrap();
+        s.copy().unwrap();
+        assert!(s.to.join(mo_sounds::compact::FILE_NAME).is_file());
+        for name in ["sounds.db", "sounds.db-wal", "sounds.db-shm"] {
+            assert!(!s.to.join(name).exists(), "{name}");
+            assert!(s.first.join(name).is_file(), "{name}");
+        }
     }
 
     #[test]

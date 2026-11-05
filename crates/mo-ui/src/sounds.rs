@@ -717,8 +717,9 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
                         let (features, clap) =
                             (std::mem::take(&mut everything.features), std::mem::take(&mut everything.clap));
                         let analysed = everything.analysed();
-                        // Taken in place of the copy's sounds shown, when those were behind: else they're the same.
-                        remade = first.behind.then_some(everything.sounds);
+                        // Taken in place of the copy's sounds shown: those were as the damaged copy had them, which
+                        // (once it's the app's own library) needn't be how sounds.db has them.
+                        remade = Some(everything.sounds);
                         Ok((features, clap, analysed))
                     }
                     Err(e) => Err(e),
@@ -738,11 +739,12 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
     if let Some(uses) = &uses {
         send(Step::Used(Arc::new(with_usage(&list, usage_of(&list, uses), &settings.weights))));
     }
-    if !first.behind {
+    if !first.behind && remade.is_none() {
         return;
     }
-    // The sounds shown were as the copy had them before the C# app's changes: the page takes them again, as they were
-    // read just now to make the copy again, or else from the copy once it's brought up to date.
+    // The sounds shown were as the copy had them before the C# app's changes (or before it was found damaged): the
+    // page takes them again, as they were read just now to make the copy again, or else from the copy once it's
+    // brought up to date.
     let (sounds, db, synced) = match remade {
         Some(sounds) => (sounds, SoundsDb::open_read_only(&first.source), None),
         None => {
@@ -946,6 +948,10 @@ fn say_made(
 /// makes it the app's own library ([`compact::last_sync`]), saying so on `cards`. What changed, or `None` when it
 /// couldn't be done (it's tried again at the next start).
 fn bring_up_to_date(sounds_db: &Path, copy: &Path, cards: Option<&Feed>) -> Option<compact::Synced> {
+    // The app's own library already (another read made it so meanwhile): nothing to bring up to date, nor to say.
+    if compact::own_since(copy).is_some() {
+        return None;
+    }
     let job = cards.map(|c| c.start("Bringing your sound library up to date", "With what the C# app changed in it"));
     let began = Instant::now();
     match compact::last_sync(sounds_db, copy) {
@@ -2732,12 +2738,17 @@ mod tests {
         assert_eq!(one_start(&sounds_db, &library_db, &cards), first);
         assert_eq!(cards_said(&cards), Vec::<String>::new());
         // Its fingerprints damaged (a bad sector): it's made again from sounds.db while that's still there (all it can
-        // be made from), and stays the app's own.
+        // be made from), and stays the app's own. The page takes the sounds it was made with in place of those shown.
         damage_first_page(&copy, "sound_features");
         let cards = Feed::default();
         assert_eq!(
             one_start(&sounds_db, &library_db, &cards),
-            ["5 sounds from sounds-rust.db, 0 plays", "6 fingerprints", "used: true"]
+            [
+                "5 sounds from sounds-rust.db, 0 plays",
+                "6 fingerprints",
+                "used: true",
+                "again: other sounds, 6 sounds, 2 plays, used: true",
+            ]
         );
         let said = cards_said(&cards);
         assert!(said.iter().any(|c| c.starts_with("Made the app's own copy of your sound library again")), "{said:?}");
@@ -2747,7 +2758,7 @@ mod tests {
             ["6 sounds from sounds-rust.db, 2 plays", "6 fingerprints", "used: true"]
         );
         // Damaged, and it can't be made again (a folder in the way of the new copy): the rest comes from sounds.db,
-        // as it does without a copy.
+        // as it does without a copy, and the sounds as sounds.db has them.
         let part = PathBuf::from(format!("{}.part-{}", copy.display(), std::process::id()));
         assert!(std::fs::create_dir_all(&part).is_ok());
         damage_first_page(&copy, "sound_features");
@@ -2759,6 +2770,7 @@ mod tests {
                 format!("the rest from {}", sounds_db.display()),
                 "6 fingerprints".to_owned(),
                 "used: true".to_owned(),
+                "again: the same sounds, 6 sounds, 2 plays, used: true".to_owned(),
             ]
         );
         let said = cards_said(&cards);
