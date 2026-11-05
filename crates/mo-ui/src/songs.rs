@@ -15,7 +15,7 @@ use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::bitwig_convert::{self as bitwig, Converted};
 use mo_app::finder::{self, Kind};
-use mo_app::live::{Live, LiveDetails};
+use mo_app::live::{Live, LiveDetails, Updated};
 use mo_app::log;
 use mo_app::places::Place;
 use mo_app::shell;
@@ -229,7 +229,12 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
         let read = Library::open_read_only(&path)
             .and_then(|lib| Live::load(&lib, DEFAULT_RUN_GAP_MONTHS, details))
             // Missing samples are looked for in the Sounds library beside it last (rule 13).
-            .map(|live| live.with_sounds(sound_library::database_beside(&path)));
+            .map(|live| live.with_sounds(sound_library::database_beside(&path)))
+            // What's read is kept in the app's own songs.db; library.db is never written.
+            .map(|live| match mo_library::songs_db::own_since(&path) {
+                Some(_) => live.with_writes(path.clone()),
+                None => live,
+            });
         let mut live = match read {
             Ok(live) => live,
             Err(e) => {
@@ -272,55 +277,119 @@ const WATCH_QUIET: Duration = Duration::from_secs(3);
 /// How long after a save couldn't be read it's tried again.
 const RETRY_AFTER: Duration = Duration::from_secs(5);
 
+/// How long after the list is up every project folder is walked to catch up with what changed while the app was
+/// closed: the pages read what they show first.
+const CATCH_UP_AFTER: Duration = Duration::from_secs(20);
+
+/// How long after what was read couldn't be kept in songs.db (another copy of the app holding it) it's tried again.
+const KEEP_AGAIN_AFTER: Duration = Duration::from_secs(60);
+
 /// What the page says when the library has no songs.
 const NO_SONGS: &str = "No songs in the library yet.";
 
 /// Watches the project folders while the app is open and keeps the list up to date, on this background thread: each
-/// time saves change, the list is made again and put on the page with a card.
+/// time saves change, the list is made again and put on the page with a card. A little after the start every folder is
+/// walked once to catch up with what changed while the app was closed (even when the folders can't be watched), and
+/// what's read is kept in the app's own songs.db.
 fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
     let (tx, rx) = mpsc::channel::<Changes>();
+    let to_watch = tx.clone();
     let watching = FolderWatch::start(live.roots(), is_project_file, WATCH_QUIET, move |c| {
-        let _ = tx.send(c);
+        let _ = to_watch.send(c);
     });
+    // Held so the loop below waits rather than ends if the watch can't start: the catch-up and the retries still run.
+    let _still_here = tx;
     let _watch = match watching {
         Ok(w) => {
             log::info("Songs", &format!("Watching {} project folders", w.count()));
-            w
+            Some(w)
         }
         Err(e) => {
-            log::warning("Songs", &format!("Can't watch the project folders: {e}"));
-            return;
+            log::warning("Songs", &format!("Can't watch the project folders: {e}; they're walked once a little later"));
+            None
         }
     };
+    let mut catch_up_at = Some(Instant::now() + CATCH_UP_AFTER);
+    let mut keep_again_at: Option<Instant> = None;
     loop {
+        let now = Instant::now();
+        let due = |at: Option<Instant>| at.map_or(RETRY_AFTER, |at| at.saturating_duration_since(now));
         // A save that couldn't be read (still being written, or locked) is tried again after a quiet moment.
-        let changes = match rx.recv_timeout(RETRY_AFTER) {
-            Ok(changes) => changes,
-            Err(mpsc::RecvTimeoutError::Timeout) => match live.retries() {
-                Some(changes) => changes,
-                None => continue,
-            },
+        let wait = due(catch_up_at).min(due(keep_again_at)).min(RETRY_AFTER);
+        let changes = match rx.recv_timeout(wait) {
+            Ok(changes) => Some(changes),
+            Err(mpsc::RecvTimeoutError::Timeout) => live.retries(),
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
-        let updated = live.update(&changes);
-        if updated.is_empty() {
+        let mut updated = Updated::default();
+        if let Some(changes) = &changes {
+            updated = live.update(changes);
+            if !updated.is_empty() {
+                log::info(
+                    "Watch",
+                    &format!(
+                        "Project folders: {} read, {} moved, {} gone ({} changes seen)",
+                        updated.read.len(),
+                        updated.moved.len(),
+                        updated.gone,
+                        changes.files.len()
+                    ),
+                );
+            }
+        }
+        // Looked at after every batch too, so a folder that keeps changing (a DAW saving every few seconds) can't put
+        // it off.
+        if catch_up_at.is_some_and(|at| Instant::now() >= at) {
+            catch_up_at = None;
+            let began = Instant::now();
+            let caught = live.catch_up();
+            log::info(
+                "Songs",
+                &format!(
+                    "Caught up with the project folders in {:.1} s: {} read, {} moved, {} gone",
+                    began.elapsed().as_secs_f32(),
+                    caught.read.len(),
+                    caught.moved.len(),
+                    caught.gone
+                ),
+            );
+            updated = updated.and(caught);
+        }
+        // Kept in songs.db with each change, or a while after it couldn't be kept.
+        let mut renumbered = false;
+        if !updated.is_empty() || keep_again_at.is_some_and(|at| Instant::now() >= at) {
+            keep_again_at = match live.keep() {
+                Some(Ok(kept)) => {
+                    let w = &kept.written;
+                    log::info(
+                        "Songs",
+                        &format!("Kept in songs.db: {} saves read, {} marked missing", w.put, w.missing),
+                    );
+                    for (path, why) in &kept.not_kept {
+                        log::warning("Songs", &format!("Couldn't keep {path} in songs.db: {why}"));
+                    }
+                    renumbered = !w.ids.is_empty();
+                    None
+                }
+                Some(Err(e)) => {
+                    log::warning("Songs", &format!("{e}; it's kept with the next change, or in a minute"));
+                    Some(Instant::now() + KEEP_AGAIN_AFTER)
+                }
+                None => None,
+            };
+        }
+        if updated.is_empty() && !renumbered {
             continue;
         }
-        log::info(
-            "Watch",
-            &format!(
-                "Project folders: {} read, {} moved, {} gone ({} changes seen)",
-                updated.read.len(),
-                updated.moved.len(),
-                updated.gone,
-                changes.files.len()
-            ),
-        );
+        // Made again when a save's id changed too, so the page picks it by the id the library has.
         let songs = live.songs();
         let found = Arc::new(finder::songs(&songs, Local::now().naive_local()));
         let _ = weak.upgrade_in_event_loop(move |app| {
             show_again(&app, songs);
             crate::finder::add_source(&app, "songs", found);
+            if updated.is_empty() {
+                return;
+            }
             let (title, line) = updated.card();
             FEED.with(|f| {
                 if let Some(feed) = f.borrow().as_ref() {

@@ -3,7 +3,8 @@
 //! (a folder moved to another drive) and [`crate::plugin_folders`] (your say on a plugin's folders), both from the
 //! Plugins page, are the only places the Rust app writes to `library.db`
 //! (Solomon's OK: folders 2026-11-03, moves and the Plugins page's folder fixes 2026-11-05); everything else opens it
-//! read-only.
+//! read-only. Once the app's own `songs.db` is the library, these write that instead, and so does
+//! [`crate::song_writes`] (what the app reads of your saves); `library.db` is then never written.
 //!
 //! Each change is one SQLite transaction: it reads the list as it is now (the C# app may have changed it since the
 //! page showed it), changes it, reads it back to check, and only then keeps it. If anything goes wrong nothing is

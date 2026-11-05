@@ -1,7 +1,7 @@
 //! Reading one project file into a save as the library lists it, as the C# app's `Scanner.Analyse` does: what the
 //! DAW's reader finds, which of its plugins are installed, and which of its samples are on this computer.
 //!
-//! This changes nothing on disk: the save it gives is held by the app until the library itself can be written. Its
+//! This changes nothing on disk: the app keeps the save it gives in its own `songs.db` ([`crate::song_writes`]). Its
 //! key and note counts aren't worked out yet (they come with the notes reader), so they read as unknown.
 
 use std::collections::HashSet;
