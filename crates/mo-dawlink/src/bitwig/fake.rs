@@ -1,6 +1,6 @@
 //! A stand-in for the Music Organiser link in Bitwig, for tests: no test reaches a real Bitwig (rule 11). It listens
 //! on a free port on this computer, greets each connection as extension 3.19 does, and answers `hello`, `newtrack`,
-//! `insert`, `pads`, `clip`, `selectedtrack`, `transport` and `deleteclip` the way the extension does, in its words (`Link.java` in the C# repo), on a made-up project:
+//! `insert`, `pads`, `clip`, `selectedtrack`, `transport` and `deleteclip` the way the extension does, in its words (`extensions/bitwig-java`'s `Link.java`), on a made-up project:
 //! the C# app's stand-in's, "Night Drive", with Drums, Kick, Bass and Master. It handles one request at a time,
 //! whichever connection it came on, as the extension makes changes one at a time.
 //!
@@ -494,7 +494,8 @@ impl World {
         {
             self.launched.retain(|&(lt, _)| lt != t);
         }
-        let now = at.and_then(|t| self.tracks.get(t)).and_then(|t| t.clips.get(slot)).map(|c| clip_name(c).to_owned());
+        let now =
+            at.and_then(|t| self.tracks.get(t)).and_then(|t| t.clips.get(slot)).map(|c| sample_name(c).to_owned());
         let deleted = matches!((&name, &now), (Some(name), Some(now)) if !now.is_empty() && name == now);
         if deleted
             && let Some(t) = at
@@ -532,7 +533,7 @@ impl World {
         let id = track.id.clone();
         self.next_step("clip", request)?;
         if request.get("audition").and_then(Value::as_bool) == Some(true) && !id.is_empty() {
-            let name = self.tracks.get(at).and_then(|t| t.clips.get(slot)).map(|c| clip_name(c).to_owned());
+            let name = self.tracks.get(at).and_then(|t| t.clips.get(slot)).map(|c| sample_name(c).to_owned());
             self.auditions.push((id, slot, name.unwrap_or_default()));
         }
         if request.get("launch").and_then(Value::as_bool) == Some(true) {
@@ -888,12 +889,6 @@ fn write_message(stream: &mut TcpStream, message: &Value, lengths: bool) -> io::
 
 /// The name Bitwig gives a sample dropped on a pad, or a Sampler it loads: the file's name without its ending, whichever
 /// way the path's folders are written.
-/// A clip's name as Bitwig gives one made from a file: the file's name without its folder or ending.
-fn clip_name(path: &str) -> &str {
-    let file = file_name(path);
-    file.rsplit_once('.').map_or(file, |(stem, _)| stem)
-}
-
 fn sample_name(path: &str) -> &str {
     stem(file_name(path))
 }

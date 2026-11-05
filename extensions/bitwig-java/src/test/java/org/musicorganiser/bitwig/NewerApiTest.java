@@ -470,6 +470,7 @@ class NewerApiTest {
                       .get("result"));
         assertTrue(bitwig.calls.contains(List.of("deleteClip", 1, 1)), String.valueOf(bitwig.calls));
         assertTrue(bitwig.calls.contains(List.of("stopTrack", 1)), String.valueOf(bitwig.calls));
+        assertTrue(bitwig.calls.contains(List.of("returnToArrangement", 1)), String.valueOf(bitwig.calls));
         assertTrue(bitwig.calls.contains(List.of("stop")), String.valueOf(bitwig.calls));
         // Your own clip stays where it is.
         assertEquals("old.mid", bitwig.state.tracks.get(1).slots.get(0));

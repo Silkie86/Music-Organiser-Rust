@@ -1,10 +1,9 @@
 //! The Bitwig link: the app talks to the Music Organiser extension (or the script it took over from) running inside
 //! Bitwig Studio, over a connection on this computer, and Send to Bitwig puts things into the project open there.
 //!
-//! The extension itself is the C# app's (`extensions/bitwig-java` in `Silkie86/Music-Organiser`, version 3.19), which
-//! stays as it is (spec section 2): Bitwig only runs Java extensions. Installing it is still done from the old app's
-//! Settings > DAW links. Changing anything needs "Let the app make changes" on in Bitwig (Settings > Controllers >
-//! Music Organiser); reading never does.
+//! The extension itself lives in this repo (`extensions/bitwig-java`, version 3.19; the C# app's copy is frozen):
+//! Bitwig only runs Java extensions. Settings > DAWs installs it. Changing anything needs "Let the app make changes"
+//! on in Bitwig (Settings > Controllers > Music Organiser); reading never does.
 //!
 //! For the screens:
 //!

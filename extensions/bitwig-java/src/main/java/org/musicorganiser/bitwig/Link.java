@@ -1890,7 +1890,9 @@ final class Link {
         waitFor(() -> {
             int now = id.isEmpty() ? t : indexOf(id);
             return now >= 0 && trackSlots[now][index].hasContent().get()
-                   && (!replace || !str(trackSlots[now][index].name().get()).equals(before));
+                   && (!replace || !str(trackSlots[now][index].name().get()).equals(before))
+                   // An audition clip waits for its name too, which deleteclip checks it by (extension 3.19).
+                   && (!audition || !str(trackSlots[now][index].name().get()).isEmpty());
         }, swap ? REPLACE_WAIT : CHANGE_WAIT, made -> {
             int now = id.isEmpty() ? t : indexOf(id);
             // A replace whose name didn't change (the same file again) still has its clip: it goes ahead.
@@ -1901,7 +1903,8 @@ final class Link {
             // An audition clip (extension 3.19) is noted with the name Bitwig gave it, so deleteclip may take it out again.
             if (audition && now >= 0) {
                 String tid = idOf(now);
-                if (!tid.isEmpty()) auditionClips.put(tid + "#" + index, str(trackSlots[now][index].name().get()));
+                String name = str(trackSlots[now][index].name().get());
+                if (!tid.isEmpty() && !name.isEmpty()) auditionClips.put(tid + "#" + index, name);
             }
             if (launch) {
                 if (now < 0) throw new LinkError("The track went before its clip could be launched.");
@@ -1952,7 +1955,11 @@ final class Link {
         String noted = auditionClips.get(key);
         int t = indexOf((String) id);
         // Stopping goes ahead whether or not the clip is the app's to take out: Stop in the app always stops the sound.
-        if (t >= 0 && flag(request, "stop", false)) trackItems[t].stop();
+        if (t >= 0 && flag(request, "stop", false)) {
+            trackItems[t].stop();
+            // As stoptracks does: the track plays its arranger clips again, not the empty launcher.
+            trackItems[t].returnToArrangement();
+        }
         if (flag(request, "transport", false) && transport != null) transport.stop();
         Map<String, Object> m = new LinkedHashMap<>();
         if (t < 0 || noted == null || !trackSlots[t][index].hasContent().get()

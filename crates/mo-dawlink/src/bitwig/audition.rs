@@ -100,8 +100,10 @@ impl Bitwig {
 
     /// Stops a part [`Bitwig::play_on_selected`] started and takes its clip out of the track; Bitwig stops too when
     /// the part started it. Whether the clip was taken out: false when it was renamed (it's yours now) or is gone.
+    ///
+    /// It doesn't wait in line behind the sends asked for before it (a kit can take seconds): it adds no track, so it
+    /// can't land in the middle of one, and the link makes one change at a time anyway.
     pub fn stop_playing(&self, playing: &Playing) -> Result<bool, Error> {
-        let _turn = SENDS.wait_turn();
         let mut link: Link = self.connect()?;
         check_version(link.hello())?;
         link.set_only_in(playing.project.clone());
