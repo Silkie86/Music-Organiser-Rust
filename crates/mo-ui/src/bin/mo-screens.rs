@@ -317,6 +317,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::space::show_sample(&app, sample_space(), mo_app::space_songs::THIN);
     capture(&window);
     shots.push(("space-thin.png".into(), capture(&window)));
+    // The plugins no song has used lately: those never used, then those not in over 2 years, each with its link to its
+    // card on the Plugins page.
+    mo_ui::space::show_sample(&app, sample_space(), mo_app::space_plugins::UNUSED_PLUGINS);
+    let top = capture(&window);
+    shots.push(("space-plugins.png".into(), top.clone()));
+    shots.push(("space-plugins-down.png".into(), card_down(&window, &top, "space-plugins-down.png")?));
     mo_ui::space::show_sample(&app, sample_space(), "");
     presets_shots(&app, &window, &mut shots)?;
     app.set_place(Place::Songs.index() as i32);
@@ -815,8 +821,107 @@ fn sample_space() -> mo_ui::space::Sample {
         old: sample_old_copies(),
         spare: sample_spare_copies(),
         songs: sample_song_room(),
+        plugins: sample_unused_plugins(),
         ..Default::default()
     }
+}
+
+/// Made-up plugins no song has used lately, as the old app measured them: some never used, some not in over 2 years.
+fn sample_unused_plugins() -> mo_app::space_plugins::Found {
+    use mo_app::space_plugins::{Found, Held, Measured};
+    use mo_space::plugin_space::SpaceKind;
+    const MB: u64 = 1 << 20;
+    let at =
+        |year: i32, month: u32| chrono::NaiveDate::from_ymd_opt(year, month, 14).and_then(|d| d.and_hms_opt(20, 0, 0));
+    let plugin =
+        |name: &str, vendor: &str, used: Option<(chrono::NaiveDateTime, usize)>, held: &[(SpaceKind, &str, u64)]| {
+            Measured {
+                name: name.to_owned(),
+                vendor: vendor.to_owned(),
+                key: name.to_lowercase(),
+                own: String::new(),
+                last_used: used.map(|(t, _)| t),
+                songs: used.map_or(0, |(_, n)| n),
+                folders: held
+                    .iter()
+                    .map(|(kind, path, mb)| Held { path: (*path).to_owned(), kind: *kind, bytes: mb * MB })
+                    .collect(),
+            }
+        };
+    let (program, presets, sounds) = (SpaceKind::Program, SpaceKind::Presets, SpaceKind::Sounds);
+    let mut plugins = vec![
+        plugin(
+            "Omnisphere",
+            "Spectrasonics",
+            at(2022, 3).map(|t| (t, 3)),
+            &[
+                (program, r"C:\Program Files\Common Files\VST3\Omnisphere.vst3", 85),
+                (presets, r"C:\ProgramData\Spectrasonics\Omnisphere\Settings Library", 120),
+                (sounds, r"I:\Spectrasonics\STEAM\Omnisphere", 39_100),
+            ],
+        ),
+        plugin(
+            "Kontakt 6",
+            "Native Instruments",
+            None,
+            &[
+                (program, r"C:\Program Files\Common Files\VST3\Kontakt.vst3", 410),
+                (sounds, r"I:\Kontakt Factory Library", 22_100),
+            ],
+        ),
+        plugin(
+            "Addictive Drums 2",
+            "XLN Audio",
+            at(2021, 8).map(|t| (t, 2)),
+            &[
+                (program, r"C:\Program Files\Common Files\VST3\Addictive Drums 2.vst3", 60),
+                (sounds, r"I:\XLN Audio\Addictive Drums 2", 10_040),
+            ],
+        ),
+        plugin(
+            "Trilian",
+            "Spectrasonics",
+            None,
+            &[
+                (program, r"C:\Program Files\Common Files\VST3\Trilian.vst3", 70),
+                (sounds, r"I:\Spectrasonics\STEAM\Trilian", 8_300),
+            ],
+        ),
+        plugin(
+            "Massive",
+            "Native Instruments",
+            at(2023, 6).map(|t| (t, 12)),
+            &[
+                (program, r"C:\Program Files\VSTPlugins\Massive.dll", 60),
+                (presets, r"C:\Users\Solomon\Documents\Native Instruments\Massive", 410),
+            ],
+        ),
+        plugin(
+            "Ozone 9",
+            "iZotope",
+            None,
+            &[
+                (program, r"C:\Program Files\Common Files\VST3\iZotope Ozone 9.vst3", 610),
+                (presets, r"C:\Users\Solomon\Documents\iZotope\Ozone 9", 40),
+            ],
+        ),
+        plugin(
+            "Sylenth1",
+            "LennarDigital",
+            at(2019, 11).map(|t| (t, 7)),
+            &[(program, r"C:\Program Files\VSTPlugins\Sylenth1.dll", 30)],
+        ),
+    ];
+    plugins.sort_by(|a, b| b.bytes().cmp(&a.bytes()));
+    let measured = chrono::NaiveDate::from_ymd_opt(2026, 11, 3).and_then(|d| d.and_hms_opt(9, 30, 0));
+    // Serum is used this year, so it isn't on the card.
+    let used = vec![plugin(
+        "Serum",
+        "Xfer Records",
+        at(2026, 10).map(|t| (t, 31)),
+        &[(program, r"C:\Program Files\Common Files\VST3\Serum.vst3", 30)],
+    )];
+    Found { plugins, used, years: 2, now: measured.unwrap_or_default(), sizes: true, measured }
 }
 
 /// Made-up songs with room to free, written as on Windows: Bitwig songs with copies of a save, old auto-backups and

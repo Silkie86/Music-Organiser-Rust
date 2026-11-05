@@ -747,6 +747,25 @@ impl Plugins {
         self.rows.iter().position(|r| r.key == key && r.own == own)
     }
 
+    /// Shows one plugin's row for another page (Space's Show on Plugins page), by its line's name key and `own`, and
+    /// gives the row to pick: when the filters hide it they go, and the sort stays.
+    pub fn show_one(&mut self, key: &str, own: &str) -> Option<usize> {
+        let row = self.find(key, own)?;
+        if !self.shown.contains(&row) {
+            self.filters = Filters { sort: self.filters.sort, ..Filters::default() };
+            self.refilter();
+        }
+        Some(row)
+    }
+
+    /// Shows only the plugins that take room and no song has used lately, for another page (Space's Show them on
+    /// Plugins page): "Big and unused" and no other filter, so the list has each one that page counted.
+    pub fn show_only_unused(&mut self) {
+        self.filters = Filters::default();
+        self.filters.show(Chip::BigUnused);
+        self.refilter();
+    }
+
     /// The picked plugin's card.
     pub fn card(&self, row: usize) -> Option<Card> {
         let r = self.rows.get(row)?;

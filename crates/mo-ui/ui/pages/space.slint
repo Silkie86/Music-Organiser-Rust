@@ -379,8 +379,8 @@ export component SpacePage inherits Rectangle {
                 for line in SpaceData.wins: RoomLineView {
                     line: line;
                 }
-                // Smaller once there are lines above it.
-                Well {
+                // Why a kind has no line, smaller once there are lines above it; none when there's nothing to say.
+                if SpaceData.wins-note != "": Well {
                     min-height: SpaceData.wins.length > 0 ? 0px : 96px;
                     VerticalLayout {
                         padding: SpaceData.wins.length > 0 ? Space.lg : Space.xl;

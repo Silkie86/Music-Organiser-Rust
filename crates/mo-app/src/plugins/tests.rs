@@ -368,3 +368,35 @@ fn review_fixes_hold() {
     f.show(Chip::BigUnused);
     assert_eq!((f.chips.as_slice(), f.sort), ([Chip::BigUnused].as_slice(), Sort::Biggest));
 }
+
+#[test]
+fn another_page_can_show_one_plugin_or_every_unused_one() {
+    let shown = |p: &Plugins| p.shown.iter().map(|&i| p.rows[i].name.clone()).collect::<Vec<_>>();
+    let mut p = plugins();
+    let kontakt = row(&p, "Kontakt 7").clone();
+    let at = p.find(&kontakt.key, &kontakt.own).unwrap();
+    // A search hides Kontakt 7: showing it takes the filters off, and keeps the sort.
+    p.filters = Filters { search: "serum".into(), chips: vec![Chip::Missing], sort: Sort::Name, ..Filters::default() };
+    p.refilter();
+    assert!(!p.shown.contains(&at));
+    assert_eq!(p.show_one(&kontakt.key, &kontakt.own), Some(at));
+    assert!(p.shown.contains(&at));
+    assert_eq!(p.filters, Filters { sort: Sort::Name, ..Filters::default() });
+    // Shown already: the filters stay.
+    p.filters = Filters { chips: vec![Chip::Installed], ..Filters::default() };
+    p.refilter();
+    assert_eq!(p.show_one(&kontakt.key, &kontakt.own), Some(at));
+    assert_eq!(p.filters.chips, [Chip::Installed]);
+    // One that isn't there: nothing to pick.
+    assert_eq!(p.show_one("nothing", ""), None);
+
+    // Every unused one, whatever else was on: the ones Space's line counts.
+    p.filters = Filters { search: "serum".into(), chips: vec![Chip::Missing], ..Filters::default() };
+    p.show_only_unused();
+    assert_eq!(shown(&p), ["Kontakt 7", "Pro-Q 3"]);
+    let space = crate::space_plugins::look(library(), now());
+    assert_eq!(space.plugins.iter().map(|u| u.name.clone()).collect::<Vec<_>>(), shown(&p));
+    // And the same when the years change on the page.
+    p.set_unused_years(10);
+    assert_eq!(space.for_years(10).plugins.iter().map(|u| u.name.clone()).collect::<Vec<_>>(), shown(&p));
+}

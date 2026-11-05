@@ -57,6 +57,17 @@ struct Page {
     /// The plugin files this session's uninstalls removed: left out of every read until the old app looks again.
     uninstalled: Vec<String>,
     clean_asked: u64,
+    /// What another page asked this one to show (Space's Show on Plugins page) before the library was first read.
+    wanted: Option<Wanted>,
+}
+
+/// What another page can ask this one to show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Wanted {
+    /// One plugin's card, by its line's name key and own.
+    Plugin(String, String),
+    /// Every plugin that takes room and no song has used lately ("Big and unused").
+    Unused,
 }
 
 type ReadJob = PathBuf;
@@ -378,7 +389,9 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>) {
             });
             clean::forget_binned(&mut fresh);
             fresh.refilter();
-            let picked = kept.and_then(|(k, o)| fresh.find(&k, &o));
+            // What another page asked for before the first read comes first.
+            let wanted = PAGE.with(|p| p.borrow_mut().wanted.take()).and_then(|w| show_in(&mut fresh, &w));
+            let picked = wanted.or_else(|| kept.and_then(|(k, o)| fresh.find(&k, &o)));
             let empty = fresh.rows.is_empty();
             PAGE.with(|p| {
                 let mut p = p.borrow_mut();
@@ -395,6 +408,66 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>) {
             pick(app, picked);
         }
     }
+}
+
+/// Shows one plugin's card (by its line's name key and `own`), for another page (Space's Show on Plugins page): when
+/// the filters hide it, they go (the sort stays). Before the library is first read, it's shown once the read is back.
+/// The caller shows this page.
+pub fn show_plugin(app: &AppWindow, key: &str, own: &str) {
+    show_wanted(app, Wanted::Plugin(key.to_owned(), own.to_owned()));
+}
+
+/// Shows only the plugins that take room and no song has used lately ("Big and unused", as the list's "Show them"
+/// link does), for another page (Space's Show them on Plugins page). The caller shows this page.
+pub fn show_unused(app: &AppWindow) {
+    show_wanted(app, Wanted::Unused);
+}
+
+fn show_wanted(app: &AppWindow, wanted: Wanted) {
+    let now = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        match p.plugins.as_mut() {
+            Some(pl) => Some(show_in(pl, &wanted)),
+            None => {
+                p.wanted = Some(wanted);
+                None
+            }
+        }
+    });
+    let Some(row) = now else { return };
+    refresh(app);
+    if let Some(row) = row {
+        pick(app, Some(row));
+        app.global::<PluginsData>().set_tab(0);
+    }
+}
+
+/// Sets the list up for what another page asked for: the plugin's row to pick (the filters go when they hide it, the
+/// sort stays), or only "Big and unused" on (nothing to pick).
+fn show_in(pl: &mut Plugins, wanted: &Wanted) -> Option<usize> {
+    match wanted {
+        Wanted::Plugin(key, own) => pl.show_one(key, own),
+        Wanted::Unused => {
+            pl.show_only_unused();
+            None
+        }
+    }
+}
+
+/// How many years make a plugin unused on this page (its pick can change while the app runs), once the library is
+/// read: Space counts the same ones.
+pub fn unused_years() -> Option<u32> {
+    PAGE.with(|p| p.borrow().plugins.as_ref().map(|pl| pl.unused_years))
+}
+
+/// Where this session's Clean ups and uninstalls took things from: Space leaves them out of the plugins it counts, as
+/// this page does, until the old app measures again.
+pub fn gone_this_session() -> Vec<String> {
+    PAGE.with(|p| {
+        let p = p.borrow();
+        let binned = p.binned.iter().flat_map(|b| b.done.removed.iter().map(|r| r.path.clone()));
+        binned.chain(p.uninstalled.iter().cloned()).collect()
+    })
 }
 
 fn change(weak: &Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
