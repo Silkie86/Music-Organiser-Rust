@@ -1,6 +1,6 @@
 //! Dragging sounds off the Sounds page into a DAW or a folder (`crate::drag` runs the drag): a tile, a line of any
-//! list view, a pad of the kit builder, a "Sounds like this" line or a line of the Galaxy's swept list. Each goes out as its own file, where it is on
-//! disk: never a copy, never moved (rule 2).
+//! list view, a pad of the kit builder, a "Sounds like this" line, a line of the Galaxy's swept list, or the picked
+//! sound by its card's handle. Each goes out as its own file, where it is on disk: never a copy, never moved (rule 2).
 //!
 //! The C# app counted a drag towards how liked a sound is. Here `sounds.db` is only read until the page is trusted, so
 //! drags aren't written down yet.
@@ -24,6 +24,8 @@ enum Spot {
     Pad(i32),
     /// A "Sounds like this" line or a Galaxy's swept line, by its sound's place in the library.
     Alike(i32),
+    /// The picked sound's card, by its handle.
+    Picked,
 }
 
 pub(super) fn wire(app: &AppWindow) {
@@ -48,6 +50,13 @@ pub(super) fn wire(app: &AppWindow) {
         let Some(app) = weak.upgrade() else { return };
         if let Ok(at) = usize::try_from(place) {
             carry(&app, at, Spot::Alike(place));
+        }
+    });
+    let weak = app.as_weak();
+    data.on_drag_picked(move || {
+        let Some(app) = weak.upgrade() else { return };
+        if let Some(at) = PAGE.with(|p| p.borrow().picked) {
+            carry(&app, at, Spot::Picked);
         }
     });
     let weak = app.as_weak();
@@ -111,6 +120,7 @@ fn lift(app: &AppWindow, spot: Spot, on: bool) {
         Spot::Row(i) => data.set_lifted_row(if on { i } else { -1 }),
         Spot::Pad(i) => data.set_lifted_pad(if on { i } else { -1 }),
         Spot::Alike(i) => data.set_lifted_alike(if on { i } else { -1 }),
+        Spot::Picked => data.set_lifted_picked(on),
     }
 }
 
@@ -121,6 +131,7 @@ fn glow(app: &AppWindow, spot: Spot, on: bool) {
         Spot::Row(i) => data.set_landed_row(if on { i } else { -1 }),
         Spot::Pad(i) => data.set_landed_pad(if on { i } else { -1 }),
         Spot::Alike(i) => data.set_landed_alike(if on { i } else { -1 }),
+        Spot::Picked => data.set_landed_picked(on),
     }
 }
 

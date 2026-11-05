@@ -394,7 +394,7 @@ pub fn year_counts(cat: &Catalogue) -> Vec<(i32, usize)> {
     for e in &cat.entries {
         *counts.entry(year_of(e.phrase.source.mtime)).or_insert(0) += 1;
     }
-    counts.into_iter().rev().filter(|(y, _)| *y > 1980).collect()
+    crate::year_strip::strip(counts)
 }
 
 /// A kind of part, as one of them is called: "Bassline", "Melody".

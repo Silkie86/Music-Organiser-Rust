@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // Read-only for now (favourites, tags and types are shown, not changed), like the C# app's sounds.db until it's trusted.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, DragHandle, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -149,16 +149,21 @@ export global SoundsData {
     in property <int> view;
     callback pick-view(int);
 
-    // Rediscover: what it digs out (type, year, how adventurous, how many) and whether sounds used once count. Each
-    // choice is on show, as the filters' are (one type and one year at most, and one of the counts).
+    // Rediscover: what it digs out (type, years, how adventurous, how many) and whether sounds used once count. Each
+    // choice is on show, as the filters' are (one type at most, the years on its year strip, one of the counts).
     in property <FilterView> re-type-filter;
-    in property <FilterView> re-year-filter;
+    // Rediscover's own year strip (it picks its own years, apart from the filters'): as `years` and its span.
+    in property <[YearBar]> re-years;
+    in property <int> re-years-from: -1;
+    in property <int> re-years-to: -1;
+    callback re-years-picked(int, int);
+    callback re-years-cleared();
     // 0 (close to what you use) to 1 (further afield).
     in-out property <float> re-adventure;
     callback re-adventure-set(float);
     in property <FilterView> re-count-filter;
     in property <bool> re-rarely;
-    // "type", "year" or "count", and the choice clicked: the type or year picked already is unpicked, and "" is any;
+    // "type" or "count", and the choice clicked: the type picked already is unpicked, and "" is any;
     // or "more-types" for the More types menu's Any, which keeps a type picked on its chip.
     callback re-pick(string, string);
     callback re-toggle-rarely();
@@ -230,6 +235,8 @@ export global SoundsData {
     in property <[SweptLine]> galaxy-swept;
     callback galaxy-swept-go(int);
     callback galaxy-swept-step(int);
+    // The Swept card was clicked into: Up and Down go through its sounds until the map is clicked (or Left or Right).
+    in-out property <bool> galaxy-swept-keys;
     callback galaxy-swept-clear();
     // The mini-map, once the view has flown in: the whole map, the part on show, and a line above it.
     in property <bool> galaxy-mini-shown;
@@ -331,13 +338,16 @@ export global SoundsData {
     callback select(int);
     callback play-row(int);
     // Dragging a sound out of the app, to a DAW or a folder (mo-ui's sounds/drag_out.rs): a tile or a line by its row,
-    // a pad by its place, a "Sounds like this" or a Galaxy's swept line by its sound's place in the library; then
-    // `drag-let-go` if the button comes up before the drag has got going. The one carried is dimmed (`lifted-…`) and
-    // glows for a moment once it has landed (`landed-…`); -1 for none.
+    // a pad by its place, a "Sounds like this" or a Galaxy's swept line by its sound's place in the library, or the
+    // picked sound by its card's handle; then `drag-let-go` if the button comes up before the drag has got going. The
+    // one carried is dimmed (`lifted-…`) and glows for a moment once it has landed (`landed-…`); -1 for none.
     callback drag-row(int);
     callback drag-pad(int);
     callback drag-alike(int);
+    callback drag-picked();
     callback drag-let-go();
+    in property <bool> lifted-picked;
+    in property <bool> landed-picked;
     in property <int> lifted-row: -1;
     in property <int> landed-row: -1;
     in property <int> lifted-pad: -1;
@@ -951,6 +961,16 @@ component SoundPanel inherits SidePanel {
             seek(at) => { SoundsData.seek(at); }
         }
     }
+    // Where to take the sound from to drag it into a DAW or a folder: a handle of its own, as a click on the waveform
+    // seeks there (Solomon's F12 note, 5 Nov 2026: the card had no plain place to drag it from).
+    DragHandle {
+        text: "Drag into your DAW or a folder";
+        tip: "Drag the sound out as its own file, where it is on disk";
+        lifted: SoundsData.lifted-picked;
+        landed: SoundsData.landed-picked;
+        drag-out => { SoundsData.drag-picked(); }
+        drag-let-go => { SoundsData.drag-let-go(); }
+    }
     CardActions {
         actions: SoundsData.actions;
         chosen(id) => { SoundsData.menu-chosen(id); }
@@ -1181,13 +1201,6 @@ export component SoundsPage inherits Rectangle {
                 toggled(text) => { SoundsData.re-pick("type", text); }
                 cleared => { SoundsData.re-pick("more-types", ""); }
             }
-            // With no years (before the first answer) it shows nothing, and leaves one gap in the row.
-            FilterPicks {
-                name: "Year";
-                filter: SoundsData.re-year-filter;
-                toggled(text) => { SoundsData.re-pick("year", text); }
-                cleared => { SoundsData.re-pick("year", ""); }
-            }
             StudioSlider {
                 low: "Safe";
                 high: "Adventurous";
@@ -1398,23 +1411,44 @@ export component SoundsPage inherits Rectangle {
                 ? 300px
                 : 0px;
             // The year strip, on Tiles, List and Galaxy: the views the filters pick for. Not on History, which lists
-            // what was played whatever the filters say, nor Rediscover or Kits, which pick their own.
-            property <length> years-width: SoundsData.view <= 2 && SoundsData.years.length > 1 && SoundsData.empty-title == ""
+            // what was played whatever the filters say, nor Kits, which picks its own. Rediscover has one too, the
+            // same strip, for the years it digs in (apart from the filters').
+            property <bool> re-strip: SoundsData.view == 4;
+            property <length> years-width: (SoundsData.view <= 2 ? SoundsData.years.length > 1 : self.re-strip && SoundsData.re-years.length > 1)
+                && SoundsData.empty-title == ""
                 ? 56px
                 : 0px;
             if area.years-width > 0: YearRange {
                 x: area.list-width - area.folders-width - area.years-width;
                 y: 0;
                 height: area.height;
-                years: SoundsData.years;
-                picked-from: SoundsData.years-from;
-                picked-to: SoundsData.years-to;
-                picked(a, b) => { SoundsData.years-picked(a, b); }
-                cleared => { SoundsData.years-cleared(); }
+                years: area.re-strip ? SoundsData.re-years : SoundsData.years;
+                picked-from: area.re-strip ? SoundsData.re-years-from : SoundsData.years-from;
+                picked-to: area.re-strip ? SoundsData.re-years-to : SoundsData.years-to;
+                picked(a, b) => {
+                    if (area.re-strip) {
+                        SoundsData.re-years-picked(a, b);
+                    } else {
+                        SoundsData.years-picked(a, b);
+                    }
+                }
+                cleared => {
+                    if (area.re-strip) {
+                        SoundsData.re-years-cleared();
+                    } else {
+                        SoundsData.years-cleared();
+                    }
+                }
             }
             keys := FocusScope {
                 x: 0;
                 width: area.list-width - area.folders-width - area.years-width;
+                // Typing elsewhere (the search) takes the arrow keys from the Swept card too, as its look says.
+                changed has-focus => {
+                    if (!self.has-focus) {
+                        SoundsData.galaxy-swept-keys = false;
+                    }
+                }
                 key-pressed(event) => {
                     if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
                         return reject;
@@ -1663,6 +1697,7 @@ export component SoundsPage inherits Rectangle {
                             grabbing: SoundsData.galaxy-grabbing;
                             down(x, y) => {
                                 keys.focus();
+                                SoundsData.galaxy-swept-keys = false;
                                 SoundsData.galaxy-sky-x = sky.absolute-position.x;
                                 SoundsData.galaxy-sky-y = sky.absolute-position.y;
                                 SoundsData.galaxy-down(x, y, false);
@@ -1706,10 +1741,17 @@ export component SoundsPage inherits Rectangle {
                             background: Theme.surface;
                             border-radius: Theme.radius;
                             border-width: 1px;
-                            border-color: Theme.edge;
+                            // Accent while the arrow keys go through it.
+                            border-color: SoundsData.galaxy-swept-keys && keys.has-focus ? Theme.accent : Theme.edge;
                             clip: true;
-                            // The card takes its own clicks and the wheel, so they don't reach the map under it.
-                            TouchArea {}
+                            // The card takes its own clicks and the wheel, so they don't reach the map under it; a
+                            // click on it hands it the arrow keys.
+                            TouchArea {
+                                clicked => {
+                                    keys.focus();
+                                    SoundsData.galaxy-swept-keys = true;
+                                }
+                            }
                             swept-card := VerticalLayout {
                                 padding: Space.md;
                                 spacing: Space.xs;
@@ -1723,12 +1765,20 @@ export component SoundsPage inherits Rectangle {
                                     StudioButton {
                                         text: "Back";
                                         tip: "The sound swept before this one";
-                                        clicked => { SoundsData.galaxy-swept-step(1); }
+                                        clicked => {
+                                            keys.focus();
+                                            SoundsData.galaxy-swept-keys = true;
+                                            SoundsData.galaxy-swept-step(1);
+                                        }
                                     }
                                     StudioButton {
                                         text: "Next";
                                         tip: "The sound swept after this one";
-                                        clicked => { SoundsData.galaxy-swept-step(-1); }
+                                        clicked => {
+                                            keys.focus();
+                                            SoundsData.galaxy-swept-keys = true;
+                                            SoundsData.galaxy-swept-step(-1);
+                                        }
                                     }
                                 }
                                 for line[i] in SoundsData.galaxy-swept: ListLine {
@@ -1740,7 +1790,11 @@ export component SoundsPage inherits Rectangle {
                                     landed: line.place == SoundsData.landed-alike;
                                     drag-out => { SoundsData.drag-alike(line.place); }
                                     drag-let-go => { SoundsData.drag-let-go(); }
-                                    clicked => { SoundsData.galaxy-swept-go(i); }
+                                    clicked => {
+                                        keys.focus();
+                                        SoundsData.galaxy-swept-keys = true;
+                                        SoundsData.galaxy-swept-go(i);
+                                    }
                                     HorizontalLayout {
                                         padding-left: Space.sm;
                                         padding-right: Space.sm;
@@ -1761,7 +1815,18 @@ export component SoundsPage inherits Rectangle {
                                     }
                                 }
                                 HorizontalLayout {
-                                    alignment: end;
+                                    spacing: Space.sm;
+                                    // What the arrow keys do here, so it's seen, not guessed.
+                                    Text {
+                                        text: SoundsData.galaxy-swept-keys && keys.has-focus
+                                            ? "Up and Down go through these"
+                                            : "Click here, then Up and Down";
+                                        color: SoundsData.galaxy-swept-keys && keys.has-focus ? Theme.accent : Theme.muted;
+                                        font-size: Type.meta;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
                                     LinkText {
                                         text: "Clear";
                                         tint: Theme.muted;
@@ -1770,6 +1835,14 @@ export component SoundsPage inherits Rectangle {
                                     }
                                 }
                             }
+                        }
+                        // What the arrow keys do on the map, in its bottom left corner (the mini-map has the right).
+                        if SoundsData.shown > 0 && SoundsData.galaxy-note == "": Text {
+                            x: Space.md;
+                            y: sky.height - self.height - Space.md;
+                            text: "Arrow keys: the nearest sound that way";
+                            color: Theme.muted;
+                            font-size: Type.meta;
                         }
                         if SoundsData.galaxy-hover-text != "": HoverNote {
                             text: SoundsData.galaxy-hover-text;

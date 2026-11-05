@@ -140,8 +140,8 @@ struct Page {
     re_started: bool,
     /// The answer to Rediscover's newest ask hasn't come yet.
     re_busy: bool,
-    /// The years Rediscover can dig in, from its newest answer.
-    re_years: Vec<i32>,
+    /// Rediscover's year strip, from its newest answer: each year, newest first, with how many sounds it holds.
+    re_years: YearCounts,
     /// The kit builder's pads and choices.
     kit: kit::Kit,
     /// The galaxy's map and the part of it on show.
@@ -267,7 +267,6 @@ struct Choices {
     placing: FilterModels,
     light: FilterModels,
     re_type: FilterModels,
-    re_year: FilterModels,
     re_count: FilterModels,
 }
 
@@ -1418,6 +1417,8 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         p.re_started = false;
         // The years come with Rediscover's first answer for these sounds.
         p.re_years.clear();
+        // And the years picked on it go with them: the new sounds may not have those years, nor a strip to clear.
+        p.re.years = None;
         galaxy::forget(&mut p.galaxy);
         // An answer still on its way was for the old list: it's dropped.
         p.re_asked += 1;
@@ -1694,7 +1695,7 @@ struct RediscoverAnswer {
     /// Why nothing was found, when nothing was.
     why: String,
     folders: Vec<FolderUse>,
-    years: Vec<i32>,
+    years: YearCounts,
     /// How many sounds your projects use: what your taste was learned from.
     learned_from: usize,
 }
@@ -1719,7 +1720,7 @@ impl RediscoverAsk {
                 found,
                 why,
                 folders,
-                years: rediscover::years(sounds),
+                years: year_strip::strip(rediscover::years(sounds)),
                 learned_from: usage.values().filter(|u| u.projects > 0).count(),
             }
         })
@@ -1838,12 +1839,12 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
     bring_picked_into_view(app);
 }
 
-/// Picks `value` on Rediscover's `what`, saying whether that changed anything. "type" and "year": one at most, so a
-/// click on the one picked unpicks it, as on the filters, and "" (the Year menu's Any) is any. "more-types": the More
-/// types menu's Any, which unpicks a type picked in that menu but keeps one picked on a chip of its own (one of
+/// Picks `value` on Rediscover's `what`, saying whether that changed anything (its years are picked on the year
+/// strip). "type": one at most, so a click on the one picked unpicks it, as on the filters, and "" is any type.
+/// "more-types": the More types menu's Any, which unpicks a type picked in that menu but keeps one picked on a chip of its own (one of
 /// `chip_types`), as the Type filter's does. "count": one of the counts is always picked.
 fn re_pick(re: &mut rediscover::Options, what: &str, value: &str, chip_types: &[&str]) -> bool {
-    let before = (re.sound_type.clone(), re.year, re.count);
+    let before = (re.sound_type.clone(), re.count);
     match what {
         "type" => {
             let mut picked: Vec<String> = re.sound_type.take().into_iter().collect();
@@ -1859,15 +1860,6 @@ fn re_pick(re: &mut rediscover::Options, what: &str, value: &str, chip_types: &[
                 re.sound_type = None;
             }
         }
-        "year" => {
-            let mut picked: Vec<i32> = re.year.into_iter().collect();
-            if value.is_empty() {
-                picked.clear();
-            } else {
-                filters::toggle_as(&mut picked, value, false, |y| y.to_string(), |w| w.parse().ok());
-            }
-            re.year = picked.pop();
-        }
         "count" => {
             if let Some(c) = value.parse().ok().filter(|c| COUNTS.contains(c)) {
                 re.count = c;
@@ -1875,7 +1867,7 @@ fn re_pick(re: &mut rediscover::Options, what: &str, value: &str, chip_types: &[
         }
         _ => {}
     }
-    before != (re.sound_type.clone(), re.year, re.count)
+    before != (re.sound_type.clone(), re.count)
 }
 
 /// Rediscover's choices as they are now, each on show: the types as the Type filter shows them (the most used as
@@ -1888,18 +1880,46 @@ fn show_rediscover_chips(app: &AppWindow) {
         let types: Vec<(String, String)> = p.types.iter().map(|(t, _)| (t.clone(), String::new())).collect();
         let picked: Vec<String> = p.re.sound_type.iter().cloned().collect();
         let types = filters::show_split(&types, &picked, list::TYPE_CHIPS);
-        let years: Vec<(String, String)> = p.re_years.iter().map(|y| (y.to_string(), String::new())).collect();
-        let picked: Vec<String> = p.re.year.iter().map(i32::to_string).collect();
-        let years = filters::show(&years, &picked);
         let counts = filters::one_of(&COUNTS.map(|c| c.to_string()), &p.re.count.to_string());
         CHOICES.with(|c| {
             data.set_re_type_filter(c.re_type.view(&types));
-            data.set_re_year_filter(c.re_year.view(&years));
             data.set_re_count_filter(c.re_count.view(&counts));
         });
         data.set_re_adventure(p.re.adventure as f32);
         data.set_re_rarely(p.re.max_uses > 0);
     });
+    show_re_years(app);
+}
+
+/// Rediscover's year strip, as [`show_years`] shows the filters' one: each year, how full it is, and the span picked.
+fn show_re_years(app: &AppWindow) {
+    let (bars, (from, to)) = PAGE.with(|p| {
+        let p = p.borrow();
+        (year_bars(&p.re_years), year_strip::picked_places(&p.re_years, p.re.years).unwrap_or((-1, -1)))
+    });
+    let data = app.global::<SoundsData>();
+    data.set_re_years(ModelRc::new(VecModel::from(bars)));
+    data.set_re_years_from(from);
+    data.set_re_years_to(to);
+}
+
+/// The bars of a year strip: each year, and how full it is next to the fullest.
+fn year_bars(years: &[(i32, usize)]) -> Vec<YearBar> {
+    let most = years.iter().map(|y| y.1).max().unwrap_or(1).max(1) as f32;
+    years.iter().map(|&(year, n)| YearBar { year: year.to_string().into(), share: n as f32 / most }).collect()
+}
+
+/// Changes Rediscover's choices with `f` and, once it has a list, picks again (the newest ask wins).
+fn re_change(app: &AppWindow, f: impl FnOnce(&mut Page)) {
+    let again = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        f(&mut p);
+        p.re_started
+    });
+    show_rediscover_chips(app);
+    if again {
+        rediscover_now(app);
+    }
 }
 
 fn wire_rediscover(app: &AppWindow) {
@@ -1920,31 +1940,33 @@ fn wire_rediscover(app: &AppWindow) {
             rediscover_now(&app);
         }
     });
+    // The year strip, as on Tiles, List and Galaxy: a drag over it picks a span of years, and its Clear any year.
+    let weak = app.as_weak();
+    data.on_re_years_picked(move |a, b| {
+        let Some(app) = weak.upgrade() else { return };
+        let span = PAGE.with(|p| year_strip::year_span(&p.borrow().re_years, a, b));
+        if span.is_some_and(|span| PAGE.with(|p| p.borrow().re.years != Some(span))) {
+            re_change(&app, |p| p.re.years = span);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_re_years_cleared(move || {
+        let Some(app) = weak.upgrade() else { return };
+        if PAGE.with(|p| p.borrow().re.years.is_some()) {
+            re_change(&app, |p| p.re.years = None);
+        }
+    });
     // The slider picks again once it's let go, not while it moves.
     let weak = app.as_weak();
     data.on_re_adventure_set(move |v| {
-        let Some(app) = weak.upgrade() else { return };
-        let again = PAGE.with(|p| {
-            let mut p = p.borrow_mut();
-            p.re.adventure = f64::from(v.clamp(0.0, 1.0));
-            p.re_started
-        });
-        show_rediscover_chips(&app);
-        if again {
-            rediscover_now(&app);
+        if let Some(app) = weak.upgrade() {
+            re_change(&app, |p| p.re.adventure = f64::from(v.clamp(0.0, 1.0)));
         }
     });
     let weak = app.as_weak();
     data.on_re_toggle_rarely(move || {
-        let Some(app) = weak.upgrade() else { return };
-        let again = PAGE.with(|p| {
-            let mut p = p.borrow_mut();
-            p.re.max_uses = if p.re.max_uses == 0 { 1 } else { 0 };
-            p.re_started
-        });
-        show_rediscover_chips(&app);
-        if again {
-            rediscover_now(&app);
+        if let Some(app) = weak.upgrade() {
+            re_change(&app, |p| p.re.max_uses = if p.re.max_uses == 0 { 1 } else { 0 });
         }
     });
     let weak = app.as_weak();
@@ -2156,13 +2178,7 @@ pub fn known() -> Known {
 fn show_years(app: &AppWindow) {
     let (bars, (from, to)) = PAGE.with(|p| {
         let p = p.borrow();
-        let most = p.years.iter().map(|y| y.1).max().unwrap_or(1).max(1) as f32;
-        let bars = p
-            .years
-            .iter()
-            .map(|&(year, n)| YearBar { year: year.to_string().into(), share: n as f32 / most })
-            .collect::<Vec<_>>();
-        (bars, year_strip::picked_places(&p.years, p.filters.years).unwrap_or((-1, -1)))
+        (year_bars(&p.years), year_strip::picked_places(&p.years, p.filters.years).unwrap_or((-1, -1)))
     });
     let data = app.global::<SoundsData>();
     data.set_years(ModelRc::new(VecModel::from(bars)));
@@ -2330,7 +2346,8 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
     }
 }
 
-/// The arrow keys: across a row of tiles (-1, 1) or down and up the list (-2, 2), a row of tiles at a time.
+/// The arrow keys: across a row of tiles (-1, 1) or down and up the list (-2, 2), a row of tiles at a time; on the
+/// galaxy, by the map ([`galaxy::arrow`]).
 fn step(app: &AppWindow, d: i32, held: bool) {
     let next = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -2338,6 +2355,9 @@ fn step(app: &AppWindow, d: i32, held: bool) {
         let (autoplay, step) = (p.autoplay, p.step);
         if !p.stepping.may_step(autoplay, held, step, Instant::now()) {
             return None;
+        }
+        if p.view == GALAXY {
+            return Some(None);
         }
         let n = p.entries();
         if n == 0 {
@@ -2353,10 +2373,13 @@ fn step(app: &AppWindow, d: i32, held: bool) {
             Some(r) => (r as isize + by).clamp(0, n as isize - 1) as usize,
             None => 0,
         };
-        Some(row)
+        Some(Some(row))
     });
-    if let Some(row) = next {
-        select_row(app, row as i32, true);
+    match next {
+        Some(Some(row)) => select_row(app, row as i32, true),
+        // The galaxy's arrows go by the map, not the list's order.
+        Some(None) => galaxy::arrow(app, d),
+        None => {}
     }
 }
 
@@ -2727,7 +2750,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rediscover_picks_one_type_and_year_at_most_and_always_a_count() {
+    fn rediscover_picks_one_type_at_most_and_always_a_count() {
         let mut re = rediscover::Options { count: COUNT, ..rediscover::Options::default() };
         let chips = ["Kick", "Snare"];
         let mut pick = |what: &str, value: &str| re_pick(&mut re, what, value, &chips);
@@ -2741,16 +2764,13 @@ mod tests {
         assert!(!pick("more-types", ""));
         assert!(pick("type", "Riser"));
         assert!(pick("more-types", ""));
-        // A year is kept as a number; the Year menu's Any unpicks it.
-        assert!(pick("year", "2024"));
-        assert!(pick("year", "2023"));
-        assert!(pick("year", ""));
-        assert!(!pick("year", ""));
+        // The years are the year strip's, not a pick here.
+        assert!(!pick("year", "2024"));
         // A count on offer is picked; the one picked already, or one not on offer, changes nothing.
         assert!(pick("count", "120"));
         assert!(!pick("count", "120"));
         assert!(!pick("count", "7"));
-        assert_eq!((re.sound_type, re.year, re.count), (None, None, 120));
+        assert_eq!((re.sound_type, re.years, re.count), (None, None, 120));
     }
 
     /// A small song library like the C# app's: two songs, a kick in both, a pad with no notes in one, and settings.

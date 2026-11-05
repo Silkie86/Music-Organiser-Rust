@@ -1086,6 +1086,8 @@ export component ListLine inherits Rectangle {
     in property <bool> landed;
     callback drag-out();
     callback drag-let-go();
+    // The pointer over it: a hand that grabs on a `DragHandle`.
+    in property <MouseCursor> cursor: MouseCursor.default;
     // This press has started a drag, so letting go isn't a click.
     property <bool> dragged;
     border-radius: Theme.radius;
@@ -1101,6 +1103,7 @@ export component ListLine inherits Rectangle {
     // Under the line's own parts, so a button or chip on the line takes its own click; a click anywhere else on
     // the line still picks it.
     touch := TouchArea {
+        mouse-cursor: root.cursor;
         clicked => {
             if !root.dragged {
                 root.clicked();
@@ -1160,6 +1163,46 @@ export component ListLine inherits Rectangle {
         at-x: touch.mouse-x;
         at-y: touch.mouse-y + Space.xl;
         above-y: touch.mouse-y - Space.sm;
+    }
+}
+
+// A handle on a card to drag what it shows out of the app (a sound into a DAW or a folder), so it's plain where to
+// take it from: a grip and its words in an outline, with a hand that grabs. It drags as a list line does (`drag-out`,
+// then `drag-let-go`; `lifted` dims it while it's carried, `landed` glows round it once it has landed).
+export component DragHandle inherits ListLine {
+    in property <string> text;
+    draggable: true;
+    cursor: MouseCursor.grab;
+    height: 32px;
+    border-width: 1px;
+    border-color: Theme.edge;
+    HorizontalLayout {
+        width: 100%;
+        height: 100%;
+        padding-left: Space.sm;
+        padding-right: Space.sm;
+        spacing: Space.sm;
+        VerticalLayout {
+            alignment: center;
+            Path {
+                width: 16px;
+                height: 16px;
+                viewbox-width: 16;
+                viewbox-height: 16;
+                commands: Icons.grip;
+                stroke: Theme.muted;
+                stroke-width: 1.5px;
+            }
+        }
+        Text {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            text: root.text;
+            color: Theme.muted;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            overflow: elide;
+        }
     }
 }
 
@@ -1366,6 +1409,8 @@ export component HoverNote inherits Rectangle {
 
 // The drawn signs for small square buttons (`StudioButton { icon: Icons.more; }`), on a 16 by 16 grid.
 export global Icons {
+    // Six dots in two rows of three: a handle to take hold of and drag.
+    out property <string> grip: "M 5.25 4 A 0.75 0.75 0 1 0 6.75 4 A 0.75 0.75 0 1 0 5.25 4 M 9.25 4 A 0.75 0.75 0 1 0 10.75 4 A 0.75 0.75 0 1 0 9.25 4 M 5.25 8 A 0.75 0.75 0 1 0 6.75 8 A 0.75 0.75 0 1 0 5.25 8 M 9.25 8 A 0.75 0.75 0 1 0 10.75 8 A 0.75 0.75 0 1 0 9.25 8 M 5.25 12 A 0.75 0.75 0 1 0 6.75 12 A 0.75 0.75 0 1 0 5.25 12 M 9.25 12 A 0.75 0.75 0 1 0 10.75 12 A 0.75 0.75 0 1 0 9.25 12";
     // Three dots: more things to do with what's picked.
     out property <string> more: "M 2.5 8 A 0.75 0.75 0 1 0 4 8 A 0.75 0.75 0 1 0 2.5 8 M 7.25 8 A 0.75 0.75 0 1 0 8.75 8 A 0.75 0.75 0 1 0 7.25 8 M 12 8 A 0.75 0.75 0 1 0 13.5 8 A 0.75 0.75 0 1 0 12 8";
     // A magnifier: search (the page's search box and Ctrl+K).
