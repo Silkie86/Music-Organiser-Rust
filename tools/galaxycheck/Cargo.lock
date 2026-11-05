@@ -2891,6 +2891,7 @@ name = "mo-app"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "fs4",
  "mo-backup",
  "mo-catch",
  "mo-convert",
@@ -2905,6 +2906,7 @@ dependencies = [
  "rayon",
  "serde",
  "serde_json",
+ "sha2",
  "swash",
  "thread-priority",
  "tiny-skia 0.12.0",

@@ -38,7 +38,7 @@ param(
 )
 
 # Raised whenever this script changes, so an older branch's copy never replaces a newer installed one.
-$LauncherVersion = 6
+$LauncherVersion = 7
 
 $ErrorActionPreference = 'Continue'   # git and cargo write progress to stderr, which Windows PowerShell treats as failure
 $GitHubRepo = 'Silkie86/Music-Organiser-Rust'
@@ -47,6 +47,14 @@ $OnWindows = [Environment]::OSVersion.Platform -eq 'Win32NT'
 $Exe = if ($OnWindows) { "$AppName.exe" } else { $AppName }
 $DataRoot = [Environment]::GetFolderPath('LocalApplicationData')
 $Home_ = Join-Path (Join-Path $DataRoot 'MusicOrganiser') 'run-latest-rust'
+# The app's data folder: the first one, or the one Settings moved it to (named in MusicOrganiser-folder.txt beside the
+# first). The launcher itself stays in the first one.
+$AppData = Join-Path $DataRoot 'MusicOrganiser'
+$Pointer = Join-Path $DataRoot 'MusicOrganiser-folder.txt'
+if (Test-Path -LiteralPath $Pointer) {
+    $moved = ((Get-Content -LiteralPath $Pointer -Raw -ErrorAction SilentlyContinue) + '').Trim()
+    if ($moved -and [IO.Path]::IsPathRooted($moved) -and (Test-Path -LiteralPath (Join-Path $moved 'moved-in.json'))) { $AppData = $moved }
+}
 $Installed = Join-Path $Home_ 'run-latest.ps1'
 $LastChoice = Join-Path $Home_ 'last-branch.txt'
 # Each build is copied here before it runs, so the next build never has to replace a file the open app is using.
@@ -669,7 +677,7 @@ function Stop-App($Process) {
 function Wait-ForNote {
     # The app puts notes\writing.lock up while an F12 note is open (holding its process id). A restart then would
     # close the note half-written, so new code waits until the note is saved or cancelled.
-    $lock = Join-Path (Join-Path (Join-Path $DataRoot 'MusicOrganiser') 'notes') 'writing.lock'
+    $lock = Join-Path (Join-Path $AppData 'notes') 'writing.lock'
     $said = $false
     while (Test-Path $lock) {
         $id = 0
@@ -731,7 +739,7 @@ try {
         if ($app -and $app.HasExited -and -not $saidClosed) {
             $saidClosed = $true
             if ($app.ExitCode -eq 0) { Say 'The app was closed. The next change from GitHub opens it again.' 'DarkGray' }
-            else { Say "The app stopped with exit code $($app.ExitCode). Its log is in $DataRoot\MusicOrganiser\logs. The next change opens it again." 'Yellow' }
+            else { Say "The app stopped with exit code $($app.ExitCode). Its log is in $AppData\logs. The next change opens it again." 'Yellow' }
         }
         if ((Get-Date) -lt $next) { continue }
         $next = (Get-Date).AddSeconds($PullEvery)

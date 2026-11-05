@@ -21,7 +21,21 @@ fn main() -> Result<(), slint::PlatformError> {
     log_crashes();
     // The graphics card takes a while to wake up: it's looked for while the log and the settings start.
     mo_ui::gpu::look_ahead();
+    // A data folder copied to another drive last run is caught up and switched to now, before any of the app's files is
+    // opened (Settings, Move to another drive).
+    let moved = mo_app::data_move::finish_at_start();
     let session = log::start_session();
+    if let Some(moved) = &moved {
+        match moved {
+            mo_app::data_move::AtStart::Switched { .. } => log::info("Data folder", &moved.line()),
+            _ => log::warning("Data folder", &moved.line()),
+        }
+    }
+    if let Some(problem) = mo_app::paths::problem() {
+        log::warning("Data folder", &problem);
+    }
+    // While this copy runs, another started meanwhile never switches folders under it.
+    mo_app::data_move::hold_open_lock();
     // Programs the app opens (DAWs, folders) start at the window's priority, not a background thread's.
     mo_app::shell::get_ready();
     // Rule 28: what an earlier run or a stopped tool left behind is cleared, a little later, at low priority.

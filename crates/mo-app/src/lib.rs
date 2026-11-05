@@ -10,6 +10,7 @@ pub mod backup_gone;
 pub mod backup_older;
 pub mod binned;
 pub mod bitwig_convert;
+pub mod data_move;
 pub mod drag_card;
 pub mod drag_out;
 pub mod filters;

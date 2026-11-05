@@ -30,6 +30,9 @@ mo-midi = { path = "../mo-midi" }
 mo-presets = { path = "../mo-presets" }
 mo-sounds = { path = "../mo-sounds" }
 mo-space = { path = "../mo-space" }
+# Moving the data folder: each copied file checked by its SHA-256, and the room on the new drive.
+sha2 = "0.10"
+fs4 = "1.1"
 thread-priority.workspace = true
 rayon.workspace = true
 tiny-skia.workspace = true

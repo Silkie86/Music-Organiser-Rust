@@ -2989,6 +2989,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "flate2",
+ "fs4",
  "junction",
  "mo-backup",
  "mo-catch",
@@ -3005,6 +3006,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "swash",
  "thread-priority",
  "tiny-skia 0.12.0",

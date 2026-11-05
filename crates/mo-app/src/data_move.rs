@@ -1,0 +1,811 @@
+//! Moving the app's data folder to another drive (Solomon, 2026-11-05: C: was 98.8% full and slow, so the folder goes
+//! to the fast I: drive). Copy, check, then switch, and the old folder stays until he removes it:
+//!
+//! 1. **Copy** ([`copy`], from Settings, in the background while the app runs): every file of the data folder goes to
+//!    the new one, read once, written as `<name>.mo-move`, read back and compared by SHA-256, given the original's
+//!    time (so every saved copy and stamp that goes by size and time stays good), then named. A file that changed
+//!    while it was copied, or that a running part of the app holds locked (this run's own log), is copied again in a
+//!    second pass, and what still changes waits for step 3. What's done is listed in the new folder's
+//!    [`MOVING_IN_FILE`], so a stopped copy goes on where it was.
+//! 2. **Ready**: once everything copied and checked, [`PENDING_FILE`] beside the first data folder names the new one.
+//!    Nothing switches while the app runs, so every open database stays where it was opened.
+//! 3. **Switch** ([`finish_at_start`], at the next start, before any file of the app is opened): one last pass copies
+//!    what changed since (normally the last run's log and settings), the same checked way. Only when every file is
+//!    there and checked does the new folder get [`paths::MOVED_IN_FILE`] and [`paths::POINTER_FILE`] name it. The old
+//!    folder gets a note, [`MOVED_OUT_FILE`], and nothing in it is removed or changed.
+//!
+//! Left out of the copy: the launchers' own folders ([`LAUNCHER_FOLDERS`]: the launcher runs the app from there and
+//! stays where it is), what [`LEFT_BEHIND`] names, lock files (`*.lock`, only for a running app), and links (never
+//! followed: the new folder gets a folder of its own where the old one had a link). A database's `-wal` and `-shm`
+//! files go with it, so the stamps the app keeps of its databases (which read them) still match after the move.
+//!
+//! Two copies of the app: each holds [`OPEN_LOCK_FILE`] in its data folder shared while it runs ([`hold_open_lock`]),
+//! and the switch needs it alone, so a start while another copy is open never switches under it.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use crate::paths::{self, MOVED_IN_FILE};
+
+/// Beside the first data folder (`%LOCALAPPDATA%\MusicOrganiser-moving.txt`): the folder whose copy is ready, for the
+/// next start to switch to. Removed once it has, or when the move is called off.
+pub const PENDING_FILE: &str = "MusicOrganiser-moving.txt";
+/// In the new folder while the move isn't finished: where from, and each file copied with the size and time it had.
+pub const MOVING_IN_FILE: &str = "moving-in.json";
+/// In the old folder once the switch is made: a note to say where the data went.
+pub const MOVED_OUT_FILE: &str = "MOVED - the app now uses another folder.txt";
+/// In the data folder: every running copy of the app holds it shared; the switch needs it alone. An empty file that
+/// stays (like tidy's `tidy-notes.lock`).
+pub const OPEN_LOCK_FILE: &str = "app-open.lock";
+/// Folders at the top of the data folder that are the launchers', not the app's data: never copied.
+pub const LAUNCHER_FOLDERS: [&str; 2] = ["run-latest-rust", "run-latest"];
+/// Files at the top of the data folder the app no longer opens, so not copied (the old databases once the Rust ones
+/// replace them: they stay in the old folder for the archive step).
+pub const LEFT_BEHIND: &[&str] = &[];
+/// What a file is written as before it's checked.
+const PART: &str = ".mo-move";
+/// Room kept free on the new drive beyond the copy itself.
+const SPARE_ROOM: u64 = 1 << 30;
+/// A pass that copied less than this (and had nothing change under it) is the last before the switch.
+const SMALL_PASS: u64 = 64 << 20;
+const MAX_PASSES: usize = 4;
+const BUFFER: usize = 1 << 20;
+
+/// A file's size and time, as copied.
+#[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Stamp {
+    pub size: u64,
+    pub secs: u64,
+    pub nanos: u32,
+}
+
+impl Stamp {
+    fn of(meta: &fs::Metadata) -> Option<Stamp> {
+        let time = meta.modified().ok()?.duration_since(UNIX_EPOCH).ok()?;
+        Some(Stamp { size: meta.len(), secs: time.as_secs(), nanos: time.subsec_nanos() })
+    }
+
+    fn time(self) -> SystemTime {
+        UNIX_EPOCH + Duration::new(self.secs, self.nanos)
+    }
+}
+
+/// [`MOVING_IN_FILE`] and, once switched, [`paths::MOVED_IN_FILE`] (without the file list).
+#[derive(Serialize, Deserialize, Default, Clone, Debug)]
+pub struct Record {
+    /// The folder the data comes from.
+    pub from: String,
+    /// When the copy started and, once switched, when that was (local time, `2026-11-05 04:30`).
+    #[serde(default)]
+    pub started: String,
+    #[serde(default)]
+    pub switched: String,
+    /// Each file copied, by its path in the folder (`/` between folders), as it was when copied.
+    #[serde(default)]
+    pub files: BTreeMap<String, Stamp>,
+}
+
+/// The finished move's record in `folder`, if the data moved into it.
+pub fn moved_in(folder: &Path) -> Option<Record> {
+    serde_json::from_str(&fs::read_to_string(folder.join(MOVED_IN_FILE)).ok()?).ok()
+}
+
+/// The folder a ready copy waits to switch to, beside the first data folder `first`.
+pub fn pending_in(first: &Path) -> Option<PathBuf> {
+    let text = fs::read_to_string(first.with_file_name(PENDING_FILE)).ok()?;
+    Some(PathBuf::from(text.trim())).filter(|p| p.is_absolute())
+}
+
+/// The folder a ready copy waits to switch to at the next start.
+pub fn pending() -> Option<PathBuf> {
+    pending_in(&paths::first_dir())
+}
+
+/// Calls off a ready move: the next start doesn't switch. The copy stays where it is (yours to remove).
+pub fn cancel() -> io::Result<()> {
+    match fs::remove_file(paths::first_dir().with_file_name(PENDING_FILE)) {
+        Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// What one pass over the folder did.
+#[derive(Default, Debug)]
+pub struct Pass {
+    pub copied: usize,
+    pub bytes: u64,
+    /// Files that changed while copied, or were held locked: copied again next pass.
+    pub busy: Vec<String>,
+    /// Files that couldn't be copied, with why.
+    pub failed: Vec<String>,
+    /// What was left out because it's a link, or its name isn't plain text.
+    pub left_out: Vec<String>,
+    /// Every file the copy now holds, and their size.
+    pub files: usize,
+    pub total: u64,
+}
+
+/// A file to copy: its path in the folder, where it is, how it looked.
+struct Found {
+    rel: String,
+    path: PathBuf,
+    stamp: Stamp,
+}
+
+/// Every file of the data folder `from` the move takes (see the module notes for what it leaves out).
+fn walk(from: &Path, left_out: &mut Vec<String>, stop: &AtomicBool) -> io::Result<Vec<Found>> {
+    let mut found = Vec::new();
+    let mut folders = vec![(from.to_path_buf(), String::new())];
+    while let Some((dir, rel)) = folders.pop() {
+        if stop.load(Ordering::Relaxed) {
+            return Err(stopped());
+        }
+        for entry in fs::read_dir(&dir)? {
+            let entry = entry?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                left_out.push(format!("{} (its name isn't plain text)", entry.path().display()));
+                continue;
+            };
+            let top = rel.is_empty();
+            if top
+                && (LEFT_BEHIND.contains(&name.as_str())
+                    || [MOVING_IN_FILE, MOVED_IN_FILE, MOVED_OUT_FILE, OPEN_LOCK_FILE].contains(&name.as_str()))
+            {
+                continue;
+            }
+            let here = if top { name.clone() } else { format!("{rel}/{name}") };
+            let meta = fs::symlink_metadata(entry.path())?;
+            if meta.file_type().is_symlink() {
+                left_out.push(format!("{here} (a link)"));
+            } else if meta.is_dir() {
+                if !(top && LAUNCHER_FOLDERS.iter().any(|f| f.eq_ignore_ascii_case(&name))) {
+                    folders.push((entry.path(), here));
+                }
+            } else if meta.is_file() {
+                if name.ends_with(".lock") || name.ends_with(PART) {
+                    continue;
+                }
+                match Stamp::of(&meta) {
+                    Some(stamp) => found.push(Found { rel: here, path: entry.path(), stamp }),
+                    None => left_out.push(format!("{here} (its time can't be read)")),
+                }
+            }
+        }
+    }
+    found.sort_by(|a, b| a.rel.cmp(&b.rel));
+    Ok(found)
+}
+
+/// Where `rel` goes in `to`.
+fn dest(to: &Path, rel: &str) -> PathBuf {
+    rel.split('/').fold(to.to_path_buf(), |p, part| p.join(part))
+}
+
+/// Why one file wasn't copied.
+enum NotCopied {
+    /// It changed while being copied, or a running app holds it locked: try again.
+    Busy,
+    Failed(io::Error),
+}
+
+impl From<io::Error> for NotCopied {
+    fn from(e: io::Error) -> Self {
+        if held_locked(&e) { NotCopied::Busy } else { NotCopied::Failed(e) }
+    }
+}
+
+/// Windows: another program (or this one) holds the file or part of it locked.
+fn held_locked(e: &io::Error) -> bool {
+    cfg!(windows) && matches!(e.raw_os_error(), Some(32 | 33))
+}
+
+/// Copies one file, reading it once, then reads the copy back and checks both read the same, and that the source
+/// didn't change meanwhile. The copy gets the source's time, then its name.
+fn copy_one(f: &Found, to_file: &Path, stop: &AtomicBool) -> Result<(), NotCopied> {
+    let mut part = to_file.as_os_str().to_owned();
+    part.push(PART);
+    let part = PathBuf::from(part);
+    // One a stopped copy left: ours by its name.
+    let _ = fs::remove_file(&part);
+    let result = (|| {
+        let mut src = File::open(&f.path)?;
+        let mut out = File::create_new(&part)?;
+        let mut hash = Sha256::new();
+        let mut buf = vec![0u8; BUFFER];
+        let mut total = 0u64;
+        while let Some(n) = read_some(&mut src, &mut buf, stop)? {
+            hash.update(&buf[..n]);
+            out.write_all(&buf[..n])?;
+            total += n as u64;
+        }
+        out.set_modified(f.stamp.time())?;
+        out.sync_all()?;
+        drop(out);
+        drop(src);
+        if total != f.stamp.size || fs::metadata(&f.path).ok().and_then(|m| Stamp::of(&m)) != Some(f.stamp) {
+            return Err(NotCopied::Busy);
+        }
+        let wrote: [u8; 32] = hash.finalize().into();
+        if hash_file(&part, stop)? != wrote {
+            return Err(NotCopied::Failed(io::Error::other(
+                "the copy read back differently: is the new drive failing?",
+            )));
+        }
+        fs::rename(&part, to_file)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&part);
+    }
+    result
+}
+
+fn hash_file(path: &Path, stop: &AtomicBool) -> io::Result<[u8; 32]> {
+    let mut file = File::open(path)?;
+    let mut buf = vec![0u8; BUFFER];
+    let mut hash = Sha256::new();
+    while let Some(n) = read_some(&mut file, &mut buf, stop)? {
+        hash.update(&buf[..n]);
+    }
+    Ok(hash.finalize().into())
+}
+
+fn read_some(file: &mut File, buf: &mut [u8], stop: &AtomicBool) -> io::Result<Option<usize>> {
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Err(stopped());
+        }
+        match file.read(buf) {
+            Ok(0) => return Ok(None),
+            Ok(n) => return Ok(Some(n)),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn stopped() -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, "Stopped")
+}
+
+fn is_stopped(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::Interrupted
+}
+
+/// One pass: copies each file of `from` the record doesn't have as it is now, and takes out of the copy each file it
+/// copied before that's gone from `from` since. `progress` hears the bytes done and to do.
+fn sync(
+    from: &Path,
+    to: &Path,
+    record: &mut Record,
+    stop: &AtomicBool,
+    progress: &mut dyn FnMut(u64, u64),
+) -> io::Result<Pass> {
+    let mut pass = Pass::default();
+    let found = walk(from, &mut pass.left_out, stop)?;
+    let todo: Vec<&Found> = found
+        .iter()
+        .filter(|f| {
+            record.files.get(&f.rel) != Some(&f.stamp)
+                || fs::symlink_metadata(dest(to, &f.rel)).map_or(true, |m| !m.is_file() || m.len() != f.stamp.size)
+        })
+        .collect();
+    let to_do: u64 = todo.iter().map(|f| f.stamp.size).sum();
+    progress(0, to_do);
+    for f in todo {
+        let to_file = dest(to, &f.rel);
+        if let Some(dir) = to_file.parent() {
+            fs::create_dir_all(dir)?;
+        }
+        match copy_one(f, &to_file, stop) {
+            Ok(()) => {
+                record.files.insert(f.rel.clone(), f.stamp);
+                pass.copied += 1;
+                pass.bytes += f.stamp.size;
+            }
+            Err(NotCopied::Failed(e)) if is_stopped(&e) => return Err(e),
+            Err(NotCopied::Busy) => {
+                record.files.remove(&f.rel);
+                pass.busy.push(f.rel.clone());
+            }
+            Err(NotCopied::Failed(e)) => {
+                record.files.remove(&f.rel);
+                pass.failed.push(format!("{}: {e}", f.rel));
+            }
+        }
+        progress(pass.bytes, to_do);
+    }
+    let now: BTreeSet<&str> = found.iter().map(|f| f.rel.as_str()).collect();
+    let gone: Vec<String> = record.files.keys().filter(|k| !now.contains(k.as_str())).cloned().collect();
+    for rel in gone {
+        let path = dest(to, &rel);
+        if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
+            fs::remove_file(&path)?;
+        }
+        record.files.remove(&rel);
+    }
+    pass.files = found.len();
+    pass.total = found.iter().map(|f| f.stamp.size).sum();
+    Ok(pass)
+}
+
+/// Writes `text` to `path` by a whole new file that then takes its name, so a crash never leaves half of it.
+fn write_whole(path: &Path, text: &str) -> io::Result<()> {
+    let mut part = path.as_os_str().to_owned();
+    part.push(PART);
+    let part = PathBuf::from(part);
+    let mut file = File::create(&part)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&part, path)
+}
+
+fn save_record(to: &Path, record: &Record) -> io::Result<()> {
+    write_whole(&to.join(MOVING_IN_FILE), &serde_json::to_string_pretty(record).map_err(io::Error::other)?)
+}
+
+fn now_text() -> String {
+    chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
+}
+
+/// Whether `to` may take the data of `from`: a whole path, neither inside the other, and empty (or a copy of `from`
+/// this move started before). Gives what the copy holds so far.
+fn check_folder(from: &Path, to: &Path) -> Result<Record, String> {
+    if !to.is_absolute() {
+        return Err(format!("{} isn't a whole folder path", to.display()));
+    }
+    if mo_backup::folders::within(to, from) || mo_backup::folders::within(from, to) {
+        return Err("Pick a folder outside the app's data folder (and not one that holds it)".to_owned());
+    }
+    match fs::symlink_metadata(to) {
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(new_record(from)),
+        Err(e) => return Err(format!("Couldn't look at {}: {e}", to.display())),
+        Ok(m) if !m.is_dir() => return Err(format!("{} isn't a folder", to.display())),
+        Ok(_) => {}
+    }
+    if let Ok(text) = fs::read_to_string(to.join(MOVING_IN_FILE)) {
+        let record: Record =
+            serde_json::from_str(&text).map_err(|e| format!("{MOVING_IN_FILE} in {} is damaged: {e}", to.display()))?;
+        if Path::new(&record.from) != from {
+            return Err(format!("{} holds a copy of another folder ({})", to.display(), record.from));
+        }
+        return Ok(record);
+    }
+    let empty = fs::read_dir(to).map_err(|e| format!("Couldn't look in {}: {e}", to.display()))?.next().is_none();
+    if !empty {
+        return Err(format!("{} isn't empty: pick an empty folder, or a new one", to.display()));
+    }
+    Ok(new_record(from))
+}
+
+fn new_record(from: &Path) -> Record {
+    Record { from: from.display().to_string(), started: now_text(), ..Record::default() }
+}
+
+/// The free room on the drive `path` is on (or would be on), from its nearest folder there is.
+fn free_room(path: &Path) -> Option<u64> {
+    path.ancestors().find(|p| p.exists()).and_then(|p| fs4::available_space(p).ok())
+}
+
+/// What a finished copy did.
+#[derive(Debug)]
+pub struct Copied {
+    pub files: usize,
+    pub bytes: u64,
+    /// Files still changing, which the switch copies at the next start.
+    pub at_start: usize,
+    pub left_out: Vec<String>,
+}
+
+/// Step 1 and 2: copies the data folder in use, `from`, to `to` and checks it, then marks it ready for the next start.
+/// Runs for minutes on a big library: call it on a background thread. `progress` hears the bytes done and to do in
+/// each pass. Stops (with `Err("Stopped")`) when `stop` is set; the copy so far stays, and a later call goes on from
+/// there.
+pub fn copy(from: &Path, to: &Path, stop: &AtomicBool, progress: &mut dyn FnMut(u64, u64)) -> Result<Copied, String> {
+    copy_with(from, to, &paths::first_dir(), stop, progress)
+}
+
+fn copy_with(
+    from: &Path,
+    to: &Path,
+    first: &Path,
+    stop: &AtomicBool,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<Copied, String> {
+    let mut record = check_folder(from, to)?;
+    let fail = |e: io::Error| if is_stopped(&e) { "Stopped".to_owned() } else { e.to_string() };
+    let mut ignored = Vec::new();
+    let all = walk(from, &mut ignored, stop).map_err(fail)?;
+    let needed: u64 = all.iter().filter(|f| record.files.get(&f.rel) != Some(&f.stamp)).map(|f| f.stamp.size).sum();
+    if let Some(free) = free_room(to)
+        && free < needed.saturating_add(SPARE_ROOM)
+    {
+        return Err(format!(
+            "Not enough room: the copy needs {} and {} has {} free (with 1 GB to spare)",
+            size_text(needed),
+            to.display(),
+            size_text(free)
+        ));
+    }
+    fs::create_dir_all(to).map_err(|e| format!("Couldn't make {}: {e}", to.display()))?;
+    save_record(to, &record).map_err(|e| format!("Couldn't write in {}: {e}", to.display()))?;
+    let mut last = Pass::default();
+    for _ in 0..MAX_PASSES {
+        let pass = sync(from, to, &mut record, stop, progress);
+        // What the pass did is kept even when it stopped part way.
+        save_record(to, &record).map_err(|e| format!("Couldn't write in {}: {e}", to.display()))?;
+        last = pass.map_err(fail)?;
+        if last.failed.is_empty() && last.busy.is_empty() && last.bytes < SMALL_PASS {
+            break;
+        }
+    }
+    if !last.failed.is_empty() {
+        return Err(format!("{} couldn't be copied: {}", plural(last.failed.len(), "file"), first_few(&last.failed)));
+    }
+    write_whole(&first.with_file_name(PENDING_FILE), &to.display().to_string())
+        .map_err(|e| format!("Couldn't note the move beside {}: {e}", first.display()))?;
+    Ok(Copied { files: last.files, bytes: last.total, at_start: last.busy.len(), left_out: last.left_out })
+}
+
+/// What the start did about a ready move.
+#[derive(Debug)]
+pub enum AtStart {
+    /// The app now uses `to`.
+    Switched { from: PathBuf, to: PathBuf, copied: usize, bytes: u64, took: Duration, left_out: Vec<String> },
+    /// Not this time; tried again at the next start.
+    NotYet { to: PathBuf, why: String },
+    /// Called off: the ready copy can't be used.
+    Dropped { to: PathBuf, why: String },
+}
+
+impl AtStart {
+    /// The session log's line.
+    pub fn line(&self) -> String {
+        match self {
+            AtStart::Switched { from, to, copied, bytes, took, left_out } => {
+                let mut line = format!(
+                    "Now using {}, moved from {} (the last {} caught up, {}, in {:.1} s); the old folder stays",
+                    to.display(),
+                    from.display(),
+                    plural(*copied, "file"),
+                    size_text(*bytes),
+                    took.as_secs_f64()
+                );
+                if !left_out.is_empty() {
+                    line.push_str(&format!("; left out: {}", first_few(left_out)));
+                }
+                line
+            }
+            AtStart::NotYet { to, why } => format!("Not switching to {} yet: {why}", to.display()),
+            AtStart::Dropped { to, why } => format!("The move to {} is called off: {why}", to.display()),
+        }
+    }
+}
+
+static AT_START: OnceLock<Option<String>> = OnceLock::new();
+
+/// What [`finish_at_start`] said this run, for Settings (none when there was nothing to do or it switched).
+pub fn start_problem() -> Option<String> {
+    AT_START.get().cloned().flatten()
+}
+
+/// Step 3, first thing at start, before any of the app's files is opened (and before [`paths::data_dir`] is asked):
+/// when a copy is ready, catches it up and switches to it. `None` when there's no move to make.
+pub fn finish_at_start() -> Option<AtStart> {
+    let outcome = finish_in(&paths::first_dir());
+    let problem = match &outcome {
+        Some(AtStart::NotYet { .. } | AtStart::Dropped { .. }) => outcome.as_ref().map(AtStart::line),
+        _ => None,
+    };
+    let _ = AT_START.set(problem);
+    outcome
+}
+
+fn finish_in(first: &Path) -> Option<AtStart> {
+    let to = pending_in(first)?;
+    let from = paths::folder_in_use(first);
+    let pending_file = first.with_file_name(PENDING_FILE);
+    let call_off = |why: String| {
+        let _ = fs::remove_file(&pending_file);
+        Some(AtStart::Dropped { to: to.clone(), why })
+    };
+    let not_yet = |why: String| Some(AtStart::NotYet { to: to.clone(), why });
+    if paths_match(&from, &to) {
+        let _ = fs::remove_file(&pending_file);
+        return None;
+    }
+    if !to.is_dir() {
+        return not_yet("the folder can't be found (is its drive there?)".to_owned());
+    }
+    let mut record: Record = match fs::read_to_string(to.join(MOVING_IN_FILE)).map(|t| serde_json::from_str(&t)) {
+        Ok(Ok(record)) => record,
+        Ok(Err(e)) => return call_off(format!("its {MOVING_IN_FILE} is damaged ({e})")),
+        Err(e) => return call_off(format!("its {MOVING_IN_FILE} can't be read ({e})")),
+    };
+    if !paths_match(Path::new(&record.from), &from) {
+        return call_off(format!("it's a copy of {}, but the app now uses {}", record.from, from.display()));
+    }
+    // No other copy of the app may be open on the old folder while it's caught up and left.
+    let Ok(lock) = File::options().create(true).truncate(false).write(true).open(from.join(OPEN_LOCK_FILE)) else {
+        return not_yet(format!("{OPEN_LOCK_FILE} couldn't be opened"));
+    };
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(fs::TryLockError::WouldBlock) => return not_yet("another copy of the app is open".to_owned()),
+        Err(fs::TryLockError::Error(e)) => return not_yet(format!("{OPEN_LOCK_FILE} couldn't be locked ({e})")),
+    }
+    let started = Instant::now();
+    let never = AtomicBool::new(false);
+    let pass = sync(&from, &to, &mut record, &never, &mut |_, _| {});
+    if save_record(&to, &record).is_err() {
+        return not_yet(format!("couldn't write {MOVING_IN_FILE}"));
+    }
+    let pass = match pass {
+        Ok(pass) => pass,
+        Err(e) => return not_yet(format!("the last copy stopped: {e}")),
+    };
+    if !pass.failed.is_empty() {
+        return not_yet(format!(
+            "{} couldn't be copied: {}",
+            plural(pass.failed.len(), "file"),
+            first_few(&pass.failed)
+        ));
+    }
+    if !pass.busy.is_empty() {
+        return not_yet(format!("{} kept changing: {}", plural(pass.busy.len(), "file"), first_few(&pass.busy)));
+    }
+    // Every file is there and checked: the new folder is marked a finished move, then the pointer names it.
+    let moved = Record { files: BTreeMap::new(), switched: now_text(), ..record };
+    let marked = serde_json::to_string_pretty(&moved)
+        .map_err(io::Error::other)
+        .and_then(|json| write_whole(&to.join(MOVED_IN_FILE), &json));
+    if let Err(e) = marked {
+        return not_yet(format!("couldn't write {MOVED_IN_FILE} ({e})"));
+    }
+    if let Err(e) = write_whole(&paths::pointer_file(first), &to.display().to_string()) {
+        return not_yet(format!("couldn't write {} ({e})", paths::POINTER_FILE));
+    }
+    let _ = fs::remove_file(to.join(MOVING_IN_FILE));
+    let _ = fs::remove_file(&pending_file);
+    let _ = fs::write(
+        from.join(MOVED_OUT_FILE),
+        format!(
+            "Music Organiser copied its data from this folder to\r\n\r\n    {}\r\n\r\non {} and uses that folder now. \
+             Nothing here was changed or removed.\r\nYou can remove this folder once you're happy the app works from \
+             the new one.\r\n",
+            to.display(),
+            moved.switched
+        ),
+    );
+    drop_lock(lock);
+    Some(AtStart::Switched {
+        from,
+        to,
+        copied: pass.copied,
+        bytes: pass.bytes,
+        took: started.elapsed(),
+        left_out: pass.left_out,
+    })
+}
+
+fn drop_lock(lock: File) {
+    let _ = lock.unlock();
+}
+
+/// Whether two folder paths name the same folder as written (Windows and a Mac ignore case).
+fn paths_match(a: &Path, b: &Path) -> bool {
+    mo_backup::folders::within(a, b) && mo_backup::folders::within(b, a)
+}
+
+/// Holds [`OPEN_LOCK_FILE`] in the data folder shared for the rest of the run, so a second copy of the app started
+/// meanwhile never switches folders under this one. Call once, after [`finish_at_start`].
+pub fn hold_open_lock() {
+    static HELD: OnceLock<File> = OnceLock::new();
+    let path = paths::data_dir().join(OPEN_LOCK_FILE);
+    let Ok(file) = File::options().create(true).truncate(false).write(true).open(&path) else { return };
+    if file.try_lock_shared().is_ok() {
+        let _ = HELD.set(file);
+    }
+}
+
+fn first_few(list: &[String]) -> String {
+    let mut text = list.iter().take(3).cloned().collect::<Vec<_>>().join("; ");
+    if list.len() > 3 {
+        text.push_str(&format!(" and {} more", list.len() - 3));
+    }
+    text
+}
+
+fn plural(n: usize, what: &str) -> String {
+    if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") }
+}
+
+/// A size in GB or MB, as the app shows them.
+pub fn size_text(bytes: u64) -> String {
+    let gb = bytes as f64 / 1e9;
+    if gb >= 1.0 { format!("{gb:.1} GB") } else { format!("{:.0} MB", bytes as f64 / 1e6) }
+}
+
+/// The line Settings shows under the data folder: a move waiting for the next start, where the data came from, or
+/// why a move's folder isn't in use.
+pub fn status_note(pending: Option<&Path>, moved_from: Option<&Path>, problems: &[String]) -> String {
+    let mut lines: Vec<String> = problems.to_vec();
+    if let Some(to) = pending {
+        lines.push(format!(
+            "Copied and checked to {}. The app switches to it the next time it starts; until then it keeps using this \
+             folder.",
+            to.display()
+        ));
+    } else if let Some(from) = moved_from {
+        lines.push(format!("Moved here from {}. That folder stays as it was until you remove it.", from.display()));
+    }
+    lines.join("\n")
+}
+
+/// The folder a move goes into when `picked` is chosen: a folder of the app's own name inside it, unless it's one
+/// already (so picking `I:\` moves to `I:\MusicOrganiser`).
+pub fn target_in(picked: &Path) -> PathBuf {
+    if picked.file_name().is_some_and(|n| n.eq_ignore_ascii_case("MusicOrganiser")) {
+        picked.to_path_buf()
+    } else {
+        picked.join("MusicOrganiser")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A first data folder and a place to move it to, in a test folder of its own.
+    struct Setup {
+        root: PathBuf,
+        first: PathBuf,
+        to: PathBuf,
+    }
+
+    impl Setup {
+        fn new(name: &str) -> Setup {
+            let root = std::env::temp_dir().join("mo-data-move-test").join(format!("{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&root);
+            let first = root.join("MusicOrganiser");
+            fs::create_dir_all(first.join("logs")).unwrap();
+            fs::create_dir_all(first.join("notes")).unwrap();
+            fs::write(first.join("library.db"), vec![7u8; 300_000]).unwrap();
+            fs::write(first.join("library.db-wal"), b"wal").unwrap();
+            fs::write(first.join("library.db-shm"), b"shm").unwrap();
+            fs::write(first.join("rust-settings.json"), b"{}").unwrap();
+            fs::write(first.join("logs").join("session.log"), b"line\n").unwrap();
+            fs::write(first.join("notes").join("draft.txt"), b"words").unwrap();
+            fs::write(first.join("notes").join("writing.lock"), b"123").unwrap();
+            fs::create_dir_all(first.join("run-latest-rust").join("app")).unwrap();
+            fs::write(first.join("run-latest-rust").join("app").join("Cargo.toml"), b"x").unwrap();
+            let to = root.join("I").join("MusicOrganiser");
+            Setup { root, first, to }
+        }
+
+        fn copy(&self) -> Result<Copied, String> {
+            copy_with(&self.first, &self.to, &self.first, &AtomicBool::new(false), &mut |_, _| {})
+        }
+    }
+
+    impl Drop for Setup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.root);
+        }
+    }
+
+    #[test]
+    fn copies_checks_then_switches_at_the_next_start() {
+        let s = Setup::new("whole");
+        let copied = s.copy().unwrap();
+        assert_eq!(copied.files, 6);
+        // Ready, not switched: the app still uses the first folder.
+        assert_eq!(pending_in(&s.first), Some(s.to.clone()));
+        assert_eq!(paths::folder_in_use(&s.first), s.first);
+        assert_eq!(fs::read(s.to.join("library.db")).unwrap(), vec![7u8; 300_000]);
+        // Times kept, so every stamp by size and time stays good.
+        let time = |p: &Path| fs::metadata(p).unwrap().modified().unwrap();
+        assert_eq!(time(&s.to.join("library.db")), time(&s.first.join("library.db")));
+        // The database's -wal and -shm go with it; the launcher's folder and lock files don't.
+        assert!(s.to.join("library.db-shm").is_file());
+        assert!(!s.to.join("run-latest-rust").exists());
+        assert!(!s.to.join("notes").join("writing.lock").exists());
+
+        // The last run changed a setting and wrote its log, and a note went.
+        fs::write(s.first.join("rust-settings.json"), b"{\"theme\":\"Paper\"}").unwrap();
+        fs::write(s.first.join("logs").join("session-2.log"), b"more\n").unwrap();
+        fs::remove_file(s.first.join("notes").join("draft.txt")).unwrap();
+
+        let Some(AtStart::Switched { copied, .. }) = finish_in(&s.first) else { panic!("didn't switch") };
+        assert_eq!(copied, 2);
+        assert_eq!(paths::folder_in_use(&s.first), s.to);
+        assert_eq!(fs::read(s.to.join("rust-settings.json")).unwrap(), b"{\"theme\":\"Paper\"}");
+        assert!(s.to.join("logs").join("session-2.log").is_file());
+        assert!(!s.to.join("notes").join("draft.txt").exists());
+        assert!(!s.to.join(MOVING_IN_FILE).exists());
+        assert_eq!(moved_in(&s.to).unwrap().from, s.first.display().to_string());
+        assert!(pending_in(&s.first).is_none());
+        // The old folder keeps everything, and says where the data went.
+        assert!(s.first.join("library.db").is_file());
+        assert!(fs::read_to_string(s.first.join(MOVED_OUT_FILE)).unwrap().contains(&s.to.display().to_string()));
+        // Nothing more to do.
+        assert!(finish_in(&s.first).is_none());
+    }
+
+    #[test]
+    fn a_folder_that_isnt_empty_or_is_inside_is_refused() {
+        let s = Setup::new("refused");
+        fs::create_dir_all(&s.to).unwrap();
+        fs::write(s.to.join("yours.txt"), b"x").unwrap();
+        assert!(s.copy().unwrap_err().contains("isn't empty"));
+        let inside = s.first.join("inner");
+        let err = copy_with(&s.first, &inside, &s.first, &AtomicBool::new(false), &mut |_, _| {}).unwrap_err();
+        assert!(err.contains("outside"));
+        assert!(pending_in(&s.first).is_none());
+        assert!(fs::read_to_string(s.to.join("yours.txt")).is_ok());
+    }
+
+    #[test]
+    fn a_stopped_copy_goes_on_where_it_was() {
+        let s = Setup::new("stopped");
+        let stop = AtomicBool::new(true);
+        let err = copy_with(&s.first, &s.to, &s.first, &stop, &mut |_, _| {}).unwrap_err();
+        assert_eq!(err, "Stopped");
+        assert!(pending_in(&s.first).is_none());
+        // Its own folder now (it holds the record), so going on is allowed.
+        let copied = s.copy().unwrap();
+        assert_eq!(copied.files, 6);
+    }
+
+    #[test]
+    fn a_damaged_copy_is_never_switched_to() {
+        let s = Setup::new("damaged");
+        s.copy().unwrap();
+        // The copy's list went missing: called off, never switched.
+        fs::remove_file(s.to.join(MOVING_IN_FILE)).unwrap();
+        assert!(matches!(finish_in(&s.first), Some(AtStart::Dropped { .. })));
+        assert_eq!(paths::folder_in_use(&s.first), s.first);
+        assert!(pending_in(&s.first).is_none());
+    }
+
+    #[test]
+    fn a_missing_drive_waits() {
+        let s = Setup::new("missing");
+        s.copy().unwrap();
+        fs::rename(&s.to, s.root.join("away")).unwrap();
+        assert!(matches!(finish_in(&s.first), Some(AtStart::NotYet { .. })));
+        assert_eq!(pending_in(&s.first), Some(s.to.clone()));
+        assert_eq!(paths::folder_in_use(&s.first), s.first);
+    }
+
+    #[test]
+    fn a_copy_that_differs_is_caught_up() {
+        let s = Setup::new("differs");
+        s.copy().unwrap();
+        // Someone changed the copy itself: its size no longer matches, so it's copied again.
+        fs::write(s.to.join("library.db"), b"short").unwrap();
+        assert!(matches!(finish_in(&s.first), Some(AtStart::Switched { copied: 1, .. })));
+        assert_eq!(fs::read(s.to.join("library.db")).unwrap().len(), 300_000);
+    }
+
+    #[test]
+    fn another_open_copy_of_the_app_holds_the_switch() {
+        let s = Setup::new("open");
+        s.copy().unwrap();
+        let other =
+            File::options().create(true).truncate(false).write(true).open(s.first.join(OPEN_LOCK_FILE)).unwrap();
+        other.lock_shared().unwrap();
+        assert!(matches!(finish_in(&s.first), Some(AtStart::NotYet { .. })));
+        drop(other);
+        assert!(matches!(finish_in(&s.first), Some(AtStart::Switched { .. })));
+    }
+}

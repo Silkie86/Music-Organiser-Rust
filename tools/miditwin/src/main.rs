@@ -49,8 +49,18 @@ struct Args {
     report: Option<PathBuf>,
 }
 
+/// The app's data folder under `local`: the one Settings moved it to (named in `MusicOrganiser-folder.txt`, and holding
+/// `moved-in.json`), else `MusicOrganiser`.
+fn data_folder(local: &std::path::Path) -> PathBuf {
+    let moved = std::fs::read_to_string(local.join("MusicOrganiser-folder.txt"))
+        .ok()
+        .map(|t| PathBuf::from(t.trim()))
+        .filter(|p| p.is_absolute() && p.join("moved-in.json").is_file());
+    moved.unwrap_or_else(|| local.join("MusicOrganiser"))
+}
+
 fn args() -> Result<Args, String> {
-    let data = std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("MusicOrganiser"));
+    let data = std::env::var_os("LOCALAPPDATA").map(|d| data_folder(&PathBuf::from(d)));
     let mut a = Args {
         midi: data.as_ref().map(|d| d.join("midi.db")).unwrap_or_default(),
         library: data.as_ref().map(|d| d.join("library.db")),

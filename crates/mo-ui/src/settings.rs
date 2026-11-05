@@ -70,6 +70,11 @@ struct Page {
     bw_loaded_from: Option<String>,
     daws_installing: bool,
     daws_message: String,
+    /// Moving the data folder: set while the copy runs (its Stop), and what the last copy did.
+    data_moving: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    data_message: String,
+    /// The folder a finished copy waits to switch to at the next start (read once, then kept here).
+    data_pending: Option<PathBuf>,
     feed: Feed,
 }
 
@@ -190,6 +195,9 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             bw_loaded_from: None,
             daws_installing: false,
             daws_message: String::new(),
+            data_moving: None,
+            data_message: String::new(),
+            data_pending: mo_app::data_move::pending(),
             feed: setup.feed,
         })
     });
@@ -344,6 +352,42 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         }
     });
     data.on_open_fact(open_fact);
+    let weak = app.as_weak();
+    data.on_move_data(move || {
+        let weak = weak.clone();
+        crate::backup::pick_folder("Pick the drive or folder the app's data goes to", move |picked| {
+            if let Some(app) = weak.upgrade() {
+                move_data(&app, mo_app::data_move::target_in(&picked));
+            }
+        });
+    });
+    data.on_stop_data_move(|| {
+        PAGE.with(|p| {
+            if let Some(stop) = p.borrow().as_ref().and_then(|p| p.data_moving.as_ref()) {
+                stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            }
+        });
+    });
+    let weak = app.as_weak();
+    data.on_cancel_data_move(move || {
+        let message = match mo_app::data_move::cancel() {
+            Ok(()) => {
+                log::info("Data folder", "The move is called off: the app keeps using this folder");
+                "Called off: the app keeps using this folder. The copy stays where it is until you remove it."
+                    .to_owned()
+            }
+            Err(e) => format!("Couldn't call the move off: {e}"),
+        };
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                p.data_message = message;
+                p.data_pending = mo_app::data_move::pending();
+            }
+        });
+        if let Some(app) = weak.upgrade() {
+            show(&app);
+        }
+    });
     let weak = app.as_weak();
     data.on_listen(move |id| {
         let id = mo_app::shortcuts::all_actions().map(|(_, a)| a.id).find(|a| *a == id.as_str());
@@ -780,6 +824,84 @@ fn install_fl(app: &AppWindow) {
     }
 }
 
+/// Copies the app's data folder to `to` and checks it, away from the window, with a card that shows how far it is.
+/// The switch is made at the next start (`mo_app::data_move`).
+fn move_data(app: &AppWindow, to: PathBuf) {
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let feed = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let p = p.as_mut().filter(|p| p.live && p.data_moving.is_none())?;
+        p.data_moving = Some(stop.clone());
+        p.data_message = format!("Copying to {}\u{2026}", to.display());
+        Some(p.feed.clone())
+    });
+    let Some(feed) = feed else { return };
+    show(app);
+    let from = mo_app::paths::data_dir();
+    log::info("Data folder", &format!("Copying {} to {}", from.display(), to.display()));
+    let weak = app.as_weak();
+    let job = feed.start(&format!("Copying the app's data to {}", to.display()), "Looking at what to copy");
+    let started = background::spawn("Data folder move", move || {
+        let done = mo_app::data_move::copy(&from, &to, &stop, &mut |done, total| {
+            let fraction = if total == 0 { 1.0 } else { done as f32 / total as f32 };
+            let detail = format!("{} of {}", mo_app::data_move::size_text(done), mo_app::data_move::size_text(total));
+            job.progress(fraction, Some(&detail));
+        });
+        let message = match &done {
+            Ok(c) => {
+                let mut line = format!(
+                    "Copied and checked {} files ({}) to {}",
+                    c.files,
+                    mo_app::data_move::size_text(c.bytes),
+                    to.display()
+                );
+                if c.at_start > 0 {
+                    line.push_str(&format!("; {} still changing go at the next start", c.at_start));
+                }
+                if !c.left_out.is_empty() {
+                    line.push_str(&format!("; left out: {}", c.left_out.join("; ")));
+                }
+                log::info("Data folder", &line);
+                job.done_as("The app's data is copied", "It switches to the new folder when the app next starts");
+                String::new()
+            }
+            Err(why) if why == "Stopped" => {
+                log::info("Data folder", "Copy stopped; the copy so far stays and a new Move goes on from there");
+                job.done_as("Copy stopped", "Move again to the same place to go on");
+                "Stopped. The copy so far stays: move to the same place again to go on from there.".to_owned()
+            }
+            Err(why) => {
+                log::warning("Data folder", &format!("Couldn't copy the data folder to {}: {why}", to.display()));
+                job.failed_as("Couldn't copy the app's data", why);
+                format!("Couldn't copy: {why}")
+            }
+        };
+        let pending = mo_app::data_move::pending();
+        let _ = slint::invoke_from_event_loop(move || {
+            PAGE.with(|p| {
+                if let Some(p) = p.borrow_mut().as_mut() {
+                    p.data_moving = None;
+                    p.data_message = message;
+                    p.data_pending = pending;
+                }
+            });
+            if let Some(app) = weak.upgrade() {
+                show(&app);
+            }
+        });
+    });
+    if let Err(e) = started {
+        log::error("Data folder", &format!("Couldn't start copying the data folder: {e}"));
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                p.data_moving = None;
+                p.data_message = format!("Couldn't start the copy: {e}");
+            }
+        });
+        show(app);
+    }
+}
+
 /// Puts the app's own Bitwig extension in Bitwig's folders and takes out the older script (Solomon's OK, 2026-11-03),
 /// away from the window, then looks again.
 fn install_bitwig(app: &AppWindow) {
@@ -1065,6 +1187,19 @@ fn show(app: &AppWindow) {
         data.set_daws_message(p.daws_message.clone().into());
         data.set_folders_busy(p.folders_busy);
         data.set_folders_message(p.folders_message.clone().into());
+
+        let pending = p.data_pending.clone();
+        let problems: Vec<String> =
+            [mo_app::paths::problem(), mo_app::data_move::start_problem()].into_iter().flatten().collect();
+        let mut note =
+            mo_app::data_move::status_note(pending.as_deref(), mo_app::paths::moved_from().as_deref(), &problems);
+        if !p.data_message.is_empty() {
+            note = if note.is_empty() { p.data_message.clone() } else { format!("{}\n{note}", p.data_message) };
+        }
+        data.set_data_folder(mo_app::paths::data_dir().display().to_string().into());
+        data.set_data_note(note.into());
+        data.set_data_moving(p.data_moving.is_some());
+        data.set_data_ready(pending.is_some() && p.data_moving.is_none());
     });
 }
 
