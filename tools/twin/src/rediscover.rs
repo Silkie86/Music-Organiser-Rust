@@ -133,11 +133,11 @@ fn queries() -> Vec<Options> {
         Options { seed: 7, count: 10, ..o.clone() },
         Options { sound_type: Some("Kick".into()), count: 5, adventure: 0.0, seed: 3, ..o.clone() },
         Options { sound_type: Some("Closed hat".into()), count: 8, adventure: 0.6, seed: 11, max_uses: 1, ..o.clone() },
-        Options { year: Some(2020), count: 6, seed: 5, ..o.clone() },
+        Options { years: Some((2020, 2020)), count: 6, seed: 5, ..o.clone() },
         Options { sound_type: Some("808".into()), count: 60, seed: 13, ..o.clone() },
         Options { sound_type: Some("Vocal".into()), seed: 2, ..o.clone() },
-        Options { year: Some(1999), seed: 2, ..o.clone() },
-        Options { sound_type: Some("Snare".into()), year: Some(2018), max_uses: 99, count: 4, seed: 17, ..o },
+        Options { years: Some((1999, 1999)), seed: 2, ..o.clone() },
+        Options { sound_type: Some("Snare".into()), years: Some((2018, 2018)), max_uses: 99, count: 4, seed: 17, ..o },
     ]
 }
 
@@ -180,7 +180,8 @@ fn query_json(o: &Options) -> Value {
         "Adventure": o.adventure,
         "Seed": o.seed,
         "MaxUses": o.max_uses,
-        "Year": o.year,
+        // The C# app picked one year: each question here asks for one (a span of one year on the Rust strip).
+        "Year": o.years.map(|(first, _)| first),
     })
 }
 
@@ -250,7 +251,9 @@ fn rust_side(db: &Path, uses: &[Value]) -> Result<Value, String> {
         "answers": answers,
         "kits": kits,
         "duplicates": duplicates,
-        "years": years(&sounds),
+        // The years alone, newest first, less undated files, as the C# app listed them (the Rust strip also counts each
+        // one's sounds, and leaves out years still to come).
+        "years": years(&sounds).iter().map(|y| y.0).filter(|&y| y > 1980).collect::<Vec<_>>(),
         "folders": folders(&sounds, &usage)
             .iter()
             .map(|f| json!({ "Folder": f.folder, "Sounds": f.sounds, "Used": f.used, "Share": f.share }))
@@ -273,6 +276,15 @@ fn same_suggestions(cs: &Value, rust: &Value, names: &Value) -> bool {
                 && (x["Reason"] == y["Reason"] || like_itself(x))
                 && (x["Score"].as_f64().unwrap_or(f64::NAN) - y["Score"].as_f64().unwrap_or(0.0)).abs() < 0.0011
         })
+}
+
+/// C#'s words for no sounds in the year asked, as the Rust app says them (DIFFERENCES.md): Rust picks its years on the
+/// year strip, so it says to pick others there.
+fn year_words(why: &Value) -> Value {
+    match why.as_str() {
+        Some(w) => json!(w.replace("Pick another year, or Any year.", "Pick other years on the strip, or clear it.")),
+        None => why.clone(),
+    }
 }
 
 /// The duplicate groups less the one known difference (DIFFERENCES.md): a trimmed copy that's only like the others
@@ -344,7 +356,7 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
                     short(&b["Suggestions"])
                 ));
             }
-            if !same(&a["WhyNothing"], &b["WhyNothing"]) {
+            if !same(&a["WhyNothing"], &b["WhyNothing"]) && !same(&year_words(&a["WhyNothing"]), &b["WhyNothing"]) {
                 differences.push(format!(
                     "Rediscover, {name}, question {q}: C# says {}, Rust {}",
                     a["WhyNothing"], b["WhyNothing"]

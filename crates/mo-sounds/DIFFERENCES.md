@@ -87,6 +87,7 @@ save a made-up library to a new sounds.db, which the Rust app reads, and both an
 | Why a starred (or rated, or much played) unused sound is suggested | Can say it "sounds like" itself. | Names the closest other sound you like. | Better (bug in C#) |
 | No sounds of the chosen type in the index yet (deep listening hasn't heard them) | Says every one is used already. | Says they haven't been listened to yet. | Better |
 | Folders on Windows spelt with `/` and `\` | One folder. | One folder too (`/` turned into `\`), spelt with `\`. | Same |
+| Years to dig in (Solomon, 2026-11-05: "years should use same system as other pages") | One year, from a Year menu; when none are dated it: "Pick another year, or Any year." | A span of years on the year strip; "Pick other years on the strip, or clear it." Years after this one and undated files are left off the strip. | Better (the twin asks one-year spans) |
 
 ## Kits
 

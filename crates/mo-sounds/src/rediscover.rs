@@ -30,13 +30,14 @@ pub struct Options {
     pub seed: i32,
     /// Sounds used in up to this many projects count as unused (0, or 1 for "Include rarely used").
     pub max_uses: u32,
-    /// Only sounds whose file is dated that year (when the pack was made, or when you got it).
-    pub year: Option<i32>,
+    /// Only sounds whose file is dated in these years, first to last (when the pack was made, or when you got it):
+    /// the span picked on the year strip.
+    pub years: Option<(i32, i32)>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { sound_type: None, count: 30, adventure: 0.3, seed: 0, max_uses: 0, year: None }
+        Options { sound_type: None, count: 30, adventure: 0.3, seed: 0, max_uses: 0, years: None }
     }
 }
 
@@ -65,12 +66,19 @@ pub(crate) fn used_in(usage: &HashMap<i64, Usage>, id: i64) -> u32 {
     usage.get(&id).map_or(0, |u| u.projects)
 }
 
-/// The years the sounds' files are dated, newest first, for the page's year filter. Hidden copies are left out.
-pub fn years(sounds: &[Sound]) -> Vec<i32> {
-    let mut y: Vec<i32> = sounds.iter().filter(|s| !s.hidden).map(|s| s.added.year()).filter(|y| *y > 1980).collect();
-    y.sort_unstable_by(|a, b| b.cmp(a));
-    y.dedup();
-    y
+/// The years the sounds' files are dated, newest first, each with how many sounds, for the page's year strip (which
+/// leaves out the years no one picks: `mo_app::year_strip::strip`). Hidden copies are left out.
+pub fn years(sounds: &[Sound]) -> Vec<(i32, usize)> {
+    let mut counts: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
+    for s in sounds.iter().filter(|s| !s.hidden) {
+        *counts.entry(s.added.year()).or_default() += 1;
+    }
+    counts.into_iter().rev().collect()
+}
+
+/// Whether a sound's file is dated in `years` (first to last; `None` is any year).
+fn dated_in(s: &Sound, years: Option<(i32, i32)>) -> bool {
+    years.is_none_or(|(first, last)| (first..=last).contains(&s.added.year()))
 }
 
 /// Suggests unused sounds you might like, best first. `sounds` is the whole library (hidden copies are left out
@@ -100,11 +108,8 @@ pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex
         })
         .collect();
     // The year narrows what's suggested, not what your taste is learned from.
-    let candidates: Vec<&Sound> = sounds
-        .iter()
-        .filter(|s| used_in(usage, s.id) <= o.max_uses && o.year.is_none_or(|y| s.added.year() == y))
-        .copied()
-        .collect();
+    let candidates: Vec<&Sound> =
+        sounds.iter().filter(|s| used_in(usage, s.id) <= o.max_uses && dated_in(s, o.years)).copied().collect();
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -279,10 +284,11 @@ pub fn why_nothing(sounds: &[Sound], index: &SoundIndex, o: &Options) -> String 
              again."
         );
     }
-    if let Some(year) = o.year {
-        of_type.retain(|s| s.added.year() == year);
+    if let Some((first, last)) = o.years {
+        of_type.retain(|s| dated_in(s, o.years));
         if of_type.is_empty() {
-            return format!("No {kind}sounds are dated {year}. Pick another year, or Any year.");
+            let when = if first == last { first.to_string() } else { format!("{first} to {last}") };
+            return format!("No {kind}sounds are dated {when}. Pick other years on the strip, or clear it.");
         }
     }
     if o.max_uses == 0 {
@@ -411,8 +417,16 @@ mod tests {
             why_nothing(&sounds, &index, &o),
             "No sounds are sorted as Snare yet. Pick another type, or Any type."
         );
-        let o = Options { year: Some(1999), ..Options::default() };
-        assert_eq!(why_nothing(&sounds, &index, &o), "No sounds are dated 1999. Pick another year, or Any year.");
+        let o = Options { years: Some((1999, 1999)), ..Options::default() };
+        assert_eq!(
+            why_nothing(&sounds, &index, &o),
+            "No sounds are dated 1999. Pick other years on the strip, or clear it."
+        );
+        let o = Options { years: Some((1997, 1999)), ..Options::default() };
+        assert_eq!(
+            why_nothing(&sounds, &index, &o),
+            "No sounds are dated 1997 to 1999. Pick other years on the strip, or clear it."
+        );
         // Pads the index hasn't heard yet.
         sounds.push(analysed(40, r"D:\Packs\Pads\40.wav", "Pad"));
         let o = Options { sound_type: Some("Pad".into()), ..Options::default() };
@@ -467,10 +481,19 @@ mod tests {
     }
 
     #[test]
-    fn years_newest_first() {
+    fn years_newest_first_with_counts() {
         let (mut sounds, ..) = library();
-        sounds[0].added = chrono::NaiveDate::from_ymd_opt(2019, 5, 1).unwrap().into();
+        let at = |y| chrono::NaiveDate::from_ymd_opt(y, 5, 1).unwrap().into();
+        for s in &mut sounds {
+            s.added = at(2019);
+        }
         sounds[1].added = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap().into();
-        assert_eq!(years(&sounds), [2019]);
+        sounds[2].added = at(2024);
+        sounds[3].added = at(2107);
+        assert_eq!(years(&sounds), [(2107, 1), (2024, 1), (2019, sounds.len() - 3), (1970, 1)]);
+        // A span of years lets in each year in it, its ends too.
+        assert!(dated_in(&sounds[2], Some((2020, 2024))));
+        assert!(!dated_in(&sounds[0], Some((2020, 2024))));
+        assert!(dated_in(&sounds[0], None));
     }
 }

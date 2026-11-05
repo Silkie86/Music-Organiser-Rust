@@ -99,6 +99,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_place(Place::Midi.index() as i32);
     mo_ui::midi::pick_row(&app, 0);
     shots.push(("midi-picked.png".into(), capture(&window)));
+    // Its loop playing, with the sound matched to it (no SoundFont here, so the card also says how to choose one).
+    app.global::<mo_ui::MidiData>().set_playing(true);
+    shots.push(("midi-playing.png".into(), capture(&window)));
+    app.global::<mo_ui::MidiData>().set_playing(false);
     // The roll with each note's name on it (it grows so each row has room).
     app.global::<mo_ui::MidiData>().set_roll_names(true);
     shots.push(("midi-note-names.png".into(), capture(&window)));
@@ -717,6 +721,17 @@ fn sounds_shots(
     data.invoke_galaxy_up(false);
     capture(window);
     shots.push(("sounds-galaxy-swept.png".into(), capture(window)));
+    // The arrow keys on the map: Right goes to the nearest star that way, and it's picked.
+    data.invoke_step(1, false);
+    capture(window);
+    shots.push(("sounds-galaxy-arrow.png".into(), capture(window)));
+    // A line on the Swept card clicked, then Down: the card has the arrow keys and goes to the next sound on it.
+    let (cx, cy) = SWEPT_LINE;
+    click(window, cx, cy);
+    data.invoke_step(2, false);
+
+    capture(window);
+    shots.push(("sounds-galaxy-swept-keys.png".into(), capture(window)));
     // The names over a zoomed-out map (a 29-sound library is too small to have neighbourhoods, so two are set here).
     let label = |region: i32, name: &str, x: f32, y: f32, colour: i32| mo_ui::GalaxyLabel {
         region,
@@ -743,6 +758,11 @@ fn sounds_shots(
     shots.push(("sounds-galaxy-mini.png".into(), capture(window)));
     data.invoke_pick_view(4);
     shots.push(("sounds-rediscover.png".into(), capture(window)));
+    // Rediscover's year strip, two years dragged over.
+    data.invoke_re_years_picked(0, 1);
+    capture(window);
+    shots.push(("sounds-rediscover-years.png".into(), capture(window)));
+    data.invoke_re_years_cleared();
     // A forgotten folder clicked on Rediscover: the List shows its own sounds, with a chip saying which folder.
     data.invoke_pick_folder(r"D:\Samples\Drums".into());
     capture(window);
@@ -1861,6 +1881,8 @@ const NARROW_PANEL_WHEEL: (f32, f32, f32) = (760.0, 404.0, -2.0 * PAGE_DOWN);
 const OLDER_BUTTON: (f32, f32) = (1005.0, 368.0);
 /// Where the wheel turns a page's card (Space's, or Sounds') down to its end, and by more than enough: on its parts.
 const SPACE_CARD_WHEEL: (f32, f32, f32) = (1240.0, 600.0, -10.0 * PAGE_DOWN);
+/// The second line on the galaxy's Swept card, after the sweep.
+const SWEPT_LINE: (f32, f32) = (760.0, 410.0);
 /// The Lock chip on the kit's second pad (Snare).
 const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
 /// The first tile's liked bar on Sounds, under the Order line and the three lines of filters.
