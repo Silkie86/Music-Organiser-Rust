@@ -157,6 +157,14 @@ export global MidiData {
     in property <string> soundfont-note;
     callback play-toggled();
     callback choose-soundfont();
+    // Playing the picked part in a DAW, through whatever is on the track selected in Bitwig or the channel selected
+    // in FL Studio: which one plays ("" none, "bitwig", "fl"), which is starting, how it went, and their keys.
+    in property <string> daw-playing;
+    in property <string> daw-starting;
+    in property <string> daw-note;
+    in property <string> bitwig-key;
+    in property <string> fl-key;
+    callback daw-play(string);
     in property <[MidiFact]> facts;
     in property <[CardAction]> actions;
     in property <[MenuItem]> menu;
@@ -438,6 +446,22 @@ component PartPanel inherits SidePanel {
             key: MidiData.play-key;
             clicked => { MidiData.play-toggled(); }
         }
+        StudioButton {
+            horizontal-stretch: 0;
+            enabled: MidiData.daw-starting == "";
+            text: MidiData.daw-playing == "bitwig" ? "Stop Bitwig" : "Play in Bitwig";
+            tip: MidiData.daw-playing == "bitwig" ? "Stop the part and take its clip out of Bitwig" : "Play the part round and round through what's on the track selected in Bitwig";
+            key: MidiData.bitwig-key;
+            clicked => { MidiData.daw-play("bitwig"); }
+        }
+        StudioButton {
+            horizontal-stretch: 0;
+            enabled: MidiData.daw-starting == "";
+            text: MidiData.daw-playing == "fl" ? "Stop FL" : "Play in FL";
+            tip: MidiData.daw-playing == "fl" ? "Stop the part in FL Studio" : "Play the part round and round through the channel selected in FL Studio";
+            key: MidiData.fl-key;
+            clicked => { MidiData.daw-play("fl"); }
+        }
         VerticalLayout {
             alignment: center;
             Text {
@@ -448,6 +472,13 @@ component PartPanel inherits SidePanel {
                 min-width: 0px;
             }
         }
+    }
+    if MidiData.daw-note != "": Text {
+        text: MidiData.daw-note;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
     }
     if MidiData.play-note != "": Text {
         text: MidiData.play-note;

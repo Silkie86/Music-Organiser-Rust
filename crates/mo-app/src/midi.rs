@@ -937,6 +937,34 @@ pub fn part_clip(name: &str, notes: &[NoteEvent], bars: i32) -> mo_formats::Midi
     clip
 }
 
+/// The start of the MIDI files Play in Bitwig writes in the system's Temp folder: "MO Play 4120-3.mid" (the app's
+/// process id and a count). Bitwig reads one into a clip on the selected track, which shows that name, and the file
+/// goes again at once; the start-up sweep clears one a crash left ([`is_play_file`]).
+pub const PLAY_FILE_PREFIX: &str = "MO Play ";
+
+/// A new name for a Play in Bitwig file: "MO Play <process id>-<count>.mid".
+pub fn play_file_name() -> String {
+    static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{PLAY_FILE_PREFIX}{}-{n}.mid", std::process::id())
+}
+
+/// Whether a file's whole name is one [`play_file_name`] gives (rule 28: the sweep removes only those).
+pub fn is_play_file(name: &str) -> bool {
+    let Some(numbers) = name.strip_prefix(PLAY_FILE_PREFIX).and_then(|r| r.strip_suffix(".mid")) else {
+        return false;
+    };
+    let parts: Vec<&str> = numbers.split('-').collect();
+    parts.len() == 2 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// A part as FL Studio plays it on its selected channel ([`mo_dawlink::fl`]): its heard notes, round and round over
+/// the same loop as Play loop's ([`loop_notes`]), at `tempo`.
+pub fn fl_part(notes: &[NoteEvent], bars: i32, tempo: f64) -> mo_dawlink::fl::Part {
+    let (heard, length) = loop_notes(notes, bars);
+    mo_dawlink::fl::Part { notes: heard, ppq: mo_midi::PPQ, length, tempo }
+}
+
 /// Writes a part's MIDI file into `dir` under `name` (made safe for a file name) as a new file: never over another.
 /// "Keys · Pattern 3.mid", or "Keys · Pattern 3 (2).mid" when that's taken. Written beside it first and only then
 /// given its name, so Bitwig never sees half a file.
@@ -1401,5 +1429,34 @@ mod tests {
         let black: Vec<bool> = (59..=63).map(is_black).collect();
         assert_eq!(black, [false, false, true, false, true], "B3 C4 Db4 D4 Eb4");
         assert!(!is_black(65) && is_black(66));
+    }
+
+    #[test]
+    fn play_files_have_names_of_their_own() {
+        let name = play_file_name();
+        assert!(is_play_file(&name), "{name}");
+        assert_ne!(play_file_name(), name);
+        assert!(is_play_file("MO Play 4120-3.mid"));
+        assert!(!is_play_file("MO Play 4120.mid"));
+        assert!(!is_play_file("MO Play Bass.mid"));
+        assert!(!is_play_file("MO Play 4120-3.mid.part"));
+        assert!(!is_play_file("Keys \u{b7} Pattern 3.mid"));
+    }
+
+    #[test]
+    fn fl_plays_the_loop_play_loop_plays() {
+        let note = |start: i64, muted: bool| NoteEvent {
+            start,
+            length: 48,
+            key: 60,
+            velocity: 40_000,
+            muted,
+            step: false,
+            attribute: mo_formats::NoteAttribute::NONE,
+        };
+        let part = fl_part(&[note(0, false), note(96, true), note(BAR * 2, false)], 2, 128.0);
+        assert_eq!(part.notes.len(), 2);
+        assert_eq!(part.length, BAR * 3);
+        assert_eq!((part.ppq, part.tempo), (mo_midi::PPQ, 128.0));
     }
 }

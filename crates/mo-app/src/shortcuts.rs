@@ -124,6 +124,8 @@ pub const CURVES_ACTIONS: &[Action] = &[
 pub const MIDI_ACTIONS: &[Action] = &[
     action("midi.moreLike", "Parts shaped like the picked one", "Ctrl+L"),
     action("midi.toBitwig", "Put the picked part into Bitwig as a clip on a new track", "Ctrl+B"),
+    action("midi.playBitwig", "Play the picked part through the track selected in Bitwig, or stop it", "Ctrl+Shift+B"),
+    action("midi.playFl", "Play the picked part through the channel selected in FL Studio, or stop it", "Ctrl+Shift+F"),
     action("midi.within", "The longer phrases the picked part is in", ""),
     action("midi.source", "Show the picked part's file in its folder", "Ctrl+Shift+E"),
     action("midi.copyPath", "Copy where the picked part's file is", "Ctrl+Shift+C"),

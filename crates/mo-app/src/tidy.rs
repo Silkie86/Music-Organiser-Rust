@@ -263,6 +263,8 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
         done.add(remove_older(&twin, is_library_copy, DAY, now, false));
     }
     done.add(remove_older(&places.temp, mo_space::admin::is_temp_file, DAY, now, true));
+    // Play in Bitwig's MIDI files, which go again as soon as Bitwig has read them: a crash can leave one.
+    done.add(remove_older(&places.temp, crate::midi::is_play_file, DAY, now, true));
     if let Some(notes) = real_folder(&places.data, &[crate::note::FOLDER]) {
         done.add(old_notes_to_bin(&notes, &places.data.join(NOTES_DONE_FILE), NOTES_KEPT_FOR, now, bin));
     }
