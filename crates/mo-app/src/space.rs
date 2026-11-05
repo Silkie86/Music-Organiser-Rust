@@ -353,7 +353,8 @@ impl Opens {
 }
 
 /// One part on a card: its name, what it holds and its size; and for a part you can act on, its tick, what happened to
-/// it, a file it opens, a link that shows more, and one that puts back what a clean-up sent to the Recycle Bin.
+/// it, a file it opens, a link that shows more, one that puts back what a clean-up sent to the Recycle Bin, and one
+/// that shows it on another page.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Part {
     pub name: String,
@@ -378,7 +379,12 @@ pub struct Part {
     pub put_back: Option<(String, i64)>,
     /// Its link to the Plugins page: one plugin's card there, or every plugin no song has used lately.
     pub plugins: Option<OnPlugins>,
+    /// Its link to the Sounds page: the sound it shows there, by id.
+    pub sound: Option<i64>,
 }
+
+/// The words of a part's link to the Sounds page.
+pub const ON_SOUNDS: &str = "Show on Sounds page";
 
 /// What a part's link to the Plugins page shows there.
 #[derive(Clone, Debug, PartialEq, Eq)]

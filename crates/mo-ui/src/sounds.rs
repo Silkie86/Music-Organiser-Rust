@@ -105,6 +105,8 @@ struct Page {
     asked: u64,
     /// The sounds have been read and handed to the page ([`show`]): the next list shown is of them.
     read: bool,
+    /// There's no sound library, or it couldn't be read: no sounds are coming ([`loaded`]).
+    unread: bool,
     /// The type chips' types with their counts, in chip order, then the rest (the More types menu).
     types: Vec<(String, usize)>,
     /// Every tag on a sound, for the Tag filter.
@@ -156,6 +158,7 @@ impl Default for Page {
             stepping: list::Stepping::default(),
             asked: 0,
             read: false,
+            unread: false,
             types: Vec::new(),
             tags: Vec::new(),
             counts: None,
@@ -458,18 +461,15 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
     let cards = feed.clone();
     wire(app, feed, shortcuts);
     crate::finder::on_open(Kind::Sound, |app, hit, how| {
-        let Some(at) = hit.id.parse::<i64>().ok().and_then(|id| PAGE.with(|p| p.borrow().places.get(&id).copied()))
-        else {
-            return false;
-        };
+        let Ok(id) = hit.id.parse::<i64>() else { return false };
         match how {
-            How::Play => play_sound(app, at, 0.0, mo_audio::MAX_SECONDS),
-            How::Open | How::InDaw => {
-                crate::go_to(app, Place::Sounds.index() as i32);
-                show_sound(app, at);
+            How::Play => {
+                let Some(at) = PAGE.with(|p| p.borrow().places.get(&id).copied()) else { return false };
+                play_sound(app, at, 0.0, mo_audio::MAX_SECONDS);
+                true
             }
+            How::Open | How::InDaw => show_sound_by_id(app, id),
         }
-        true
     });
     PAGE.with(|p| p.borrow_mut().galaxy.db = Some(sounds_db.clone()));
     reading(app);
@@ -505,7 +505,11 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
 /// as the Songs page says it, not again in the page's header. The first list of the sounds takes its place once they
 /// arrive ([`listed`]), or why they couldn't be read does ([`loaded`]).
 pub fn reading(app: &AppWindow) {
-    PAGE.with(|p| p.borrow_mut().read = false);
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.read = false;
+        p.unread = false;
+    });
     let data = app.global::<SoundsData>();
     data.set_empty_title("Reading your sounds…".into());
     data.set_empty_text("".into());
@@ -1106,6 +1110,8 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
             show_picked_tags(&data, &p);
         });
     }
+    // The Space page keeps the copies it counts to the one to keep that your songs use.
+    crate::space::sounds_changed(app);
 }
 
 /// The sounds read again once the app's copy of the library was brought up to date: a [`Library`] to show in place of
@@ -1179,6 +1185,7 @@ fn brought_up_to_date(app: &AppWindow, r: Refreshed) {
     if after.galaxy_again {
         galaxy::shown(app);
     }
+    crate::space::sounds_changed(app);
 }
 
 /// What the page does once [`take_refreshed`] has put the sounds read again in place: what needs the window.
@@ -1256,6 +1263,8 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
             if !why.is_empty() {
                 log::warning("Sounds", &format!("Couldn't read the sound library: {why}"));
             }
+            PAGE.with(|p| p.borrow_mut().unread = true);
+            crate::space::sounds_changed(app);
             data.set_empty_title("No sound library yet".into());
             data.set_empty_text(
                 if why.is_empty() {
@@ -1287,6 +1296,9 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         // "Reading your sounds…" stays until the list of them is worked out, so "No sounds match" never flashes up
         // in between ([`listed`]).
         p.read = true;
+        // Read now, whatever came before (the screenshots show a library without reading one): the Space page counts
+        // its copies ([`known`]).
+        p.unread = false;
         // History lists them once the filters have been through them ([`listed`]).
         p.played = Arc::new(library.played);
         p.history.clear();
@@ -1319,6 +1331,7 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         GALAXY => galaxy::shown(app),
         _ => {}
     }
+    crate::space::sounds_changed(app);
 }
 
 /// What the picked sound offers besides Play: (its words, its id in the shortcut list). The card shows them as
@@ -1981,6 +1994,38 @@ fn show_sound(app: &AppWindow, at: usize) {
     });
     app.global::<SoundsData>().set_search(SharedString::new());
     refresh(app);
+}
+
+/// Opens the page on the sound with id `id` and picks it, as Ctrl+K does: the Space page's links to it. False when the
+/// list doesn't have it (it's hidden, or gone since).
+pub fn show_sound_by_id(app: &AppWindow, id: i64) -> bool {
+    let Some(at) = PAGE.with(|p| p.borrow().places.get(&id).copied()) else { return false };
+    crate::go_to(app, Place::Sounds.index() as i32);
+    show_sound(app, at);
+    true
+}
+
+/// The sounds as the page has them, for the Space page, which counts their copies ([`known`]).
+pub enum Known {
+    /// Still being read.
+    Reading,
+    /// There's no sound library, or it couldn't be read.
+    Unread,
+    /// The sounds the page lists (hidden copies left out), with how your songs use them once that's known, and the
+    /// sound library they were read from.
+    Read(Arc<SoundList>, PathBuf),
+}
+
+/// The sounds as the page has them now. The Space page is told each time that changes (`space::sounds_changed`).
+pub fn known() -> Known {
+    PAGE.with(|p| {
+        let p = p.borrow();
+        match (p.read, p.unread, &p.galaxy.db) {
+            (_, true, _) | (true, false, None) => Known::Unread,
+            (true, false, Some(db)) => Known::Read(p.list.clone(), db.clone()),
+            (false, false, _) => Known::Reading,
+        }
+    })
 }
 
 /// The year strip: each year, how full it is, and whether the filter has it.

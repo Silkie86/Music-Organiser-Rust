@@ -9,6 +9,7 @@ use chrono::{Local, NaiveDateTime};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
+use crate::duplicates::Finds;
 use crate::index::Gathered;
 use crate::{Sound, SoundActivity, SoundAnalysis, Word, compact, event, types};
 
@@ -560,6 +561,37 @@ impl SoundsDb {
         let mut st = self.conn.prepare("SELECT sound_id FROM sound_hidden")?;
         let rows = st.query_map([], |r| r.get::<_, i64>(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// The sounds you've hidden as duplicates, each as [`SoundsDb::all`] reads it but without its tags or activity,
+    /// in the order the rows are stored: what the Space page counts copies in with the Sounds page's list, which
+    /// leaves them out (their files are still there). Only their own rows are read.
+    pub fn hidden_sounds(&self) -> Result<Vec<Sound>, SoundsError> {
+        if !self.has("sound_hidden") {
+            return Ok(Vec::new());
+        }
+        let sql = if self.copy { COPY_SOUND_SQL } else { SOUND_SQL };
+        let mut st = self.conn.prepare(&format!("{sql} WHERE id IN (SELECT sound_id FROM sound_hidden)"))?;
+        let copy = self.copy;
+        let rows = st.query_map([], |r| {
+            let s = if copy { copy_sound_at(r) } else { sound_at(r) }?;
+            Ok(Sound { hidden: true, ..s })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// What the duplicate finder found and the sounds you've hidden, read at one moment, for grouping with a list of
+    /// the sounds that leaves the hidden ones out (the Sounds page's): only the sizes of sounds with copies are kept.
+    pub fn finds(&self) -> Result<Finds, SoundsError> {
+        let snapshot = self.conn.unchecked_transaction()?;
+        let (matches, exact) = (self.matches()?, self.exact_copies()?);
+        let copied: HashSet<i64> = matches.iter().flat_map(|m| [m.a, m.b]).chain(exact.iter().map(|e| e.0)).collect();
+        let mut sizes = self.sizes()?;
+        sizes.retain(|id, _| copied.contains(id));
+        sizes.shrink_to_fit();
+        let hidden = self.hidden_sounds()?;
+        snapshot.finish()?;
+        Ok(Finds { matches, exact, sizes, hidden })
     }
 
     /// Every pair of copies the duplicate finder found.

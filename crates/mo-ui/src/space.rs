@@ -2,19 +2,21 @@
 //! the app's own files take (part 1), Bitwig's copies of Library multisamples in your projects (part 2), with Fix for
 //! the saves you tick, the old copies moving plugin folders to another drive left (part 3) and the spare plugin copies
 //! (part 4), each with Remove for the ones you tick, what compacting your songs and thinning their older saves could
-//! free (part 5), with Remove for the old autosaves and caches you tick, and the Recycle Bin, with Put back for what the
-//! app put there. mo_app's `space`, `space_bitwig`, `space_old`, `space_spare`, `space_songs`, `space_removing` and
-//! `space_bin` decide every word. It looks the first time the page shows, on low-priority threads, and again when it
-//! shows after five minutes or on Measure again, so nothing on the window's thread waits for a disk (rule 12). Fix only
-//! writes new "(fixed)" projects beside the saves you ticked; Remove sends the old copies, spare copies or songs' old
-//! autosaves and caches you ticked to the Recycle Bin, each checked again first, and Put back returns them
-//! (`mo_app::binned` keeps what went, so Put back works after a restart too). The library is only read.
+//! free (part 5), with Remove for the old autosaves and caches you tick, the plugins no song has used lately (part 6),
+//! the copies of the same sound in your sample folders (information only), and the Recycle Bin, with Put back for what
+//! the app put there. mo_app's `space`, `space_bitwig`, `space_old`, `space_spare`, `space_songs`, `space_plugins`,
+//! `space_sounds`, `space_removing` and `space_bin` decide every word. It looks the first time the page shows, on
+//! low-priority threads, and again when it shows after five minutes or on Measure again, so nothing on the window's
+//! thread waits for a disk (rule 12). Fix only writes new "(fixed)" projects beside the saves you ticked; Remove sends
+//! the old copies, spare copies or songs' old autosaves and caches you ticked to the Recycle Bin, each checked again
+//! first, and Put back returns them (`mo_app::binned` keeps what went, so Put back works after a restart too). The
+//! library and the sound library are only read.
 
 use std::cell::RefCell;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
@@ -23,6 +25,7 @@ use mo_app::binned::{self, Kept};
 use mo_app::places::Place;
 use mo_app::plugins::folder_fixes::FolderFix;
 use mo_app::shortcuts::what_of;
+use mo_app::sounds::SoundList;
 use mo_app::space::{self, Drive, Fill, Holds, OnPlugins, Opens, Part};
 use mo_app::space_bin::{self, BIN, CAN_PUT_BACK, PutBacks};
 use mo_app::space_bitwig::{self, BITWIG_COPIES, Copies, Fixes, Fixing, ToFix};
@@ -30,10 +33,13 @@ use mo_app::space_old::{self, Found, OLD_COPIES};
 use mo_app::space_plugins::{self, UNUSED_PLUGINS};
 use mo_app::space_removing::{self, Removable, Tally};
 use mo_app::space_songs::{self, COMPACT, FromLibrary, SongItem};
+use mo_app::space_sounds::{self, SOUND_COPIES};
 use mo_app::space_spare::{self, Removing, SPARE_COPIES, Stage};
 use mo_app::{backup, log, paths, shell};
 use mo_catch::catch_crash;
 use mo_library::folders::FolderList;
+use mo_sounds::SoundsDb;
+use mo_sounds::duplicates::Finds;
 use mo_space::app_files::{self, AppFilesPart};
 use mo_space::bitwig::{self, LibraryIndex};
 use mo_space::clean::{self, Bin, Done, Heard, Problem, SystemBin, What};
@@ -44,6 +50,7 @@ use mo_space::{plugin_space, plugins};
 use slint::{ComponentHandle, ModelRc, VecModel};
 
 use crate::plugins as plugins_page;
+use crate::sounds::{self as sounds_page, Known};
 use crate::{AppWindow, CardAction, CardPart, DriveCard, RoomLine, SpaceData};
 
 /// How long what the page shows stays fresh: shown again after this, it looks again (the C# app looked every five
@@ -125,6 +132,30 @@ struct PluginsAsk {
     fixes: Vec<FolderFix>,
 }
 
+/// One look at the copies of the same sound: what the old app's duplicate finder found, read from the sound library
+/// the Sounds page read (`db`, read-only), grouped with that page's list of the sounds (`list`, with your songs' use
+/// once it's known), on the page's own low-priority thread. It's asked for on the page's first look, once what it
+/// shows is five minutes old, on Measure again, and when the Sounds page's list changes. It reads the sound library
+/// again only when that has changed since the look on show read it (`read`, with the library's stamp then,
+/// [`SoundsDb::stamp`]; none on Measure again): else a new list is grouped from what it read, and the same list's look
+/// stands (`same_list`).
+struct CopiesAsk {
+    id: u64,
+    list: Arc<SoundList>,
+    db: PathBuf,
+    read: Option<(Arc<Finds>, String)>,
+    same_list: bool,
+    stop: Arc<AtomicBool>,
+}
+
+/// What a look at the copies of the same sound brings back.
+enum CopiesLooked {
+    /// What it found, what it read from the sound library for it, and the library's stamp when it read that.
+    Found(space_sounds::Found, Arc<Finds>, String),
+    /// The list and the sound library are as the look on show found them: that stands.
+    Same,
+}
+
 /// What a look at the plugins no song has used lately brings back.
 enum PluginsLooked {
     /// What it found, the library's stamp when it read it, and the folder fixes it counted.
@@ -155,6 +186,8 @@ enum Step {
     SongsNone(u64),
     Plugins(u64, Box<PluginsLooked>),
     PluginsNone(u64),
+    Copies(u64, Box<CopiesLooked>),
+    CopiesNone(u64),
     Fixed(PathBuf, Fixing),
     FixDone,
     Kept(Kept),
@@ -266,6 +299,15 @@ struct Page {
     /// What the plugins line last showed: shown again when the page comes back on show and that has changed (a Clean
     /// up or uninstall on the Plugins page, or the years picked there).
     plugins_shown: Option<space_plugins::Found>,
+    /// The look at the copies of the same sound, what the last one found (it stays on show while the next one looks),
+    /// and whether one is on; the Sounds page's list the newest look was asked for (held weakly: the list itself is
+    /// that page's to let go; none once that look failed), and what the look on show read from the sound library, with
+    /// the library's stamp then.
+    copies_look: Looks<CopiesAsk>,
+    copies: Option<space_sounds::Found>,
+    copies_looking: bool,
+    copies_of: Weak<SoundList>,
+    copies_read: Option<(Arc<Finds>, String)>,
     /// What the app's clean-ups put in the Recycle Bin that's still there: none until the bin has been looked in. Of
     /// two that arrive, the later change wins ([`Kept::seq`]).
     kept: Option<Kept>,
@@ -365,17 +407,19 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
         });
         show_card(&app);
     });
-    // A fixed project's link opens it in Bitwig; an old copy's or a spare copy's shows it in its folder; a format's
-    // opens the folder its spare copies are all in; a clean-up's on the Recycle Bin card puts it back.
+    // A fixed project's link opens it in Bitwig; an old copy's, a spare copy's or a sound's file shows it in its
+    // folder; a format's opens the folder its spare copies are all in; a clean-up's on the Recycle Bin card puts it
+    // back; a plugin's and a sound's show it on its page.
     let weak = app.as_weak();
     data.on_open_part(move |at| {
-        let (open, put_back, on_plugins, feed) = PAGE.with(|p| {
+        let (open, put_back, on_plugins, sound, feed) = PAGE.with(|p| {
             let p = p.borrow();
             let part = part_at(&p, at);
             (
                 part.and_then(|part| part.open.clone()),
                 part.and_then(|part| part.put_back.clone()),
                 part.and_then(|part| part.plugins.clone()),
+                part.and_then(|part| part.sound),
                 p.feed.clone(),
             )
         });
@@ -389,6 +433,17 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
             match on {
                 OnPlugins::Plugin { key, own, name } => plugins_page::show_plugin(&app, &key, &own, &name),
                 OnPlugins::Unused => plugins_page::show_unused(&app),
+            }
+            return;
+        }
+        // A sound's link shows it on the Sounds page.
+        if let (Some(id), Some(app)) = (sound, weak.upgrade()) {
+            // Gone from that page since the copies were counted: they're counted again, so the card shows them as
+            // they are now.
+            if !sounds_page::show_sound_by_id(&app, id) {
+                log::info("Space", "A sound on the copies card isn't on the Sounds page any more: counting again");
+                PAGE.with(|p| p.borrow_mut().copies_of = Weak::new());
+                look_for_sound_copies(&app, sounds_page::known(), false);
             }
             return;
         }
@@ -428,7 +483,8 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
 /// and every song's folder. None of those three is looked for while what it finds is going to the Recycle Bin or
 /// coming back ([`held`]).
 pub fn shown(app: &AppWindow) {
-    let (stale, bitwig, old, spare, songs, plugins, plugins_changed) = PAGE.with(|p| {
+    let sounds = sounds_page::known();
+    let (stale, bitwig, old, spare, songs, plugins, plugins_changed, copies) = PAGE.with(|p| {
         let p = p.borrow();
         let wired = p.feed.is_some();
         let stale = wired && p.looked.is_none_or(|at| at.elapsed() >= FRESH);
@@ -440,7 +496,8 @@ pub fn shown(app: &AppWindow) {
         let fixed = p.plugins.is_some() && plugins_page::folder_fixes_this_session() != p.plugins_fixes;
         let plugins = wired && !p.plugins_looking && (stale || p.plugins.is_none() || fixed);
         let plugins_changed = wired && plugins_now(&p) != p.plugins_shown;
-        (stale, bitwig, old, spare, songs, plugins, plugins_changed)
+        let copies = wired && copies_due(&p, &sounds, stale);
+        (stale, bitwig, old, spare, songs, plugins, plugins_changed, copies)
     });
     if stale {
         look_again(app);
@@ -462,6 +519,40 @@ pub fn shown(app: &AppWindow) {
     } else if plugins_changed {
         show_wins(app);
     }
+    if copies {
+        look_for_sound_copies(app, sounds, false);
+    }
+}
+
+/// The Sounds page's list changed: read, your songs' use counted in, or brought up to date; or there's none to read.
+/// While the page is on show and has looked, it counts the copies of the same sound again from the new list, and its
+/// line shows what's known meanwhile; else it does when it next shows ([`shown`]).
+pub fn sounds_changed(app: &AppWindow) {
+    let looked = PAGE.with(|p| {
+        let p = p.borrow();
+        p.feed.is_some() && p.looked.is_some()
+    });
+    if !looked || app.get_place() != Place::Space.index() as i32 {
+        return;
+    }
+    let sounds = sounds_page::known();
+    if PAGE.with(|p| copies_due(&p.borrow(), &sounds, false)) {
+        look_for_sound_copies(app, sounds, false);
+    } else {
+        show_also(app);
+        show_card(app);
+    }
+}
+
+/// Whether the copies of the same sound are due a look, with the Sounds page's sounds as `sounds` has them: none is
+/// while that page hasn't read them. One is when the newest look was for another of its lists than the one it has now
+/// (one with your songs' use counted in, or brought up to date), even while that look is on; else, with none on, when
+/// nothing's found yet, or when what's on show is five minutes old (`stale`: the look then reads the sound library
+/// again only if it changed).
+fn copies_due(p: &Page, sounds: &Known, stale: bool) -> bool {
+    let Known::Read(list, _) = sounds else { return false };
+    let other = !Weak::ptr_eq(&p.copies_of, &Arc::downgrade(list));
+    other || (!p.copies_looking && (stale || p.copies.is_none()))
 }
 
 /// Runs one of the page's own shortcuts ([`mo_app::shortcuts::SPACE_ACTIONS`]). Returns whether it did anything,
@@ -630,9 +721,13 @@ fn chosen(app: &AppWindow, id: &str) {
             if spare {
                 look_for_spare(app);
             }
-            // The plugins look only reads the library, so one that's on goes on: it read it just now.
+            // The plugins look only reads the library, so one that's on goes on: it read it just now. So does the look
+            // at the copies of the same sound, which only reads the sound library.
             if !PAGE.with(|p| p.borrow().plugins_looking) {
                 look_for_plugins(app);
+            }
+            if !PAGE.with(|p| p.borrow().copies_looking) {
+                look_for_sound_copies(app, sounds_page::known(), true);
             }
         }
         (REVEAL, Some(feed)) => crate::files::open_folder(&feed, &paths::data_dir().to_string_lossy()),
@@ -1546,6 +1641,79 @@ fn plugins_now(p: &Page) -> Option<space_plugins::Found> {
     Some(found.as_of(years, found.now).without(&gone))
 }
 
+/// Asks for a new look at the copies of the same sound in the Sounds page's list as `sounds` has it, on the page's
+/// seventh low-priority thread ([`CopiesAsk`]); `again`: the sound library is read again even if it looks as it was
+/// (Measure again). With no list yet, or none coming, it only shows that.
+fn look_for_sound_copies(app: &AppWindow, sounds: Known, again: bool) {
+    let Known::Read(list, db) = sounds else {
+        show_also(app);
+        show_card(app);
+        return;
+    };
+    let ask = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.feed.as_ref()?;
+        let (id, stop) = p.copies_look.next();
+        p.copies_looking = true;
+        let same_list = p.copies.is_some() && Weak::ptr_eq(&p.copies_of, &Arc::downgrade(&list));
+        p.copies_of = Arc::downgrade(&list);
+        // What the look on show read stands while the sound library is as it was then, unless Measure again asks.
+        let read = if again { None } else { p.copies_read.clone() };
+        Some(CopiesAsk { id, list, db, read, same_list, stop })
+    });
+    let Some(ask) = ask else { return };
+    let weak = app.as_weak();
+    // A crash in a look (logged as one) leaves the thread for the next look, and says so, as one that found nothing to
+    // show does.
+    let work = move |ask: CopiesAsk| {
+        let id = ask.id;
+        match catch_crash(AssertUnwindSafe(|| look_for_sound_copies_now(&ask))) {
+            Ok(Some(looked)) => arrive(&weak, Step::Copies(id, Box::new(looked))),
+            Ok(None) | Err(_) => arrive(&weak, Step::CopiesNone(id)),
+        }
+    };
+    let started = PAGE.with(|p| p.borrow_mut().copies_look.ask("Space copies", work, ask));
+    if let Err(e) = started {
+        log::error("Space", &format!("Couldn't start counting the copies of your sounds: {e}"));
+        // Measure again can try again, and so can the page the next time it shows.
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.copies_looking = false;
+            p.copies_of = Weak::new();
+        });
+    }
+    // The first look's line says it's reading, and the card's Measure again waits for it.
+    show_also(app);
+    show_card(app);
+}
+
+/// One look at the copies of the same sound, off the window's thread: what the old app's duplicate finder found and
+/// the sounds you've hidden, from the sound library (read-only, and closed again first), or as the look on show read
+/// them while the library is as it was then, grouped with the Sounds page's list; or, when that's the same list too,
+/// only that. None when it was stopped, or the sound library couldn't be read (said in the log).
+fn look_for_sound_copies_now(ask: &CopiesAsk) -> Option<CopiesLooked> {
+    let stamp = SoundsDb::stamp(&ask.db);
+    let kept = ask.read.as_ref().filter(|(_, at)| *at == stamp).map(|(finds, _)| finds.clone());
+    if kept.is_some() && ask.same_list {
+        return Some(CopiesLooked::Same);
+    }
+    let finds = match kept {
+        Some(finds) => finds,
+        None => {
+            let read = SoundsDb::open_read_only(&ask.db).and_then(|db| db.finds());
+            let said = |e: mo_sounds::SoundsError| {
+                log::warning("Space", &format!("Couldn't read the copies of your sounds: {e}"));
+            };
+            Arc::new(read.map_err(said).ok()?)
+        }
+    };
+    if ask.stop.load(Ordering::Relaxed) {
+        return None;
+    }
+    let found = space_sounds::look(ask.list.sounds(), ask.list.usage_map(), &finds);
+    Some(CopiesLooked::Found(found, finds, stamp))
+}
+
 /// The plugin files the app's clean-ups here sent to the Recycle Bin that are still there (spare plugin copies).
 fn binned_plugin_files(p: &Page) -> Vec<String> {
     let binned = p.kept.iter().flat_map(|k| &k.list).flat_map(|b| &b.done.removed);
@@ -1712,6 +1880,22 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     p.plugins_looking = false;
                     Changed::Wins
                 }
+                Step::Copies(id, looked) if id == p.copies_look.asked => {
+                    if let CopiesLooked::Found(found, finds, stamp) = *looked {
+                        p.copies = Some(found);
+                        // What the last look read (every copy found) is let go on the freeing thread.
+                        background::free_later(p.copies_read.replace((finds, stamp)));
+                    }
+                    p.copies_looking = false;
+                    Changed::Also
+                }
+                // What the last look found stays on show, but it isn't of the newest list: shown again, the page looks
+                // again.
+                Step::CopiesNone(id) if id == p.copies_look.asked => {
+                    p.copies_looking = false;
+                    p.copies_of = Weak::new();
+                    Changed::Also
+                }
                 Step::Fixed(save, fixing) => {
                     p.fixes.done(save, fixing);
                     Changed::Wins
@@ -1841,19 +2025,22 @@ pub fn show(app: &AppWindow) {
     show_wins(app);
 }
 
-/// Shows Also taking room: the app's own files, then what the app put in the Recycle Bin that's still there. A picked
-/// Recycle Bin line that's gone (nothing of the app's is left there) has its card closed.
+/// Shows Also taking room: the app's own files, the copies of the same sound in your sample folders (while the Sounds
+/// page reads the sounds, that it's reading), then what the app put in the Recycle Bin that's still there. A picked
+/// line that's gone (no copies found this time, nothing of the app's left in the bin) has its card closed.
 fn show_also(app: &AppWindow) {
     let data = app.global::<SpaceData>();
+    let reading = matches!(sounds_page::known(), Known::Reading);
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let app_drive = space::app_drive(&p.drives);
         let files = space::app_files_line(p.parts.as_deref(), app_drive.map(|d| d.name.as_str()));
+        let copies = space_sounds::line(p.copies.as_ref(), p.copies_looking || reading);
         let bin = space_bin::line(p.kept.as_ref());
-        if bin.is_none() && p.picked == space_bin::RECYCLE_BIN {
+        if (copies.is_none() && p.picked == SOUND_COPIES) || (bin.is_none() && p.picked == space_bin::RECYCLE_BIN) {
             p.picked.clear();
         }
-        let also: Vec<RoomLine> = std::iter::once(files).chain(bin).map(room_line).collect();
+        let also: Vec<RoomLine> = std::iter::once(files).chain(copies).chain(bin).map(room_line).collect();
         data.set_also(ModelRc::new(VecModel::from(also)));
     });
 }
@@ -1996,6 +2183,15 @@ fn show_card(app: &AppWindow) {
                 let enabled = measure.enabled && !p.plugins_looking;
                 (card, vec![Button { enabled, ..measure }])
             }
+            // Read-only: each sound's link shows it on the Sounds page, and each of its files' shows it in its folder.
+            // Measure again waits while a look is on.
+            SOUND_COPIES => {
+                let reading = matches!(sounds_page::known(), Known::Reading);
+                let card = space_sounds::card(p.copies.as_ref(), p.copies_looking || reading);
+                let measure = measure_button(&p);
+                let enabled = measure.enabled && !p.copies_looking;
+                (card, vec![Button { enabled, ..measure }])
+            }
             // Each clean-up's Put back is a link on its line; the bin itself opens from here.
             space_bin::RECYCLE_BIN => {
                 let card = space_bin::card(p.kept.as_ref(), &p.put_backs, CAN_PUT_BACK, removing(&p));
@@ -2024,11 +2220,12 @@ fn show_card(app: &AppWindow) {
 
 fn card_part(part: &Part) -> CardPart {
     // A clean-up's Put back is its link that opens: the page knows which by the part.
-    let open = match (&part.put_back, &part.open, &part.plugins) {
-        (Some(_), _, _) => space_bin::PUT_BACK,
-        (None, Some((opens, _)), _) => opens.words(),
-        (None, None, Some(on)) => on.words(),
-        (None, None, None) => "",
+    let open = match (&part.put_back, &part.open, &part.plugins, part.sound) {
+        (Some(_), _, _, _) => space_bin::PUT_BACK,
+        (None, Some((opens, _)), _, _) => opens.words(),
+        (None, None, Some(on), _) => on.words(),
+        (None, None, None, Some(_)) => space::ON_SOUNDS,
+        (None, None, None, None) => "",
     };
     CardPart {
         name: part.name.as_str().into(),
@@ -2045,9 +2242,9 @@ fn card_part(part: &Part) -> CardPart {
     }
 }
 
-/// Made-up finds for the screenshots: what each of the page's looks would have found, what Fix did, how Remove went
-/// for spare copies, old copies and your songs' things (and the ticks changed), and what the app put in the Recycle
-/// Bin.
+/// Made-up finds for the screenshots: what each of the page's looks would have found (the copies of the same sound
+/// too), what Fix did, how Remove went for spare copies, old copies and your songs' things (and the ticks changed), and
+/// what the app put in the Recycle Bin.
 #[derive(Default)]
 pub struct Sample {
     pub drives: Vec<Drive>,
@@ -2061,6 +2258,7 @@ pub struct Sample {
     pub songs: space_songs::Found,
     pub songs_removing: space_songs::Removing,
     pub plugins: space_plugins::Found,
+    pub copies: space_sounds::Found,
     pub kept: Option<Kept>,
     pub put_backs: PutBacks,
 }
@@ -2082,6 +2280,7 @@ pub fn show_sample(app: &AppWindow, sample: Sample, picked: &str) {
         p.songs = Some(space_songs::Shown::of(&sample.songs, chrono::Local::now().date_naive()));
         p.songs_removing = sample.songs_removing;
         p.plugins = Some(sample.plugins);
+        p.copies = Some(sample.copies);
         p.kept = sample.kept;
         p.put_backs = sample.put_backs;
         p.picked = picked.to_owned();

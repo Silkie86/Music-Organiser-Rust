@@ -377,6 +377,20 @@ fn same_answers(old: &Path, copy: &Path) {
         }
     }
     assert_eq!(a.hidden().unwrap(), b.hidden().unwrap());
+    // The hidden sounds alone: the same ones every read marks hidden.
+    let hidden = a.hidden_sounds().unwrap();
+    let ids = |sounds: &mut dyn Iterator<Item = &mo_sounds::Sound>| {
+        let mut ids: Vec<i64> = sounds.map(|s| s.id).collect();
+        ids.sort_unstable();
+        ids
+    };
+    assert_eq!(ids(&mut hidden.iter()), ids(&mut ea.sounds.iter().filter(|s| s.hidden)));
+    assert!(hidden.iter().all(|s| s.hidden));
+    assert_eq!(format!("{hidden:?}"), format!("{:?}", b.hidden_sounds().unwrap()));
+    // Read at one moment, the same in both (the sizes compared as maps: their printed order is random).
+    let (fa, fb) = (a.finds().unwrap(), b.finds().unwrap());
+    assert_eq!((&fa.matches, &fa.exact, &fa.sizes), (&fb.matches, &fb.exact, &fb.sizes));
+    assert_eq!(format!("{:?}", fa.hidden), format!("{:?}", fb.hidden));
     assert_eq!(a.matches().unwrap(), b.matches().unwrap());
     assert_eq!(a.exact_copies().unwrap(), b.exact_copies().unwrap());
     assert_eq!(a.duplicate_finds().unwrap(), b.duplicate_finds().unwrap());
