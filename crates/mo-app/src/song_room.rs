@@ -41,6 +41,12 @@ impl Others {
         }
     }
 
+    /// Whether any save uses a sample with this file name (letter case aside): what a clean-up's guard asks of audio
+    /// before it goes.
+    pub fn uses(&self, name: &str) -> bool {
+        self.used_names.contains(&case::key(file_name(name)))
+    }
+
     /// Measures one song's `saves` ([`measure`]): `roots` are your project folders, `used` every sample path the
     /// song's saves name. `opens` is the save the song opens (its highest-numbered one, as the Songs page has it): it's
     /// never on the list, even when by time alone it's from the middle of a sitting or a copy of a newer save (a copied

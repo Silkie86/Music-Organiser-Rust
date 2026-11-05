@@ -210,10 +210,13 @@ component SpaceCard inherits SidePanel {
             font-size: Type.heading;
             font-weight: 600;
         }
+        // How a removal went can be long ("61 old autosaves and 1 cache are in the Recycle Bin, and 2 stayed").
         if SpaceData.card-big-note != "": Text {
             text: SpaceData.card-big-note;
             color: Theme.muted;
             font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
         }
     }
     Text {
