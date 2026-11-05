@@ -120,6 +120,9 @@ struct NotesAsk {
     cut: bool,
     bars: i32,
     read_key: bool,
+    /// The key the stored reading names, which the chord chart is spelled in (one read just now is used when there's
+    /// none).
+    key: Option<KeyFact>,
 }
 
 struct NotesRead {
@@ -127,6 +130,8 @@ struct NotesRead {
     read: usize,
     roll: Roll,
     fact: Option<KeyFact>,
+    /// The chord chart, read just now from the notes.
+    chart: page::ChordChart,
 }
 
 /// The card's key while the part's notes are read.
@@ -905,6 +910,7 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
             cut: page::is_cut(&e.phrase.clip),
             bars: e.phrase.bars,
             read_key: e.phrase.key_fact.is_none(),
+            key: e.phrase.key_fact,
         })
     });
     data.set_panel_shown(true);
@@ -981,7 +987,10 @@ fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result
     } else {
         None
     };
-    Ok(NotesRead { read: notes.len(), roll: page::roll(&notes, ask.bars), fact })
+    // The chords too (about a millisecond for a loop), spelled in the part's key.
+    let reading = mo_midi::chart::read(&notes, ask.role, ask.cut);
+    let chart = page::chord_chart(reading.as_ref(), page::chart_key(ask.key.as_ref().or(fact.as_ref())));
+    Ok(NotesRead { read: notes.len(), roll: page::roll(&notes, ask.bars), fact, chart })
 }
 
 fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
@@ -1011,6 +1020,8 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
                     "".into()
                 };
             }
+            picked.chords = read.chart.bars.into();
+            picked.chords_why = read.chart.why.into();
             // Drawn off the window's thread, as up to 4,000 notes would be a lot for it to lay out.
             crate::piano_roll::show(app, Some(read.roll));
             let drums = picked.kind == page::role_label(Role::Drums);
@@ -1065,6 +1076,8 @@ fn card(e: &mo_midi::Entry) -> PickedPart {
         roll_low: "".into(),
         roll_high: "".into(),
         roll_note: "".into(),
+        chords: "".into(),
+        chords_why: "".into(),
         others: strings(others),
         others_more: if more > 0 { format!("and {} more", thousands(more)).into() } else { "".into() },
     }
@@ -1712,10 +1725,12 @@ mod tests {
             cut: false,
             bars: e.phrase.bars,
             read_key: true,
+            key: None,
         };
         let Ok(read) = read_notes(&ask, &mut None) else { panic!("the made-up notes should read") };
         assert_eq!(read.roll.notes.len(), 12);
         assert!(read.fact.is_some());
+        assert!(!read.chart.bars.is_empty(), "its chords are read too");
     }
 
     #[test]

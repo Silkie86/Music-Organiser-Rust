@@ -33,7 +33,7 @@ pub fn with_reader<T>(f: impl FnOnce(&mut KeyReader) -> T) -> T {
 }
 
 /// How the key finder hears a part of this kind.
-fn heard_as(role: Role) -> mo_harmony::Role {
+pub(crate) fn heard_as(role: Role) -> mo_harmony::Role {
     match role {
         Role::Melody => mo_harmony::Role::Melody,
         Role::Chords | Role::Arp => mo_harmony::Role::Harmony,
