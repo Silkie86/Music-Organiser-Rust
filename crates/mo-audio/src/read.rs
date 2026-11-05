@@ -4,7 +4,7 @@ use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
-use crate::{AudioData, AudioError};
+use crate::{AudioData, AudioError, adpcm};
 
 /// The longest stretch decoded for analysis: long files are analysed from their first minute.
 pub const MAX_SECONDS: f64 = 60.0;
@@ -86,6 +86,8 @@ fn read_wav(f: &mut File, len: u64, max_seconds: f64, from_frame: u64) -> Result
     let (mut format, mut channels, mut rate, mut bits) = (0u16, 0u16, 0u32, 0u16);
     let mut data: Option<(u64, u64)> = None;
     let (mut tempo, mut root, mut is_loop) = (None, None, None);
+    // The `fmt ` chunk's bytes (an ADPCM file's block layout is in them) and the `fact` chunk's frame count.
+    let (mut fmt_bytes, mut fact) = (Vec::new(), None);
 
     let mut pos = 12u64; // RIFF, size, WAVE
     while pos + 8 <= len {
@@ -97,7 +99,8 @@ fn read_wav(f: &mut File, len: u64, max_seconds: f64, from_frame: u64) -> Result
         let mut next = body + size + (size & 1);
         match id {
             b"fmt " => {
-                let b = take(f, size.min(64))?;
+                // Room for a Microsoft ADPCM file's own coefficient list (7 pairs as a rule, at most 256).
+                let b = take(f, size.min(22 + 256 * 4))?;
                 format = u16_le(&b, 0).unwrap_or(0);
                 channels = u16_le(&b, 2).unwrap_or(0);
                 rate = u32_le(&b, 4).unwrap_or(0);
@@ -106,6 +109,10 @@ fn read_wav(f: &mut File, len: u64, max_seconds: f64, from_frame: u64) -> Result
                 if format == 0xFFFE && size >= 40 {
                     format = u16_le(&b, 24).unwrap_or(0);
                 }
+                fmt_bytes = b;
+            }
+            b"fact" if size >= 4 => {
+                fact = u32_le(&take(f, 4)?, 0).map(u64::from);
             }
             b"data" => {
                 let length = if size == 0xFFFF_FFFF || body + size > len { len - body } else { size };
@@ -145,6 +152,13 @@ fn read_wav(f: &mut File, len: u64, max_seconds: f64, from_frame: u64) -> Result
     let Some((start_byte, length)) = data.filter(|_| channels > 0 && rate > 0) else {
         return Err(AudioError::Format("WAV file has no audio data".into()));
     };
+    if format == adpcm::MS || format == adpcm::IMA {
+        let layout = adpcm::Layout::from_fmt(format, channels, &fmt_bytes)?;
+        return read_adpcm(f, &layout, rate, start_byte, length, fact, max_seconds, from_frame).map(|mut a| {
+            (a.embedded_tempo, a.embedded_root_note, a.embedded_is_loop) = (tempo, root, is_loop);
+            a
+        });
+    }
     // Rounded up, so a 12-bit or 20-bit file is read with the bytes each sample really takes.
     let bytes = usize::from(bits).div_ceil(8);
     if bytes == 0 {
@@ -168,6 +182,45 @@ fn read_wav(f: &mut File, len: u64, max_seconds: f64, from_frame: u64) -> Result
         embedded_root_note: root,
         embedded_is_loop: is_loop,
     })
+}
+
+/// Up to `max_seconds` of an ADPCM WAV's audio from `from_frame` on: the blocks that hold them are read and decoded,
+/// then cut to the frames asked for. The `fact` chunk's count, when there is one, drops the padding the last block ends
+/// with.
+#[allow(clippy::too_many_arguments)]
+fn read_adpcm(
+    f: &mut File,
+    layout: &adpcm::Layout,
+    rate: u32,
+    start_byte: u64,
+    length: u64,
+    fact: Option<u64>,
+    max_seconds: f64,
+    from_frame: u64,
+) -> Result<AudioData, AudioError> {
+    let in_blocks = layout.frames_in(length);
+    let total = fact.filter(|&n| n > 0 && n <= in_blocks).unwrap_or(in_blocks);
+    let first = from_frame.min(total);
+    // `as` saturates: NaN and anything below zero give 0, infinity gives every frame.
+    let wanted = (total - first).min((max_seconds * f64::from(rate)) as u64);
+    let per_block = layout.frames_per_block as u64;
+    let block_bytes = layout.block_bytes as u64;
+    let first_block = first / per_block;
+    let skip = (first - first_block * per_block) as usize;
+    let blocks = (skip as u64 + wanted).div_ceil(per_block).min(MOST_BYTES / block_bytes);
+    let at = start_byte.saturating_add(first_block.saturating_mul(block_bytes));
+    let end = start_byte.saturating_add(length);
+    let want = (blocks * block_bytes).min(end.saturating_sub(at));
+    f.seek(SeekFrom::Start(at))?;
+    let mut raw = Vec::with_capacity(usize::try_from(want).unwrap_or(0));
+    f.by_ref().take(want).read_to_end(&mut raw)?;
+    let mut channels = layout.decode(&raw);
+    let keep = usize::try_from(wanted).unwrap_or(usize::MAX);
+    for ch in &mut channels {
+        ch.drain(..skip.min(ch.len()));
+        ch.truncate(keep);
+    }
+    Ok(AudioData { sample_rate: rate, channels, file_seconds: total as f64 / f64::from(rate), ..AudioData::default() })
 }
 
 // ---- AIFF ---------------------------------------------------------------------------------------------------------

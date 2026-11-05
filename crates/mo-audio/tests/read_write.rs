@@ -178,7 +178,9 @@ fn says_what_it_cannot_read() {
     assert!(e("empty.wav", b"").to_string().contains("Not a WAV or AIFF"));
     assert!(e("no-data.wav", &riff(&[fmt(1, 1, 10, 16)])).to_string().contains("no audio data"));
     assert!(
-        e("adpcm.wav", &riff(&[fmt(2, 1, 10, 16), chunk(b"data", &[0; 4], false)])).to_string().contains("isn't PCM")
+        e("mp3-in-wav.wav", &riff(&[fmt(85, 1, 10, 16), chunk(b"data", &[0; 4], false)]))
+            .to_string()
+            .contains("isn't PCM")
     );
     assert!(read(&PathBuf::from("does/not/exist.wav"), 60.0).is_err());
 }
@@ -312,5 +314,66 @@ fn a_cut_short_mp3_flac_or_ogg_is_damage_not_a_read_failure() {
     for name in ["tone.flac", "tone.ogg"] {
         let e = cut(name, |n| n / 2).unwrap_err();
         assert!(matches!(e, AudioError::Format(_)), "{name}: {e:?}");
+    }
+}
+
+/// An IMA ADPCM WAV of `blocks` 8-byte mono blocks (9 frames each), with a `fact` chunk saying `frames`.
+fn ima_wav(blocks: u8, frames: u32) -> Vec<u8> {
+    let mut f = Vec::new();
+    for v in [0x11u16, 1] {
+        f.extend_from_slice(&v.to_le_bytes());
+    }
+    f.extend_from_slice(&8000u32.to_le_bytes());
+    f.extend_from_slice(&4000u32.to_le_bytes());
+    for v in [8u16, 4, 2, 9] {
+        f.extend_from_slice(&v.to_le_bytes());
+    }
+    let mut data = Vec::new();
+    for b in 0..blocks {
+        data.extend_from_slice(&(i16::from(b) * 1000).to_le_bytes());
+        data.extend_from_slice(&[0, 0, 0x74, 0x21, 0x9C, 0x05]);
+    }
+    riff(&[chunk(b"fmt ", &f, false), chunk(b"fact", &frames.to_le_bytes(), false), chunk(b"data", &data, false)])
+}
+
+#[test]
+fn adpcm_wavs_are_read_and_can_start_part_way() {
+    let path = fixture("ima-adpcm.wav", &ima_wav(3, 20));
+    let all = read(&path, 60.0).unwrap();
+    assert_eq!(all.sample_rate, 8000);
+    // The fact chunk's 20 frames, not the 27 the three blocks could hold.
+    assert_eq!(all.len(), 20);
+    assert!((all.file_seconds - 20.0 / 8000.0).abs() < 1e-12);
+    // Each block starts afresh at its header's sample.
+    assert_eq!(all.channels[0][9], 1000.0 / 32768.0);
+    let part = read_from(&path, 60.0, 11).unwrap();
+    assert_eq!(part.channels[0], all.channels[0][11..]);
+    let short = read_from(&path, 4.0 / 8000.0, 5).unwrap();
+    assert_eq!(short.channels[0], all.channels[0][5..9]);
+    // A file without a fact chunk, cut short in its last block, gives the frames its bytes hold.
+    let mut cut = ima_wav(2, 0);
+    cut.truncate(cut.len() - 4);
+    assert_eq!(read(&fixture("ima-adpcm-cut.wav", &cut), 60.0).unwrap().len(), 10);
+}
+
+/// FNV-1a over the samples as 16-bit little-endian, interleaved, as ffmpeg's `-f s16le` writes them.
+fn s16_hash(a: &mo_audio::AudioData) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for i in 0..a.len() {
+        for ch in &a.channels {
+            for b in (((ch[i] * 32768.0).round()) as i16).to_le_bytes() {
+                h = (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+    }
+    h
+}
+
+#[test]
+fn adpcm_wavs_decode_as_ffmpeg_decodes_them() {
+    for (name, hash) in [("tone-ms-adpcm.wav", 0xb4a0_b56d_1113_2391), ("tone-ima-adpcm.wav", 0x9d81_dd80_84bd_2239)] {
+        let a = read(&tone(name), 60.0).unwrap();
+        assert_eq!((a.sample_rate, a.channels.len(), a.len()), (22050, 2, 11025), "{name}");
+        assert_eq!(s16_hash(&a), hash, "{name}");
     }
 }
