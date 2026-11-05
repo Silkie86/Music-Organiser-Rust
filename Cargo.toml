@@ -90,3 +90,14 @@ opt-level = 2
 
 [profile.dev.package.mo-space]
 opt-level = 2
+
+# The build Solomon gets in the end (`cargo build --profile dist --bin music-organiser`, made in `target\dist`): a
+# release build, linked as one piece so the linker can drop code nothing uses and join the rest. Measured on main
+# (Windows, 2026-11-05): 71 MB down to 49 MB, and no slower to run. It takes about twice as long to build, so the
+# launcher's release builds and the twin tests keep the quicker plain release build. Not here, on purpose:
+# `panic = "abort"` (mo-catch must catch panics, so a damaged file doesn't close the app), `strip` (on Windows it
+# would drop the .pdb that lets a crash log say where it happened) and `opt-level = "s"` (35 MB, but slower code).
+[profile.dist]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
