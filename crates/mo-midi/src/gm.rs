@@ -85,96 +85,129 @@ pub fn for_kind(role: Role) -> u8 {
     }
 }
 
-/// Words in names and the program each stands for. A word matches the start of a word in the name ("strings" by
-/// "string", "bassline" by "bass"), so the more particular ones come first ("e-piano" before "piano", "808" before
-/// "bass"). Drum words are left out: a drum part is known by its channel and its kind.
-const WORDS: &[(&str, u8)] = &[
-    ("rhodes", 4),
-    ("wurli", 5),
-    ("epiano", 4),
-    ("ep", 4),
-    ("clav", 7),
-    ("celesta", 8),
-    ("glock", 9),
-    ("musicbox", 10),
-    ("vibe", 11),
-    ("vibra", 11),
-    ("marimba", 12),
-    ("xylo", 13),
-    ("bell", 14),
-    ("organ", 16),
-    ("accordion", 21),
-    ("harmonica", 22),
-    ("nylon", 24),
-    ("acoustic", 25),
-    ("guitar", 27),
-    ("gtr", 27),
-    ("808", 38),
-    ("reese", 39),
-    ("sub", 38),
-    ("fretless", 35),
-    ("slap", 36),
-    ("bass", 38),
-    ("violin", 40),
-    ("viola", 41),
-    ("cello", 42),
-    ("pizz", 45),
-    ("pluck", 45),
-    ("harp", 46),
-    ("timpani", 47),
-    ("string", 48),
-    ("choir", 52),
-    ("vox", 53),
-    ("vocal", 53),
-    ("voice", 53),
-    ("orch", 55),
-    ("hit", 55),
-    ("trumpet", 56),
-    ("trombone", 57),
-    ("tuba", 58),
-    ("horn", 60),
-    ("brass", 61),
-    ("sax", 65),
-    ("oboe", 68),
-    ("clarinet", 71),
-    ("piccolo", 72),
-    ("flute", 73),
-    ("pan", 75),
-    ("whistle", 78),
-    ("ocarina", 79),
-    ("square", 80),
-    ("saw", 81),
-    ("lead", 81),
-    ("pad", 89),
-    ("warm", 89),
-    ("atmos", 99),
-    ("sitar", 104),
-    ("kalimba", 108),
-    ("steel", 114),
-    ("synth", 81),
-    ("keys", 4),
-    ("piano", 0),
+/// Two words that together say more than either alone ("Synth strings" aren't strings, "Acoustic bass" isn't a
+/// guitar). Looked for before [`WORDS`].
+const PAIRS: &[(&str, &str, u8, &str)] = &[
+    ("synth", "string", 50, "synth strings"),
+    ("synth", "brass", 62, "synth brass"),
+    ("synth", "bass", 38, "synth bass"),
+    ("acoustic", "bass", 32, "acoustic bass"),
+    ("acoustic", "piano", 0, "acoustic piano"),
+    ("bass", "guitar", 33, "bass guitar"),
+    ("electric", "piano", 4, "electric piano"),
+    ("e", "piano", 4, "e-piano"),
 ];
+
+/// How a word in [`WORDS`] is matched to a word in a name.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Match {
+    /// The start of a word: "strings" by "string", "bassline" by "bass", "808s" by "808".
+    Start,
+    /// The whole word, or it with an "s" ("pads", "subs"): so "subtle", "panic", "organic" and "harpsichord" don't
+    /// count as a sub, a pan flute, an organ or a harp.
+    Whole,
+}
+
+use Match::{Start, Whole};
+
+/// Words in names and the program each stands for, the more particular ones first ("harpsichord" before "harp",
+/// "808" and "bass" before "guitar" and "acoustic", "pad" before "synth"). Drum words are left out: a drum part is
+/// known by its channel and its kind.
+const WORDS: &[(&str, Match, u8)] = &[
+    ("rhodes", Start, 4),
+    ("wurli", Start, 5),
+    ("epiano", Start, 4),
+    ("ep", Whole, 4),
+    ("clav", Start, 7),
+    ("harpsi", Start, 6),
+    ("celesta", Start, 8),
+    ("glock", Start, 9),
+    ("musicbox", Start, 10),
+    ("vibe", Whole, 11),
+    ("vibra", Start, 11),
+    ("marimba", Start, 12),
+    ("xylo", Start, 13),
+    ("bell", Start, 14),
+    ("organ", Whole, 16),
+    ("accordion", Start, 21),
+    ("harmonica", Start, 22),
+    ("808", Start, 38),
+    ("reese", Start, 39),
+    ("sub", Whole, 38),
+    ("fretless", Start, 35),
+    ("slap", Start, 36),
+    ("bass", Start, 38),
+    ("piano", Start, 0),
+    ("grand", Whole, 0),
+    ("nylon", Start, 24),
+    ("guitar", Start, 27),
+    ("gtr", Whole, 27),
+    ("acoustic", Start, 25),
+    ("violin", Start, 40),
+    ("viola", Whole, 41),
+    ("cello", Start, 42),
+    ("pizz", Start, 45),
+    ("pluck", Start, 45),
+    ("harp", Whole, 46),
+    ("timpani", Start, 47),
+    ("string", Start, 48),
+    ("choir", Start, 52),
+    ("vox", Whole, 53),
+    ("vocal", Start, 53),
+    ("voice", Start, 53),
+    ("orch", Start, 55),
+    ("hit", Whole, 55),
+    ("trumpet", Start, 56),
+    ("trombone", Start, 57),
+    ("tuba", Whole, 58),
+    ("horn", Whole, 60),
+    ("brass", Start, 61),
+    ("sax", Start, 65),
+    ("oboe", Start, 68),
+    ("clarinet", Start, 71),
+    ("piccolo", Start, 72),
+    ("flute", Start, 73),
+    ("pan", Whole, 75),
+    ("whistle", Start, 78),
+    ("ocarina", Start, 79),
+    ("square", Start, 80),
+    ("saw", Whole, 81),
+    ("lead", Whole, 81),
+    ("pad", Whole, 89),
+    ("warm", Whole, 89),
+    ("atmos", Start, 99),
+    ("sitar", Start, 104),
+    ("kalimba", Start, 108),
+    ("steel", Whole, 114),
+    ("synth", Start, 81),
+    ("keys", Whole, 4),
+];
+
+/// Whether `word` (from [`WORDS`]) is the name's word `w`.
+fn matches(w: &str, word: &str, how: Match) -> bool {
+    match how {
+        Start => w.starts_with(word),
+        Whole => w == word || w.strip_prefix(word).is_some_and(|rest| rest == "s" || rest == "es"),
+    }
+}
 
 /// The sound a name's words stand for, if any word does.
 fn by_name(name: &str) -> Option<GmSound> {
     let lower = name.to_lowercase();
-    // "E-Piano", "e piano" and "EPiano" all say electric piano.
-    let joined = lower.replace(['-', '_'], "");
     let words: Vec<&str> = lower.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
-    let joined_words: Vec<&str> = joined.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).collect();
-    if joined.contains("e piano") || joined_words.iter().any(|w| w.starts_with("epiano")) {
-        return Some(GmSound { program: 4, drums: false, why: Why::Name("e-piano") });
-    }
-    for &(word, program) in WORDS {
-        // Short words only as a whole word ("ep", "sub", "pan", "hit"), so "subtle", "panic" and "white" don't count.
-        let found = if word.len() <= 3 {
-            words.contains(&word)
+    for &(a, b, program, said) in PAIRS {
+        // "E piano" only as two words side by side: "House piano" isn't an electric piano.
+        let found = if a == "e" {
+            words.windows(2).any(|p| p[0] == "e" && matches(p[1], b, Start))
         } else {
-            words.iter().any(|w| w.starts_with(word))
-                || (word.chars().all(|c| c.is_ascii_digit()) && lower.contains(word))
+            words.iter().any(|w| matches(w, a, Start)) && words.iter().any(|w| matches(w, b, Start))
         };
         if found {
+            return Some(GmSound { program, drums: false, why: Why::Name(said) });
+        }
+    }
+    for &(word, how, program) in WORDS {
+        if words.iter().any(|w| matches(w, word, how)) {
             return Some(GmSound { program, drums: false, why: Why::Name(word) });
         }
     }
@@ -351,8 +384,20 @@ mod tests {
         // The first name with a word in it wins: the track's before the file's.
         assert_eq!(named(Role::Chords, &["Organ", "Night drive pad"]).program, 16);
         assert_eq!(named(Role::Chords, &["Organ"]).why, Why::Name("organ"));
-        // Short words only on their own.
+        // Some words only on their own (or with an s).
         assert_eq!(named(Role::Chords, &["Subtle panic"]).why, Why::Kind);
+        assert_eq!(named(Role::Chords, &["Ambient Pads"]).program, 89);
+        assert_eq!(named(Role::Bass, &["808s"]).program, 38);
+        assert_eq!(named(Role::Melody, &["Tenor Saxophone"]).program, 65);
+        assert_eq!(named(Role::Chords, &["Harpsichord"]).program, 6);
+        assert_eq!(named(Role::Chords, &["Organic pad"]).program, 89);
+        // Two words that say more together, and electric piano only when it says so.
+        assert_eq!(named(Role::Chords, &["Synth Strings"]).program, 50);
+        assert_eq!(named(Role::Bass, &["Acoustic Bass"]).program, 32);
+        assert_eq!(named(Role::Chords, &["Acoustic Grand Piano"]).program, 0);
+        assert_eq!(named(Role::Bass, &["Bass Guitar"]).program, 33);
+        assert_eq!(named(Role::Chords, &["House piano"]).program, 0);
+        assert_eq!(named(Role::Chords, &["E Piano"]).program, 4);
     }
 
     #[test]
@@ -367,6 +412,7 @@ mod tests {
     #[test]
     fn every_program_has_a_name() {
         assert!(PROGRAM_NAMES.iter().all(|n| !n.is_empty()));
-        assert!(WORDS.iter().all(|(_, p)| *p < 128));
+        assert!(WORDS.iter().all(|(_, _, p)| *p < 128));
+        assert!(PAIRS.iter().all(|(_, _, p, _)| *p < 128));
     }
 }

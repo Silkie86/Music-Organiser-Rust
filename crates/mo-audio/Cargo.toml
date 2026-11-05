@@ -16,10 +16,10 @@ cpal = { version = "0.18", optional = true }
 # MP3, FLAC, M4A (AAC), OGG (Vorbis) and AAC, decoded in Rust on every system (the C# app needed Windows for these).
 # The ID3v2, ID3v1 and APE readers let the probe skip a tag by its size: without them it looked through a tag (cover
 # art) a byte at a time and gave up after 1 MB.
+symphonia = { version = "0.6", default-features = false, features = ["mp3", "flac", "isomp4", "aac", "ogg", "vorbis", "id3v2", "id3v1", "ape"] }
 # General MIDI sounds from a SoundFont (.sf2), for playing MIDI parts: the Rust port of MeltySynth, which the C# app
 # used. MIT.
 rustysynth = { version = "1.3", optional = true }
-symphonia = { version = "0.6", default-features = false, features = ["mp3", "flac", "isomp4", "aac", "ogg", "vorbis", "id3v2", "id3v1", "ape"] }
 
 # WMA, decoded by Windows itself (Media Foundation): there's no WMA decoder written in Rust. MIT or Apache-2.0.
 [target.'cfg(windows)'.dependencies]

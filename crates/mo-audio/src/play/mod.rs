@@ -139,12 +139,7 @@ impl Player {
     /// [`Player::play`] going round and round: at its end it starts again with no gap, until it's stopped or
     /// replaced. `on_end` is never called for it.
     pub fn play_looped(&self, sound: Arc<AudioData>, key: impl Into<String>, start_seconds: f64) {
-        let key = key.into();
-        let start = start_seconds.max(0.0);
-        let mut now = lock(&self.shared.now);
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        *now = Some(Now { id, key, start });
-        self.send(Order::Play { id, sound, start, looping: true });
+        let _ = self.start(sound, key.into(), start_seconds, true, || Ok::<(), std::convert::Infallible>(()));
     }
 
     /// [`Player::play`], only if `wanted` still says so as the sound starts, with no other play or stop able to come
@@ -157,7 +152,17 @@ impl Player {
         start_seconds: f64,
         wanted: impl FnOnce() -> Result<(), E>,
     ) -> Result<(), E> {
-        let key = key.into();
+        self.start(sound, key.into(), start_seconds, false, wanted)
+    }
+
+    fn start<E>(
+        &self,
+        sound: Arc<AudioData>,
+        key: String,
+        start_seconds: f64,
+        looping: bool,
+        wanted: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
         let start = start_seconds.max(0.0);
         // Held until the order is sent, as `seek` and `stop` hold it, so the player's thread gets the orders in the
         // order they were decided in.
@@ -165,7 +170,7 @@ impl Player {
         wanted()?;
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         *now = Some(Now { id, key, start });
-        self.send(Order::Play { id, sound, start, looping: false });
+        self.send(Order::Play { id, sound, start, looping });
         Ok(())
     }
 

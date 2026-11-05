@@ -244,6 +244,10 @@ fn mix(v: &mut Voice, out: &mut [f32], rate: u32, channels: usize, fade_step: f3
         }
         v.at += step;
     }
+    // A loop's place is always inside it, also at the end of a buffer.
+    if v.looping && v.at >= len as f64 {
+        v.at -= len as f64;
+    }
     false
 }
 

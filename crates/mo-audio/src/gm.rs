@@ -111,28 +111,48 @@ pub fn render_loop(font: &Font, part: &Part) -> Result<AudioData, String> {
     // A note ending where the next starts lets go first.
     events.sort_by_key(|&(frame, off, key, _)| (frame, !off, key));
 
+    // The first time round is made into a small piece of memory used again and again, and only the second is kept:
+    // a long loop takes the memory it keeps, not three times it.
     let total = 2 * len;
-    let mut left = vec![0.0f32; total];
-    let mut right = vec![0.0f32; total];
+    let mut left = vec![0.0f32; len];
+    let mut right = vec![0.0f32; len];
+    let mut scratch = (vec![0.0f32; 4096], vec![0.0f32; 4096]);
+    let mut render_to = |synth: &mut Synthesizer, from: usize, to: usize| {
+        let mut at = from;
+        while at < to.min(len) {
+            let n = (to.min(len) - at).min(scratch.0.len());
+            synth.render(&mut scratch.0[..n], &mut scratch.1[..n]);
+            at += n;
+        }
+        let from = at.max(len);
+        if to > from {
+            synth.render(&mut left[from - len..to - len], &mut right[from - len..to - len]);
+        }
+    };
+    // How many notes hold each key down: a key is let go only when the last of them ends, so a note left over from
+    // the first time round doesn't cut short the same note starting again (the synth lets go of every voice of a key).
+    let mut held = [0u32; 128];
     let mut done = 0;
     for (frame, off, key, velocity) in events {
         let to = frame.min(total);
         if to > done {
-            synth.render(&mut left[done..to], &mut right[done..to]);
+            render_to(&mut synth, done, to);
             done = to;
         }
+        let k = usize::from(key);
         if off {
-            synth.note_off(channel, i32::from(key));
+            held[k] = held[k].saturating_sub(1);
+            if held[k] == 0 {
+                synth.note_off(channel, i32::from(key));
+            }
         } else {
+            held[k] += 1;
             synth.note_on(channel, i32::from(key), i32::from(velocity));
         }
     }
     if done < total {
-        synth.render(&mut left[done..], &mut right[done..]);
+        render_to(&mut synth, done, total);
     }
-    // The second time round: what the first left sounding is heard under its start.
-    let left = left.split_off(len);
-    let right = right.split_off(len);
     Ok(AudioData {
         sample_rate: RATE,
         channels: vec![left, right],
