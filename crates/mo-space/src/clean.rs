@@ -1266,6 +1266,53 @@ fn bin_problem(e: &trash::Error) -> String {
     }
 }
 
+/// The bin's items by where each was before it went (its folder and its name, as [`key`]s) and by what the bin calls
+/// it, read once: a clean-up can send thousands of things to a bin that holds thousands more, and looking through all
+/// of the bin for each one took minutes. It only narrows down where to look: what's looked for there is as before.
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+struct BinIndex<'a> {
+    items: &'a [trash::TrashItem],
+    by_place: HashMap<(String, String), Vec<usize>>,
+    by_id: HashMap<&'a std::ffi::OsStr, Vec<usize>>,
+}
+
+#[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+impl<'a> BinIndex<'a> {
+    fn new(items: &'a [trash::TrashItem]) -> Self {
+        let mut by_place: HashMap<(String, String), Vec<usize>> = HashMap::new();
+        let mut by_id: HashMap<&std::ffi::OsStr, Vec<usize>> = HashMap::new();
+        for (n, item) in items.iter().enumerate() {
+            let place = (key(&text(&item.original_parent)), key(&item.name.to_string_lossy()));
+            by_place.entry(place).or_default().push(n);
+            by_id.entry(item.id.as_os_str()).or_default().push(n);
+        }
+        BinIndex { items, by_place, by_id }
+    }
+
+    /// Every item that may be from where `r` was, in the bin's order: from its folder, called by its name or by its
+    /// name without its ending, as [`from_there`] has it (which still says whether each is).
+    fn near(&self, r: &Removed) -> impl Iterator<Item = &'a trash::TrashItem> + use<'a> {
+        let real = Path::new(&r.real);
+        let mut at: Vec<usize> = Vec::new();
+        if let Some(folder) = real.parent().map(|f| key(&text(f))) {
+            for name in [real.file_name(), real.file_stem()].into_iter().flatten() {
+                at.extend(self.by_place.get(&(folder.clone(), key(&name.to_string_lossy()))).into_iter().flatten());
+            }
+        }
+        at.sort_unstable();
+        at.dedup();
+        let items = self.items;
+        at.into_iter().filter_map(move |n| items.get(n))
+    }
+
+    /// The items the bin calls `id`, in its order.
+    fn called(&self, id: &std::ffi::OsStr) -> impl Iterator<Item = &'a trash::TrashItem> + use<'a> {
+        let items = self.items;
+        let at = self.by_id.get(id).cloned().unwrap_or_default();
+        at.into_iter().filter_map(move |n| items.get(n))
+    }
+}
+
 /// Whether a bin item is the one removed: from the same place, and gone to the bin at or after the moment it was sent
 /// (a couple of seconds' leeway for the clock).
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
@@ -1344,12 +1391,13 @@ fn find_in_system_bin(removed: &mut [Removed]) -> Vec<Problem> {
             })
             .collect();
     };
+    let index = BinIndex::new(&items);
     let mut taken: HashSet<&std::ffi::OsStr> = HashSet::new();
     let mut problems = Vec::new();
     for r in removed.iter_mut() {
         // The first to go there after it was sent is this one.
-        let found = items
-            .iter()
+        let found = index
+            .near(r)
             .filter(|i| !taken.contains(i.id.as_os_str()) && is_the_one(i, r))
             .min_by_key(|i| i.time_deleted);
         match found {
@@ -1508,6 +1556,7 @@ fn held_among(items: &[trash::TrashItem], removed: &[Removed]) -> Vec<bool> {
 /// name, an item that went after both is the later one's.
 #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
 fn matched<'a>(items: &'a [trash::TrashItem], removed: &[Removed]) -> Vec<Option<&'a trash::TrashItem>> {
+    let index = BinIndex::new(items);
     let mut found: Vec<Option<&trash::TrashItem>> = vec![None; removed.len()];
     let mut taken: HashSet<&std::ffi::OsStr> = HashSet::new();
     let mut last_first: Vec<usize> = (0..removed.len()).collect();
@@ -1516,7 +1565,7 @@ fn matched<'a>(items: &'a [trash::TrashItem], removed: &[Removed]) -> Vec<Option
     for &n in &last_first {
         let r = &removed[n];
         let Some(id) = r.bin_id.as_deref().map(std::ffi::OsStr::new) else { continue };
-        let item = items.iter().find(|i| i.id.as_os_str() == id && from_there(i, r) && went_in_then(i, r));
+        let item = index.called(id).find(|i| i.id.as_os_str() == id && from_there(i, r) && went_in_then(i, r));
         if let Some(item) = item
             && taken.insert(item.id.as_os_str())
         {
@@ -1528,8 +1577,8 @@ fn matched<'a>(items: &'a [trash::TrashItem], removed: &[Removed]) -> Vec<Option
         if r.bin_id.is_some() {
             continue;
         }
-        let first = items
-            .iter()
+        let first = index
+            .near(r)
             .filter(|i| !taken.contains(i.id.as_os_str()) && is_the_one(i, r))
             .min_by_key(|i| i.time_deleted);
         if let Some(item) = first {
@@ -1754,6 +1803,104 @@ mod tests {
         // the first had gone, is another thing.
         assert_eq!(held_among(&in_bin(day), &asked(zone)), [true]);
         assert_eq!(held_among(&in_bin(day + 3601), &asked(zone)), [false]);
+    }
+
+    /// The bin's items are looked through by where each came from: what's found is what looking through every item
+    /// for each one found (as before), whatever the letter case, with Windows' names without their endings, two things
+    /// from one place, and thousands of items; and fast.
+    #[cfg(any(windows, all(unix, not(target_os = "macos"), not(target_os = "ios"), not(target_os = "android"))))]
+    #[test]
+    fn what_is_in_the_bin_is_found_the_same_quickly_by_where_it_came_from() {
+        use std::collections::HashSet;
+        use std::path::PathBuf;
+
+        use super::{BinIndex, Removed, What, from_there, held_among, is_the_one, went_in_then};
+        use crate::song::CompactKind;
+
+        let root = if cfg!(windows) { r"C:\Music" } else { "/music" };
+        let folder = |f: usize| PathBuf::from(root).join(format!("Song {f}")).join("Backup");
+        let item = |id: String, name: String, f: usize, at: i64| trash::TrashItem {
+            id: id.into(),
+            name: name.into(),
+            original_parent: folder(f),
+            time_deleted: at,
+        };
+        let mut items = Vec::new();
+        for f in 0..300 {
+            for n in 0..20 {
+                let at = 1_000 + i64::try_from(f * 20 + n).unwrap_or_default();
+                // Some named without their ending, as Windows can list them; some in capitals.
+                let name = match n % 4 {
+                    0 => format!("Song {f} (overwritten at {n:04})"),
+                    1 => format!("SONG {f} (OVERWRITTEN AT {n:04}).FLP"),
+                    _ => format!("Song {f} (overwritten at {n:04}).flp"),
+                };
+                items.push(item(format!("{f}-{n}.flp"), name, f, at));
+            }
+            // Two from one place.
+            items.push(item(format!("{f}-again.flp"), format!("Song {f} (overwritten at 0002).flp"), f, 900_000));
+        }
+        let removed = |f: usize, n: usize, when: i64, bin_id: Option<String>| {
+            let path = folder(f).join(format!("Song {f} (overwritten at {n:04}).flp")).to_string_lossy().into_owned();
+            let binned = bin_id.as_ref().map(|_| 1_000 + i64::try_from(f * 20 + n).unwrap_or_default());
+            let what = What::Song(CompactKind::Backup);
+            Removed { real: path.clone(), path, bytes: 10, what, when, binned, binned_zone: None, bin_id, stamp: None }
+        };
+        let mut asked = Vec::new();
+        for k in 0..3_000 {
+            let (f, n) = (k * 7 % 300, k % 23);
+            let bin_id = (k % 3 == 0).then(|| format!("{f}-{n}.flp"));
+            asked.push(removed(f, n, 900 + i64::try_from(k % 5).unwrap_or_default() * 100, bin_id));
+        }
+        // What every item looked through for each one finds, as before the index.
+        let slowly = |items: &[trash::TrashItem], removed: &[Removed]| -> Vec<bool> {
+            let mut found = vec![false; removed.len()];
+            let mut taken: HashSet<&std::ffi::OsStr> = HashSet::new();
+            let mut last_first: Vec<usize> = (0..removed.len()).collect();
+            last_first.sort_by_key(|&n| std::cmp::Reverse(removed[n].when));
+            for &n in &last_first {
+                let r = &removed[n];
+                let Some(id) = r.bin_id.as_deref().map(std::ffi::OsStr::new) else { continue };
+                let item = items.iter().find(|i| i.id.as_os_str() == id && from_there(i, r) && went_in_then(i, r));
+                if let Some(item) = item
+                    && taken.insert(item.id.as_os_str())
+                {
+                    found[n] = true;
+                }
+            }
+            for &n in &last_first {
+                let r = &removed[n];
+                if r.bin_id.is_some() {
+                    continue;
+                }
+                let first = items
+                    .iter()
+                    .filter(|i| !taken.contains(i.id.as_os_str()) && is_the_one(i, r))
+                    .min_by_key(|i| i.time_deleted);
+                if let Some(item) = first {
+                    taken.insert(item.id.as_os_str());
+                    found[n] = true;
+                }
+            }
+            found
+        };
+        let some = &asked[..300];
+        let held = held_among(&items, some);
+        assert_eq!(held, slowly(&items, some));
+        assert!(held.iter().any(|h| *h) && held.iter().any(|h| !*h));
+        let at = std::time::Instant::now();
+        assert_eq!(held_among(&items, &asked).len(), asked.len());
+        let quick = at.elapsed();
+        // Every item from a place is near what was there, whatever the case or ending, and nothing from elsewhere.
+        let index = BinIndex::new(&items);
+        let near: Vec<&trash::TrashItem> = index.near(&removed(5, 1, 0, None)).collect();
+        assert_eq!(near.len(), 1);
+        assert!(near.iter().all(|i| from_there(i, &removed(5, 1, 0, None))));
+        assert_eq!(index.near(&removed(5, 2, 0, None)).count(), 2);
+        assert_eq!(index.near(&removed(5, 0, 0, None)).count(), 1);
+        assert_eq!(index.called(std::ffi::OsStr::new("5-2.flp")).count(), 1);
+        // 3,000 things among 6,300 items: looked through item by item, that took seconds.
+        assert!(quick.as_secs() < 2, "{quick:?}");
     }
 
     /// Only asks: nothing is sent to the computer's bin here (rule 11).

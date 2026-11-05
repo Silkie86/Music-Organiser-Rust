@@ -366,25 +366,45 @@ fn one_kind(mut kinds: impl Iterator<Item = CompactKind>) -> Option<CompactKind>
 /// What a removal of your songs' things sent, by kind, as the Recycle Bin card says it: "12 old autosaves and 1
 /// cache".
 pub fn sent_things(removed: &[Removed]) -> String {
-    let kinds = [
+    things_words(removed)
+}
+
+/// Things that went, counted by kind: "12 old autosaves and 1 cache".
+fn things_words<'a>(removed: impl IntoIterator<Item = &'a Removed>) -> String {
+    let mut counts: Vec<(CompactKind, usize)> = [
         CompactKind::SameSave,
         CompactKind::ThinnedSave,
         CompactKind::Backup,
         CompactKind::Cache,
         CompactKind::UnusedAudio,
-    ];
-    let mut said: Vec<String> = kinds
-        .into_iter()
-        .filter_map(|kind| {
-            let n = removed.iter().filter(|r| r.what == What::Song(kind)).count();
-            (n > 0).then(|| kind_count(kind, n))
-        })
-        .collect();
-    let other = removed.iter().filter(|r| !matches!(r.what, What::Song(_))).count();
+    ]
+    .map(|kind| (kind, 0))
+    .to_vec();
+    let mut other = 0;
+    for r in removed {
+        match counts.iter_mut().find(|(kind, _)| r.what == What::Song(*kind)) {
+            Some((_, n)) => *n += 1,
+            None => other += 1,
+        }
+    }
+    let mut said: Vec<String> =
+        counts.into_iter().filter(|(_, n)| *n > 0).map(|(kind, n)| kind_count(kind, n)).collect();
     if other > 0 {
         said.push(count_of(other, "file or folder", "files and folders"));
     }
     and_list(&said)
+}
+
+/// How a removal's lines count: what's in the bin by kind, when `n` is how many are (`in_bin`, said as `in_bin_words`:
+/// "61 old autosaves and 1 cache"); any other count by `kinds`' noun ([`noun_of`]).
+fn bin_noun(in_bin: usize, in_bin_words: String, kinds: Option<CompactKind>) -> impl Fn(usize) -> String {
+    let other = noun_of(kinds);
+    move |n| if n == in_bin && n > 0 { in_bin_words.clone() } else { other(n) }
+}
+
+/// How the lines of a removal that ran count ([`bin_noun`]).
+fn sent_noun(sent: &Sent) -> impl Fn(usize) -> String + use<> {
+    bin_noun(sent.binned().count(), things_words(sent.binned()), one_kind(sent.picked.iter().map(|i| i.item.kind)))
 }
 
 /// The activity card's line while Remove is on.
@@ -399,7 +419,10 @@ pub fn removed_words(done: &Done) -> Result<String, String> {
         What::Song(kind) => Some(kind),
         _ => None,
     });
-    space_removing::removed_words(done, &noun_of(one_kind(kinds)))
+    let said: HashSet<&str> = done.problems.iter().map(|p| p.path.as_str()).collect();
+    let in_bin: Vec<&Removed> = done.removed.iter().filter(|r| !said.contains(r.path.as_str())).collect();
+    let noun = bin_noun(in_bin.len(), things_words(in_bin.iter().copied()), one_kind(kinds));
+    space_removing::removed_words(done, &noun)
 }
 
 /// "autosaves past the newest 5", as the cards say what of the autosaves goes.
@@ -631,17 +654,17 @@ fn compact_rows(found: &Found) -> (Vec<SongItem>, Vec<Row>) {
                 let names = song.items(k.kind).map(|i| file_name(&i.path));
                 let words = (song.name.clone(), song_what(k.kind, n, names));
                 let part = song_part(&song.opens, words, bytes, true);
-                under.push(Row { part, ticks: ticks.then(|| from..items.len()) });
+                under.push(Row { part, ticks: ticks.then_some(from..items.len()) });
             } else {
                 let (_, songs, sum) = rest.get_or_insert((from, 0, 0));
                 *songs += 1;
                 *sum = sum.saturating_add(bytes);
             }
         }
-        rows.push(Row { part: kind_part(k.kind, k.count, k.bytes, keep), ticks: ticks.then(|| start..items.len()) });
+        rows.push(Row { part: kind_part(k.kind, k.count, k.bytes, keep), ticks: ticks.then_some(start..items.len()) });
         rows.extend(under);
         if let Some((from, songs, bytes)) = rest {
-            rows.push(Row { part: rest_part(songs, bytes, true), ticks: ticks.then(|| from..items.len()) });
+            rows.push(Row { part: rest_part(songs, bytes, true), ticks: ticks.then_some(from..items.len()) });
         }
     }
     (items, rows)
@@ -731,9 +754,8 @@ impl Looked for Shown {
 /// while the next one looks), or while the first look is on (`looking`), that it's measuring. Once a removal's result
 /// is on show (`removing`), the compact line says how that went instead, freeing nothing more, until Measure again.
 pub fn lines(shown: Option<&Shown>, looking: bool, removing: &Removing) -> [Option<(u64, Line)>; 2] {
-    let noun = |sent: &Sent| noun_of(one_kind(sent.picked.iter().map(|i| i.item.kind)));
     let compact = match removing.stage() {
-        Stage::Sent(sent) => Some((0, line(sent_words(sent, &noun(sent)), freed_words(sent)))),
+        Stage::Sent(sent) => Some((0, line(sent_words(sent, &sent_noun(sent)), freed_words(sent)))),
         Stage::PuttingBack(sent) => Some((0, line("Putting them back…".to_owned(), freed_words(sent)))),
         Stage::PutBack(sent, problems) => Some((0, line(back_words(sent, problems), String::new()))),
         Stage::Picking | Stage::Sending(_) => match shown {
@@ -991,8 +1013,7 @@ fn result_card(sent: &Sent, stage: &Stage, can_put_back: bool, keep: usize) -> C
             parts.push(Part { status, problem, ..rest_part(rest_songs, rest.freed, true) });
         }
     }
-    let noun = noun_of(one_kind(sent.picked.iter().map(|i| i.item.kind)));
-    let (big, big_note, note) = result_figures(sent, stage, can_put_back, &noun);
+    let (big, big_note, note) = result_figures(sent, stage, can_put_back, &sent_noun(sent));
     Card {
         kind: KIND,
         title: TITLE,
@@ -1419,7 +1440,9 @@ mod tests {
         let card = compact_card(Some(&shown), &removing, true);
         let freed: u64 = picked.iter().filter(|i| i.item.path != changed).map(|i| i.item.bytes).sum();
         assert_eq!(card.big, format!("Freed {}", size_text(freed)));
-        assert_eq!(card.big_note, format!("{} autosaves and caches are in the {BIN}, and 1 stayed", picked.len() - 1));
+        // What's in the bin is counted by kind; what stayed only by how many.
+        let in_bin = picked.len() - 2;
+        assert_eq!(card.big_note, format!("{in_bin} old autosaves and 1 cache are in the {BIN}, and 1 stayed"));
         let rows = rows(&card);
         assert_eq!(rows.first().map(|r| (r.0, r.4)), Some(("14 old autosaves", "")));
         let in_bin = format!("In the {BIN}.");
@@ -1501,7 +1524,17 @@ mod tests {
         let done = Done { removed, ..Done::default() };
         assert_eq!(
             removed_words(&done),
-            Ok(format!("Freed {}: 4 autosaves and caches are in the {BIN}.", size_text(done.bytes())))
+            Ok(format!("Freed {}: 3 old autosaves and 1 cache are in the {BIN}.", size_text(done.bytes())))
+        );
+        // One that went but wasn't found in the bin is counted on its own.
+        let first = done.removed.first().map(|r| r.path.clone()).unwrap_or_default();
+        let lost = Done { problems: vec![Problem { path: first, why: "Not found.".to_owned() }], ..done.clone() };
+        assert_eq!(
+            removed_words(&lost),
+            Ok(format!(
+                "Freed {}: 2 old autosaves and 1 cache are in the {BIN}, and 1 went but wasn't found there.",
+                size_text(done.bytes())
+            ))
         );
         let caches = Done {
             removed: done.removed.iter().filter(|r| r.what == What::Song(CompactKind::Cache)).cloned().collect(),
