@@ -256,6 +256,10 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     });
     let weak = app.as_weak();
     data.on_choose_export_folder(move || {
+        // Not for the screenshots, as the folder lists' Add folder isn't: nothing would be kept.
+        if !PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live)) {
+            return;
+        }
         let weak = weak.clone();
         crate::backup::pick_folder(page::EXPORTS_PICK_TITLE, move |folder| {
             if let Some(app) = weak.upgrade() {
@@ -1128,19 +1132,19 @@ pub fn show_folders(app: &AppWindow, groups: Result<Vec<page::FolderGroup>, Stri
 /// library, checked on the disk. Opens the library and looks at the disk, so never on the window's thread.
 fn read_exports(library: &Path) -> page::ExportsCard {
     use mo_app::bitwig_convert as bitwig;
-    let setting = if library.exists() {
-        Library::open_read_only(library).and_then(|lib| lib.setting(bitwig::EXPORT_FOLDER_KEY))
-    } else {
-        Ok(None)
-    };
-    let setting = match setting {
+    let setting = match bitwig::export_setting_in(library) {
         Ok(setting) => setting,
-        Err(e) => {
-            let why = format!("The export folder setting couldn't be read. {e}.");
-            return page::exports_card(None, &Err(why), false);
-        }
+        Err(why) => return page::exports_card(None, &Err(why), false),
     };
-    let checked = bitwig::export_folder(setting.as_deref(), bitwig::documents().as_deref());
+    let checked = bitwig::export_folder(setting.as_deref(), bitwig::documents().as_deref()).and_then(|folder| {
+        // Documents' own isn't looked at by an export until it makes it: something else by its name stops that.
+        match std::fs::metadata(&folder) {
+            Ok(m) if !m.is_dir() => {
+                Err(format!("{} is a file, not a folder, so nothing can be exported there.", folder.display()))
+            }
+            _ => Ok(folder),
+        }
+    });
     let there = checked.as_ref().is_ok_and(|folder| folder.is_dir());
     page::exports_card(setting.as_deref(), &checked, there)
 }

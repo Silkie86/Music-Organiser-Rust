@@ -117,7 +117,8 @@ export global SettingsData {
     callback add-folder(int);
     callback remove-folder(int, string);
     // Folders: where exports go (mo_app::settings::exports_card): the card's title and what it's for, the folder and a
-    // line under it, whether one was chosen (so Documents can be gone back to) and whether it's there (so Open shows it).
+    // line under it, whether one was chosen (so Documents can be gone back to) and whether it's there (so Open can
+    // show it).
     in property <string> exports-title;
     in property <string> exports-note;
     in property <string> export-folder;

@@ -89,18 +89,23 @@ fn not_there(set: &Path) -> String {
     }
 }
 
-/// [`export_folder`], with the setting read from the song library at `library` (none is set without one). A setting
-/// that can't be read stops the export too, rather than it going to Documents in place of the folder set. Opens the
+/// [`export_folder`], with the setting read from the song library at `library` ([`export_setting_in`]). Opens the
 /// library and looks at the disk, so never on the window's thread.
 pub fn export_folder_in(library: &Path) -> Result<PathBuf, String> {
-    let setting = if library.exists() {
-        mo_library::Library::open_read_only(library)
-            .and_then(|lib| lib.setting(EXPORT_FOLDER_KEY))
-            .map_err(|e| format!("The export folder setting couldn't be read. {e}."))?
-    } else {
-        None
-    };
+    let setting = export_setting_in(library)?;
     export_folder(setting.as_deref(), documents().as_deref())
+}
+
+/// The export folder setting, as every export reads it: from the song library at `library` (none is set without
+/// one). A setting that can't be read stops the export too, rather than it going to Documents in place of the folder
+/// set. Opens the library, so never on the window's thread.
+pub fn export_setting_in(library: &Path) -> Result<Option<String>, String> {
+    if !library.exists() {
+        return Ok(None);
+    }
+    mo_library::Library::open_read_only(library)
+        .and_then(|lib| lib.setting(EXPORT_FOLDER_KEY))
+        .map_err(|e| format!("The export folder setting couldn't be read. {e}."))
 }
 
 /// Why nothing can be exported with no export folder set and no Documents folder to make one in.

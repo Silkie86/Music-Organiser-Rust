@@ -137,9 +137,12 @@ fn the_export_folder_is_set_and_taken_back_and_nothing_else_changes() {
     let path = make("exports.db");
     assert!(set_export_folder(&path, Some(r"K:\Music Exports")).unwrap());
     assert_eq!(export_setting(&path).as_deref(), Some(r"K:\Music Exports"));
-    // The same folder again, whatever its letter case or a separator at the end: nothing to do.
-    assert!(!set_export_folder(&path, Some(r"k:\music exports\")).unwrap());
+    // The same folder again, with a separator at the end: nothing to do. Spelt another way, it's kept as spelt
+    // (on Linux it's another folder).
+    assert!(!set_export_folder(&path, Some(r"K:\Music Exports\")).unwrap());
     assert_eq!(export_setting(&path).as_deref(), Some(r"K:\Music Exports"));
+    assert!(set_export_folder(&path, Some(r"K:\music exports")).unwrap());
+    assert_eq!(export_setting(&path).as_deref(), Some(r"K:\music exports"));
     assert!(set_export_folder(&path, Some(r"I:\Exports")).unwrap());
     assert_eq!(export_setting(&path).as_deref(), Some(r"I:\Exports"));
     // Back to Documents: kept as "", as the C# app keeps "none"; blank is Documents too.

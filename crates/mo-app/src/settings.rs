@@ -1,7 +1,7 @@
 //! The Settings page (spec 3.9, folded from the C# app's nine tabs to five, 3A): General (the look, the size of
 //! everything, the start page, the pace, the sound output, and About with the "Made with Slint" credit), Folders (where
-//! your projects, samples, MIDI and moved plugin data are), DAWs, Shortcuts and Developer. A page's own numbers live in
-//! an Options popover on that page, not here.
+//! your projects, samples, MIDI and moved plugin data are, and where exports go), DAWs, Shortcuts and Developer. A
+//! page's own numbers live in an Options popover on that page, not here.
 //!
 //! Every word the page shows is decided here, so it's tested without a window. The choices are kept by
 //! [`crate::app_settings`]: this app's own file over the C# app's, which stays read-only.
@@ -65,7 +65,7 @@ impl Tab {
     pub fn summary(self) -> &'static str {
         match self {
             Tab::General => "How the app looks and behaves everywhere",
-            Tab::Folders => "Where your projects, samples, MIDI and plugin data are",
+            Tab::Folders => "Where your projects, samples, MIDI and plugin data are, and where exports go",
             Tab::Daws => "The links that let the app talk to Bitwig and FL Studio",
             Tab::Shortcuts => "Every key, in one list",
             Tab::Developer => "The app's version, its logs and its own files, for testing at home",
@@ -316,9 +316,10 @@ pub fn folder_groups(
 }
 
 /// The line under the Folders tab's title.
-pub const FOLDERS_NOTE: &str = "The folders the app looks in, and at the bottom the one it puts exports in. Adding or \
-    removing one never moves or deletes anything on disk, and a project folder taken off keeps its songs listed. The Songs page takes up a changed project folder \
-    (one added, or one taken off) at the next start, and reads the saves in a new one then.";
+pub const FOLDERS_NOTE: &str = "The folders the app looks in, and at the bottom the one it puts exports in. Adding \
+    or removing one never moves or deletes anything on disk, and a project folder taken off keeps its songs listed. \
+    The Songs page takes up a changed project folder (one added, or one taken off) at the next start, and reads the \
+    saves in a new one then.";
 
 /// The folder picker's title for a list.
 pub fn pick_title(list: FolderList) -> &'static str {
