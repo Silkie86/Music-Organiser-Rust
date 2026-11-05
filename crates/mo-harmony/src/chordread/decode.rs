@@ -644,7 +644,7 @@ pub struct Decoder {
     /// sharpness the moves were.
     scorer: Scorer,
     scorer_from: Option<(Weights, Tables)>,
-    moves_from: Option<(f64, f64, Tables)>,
+    moves_from: Option<f64>,
     /// The sharpness the next decode works the chances out at ([`Decoder::decode_at`]).
     sharpness: f64,
     evidence: Evidence,
@@ -739,13 +739,15 @@ impl Decoder {
             return false;
         }
         self.cap = SPAN_BARS * hearing.bar_units().max(1);
-        if self.scorer_from != Some((*weights, *tables)) {
+        // The moves are worked out again with the scorer (new weights or tables), or at a new sharpness.
+        let fresh = self.scorer_from != Some((*weights, *tables));
+        if fresh {
             self.scorer = Scorer::new(weights, &Priors::of(tables));
             self.scorer_from = Some((*weights, *tables));
         }
-        if self.moves_from != Some((weights.pair, sharpness, *tables)) {
+        if fresh || self.moves_from != Some(sharpness) {
             self.moves = Moves::new(weights.pair, sharpness, tables);
-            self.moves_from = Some((weights.pair, sharpness, *tables));
+            self.moves_from = Some(sharpness);
         }
         self.evidence.prepare(hearing);
         self.find_regions(hearing, pins);

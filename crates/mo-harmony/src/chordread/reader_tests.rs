@@ -750,7 +750,7 @@ const READINGS: &[(u32, u64)] = &[
     (2, 0x1a86_e909_00c4_7d95),
     (3, 0x0b75_cf69_1fba_b90d),
     (4, 0xcb78_8296_e472_6c11),
-    (5, 0xf802_4adc_b4eb_75fe),
+    (5, 0x9fdb_0822_fc5b_5762),
 ];
 
 /// The music whose readings the hash covers, with its pins: every hand case, the music the rules are checked on, and
@@ -1004,7 +1004,8 @@ fn the_sharpness_moves_the_chances_never_what_is_read() {
         let mut with =
             |calibration: &Calibration| reader.read_with(&parts, music.grid, &cx, &Model { calibration, ..SHIPPED });
         let (Some(a), Some(b), Some(c)) = (with(&soft), with(&Calibration::NONE), with(&sharp)) else { continue };
-        assert!(a.sharpness == 0.4 && b.sharpness == 1.0 && c.sharpness == 2.5);
+        let near = |x: f64, want: f64| (x - want).abs() < 1e-12;
+        assert!(near(a.sharpness, 0.4) && near(b.sharpness, 1.0) && near(c.sharpness, 2.5));
         let cuts = |r: &ChordReading| r.spans.iter().map(|s| (s.units.clone(), s.label)).collect::<Vec<_>>();
         assert_eq!(cuts(&a), cuts(&b));
         assert_eq!(cuts(&c), cuts(&b));

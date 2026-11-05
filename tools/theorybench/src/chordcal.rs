@@ -23,9 +23,10 @@
 //!   straight line between its points on a log scale). Then each piece is read once more with the numbers fitted.
 //! - **The thresholds**, texture by texture (a full mix, an accompaniment, chords alone; one line alone is never one
 //!   chord), are each the smallest on a 0.01 grid, from an even chance up, at which the answers of that kind are wrong
-//!   no more often than their target ([`TARGET`]), judged by the upper end of the error's likely range when the songs
-//!   are drawn again (95%, the songs' answers going wrong together counted): one chord first, wrong when its root and
-//!   core aren't the label's; then the same notes on the stretches left, wrong when the label is outside the group.
+//!   no more often than their target ([`TARGET`]), judged by the error itself, as the key finder's are (the upper end
+//!   of its likely range when the songs are drawn again, 95%, is printed beside it): one chord first, wrong when its
+//!   root and core aren't the label's; then the same notes on the stretches left, wrong when the label is outside the
+//!   group.
 //!   A texture with fewer than [`MIN_SONGS`] songs keeps the thresholds built in.
 
 use std::collections::{BTreeMap, HashSet};
@@ -153,12 +154,14 @@ struct Read {
 }
 
 /// The stretches of a reading judged against the labels: each stretch read as a chord with readings, against the
-/// label of most of its time, when the label is a chord the reader can read.
+/// label of most of its time, when the label is a chord the reader can read. A stretch the reader gives no chord
+/// (fewer than two notes heard: that answer is the same at any threshold) is left out, as [`Seen::answer`] grades as
+/// if two or more were heard.
 fn judge(reading: &ChordReading, labels: &[(i64, i64, String)], lenient: bool) -> Vec<Seen> {
     reading
         .spans
         .iter()
-        .filter(|s| s.label.is_some() && !s.readings.is_empty())
+        .filter(|s| s.label.is_some() && !s.readings.is_empty() && s.answer.shows_chord())
         .filter_map(|s| {
             let overlap = |(a, b): (i64, i64)| (b.min(s.end) - a.max(s.start)).max(0);
             let most = labels.iter().filter(|l| overlap((l.0, l.1)) > 0).max_by_key(|l| overlap((l.0, l.1)))?;
@@ -274,8 +277,7 @@ fn read_take(reader: &mut ChordReader, take: &Take, model: &Model) -> Option<Rea
         take.parts.iter().map(|(role, notes)| mo_harmony::Part { role: *role, notes }).collect();
     let cx = ChordContext { span: take.span, pins: &[], readings: MOST_READINGS };
     let reading = reader.read_with(&parts, take.grid, &cx, model)?;
-    let bar = i64::from(take.grid.beats_per_bar.max(1)) * i64::from(take.grid.ticks_per_beat.max(1));
-    let bars = (reading.end - reading.start) as f64 / bar as f64;
+    let bars = (reading.end - reading.start) as f64 / take.grid.bar().max(1) as f64;
     Some(Read { texture: reading.texture, bars, seen: judge(&reading, &take.labels, take.lenient) })
 }
 
@@ -502,8 +504,9 @@ fn errors(answers: &[&Answer], songs: usize, wrong: impl Fn(&Answer) -> bool) ->
 }
 
 /// The smallest threshold on the 0.01 grid, [`LEAST`] or more, at which the answers `chance` gives (those with a
-/// chance, at or above it) are wrong no more often than [`TARGET`] by the upper end of their likely range, from at
-/// least [`MIN_SONGS`] songs; 1 (never given) when none is. Each step's error and upper end are printed.
+/// chance, at or above it) are wrong no more often than [`TARGET`] (the error itself, not the upper end of its likely
+/// range), from at least [`MIN_SONGS`] songs; 1 (never given) when none is. Each step's error and upper end are
+/// printed.
 fn smallest(
     name: &str,
     answers: &[&Answer],
@@ -797,19 +800,24 @@ pub fn run(args: &[String]) -> Result<(), String> {
         return Ok(());
     }
 
-    let fitted = if o.keep_sharpness { given.calibration } else { fit_sharpness(&takes, &before, &model) };
-    let calibration = Calibration(fitted);
-    let model = Model { calibration: &calibration, ..model };
-    let reads = read_all(&takes, &model);
-    println!();
-    println!("How true the chances are with the sharpness fitted:");
-    report(&takes, &reads);
+    // Kept as given, the reads made with it already are the reads to fit the thresholds on.
+    let (fitted, reads) = if o.keep_sharpness {
+        (given.calibration, before)
+    } else {
+        let fitted = fit_sharpness(&takes, &before, &model);
+        let calibration = Calibration(fitted);
+        let reads = read_all(&takes, &Model { calibration: &calibration, ..model });
+        println!();
+        println!("How true the chances are with the sharpness fitted:");
+        report(&takes, &reads);
+        (fitted, reads)
+    };
     let answers = answers_of(&takes, &reads);
     let (thresholds, lines) = fit_thresholds(&answers, songs);
     println!();
     println!(
         "The thresholds fitted (the least chance, on a 0.01 grid from {LEAST}, at which an answer's error is at most \
-         {} by the upper end of its likely range):",
+         {}; the upper end of its likely range beside it):",
         metrics::pct(TARGET)
     );
     for line in &lines {

@@ -40,7 +40,7 @@ theorybench chordfit <labelled.jsonl>... [--inputs <kinds>] [--weigh <source>=<w
                    [--test <folds>] [--lambda <x>] [--steps <n>] [--from <weights.json>] [--fix <numbers>]
                    [--hand <mu>] [--hold <rounds>] [--out <weights.json>]
 theorybench chordcal <labelled.jsonl>... [--weights <weights.json>] [--folds <folds>] [--picks <n>]
-                   [--measure] [--calibration <calibration.json>] [--out <calibration.json>]
+                   [--measure] [--calibration <calibration.json>] [--keep-sharpness] [--out <calibration.json>]
 theorybench candidates <labelled.jsonl>... [--inputs <kinds>] [--misses <file>]
 theorybench tables <labelled.jsonl>... [--write <tables.rs>]
 
@@ -114,6 +114,7 @@ theorybench tables <labelled.jsonl>... [--write <tables.rs>]
   --measure  fits nothing: reads every piece given, of any licence and fold, and says how true the chances are and
              how often each answer is wrong, with the calibration built in (or --calibration's)
   --calibration  a file --out wrote, read in place of the calibration and thresholds built in
+  --keep-sharpness  fits only the thresholds, on the sharpness built in (or --calibration's)
   --out      writes the calibration and the thresholds fitted to a file
   candidates how often mo-harmony's chord reader has the labelled chord among the readings it scores (its ceiling),
              with the labelled ends, and moved by up to a unit

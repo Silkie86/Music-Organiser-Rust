@@ -15,7 +15,7 @@ use super::score::{Feature, PerFeature};
 /// The hash of every number the reader is built from ([`super::numbers_hash`]) that these were written with, and the
 /// version of the reader they were first given with ([`super::CHORD_READER_VERSION`]). A test checks both: change a
 /// number here, in the counted tables or among those set by hand, and it asks for the new hash and a new version.
-pub(super) const SHIPPED_HASH: u64 = 0x8a03_9143_ed40_92df;
+pub(super) const SHIPPED_HASH: u64 = 0x71d8_32ab_cada_d817;
 pub(super) const HASH_VERSION: u32 = 5;
 
 /// What each piece of evidence is worth ([`Feature`]), the trust in the pair term, and what a stretch read as no chord
@@ -181,8 +181,8 @@ pub const FIRST_FIT: Weights = Weights {
 /// stretches given one chord on fold 1 of POP909-CL and Billboard set A are wrong (their root and core not the
 /// label's) at most one time in ten.
 ///
-/// - **One chord:** 0.80 for an accompaniment and 0.84 for chords alone, as fitted. A full mix keeps the hand-set 0.8:
-///   the fit's 0.59 met the target on the music it was fitted on, but on Billboard set B's voicings, never fitted on,
+/// - **One chord:** 0.80 for an accompaniment and 0.83 for chords alone, as fitted. A full mix keeps the hand-set 0.8:
+///   the fit's 0.58 met the target on the music it was fitted on, but on Billboard set B's voicings, never fitted on,
 ///   13% of the chords it gave as one chord were wrong (at 0.8, 8%), and harmony must be very precise.
 /// - **The same notes** are never given (1): the label was outside the first reading's same-notes group more than one
 ///   time in ten at every threshold (a fifth of the time in a full mix and an accompaniment, 11% to 13% for chords
@@ -192,7 +192,7 @@ pub const FIRST_FIT: Weights = Weights {
 /// As the key finder's, each is judged by the error itself, not by the upper end of its likely range (printed beside
 /// it): by the upper end, chords alone could never be given one chord, the surest answers being wrong a little under
 /// one time in ten.
-pub const THRESHOLDS: Thresholds = Thresholds { one: [0.8, 0.8, 0.84, 1.0], same: [1.0, 1.0, 1.0, 1.0] };
+pub const THRESHOLDS: Thresholds = Thresholds { one: [0.8, 0.8, 0.83, 1.0], same: [1.0, 1.0, 1.0, 1.0] };
 
 /// The thresholds set by hand before the calibration's fit: one chord at 0.8 and the same notes at 0.9, but for one
 /// line alone (never). Set from the hand cases: keys alone that a player could read more than one way (cases 13, 20,

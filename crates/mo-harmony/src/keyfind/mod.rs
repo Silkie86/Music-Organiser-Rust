@@ -151,10 +151,12 @@ pub const LEAST_SHARPNESS: f64 = 0.05;
 pub struct Calibration(pub [f64; CALIBRATION_TERMS]);
 
 /// Writes the weights of a tent curve over `bars` on a log scale into `terms`: 1 on the knot at `bars` (1, 2, 4 …),
-/// split between the two knots around it in between, and the last knot's past them.
-fn tent(terms: &mut [f64], bars: u32) {
+/// split between the two knots around it in between, and the last knot's past them (the first's below 1 bar, and for
+/// a number of bars that isn't one). The chord reader's sharpness is the same curve ([`crate::chordread::Calibration`]).
+pub(crate) fn tent(terms: &mut [f64], bars: f64) {
     let last = terms.len().saturating_sub(1);
-    let at = f64::from(bars.max(1)).log2().clamp(0.0, last as f64);
+    let bars = if bars.is_finite() { bars.max(1.0) } else { 1.0 };
+    let at = bars.log2().clamp(0.0, last as f64);
     let below = at.floor() as usize;
     let above = at - below as f64;
     if let Some(t) = terms.get_mut(below) {
@@ -175,7 +177,7 @@ impl Calibration {
         let (curve, rest) = terms.split_at_mut(KNOTS);
         let (inputs, rest) = rest.split_at_mut(3);
         let (loops, song) = rest.split_at_mut(KNOTS);
-        tent(curve, bars);
+        tent(curve, f64::from(bars));
         let input = match config {
             Config::Full => None,
             Config::MelodyOnly => Some(0),
@@ -186,7 +188,7 @@ impl Calibration {
             *t = 1.0;
         }
         match span {
-            Span::Loop => tent(loops, bars),
+            Span::Loop => tent(loops, f64::from(bars)),
             Span::Song => song.fill(1.0),
             Span::Window => {}
         }

@@ -1018,37 +1018,40 @@ Reading every take at the 64 sharpnesses took 28 minutes on 4 cores.
 (POP909-CL's first reading looks a little unsure beside how often it's right: its labels are triads, judged
 leniently, so a C read at 0.6 with Cmaj7 at 0.3 is right as the C label, at 0.6.)
 
-**The thresholds fitted**, wrong (and the upper end of its likely range) at each:
+**The thresholds fitted** (on the stretches the reader gives a chord: not those with too few notes), wrong (and the
+upper end of its likely range) at each:
 
 | texture | one chord fitted | wrong there | at 0.8 | the same notes |
 |---|---|---|---|---|
-| a full mix | 0.59 | 9.9% (10.8%) | 6.3% (7.1%) | never: 20% wrong at any threshold |
-| an accompaniment | 0.80 | 10.0% (11.6%) | 10.0% (11.6%) | never: 18% |
-| chords alone | 0.84 | 9.8% (11.3%) | 10.7% (12.3%) | never: 11% to 13% |
+| a full mix | 0.58 | 10.0% (10.9%) | 6.3% (7.0%) | never: 20% wrong at any threshold |
+| an accompaniment | 0.80 | 9.9% (11.5%) | 9.9% (11.5%) | never: 18% |
+| chords alone | 0.83 | 10.0% (11.5%) | 10.7% (12.2%) | never: 11% to 13% |
 
 By the upper end of the likely range (the design's rule), chords alone could never be one chord (at 0.95 still 10.4%
 wrong), so the error itself is used, as the key finder's thresholds are.
 
 **Measured where it never fitted** (`--measure`, every piece, one stretch of each length a piece), the chords given as
-one chord and the share of them wrong, before (σ 1, the hand-set 0.8 and 0.9) and with the fit:
+one chord and the share of them wrong: before (σ 1, the hand-set 0.8 and 0.9), with the fit's 0.59 for a full mix (a
+first run, before stretches with too few notes were left out of the fit), and as shipped (σ fitted, 0.8, 0.8, 0.83):
 
-| set | full mix: before / the fit's 0.59 | accompaniment: before / fitted | chords alone: before / fitted |
+| set | full mix: before / 0.59 / shipped | accompaniment: before / shipped | chords alone: before / shipped |
 |---|---|---|---|
-| Billboard set B | 64.8% (7.9% wrong) / 84.2% (13.2%) | 62.9% (9.7%) / 58.5% (9.3%) | 74.2% (7.1%) / 66.0% (5.7%) |
-| RS200 set A | 86.1% (3.3%) / 94.9% (4.8%) | 82.5% (3.7%) / 80.2% (3.5%) | 92.9% (3.8%) / 91.2% (3.2%) |
-| RS200 set B | 67.2% (4.2%) / 86.7% (7.7%) | 62.6% (6.5%) / 58.4% (5.9%) | 58.5% (5.8%) / 51.7% (5.5%) |
-| RS200 block chords | - | 96.9% (0.8%) / 96.7% (0.8%) | 82.7% (0.3%) / 81.3% (0.2%) |
-| the sweep | - | 58.7% (21.3%) / 56.2% (20.1%) | 60.7% (12.8%) / 59.6% (12.0%) |
+| Billboard set B | 64.8% (7.9%) / 84.2% (13.2%) / 65.9% (8.1%) | 62.9% (9.7%) / 58.5% (9.3%) | 74.2% (7.1%) / 68.0% (5.8%) |
+| RS200 set A | 86.1% (3.3%) / 94.9% (4.8%) / 86.6% (3.3%) | 82.5% (3.7%) / 80.2% (3.5%) | 92.9% (3.8%) / 92.4% (3.8%) |
+| RS200 set B | 67.2% (4.2%) / 86.7% (7.7%) / 68.1% (4.3%) | 62.6% (6.5%) / 58.5% (5.9%) | 58.5% (5.8%) / 53.4% (5.3%) |
+| RS200 block chords | - | 96.9% (0.8%) / 96.7% (0.8%) | 82.7% (0.3%) / 82.0% (0.2%) |
+| the sweep | - | 58.7% (21.3%) / 56.2% (20.0%) | 60.7% (12.8%) / 60.5% (12.8%) |
 
-The fit's 0.59 for a full mix misses the target on Billboard set B's voicings (13.2% wrong), so the reader ships a full
-mix at the hand-set 0.8, with the fitted sharpness, 0.80 for an accompaniment and 0.84
-for chords alone, and the same notes never given: `chordread::CALIBRATION` and `THRESHOLDS`, `CHORD_READER_VERSION` 5.
-The sweep's chords (45 qualities in every voicing, scored exactly) are wrong a fifth of the time over a bass at any
-threshold: the extensions are what it gets wrong, which no threshold mends.
+The fit's full mix threshold misses the target on Billboard set B's voicings (13.2% wrong at 0.59), so the reader ships
+a full mix at the hand-set 0.8, with the fitted sharpness, 0.80 for an accompaniment and 0.83 for chords alone, and the
+same notes never given: `chordread::CALIBRATION` and `THRESHOLDS`, `CHORD_READER_VERSION` 5. (The sharpness was fitted
+with the few stretches of too few notes in, 0.06% of them.) The sweep's chords (45 qualities in every voicing, scored
+exactly) are wrong a fifth of the time over a bass at any threshold: the extensions are what it gets wrong, which no
+threshold mends.
 
 - **The hand cases.** Every gate holds, and every answer the cases ask for. Dm7 over a walk (38) and the walk under
   F A C (36) are unclear now (0.75, under an accompaniment's 0.8), and C6 or Am7 with no bass (22) is unclear, leaning
   to C6, where it was the same notes.
-- **Next.** With the keys alone that stopped the weights at a fifth of the way now under chords alone's 0.84 (and
+- **Next.** With the keys alone that stopped the weights at a fifth of the way now under chords alone's 0.83 (and
   read a little less surely in a bar or two), the weights can move further towards the fit: each step needs the
   calibration fitted again on its own chances.

@@ -691,7 +691,7 @@ Each guess is played with its own root in the bass.
 - Fitted on fold 1 only (the fold `FITTED` never learned from), not cross-fitted over folds 1 to 4: three more fits of two hours each for numbers a fifth of the way from the hand-set ones. Each piece is read whole and cut into stretches of 1 to 16 bars (2 of each a way of hearing), since whole songs alone sit only at the last knot.
 - The event: the first reading's root and core among the label's accept set (lenient on POP909-CL); the bass kind is left out, as names are written with no slash.
 - NLL of the labelled chord over the readings kept (6), on a grid of 64 σ, coordinate descent. σ came out 0.82 to 1.09: the chances were near true.
-- Thresholds by the error itself, not its 95% upper bound (with the bound, chords alone could never be one chord), as the key finder's. Fitted: one chord at 0.59 (full mix), 0.80 (accompaniment) and 0.84 (chords alone); the same notes never meet 10% (the truth is outside the group 11% to 20% of the time), so they are never given. The full mix's 0.59 was 13.2% wrong on Billboard set B, never fitted on, so it ships at the hand-set 0.8.
+- Thresholds by the error itself, not its 95% upper bound (with the bound, chords alone could never be one chord), as the key finder's. Fitted: one chord at 0.58 (full mix), 0.80 (accompaniment) and 0.83 (chords alone); the same notes never meet 10% (the truth is outside the group 11% to 20% of the time), so they are never given. The full mix's fitted threshold (0.59 in a first run) was 13.2% wrong on Billboard set B, never fitted on, so it ships at the hand-set 0.8.
 
 ## Explanations
 

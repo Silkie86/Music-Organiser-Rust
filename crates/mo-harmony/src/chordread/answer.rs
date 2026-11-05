@@ -20,6 +20,7 @@
 //! one time in ten. The bench fits both (`theorybench chordcal`).
 
 use super::hear::{Hearing, Stream};
+use crate::keyfind::tent;
 
 /// What kinds of line are heard: what the notes can say, and so how sure the reader may be of its chords.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -144,24 +145,6 @@ pub const LEAST_SHARPNESS: f64 = 0.05;
 /// numbers (`theorybench chordcal`), so the chance of the first reading's chord is as often right as it says.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Calibration(pub [f64; CALIBRATION_TERMS]);
-
-/// Writes the weights of a tent curve over `bars` on a log scale into `terms`: 1 on the knot at `bars` (1, 2, 4 …),
-/// split between the two knots around it in between, and the last knot's past them (the first's below 1 bar).
-fn tent(terms: &mut [f64], bars: f64) {
-    let last = terms.len().saturating_sub(1);
-    let bars = if bars.is_finite() { bars.max(1.0) } else { 1.0 };
-    let at = bars.log2().clamp(0.0, last as f64);
-    let below = at.floor() as usize;
-    let above = at - below as f64;
-    if let Some(t) = terms.get_mut(below) {
-        *t = 1.0 - above;
-    }
-    if above > 0.0
-        && let Some(t) = terms.get_mut(below + 1)
-    {
-        *t = above;
-    }
-}
 
 impl Calibration {
     /// Every score as it is: a sharpness of 1 whatever is heard.

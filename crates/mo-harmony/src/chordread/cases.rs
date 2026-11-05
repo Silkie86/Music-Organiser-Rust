@@ -466,8 +466,9 @@ pub struct Named {
 }
 
 impl Named {
-    /// Some music heard, read whole and named, each span keeping at most `most` readings, its chances as sharp as
-    /// `calibration` makes them for what's heard, as the reader's are; none when nothing is heard or read.
+    /// Some music heard, read whole and named with a model, each span keeping at most `most` readings, its chances as
+    /// sharp as the model's calibration makes them for what's heard, as the reader's are; none when nothing is heard or
+    /// read.
     pub fn of(music: &Music, model: &Model, pins: &[PinnedSpan], most: usize) -> Option<Named> {
         let hearing = music.heard()?;
         let (mut decoder, mut decoding, mut naming) = (Decoder::new(), Decoding::new(), Naming::new());
