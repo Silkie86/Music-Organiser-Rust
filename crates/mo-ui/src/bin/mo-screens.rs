@@ -107,7 +107,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let still = capture(&window);
     app.global::<mo_ui::MidiData>().set_lifted_row(1);
     let lifted = capture(&window);
-    let card = mo_ui::midi::card_at_row(1).ok_or("midi-drag.png: no part on the second line")?;
+    let card = mo_ui::midi::card_at_row(&app, 1).ok_or("midi-drag.png: no part on the second line")?;
     let (x, y, w, h) = changed_box(&still, &lifted).ok_or("midi-drag.png: the second line didn't dim")?;
     shots.push(("midi-drag.png".into(), with_card(lifted, &card, &graphite, (x + w / 3, y + h / 2 + 20))));
     app.global::<mo_ui::MidiData>().set_lifted_row(-1);

@@ -181,14 +181,15 @@ pub(crate) fn share(i: usize, slots: usize, len: usize) -> (usize, usize) {
     (a, at(i + 1).max(a + 1).min(len))
 }
 
-// ---- Clips and tracks from a song's arrangement ----------------------------------------------------------------
-
 // ---- A MIDI page part ---------------------------------------------------------------------------------------------
 
 /// A part from the MIDI page, ready to drag out: its heard notes as one MIDI file named after it (the same file Send to
 /// Bitwig writes: muted notes left out, starting at its first bar, lasting its bars), and its card line with a small
 /// piano roll in `tint`. The DAW plays it at its own project's tempo. An error is what to say instead.
 pub fn from_part(name: &str, notes: &[NoteEvent], bars: i32, tint: u32) -> Result<Outgoing, String> {
+    if notes.is_empty() {
+        return Err("Its notes aren't in the index any more, so there's nothing to drag.".to_owned());
+    }
     let clip = crate::midi::part_clip(name, notes, bars);
     let heard: Vec<NoteEvent> = clip.tracks.iter().flat_map(|(_, n)| n.iter().copied()).collect();
     if heard.is_empty() {
@@ -225,6 +226,8 @@ pub fn from_part(name: &str, notes: &[NoteEvent], bars: i32, tint: u32) -> Resul
         ..Outgoing::default()
     })
 }
+
+// ---- Clips and tracks from a song's arrangement ----------------------------------------------------------------
 
 /// What in an arrangement a drag picks up: one clip, or a whole lane (a track), by their places in
 /// [`Arrangement::lanes`] and [`PreviewLane::clips`].

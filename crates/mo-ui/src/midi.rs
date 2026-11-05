@@ -1729,13 +1729,15 @@ fn carry(app: &AppWindow, at: usize, spot: Spot) {
     }) else {
         return;
     };
-    let c = app.global::<crate::Theme>().invoke_sound_type(colour);
-    let tint = u32::from_be_bytes([0, c.red(), c.green(), c.blue()]);
+    let tint = tint(app, colour);
     let under_way = crate::drag::start(
         app,
         crate::drag::Drag {
             make: Box::new(move || {
-                let notes = notes_of(&from, phrase_id, &hash, &mut None)?;
+                let notes = notes_of(&from, phrase_id, &hash, &mut None).map_err(|e| {
+                    log::warning("MIDI", &format!("A dragged part's notes couldn't be read: {e}"));
+                    format!("Its notes couldn't be read: {e}.")
+                })?;
                 mo_app::drag_out::from_part(&name, &notes, bars, tint)?
                     .write(&std::env::temp_dir())
                     .map_err(|e| format!("Couldn't write the MIDI file in Temp: {e}."))
@@ -1755,15 +1757,21 @@ fn carry(app: &AppWindow, at: usize, spot: Spot) {
 
 /// For the screenshots: what dragging the line at `row` carries (its card), without writing anything. None when
 /// there's no part there or its notes can't be read.
-pub fn card_at_row(row: usize) -> Option<mo_app::drag_out::Payload> {
-    let (from, phrase_id, hash, name, bars) = PAGE.with(|p| {
+pub fn card_at_row(app: &AppWindow, row: usize) -> Option<mo_app::drag_out::Payload> {
+    let (from, phrase_id, hash, name, bars, colour) = PAGE.with(|p| {
         let p = p.borrow();
         let e = p.cat.entry(p.shown.get(row)?.entry)?;
-        Some((p.notes.clone()?, e.phrase.id, e.phrase.hash.clone(), page::title(e), e.phrase.bars))
+        Some((p.notes.clone()?, e.phrase.id, e.phrase.hash.clone(), page::title(e), e.phrase.bars, colour(e.role())))
     })?;
     let notes = notes_of(&from, phrase_id, &hash, &mut None).ok()?;
-    let out = mo_app::drag_out::from_part(&name, &notes, bars, 0).ok()?;
+    let out = mo_app::drag_out::from_part(&name, &notes, bars, tint(app, colour)).ok()?;
     Some(mo_app::drag_out::Payload { files: Vec::new(), cards: out.cards, caption: out.caption, numbered: false })
+}
+
+/// A kind's colour as the drag card takes it: 0xRRGGBB.
+fn tint(app: &AppWindow, colour: i32) -> u32 {
+    let c = app.global::<crate::Theme>().invoke_sound_type(colour);
+    u32::from_be_bytes([0, c.red(), c.green(), c.blue()])
 }
 
 /// Dims the part at `spot` while it's carried, or brings it back.
