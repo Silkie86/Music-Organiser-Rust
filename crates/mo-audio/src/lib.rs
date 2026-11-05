@@ -19,7 +19,7 @@ mod wma;
 mod write;
 
 pub use other::OTHER_EXTENSIONS;
-pub use read::{MAX_SECONDS, can_read_from, read, read_from};
+pub use read::{MAX_SECONDS, can_read_from, read, read_from, reads_exactly};
 pub use wma::WMA_EXTENSIONS;
 pub use write::write_wav;
 

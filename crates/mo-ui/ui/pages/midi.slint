@@ -68,6 +68,9 @@ export struct PickedPart {
     key-why: string,
     // Where the reading comes from ("Read now from its notes by the key finder").
     key-from: string,
+    // The chord chart, a bar each ("Am7 | Dm9 G7 | Cmaj7"), read from the notes once they're read; "" for none.
+    chords: string,
+    chords-why: string,
     instrument: string,
     phrase: string,
     // The roll's lowest and highest key: "C2", "G4".
@@ -535,6 +538,24 @@ component PartPanel inherits SidePanel {
         Text {
             text: MidiData.picked.key-from;
             color: Theme.faint;
+            font-size: Type.meta;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+    }
+    if MidiData.picked.chords != "": VerticalLayout {
+        spacing: Space.xs;
+        Caps { text: "CHORDS"; }
+        Text {
+            text: MidiData.picked.chords;
+            color: Theme.text;
+            font-size: Type.body;
+            wrap: word-wrap;
+            min-width: 0px;
+        }
+        if MidiData.picked.chords-why != "": Text {
+            text: MidiData.picked.chords-why;
+            color: Theme.muted;
             font-size: Type.meta;
             wrap: word-wrap;
             min-width: 0px;

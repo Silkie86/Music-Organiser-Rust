@@ -16,6 +16,7 @@ fs4 = "1.1"
 half = "2.7"
 # Without playing sounds: reading and analysing them needs no sound output.
 mo-audio = { path = "../mo-audio", default-features = false }
+mo-catch = { path = "../mo-catch" }
 mo-formats = { path = "../mo-formats" }
 mo-library = { path = "../mo-library" }
 rayon.workspace = true
@@ -24,3 +25,5 @@ regex = { version = "1", default-features = false, features = ["std", "unicode",
 rusqlite = { version = "0.41", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Prints of sounds' audio, to find real copies (copies.rs).
+sha2 = "0.10"
