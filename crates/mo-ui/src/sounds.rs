@@ -116,6 +116,12 @@ struct Page {
     now: NaiveDateTime,
     /// The sound playing (its place in `list`) and how long the part shown in its waveform lasts.
     playing: Option<(usize, f64)>,
+    /// That play's number: the player knows it by that ([`ended`]), not by its file, so an older play of the same
+    /// sound that ends meanwhile isn't taken for it.
+    play: u64,
+    /// How many seconds of it that play reads at most (a sweep reads only its start): a click on its waveform past
+    /// that reads it again from there ([`seeks`]).
+    play_reads: f64,
     /// Each sound's place in `list`, by id.
     places: Arc<HashMap<i64, usize>>,
     /// Every sound's fingerprint, once read, for Sounds like this and Rediscover.
@@ -164,6 +170,8 @@ impl Default for Page {
             counts: None,
             now: Local::now().naive_local(),
             playing: None,
+            play: 0,
+            play_reads: 0.0,
             places: Arc::default(),
             index: None,
             rediscover: Vec::new(),
@@ -1565,8 +1573,13 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         });
         match (picked, playing) {
             (Some(i), Some((j, seconds))) if i == j => {
-                if let Some(player) = PLAYER.get() {
-                    player.seek(f64::from(at) * seconds);
+                let to = f64::from(at) * seconds;
+                match PLAYER.get() {
+                    Some(player) if PAGE.with(|p| seeks(&p.borrow(), player.playing().as_deref(), to)) => {
+                        player.seek(to);
+                    }
+                    // Still being read, or read only as far as its start: read again from there (newest wins).
+                    _ => play_picked(&app, f64::from(at)),
                 }
             }
             (Some(_), _) => play_picked(&app, f64::from(at)),
@@ -2288,9 +2301,8 @@ fn play_picked(app: &AppWindow, from: f64) {
 }
 
 /// Plays the sound at `at` in the list from `from` (0 to 1 of the way through), whether it's picked or not (the
-/// galaxy's sweep plays the stars it passes without picking them).
-/// Plays the sound at `at` from `from` (0 to 1 of the way through), reading at most `most` seconds of it: a sweep
-/// only needs its start, which reads far quicker than a whole loop.
+/// galaxy's sweep plays the stars it passes without picking them), reading at most `most` seconds of it: a sweep only
+/// needs its start, which reads far quicker than a whole loop.
 fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     let Some((at, path, seconds)) = PAGE.with(|p| {
         let p = p.borrow();
@@ -2300,14 +2312,21 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     }) else {
         return;
     };
-    PAGE.with(|p| p.borrow_mut().playing = Some((at, seconds.max(0.001))));
-    playing_changed(app);
     // The screenshots show a sound playing without a sound card.
-    if HERE.with(|h| *h.borrow()) {
+    let here = HERE.with(|h| *h.borrow());
+    let ask = if here { 0 } else { PLAYS.fetch_add(1, Ordering::SeqCst) + 1 };
+    // Straight after, so a read this one overtakes never takes it for a stop.
+    NEWEST_PLAY.fetch_max(ask, Ordering::SeqCst);
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.playing = Some((at, seconds.max(0.001)));
+        p.play = ask;
+        p.play_reads = most;
+    });
+    playing_changed(app);
+    if here {
         return;
     }
-    let ask = PLAYS.fetch_add(1, Ordering::SeqCst) + 1;
-    NEWEST_PLAY.fetch_max(ask, Ordering::SeqCst);
     let job = PlayJob { ask, path, from, seconds, most, window: app.as_weak(), held: Arc::default() };
     ask_reader(job);
 }
@@ -2376,57 +2395,84 @@ impl Drop for PlayJob {
 fn read_and_play(job: PlayJob) {
     let PlayJob { ask, ref path, from, seconds, most, ref window, .. } = job;
     let (path, window) = (path.clone(), window.clone());
-    let overtaken = || NEWEST_PLAY.load(Ordering::SeqCst) != ask;
-    let stopped = || PLAYS.load(Ordering::SeqCst) != ask;
+    // Still the newest play, with no stop since.
+    let wanted = || {
+        if NEWEST_PLAY.load(Ordering::SeqCst) != ask {
+            Err(Unwanted::Overtaken)
+        } else if PLAYS.load(Ordering::SeqCst) != ask {
+            Err(Unwanted::Stopped)
+        } else {
+            Ok(())
+        }
+    };
     // Passed over since it was asked for (it waited behind another read): never opened, so the sweep's timings
     // forget it by themselves.
-    if overtaken() || stopped() {
+    if wanted().is_err() {
         return;
     }
     sweep_timing::opening(&path, ask);
-    let read = mo_audio::read(Path::new(&path), most);
-    match read {
-        // A newer play came while this one was reading: overtaken. A stop (the mouse let go, say): dropped.
-        _ if overtaken() => sweep_timing::overtaken(&path, ask),
-        _ if stopped() => sweep_timing::dropped(&path, ask),
-        Ok(audio) => {
-            let player = player();
-            player.play(Arc::new(audio), path.clone(), from * seconds);
-            let output = player.info();
+    let went = match mo_audio::read(Path::new(&path), most) {
+        // Looked at again as it starts, with no stop or other sound able to come in between: one asked for since
+        // wins, rather than this sound starting after it and playing on while the page shows another or none.
+        Ok(audio) => player().play_if(Arc::new(audio), ask.to_string(), from * seconds, wanted),
+        Err(e) => match wanted() {
+            Err(unwanted) => Err(unwanted),
+            Ok(()) => {
+                couldnt_play(&path, ask, &e.to_string(), window);
+                return;
+            }
+        },
+    };
+    match went {
+        Ok(()) => {
+            let output = player().info();
             sweep_timing::output(output.mix_every_ms.map(|m| m / 2.0), output.delay_ms);
             sweep_timing::started(&path, ask);
         }
-        Err(e) => {
-            sweep_timing::dropped(&path, ask);
-            log::warning("Sounds", &format!("Couldn't play {path}: {e}"));
-            let why = e.to_string();
-            let _ = slint::invoke_from_event_loop(move || {
-                // Only while this is still the sound asked for: a newer one asked meanwhile keeps playing.
-                if PLAYS.load(Ordering::SeqCst) != ask {
-                    return;
-                }
-                // Stepping or sweeping over many sounds that won't play for the same reason (a drive unplugged)
-                // says so once; the log has each of them.
-                let now = Instant::now();
-                let new_card = FAILED_CARD.with(|c| {
-                    let mut c = c.borrow_mut();
-                    let fresh = c
-                        .as_ref()
-                        .is_none_or(|(at, before)| *before != why || now.duration_since(*at) >= FAILED_CARD_GAP);
-                    if fresh {
-                        *c = Some((now, why.clone()));
-                    }
-                    fresh
-                });
-                if new_card && let Some(feed) = FEED.with(|f| f.borrow().clone()) {
-                    feed.start("Couldn't play the sound", "").failed(&why);
-                }
-                if let Some(app) = window.upgrade() {
-                    stop(&app);
-                }
-            });
-        }
+        // A newer play came while this one was reading: overtaken. A stop (the mouse let go, say): dropped.
+        Err(Unwanted::Overtaken) => sweep_timing::overtaken(&path, ask),
+        Err(Unwanted::Stopped) => sweep_timing::dropped(&path, ask),
     }
+}
+
+/// Why a sound that was read isn't played.
+enum Unwanted {
+    /// A newer sound was asked for.
+    Overtaken,
+    /// A stop was asked for.
+    Stopped,
+}
+
+/// Says that the sound of play `ask` couldn't be read (`why`), once for many that fail the same way, and stops it on
+/// the page.
+fn couldnt_play(path: &str, ask: u64, why: &str, window: slint::Weak<AppWindow>) {
+    sweep_timing::dropped(path, ask);
+    log::warning("Sounds", &format!("Couldn't play {path}: {why}"));
+    let why = why.to_owned();
+    let _ = slint::invoke_from_event_loop(move || {
+        // Only while this is still the sound asked for: a newer one asked meanwhile keeps playing.
+        if PLAYS.load(Ordering::SeqCst) != ask {
+            return;
+        }
+        // Stepping or sweeping over many sounds that won't play for the same reason (a drive unplugged) says so once;
+        // the log has each of them.
+        let now = Instant::now();
+        let new_card = FAILED_CARD.with(|c| {
+            let mut c = c.borrow_mut();
+            let fresh =
+                c.as_ref().is_none_or(|(at, before)| *before != why || now.duration_since(*at) >= FAILED_CARD_GAP);
+            if fresh {
+                *c = Some((now, why.clone()));
+            }
+            fresh
+        });
+        if new_card && let Some(feed) = FEED.with(|f| f.borrow().clone()) {
+            feed.start("Couldn't play the sound", "").failed(&why);
+        }
+        if let Some(app) = window.upgrade() {
+            stop(&app);
+        }
+    });
 }
 
 /// The least time between two "Couldn't play the sound" cards for the same reason: as long as one stays.
@@ -2438,6 +2484,8 @@ thread_local! {
 }
 
 fn stop(app: &AppWindow) {
+    // Counted first: a read that looks after this ([`read_and_play`]) doesn't start its sound, and one that looked
+    // before has started it by the time the player takes the stop.
     PLAYS.fetch_add(1, Ordering::SeqCst);
     if let Some(player) = PLAYER.get() {
         player.stop();
@@ -2446,11 +2494,20 @@ fn stop(app: &AppWindow) {
     playing_changed(app);
 }
 
-/// A sound played to its end by itself.
+/// Whether a click `to` seconds into the waveform of the sound shown playing can move the play the player has
+/// (`player_has`: its key), rather than reading the sound again from there: only when the player has that very play
+/// (not an older one, nor none while it's still being read) and the play read that far (a sweep reads only its start).
+fn seeks(p: &Page, player_has: Option<&str>, to: f64) -> bool {
+    p.playing.is_some() && player_has.is_some_and(|key| key.parse() == Ok(p.play)) && to < p.play_reads
+}
+
+/// A sound played to its end by itself: `key` is its play's number.
 fn ended(key: &str) {
     let ours = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        let ours = p.playing.and_then(|(i, _)| p.list.sound(i)).is_some_and(|s| s.path == key);
+        // By the play's number, not its file: played again near its end, the same sound's older play ends while the
+        // new one is still being read, and the page goes on showing the new one.
+        let ours = p.playing.is_some() && key.parse() == Ok(p.play);
         if ours {
             p.playing = None;
         }
@@ -2937,6 +2994,32 @@ mod tests {
         let mut p = Page { picked: Some(2), playing: Some((2, 1.0)), ..Page::default() };
         assert_eq!(move_places(&mut p, &moved), Gone { picked: true, playing: true });
         assert_eq!((p.picked, p.playing), (None, None));
+    }
+
+    #[test]
+    fn an_older_play_of_the_same_sound_ending_leaves_the_new_one_on_show() {
+        // The sound at 4 played (play 5), then played again near its end (play 6): play 5 ends while play 6 is read.
+        PAGE.with(|p| *p.borrow_mut() = Page { playing: Some((4, 2.5)), play: 6, ..Page::default() });
+        ended("5");
+        assert_eq!(PAGE.with(|p| p.borrow().playing), Some((4, 2.5)));
+        // A key that isn't a play's number is never the page's.
+        ended(r"C:\s\kick.wav");
+        assert_eq!(PAGE.with(|p| p.borrow().playing), Some((4, 2.5)));
+        // Play 6 ending by itself does stop it on the page.
+        ended("6");
+        assert_eq!(PAGE.with(|p| p.borrow().playing), None);
+    }
+
+    #[test]
+    fn a_click_on_the_waveform_moves_only_the_play_the_player_has_as_far_as_it_was_read() {
+        // Play 6 of the sound at 4 is a sweep's: only its first 4 s were read.
+        let p = Page { playing: Some((4, 30.0)), play: 6, play_reads: 4.0, ..Page::default() };
+        assert!(seeks(&p, Some("6"), 2.0));
+        // Past what was read, the sound is read again from there; so it is while play 6 is still being read (the
+        // player has nothing, or an older play of the same sound).
+        assert!(!seeks(&p, Some("6"), 15.0));
+        assert!(!seeks(&p, None, 2.0));
+        assert!(!seeks(&p, Some("5"), 2.0));
     }
 
     #[test]
