@@ -583,7 +583,7 @@ pub fn read_midi(app: &AppWindow, retry: bool) {
             }
         }
         // What was read shows straight away; after a failed reading too, as it may have saved some before failing.
-        let changed = ran.as_ref().map_or(true, |s| s.read > 0 || s.forgotten > 0 || s.rekeyed > 0);
+        let changed = ran.as_ref().map_or(true, |s| s.read > 0 || s.forgotten > 0 || s.rekeyed > 0 || s.shaped > 0);
         let loaded = changed.then(|| load(&library));
         let _ = slint::invoke_from_event_loop(move || {
             let Some(app) = weak.upgrade() else { return };
@@ -1414,6 +1414,7 @@ pub fn sample() -> Loaded {
             drums: role == Role::Drums,
             track_name: String::new(),
             your_octave: None,
+            shape: None,
         });
     }
     // An older save of the song with the same keys part: one line, "in 2 files".

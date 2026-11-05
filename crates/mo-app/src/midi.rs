@@ -190,6 +190,11 @@ pub fn view(
         .into_par_iter()
         .filter(|h| cat.entry(h.entry).is_some_and(|e| in_years(f, e) && chips_pass(f, e) == [true; 3]))
         .collect();
+    // The same loop in other keys is one line, the first the filters let through ("in 12 keys"); a whole phrase's
+    // list shows each.
+    if !matches!(target, Some(Target::Within(_))) {
+        one_per_key_group(cat, &mut hits);
+    }
     // Ranked by likeness, or the longest phrase first: that order is the point.
     if target.is_none() {
         sort(cat, &mut hits, order);
@@ -199,6 +204,12 @@ pub fn view(
         shuffle(&mut hits, seed);
     }
     (hits, counts)
+}
+
+/// Keeps the first hit of each set of the same notes in other keys ([`Entry::key_group`]), in the order they come.
+fn one_per_key_group(cat: &Catalogue, hits: &mut Vec<Hit>) {
+    let mut seen = HashSet::new();
+    hits.retain(|h| cat.entry(h.entry).and_then(Entry::key_group).is_none_or(|g| seen.insert(g)));
 }
 
 /// How many parts each chip's choices would show, with the other filters as they are.
@@ -221,6 +232,15 @@ impl ChoiceCounts {
         }
     }
 
+    /// One chip's counts: kind 0, From 1, key 2.
+    fn chip(&mut self, chip: usize) -> &mut Vec<usize> {
+        match chip {
+            0 => &mut self.roles,
+            1 => &mut self.froms,
+            _ => &mut self.keys,
+        }
+    }
+
     fn add(mut self, other: ChoiceCounts) -> ChoiceCounts {
         for (a, b) in [(&mut self.roles, other.roles), (&mut self.froms, other.froms), (&mut self.keys, other.keys)] {
             a.iter_mut().zip(b).for_each(|(a, b)| *a += b);
@@ -230,37 +250,65 @@ impl ChoiceCounts {
 }
 
 /// Counts every chip's choices in one pass over `hits`: a part counts beside every chip when all three let it
-/// through, and beside the one that doesn't when only one doesn't (picking another choice there could show it).
+/// through, and beside the one that doesn't when only one doesn't (picking another choice there could show it). The
+/// same loop in other keys is one line, so it counts once beside each choice that would show it.
 fn counts(cat: &Catalogue, hits: &[Hit], f: &Filters) -> ChoiceCounts {
     let keys = key_list();
-    hits.par_iter()
+    let (grouped, single): (Vec<&Entry>, Vec<&Entry>) = hits
+        .par_iter()
         .filter_map(|h| cat.entry(h.entry).filter(|e| in_years(f, e)))
+        .partition(|e| e.key_group().is_some());
+    let mut c = single
+        .into_par_iter()
         .fold(ChoiceCounts::empty, |mut c, e| {
-            let ok = chips_pass(f, e);
-            let fails = ok.iter().filter(|o| !**o).count();
-            let counts_on = |chip: usize| fails == 0 || (fails == 1 && !ok[chip]);
-            if counts_on(0)
-                && let Some(at) = Role::ALL.iter().position(|&r| r == e.role())
-            {
-                c.roles[at] += 1;
-            }
-            if counts_on(1) {
-                let from = if e.is_project() { From::Projects } else { From::Files };
-                if let Some(at) = FROM_CHOICES.iter().position(|&w| w == from) {
-                    c.froms[at] += 1;
+            choices_of(e, f, &keys, |chip, at| {
+                if let Some(n) = c.chip(chip).get_mut(at) {
+                    *n += 1;
                 }
-            }
-            if counts_on(2) {
-                let test = key_test(e);
-                for (at, &k) in keys.iter().enumerate() {
-                    if test(k) {
-                        c.keys[at] += 1;
-                    }
-                }
-            }
+            });
             c
         })
-        .reduce(ChoiceCounts::empty, ChoiceCounts::add)
+        .reduce(ChoiceCounts::empty, ChoiceCounts::add);
+    // Few: a pack's loops in other keys. Each (set, chip, choice) once.
+    let mut seen = HashSet::new();
+    for e in grouped {
+        let group = e.key_group().unwrap_or_default();
+        choices_of(e, f, &keys, |chip, at| {
+            if seen.insert((group, chip, at))
+                && let Some(n) = c.chip(chip).get_mut(at)
+            {
+                *n += 1;
+            }
+        });
+    }
+    c
+}
+
+/// Each chip choice a part counts beside (see [`counts`]), as (chip, place in that chip's choices): kind 0, From 1,
+/// key 2.
+fn choices_of(e: &Entry, f: &Filters, keys: &[KeyName], mut add: impl FnMut(usize, usize)) {
+    let ok = chips_pass(f, e);
+    let fails = ok.iter().filter(|o| !**o).count();
+    let counts_on = |chip: usize| fails == 0 || (fails == 1 && !ok[chip]);
+    if counts_on(0)
+        && let Some(at) = Role::ALL.iter().position(|&r| r == e.role())
+    {
+        add(0, at);
+    }
+    if counts_on(1) {
+        let from = if e.is_project() { From::Projects } else { From::Files };
+        if let Some(at) = FROM_CHOICES.iter().position(|&w| w == from) {
+            add(1, at);
+        }
+    }
+    if counts_on(2) {
+        let test = key_test(e);
+        for (at, &k) in keys.iter().enumerate() {
+            if test(k) {
+                add(2, at);
+            }
+        }
+    }
 }
 
 /// The chips as the page shows them: each filter's choices with their counts, and what's picked.
@@ -432,6 +480,9 @@ pub fn from_text(e: &Entry) -> String {
     };
     if e.copies() > 1 {
         text.push_str(&format!(" · in {} files", thousands(e.copies())));
+    }
+    if let Some((what, n)) = e.in_keys_count {
+        text.push_str(&format!(" · in {n} {what}"));
     }
     text
 }
@@ -943,6 +994,7 @@ mod tests {
             drums: role == Role::Drums,
             track_name: String::new(),
             your_octave: None,
+            shape: None,
         }
     }
 
@@ -996,6 +1048,40 @@ mod tests {
         let f = Filters { years: Some((y, y)), ..Filters::default() };
         assert_eq!(titles(&cat, &list(&cat, &f, Order::Newest, None, None)), ["Kick"]);
         assert!(year_counts(&cat).first().is_some_and(|(year, n)| *year == year_of(1_760_000_000) && *n == 2));
+    }
+
+    #[test]
+    fn the_same_loop_in_other_keys_is_one_line() {
+        let day = 86_400;
+        let loop_in = |tonic: u8, hash: &str, age: i64| {
+            let mut p = phrase(
+                &format!("L:/New Midi/Pack/loop {hash}.mid"),
+                "Lead",
+                Role::Melody,
+                hash,
+                1_760_000_000 - age * day,
+            );
+            p.key = sure(tonic, true);
+            p.lowest = 57 + tonic % 12;
+            p.shape = Some(42);
+            p
+        };
+        let other = phrase("L:/New Midi/Pack/other.mid", "Pad", Role::Chords, "P", 1_700_000_000);
+        let cat = Catalogue::new(vec![loop_in(9, "Am", 0), loop_in(2, "Dm", 1), loop_in(4, "Em", 2), other]);
+        let f = Filters::default();
+        let (hits, counts) = view(&cat, &f, Order::Newest, None, None);
+        let keys = |hits: &[Hit]| hits.iter().map(|h| key_text(cat.entry(h.entry).unwrap())).collect::<Vec<_>>();
+        assert_eq!(titles(&cat, &hits), ["Lead", "Pad"]);
+        assert_eq!(keys(&hits), ["Am", ""], "the newest stands for them");
+        assert_eq!(from_text(cat.entry(hits[0].entry).unwrap()), "MIDI file in Pack · in 3 keys");
+        // Counted once beside its kind, and once beside each key it's in.
+        let melody = Role::ALL.iter().position(|&r| r == Role::Melody).unwrap();
+        assert_eq!(counts.roles[melody], 1);
+        let at = |name: &str| key_list().iter().position(|k| Some(*k) == key_of_choice(name)).unwrap();
+        assert_eq!((counts.keys[at("Am")], counts.keys[at("Dm")], counts.keys[at("Cm")]), (1, 1, 0));
+        // A key picked shows the loop in that key.
+        let f = Filters { keys: key_of_choice("Dm").into_iter().collect(), ..Filters::default() };
+        assert_eq!(keys(&list(&cat, &f, Order::Newest, None, None)), ["Dm"]);
     }
 
     #[test]

@@ -32,6 +32,13 @@ pub struct Entry {
     pub members: Vec<PhraseMember>,
     /// The longer phrases these notes are part of (as places in [`Catalogue::entries`]), longest first.
     pub within: Vec<usize>,
+    /// The same notes moved up or down (the same [`StoredPhrase::shape`]: a pack's loop in every key), as places in
+    /// [`Catalogue::entries`], newest first, this one among them; empty when there's no other. Never for drums: a
+    /// drum pattern moved is other drums.
+    pub in_keys: Vec<usize>,
+    /// How many keys those are in (12 for a pack's loop in every key), or how many octaves when they're only moved by
+    /// octaves: ("keys", 12) or ("octaves", 2).
+    pub in_keys_count: Option<(&'static str, usize)>,
     /// Everything search looks in, in small letters.
     search_text: String,
     /// The songs this part is in (see [`song_of`]), worked out the first time they're asked for.
@@ -51,6 +58,12 @@ impl Entry {
 
     pub fn is_project(&self) -> bool {
         self.phrase.source.kind == SourceKind::Project
+    }
+
+    /// The newest of the same notes in other keys (a place in [`Catalogue::entries`]), which stands for them all in a
+    /// list; None when there are no others.
+    pub fn key_group(&self) -> Option<usize> {
+        self.in_keys.first().copied()
     }
 
     pub fn is_joined(&self) -> bool {
@@ -192,6 +205,8 @@ impl Catalogue {
                     instrument,
                     members,
                     within: Vec::new(),
+                    in_keys: Vec::new(),
+                    in_keys_count: None,
                     search_text,
                     songs: OnceLock::new(),
                 }
@@ -213,6 +228,27 @@ impl Catalogue {
         for (member, phrase) in within {
             if let Some(e) = entries.get_mut(member) {
                 e.within.push(phrase);
+            }
+        }
+        // The same loop in other keys: grouped by shape, newest first as the entries are.
+        let mut by_shape: HashMap<i64, Vec<usize>> = HashMap::new();
+        for (at, e) in entries.iter().enumerate() {
+            if let Some(shape) = e.phrase.shape.filter(|_| !e.phrase.drums && e.phrase.role != Role::Drums) {
+                by_shape.entry(shape).or_default().push(at);
+            }
+        }
+        for mut group in by_shape.into_values().filter(|g| g.len() > 1) {
+            group.sort_unstable();
+            let mut keys: Vec<u8> =
+                group.iter().filter_map(|&at| entries.get(at)).map(|e| e.phrase.lowest % 12).collect();
+            keys.sort_unstable();
+            keys.dedup();
+            let count = if keys.len() > 1 { ("keys", keys.len()) } else { ("octaves", group.len()) };
+            for &at in &group {
+                if let Some(e) = entries.get_mut(at) {
+                    e.in_keys.clone_from(&group);
+                    e.in_keys_count = Some(count);
+                }
             }
         }
         let bars: Vec<i32> = entries.iter().map(|e| e.phrase.bars).collect();
@@ -457,6 +493,7 @@ mod tests {
             drums: false,
             track_name: String::new(),
             your_octave: None,
+            shape: None,
         }
     }
 

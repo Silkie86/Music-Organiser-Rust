@@ -843,6 +843,25 @@ pub fn hash_of(notes: &[NoteEvent]) -> String {
     sha.finalize().iter().take(8).map(|b| format!("{b:02X}")).collect()
 }
 
+/// The shape of some notes, the same in every key: like [`hash_of`], but each key counted from the lowest note, as
+/// a number (the first 8 bytes of the SHA-256). A loop and the same loop moved up or down have the same shape; `None`
+/// for no notes.
+pub fn shape_of(notes: &[NoteEvent]) -> Option<i64> {
+    let lowest = notes.iter().map(|n| n.key).min()?;
+    let mut sorted: Vec<&NoteEvent> = notes.iter().collect();
+    sorted.sort_by_key(|n| (n.start, n.key));
+    let mut sha = Sha256::new();
+    for n in sorted {
+        sha.update((n.start as i32).to_le_bytes());
+        sha.update((n.length as i32).to_le_bytes());
+        sha.update([n.key.saturating_sub(lowest)]);
+    }
+    let digest = sha.finalize();
+    let mut first = [0u8; 8];
+    first.copy_from_slice(digest.get(..8)?);
+    Some(i64::from_le_bytes(first))
+}
+
 /// Numbers from 0 to 1 as bytes (0 to 255), as `midi.db` keeps them: plenty for comparing, at a quarter of the size.
 /// With `scale_to_max`, the largest becomes 255 (for pitch-class shares, only ever compared as proportions).
 pub fn bytes(values: &[f32], scale_to_max: bool) -> Vec<u8> {
@@ -901,6 +920,21 @@ mod tests {
         assert_eq!(bars_of(&[note(0, BAR, 60)]), 1);
         assert_eq!(bars_of(&[note(0, BAR + 3, 60)]), 1, "a hair over the bar line is still one bar");
         assert_eq!(bars_of(&[note(0, BAR + 4, 60)]), 2);
+    }
+
+    #[test]
+    fn a_loop_moved_up_has_the_same_shape_but_not_the_same_notes() {
+        let riff = [note(0, 96, 60), note(96, 96, 63), note(192, 192, 67)];
+        let up: Vec<NoteEvent> = riff.iter().map(|n| NoteEvent { key: n.key + 5, ..*n }).collect();
+        let other = [note(0, 96, 60), note(96, 96, 64), note(192, 192, 67)];
+        assert_eq!(shape_of(&riff), shape_of(&up));
+        assert_ne!(hash_of(&riff), hash_of(&up));
+        assert_ne!(shape_of(&riff), shape_of(&other));
+        // Velocity and the order notes come in don't change it.
+        let loud: Vec<NoteEvent> =
+            riff.iter().rev().map(|n| NoteEvent { velocity: velocity::from_7(30), ..*n }).collect();
+        assert_eq!(shape_of(&riff), shape_of(&loud));
+        assert_eq!(shape_of(&[]), None);
     }
 
     #[test]

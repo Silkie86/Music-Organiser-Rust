@@ -317,3 +317,41 @@ fn an_index_from_before_keys_gets_them() {
     assert_eq!(run(&mut store, &dir, false).rekeyed, 1);
     assert!(store.all(&HashMap::new(), &HashMap::new()).unwrap()[0].key_fact.is_some());
 }
+
+#[test]
+fn the_same_loop_in_other_keys_is_one_set_and_old_notes_get_their_shape() {
+    let dir = folder("mo-midi-indexer-keys");
+    let pack = dir.join("Pack").join("Basslines");
+    let up: Vec<u8> = BASS.iter().map(|k| k + 5).collect();
+    let octave: Vec<u8> = BASS.iter().map(|k| k + 12).collect();
+    std::fs::write(pack.join("Low C.mid"), smf(BASS)).unwrap();
+    std::fs::write(pack.join("Low F.mid"), smf(&up)).unwrap();
+    std::fs::write(dir.join("Tune.mid"), smf(TUNE)).unwrap();
+    let db = dir.join("midi-index.db");
+    let mut store = MidiStore::open(&db).unwrap();
+    assert_eq!(run(&mut store, &dir, false).shaped, 0, "new notes get their shape as they're saved");
+    assert_eq!(count(&db, "shapes"), 3);
+
+    let catalogue = Catalogue::new(store.all(&HashMap::new(), &HashMap::new()).unwrap());
+    assert_eq!(catalogue.entries.len(), 3, "different notes, so three parts");
+    let low: Vec<_> = catalogue.entries.iter().filter(|e| e.phrase.clip.starts_with("Low")).collect();
+    assert_eq!(low.len(), 2);
+    assert!(low.iter().all(|e| e.in_keys.len() == 2 && e.in_keys_count == Some(("keys", 2))));
+    assert_eq!(low[0].key_group(), low[1].key_group());
+    let tune = catalogue.entries.iter().find(|e| e.phrase.clip == "Tune").unwrap();
+    assert!(tune.in_keys.is_empty() && tune.key_group().is_none());
+
+    // Notes saved before shapes were kept get theirs at the next read, from the notes in the index.
+    rusqlite::Connection::open(&db).unwrap().execute("DELETE FROM shapes", []).unwrap();
+    let again = run(&mut store, &dir, false);
+    assert_eq!((again.read, again.shaped), (0, 3));
+    assert_eq!(run(&mut store, &dir, false).shaped, 0, "worked out once");
+
+    // Only an octave up: the same key, so "in 2 octaves".
+    std::fs::remove_file(pack.join("Low F.mid")).unwrap();
+    std::fs::write(pack.join("Low C high.mid"), smf(&octave)).unwrap();
+    run(&mut store, &dir, false);
+    let catalogue = Catalogue::new(store.all(&HashMap::new(), &HashMap::new()).unwrap());
+    let low = catalogue.entries.iter().find(|e| e.phrase.clip == "Low C").unwrap();
+    assert_eq!(low.in_keys_count, Some(("octaves", 2)));
+}
