@@ -816,30 +816,40 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
     // A copy of the format before, read as it is: laid out anew now that the page has all it needs from it (one that's
     // behind is made afresh below instead). The page works as usual meanwhile: it holds nothing of it.
     if first.formerly && !first.behind && remade.is_none() {
-        let job = cards.as_ref().map(|c| {
-            c.start(
-                "Making your sound library smaller",
-                "Once, for this version of the app. Sounds works as usual meanwhile.",
-            )
-        });
+        const MAKING: &str = "Making your sound library smaller";
+        // Its card shows from when the work starts; one that couldn't start gets its card at the end.
+        let mut job = None;
         let began = Instant::now();
-        let laid_out = compact::lay_out(sounds_db);
-        if let Some(compact::LaidOut::Damaged(why)) = &laid_out
-            && sounds_db.exists()
-        {
-            log::warning("Sounds", &format!("The app's own sound library is damaged ({why}), so it's made again"));
-            if let Some(job) = job {
-                job.failed_as(
-                    "Couldn't make your sound library smaller",
-                    "It's damaged, so it's made again from sounds.db, smaller.",
-                );
+        let laid_out = compact::lay_out(sounds_db, || {
+            job = cards.as_ref().map(|c| c.start(MAKING, "Once, for this version of the app. Sounds works as usual."));
+        });
+        let card_for = |job: Option<Job>| job.or_else(|| cards.as_ref().map(|c| c.start(MAKING, "")));
+        match laid_out {
+            // Nothing to do after all (laid out meanwhile, or sounds.db changed since).
+            None => {}
+            Some(compact::LaidOut::Damaged(why)) if sounds_db.exists() => {
+                log::warning("Sounds", &format!("The app's own sound library is damaged ({why}), so it's made again"));
+                let made = remake(&mut first, &mut remade);
+                let job = card_for(job);
+                match made {
+                    Ok(prints) => {
+                        send_index(Ok(prints), &send);
+                        if let Some(job) = job {
+                            job.done_as(
+                                "Made your sound library smaller",
+                                "It was damaged, so it was made again from sounds.db.",
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        log::warning("Sounds", &format!("Couldn't make the app's own sound library again: {e}"));
+                        if let Some(job) = job {
+                            job.failed_as("Couldn't make your sound library smaller", &list::not_remade_line(&e));
+                        }
+                    }
+                }
             }
-            match remake(&mut first, &mut remade) {
-                Ok(prints) => send_index(Ok(prints), &send),
-                Err(e) => log::warning("Sounds", &format!("Couldn't make the app's own sound library again: {e}")),
-            }
-        } else {
-            say_laid_out(laid_out.as_ref(), job, began);
+            Some(laid_out) => say_laid_out(&laid_out, card_for(job), began),
         }
     }
     if !first.behind && remade.is_none() {
@@ -1001,19 +1011,17 @@ fn read_through_copy(sounds_db: &Path, now: NaiveDateTime, cards: &Feed) -> Resu
 }
 
 /// Says (in the log, and on its card, `job`) how laying the app's own sound library out anew went
-/// ([`compact::lay_out`]), begun at `began`: `None` when there was nothing to do after all (another read did it
-/// meanwhile).
-fn say_laid_out(laid_out: Option<&compact::LaidOut>, job: Option<Job>, began: Instant) {
+/// ([`compact::lay_out`]), begun at `began`.
+fn say_laid_out(laid_out: &compact::LaidOut, job: Option<Job>, began: Instant) {
     let took = began.elapsed().as_secs_f32();
     let (title, line, done) = match laid_out {
-        None => ("Made your sound library smaller", String::new(), true),
-        Some(compact::LaidOut::Done { before, after }) => {
+        compact::LaidOut::Done { before, after } => {
             let line = list::laid_out_line(*before, *after);
             log::info("Sounds", &format!("Laid the app's own sound library out anew in {took:.1} s: {line}"));
             ("Made your sound library smaller", line, true)
         }
         // Read as it is meanwhile: nothing's different on the page.
-        Some(compact::LaidOut::NotNow(why)) => {
+        compact::LaidOut::NotNow(why) => {
             log::warning(
                 "Sounds",
                 &format!(
@@ -1023,7 +1031,7 @@ fn say_laid_out(laid_out: Option<&compact::LaidOut>, job: Option<Job>, began: In
             );
             ("Couldn't make your sound library smaller just now", list::not_laid_out_line(why), false)
         }
-        Some(compact::LaidOut::Damaged(why)) => {
+        compact::LaidOut::Damaged(why) => {
             log::warning(
                 "Sounds",
                 &format!(

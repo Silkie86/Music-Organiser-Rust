@@ -529,6 +529,13 @@ fn formerly(old: &Path, copy: &Path, own_since: Option<i64>) {
     assert_eq!(format_of(copy), 1);
 }
 
+/// [`compact::lay_out`], and whether it said it was starting the work.
+fn lay_out(old: &Path) -> (Option<LaidOut>, bool) {
+    let mut started = false;
+    let laid_out = compact::lay_out(old, || started = true);
+    (laid_out, started)
+}
+
 /// The format the copy at `copy` notes it's laid out in.
 fn format_of(copy: &Path) -> i64 {
     Connection::open(copy)
@@ -1145,7 +1152,7 @@ fn the_page_reads_the_copy_whenever_there_is_one() {
     };
     assert!(!behind);
     assert!(!db.is_formerly());
-    assert_eq!(compact::lay_out(&old), None, "of this version's format already");
+    assert_eq!(lay_out(&old).0, None, "of this version's format already");
     assert!(!adopted, "it became the app's own when it was made, on the page's pass");
     assert!(db.is_copy());
     assert_eq!(format!("{sounds:?}"), listed(&old));
@@ -1305,7 +1312,8 @@ fn library_with_odd_claps(dir: &Path, n: i64) -> PathBuf {
 /// row for row, but that it's still the app's own library since the time it was. Smaller, and nothing left beside it.
 #[test]
 fn a_copy_of_the_format_before_is_laid_out_anew_from_itself() {
-    let dir = folder("lay-out");
+    // A folder name SQLite's URIs must spell out (the copy is named to SQLite as one).
+    let dir = folder("lay-out #1 % é");
     let old = library_with_odd_claps(&dir, 700);
     let copy = compact::copy_of(&old);
     formerly(&old, &copy, Some(1_780_000_000));
@@ -1328,12 +1336,13 @@ fn a_copy_of_the_format_before_is_laid_out_anew_from_itself() {
     assert!(!behind && !adopted);
     assert!(db.is_formerly());
     assert_eq!(format!("{sounds:?}"), listed);
-    // Not while the page has it open.
-    let Some(LaidOut::NotNow(why)) = compact::lay_out(&old) else { panic!("not laid out while it's open") };
+    // Not while the page has it open: nor is the work started.
+    let (Some(LaidOut::NotNow(why)), false) = lay_out(&old) else { panic!("not laid out while it's open") };
     assert!(why.contains("has it open"), "{why}");
     assert_eq!(format_of(&copy), 1);
     drop(db);
-    let laid_out = compact::lay_out(&old);
+    let (laid_out, started) = lay_out(&old);
+    assert!(started);
     let Some(LaidOut::Done { before: was, after }) = laid_out else { panic!("laid out anew: {laid_out:?}") };
     let db = SoundsDb::open_read_only(&copy).unwrap();
     assert!(db.is_copy() && !db.is_formerly());
@@ -1360,7 +1369,7 @@ fn a_copy_of_the_format_before_is_laid_out_anew_from_itself() {
     drop(c);
     assert_eq!(half_made(&dir), Vec::<String>::new());
     // Once is enough.
-    assert_eq!(compact::lay_out(&old), None);
+    assert_eq!(lay_out(&old), (None, false));
     // And it still gives every answer sounds.db gave.
     std::fs::rename(&archived, &old).unwrap();
     same_answers(&old, &copy);
@@ -1389,13 +1398,13 @@ fn a_copy_of_the_format_before_that_another_program_has_open_is_read_as_it_is() 
     assert_eq!((features, clap), (e.features.clone(), e.clap.clone()));
     assert_eq!(db.count_with_clap().unwrap(), SoundsDb::open_read_only(&old).unwrap().count_with_clap().unwrap());
     drop(db);
-    let Some(LaidOut::NotNow(why)) = compact::lay_out(&old) else { panic!("not laid out while it's open") };
+    let Some(LaidOut::NotNow(why)) = lay_out(&old).0 else { panic!("not laid out while it's open") };
     assert!(why.contains("has it open"), "{why}");
     assert_eq!(format_of(&copy), 1);
     assert_eq!(half_made(&dir), Vec::<String>::new());
     drop(other);
     let since = compact::own_since(&copy).expect("the app's own now");
-    let laid_out = compact::lay_out(&old);
+    let laid_out = lay_out(&old).0;
     assert!(matches!(laid_out, Some(LaidOut::Done { .. })), "{laid_out:?}");
     let Ok(PageRead::Copy { db, adopted, .. }) = compact::read_for_page(&old, now()) else {
         panic!("the copy is read");
@@ -1425,7 +1434,7 @@ fn a_copy_of_the_format_before_that_is_behind_is_made_afresh() {
     assert!(db.is_formerly());
     assert_eq!(format!("{sounds:?}"), listed);
     drop(db);
-    assert_eq!(compact::lay_out(&old), None, "one that's behind is made afresh instead");
+    assert_eq!(lay_out(&old).0, None, "one that's behind is made afresh instead");
     assert_eq!(format_of(&copy), 1);
     assert_eq!(compact::last_sync(&old, &copy).unwrap(), Synced { made: true, sounds: 123, adopted: true });
     assert_eq!(format_of(&copy), 2);
@@ -1450,7 +1459,7 @@ fn a_copy_of_the_format_before_with_a_table_this_version_doesnt_know_is_left_as_
     };
     assert!(db.is_formerly());
     drop(db);
-    let laid_out = compact::lay_out(&old);
+    let laid_out = lay_out(&old).0;
     let Some(LaidOut::NotNow(why)) = laid_out else { panic!("not laid out: {laid_out:?}") };
     assert!(why.contains("later_notes"), "{why}");
     assert!(std::fs::read(&copy).unwrap() == before, "the copy changed");
@@ -1477,7 +1486,7 @@ fn a_damaged_copy_of_the_format_before_is_left_as_it_was() {
     assert!(prints.damaged(), "{prints}");
     drop(db);
     let before = std::fs::read(&copy).unwrap();
-    let laid_out = compact::lay_out(&old);
+    let laid_out = lay_out(&old).0;
     let Some(LaidOut::Damaged(why)) = laid_out else { panic!("found damaged: {laid_out:?}") };
     assert!(why.contains("malformed"), "{why}");
     assert!(std::fs::read(&copy).unwrap() == before, "the copy changed");
@@ -1492,7 +1501,7 @@ fn a_damaged_copy_of_the_format_before_is_left_as_it_was() {
     formerly(&old, &copy, Some(1_780_000_000));
     damage(&copy, "sound_clap");
     remove_db(&old);
-    assert!(matches!(compact::lay_out(&old), Some(LaidOut::Damaged(_))));
+    assert!(matches!(lay_out(&old).0, Some(LaidOut::Damaged(_))));
     let Ok(PageRead::Copy { db, sounds, .. }) = compact::read_for_page(&old, now()) else {
         panic!("the copy is read as it is");
     };
@@ -1504,4 +1513,52 @@ fn a_damaged_copy_of_the_format_before_is_left_as_it_was() {
     drop(db);
     assert_eq!(format_of(&copy), 1);
     assert_eq!(half_made(&dir), Vec::<String>::new());
+}
+
+/// A table whose rows count up (AUTOINCREMENT) keeps SQLite's count of them as it was, past its last row, through
+/// being laid out anew; and nothing another copy of the app writes meanwhile is lost.
+#[test]
+fn a_count_of_rows_and_a_save_meanwhile_are_kept() {
+    let dir = folder("lay-out-count");
+    let old = library(&dir, 80);
+    let copy = compact::copy_of(&old);
+    formerly(&old, &copy, Some(1_780_000_000));
+    Connection::open(&copy)
+        .unwrap()
+        .execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             CREATE TABLE counted (sound_id INTEGER PRIMARY KEY AUTOINCREMENT, batch TEXT NOT NULL, at INTEGER NOT NULL);
+             INSERT INTO counted SELECT * FROM sound_hidden;
+             DROP TABLE sound_hidden;
+             ALTER TABLE counted RENAME TO sound_hidden;
+             UPDATE sqlite_sequence SET seq = 9999999 WHERE name = 'sound_hidden';",
+        )
+        .unwrap();
+    let hidden = SoundsDb::open_read_only(&copy).unwrap().hidden().unwrap();
+    let count = "SELECT name, seq FROM sqlite_sequence ORDER BY name";
+    let counted = rows(&copy, count);
+    assert_eq!(counted.len(), 1);
+    let (laid_out, _) = lay_out(&old);
+    assert!(matches!(laid_out, Some(LaidOut::Done { .. })), "{laid_out:?}");
+    assert_eq!(rows(&copy, count), counted);
+    assert_eq!(SoundsDb::open_read_only(&copy).unwrap().hidden().unwrap(), hidden);
+    // Another copy of the app saving into it while it's laid out anew: it's left as it was, save and all, and laid out
+    // anew the next time.
+    formerly(&old, &copy, Some(1_780_000_000));
+    let mut saved = false;
+    let laid_out = compact::lay_out(&old, || {
+        Connection::open(&copy).unwrap().execute("INSERT INTO copy_info VALUES ('saved', 1)", []).unwrap();
+        saved = true;
+    });
+    assert!(saved);
+    let Some(LaidOut::NotNow(why)) = laid_out else { panic!("not laid out: {laid_out:?}") };
+    assert!(why.contains("wrote to it meanwhile"), "{why}");
+    assert_eq!(format_of(&copy), 1);
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+    assert!(matches!(lay_out(&old).0, Some(LaidOut::Done { .. })));
+    let saved: i64 = Connection::open(&copy)
+        .unwrap()
+        .query_row("SELECT value FROM copy_info WHERE key = 'saved'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(saved, 1);
 }

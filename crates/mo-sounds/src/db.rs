@@ -980,7 +980,7 @@ fn copy_kind(kind: Option<&str>) -> &'static str {
 
 /// Floats stored as the C# app stores them: little-endian 4-byte floats, one after another. `None` when the length
 /// isn't a whole number of floats.
-fn floats(blob: &[u8]) -> Option<Vec<f32>> {
+pub(crate) fn floats(blob: &[u8]) -> Option<Vec<f32>> {
     if blob.is_empty() || !blob.len().is_multiple_of(4) {
         return None;
     }

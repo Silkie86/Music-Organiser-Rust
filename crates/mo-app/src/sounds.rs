@@ -953,6 +953,16 @@ pub fn damaged_not_laid_out_line() -> String {
     "It's damaged, and there's no sounds.db to make it again from, so it's read as it is.".to_owned()
 }
 
+/// What the card says when the app's own sound library was found damaged as it was laid out anew, and couldn't be
+/// made again from `sounds.db` either: why, without the library's whole path.
+pub fn not_remade_line(e: &SoundsError) -> String {
+    let why = match e {
+        SoundsError::Copy { why, .. } => why.clone(),
+        e => e.to_string(),
+    };
+    format!("It's damaged, and it couldn't be made again from sounds.db ({why}), so it's read as it is.")
+}
+
 /// Why the app's own copy of the sound library couldn't be made or brought up to date, for a card: what went wrong,
 /// without the copy's whole path.
 pub fn copy_failed_line(e: &SoundsError) -> String {
@@ -1466,6 +1476,12 @@ mod tests {
             not_laid_out_line("something else has it open (a page reading it, or another copy of the app)"),
             "Something else has it open (a page reading it, or another copy of the app). It's tried again the next \
              time Sounds opens, and until then it's read as it is."
+        );
+        let short =
+            SoundsError::Copy { path: "I:\\MusicOrganiser\\sounds-rust.db".into(), why: "only 0.4 GB is free".into() };
+        assert_eq!(
+            not_remade_line(&short),
+            "It's damaged, and it couldn't be made again from sounds.db (only 0.4 GB is free), so it's read as it is."
         );
         let full = SoundsError::Copy {
             path: "C:\\Users\\Solomon\\AppData\\Local\\MusicOrganiser\\sounds-rust.db".into(),

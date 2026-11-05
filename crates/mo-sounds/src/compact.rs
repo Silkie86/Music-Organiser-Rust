@@ -361,17 +361,19 @@ fn has_more_for(sounds_db: &Path, made_from: Option<&str>) -> bool {
 
 /// Lays the copy beside `sounds_db` out anew in this version's format, from itself, when it's of the format before
 /// ([`FORMERLY`]) and has nothing more to take from `sounds_db` (one that's behind is made afresh by [`last_sync`]);
-/// `None` when there's nothing to do. For the Sounds page, once it's done with the copy it read ([`read_for_page`]):
-/// one something has open is left for another time. Takes a while for a big library (it reads the copy twice, and
-/// writes most of its size), and never waits for anything else.
-pub fn lay_out(sounds_db: &Path) -> Option<LaidOut> {
+/// `None` when there's nothing to do (and `starting` isn't called). For the Sounds page, once it's done with the copy
+/// it read ([`read_for_page`]): one something has open is left for another time. `starting` is called as the work
+/// starts, once it's sure it can: it takes a while for a big library (it reads the copy a few times, and writes most
+/// of its size), and never waits for anything else.
+pub fn lay_out(sounds_db: &Path, starting: impl FnOnce()) -> Option<LaidOut> {
     let copy = copy_of(sounds_db);
     match look_at(&copy, WAIT) {
         Ok(Found::Copy { format: FORMERLY, own, stamp })
             if own.is_some() || !has_more_for(sounds_db, stamp.as_deref()) => {}
-        _ => return None,
+        Ok(_) => return None,
+        Err(why) => return Some(LaidOut::NotNow(format!("it couldn't be read just now ({why})"))),
     }
-    match lay_out_anew(&copy) {
+    match lay_out_anew(&copy, starting) {
         Relaid::Done(done) => Some(done),
         Relaid::Already => None,
         Relaid::NotNow(why) => Some(LaidOut::NotNow(why)),
@@ -435,8 +437,9 @@ const FORMERLY_HELD: [&str; 7] =
 /// checked whole and put on the disk, and only then given the copy's name, and only when nothing else has the copy
 /// open. Every fact is kept as it was (what it was made from, and since when it's the app's own library), CLAP's
 /// fingerprints as CLAP's index holds them ([`held`]), and the row hashes by which it followed `sounds.db` are left
-/// behind. A fingerprint of a sound the copy doesn't have (it never kept one) goes too.
-fn lay_out_anew(copy: &Path) -> Relaid {
+/// behind. A fingerprint of a sound the copy doesn't have (it never kept one) goes too. `starting` is called once
+/// it's sure it can start.
+fn lay_out_anew(copy: &Path, starting: impl FnOnce()) -> Relaid {
     let _one_at_a_time = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
     // Looked at again under the lock: another read may have laid it out anew meanwhile.
     match look_at(copy, WAIT) {
@@ -449,6 +452,8 @@ fn lay_out_anew(copy: &Path) -> Relaid {
     if let Err(why) = let_go_of(copy) {
         return Relaid::NotNow(why);
     }
+    // How it looks now, with nothing holding it: still so at the end, nothing wrote to it meanwhile.
+    let stamp = SoundsDb::stamp(copy);
     remove_parts(copy, true);
     let size = |path: &Path| -> u64 {
         ["", "-wal"].iter().filter_map(|end| fs::metadata(side(path, end)).ok()).map(|m| m.len()).sum()
@@ -465,6 +470,7 @@ fn lay_out_anew(copy: &Path) -> Relaid {
         return Relaid::NotNow(format!("a half-made copy couldn't be removed ({e})"));
     }
     let _part = Part(part.clone());
+    starting();
     match fill_anew(&part, copy) {
         Ok(()) => {}
         Err(Failed { why, damaged: true }) => return Relaid::Damaged(why),
@@ -473,12 +479,15 @@ fn lay_out_anew(copy: &Path) -> Relaid {
     // No reader in this app opens the copy from here until the new one has its name: one that did would hold the old
     // one through the swap.
     let _readers_wait = LAYING_OUT.lock().unwrap_or_else(PoisonError::into_inner);
-    // The last connection to a copy to close takes SQLite's files beside it away (once it has put what its log held
-    // into it): still there, something else has it open (a page reading it, or another copy of the app), or opened
-    // it since. Replaced meanwhile, that one would go on reading the old file, with SQLite's files for the new one
-    // beside it.
-    if ["-wal", "-shm"].iter().any(|end| side(copy, end).exists()) {
-        return Relaid::NotNow("something else has it open (a page reading it, or another copy of the app)".into());
+    // Something that has it open now (a page reading it, or another copy of the app) would go on reading the old file,
+    // with SQLite's files for the new one beside it.
+    if let Err(why) = let_go_of(copy) {
+        return Relaid::NotNow(why);
+    }
+    // Another copy of the app may have written to it meanwhile (this one writes only under the same lock): the new
+    // file wouldn't have that.
+    if SoundsDb::stamp(copy) != stamp {
+        return Relaid::NotNow("something wrote to it meanwhile (another copy of the app)".into());
     }
     // Windows doesn't let a file another program has open be replaced, so one opened since isn't either.
     if let Err(e) = fs::rename(&part, copy) {
@@ -501,7 +510,12 @@ impl Drop for Part {
 /// the copy, row by row, then whole; and puts it on the disk.
 fn fill_anew(part: &Path, copy: &Path) -> Result<(), Failed> {
     let Some(old) = copy.to_str() else { return Err(Failed::new("its folder's name can't be handed to SQLite")) };
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    // Named so it's opened only if it's there: gone meanwhile, an empty file would be made in its place.
+    let old = existing_only(copy).unwrap_or_else(|| old.to_owned());
+    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+        | OpenFlags::SQLITE_OPEN_CREATE
+        | OpenFlags::SQLITE_OPEN_URI
+        | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = open_for_writing(part, flags)?;
     conn.busy_timeout(WAIT)?;
     // A file being made needs no journal: if this stops half way, the file is thrown away.
@@ -511,7 +525,7 @@ fn fill_anew(part: &Path, copy: &Path) -> Result<(), Failed> {
     conn.execute_batch(SCHEMA)?;
     // Opened for writing (nothing is written to it), so that when this connection lets go of it, it's the one that
     // tidies SQLite's files beside it away if it's the last.
-    conn.execute("ATTACH DATABASE ?1 AS old", [old])?;
+    conn.execute("ATTACH DATABASE ?1 AS old", [&old])?;
     // One read of the copy from here to the end: what's copied and what it's checked against are the same.
     conn.execute_batch("BEGIN")?;
     let format: Option<i64> = conn
@@ -542,8 +556,11 @@ fn fill_anew(part: &Path, copy: &Path) -> Result<(), Failed> {
     if let Some(missing) = ["copy_info", "sounds", "sound_features", "sound_clap"].into_iter().find(|t| !has(t)) {
         return Err(Failed::new(format!("it has no {missing} table")));
     }
-    let whole: Vec<&str> = WHOLE.into_iter().chain(["sound_prints", "sqlite_sequence"]).filter(|t| has(t)).collect();
-    let claps = copy_anew(&conn, &whole)?;
+    let whole: Vec<&str> = WHOLE.into_iter().chain(["sound_prints"]).filter(|t| has(t)).collect();
+    // The disk the new file is written on, watched meanwhile: other programs fill it too.
+    let room = Room::new(dir_of(part));
+    let claps = copy_anew(&conn, &whole, has("sqlite_sequence"), &room)?;
+    room.look()?;
     conn.execute_batch(INDEXES)?;
     check_anew(&conn, &whole, &claps)?;
     conn.execute("INSERT INTO main.copy_info (key, value) VALUES ('format', ?1)", [FORMAT])?;
@@ -569,48 +586,65 @@ struct ClapMade {
     held: Option<i64>,
 }
 
+/// How many rows are copied at a time when a copy is laid out anew, between two looks at the room left on the disk
+/// ([`Room`]): tens of MB.
+const ROWS_AT_A_TIME: i64 = 16_384;
+
 /// Copies every row of the copy attached as `old` into the new file's tables (`main`): each sound's row column for
-/// column, its waveform into a row of its own, its fingerprints (CLAP's as CLAP's index holds them, and how many
-/// numbers each has), the `whole` tables as they are, row numbers and indexes too, and the copy's own notes but for
-/// its format and the row hashes. What it made of each CLAP fingerprint.
-fn copy_anew(conn: &Connection, whole: &[&str]) -> Result<Vec<ClapMade>, Failed> {
-    conn.execute_batch(concat!(
+/// column, with how many numbers its CLAP fingerprint has ([`clap_numbers`]); its waveform into a row of its own; its
+/// fingerprints, CLAP's as CLAP's index holds them; the `whole` tables as they are, row numbers and indexes too (and,
+/// with `sequence`, SQLite's count for a table whose rows count up); and the copy's own notes but for its format and
+/// the row hashes. Watches the disk's room on the way. What it made of each CLAP fingerprint.
+fn copy_anew(conn: &Connection, whole: &[&str], sequence: bool, room: &Room<'_>) -> Result<Vec<ClapMade>, Failed> {
+    // How many numbers each CLAP fingerprint has, as `clap_numbers` counts them (checked against it after).
+    let sounds = conn.prepare(concat!(
         "INSERT INTO main.sounds (",
         row_columns!(),
-        ") SELECT ",
+        ", clap_numbers) SELECT ",
         row_columns!(),
-        " FROM old.sounds ORDER BY id;
-         INSERT INTO main.sound_waves (sound_id, v)
-             SELECT id, waveform FROM old.sounds WHERE waveform IS NOT NULL ORDER BY id;
-         INSERT INTO main.sound_features (sound_id, v) SELECT sound_id, v FROM old.sound_features ORDER BY sound_id;
-         INSERT INTO main.copy_info (key, value)
-             SELECT key, value FROM old.copy_info WHERE key <> 'format' AND substr(key, 1, 5) <> 'hash:';"
+        ", CASE WHEN c.v IS NULL THEN NULL
+                WHEN typeof(c.v) = 'blob' AND length(c.v) > 0 AND length(c.v) % 4 = 0 THEN length(c.v) / 4
+                ELSE 0 END
+         FROM old.sounds LEFT JOIN old.sound_clap c ON c.sound_id = old.sounds.id
+         WHERE old.sounds.id >= ?1 ORDER BY old.sounds.id LIMIT ?2"
     ))?;
+    let mut waves = conn.prepare(
+        "INSERT INTO main.sound_waves (sound_id, v)
+             SELECT id, waveform FROM old.sounds WHERE id BETWEEN ?1 AND ?2 AND waveform IS NOT NULL ORDER BY id",
+    )?;
+    let last_sound = "SELECT MAX(id) FROM main.sounds";
+    in_turn(conn, sounds, last_sound, room, |from, to| Ok(waves.execute(params![from, to]).map(|_| ())?))?;
+    let features = conn.prepare(
+        "INSERT INTO main.sound_features (sound_id, v)
+             SELECT sound_id, v FROM old.sound_features WHERE sound_id >= ?1 ORDER BY sound_id LIMIT ?2",
+    )?;
+    in_turn(conn, features, "SELECT MAX(sound_id) FROM main.sound_features", room, |_, _| Ok(()))?;
+    conn.execute_batch(
+        "INSERT INTO main.copy_info (key, value)
+             SELECT key, value FROM old.copy_info WHERE key <> 'format' AND substr(key, 1, 5) <> 'hash:';",
+    )?;
+    // A fingerprint of a sound the copy doesn't have goes.
     let mut made = Vec::new();
-    let mut st = conn.prepare("SELECT sound_id, v FROM old.sound_clap ORDER BY sound_id")?;
-    let mut numbers = conn.prepare("UPDATE main.sounds SET clap_numbers = ?2 WHERE id = ?1")?;
+    let mut st = conn.prepare(
+        "SELECT c.sound_id, c.v FROM old.sound_clap c
+         WHERE c.v IS NOT NULL AND EXISTS (SELECT 1 FROM old.sounds s WHERE s.id = c.sound_id) ORDER BY c.sound_id",
+    )?;
     let mut insert = conn.prepare("INSERT INTO main.sound_clap (sound_id, v) VALUES (?1, ?2)")?;
     let mut rows = st.query([])?;
+    let mut counted = Room::new(room.dir);
     while let Some(r) = rows.next()? {
         let id: i64 = r.get(0)?;
         let v = r.get_ref(1)?;
-        let Some(n) = clap_numbers(v) else { continue };
-        // A fingerprint of a sound the copy doesn't have goes.
-        if numbers.execute(params![id, n])? == 0 {
-            continue;
-        }
+        let Some(numbers) = clap_numbers(v) else { continue };
         let held = whole_floats(v).map(|floats| held_bytes(&held(&floats)));
         if let Some(bytes) = &held {
             insert.execute(params![id, bytes])?;
+            counted.wrote()?;
         }
-        made.push(ClapMade { id, numbers: n, held: held.map(|bytes| hash_of(ValueRef::Blob(&bytes))) });
+        made.push(ClapMade { id, numbers, held: held.map(|bytes| hash_of(ValueRef::Blob(&bytes))) });
     }
     for &table in whole {
-        if table == "sqlite_sequence" {
-            // SQLite's own, made with a table that counts its rows up (AUTOINCREMENT): its rows only.
-            conn.execute_batch("INSERT INTO main.sqlite_sequence SELECT * FROM old.sqlite_sequence")?;
-            continue;
-        }
+        room.look()?;
         let Some(sql) = table_sql(conn, "old", table)? else { continue };
         conn.execute_batch(&sql)?;
         let columns = Columns::of(conn, "old", table, &sql)?.list();
@@ -620,7 +654,38 @@ fn copy_anew(conn: &Connection, whole: &[&str]) -> Result<Vec<ClapMade>, Failed>
             conn.execute_batch(&sql)?;
         }
     }
+    // SQLite's own count for a table whose rows count up (AUTOINCREMENT), made with that table and moved on by the
+    // rows copied into it: as it was, which may be past the last row there.
+    if sequence && table_sql(conn, "main", "sqlite_sequence")?.is_some() {
+        conn.execute_batch(
+            "DELETE FROM main.sqlite_sequence;
+             INSERT INTO main.sqlite_sequence (name, seq) SELECT name, seq FROM old.sqlite_sequence;",
+        )?;
+    }
     Ok(made)
+}
+
+/// Runs `insert`, which copies up to `?2` rows from the key `?1` on, in turn until it copies none, [`ROWS_AT_A_TIME`]
+/// at a time, looking at the room left on the disk between each: `last` gives the last key copied so far, and `then`
+/// is told the keys each turn copied, from and to.
+fn in_turn(
+    conn: &Connection,
+    mut insert: rusqlite::Statement<'_>,
+    last: &str,
+    room: &Room<'_>,
+    mut then: impl FnMut(i64, i64) -> Result<(), Failed>,
+) -> Result<(), Failed> {
+    let mut from = Some(i64::MIN);
+    while let Some(start) = from {
+        if insert.execute(params![start, ROWS_AT_A_TIME])? == 0 {
+            break;
+        }
+        let to: i64 = conn.query_row(last, [], |r| r.get(0))?;
+        then(start, to)?;
+        room.look()?;
+        from = to.checked_add(1);
+    }
+    Ok(())
 }
 
 /// Checks the new file (`main`) against the copy attached as `old`, every row of every table, to the last bit: what
@@ -650,12 +715,18 @@ fn check_anew(conn: &Connection, whole: &[&str], claps: &[ClapMade]) -> Result<(
         "SELECT key, value FROM old.copy_info WHERE key <> 'format' AND substr(key, 1, 5) <> 'hash:' ORDER BY key",
     )?;
     for &table in whole {
-        let columns = match table_sql(conn, "old", table)? {
-            Some(sql) if table != "sqlite_sequence" => Columns::of(conn, "old", table, &sql)?.list(),
-            _ => "*".to_owned(),
-        };
+        let Some(sql) = table_sql(conn, "old", table)? else { continue };
+        let columns = Columns::of(conn, "old", table, &sql)?.list();
         let name = quoted(table);
         compare(table, &format!("SELECT {columns} FROM main.{name}"), &format!("SELECT {columns} FROM old.{name}"))?;
+    }
+    if table_sql(conn, "old", "sqlite_sequence")?.is_some() {
+        let ours = if table_sql(conn, "main", "sqlite_sequence")?.is_some() {
+            "SELECT name, seq FROM main.sqlite_sequence ORDER BY name"
+        } else {
+            "SELECT NULL, NULL WHERE 0"
+        };
+        compare("SQLite's counts", ours, "SELECT name, seq FROM old.sqlite_sequence ORDER BY name")?;
     }
     // CLAP's: how many numbers each has, in each sound's row, and the numbers as CLAP's index holds them.
     let clap_failed = |at: String| Failed::new(format!("CLAP's fingerprints didn't come out the same ({at})"));
@@ -891,6 +962,9 @@ fn make(old: &SoundsDb, copy: &Path, keep: bool, pass: Pass<'_>) -> Result<Synce
     if keep {
         let_go_of(copy).map_err(|why| failed(format!("the old copy couldn't be replaced ({why})")))?;
     }
+    // How the one that's kept looks now, with nothing holding it: still so when it's replaced, nothing wrote to it
+    // meanwhile.
+    let kept = keep.then(|| SoundsDb::stamp(copy));
     // A copy of an older format (or a file that can't be read) goes first, with SQLite's files beside it: a log left
     // beside the new one would be read into it as if it were its own.
     if !keep {
@@ -918,8 +992,12 @@ fn make(old: &SoundsDb, copy: &Path, keep: bool, pass: Pass<'_>) -> Result<Synce
     let synced = made.map_err(|Failed { why, .. }| failed(why))?;
     // No reader in this app opens the copy while it's swapped: one that did would hold the old file through it.
     let _readers_wait = LAYING_OUT.lock().unwrap_or_else(PoisonError::into_inner);
-    if keep {
+    if let Some(kept) = kept {
         let_go_of(copy).map_err(|why| failed(format!("the old copy couldn't be replaced ({why})")))?;
+        // Another copy of the app may have written to it meanwhile (this one writes only under the same lock).
+        if SoundsDb::stamp(copy) != kept {
+            return Err(failed("the old copy couldn't be replaced (something wrote to it meanwhile)".into()));
+        }
     }
     if let Err(e) = fs::rename(&part, copy) {
         return Err(failed(format!("the new copy couldn't be given its name ({e})")));
@@ -1130,9 +1208,7 @@ fn write_clap(tx: &Transaction<'_>, id: i64, v: ValueRef<'_>) -> rusqlite::Resul
 /// [`crate::index::Gathered::push_blob`] takes them).
 fn whole_floats(v: ValueRef<'_>) -> Option<Vec<f32>> {
     match v {
-        ValueRef::Blob(b) if !b.is_empty() && b.len().is_multiple_of(4) => {
-            Some(b.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)).collect())
-        }
+        ValueRef::Blob(b) => crate::db::floats(b),
         _ => None,
     }
 }
@@ -1366,6 +1442,30 @@ fn side(path: &Path, end: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(end);
     PathBuf::from(name)
+}
+
+/// `path` as a name for SQLite that opens the database there only if it's there (a URI, `mode=rw`): never makes an
+/// empty one in its place. `None` for a path a URI can't name (a network share's, or one that isn't text).
+fn existing_only(path: &Path) -> Option<String> {
+    let slashed = path.to_str()?.replace('\\', "/");
+    if slashed.starts_with("//") {
+        return None;
+    }
+    let mut uri = String::from("file:");
+    // A Windows path from its drive's letter: "file:///C:/…".
+    if slashed.as_bytes().get(1) == Some(&b':') {
+        uri.push_str("///");
+    }
+    for b in slashed.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' | b':' => {
+                uri.push(char::from(b))
+            }
+            _ => uri.push_str(&format!("%{b:02X}")),
+        }
+    }
+    uri.push_str("?mode=rw");
+    Some(uri)
 }
 
 /// Removes a database and the files SQLite keeps beside it. Fine when there are none.
