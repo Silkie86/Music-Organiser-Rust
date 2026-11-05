@@ -248,6 +248,8 @@ final class Link {
     private boolean followed;
     private TrackBank tracks;
     private final Track[] trackItems = new Track[MAX_TRACKS];
+    /** The clips put in for auditions (extension 3.19), as "trackId#slot", with the name each came in with. */
+    private final Map<String, String> auditionClips = new HashMap<>();
     private final DeviceBank[] trackDevices = new DeviceBank[MAX_TRACKS];
     /** Where things go on each track: the start and end of its device chain. */
     private final InsertionPoint[] trackStarts = new InsertionPoint[MAX_TRACKS];
@@ -399,6 +401,11 @@ final class Link {
         // on its tracks. clip takes "replace" and "launch" from 3.16 too (from 3.17 launched in step with the song).
         commands.put("transport", Command.answer(false, this::transportNow));
         commands.put("stoptracks", Command.job(this::stopTracks));
+        // Extension 3.19: for the app's Play on the selected track (auditioning a MIDI part with what's on it).
+        // selectedtrack only reads; a clip sent with "audition" is noted, and deleteclip takes out only a clip so noted,
+        // while it still has the name it came in with, so it can never delete a clip of yours.
+        commands.put("selectedtrack", Command.answer(false, this::selectedTrack));
+        commands.put("deleteclip", Command.job(this::deleteClip));
     }
 
     // ---- Starting and stopping ----
@@ -1857,6 +1864,7 @@ final class Link {
         String path = given(field(request, "path"), "file");
         boolean replace = flag(request, "replace", false);
         boolean launch = flag(request, "launch", false);
+        boolean audition = flag(request, "audition", false);
         if (replace && absent(field(request, "slot"))) throw new LinkError("Say which slot's clip to replace.");
         ClipLauncherSlot[] slots = trackSlots[t];
         Object s = field(request, "slot");
@@ -1882,7 +1890,9 @@ final class Link {
         waitFor(() -> {
             int now = id.isEmpty() ? t : indexOf(id);
             return now >= 0 && trackSlots[now][index].hasContent().get()
-                   && (!replace || !str(trackSlots[now][index].name().get()).equals(before));
+                   && (!replace || !str(trackSlots[now][index].name().get()).equals(before))
+                   // An audition clip waits for its name too, which deleteclip checks it by (extension 3.19).
+                   && (!audition || !str(trackSlots[now][index].name().get()).isEmpty());
         }, swap ? REPLACE_WAIT : CHANGE_WAIT, made -> {
             int now = id.isEmpty() ? t : indexOf(id);
             // A replace whose name didn't change (the same file again) still has its clip: it goes ahead.
@@ -1890,6 +1900,12 @@ final class Link {
                 throw new LinkError("Bitwig didn't make a clip from " + path + ".");
             Map<String, Object> m = new LinkedHashMap<>();
             m.put("slot", index);
+            // An audition clip (extension 3.19) is noted with the name Bitwig gave it, so deleteclip may take it out again.
+            if (audition && now >= 0) {
+                String tid = idOf(now);
+                String name = str(trackSlots[now][index].name().get());
+                if (!tid.isEmpty() && !name.isEmpty()) auditionClips.put(tid + "#" + index, name);
+            }
             if (launch) {
                 if (now < 0) throw new LinkError("The track went before its clip could be launched.");
                 // In step with the song (extension 3.17): a swapped clip carries on from where Bitwig is, not from its own
@@ -1897,6 +1913,69 @@ final class Link {
                 trackSlots[now][index].launchWithOptions("default", "synced");
                 m.put("launched", true);
             }
+            finish.ok(m);
+        }, finish);
+    }
+
+    /**
+     * The track selected in Bitwig (extension 3.19): its `index` in the project listing, `id`, `name` and `type`, or
+     * `index` null when no track is selected or it isn't in the listing (a group's inner track past the first ones).
+     */
+    private void selectedTrack(Ask ask, Map<String, Object> request) {
+        Map<String, Object> m = new LinkedHashMap<>();
+        int found = -1;
+        for (int t = 0; t < MAX_TRACKS; t++)
+            if (trackItems[t] != null && trackItems[t].exists().get() && trackSelected[t] != null && trackSelected[t].get()) {
+                found = t;
+                break;
+            }
+        m.put("index", found < 0 ? null : found);
+        if (found >= 0) {
+            String id = idOf(found);
+            if (!id.isEmpty()) m.put("id", id);
+            m.put("name", str(trackItems[found].name().get()));
+            m.put("type", str(trackItems[found].trackType().get()));
+        }
+        reply(ask, m, null);
+    }
+
+    /**
+     * Takes out a launcher clip the app put in for an audition (`clip` with `audition`, extension 3.19): the one in `slot`
+     * on the track with ID `trackId`, only while it still has the name it came in with. Answers `deleted`: false when the
+     * clip isn't one the app noted, was renamed (so it's yours now), or is already gone. With `stop`, the track's clips
+     * stop first; with `transport`, Bitwig stops playing too (when the audition started it).
+     */
+    private void deleteClip(Map<String, Object> request, Finish finish) {
+        Object id = field(request, "trackId");
+        if (!(id instanceof String) || ((String) id).isEmpty()) throw new LinkError("Say which track, by its ID.");
+        Object s = field(request, "slot");
+        if (!isIndex(s, SCENES)) throw new LinkError("The app can reach the first " + SCENES + " clip slots on a track, not slot " + Json.js(s) + ".");
+        int index = index(s);
+        String key = id + "#" + index;
+        String noted = auditionClips.get(key);
+        int t = indexOf((String) id);
+        // Stopping goes ahead whether or not the clip is the app's to take out: Stop in the app always stops the sound.
+        if (t >= 0 && flag(request, "stop", false)) {
+            trackItems[t].stop();
+            // As stoptracks does: the track plays its arranger clips again, not the empty launcher.
+            trackItems[t].returnToArrangement();
+        }
+        if (flag(request, "transport", false) && transport != null) transport.stop();
+        Map<String, Object> m = new LinkedHashMap<>();
+        if (t < 0 || noted == null || !trackSlots[t][index].hasContent().get()
+            || !noted.equals(str(trackSlots[t][index].name().get()))) {
+            auditionClips.remove(key);
+            m.put("deleted", false);
+            finish.ok(m);
+            return;
+        }
+        auditionClips.remove(key);
+        trackSlots[t][index].deleteObject();
+        waitFor(() -> {
+            int now = indexOf((String) id);
+            return now < 0 || !trackSlots[now][index].hasContent().get();
+        }, CHANGE_WAIT, gone -> {
+            m.put("deleted", gone);
             finish.ok(m);
         }, finish);
     }

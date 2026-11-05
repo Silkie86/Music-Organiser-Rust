@@ -1,6 +1,6 @@
 //! A stand-in for the Music Organiser link in Bitwig, for tests: no test reaches a real Bitwig (rule 11). It listens
-//! on a free port on this computer, greets each connection as extension 3.18 does, and answers `hello`, `newtrack`,
-//! `insert` and `pads` the way the extension does, in its words (`Link.java` in the C# repo), on a made-up project:
+//! on a free port on this computer, greets each connection as extension 3.19 does, and answers `hello`, `newtrack`,
+//! `insert`, `pads`, `clip`, `selectedtrack`, `transport` and `deleteclip` the way the extension does, in its words (`extensions/bitwig-java`'s `Link.java`), on a made-up project:
 //! the C# app's stand-in's, "Night Drive", with Drums, Kick, Bass and Master. It handles one request at a time,
 //! whichever connection it came on, as the extension makes changes one at a time.
 //!
@@ -168,18 +168,24 @@ pub struct World {
     pub before_answer: Vec<Value>,
     /// Every request the app sent, as it came (one that wasn't JSON as its text).
     pub requests: Vec<Value>,
+    /// Whether Bitwig is playing: a launched clip starts it, `deleteclip` with `transport` stops it.
+    pub playing: bool,
+    /// The launched clips, as (track's place, slot).
+    pub launched: Vec<(usize, usize)>,
+    /// The audition clips the link noted (extension 3.19): track ID, slot, and the name the clip came in with.
+    pub auditions: Vec<(String, usize, String)>,
     /// How many tracks have been made, for their IDs.
     made: usize,
 }
 
 impl Default for World {
-    /// "Night Drive" open, changes allowed, extension 3.18 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
+    /// "Night Drive" open, changes allowed, extension 3.19 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
     /// Drums (a group), Kick (audio, with EQ+), Bass (an instrument: Serum, then a Compressor, selected) and the
     /// Master (with a Peak Limiter).
     fn default() -> World {
         let hello = json!({
             "link": 3, "product": "Bitwig Studio", "version": "6.1.5", "api": 23, "platform": "WINDOWS",
-            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.18", "loopback": true,
+            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.19", "loopback": true,
         });
         let mut serum = FakeDevice::new("Serum", "instrument");
         serum.preset = "Reese".into();
@@ -215,6 +221,9 @@ impl Default for World {
             slow_pads: false,
             before_answer: Vec::new(),
             requests: Vec::new(),
+            playing: false,
+            launched: Vec::new(),
+            auditions: Vec::new(),
             made: 0,
         };
         for track in &mut world.tracks {
@@ -353,8 +362,8 @@ impl World {
         };
         let cmd = map.get("cmd");
         let changes = match cmd.and_then(Value::as_str) {
-            Some("hello") => false,
-            Some("newtrack" | "insert" | "pads" | "clip") => true,
+            Some("hello" | "selectedtrack" | "transport") => false,
+            Some("newtrack" | "insert" | "pads" | "clip" | "deleteclip") => true,
             _ => return Err(format!("Unknown command: {}", js(cmd))),
         };
         self.check_allowed(map, changes)?;
@@ -366,6 +375,9 @@ impl World {
             Some("newtrack") => self.new_track(map),
             Some("insert") => self.insert(map),
             Some("clip") => self.add_clip(map),
+            Some("selectedtrack") => Ok(self.selected()),
+            Some("transport") => Ok(json!({ "playing": self.playing })),
+            Some("deleteclip") => self.delete_clip(map),
             _ => self.fill_pads(map),
         }
     }
@@ -435,9 +447,70 @@ impl World {
         Ok(answer)
     }
 
+    /// The selected track, as the link's `selectedTrack` (extension 3.19).
+    fn selected(&self) -> Value {
+        match self.selected_track.and_then(|t| self.tracks.get(t).map(|track| (t, track))) {
+            Some((t, track)) => json!({ "index": t, "id": track.id, "name": track.name, "type": track.kind }),
+            None => json!({ "index": null }),
+        }
+    }
+
+    /// A track by `trackId` when the request gives one (extension 3.9), else by its place (`track`).
+    fn requested_track(&self, request: &Map<String, Value>) -> Result<usize, String> {
+        match request.get("trackId") {
+            None | Some(Value::Null) => self.check_track(request.get("track").unwrap_or(&Value::Null)),
+            Some(Value::String(id)) if !id.is_empty() => self
+                .tracks
+                .iter()
+                .position(|t| t.id == *id)
+                .ok_or_else(|| format!("There's no track with ID {id} in the project listing.")),
+            Some(_) => Err("A track's ID is text.".into()),
+        }
+    }
+
+    /// Takes out an audition clip the link noted, while it keeps its name, as the link's `deleteClip` (3.19).
+    fn delete_clip(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
+        let id = match request.get("trackId") {
+            Some(Value::String(id)) if !id.is_empty() => id.clone(),
+            _ => return Err("Say which track, by its ID.".into()),
+        };
+        let slot = index(request.get("slot"), CLIP_SLOTS).ok_or_else(|| {
+            format!(
+                "The app can reach the first {CLIP_SLOTS} clip slots on a track, not slot {}.",
+                js(request.get("slot"))
+            )
+        })?;
+        if request.get("transport").and_then(Value::as_bool) == Some(true) {
+            self.playing = false;
+        }
+        let noted = self.auditions.iter().position(|(t, s, _)| *t == id && *s == slot);
+        let name = noted.and_then(|n| self.auditions.get(n)).map(|(_, _, name)| name.clone());
+        if let Some(n) = noted {
+            self.auditions.remove(n);
+        }
+        let at = self.tracks.iter().position(|t| t.id == id);
+        if let Some(t) = at
+            && request.get("stop").and_then(Value::as_bool) == Some(true)
+        {
+            self.launched.retain(|&(lt, _)| lt != t);
+        }
+        let now =
+            at.and_then(|t| self.tracks.get(t)).and_then(|t| t.clips.get(slot)).map(|c| sample_name(c).to_owned());
+        let deleted = matches!((&name, &now), (Some(name), Some(now)) if !now.is_empty() && name == now);
+        if deleted
+            && let Some(t) = at
+            && let Some(clip) = self.tracks.get_mut(t).and_then(|t| t.clips.get_mut(slot))
+        {
+            clip.clear();
+            self.modified = true;
+        }
+        self.next_step("deleteclip", request)?;
+        Ok(json!({ "deleted": deleted }))
+    }
+
     /// A file in a track's first empty clip launcher slot (of the first 8 the link reaches), as the link's `addClip`.
     fn add_clip(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
-        let at = self.check_track(request.get("track").unwrap_or(&Value::Null))?;
+        let at = self.requested_track(request)?;
         let path = given(request.get("path"), "file")?.to_owned();
         let file = file_name(&path);
         let midi = file
@@ -457,7 +530,17 @@ impl World {
         } else if let Some(empty) = track.clips.get_mut(slot) {
             *empty = path;
         }
+        let id = track.id.clone();
         self.next_step("clip", request)?;
+        if request.get("audition").and_then(Value::as_bool) == Some(true) && !id.is_empty() {
+            let name = self.tracks.get(at).and_then(|t| t.clips.get(slot)).map(|c| sample_name(c).to_owned());
+            self.auditions.push((id, slot, name.unwrap_or_default()));
+        }
+        if request.get("launch").and_then(Value::as_bool) == Some(true) {
+            self.launched.push((at, slot));
+            self.playing = true;
+            return Ok(json!({ "slot": slot, "launched": true }));
+        }
         Ok(json!({ "slot": slot }))
     }
 

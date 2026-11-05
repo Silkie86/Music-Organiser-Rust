@@ -1959,9 +1959,19 @@ fn settings_shots(
             &[moved],
         )),
     );
+    // Exports go into a folder chosen on another drive (an invented one).
+    let exports = r"I:\Music Organiser Exports";
+    mo_ui::settings::show_exports(
+        app,
+        &mo_app::settings::exports_card(Some(exports), &Ok(PathBuf::from(exports)), true),
+    );
     data.invoke_tab_picked(1);
     capture(window);
     shots.push(("settings-folders.png".into(), capture(window)));
+    // The Exports card, at the bottom of the tab.
+    scroll(window, 900.0, 500.0, -4.0 * PAGE_DOWN);
+    shots.push(("settings-folders-exports.png".into(), capture(window)));
+    scroll(window, 900.0, 500.0, 4.0 * PAGE_DOWN);
     data.invoke_tab_picked(2);
     mo_ui::settings::show_bitwig(
         app,
