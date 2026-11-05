@@ -229,7 +229,12 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
         let read = Library::open_read_only(&path)
             .and_then(|lib| Live::load(&lib, DEFAULT_RUN_GAP_MONTHS, details))
             // Missing samples are looked for in the Sounds library beside it last (rule 13).
-            .map(|live| live.with_sounds(sound_library::database_beside(&path)));
+            .map(|live| live.with_sounds(sound_library::database_beside(&path)))
+            // What's read is kept in the app's own songs.db; library.db is never written.
+            .map(|live| match mo_library::songs_db::own_since(&path) {
+                Some(_) => live.with_writes(path.clone()),
+                None => live,
+            });
         let mut live = match read {
             Ok(live) => live,
             Err(e) => {
@@ -272,6 +277,13 @@ const WATCH_QUIET: Duration = Duration::from_secs(3);
 /// How long after a save couldn't be read it's tried again.
 const RETRY_AFTER: Duration = Duration::from_secs(5);
 
+/// How long after the list is up every project folder is walked to catch up with what changed while the app was
+/// closed: the pages read what they show first.
+const CATCH_UP_AFTER: Duration = Duration::from_secs(20);
+
+/// How long after what was read couldn't be kept in songs.db (another copy of the app holding it) it's tried again.
+const KEEP_AGAIN_AFTER: Duration = Duration::from_secs(60);
+
 /// What the page says when the library has no songs.
 const NO_SONGS: &str = "No songs in the library yet.";
 
@@ -292,30 +304,74 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
             return;
         }
     };
+    let mut catch_up_at = Some(Instant::now() + CATCH_UP_AFTER);
+    let mut keep_again_at: Option<Instant> = None;
     loop {
         // A save that couldn't be read (still being written, or locked) is tried again after a quiet moment.
-        let changes = match rx.recv_timeout(RETRY_AFTER) {
-            Ok(changes) => changes,
-            Err(mpsc::RecvTimeoutError::Timeout) => match live.retries() {
-                Some(changes) => changes,
-                None => continue,
-            },
+        let wait = catch_up_at.map_or(RETRY_AFTER, |at| at.saturating_duration_since(Instant::now()).min(RETRY_AFTER));
+        let (changes, caught_up) = match rx.recv_timeout(wait) {
+            Ok(changes) => (Some(changes), false),
+            Err(mpsc::RecvTimeoutError::Timeout) if catch_up_at.is_some_and(|at| Instant::now() >= at) => {
+                catch_up_at = None;
+                (None, true)
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => (live.retries(), false),
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
-        let updated = live.update(&changes);
+        let updated = match (&changes, caught_up) {
+            (Some(changes), _) => live.update(changes),
+            (None, true) => {
+                let began = Instant::now();
+                let updated = live.catch_up();
+                log::info(
+                    "Songs",
+                    &format!(
+                        "Caught up with the project folders in {:.1} s: {} read, {} moved, {} gone",
+                        began.elapsed().as_secs_f32(),
+                        updated.read.len(),
+                        updated.moved.len(),
+                        updated.gone
+                    ),
+                );
+                updated
+            }
+            (None, false) => Default::default(),
+        };
+        // Kept in songs.db with each change, or after a while when it couldn't be kept last time.
+        if !updated.is_empty() || keep_again_at.is_some_and(|at| Instant::now() >= at) {
+            keep_again_at = match live.keep() {
+                Some(Ok(kept)) => {
+                    log::info(
+                        "Songs",
+                        &format!(
+                            "Kept in songs.db: {} saves read, {} marked missing, {} left out",
+                            kept.put, kept.missing, kept.dropped
+                        ),
+                    );
+                    None
+                }
+                Some(Err(e)) => {
+                    log::warning("Songs", &format!("{e}; it's kept with the next change, or in a minute"));
+                    Some(Instant::now() + KEEP_AGAIN_AFTER)
+                }
+                None => None,
+            };
+        }
         if updated.is_empty() {
             continue;
         }
-        log::info(
-            "Watch",
-            &format!(
-                "Project folders: {} read, {} moved, {} gone ({} changes seen)",
-                updated.read.len(),
-                updated.moved.len(),
-                updated.gone,
-                changes.files.len()
-            ),
-        );
+        if let Some(changes) = &changes {
+            log::info(
+                "Watch",
+                &format!(
+                    "Project folders: {} read, {} moved, {} gone ({} changes seen)",
+                    updated.read.len(),
+                    updated.moved.len(),
+                    updated.gone,
+                    changes.files.len()
+                ),
+            );
+        }
         let songs = live.songs();
         let found = Arc::new(finder::songs(&songs, Local::now().naive_local()));
         let _ = weak.upgrade_in_event_loop(move |app| {

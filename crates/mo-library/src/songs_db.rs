@@ -698,7 +698,7 @@ fn quote(name: &str) -> String {
 }
 
 /// A save's track details, compressed as `project_info` keeps them.
-fn deflate(text: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn deflate(text: &[u8]) -> Result<Vec<u8>, String> {
     let mut out = DeflateEncoder::new(Vec::with_capacity(text.len() / 4), Compression::default());
     out.write_all(text).map_err(|e| e.to_string())?;
     out.finish().map_err(|e| e.to_string())

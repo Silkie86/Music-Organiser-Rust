@@ -316,10 +316,9 @@ pub fn folder_groups(
 }
 
 /// The line under the Folders tab's title.
-pub const FOLDERS_NOTE: &str = "The folders the app looks in, shared with the C# app (library.db). Adding or removing \
-    one never moves or deletes anything on disk, and a project folder taken off keeps its songs listed. The Songs page \
-    takes up a changed project folder (one added, or one taken off) at the next start; the C# app reads new folders at \
-    its next scan.";
+pub const FOLDERS_NOTE: &str = "The folders the app looks in. Adding or removing one never moves or deletes anything \
+    on disk, and a project folder taken off keeps its songs listed. The Songs page takes up a changed project folder \
+    (one added, or one taken off) at the next start, and reads the saves in a new one then.";
 
 /// The folder picker's title for a list.
 pub fn pick_title(list: FolderList) -> &'static str {

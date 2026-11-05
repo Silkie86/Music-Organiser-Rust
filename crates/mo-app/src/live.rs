@@ -2,11 +2,16 @@
 //! moved or deleted in your project folders is read (or marked missing) a moment later, without walking every folder
 //! again. When the folder watch can't name every file, the folders it names are walked with the scanner instead.
 //!
-//! Until the library is trusted the app doesn't write it (CLAUDE.md), so what's read here is held in memory: the list
-//! shows it, and the C# app's next scan puts the same saves in the library. A save read again keeps its id; a new one
-//! gets an id after the library's. The song panel takes the details of either from here rather than from the library.
+//! Once the library is the app's own `songs.db`, what's read here is kept there too ([`Live::keep`], in
+//! [`mo_library::song_writes`]), so the next start lists it without reading the files again. Before that (the app
+//! still reading the C# app's `library.db`, which it never writes) it's held in memory only. A save read again keeps
+//! its id; a new one gets an id after the library's. The song panel takes the details of either from here rather than
+//! from the library.
+//!
+//! At the start, once the list is up, every project folder is walked once ([`Live::catch_up`]): saves made or changed
+//! while the app was closed are read, and ones gone are marked missing, as the C# app's scan at its start did.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -15,6 +20,7 @@ use mo_formats::{case, paths};
 use mo_library::read::{Installed, read_save};
 use mo_library::samples::SampleLocator;
 use mo_library::scan::{self, KnownFile};
+use mo_library::song_writes::{self, Batch, Put, Written};
 use mo_library::songs;
 use mo_library::watch::Changes;
 use mo_library::{Library, LibraryError, Save, SaveDetail, SongChoices};
@@ -56,6 +62,13 @@ pub struct Live {
     retry: HashMap<String, u8>,
     /// Where the list came from when it was loaded, for the log (`Library::saves_and_source`).
     source: Option<String>,
+    /// The app's own `songs.db`, where what's read is kept ([`Live::with_writes`]); none while it's held here only.
+    writes: Option<PathBuf>,
+    /// What's still to be kept there: saves read (by id, with whether the library has never had them), saves gone
+    /// missing, and saves the scan now leaves out.
+    to_put: BTreeMap<i64, bool>,
+    to_mark: BTreeSet<i64>,
+    to_drop: BTreeSet<i64>,
 }
 
 /// What [`Live::update`] did, for its card.
@@ -140,7 +153,22 @@ impl Live {
             sounds_db: None,
             retry: HashMap::new(),
             source,
+            writes: None,
+            to_put: BTreeMap::new(),
+            to_mark: BTreeSet::new(),
+            to_drop: BTreeSet::new(),
         })
+    }
+
+    /// Keeps what's read in `songs_db`, the library it was loaded from, once that's the app's own ([`Live::keep`]).
+    pub fn with_writes(mut self, songs_db: PathBuf) -> Live {
+        self.writes = Some(songs_db);
+        self
+    }
+
+    /// Whether what's read is kept in the library ([`Live::with_writes`]).
+    pub fn writes(&self) -> bool {
+        self.writes.is_some()
     }
 
     /// Looks for missing samples in the Sounds library at `sounds_db` too (rule 13).
@@ -170,6 +198,77 @@ impl Live {
     pub fn retries(&mut self) -> Option<Changes> {
         let files: Vec<String> = self.retry.keys().cloned().collect();
         (!files.is_empty()).then_some(Changes { files, ..Changes::default() })
+    }
+
+    /// Walks every project folder once, as the C# app's scan did at its start: saves made or changed while the app was
+    /// closed are read, and ones whose file has gone are marked missing. Only what differs from the library (by size
+    /// and date) is read. Asks the disk, so never on the window's thread.
+    pub fn catch_up(&mut self) -> Updated {
+        let roots = self.roots.clone();
+        if roots.is_empty() {
+            return Updated::default();
+        }
+        self.update(&Changes { overflowed: roots, ..Changes::default() })
+    }
+
+    /// Keeps what's been read since the last time in the app's own `songs.db` ([`Live::with_writes`]): `None` when
+    /// there's nothing to keep, or nowhere to keep it. If it can't be kept now (another copy of the app holding the
+    /// library), it's kept with the next batch, and meanwhile the list shows it as before. Writes to the disk, so never
+    /// on the window's thread.
+    pub fn keep(&mut self) -> Option<Result<Written, LibraryError>> {
+        let songs_db = self.writes.clone()?;
+        let batch = self.batch();
+        if batch.is_empty() {
+            return None;
+        }
+        let written = song_writes::write(&songs_db, &batch);
+        if let Ok(w) = &written {
+            self.renumber(&w.ids);
+            self.to_put.clear();
+            self.to_mark.clear();
+            self.to_drop.clear();
+        }
+        Some(written)
+    }
+
+    /// What's to be kept, each save as the list has it now.
+    fn batch(&self) -> Batch {
+        let at: HashMap<i64, &Save> = self.saves.iter().map(|s| (s.id, s)).collect();
+        let details = self.details.lock().ok();
+        let put = self
+            .to_put
+            .iter()
+            .filter_map(|(id, new)| {
+                let save = at.get(id)?;
+                let mut detail = details.as_ref()?.get(id)?.clone();
+                detail.save = (*save).clone();
+                Some(Put { detail, new: *new })
+            })
+            .collect();
+        Batch { put, missing: self.to_mark.iter().copied().collect(), dropped: self.to_drop.iter().copied().collect() }
+    }
+
+    /// Saves the library kept under another id than the one given here, as (given, kept): they go by it from now on.
+    fn renumber(&mut self, ids: &[(i64, i64)]) {
+        if ids.is_empty() {
+            return;
+        }
+        let to: HashMap<i64, i64> = ids.iter().copied().collect();
+        for s in &mut self.saves {
+            if let Some(&kept) = to.get(&s.id) {
+                s.id = kept;
+            }
+        }
+        if let Ok(mut d) = self.details.lock() {
+            for (given, kept) in ids {
+                if let Some(mut detail) = d.remove(given) {
+                    detail.save.id = *kept;
+                    d.insert(*kept, detail);
+                }
+            }
+        }
+        let highest = ids.iter().map(|&(_, kept)| kept).max().unwrap_or(0);
+        self.next_id = self.next_id.max(highest + 1);
     }
 
     /// Takes in what the folder watch saw: new and changed project files are read, gone ones marked missing, and
@@ -210,6 +309,7 @@ impl Live {
                         && let Some(s) = self.saves.get_mut(i).filter(|s| !s.file_missing)
                     {
                         s.file_missing = true;
+                        self.to_mark.insert(s.id);
                         marked.insert(i);
                         done.gone += 1;
                     }
@@ -276,6 +376,8 @@ impl Live {
                     } else {
                         done.read.push(detail.save.name.clone());
                     }
+                    self.to_put.entry(old.id).or_insert(false);
+                    self.to_mark.remove(&old.id);
                     self.saves[i] = detail.save.clone();
                 }
                 None => {
@@ -284,6 +386,7 @@ impl Live {
                     self.inherit(&mut detail.save);
                     add_hardware_tags(&mut detail.save);
                     index.insert(case::key(&detail.save.path), self.saves.len());
+                    self.to_put.insert(detail.save.id, true);
                     self.saves.push(detail.save.clone());
                     done.read.push(detail.save.name.clone());
                 }
@@ -324,6 +427,11 @@ impl Live {
         paths.extend(self.saves.iter().filter(|s| gone.contains(&s.id)).map(|s| s.path.clone()));
         if !plan.dropped.is_empty() {
             let dropped: HashSet<i64> = plan.dropped.into_iter().collect();
+            for id in &dropped {
+                self.to_put.remove(id);
+                self.to_mark.remove(id);
+                self.to_drop.insert(*id);
+            }
             self.saves.retain(|s| !dropped.contains(&s.id));
             if let Ok(mut d) = self.details.lock() {
                 d.retain(|id, _| !dropped.contains(id));
@@ -444,6 +552,10 @@ mod tests {
             sounds_db: None,
             retry: HashMap::new(),
             source: None,
+            writes: None,
+            to_put: BTreeMap::new(),
+            to_mark: BTreeSet::new(),
+            to_drop: BTreeSet::new(),
         }
     }
 
@@ -520,5 +632,67 @@ mod tests {
         // Two to choose from: neither.
         let twice = self::live(vec![old.clone(), Save { id: 9, ..old }]);
         assert_eq!(twice.moved_from(&moved), None);
+    }
+
+    /// The smallest FL Studio project there is: its header and no events.
+    fn tiny_flp() -> Vec<u8> {
+        let mut b = b"FLhd".to_vec();
+        b.extend(6i32.to_le_bytes());
+        b.extend(0i16.to_le_bytes());
+        b.extend(3u16.to_le_bytes());
+        b.extend(96u16.to_le_bytes());
+        b.extend(b"FLdt");
+        b.extend(0i32.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn what_s_read_is_kept_in_songs_db_and_not_read_again_at_the_next_start() {
+        let dir = std::env::temp_dir().join(format!("mo-live-keep-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let projects = dir.join("Projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        rusqlite::Connection::open(dir.join("library.db"))
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE roots (path TEXT PRIMARY KEY);
+                 CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                     name TEXT NOT NULL, daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, info TEXT);
+                 INSERT INTO roots VALUES ('{}');",
+                projects.display()
+            ))
+            .unwrap();
+        // Before songs.db is the app's own: read, and held here only.
+        let old = Library::open_read_only(&dir.join("library.db")).unwrap();
+        std::fs::write(projects.join("Night_1.flp"), tiny_flp()).unwrap();
+        let mut held = Live::load(&old, 6, LiveDetails::default()).unwrap();
+        assert!(!held.writes());
+        assert_eq!(held.catch_up().read, vec!["Night_1".to_owned()]);
+        assert!(held.keep().is_none());
+        drop(old);
+        let songs = dir.join(mo_library::songs_db::FILE_NAME);
+        mo_library::songs_db::make(&dir.join("library.db"), &songs, &mut |_| {}).unwrap();
+        assert!(mo_library::songs_db::at_start(&dir, "test").is_songs_db());
+        let open = || {
+            let lib = Library::open_read_only(&songs).unwrap();
+            Live::load(&lib, 6, LiveDetails::default()).unwrap().with_writes(songs.clone())
+        };
+        // The app's own: what's read is kept.
+        let mut live = open();
+        assert_eq!(live.catch_up().read, vec!["Night_1".to_owned()]);
+        let kept = live.keep().unwrap().unwrap();
+        assert_eq!((kept.put, kept.missing), (1, 0));
+        assert!(live.keep().is_none(), "kept once");
+        // The next start lists it, and has nothing to read.
+        let mut next = open();
+        assert_eq!(next.saves.len(), 1);
+        assert!(next.catch_up().is_empty());
+        // Gone while the app was closed: missing, and kept so.
+        std::fs::remove_file(projects.join("Night_1.flp")).unwrap();
+        assert_eq!(next.catch_up().gone, 1);
+        assert_eq!(next.keep().unwrap().unwrap().missing, 1);
+        assert!(open().saves[0].file_missing);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
