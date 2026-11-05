@@ -1310,6 +1310,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 pub mod clean;
+pub mod moving;
 pub mod uninstall;
 
 #[cfg(test)]

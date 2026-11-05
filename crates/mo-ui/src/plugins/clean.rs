@@ -69,6 +69,26 @@ pub(super) enum Stage {
     },
     /// Uninstall: its uninstaller is open, and the app waits for the plugin's files to go.
     Waiting,
+    /// Move: which folder to move.
+    MovePick {
+        intro: String,
+        ask: Arc<mo_app::plugins::moving::Ask>,
+        picked: Option<usize>,
+        /// The folder picker is open: the folder picked stays as it is until it closes.
+        choosing: bool,
+    },
+    /// Move: checking the folder can go where you picked.
+    MoveChecking,
+    /// Move: ready to move `folder` (`bytes`, measured just now) to `destination`.
+    MoveReady {
+        text: String,
+        ask: Arc<mo_app::plugins::moving::Ask>,
+        folder: usize,
+        bytes: u64,
+        destination: String,
+    },
+    /// Move: copying, checking, then swapping in the link.
+    Moving,
 }
 
 impl Stage {
@@ -85,7 +105,7 @@ pub(super) struct Binned {
 
 impl Cleaning {
     pub(super) fn busy(&self) -> bool {
-        matches!(self.stage, Stage::Removing | Stage::PuttingBack | Stage::Waiting)
+        matches!(self.stage, Stage::Removing | Stage::PuttingBack | Stage::Waiting | Stage::Moving)
     }
 }
 
@@ -202,14 +222,8 @@ pub(super) fn tick(app: &AppWindow, at: usize, on: bool) {
                 false
             }
             // One at a time: the others untick.
-            Stage::Pick { found, picked, .. } => {
-                if on && at < found.len() {
-                    *picked = Some(at);
-                } else if *picked == Some(at) {
-                    *picked = None;
-                }
-                true
-            }
+            Stage::Pick { found, picked, .. } => pick_one(picked, at, on, found.len()),
+            Stage::MovePick { ask, picked, choosing: false, .. } => pick_one(picked, at, on, ask.folders.len()),
             _ => false,
         }
     });
@@ -246,6 +260,8 @@ fn go_state(stage: &Stage) -> Option<(String, bool)> {
             Some((uninstall::files_freed_text(lines, ticks), uninstall::ticked_files(lines, ticks).next().is_some()))
         }
         Stage::Pick { picked, .. } => Some((String::new(), picked.is_some())),
+        Stage::MovePick { picked, choosing, .. } => Some((String::new(), picked.is_some() && !choosing)),
+        Stage::MoveReady { .. } => Some((String::new(), true)),
         _ => None,
     }
 }
@@ -254,11 +270,20 @@ fn go_state(stage: &Stage) -> Option<(String, bool)> {
 /// folders, the samples your projects use) and takes how the page sees the plugins now (the years you picked, a
 /// new read), so each folder is checked against things as they are when it goes, not when the card opened.
 pub(super) fn confirm(app: &AppWindow) {
-    let theirs = PAGE.with(|p| {
-        p.borrow().clean.as_ref().is_some_and(|c| matches!(c.stage, Stage::Pick { .. } | Stage::Files { .. }))
+    let (uninstalling, moving) = PAGE.with(|p| {
+        let p = p.borrow();
+        let stage = p.clean.as_ref().map(|c| &c.stage);
+        (
+            matches!(stage, Some(Stage::Pick { .. } | Stage::Files { .. })),
+            matches!(stage, Some(Stage::MovePick { .. } | Stage::MoveReady { .. })),
+        )
     });
-    if theirs {
+    if uninstalling {
         super::uninstall::confirm(app);
+        return;
+    }
+    if moving {
+        super::moving::confirm(app);
         return;
     }
     let job = PAGE.with(|p| {
@@ -329,13 +354,23 @@ pub(super) fn report(card: mo_app::activity::Job, outcome: &Outcome) {
     }
 }
 
+/// Picks line `at` of `len` (the others untick), or unpicks it. Says the lines need drawing again.
+fn pick_one(picked: &mut Option<usize>, at: usize, on: bool, len: usize) -> bool {
+    if on && at < len {
+        *picked = Some(at);
+    } else if *picked == Some(at) {
+        *picked = None;
+    }
+    true
+}
+
 /// Whether a card that's working (sending, putting back, waiting for an uninstaller) holds the page: then nothing new
 /// starts, and an activity card says why.
 pub(super) fn held(p: &super::Page) -> bool {
     let Some(c) = p.clean.as_ref().filter(|c| c.busy()) else { return false };
-    p.feed
-        .start(&format!("{} is still under way", c.title.trim_end_matches('?')), "")
-        .failed("One clean-up or uninstall at a time: this starts once it's done (or once you press Stop on it).");
+    p.feed.start(&format!("{} is still under way", c.title.trim_end_matches('?')), "").failed(
+        "One clean-up, uninstall or move at a time: this starts once it's done (or once you press Stop on it).",
+    );
     true
 }
 
@@ -472,7 +507,7 @@ pub(super) fn stop(app: &AppWindow) {
         let p = p.borrow();
         let Some(c) = p.clean.as_ref() else { return false };
         c.stop.store(true, Ordering::Relaxed);
-        matches!(c.stage, Stage::Checking | Stage::Finding)
+        matches!(c.stage, Stage::Checking | Stage::Finding | Stage::MoveChecking)
     });
     if checking {
         close(app);
@@ -531,9 +566,10 @@ pub(super) fn fill(app: &AppWindow) {
         data.set_clean_title(c.title.as_str().into());
         data.set_clean_warning(c.warning.as_str().into());
         data.set_clean_stage(match c.stage {
-            Stage::Checking | Stage::Finding => 0,
+            Stage::Checking | Stage::Finding | Stage::MoveChecking => 0,
             Stage::Ready { .. } | Stage::Pick { .. } | Stage::Files { .. } => 1,
-            Stage::Removing | Stage::Waiting => 2,
+            Stage::MovePick { .. } | Stage::MoveReady { .. } => 1,
+            Stage::Removing | Stage::Waiting | Stage::Moving => 2,
             Stage::Done { .. } => 3,
             Stage::PuttingBack => 4,
         });
@@ -543,6 +579,12 @@ pub(super) fn fill(app: &AppWindow) {
             Stage::Removing => ("Sending to the Recycle Bin…", true),
             Stage::Waiting => ("Its uninstaller is open in its own window. Waiting for its files to go…", true),
             Stage::PuttingBack => ("Putting back…", false),
+            Stage::MoveChecking => ("Checking it can move there…", true),
+            Stage::Moving => (
+                "Copying to the other drive and checking every file, then leaving a link where it was. Stop works \
+                 until the link goes in; nothing changes here before then.",
+                true,
+            ),
             _ => ("", false),
         };
         data.set_clean_busy_text(busy.into());
@@ -610,6 +652,31 @@ pub(super) fn fill(app: &AppWindow) {
                 data.set_clean_rows(model(rows));
                 data.set_clean_go_text("Uninstall".into());
                 data.set_clean_keep_text("Keep it".into());
+            }
+            Stage::MovePick { intro, ask, picked, .. } => {
+                data.set_clean_intro(intro.as_str().into());
+                let rows: Vec<CleanRow> = ask
+                    .folders
+                    .iter()
+                    .enumerate()
+                    .map(|(i, f)| CleanRow {
+                        path: mo_app::shell::wrappable_path(&f.path).into(),
+                        kind: mo_app::plugins::moving::folder_kind(f).into(),
+                        size: size_text(f.bytes).into(),
+                        why: SharedString::new(),
+                        can: true,
+                        ticked: *picked == Some(i),
+                    })
+                    .collect();
+                data.set_clean_rows(model(rows));
+                data.set_clean_go_text("Pick where it goes…".into());
+                data.set_clean_keep_text("Keep it here".into());
+            }
+            Stage::MoveReady { text, .. } => {
+                data.set_clean_intro(text.as_str().into());
+                data.set_clean_rows(model(Vec::new()));
+                data.set_clean_go_text("Move".into());
+                data.set_clean_keep_text("Keep it here".into());
             }
             Stage::Done { head, problems, offer_clean } => {
                 data.set_clean_intro(SharedString::new());
