@@ -982,8 +982,7 @@ fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
 fn convert_save(db: &Path, project: &Path) -> Result<Converted, String> {
     let lib = Library::open_read_only(db).map_err(|e| format!("Couldn't read the library: {e}"))?;
     let setting = |key: &str| lib.setting(key).map_err(|e| format!("Couldn't read the settings: {e}"));
-    let root = bitwig::export_root(setting(bitwig::EXPORT_FOLDER_KEY)?.as_deref(), bitwig::home().as_deref())
-        .ok_or("There's no export folder to convert into. Pick one in Settings.")?;
+    let root = bitwig::export_folder(setting(bitwig::EXPORT_FOLDER_KEY)?.as_deref(), bitwig::documents().as_deref())?;
     let template = bitwig::template_path(&paths::data_dir(), setting(bitwig::BITWIG_TEMPLATE_KEY)?.as_deref())
         .ok_or(bitwig::NO_TEMPLATE)?;
     let steps = setting(bitwig::STEPS_UNTIL_NEXT_NOTE_KEY)?.as_deref() == Some("1");

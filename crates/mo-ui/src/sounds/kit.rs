@@ -6,14 +6,14 @@
 use std::cell::RefCell;
 use std::collections::HashSet;
 use std::panic::AssertUnwindSafe;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
 use chrono::Local;
 use mo_app::background::{self, Newest};
 use mo_app::sounds::{self as list, SoundList};
-use mo_app::{log, to_bitwig};
+use mo_app::{bitwig_convert, log, to_bitwig};
 use mo_sounds::index::SoundIndex;
 use mo_sounds::kits::{self, ExportOptions, KitSlot};
 use mo_sounds::music::NOTE_NAMES;
@@ -41,8 +41,9 @@ pub(super) struct Kit {
     pub(super) asked: u64,
     pub(super) busy: bool,
     pub(super) status: String,
-    /// The C# app's export folder setting, read from `library.db` (kits go in its Kits folder).
-    pub(super) export_folder: Option<String>,
+    /// The song library, which a kit's export reads the export folder setting from as it starts (kits go in its
+    /// Kits folder).
+    pub(super) library: Option<PathBuf>,
     /// The kit is on its way to Bitwig: Send to Bitwig waits meanwhile, as in the C# app.
     pub(super) sending: bool,
     /// The kit is being copied into its folder: Export kit waits meanwhile, so a second click doesn't copy it again.
@@ -66,7 +67,7 @@ impl Default for Kit {
             asked: 0,
             busy: false,
             status: "Roll a kit to fill the pads.".to_owned(),
-            export_folder: None,
+            library: None,
             sending: false,
             exporting: false,
             drum_machine: None,
@@ -413,27 +414,30 @@ fn rolled_in(app: &AppWindow, r: Rolled) {
     show(app);
 }
 
-/// What an export copies: the pads, the sounds they're from, the export folder setting, the new folder's name, and
-/// how the samples are written.
-type ToExport = (Vec<KitSlot>, Arc<SoundList>, Option<String>, String, ExportOptions);
+/// What an export copies: the pads, the sounds they're from, the song library the export folder is read from, the new
+/// folder's name, and how the samples are written.
+type ToExport = (Vec<KitSlot>, Arc<SoundList>, Option<PathBuf>, String, ExportOptions);
 
 /// Copies the kit into a new folder under the export folder's Kits, off the window's thread, saying on a card how it
 /// went. Never writes over a kit already there.
 fn export(app: &AppWindow) {
     let ready = PAGE.with(|p| ready_to_export(&mut p.borrow_mut()));
     show(app);
-    let Some((slots, list, setting, name, options)) = ready else { return };
+    let Some((slots, list, library, name, options)) = ready else { return };
     let feed = FEED.with(|f| f.borrow().clone());
     let weak = app.as_weak();
     let started = background::spawn("Kit export", move || {
         let job = feed.map(|f| f.start("Exporting a kit", &name));
         // A panic in it is logged as a crash and fails the card as it goes; Export kit still comes back.
         let status = mo_catch::catch_crash(AssertUnwindSafe(|| {
-            // Worked out here: finding the Documents folder can wait on the disk.
-            let folder = kits_folder(setting.as_deref());
-            let done = background::on_pool(|| {
-                let get = |id: i64| list.find(id).and_then(|i| list.sound(i));
-                kits::export(&slots, get, &folder, &name, options)
+            // Worked out here: reading the setting, finding the Documents folder and seeing that the export folder
+            // is there wait on the disk.
+            let done = kits_folder(library.as_deref()).and_then(|folder| {
+                background::on_pool(|| {
+                    let get = |id: i64| list.find(id).and_then(|i| list.sound(i));
+                    kits::export(&slots, get, &folder, &name, options)
+                })
+                .map_err(|e| e.to_string())
             });
             match done {
                 Ok(e) => {
@@ -446,7 +450,7 @@ fn export(app: &AppWindow) {
                 Err(e) => {
                     log::warning("Sounds", &format!("Kit export failed: {e}"));
                     if let Some(job) = job {
-                        job.failed(&e.to_string());
+                        job.failed(&e);
                     }
                     format!("Export failed: {e}")
                 }
@@ -490,7 +494,7 @@ fn ready_to_export(p: &mut Page) -> Option<ToExport> {
     k.exporting = true;
     k.status = "Exporting the kit…".to_owned();
     let name = format!("Kit {} #{}", Local::now().format("%Y-%m-%d %H%M"), k.seed);
-    Some((k.slots.clone(), p.list.clone(), k.export_folder.clone(), name, k.export))
+    Some((k.slots.clone(), p.list.clone(), k.library.clone(), name, k.export))
 }
 
 /// Puts the kit on a Drum Machine in the project open in Bitwig, off the window's thread: on a new track named after
@@ -563,13 +567,15 @@ fn send_to_bitwig(app: &AppWindow) {
     }
 }
 
-/// Where kits go: the export folder (the C# app's setting, else Documents\Music Organiser Exports), then Kits.
-fn kits_folder(setting: Option<&str>) -> PathBuf {
-    let root = match setting.filter(|f| !f.trim().is_empty()) {
-        Some(f) => PathBuf::from(f),
-        None => crate::files::documents().join("Music Organiser Exports"),
+/// Where kits go: Kits in the export folder, as every export finds it, from the song `library`
+/// ([`bitwig_convert::export_folder_in`]: one set that isn't there stops the export, saying so). Reads the library
+/// and looks at the disk.
+fn kits_folder(library: Option<&Path>) -> Result<PathBuf, String> {
+    let root = match library {
+        Some(library) => bitwig_convert::export_folder_in(library)?,
+        None => bitwig_convert::export_folder(None, bitwig_convert::documents().as_deref())?,
     };
-    root.join("Kits")
+    Ok(root.join("Kits"))
 }
 
 /// The pads and choices as they are now; also when what's picked or playing changes.
@@ -735,9 +741,9 @@ mod tests {
         assert!(ready_to_export(&mut p).is_none());
         assert_eq!(p.kit.status, "Roll a kit first.");
         p.kit.slots[0].sound = Some(10);
-        p.kit.export_folder = Some(r"E:\Exports".into());
-        let Some((slots, _, setting, _, _)) = ready_to_export(&mut p) else { panic!("nothing to export") };
-        assert_eq!((slots[0].sound, setting.as_deref()), (Some(10), Some(r"E:\Exports")));
+        p.kit.library = Some(PathBuf::from("songs.db"));
+        let Some((slots, _, library, _, _)) = ready_to_export(&mut p) else { panic!("nothing to export") };
+        assert_eq!((slots[0].sound, library.as_deref()), (Some(10), Some(Path::new("songs.db"))));
         assert!(p.kit.exporting);
         // A second click while it's copied does nothing.
         assert!(ready_to_export(&mut p).is_none());
@@ -759,8 +765,21 @@ mod tests {
 
     #[test]
     fn kits_go_in_the_export_folder_else_documents() {
-        assert_eq!(kits_folder(Some("E:\\Exports")), PathBuf::from("E:\\Exports").join("Kits"));
-        assert!(kits_folder(None).ends_with(Path::new("Music Organiser Exports").join("Kits")));
-        assert!(kits_folder(Some("  ")).ends_with(Path::new("Music Organiser Exports").join("Kits")));
+        use super::super::tests::song_library;
+        let here = std::env::temp_dir();
+        let set = |folder: &Path| {
+            let name = format!("kits-{}.db", folder.file_name().unwrap_or_default().to_string_lossy());
+            let folder = folder.to_string_lossy().into_owned();
+            song_library(&name, &[(bitwig_convert::EXPORT_FOLDER_KEY, folder.as_str())])
+        };
+        assert_eq!(kits_folder(Some(&set(&here))), Ok(here.join("Kits")));
+        let in_documents = |f: Result<PathBuf, String>| {
+            f.is_ok_and(|f| f.ends_with(Path::new("Music Organiser Exports").join("Kits")))
+        };
+        assert!(in_documents(kits_folder(None)));
+        assert!(in_documents(kits_folder(Some(&song_library("kits-none-set.db", &[])))));
+        // One set that isn't there: no kit, and why.
+        let gone = here.join(format!("mo-ui-no-such-export-folder-{}", std::process::id()));
+        assert!(kits_folder(Some(&set(&gone))).is_err_and(|why| why.contains("isn't there")));
     }
 }

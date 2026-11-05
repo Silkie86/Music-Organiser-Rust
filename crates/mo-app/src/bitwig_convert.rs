@@ -28,19 +28,68 @@ pub fn convert_key(file: &Path) -> String {
     format!("bitwig_convert:{}", file.display())
 }
 
-/// Where converts go: the folder picked in Settings, or "Music Organiser Exports" in Documents in the home folder
-/// (the C# app asks Windows where Documents is, so a Documents moved to OneDrive differs: pick the folder in Settings
-/// there). None when there's neither a folder picked nor a home folder, rather than writing wherever the app started.
-pub fn export_root(setting: Option<&str>, home: Option<&Path>) -> Option<PathBuf> {
+/// Where every export goes (Bitwig converts, kits, MIDI parts): the export folder setting, or "Music Organiser
+/// Exports" in `documents` (the Documents folder [`documents`] finds). None when there's neither, rather than writing
+/// wherever the app started. Only works the path out: [`export_folder`] checks it before anything is written.
+pub fn export_root(setting: Option<&str>, documents: Option<&Path>) -> Option<PathBuf> {
     match setting.map(str::trim).filter(|s| !s.is_empty()) {
         Some(folder) => Some(PathBuf::from(folder)),
-        None => home.map(|h| h.join("Documents").join("Music Organiser Exports")),
+        None => documents.map(|d| d.join("Music Organiser Exports")),
     }
 }
 
-/// The user's home folder, where Documents is.
-pub fn home() -> Option<PathBuf> {
-    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(PathBuf::from)
+/// Where an export writes ([`export_root`]), checked first. An export folder that's set but isn't there stops the
+/// export, saying so, rather than being made again or the export going somewhere else (Solomon, 2026-11-05: it's most
+/// likely on a drive that isn't plugged in, and C: is nearly full). The one in Documents is made when it's needed.
+/// Looks at the disk, so never on the window's thread.
+pub fn export_folder(setting: Option<&str>, documents: Option<&Path>) -> Result<PathBuf, String> {
+    // Without Documents, export_root gives only a folder that's set.
+    let Some(set) = export_root(setting, None) else {
+        return export_root(None, documents).ok_or_else(|| NO_EXPORT_FOLDER.to_owned());
+    };
+    if !set.is_absolute() {
+        // It would be looked for from wherever the app started.
+        return Err(format!(
+            "The export folder {} isn't a full path, so the app can't tell where it is.",
+            set.display()
+        ));
+    }
+    match std::fs::metadata(&set) {
+        Ok(m) if m.is_dir() => Ok(set),
+        Ok(_) => Err(format!("The export folder {} is a file, not a folder.", set.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(format!("The export folder {} isn't there. Plug its drive in, then try again.", set.display()))
+        }
+        Err(e) => Err(format!("The export folder {} can't be opened: {e}.", set.display())),
+    }
+}
+
+/// [`export_folder`], with the setting read from the song library at `library` (none is set without one). A setting
+/// that can't be read stops the export too, rather than it going to Documents in place of the folder set. Opens the
+/// library and looks at the disk, so never on the window's thread.
+pub fn export_folder_in(library: &Path) -> Result<PathBuf, String> {
+    let setting = if library.exists() {
+        mo_library::Library::open_read_only(library)
+            .and_then(|lib| lib.setting(EXPORT_FOLDER_KEY))
+            .map_err(|e| format!("The export folder setting couldn't be read. {e}."))?
+    } else {
+        None
+    };
+    export_folder(setting.as_deref(), documents().as_deref())
+}
+
+/// Why nothing can be exported with no export folder set and no Documents folder to make one in.
+pub const NO_EXPORT_FOLDER: &str = "There's no export folder, and no Documents folder to make one in.";
+
+/// The Documents folder: on Windows where Windows really keeps it (it may have moved, to OneDrive say), elsewhere the
+/// one in the home folder. None without a home folder. Asking Windows can wait on the disk, so never on the window's
+/// thread.
+pub fn documents() -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Some(d) = known_folders::get_known_folder_path(known_folders::KnownFolder::Documents) {
+        return Some(d);
+    }
+    std::env::var_os(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).map(|h| PathBuf::from(h).join("Documents"))
 }
 
 /// The template to convert with: the app's own copy (`<data>/Bitwig template/Music Organiser template.bwproject`),
@@ -157,11 +206,81 @@ mod tests {
     #[test]
     fn exports_go_where_settings_say_or_in_documents() {
         assert_eq!(export_root(Some(r"D:\Exports"), None), Some(PathBuf::from(r"D:\Exports")));
-        let home = Path::new("home");
-        let documents = home.join("Documents").join("Music Organiser Exports");
-        assert_eq!(export_root(Some("  "), Some(home)), Some(documents.clone()));
-        assert_eq!(export_root(None, Some(home)), Some(documents));
+        let documents = Path::new("Documents");
+        let exports = documents.join("Music Organiser Exports");
+        assert_eq!(export_root(Some("  "), Some(documents)), Some(exports.clone()));
+        assert_eq!(export_root(None, Some(documents)), Some(exports));
         assert_eq!(export_root(None, None), None);
+    }
+
+    #[test]
+    fn an_export_folder_that_isnt_there_stops_the_export() {
+        let dir = std::env::temp_dir().join(format!("mo-app-export-folder-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(export_folder(dir.to_str(), None), Ok(dir.clone()));
+        // Its drive unplugged, say: the export stops, and the folder isn't made again.
+        let gone = dir.join("unplugged");
+        let why = export_folder(gone.to_str(), Some(&dir)).unwrap_err();
+        assert_eq!(
+            why,
+            format!("The export folder {} isn't there. Plug its drive in, then try again.", gone.display())
+        );
+        assert!(!gone.exists());
+        // None set: the one in Documents, made when it's needed.
+        assert_eq!(export_folder(Some(" "), Some(&dir)), Ok(dir.join("Music Organiser Exports")));
+        assert_eq!(export_folder(None, None), Err(NO_EXPORT_FOLDER.to_owned()));
+        // A file where the folder should be, and a path that isn't a full one: each says what's wrong.
+        let file = dir.join("a file");
+        std::fs::write(&file, b"").unwrap();
+        assert_eq!(
+            export_folder(file.to_str(), Some(&dir)),
+            Err(format!("The export folder {} is a file, not a folder.", file.display()))
+        );
+        assert_eq!(
+            export_folder(Some("Exports"), Some(&dir)),
+            Err("The export folder Exports isn't a full path, so the app can't tell where it is.".to_owned())
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_export_folder_setting_is_read_from_the_song_library() {
+        let dir = std::env::temp_dir().join(format!("mo-app-export-setting-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // A song library with the export folder setting, or none.
+        let library = |name: &str, folder: Option<&Path>| {
+            let path = dir.join(name);
+            let c = rusqlite::Connection::open(&path).unwrap();
+            c.execute_batch(
+                "CREATE TABLE projects (id INTEGER PRIMARY KEY); CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);",
+            )
+            .unwrap();
+            if let Some(folder) = folder {
+                let value = folder.to_string_lossy().into_owned();
+                c.execute(
+                    "INSERT INTO settings (key, value) VALUES (?1, ?2)",
+                    rusqlite::params![EXPORT_FOLDER_KEY, value],
+                )
+                .unwrap();
+            }
+            path
+        };
+        // None set, or no song library: the one in Documents.
+        let in_documents = export_folder(None, documents().as_deref());
+        assert_eq!(export_folder_in(&library("none set.db", None)), in_documents);
+        assert_eq!(export_folder_in(&dir.join("no library.db")), in_documents);
+        // The one set; one set that isn't there stops the export.
+        assert_eq!(export_folder_in(&library("set.db", Some(&dir))), Ok(dir.clone()));
+        let gone = dir.join("unplugged");
+        assert!(export_folder_in(&library("gone.db", Some(&gone))).is_err_and(|why| why.contains("isn't there")));
+        // A library that can't be read stops it too, rather than the export going to Documents.
+        let damaged = dir.join("damaged.db");
+        std::fs::write(&damaged, b"not a database").unwrap();
+        let why = export_folder_in(&damaged).unwrap_err();
+        assert!(why.starts_with("The export folder setting couldn't be read."), "{why}");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

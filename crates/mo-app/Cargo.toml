@@ -46,6 +46,8 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 # Long work over a disk is put low in the system's memory (background::on_bulk_pool).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
+# The real Documents folder (it may have moved to OneDrive), for exports.
+known-folders = "1.4"
 
 [dev-dependencies]
 # The stand-in Bitwig, for the Send to Bitwig tests: no test reaches a real Bitwig (rule 11).
