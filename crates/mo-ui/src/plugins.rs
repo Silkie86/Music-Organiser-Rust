@@ -11,6 +11,7 @@ mod uninstall;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use chrono::Local;
@@ -28,7 +29,7 @@ use mo_app::shortcuts::{PLUGINS_ACTIONS, Shortcuts};
 use mo_app::year_strip;
 use mo_library::Library;
 use mo_library::plugins::ScannedPlugin;
-use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
+use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel, Weak};
 
 use crate::filters::FilterModels;
 use crate::{
@@ -97,6 +98,34 @@ thread_local! {
     static READER: RefCell<Option<Newest<ReadJob>>> = const { RefCell::new(None) };
     static COPIES: RefCell<Option<Newest<CopiesJob>>> = const { RefCell::new(None) };
     static FILTER_MODELS: FilterChips = FilterChips::default();
+    static LINES: Rc<Lines> = Rc::new(Lines::default());
+}
+
+/// The list's lines, made only for the rows in sight as the list scrolls (the list view asks for them): a search or
+/// filter only tells the list it changed, rather than making a line for every plugin shown.
+#[derive(Default)]
+struct Lines {
+    notify: ModelNotify,
+}
+
+impl Model for Lines {
+    type Data = PluginListLine;
+
+    fn row_count(&self) -> usize {
+        PAGE.with(|p| p.try_borrow().ok().and_then(|p| p.plugins.as_ref().map(|pl| pl.shown.len())).unwrap_or(0))
+    }
+
+    fn row_data(&self, row: usize) -> Option<PluginListLine> {
+        PAGE.with(|p| {
+            let p = p.try_borrow().ok()?;
+            let pl = p.plugins.as_ref()?;
+            Some(line(pl, *pl.shown.get(row)?))
+        })
+    }
+
+    fn model_tracker(&self) -> &dyn ModelTracker {
+        &self.notify
+    }
 }
 
 /// The filters' chips and menus on screen, kept from one showing to the next.
@@ -119,6 +148,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         p.shortcuts = shortcuts.clone();
     });
     let data = app.global::<PluginsData>();
+    data.set_lines(ModelRc::from(LINES.with(|m| m.clone()) as Rc<dyn Model<Data = PluginListLine>>));
     data.set_sorts(strings(Sort::ALL.iter().map(|s| s.name())));
     data.set_tabs(strings(TABS));
     data.set_card_counts(strings(
@@ -605,11 +635,10 @@ fn change(weak: &Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
 /// Shows the list as the filters leave it.
 fn refresh(app: &AppWindow) {
     let data = app.global::<PluginsData>();
+    // The lines are made as the list asks for them ([`Lines`]), once the page is let go below.
     PAGE.with(|p| {
         let p = p.borrow();
         let Some(pl) = p.plugins.as_ref() else { return };
-        let lines: Vec<PluginListLine> = pl.shown.iter().map(|&i| line(pl, i)).collect();
-        data.set_lines(ModelRc::new(VecModel::from(lines)));
         data.set_summary(pl.summary().into());
         data.set_count(pl.count_text().into());
         FILTER_MODELS.with(|m| {
@@ -638,6 +667,7 @@ fn refresh(app: &AppWindow) {
         data.set_years_from(from);
         data.set_years_to(to);
     });
+    LINES.with(|m| m.notify.reset());
 }
 
 fn line(pl: &Plugins, i: usize) -> PluginListLine {

@@ -170,6 +170,8 @@ pub struct PluginRow {
     pub room: Option<PluginSpace>,
     /// Installed, measured, and no song has used it in the years asked about (or ever).
     pub unused: bool,
+    /// Its name and maker in small letters, made once for the search box (not again for every row on every key).
+    lower: (String, String),
 }
 
 impl PluginRow {
@@ -397,7 +399,7 @@ impl Filters {
         {
             return false;
         }
-        search.is_empty() || case::to_lower(&p.name).contains(search) || case::to_lower(&p.vendor).contains(search)
+        search.is_empty() || p.lower.0.contains(search) || p.lower.1.contains(search)
     }
 }
 
@@ -1172,8 +1174,6 @@ fn row(
         now.iter().filter(|id| missing_by_save.get(id).is_some_and(|m| m.len() == 1 && m.contains(&key))).count()
     };
     PluginRow {
-        name,
-        vendor,
         format,
         kind,
         key,
@@ -1187,6 +1187,9 @@ fn row(
         saves: ids,
         formats,
         last_used,
+        lower: (case::to_lower(&name), case::to_lower(&vendor)),
+        name,
+        vendor,
         years,
         room: None,
         unused: false,
@@ -1261,6 +1264,7 @@ fn with_room(rows: &mut Vec<PluginRow>, spaces: &[StoredSpace], cutoff: NaiveDat
                 .find(|f| !f.is_empty())
                 .unwrap_or("");
             let mut r = PluginRow {
+                lower: (case::to_lower(&s.name), case::to_lower(&s.vendor)),
                 name: s.name.clone(),
                 vendor: s.vendor.clone(),
                 format: format.to_owned(),
