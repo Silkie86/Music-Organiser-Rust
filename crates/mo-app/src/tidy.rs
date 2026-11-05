@@ -1452,7 +1452,7 @@ mod tests {
         assert_eq!(sweep(&places, later, &bin).removed, 1);
         assert!(copy.exists() && !half_made.exists());
         // songs.db the app's own: nothing reads the copy any more.
-        assert!(mo_library::songs_db::at_start(&places.data).is_songs_db());
+        assert!(mo_library::songs_db::at_start(&places.data, "test").is_songs_db());
         assert_eq!(sweep(&places, later, &bin).removed, 1);
         assert!(!copy.exists());
         assert!(places.data.join("library.db").exists() && places.data.join("songs.db").exists());

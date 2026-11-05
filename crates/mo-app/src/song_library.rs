@@ -1,7 +1,7 @@
 //! Making the app's own song library, `songs.db`, from the C# app's `library.db` (step 2 of the new databases): once,
 //! in the background, a little after the app starts, with a card that says how it went. The app switches to it at
 //! the next start ([`mo_library::songs_db::at_start`]); until then, and if it can't be made, `library.db` is read as
-//! before.
+//! before (one that fails the same way twice waits a week, or for a change: [`songs_db::note_failed`]).
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -37,8 +37,14 @@ pub fn make_now(dir: &Path, feed: &Feed) -> Result<Made, String> {
     let songs = dir.join(songs_db::FILE_NAME);
     let job = feed.start("Making the app's own song library", "Reading library.db once, to make songs.db from it");
     let began = Instant::now();
-    let made = room_for(&library).and_then(|()| {
-        songs_db::make(&library, &songs, &mut |done| job.progress(done, None)).map_err(|e| e.to_string())
+    let mut waits = false;
+    let made = room_for(&library, &songs).and_then(|()| {
+        songs_db::make(&library, &songs, &mut |done| job.progress(done, None)).map_err(|e| {
+            let why = e.to_string();
+            // Room may be made before the next start; anything else may well happen every time.
+            waits = songs_db::note_failed(dir, &crate::version::version(), &why);
+            why
+        })
     });
     match &made {
         Ok(made) => {
@@ -55,7 +61,12 @@ pub fn make_now(dir: &Path, feed: &Feed) -> Result<Made, String> {
         }
         Err(why) => {
             log::warning("Song library", &format!("Couldn't make songs.db: {why}"));
-            job.failed_as("Couldn't make the app's own song library", &format!("{why}. It's tried again next start."));
+            let when = if waits {
+                "It's tried again once library.db or the app changes, or in a week"
+            } else {
+                "It's tried again next start"
+            };
+            job.failed_as("Couldn't make the app's own song library", &format!("{why}. {when}."));
         }
     }
     made
@@ -72,14 +83,17 @@ pub fn made_line(made: &Made) -> String {
     )
 }
 
-/// Whether the drive has room for the new file: about half of `library.db` (the track details compress to a fraction
-/// of it) and [`SPARE_ROOM`] to spare.
-fn room_for(library: &Path) -> Result<(), String> {
-    let size = std::fs::metadata(library).map_or(0, |m| m.len());
-    let needed = size / 2 + SPARE_ROOM;
-    let free = library.ancestors().find(|p| p.exists()).and_then(|p| fs4::available_space(p).ok());
-    match free {
-        Some(free) if free < needed => Err(format!(
+/// Whether the drive has room for the new file: about half of `library.db` with its `-wal` (the track details
+/// compress to a fraction of them) and [`SPARE_ROOM`] to spare. An out-of-step `songs.db` there goes first, so its room
+/// counts as free.
+fn room_for(library: &Path, songs: &Path) -> Result<(), String> {
+    let sizes = |db: &Path, ends: &[&str]| -> u64 {
+        ends.iter().filter_map(|end| std::fs::metadata(format!("{}{end}", db.display())).ok()).map(|m| m.len()).sum()
+    };
+    let needed = sizes(library, &["", "-wal"]) / 2 + SPARE_ROOM;
+    let going = sizes(songs, &["", "-wal", "-shm"]);
+    match crate::data_move::free_room(library) {
+        Some(free) if free.saturating_add(going) < needed => Err(format!(
             "there isn't room on the drive: it needs about {} and has {} free",
             mo_space::size_text(needed),
             mo_space::size_text(free)
@@ -122,7 +136,26 @@ mod tests {
         assert_eq!(cards.len(), 1);
         assert_eq!(cards[0].title, "Made the app's own song library");
         // Made once: the next start switches to it.
-        assert_eq!(songs_db::at_start(&dir).library, dir.join("songs.db"));
+        assert_eq!(songs_db::at_start(&dir, "test").library, dir.join("songs.db"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn one_that_cant_be_made_is_noted_so_it_isnt_tried_at_every_start() {
+        let dir = std::env::temp_dir().join(format!("mo-song-library-failing-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        rusqlite::Connection::open(dir.join("library.db")).unwrap().execute_batch("CREATE TABLE mystery (x);").unwrap();
+        let feed = Feed::default();
+        assert!(make_now(&dir, &feed).is_err());
+        assert_eq!(feed.visible(Instant::now())[0].title, "Couldn't make the app's own song library");
+        let note = std::fs::read_to_string(dir.join(songs_db::FAILED_NOTE)).unwrap();
+        assert!(note.contains("tries: 1") && note.contains("doesn't know"), "{note}");
+        assert!(feed.visible(Instant::now())[0].detail.ends_with("tried again next start."));
+        // The same again: it waits, and says so.
+        assert!(make_now(&dir, &feed).is_err());
+        let cards = feed.visible(Instant::now());
+        assert!(cards.iter().any(|c| c.detail.ends_with("or in a week.")), "{cards:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

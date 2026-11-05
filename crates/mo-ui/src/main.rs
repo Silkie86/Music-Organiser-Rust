@@ -46,7 +46,7 @@ fn main() -> Result<(), slint::PlatformError> {
     let data = mo_app::paths::data_dir();
     // The app's own song library, songs.db, once it's been made and checked; the C# app's library.db until then (and
     // songs.db is made from it in the background, for the next start).
-    let songs_db = mo_library::songs_db::at_start(&data);
+    let songs_db = mo_library::songs_db::at_start(&data, &mo_app::version::version());
     log::info("Song library", &songs_db.line());
     let library = songs_db.library.clone();
     if !songs_db.is_songs_db() {

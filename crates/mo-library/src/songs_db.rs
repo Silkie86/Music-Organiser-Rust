@@ -36,7 +36,7 @@ use rusqlite::types::{Value, ValueRef};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter};
 use sha2::{Digest, Sha256};
 
-use crate::list_copy::stamp_of;
+use crate::list_copy::{stamp_of, with_ending};
 use crate::{Library, LibraryError};
 
 /// The app's own song library, in the app's data folder.
@@ -140,8 +140,7 @@ pub enum State {
     /// `songs.db`, the app's own library.
     Own,
     /// `songs.db`, the app's own library from now on: it was made last time, and `library.db` hasn't changed since.
-    /// `noted`: that was written in it (if not, it's tried again next start; meanwhile nothing's different).
-    Switched { noted: bool },
+    Switched,
     /// `library.db`, as before: `songs.db` is to be made from it ([`make`]), because `why`.
     Old { why: String },
     /// `library.db`, as before, and no `songs.db` is made: `why`.
@@ -156,19 +155,15 @@ impl AtStart {
 
     /// Whether the app reads its own `songs.db` (rather than `library.db`).
     pub fn is_songs_db(&self) -> bool {
-        matches!(self.state, State::Own | State::Switched { .. })
+        matches!(self.state, State::Own | State::Switched)
     }
 
     /// What the log says.
     pub fn line(&self) -> String {
         match &self.state {
             State::Own => "Reading songs.db, the app's own song library".to_owned(),
-            State::Switched { noted: true } => {
+            State::Switched => {
                 "songs.db is the app's own song library from now on: library.db is no longer read".to_owned()
-            }
-            State::Switched { noted: false } => {
-                "Reading songs.db (it couldn't be noted as the app's own library just now; tried again next start)"
-                    .to_owned()
             }
             State::Old { why } => format!("Reading library.db: {why}, so songs.db will be made from it"),
             State::Kept { why } => format!("Reading library.db: {why}"),
@@ -176,33 +171,110 @@ impl AtStart {
     }
 }
 
+/// How long the start waits for another program (another copy of the app, a virus checker) to let go of `songs.db`
+/// before reading `library.db` this time: it holds up the window opening.
+const START_WAIT: Duration = Duration::from_millis(250);
+
 /// Which library the app opens at this start, in its data folder `dir`: `songs.db` once it's been made and checked
 /// and `library.db` hasn't changed since (it becomes the app's own library then), else `library.db` as before. Looks
-/// only at `songs.db`'s own notes and `library.db`'s size and times, so it's quick enough for the start.
-pub fn at_start(dir: &Path) -> AtStart {
+/// only at `songs.db`'s own notes and `library.db`'s size and times, so it's quick enough for the start. `app` is this
+/// build's version: a `songs.db` that couldn't be made twice from this `library.db` by this build waits a while
+/// ([`note_failed`]).
+pub fn at_start(dir: &Path, app: &str) -> AtStart {
     let songs = dir.join(FILE_NAME);
     let old = dir.join(OLD_FILE_NAME);
     let old_one = |state| AtStart { library: old.clone(), state };
+    // To be made: unless making it failed the same way already.
+    let to_make = |why: &str| match stamp_of(&old).and_then(|stamp| failed_before(dir, &stamp, app)) {
+        Some(before) => old_one(State::Kept {
+            why: format!(
+                "songs.db couldn't be made from it ({before}), so it's tried again once library.db or the app changes, \
+                 or in a week"
+            ),
+        }),
+        None => old_one(State::Old { why: why.to_owned() }),
+    };
+    // Made last time and in step: the app's own from now on, once that's written in it. Until then (another program
+    // holding it), library.db as before: the app never writes to a songs.db that might yet be made again.
+    let switch = |made_from: Option<&str>| match adopt(&songs, made_from) {
+        Ok(()) => {
+            let _ = fs::remove_file(dir.join(FAILED_NOTE));
+            AtStart { library: songs.clone(), state: State::Switched }
+        }
+        Err(why) => old_one(State::Kept {
+            why: format!(
+                "songs.db couldn't be noted as the app's own library just now ({why}); tried again next start"
+            ),
+        }),
+    };
     match look(&songs) {
         Ok(Found::Songs { own: Some(_), .. }) => AtStart { library: songs, state: State::Own },
         Ok(Found::Songs { own: None, made_from }) => match stamp_of(&old) {
-            // Unchanged since it was made, or gone (archived, or left in the old folder when the data folder moved).
-            Some(now) if made_from.as_deref() == Some(now.as_str()) => {
-                AtStart { state: State::Switched { noted: adopt(&songs).is_ok() }, library: songs }
-            }
-            None if !old.exists() => {
-                AtStart { state: State::Switched { noted: adopt(&songs).is_ok() }, library: songs }
-            }
+            Some(now) if made_from.as_deref() == Some(now.as_str()) => switch(Some(&now)),
+            // Gone (archived, or left in the old folder when the data folder moved): songs.db is all there is.
+            None if !old.exists() => switch(None),
             None => old_one(State::Kept { why: "library.db couldn't be looked at".to_owned() }),
-            Some(_) => old_one(State::Old { why: "library.db has changed since songs.db was made".to_owned() }),
+            Some(_) => to_make("library.db has changed since songs.db was made"),
         },
-        Ok(Found::Nothing) if old.is_file() => old_one(State::Old { why: "there's no songs.db yet".to_owned() }),
+        Ok(Found::Nothing) if old.is_file() => to_make("there's no songs.db yet"),
         Ok(Found::Nothing) => old_one(State::Kept { why: "there's no library yet".to_owned() }),
         Ok(Found::Newer(version)) => old_one(State::Kept {
             why: format!("songs.db was made by a newer version of the app (layout {version}), so it's left as it is"),
         }),
         Err(why) => old_one(State::Kept { why: format!("songs.db couldn't be read ({why}), so it's left as it is") }),
     }
+}
+
+/// The note, in the data folder, of a `songs.db` that couldn't be made ([`note_failed`]).
+pub const FAILED_NOTE: &str = "songs-db-failed.txt";
+
+/// After how many tries in a row that fail with the same `library.db` and the same build it waits ([`RETRY_AFTER`]):
+/// one failure may be a passing thing (another program holding a file), two the same is what happens every time.
+const TRIES: u32 = 2;
+/// How long it waits then before trying again: each try reads the whole of `library.db`.
+const RETRY_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+/// Notes in the data folder `dir` that `songs.db` couldn't be made from its `library.db` by the build `app`, because
+/// `why`, so that a failure that comes back every time doesn't read the whole of `library.db` at every start
+/// ([`at_start`]). A note of one made later, or of a `library.db` or build since changed, has no say; it's removed
+/// once `songs.db` is made. Not for a failure that's sure to pass (no room on the drive). Whether the next starts wait
+/// now, rather than try again.
+pub fn note_failed(dir: &Path, app: &str, why: &str) -> bool {
+    let Some(stamp) = stamp_of(&dir.join(OLD_FILE_NAME)) else { return false };
+    let tries = read_note(dir).filter(|n| n.library == stamp && n.app == app).map_or(0, |n| n.tries).saturating_add(1);
+    let why: String = why.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+    let text = format!("library: {stamp}\napp: {app}\ntries: {tries}\nlast: {}\nwhy: {why}\n", unix_now());
+    fs::write(dir.join(FAILED_NOTE), text).is_ok() && tries >= TRIES
+}
+
+/// Why making `songs.db` from the `library.db` at `stamp` failed with the build `app` when it's to wait still
+/// ([`TRIES`], [`RETRY_AFTER`]).
+fn failed_before(dir: &Path, stamp: &str, app: &str) -> Option<String> {
+    let note = read_note(dir)?;
+    let waited = u64::try_from(unix_now().saturating_sub(note.last)).unwrap_or(0);
+    (note.library == stamp && note.app == app && note.tries >= TRIES && waited < RETRY_AFTER.as_secs())
+        .then_some(note.why)
+}
+
+/// What a [`FAILED_NOTE`] says.
+struct Note {
+    library: String,
+    app: String,
+    tries: u32,
+    last: i64,
+    why: String,
+}
+
+fn read_note(dir: &Path) -> Option<Note> {
+    let text = fs::read_to_string(dir.join(FAILED_NOTE)).ok()?;
+    let line = |key: &str| text.lines().find_map(|l| l.strip_prefix(key)?.strip_prefix(": ")).map(str::to_owned);
+    Some(Note {
+        library: line("library")?,
+        app: line("app")?,
+        tries: line("tries")?.parse().ok()?,
+        last: line("last")?.parse().ok()?,
+        why: line("why").unwrap_or_default(),
+    })
 }
 
 /// Since when (Unix seconds) the `songs.db` at `songs` has been the app's own library; `None` while it isn't (or isn't
@@ -262,16 +334,31 @@ fn look(songs: &Path) -> Result<Found, String> {
 
 fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-    conn.busy_timeout(Duration::from_secs(2))?;
+    conn.busy_timeout(START_WAIT)?;
     Ok(conn)
 }
 
-/// Notes in `songs` that it's the app's own library from now on (kept as it was, if it was already).
-fn adopt(songs: &Path) -> rusqlite::Result<()> {
-    let conn = Connection::open_with_flags(songs, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-    conn.busy_timeout(Duration::from_secs(2))?;
-    conn.execute("INSERT OR IGNORE INTO songs_info (key, value) VALUES ('own_since', ?1)", [unix_now()])?;
-    Ok(())
+/// Notes in `songs` that it's the app's own library from now on (kept as it was, if it was already), when it's still
+/// the one made from the `library.db` at `made_from` (`None`: `library.db` has gone, so it's taken as it is). Looked at
+/// again inside the write: another copy of the app may have made it again meanwhile.
+fn adopt(songs: &Path, made_from: Option<&str>) -> Result<(), String> {
+    let noted = (|| -> rusqlite::Result<Result<(), String>> {
+        let conn =
+            Connection::open_with_flags(songs, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        conn.busy_timeout(START_WAIT)?;
+        let tx = rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
+        let now: Option<Value> =
+            tx.query_row("SELECT value FROM songs_info WHERE key = 'made_from'", [], |r| r.get(0)).optional()?;
+        if let Some(wanted) = made_from
+            && !matches!(&now, Some(Value::Text(stamp)) if stamp == wanted)
+        {
+            return Ok(Err("it was made again meanwhile".to_owned()));
+        }
+        tx.execute("INSERT OR IGNORE INTO songs_info (key, value) VALUES ('own_since', ?1)", [unix_now()])?;
+        tx.commit()?;
+        Ok(Ok(()))
+    })();
+    noted.map_err(|e| e.to_string())?
 }
 
 /// What making `songs.db` did ([`make`]).
@@ -306,6 +393,9 @@ pub fn make(library_db: &Path, songs_db: &Path, progress: &mut dyn FnMut(f32)) -
             return Err(failed(format!("library.db has a table the app doesn't know ({table}), so nothing was made")));
         }
     }
+    // One out of step goes first, with SQLite's files beside it: it's never read (the app reads library.db until
+    // songs.db is its own), and its room is wanted for the new one.
+    remove_with_sides(songs_db).map_err(failed)?;
     let new = new_path(songs_db);
     let mut part = Part::new(new.clone());
     let made = (|| -> Result<(u64, u64), String> {
@@ -332,22 +422,18 @@ pub fn make(library_db: &Path, songs_db: &Path, progress: &mut dyn FnMut(f32)) -
         .map_err(|e| e.to_string())?;
         // Closed before it's synced and moved: Windows can't move a file that's open.
         conn.close().map_err(|(_, e)| e.to_string())?;
-        fs::File::open(&new).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+        // Windows only flushes a file for a program that may write to it.
+        fs::OpenOptions::new().write(true).open(&new).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
         Ok((read.saves, read.rows))
     })();
     let (saves, rows) = made.map_err(failed)?;
-    // Looked at again: the app may have switched to one made meanwhile (another copy of the app).
+    // Looked at again: another copy of the app may have made one meanwhile, and switched to it.
     refuse_to_replace(songs_db).map_err(failed)?;
-    // Whatever SQLite kept beside an older songs.db would be played onto the new one: they go first.
-    for end in ["-wal", "-shm", "-journal"] {
-        match fs::remove_file(with_ending(songs_db, end)) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(failed(format!("the old songs.db{end} couldn't be removed ({e})"))),
-        }
-    }
+    // Whatever SQLite kept beside a songs.db made meanwhile would be played onto the new one: it goes first.
+    remove_with_sides(songs_db).map_err(failed)?;
     fs::rename(&new, songs_db).map_err(|e| failed(format!("it couldn't be put in place ({e})")))?;
     part.kept();
+    let _ = fs::remove_file(songs_db.with_file_name(FAILED_NOTE));
     let size = |p: &Path| fs::metadata(p).map_or(0, |m| m.len());
     Ok(Made {
         saves,
@@ -367,6 +453,18 @@ fn refuse_to_replace(songs_db: &Path) -> Result<(), String> {
         // Can't be read: it may be the app's own, damaged. Left for Solomon, never replaced.
         Err(why) => Err(format!("the songs.db there couldn't be read ({why})")),
     }
+}
+
+/// Removes the `songs.db` at `songs_db` that's to be made again, and SQLite's files beside it.
+fn remove_with_sides(songs_db: &Path) -> Result<(), String> {
+    for end in ["", "-wal", "-shm", "-journal"] {
+        match fs::remove_file(with_ending(songs_db, end)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("the old songs.db{end} couldn't be removed ({e})")),
+        }
+    }
+    Ok(())
 }
 
 /// Where a new `songs.db` is made: `songs.db.new-<process>`, which the start-up sweep clears if a crash leaves it.
@@ -438,6 +536,7 @@ fn fill(old: &Library, new: &Connection, stamp: &str, progress: &mut dyn FnMut(f
         }
     };
     new.execute_batch("BEGIN").map_err(e)?;
+    let mut insert_info = new.prepare("INSERT INTO project_info (project_id, info) VALUES (?1, ?2)").map_err(e)?;
     let mut hashes = Vec::new();
     let mut copied = Vec::new();
     let mut saves = 0u64;
@@ -468,7 +567,6 @@ fn fill(old: &Library, new: &Connection, stamp: &str, progress: &mut dyn FnMut(f
                 vec!["?"; into.len()].join(", ")
             ))
             .map_err(e)?;
-        let mut insert_info = new.prepare("INSERT INTO project_info (project_id, info) VALUES (?1, ?2)").map_err(e)?;
         let mut found = read.query([]).map_err(e)?;
         while let Some(row) = found.next().map_err(e)? {
             let rowid: i64 = row.get(0).map_err(e)?;
@@ -502,6 +600,7 @@ fn fill(old: &Library, new: &Connection, stamp: &str, progress: &mut dyn FnMut(f
         }
         copied.push(((*table).to_owned(), wanted.iter().map(|c| (*c).to_owned()).collect()));
     }
+    drop(insert_info);
     drop(snapshot);
     new.execute_batch(INDEXES).map_err(e)?;
     let mut note = new.prepare("INSERT INTO songs_info (key, value) VALUES (?1, ?2)").map_err(e)?;
@@ -610,13 +709,6 @@ pub(crate) fn inflate(blob: &[u8]) -> Result<Vec<u8>, String> {
     let mut text = Vec::with_capacity(blob.len() * 4);
     DeflateDecoder::new(blob).read_to_end(&mut text).map_err(|e| e.to_string())?;
     Ok(text)
-}
-
-/// `path` with `ending` added to its whole name.
-fn with_ending(path: &Path, ending: &str) -> PathBuf {
-    let mut p = path.as_os_str().to_owned();
-    p.push(ending);
-    PathBuf::from(p)
 }
 
 /// The time now, in Unix seconds.

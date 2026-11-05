@@ -139,7 +139,7 @@ pub fn stamp_of(library: &Path) -> Option<String> {
 }
 
 /// `path` with `ending` added to its whole name.
-fn with_ending(path: &Path, ending: &str) -> PathBuf {
+pub(crate) fn with_ending(path: &Path, ending: &str) -> PathBuf {
     let mut p = path.as_os_str().to_owned();
     p.push(ending);
     PathBuf::from(p)

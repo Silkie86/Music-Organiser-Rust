@@ -117,6 +117,9 @@ fn library(name: &str) -> PathBuf {
     path
 }
 
+/// This build, as the start names it.
+const APP: &str = "0.1.0 (test)";
+
 fn songs_beside(library: &Path) -> PathBuf {
     library.with_file_name(songs_db::FILE_NAME)
 }
@@ -253,26 +256,26 @@ fn the_app_switches_to_songs_db_at_the_next_start_once_its_in_step() {
     let dir = old.parent().unwrap();
     let new = songs_beside(&old);
     // No songs.db yet: library.db, and one is to be made.
-    let first = songs_db::at_start(dir);
+    let first = songs_db::at_start(dir, APP);
     assert_eq!(first.library, old);
     assert!(first.make_wanted() && !first.is_songs_db(), "{first:?}");
     make(&old);
     // library.db changed since it was made (a setting written): library.db again, and it's made again.
     Connection::open(&old).unwrap().execute("INSERT INTO settings VALUES ('later', 'x')", []).unwrap();
-    let changed = songs_db::at_start(dir);
+    let changed = songs_db::at_start(dir, APP);
     assert_eq!(changed.library, old);
     assert!(changed.make_wanted(), "{changed:?}");
     assert!(songs_db::own_since(&new).is_none());
     make(&old);
     // In step: songs.db from now on, the app's own.
-    let switched = songs_db::at_start(dir);
+    let switched = songs_db::at_start(dir, APP);
     assert_eq!(switched.library, new);
-    assert_eq!(switched.state, State::Switched { noted: true });
+    assert_eq!(switched.state, State::Switched);
     assert!(songs_db::own_since(&new).is_some());
     assert_eq!(Library::open_read_only(&new).unwrap().setting("later").unwrap().as_deref(), Some("x"));
     // From then on, whatever happens to library.db.
     Connection::open(&old).unwrap().execute("INSERT INTO settings VALUES ('after', 'y')", []).unwrap();
-    let own = songs_db::at_start(dir);
+    let own = songs_db::at_start(dir, APP);
     assert_eq!((own.library.clone(), own.state.clone()), (new.clone(), State::Own));
     assert!(!own.make_wanted());
     // The app's own library is never made over.
@@ -291,13 +294,13 @@ fn songs_db_is_used_once_library_db_has_gone() {
     for end in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{end}", old.display()));
     }
-    let start = songs_db::at_start(&dir);
+    let start = songs_db::at_start(&dir, APP);
     assert_eq!(start.library, songs_beside(&old));
-    assert_eq!(start.state, State::Switched { noted: true });
+    assert_eq!(start.state, State::Switched);
     // Neither file: there's no library yet, and nothing to make.
     let empty = old.parent().unwrap().join("empty");
     std::fs::create_dir_all(&empty).unwrap();
-    let none = songs_db::at_start(&empty);
+    let none = songs_db::at_start(&empty, APP);
     assert_eq!(none.library, empty.join("library.db"));
     assert!(!none.make_wanted(), "{none:?}");
 }
@@ -309,7 +312,7 @@ fn a_songs_db_the_app_didnt_make_or_cant_read_is_left_alone() {
     let new = songs_beside(&old);
     // A database of something else at its name.
     Connection::open(&new).unwrap().execute_batch("CREATE TABLE mine (x); INSERT INTO mine VALUES (1);").unwrap();
-    let start = songs_db::at_start(dir);
+    let start = songs_db::at_start(dir, APP);
     assert_eq!(start.library, old);
     assert!(!start.make_wanted(), "{start:?}");
     assert!(songs_db::make(&old, &new, &mut |_| {}).is_err());
@@ -319,7 +322,7 @@ fn a_songs_db_the_app_didnt_make_or_cant_read_is_left_alone() {
     std::fs::remove_file(&new).unwrap();
     make(&old);
     Connection::open(&new).unwrap().execute_batch("PRAGMA user_version = 99;").unwrap();
-    let start = songs_db::at_start(dir);
+    let start = songs_db::at_start(dir, APP);
     assert_eq!(start.library, old);
     assert!(matches!(&start.state, State::Kept { why } if why.contains("newer")), "{start:?}");
     assert!(songs_db::make(&old, &new, &mut |_| {}).is_err());
@@ -388,4 +391,50 @@ fn the_settings_writers_change_songs_db_as_they_did_library_db() {
     assert!(lib.roots().unwrap().contains(&"L:\\Songs".to_owned()));
     // library.db itself is never touched.
     assert_eq!(Library::open_read_only(&old).unwrap().list_setting("sample_folders").unwrap().len(), 2);
+}
+
+#[test]
+fn a_songs_db_that_cant_be_made_twice_over_waits_rather_than_read_library_db_every_start() {
+    let old = library("failing");
+    let dir = old.parent().unwrap();
+    let note = dir.join(songs_db::FAILED_NOTE);
+    Connection::open(&old).unwrap().execute_batch("CREATE TABLE mystery (x);").unwrap();
+    let fail = || {
+        let why = songs_db::make(&old, &songs_beside(&old), &mut |_| {}).unwrap_err().to_string();
+        songs_db::note_failed(dir, APP, &why);
+    };
+    // Once: it may have been a passing thing, so it's tried again.
+    fail();
+    assert!(songs_db::at_start(dir, APP).make_wanted());
+    // Twice the same: it waits, and says why.
+    fail();
+    let waits = songs_db::at_start(dir, APP);
+    assert_eq!(waits.library, old);
+    assert!(matches!(&waits.state, State::Kept { why } if why.contains("doesn't know")), "{waits:?}");
+    // Another build may make it.
+    assert!(songs_db::at_start(dir, "0.1.1 (newer)").make_wanted());
+    // And so may a library.db that's changed: made then, and the note goes.
+    Connection::open(&old).unwrap().execute_batch("DROP TABLE mystery;").unwrap();
+    assert!(songs_db::at_start(dir, APP).make_wanted());
+    make(&old);
+    assert!(!note.exists());
+    assert_eq!(songs_db::at_start(dir, APP).state, State::Switched);
+}
+
+#[test]
+fn songs_db_held_by_another_program_at_the_start_leaves_library_db_in_use_till_next_time() {
+    let old = library("held");
+    let dir = old.parent().unwrap();
+    let new = songs_beside(&old);
+    make(&old);
+    // Another program writing to it: it can't be noted as the app's own, so the app doesn't write to it yet.
+    let holder = Connection::open(&new).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE;").unwrap();
+    let held = songs_db::at_start(dir, APP);
+    assert_eq!(held.library, old);
+    assert!(!held.make_wanted() && !held.is_songs_db(), "{held:?}");
+    assert!(held.line().contains("tried again next start"), "{}", held.line());
+    holder.execute_batch("ROLLBACK;").unwrap();
+    drop(holder);
+    assert_eq!(songs_db::at_start(dir, APP).state, State::Switched);
 }
