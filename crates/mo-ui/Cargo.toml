@@ -29,7 +29,8 @@ mo-audio = { path = "../mo-audio", features = ["gm"] }
 mo-backup = { path = "../mo-backup" }
 mo-presets = { path = "../mo-presets" }
 # Send to Bitwig (Presets), and Settings › DAWs checks the Bitwig link.
-mo-dawlink = { path = "../mo-dawlink" }
+# midi-port: Play on selected in FL Studio sends notes out of the "Music Organiser" MIDI port.
+mo-dawlink = { path = "../mo-dawlink", features = ["midi-port"] }
 # The window and the views the app draws itself (the galaxy) go through the graphics card with wgpu (spec 9.1).
 # Its window's handle too, so a drag out of the app can tell Windows which window it's from.
 slint = { workspace = true, features = [
