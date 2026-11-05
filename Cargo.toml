@@ -43,6 +43,9 @@ expect_used = "deny"
 # Release builds stop on arithmetic that overflows, as test builds do, rather than going on with a wrong number.
 [profile.release]
 overflow-checks = true
+# File names and line numbers, as in debug builds, so a release build's crash log says where it happened. On Windows
+# they go in the .pdb beside the app, not in the app itself.
+debug = "line-tables-only"
 
 # Debug builds (the launcher's, the tests') keep only file names and line numbers for their debugging info: all a
 # crash log needs to say where it happened. Full debugging info made the build folder several times bigger, and the
