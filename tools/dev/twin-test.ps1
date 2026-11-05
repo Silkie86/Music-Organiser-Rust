@@ -28,8 +28,8 @@ $First = Join-Path $env:LOCALAPPDATA 'MusicOrganiser'
 $Data = $First
 $Pointer = Join-Path $env:LOCALAPPDATA 'MusicOrganiser-folder.txt'
 if (Test-Path -LiteralPath $Pointer) {
-    $moved = ((Get-Content -LiteralPath $Pointer -Raw) + '').Trim()
-    if ($moved -and (Test-Path -LiteralPath (Join-Path $moved 'moved-in.json'))) { $Data = $moved }
+    $moved = ((Get-Content -LiteralPath $Pointer -Raw -Encoding UTF8 -ErrorAction SilentlyContinue) + '').Trim()
+    if ($moved -and [IO.Path]::IsPathRooted($moved) -and (Test-Path -LiteralPath (Join-Path $moved 'moved-in.json'))) { $Data = $moved }
 }
 $Rust = Join-Path $First 'run-latest-rust\app'
 $Cs = Join-Path $First 'run-latest\app'

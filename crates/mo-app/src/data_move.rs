@@ -15,9 +15,16 @@
 //!    folder gets a note, [`MOVED_OUT_FILE`], and nothing in it is removed or changed.
 //!
 //! Left out of the copy: the launchers' own folders ([`LAUNCHER_FOLDERS`]: the launcher runs the app from there and
-//! stays where it is), what [`LEFT_BEHIND`] names, lock files (`*.lock`, only for a running app), and links (never
-//! followed: the new folder gets a folder of its own where the old one had a link). A database's `-wal` and `-shm`
-//! files go with it, so the stamps the app keeps of its databases (which read them) still match after the move.
+//! stays where it is), what [`LEFT_BEHIND`] names, lock files (`*.lock`, only for a running app) and half-written
+//! saves (`*.mo-part`). A database's `-wal` and `-shm` files go with it, so the stamps the app keeps of its databases
+//! (which read them) still match after the move. A link or a junction in the folder (`logs` moved to another drive,
+//! say) is copied through: the new folder gets a plain folder with its files, so nothing the app reads goes missing; one
+//! that leads back into the data folder or the copy is left out. The copy always ends up holding exactly what the data
+//! folder holds: a file gone from it since an earlier pass is taken out of the copy too, and so is a half-made one.
+//!
+//! The switch at start runs before the window opens, so it only takes on a little ([`START_LIMIT`]): when more than
+//! that changed since the copy, it waits, and the app copies the changes again in the background
+//! ([`catch_up_wanted`]), so the next start switches.
 //!
 //! Two copies of the app: each holds [`OPEN_LOCK_FILE`] in its data folder shared while it runs ([`hold_open_lock`]),
 //! and the switch needs it alone, so a start while another copy is open never switches under it.
@@ -26,14 +33,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::paths::{self, MOVED_IN_FILE};
+use crate::songs::plural;
 
 /// Beside the first data folder (`%LOCALAPPDATA%\MusicOrganiser-moving.txt`): the folder whose copy is ready, for the
 /// next start to switch to. Removed once it has, or when the move is called off.
@@ -56,7 +64,11 @@ const PART: &str = ".mo-move";
 const SPARE_ROOM: u64 = 1 << 30;
 /// A pass that copied less than this (and had nothing change under it) is the last before the switch.
 const SMALL_PASS: u64 = 64 << 20;
-const MAX_PASSES: usize = 4;
+const MAX_PASSES: usize = 3;
+/// The most the switch at start copies before the window opens; more waits for a background catch-up.
+pub const START_LIMIT: u64 = 1 << 30;
+/// How often a pass saves what it has done so far, so a copy cut short goes on from there.
+const SAVE_EVERY: Duration = Duration::from_secs(5);
 const BUFFER: usize = 1 << 20;
 
 /// A file's size and time, as copied.
@@ -113,7 +125,10 @@ pub fn pending() -> Option<PathBuf> {
 pub fn cancel() -> io::Result<()> {
     match fs::remove_file(paths::first_dir().with_file_name(PENDING_FILE)) {
         Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
-        _ => Ok(()),
+        _ => {
+            set_start_note(None);
+            Ok(())
+        }
     }
 }
 
@@ -126,8 +141,10 @@ pub struct Pass {
     pub busy: Vec<String>,
     /// Files that couldn't be copied, with why.
     pub failed: Vec<String>,
-    /// What was left out because it's a link, or its name isn't plain text.
-    pub left_out: Vec<String>,
+    /// What was left out (a link back into the folder, a name that isn't plain text) or copied through a link.
+    pub notes: Vec<String>,
+    /// With a limit: nothing was copied, as this much was to do.
+    pub too_much: Option<u64>,
     /// Every file the copy now holds, and their size.
     pub files: usize,
     pub total: u64,
@@ -140,21 +157,30 @@ struct Found {
     stamp: Stamp,
 }
 
-/// Every file of the data folder `from` the move takes (see the module notes for what it leaves out).
-fn walk(from: &Path, left_out: &mut Vec<String>, stop: &AtomicBool) -> io::Result<Vec<Found>> {
+/// Every file of the data folder `from` the move takes (see the module notes for what it leaves out and how links
+/// are copied through). `inside` are folders a link must not lead into (the data folder and the copy). A file or
+/// folder that goes while it's listed is passed over.
+fn walk(from: &Path, inside: &[&Path], notes: &mut Vec<String>, stop: &AtomicBool) -> io::Result<Vec<Found>> {
     let mut found = Vec::new();
     let mut folders = vec![(from.to_path_buf(), String::new())];
+    let mut through: BTreeSet<PathBuf> = BTreeSet::new();
+    let real_inside: Vec<PathBuf> = inside.iter().map(|p| real(p)).collect();
     while let Some((dir, rel)) = folders.pop() {
         if stop.load(Ordering::Relaxed) {
             return Err(stopped());
         }
-        for entry in fs::read_dir(&dir)? {
-            let entry = entry?;
+        let top = rel.is_empty();
+        let listing = match fs::read_dir(&dir) {
+            Ok(listing) => listing,
+            Err(e) if !top && e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        for entry in listing {
+            let Ok(entry) = entry else { continue };
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                left_out.push(format!("{} (its name isn't plain text)", entry.path().display()));
+                notes.push(format!("left out {} (its name isn't plain text)", entry.path().display()));
                 continue;
             };
-            let top = rel.is_empty();
             if top
                 && (LEFT_BEHIND.contains(&name.as_str())
                     || [MOVING_IN_FILE, MOVED_IN_FILE, MOVED_OUT_FILE, OPEN_LOCK_FILE].contains(&name.as_str()))
@@ -162,26 +188,95 @@ fn walk(from: &Path, left_out: &mut Vec<String>, stop: &AtomicBool) -> io::Resul
                 continue;
             }
             let here = if top { name.clone() } else { format!("{rel}/{name}") };
-            let meta = fs::symlink_metadata(entry.path())?;
+            let mut meta = match fs::symlink_metadata(entry.path()) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e),
+            };
             if meta.file_type().is_symlink() {
-                left_out.push(format!("{here} (a link)"));
-            } else if meta.is_dir() {
+                // Copied through: what it leads to, unless that's inside the data folder or the copy, or seen already.
+                let Ok(target) = fs::metadata(entry.path()) else {
+                    notes.push(format!("left out {here} (a link that leads nowhere)"));
+                    continue;
+                };
+                let leads_to = real(&entry.path());
+                if real_inside.iter().any(|f| mo_backup::folders::within(&leads_to, f))
+                    || !through.insert(leads_to.clone())
+                {
+                    notes.push(format!("left out {here} (a link back into the folder)"));
+                    continue;
+                }
+                notes.push(format!("{here} is a link to {}: its files were copied", leads_to.display()));
+                meta = target;
+            }
+            if meta.is_dir() {
                 if !(top && LAUNCHER_FOLDERS.iter().any(|f| f.eq_ignore_ascii_case(&name))) {
                     folders.push((entry.path(), here));
                 }
             } else if meta.is_file() {
-                if name.ends_with(".lock") || name.ends_with(PART) {
+                if name.ends_with(".lock") || name.ends_with(PART) || name.ends_with(".mo-part") {
                     continue;
                 }
                 match Stamp::of(&meta) {
                     Some(stamp) => found.push(Found { rel: here, path: entry.path(), stamp }),
-                    None => left_out.push(format!("{here} (its time can't be read)")),
+                    None => notes.push(format!("left out {here} (its time can't be read)")),
                 }
             }
         }
     }
     found.sort_by(|a, b| a.rel.cmp(&b.rel));
     Ok(found)
+}
+
+/// Every plain file in the copy `to`, by its path there, but the move's own notes at its top.
+fn files_in(to: &Path) -> io::Result<Vec<String>> {
+    let mut files = Vec::new();
+    let mut folders = vec![(to.to_path_buf(), String::new())];
+    while let Some((dir, rel)) = folders.pop() {
+        let top = rel.is_empty();
+        let listing = match fs::read_dir(&dir) {
+            Ok(listing) => listing,
+            Err(e) if !top && e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        };
+        for entry in listing.flatten() {
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else { continue };
+            if top && [MOVING_IN_FILE, MOVED_IN_FILE, OPEN_LOCK_FILE].contains(&name.as_str()) {
+                continue;
+            }
+            let here = if top { name.clone() } else { format!("{rel}/{name}") };
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => folders.push((entry.path(), here)),
+                Ok(t) if t.is_file() => files.push(here),
+                _ => {}
+            }
+        }
+    }
+    Ok(files)
+}
+
+/// A file's place as it's matched: its case folded where the system ignores case (Windows, a Mac), so a file whose
+/// name only changed case is one file, not one to copy and one to take out.
+fn key(rel: &str) -> String {
+    if cfg!(any(windows, target_os = "macos")) { rel.to_lowercase() } else { rel.to_owned() }
+}
+
+/// Where `path` really is, through any links (as much of it as there is; the rest added as written).
+fn real(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    let mut at = path;
+    loop {
+        if let Ok(found) = fs::canonicalize(at) {
+            return rest.iter().rev().fold(found, |p, part| p.join(part));
+        }
+        match (at.parent(), at.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name.to_owned());
+                at = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 /// Where `rel` goes in `to`.
@@ -193,6 +288,8 @@ fn dest(to: &Path, rel: &str) -> PathBuf {
 enum NotCopied {
     /// It changed while being copied, or a running app holds it locked: try again.
     Busy,
+    /// It went from the data folder since it was listed.
+    Gone,
     Failed(io::Error),
 }
 
@@ -216,7 +313,11 @@ fn copy_one(f: &Found, to_file: &Path, stop: &AtomicBool) -> Result<(), NotCopie
     // One a stopped copy left: ours by its name.
     let _ = fs::remove_file(&part);
     let result = (|| {
-        let mut src = File::open(&f.path)?;
+        let mut src = match File::open(&f.path) {
+            Ok(src) => src,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(NotCopied::Gone),
+            Err(e) => return Err(e.into()),
+        };
         let mut out = File::create_new(&part)?;
         let mut hash = Sha256::new();
         let mut buf = vec![0u8; BUFFER];
@@ -280,17 +381,19 @@ fn is_stopped(e: &io::Error) -> bool {
     e.kind() == io::ErrorKind::Interrupted
 }
 
-/// One pass: copies each file of `from` the record doesn't have as it is now, and takes out of the copy each file it
-/// copied before that's gone from `from` since. `progress` hears the bytes done and to do.
+/// One pass: copies each file of `from` the record doesn't have as it is now, then takes out of the copy every file
+/// that isn't in `from` (gone since an earlier pass, or half made). `progress` hears the bytes done and to do. With a
+/// `limit`, nothing is copied when more than that is to do ([`Pass::too_much`] says how much).
 fn sync(
     from: &Path,
     to: &Path,
     record: &mut Record,
+    limit: Option<u64>,
     stop: &AtomicBool,
     progress: &mut dyn FnMut(u64, u64),
 ) -> io::Result<Pass> {
     let mut pass = Pass::default();
-    let found = walk(from, &mut pass.left_out, stop)?;
+    let found = walk(from, &[from, to], &mut pass.notes, stop)?;
     let todo: Vec<&Found> = found
         .iter()
         .filter(|f| {
@@ -299,7 +402,13 @@ fn sync(
         })
         .collect();
     let to_do: u64 = todo.iter().map(|f| f.stamp.size).sum();
+    if limit.is_some_and(|limit| to_do > limit) {
+        pass.too_much = Some(to_do);
+        return Ok(pass);
+    }
     progress(0, to_do);
+    let mut gone: BTreeSet<String> = BTreeSet::new();
+    let mut saved = Instant::now();
     for f in todo {
         let to_file = dest(to, &f.rel);
         if let Some(dir) = to_file.parent() {
@@ -316,54 +425,57 @@ fn sync(
                 record.files.remove(&f.rel);
                 pass.busy.push(f.rel.clone());
             }
+            Err(NotCopied::Gone) => {
+                record.files.remove(&f.rel);
+                gone.insert(key(&f.rel));
+            }
             Err(NotCopied::Failed(e)) => {
                 record.files.remove(&f.rel);
                 pass.failed.push(format!("{}: {e}", f.rel));
             }
         }
         progress(pass.bytes, to_do);
-    }
-    let now: BTreeSet<&str> = found.iter().map(|f| f.rel.as_str()).collect();
-    let gone: Vec<String> = record.files.keys().filter(|k| !now.contains(k.as_str())).cloned().collect();
-    for rel in gone {
-        let path = dest(to, &rel);
-        if fs::symlink_metadata(&path).is_ok_and(|m| m.is_file()) {
-            fs::remove_file(&path)?;
+        if saved.elapsed() >= SAVE_EVERY {
+            let _ = save_record(to, record);
+            saved = Instant::now();
         }
-        record.files.remove(&rel);
     }
-    pass.files = found.len();
-    pass.total = found.iter().map(|f| f.stamp.size).sum();
+    // The copy holds only what the data folder holds: a file gone since, or half made, is taken out.
+    let keep: BTreeSet<String> = found.iter().map(|f| key(&f.rel)).filter(|k| !gone.contains(k)).collect();
+    for rel in files_in(to)? {
+        if !keep.contains(&key(&rel)) {
+            match fs::remove_file(dest(to, &rel)) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+    }
+    record.files.retain(|rel, _| keep.contains(&key(rel)));
+    pass.files = keep.len();
+    pass.total = found.iter().filter(|f| keep.contains(&key(&f.rel))).map(|f| f.stamp.size).sum();
     Ok(pass)
 }
 
-/// Writes `text` to `path` by a whole new file that then takes its name, so a crash never leaves half of it.
-fn write_whole(path: &Path, text: &str) -> io::Result<()> {
-    let mut part = path.as_os_str().to_owned();
-    part.push(PART);
-    let part = PathBuf::from(part);
-    let mut file = File::create(&part)?;
-    file.write_all(text.as_bytes())?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&part, path)
-}
-
 fn save_record(to: &Path, record: &Record) -> io::Result<()> {
-    write_whole(&to.join(MOVING_IN_FILE), &serde_json::to_string_pretty(record).map_err(io::Error::other)?)
+    crate::backup::write_whole(
+        &to.join(MOVING_IN_FILE),
+        &serde_json::to_string_pretty(record).map_err(io::Error::other)?,
+    )
 }
 
 fn now_text() -> String {
     chrono::Local::now().format("%Y-%m-%d %H:%M").to_string()
 }
 
-/// Whether `to` may take the data of `from`: a whole path, neither inside the other, and empty (or a copy of `from`
-/// this move started before). Gives what the copy holds so far.
+/// Whether `to` may take the data of `from`: a whole path, neither inside the other (where each really is, through
+/// links), and empty (or a copy of `from` this move started before). Gives what the copy holds so far.
 fn check_folder(from: &Path, to: &Path) -> Result<Record, String> {
     if !to.is_absolute() {
         return Err(format!("{} isn't a whole folder path", to.display()));
     }
-    if mo_backup::folders::within(to, from) || mo_backup::folders::within(from, to) {
+    let (real_from, real_to) = (real(from), real(to));
+    let inside = |a: &Path, b: &Path| mo_backup::folders::within(a, b) || mo_backup::folders::within(b, a);
+    if inside(to, from) || inside(&real_to, &real_from) {
         return Err("Pick a folder outside the app's data folder (and not one that holds it)".to_owned());
     }
     match fs::symlink_metadata(to) {
@@ -375,7 +487,7 @@ fn check_folder(from: &Path, to: &Path) -> Result<Record, String> {
     if let Ok(text) = fs::read_to_string(to.join(MOVING_IN_FILE)) {
         let record: Record =
             serde_json::from_str(&text).map_err(|e| format!("{MOVING_IN_FILE} in {} is damaged: {e}", to.display()))?;
-        if Path::new(&record.from) != from {
+        if !paths_match(Path::new(&record.from), from) {
             return Err(format!("{} holds a copy of another folder ({})", to.display(), record.from));
         }
         return Ok(record);
@@ -403,7 +515,8 @@ pub struct Copied {
     pub bytes: u64,
     /// Files still changing, which the switch copies at the next start.
     pub at_start: usize,
-    pub left_out: Vec<String>,
+    /// What was left out, or copied through a link.
+    pub notes: Vec<String>,
 }
 
 /// Step 1 and 2: copies the data folder in use, `from`, to `to` and checks it, then marks it ready for the next start.
@@ -411,7 +524,11 @@ pub struct Copied {
 /// each pass. Stops (with `Err("Stopped")`) when `stop` is set; the copy so far stays, and a later call goes on from
 /// there.
 pub fn copy(from: &Path, to: &Path, stop: &AtomicBool, progress: &mut dyn FnMut(u64, u64)) -> Result<Copied, String> {
-    copy_with(from, to, &paths::first_dir(), stop, progress)
+    let copied = copy_with(from, to, &paths::first_dir(), stop, progress);
+    if copied.is_ok() {
+        set_start_note(None);
+    }
+    copied
 }
 
 fn copy_with(
@@ -423,8 +540,8 @@ fn copy_with(
 ) -> Result<Copied, String> {
     let mut record = check_folder(from, to)?;
     let fail = |e: io::Error| if is_stopped(&e) { "Stopped".to_owned() } else { e.to_string() };
-    let mut ignored = Vec::new();
-    let all = walk(from, &mut ignored, stop).map_err(fail)?;
+    let mut notes = Vec::new();
+    let all = walk(from, &[from, to], &mut notes, stop).map_err(fail)?;
     let needed: u64 = all.iter().filter(|f| record.files.get(&f.rel) != Some(&f.stamp)).map(|f| f.stamp.size).sum();
     if let Some(free) = free_room(to)
         && free < needed.saturating_add(SPARE_ROOM)
@@ -440,7 +557,7 @@ fn copy_with(
     save_record(to, &record).map_err(|e| format!("Couldn't write in {}: {e}", to.display()))?;
     let mut last = Pass::default();
     for _ in 0..MAX_PASSES {
-        let pass = sync(from, to, &mut record, stop, progress);
+        let pass = sync(from, to, &mut record, None, stop, progress);
         // What the pass did is kept even when it stopped part way.
         save_record(to, &record).map_err(|e| format!("Couldn't write in {}: {e}", to.display()))?;
         last = pass.map_err(fail)?;
@@ -451,18 +568,19 @@ fn copy_with(
     if !last.failed.is_empty() {
         return Err(format!("{} couldn't be copied: {}", plural(last.failed.len(), "file"), first_few(&last.failed)));
     }
-    write_whole(&first.with_file_name(PENDING_FILE), &to.display().to_string())
+    crate::backup::write_whole(&first.with_file_name(PENDING_FILE), &to.display().to_string())
         .map_err(|e| format!("Couldn't note the move beside {}: {e}", first.display()))?;
-    Ok(Copied { files: last.files, bytes: last.total, at_start: last.busy.len(), left_out: last.left_out })
+    Ok(Copied { files: last.files, bytes: last.total, at_start: last.busy.len(), notes: last.notes })
 }
 
 /// What the start did about a ready move.
 #[derive(Debug)]
 pub enum AtStart {
     /// The app now uses `to`.
-    Switched { from: PathBuf, to: PathBuf, copied: usize, bytes: u64, took: Duration, left_out: Vec<String> },
-    /// Not this time; tried again at the next start.
-    NotYet { to: PathBuf, why: String },
+    Switched { from: PathBuf, to: PathBuf, copied: usize, bytes: u64, took: Duration, notes: Vec<String> },
+    /// Not this time; tried again at the next start. `catch_up`: too much changed since the copy to take on before
+    /// the window opens, so the app copies it again in the background now.
+    NotYet { to: PathBuf, why: String, catch_up: bool },
     /// Called off: the ready copy can't be used.
     Dropped { to: PathBuf, why: String },
 }
@@ -471,7 +589,7 @@ impl AtStart {
     /// The session log's line.
     pub fn line(&self) -> String {
         match self {
-            AtStart::Switched { from, to, copied, bytes, took, left_out } => {
+            AtStart::Switched { from, to, copied, bytes, took, notes } => {
                 let mut line = format!(
                     "Now using {}, moved from {} (the last {} caught up, {}, in {:.1} s); the old folder stays",
                     to.display(),
@@ -480,45 +598,64 @@ impl AtStart {
                     size_text(*bytes),
                     took.as_secs_f64()
                 );
-                if !left_out.is_empty() {
-                    line.push_str(&format!("; left out: {}", first_few(left_out)));
+                if !notes.is_empty() {
+                    line.push_str(&format!("; {}", notes.join("; ")));
                 }
                 line
             }
-            AtStart::NotYet { to, why } => format!("Not switching to {} yet: {why}", to.display()),
+            AtStart::NotYet { to, why, .. } => format!("Not switching to {} yet: {why}", to.display()),
             AtStart::Dropped { to, why } => format!("The move to {} is called off: {why}", to.display()),
         }
     }
 }
 
-static AT_START: OnceLock<Option<String>> = OnceLock::new();
+/// What the start said about a move that didn't switch, for Settings, and the folder to catch up in the background.
+struct StartNote {
+    line: String,
+    catch_up: Option<PathBuf>,
+}
 
-/// What [`finish_at_start`] said this run, for Settings (none when there was nothing to do or it switched).
+static START_NOTE: Mutex<Option<StartNote>> = Mutex::new(None);
+
+fn set_start_note(note: Option<StartNote>) {
+    *START_NOTE.lock().unwrap_or_else(PoisonError::into_inner) = note;
+}
+
+/// Why the start didn't switch to a ready move, for Settings, until the move is called off or copied again.
 pub fn start_problem() -> Option<String> {
-    AT_START.get().cloned().flatten()
+    START_NOTE.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|n| n.line.clone())
+}
+
+/// The folder to copy the changes to again in the background, when the start found too much changed to switch.
+/// Asked once: the next ask gives `None`.
+pub fn catch_up_wanted() -> Option<PathBuf> {
+    START_NOTE.lock().unwrap_or_else(PoisonError::into_inner).as_mut().and_then(|n| n.catch_up.take())
 }
 
 /// Step 3, first thing at start, before any of the app's files is opened (and before [`paths::data_dir`] is asked):
 /// when a copy is ready, catches it up and switches to it. `None` when there's no move to make.
 pub fn finish_at_start() -> Option<AtStart> {
     let outcome = finish_in(&paths::first_dir());
-    let problem = match &outcome {
-        Some(AtStart::NotYet { .. } | AtStart::Dropped { .. }) => outcome.as_ref().map(AtStart::line),
+    set_start_note(match &outcome {
+        Some(o @ AtStart::NotYet { to, catch_up, .. }) => {
+            Some(StartNote { line: o.line(), catch_up: catch_up.then(|| to.clone()) })
+        }
+        Some(o @ AtStart::Dropped { .. }) => Some(StartNote { line: o.line(), catch_up: None }),
         _ => None,
-    };
-    let _ = AT_START.set(problem);
+    });
     outcome
 }
 
 fn finish_in(first: &Path) -> Option<AtStart> {
     let to = pending_in(first)?;
-    let from = paths::folder_in_use(first);
+    let in_use = paths::resolve_in(first);
+    let from = in_use.folder;
     let pending_file = first.with_file_name(PENDING_FILE);
     let call_off = |why: String| {
         let _ = fs::remove_file(&pending_file);
         Some(AtStart::Dropped { to: to.clone(), why })
     };
-    let not_yet = |why: String| Some(AtStart::NotYet { to: to.clone(), why });
+    let not_yet = |why: String| Some(AtStart::NotYet { to: to.clone(), why, catch_up: false });
     if paths_match(&from, &to) {
         let _ = fs::remove_file(&pending_file);
         return None;
@@ -532,6 +669,11 @@ fn finish_in(first: &Path) -> Option<AtStart> {
         Err(e) => return call_off(format!("its {MOVING_IN_FILE} can't be read ({e})")),
     };
     if !paths_match(Path::new(&record.from), &from) {
+        // The folder in use isn't the one copied: when that's only because a moved folder's drive is missing now,
+        // wait for it; otherwise the copy is of a folder the app no longer uses.
+        if in_use.problem.is_some() {
+            return not_yet(format!("the folder it was copied from ({}) can't be found", record.from));
+        }
         return call_off(format!("it's a copy of {}, but the app now uses {}", record.from, from.display()));
     }
     // No other copy of the app may be open on the old folder while it's caught up and left.
@@ -545,7 +687,7 @@ fn finish_in(first: &Path) -> Option<AtStart> {
     }
     let started = Instant::now();
     let never = AtomicBool::new(false);
-    let pass = sync(&from, &to, &mut record, &never, &mut |_, _| {});
+    let pass = sync(&from, &to, &mut record, Some(START_LIMIT), &never, &mut |_, _| {});
     if save_record(&to, &record).is_err() {
         return not_yet(format!("couldn't write {MOVING_IN_FILE}"));
     }
@@ -553,6 +695,13 @@ fn finish_in(first: &Path) -> Option<AtStart> {
         Ok(pass) => pass,
         Err(e) => return not_yet(format!("the last copy stopped: {e}")),
     };
+    if let Some(much) = pass.too_much {
+        return Some(AtStart::NotYet {
+            to: to.clone(),
+            why: format!("{} changed since the copy, so it's copied again in the background first", size_text(much)),
+            catch_up: true,
+        });
+    }
     if !pass.failed.is_empty() {
         return not_yet(format!(
             "{} couldn't be copied: {}",
@@ -567,11 +716,11 @@ fn finish_in(first: &Path) -> Option<AtStart> {
     let moved = Record { files: BTreeMap::new(), switched: now_text(), ..record };
     let marked = serde_json::to_string_pretty(&moved)
         .map_err(io::Error::other)
-        .and_then(|json| write_whole(&to.join(MOVED_IN_FILE), &json));
+        .and_then(|json| crate::backup::write_whole(&to.join(MOVED_IN_FILE), &json));
     if let Err(e) = marked {
         return not_yet(format!("couldn't write {MOVED_IN_FILE} ({e})"));
     }
-    if let Err(e) = write_whole(&paths::pointer_file(first), &to.display().to_string()) {
+    if let Err(e) = crate::backup::write_whole(&paths::pointer_file(first), &to.display().to_string()) {
         return not_yet(format!("couldn't write {} ({e})", paths::POINTER_FILE));
     }
     let _ = fs::remove_file(to.join(MOVING_IN_FILE));
@@ -586,19 +735,15 @@ fn finish_in(first: &Path) -> Option<AtStart> {
             moved.switched
         ),
     );
-    drop_lock(lock);
+    let _ = lock.unlock();
     Some(AtStart::Switched {
         from,
         to,
         copied: pass.copied,
         bytes: pass.bytes,
         took: started.elapsed(),
-        left_out: pass.left_out,
+        notes: pass.notes,
     })
-}
-
-fn drop_lock(lock: File) {
-    let _ = lock.unlock();
 }
 
 /// Whether two folder paths name the same folder as written (Windows and a Mac ignore case).
@@ -625,14 +770,9 @@ fn first_few(list: &[String]) -> String {
     text
 }
 
-fn plural(n: usize, what: &str) -> String {
-    if n == 1 { format!("1 {what}") } else { format!("{n} {what}s") }
-}
-
-/// A size in GB or MB, as the app shows them.
+/// A size as the Space page shows it.
 pub fn size_text(bytes: u64) -> String {
-    let gb = bytes as f64 / 1e9;
-    if gb >= 1.0 { format!("{gb:.1} GB") } else { format!("{:.0} MB", bytes as f64 / 1e6) }
+    mo_space::size_text(bytes)
 }
 
 /// The line Settings shows under the data folder: a move waiting for the next start, where the data came from, or
@@ -807,5 +947,61 @@ mod tests {
         assert!(matches!(finish_in(&s.first), Some(AtStart::NotYet { .. })));
         drop(other);
         assert!(matches!(finish_in(&s.first), Some(AtStart::Switched { .. })));
+    }
+
+    #[test]
+    fn a_file_gone_since_an_earlier_pass_leaves_the_copy_too() {
+        let s = Setup::new("gone");
+        s.copy().unwrap();
+        // The old log isn't in the record now (it was busy last pass), and the app's last close took it away: the
+        // copy must not keep the stale one (SQLite would play an old -wal over newer pages).
+        let mut record: Record = serde_json::from_str(&fs::read_to_string(s.to.join(MOVING_IN_FILE)).unwrap()).unwrap();
+        record.files.remove("library.db-wal");
+        save_record(&s.to, &record).unwrap();
+        fs::remove_file(s.first.join("library.db-wal")).unwrap();
+        // A half-made copy a killed run left goes too.
+        fs::write(s.to.join(format!("rust-settings.json{PART}")), b"half").unwrap();
+        assert!(matches!(finish_in(&s.first), Some(AtStart::Switched { .. })));
+        assert!(!s.to.join("library.db-wal").exists());
+        assert!(!s.to.join(format!("rust-settings.json{PART}")).exists());
+        assert!(s.to.join("library.db").is_file());
+    }
+
+    #[test]
+    fn too_much_changed_waits_for_a_catch_up() {
+        let s = Setup::new("much");
+        s.copy().unwrap();
+        let mut record: Record = serde_json::from_str(&fs::read_to_string(s.to.join(MOVING_IN_FILE)).unwrap()).unwrap();
+        let sync_it = |record: &mut Record, limit| {
+            sync(&s.first, &s.to, record, Some(limit), &AtomicBool::new(false), &mut |_, _| {}).unwrap()
+        };
+        fs::write(s.first.join("library.db"), vec![8u8; 300_000]).unwrap();
+        let pass = sync_it(&mut record, 1000);
+        assert_eq!((pass.too_much, pass.copied), (Some(300_000), 0));
+        let pass = sync_it(&mut record, START_LIMIT);
+        assert_eq!((pass.too_much, pass.copied), (None, 1));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_link_is_copied_through_unless_it_leads_back_in() {
+        use std::os::unix::fs::symlink;
+        let s = Setup::new("links");
+        let away = s.root.join("D").join("logs");
+        fs::create_dir_all(&away).unwrap();
+        fs::write(away.join("old.log"), b"kept").unwrap();
+        fs::remove_dir_all(s.first.join("logs")).unwrap();
+        symlink(&away, s.first.join("logs")).unwrap();
+        symlink(&s.first, s.first.join("loop")).unwrap();
+        let copied = s.copy().unwrap();
+        assert_eq!(fs::read(s.to.join("logs").join("old.log")).unwrap(), b"kept");
+        assert!(fs::symlink_metadata(s.to.join("logs")).unwrap().is_dir());
+        assert!(!s.to.join("loop").exists());
+        assert!(copied.notes.iter().any(|n| n.contains("back into the folder")));
+        // A target reached through a link into the data folder is refused.
+        let into = s.root.join("into");
+        symlink(&s.first, &into).unwrap();
+        let err = copy_with(&s.first, &into.join("MusicOrganiser"), &s.first, &AtomicBool::new(false), &mut |_, _| {});
+        assert!(err.unwrap_err().contains("outside"));
     }
 }

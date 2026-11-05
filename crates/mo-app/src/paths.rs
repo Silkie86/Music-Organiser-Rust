@@ -83,6 +83,7 @@ pub(crate) fn resolve_in(first: &Path) -> Resolved {
 }
 
 /// The folder in use for the first data folder `first`, read now (not the run's own, which [`data_dir`] keeps).
+#[cfg(test)]
 pub(crate) fn folder_in_use(first: &Path) -> PathBuf {
     resolve_in(first).folder
 }

@@ -202,6 +202,11 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         })
     });
     app.set_settings_built(true);
+    // The start found too much changed since a move's copy to switch before the window opened: catch it up now, so
+    // the next start switches.
+    if let Some(to) = mo_app::data_move::catch_up_wanted().filter(|_| setup_live) {
+        move_data(app, to);
+    }
 
     let data = app.global::<SettingsData>();
     data.set_tabs(ModelRc::new(VecModel::from(
@@ -858,8 +863,8 @@ fn move_data(app: &AppWindow, to: PathBuf) {
                 if c.at_start > 0 {
                     line.push_str(&format!("; {} still changing go at the next start", c.at_start));
                 }
-                if !c.left_out.is_empty() {
-                    line.push_str(&format!("; left out: {}", c.left_out.join("; ")));
+                if !c.notes.is_empty() {
+                    line.push_str(&format!("; {}", c.notes.join("; ")));
                 }
                 log::info("Data folder", &line);
                 job.done_as("The app's data is copied", "It switches to the new folder when the app next starts");
