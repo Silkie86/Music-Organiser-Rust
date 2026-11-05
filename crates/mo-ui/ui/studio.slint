@@ -1749,6 +1749,8 @@ export component Segmented inherits Rectangle {
     in property <[string]> keys;
     // The picked one. The page sets it when told of a pick, so a key that changes the view moves it too.
     in property <int> current;
+    // The room either side of each label: less where many choices share a narrow row (Ctrl+K's kinds).
+    in property <length> pad: Space.lg;
     callback picked(int);
     // Where the picked button is, which each button reports.
     property <length> lit-x;
@@ -1787,7 +1789,7 @@ export component Segmented inherits Rectangle {
     row := HorizontalLayout {
         for name[i] in root.choices: Rectangle {
             property <bool> is-current: i == root.current;
-            width: label.preferred-width + 2 * Space.lg;
+            width: label.preferred-width + 2 * root.pad;
             background: self.is-current ? transparent : touch.pressed ? Theme.well : touch.has-hover ? Theme.hover.transparentize(40%) : transparent;
             animate background { duration: Motion.tap; }
             init => { self.report(); }
