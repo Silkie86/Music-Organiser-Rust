@@ -347,7 +347,11 @@ impl Link {
 
     /// Adds an instrument track after the project's last track (before the effect tracks), names it and selects it.
     pub fn new_track(&mut self, name: &str) -> Result<NewTrack, Error> {
-        let answer = self.change(ask("newtrack", [("name", name.into())]))?;
+        self.add_track(ask("newtrack", [("name", name.into())]))
+    }
+
+    fn add_track(&mut self, request: Map<String, Value>) -> Result<NewTrack, Error> {
+        let answer = self.change(request)?;
         let index = index(answer.get("index")).ok_or(Error::Unexpected)?;
         let id = answer.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).map(str::to_owned);
         Ok(NewTrack { index, name: text(&answer, "name"), id })
@@ -356,10 +360,7 @@ impl Link {
     /// [`Link::new_track`], noted as the app's audition track so [`Link::delete_audition_track`] may take it out again.
     /// Extension 3.20 and later.
     pub fn new_audition_track(&mut self, name: &str) -> Result<NewTrack, Error> {
-        let answer = self.change(ask("newtrack", [("name", name.into()), ("audition", true.into())]))?;
-        let index = index(answer.get("index")).ok_or(Error::Unexpected)?;
-        let id = answer.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).map(str::to_owned);
-        Ok(NewTrack { index, name: text(&answer, "name"), id })
+        self.add_track(ask("newtrack", [("name", name.into()), ("audition", true.into())]))
     }
 
     /// Stops and takes out the track [`Link::new_audition_track`] made, only while it still has the name it came in

@@ -524,6 +524,7 @@ impl World {
             _ => return Err("Say which track, by its ID.".into()),
         };
         let noted = self.audition_tracks.iter().position(|(t, _)| *t == id).map(|n| self.audition_tracks.remove(n).1);
+        self.auditions.retain(|(t, _, _)| *t != id);
         let at = self.tracks.iter().position(|t| t.id == id);
         if let Some(t) = at {
             self.launched.retain(|&(lt, _)| lt != t);

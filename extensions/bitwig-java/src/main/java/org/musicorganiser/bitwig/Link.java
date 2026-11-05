@@ -1857,8 +1857,9 @@ final class Link {
                     String id = idOf(t);
                     if (!id.isEmpty()) m.put("id", id);
                     // An audition track (extension 3.20) is noted with its name, so deletetrack may take it out again.
-                    String shown = str(track.name().get());
-                    if (audition && !id.isEmpty() && !shown.isEmpty()) auditionTracks.put(id, shown);
+                    // The name asked for, which Bitwig shows even when it was slow to: deletetrack then still finds it.
+                    String noted = name.isEmpty() ? str(track.name().get()) : name;
+                    if (audition && !id.isEmpty() && !noted.isEmpty()) auditionTracks.put(id, noted);
                     finish.ok(m);
                 }, finish);
             }, finish);
@@ -2000,8 +2001,14 @@ final class Link {
         Object id = field(request, "trackId");
         if (!(id instanceof String) || ((String) id).isEmpty()) throw new LinkError("Say which track, by its ID.");
         String noted = auditionTracks.remove(id);
+        // Its clips go with it, or stay yours with a track you kept: either way they're not the app's to take out now.
+        auditionClips.keySet().removeIf(k -> k.startsWith(id + "#"));
         int t = indexOf((String) id);
-        if (t >= 0) trackItems[t].stop();
+        if (t >= 0) {
+            trackItems[t].stop();
+            // As stoptracks does: a track you keep plays its arranger clips again, not the empty launcher.
+            trackItems[t].returnToArrangement();
+        }
         if (flag(request, "transport", false) && transport != null) transport.stop();
         Map<String, Object> m = new LinkedHashMap<>();
         if (t < 0 || noted == null || !noted.equals(str(trackItems[t].name().get()))) {

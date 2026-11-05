@@ -161,9 +161,10 @@ impl Bitwig {
                     .into(),
             ));
         };
-        // Whatever goes wrong from here, the track comes out again, so a failed audition leaves nothing behind.
+        // Whatever goes wrong from here, the track comes out again, so a failed audition leaves nothing behind (and
+        // Bitwig stops if its clip launched after all and started it).
         let undo = |link: &mut Link, why: Error| {
-            let _ = link.delete_audition_track(&track_id, false);
+            let _ = link.delete_audition_track(&track_id, !was_playing);
             why
         };
         match link.insert_file(track.index, &preset) {
