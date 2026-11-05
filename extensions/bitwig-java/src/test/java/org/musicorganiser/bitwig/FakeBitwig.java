@@ -2506,6 +2506,17 @@ final class FakeBitwig {
             FakeBitwig.this.returnToArrangement(index);
         }
 
+        /** Deletes the track a moment later: the tracks after it move up one (extension 3.20's deletetrack). */
+        void deleteObject() {
+            calls.add(Arrays.asList("deleteTrack", index));
+            later(20, () -> {
+                if (index < 0 || index >= state.tracks.size()) return;
+                state.tracks.remove(index);
+                if (cursorIndex == index) cursorIndex = -1;
+                else if (cursorIndex > index) cursorIndex--;
+            });
+        }
+
         Colour color() {
             return colour;
         }

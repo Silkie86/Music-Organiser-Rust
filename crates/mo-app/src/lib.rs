@@ -29,6 +29,7 @@ pub mod paths;
 pub mod piano_roll;
 pub mod places;
 pub mod plugins;
+pub mod preset_audition;
 pub mod presets;
 pub mod settings;
 pub mod shapes;

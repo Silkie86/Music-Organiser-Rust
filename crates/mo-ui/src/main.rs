@@ -161,6 +161,7 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::drag::finish_up();
     // A part playing in Bitwig or FL stops with the app.
     mo_ui::midi::finish_up();
+    mo_ui::presets::finish_up();
     // The sweep's and the frames' last few seconds, before the log closes.
     mo_app::sweep_timing::finish();
     mo_app::frame_timing::finish();

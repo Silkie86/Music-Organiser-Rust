@@ -562,6 +562,9 @@ fn presets_shots(
     data.invoke_clear();
     mo_ui::presets::pick_row(app, 3);
     shots.push(("presets-picked.png".into(), capture(window)));
+    mo_ui::presets::show_audition_sample(app, true);
+    shots.push(("presets-auditioning.png".into(), capture(window)));
+    mo_ui::presets::show_audition_sample(app, false);
     mo_ui::presets::show_section(app, Section::Curves);
     shots.push(("presets-curves.png".into(), capture(window)));
     mo_ui::presets::pick_row(app, 0);

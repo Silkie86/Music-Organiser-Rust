@@ -44,7 +44,7 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 
 /// The commands that change or select something in Bitwig's project, as the link lists them: each carries
 /// [`Link::only_in`] when it's set. Not `recordabort`, which must reach the link whatever project is in front.
-const PROJECT_COMMANDS: [&str; 15] = [
+const PROJECT_COMMANDS: [&str; 16] = [
     "set",
     "insert",
     "newtrack",
@@ -60,6 +60,7 @@ const PROJECT_COMMANDS: [&str; 15] = [
     "probe",
     "stoptracks",
     "deleteclip",
+    "deletetrack",
 ];
 
 /// What the link in Bitwig says when the app connects (and to `hello`).
@@ -350,6 +351,31 @@ impl Link {
         let index = index(answer.get("index")).ok_or(Error::Unexpected)?;
         let id = answer.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).map(str::to_owned);
         Ok(NewTrack { index, name: text(&answer, "name"), id })
+    }
+
+    /// [`Link::new_track`], noted as the app's audition track so [`Link::delete_audition_track`] may take it out again.
+    /// Extension 3.20 and later.
+    pub fn new_audition_track(&mut self, name: &str) -> Result<NewTrack, Error> {
+        let answer = self.change(ask("newtrack", [("name", name.into()), ("audition", true.into())]))?;
+        let index = index(answer.get("index")).ok_or(Error::Unexpected)?;
+        let id = answer.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).map(str::to_owned);
+        Ok(NewTrack { index, name: text(&answer, "name"), id })
+    }
+
+    /// Stops and takes out the track [`Link::new_audition_track`] made, only while it still has the name it came in
+    /// with; with `stop_bitwig`, Bitwig stops playing too. Whether it was taken out: false when it was renamed (so it's
+    /// yours now) or is gone already. Extension 3.20 and later.
+    pub fn delete_audition_track(&mut self, track_id: &str, stop_bitwig: bool) -> Result<bool, Error> {
+        let answer =
+            self.change(ask("deletetrack", [("trackId", track_id.into()), ("transport", stop_bitwig.into())]))?;
+        answer.get("deleted").and_then(Value::as_bool).ok_or(Error::Unexpected)
+    }
+
+    /// Stops the launcher clips on the track Bitwig keeps under `track_id` and puts it back on the arranger
+    /// (`stoptracks`); with `stop_bitwig`, Bitwig stops playing too (extension 3.20).
+    pub fn stop_track(&mut self, track_id: &str, stop_bitwig: bool) -> Result<(), Error> {
+        let fields = [("trackIds", json!([track_id])), ("transport", stop_bitwig.into())];
+        self.change(ask("stoptracks", fields)).map(|_| ())
     }
 
     /// Adds a file to the end of a track's chain (by its place in the project listing), as if it were dropped there:

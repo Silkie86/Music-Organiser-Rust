@@ -1,6 +1,6 @@
 //! A stand-in for the Music Organiser link in Bitwig, for tests: no test reaches a real Bitwig (rule 11). It listens
-//! on a free port on this computer, greets each connection as extension 3.19 does, and answers `hello`, `newtrack`,
-//! `insert`, `pads`, `clip`, `selectedtrack`, `transport` and `deleteclip` the way the extension does, in its words (`extensions/bitwig-java`'s `Link.java`), on a made-up project:
+//! on a free port on this computer, greets each connection as extension 3.20 does, and answers `hello`, `newtrack`,
+//! `insert`, `pads`, `clip`, `selectedtrack`, `transport`, `stoptracks`, `deleteclip` and `deletetrack` the way the extension does, in its words (`extensions/bitwig-java`'s `Link.java`), on a made-up project:
 //! the C# app's stand-in's, "Night Drive", with Drums, Kick, Bass and Master. It handles one request at a time,
 //! whichever connection it came on, as the extension makes changes one at a time.
 //!
@@ -174,18 +174,20 @@ pub struct World {
     pub launched: Vec<(usize, usize)>,
     /// The audition clips the link noted (extension 3.19): track ID, slot, and the name the clip came in with.
     pub auditions: Vec<(String, usize, String)>,
+    /// The audition tracks the link noted (extension 3.20): track ID, and the name the track came in with.
+    pub audition_tracks: Vec<(String, String)>,
     /// How many tracks have been made, for their IDs.
     made: usize,
 }
 
 impl Default for World {
-    /// "Night Drive" open, changes allowed, extension 3.19 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
+    /// "Night Drive" open, changes allowed, extension 3.20 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
     /// Drums (a group), Kick (audio, with EQ+), Bass (an instrument: Serum, then a Compressor, selected) and the
     /// Master (with a Peak Limiter).
     fn default() -> World {
         let hello = json!({
             "link": 3, "product": "Bitwig Studio", "version": "6.1.5", "api": 23, "platform": "WINDOWS",
-            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.19", "loopback": true,
+            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.20", "loopback": true,
         });
         let mut serum = FakeDevice::new("Serum", "instrument");
         serum.preset = "Reese".into();
@@ -224,6 +226,7 @@ impl Default for World {
             playing: false,
             launched: Vec::new(),
             auditions: Vec::new(),
+            audition_tracks: Vec::new(),
             made: 0,
         };
         for track in &mut world.tracks {
@@ -363,7 +366,7 @@ impl World {
         let cmd = map.get("cmd");
         let changes = match cmd.and_then(Value::as_str) {
             Some("hello" | "selectedtrack" | "transport") => false,
-            Some("newtrack" | "insert" | "pads" | "clip" | "deleteclip") => true,
+            Some("newtrack" | "insert" | "pads" | "clip" | "deleteclip" | "deletetrack" | "stoptracks") => true,
             _ => return Err(format!("Unknown command: {}", js(cmd))),
         };
         self.check_allowed(map, changes)?;
@@ -378,6 +381,8 @@ impl World {
             Some("selectedtrack") => Ok(self.selected()),
             Some("transport") => Ok(json!({ "playing": self.playing })),
             Some("deleteclip") => self.delete_clip(map),
+            Some("deletetrack") => self.delete_track(map),
+            Some("stoptracks") => self.stop_tracks(map),
             _ => self.fill_pads(map),
         }
     }
@@ -442,6 +447,9 @@ impl World {
             track.name = name.to_owned();
         }
         let answer = json!({ "index": at, "name": track.name, "id": track.id });
+        if request.get("audition").and_then(Value::as_bool) == Some(true) && !track.name.is_empty() {
+            self.audition_tracks.push((track.id.clone(), track.name.clone()));
+        }
         self.selected_track = Some(at);
         self.selected_device = None;
         Ok(answer)
@@ -506,6 +514,64 @@ impl World {
         }
         self.next_step("deleteclip", request)?;
         Ok(json!({ "deleted": deleted }))
+    }
+
+    /// Stops and takes out an audition track the link noted, while it keeps its name, as the link's `deleteTrack`
+    /// (3.20): the tracks after it move up one.
+    fn delete_track(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
+        let id = match request.get("trackId") {
+            Some(Value::String(id)) if !id.is_empty() => id.clone(),
+            _ => return Err("Say which track, by its ID.".into()),
+        };
+        let noted = self.audition_tracks.iter().position(|(t, _)| *t == id).map(|n| self.audition_tracks.remove(n).1);
+        let at = self.tracks.iter().position(|t| t.id == id);
+        if let Some(t) = at {
+            self.launched.retain(|&(lt, _)| lt != t);
+        }
+        if request.get("transport").and_then(Value::as_bool) == Some(true) {
+            self.playing = false;
+        }
+        let deleted = match (at, &noted) {
+            (Some(t), Some(name)) => self.tracks.get(t).is_some_and(|track| track.name == *name),
+            _ => false,
+        };
+        if deleted && let Some(t) = at {
+            self.tracks.remove(t);
+            let after = |x: usize| {
+                if x > t {
+                    Some(x - 1)
+                } else if x == t {
+                    None
+                } else {
+                    Some(x)
+                }
+            };
+            self.launched = self.launched.iter().filter_map(|&(lt, s)| after(lt).map(|lt| (lt, s))).collect();
+            self.selected_track = self.selected_track.and_then(after);
+            self.selected_device = self.selected_device.and_then(|(st, d)| after(st).map(|st| (st, d)));
+            self.modified = true;
+        }
+        self.next_step("deletetrack", request)?;
+        Ok(json!({ "deleted": deleted }))
+    }
+
+    /// Stops the launcher clips on the tracks given by ID, as the link's `stopTracks` (3.16; `transport` from 3.20).
+    fn stop_tracks(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
+        let Some(Value::Array(ids)) = request.get("trackIds") else {
+            return Err("Say which tracks to stop, by their IDs.".into());
+        };
+        let mut stopped = Vec::new();
+        for id in ids {
+            let Some(id) = id.as_str() else { return Err("A track's ID is text.".into()) };
+            if let Some(t) = self.tracks.iter().position(|track| track.id == id) {
+                self.launched.retain(|&(lt, _)| lt != t);
+                stopped.push(id.to_owned());
+            }
+        }
+        if request.get("transport").and_then(Value::as_bool) == Some(true) {
+            self.playing = false;
+        }
+        Ok(json!({ "stopped": stopped }))
     }
 
     /// A file in a track's first empty clip launcher slot (of the first 8 the link reaches), as the link's `addClip`.

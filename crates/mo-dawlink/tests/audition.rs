@@ -114,3 +114,89 @@ fn a_part_that_isnt_there_isnt_played() {
     let gone = part("MO Play 8").with_file_name("Gone.mid");
     assert!(matches!(bitwig.bitwig().play_on_selected(&gone), Err(Error::Missing { .. })));
 }
+
+// ---- Audition: a preset on a track of its own, playing a part (extension 3.20) ----
+
+fn preset(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("audition-preset-{name}"));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{name}.bwpreset"));
+    fs::write(&path, b"BtWg").unwrap();
+    path
+}
+
+#[test]
+fn auditions_a_preset_on_a_track_of_its_own_and_takes_it_out_again() {
+    let bitwig = FakeBitwig::start().unwrap();
+    let before = bitwig.world().tracks.len();
+    let file = preset("Warm Pad");
+    let auditioning = bitwig.bitwig().audition_preset(&file, part("MO Play 8"), "Warm Pad").unwrap();
+    assert_eq!(auditioning.track, "Warm Pad");
+    {
+        let world = bitwig.world();
+        assert_eq!(world.tracks.len(), before + 1);
+        let track = &world.tracks[3];
+        assert_eq!(track.name, "Warm Pad");
+        assert_eq!(track.devices.len(), 1, "the preset's device is on it");
+        assert!(world.playing);
+        assert_eq!(world.launched, [(3, 0)]);
+    }
+    assert!(bitwig.bitwig().stop_audition(&auditioning).unwrap());
+    let world = bitwig.world();
+    assert_eq!(world.tracks.len(), before);
+    assert!(world.tracks.iter().all(|t| t.name != "Warm Pad"));
+    assert!(!world.playing, "the audition started Bitwig, so it stops it");
+    let last = world.requests.last().unwrap();
+    assert_eq!(last["cmd"], "deletetrack");
+    assert_eq!(last["onlyIn"], "Night Drive");
+}
+
+#[test]
+fn keep_leaves_the_track_and_stops_it_playing() {
+    let bitwig = FakeBitwig::start().unwrap();
+    let auditioning = bitwig.bitwig().audition_preset(preset("Keeper"), part("MO Play 9"), "Keeper").unwrap();
+    // Kept, it's yours: keeping takes the audition, so the app can't stop it (and take its track out) later.
+    bitwig.bitwig().keep_audition(auditioning).unwrap();
+    let world = bitwig.world();
+    assert_eq!(world.tracks[3].name, "Keeper");
+    assert_eq!(world.tracks[3].clips.len(), 1);
+    assert!(world.launched.is_empty());
+    assert!(!world.playing);
+    let last = world.requests.last().unwrap();
+    assert_eq!(last["cmd"], "stoptracks");
+    assert_eq!(last["transport"], true);
+}
+
+#[test]
+fn a_track_you_renamed_is_yours_and_stays() {
+    let bitwig = with(|w| w.playing = true);
+    let auditioning = bitwig.bitwig().audition_preset(preset("Renamed"), part("MO Play 10"), "Renamed").unwrap();
+    bitwig.world().tracks[3].name = "My Pad".into();
+    assert!(!bitwig.bitwig().stop_audition(&auditioning).unwrap());
+    let world = bitwig.world();
+    assert_eq!(world.tracks[3].name, "My Pad");
+    assert!(world.launched.is_empty(), "it still stops playing");
+    assert!(world.playing, "Bitwig was playing before, so it plays on");
+}
+
+#[test]
+fn a_preset_bitwig_doesnt_load_leaves_no_track() {
+    let bitwig = with(|w| w.unloadable = vec!["Broken.bwpreset".into()]);
+    let before = bitwig.world().tracks.len();
+    let refused = bitwig.bitwig().audition_preset(preset("Broken"), part("MO Play 11"), "Broken").unwrap_err();
+    assert_eq!(refused.to_string(), "Bitwig didn't load Broken.bwpreset.");
+    let world = bitwig.world();
+    assert_eq!(world.tracks.len(), before);
+    assert!(world.requests.iter().all(|r| r["cmd"] != "clip"));
+}
+
+#[test]
+fn audition_needs_the_extension_3_20() {
+    let old = with(|w| {
+        w.hello.insert("extension".into(), json!("3.19"));
+    });
+    let refused = old.bitwig().audition_preset(preset("Old"), part("MO Play 12"), "Old").unwrap_err();
+    assert_eq!(refused, Error::OldExtension { has: "the Music Organiser extension 3.19".into(), needs: "3.20" });
+    assert!(old.world().requests.is_empty());
+}

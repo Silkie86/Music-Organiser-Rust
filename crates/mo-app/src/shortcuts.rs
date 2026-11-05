@@ -96,6 +96,12 @@ pub const PLUGINS_ACTIONS: &[Action] = &[
 pub const PRESETS_ACTIONS: &[Action] = &[
     action("presets.export", "Export the picked sound as a preset file", "Ctrl+E"),
     action("presets.toBitwig", "Make the picked sound a Bitwig preset and send it to Bitwig", "Ctrl+B"),
+    action(
+        "presets.audition",
+        "Hear the picked sound in Bitwig, playing a part on a track of its own; again to stop",
+        "Ctrl+Shift+B",
+    ),
+    action("presets.keepAudition", "Keep the sound you're hearing in Bitwig: its track stays", "Ctrl+Shift+K"),
     action("presets.exportShown", "Export every sound in the list as it's filtered now", "Ctrl+Shift+S"),
     action("presets.reveal", "Show the picked sound's song or file in its folder", "Ctrl+Shift+E"),
     action("presets.copyPath", "Copy where the picked sound's song or file is", "Ctrl+Shift+C"),

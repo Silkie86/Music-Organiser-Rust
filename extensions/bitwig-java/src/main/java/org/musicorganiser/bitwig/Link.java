@@ -250,6 +250,8 @@ final class Link {
     private final Track[] trackItems = new Track[MAX_TRACKS];
     /** The clips put in for auditions (extension 3.19), as "trackId#slot", with the name each came in with. */
     private final Map<String, String> auditionClips = new HashMap<>();
+    /** The tracks made for auditions (`newtrack` with `audition`, extension 3.20), by ID, with the name each came in with. */
+    private final Map<String, String> auditionTracks = new HashMap<>();
     private final DeviceBank[] trackDevices = new DeviceBank[MAX_TRACKS];
     /** Where things go on each track: the start and end of its device chain. */
     private final InsertionPoint[] trackStarts = new InsertionPoint[MAX_TRACKS];
@@ -406,6 +408,10 @@ final class Link {
         // while it still has the name it came in with, so it can never delete a clip of yours.
         commands.put("selectedtrack", Command.answer(false, this::selectedTrack));
         commands.put("deleteclip", Command.job(this::deleteClip));
+        // Extension 3.20: for the app's Audition on the Presets page (a preset on a track of its own, playing a part). A
+        // track made with newtrack's "audition" is noted, and deletetrack takes out only a track so noted, while it still
+        // has the name it came in with, so it can never delete a track of yours.
+        commands.put("deletetrack", Command.job(this::deleteTrack));
     }
 
     // ---- Starting and stopping ----
@@ -1822,6 +1828,7 @@ final class Link {
         Object given = field(request, "name");
         if (!absent(given) && !(given instanceof String)) throw new LinkError("A track's name is text.");
         String name = absent(given) ? "" : (String) given;
+        boolean audition = flag(request, "audition", false);
         Object colour = field(request, "color");
         float[] rgb = absent(colour) ? null : parseColour(colour);
         int count = tracks.itemCount().get();
@@ -1849,6 +1856,9 @@ final class Link {
                     // Extension 3.9: the ID Bitwig keeps it under, when it has said, which finds it however tracks move.
                     String id = idOf(t);
                     if (!id.isEmpty()) m.put("id", id);
+                    // An audition track (extension 3.20) is noted with its name, so deletetrack may take it out again.
+                    String shown = str(track.name().get());
+                    if (audition && !id.isEmpty() && !shown.isEmpty()) auditionTracks.put(id, shown);
                     finish.ok(m);
                 }, finish);
             }, finish);
@@ -1981,8 +1991,35 @@ final class Link {
     }
 
     /**
+     * Takes out a track the app made for an audition (`newtrack` with `audition`, extension 3.20): the one with ID
+     * `trackId`, only while it still has the name it came in with. Its clips stop first; with `transport`, Bitwig stops
+     * playing too (when the audition started it). Answers `deleted`: false when the track isn't one the app noted, was
+     * renamed (so it's yours now), or is already gone.
+     */
+    private void deleteTrack(Map<String, Object> request, Finish finish) {
+        Object id = field(request, "trackId");
+        if (!(id instanceof String) || ((String) id).isEmpty()) throw new LinkError("Say which track, by its ID.");
+        String noted = auditionTracks.remove(id);
+        int t = indexOf((String) id);
+        if (t >= 0) trackItems[t].stop();
+        if (flag(request, "transport", false) && transport != null) transport.stop();
+        Map<String, Object> m = new LinkedHashMap<>();
+        if (t < 0 || noted == null || !noted.equals(str(trackItems[t].name().get()))) {
+            m.put("deleted", false);
+            finish.ok(m);
+            return;
+        }
+        trackItems[t].deleteObject();
+        waitFor(() -> indexOf((String) id) < 0, CHANGE_WAIT, gone -> {
+            m.put("deleted", gone);
+            finish.ok(m);
+        }, finish);
+    }
+
+    /**
      * Stops the launcher clips playing on the tracks with the IDs given (`trackIds`) and puts them back on the arranger
      * (extension 3.16), for the Playground when it stops playing in Bitwig. A track that's gone is left out of `stopped`.
+     * With `transport` (extension 3.20, for Keep after an audition that started Bitwig), Bitwig stops playing too.
      */
     private void stopTracks(Map<String, Object> request, Finish finish) {
         Object given = field(request, "trackIds");
@@ -1996,6 +2033,7 @@ final class Link {
             trackItems[t].returnToArrangement();
             stopped.add(id);
         }
+        if (flag(request, "transport", false) && transport != null) transport.stop();
         Map<String, Object> m = new LinkedHashMap<>();
         m.put("stopped", stopped);
         finish.ok(m);
