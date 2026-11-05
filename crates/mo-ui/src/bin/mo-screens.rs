@@ -564,6 +564,14 @@ fn finder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     data.invoke_key("\t".into(), false, false);
     typed("full");
     shots.push(("finder-action.png".into(), capture(window)));
+    // Every kind again: a Settings tab found by what's on it, and the MIDI parts the MIDI page's sample has.
+    data.invoke_kind_picked(0);
+    let settings = std::sync::Arc::new(mo_app::finder::settings());
+    finder::add_source(app, "settings", settings);
+    typed("bass");
+    shots.push(("finder-midi.png".into(), capture(window)));
+    typed("theme");
+    shots.push(("finder-settings.png".into(), capture(window)));
     finder::close(app);
 }
 

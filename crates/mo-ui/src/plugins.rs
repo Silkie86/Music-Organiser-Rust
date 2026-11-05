@@ -10,11 +10,14 @@ mod uninstall;
 
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use chrono::Local;
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
+use mo_app::finder::Kind;
 use mo_app::log;
+use mo_app::places::Place;
 use mo_app::plugins::{
     self, Chip, Filters, Group, NEEDED_COUNT_CHOICES, Plugins, Sort, State, UNUSED_YEARS_CHOICES, copy_lines,
     no_copies_note, search_url,
@@ -63,6 +66,8 @@ struct Page {
     clean_asked: u64,
     /// What another page asked this one to show (Space's Show on Plugins page) before the library was first read.
     wanted: Option<Wanted>,
+    /// Ctrl+K asked for the library to be read before the page was first shown.
+    finder_asked: bool,
 }
 
 /// What another page can ask this one to show.
@@ -113,6 +118,22 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         UNUSED_YEARS_CHOICES.iter().map(|&y| if y == 1 { "1 year".to_owned() } else { format!("{y} years") }),
     ));
     fill_actions(app);
+    crate::finder::on_open(Kind::Plugin, |app, hit, _| {
+        let (key, own) = mo_app::finder::plugin_of(&hit.id);
+        crate::go_to(app, Place::Plugins.index() as i32);
+        show_plugin(app, key, own, &hit.title);
+        true
+    });
+    // Ctrl+K finds your plugins before this page is first shown: the library is read once, in the background.
+    crate::finder::when_opening(|_| {
+        let first = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.plugins.is_none() && !std::mem::replace(&mut p.finder_asked, true)
+        });
+        if first {
+            shown();
+        }
+    });
 
     let weak = app.as_weak();
     data.on_search_edited(move |t| change(&weak, |f| f.search = t.to_string()));
@@ -272,9 +293,14 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         if let Ok(p) = &built {
             log::info("Plugins", &format!("{} plugins read in {:.1} s", p.rows.len(), started.elapsed().as_secs_f32()));
         }
+        // What Ctrl+K finds, made here rather than on the window's thread.
+        let found = built.as_ref().ok().map(|p| Arc::new(mo_app::finder::plugins(p)));
         let weak = weak.clone();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(app) = weak.upgrade() {
+                if let Some(found) = found {
+                    crate::finder::add_source(&app, "plugins", found);
+                }
                 arrived(&app, built);
             }
         });
