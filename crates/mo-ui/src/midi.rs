@@ -76,6 +76,8 @@ struct Page {
     years: Vec<(i32, usize)>,
     /// How many parts each filter chip's choices would show, from the last list worked out.
     counts: page::ChoiceCounts,
+    /// The part playing as a loop (or being made into one), as its place in the catalogue's entries.
+    looping: Option<usize>,
     /// The picked part, as its place in the catalogue's entries, and its row in the list on show (kept, so stepping
     /// down a long list never searches it).
     picked: Option<usize>,
@@ -393,9 +395,14 @@ fn wire(app: &AppWindow) {
 /// The page is on show: the first time, the index is read.
 pub fn shown(app: &AppWindow) {
     // Another page may have played something since: the Play button says what the player is doing.
-    if app.global::<MidiData>().get_playing() && !loop_playing() && PLAYS.with(|w| w.borrow().is_some()) {
-        let data = app.global::<MidiData>();
-        data.set_playing(false);
+    // (Not while the loop is still being made: it hasn't reached the player yet.)
+    let asked = PLAY_ASKED.load(std::sync::atomic::Ordering::SeqCst);
+    if app.global::<MidiData>().get_playing()
+        && PLAY_STARTED.load(std::sync::atomic::Ordering::SeqCst) == asked
+        && !loop_playing()
+    {
+        app.global::<MidiData>().set_playing(false);
+        PAGE.with(|p| p.borrow_mut().looping = None);
     }
     let library = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -863,6 +870,10 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
     let data = app.global::<MidiData>();
     let Some((at, _)) = picked else {
         data.set_panel_shown(false);
+        // The loop's Stop is on the card: closing it stops the loop too.
+        if data.get_playing() {
+            stop_playing(app);
+        }
         return;
     };
     let ask = PAGE.with(|p| {
@@ -895,8 +906,9 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
     });
     data.set_panel_shown(true);
     show_soundfont(app);
-    // While a loop plays, picking another part plays that one instead (newest wins).
-    if data.get_playing() {
+    // While a loop plays, picking another part plays that one instead (newest wins); the same part again (a click on
+    // its line, or the list read again) goes on as it is.
+    if data.get_playing() && PAGE.with(|p| p.borrow().looping) != Some(at) {
         play(app, at);
     }
     let Some(ask) = ask else { return };
@@ -1418,6 +1430,8 @@ pub fn sample() -> Loaded {
 static FONT: std::sync::Mutex<Option<(PathBuf, mo_audio::gm::Font)>> = std::sync::Mutex::new(None);
 /// The newest play asked for: a loop made for an older ask (or after Stop) isn't played.
 static PLAY_ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// The newest play that reached the player.
+static PLAY_STARTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// What the player calls the MIDI page's loops: "midi:" and the ask's number.
 const PLAY_KEY: &str = "midi:";
 
@@ -1437,10 +1451,20 @@ thread_local! {
     static PLAYS: RefCell<Option<Newest<PlayAsk>>> = const { RefCell::new(None) };
 }
 
+thread_local! {
+    /// Where the SoundFont is, looked for once (a look at the disk, so not on every pick) and again when one is chosen.
+    static SOUNDFONT: RefCell<Option<Option<PathBuf>>> = const { RefCell::new(None) };
+}
+
 /// The SoundFont parts play with now: the one picked in the app's settings, else GeneralUser GS in the app's folder.
 fn soundfont() -> Option<PathBuf> {
+    if let Some(known) = SOUNDFONT.with(|s| s.borrow().clone()) {
+        return known;
+    }
     let folder = PAGE.with(|p| p.borrow().library.parent().map(Path::to_path_buf))?;
-    page::soundfont_path(crate::settings::value(page::SOUNDFONT_KEY).as_deref(), &folder)
+    let found = page::soundfont_path(crate::settings::value(page::SOUNDFONT_KEY).as_deref(), &folder);
+    SOUNDFONT.with(|s| *s.borrow_mut() = Some(found.clone()));
+    found
 }
 
 /// Whether the MIDI page's loop is what the player is playing.
@@ -1466,7 +1490,10 @@ pub fn toggle_play(app: &AppWindow) -> bool {
 }
 
 fn stop_playing(app: &AppWindow) {
+    // Counted first: a loop being made checks the count as it starts (under the player's lock), so it either sees
+    // this and doesn't start, or started already and is stopped here.
     PLAY_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    PAGE.with(|p| p.borrow_mut().looping = None);
     if loop_playing() {
         crate::sounds::player().stop();
     }
@@ -1497,6 +1524,7 @@ fn show_soundfont(app: &AppWindow) {
 fn play(app: &AppWindow, at: usize) {
     let data = app.global::<MidiData>();
     let Some(font) = soundfont() else {
+        stop_playing(app);
         data.set_soundfont_missing(true);
         data.set_play_note("Choose a SoundFont first.".into());
         return;
@@ -1515,7 +1543,11 @@ fn play(app: &AppWindow, at: usize) {
             tempo: page::play_tempo(e),
         })
     });
-    let Some(ask) = ask else { return };
+    let Some(ask) = ask else {
+        stop_playing(app);
+        return;
+    };
+    PAGE.with(|p| p.borrow_mut().looping = Some(at));
     crate::sounds::stop_for_another(app);
     data.set_playing(true);
     data.set_play_note("".into());
@@ -1527,17 +1559,28 @@ fn play(app: &AppWindow, at: usize) {
         let mut w = w.borrow_mut();
         if w.is_none() {
             let weak = app.as_weak();
-            let mut open: Option<(PathBuf, Reader)> = None;
+            let mut open: Option<(PathBuf, MidiStore)> = None;
             match Newest::start("MIDI play", move |ask: PlayAsk| {
                 let id = ask.id;
                 let made = make_loop(&ask, &mut open);
-                let newest = PLAY_ASKED.load(std::sync::atomic::Ordering::SeqCst) == id;
                 let problem = match made {
-                    Ok(sound) if newest => {
-                        crate::sounds::player().play_looped(Arc::new(sound), format!("{PLAY_KEY}{id}"), 0.0);
+                    Ok(sound) => {
+                        // Only if it's still the newest ask as it starts: a Stop or another part meanwhile wins.
+                        let _ = crate::sounds::player().play_looped_if(
+                            Arc::new(sound),
+                            format!("{PLAY_KEY}{id}"),
+                            0.0,
+                            || {
+                                if PLAY_ASKED.load(std::sync::atomic::Ordering::SeqCst) == id {
+                                    PLAY_STARTED.store(id, std::sync::atomic::Ordering::SeqCst);
+                                    Ok(())
+                                } else {
+                                    Err(())
+                                }
+                            },
+                        );
                         return;
                     }
-                    Ok(_) => return,
                     Err(e) => e,
                 };
                 log::warning("MIDI", &format!("A part couldn't be played: {problem}"));
@@ -1549,6 +1592,7 @@ fn play(app: &AppWindow, at: usize) {
                         let data = app.global::<MidiData>();
                         data.set_playing(false);
                         data.set_play_note(problem.into());
+                        PAGE.with(|p| p.borrow_mut().looping = None);
                     }
                 });
             }) {
@@ -1563,7 +1607,7 @@ fn play(app: &AppWindow, at: usize) {
 }
 
 /// The part's loop: its notes read, the SoundFont read (once), and the two made into sound.
-fn make_loop(ask: &PlayAsk, open: &mut Option<(PathBuf, Reader)>) -> Result<mo_audio::AudioData, String> {
+fn make_loop(ask: &PlayAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<mo_audio::AudioData, String> {
     let notes = notes_of(&ask.from, ask.phrase_id, &ask.hash, open)?;
     let (heard, length) = page::loop_notes(&notes, ask.bars);
     if heard.is_empty() {
@@ -1614,10 +1658,25 @@ fn choose_soundfont(app: &AppWindow) {
             data.set_play_note(format!("{} isn't a SoundFont (.sf2).", path.display()).into());
             return;
         }
-        crate::settings::remember(page::SOUNDFONT_KEY, &path.to_string_lossy());
+        let kept = crate::settings::remember(page::SOUNDFONT_KEY, &path.to_string_lossy());
+        SOUNDFONT.with(|s| *s.borrow_mut() = Some(Some(path.clone())));
         data.set_soundfont_missing(false);
-        data.set_play_note("".into());
+        data.set_play_note(
+            if kept {
+                ""
+            } else {
+                "Playing with it now; your settings file couldn't be read, so it's only kept until the app closes."
+            }
+            .into(),
+        );
         log::info("MIDI", &format!("Parts play with the SoundFont {}", path.display()));
+        // A loop playing goes on with the new sounds.
+        if data.get_playing()
+            && let Some(at) = PAGE.with(|p| p.borrow().looping)
+        {
+            PAGE.with(|p| p.borrow_mut().looping = None);
+            play(&app, at);
+        }
     });
     if let Err(e) = asked {
         log::error("MIDI", &format!("Couldn't open the file picker: {e}"));

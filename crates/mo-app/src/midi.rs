@@ -699,8 +699,6 @@ pub fn other_files(e: &Entry, most: usize) -> (Vec<String>, usize) {
     (names, e.other_sources.len().saturating_sub(most))
 }
 
-/// The C# app's settings in `library.db` the reading follows: the MIDI library folders (a JSON list), and "1" to
-/// read every save of a song, not only its newest.
 /// The SoundFont you picked to play parts with (the C# app's setting); none: the one in the app's folder.
 pub const SOUNDFONT_KEY: &str = "midi_soundfont";
 /// Where the C# app downloaded GeneralUser GS, in the app's folder: `sounds\GeneralUser-GS.sf2`.
@@ -752,6 +750,8 @@ pub fn loop_notes(notes: &[NoteEvent], bars: i32) -> (Vec<NoteEvent>, i64) {
     (heard, length)
 }
 
+/// The C# app's settings in `library.db` the reading follows: the MIDI library folders (a JSON list), and "1" to
+/// read every save of a song, not only its newest.
 pub const FOLDERS_KEY: &str = "midi_folders";
 pub const OLDER_SAVES_KEY: &str = "midi_older_saves";
 

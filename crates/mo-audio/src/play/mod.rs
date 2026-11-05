@@ -142,6 +142,18 @@ impl Player {
         let _ = self.start(sound, key.into(), start_seconds, true, || Ok::<(), std::convert::Infallible>(()));
     }
 
+    /// [`Player::play_looped`], only if `wanted` still says so as it starts (as [`Player::play_if`]): so a stop asked
+    /// for while the loop was being made can't be undone by it starting just after.
+    pub fn play_looped_if<E>(
+        &self,
+        sound: Arc<AudioData>,
+        key: impl Into<String>,
+        start_seconds: f64,
+        wanted: impl FnOnce() -> Result<(), E>,
+    ) -> Result<(), E> {
+        self.start(sound, key.into(), start_seconds, true, wanted)
+    }
+
     /// [`Player::play`], only if `wanted` still says so as the sound starts, with no other play or stop able to come
     /// in between: so a stop or a newer sound asked for just before can't be undone by this one starting after it.
     /// Gives back what `wanted` said. `wanted` should only take a quick look (a stop waits for it).
