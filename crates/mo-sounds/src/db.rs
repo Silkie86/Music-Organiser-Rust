@@ -161,11 +161,19 @@ const fn columns(list: &str) -> usize {
 const SOUND_SQL: &str = concat!("SELECT ", sound_columns!(), " FROM sounds");
 
 /// Every sound in the Rust app's copy of the library, in the order the rows are stored: the columns [`copy_sound_at`]
-/// takes, the analysis's as [`compact::analysis_at`] takes them.
+/// takes, the analysis's (and the waveform straight after them, from its own table) as [`compact::analysis_at`]
+/// takes them.
 const COPY_SOUND_SQL: &str = concat!(
     "SELECT id, path, mtime, error, name_type, user_type, type, type_source, type_conf, favourite, rating, plays, ",
     compact::analysis_columns!(),
-    " FROM sounds"
+    ", w.v FROM sounds LEFT JOIN sound_waves w ON w.sound_id = sounds.id"
+);
+
+/// The same from a copy of the format before ([`compact::FORMERLY`]), which keeps the waveform in each sound's row.
+const FORMERLY_SOUND_SQL: &str = concat!(
+    "SELECT id, path, mtime, error, name_type, user_type, type, type_source, type_conf, favourite, rating, plays, ",
+    compact::analysis_columns!(),
+    ", waveform FROM sounds"
 );
 
 /// Where [`COPY_SOUND_SQL`] has the analysis's first column.
@@ -176,7 +184,9 @@ const SOUND_AND_VECTORS_SQL: &str = concat!("SELECT ", sound_columns!(), ", feat
 
 /// The sound library, open for reading only: SQLite itself refuses any change, so the C# app's data is safe.
 ///
-/// Either the C# app's `sounds.db` or the Rust app's compact copy of it ([`compact`]): both give the same answers.
+/// Either the C# app's `sounds.db` or the Rust app's compact copy of it ([`compact`]), of this version's format or the
+/// one before: all give the same answers, but for CLAP's fingerprints, which the copy keeps as CLAP's index holds them
+/// ([`crate::index::held`]).
 ///
 /// SQLite may leave `sounds.db-wal` and `sounds.db-shm` beside the file after reading (it needs them to read while the
 /// C# app writes). They hold nothing of their own.
@@ -185,8 +195,21 @@ pub struct SoundsDb {
     path: PathBuf,
     /// The tables this library has: an older C# app's may lack the duplicate finder's, which then read as empty.
     tables: HashSet<String>,
-    /// The Rust app's copy, which keeps the analysis as numbers and the fingerprints in tables of their own.
-    copy: bool,
+    /// How the library is laid out: as `sounds.db`, or the Rust app's copy, of which format.
+    layout: Layout,
+}
+
+/// How a [`SoundsDb`] is laid out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layout {
+    /// The C# app's `sounds.db`.
+    Library,
+    /// The Rust app's copy, in this version's format ([`compact::FORMAT`]): the analysis as numbers, the waveforms
+    /// and both fingerprints in tables of their own, CLAP's as CLAP's index holds them.
+    Copy,
+    /// The copy in the format before ([`compact::FORMERLY`]): the waveform in each sound's row, CLAP's fingerprints
+    /// as CLAP gave them, and how long each is beside the hash of its row.
+    Formerly,
 }
 
 impl SoundsDb {
@@ -194,6 +217,10 @@ impl SoundsDb {
     pub fn open_read_only(path: &Path) -> Result<SoundsDb, SoundsError> {
         let open_error = |why: String| SoundsError::Open { path: path.to_owned(), why };
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        // Not while the app's copy is swapped for a new one ([`compact::LAYING_OUT`]): opened then, it would read the
+        // old file with SQLite's files for the new one beside it. Held until SQLite has the file and its log open
+        // (its first read, below).
+        let _not_while_swapped = compact::LAYING_OUT.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let conn = Connection::open_with_flags(path, flags).map_err(|e| open_error(e.to_string()))?;
         // The C# app may be saving a scan while this reads: wait a little for it rather than fail.
         conn.busy_timeout(Duration::from_secs(2)).map_err(|e| open_error(e.to_string()))?;
@@ -208,12 +235,19 @@ impl SoundsDb {
         if !tables.contains("sounds") {
             return Err(open_error("it isn't a Music Organiser sound library (it has no sounds table)".into()));
         }
-        let copy = tables.contains(compact::INFO_TABLE);
-        // A copy laid out by another version of the app isn't read: its columns may mean something else.
-        if copy && compact::format_of(&conn).map_err(|e| open_error(e.to_string()))? != Some(compact::FORMAT) {
-            return Err(open_error("it's a copy another version of the app made, laid out differently".into()));
-        }
-        Ok(SoundsDb { conn, path: path.to_owned(), tables, copy })
+        let layout = if tables.contains(compact::INFO_TABLE) {
+            // A copy laid out by another version of the app isn't read: its columns may mean something else.
+            match compact::format_of(&conn).map_err(|e| open_error(e.to_string()))? {
+                Some(compact::FORMAT) => Layout::Copy,
+                Some(compact::FORMERLY) => Layout::Formerly,
+                _ => {
+                    return Err(open_error("it's a copy another version of the app made, laid out differently".into()));
+                }
+            }
+        } else {
+            Layout::Library
+        };
+        Ok(SoundsDb { conn, path: path.to_owned(), tables, layout })
     }
 
     /// What the sound library at `path` looks like now, as a line of text that changes whenever anything saves into
@@ -251,7 +285,17 @@ impl SoundsDb {
 
     /// Whether this is the Rust app's compact copy of the library rather than the C# app's own file.
     pub fn is_copy(&self) -> bool {
-        self.copy
+        self.layout != Layout::Library
+    }
+
+    /// Whether this is a copy of the format before ([`compact::FORMERLY`]), still to be laid out anew.
+    pub fn is_formerly(&self) -> bool {
+        self.layout == Layout::Formerly
+    }
+
+    /// The query that reads every sound of a copy, in the order the rows are stored ([`copy_sound_at`]).
+    fn copy_sounds(&self) -> &'static str {
+        if self.layout == Layout::Formerly { FORMERLY_SOUND_SQL } else { COPY_SOUND_SQL }
     }
 
     pub(crate) fn has(&self, table: &str) -> bool {
@@ -276,23 +320,26 @@ impl SoundsDb {
 
     /// How many sounds the CLAP model has listened to.
     pub fn count_with_clap(&self) -> Result<i64, SoundsError> {
-        let sql = if self.copy {
-            // From the lengths kept beside the hashes: the fingerprints themselves are a gigabyte.
-            "SELECT COUNT(*) FROM sound_hashes WHERE clap_len IS NOT NULL"
-        } else {
-            "SELECT COUNT(*) FROM sounds WHERE clap IS NOT NULL"
+        // From each sound's note of how many numbers its CLAP has, which an index holds by itself: the fingerprints
+        // themselves are half a gigabyte (in the format before, from the lengths kept beside the rows' hashes).
+        let sql = match self.layout {
+            Layout::Copy => "SELECT COUNT(*) FROM sounds WHERE clap_numbers IS NOT NULL",
+            Layout::Formerly => "SELECT COUNT(*) FROM sound_hashes WHERE clap_len IS NOT NULL",
+            Layout::Library => "SELECT COUNT(*) FROM sounds WHERE clap IS NOT NULL",
         };
         Ok(self.conn.query_row(sql, [], |r| r.get(0))?)
     }
 
     /// Every file the library knows, as the last scan saw it.
     pub fn known_files(&self) -> Result<Vec<KnownSound>, SoundsError> {
-        let mut st = self.conn.prepare(if self.copy {
-            "SELECT path, COALESCE(size, 0), COALESCE(mtime, 0),
-                 EXISTS (SELECT 1 FROM sound_hashes h WHERE h.sound_id = sounds.id AND h.clap_len IS NOT NULL)
-             FROM sounds"
-        } else {
-            "SELECT path, COALESCE(size, 0), COALESCE(mtime, 0), clap IS NOT NULL FROM sounds"
+        let mut st = self.conn.prepare(match self.layout {
+            Layout::Copy => "SELECT path, COALESCE(size, 0), COALESCE(mtime, 0), clap_numbers IS NOT NULL FROM sounds",
+            Layout::Formerly => {
+                "SELECT path, COALESCE(size, 0), COALESCE(mtime, 0),
+                     EXISTS (SELECT 1 FROM sound_hashes h WHERE h.sound_id = sounds.id AND h.clap_len IS NOT NULL)
+                 FROM sounds"
+            }
+            Layout::Library => "SELECT path, COALESCE(size, 0), COALESCE(mtime, 0), clap IS NOT NULL FROM sounds",
         })?;
         let rows = st.query_map([], |r| {
             Ok(KnownSound { path: r.get(0)?, size: r.get(1)?, mtime: r.get(2)?, has_clap: r.get(3)? })
@@ -324,9 +371,9 @@ impl SoundsDb {
         // random place in a file of gigabytes: minutes on a cold disk with a big library. In stored order the same
         // read goes straight through the file once. On one connection: several at once were no faster on a slow
         // disk, and they held up the other pages reading from it (Solomon's PC, 2026-11-03).
-        if self.copy {
+        if self.is_copy() {
             // The copy keeps the fingerprints in tables of their own: the list comes first, then each of them.
-            let mut st = self.conn.prepare(COPY_SOUND_SQL)?;
+            let mut st = self.conn.prepare(self.copy_sounds())?;
             let mut rows = st.query([])?;
             while let Some(r) = rows.next()? {
                 reading.add(copy_sound_at(r)?);
@@ -336,7 +383,7 @@ impl SoundsDb {
             if vectors {
                 // In the same order as from sounds.db: by sound, as its rows are stored.
                 reading.out.features = self.copied_gathered("sound_features")?;
-                reading.out.clap = self.copied_gathered("sound_clap")?;
+                reading.out.clap = self.copied_clap()?;
             }
         } else {
             let mut st = self.conn.prepare(if vectors { SOUND_AND_VECTORS_SQL } else { SOUND_SQL })?;
@@ -355,11 +402,11 @@ impl SoundsDb {
     /// (a gigabyte for a library like Solomon's).
     ///
     /// Quick from the Rust app's copy, which keeps each kind in a table of its own and notes how long each sound's
-    /// CLAP is. From `sounds.db` it's a pass over the whole file: [`SoundsDb::everything`] takes them on the same pass
-    /// as the list.
+    /// CLAP is (and keeps CLAP's as the index holds them, which go into it as they are). From `sounds.db` it's a pass
+    /// over the whole file: [`SoundsDb::everything`] takes them on the same pass as the list.
     pub fn fingerprints(&self, analysed: usize) -> Result<(Gathered, Gathered), SoundsError> {
         let snapshot = self.conn.unchecked_transaction()?;
-        if !self.copy {
+        if !self.is_copy() {
             // As the page's read gathers them, in the order the rows are stored.
             let (mut features, mut clap) = (Gathered::default(), Gathered::default());
             let mut st = self.conn.prepare("SELECT id, features, clap FROM sounds")?;
@@ -384,14 +431,19 @@ impl SoundsDb {
         // As the index counts them: the CLAP vectors of the most common length (a damaged one, not whole floats, has
         // none).
         let heard: i64 = self.conn.query_row(
-            "SELECT COALESCE(MAX(n), 0) FROM (SELECT COUNT(*) AS n FROM sound_hashes
-                 WHERE clap_len > 0 AND clap_len % 4 = 0 GROUP BY clap_len)",
+            if self.layout == Layout::Formerly {
+                "SELECT COALESCE(MAX(n), 0) FROM (SELECT COUNT(*) AS n FROM sound_hashes
+                     WHERE clap_len > 0 AND clap_len % 4 = 0 GROUP BY clap_len)"
+            } else {
+                "SELECT COALESCE(MAX(n), 0) FROM (SELECT COUNT(*) AS n FROM sounds
+                     WHERE clap_numbers > 0 GROUP BY clap_numbers)"
+            },
             [],
             |r| r.get(0),
         )?;
         let deep = crate::learn::heard_enough(usize::try_from(heard).unwrap_or(0), analysed);
         let features = self.copied_gathered("sound_features")?;
-        let clap = if deep { self.copied_gathered("sound_clap")? } else { Gathered::default() };
+        let clap = if deep { self.copied_clap()? } else { Gathered::default() };
         snapshot.finish()?;
         Ok((features, clap))
     }
@@ -488,9 +540,11 @@ impl SoundsDb {
     }
 
     /// Each sound's vector in a space: "clap" (once the model has listened) or, for anything else, "features" (the
-    /// analyser's own). Sounds without one, or with a damaged one, are left out.
+    /// analyser's own). Sounds without one, or with a damaged one, are left out. CLAP's from the copy are as CLAP's
+    /// index holds them: unit length, to about 3 significant digits ([`crate::index::held`]).
     pub fn vectors(&self, space: &str) -> Result<HashMap<i64, Vec<f32>>, SoundsError> {
-        let sql = match (self.copy, space == "clap") {
+        let clap = space == "clap";
+        let sql = match (self.is_copy(), clap) {
             (true, true) => "SELECT sound_id, v FROM sound_clap".to_owned(),
             (true, false) => "SELECT sound_id, v FROM sound_features".to_owned(),
             (false, clap) => {
@@ -498,12 +552,31 @@ impl SoundsDb {
                 format!("SELECT id, {column} FROM sounds WHERE {column} IS NOT NULL")
             }
         };
+        let held = clap && self.layout == Layout::Copy;
         let mut st = self.conn.prepare(&sql)?;
         let mut rows = st.query([])?;
         let mut out = HashMap::new();
         while let Some(r) = rows.next()? {
-            if let Some(v) = vector_at(r, 1) {
+            let v = if held { held_at(r, 1) } else { vector_at(r, 1) };
+            if let Some(v) = v {
                 out.insert(r.get::<_, i64>(0)?, v);
+            }
+        }
+        Ok(out)
+    }
+
+    /// CLAP's fingerprints in the copy, gathered as [`SoundsDb::copied_gathered`] gathers them: as CLAP's index holds
+    /// them, from this version's format; as CLAP gave them, from the format before.
+    fn copied_clap(&self) -> Result<Gathered, SoundsError> {
+        if self.layout == Layout::Formerly {
+            return self.copied_gathered("sound_clap");
+        }
+        let mut st = self.conn.prepare("SELECT sound_id, v FROM sound_clap")?;
+        let mut rows = st.query([])?;
+        let mut out = Gathered::default();
+        while let Some(r) = rows.next()? {
+            if let Ok(ValueRef::Blob(blob)) = r.get_ref(1) {
+                out.push_held(r.get(0)?, blob);
             }
         }
         Ok(out)
@@ -570,9 +643,9 @@ impl SoundsDb {
         if !self.has("sound_hidden") {
             return Ok(Vec::new());
         }
-        let sql = if self.copy { COPY_SOUND_SQL } else { SOUND_SQL };
+        let sql = if self.is_copy() { self.copy_sounds() } else { SOUND_SQL };
         let mut st = self.conn.prepare(&format!("{sql} WHERE id IN (SELECT sound_id FROM sound_hidden)"))?;
-        let copy = self.copy;
+        let copy = self.is_copy();
         let rows = st.query_map([], |r| {
             let s = if copy { copy_sound_at(r) } else { sound_at(r) }?;
             Ok(Sound { hidden: true, ..s })
@@ -785,6 +858,14 @@ fn vector_at(r: &Row<'_>, i: usize) -> Option<Vec<f32>> {
     }
 }
 
+/// The vector held as CLAP's index holds it ([`crate::index::held`]) in column `i`, as floats.
+fn held_at(r: &Row<'_>, i: usize) -> Option<Vec<f32>> {
+    match r.get_ref(i) {
+        Ok(ValueRef::Blob(blob)) => crate::index::held_from_bytes(blob).map(|held| crate::index::unheld(&held)),
+        _ => None,
+    }
+}
+
 /// The order SQLite's `COLLATE NOCASE` gives the `path` column, so the list comes out as the C# app's did: byte by
 /// byte, with only the English letters A to Z folded to lower case.
 ///
@@ -899,7 +980,7 @@ fn copy_kind(kind: Option<&str>) -> &'static str {
 
 /// Floats stored as the C# app stores them: little-endian 4-byte floats, one after another. `None` when the length
 /// isn't a whole number of floats.
-fn floats(blob: &[u8]) -> Option<Vec<f32>> {
+pub(crate) fn floats(blob: &[u8]) -> Option<Vec<f32>> {
     if blob.is_empty() || !blob.len().is_multiple_of(4) {
         return None;
     }
