@@ -348,7 +348,8 @@ fn show_again(app: &AppWindow, songs: Songs) {
         let new = row.and_then(|i| songs.rows.get(i)).map(|r| &r.song.latest);
         let same = matches!((old, new), (Some(a), Some(b)) if a.id == b.id && a.mtime == b.mtime && a.size == b.size
             && a.file_missing == b.file_missing);
-        p.songs = songs;
+        // The old list (thousands of songs) is let go on the freeing thread, not the window's.
+        background::free_later(std::mem::replace(&mut p.songs, songs));
         p.picked = if same { row } else { None };
         same
     });
@@ -420,7 +421,8 @@ pub fn show(app: &AppWindow, songs: Songs) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.years = songs.year_counts();
-        p.songs = songs;
+        // The old list (thousands of songs) is let go on the freeing thread, not the window's.
+        background::free_later(std::mem::replace(&mut p.songs, songs));
     });
     pick(app, None);
     data.set_lines(LINES.with(|l| ModelRc::from(l.clone() as Rc<dyn Model<Data = SongLine>>)));

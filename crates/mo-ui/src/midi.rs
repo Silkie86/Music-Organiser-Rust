@@ -440,9 +440,10 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         // The picked part stays picked when the index is read again, found by its notes.
         let hash = p.picked.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.hash.clone());
         p.years = loaded.years;
-        p.cat = Arc::new(loaded.cat);
+        // The old index and notes go on the freeing thread: tens of thousands of parts take a while to let go.
+        background::free_later(std::mem::replace(&mut p.cat, Arc::new(loaded.cat)));
         p.old = loaded.old;
-        p.notes = Some(loaded.notes);
+        background::free_later(p.notes.replace(loaded.notes));
         p.picked = hash.and_then(|h| p.cat.find(&h));
         p.picked_row = None;
         p.target = None;

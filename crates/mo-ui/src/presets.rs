@@ -242,6 +242,10 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
     });
     wire(app);
+    // The app may start on this page: it was shown before the page knew where the library is.
+    if app.get_place() == mo_app::places::Place::Presets.index() as i32 {
+        shown(app);
+    }
 }
 
 /// A key was changed in Settings: the buttons, card and menu show the new keys at once.
@@ -400,6 +404,10 @@ fn wire(app: &AppWindow) {
 pub fn shown(app: &AppWindow) {
     let start = PAGE.with(|p| {
         let mut p = p.borrow_mut();
+        // Not connected yet (the app starting on this page): `connect` shows it again once it knows the library.
+        if p.library.as_os_str().is_empty() {
+            return false;
+        }
         !std::mem::replace(&mut p.started, true)
     });
     if start {

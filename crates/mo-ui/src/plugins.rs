@@ -332,6 +332,10 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         Ok(c) => COPIES.with(|s| *s.borrow_mut() = Some(c)),
         Err(e) => log::error("Plugins", &format!("Couldn't start reading installed copies: {e}")),
     }
+    // The app may start on this page, before its reader was there to ask.
+    if app.get_place() == mo_app::places::Place::Plugins.index() as i32 {
+        shown();
+    }
 }
 
 /// This session's "Not its", "Take off" and "Add a folder", for Space's own read of the plugins to show too
@@ -438,7 +442,7 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>) {
             PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 p.years = fresh.year_counts();
-                p.plugins = Some(fresh);
+                background::free_later(p.plugins.replace(fresh));
                 // The same plugin at its new place, so its tab, DAW and "Every save" stay as they were.
                 p.picked = picked;
             });
