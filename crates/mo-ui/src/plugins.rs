@@ -5,6 +5,7 @@
 //! folders you tick to the Recycle Bin, and nowhere else.
 
 mod clean;
+mod folder_fixes;
 mod moving;
 mod uninstall;
 
@@ -64,6 +65,10 @@ struct Page {
     /// of every read too.
     moved: Vec<String>,
     clean_asked: u64,
+    /// The picked plugin's folder lines' paths, as the On disk tab shows them.
+    room_paths: Vec<String>,
+    /// This session's "Not its", "Take off" and "Add a folder": shown over every read until the old app measures.
+    folder_fixes: Vec<mo_app::plugins::folder_fixes::FolderFix>,
     /// What another page asked this one to show (Space's Show on Plugins page) before the library was first read.
     wanted: Option<Wanted>,
     /// Ctrl+K asked for the library to be read before the page was first shown.
@@ -275,6 +280,18 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         }
     });
     let weak = app.as_weak();
+    data.on_folder_not_its(move |at| {
+        if let (Some(app), Ok(at)) = (weak.upgrade(), usize::try_from(at)) {
+            folder_fixes::not_its(&app, at);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_add_folder(move || {
+        if let Some(app) = weak.upgrade() {
+            folder_fixes::add(&app);
+        }
+    });
+    let weak = app.as_weak();
     data.on_put_back(move || {
         if let Some(app) = weak.upgrade() {
             clean::put_back(&app);
@@ -341,6 +358,12 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         Ok(c) => COPIES.with(|s| *s.borrow_mut() = Some(c)),
         Err(e) => log::error("Plugins", &format!("Couldn't start reading installed copies: {e}")),
     }
+}
+
+/// This session's "Not its", "Take off" and "Add a folder", for Space's own read of the plugins to show too
+/// ([`mo_app::plugins::Plugins::apply_folder_fixes`]).
+pub fn folder_fixes_this_session() -> Vec<mo_app::plugins::folder_fixes::FolderFix> {
+    PAGE.with(|p| p.borrow().folder_fixes.clone())
 }
 
 /// The page came into view: its library is read (again).
@@ -424,6 +447,10 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>) {
             clean::forget_binned(&mut fresh);
             // And the plugin files Space's clean-ups sent to the Recycle Bin, as Space leaves them out.
             fresh.forget_paths(&crate::space::plugin_files_in_bin());
+            PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.folder_fixes = fresh.apply_folder_fixes(&p.folder_fixes);
+            });
             fresh.refilter();
             // What another page asked for before the first read comes first; with every unused plugin asked for, the
             // plugin picked before stays picked only when it's among them.
@@ -742,14 +769,22 @@ fn fill_panel(app: &AppWindow) {
         .room
         .folders
         .iter()
-        .map(|f| RoomFolder {
+        .enumerate()
+        .map(|(i, f)| RoomFolder {
             kind: f.kind.into(),
             path: shell::wrappable_path(&f.path).into(),
             size: f.size.as_str().into(),
             shared: f.shared.as_str().into(),
             added: f.added,
+            can_say: f.can_say,
+            at: i as i32,
         })
         .collect();
+    PAGE.with(|p| p.borrow_mut().room_paths = card.room.folders.iter().map(|f| f.path.clone()).collect());
+    data.set_can_add_folder(PAGE.with(|p| {
+        let p = p.borrow();
+        p.picked.is_some_and(|r| p.plugins.as_ref().is_some_and(|pl| pl.can_add_folder(r)))
+    }));
     data.set_room_folders(ModelRc::new(VecModel::from(folders)));
     data.set_sizes_note(sizes.into());
     data.set_scanner_note(scanner.into());
