@@ -276,6 +276,15 @@ fn same_suggestions(cs: &Value, rust: &Value, names: &Value) -> bool {
         })
 }
 
+/// C#'s words for no sounds in the year asked, as the Rust app says them (DIFFERENCES.md): Rust picks its years on the
+/// year strip, so it says to pick others there.
+fn year_words(why: &Value) -> Value {
+    match why.as_str() {
+        Some(w) => json!(w.replace("Pick another year, or Any year.", "Pick other years on the strip, or clear it.")),
+        None => why.clone(),
+    }
+}
+
 /// The duplicate groups less the one known difference (DIFFERENCES.md): a trimmed copy that's only like the others
 /// was described against itself in C# (always "Longer version (x s)"), against the one to keep in Rust. Those C#
 /// texts are left out; the Rust ones are still checked to be one of the two wordings.
@@ -345,7 +354,7 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
                     short(&b["Suggestions"])
                 ));
             }
-            if !same(&a["WhyNothing"], &b["WhyNothing"]) {
+            if !same(&a["WhyNothing"], &b["WhyNothing"]) && !same(&year_words(&a["WhyNothing"]), &b["WhyNothing"]) {
                 differences.push(format!(
                     "Rediscover, {name}, question {q}: C# says {}, Rust {}",
                     a["WhyNothing"], b["WhyNothing"]
