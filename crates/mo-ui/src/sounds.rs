@@ -643,7 +643,8 @@ impl Settings {
 /// same pass that reads `sounds.db` for the page. A copy that's behind (the C# app changed `sounds.db` since) is shown
 /// at once, then brought up to date, and the page takes the sounds again from it ([`Step::Refreshed`]).
 fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl Fn(Step)) {
-    if !sounds_db.exists() {
+    // No library at all. Once the copy is the app's own, it's all there is: `sounds.db` may have been archived.
+    if !sounds_db.exists() && (cards.is_none() || !compact::copy_of(sounds_db).exists()) {
         send(Step::Read(Err(String::new())));
         return;
     }
@@ -853,13 +854,18 @@ fn read_in_place(sounds_db: &Path, now: NaiveDateTime) -> Result<FirstRead, Soun
 fn read_through_copy(sounds_db: &Path, now: NaiveDateTime, cards: &Feed) -> Result<FirstRead, SoundsError> {
     let copy = compact::copy_of(sounds_db);
     match compact::read_for_page(sounds_db, now)? {
-        PageRead::Copy { db, sounds, behind } => Ok(FirstRead {
-            sounds,
-            played: db.history(HISTORY_LENGTH).unwrap_or_default(),
-            source: copy,
-            prints: Prints::InCopy(db),
-            behind,
-        }),
+        PageRead::Copy { db, sounds, behind, adopted } => {
+            if adopted {
+                say_adopted();
+            }
+            Ok(FirstRead {
+                sounds,
+                played: db.history(HISTORY_LENGTH).unwrap_or_default(),
+                source: copy,
+                prints: Prints::InCopy(db),
+                behind,
+            })
+        }
         PageRead::Library { everything, made } => {
             say_made(&made, &copy, sounds_db, Some(cards), false);
             // The rest is read from the copy made at the moment the sounds were read, or else (when it couldn't be
@@ -883,6 +889,18 @@ fn read_through_copy(sounds_db: &Path, now: NaiveDateTime, cards: &Feed) -> Resu
     }
 }
 
+/// Says in the log, once, that the app's copy of the sound library is its own library from now on (the C# app is
+/// retired, Solomon 2026-11-05): `sounds.db` isn't read again.
+fn say_adopted() {
+    log::info(
+        "Sounds",
+        &format!(
+            "{} is the app's own sound library from now on: sounds.db is no longer read (the C# app is retired)",
+            compact::FILE_NAME
+        ),
+    );
+}
+
 /// Says (in the log, and on `cards`) how making the app's copy of the library beside `sounds_db` went: `again` when
 /// it was made again because it was damaged.
 fn say_made(
@@ -893,6 +911,9 @@ fn say_made(
     again: bool,
 ) {
     let size = |path: &Path| fs::metadata(path).map_or(0, |m| m.len());
+    if made.as_ref().is_ok_and(|synced| synced.adopted) {
+        say_adopted();
+    }
     match made {
         Ok(synced) if synced.made => {
             let line = list::copy_made_line(size(copy), size(sounds_db));
@@ -921,13 +942,17 @@ fn say_made(
     }
 }
 
-/// Brings the app's copy of the library up to date with `sounds_db` after the C# app changed it, saying so on
-/// `cards`. What changed, or `None` when it couldn't be done (it's tried again at the next start).
+/// Brings the app's copy of the library up to date with `sounds_db` one last time, after the C# app changed it, and
+/// makes it the app's own library ([`compact::last_sync`]), saying so on `cards`. What changed, or `None` when it
+/// couldn't be done (it's tried again at the next start).
 fn bring_up_to_date(sounds_db: &Path, copy: &Path, cards: Option<&Feed>) -> Option<compact::Synced> {
     let job = cards.map(|c| c.start("Bringing your sound library up to date", "With what the C# app changed in it"));
     let began = Instant::now();
-    match compact::sync(sounds_db, copy) {
+    match compact::last_sync(sounds_db, copy) {
         Ok(synced) => {
+            if synced.adopted {
+                say_adopted();
+            }
             let line = list::copy_synced_line(&synced);
             log::info(
                 "Sounds",
@@ -2681,15 +2706,16 @@ mod tests {
     }
 
     #[test]
-    fn the_page_reads_the_apps_copy_and_brings_it_up_to_date() {
+    fn the_page_makes_the_apps_own_sound_library_and_reads_only_that_after() {
         let sounds_db = sound_library("copy");
         let library_db = song_library("copy-songs.db", &[]);
         let copy = sounds_db.with_file_name("sounds-rust.db");
-        // The first start: sounds.db is read once, and the copy made on the same pass.
+        // The first start: sounds.db is read once, and the copy made on the same pass: the app's own library now.
         let cards = Feed::default();
         let first = one_start(&sounds_db, &library_db, &cards);
         assert_eq!(first, ["5 sounds from sounds-rust.db, 0 plays", "5 fingerprints", "used: true"]);
         assert!(copy.exists());
+        assert!(compact::own_since(&copy).is_some());
         let said = cards_said(&cards);
         assert_eq!(said.len(), 1, "{said:?}");
         assert!(said[0].starts_with("Made the app's own copy of your sound library: "), "{said:?}");
@@ -2697,10 +2723,83 @@ mod tests {
         let cards = Feed::default();
         assert_eq!(one_start(&sounds_db, &library_db, &cards), first);
         assert_eq!(cards_said(&cards), Vec::<String>::new());
-        // The C# app plays a sound: the page shows the copy as it was at once, then the sounds again in place.
+        // The retired C# app plays a sound and finds a new one: never read into the app's own library.
         let played = c_sharp(&sounds_db)
             .execute_batch("UPDATE sounds SET plays = 2, last_played = 1780000000 WHERE id = 3; INSERT INTO sound_events VALUES (3, 'play', 1780000000);");
         assert!(played.is_ok(), "{played:?}");
+        add_sound(&sounds_db, 9, "rim");
+        let cards = Feed::default();
+        assert_eq!(one_start(&sounds_db, &library_db, &cards), first);
+        assert_eq!(cards_said(&cards), Vec::<String>::new());
+        // Its fingerprints damaged (a bad sector): it's made again from sounds.db while that's still there (all it can
+        // be made from), and stays the app's own.
+        damage_first_page(&copy, "sound_features");
+        let cards = Feed::default();
+        assert_eq!(
+            one_start(&sounds_db, &library_db, &cards),
+            ["5 sounds from sounds-rust.db, 0 plays", "6 fingerprints", "used: true"]
+        );
+        let said = cards_said(&cards);
+        assert!(said.iter().any(|c| c.starts_with("Made the app's own copy of your sound library again")), "{said:?}");
+        assert!(compact::own_since(&copy).is_some());
+        assert_eq!(
+            one_start(&sounds_db, &library_db, &Feed::default()),
+            ["6 sounds from sounds-rust.db, 2 plays", "6 fingerprints", "used: true"]
+        );
+        // Damaged, and it can't be made again (a folder in the way of the new copy): the rest comes from sounds.db,
+        // as it does without a copy.
+        let part = PathBuf::from(format!("{}.part-{}", copy.display(), std::process::id()));
+        assert!(std::fs::create_dir_all(&part).is_ok());
+        damage_first_page(&copy, "sound_features");
+        let cards = Feed::default();
+        assert_eq!(
+            one_start(&sounds_db, &library_db, &cards),
+            [
+                "6 sounds from sounds-rust.db, 2 plays".to_owned(),
+                format!("the rest from {}", sounds_db.display()),
+                "6 fingerprints".to_owned(),
+                "used: true".to_owned(),
+            ]
+        );
+        let said = cards_said(&cards);
+        assert!(
+            said.iter().any(|c| c.starts_with("Couldn't make the app's own copy of your sound library")),
+            "{said:?}"
+        );
+        assert!(std::fs::remove_dir(&part).is_ok());
+        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default())[1], "6 fingerprints", "made whole again");
+        // sounds.db archived: the app's own library is all the page needs.
+        for end in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{end}", sounds_db.display()));
+        }
+        assert_eq!(
+            one_start(&sounds_db, &library_db, &Feed::default()),
+            ["6 sounds from sounds-rust.db, 2 plays", "6 fingerprints", "used: true"]
+        );
+    }
+
+    #[test]
+    fn a_copy_made_before_the_c_sharp_app_retired_is_brought_up_to_date_one_last_time() {
+        let sounds_db = sound_library("last-sync");
+        let library_db = song_library("last-sync-songs.db", &[]);
+        let copy = sounds_db.with_file_name("sounds-rust.db");
+        // Made by an earlier version, which kept it following sounds.db.
+        assert!(compact::sync(&sounds_db, &copy).is_ok_and(|s| !s.adopted));
+        // The C# app played a sound since, and sounds.db can't be read into the copy just now (it isn't a library
+        // any more): the page keeps what it showed, and tries again at the next start.
+        let played = c_sharp(&sounds_db)
+            .execute_batch("UPDATE sounds SET plays = 2, last_played = 1780000000 WHERE id = 3; INSERT INTO sound_events VALUES (3, 'play', 1780000000);");
+        assert!(played.is_ok(), "{played:?}");
+        assert!(c_sharp(&sounds_db).execute_batch("ALTER TABLE sounds RENAME TO gone;").is_ok());
+        let cards = Feed::default();
+        let kept = one_start(&sounds_db, &library_db, &cards);
+        assert_eq!(kept.first().map(String::as_str), Some("5 sounds from sounds-rust.db, 0 plays"));
+        assert!(!kept.iter().any(|k| k.starts_with("again")), "{kept:?}");
+        let said = cards_said(&cards);
+        assert!(said.iter().any(|c| c.starts_with("Couldn't bring your sound library up to date: ")), "{said:?}");
+        assert_eq!(compact::own_since(&copy), None);
+        // Readable again: shown as it was at once, then brought up to date one last time, and the app's own after.
+        assert!(c_sharp(&sounds_db).execute_batch("ALTER TABLE gone RENAME TO sounds;").is_ok());
         let cards = Feed::default();
         assert_eq!(
             one_start(&sounds_db, &library_db, &cards),
@@ -2713,93 +2812,13 @@ mod tests {
             ]
         );
         assert_eq!(cards_said(&cards), ["Brought your sound library up to date: 1 changed"]);
-        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default()).len(), 3, "up to date since");
-        // A scan finds a new sound: the library is shown again, with its fingerprint.
+        assert!(compact::own_since(&copy).is_some());
+        // A scan in the C# app after that: not read in.
         add_sound(&sounds_db, 9, "rim");
         assert_eq!(
             one_start(&sounds_db, &library_db, &Feed::default()),
-            [
-                "5 sounds from sounds-rust.db, 2 plays",
-                "5 fingerprints",
-                "used: true",
-                "again: other sounds, 6 sounds, 2 plays, used: true",
-                "6 fingerprints",
-            ]
+            ["5 sounds from sounds-rust.db, 2 plays", "5 fingerprints", "used: true"]
         );
-        // The copy's fingerprints damaged (a bad sector): it's made again from sounds.db, which gives them.
-        damage_first_page(&copy, "sound_features");
-        let cards = Feed::default();
-        assert_eq!(
-            one_start(&sounds_db, &library_db, &cards),
-            ["6 sounds from sounds-rust.db, 2 plays", "6 fingerprints", "used: true"]
-        );
-        let said = cards_said(&cards);
-        assert!(said.iter().any(|c| c.starts_with("Made the app's own copy of your sound library again")), "{said:?}");
-        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default())[1], "6 fingerprints", "made whole again");
-        // A sound given another type in the C# app: the same sounds in place, the galaxy coloured again.
-        assert!(c_sharp(&sounds_db).execute_batch("UPDATE sounds SET type = 'Snare' WHERE id = 1;").is_ok());
-        assert_eq!(
-            one_start(&sounds_db, &library_db, &Feed::default()),
-            [
-                "6 sounds from sounds-rust.db, 2 plays",
-                "6 fingerprints",
-                "used: true",
-                "again: the same sounds, retyped, 6 sounds, 2 plays, used: true",
-            ]
-        );
-        // Damaged while it's behind (the C# app played a sound since): the sounds come from making it again, with
-        // nothing to bring up to date after.
-        let played = c_sharp(&sounds_db).execute_batch(
-            "UPDATE sounds SET plays = 3 WHERE id = 3; INSERT INTO sound_events VALUES (3, 'play', 1780000100);",
-        );
-        assert!(played.is_ok(), "{played:?}");
-        damage_first_page(&copy, "sound_features");
-        let cards = Feed::default();
-        assert_eq!(
-            one_start(&sounds_db, &library_db, &cards),
-            [
-                "6 sounds from sounds-rust.db, 2 plays",
-                "6 fingerprints",
-                "used: true",
-                "again: the same sounds, 6 sounds, 3 plays, used: true",
-            ]
-        );
-        let said = cards_said(&cards);
-        assert!(said.iter().any(|c| c.starts_with("Made the app's own copy of your sound library again")), "{said:?}");
-        assert!(!said.iter().any(|c| c.starts_with("Brought")), "{said:?}");
-        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default()).len(), 3, "up to date since");
-        // Damaged, and it can't be made again (a folder in the way of the new copy): the rest comes from sounds.db,
-        // as it does without a copy.
-        let part = PathBuf::from(format!("{}.part-{}", copy.display(), std::process::id()));
-        assert!(std::fs::create_dir_all(&part).is_ok());
-        damage_first_page(&copy, "sound_features");
-        let cards = Feed::default();
-        assert_eq!(
-            one_start(&sounds_db, &library_db, &cards),
-            [
-                "6 sounds from sounds-rust.db, 3 plays".to_owned(),
-                format!("the rest from {}", sounds_db.display()),
-                "6 fingerprints".to_owned(),
-                "used: true".to_owned(),
-            ]
-        );
-        let said = cards_said(&cards);
-        assert!(
-            said.iter().any(|c| c.starts_with("Couldn't make the app's own copy of your sound library")),
-            "{said:?}"
-        );
-        assert!(std::fs::remove_dir(&part).is_ok());
-        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default())[0], "6 sounds from sounds-rust.db, 3 plays");
-        assert!(copy.exists(), "made at the next start");
-        // The copy can't be brought up to date (sounds.db isn't a library any more): the page keeps what it showed.
-        let cards = Feed::default();
-        assert!(c_sharp(&sounds_db).execute_batch("UPDATE sounds SET rating = 4 WHERE id = 1;").is_ok());
-        assert!(c_sharp(&sounds_db).execute_batch("ALTER TABLE sounds RENAME TO gone;").is_ok());
-        let kept = one_start(&sounds_db, &library_db, &cards);
-        assert_eq!(kept.first().map(String::as_str), Some("6 sounds from sounds-rust.db, 3 plays"));
-        assert!(!kept.iter().any(|k| k.starts_with("again")), "{kept:?}");
-        let said = cards_said(&cards);
-        assert!(said.iter().any(|c| c.starts_with("Couldn't bring your sound library up to date: ")), "{said:?}");
     }
 
     #[test]

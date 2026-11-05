@@ -1409,6 +1409,7 @@ mod tests {
             tables,
             listed_tables,
             prints: 0,
+            adopted: false,
         };
         assert_eq!(copy_synced_line(&synced(false, 1, 3, 2, (1, 1))), "3 changed, 1 new, 2 gone");
         assert_eq!(copy_synced_line(&synced(false, 0, 1_204, 0, (0, 0))), "1,204 changed");

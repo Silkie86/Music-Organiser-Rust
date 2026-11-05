@@ -608,19 +608,19 @@ fn a_copy_left_half_made_goes_at_the_next_start() {
         std::fs::write(path, b"half a copy").unwrap();
     }
     left_long_ago(&left);
-    // The page's read of the copy clears what was left, and only that.
-    let Ok(compact::PageRead::Copy { .. }) = compact::read_for_page(&old, now()) else {
-        panic!("the copy is read");
-    };
-    assert_eq!(half_made(&dir), vec!["sounds-rust.db.part-66666".to_owned()]);
-    // So does bringing the copy up to date, once the other has been left long enough too.
-    left_long_ago(&making);
+    // Bringing the copy up to date clears what was left, and only that.
     cs(&old)
         .execute_batch("UPDATE sounds SET plays = COALESCE(plays, 0) + 1 WHERE id = (SELECT MIN(id) FROM sounds);")
         .unwrap();
     assert_eq!(compact::sync(&old, &copy).unwrap().changed, 1);
-    assert_eq!(half_made(&dir), Vec::<String>::new());
+    assert_eq!(half_made(&dir), vec!["sounds-rust.db.part-66666".to_owned()]);
     same_answers(&old, &copy);
+    // So does the page's read of the copy, once the other has been left long enough too.
+    left_long_ago(&making);
+    let Ok(compact::PageRead::Copy { .. }) = compact::read_for_page(&old, now()) else {
+        panic!("the copy is read");
+    };
+    assert_eq!(half_made(&dir), Vec::<String>::new());
 }
 
 /// Where SQLite keeps `table` in the file at `db`: the first byte of its first page.
@@ -684,10 +684,8 @@ fn damage_met_while_bringing_the_copy_up_to_date() {
     compact::sync(&old, &copy).unwrap();
     damage(&copy, "sounds_path");
     cs(&old).execute_batch("UPDATE sounds SET rating = 5 WHERE id = (SELECT MIN(id) FROM sounds);").unwrap();
-    // (Not seen as behind here: saved within the same tick of the file system's clock as the copy was made.)
-    let read = compact::read_for_page(&old, now());
-    assert!(matches!(read, Ok(compact::PageRead::Copy { .. })), "the copy still reads");
-    drop(read);
+    let listed = SoundsDb::open_read_only(&copy).unwrap().all(now());
+    assert!(listed.is_ok(), "the copy still reads");
     let synced = compact::sync(&old, &copy).unwrap();
     assert!(synced.made, "made again: {synced:?}");
     same_answers(&old, &copy);
@@ -909,7 +907,8 @@ fn sounds_db_is_never_changed() {
 }
 
 /// With no copy yet, the page's read and the copy's are one pass over `sounds.db`: the page gets what its own read
-/// gives, and the copy made on the same pass gives it too. An update on the same pass likewise.
+/// gives, and the copy made on the same pass gives it too, and is the app's own library from then on. An update on
+/// the same pass (of a copy made before the C# app was retired) likewise.
 #[test]
 fn the_page_reads_sounds_db_once_while_the_copy_is_made() {
     let dir = folder("one-pass");
@@ -917,11 +916,16 @@ fn the_page_reads_sounds_db_once_while_the_copy_is_made() {
     let copy = compact::copy_of(&old);
     let (e, synced) = compact::sync_reading(&old, &copy, now()).unwrap();
     let s = synced.unwrap();
-    assert!(s.made);
+    assert!(s.made && s.adopted);
     assert_eq!(s.sounds, e.sounds.len());
     same_everything(&e, &read_for_page(&old));
     assert!(compact::in_step(&old, &copy));
     same_answers(&old, &copy);
+    // One made while the C# app still ran, which still follows sounds.db.
+    for end in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{end}", copy.display()));
+    }
+    assert!(!compact::sync(&old, &copy).unwrap().adopted);
     cs(&old)
         .execute_batch(
             "UPDATE sounds SET plays = COALESCE(plays, 0) + 1
@@ -931,7 +935,7 @@ fn the_page_reads_sounds_db_once_while_the_copy_is_made() {
         .unwrap();
     let (e, synced) = compact::sync_reading(&old, &copy, now()).unwrap();
     let s = synced.unwrap();
-    assert_eq!((s.made, s.added, s.changed, s.removed), (false, 0, 7, 1));
+    assert_eq!((s.made, s.added, s.changed, s.removed, s.adopted), (false, 0, 7, 1, true));
     same_everything(&e, &read_for_page(&old));
     assert!(compact::in_step(&old, &copy));
     same_answers(&old, &copy);
@@ -1007,32 +1011,18 @@ fn the_page_reads_the_copy_whenever_there_is_one() {
     let Ok(compact::PageRead::Library { everything, made }) = compact::read_for_page(&old, now()) else {
         panic!("no copy yet, so sounds.db is read");
     };
-    assert!(made.unwrap().made);
+    let made = made.unwrap();
+    assert!(made.made && made.adopted, "{made:?}");
+    assert!(compact::own_since(&copy).is_some());
     same_everything(&everything, &read_for_page(&old));
-    let Ok(compact::PageRead::Copy { db, sounds, behind }) = compact::read_for_page(&old, now()) else {
+    let Ok(compact::PageRead::Copy { db, sounds, behind, adopted }) = compact::read_for_page(&old, now()) else {
         panic!("the copy is read once it's there");
     };
     assert!(!behind);
+    assert!(!adopted, "it became the app's own when it was made, on the page's pass");
     assert!(db.is_copy());
     assert_eq!(format!("{sounds:?}"), listed(&old));
     drop(db);
-    // A save in the C# app: the copy is still read at once, as it was, and says it's behind.
-    let before = listed(&old);
-    cs(&old)
-        .execute("UPDATE sounds SET rating = 5 - COALESCE(rating, 0) WHERE id IN (SELECT id FROM sounds LIMIT 4)", [])
-        .unwrap();
-    assert_ne!(listed(&old), before);
-    let Ok(compact::PageRead::Copy { sounds, behind, .. }) = compact::read_for_page(&old, now()) else {
-        panic!("the copy is read even when it's behind");
-    };
-    assert!(behind);
-    assert_eq!(format!("{sounds:?}"), before);
-    compact::sync(&old, &copy).unwrap();
-    let Ok(compact::PageRead::Copy { sounds, behind, .. }) = compact::read_for_page(&old, now()) else {
-        panic!("the copy brought up to date is read");
-    };
-    assert!(!behind);
-    assert_eq!(format!("{sounds:?}"), listed(&old));
     // A newer version's copy: left alone, and sounds.db is read instead.
     Connection::open(&copy).unwrap().execute("UPDATE copy_info SET value = 99 WHERE key = 'format'", []).unwrap();
     let Ok(compact::PageRead::Library { everything, made }) = compact::read_for_page(&old, now()) else {
@@ -1045,4 +1035,98 @@ fn the_page_reads_the_copy_whenever_there_is_one() {
         .query_row("SELECT value FROM copy_info WHERE key = 'format'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(format, 99, "the newer copy is left as it is");
+}
+
+/// The C# app is retired (Solomon, 2026-11-05): a copy that's behind `sounds.db` is shown at once, brought up to date
+/// one last time, and is the app's own sound library from then on. `sounds.db` is never read into it again, and once
+/// it's gone the page still reads the copy.
+#[test]
+fn a_copy_behind_is_brought_up_to_date_one_last_time_and_is_the_apps_own_after() {
+    let dir = folder("last-sync");
+    let old = library(&dir, 90);
+    let copy = compact::copy_of(&old);
+    let listed = |path: &Path| format!("{:?}", SoundsDb::open_read_only(path).unwrap().all(now()).unwrap());
+    // Made by the app before the C# app was retired: it still follows sounds.db.
+    assert!(!compact::sync(&old, &copy).unwrap().adopted);
+    assert_eq!(compact::own_since(&copy), None);
+    let before = listed(&old);
+    cs(&old)
+        .execute("UPDATE sounds SET rating = 5 - COALESCE(rating, 0) WHERE id IN (SELECT id FROM sounds LIMIT 4)", [])
+        .unwrap();
+    assert_ne!(listed(&old), before);
+    let Ok(compact::PageRead::Copy { sounds, behind, adopted, .. }) = compact::read_for_page(&old, now()) else {
+        panic!("the copy is read even when it's behind");
+    };
+    assert!(behind && !adopted);
+    assert_eq!(format!("{sounds:?}"), before);
+    assert_eq!(compact::own_since(&copy), None, "not the app's own while it's behind");
+    // One last time.
+    let last = compact::last_sync(&old, &copy).unwrap();
+    assert!(last.adopted && last.changed == 4, "{last:?}");
+    let since = compact::own_since(&copy).expect("the app's own now");
+    same_answers(&old, &copy);
+    let Ok(compact::PageRead::Copy { sounds, behind, adopted, .. }) = compact::read_for_page(&old, now()) else {
+        panic!("the copy is read");
+    };
+    assert!(!behind && !adopted);
+    assert_eq!(format!("{sounds:?}"), listed(&old));
+    // A save in the C# app after that: never read into the copy.
+    let owned = listed(&copy);
+    cs(&old)
+        .execute("UPDATE sounds SET rating = 5 - COALESCE(rating, 0) WHERE id IN (SELECT id FROM sounds)", [])
+        .unwrap();
+    assert!(compact::in_step(&old, &copy), "nothing more to take from sounds.db");
+    let Ok(compact::PageRead::Copy { sounds, behind, .. }) = compact::read_for_page(&old, now()) else {
+        panic!("the copy is read");
+    };
+    assert!(!behind);
+    assert_eq!(format!("{sounds:?}"), owned);
+    let refused = compact::sync(&old, &copy).unwrap_err().to_string();
+    assert!(refused.contains("own sound library"), "{refused}");
+    assert_eq!(compact::last_sync(&old, &copy).unwrap(), Synced::default());
+    assert_eq!(listed(&copy), owned);
+    assert_eq!(compact::own_since(&copy), Some(since));
+    // sounds.db archived: the page reads the copy all the same.
+    for end in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{end}", old.display()));
+    }
+    let Ok(compact::PageRead::Copy { sounds, behind, .. }) = compact::read_for_page(&old, now()) else {
+        panic!("the copy is read without sounds.db");
+    };
+    assert!(!behind);
+    assert_eq!(format!("{sounds:?}"), owned);
+}
+
+/// A copy that's up to date becomes the app's own on the page's first read, once; made again because it's damaged, it
+/// keeps the time it became so. Without `sounds.db` to make it again from, the damage is said, not hidden.
+#[test]
+fn an_up_to_date_copy_becomes_the_apps_own_and_stays_so_when_made_again() {
+    let dir = folder("adopt");
+    let old = library(&dir, 60);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    let Ok(compact::PageRead::Copy { behind, adopted, .. }) = compact::read_for_page(&old, now()) else {
+        panic!("the copy is read");
+    };
+    assert!(!behind && adopted);
+    let since = compact::own_since(&copy).expect("the app's own now");
+    let Ok(compact::PageRead::Copy { adopted, .. }) = compact::read_for_page(&old, now()) else {
+        panic!("the copy is read");
+    };
+    assert!(!adopted, "only once");
+    // Damaged where its list is: made again from sounds.db, still the app's own since the same time.
+    damage(&copy, "sounds");
+    let Ok(compact::PageRead::Library { everything, made }) = compact::read_for_page(&old, now()) else {
+        panic!("a damaged copy isn't read");
+    };
+    let made = made.unwrap();
+    assert!(made.made && !made.adopted, "{made:?}");
+    assert_eq!(compact::own_since(&copy), Some(since));
+    same_everything(&everything, &read_for_page(&old));
+    // Damaged again, with sounds.db gone: the page says why it can't read its sounds.
+    damage(&copy, "sounds");
+    for end in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{end}", old.display()));
+    }
+    assert!(compact::read_for_page(&old, now()).is_err());
 }
