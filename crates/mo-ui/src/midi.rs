@@ -1193,9 +1193,9 @@ fn send_to_bitwig(at: usize) {
     };
     let job = to_bitwig::part_card(&feed, &sending.name);
     let started = background::spawn("Send to Bitwig", move || {
-        let export = export_dir(&sending.library);
-        // A panic in it is logged as a crash and fails the card as it goes.
+        // A panic in it (finding the export folder too) is logged as a crash and fails the card as it goes.
         let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
+            let export = export_dir(&sending.library);
             send_part(job, &to_bitwig::Bitwig::default(), &sending, export.as_deref().map_err(String::as_str))
         }));
     });

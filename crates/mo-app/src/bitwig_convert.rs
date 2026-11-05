@@ -57,10 +57,34 @@ pub fn export_folder(setting: Option<&str>, documents: Option<&Path>) -> Result<
     match std::fs::metadata(&set) {
         Ok(m) if m.is_dir() => Ok(set),
         Ok(_) => Err(format!("The export folder {} is a file, not a folder.", set.display())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            Err(format!("The export folder {} isn't there. Plug its drive in, then try again.", set.display()))
-        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound || drive_not_ready(&e) => Err(not_there(&set)),
         Err(e) => Err(format!("The export folder {} can't be opened: {e}.", set.display())),
+    }
+}
+
+/// Windows' word for a drive with nothing in it (a card reader with no card in, say), or one that isn't ready yet.
+fn drive_not_ready(e: &std::io::Error) -> bool {
+    const ERROR_NOT_READY: i32 = 21;
+    cfg!(windows) && e.raw_os_error() == Some(ERROR_NOT_READY)
+}
+
+/// What an export says when the export folder that's set isn't there. On Windows its drive tells which: when that
+/// isn't there either, it's unplugged (or a card reader has no card in); else the folder has gone from it. Elsewhere a
+/// drive shows as a folder too, so both are said. Looks at the disk.
+fn not_there(set: &Path) -> String {
+    let folder = set.display();
+    if !cfg!(windows) {
+        return format!(
+            "The export folder {folder} isn't there. Plug its drive in, or make the folder again, then try again."
+        );
+    }
+    if set.ancestors().last().is_some_and(|drive| std::fs::metadata(drive).is_ok()) {
+        format!(
+            "The export folder {folder} isn't there any more, though its drive is. Make the folder again, then try \
+             again."
+        )
+    } else {
+        format!("The export folder {folder} isn't there. Plug its drive in, then try again.")
     }
 }
 
@@ -219,14 +243,28 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         assert_eq!(export_folder(dir.to_str(), None), Ok(dir.clone()));
-        // Its drive unplugged, say: the export stops, and the folder isn't made again.
-        let gone = dir.join("unplugged");
+        // Gone from a drive that's there: the export stops, and the folder isn't made again.
+        let gone = dir.join("removed");
         let why = export_folder(gone.to_str(), Some(&dir)).unwrap_err();
-        assert_eq!(
-            why,
-            format!("The export folder {} isn't there. Plug its drive in, then try again.", gone.display())
-        );
+        let says = if cfg!(windows) {
+            "isn't there any more, though its drive is. Make the folder again, then try again."
+        } else {
+            "isn't there. Plug its drive in, or make the folder again, then try again."
+        };
+        assert_eq!(why, format!("The export folder {} {says}", gone.display()));
         assert!(!gone.exists());
+        // Windows: on a drive that isn't there (unplugged, say), it says to plug it in.
+        #[cfg(windows)]
+        if let Some(drive) = ('D'..='Z').rev().map(|l| PathBuf::from(format!("{l}:\\"))).find(|d| !d.exists()) {
+            let unplugged = drive.join("Exports");
+            assert_eq!(
+                export_folder(unplugged.to_str(), Some(&dir)),
+                Err(format!(
+                    "The export folder {} isn't there. Plug its drive in, then try again.",
+                    unplugged.display()
+                ))
+            );
+        }
         // None set: the one in Documents, made when it's needed.
         assert_eq!(export_folder(Some(" "), Some(&dir)), Ok(dir.join("Music Organiser Exports")));
         assert_eq!(export_folder(None, None), Err(NO_EXPORT_FOLDER.to_owned()));
