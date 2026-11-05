@@ -54,6 +54,8 @@ pub struct Live {
     sounds_db: Option<PathBuf>,
     /// Saves whose read failed, to try again, with how many tries are left.
     retry: HashMap<String, u8>,
+    /// Where the list came from when it was loaded, for the log (`Library::saves_and_source`).
+    source: Option<String>,
 }
 
 /// What [`Live::update`] did, for its card.
@@ -103,7 +105,7 @@ impl Live {
     /// the C# app), or at `gap_months` when none is picked.
     pub fn load(library: &Library, gap_months: u32, details: LiveDetails) -> Result<Live, LibraryError> {
         let pending = library.pending_fixes()?;
-        let mut saves = library.saves()?;
+        let (mut saves, source) = library.saves_and_source()?;
         // After every row of the library, Fix's copies left out below included, so no two saves share an id.
         let next_id = saves.iter().map(|s| s.id).max().unwrap_or(0) + 1;
         if !pending.is_empty() {
@@ -137,6 +139,7 @@ impl Live {
             samples: None,
             sounds_db: None,
             retry: HashMap::new(),
+            source,
         })
     }
 
@@ -144,6 +147,11 @@ impl Live {
     pub fn with_sounds(mut self, sounds_db: PathBuf) -> Live {
         self.sounds_db = Some(sounds_db);
         self
+    }
+
+    /// Where the list came from when it was loaded ("from the app's copy"...), for the log.
+    pub fn source(&self) -> Option<&str> {
+        self.source.as_deref()
     }
 
     /// The project folders, for the folder watch.
@@ -435,6 +443,7 @@ mod tests {
             samples: None,
             sounds_db: None,
             retry: HashMap::new(),
+            source: None,
         }
     }
 

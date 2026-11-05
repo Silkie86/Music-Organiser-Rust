@@ -27,6 +27,9 @@ pub enum How {
 /// Opens one of a page's things, by its id. Returns whether it could.
 type Opener = Rc<dyn Fn(&AppWindow, &Hit, How) -> bool>;
 
+/// Run each time the finder opens ([`when_opening`]).
+type Opening = Rc<dyn Fn(&AppWindow)>;
+
 #[derive(Default)]
 struct State {
     /// Every page's source, by the name it was added under, so a list read again replaces its old source.
@@ -57,6 +60,7 @@ thread_local! {
     static STATE: RefCell<State> = RefCell::default();
     static OPENERS: RefCell<HashMap<Kind, Opener>> = RefCell::default();
     static WORKER: RefCell<Option<Newest<Ask>>> = const { RefCell::new(None) };
+    static OPENING: RefCell<Vec<Opening>> = RefCell::default();
 }
 
 /// Hands the finder a page's things, under a name of the page's own; handing them again under the same name replaces
@@ -75,6 +79,12 @@ pub fn add_source(app: &AppWindow, name: &'static str, source: Arc<dyn Source>) 
 /// Says how to open a page's things of one kind.
 pub fn on_open(kind: Kind, open: impl Fn(&AppWindow, &Hit, How) -> bool + 'static) {
     OPENERS.with(|o| o.borrow_mut().insert(kind, Rc::new(open)));
+}
+
+/// Runs `f` each time the finder opens, before it searches: to bring a source up to date (the actions of the page on
+/// show), or to start reading a page's list in the background so its things can be found before it's first visited.
+pub fn when_opening(f: impl Fn(&AppWindow) + 'static) {
+    OPENING.with(|o| o.borrow_mut().push(Rc::new(f)));
 }
 
 /// Searches on the window's thread from now on (the screenshots, which can't wait for the pool).
@@ -148,6 +158,10 @@ pub fn toggle(app: &AppWindow) {
     });
     data.set_query(SharedString::new());
     data.set_open(true);
+    let opening = OPENING.with(|o| o.borrow().clone());
+    for f in opening {
+        f(app);
+    }
     search(app);
 }
 

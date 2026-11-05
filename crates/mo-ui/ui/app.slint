@@ -1,6 +1,6 @@
 // The window shell: the rail on the left and the page on show. Agreed map (2026-10-29): Songs, Sounds, Presets, MIDI,
 // Plugins and Space, with Settings at the bottom.
-import { Theme, Type, Space, Motion, Icons, RailItem, Groove, Caps, ActionKey, TipLayer, TipState, StudioButton } from "studio.slint";
+import { Theme, Type, Space, Motion, Icons, RailItem, Groove, Caps, ActionKey, TipLayer, TipState, StudioButton, JumpField } from "studio.slint";
 import { ComingPage } from "pages/coming.slint";
 import { PartsGallery } from "pages/parts.slint";
 import { SoundsPage, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook } from "pages/sounds.slint";
@@ -153,20 +153,38 @@ export component AppWindow inherits Window {
                     padding: Space.sm;
                     padding-top: Space.lg;
                     spacing: Space.xs;
-                    // The app's name in its own title face.
-                    Text {
-                        text: "Music Organiser";
-                        font-family: Theme.title-font;
-                        font-size: Type.row-title;
-                        font-weight: 700;
-                        letter-spacing: -0.2px;
-                        color: Theme.text;
+                    // The app's mark and name, lined up with the places under it (icon column, then the name column),
+                    // so the rail reads as one straight edge from top to bottom.
+                    Rectangle {
                         height: 40px;
-                        x: 10px;
+                        // The mark: a rack unit seen from the front, its fader slot and its light.
+                        Path {
+                            x: 12px;
+                            y: (parent.height - self.height) / 2;
+                            width: 16px;
+                            height: 16px;
+                            viewbox-width: 16;
+                            viewbox-height: 16;
+                            commands: "M 1.5 4 L 14.5 4 L 14.5 12 L 1.5 12 Z M 4 8 L 8.5 8 M 11 8 A 0.9 0.9 0 1 0 12.8 8 A 0.9 0.9 0 1 0 11 8";
+                            stroke: Theme.accent;
+                            stroke-width: 1.6px;
+                        }
+                        Text {
+                            x: 38px;
+                            height: parent.height;
+                            vertical-alignment: center;
+                            text: "Music Organiser";
+                            font-family: Theme.title-font;
+                            font-size: Type.row-title;
+                            font-weight: 700;
+                            letter-spacing: -0.2px;
+                            color: Theme.text;
+                        }
                     }
+                    Rectangle { height: Space.xs; }
                     // Ctrl+K in sight, not only on a key (Solomon, 4 Nov: nothing useful hidden away).
-                    StudioButton {
-                        text: "Jump to anything…";
+                    JumpField {
+                        text: "Jump to…";
                         tip: "Jump to a song, sound, page or action";
                         key: FinderData.jump-key;
                         clicked => { FinderData.open-asked(); }
@@ -199,12 +217,16 @@ export component AppWindow inherits Window {
                     Rectangle { height: 10px; }
                     Groove { }
                     Rectangle { height: 6px; }
-                    Caps { text: "IN YOUR DAWS"; x: 10px; }
-                    Text {
-                        x: 10px;
-                        text: "Nothing open";
-                        color: Theme.faint;
-                        font-size: Type.meta;
+                    // On the same left edge as the icons above (a layout ignores `x`, so padding does it).
+                    VerticalLayout {
+                        padding-left: Space.md;
+                        spacing: Space.xs;
+                        Caps { text: "IN YOUR DAWS"; }
+                        Text {
+                            text: "Nothing open";
+                            color: Theme.faint;
+                            font-size: Type.meta;
+                        }
                     }
                     Rectangle { }
                     RailItem {

@@ -216,12 +216,8 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     let weak = app.as_weak();
     data.on_tab_picked(move |i| {
         let Some(tab) = usize::try_from(i).ok().and_then(Tab::from_index) else { return };
-        change(TAB_KEY, tab.name());
         if let Some(app) = weak.upgrade() {
-            show(&app);
-            if tab == Tab::Daws {
-                check_daws(&app);
-            }
+            show_tab(&app, tab);
         }
     });
     let weak = app.as_weak();
@@ -480,6 +476,15 @@ fn keys_now(app: &AppWindow, keys: &mo_app::shortcuts::Shortcuts, said: String) 
 
 /// Remembers the page on show, for "Last page I used": only while that's the start page, so other clicks on the rail
 /// write nothing.
+/// Shows one tab (picked on the page, or by Ctrl+K).
+pub fn show_tab(app: &AppWindow, tab: Tab) {
+    change(TAB_KEY, tab.name());
+    show(app);
+    if tab == Tab::Daws {
+        check_daws(app);
+    }
+}
+
 pub fn page_shown(place: Place) {
     // Leaving Settings stops Shortcuts listening, so the next key on another page works as a key again.
     if place != Place::Settings {
