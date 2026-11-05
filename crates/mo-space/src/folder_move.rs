@@ -595,8 +595,14 @@ pub fn move_folder(
         Tree { leave_out: &leave_out, links_lead: Some(Path::new(&from)), ..Tree::new(Path::new(&from), &to, &to) };
     copy_fresh(&tree, progress, stop)?;
     // Still the real folder that was copied: one that turned into a link meanwhile would be set aside as the old copy,
-    // a link, with the plugin's files somewhere else.
+    // a link, with the plugin's files somewhere else. One that can't be looked at at all now (its drive went just as
+    // the copy was done, say) leaves the copy as the only one that may be reached: it stays, as one stopped part way
+    // does.
     if !real_folder(&from) {
+        if fs::symlink_metadata(&from).is_err() {
+            let from = Path::new(&from);
+            return Err(stays_while_gone("The folder hasn't moved, though all of it was copied.", &to, from, from));
+        }
         remove_copy(&to);
         return Err(CantMove::Failed(format!("{from} isn't a real folder now, so it was left alone.")));
     }
@@ -1018,8 +1024,9 @@ pub(crate) fn room_for(tree: &Tree, here: &Path, drives: &dyn Drives, stop: &Ato
 /// the disk ([`write_through`]). The new folder holds a marker from the moment it's made ([`crate::half_copy`]), which
 /// the caller takes out once the copy is in use, so one the app or the computer stops part way is known for the half
 /// copy it is. If anything goes wrong, or you press Stop, the new folder goes; but not while nothing can be looked at
-/// where the folder it copies really is (moving back, the other drive went part way, say), as it may be the only copy
-/// of some of those files then: it stays, and it says so. Returns what each pass did.
+/// where the folder it copies really was as it began (moving back, the other drive went part way, say), as it may be
+/// the only copy of some of those files then: it stays, and it says so ([`stays_while_gone`]). Returns what each pass
+/// did.
 pub(crate) fn copy_fresh(
     tree: &Tree,
     progress: &(dyn Fn(u64) + Sync),
@@ -1041,25 +1048,35 @@ pub(crate) fn copy_fresh(
                 .map(|again| (first, again))
         })
         .and_then(|(first, again)| write_through(&[&first, &again], stop).map(|()| (first, again)));
-    match copied {
-        Ok(passes) => Ok(passes),
-        // Nothing can be looked at where it really copied from (its drive went part way, say): what came across may be
-        // the only copy of some of its files that can be reached then. It stays, still a half copy, which the next try
-        // clears first once that can be reached again ([`half_copy::clear_own`]).
-        Err(why) if fs::symlink_metadata(&real_from).is_err() => Err(CantMove::LeftHalfway(format!(
-            "{} The copy made so far stays, as {}: {} can't be reached now, so it may hold the only copy of some of its \
-             files. Once that can be reached again, trying again clears it first.",
-            part_way(&why),
-            text(tree.to),
-            text(tree.from)
-        ))),
+    copied.map_err(|why| {
+        // Nothing can be looked at where it really copied from (its drive went part way, say; whatever the system says,
+        // as an unplugged drive can say several things): it stays.
+        if fs::symlink_metadata(&real_from).is_err() {
+            return stays_while_gone(&part_way(&why), tree.to, tree.from, &real_from);
+        }
         // Anything else goes: what it copies is still there, or something else is in its place now (a link put there,
         // so what was read may not be its files).
-        Err(why) => {
-            remove_copy(tree.to);
-            Err(why)
-        }
-    }
+        remove_copy(tree.to);
+        why
+    })
+}
+
+/// What a copy the move made says when it stays because nothing can be looked at where it was copied from (`real`,
+/// where `from` really was as the copy began: its drive went, say): what came across may be the only copy of some of
+/// those files that can be reached then. It stays, still a half copy, which the next try clears first once that can be
+/// reached again ([`half_copy::clear_own`]). `said` is what stopped it.
+fn stays_while_gone(said: &str, to: &Path, from: &Path, real: &Path) -> CantMove {
+    // `from` still leads somewhere (a link pointed elsewhere meanwhile): it's where it led that went, not `from`.
+    let gone = if fs::metadata(from).is_ok() {
+        format!("{}, where {} led,", text(&plainly(real)), text(from))
+    } else {
+        text(from)
+    };
+    CantMove::LeftHalfway(format!(
+        "{said} The copy made so far stays, as {}: {gone} can't be reached now, so it may hold the only copy of some of \
+         its files. Once that can be reached again, trying again clears it first.",
+        text(to)
+    ))
 }
 
 /// Writes a copy through to the disk just before it goes into use: every big file its passes wrote
@@ -1246,8 +1263,8 @@ fn differences(
         inner_links(moved, all).into_iter().map(|(rest, _)| key(&text(&old.join(rest)))).collect()
     });
     let show = |p: &Path| shown_as.join(p.strip_prefix(old).unwrap_or(p)).to_string_lossy().into_owned();
-    // Where the two really are, for where links in them lead ([`same_lead`]).
-    let roots = [fs::canonicalize(old).ok(), fs::canonicalize(copy).ok()];
+    // Where the two really are, for where links in them lead ([`same_lead`]), plainly.
+    let roots = [fs::canonicalize(old).ok().map(|r| plainly(&r)), fs::canonicalize(copy).ok().map(|r| plainly(&r))];
     let mut folders = vec![(old.to_path_buf(), copy.to_path_buf())];
     while let Some((old_dir, copy_dir)) = folders.pop() {
         let top = old_dir.as_path() == old;
@@ -1326,9 +1343,9 @@ fn differences(
 
 /// Whether two links lead to the same place: worded with the same whole path, or by where they lead
 /// ([`where_it_leads`]); two whose places can't be told (a link that can't be read) aren't the same. A place inside
-/// either folder of `roots` (where the two folders really are: the old copy and the copy, say) counts by its path
-/// inside it: an old copy's link into the folder leads into the old copy, or by the folder's own path into the copy,
-/// as the copy's does.
+/// either folder of `roots` (where the two folders really are, written [`plainly`]: the old copy and the copy, say)
+/// counts by its path inside it: an old copy's link into the folder leads into the old copy, or by the folder's own
+/// path into the copy, as the copy's does.
 fn same_lead(a: &Path, b: &Path, roots: &[Option<PathBuf>]) -> bool {
     let (x, y) = (fs::read_link(a).ok(), fs::read_link(b).ok());
     // Worded with the same whole path, they lead to the same place wherever they are, without asking where (a network
@@ -1344,8 +1361,7 @@ fn same_lead(a: &Path, b: &Path, roots: &[Option<PathBuf>]) -> bool {
     let place = |link: &Path, words: Option<&Path>| {
         where_it_leads(link, words).map(|real| {
             let real = plainly(&real);
-            let inside =
-                roots.iter().flatten().find_map(|root| real.strip_prefix(plainly(root)).ok().map(Path::to_path_buf));
+            let inside = roots.iter().flatten().find_map(|root| real.strip_prefix(root).ok().map(Path::to_path_buf));
             inside.map_or((false, real), |rest| (true, rest))
         })
     };
@@ -1927,8 +1943,10 @@ pub(crate) fn copy_tree(
             _ => Ok(()),
         };
     // Where the folder and the copy really are, for where links at the same place in both lead, freshening a folder of
-    // yours ([`same_lead`]). Looked up once a pass: the copy's drive is awake anyway, as each name is looked for in it.
-    let roots = [Some(source_real.clone()), tree.keep_in.and_then(|_| fs::canonicalize(tree.to).ok())];
+    // yours ([`same_lead`]), plainly. Looked up once a pass: the copy's drive is awake anyway, as each name is looked for
+    // in it.
+    let roots =
+        [Some(plainly(&source_real)), tree.keep_in.and_then(|_| fs::canonicalize(tree.to).ok()).map(|r| plainly(&r))];
     let inside = |copy: &Path| copy.strip_prefix(tree.to).unwrap_or(copy).to_path_buf();
     let mut copied = Copied::default();
     let mut recent: VecDeque<(Instant, PathBuf)> = VecDeque::new();
