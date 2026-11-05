@@ -353,6 +353,59 @@ impl SoundsDb {
         Ok(self.read_sounds(now, false)?.sounds)
     }
 
+    /// The ids of the sounds a list of them shows: all but the ones you've hidden as duplicates, in no order to go by.
+    /// Read from the index of the sounds' paths alone (a few megabytes for half a million sounds, where their rows
+    /// are hundreds), so it's quick whatever the rows hold: for picking which sounds to show first
+    /// ([`SoundsDb::some`]) while the rest are read.
+    pub fn shown_ids(&self) -> Result<Vec<i64>, SoundsError> {
+        let snapshot = self.conn.unchecked_transaction()?;
+        let hidden = self.hidden()?;
+        let mut st = self.conn.prepare("SELECT id FROM sounds")?;
+        let rows = st.query_map([], |r| r.get::<_, i64>(0))?;
+        let mut ids = Vec::new();
+        for id in rows {
+            let id = id?;
+            if !hidden.contains(&id) {
+                ids.push(id);
+            }
+        }
+        drop(st);
+        snapshot.finish()?;
+        Ok(ids)
+    }
+
+    /// The sounds with these ids (any it doesn't have are left out), each just as [`SoundsDb::all`] gives it, in the
+    /// same order: for showing a few at once while the rest are read. Only what's theirs is read (their rows, tags,
+    /// plays and hidden marks), so it's quick for a few hundred whatever the size of the library.
+    pub fn some(&self, ids: &[i64], now: NaiveDateTime) -> Result<Vec<Sound>, SoundsError> {
+        let snapshot = self.conn.unchecked_transaction()?;
+        let mut sounds = Vec::with_capacity(ids.len());
+        // A few hundred at a time: each id is a value handed to SQLite, which takes only so many in one statement.
+        for ids in ids.chunks(SOME_AT_ONCE) {
+            let mut reading = Reading::start_for(self, now, false, Some(ids))?;
+            let sql = format!("{} WHERE sounds.id IN ({})", self.listing(false), places_for(ids.len()));
+            let mut st = self.conn.prepare(&sql)?;
+            let mut rows = st.query(rusqlite::params_from_iter(ids))?;
+            while let Some(r) = rows.next()? {
+                reading.add_listed(self.is_copy(), r)?;
+            }
+            sounds.append(&mut reading.out.sounds);
+        }
+        snapshot.finish()?;
+        sounds.sort_unstable_by(|a, b| by_path(&a.path, &b.path));
+        Ok(sounds)
+    }
+
+    /// The query that reads every sound for the list, in the order the rows are stored, each one's vectors after its
+    /// columns with `vectors` (from `sounds.db`: the copy keeps them in tables of their own).
+    fn listing(&self, vectors: bool) -> &'static str {
+        match self.layout {
+            Layout::Library if vectors => SOUND_AND_VECTORS_SQL,
+            Layout::Library => SOUND_SQL,
+            Layout::Copy | Layout::Formerly => self.copy_sounds(),
+        }
+    }
+
     /// Every sound as [`SoundsDb::all`] gives them, with each one's vectors as [`SoundsDb::vectors`] gives them, from
     /// one pass over the library. Each row keeps its vectors before its type and stars, so reading the list already
     /// goes through them: taking them on the way saves reading the whole file twice more.
@@ -371,26 +424,18 @@ impl SoundsDb {
         // random place in a file of gigabytes: minutes on a cold disk with a big library. In stored order the same
         // read goes straight through the file once. On one connection: several at once were no faster on a slow
         // disk, and they held up the other pages reading from it (Solomon's PC, 2026-11-03).
-        if self.is_copy() {
-            // The copy keeps the fingerprints in tables of their own: the list comes first, then each of them.
-            let mut st = self.conn.prepare(self.copy_sounds())?;
-            let mut rows = st.query([])?;
-            while let Some(r) = rows.next()? {
-                reading.add(copy_sound_at(r)?);
-            }
-            drop(rows);
-            drop(st);
-            if vectors {
-                // In the same order as from sounds.db: by sound, as its rows are stored.
-                reading.out.features = self.copied_gathered("sound_features")?;
-                reading.out.clap = self.copied_clap()?;
-            }
-        } else {
-            let mut st = self.conn.prepare(if vectors { SOUND_AND_VECTORS_SQL } else { SOUND_SQL })?;
-            let mut rows = st.query([])?;
-            while let Some(r) = rows.next()? {
-                reading.add_row(r)?;
-            }
+        let mut st = self.conn.prepare(self.listing(vectors))?;
+        let mut rows = st.query([])?;
+        while let Some(r) = rows.next()? {
+            reading.add_listed(self.is_copy(), r)?;
+        }
+        drop(rows);
+        drop(st);
+        if self.is_copy() && vectors {
+            // The copy keeps the fingerprints in tables of their own: the list comes first, then each of them, in the
+            // same order as from sounds.db (by sound, as its rows are stored).
+            reading.out.features = self.copied_gathered("sound_features")?;
+            reading.out.clap = self.copied_clap()?;
         }
         snapshot.finish()?;
         Ok(reading.finish())
@@ -451,7 +496,7 @@ impl SoundsDb {
     /// What's been done with each sound in the year before `now` and before that: deliberate plays, drags out of the
     /// app and sends into a DAW. Plays counted before the app kept dates count as recent, as in the C# app.
     pub fn activity(&self, now: NaiveDateTime) -> Result<HashMap<i64, SoundActivity>, SoundsError> {
-        let mut result = self.dated_activity(now)?;
+        let mut result = self.dated_activity(now, None)?;
         // Plays counted on the sound before each one was dated: those beyond the dated ones count as recent.
         let mut st = self.conn.prepare("SELECT id, plays FROM sounds WHERE plays > 0")?;
         let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, int(int_at(r, 1)))))?;
@@ -463,15 +508,22 @@ impl SoundsDb {
     }
 
     /// The dated part of [`SoundsDb::activity`]: what `sound_events` holds, without the plays counted before then.
-    fn dated_activity(&self, now: NaiveDateTime) -> Result<HashMap<i64, SoundActivity>, SoundsError> {
+    /// Each sound's activity (only those with ids `of`, when given), as of `now`.
+    fn dated_activity(
+        &self,
+        now: NaiveDateTime,
+        of: Option<&[i64]>,
+    ) -> Result<HashMap<i64, SoundActivity>, SoundsError> {
         let cutoff = unix(year_before(now));
         let mut result: HashMap<i64, SoundActivity> = HashMap::new();
         if self.has("sound_events") {
-            let mut st = self.conn.prepare(
+            let only = of.map_or(String::new(), |ids| format!(" AND sound_id IN ({})", places_for(ids.len())));
+            let mut st = self.conn.prepare(&format!(
                 "SELECT sound_id, kind, SUM(at >= ?1), SUM(at < ?1) FROM sound_events
-                 WHERE sound_id IS NOT NULL GROUP BY sound_id, kind",
-            )?;
-            let rows = st.query_map([cutoff], |r| {
+                 WHERE sound_id IS NOT NULL{only} GROUP BY sound_id, kind"
+            ))?;
+            let given = std::iter::once(cutoff).chain(of.unwrap_or_default().iter().copied());
+            let rows = st.query_map(rusqlite::params_from_iter(given), |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
                     r.get::<_, String>(1)?,
@@ -494,13 +546,16 @@ impl SoundsDb {
         Ok(result)
     }
 
-    /// Each sound's tags, sorted as `ORDER BY tag` sorts them (byte by byte). Read in the order they're stored and
-    /// sorted here, so SQLite doesn't fetch each row from wherever it sits by way of the tag index.
-    fn tags(&self) -> Result<HashMap<i64, Vec<String>>, SoundsError> {
+    /// Each sound's tags (only those with ids `of`, when given), sorted as `ORDER BY tag` sorts them (byte by byte).
+    /// Read in the order they're stored and sorted here, so SQLite doesn't fetch each row from wherever it sits by way
+    /// of the tag index.
+    fn tags(&self, of: Option<&[i64]>) -> Result<HashMap<i64, Vec<String>>, SoundsError> {
         let mut tags: HashMap<i64, Vec<String>> = HashMap::new();
         if self.has("sound_tags") {
-            let mut st = self.conn.prepare("SELECT sound_id, tag FROM sound_tags")?;
-            let rows = st.query_map([], |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?)))?;
+            let only = of.map_or(String::new(), |ids| format!(" WHERE sound_id IN ({})", places_for(ids.len())));
+            let mut st = self.conn.prepare(&format!("SELECT sound_id, tag FROM sound_tags{only}"))?;
+            let given = rusqlite::params_from_iter(of.unwrap_or_default());
+            let rows = st.query_map(given, |r| Ok((r.get::<_, Option<i64>>(0)?, r.get::<_, String>(1)?)))?;
             for row in rows {
                 if let (Some(id), tag) = row? {
                     tags.entry(id).or_default().push(tag);
@@ -628,11 +683,17 @@ impl SoundsDb {
 
     /// The sounds you've hidden as duplicates.
     pub fn hidden(&self) -> Result<HashSet<i64>, SoundsError> {
+        self.hidden_of(None)
+    }
+
+    /// The same of the sounds with ids `of` alone, when given.
+    fn hidden_of(&self, of: Option<&[i64]>) -> Result<HashSet<i64>, SoundsError> {
         if !self.has("sound_hidden") {
             return Ok(HashSet::new());
         }
-        let mut st = self.conn.prepare("SELECT sound_id FROM sound_hidden")?;
-        let rows = st.query_map([], |r| r.get::<_, i64>(0))?;
+        let only = of.map_or(String::new(), |ids| format!(" WHERE sound_id IN ({})", places_for(ids.len())));
+        let mut st = self.conn.prepare(&format!("SELECT sound_id FROM sound_hidden{only}"))?;
+        let rows = st.query_map(rusqlite::params_from_iter(of.unwrap_or_default()), |r| r.get::<_, i64>(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -743,13 +804,28 @@ impl Reading {
     /// Starts with what the other tables hold for each sound. Inside the read transaction the rows are read in, so
     /// they all come from one moment.
     pub(crate) fn start(db: &SoundsDb, now: NaiveDateTime, vectors: bool) -> Result<Reading, SoundsError> {
+        Self::start_for(db, now, vectors, None)
+    }
+
+    /// The same for the sounds with ids `of` alone (every sound with `None`): only what's theirs is read.
+    fn start_for(db: &SoundsDb, now: NaiveDateTime, vectors: bool, of: Option<&[i64]>) -> Result<Reading, SoundsError> {
         Ok(Reading {
-            activity: db.dated_activity(now)?,
-            tags: db.tags()?,
-            hidden: db.hidden()?,
+            activity: db.dated_activity(now, of)?,
+            tags: db.tags(of)?,
+            hidden: db.hidden_of(of)?,
             vectors,
             out: Everything::default(),
         })
+    }
+
+    /// A row of the list's query ([`SoundsDb::listing`]): of the app's copy (`copy`), or of `sounds.db`.
+    fn add_listed(&mut self, copy: bool, r: &Row<'_>) -> rusqlite::Result<()> {
+        if copy {
+            self.add(copy_sound_at(r)?);
+            Ok(())
+        } else {
+            self.add_row(r)
+        }
     }
 
     /// A row of `sounds.db` whose columns start as [`SOUND_AND_VECTORS_SQL`]'s do (as [`SOUND_SQL`]'s without the
@@ -789,6 +865,15 @@ impl Reading {
         self.out.sounds.sort_unstable_by(|a, b| by_path(&a.path, &b.path));
         self.out
     }
+}
+
+/// How many sounds [`SoundsDb::some`] asks SQLite for in one statement: each id is a value handed to it, and an older
+/// SQLite takes 999 at most.
+const SOME_AT_ONCE: usize = 500;
+
+/// `n` of SQLite's places for values (`?, ?, ?`), for a list of them in a statement.
+fn places_for(n: usize) -> String {
+    vec!["?"; n].join(", ")
 }
 
 /// A sound from a row of [`SOUND_SQL`], without its tags, activity or hidden mark yet.

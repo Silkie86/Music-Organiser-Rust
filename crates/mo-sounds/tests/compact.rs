@@ -733,7 +733,7 @@ fn a_copy_left_half_made_goes_at_the_next_start() {
     same_answers(&old, &copy);
     // So does the page's read of the copy, once the other has been left long enough too.
     left_long_ago(&making);
-    let Ok(PageRead::Copy { .. }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { .. }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read");
     };
     assert_eq!(half_made(&dir), Vec::<String>::new());
@@ -767,7 +767,7 @@ fn a_copy_damaged_inside_is_made_again() {
     damage(&copy, "sounds");
     let listed = SoundsDb::open_read_only(&copy).unwrap().all(now()).unwrap_err();
     assert!(listed.damaged(), "{listed}");
-    let Ok(PageRead::Library { everything, made }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Library { everything, made }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("a damaged copy isn't read");
     };
     assert!(made.unwrap().made, "made again");
@@ -1140,14 +1140,14 @@ fn the_page_reads_the_copy_whenever_there_is_one() {
     let old = library(&dir, 120);
     let copy = compact::copy_of(&old);
     let listed = |path: &Path| format!("{:?}", SoundsDb::open_read_only(path).unwrap().all(now()).unwrap());
-    let Ok(PageRead::Library { everything, made }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Library { everything, made }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("no copy yet, so sounds.db is read");
     };
     let made = made.unwrap();
     assert!(made.made && made.adopted, "{made:?}");
     assert!(compact::own_since(&copy).is_some());
     same_everything(&everything, &read_for_page(&old));
-    let Ok(PageRead::Copy { db, sounds, behind, adopted }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { db, sounds, behind, adopted }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read once it's there");
     };
     assert!(!behind);
@@ -1159,7 +1159,7 @@ fn the_page_reads_the_copy_whenever_there_is_one() {
     drop(db);
     // A newer version's copy: left alone, and sounds.db is read instead.
     Connection::open(&copy).unwrap().execute("UPDATE copy_info SET value = 99 WHERE key = 'format'", []).unwrap();
-    let Ok(PageRead::Library { everything, made }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Library { everything, made }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("a newer copy isn't read");
     };
     assert!(made.is_err());
@@ -1188,7 +1188,7 @@ fn a_copy_behind_is_brought_up_to_date_one_last_time_and_is_the_apps_own_after()
         .execute("UPDATE sounds SET rating = 5 - COALESCE(rating, 0) WHERE id IN (SELECT id FROM sounds LIMIT 4)", [])
         .unwrap();
     assert_ne!(listed(&old), before);
-    let Ok(PageRead::Copy { sounds, behind, adopted, .. }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { sounds, behind, adopted, .. }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read even when it's behind");
     };
     assert!(behind && !adopted);
@@ -1199,7 +1199,7 @@ fn a_copy_behind_is_brought_up_to_date_one_last_time_and_is_the_apps_own_after()
     assert_eq!(last, Synced { made: true, sounds: 93, adopted: true });
     let since = compact::own_since(&copy).expect("the app's own now");
     same_answers(&old, &copy);
-    let Ok(PageRead::Copy { sounds, behind, adopted, .. }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { sounds, behind, adopted, .. }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read");
     };
     assert!(!behind && !adopted);
@@ -1210,7 +1210,7 @@ fn a_copy_behind_is_brought_up_to_date_one_last_time_and_is_the_apps_own_after()
         .execute("UPDATE sounds SET rating = 5 - COALESCE(rating, 0) WHERE id IN (SELECT id FROM sounds)", [])
         .unwrap();
     assert!(compact::in_step(&old, &copy), "nothing more to take from sounds.db");
-    let Ok(PageRead::Copy { sounds, behind, .. }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { sounds, behind, .. }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read");
     };
     assert!(!behind);
@@ -1224,7 +1224,7 @@ fn a_copy_behind_is_brought_up_to_date_one_last_time_and_is_the_apps_own_after()
     for end in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{end}", old.display()));
     }
-    let Ok(PageRead::Copy { sounds, behind, .. }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { sounds, behind, .. }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read without sounds.db");
     };
     assert!(!behind);
@@ -1250,7 +1250,7 @@ fn a_copy_left_without_sounds_db_becomes_the_apps_own_as_it_is() {
         let _ = std::fs::remove_file(format!("{}{end}", old.display()));
     }
     assert!(compact::in_step(&old, &copy), "nothing to bring it up to date with");
-    let Ok(PageRead::Copy { sounds, behind, adopted, .. }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { sounds, behind, adopted, .. }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read without sounds.db");
     };
     assert!(!behind && adopted);
@@ -1266,18 +1266,18 @@ fn an_up_to_date_copy_becomes_the_apps_own_and_stays_so_when_made_again() {
     let old = library(&dir, 60);
     let copy = compact::copy_of(&old);
     compact::sync(&old, &copy).unwrap();
-    let Ok(PageRead::Copy { behind, adopted, .. }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { behind, adopted, .. }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read");
     };
     assert!(!behind && adopted);
     let since = compact::own_since(&copy).expect("the app's own now");
-    let Ok(PageRead::Copy { adopted, .. }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { adopted, .. }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read");
     };
     assert!(!adopted, "only once");
     // Damaged where its list is: made again from sounds.db, still the app's own since the same time.
     damage(&copy, "sounds");
-    let Ok(PageRead::Library { everything, made }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Library { everything, made }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("a damaged copy isn't read");
     };
     let made = made.unwrap();
@@ -1289,7 +1289,7 @@ fn an_up_to_date_copy_becomes_the_apps_own_and_stays_so_when_made_again() {
     for end in ["", "-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{end}", old.display()));
     }
-    assert!(compact::read_for_page(&old, now()).is_err());
+    assert!(compact::read_for_page(&old, now(), |_| {}).is_err());
 }
 
 /// A library with CLAP fingerprints of every kind `sounds.db` holds: of the most common length, of another (an older
@@ -1330,7 +1330,7 @@ fn a_copy_of_the_format_before_is_laid_out_anew_from_itself() {
     let archived = dir.join("archived.db");
     std::fs::rename(&old, &archived).unwrap();
     remove_db(&old);
-    let Ok(PageRead::Copy { db, sounds, behind, adopted }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { db, sounds, behind, adopted }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read");
     };
     assert!(!behind && !adopted);
@@ -1387,7 +1387,7 @@ fn a_copy_of_the_format_before_that_another_program_has_open_is_read_as_it_is() 
     let other = Connection::open(&copy).unwrap();
     other.query_row("SELECT COUNT(*) FROM sounds", [], |r| r.get::<_, i64>(0)).unwrap();
     let e = read_for_page(&old);
-    let Ok(PageRead::Copy { db, sounds, behind, adopted }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { db, sounds, behind, adopted }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read");
     };
     assert!(!behind && adopted);
@@ -1406,7 +1406,7 @@ fn a_copy_of_the_format_before_that_another_program_has_open_is_read_as_it_is() 
     let since = compact::own_since(&copy).expect("the app's own now");
     let laid_out = lay_out(&old).0;
     assert!(matches!(laid_out, Some(LaidOut::Done { .. })), "{laid_out:?}");
-    let Ok(PageRead::Copy { db, adopted, .. }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { db, adopted, .. }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read");
     };
     assert!(!adopted && !db.is_formerly());
@@ -1427,7 +1427,7 @@ fn a_copy_of_the_format_before_that_is_behind_is_made_afresh() {
     cs(&old)
         .execute("UPDATE sounds SET rating = 5 - COALESCE(rating, 0) WHERE id IN (SELECT id FROM sounds LIMIT 4)", [])
         .unwrap();
-    let Ok(PageRead::Copy { db, sounds, behind, adopted }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { db, sounds, behind, adopted }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read");
     };
     assert!(behind && !adopted);
@@ -1454,7 +1454,7 @@ fn a_copy_of_the_format_before_with_a_table_this_version_doesnt_know_is_left_as_
         .execute_batch("CREATE TABLE later_notes (x); INSERT INTO later_notes VALUES (1);")
         .unwrap();
     let before = std::fs::read(&copy).unwrap();
-    let Ok(PageRead::Copy { db, .. }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { db, .. }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read");
     };
     assert!(db.is_formerly());
@@ -1476,7 +1476,7 @@ fn a_damaged_copy_of_the_format_before_is_left_as_it_was() {
     let copy = compact::copy_of(&old);
     formerly(&old, &copy, Some(1_780_000_000));
     damage(&copy, "sound_clap");
-    let Ok(PageRead::Copy { db, sounds, .. }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { db, sounds, .. }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read as it is: the list isn't damaged");
     };
     assert!(db.is_formerly());
@@ -1502,7 +1502,7 @@ fn a_damaged_copy_of_the_format_before_is_left_as_it_was() {
     damage(&copy, "sound_clap");
     remove_db(&old);
     assert!(matches!(lay_out(&old).0, Some(LaidOut::Damaged(_))));
-    let Ok(PageRead::Copy { db, sounds, .. }) = compact::read_for_page(&old, now()) else {
+    let Ok(PageRead::Copy { db, sounds, .. }) = compact::read_for_page(&old, now(), |_| {}) else {
         panic!("the copy is read as it is");
     };
     assert!(db.is_formerly());
@@ -1561,4 +1561,40 @@ fn a_count_of_rows_and_a_save_meanwhile_are_kept() {
         .query_row("SELECT value FROM copy_info WHERE key = 'saved'", [], |r| r.get(0))
         .unwrap();
     assert_eq!(saved, 1);
+}
+
+#[test]
+fn a_few_sounds_read_on_their_own_are_as_the_whole_list_gives_them() {
+    let dir = folder("a few on their own");
+    let old = library(&dir, 1_200);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    formerly(&old, &dir.join("formerly.db"), None);
+    for path in [old.clone(), copy, dir.join("formerly.db")] {
+        let db = SoundsDb::open_read_only(&path).unwrap();
+        let all = db.all(now()).unwrap();
+        let hidden = db.hidden().unwrap();
+        assert!(!hidden.is_empty());
+        // Every sound but the hidden copies.
+        let mut ids = db.shown_ids().unwrap();
+        ids.sort_unstable();
+        let mut shown: Vec<i64> = all.iter().filter(|s| !s.hidden).map(|s| s.id).collect();
+        shown.sort_unstable();
+        assert_eq!(ids, shown, "{}", path.display());
+        // Every other one (more than SQLite is asked for at once), one it doesn't have and a hidden one: each as the
+        // whole list has it, in its order.
+        let mut picked: Vec<i64> = ids.iter().step_by(2).copied().collect();
+        assert!(picked.len() > 500);
+        picked.extend([999_999, *hidden.iter().next().unwrap()]);
+        picked.reverse();
+        let some = db.some(&picked, now()).unwrap();
+        let expected: Vec<&mo_sounds::Sound> = all.iter().filter(|s| picked.contains(&s.id)).collect();
+        assert_eq!(some.len(), picked.len() - 1);
+        assert_eq!(some.len(), expected.len());
+        assert!(some.iter().any(|s| s.hidden) && some.iter().any(|s| !s.tags.is_empty()));
+        assert!(some.iter().any(|s| s.activity != mo_sounds::SoundActivity::default()));
+        for (a, b) in some.iter().zip(expected) {
+            assert_eq!(format!("{a:?}"), format!("{b:?}"), "{}", path.display());
+        }
+    }
 }

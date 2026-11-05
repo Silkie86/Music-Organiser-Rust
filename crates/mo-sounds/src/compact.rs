@@ -313,7 +313,14 @@ pub enum LaidOut {
 /// behind (the page shows it at once and makes it afresh after, one last time), else from `sounds_db` while the
 /// copy is made on the same pass ([`sync_reading`]). A copy that's up to date becomes the app's own library here.
 /// `now` is the page's "now", for what counts as recent.
-pub fn read_for_page(sounds_db: &Path, now: NaiveDateTime) -> Result<PageRead, SoundsError> {
+///
+/// `first` is handed the copy before its sounds are read, to take a few of them at once ([`SoundsDb::some`]) and
+/// show them while the rest are read: it isn't called when there's no copy to read.
+pub fn read_for_page(
+    sounds_db: &Path,
+    now: NaiveDateTime,
+    first: impl FnOnce(&SoundsDb),
+) -> Result<PageRead, SoundsError> {
     let copy = copy_of(sounds_db);
     // One look at the copy's own note, waiting its turn: a copy busy just then isn't taken for one that's behind.
     // Looked at before reading, so a save the C# app makes while this reads counts as one next time.
@@ -328,20 +335,23 @@ pub fn read_for_page(sounds_db: &Path, now: NaiveDateTime) -> Result<PageRead, S
     // (made again from `sounds.db`, while that's still there).
     let mut damaged = false;
     match SoundsDb::open_read_only(&copy) {
-        Ok(db) if db.is_copy() => match db.all(now) {
-            Ok(sounds) => {
-                // A copy left half made by an app closed while it made one goes now, not only the next time one is
-                // made: that may be never, and it's most of the copy's size (on a disk that was nearly full).
-                remove_parts(&copy, false);
-                // Up to date: it's the app's own library from now on. If that can't be noted just now (another
-                // program holding the copy), the next start tries again; meanwhile nothing's different.
-                let adopted = !own && !behind && adopt(sounds_db, &copy).unwrap_or(false);
-                return Ok(PageRead::Copy { db, sounds, behind, adopted });
+        Ok(db) if db.is_copy() => {
+            first(&db);
+            match db.all(now) {
+                Ok(sounds) => {
+                    // A copy left half made by an app closed while it made one goes now, not only the next time one
+                    // is made: that may be never, and it's most of the copy's size (on a disk that was nearly full).
+                    remove_parts(&copy, false);
+                    // Up to date: it's the app's own library from now on. If that can't be noted just now (another
+                    // program holding the copy), the next start tries again; meanwhile nothing's different.
+                    let adopted = !own && !behind && adopt(sounds_db, &copy).unwrap_or(false);
+                    return Ok(PageRead::Copy { db, sounds, behind, adopted });
+                }
+                Err(e) if e.damaged() => damaged = true,
+                Err(e) if own => return Err(e),
+                Err(_) => {}
             }
-            Err(e) if e.damaged() => damaged = true,
-            Err(e) if own => return Err(e),
-            Err(_) => {}
-        },
+        }
         Err(e) if own => return Err(e),
         _ => {}
     }
@@ -1966,7 +1976,7 @@ mod tests {
     }
 
     /// How SQLite reads the copy: how many sounds CLAP has heard from the index of those it has (a few MB) alone, not
-    /// from the rows.
+    /// from the rows; and every sound's id from the index of their paths.
     #[test]
     fn the_copy_counts_what_clap_heard_from_its_index_alone() {
         let conn = Connection::open_in_memory().unwrap();
@@ -1983,6 +1993,9 @@ mod tests {
         ] {
             assert!(plan(sql).contains("USING COVERING INDEX sounds_clap"), "{sql}: {}", plan(sql));
         }
+        // And the sounds' ids, for picking the first to show ([`SoundsDb::shown_ids`]), from the index of their paths.
+        let ids = "SELECT id FROM sounds";
+        assert!(plan(ids).contains("USING COVERING INDEX sounds_path"), "{}", plan(ids));
     }
 
     #[test]
