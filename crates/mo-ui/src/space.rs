@@ -1386,9 +1386,10 @@ fn look(ask: Ask, weak: &slint::Weak<AppWindow>) {
     arrive(weak, Step::Drives(ask.id, drives));
     let data = &ask.app_folder;
     let databases = app_files::databases(data.join("library.db"), data.join("sounds.db"), data.join("midi.db"));
-    // Spread over the low-priority pool's threads (rule 21). A look stopped for a newer one says nothing: the newer
-    // one's sizes follow.
-    if let Ok(parts) = background::on_pool(|| app_files::measure(data, &databases, &ask.stop)) {
+    // On the pool for long work that waits on a disk, as Space's other walks are (rule 21): the app's folder can hold
+    // thousands of files, and on the pages' quick pool the walk would hold up their asks (Ctrl+K, a filter) until it
+    // ended. A look stopped for a newer one says nothing: the newer one's sizes follow.
+    if let Ok(parts) = background::on_bulk_pool(|| app_files::measure(data, &databases, &ask.stop)) {
         arrive(weak, Step::AppFiles(ask.id, parts));
     }
     // What the app put in the Recycle Bin that's still there, for its line under Also taking room. The bin is only
