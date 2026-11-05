@@ -64,6 +64,9 @@ struct Page {
     /// The folders this session's moves swapped for a link: their room is on the other drive now, so they're left out
     /// of every read too.
     moved: Vec<String>,
+    /// How many of this session's moves have finished, whatever came of them: each leaves an old copy beside its link,
+    /// or, cut short, what it had copied, for Space to look for ([`moves_this_session`]).
+    moves: u64,
     clean_asked: u64,
     /// The picked plugin's folder lines' paths, as the On disk tab shows them.
     room_paths: Vec<String>,
@@ -570,6 +573,11 @@ fn show_in(pl: &mut Plugins, wanted: &Wanted) -> Option<usize> {
 /// read: Space counts the same ones.
 pub fn unused_years() -> Option<u32> {
     PAGE.with(|p| p.borrow().plugins.as_ref().map(|pl| pl.unused_years))
+}
+
+/// How many moves have finished this session, whatever came of them: Space looks for old copies again after each.
+pub fn moves_this_session() -> u64 {
+    PAGE.with(|p| p.borrow().moves)
 }
 
 /// Where this session's Clean ups, uninstalls and moves took things from: Space leaves them out of the plugins it
