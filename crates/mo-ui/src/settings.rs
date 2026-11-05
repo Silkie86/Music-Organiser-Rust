@@ -54,6 +54,8 @@ struct Page {
     /// Whether a folder change is being kept now.
     folders_busy: bool,
     folders_message: String,
+    /// The folder exports go into, as last read (for its Open button), or empty.
+    export_folder: String,
     daws_checking: bool,
     daws_asked: u64,
     /// FL Studio's script: whether it's installed (none while being looked at), the folders it goes into, and whether
@@ -183,6 +185,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             folder_lists: Vec::new(),
             folders_busy: false,
             folders_message: String::new(),
+            export_folder: String::new(),
             daws_checking: false,
             daws_asked: 0,
             fl_state: None,
@@ -219,6 +222,8 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     data.set_version(format!("Version {}", mo_app::version::version()).into());
     data.set_credit(page::SLINT_CREDIT.into());
     data.set_folders_note(page::FOLDERS_NOTE.into());
+    data.set_exports_title(page::EXPORTS_TITLE.into());
+    data.set_exports_note(page::EXPORTS_NOTE.into());
     data.set_keys_note(page::KEYS_NOTE.into());
     data.set_daws_note(page::DAWS_NOTE.into());
     data.set_kept_note(
@@ -249,6 +254,26 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             edit_folder(&app, list, folder.to_string(), false);
         }
     });
+    let weak = app.as_weak();
+    data.on_choose_export_folder(move || {
+        // Not for the screenshots, as the folder lists' Add folder isn't: nothing would be kept.
+        if !PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live)) {
+            return;
+        }
+        let weak = weak.clone();
+        crate::backup::pick_folder(page::EXPORTS_PICK_TITLE, move |folder| {
+            if let Some(app) = weak.upgrade() {
+                edit_export(&app, Some(folder.display().to_string()));
+            }
+        });
+    });
+    let weak = app.as_weak();
+    data.on_documents_exports(move || {
+        if let Some(app) = weak.upgrade() {
+            edit_export(&app, None);
+        }
+    });
+    data.on_open_export_folder(open_export_folder);
     let weak = app.as_weak();
     data.on_check_daws(move || {
         if let Some(app) = weak.upgrade() {
@@ -616,12 +641,14 @@ fn read_folders_later(app: &AppWindow, library: PathBuf, asked: u64) {
     let weak = app.as_weak();
     let started = background::spawn("Settings folders", move || {
         let groups = read_folders(&library);
+        let exports = read_exports(&library);
         let _ = slint::invoke_from_event_loop(move || {
             let newest = PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.folders_asked == asked));
             if let Some(app) = weak.upgrade()
                 && newest
             {
                 show_folders(&app, groups);
+                show_exports(&app, &exports);
             }
         });
     });
@@ -677,31 +704,78 @@ fn edit_folder(app: &AppWindow, list: FolderList, folder: String, add: bool) {
             Err(e) => log::warning("Settings", &format!("Couldn't change the {list:?} folders: {e}")),
         }
         let done = done.map(|d| matches!(d, folders::Changed::Done(_))).map_err(|e| e.to_string());
-        let note = page::folder_change_note(add, &folder, done);
-        let _ = slint::invoke_from_event_loop(move || {
-            let asked = PAGE.with(|p| {
-                let mut p = p.borrow_mut();
-                let p = p.as_mut()?;
-                p.folders_busy = false;
-                p.folders_message = note.unwrap_or_default();
-                p.folders_asked += 1;
-                Some((p.library.clone(), p.folders_asked))
-            });
-            if let (Some(app), Some((library, asked))) = (weak.upgrade(), asked) {
-                show(&app);
-                read_folders_later(&app, library, asked);
-            }
-        });
+        changed_folders(weak, page::folder_change_note(add, &folder, done));
     });
     if let Err(e) = started {
         log::error("Settings", &format!("Couldn't start changing the folders: {e}"));
-        PAGE.with(|p| {
-            if let Some(p) = p.borrow_mut().as_mut() {
-                p.folders_busy = false;
-            }
-        });
-        show(app);
+        not_changing_folders(app);
     }
+}
+
+/// Chooses the folder exports go into (`Some`), or goes back to "Music Organiser Exports" in Documents (`None`), in
+/// the library, away from the window; then reads the folders again. One change at a time, with the folder lists'.
+/// Only the setting changes: no folder is made, moved or emptied, and what was exported before stays where it is.
+fn edit_export(app: &AppWindow, folder: Option<String>) {
+    let library = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let p = p.as_mut().filter(|p| p.live)?;
+        if p.folders_busy {
+            // Picked while another change was being kept: say so rather than drop it.
+            p.folders_message =
+                "The export folder wasn't changed: a folder change was being saved. Try it again.".to_owned();
+            return None;
+        }
+        p.folders_busy = true;
+        Some(p.library.clone())
+    });
+    let Some(library) = library else {
+        show(app);
+        return;
+    };
+    show(app);
+    let weak = app.as_weak();
+    let started = background::spawn("Settings export folder", move || {
+        let done = folders::set_export_folder(&library, folder.as_deref());
+        match (&done, &folder) {
+            (Ok(true), Some(folder)) => log::info("Settings", &format!("Exports go into {folder}")),
+            (Ok(true), None) => log::info("Settings", "Exports go into Music Organiser Exports in Documents again"),
+            (Ok(false), _) => {}
+            (Err(e), _) => log::warning("Settings", &format!("Couldn't change the export folder: {e}")),
+        }
+        changed_folders(weak, page::export_change_note(folder.as_deref(), done.map_err(|e| e.to_string())));
+    });
+    if let Err(e) = started {
+        log::error("Settings", &format!("Couldn't start changing the export folder: {e}"));
+        not_changing_folders(app);
+    }
+}
+
+/// A folder change is done (from its thread): its words show, and the folders are read again.
+fn changed_folders(weak: slint::Weak<AppWindow>, note: Option<String>) {
+    let _ = slint::invoke_from_event_loop(move || {
+        let asked = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            let p = p.as_mut()?;
+            p.folders_busy = false;
+            p.folders_message = note.unwrap_or_default();
+            p.folders_asked += 1;
+            Some((p.library.clone(), p.folders_asked))
+        });
+        if let (Some(app), Some((library, asked))) = (weak.upgrade(), asked) {
+            show(&app);
+            read_folders_later(&app, library, asked);
+        }
+    });
+}
+
+/// A folder change couldn't start: the buttons are free again.
+fn not_changing_folders(app: &AppWindow) {
+    PAGE.with(|p| {
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.folders_busy = false;
+        }
+    });
+    show(app);
 }
 
 /// Asks the link in Bitwig how it stands, away from the window (it may wait a few seconds for a busy Bitwig). Only
@@ -1051,6 +1125,53 @@ pub fn show_folders(app: &AppWindow, groups: Result<Vec<page::FolderGroup>, Stri
             data.set_folder_groups(ModelRc::default());
             data.set_folders_note(format!("Couldn't read your folders from the library: {e}").into());
         }
+    }
+}
+
+/// Where exports go, as every export finds it ([`mo_app::bitwig_convert::export_folder_in`]): the setting from the
+/// library, checked on the disk. Opens the library and looks at the disk, so never on the window's thread.
+fn read_exports(library: &Path) -> page::ExportsCard {
+    use mo_app::bitwig_convert as bitwig;
+    let setting = match bitwig::export_setting_in(library) {
+        Ok(setting) => setting,
+        Err(why) => return page::exports_card(None, &Err(why), false),
+    };
+    let checked = bitwig::export_folder(setting.as_deref(), bitwig::documents().as_deref()).and_then(|folder| {
+        // Documents' own isn't looked at by an export until it makes it: something else by its name stops that.
+        match std::fs::metadata(&folder) {
+            Ok(m) if !m.is_dir() => {
+                Err(format!("{} is a file, not a folder, so nothing can be exported there.", folder.display()))
+            }
+            _ => Ok(folder),
+        }
+    });
+    let there = checked.as_ref().is_ok_and(|folder| folder.is_dir());
+    page::exports_card(setting.as_deref(), &checked, there)
+}
+
+/// Shows the Folders tab's Exports card.
+pub fn show_exports(app: &AppWindow, card: &page::ExportsCard) {
+    PAGE.with(|p| {
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.export_folder = if card.there { card.folder.clone() } else { String::new() };
+        }
+    });
+    let data = app.global::<SettingsData>();
+    data.set_export_folder(card.folder.clone().into());
+    data.set_export_line(card.note.clone().into());
+    data.set_export_chosen(card.chosen);
+    data.set_export_there(card.there);
+}
+
+/// The Exports card's Open: shows the folder exports go into, off the window's thread.
+fn open_export_folder() {
+    let found = PAGE.with(|p| {
+        let p = p.borrow();
+        let p = p.as_ref().filter(|p| p.live && !p.export_folder.is_empty())?;
+        Some((p.feed.clone(), p.export_folder.clone()))
+    });
+    if let Some((feed, folder)) = found {
+        crate::files::open_folder(&feed, &folder);
     }
 }
 

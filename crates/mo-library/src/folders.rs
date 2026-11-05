@@ -1,9 +1,10 @@
 //! Adding and removing the folders the app looks in (Settings › Folders), in the C# app's `library.db`: the project
-//! folders (`roots`) and the sample, MIDI and plugin folders (JSON lists in `settings`). This, [`crate::moves`]
-//! (a folder moved to another drive) and [`crate::plugin_folders`] (your say on a plugin's folders), both from the
-//! Plugins page, are the only places the Rust app writes to `library.db`
-//! (Solomon's OK: folders 2026-11-03, moves and the Plugins page's folder fixes 2026-11-05); everything else opens it
-//! read-only. Once the app's own `songs.db` is the library, these write that instead, and so does
+//! folders (`roots`) and the sample, MIDI and plugin folders (JSON lists in `settings`); and the folder exports go
+//! into ([`set_export_folder`]). This, [`crate::moves`] (a folder moved to another drive) and
+//! [`crate::plugin_folders`] (your say on a plugin's folders), both from the Plugins page, are the only places the Rust
+//! app writes to `library.db` (Solomon's OK: folders 2026-11-03, moves and the Plugins page's folder fixes 2026-11-05,
+//! the export folder 2026-11-05); everything else opens it read-only. Once the app's own `songs.db` is the library,
+//! these write that instead, and so does
 //! [`crate::song_writes`] (what the app reads of your saves); `library.db` is then never written.
 //!
 //! Each change is one SQLite transaction: it reads the list as it is now (the C# app may have changed it since the
@@ -90,6 +91,24 @@ pub fn remove_folder(
         let before = folders.len();
         folders.retain(|f| !same_folder(f, folder));
         folders.len() != before
+    })
+}
+
+/// The setting naming the folder every export goes into (the C# app's key). Not set, or blank: "Music Organiser
+/// Exports" in Documents.
+pub const EXPORT_FOLDER: &str = "export_folder";
+
+/// Sets the folder every export goes into (Settings › Folders), or with `None` goes back to "Music Organiser Exports"
+/// in Documents (kept as "", the C# app's way of keeping "none"). The folder itself isn't looked at, made or moved.
+/// Says whether it changed anything: the folder already set (spelt the same, but for a separator at the end) is left
+/// as it is. Letter case counts, as Linux sees it; the folder picker gives a folder as it's spelt on the disk. Kept
+/// the safe way every setting is (`setting_list::change_text`): a setting that isn't text is left alone.
+pub fn set_export_folder(library: &Path, folder: Option<&str>) -> Result<bool, LibraryError> {
+    let folder = folder.map(str::trim).filter(|f| !f.is_empty());
+    let trim = |f: &str| f.trim().trim_end_matches(['\\', '/']).to_owned();
+    crate::setting_list::change_text(library, EXPORT_FOLDER, |now| {
+        let now = now.map(trim).filter(|f| !f.is_empty());
+        (now != folder.map(trim)).then(|| folder.unwrap_or_default().to_owned())
     })
 }
 
