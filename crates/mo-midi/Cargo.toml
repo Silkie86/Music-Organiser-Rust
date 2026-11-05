@@ -18,3 +18,5 @@ regex = { version = "1", default-features = false, features = ["std", "unicode",
 rusqlite = { version = "0.41", features = ["bundled"] }
 # The note hash, as the C# app makes it.
 sha2 = "0.10"
+# How much room is free on the disk before the index is copied into a new layout.
+fs4 = "1.1"

@@ -90,6 +90,7 @@ fn reads_only_what_changed_and_stores_notes_once() {
     let first = run(&mut store, &dir, false);
     assert_eq!((first.read, first.failed, first.parts), (4, 1, 3));
     assert_eq!(count(&db, "notes"), 2);
+    assert_eq!(count(&db, "note_data"), 2, "each set of notes once, in a table of its own");
     assert_eq!(count(&db, "parts"), 3);
     let failures = store.failures().unwrap();
     assert_eq!(failures.len(), 1);
@@ -117,6 +118,7 @@ fn reads_only_what_changed_and_stores_notes_once() {
     let after = run(&mut store, &dir, false);
     assert_eq!((after.read, after.forgotten), (0, 1));
     assert_eq!(count(&db, "notes"), 1);
+    assert_eq!((count(&db, "note_data"), count(&db, "keys")), (1, 1), "the notes themselves and their key go too");
 
     // A copy gone: the notes stay, the other file still has them.
     std::fs::remove_file(pack.join("Low 01 copy.mid")).unwrap();
@@ -293,15 +295,24 @@ fn an_index_from_before_keys_gets_them() {
     let mut store = MidiStore::open(&db).unwrap();
     run(&mut store, &dir, false);
     drop(store);
-    // As the first indexes were made: no keys table.
+    // As the first indexes were made: no keys table, and the notes in the last column of `notes`.
     let conn = rusqlite::Connection::open(&db).unwrap();
-    conn.execute_batch("DROP TABLE keys; PRAGMA user_version = 0;").unwrap();
+    conn.execute_batch(
+        "ALTER TABLE notes ADD COLUMN data BLOB NOT NULL DEFAULT x'';
+         UPDATE notes SET data = (SELECT d.data FROM note_data d WHERE d.notes = notes.id);
+         DROP TABLE note_data; DROP TABLE keys; DROP TABLE about; PRAGMA user_version = 0;",
+    )
+    .unwrap();
     drop(conn);
-    // The page can list it before the indexer has opened it.
+    // The page can list it before the indexer has opened it, and show its notes.
     let page = MidiStore::open_read_only(&db).unwrap();
-    assert_eq!(page.all(&HashMap::new(), &HashMap::new()).unwrap()[0].key_fact, None);
+    let listed = page.all(&HashMap::new(), &HashMap::new()).unwrap();
+    assert_eq!(listed[0].key_fact, None);
+    assert_eq!(page.notes(listed[0].id, &listed[0].hash).unwrap().len(), TUNE.len());
     drop(page);
+    // The indexer copies it into this app's layout first.
     let mut store = MidiStore::open(&db).unwrap();
+    assert_eq!(count(&db, "note_data"), 1);
     assert_eq!(store.all(&HashMap::new(), &HashMap::new()).unwrap()[0].key_fact, None);
     assert_eq!(run(&mut store, &dir, false).rekeyed, 1);
     assert!(store.all(&HashMap::new(), &HashMap::new()).unwrap()[0].key_fact.is_some());

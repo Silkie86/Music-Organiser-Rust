@@ -10,7 +10,7 @@
 //!
 //! - The data folder: a settings or database file whose writing a crash cut short (`backup.txt.mo-part`,
 //!   `rust-settings.json.mo-part`, `presets.db.new-<number>`), once it's an hour old, so one being written right now is
-//!   left alone.
+//!   left alone; and, as old, a file the app wrote once but no longer reads ([`RETIRED`]).
 //! - `Curves\`: a curve file whose writing a crash cut short (`… .mo-part-<number>-<number>`), an hour old.
 //! - `twin\cs\`: the twin test's copy of your library (`library-copy.db`), left when the test was stopped, a day old.
 //! - Your Temp folder: the Space page's lists for the administrator step (`mo-admin-<n>-<n>-<n>.txt`), a day old.
@@ -251,7 +251,7 @@ fn report(done: &Tidied) {
 /// the window's thread.
 pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     let mut done = Tidied::default();
-    done.add(remove_older(&places.data, is_cut_short, WRITING, now, false));
+    done.add(remove_older(&places.data, |n| is_cut_short(n) || RETIRED.contains(&n), WRITING, now, false));
     // The saves-list copy of library.db goes once songs.db is the app's own library: nothing reads it any more.
     if mo_library::songs_db::own_since(&places.data.join(mo_library::songs_db::FILE_NAME)).is_some() {
         done.add(remove_older(&places.data, is_list_copy, Duration::ZERO, now, false));
@@ -826,13 +826,20 @@ fn is_report(name: &str, start: &str) -> bool {
         && stamp.bytes().all(|b| b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
+/// Files the app wrote in the data folder once but no longer reads: the MIDI page's mark that a reading of your MIDI
+/// had got to the end (`midi-index.read`), which said to list the Rust app's index rather than the C# app's `midi.db`
+/// (the page lists only its own since `midi.db` stopped being read).
+const RETIRED: &[&str] = &["midi-index.read"];
+
 /// A file in the data folder whose writing was cut short, named as the code that writes it names it: the Backup
 /// settings' (`backup.txt.mo-part`, `backup-songs.txt.mo-part`, see [`crate::backup`]), the app's own settings'
 /// (`rust-settings.json.mo-part`, [`crate::app_settings::save`]), the sweep's own (`tidy-notes.txt.mo-part`,
 /// [`write_notes_done`]), the list of what the Space page put in the Recycle Bin (`space-binned.json.mo-part`,
 /// [`crate::binned::write`]), or a side database being made (`presets.db.new-<number>`, `curves.db.new-<number>`, with
 /// SQLite's own files beside it; `mo_presets::fixes`; the same for `preset-sounds.db.new-<number>`), or the saves
-/// list's copy being made (`library-list-rust.db.new-<number>`, `mo_library::list_copy`).
+/// list's copy being made (`library-list-rust.db.new-<number>`, `mo_library::list_copy`), the song library
+/// (`songs.db.new-<number>`, `mo_library::songs_db`) or the MIDI index copied into a new layout
+/// (`midi-index.db.new-<number>`, `mo_midi::store`).
 fn is_cut_short(name: &str) -> bool {
     [SETTINGS_FILE, SONGS_FILE, crate::app_settings::FILE, NOTES_DONE_FILE, crate::binned::FILE]
         .iter()
@@ -843,6 +850,7 @@ fn is_cut_short(name: &str) -> bool {
             mo_presets::sound_store::FILE_NAME,
             mo_library::list_copy::FILE_NAME,
             mo_library::songs_db::FILE_NAME,
+            mo_midi::store::FILE_NAME,
         ]
         .iter()
         .any(|database| mo_presets::fixes::is_half_made(name, database))
@@ -1493,6 +1501,9 @@ mod tests {
             data.join("curves.db.new-77-journal"),
             data.join("Curves").join("Rise abcd1234.bwcurve.mo-part-4120-3"),
             data.join("tidy-notes.txt.mo-part"),
+            data.join("midi-index.db.new-4120"),
+            data.join("midi-index.db.new-4120-wal"),
+            data.join("midi-index.read"),
         ];
         // Gone a day after: they may be in use for a while.
         let days = [
@@ -1510,6 +1521,9 @@ mod tests {
             data.join("presets.db"),
             data.join("curves.db"),
             data.join("midi-index.db"),
+            data.join("midi-index.db-wal"),
+            data.join("midi-index.db.new-"),
+            data.join("midi-index.read.txt"),
             data.join("bitwig-prints.db"),
             data.join("bitwig-prints.db-wal"),
             data.join("preset-files.db"),
