@@ -64,7 +64,7 @@ export component Finder inherits Rectangle {
         }
     }
     card := Rectangle {
-        width: min(720px, root.width - 80px);
+        width: min(960px, root.width - 80px);
         x: (root.width - self.width) / 2;
         y: max(40px, root.height * 0.1);
         height: min(layout.preferred-height, root.height - self.y - 40px);
@@ -129,17 +129,21 @@ export component Finder inherits Rectangle {
                     }
                 }
             }
-            if FinderData.kinds.length > 2: HorizontalLayout {
-                padding-left: Space.sm;
-                Segmented {
+            // Every kind fits on a wide window; on a narrow one the row scrolls sideways inside the box, never past it.
+            if FinderData.kinds.length > 2: Flickable {
+                height: kinds.height;
+                content-width: kinds.width + 2 * Space.sm;
+                interactive: self.content-width > self.width;
+                kinds := Segmented {
+                    x: Space.sm;
                     choices: FinderData.kinds;
                     current: FinderData.kind;
+                    pad: Space.md;
                     picked(i) => {
                         FinderData.kind-picked(i);
                         input.focus();
                     }
                 }
-                Rectangle { }
             }
             Groove { }
             if FinderData.note != "": Text {
