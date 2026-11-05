@@ -90,17 +90,21 @@ impl SameAudio {
     }
 }
 
-/// What the analysis says that identical audio always shares: length in milliseconds, sample rate, channels and peak
-/// level (as stored, bit for bit). Sounds not analysed have none and are never taken for copies.
-fn key(s: &Sound) -> Option<(u64, i32, i32, u64)> {
+/// What the analysis says that identical audio always shares: length to the millisecond, sample rate, channels and
+/// peak level to a tenth of a dB (rounded, so analyses made a little differently, by the C# app and this one, still
+/// agree). Sounds not analysed have none and are never taken for copies.
+type Key = (i64, i32, i32, i64);
+
+fn key(s: &Sound) -> Option<Key> {
     let a = s.analysis.as_ref()?;
-    Some((a.seconds.to_bits(), a.sample_rate, a.channel_count, a.peak_db.to_bits()))
+    let peak = if a.peak_db.is_finite() { (a.peak_db * 10.0).round() as i64 } else { i64::MIN };
+    Some(((a.seconds * 1000.0).round() as i64, a.sample_rate, a.channel_count, peak))
 }
 
 /// The places in `sounds` of the ones that could be copies: their [`key`] is another sound's too. Every real copy is
 /// one of these; most sounds aren't, so they're never read.
 pub fn candidates(sounds: &[Sound]) -> Vec<usize> {
-    let mut count: HashMap<(u64, i32, i32, u64), u32> = HashMap::new();
+    let mut count: HashMap<Key, u32> = HashMap::new();
     for k in sounds.iter().filter_map(key) {
         *count.entry(k).or_default() += 1;
     }
@@ -118,22 +122,31 @@ pub fn print_of(path: &Path) -> Result<Print, AudioError> {
     }
 }
 
-/// Puts decoded audio into the print: the frames in order, each channel's sample in turn, as little-endian floats.
+/// Puts decoded audio into the print: the frames in order, each channel's sample in turn, as little-endian floats,
+/// through a small buffer (never a second copy of the whole sound).
 fn add_frames(h: &mut Sha256, audio: &AudioData) {
-    let mut buf = Vec::with_capacity(audio.len() * audio.channels.len() * 4);
-    for i in 0..audio.len() {
-        for ch in &audio.channels {
-            buf.extend_from_slice(&ch[i].to_bits().to_le_bytes());
+    const FRAMES: usize = 4096;
+    let mut buf = Vec::with_capacity(FRAMES * audio.channels.len() * 4);
+    for from in (0..audio.len()).step_by(FRAMES) {
+        buf.clear();
+        for i in from..(from + FRAMES).min(audio.len()) {
+            for ch in &audio.channels {
+                buf.extend_from_slice(&ch[i].to_bits().to_le_bytes());
+            }
         }
+        h.update(&buf);
     }
-    h.update(&buf);
 }
 
-/// The print of the file's decoded audio: `None` when it can't be decoded whole here (a long MP3 or similar).
+/// The print of the file's decoded audio: `None` when it can't be decoded whole here (a long MP3 or similar), or its
+/// samples or rate can't be read exactly ([`mo_audio::reads_exactly`]: 32-bit whole-number and 64-bit float WAVs).
 fn decoded_print(path: &Path) -> Result<Option<Print>, AudioError> {
     let mut h = Sha256::new();
     h.update(b"MO same audio 1\0");
     let (rate, channels, frames) = if mo_audio::can_read_from(path) {
+        if !mo_audio::reads_exactly(path) {
+            return Ok(None);
+        }
         let mut at = 0u64;
         let mut head: Option<(u32, usize)> = None;
         loop {
@@ -147,10 +160,6 @@ fn decoded_print(path: &Path) -> Result<Option<Print>, AudioError> {
             }
             add_frames(&mut h, &part);
             at += part.len() as u64;
-            // A part shorter than asked for is the last.
-            if (part.len() as u64) < (PART_SECONDS * f64::from(part.sample_rate)) as u64 {
-                break;
-            }
         }
         let (rate, channels) = head.unwrap_or_default();
         (rate, channels, at)
@@ -215,11 +224,15 @@ fn open_error(path: &Path, e: impl std::fmt::Display) -> SoundsError {
 }
 
 impl Kept {
-    /// Opens the file, making it when it isn't there. One of another layout, or that can't be read (damaged), is
-    /// made afresh: it only holds what can be worked out again.
+    /// Opens the file, making it when it isn't there. This app's file of another layout, or one that's damaged (or
+    /// isn't a database at all), is made afresh: it only holds what can be worked out again. Another app's database,
+    /// or a file that's only locked or can't be reached for now, is left as it is: the look fails this time.
     fn open(path: &Path) -> Result<Kept, SoundsError> {
-        if let Ok(Some(kept)) = Self::try_open(path) {
-            return Ok(kept);
+        match Self::try_open(path) {
+            Ok(Opened::Kept(kept)) => return Ok(kept),
+            Ok(Opened::Remake) => {}
+            Ok(Opened::Foreign) => return Err(open_error(path, "it's another app's database")),
+            Err(e) => return Err(e),
         }
         for end in ["", "-journal", "-wal", "-shm"] {
             let file = with_end(path, end);
@@ -227,14 +240,28 @@ impl Kept {
                 std::fs::remove_file(&file).map_err(|e| open_error(&file, e))?;
             }
         }
-        Self::try_open(path)?.ok_or_else(|| open_error(path, "made afresh, but still not of this layout"))
+        match Self::try_open(path)? {
+            Opened::Kept(kept) => Ok(kept),
+            _ => Err(open_error(path, "made afresh, but still not of this layout")),
+        }
     }
 
-    /// The file, if it's this app's of this layout (or new).
-    fn try_open(path: &Path) -> Result<Option<Kept>, SoundsError> {
+    /// The file, if it's this app's of this layout (or new); else whether it may be made afresh.
+    fn try_open(path: &Path) -> Result<Opened, SoundsError> {
         let conn = Connection::open(path).map_err(|e| open_error(path, e))?;
         conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(SoundsError::Read)?;
-        let id: i32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0))?;
+        // Not a database (or a damaged one): SQLite says so on the first read.
+        let damaged = |e: &rusqlite::Error| {
+            matches!(
+                e.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt)
+            )
+        };
+        let id: i32 = match conn.query_row("PRAGMA application_id", [], |r| r.get(0)) {
+            Ok(id) => id,
+            Err(e) if damaged(&e) => return Ok(Opened::Remake),
+            Err(e) => return Err(e.into()),
+        };
         let layout: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let tables: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |r| r.get(0))?;
         if id == 0 && layout == 0 && tables == 0 {
@@ -244,14 +271,20 @@ impl Kept {
                  CREATE TABLE prints (path TEXT PRIMARY KEY, size INTEGER NOT NULL, changed INTEGER NOT NULL,
                                       print BLOB NOT NULL) WITHOUT ROWID;"
             ))?;
-        } else if id != APP_ID || layout != LAYOUT {
-            return Ok(None);
+        } else if id != APP_ID {
+            return Ok(Opened::Foreign);
+        } else if layout != LAYOUT {
+            return Ok(Opened::Remake);
         }
-        let check: String = conn.query_row("PRAGMA quick_check", [], |r| r.get(0))?;
+        let check: String = match conn.query_row("PRAGMA quick_check", [], |r| r.get(0)) {
+            Ok(check) => check,
+            Err(e) if damaged(&e) => return Ok(Opened::Remake),
+            Err(e) => return Err(e.into()),
+        };
         if check != "ok" {
-            return Ok(None);
+            return Ok(Opened::Remake);
         }
-        Ok(Some(Kept { conn }))
+        Ok(Opened::Kept(Kept { conn }))
     }
 
     fn known(&self) -> Result<HashMap<String, (Stamp, Print)>, SoundsError> {
@@ -306,6 +339,15 @@ impl Kept {
         tx.commit()?;
         Ok(())
     }
+}
+
+/// What [`Kept::try_open`] found.
+enum Opened {
+    Kept(Kept),
+    /// This app's file of another layout, or damaged: it may be made afresh.
+    Remake,
+    /// Another app's database: never touched.
+    Foreign,
 }
 
 /// `path` with `end` added to its name.

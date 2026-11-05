@@ -6,8 +6,8 @@
 
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use mo_app::sounds::{self as list, CopiesFound, SoundList, SoundsOf};
 use mo_app::{background, log};
@@ -34,6 +34,9 @@ struct Look {
 thread_local! {
     static LOOK: RefCell<Look> = RefCell::default();
 }
+
+/// Held by the look under way.
+static ONE_LOOK: Mutex<()> = Mutex::new(());
 
 /// Copies are kept beside the sound library at `sounds_db`.
 pub(super) fn connect(sounds_db: &std::path::Path) {
@@ -103,6 +106,12 @@ pub(super) fn wanted(app: &AppWindow) {
         });
     };
     let started = background::spawn("Sounds duplicates", move || {
+        // One look at a time: a new one waits for the one it replaced to stop (it's told to), so the two never share
+        // the file the prints are kept in.
+        let _one = ONE_LOOK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if stop.load(Ordering::Relaxed) {
+            return;
+        }
         let found = background::on_bulk_pool(|| {
             copies::find(list.sounds(), &kept_at, &stop, |f| match f {
                 Finding::Known { same, left } => {
@@ -180,6 +189,8 @@ fn heard(app: &AppWindow, look: u64, word: Word) {
                 let mut l = l.borrow_mut();
                 l.found = CopiesFound::Failed;
                 l.stop = None;
+                // Tried again when the switch is turned off and on, or the sounds are read again.
+                l.of = None;
             });
             super::show_chips(app);
         }

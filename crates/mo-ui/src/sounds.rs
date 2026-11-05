@@ -1411,7 +1411,10 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
         if p.list.len() != list.len() {
             return None;
         }
-        p.list = list.clone();
+        // The copies Hide duplicates found meanwhile stay.
+        let mut with_use = (*list).clone();
+        with_use.keep_copies_of(&p.list);
+        p.list = Arc::new(with_use);
         Some(p.picked)
     });
     let Some(picked) = picked else { return };
@@ -2282,7 +2285,8 @@ fn wire_rediscover(app: &AppWindow) {
         let Some(app) = weak.upgrade() else { return };
         PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            p.filters = Filters { folder: Some(folder.to_string()), ..Filters::default() };
+            let hide_copies = p.filters.hide_copies;
+            p.filters = Filters { folder: Some(folder.to_string()), hide_copies, ..Filters::default() };
             p.pick_view(LIST);
         });
         app.global::<SoundsData>().set_search(SharedString::new());
@@ -2451,7 +2455,9 @@ fn show_sound(app: &AppWindow, at: usize) {
     }
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        p.filters = Filters::default();
+        // Hide duplicates stays on unless the sound has copies (one of them might show in its place).
+        let hide_copies = p.filters.hide_copies && !p.list.has_copies(at);
+        p.filters = Filters { hide_copies, ..Filters::default() };
         p.to_pick = Some(at);
     });
     app.global::<SoundsData>().set_search(SharedString::new());

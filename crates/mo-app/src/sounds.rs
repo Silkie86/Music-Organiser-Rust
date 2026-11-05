@@ -244,7 +244,7 @@ pub struct SoundList {
     /// Each project's file, by id, once known: the projects a sound is used in are named from it. Shared by a clone.
     projects: Option<Arc<HashMap<i64, ProjectFile>>>,
     /// Each sound's Most liked score, in `sounds` order, once known.
-    liked: Option<Vec<f64>>,
+    liked: Option<Arc<Vec<f64>>>,
     /// The best of `liked`, worked out once, as every tile asks for its share of it.
     liked_best: f64,
     /// Which sounds are copies of each other (the same audio), once known: shared by a clone, and kept by
@@ -405,11 +405,24 @@ impl SoundList {
     }
 
     /// This list with `copies` (from [`SoundList::copies_in`] on a list sharing its sounds). What it holds is shared,
-    /// not copied.
+    /// not copied (a few pointers).
     pub fn with_copies(&self, copies: Arc<Copies>) -> SoundList {
         let mut list = self.clone();
         list.copies = Some(copies);
         list
+    }
+
+    /// The copies `other` knows, when it shares this list's sounds and this list doesn't know them yet: a list made
+    /// from the same sounds before they were found (with the use counts in) keeps what was found since.
+    pub fn keep_copies_of(&mut self, other: &SoundList) {
+        if self.copies.is_none() && self.shares_with(other) {
+            self.copies = other.copies.clone();
+        }
+    }
+
+    /// Whether the sound at `i` has a copy (the same audio) that Hide duplicates may show instead.
+    pub fn has_copies(&self, i: usize) -> bool {
+        self.copies.as_ref().is_some_and(|c| c.group_of.contains_key(&i))
     }
 
     /// How many sounds Hide duplicates leaves out (every copy but one of each sound), once the copies are known.
@@ -459,7 +472,7 @@ impl SoundList {
     pub fn set_liked(&mut self, score: impl Fn(&Sound) -> f64 + Sync + Send) {
         let liked: Vec<f64> = self.shared.sounds.par_iter().map(&score).collect();
         self.liked_best = liked.iter().copied().fold(0.0, f64::max);
-        self.liked = Some(liked);
+        self.liked = Some(Arc::new(liked));
     }
 
     pub fn len(&self) -> usize {
@@ -860,11 +873,15 @@ impl<'a> Tally<'a> {
         }
     }
 
-    /// Every count of one at most: the counts of a sound's copies, as one sound.
+    /// Every count of one at most: the counts of a sound's copies, as one sound. Types and tags that differ only in
+    /// capitals are one, as the filters match them.
     fn once(mut self) -> Tally<'a> {
-        for n in self.types.values_mut().chain(self.tags.values_mut()) {
-            *n = (*n).min(1);
-        }
+        let one_each = |words: HashMap<&'a str, usize>| {
+            let mut seen = std::collections::HashSet::new();
+            words.into_keys().filter(|w| seen.insert(w.to_ascii_lowercase())).map(|w| (w, 1)).collect()
+        };
+        self.types = one_each(std::mem::take(&mut self.types));
+        self.tags = one_each(std::mem::take(&mut self.tags));
         for n in self.lengths.iter_mut().chain(self.keys.iter_mut()).chain(self.tempos.iter_mut()) {
             *n = (*n).min(1);
         }
@@ -1517,6 +1534,30 @@ mod tests {
         assert!(busy.hide_copies && !busy.any());
         busy.toggle(HIDE_COPIES);
         assert!(!busy.hide_copies);
+    }
+
+    #[test]
+    fn copies_count_once_beside_a_tag_however_its_capitals_go_and_a_list_with_use_keeps_them() {
+        let mut sounds: Vec<Sound> = (1..=2).map(|i| sound(i, &format!("{i}.wav"), "Kick", None)).collect();
+        sounds[0].tags = vec!["Dark".into()];
+        sounds[1].tags = vec!["dark".into()];
+        let mut list = SoundList::new(sounds);
+        let with_use = list.sharing();
+        list.set_copies(&SameAudio { groups: vec![vec![1, 2]] });
+        let on = Filters { hide_copies: true, ..Filters::default() };
+        let (shown, counts) = list.view_counted(&on, Order::Name, 0);
+        assert_eq!(shown.len(), 1);
+        assert_eq!(counts.tags.get("dark"), Some(&1));
+        assert_eq!(counts.types.get("kick"), Some(&1));
+        assert!(list.has_copies(0) && list.has_copies(1));
+        // A list made from the same sounds before the copies were found takes them from the one that knows them.
+        let mut with_use = with_use;
+        assert_eq!(with_use.copies(), None);
+        with_use.keep_copies_of(&list);
+        assert_eq!(with_use.copies(), Some(1));
+        let mut other = SoundList::new(vec![sound(1, "1.wav", "Kick", None), sound(2, "2.wav", "Kick", None)]);
+        other.keep_copies_of(&list);
+        assert_eq!(other.copies(), None);
     }
 
     #[test]

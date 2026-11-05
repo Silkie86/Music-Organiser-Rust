@@ -126,3 +126,76 @@ fn files_the_app_cant_decode_are_copies_only_byte_for_byte() {
     assert_ne!(copies::print_of(&a).unwrap(), copies::print_of(&c).unwrap());
     assert!(copies::print_of(&dir.join("not there.wav")).is_err());
 }
+
+/// A mono 32-bit whole-number PCM WAV holding `samples`.
+fn wav32(path: &Path, samples: &[i32]) {
+    let data: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+    let mut b = Vec::new();
+    b.extend_from_slice(b"RIFF");
+    b.extend_from_slice(&(36 + data.len() as u32).to_le_bytes());
+    b.extend_from_slice(b"WAVEfmt ");
+    b.extend_from_slice(&16u32.to_le_bytes());
+    b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+    b.extend_from_slice(&1u16.to_le_bytes()); // mono
+    b.extend_from_slice(&44_100u32.to_le_bytes());
+    b.extend_from_slice(&(44_100u32 * 4).to_le_bytes());
+    b.extend_from_slice(&4u16.to_le_bytes());
+    b.extend_from_slice(&32u16.to_le_bytes());
+    b.extend_from_slice(b"data");
+    b.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    b.extend_from_slice(&data);
+    fs::write(path, b).unwrap();
+}
+
+#[test]
+fn audio_read_as_floats_that_lose_bits_is_a_copy_only_byte_for_byte() {
+    let dir = folder("mo-sounds-copies-32bit");
+    let samples: Vec<i32> = (0..1000).map(|i| (i * 1_000_003) << 8).collect();
+    let mut nudged = samples.clone();
+    // A difference in the last bit: lost when read as 32-bit floats, so the two read the same.
+    nudged[500] += 1;
+    let (a, b) = (dir.join("deep.wav"), dir.join("deep nudged.wav"));
+    wav32(&a, &samples);
+    wav32(&b, &nudged);
+    assert_eq!(mo_audio::read(&a, 60.0).unwrap(), mo_audio::read(&b, 60.0).unwrap());
+    assert!(!mo_audio::reads_exactly(&a));
+    assert_ne!(copies::print_of(&a).unwrap(), copies::print_of(&b).unwrap());
+    let c = dir.join("deep copy.wav");
+    fs::copy(&a, &c).unwrap();
+    assert_eq!(copies::print_of(&a).unwrap(), copies::print_of(&c).unwrap());
+    // A 16-bit file reads exactly.
+    let d = dir.join("plain.wav");
+    mo_audio::write_wav(&d, &[tone(100, 0.1)], 44_100, 16).unwrap();
+    assert!(mo_audio::reads_exactly(&d));
+}
+
+#[test]
+fn a_long_wav_is_printed_whole_a_part_at_a_time() {
+    let dir = folder("mo-sounds-copies-long");
+    // 70 seconds at 8 kHz: three parts. Two files that differ only in their last second.
+    let frames = 70 * 8000;
+    let one = tone(frames, 0.01);
+    let mut two = one.clone();
+    two[frames - 100] = 0.0;
+    let (a, b) = (dir.join("long.wav"), dir.join("long other end.wav"));
+    mo_audio::write_wav(&a, &[one], 8000, 16).unwrap();
+    mo_audio::write_wav(&b, &[two], 8000, 16).unwrap();
+    assert_ne!(copies::print_of(&a).unwrap(), copies::print_of(&b).unwrap());
+}
+
+#[test]
+fn another_apps_database_where_the_prints_are_kept_is_left_alone() {
+    let dir = folder("mo-sounds-copies-foreign");
+    let kept = dir.join(copies::FILE_NAME);
+    {
+        let other = rusqlite::Connection::open(&kept).unwrap();
+        other.execute_batch("PRAGMA application_id = 1234; CREATE TABLE theirs (x);").unwrap();
+    }
+    let a = dir.join("Hat.wav");
+    mo_audio::write_wav(&a, &[tone(800, 0.7)], 22_050, 16).unwrap();
+    let sounds = [sound(1, &a, 0.036, 22_050, -6.0), sound(2, &a, 0.036, 22_050, -6.0)];
+    assert!(copies::find(&sounds, &kept, &AtomicBool::new(false), |_| {}).is_err());
+    let other = rusqlite::Connection::open(&kept).unwrap();
+    let n: i64 = other.query_row("SELECT COUNT(*) FROM theirs", [], |r| r.get(0)).unwrap();
+    assert_eq!(n, 0);
+}
