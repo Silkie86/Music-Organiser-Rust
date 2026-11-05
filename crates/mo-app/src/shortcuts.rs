@@ -85,6 +85,11 @@ pub const PLUGINS_ACTIONS: &[Action] = &[
         "Uninstall the picked plugin: its own uninstaller, or its plugin files to the Recycle Bin (asks first)",
         "Ctrl+Shift+U",
     ),
+    action(
+        "plugins.move",
+        "Move one of the picked plugin's folders to another drive, leaving a link behind (asks first)",
+        "Ctrl+Shift+M",
+    ),
 ];
 
 /// The Presets page's own actions on its Sounds section. Send to Bitwig takes the C# Sound Lab's key.

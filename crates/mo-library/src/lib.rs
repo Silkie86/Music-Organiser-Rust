@@ -9,6 +9,7 @@
 mod db;
 pub mod folders;
 pub mod list_copy;
+pub mod moves;
 pub mod plugins;
 pub mod read;
 pub mod samples;

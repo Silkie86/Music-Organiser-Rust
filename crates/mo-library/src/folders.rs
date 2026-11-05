@@ -1,6 +1,8 @@
 //! Adding and removing the folders the app looks in (Settings › Folders), in the C# app's `library.db`: the project
-//! folders (`roots`) and the sample, MIDI and plugin folders (JSON lists in `settings`). This is the only place the
-//! Rust app writes to `library.db` (Solomon's OK, 2026-11-03); everything else opens it read-only.
+//! folders (`roots`) and the sample, MIDI and plugin folders (JSON lists in `settings`). This and [`crate::moves`]
+//! (a folder moved to another drive, from the Plugins page) are the only places the Rust app writes to `library.db`
+//! (Solomon's OK: folders 2026-11-03, moves and the Plugins page's folder fixes 2026-11-05); everything else opens it
+//! read-only.
 //!
 //! Each change is one SQLite transaction: it reads the list as it is now (the C# app may have changed it since the
 //! page showed it), changes it, reads it back to check, and only then keeps it. If anything goes wrong nothing is
@@ -197,8 +199,11 @@ fn read_list(conn: &Connection, list: FolderList) -> Result<Vec<String>, String>
 }
 
 /// Opens an existing library to change it: never makes one.
-fn open(library: &Path) -> Result<Connection, LibraryError> {
+pub(crate) fn open(library: &Path) -> Result<Connection, LibraryError> {
     let open_error = |why: String| LibraryError::Open { path: library.to_owned(), why };
+    if !library.is_file() {
+        return Err(open_error("it isn't there".to_owned()));
+    }
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = Connection::open_with_flags(library, flags).map_err(|e| open_error(e.to_string()))?;
     // The C# app may be saving a scan: wait for it rather than fail.

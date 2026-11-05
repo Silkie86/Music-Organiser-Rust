@@ -5,6 +5,7 @@
 //! folders you tick to the Recycle Bin, and nowhere else.
 
 mod clean;
+mod moving;
 mod uninstall;
 
 use std::cell::RefCell;
@@ -331,6 +332,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
         }
         "plugins.cleanUp" => clean::start(app),
         "plugins.uninstall" => uninstall::start(app),
+        "plugins.move" => moving::start(app),
         "plugins.searchOnline" => {
             let url = search_url(&name, &vendor);
             let started = background::spawn("Search online", move || {
@@ -539,11 +541,15 @@ fn pick(app: &AppWindow, row: Option<usize>) {
 fn fill_actions(app: &AppWindow) {
     let data = app.global::<PluginsData>();
     let (shortcuts, picked) = PAGE.with(|p| (p.borrow().shortcuts.clone(), p.borrow().picked));
-    let (can_clean, can_uninstall) =
-        (picked.is_some_and(clean::can_clean), picked.is_some_and(uninstall::can_uninstall));
+    let (can_clean, can_uninstall, can_move) = (
+        picked.is_some_and(clean::can_clean),
+        picked.is_some_and(uninstall::can_uninstall),
+        picked.is_some_and(moving::can_move),
+    );
     let enabled = |id: &str| match id {
         "plugins.cleanUp" => can_clean,
         "plugins.uninstall" => can_uninstall,
+        "plugins.move" => can_move,
         _ => true,
     };
     let menu: Vec<MenuItem> = PLUGINS_ACTIONS
@@ -563,6 +569,7 @@ fn fill_actions(app: &AppWindow) {
                 "plugins.projects" => "Show in Songs",
                 "plugins.cleanUp" => "Clean up…",
                 "plugins.uninstall" => "Uninstall…",
+                "plugins.move" => "Move to another drive…",
                 _ => "Search online",
             }
             .into(),

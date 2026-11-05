@@ -29,7 +29,7 @@ use crate::space_removing::{
 
 /// The library settings the moves are kept in, as the C# app keeps them: the moved folders, and the folders moves
 /// left behind.
-pub const MOVED_FOLDERS: &str = "space_moved_folders";
+pub use mo_library::moves::MOVED_FOLDERS;
 pub const OLD_HOMES: &str = "space_old_homes";
 
 /// The old copies line's id.
