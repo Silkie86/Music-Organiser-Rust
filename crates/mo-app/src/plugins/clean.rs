@@ -339,6 +339,8 @@ fn sentence(why: &str) -> String {
 /// A bin that notes what it sent, so a clean-up that stopped on a bug part way still knows what went
 /// ([`Watched::went`]). What went in Windows' administrator step goes another way and isn't noted: after such a stop
 /// that is only found in the Recycle Bin by hand.
+/// Each of [`Bin`]'s ways is passed on to `bin` (as `mo_space::clean::Heard` does): a way added to [`Bin`] later must be
+/// passed on here too, or its default would stand in for `bin`'s own.
 pub struct Watched<'a> {
     bin: &'a (dyn Bin + Sync),
     sent: Mutex<Vec<(String, i64)>>,
@@ -404,6 +406,17 @@ impl Bin for Watched<'_> {
     }
     fn holds(&self, removed: &[Removed]) -> Option<Vec<bool>> {
         self.bin.holds(removed)
+    }
+    fn put_back_checked(
+        &self,
+        removed: &[Removed],
+        check: &mo_space::clean::Check<'_>,
+        each: &mut dyn FnMut(usize, Option<String>),
+    ) {
+        self.bin.put_back_checked(removed, check, each);
+    }
+    fn can_look_for(&self, removed: &Removed) -> bool {
+        self.bin.can_look_for(removed)
     }
     fn refuses_quietly(&self, path: &Path, bytes: u64) -> Option<String> {
         self.bin.refuses_quietly(path, bytes)
