@@ -728,11 +728,17 @@ export component JumpField inherits Rectangle {
 export component ToggleChip inherits Rectangle {
     in property <string> text;
     in property <bool> on;
+    // Joined to the chip before or after it in a filter's strip (FilterPicks): that side is square.
+    in property <bool> joined-left;
+    in property <bool> joined-right;
     callback clicked;
     width: label.preferred-width + 24px;
     height: 28px;
-    border-radius: 14px;
-    border-width: 1px;
+    border-top-left-radius: joined-left ? 0 : 14px;
+    border-bottom-left-radius: joined-left ? 0 : 14px;
+    border-top-right-radius: joined-right ? 0 : 14px;
+    border-bottom-right-radius: joined-right ? 0 : 14px;
+    border-width: 2px;
     border-color: on ? Theme.accent : Theme.edge;
     background: on ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
     animate background, border-color { duration: Motion.tap; }
@@ -826,11 +832,16 @@ component MenuChipFace inherits Rectangle {
     in property <string> name;
     // What's picked, as the chip says it after its name; "" for none.
     in property <string> value;
+    // Joined to the chip before it in a filter's strip (FilterPicks): its left side is square.
+    in property <bool> joined-left;
     callback clicked;
     width: label.preferred-width + 34px;
     height: 28px;
-    border-radius: 14px;
-    border-width: 1px;
+    border-top-left-radius: joined-left ? 0 : 14px;
+    border-bottom-left-radius: joined-left ? 0 : 14px;
+    border-top-right-radius: 14px;
+    border-bottom-right-radius: 14px;
+    border-width: 2px;
     border-color: value != "" ? Theme.accent : Theme.edge;
     background: value != "" ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
     animate background, border-color { duration: Motion.tap; }
@@ -956,11 +967,33 @@ export component PicksChip inherits MenuChipFace {
     }
 }
 
-// A filter, the same on every page (Solomon's note, 4 Nov 2026): a short list's choices as chips of their own, each
-// picked or unpicked by a click, behind the filter's name; or a longer list's in a PicksChip's menu, the chip saying
-// the name and what's picked. A long list can also keep its first choices as chips, with the rest in a menu after them
+// The name at the start of a filter's strip: a sunken cap, so the chips after it read as its choices.
+component FilterName inherits Rectangle {
+    in property <string> text;
+    width: label.preferred-width + 22px;
+    height: 28px;
+    border-top-left-radius: 14px;
+    border-bottom-left-radius: 14px;
+    border-width: 2px;
+    border-color: Theme.edge;
+    background: Theme.well;
+    label := Text {
+        x: 12px;
+        text: root.text;
+        color: Theme.muted;
+        font-size: Type.meta;
+        font-weight: 500;
+        vertical-alignment: center;
+        height: parent.height;
+    }
+}
+
+// A filter, the same on every page (Solomon's notes, 4 Nov 2026): a short list's choices as chips of their own, each
+// picked or unpicked by a click, joined into one strip behind the filter's name ("Type | Kick | Snare | More"), so
+// it's plain they set the same thing; or a longer list's in a PicksChip's menu, the chip saying the name and what's
+// picked. A long list can also keep its first choices as chips, with the rest in a menu at the strip's end
 // (`more-name`: the sounds' types, the most used first). mo-app's `filters` decides which, what each says and whether
-// more than one can be picked. Put filters in a row `Space.md` apart, so each one's chips stay together.
+// more than one can be picked. Put filters in a row `Space.md` apart, so each one's strip stands apart.
 export component FilterPicks inherits FlexboxLayout {
     in property <string> name;
     in property <FilterView> filter;
@@ -970,10 +1003,14 @@ export component FilterPicks inherits FlexboxLayout {
     callback toggled(string);
     // The menu's Any: it unpicks what's picked in the menu (all of the filter, unless some choices are chips too).
     callback cleared();
-    spacing: Space.sm;
+    property <bool> has-chips: root.filter.chips.length > 0;
+    property <bool> has-more: root.filter.more.length > 0;
+    // The strip's parts touch; only a strip too long for a line breaks onto a second one.
+    spacing-horizontal: 0;
+    spacing-vertical: Space.sm;
     // As wide as the whole filter on one line, so the row it's in moves it to a line of its own before breaking it; it
     // only wraps inside itself when it's wider than a line on its own (a narrow window, a long list of chips).
-    preferred-width: root.filter.chips.length > 0 ? line.preferred-width : head.preferred-width;
+    preferred-width: root.has-chips ? line.preferred-width : head.preferred-width;
     // The name before the chips, or the menu's chip: always the first thing, so the name never ends a line.
     Rectangle {
         min-width: head.min-width;
@@ -982,13 +1019,10 @@ export component FilterPicks inherits FlexboxLayout {
         min-height: head.min-height;
         preferred-height: head.preferred-height;
         head := HorizontalLayout {
-            if root.filter.chips.length > 0: Text {
+            if root.has-chips: FilterName {
                 text: root.name;
-                color: Theme.muted;
-                font-size: Type.meta;
-                vertical-alignment: center;
             }
-            if root.filter.chips.length == 0 && root.filter.more.length > 0: PicksChip {
+            if !root.has-chips && root.has-more: PicksChip {
                 name: root.name;
                 value: root.filter.more-picked;
                 choices: root.filter.more;
@@ -996,33 +1030,34 @@ export component FilterPicks inherits FlexboxLayout {
                 cleared => { root.cleared(); }
             }
         }
-        // Never drawn: the chips on one line, to measure it.
+        // Never drawn: the strip on one line, to measure it.
         line := HorizontalLayout {
             visible: false;
-            spacing: Space.sm;
-            Text {
+            FilterName {
                 text: root.name;
-                font-size: Type.meta;
             }
             for c in root.filter.chips: ToggleChip {
                 text: c.count == "" ? c.text : c.text + "  " + c.count;
-                on: c.on;
             }
-            if root.filter.more.length > 0: MenuChipFace {
+            if root.has-more: MenuChipFace {
                 name: root.more-name;
                 value: root.filter.more-picked;
             }
         }
     }
-    for c in root.filter.chips: ToggleChip {
+    for c[i] in root.filter.chips: ToggleChip {
         text: c.count == "" ? c.text : c.text + "  " + c.count;
         on: c.on;
+        // A chip that starts a new line (the strip broke in a narrow window) rounds its left side again.
+        joined-left: self.x > 0;
+        joined-right: root.has-more || i < root.filter.chips.length - 1;
         clicked => { root.toggled(c.text); }
     }
-    if root.filter.chips.length > 0 && root.filter.more.length > 0: PicksChip {
+    if root.has-chips && root.has-more: PicksChip {
         name: root.more-name;
         value: root.filter.more-picked;
         choices: root.filter.more;
+        joined-left: self.x > 0;
         toggled(text) => { root.toggled(text); }
         cleared => { root.cleared(); }
     }
