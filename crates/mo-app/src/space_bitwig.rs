@@ -110,12 +110,15 @@ impl Copies {
     }
 }
 
+/// How often a look writes the fingerprints read so far to the store.
+const KEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Looks through the Bitwig projects in `roots` (your project folders) for copies of Library multisamples: the project
 /// folders with a `multi-samples` folder first, then Bitwig's Library ([`library_folders`]), then each project's
 /// copies. `index` is the last look's Library, kept so a file already read isn't read again while it's unchanged
 /// (rule 12); the first look makes it, taking in the fingerprints kept in `prints` (the store in the app's data
 /// folder, `mo_space::prints::FILE_NAME`) so a restart doesn't read them again either. What was read is written there
-/// at the end, also when stopped. `progress` hears how many project folders have been looked through, of how many.
+/// as it goes and at the end, also when stopped. `progress` hears how many project folders have been looked through, of how many.
 /// Reads the disks, so call it off the window's thread, inside the low-priority pool (rule 21).
 pub fn look(
     roots: &[PathBuf],
@@ -181,7 +184,16 @@ fn look_through(
             ),
         }
     }
+    // What's read is written to the store as it goes, not only at the end: a look takes minutes when much is new, and
+    // one cut short by the app closing would otherwise read it all again at the next start.
+    let mut kept_at = std::time::Instant::now();
     for (n, folder) in folders.iter().enumerate() {
+        if index.remembers() && kept_at.elapsed() >= KEEP_EVERY {
+            kept_at = std::time::Instant::now();
+            if let Err(e) = index.keep(false) {
+                crate::log::warning("Space", &format!("Couldn't keep the Bitwig copies' fingerprints so far: {e}"));
+            }
+        }
         let copies = index.copies_in(folder, stop)?;
         if !copies.is_empty() {
             let saves = bitwig::saves_in(folder, stop)?;
