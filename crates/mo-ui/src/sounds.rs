@@ -251,7 +251,13 @@ thread_local! {
     static TICKER: Timer = Timer::default();
     /// Works out lists in place, for the screenshots, which have no event loop to send answers back to.
     static HERE: RefCell<bool> = const { RefCell::new(false) };
+    /// Starts reading the sound library, until it has started ([`wanted`]).
+    static START_READ: RefCell<Option<Box<dyn FnOnce()>>> = const { RefCell::new(None) };
 }
+
+/// How long after the window opens the sounds are read when nothing has asked for them yet: the page on show reads
+/// its own things from the disk first.
+const READ_AFTER: Duration = Duration::from_secs(3);
 
 /// The one player, made the first time something plays or Settings lists the outputs (nothing opens before a sound
 /// plays).
@@ -494,9 +500,33 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
         read_all(&sounds_db, &library_db, None, send);
         return;
     }
-    if let Err(e) = background::spawn("Sounds library", move || read_all(&sounds_db, &library_db, Some(cards), send)) {
-        // The sounds would never come: the page says why, rather than reading for ever.
-        loaded(app, Err(format!("its reader couldn't start ({e})")));
+    // Not at once: the first thing on show reads from the disk first. The sounds are read when this page, Space or
+    // Ctrl+K wants them ([`wanted`]), or a few seconds after the window opens, whichever is first.
+    let weak = app.as_weak();
+    START_READ.with(|s| {
+        *s.borrow_mut() = Some(Box::new(move || {
+            let read = move || read_all(&sounds_db, &library_db, Some(cards), send);
+            if let Err(e) = background::spawn("Sounds library", read)
+                && let Some(app) = weak.upgrade()
+            {
+                // The sounds would never come: the page says why, rather than reading for ever.
+                loaded(&app, Err(format!("its reader couldn't start ({e})")));
+            }
+        }))
+    });
+    crate::finder::when_opening(|_| wanted());
+    if [Place::Sounds, Place::Space].iter().any(|p| p.index() as i32 == app.get_place()) {
+        wanted();
+    } else {
+        Timer::single_shot(READ_AFTER, wanted);
+    }
+}
+
+/// Something wants the sounds (their page or Space came on show, or Ctrl+K opened): they're read now, if they
+/// haven't been yet.
+pub fn wanted() {
+    if let Some(start) = START_READ.with(|s| s.borrow_mut().take()) {
+        start();
     }
 }
 

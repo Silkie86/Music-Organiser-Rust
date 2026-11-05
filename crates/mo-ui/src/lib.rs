@@ -300,6 +300,9 @@ pub(crate) fn go_to(app: &AppWindow, index: i32) {
     app.set_place(index);
     finder::close(app);
     settings::page_shown(place);
+    if matches!(place, Place::Sounds | Place::Space) {
+        sounds::wanted();
+    }
     if place == Place::Backup {
         backup::shown();
     }
