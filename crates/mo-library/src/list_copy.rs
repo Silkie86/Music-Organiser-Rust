@@ -245,6 +245,28 @@ impl Drop for NewCopy {
     }
 }
 
+/// The app has just written to `library` itself, only to what the list doesn't hold (settings and folder lists, through
+/// [`crate::folders`]' writer): a copy that fitted the library as it was just before (`before`, its [`stamp_of`] then)
+/// holds the very same list, so it's marked as fitting the library as it is now. Without this, each folder added in
+/// Settings or each Plugins folder fix made the next start read the whole library again (47-104 s on Solomon's C:).
+///
+/// A copy that didn't fit before is left as it was, and so is one when something else wrote in between (its stamp
+/// then differs from `before`): the next read makes a new copy, as it would have anyway.
+pub(crate) fn after_own_write(library: &Path, before: &str) {
+    let Some(copy) = copy_for(library) else { return };
+    // Not while a copy is being made or read: one made from the library before this write would be marked anew here.
+    let _one = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(now) = stamp_of(library) else { return };
+    if now == before || !copy.is_file() {
+        return;
+    }
+    // One that can't be marked is no harm: the next read makes a new copy.
+    let _ = Connection::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+        .and_then(|conn| {
+            conn.execute("UPDATE meta SET value = ?1 WHERE key = 'stamp' AND value = ?2", [now.as_str(), before])
+        });
+}
+
 /// Removes a half-made copy, and a journal SQLite may have left beside it.
 fn remove_with_journal(temp: &Path) {
     let _ = std::fs::remove_file(temp);
@@ -332,7 +354,28 @@ mod tests {
 
         // And once more as the library has it, now from the new copy.
         assert_eq!(listed(&lib.saves().unwrap()), listed(&after));
+        writer.execute_batch("CREATE TABLE roots (path TEXT UNIQUE NOT NULL)").unwrap();
         drop(writer);
+        lib.saves().unwrap();
+        assert_eq!(lib.saves_and_source().unwrap().1.as_deref(), Some("from the app's copy"));
+
+        // The app's own settings writes (a folder added in Settings) change the library's files but not the list: the
+        // copy is still read, not the whole library again.
+        let before = stamp_of(&path);
+        let added = crate::folders::add_folder(&path, crate::folders::FolderList::Projects, "K:/new", &[]).unwrap();
+        assert!(matches!(added, crate::folders::Changed::Done(_)));
+        assert_ne!(stamp_of(&path), before, "the write should change the library's files");
+        assert_eq!(lib.saves_and_source().unwrap().1.as_deref(), Some("from the app's copy"));
+        assert_eq!(listed(&lib.saves().unwrap()), listed(&after));
+
+        // But a list change made after the copy stops fitting stays a change: the copy isn't marked over it.
+        let writer = Connection::open(&path).unwrap();
+        writer.execute("UPDATE projects SET rating = 5 WHERE id = 1", []).unwrap();
+        drop(writer);
+        crate::folders::add_folder(&path, crate::folders::FolderList::Projects, "K:/newer", &[]).unwrap();
+        let (now, source) = lib.saves_and_source().unwrap();
+        assert!(source.unwrap_or_default().starts_with("from library.db"));
+        assert_eq!(now.iter().find(|s| s.id == 1).map(|s| s.rating), Some(5));
 
         // Another library (a test's, a copy's) never gets one.
         let other_dir = dir.join("other");

@@ -19,7 +19,7 @@ use mo_space::size::size_text;
 use mo_space::uninstallers::Uninstaller;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 
-use super::{PAGE, fill_panel, refresh, shown};
+use super::{PAGE, fill_panel, refresh};
 use crate::{AppWindow, CleanRow, PluginsData};
 
 /// A clean-up or uninstall under way, for the plugin with this row key (name key and own).
@@ -497,7 +497,7 @@ fn put_back_done(
     });
     fill(app);
     // The library still lists them: a fresh read shows them again (less what's still binned).
-    shown();
+    super::read_again();
 }
 
 /// Stop: a check closes; sending to the Recycle Bin stops after the folder going now (what went stays in the bin, with
