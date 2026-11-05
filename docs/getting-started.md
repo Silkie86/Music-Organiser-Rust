@@ -19,6 +19,7 @@ From the repo folder:
 | `cargo watch -x run` | Rebuilds and reopens the app every time you edit the code yourself. |
 | `cargo run --bin mo-screens` | Draws every page into `screenshots\` without opening the app. |
 | `cargo test` | Runs every test. |
+| `cargo build --profile dist --bin music-organiser` | Makes the smallest, quickest build: the one to hand out. About 10 minutes; it ends up in `target\dist`. |
 
 ## The launcher: test a pull request without typing anything
 
