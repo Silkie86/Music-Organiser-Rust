@@ -23,14 +23,21 @@ pub fn rule_out_plugin_folder(library: &Path, key: &str, folder: &str) -> Result
     add_to(library, &ruled_out_key(key), folder)
 }
 
-/// Takes `folder` off the folders you added to the plugin `key`.
+/// Takes `folder` off the folders you added to the plugin `key`. One that isn't on the list is an error: nothing was
+/// taken off, so the page mustn't say it was.
 pub fn take_off_added_folder(library: &Path, key: &str, folder: &str) -> Result<(), LibraryError> {
     let gone = path_key(folder);
-    setting_list::change(library, &added_folders_key(key), |list| {
+    let changed = setting_list::change(library, &added_folders_key(key), |list| {
         let before = list.len();
         list.retain(|f| f.as_str().map(path_key).as_deref() != Some(gone.as_str()));
         list.len() != before
-    })
+    })?;
+    if changed {
+        Ok(())
+    } else {
+        let why = format!("{folder} isn't on the list of folders you added, so nothing was changed");
+        Err(LibraryError::Write { path: library.to_owned(), why })
+    }
 }
 
 fn add_to(library: &Path, setting: &str, folder: &str) -> Result<(), LibraryError> {
@@ -46,6 +53,7 @@ fn add_to(library: &Path, setting: &str, folder: &str) -> Result<(), LibraryErro
         list.push(Value::String(folder.to_owned()));
         true
     })
+    .map(|_| ())
 }
 
 #[cfg(test)]
@@ -86,6 +94,8 @@ mod tests {
         assert!(kept(&path, "plugin_space_not:kontakt").unwrap().contains("Massive"));
         take_off_added_folder(&path, "kontakt", "E:/Kontakt Libraries").unwrap();
         assert_eq!(kept(&path, "plugin_space_added:kontakt").as_deref(), Some("[]"));
+        // Not on the list: an error, never "taken off".
+        assert!(take_off_added_folder(&path, "kontakt", "E:/Kontakt Libraries").is_err());
         // Another plugin's lists aren't touched.
         assert_eq!(kept(&path, "plugin_space_added:massive"), None);
     }

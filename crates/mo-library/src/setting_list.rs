@@ -14,11 +14,12 @@ use crate::LibraryError;
 use crate::folders::open;
 
 /// Changes the list kept in setting `key`: `edit` changes it and says whether it did (when not, nothing is written).
+/// Says whether it changed.
 pub(crate) fn change(
     library: &Path,
     key: &str,
     edit: impl FnOnce(&mut Vec<Value>) -> bool,
-) -> Result<(), LibraryError> {
+) -> Result<bool, LibraryError> {
     let write_error = |why: String| LibraryError::Write { path: library.to_owned(), why };
     let sql = |e: rusqlite::Error| match e.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => LibraryError::Busy { path: library.to_owned() },
@@ -37,7 +38,7 @@ pub(crate) fn change(
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql)?;
     let mut list = read(&tx, key).map_err(write_error)?;
     if !edit(&mut list) {
-        return Ok(());
+        return Ok(false);
     }
     let json = serde_json::to_string(&list).map_err(|e| write_error(format!("couldn't write the list ({e})")))?;
     tx.execute(
@@ -50,7 +51,7 @@ pub(crate) fn change(
         return Err(write_error(format!("its {key} setting read back wasn't the one written, so nothing was changed")));
     }
     tx.commit().map_err(sql)?;
-    Ok(())
+    Ok(true)
 }
 
 /// The list kept now: NULL, missing or blank is none; anything that isn't a JSON list is refused.

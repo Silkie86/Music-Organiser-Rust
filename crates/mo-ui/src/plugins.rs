@@ -320,7 +320,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     }
 }
 
-/// This session's "Not its", "Take off" and "Add a folder", for another page's read of the plugins to show too
+/// This session's "Not its", "Take off" and "Add a folder", for Space's own read of the plugins to show too
 /// ([`mo_app::plugins::Plugins::apply_folder_fixes`]).
 pub fn folder_fixes_this_session() -> Vec<mo_app::plugins::folder_fixes::FolderFix> {
     PAGE.with(|p| p.borrow().folder_fixes.clone())
@@ -402,7 +402,10 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>) {
                 p.picked.and_then(|i| old.rows.get(i)).map(|r| (r.key.clone(), r.own.clone()))
             });
             clean::forget_binned(&mut fresh);
-            PAGE.with(|p| fresh.apply_folder_fixes(&p.borrow().folder_fixes));
+            PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.folder_fixes = fresh.apply_folder_fixes(&p.folder_fixes);
+            });
             fresh.refilter();
             let picked = kept.and_then(|(k, o)| fresh.find(&k, &o));
             let empty = fresh.rows.is_empty();
@@ -656,7 +659,7 @@ fn fill_panel(app: &AppWindow) {
     PAGE.with(|p| p.borrow_mut().room_paths = card.room.folders.iter().map(|f| f.path.clone()).collect());
     data.set_can_add_folder(PAGE.with(|p| {
         let p = p.borrow();
-        p.picked.is_some_and(|r| p.plugins.as_ref().is_some_and(|pl| pl.can_add_folder(r).is_some()))
+        p.picked.is_some_and(|r| p.plugins.as_ref().is_some_and(|pl| pl.can_add_folder(r)))
     }));
     data.set_room_folders(ModelRc::new(VecModel::from(folders)));
     data.set_sizes_note(sizes.into());

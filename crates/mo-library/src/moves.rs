@@ -33,6 +33,7 @@ pub fn add_moved_folder(library: &Path, entry: &str) -> Result<(), LibraryError>
         list.push(entry);
         true
     })
+    .map(|_| ())
 }
 
 #[cfg(test)]
