@@ -9,6 +9,7 @@
 //!
 //! The engine is `mo-presets`; this file only picks, sorts and words what it finds.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -211,10 +212,31 @@ impl Item {
         Item { row, song, year, words, file_key }
     }
 
+    /// Your part for the line with `fixes` laid over it: a fix made since the line was read wins.
+    pub fn fixed_with(&self, fixes: &Fixes) -> Option<Role> {
+        fixes.get(&self.row.hash).copied().unwrap_or(self.row.fixed)
+    }
+
+    /// The part shown with `fixes` laid over the line ([`Item::role`]).
+    pub fn role_with(&self, fixes: &Fixes) -> Option<Role> {
+        self.fixed_with(fixes).or(self.row.guess.role)
+    }
+
+    /// The line as it shows with `fixes` laid over it: itself, unless a fix changes its part (then a copy of it).
+    pub fn as_fixed<'a>(&'a self, fixes: &Fixes) -> Cow<'a, Item> {
+        let fixed = self.fixed_with(fixes);
+        if fixed == self.row.fixed {
+            return Cow::Borrowed(self);
+        }
+        let mut i = self.clone();
+        i.row.fixed = fixed;
+        Cow::Owned(i)
+    }
+
     /// Every word of a search (already in lower case) is in the line's texts or its part.
-    fn found(&self, search: &[String]) -> bool {
+    fn found(&self, search: &[String], fixes: &Fixes) -> bool {
         // The part's words only when a word isn't in the line's own: this runs for every line, several times a key.
-        let in_part = |w: &str| self.role().is_some_and(|r| r.label().to_lowercase().contains(w));
+        let in_part = |w: &str| self.role_with(fixes).is_some_and(|r| r.label().to_lowercase().contains(w));
         search.iter().all(|w| self.words.contains(w.as_str()) || in_part(w))
     }
 
@@ -422,21 +444,21 @@ impl Filters {
 
     /// Everything but the five chips lets `i` through: the unused synths, the song, the years and the search. `words`
     /// is [`Filters::words`].
-    fn passes_others(&self, i: &Item, words: &[String]) -> bool {
+    fn passes_others(&self, i: &Item, words: &[String], fixes: &Fixes) -> bool {
         (self.unused || !i.row.plays_nothing)
             && self.song.as_ref().is_none_or(|s| !i.is_file() && i.path() == s)
             && self.years.is_none_or(|(a, b)| i.year.is_some_and(|y| y >= a && y <= b))
-            && i.found(words)
+            && i.found(words, fixes)
     }
 
     /// Which of the five chips let `i` through: the maker, the type, the part, where it's from and the plugin.
-    fn chips_pass(&self, i: &Item) -> [bool; 5] {
+    fn chips_pass(&self, i: &Item, fixes: &Fixes) -> [bool; 5] {
         let maker = Choice { kind: Type::All, ..self.choice };
         let kind = Choice { maker: Maker::All, ..self.choice };
         [
             maker.matches(i.row.native, i.row.kind),
             kind.matches(i.row.native, i.row.kind),
-            self.parts.is_empty() || self.parts.iter().any(|p| p.matches(i.role())),
+            self.parts.is_empty() || self.parts.iter().any(|p| p.matches(i.role_with(fixes))),
             match self.from {
                 From::All => true,
                 From::Songs => !i.is_file(),
@@ -447,7 +469,8 @@ impl Filters {
     }
 
     fn passes_with(&self, i: &Item, words: &[String]) -> bool {
-        self.chips_pass(i) == [true; 5] && self.passes_others(i, words)
+        let none = Fixes::new();
+        self.chips_pass(i, &none) == [true; 5] && self.passes_others(i, words, &none)
     }
 
     pub fn passes(&self, i: &Item) -> bool {
@@ -493,16 +516,26 @@ pub struct Filtered {
 }
 
 pub fn filtered(items: &[Item], f: &Filters) -> Filtered {
+    filtered_with(items, f, &Fixes::new())
+}
+
+/// Your part fixes made since the lines were read, by the sound's fingerprint (None: the fix was taken away). They're
+/// laid over the lines rather than written into them: the page shares its lines with other threads (the filtering,
+/// Ctrl+K), and changing one line would mean copying them all.
+pub type Fixes = HashMap<String, Option<Role>>;
+
+/// [`filtered`] with `fixes` laid over the lines.
+pub fn filtered_with(items: &[Item], f: &Filters, fixes: &Fixes) -> Filtered {
     let words = f.words();
     let without_years = Filters { years: None, ..f.clone() };
     let mut tally = Tally::new();
     let mut shown: Vec<usize> = Vec::new();
     let mut by_year: BTreeMap<i32, usize> = BTreeMap::new();
     for (n, i) in items.iter().enumerate() {
-        if !without_years.passes_others(i, &words) {
+        if !without_years.passes_others(i, &words, fixes) {
             continue;
         }
-        let ok = f.chips_pass(i);
+        let ok = f.chips_pass(i, fixes);
         let all = ok == [true; 5];
         // The year strip counts the years with every other filter on.
         if all && let Some(y) = i.year {
@@ -511,7 +544,7 @@ pub fn filtered(items: &[Item], f: &Filters) -> Filtered {
         if !f.years.is_none_or(|(a, b)| i.year.is_some_and(|y| y >= a && y <= b)) {
             continue;
         }
-        tally.add(i, ok);
+        tally.add(i, ok, fixes);
         if all {
             shown.push(n);
         }
@@ -550,7 +583,7 @@ impl<'a> Tally<'a> {
     }
 
     /// A line the other filters let through, with which of the five chips let it through.
-    fn add(&mut self, i: &'a Item, ok: [bool; 5]) {
+    fn add(&mut self, i: &'a Item, ok: [bool; 5], fixes: &Fixes) {
         let synths = Choice { kind: Type::Synths, ..Choice::default() };
         let effects = Choice { kind: Type::Effects, ..Choice::default() };
         let c = &mut self.c;
@@ -565,7 +598,7 @@ impl<'a> Tally<'a> {
         }
         if counts_on(2) {
             let no_guess = Role::ALL.len();
-            let at = i.role().and_then(|r| Role::ALL.iter().position(|&x| x == r)).unwrap_or(no_guess);
+            let at = i.role_with(fixes).and_then(|r| Role::ALL.iter().position(|&x| x == r)).unwrap_or(no_guess);
             c.parts[at] += 1;
         }
         if counts_on(3) {
