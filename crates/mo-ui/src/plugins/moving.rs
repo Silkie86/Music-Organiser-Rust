@@ -327,9 +327,13 @@ fn moved_done(app: &AppWindow, id: u64, head: String, gone: Option<String>) {
     log::info("Plugins", &format!("Move: {head}"));
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        // A link now: its room is on the other drive, and it can't move again.
-        if let (Some(gone), Some(pl)) = (&gone, p.plugins.as_mut()) {
-            pl.forget_paths(std::slice::from_ref(gone));
+        // A link now: its room is on the other drive, and it can't move again. Kept, so the next read (and Space)
+        // leaves it out too.
+        if let Some(gone) = gone {
+            if let Some(pl) = p.plugins.as_mut() {
+                pl.forget_paths(std::slice::from_ref(&gone));
+            }
+            p.moved.push(gone);
         }
         if let Some(c) = p.clean.as_mut().filter(|c| c.id == id) {
             c.stage = Stage::done(head);

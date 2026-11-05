@@ -549,6 +549,7 @@ pub(super) fn forget_binned(plugins: &mut mo_app::plugins::Plugins) {
             plugins.forget_removed(&b.done);
         }
         plugins.forget_paths(&p.uninstalled);
+        plugins.forget_paths(&p.moved);
     });
 }
 

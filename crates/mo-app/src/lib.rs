@@ -42,6 +42,7 @@ pub mod space;
 pub mod space_bin;
 pub mod space_bitwig;
 pub mod space_old;
+pub mod space_plugins;
 pub mod space_removing;
 pub mod space_songs;
 pub mod space_spare;
