@@ -172,6 +172,9 @@ whether Bitwig's audio engine is on.) The rest is additions, which the app can i
   each whether its panel showed before and after each go (`visible`), whether the route `ran` it, and whether
   the link put the panel back as it was (`restored`). A panel that shows and hides with them means Bitwig
   carried them out for the link.
+- From 3.19, for the app's Play on selected track: `selectedtrack` says which track is selected, `clip` with
+  `audition` notes the clip it makes, and `deleteclip` takes out only a clip so noted while it keeps the name it came
+  in with (so never one of yours), stopping the track and Bitwig first when asked.
 - From 3.18, a change still waiting behind others when its app closes the connection (it gave up waiting) isn't
   made, so asking again doesn't make it twice (apart from `stoptracks`, which the app sends as it closes), and a
   `replace` into an empty slot waits as long as any new clip.
