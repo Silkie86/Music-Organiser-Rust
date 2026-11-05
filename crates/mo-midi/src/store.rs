@@ -19,6 +19,9 @@
 //!   stretch), so it's read again from the stored notes, without opening any file, when the finder gets better or the
 //!   kind changes (rule 7). It's per set of notes, velocities and all: a stray soft touch isn't heard. A table of its
 //!   own, so the list reads it without going past the notes, and finding what to read again is one index lookup.
+//! - `shapes`: each set of notes' shape in any key (8 bytes, [`crate::analyser::shape_of`]), so a pack's loop in
+//!   every key is one line on the page. A table of its own, added after layout 2 came out: an index made before it
+//!   gets the table when the indexer opens it, and its shapes from the stored notes after the next read.
 //! - `your_roles`, `your_octaves`: what you said about a set of notes, by its note hash, so it holds for every copy: the
 //!   ones you made in the C# app, taken in once, and the Rust app's own, which win (a row with no value says "back to
 //!   the app's guess", which wins too).
@@ -98,6 +101,12 @@ const TABLES: &str = "
         role INTEGER NOT NULL,          -- the kind the notes were heard as (Role::code)
         cut INTEGER NOT NULL,           -- 1 for a piece cut from a longer stretch, heard as a window
         fact BLOB                       -- mo-harmony's KeyFact (8 bytes); NULL for drums or no pitched notes
+    );
+    -- The notes' shape in any key (analyser::shape_of): a loop and the same loop moved up or down share it. Filled
+    -- when notes are saved, and for notes saved before this table was there, after a read (indexer::fill_shapes).
+    CREATE TABLE IF NOT EXISTS shapes (
+        notes INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+        shape INTEGER NOT NULL
     );
     -- NULL: back to the app's guess (which wins over the C# app's correction too).
     CREATE TABLE IF NOT EXISTS your_roles (hash TEXT PRIMARY KEY, role INTEGER) WITHOUT ROWID;
@@ -605,6 +614,8 @@ pub struct MidiStore {
     path: PathBuf,
     /// Whether the index has its `keys` table (always, once the indexer has opened it).
     has_keys: bool,
+    /// Whether it has its `shapes` table (the same).
+    has_shapes: bool,
     /// Its layout ([`LAYOUT`] once the indexer has opened it; the page reads an older one as it is).
     layout: i64,
 }
@@ -665,7 +676,7 @@ fn open_for_writing(path: &Path) -> Result<(MidiStore, Option<(i64, i64)>), Midi
             // A new index: of this layout from the start.
             .and_then(|()| if layout == LAYOUT { Ok(()) } else { conn.pragma_update(None, "user_version", LAYOUT) })
             .map_err(|e| open_error(e.to_string()))?;
-        let store = MidiStore { conn, path: path.to_owned(), has_keys: true, layout: LAYOUT };
+        let store = MidiStore { conn, path: path.to_owned(), has_keys: true, has_shapes: true, layout: LAYOUT };
         return Ok((store, copied));
     }
 }
@@ -706,10 +717,16 @@ impl MidiStore {
         let layout: i64 =
             conn.pragma_query_value(None, "user_version", |r| r.get(0)).map_err(|e| open_error(e.to_string()))?;
         // An index made before keys were read (until the indexer next opens it): listed without keys.
-        let has_keys = conn
-            .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'keys'", [], |r| r.get(0))
-            .map_err(|e| open_error(e.to_string()))?;
-        Ok(MidiStore { conn, path: path.to_owned(), has_keys, layout })
+        let has_table = |name: &str| {
+            conn.query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1", [name], |r| {
+                r.get(0)
+            })
+            .map_err(|e| open_error(e.to_string()))
+        };
+        let has_keys = has_table("keys")?;
+        // One made before shapes were kept (until the indexer next opens it): listed with no loop in other keys.
+        let has_shapes = has_table("shapes")?;
+        Ok(MidiStore { conn, path: path.to_owned(), has_keys, has_shapes, layout })
     }
 
     pub fn path(&self) -> &Path {
@@ -771,6 +788,8 @@ impl MidiStore {
             // The notes themselves once: `sound` is their hash, so the same notes found again are already there.
             let mut data =
                 tx.prepare_cached("INSERT INTO note_data (notes, data) VALUES (?1, ?2) ON CONFLICT(notes) DO NOTHING")?;
+            let mut shape =
+                tx.prepare_cached("INSERT INTO shapes (notes, shape) VALUES (?1, ?2) ON CONFLICT(notes) DO NOTHING")?;
             let mut key = tx.prepare_cached(
                 "INSERT INTO keys (notes, version, role, cut, fact) VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(notes) DO UPDATE SET version = ?2, role = ?3, cut = ?4, fact = ?5",
@@ -814,6 +833,9 @@ impl MidiStore {
                                 |r| r.get(0),
                             )?;
                             data.execute(params![notes, encoded])?;
+                            if let Some(s) = analyser::shape_of(&p.notes) {
+                                shape.execute(params![notes, s])?;
+                            }
                             key.execute(params![
                                 notes,
                                 keys::VERSION,
@@ -900,6 +922,44 @@ impl MidiStore {
         Ok(())
     }
 
+    /// How many sets of notes have no shape yet (saved before the `shapes` table was there): two counts, each read
+    /// from a small index, so it's quick when there are none.
+    pub fn unshaped_count(&self) -> Result<usize, MidiError> {
+        let n: i64 =
+            self.conn
+                .query_row("SELECT (SELECT COUNT(*) FROM notes) - (SELECT COUNT(*) FROM shapes)", [], |r| r.get(0))?;
+        Ok(n.max(0) as usize)
+    }
+
+    /// Notes with no shape yet after the set of notes `after` (an id; 0 for the first), in id order, up to `limit`:
+    /// each with its notes. The caller goes on from the last one given, so each row is looked at once.
+    pub fn unshaped(&self, after: i64, limit: usize) -> Result<Vec<(i64, Vec<NoteEvent>)>, MidiError> {
+        let mut st = self.conn.prepare_cached(
+            "SELECT d.notes, d.data FROM note_data d
+             WHERE d.notes > ?1 AND NOT EXISTS (SELECT 1 FROM shapes s WHERE s.notes = d.notes)
+             ORDER BY d.notes LIMIT ?2",
+        )?;
+        let rows =
+            st.query_map(params![after, limit as i64], |r| Ok((r.get(0)?, decode_notes(&r.get::<_, Vec<u8>>(1)?))))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
+    /// Keeps the shapes worked out for [`MidiStore::unshaped`] notes: `None` (no notes) is kept as 0, so the same
+    /// notes aren't asked for again.
+    pub fn save_shapes(&mut self, shapes: &[(i64, Option<i64>)]) -> Result<(), MidiError> {
+        let tx = self.conn.transaction()?;
+        {
+            let mut st = tx.prepare_cached(
+                "INSERT INTO shapes (notes, shape) VALUES (?1, ?2) ON CONFLICT(notes) DO UPDATE SET shape = ?2",
+            )?;
+            for (notes, shape) in shapes {
+                st.execute(params![notes, shape.unwrap_or(0)])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Drops notes no file has any more: once at the end of each run, not with every batch.
     pub fn tidy(&mut self) -> Result<usize, MidiError> {
         let tx = self.conn.transaction()?;
@@ -942,13 +1002,15 @@ impl MidiStore {
     ) -> Result<Vec<StoredPhrase>, MidiError> {
         let (key_fact, keys_join) =
             if self.has_keys { ("k.fact", "LEFT JOIN keys k ON k.notes = n.id") } else { ("NULL", "") };
+        let (shape, shapes_join) =
+            if self.has_shapes { ("s.shape", "LEFT JOIN shapes s ON s.notes = n.id") } else { ("NULL", "") };
         let mut st = self.conn.prepare(&format!(
             "SELECT p.id, f.id, f.path, f.kind, f.mtime, f.size, p.part, p.clip, p.role, p.why, y.role, n.hash,
                     n.count, n.bars, n.lowest, n.highest, n.chroma, n.features, p.members, o.octaves, p.program,
-                    p.drums, p.track_name, {key_fact}, y.hash IS NOT NULL, o.hash IS NOT NULL
+                    p.drums, p.track_name, {key_fact}, y.hash IS NOT NULL, o.hash IS NOT NULL, {shape}
              FROM parts p JOIN files f ON f.id = p.file JOIN notes n ON n.id = p.notes
                   LEFT JOIN your_roles y ON y.hash = n.hash LEFT JOIN your_octaves o ON o.hash = n.hash
-                  {keys_join}
+                  {keys_join} {shapes_join}
              ORDER BY f.mtime DESC, p.id"
         ))?;
         let mut rows = st.query([])?;
@@ -1016,6 +1078,8 @@ impl MidiStore {
                 track_name: r.get(22)?,
                 hash,
                 your_octave,
+                // 0: kept for notes with no shape.
+                shape: r.get::<_, Option<i64>>(26)?.filter(|s| *s != 0),
             });
         }
         Ok(list)

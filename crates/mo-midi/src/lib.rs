@@ -19,7 +19,7 @@ pub mod member;
 pub mod roles;
 pub mod store;
 
-pub use catalogue::{Catalogue, Entry, From, Hit, Query};
+pub use catalogue::{Catalogue, Entry, From, Hit, InKeys, Query};
 pub use chord::PhraseChord;
 pub use index::{Failure, Key, MidiError, MidiIndex, Source, SourceKind, Stopper, StoredPhrase};
 pub use instruments::{Family, InstrumentGuess};

@@ -115,6 +115,8 @@ pub struct Summary {
     pub parts: usize,
     /// Sets of notes whose key was read again, as the key finder got better.
     pub rekeyed: usize,
+    /// Sets of notes given their shape (the same in any key), kept before the index kept shapes.
+    pub shaped: usize,
     /// Stopped before the end, because a newer run was wanted.
     pub stopped: bool,
 }
@@ -147,10 +149,7 @@ pub fn run(
         Summary { forgotten: store.forget(plan.forget.iter().map(String::as_str))?, ..Summary::default() };
     let total = plan.todo.len();
     if total == 0 {
-        store.tidy()?;
-        let (rekeyed, finished) = rekey(store, pool, readers, stop, progress)?;
-        summary.rekeyed = rekeyed;
-        summary.stopped = !finished;
+        after_reading(store, pool, readers, stop, progress, &mut summary)?;
         return Ok(summary);
     }
     // A small bounded queue: readers wait when the saver is behind, so read files never pile up in memory.
@@ -228,12 +227,60 @@ pub fn run(
     summary.stopped = summary.read < total;
     progress(summary.read, total, "");
     if !summary.stopped {
-        store.tidy()?;
-        let (rekeyed, finished) = rekey(store, pool, readers, stop, progress)?;
-        summary.rekeyed = rekeyed;
-        summary.stopped = !finished;
+        after_reading(store, pool, readers, stop, progress, &mut summary)?;
     }
     Ok(summary)
+}
+
+/// What's done once the files are read: notes no file has any more go, keys are read again where the key finder got
+/// better, and notes kept before shapes were get theirs.
+fn after_reading(
+    store: &mut MidiStore,
+    pool: &rayon::ThreadPool,
+    readers: usize,
+    stop: &AtomicBool,
+    progress: &dyn Fn(usize, usize, &str),
+    summary: &mut Summary,
+) -> Result<(), MidiError> {
+    store.tidy()?;
+    let (rekeyed, finished) = rekey(store, pool, readers, stop, progress)?;
+    summary.rekeyed = rekeyed;
+    summary.stopped = !finished;
+    if finished {
+        let (shaped, finished) = fill_shapes(store, pool, stop)?;
+        summary.shaped = shaped;
+        summary.stopped = !finished;
+    }
+    Ok(())
+}
+
+/// Sets of notes given their shape at once.
+const SHAPE_BATCH: usize = 2_000;
+
+/// Works out the shape (the same in every key) of the notes saved before the index kept shapes, from the notes kept
+/// in the index: no file is opened. Quick (a hash a set of notes), on `pool`, a batch at a time; `stop` ends it after
+/// the batch it's on. Gives how many were worked out and whether it got to the end.
+fn fill_shapes(store: &mut MidiStore, pool: &rayon::ThreadPool, stop: &AtomicBool) -> Result<(usize, bool), MidiError> {
+    if store.unshaped_count()? == 0 {
+        return Ok((0, true));
+    }
+    let (mut done, mut after) = (0, 0);
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok((done, false));
+        }
+        let unshaped = store.unshaped(after, SHAPE_BATCH)?;
+        let Some(&(last, _)) = unshaped.last() else {
+            return Ok((done, true));
+        };
+        after = last;
+        let shapes: Vec<(i64, Option<i64>)> = pool.install(|| {
+            use rayon::prelude::*;
+            unshaped.par_iter().map(|(id, notes)| (*id, crate::analyser::shape_of(notes))).collect()
+        });
+        store.save_shapes(&shapes)?;
+        done += shapes.len();
+    }
 }
 
 /// Sets of notes read again at once, for their key.

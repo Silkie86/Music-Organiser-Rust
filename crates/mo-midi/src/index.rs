@@ -179,6 +179,9 @@ pub struct StoredPhrase {
     pub track_name: String,
     /// The octaves you moved these notes by, or none.
     pub your_octave: Option<i32>,
+    /// The notes' shape in any key ([`crate::analyser::shape_of`]): the same loop moved up or down has the same one.
+    /// None from the C# app's `midi.db`, or before the index has worked it out.
+    pub shape: Option<i64>,
 }
 
 impl StoredPhrase {
@@ -414,6 +417,7 @@ fn phrase_of(r: &Row<'_>, source: Arc<Source>) -> rusqlite::Result<StoredPhrase>
         program: r.get::<_, Option<i64>>(25)?.filter(|p| (0..128).contains(p)).map(|p| p as u8),
         drums: int(26)? == 1,
         track_name: text(27)?,
+        shape: None,
     })
 }
 
