@@ -119,7 +119,8 @@ struct NotesAsk {
     role: Role,
     cut: bool,
     bars: i32,
-    read_key: bool,
+    /// The stored key reading, which the chord chart is spelled in; none: the key is read now, from the notes.
+    key: Option<KeyFact>,
 }
 
 struct NotesRead {
@@ -127,6 +128,8 @@ struct NotesRead {
     read: usize,
     roll: Roll,
     fact: Option<KeyFact>,
+    /// The chord chart, read just now from the notes.
+    chart: page::ChordChart,
 }
 
 /// The card's key while the part's notes are read.
@@ -904,7 +907,7 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
             role: e.role(),
             cut: page::is_cut(&e.phrase.clip),
             bars: e.phrase.bars,
-            read_key: e.phrase.key_fact.is_none(),
+            key: e.phrase.key_fact,
         })
     });
     data.set_panel_shown(true);
@@ -976,12 +979,15 @@ fn notes_of(
 
 fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<NotesRead, String> {
     let notes = notes_of(&ask.from, ask.phrase_id, &ask.hash, open)?;
-    let fact = if ask.read_key {
+    let fact = if ask.key.is_none() {
         mo_midi::keys::with_reader(|r| mo_midi::keys::read(r, &notes, ask.role, ask.cut)).1
     } else {
         None
     };
-    Ok(NotesRead { read: notes.len(), roll: page::roll(&notes, ask.bars), fact })
+    // The chords too (their first 16 bars: quick even for a long part), spelled in the part's key.
+    let chords = mo_midi::chart::read(&notes, ask.role, ask.cut);
+    let chart = page::chord_chart(chords.as_ref(), page::chart_key(ask.key.as_ref().or(fact.as_ref())));
+    Ok(NotesRead { read: notes.len(), roll: page::roll(&notes, ask.bars), fact, chart })
 }
 
 fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
@@ -1011,6 +1017,8 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
                     "".into()
                 };
             }
+            picked.chords = read.chart.bars.into();
+            picked.chords_why = read.chart.why.into();
             // Drawn off the window's thread, as up to 4,000 notes would be a lot for it to lay out.
             crate::piano_roll::show(app, Some(read.roll));
             let drums = picked.kind == page::role_label(Role::Drums);
@@ -1065,6 +1073,8 @@ fn card(e: &mo_midi::Entry) -> PickedPart {
         roll_low: "".into(),
         roll_high: "".into(),
         roll_note: "".into(),
+        chords: "".into(),
+        chords_why: "".into(),
         others: strings(others),
         others_more: if more > 0 { format!("and {} more", thousands(more)).into() } else { "".into() },
     }
@@ -1711,11 +1721,12 @@ mod tests {
             role: e.role(),
             cut: false,
             bars: e.phrase.bars,
-            read_key: true,
+            key: None,
         };
         let Ok(read) = read_notes(&ask, &mut None) else { panic!("the made-up notes should read") };
         assert_eq!(read.roll.notes.len(), 12);
         assert!(read.fact.is_some());
+        assert!(!read.chart.bars.is_empty(), "its chords are read too");
     }
 
     #[test]
