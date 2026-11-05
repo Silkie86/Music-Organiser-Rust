@@ -14,8 +14,8 @@ use super::decode::{Kind, Lattice, Reading};
 use super::hear_tests::{BAR, BEAT, Dice, Music, line, notes, random_music};
 use super::score_tests::{Want, bars, facts_on, hand_cases, label, ranking_by, reads, samples};
 use super::{
-    COUNTED, Chance, Core, Decoder, Decoding, Evidence, Feature, HAND, Hearing, Label, PerFeature, PinnedSpan, Priors,
-    SHIPPED, SpanFacts, Weights,
+    COUNTED, Calibration, Chance, Core, Decoder, Decoding, Evidence, Feature, HAND, Hearing, Label, PerFeature,
+    PinnedSpan, Priors, SHIPPED, SpanFacts, Weights,
 };
 use crate::chord::Chord;
 use crate::notes::{Note, Role};
@@ -27,7 +27,7 @@ const B: usize = 8;
 impl Whole {
     /// Some music read whole on the counted tables, as the reader reads it.
     fn read(music: &Music, weights: &Weights, pins: &[PinnedSpan]) -> Whole {
-        Whole::of(music, weights, &COUNTED, pins).expect("nothing read")
+        Whole::of(music, weights, &COUNTED, &Calibration::NONE, pins).expect("nothing read")
     }
 }
 

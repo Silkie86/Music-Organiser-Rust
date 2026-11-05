@@ -2991,6 +2991,7 @@ dependencies = [
  "flate2",
  "fs4",
  "junction",
+ "known-folders",
  "mo-backup",
  "mo-catch",
  "mo-convert",
@@ -3121,6 +3122,7 @@ dependencies = [
 name = "mo-midi"
 version = "0.1.0"
 dependencies = [
+ "fs4",
  "mo-catch",
  "mo-formats",
  "mo-harmony",
@@ -3234,7 +3236,6 @@ dependencies = [
  "chrono",
  "femtovg",
  "image",
- "known-folders",
  "mo-app",
  "mo-audio",
  "mo-backup",

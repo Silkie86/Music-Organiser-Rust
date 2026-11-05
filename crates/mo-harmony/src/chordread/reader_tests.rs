@@ -7,9 +7,9 @@ use super::hear_tests::{BAR, BEAT, Dice, Music, VELOCITY, line, notes, random_mu
 use super::name_tests::named_cases;
 use super::score_tests::bars;
 use super::{
-    BassKind, CHOICE_FLOOR, CHORD_READER_VERSION, ChoiceFrom, ChordAnswer, ChordContext, ChordExplainer, ChordReader,
-    ChordReading, ChordSpan, Grading, Hearing, Label, MOST_READINGS, Model, NameCheck, NoChord, Pin, PinnedSpan,
-    SHIPPED, SHIPPED_HASH, SpanFlags, Texture, Thresholds, grade, numbers_hash, read_chords,
+    BassKind, CALIBRATION_TERMS, CHOICE_FLOOR, CHORD_READER_VERSION, ChoiceFrom, ChordAnswer, ChordContext,
+    ChordExplainer, ChordReader, ChordReading, ChordSpan, Grading, Hearing, Label, MOST_READINGS, Model, NameCheck,
+    NoChord, Pin, PinnedSpan, SHIPPED, SHIPPED_HASH, SpanFlags, Texture, Thresholds, grade, numbers_hash, read_chords,
 };
 use crate::chord::Chord;
 use crate::fnv::Fnv;
@@ -288,10 +288,11 @@ fn chord_check_offers_the_same_notes_another_way_then_another_chord() {
     // Dm9: Fmaj7/D is the same notes, but under 1%; so Dm9 with its tensions left out.
     let r = case("10 Dm9 | G13 | Cmaj9");
     assert_eq!(choices(&r.spans[0], 3), own(&[("Dm9", First), ("Dm7", Tensions)]), "{}", render(&r));
-    // Dm7 over a walk: F6 is the same notes, F another chord. (One chord, just: Dm7 is read at 0.81. With the
-    // hand-set weights it was unclear, and the choices are the same either way.)
+    // Dm7 over a walk: F6 is the same notes, F another chord. (Unclear: Dm7 is read at 0.75, under the 0.8 an
+    // accompaniment needs; with the first fit's weights and no calibration it was one chord at 0.81. The choices are
+    // the same either way.)
     let r = case("38 Dm7 | G7 | Cmaj7 over a walk");
-    assert_eq!(r.spans[0].answer, ChordAnswer::Chord, "{}", render(&r));
+    assert_eq!(r.spans[0].answer, ChordAnswer::Unclear, "{}", render(&r));
     assert_eq!(choices(&r.spans[0], 3), own(&[("Dm7", First), ("F6", SameNotes), ("F", Other)]), "{}", render(&r));
     // None asked for: none.
     assert!(r.spans[0].choices(0).is_empty());
@@ -744,8 +745,13 @@ fn damaged_notes_are_read_without_a_panic() {
 
 /// What the hand cases, the tests' music and some music made here read at each version of the reader, as a hash
 /// ([`readings_hash`]). A change that moves any of them needs `CHORD_READER_VERSION` bumped, and a line added here.
-const READINGS: &[(u32, u64)] =
-    &[(1, 0xe3a9_cd16_4f69_5725), (2, 0x1a86_e909_00c4_7d95), (3, 0x0b75_cf69_1fba_b90d), (4, 0xcb78_8296_e472_6c11)];
+const READINGS: &[(u32, u64)] = &[
+    (1, 0xe3a9_cd16_4f69_5725),
+    (2, 0x1a86_e909_00c4_7d95),
+    (3, 0x0b75_cf69_1fba_b90d),
+    (4, 0xcb78_8296_e472_6c11),
+    (5, 0x9fdb_0822_fc5b_5762),
+];
 
 /// The music whose readings the hash covers, with its pins: every hand case, the music the rules are checked on, and
 /// music made here so every kind of answer is read (one line, one note, all twelve, a rest, chords given), what is one
@@ -888,7 +894,10 @@ fn a_change_that_moves_a_reading_bumps_the_version() {
             }
         }
     }
-    assert!(given && ChordAnswer::ALL.iter().all(|a| kinds.contains(a)), "{kinds:?}");
+    // The same notes only where a threshold gives them (those built in never do).
+    let gives_same = SHIPPED.thresholds.same.iter().any(|&t| t < 1.0);
+    let wanted = ChordAnswer::ALL.iter().filter(|&&a| gives_same || a != ChordAnswer::SameNotes);
+    assert!(given && wanted.into_iter().all(|a| kinds.contains(a)), "{kinds:?}");
 }
 
 #[test]
@@ -918,6 +927,9 @@ fn the_version_is_bumped_when_a_number_changes() {
     core.core[15] = nudge(core.core[15]);
     tension.tension[3][11] = nudge(tension.tension[3][11]);
     motion.motion[2][7][1] = nudge(motion.motion[2][7][1]);
+    let (mut knot, mut texture) = (*SHIPPED.calibration, *SHIPPED.calibration);
+    knot.0[0] = nudge(knot.0[0]);
+    texture.0[CALIBRATION_TERMS - 1] = nudge(texture.0[CALIBRATION_TERMS - 1]);
     let (mut one, mut same) = (*SHIPPED.thresholds, *SHIPPED.thresholds);
     one.one[2] = nudge(one.one[2]);
     same.same[3] = nudge(same.same[3]);
@@ -928,6 +940,8 @@ fn the_version_is_bumped_when_a_number_changes() {
         Model { tables: &core, ..SHIPPED },
         Model { tables: &tension, ..SHIPPED },
         Model { tables: &motion, ..SHIPPED },
+        Model { calibration: &knot, ..SHIPPED },
+        Model { calibration: &texture, ..SHIPPED },
         Model { thresholds: &one, ..SHIPPED },
         Model { thresholds: &same, ..SHIPPED },
     ] {
@@ -944,4 +958,70 @@ fn show_the_answers() {
             None => println!("{name}: nothing"),
         }
     }
+}
+
+#[test]
+fn the_sharpness_follows_its_curve_over_the_bars_heard_and_the_texture() {
+    use super::{Calibration, LEAST_SHARPNESS};
+    let terms = |bars: f64, t: Texture| Calibration::terms(bars, t);
+    // On a knot, all of it there; between two, split on a log scale; past the last, the last; under a bar, the first.
+    assert_eq!(terms(1.0, Texture::Full), [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+    assert_eq!(terms(8.0, Texture::Full), [0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0]);
+    assert_eq!(terms(400.0, Texture::Full), [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]);
+    assert_eq!(terms(0.25, Texture::Full), terms(1.0, Texture::Full));
+    let three = terms(3.0, Texture::Full);
+    assert!((three[1] - (2.0 - 3f64.log2())).abs() < 1e-12 && (three[2] - (3f64.log2() - 1.0)).abs() < 1e-12);
+    assert_eq!(terms(f64::NAN, Texture::Full), terms(1.0, Texture::Full));
+    // Each texture but a full mix adds its own number.
+    for (k, t) in [Texture::Accompaniment, Texture::HarmonyOnly, Texture::SingleLine].into_iter().enumerate() {
+        let got = terms(1.0, t);
+        assert!(got[5 + k] == 1.0 && got.iter().sum::<f64>() == 2.0, "{t:?}: {got:?}");
+    }
+    // Every score as it is: 1 everywhere.
+    for t in Texture::ALL {
+        for bars in [0.5, 1.0, 3.0, 12.0, 100.0] {
+            assert_eq!(Calibration::NONE.sharpness(bars, t), 1.0);
+        }
+    }
+    let c = Calibration([0.5, 0.6, 0.8, 1.0, 1.2, -0.1, -0.2, -2.0]);
+    assert!((c.sharpness(4.0, Texture::Accompaniment) - 0.7).abs() < 1e-12);
+    assert!((c.sharpness(2.0, Texture::HarmonyOnly) - 0.4).abs() < 1e-12);
+    // Never below the least, nor less for a number that isn't one.
+    assert_eq!(c.sharpness(1.0, Texture::SingleLine), LEAST_SHARPNESS);
+    assert_eq!(Calibration([f64::NAN; 8]).sharpness(4.0, Texture::Full), LEAST_SHARPNESS);
+}
+
+#[test]
+fn the_sharpness_moves_the_chances_never_what_is_read() {
+    use super::Calibration;
+    let at = |s: f64| Calibration([s, s, s, s, s, 0.0, 0.0, 0.0]);
+    let (soft, sharp) = (at(0.4), at(2.5));
+    let mut moved = 0;
+    for (music, pins) in hashed_music() {
+        let parts: Vec<Part> = music.parts.iter().map(|(role, notes)| Part { role: *role, notes }).collect();
+        let cx = ChordContext { span: music.span, pins: &pins, readings: MOST_READINGS };
+        let mut reader = ChordReader::new();
+        let mut with =
+            |calibration: &Calibration| reader.read_with(&parts, music.grid, &cx, &Model { calibration, ..SHIPPED });
+        let (Some(a), Some(b), Some(c)) = (with(&soft), with(&Calibration::NONE), with(&sharp)) else { continue };
+        let near = |x: f64, want: f64| (x - want).abs() < 1e-12;
+        assert!(near(a.sharpness, 0.4) && near(b.sharpness, 1.0) && near(c.sharpness, 2.5));
+        let cuts = |r: &ChordReading| r.spans.iter().map(|s| (s.units.clone(), s.label)).collect::<Vec<_>>();
+        assert_eq!(cuts(&a), cuts(&b));
+        assert_eq!(cuts(&c), cuts(&b));
+        // A softer sharpness makes the first reading less sure wherever the readings aren't all one, a sharper surer.
+        for ((x, y), z) in a.spans.iter().zip(&b.spans).zip(&c.spans) {
+            let first = |s: &ChordSpan| s.readings.first().map_or(0.0, |r| r.chance);
+            if reads_from_the_music(y) && first(y) > 0.05 && first(y) < 0.95 && y.readings.len() > 1 {
+                assert!(first(x) < first(y) && first(y) < first(z), "{x:?}\n{y:?}\n{z:?}");
+                moved += 1;
+            }
+        }
+    }
+    assert!(moved > 10, "{moved}");
+}
+
+/// Whether a span's chances come from the music: not a rest, nor a chord given.
+fn reads_from_the_music(s: &ChordSpan) -> bool {
+    !s.flags.contains(SpanFlags::GIVEN) && !s.readings.is_empty() && s.label.is_some()
 }

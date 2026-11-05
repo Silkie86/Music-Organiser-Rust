@@ -46,8 +46,6 @@ arboard = { version = "3.7", default-features = false }
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal"] }
 
 [target.'cfg(windows)'.dependencies]
-# The real Documents folder (it may have moved to OneDrive), for exports.
-known-folders = "1.4"
 # The freeze watchdog looks at where the window's thread is stuck, and at the app's page faults (crate::stuck).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

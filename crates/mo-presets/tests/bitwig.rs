@@ -162,7 +162,11 @@ fn export_writes_a_bitwig_preset_beside_the_plugin_preset() {
     let t = send::inspect(&saved_in_bitwig(&dir, "Init", "Serum", "Init", "a.fxb")).unwrap();
     let presets = [serum_sound("Big Bass", "Serum"), serum_sound("Wide", "Diva")];
     let out = export::export(&presets, "Song.flp", &dir.join("out"), Some(&one(t))).unwrap();
-    assert_eq!(out.files, ["Serum - Big Bass.fxp", "Serum - Big Bass.bwpreset", "Diva - Wide.fxp"]);
+    // Diva has no template of its own: Serum's stands in for it (a VST2 too).
+    assert_eq!(
+        out.files,
+        ["Serum - Big Bass.fxp", "Serum - Big Bass.bwpreset", "Diva - Wide.fxp", "Diva - Wide.bwpreset"]
+    );
     assert!(out.failed.is_empty());
     let made = std::fs::read(out.folder.join("Serum - Big Bass.bwpreset")).unwrap();
     assert_eq!(bitwig::decode(made).unwrap().meta_str("preset_name"), "Big Bass");
@@ -214,4 +218,49 @@ fn an_old_bitwig_preset_left_from_an_earlier_export_is_told() {
     assert_eq!(again.files, ["Serum - Lead.fxp"]);
     assert_eq!(again.failed.len(), 1);
     assert!(again.failed[0].contains("earlier export is still there"), "{:?}", again.failed);
+}
+
+#[test]
+fn a_plugin_with_no_template_of_its_own_gets_a_stand_in_of_its_format() {
+    // Solomon has a Bitwig preset of Serum, none of Hive (5 Nov 2026: Hive never sent).
+    let dir = folder("stand-in");
+    let t = send::inspect(&saved_in_bitwig(&dir, "Init", "Serum", "Init", "a.fxb")).unwrap();
+    let templates = one(t.clone());
+    let hive_id = i32::from_be_bytes(*b"HiVe");
+    let hive = PresetBlob::new("Hive - Hive", "Hive", ".fxp", fxp::wrap_chunk(&[4, 5, 6], "Bass", hive_id));
+    assert!(send::template_for(&hive, &templates).is_none());
+    assert_eq!(send::stand_in_for(&hive, &templates), Some(&t));
+    // A VST3 sound has no VST2 stand-in.
+    let vst3 = PresetBlob::new("Pad", "Diva", ".vstpreset", b"VST3".to_vec());
+    assert!(send::stand_in_for(&vst3, &templates).is_none());
+
+    let raw = std::fs::read(&t.path).unwrap();
+    let made = send::build_for_other(&raw, &t.path, &hive, "Hive - Hive").unwrap();
+    let doc = bitwig::decode(made).unwrap();
+    let got = send::inspect_doc(&doc).unwrap();
+    // The device is Hive's now, by its name and its VST2 id, and holds Hive's settings as a bank.
+    assert_eq!((got.plugin.as_str(), got.plugin_id.as_str()), ("Hive", "HiVe"));
+    let device = (0..doc.objects.len() as u32).map(bitwig::ObjId).find(|&o| doc.obj(o).str(0x9a) == "Hive").unwrap();
+    assert_eq!(doc.obj(device).get(0xce4), Some(&bitwig::Value::I32(hive_id)));
+    let state = zip_file(&doc, &got.state_file).unwrap();
+    assert_eq!(&state[8..12], b"FBCh");
+    // The stand-in's own name for its preset became the sound's.
+    assert_eq!(doc.obj(device).str(0x12de), "Hive - Hive");
+    // The template itself is only read.
+    assert_eq!(std::fs::read(&t.path).unwrap(), raw);
+
+    // Settings that don't say which plugin they're for aren't given a stand-in's device.
+    let unknown = PresetBlob::new("X", "Hive", ".fxp", b"not a program".to_vec());
+    assert!(send::build_for_other(&raw, &t.path, &unknown, "X").is_err());
+}
+
+#[test]
+fn export_uses_a_stand_in_when_the_plugin_has_no_template() {
+    let dir = folder("stand-in-export");
+    let t = send::inspect(&saved_in_bitwig(&dir, "Init", "Serum", "Init", "a.fxb")).unwrap();
+    let templates = one(t);
+    let hive = PresetBlob::new("Lead", "Hive", ".fxp", fxp::wrap_chunk(&[7], "Lead", i32::from_be_bytes(*b"HiVe")));
+    let out = dir.join("out");
+    let e = export::export(&[hive], "/songs/Song.flp", &out, Some(&templates)).unwrap();
+    assert!(e.files.iter().any(|f| f.ends_with(".bwpreset")), "{:?} {:?}", e.files, e.failed);
 }

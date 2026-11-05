@@ -144,8 +144,11 @@ fn write_all(
                 files.push(name);
                 // Send to Bitwig: only beside a plugin preset that was written.
                 let Some(templates) = templates else { continue };
-                let made = match bitwig::template_for(p, templates) {
-                    Some(template) => {
+                // Its plugin's own template, else a stand-in of the same format that becomes its plugin.
+                let own = bitwig::template_for(p, templates);
+                let chosen = own.map(|t| (t, false)).or_else(|| bitwig::stand_in_for(p, templates).map(|t| (t, true)));
+                let made = match chosen {
+                    Some((template, other)) => {
                         let raw = template_bytes
                             .entry(template.path.clone())
                             .or_insert_with(|| {
@@ -155,8 +158,11 @@ fn write_all(
                             .map_err(|e| e.clone());
                         // A template changed since it was found could trip the reader: that's this one's failure.
                         let built = raw.and_then(|raw| {
-                            mo_catch::catch(|| bitwig::build(raw, &template.path, p, &p.name))
-                                .unwrap_or_else(|_| Err("its template stopped the reader".into()))
+                            mo_catch::catch(|| match other {
+                                false => bitwig::build(raw, &template.path, p, &p.name),
+                                true => bitwig::build_for_other(raw, &template.path, p, &p.name),
+                            })
+                            .unwrap_or_else(|_| Err("its template stopped the reader".into()))
                         });
                         Some(built.map_err(io::Error::other).and_then(|b| write_checked(&folder.join(&bw), &b)))
                     }
@@ -167,7 +173,7 @@ fn write_all(
                     Some(Err(e)) => failed.push(stale(&folder, &bw, &e.to_string())),
                     // No template for its plugin now, but one was made last time: it no longer matches.
                     None if folder.join(&bw).exists() => {
-                        failed.push(stale(&folder, &bw, "no preset Bitwig saved for its plugin was found"))
+                        failed.push(stale(&folder, &bw, "no preset Bitwig saved for a plugin of its format was found"))
                     }
                     None => {}
                 }

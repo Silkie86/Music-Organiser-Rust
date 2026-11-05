@@ -68,8 +68,6 @@ export struct PickedPart {
     key-why: string,
     // Where the reading comes from ("Read now from its notes by the key finder").
     key-from: string,
-    // The old app's key, to compare, or "".
-    old-key: string,
     instrument: string,
     phrase: string,
     // The roll's lowest and highest key: "C2", "G4".
@@ -511,13 +509,6 @@ component PartPanel inherits SidePanel {
         }
         Text {
             text: MidiData.picked.key-from;
-            color: Theme.faint;
-            font-size: Type.meta;
-            wrap: word-wrap;
-            min-width: 0px;
-        }
-        if MidiData.picked.old-key != "": Text {
-            text: MidiData.picked.old-key;
             color: Theme.faint;
             font-size: Type.meta;
             wrap: word-wrap;
