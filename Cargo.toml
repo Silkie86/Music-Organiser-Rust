@@ -56,6 +56,13 @@ opt-level = 2
 
 # The screens' logic too: the launcher runs a debug build, and the Sounds page's galaxy draws half a million stars,
 # which unoptimised code is too slow for. (mo-ui itself stays quick to build: its Slint code is most of the time.)
+# wgpu-core's debug-only lock tracer keeps a per-thread note. When the app closes, Windows drops Slint's per-thread
+# graphics state after that note is already gone, and the tracer's look at it panicked as a crash on every close of a
+# debug build (crash-*.log, "cannot access a Thread Local Storage value during or after destruction"). Release builds
+# never had the tracer, so debug builds now leave it out too.
+[profile.dev.package.wgpu-core]
+debug-assertions = false
+
 [profile.dev.package.mo-app]
 opt-level = 2
 
