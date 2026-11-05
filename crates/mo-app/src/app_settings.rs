@@ -50,6 +50,7 @@ pub const FROM_CSHARP: &[&str] = &[
     SOUND_OUTPUT_KEY,
     TAB_KEY,
     shortcuts::SETTING_KEY,
+    crate::midi::SOUNDFONT_KEY,
 ];
 
 /// The settings in use: this app's own changes, over the C# app's choices.

@@ -2579,6 +2579,14 @@ fn stop(app: &AppWindow) {
     playing_changed(app);
 }
 
+/// Another page is about to play (the MIDI page's loop): the sound shown playing here stops, so this page doesn't go
+/// on saying it plays.
+pub fn stop_for_another(app: &AppWindow) {
+    if PAGE.with(|p| p.borrow().playing.is_some()) {
+        stop(app);
+    }
+}
+
 /// Whether a click `to` seconds into the waveform of the sound shown playing can move the play the player has
 /// (`player_has`: its key), rather than reading the sound again from there: only when the player has that very play
 /// (not an older one, nor none while it's still being read) and the play read that far (a sweep reads only its start).

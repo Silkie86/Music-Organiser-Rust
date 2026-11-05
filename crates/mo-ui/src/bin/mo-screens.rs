@@ -99,6 +99,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_place(Place::Midi.index() as i32);
     mo_ui::midi::pick_row(&app, 0);
     shots.push(("midi-picked.png".into(), capture(&window)));
+    // Its loop playing, with the sound matched to it (no SoundFont here, so the card also says how to choose one).
+    app.global::<mo_ui::MidiData>().set_playing(true);
+    shots.push(("midi-playing.png".into(), capture(&window)));
+    app.global::<mo_ui::MidiData>().set_playing(false);
     // The roll with each note's name on it (it grows so each row has room).
     app.global::<mo_ui::MidiData>().set_roll_names(true);
     shots.push(("midi-note-names.png".into(), capture(&window)));

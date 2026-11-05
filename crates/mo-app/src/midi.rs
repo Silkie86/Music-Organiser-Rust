@@ -705,6 +705,57 @@ pub fn other_files(e: &Entry, most: usize) -> (Vec<String>, usize) {
 
 /// The C# app's settings in `library.db` the reading follows: the MIDI library folders (a JSON list), and "1" to
 /// read every save of a song, not only its newest.
+/// The SoundFont you picked to play parts with (the C# app's setting); none: the one in the app's folder.
+pub const SOUNDFONT_KEY: &str = "midi_soundfont";
+/// Where the C# app downloaded GeneralUser GS, in the app's folder: `sounds\GeneralUser-GS.sf2`.
+pub const SOUNDFONT_FOLDER: &str = "sounds";
+pub const SOUNDFONT_FILE: &str = "GeneralUser-GS.sf2";
+/// The tempo a part plays at when its file doesn't say.
+pub const PLAY_TEMPO: f64 = 120.0;
+
+/// The SoundFont parts play with: the one picked, while it's there, else GeneralUser GS in the app's folder, else
+/// none.
+pub fn soundfont_path(chosen: Option<&str>, app_folder: &std::path::Path) -> Option<std::path::PathBuf> {
+    let chosen = chosen.map(str::trim).filter(|c| !c.is_empty()).map(std::path::PathBuf::from);
+    let usual = app_folder.join(SOUNDFONT_FOLDER).join(SOUNDFONT_FILE);
+    chosen.filter(|c| c.is_file()).or_else(|| usual.is_file().then_some(usual))
+}
+
+/// The General MIDI sound a part plays with, matched to it (`mo_midi::gm`): drums, a MIDI file's own program, its
+/// names (track, part, file), the instrument finder's answer, then its kind.
+pub fn gm_sound(e: &Entry) -> mo_midi::gm::GmSound {
+    let p = &e.phrase;
+    let file = std::path::Path::new(&p.source.path).file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    // A project's channel has no program change of its own to go by.
+    let program = if e.is_project() { None } else { p.program };
+    mo_midi::gm::sound_for(
+        e.role(),
+        p.drums,
+        program,
+        &[&p.track_name, &p.part, &p.clip, file],
+        e.instrument.as_ref().map(|i| i.family),
+    )
+}
+
+/// The tempo a part plays at: its file's, else [`PLAY_TEMPO`].
+pub fn play_tempo(e: &Entry) -> f64 {
+    e.phrase.source.tempo.filter(|t| t.is_finite() && *t >= 20.0 && *t <= 400.0).unwrap_or(PLAY_TEMPO)
+}
+
+/// What the card says about the sound: "Electric Piano 1 · from its name: rhodes · 128 BPM".
+pub fn sound_line(sound: &mo_midi::gm::GmSound, tempo: f64) -> String {
+    format!("{} · {} · {} BPM", sound.name(), sound.why_text(), (tempo * 10.0).round() / 10.0)
+}
+
+/// A part's heard notes (muted ones left out) and how long it loops for, in ticks at [`mo_midi::PPQ`]: its bars, or
+/// to the end of the bar its last note starts in when that's later.
+pub fn loop_notes(notes: &[NoteEvent], bars: i32) -> (Vec<NoteEvent>, i64) {
+    let heard: Vec<NoteEvent> = notes.iter().filter(|n| !n.muted && n.start >= 0).copied().collect();
+    let last_start = heard.iter().map(|n| n.start).max().unwrap_or(0);
+    let length = (i64::from(bars.max(1)) * BAR).max((last_start / BAR + 1) * BAR);
+    (heard, length)
+}
+
 pub const FOLDERS_KEY: &str = "midi_folders";
 pub const OLDER_SAVES_KEY: &str = "midi_older_saves";
 
@@ -1103,6 +1154,49 @@ mod tests {
         for f in FROM_CHOICES {
             assert_eq!(from_of_name(from_name(f)), Some(f));
         }
+    }
+
+    #[test]
+    fn a_part_plays_with_its_matched_sound() {
+        let cat = catalogue();
+        let bass = cat.entry(cat.find("A").unwrap()).unwrap();
+        let sound = gm_sound(bass);
+        assert_eq!(sound.program, 38);
+        assert!(gm_sound(cat.entry(cat.find("C").unwrap()).unwrap()).drums);
+        assert_eq!(play_tempo(bass), PLAY_TEMPO);
+        assert_eq!(sound_line(&sound, 120.0), "Synth Bass 1 · from its name: bass · 120 BPM");
+    }
+
+    #[test]
+    fn a_loop_is_its_bars_or_to_its_last_note() {
+        let n = |start, muted| NoteEvent {
+            start,
+            length: 96,
+            key: 60,
+            velocity: 30_000,
+            muted,
+            step: false,
+            attribute: mo_formats::NoteAttribute::NONE,
+        };
+        let (heard, length) = loop_notes(&[n(0, false), n(96, true)], 2);
+        assert_eq!((heard.len(), length), (1, 2 * BAR));
+        assert_eq!(loop_notes(&[n(5 * BAR + 10, false)], 4).1, 6 * BAR);
+        assert_eq!(loop_notes(&[], 0).1, BAR);
+    }
+
+    #[test]
+    fn the_soundfont_is_the_picked_one_else_the_one_in_the_app_folder() {
+        let dir = std::env::temp_dir().join(format!("mo-app-soundfont-{}", std::process::id()));
+        let usual = dir.join(SOUNDFONT_FOLDER).join(SOUNDFONT_FILE);
+        assert_eq!(soundfont_path(None, &dir), None);
+        std::fs::create_dir_all(usual.parent().unwrap()).unwrap();
+        std::fs::write(&usual, b"x").unwrap();
+        let picked = dir.join("mine.sf2");
+        assert_eq!(soundfont_path(Some(picked.to_str().unwrap()), &dir), Some(usual.clone()));
+        std::fs::write(&picked, b"x").unwrap();
+        assert_eq!(soundfont_path(Some(picked.to_str().unwrap()), &dir), Some(picked));
+        assert_eq!(soundfont_path(Some("  "), &dir), Some(usual));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
