@@ -183,6 +183,49 @@ pub(crate) fn share(i: usize, slots: usize, len: usize) -> (usize, usize) {
 
 // ---- Clips and tracks from a song's arrangement ----------------------------------------------------------------
 
+// ---- A MIDI page part ---------------------------------------------------------------------------------------------
+
+/// A part from the MIDI page, ready to drag out: its heard notes as one MIDI file named after it (the same file Send to
+/// Bitwig writes: muted notes left out, starting at its first bar, lasting its bars), and its card line with a small
+/// piano roll in `tint`. The DAW plays it at its own project's tempo. An error is what to say instead.
+pub fn from_part(name: &str, notes: &[NoteEvent], bars: i32, tint: u32) -> Result<Outgoing, String> {
+    let clip = crate::midi::part_clip(name, notes, bars);
+    let heard: Vec<NoteEvent> = clip.tracks.iter().flat_map(|(_, n)| n.iter().copied()).collect();
+    if heard.is_empty() {
+        return Err("Every note in it is muted, so there's nothing to drag.".to_owned());
+    }
+    let bytes = write_clip(&clip).map_err(|e| format!("Couldn't make the MIDI file: {e}."))?.bytes;
+    let ppq = f64::from(clip.ppq.max(1));
+    let beats: Vec<BeatNote> = heard
+        .iter()
+        .map(|n| BeatNote {
+            start: n.start as f64 / ppq,
+            length: n.length as f64 / ppq,
+            key: n.key,
+            velocity: n.velocity,
+            step: n.step,
+        })
+        .collect();
+    let length = clip.end.unwrap_or(0) as f64 / ppq;
+    let card = Card {
+        title: name.to_owned(),
+        detail: ["MIDI".to_owned(), count_of(heard.len(), "note", "notes"), bars_text(length, 4)]
+            .into_iter()
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>()
+            .join(" · "),
+        kind: Kind::Midi,
+        tint,
+        thumb: Thumb::Notes(thumb_notes(&beats, length)),
+    };
+    Ok(Outgoing {
+        midi: vec![MidiFile { name: format!("{}.mid", safe_file_name(name)), bytes }],
+        cards: vec![card],
+        caption: "1 MIDI clip".to_owned(),
+        ..Outgoing::default()
+    })
+}
+
 /// What in an arrangement a drag picks up: one clip, or a whole lane (a track), by their places in
 /// [`Arrangement::lanes`] and [`PreviewLane::clips`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -749,6 +792,27 @@ mod tests {
 
     fn card(title: &str) -> Card {
         Card { title: title.into(), ..Card::default() }
+    }
+
+    #[test]
+    fn a_midi_page_part_drags_as_one_midi_clip() {
+        let n = |start, muted| NoteEvent {
+            start,
+            length: 96,
+            key: 60,
+            velocity: 50_000,
+            muted,
+            step: false,
+            attribute: NoteAttribute::NONE,
+        };
+        let out = from_part("Keys · Pattern 3", &[n(0, false), n(96, false), n(192, true)], 2, 0x33aa77).unwrap();
+        assert_eq!(out.midi.len(), 1);
+        assert!(out.midi[0].name.ends_with(".mid"));
+        assert!(out.midi[0].bytes.starts_with(b"MThd"));
+        assert_eq!(out.caption, "1 MIDI clip");
+        assert_eq!(out.cards[0].detail, "MIDI · 2 notes · 2 bars");
+        assert!(matches!(&out.cards[0].thumb, Thumb::Notes(t) if t.len() == 2));
+        assert!(from_part("x", &[n(0, true)], 1, 0).is_err());
     }
 
     #[test]

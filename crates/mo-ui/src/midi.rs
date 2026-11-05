@@ -379,6 +379,27 @@ fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
+    data.on_drag_row(move |row| {
+        let Some(app) = weak.upgrade() else { return };
+        let at = PAGE.with(|p| usize::try_from(row).ok().and_then(|r| p.borrow().shown.get(r).map(|h| h.entry)));
+        if let Some(at) = at {
+            carry(&app, at, Spot::Row(row));
+        }
+    });
+    let weak = app.as_weak();
+    data.on_drag_picked(move || {
+        let Some(app) = weak.upgrade() else { return };
+        if let Some(at) = PAGE.with(|p| p.borrow().picked) {
+            carry(&app, at, Spot::Picked);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_drag_let_go(move || {
+        if let Some(app) = weak.upgrade() {
+            crate::drag::let_go(&app);
+        }
+    });
+    let weak = app.as_weak();
     data.on_play_toggled(move || {
         if let Some(app) = weak.upgrade() {
             toggle_play(&app);
@@ -1680,6 +1701,82 @@ fn choose_soundfont(app: &AppWindow) {
     });
     if let Err(e) = asked {
         log::error("MIDI", &format!("Couldn't open the file picker: {e}"));
+    }
+}
+
+// ---- Dragging a part out into a DAW (`crate::drag` runs the drag) ------------------------------------------------
+
+/// Where a part was picked up, so it's dimmed there while it's carried and glows there once it has landed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Spot {
+    /// A line of the list, by its row.
+    Row(i32),
+    /// The picked part's card, by its handle.
+    Picked,
+}
+
+/// Drags the part at `at` in the catalogue out as a new MIDI file of its notes, written to a drag folder in Temp
+/// (cleared later, rule 28). Its notes are read and the file written off the window's thread, as the drag gets going.
+fn carry(app: &AppWindow, at: usize, spot: Spot) {
+    let Some((from, phrase_id, hash, name, bars, colour)) = PAGE.with(|p| {
+        let p = p.borrow();
+        let e = p.cat.entry(at)?;
+        Some((p.notes.clone()?, e.phrase.id, e.phrase.hash.clone(), page::title(e), e.phrase.bars, colour(e.role())))
+    }) else {
+        return;
+    };
+    let c = app.global::<crate::Theme>().invoke_sound_type(colour);
+    let tint = u32::from_be_bytes([0, c.red(), c.green(), c.blue()]);
+    let under_way = crate::drag::start(
+        app,
+        crate::drag::Drag {
+            make: Box::new(move || {
+                let notes = notes_of(&from, phrase_id, &hash, &mut None)?;
+                mo_app::drag_out::from_part(&name, &notes, bars, tint)?
+                    .write(&std::env::temp_dir())
+                    .map_err(|e| format!("Couldn't write the MIDI file in Temp: {e}."))
+            }),
+            done: Box::new(move |app, outcome| {
+                lift(app, spot, false);
+                if outcome == crate::drag::Outcome::Landed {
+                    crate::drag::glow(app, move |app, on| glow(app, spot, on));
+                }
+            }),
+        },
+    );
+    if under_way {
+        lift(app, spot, true);
+    }
+}
+
+/// For the screenshots: what dragging the line at `row` carries (its card), without writing anything. None when
+/// there's no part there or its notes can't be read.
+pub fn card_at_row(row: usize) -> Option<mo_app::drag_out::Payload> {
+    let (from, phrase_id, hash, name, bars) = PAGE.with(|p| {
+        let p = p.borrow();
+        let e = p.cat.entry(p.shown.get(row)?.entry)?;
+        Some((p.notes.clone()?, e.phrase.id, e.phrase.hash.clone(), page::title(e), e.phrase.bars))
+    })?;
+    let notes = notes_of(&from, phrase_id, &hash, &mut None).ok()?;
+    let out = mo_app::drag_out::from_part(&name, &notes, bars, 0).ok()?;
+    Some(mo_app::drag_out::Payload { files: Vec::new(), cards: out.cards, caption: out.caption, numbered: false })
+}
+
+/// Dims the part at `spot` while it's carried, or brings it back.
+fn lift(app: &AppWindow, spot: Spot, on: bool) {
+    let data = app.global::<MidiData>();
+    match spot {
+        Spot::Row(i) => data.set_lifted_row(if on { i } else { -1 }),
+        Spot::Picked => data.set_lifted_picked(on),
+    }
+}
+
+/// Lights the glow round the part at `spot` once it has landed, or lets it fade.
+fn glow(app: &AppWindow, spot: Spot, on: bool) {
+    let data = app.global::<MidiData>();
+    match spot {
+        Spot::Row(i) => data.set_landed_row(if on { i } else { -1 }),
+        Spot::Picked => data.set_landed_picked(on),
     }
 }
 
