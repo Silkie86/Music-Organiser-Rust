@@ -64,16 +64,12 @@ pub(crate) fn used_in(usage: &HashMap<i64, Usage>, id: i64) -> u32 {
     usage.get(&id).map_or(0, |u| u.projects)
 }
 
-/// The years the sounds' files are dated, newest first, each with how many sounds, for the page's year strip.
-/// Hidden copies are left out, and so are dates no one picks: none (it reads as 1970) and ones after `this_year` (a
-/// file with a wrong clock on it: future-dated files leave the year strips).
-pub fn years(sounds: &[Sound], this_year: i32) -> Vec<(i32, usize)> {
+/// The years the sounds' files are dated, newest first, each with how many sounds, for the page's year strip (which
+/// leaves out the years no one picks: `mo_app::year_strip::strip`). Hidden copies are left out.
+pub fn years(sounds: &[Sound]) -> Vec<(i32, usize)> {
     let mut counts: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
     for s in sounds.iter().filter(|s| !s.hidden) {
-        let y = s.added.year();
-        if y > 1980 && y <= this_year {
-            *counts.entry(y).or_default() += 1;
-        }
+        *counts.entry(s.added.year()).or_default() += 1;
     }
     counts.into_iter().rev().collect()
 }
@@ -481,9 +477,8 @@ mod tests {
         }
         sounds[1].added = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap().into();
         sounds[2].added = at(2024);
-        // A file dated in the future (a wrong clock) isn't a year anyone picks.
         sounds[3].added = at(2107);
-        assert_eq!(years(&sounds, 2026), [(2024, 1), (2019, sounds.len() - 3)]);
+        assert_eq!(years(&sounds), [(2107, 1), (2024, 1), (2019, sounds.len() - 3), (1970, 1)]);
         // A span of years lets in each year in it, its ends too.
         assert!(dated_in(&sounds[2], Some((2020, 2024))));
         assert!(!dated_in(&sounds[0], Some((2020, 2024))));

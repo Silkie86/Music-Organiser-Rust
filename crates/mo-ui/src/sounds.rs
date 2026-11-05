@@ -1720,7 +1720,7 @@ impl RediscoverAsk {
                 found,
                 why,
                 folders,
-                years: rediscover::years(sounds, chrono::Datelike::year(&Local::now())),
+                years: year_strip::strip(rediscover::years(sounds)),
                 learned_from: usage.values().filter(|u| u.projects > 0).count(),
             }
         })

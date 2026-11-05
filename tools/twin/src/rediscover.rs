@@ -250,8 +250,9 @@ fn rust_side(db: &Path, uses: &[Value]) -> Result<Value, String> {
         "answers": answers,
         "kits": kits,
         "duplicates": duplicates,
-        // The years alone, newest first, as the C# app listed them (the Rust strip also counts each one's sounds).
-        "years": years(&sounds, chrono::Datelike::year(&Local::now())).iter().map(|y| y.0).collect::<Vec<_>>(),
+        // The years alone, newest first, less undated files, as the C# app listed them (the Rust strip also counts each
+        // one's sounds, and leaves out years still to come).
+        "years": years(&sounds).iter().map(|y| y.0).filter(|&y| y > 1980).collect::<Vec<_>>(),
         "folders": folders(&sounds, &usage)
             .iter()
             .map(|f| json!({ "Folder": f.folder, "Sounds": f.sounds, "Used": f.used, "Share": f.share }))
