@@ -34,6 +34,7 @@ pub mod settings;
 pub mod shapes;
 pub mod shell;
 pub mod shortcuts;
+pub mod song_library;
 pub mod song_panel;
 pub mod song_room;
 pub mod songs;

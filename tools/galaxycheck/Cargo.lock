@@ -2904,6 +2904,7 @@ dependencies = [
  "mo-sounds",
  "mo-space",
  "rayon",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -2982,6 +2983,7 @@ name = "mo-library"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "flate2",
  "known-folders",
  "mo-catch",
  "mo-formats",
@@ -2991,6 +2993,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2",
  "thread-priority",
 ]
 
@@ -3051,6 +3054,7 @@ dependencies = [
  "mo-library",
  "rayon",
  "regex",
+ "rusqlite",
  "rustix 1.1.6",
  "serde",
  "serde_json",

@@ -1385,7 +1385,9 @@ fn look(ask: Ask, weak: &slint::Weak<AppWindow>) {
     let drives = space::drives(&folders, space::look);
     arrive(weak, Step::Drives(ask.id, drives));
     let data = &ask.app_folder;
-    let databases = app_files::databases(data.join("library.db"), data.join("sounds.db"), data.join("midi.db"));
+    // The song and sound libraries the app reads (its own songs.db and sounds-rust.db once they're made).
+    let databases =
+        app_files::databases(ask.library.clone(), mo_app::sound_library::database_in(data), data.join("midi.db"));
     // On the pool for long work that waits on a disk, as Space's other walks are (rule 21): the app's folder can hold
     // thousands of files, and on the pages' quick pool the walk would hold up their asks (Ctrl+K, a filter) until it
     // ended. A look stopped for a newer one says nothing: the newer one's sizes follow.

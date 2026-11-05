@@ -115,9 +115,10 @@ fn what_changed(kept: &str, now: &str) -> String {
 
 /// The library's files as they are now: `library.db`'s and its `-wal`'s size and last-written time (to the
 /// nanosecond, as the disk keeps it), and the `-wal`'s header, whose numbers SQLite changes each time it starts the
-/// file again from the top (where a write would leave its size as it was). None when the library itself can't be
-/// looked at. Two the same: nothing has been written to the library in between (the Space page's plugins look uses it
-/// too, to read only a changed library).
+/// file again from the top (where a write would leave its size as it was). An empty `-wal` counts as none: SQLite
+/// makes one when a reader opens the library, and it holds nothing. None when the library itself can't be looked at.
+/// Two the same: nothing has been written to the library in between (the Space page's plugins look uses it too, to
+/// read only a changed library, and [`crate::songs_db`] to tell whether `library.db` changed since it was made).
 pub fn stamp_of(library: &Path) -> Option<String> {
     let of = |p: &Path| -> Option<String> {
         let m = std::fs::metadata(p).ok()?;
@@ -126,7 +127,11 @@ pub fn stamp_of(library: &Path) -> Option<String> {
     };
     let main = of(library)?;
     let wal_path = with_ending(library, "-wal");
-    let wal = of(&wal_path).unwrap_or_else(|| "none".to_owned());
+    let wal = std::fs::metadata(&wal_path)
+        .ok()
+        .filter(|m| m.len() > 0)
+        .and_then(|_| of(&wal_path))
+        .unwrap_or_else(|| "none".to_owned());
     let mut header = [0u8; 32];
     let read = std::fs::File::open(&wal_path).and_then(|mut f| std::io::Read::read(&mut f, &mut header)).unwrap_or(0);
     let header: String = header[..read].iter().map(|b| format!("{b:02x}")).collect();
@@ -134,7 +139,7 @@ pub fn stamp_of(library: &Path) -> Option<String> {
 }
 
 /// `path` with `ending` added to its whole name.
-fn with_ending(path: &Path, ending: &str) -> PathBuf {
+pub(crate) fn with_ending(path: &Path, ending: &str) -> PathBuf {
     let mut p = path.as_os_str().to_owned();
     p.push(ending);
     PathBuf::from(p)

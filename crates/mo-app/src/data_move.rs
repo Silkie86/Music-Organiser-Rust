@@ -516,7 +516,7 @@ fn new_record(from: &Path) -> Record {
 }
 
 /// The free room on the drive `path` is on (or would be on), from its nearest folder there is.
-fn free_room(path: &Path) -> Option<u64> {
+pub(crate) fn free_room(path: &Path) -> Option<u64> {
     path.ancestors().find(|p| p.exists()).and_then(|p| fs4::available_space(p).ok())
 }
 
