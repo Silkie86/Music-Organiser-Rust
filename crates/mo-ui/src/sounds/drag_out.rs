@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use mo_app::drag_out::{self, Payload, SoundItem};
 use mo_app::sounds as list;
+use mo_sounds::Peaks;
 use slint::ComponentHandle;
 
 use super::{PAGE, kit};
@@ -67,26 +68,39 @@ pub(super) fn wire(app: &AppWindow) {
     });
 }
 
-/// The sound at `at` in the library, as a drag carries it: its file and its line on the card.
-fn item(app: &AppWindow, at: usize) -> Option<SoundItem> {
+/// The sound at `at` in the library, as a drag carries it: its file and its line on the card. With where its
+/// waveform is read from when it isn't yet ([`super::peaks`]): the card gets it as the drag is made.
+fn item(app: &AppWindow, at: usize) -> Option<(SoundItem, Option<Unread>)> {
     PAGE.with(|p| {
         let p = p.borrow();
         let s = p.list.sound(at)?;
-        let card = drag_out::sound_card(s, tint(app, list::type_colour(&s.sound_type)));
-        Some(SoundItem { path: PathBuf::from(&s.path), card })
+        let tint = tint(app, list::type_colour(&s.sound_type));
+        let card = super::peaks::with(s, |wave| drag_out::sound_card(s, wave, tint));
+        let unread = match (&card, &s.analysis, &p.galaxy.db) {
+            (None, Some(_), Some(db)) => Some(Unread { db: db.clone(), id: s.id }),
+            _ => None,
+        };
+        let card = card.unwrap_or_else(|| drag_out::sound_card(s, &Peaks::default(), tint));
+        Some((SoundItem { path: PathBuf::from(&s.path), card }, unread))
     })
+}
+
+/// A sound whose waveform isn't read yet: the one with this id in the library at `db`.
+struct Unread {
+    db: PathBuf,
+    id: i64,
 }
 
 /// For the screenshots: what dragging the tile or line at `row` of the view on show carries (its card), without
 /// looking for its file. None when there's no sound there.
 pub fn card_at_row(app: &AppWindow, row: i32) -> Option<Payload> {
     let at = PAGE.with(|p| usize::try_from(row).ok().and_then(|r| p.borrow().entry(r)))?;
-    drag_out::sounds(vec![item(app, at)?])
+    drag_out::sounds(vec![item(app, at)?.0])
 }
 
 /// Drags the sound at `at` in the library out of the app, picked up at `spot`.
 fn carry(app: &AppWindow, at: usize, spot: Spot) {
-    let Some(item) = item(app, at) else { return };
+    let Some((mut item, unread)) = item(app, at) else { return };
     let under_way = drag::start(
         app,
         Drag {
@@ -97,6 +111,13 @@ fn carry(app: &AppWindow, at: usize, spot: Spot) {
                         "{} isn't on this computer any more, so there's nothing to drag.",
                         item.card.title
                     ));
+                }
+                // Its waveform, for its line on the card, read here too when it wasn't yet (none if it can't be).
+                if let Some(Unread { db, id }) = unread
+                    && let Ok(waves) = super::peaks::read(&db, &[id])
+                    && let Some((_, wave)) = waves.first()
+                {
+                    item.card.thumb = drag_out::wave_thumb(wave);
                 }
                 drag_out::sounds(vec![item]).ok_or_else(|| "There's nothing to drag.".to_owned())
             }),

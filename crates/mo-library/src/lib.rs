@@ -22,7 +22,10 @@ pub mod songs;
 pub mod songs_db;
 pub mod watch;
 
-pub use db::{Library, LibraryError, PathSet, ProjectPlugin, ProjectSample, SampleUse, SaveDetail, UsageRules};
+pub use db::{
+    Library, LibraryError, PathSet, ProjectFile, ProjectPlugin, ProjectSample, SampleUsage, SampleUse, SaveDetail,
+    UsageRules,
+};
 pub use mo_formats::{Confidence, PluginKind};
 pub use songs::{SaveRun, Song, SongChoices, SongDoubt};
 

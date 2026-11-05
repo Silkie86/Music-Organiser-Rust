@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Datelike;
+use mo_library::ProjectFile;
 use mo_sounds::compact::Synced;
 use mo_sounds::usage::Usage;
 use mo_sounds::{Sound, SoundsError, music, rediscover, types};
@@ -225,6 +226,8 @@ pub struct SoundList {
     shared: Arc<Shared>,
     /// How your projects use each sound, by sound id, once known (sounds no project uses are left out).
     used: Option<HashMap<i64, Usage>>,
+    /// Each project's file, by id, once known: the projects a sound is used in are named from it. Shared by a clone.
+    projects: Option<Arc<HashMap<i64, ProjectFile>>>,
     /// Each sound's Most liked score, in `sounds` order, once known.
     liked: Option<Vec<f64>>,
     /// The best of `liked`, worked out once, as every tile asks for its share of it.
@@ -263,13 +266,19 @@ impl SoundList {
         sounds.shrink_to_fit();
         let hay = sounds.par_iter().map(hay_of).collect();
         let names = sounds.par_iter().map(|s| s.name().to_lowercase()).collect();
-        SoundList { shared: Arc::new(Shared { sounds, hay, names }), used: None, liked: None, liked_best: 0.0 }
+        SoundList {
+            shared: Arc::new(Shared { sounds, hay, names }),
+            used: None,
+            projects: None,
+            liked: None,
+            liked_best: 0.0,
+        }
     }
 
     /// A list of the same sounds, sharing them, without this one's use or Most liked yet: what a list with the use
     /// counted in starts from.
     pub fn sharing(&self) -> SoundList {
-        SoundList { shared: self.shared.clone(), used: None, liked: None, liked_best: 0.0 }
+        SoundList { shared: self.shared.clone(), used: None, projects: None, liked: None, liked_best: 0.0 }
     }
 
     /// Whether `other` shares this list's sounds (it was cloned from it, or made with [`SoundList::sharing`]).
@@ -289,6 +298,23 @@ impl SoundList {
     /// column.
     pub fn set_used(&mut self, used: HashMap<i64, Usage>) {
         self.used = Some(used);
+    }
+
+    /// The file of each project that uses a sound, by id ([`mo_library::Library::sample_usage_with_projects`]), to
+    /// name the projects a sound is used in.
+    pub fn set_project_files(&mut self, projects: Arc<HashMap<i64, ProjectFile>>) {
+        self.projects = Some(projects);
+    }
+
+    /// The projects that use the sound at `i`, newest first (each one's file and when it was saved). None while
+    /// that isn't known; empty when none do.
+    pub fn projects_of(&self, i: usize) -> Option<Vec<&ProjectFile>> {
+        let files = self.projects.as_deref()?;
+        self.used.as_ref()?;
+        let ids = self.usage(i).map_or(&[][..], |u| &u.project_ids[..]);
+        let mut of: Vec<&ProjectFile> = ids.iter().filter_map(|id| files.get(id)).collect();
+        of.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.path.cmp(&b.path)));
+        Some(of)
     }
 
     /// Each sound's Most liked score, from `score`.
@@ -789,7 +815,22 @@ fn key_order(s: &Sound) -> i32 {
     s.analysis.as_ref().and_then(|a| a.key_tonic.map(|t| t * 2 + i32::from(a.key_minor))).unwrap_or(i32::MAX)
 }
 
-/// A sound's place in the shuffled order for `seed`: SplitMix64 of the two, a good spread from a cheap sum.
+/// Of the sounds with these `ids`, the `n` that [`Order::Shuffled`] puts first for `seed`, in that order: shown at
+/// once while the rest are read, the list of them is then the start of the whole list's, whatever the filters let
+/// through (a sound they'd let through that comes before the last of these would be one of them). So nothing on
+/// show moves when the rest arrive.
+pub fn first_shuffled(ids: &[i64], seed: u64, n: usize) -> Vec<i64> {
+    let mut keyed: Vec<(u64, i64)> = ids.iter().map(|&id| (shuffle_key(seed, id), id)).collect();
+    if keyed.len() > n {
+        keyed.select_nth_unstable(n);
+        keyed.truncate(n);
+    }
+    keyed.sort_unstable();
+    keyed.into_iter().map(|(_, id)| id).collect()
+}
+
+/// A sound's place in the shuffled order for `seed`: SplitMix64 of the two, a good spread from a cheap sum. Two
+/// sounds never share one: each step turns one number into one other.
 fn shuffle_key(seed: u64, id: i64) -> u64 {
     let mut z = seed.wrapping_add((id as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15));
     z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
@@ -877,6 +918,77 @@ pub fn facts_line(s: &Sound) -> String {
     parts.join(" · ")
 }
 
+/// The card's "Used in" list shows at most this many projects, the newest: a kick can be in a thousand.
+pub const PROJECTS_SHOWN: usize = 50;
+
+/// What the card's "Used in" side shows for a sound: its words on the card's switch ("Used in 4"), a word above the
+/// list, and the projects, newest first.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ProjectsCard {
+    pub title: String,
+    pub note: String,
+    pub lines: Vec<ProjectLine>,
+}
+
+/// One project on the card: its save's id (the Songs page opens it by that), its name, its DAW and the day it was
+/// last saved ("" when that isn't known).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProjectLine {
+    pub id: i64,
+    pub name: String,
+    /// As the library names it ("FL Studio"), or "" for a file no reader knows.
+    pub daw: String,
+    pub saved: String,
+}
+
+/// The card's "Used in" side: `own`, the projects that use the sound, newest first (None while that isn't known
+/// yet); `like`, for a sound Rediscover dug out, the sound its line says it sounds like, by name, with that one's
+/// projects, which are listed when none use this one.
+pub fn projects_card(own: Option<&[&ProjectFile]>, like: Option<(&str, &[&ProjectFile])>) -> ProjectsCard {
+    let Some(own) = own else {
+        return ProjectsCard {
+            title: "Used in".to_owned(),
+            note: "Your projects haven't been counted yet.".to_owned(),
+            lines: Vec::new(),
+        };
+    };
+    let title = format!("Used in {}", crate::songs::thousands(own.len()));
+    if !own.is_empty() {
+        let note = if own.len() > PROJECTS_SHOWN { format!("The newest {PROJECTS_SHOWN}:") } else { String::new() };
+        return ProjectsCard { title, note, lines: project_lines(own) };
+    }
+    match like {
+        Some((name, theirs)) if !theirs.is_empty() => {
+            let newest = if theirs.len() > PROJECTS_SHOWN {
+                format!(" (the newest {PROJECTS_SHOWN} here)")
+            } else {
+                String::new()
+            };
+            let note = format!(
+                "No project of yours uses it yet. {name}, which it sounds like, is in {}{newest}:",
+                crate::songs::plural(theirs.len(), "project")
+            );
+            ProjectsCard { title, note, lines: project_lines(theirs) }
+        }
+        _ => ProjectsCard { title, note: "No project of yours uses it yet.".to_owned(), lines: Vec::new() },
+    }
+}
+
+/// The card's lines for `projects`, newest first: the newest [`PROJECTS_SHOWN`].
+fn project_lines(projects: &[&ProjectFile]) -> Vec<ProjectLine> {
+    projects
+        .iter()
+        .take(PROJECTS_SHOWN)
+        .map(|f| ProjectLine {
+            id: f.id,
+            name: mo_formats::paths::stem(mo_formats::paths::file_name(&f.path)).to_owned(),
+            daw: mo_library::scan::daw_of(&f.path).unwrap_or_default().to_owned(),
+            // A save the scan didn't date (0) shows none, rather than 1 Jan 1970.
+            saved: if f.mtime > 0 { crate::midi::date_text(f.mtime) } else { String::new() },
+        })
+        .collect()
+}
+
 /// "Never", "1 project", "12 projects", or "" when the counts aren't known yet.
 pub fn used_text(used: Option<u32>) -> String {
     match used {
@@ -917,25 +1029,50 @@ pub fn copy_made_line(copy_bytes: u64, library_bytes: u64) -> String {
 }
 
 /// What the card says once the app's own copy of the sound library has been brought up to date with what the C# app
-/// changed: "3 changed, 1 new, 2 gone".
+/// changed: made afresh from it, or nothing had changed.
 pub fn copy_synced_line(s: &Synced) -> String {
     if s.made {
-        return format!("Made afresh from {} sounds", crate::songs::thousands(s.sounds));
-    }
-    let parts: Vec<String> = [(s.changed, "changed"), (s.added, "new"), (s.removed, "gone")]
-        .into_iter()
-        .filter(|(n, _)| *n > 0)
-        .map(|(n, what)| format!("{} {what}", crate::songs::thousands(n)))
-        .collect();
-    if !parts.is_empty() {
-        parts.join(", ")
-    } else if s.listed_tables > 0 {
-        "Tags, plays or hidden copies changed".to_owned()
-    } else if s.tables > 0 {
-        "Galaxy places, copies or settings changed".to_owned()
+        format!("Made afresh from {} sounds", crate::songs::thousands(s.sounds))
     } else {
         "Nothing had changed".to_owned()
     }
+}
+
+/// What the card says once the app's own sound library has been laid out anew ([`mo_sounds::compact::LaidOut`]): how
+/// big it is now, and was.
+pub fn laid_out_line(before: u64, after: u64) -> String {
+    format!(
+        "{}, from {}. The waveforms and CLAP's fingerprints now sit apart from the list, and the fingerprints take half \
+         the room, so the page reads less. \"Sounds like this\" finds the same sounds as before.",
+        size_text(after),
+        size_text(before)
+    )
+}
+
+/// What the card says when the app's own sound library couldn't be laid out anew just now, and `why` (as
+/// [`mo_sounds::compact::LaidOut::NotNow`] says it).
+pub fn not_laid_out_line(why: &str) -> String {
+    let mut why = why.trim_end_matches('.').to_owned();
+    if let Some(first) = why.get(..1) {
+        why.replace_range(..1, &first.to_uppercase());
+    }
+    format!("{why}. It's tried again the next time Sounds opens, and until then it's read as it is.")
+}
+
+/// What the card says when the app's own sound library was found damaged as it was laid out anew, with no `sounds.db`
+/// left to make it again from.
+pub fn damaged_not_laid_out_line() -> String {
+    "It's damaged, and there's no sounds.db to make it again from, so it's read as it is.".to_owned()
+}
+
+/// What the card says when the app's own sound library was found damaged as it was laid out anew, and couldn't be
+/// made again from `sounds.db` either: why, without the library's whole path.
+pub fn not_remade_line(e: &SoundsError) -> String {
+    let why = match e {
+        SoundsError::Copy { why, .. } => why.clone(),
+        e => e.to_string(),
+    };
+    format!("It's damaged, and it couldn't be made again from sounds.db ({why}), so it's read as it is.")
 }
 
 /// Why the app's own copy of the sound library couldn't be made or brought up to date, for a card: what went wrong,
@@ -1106,7 +1243,7 @@ mod tests {
         let by = |list: &SoundList, f: Filters| ids(list, &list.view(&f, Order::Newest, 0));
         assert_eq!(by(&list, Filters { years: Some((2020, 2023)), ..Filters::default() }), [2, 3]);
         // With Used on, the songs' years count instead.
-        let used = |years: Vec<i32>| Usage { projects: years.len() as u32, recent: 0, years };
+        let used = |years: Vec<i32>| Usage { projects: years.len() as u32, recent: 0, years, ..Usage::default() };
         list.set_used(HashMap::from([(1, used(vec![2025, 2026])), (4, used(vec![2020]))]));
         assert_eq!(list.year_counts(true), [(2026, 1), (2025, 1), (2020, 1)]);
         let used_then = Filters { used: true, years: Some((2025, 2026)), ..Filters::default() };
@@ -1323,7 +1460,7 @@ mod tests {
         let mut list = library();
         let f = Filters { unused: true, ..Filters::default() };
         assert_eq!(list.view(&f, Order::Name, 0).len(), 4);
-        let used = |projects| Usage { projects, recent: 0, years: vec![2026] };
+        let used = |projects| Usage { projects, recent: 0, years: vec![2026], ..Usage::default() };
         list.set_used(HashMap::from([(1, used(3)), (2, used(1))]));
         assert_eq!(ids(&list, &list.view(&f, Order::Name, 0)), vec![4, 3]);
         let f = Filters { used: true, ..Filters::default() };
@@ -1350,6 +1487,50 @@ mod tests {
         assert_eq!(first.len(), 4);
         let seen: std::collections::HashSet<_> = (0..20).map(|seed| list.view(&all, Order::Shuffled, seed)).collect();
         assert!(seen.len() > 1);
+    }
+
+    #[test]
+    fn the_sounds_shown_first_are_the_start_of_the_whole_shuffled_list_whatever_the_filters() {
+        let types = ["Kick", "Snare", "Pad", "Loop"];
+        let sounds: Vec<Sound> = (1..=2_000)
+            .map(|id| {
+                let key = (id % 3 != 0).then_some(((id % 12) as i32, id % 2 == 0));
+                let path = format!(r"I:\Samples\Pack {}\Sound {id}.wav", id % 7);
+                let mut s = sound(id * 3 + 1, &path, types[(id % 4) as usize], analysed(id % 5 == 0, None, key));
+                s.added = NaiveDate::from_ymd_opt(2026, 1, 1).and_then(|d| d.and_hms_opt(0, 0, 0)).unwrap_or_default();
+                s
+            })
+            .collect();
+        let every: Vec<i64> = sounds.iter().map(|s| s.id).collect();
+        let whole = SoundList::new(sounds.clone());
+        let mut kicks = Filters::default();
+        kicks.toggle_type("Kick");
+        let mut loops = Filters::default();
+        loops.pick(LENGTH, Length::Loops.name());
+        let searched = Filters { search: "pack 3".into(), ..Filters::default() };
+        for seed in [1, 7, 0xDEAD_BEEF] {
+            let first = first_shuffled(&every, seed, 200);
+            assert_eq!(first.len(), 200);
+            let shown_first: Vec<Sound> = sounds.iter().filter(|s| first.contains(&s.id)).cloned().collect();
+            let part = SoundList::new(shown_first);
+            for filters in [&Filters::default(), &kicks, &loops, &searched] {
+                let start = ids(&part, &part.view(filters, Order::Shuffled, seed));
+                let all = ids(&whole, &whole.view(filters, Order::Shuffled, seed));
+                assert!(!start.is_empty() && start.len() < all.len());
+                assert_eq!(start, all[..start.len()]);
+            }
+            assert_eq!(first, ids(&part, &part.view(&Filters::default(), Order::Shuffled, seed)));
+        }
+        // Fewer sounds than asked for: all of them, in order.
+        let few = first_shuffled(&every[..5], 7, 200);
+        assert_eq!(few.len(), 5);
+        assert_eq!(
+            few,
+            ids(&whole, &whole.view(&Filters::default(), Order::Shuffled, 7))
+                .into_iter()
+                .filter(|id| every[..5].contains(id))
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
@@ -1438,23 +1619,26 @@ mod tests {
             copy_made_line(1_621_000_000, 4_896_000_000),
             "1.51 GB beside sounds.db's 4.56 GB. Sounds opens from it from now on."
         );
-        let synced = |made, added, changed, removed, (tables, listed_tables)| Synced {
-            made,
-            sounds: 453_885,
-            added,
-            changed,
-            removed,
-            tables,
-            listed_tables,
-            prints: 0,
-            adopted: false,
-        };
-        assert_eq!(copy_synced_line(&synced(false, 1, 3, 2, (1, 1))), "3 changed, 1 new, 2 gone");
-        assert_eq!(copy_synced_line(&synced(false, 0, 1_204, 0, (0, 0))), "1,204 changed");
-        assert_eq!(copy_synced_line(&synced(false, 0, 0, 0, (2, 1))), "Tags, plays or hidden copies changed");
-        assert_eq!(copy_synced_line(&synced(false, 0, 0, 0, (2, 0))), "Galaxy places, copies or settings changed");
-        assert_eq!(copy_synced_line(&synced(false, 0, 0, 0, (0, 0))), "Nothing had changed");
-        assert_eq!(copy_synced_line(&synced(true, 453_885, 0, 0, (7, 3))), "Made afresh from 453,885 sounds");
+        let synced = |made, sounds| Synced { made, sounds, adopted: false };
+        assert_eq!(copy_synced_line(&synced(false, 0)), "Nothing had changed");
+        assert_eq!(copy_synced_line(&synced(true, 453_885)), "Made afresh from 453,885 sounds");
+        assert_eq!(
+            laid_out_line(1_621_000_000, 933_000_000),
+            "890 MB, from 1.51 GB. The waveforms and CLAP's fingerprints now sit apart from the list, and the \
+             fingerprints take half the room, so the page reads less. \"Sounds like this\" finds the same sounds as \
+             before."
+        );
+        assert_eq!(
+            not_laid_out_line("something else has it open (a page reading it, or another copy of the app)"),
+            "Something else has it open (a page reading it, or another copy of the app). It's tried again the next \
+             time Sounds opens, and until then it's read as it is."
+        );
+        let short =
+            SoundsError::Copy { path: "I:\\MusicOrganiser\\sounds-rust.db".into(), why: "only 0.4 GB is free".into() };
+        assert_eq!(
+            not_remade_line(&short),
+            "It's damaged, and it couldn't be made again from sounds.db (only 0.4 GB is free), so it's read as it is."
+        );
         let full = SoundsError::Copy {
             path: "C:\\Users\\Solomon\\AppData\\Local\\MusicOrganiser\\sounds-rust.db".into(),
             why: "only 3.1 GB is free on its disk".into(),
@@ -1474,5 +1658,64 @@ mod tests {
         // Only the sounds: what the first list worked out from its use isn't carried over.
         assert!(!used.knows_liked() && list.knows_liked());
         assert!(!SoundList::new(Vec::new()).shares_with(&list));
+    }
+
+    fn project(id: i64, path: &str, mtime: i64) -> ProjectFile {
+        ProjectFile { id, path: path.to_owned(), mtime }
+    }
+
+    #[test]
+    fn the_card_lists_the_projects_that_use_a_sound_newest_first() {
+        let a = project(7, r"K:\Projects\Didums_77.flp", 1_760_000_000);
+        let b = project(3, r"K:\Projects\Old one.bwproject", 1_600_000_000);
+        // Not known yet.
+        let card = projects_card(None, None);
+        assert_eq!((card.title.as_str(), card.lines.len()), ("Used in", 0));
+        // Its own, newest first, by name without the ending, with its DAW and the day each was saved.
+        let card = projects_card(Some(&[&a, &b][..]), None);
+        assert_eq!(card.title, "Used in 2");
+        assert_eq!(card.note, "");
+        let names: Vec<(i64, &str, &str)> =
+            card.lines.iter().map(|l| (l.id, l.name.as_str(), l.daw.as_str())).collect();
+        assert_eq!(names, [(7, "Didums_77", "FL Studio"), (3, "Old one", "Bitwig Studio")]);
+        assert_eq!(card.lines[0].saved, crate::midi::date_text(1_760_000_000));
+        // A save the scan didn't date shows no day, rather than 1 Jan 1970.
+        let undated = project(9, r"K:\Projects\Undated.flp", 0);
+        assert_eq!(projects_card(Some(&[&undated][..]), None).lines[0].saved, "");
+        // None of its own: the sound it sounds like has some.
+        let card = projects_card(Some(&[][..]), Some(("VEH1 FX - 37", &[&a][..])));
+        assert_eq!(card.title, "Used in 0");
+        assert_eq!(card.note, "No project of yours uses it yet. VEH1 FX - 37, which it sounds like, is in 1 project:");
+        assert_eq!(card.lines.len(), 1);
+        // Neither has any.
+        let card = projects_card(Some(&[][..]), Some(("VEH1 FX - 37", &[][..])));
+        assert_eq!((card.note.as_str(), card.lines.len()), ("No project of yours uses it yet.", 0));
+        // A sound in more projects than the card lists: the newest.
+        let many: Vec<ProjectFile> =
+            (0..1_200).map(|n| project(n, &format!("K:\\P\\{n}.flp"), 1_700_000_000 - n)).collect();
+        let many: Vec<&ProjectFile> = many.iter().collect();
+        let card = projects_card(Some(many.as_slice()), None);
+        assert_eq!((card.title.as_str(), card.note.as_str()), ("Used in 1,200", "The newest 50:"));
+        assert_eq!(card.lines.len(), PROJECTS_SHOWN);
+        let card = projects_card(Some(&[][..]), Some(("VEH1 FX - 37", many.as_slice())));
+        assert!(card.note.ends_with("is in 1,200 projects (the newest 50 here):"), "{}", card.note);
+    }
+
+    #[test]
+    fn the_list_names_a_sounds_projects_newest_first_once_both_are_known() {
+        let mut list = SoundList::new(vec![sound(1, "a.wav", "Kick", None), sound(2, "b.wav", "Kick", None)]);
+        // Nothing known yet.
+        assert_eq!(list.projects_of(0), None);
+        list.set_used(HashMap::from([(1, Usage { projects: 3, project_ids: vec![10, 11, 12], ..Usage::default() })]));
+        assert_eq!(list.projects_of(0), None, "the files aren't known yet");
+        // Project 12's file has gone: it isn't listed.
+        let files = HashMap::from([(10, project(10, "old.flp", 100)), (11, project(11, "new.flp", 300))]);
+        list.set_project_files(Arc::new(files));
+        let of = list.projects_of(0).unwrap_or_default();
+        assert_eq!(of.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["new.flp", "old.flp"]);
+        // One no project uses: none.
+        assert_eq!(list.projects_of(1).map(|of| of.len()), Some(0));
+        // A list sharing its sounds starts without them, as it does without the use.
+        assert_eq!(list.sharing().projects_of(0), None);
     }
 }

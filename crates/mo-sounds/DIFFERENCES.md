@@ -59,6 +59,14 @@ back; nothing is saved to `sounds.db` yet.
 |---|---|---|---|
 | A key written with capitals ("Pad C Minor", "Keys Bb MIN") | Read as major: only small "minor"/"min" counted. | Read as minor (found by the harmony thread, 2026-11-01). A lone capital "M" still isn't minor. | Better |
 
+## Use in your projects
+
+`usage` ports `SoundOrganiser.ApplyUsage`: how many of your projects use each sound, from the library's sample lists.
+
+| What | C# | Rust | Judged |
+|---|---|---|---|
+| A project that names one sound by two paths (a Bitwig copy and a relative path) | Counted twice. | Counted once (2026-11-05): the Sounds card lists which projects use a sound, and the count matches that list. How many were saved lately is capped at the count. The twin tool's uses, which don't say which projects, still add up. | Better |
+
 ## Sounds like this
 
 `index` ports `VectorIndex` and `SoundOrganiser.Similar`; the twin test (`twin sounds`) has both apps find the
