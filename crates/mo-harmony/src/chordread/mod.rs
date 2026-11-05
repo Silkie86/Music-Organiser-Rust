@@ -83,7 +83,10 @@ mod words;
 #[cfg(test)]
 mod words_tests;
 
-pub use answer::{ChordAnswer, Grading, NoChord, Texture, Thresholds, grade};
+pub use answer::{
+    CALIBRATION_TERMS, Calibration, ChordAnswer, Grading, LEAST_SHARPNESS, NoChord, SHARPNESS_KNOTS, Texture,
+    Thresholds, grade,
+};
 
 pub use candidates::{Candidate, Label, Route, allowed, candidates, escape, open_fifth};
 pub use cores::{Core, CoreSet, Group, ToneClass, valid, valid_rootless};
@@ -105,7 +108,10 @@ pub use reader::{
 pub use score::{Evidence, Feature, PerFeature, Scored, Scorer, Scoring, SpanFacts};
 pub use tables::{COUNTED, COUNTED_FROM};
 pub use version::{SHIPPED_HASH, numbers_hash};
-pub use weights::{Bound, EVEN, FIRST_FIT, FITTED, HAND, NUMBERS, Priors, RULES, Rule, THRESHOLDS, Tables, Weights};
+pub use weights::{
+    Bound, CALIBRATION, EVEN, FIRST_FIT, FITTED, HAND, HAND_THRESHOLDS, NUMBERS, Priors, RULES, Rule, THRESHOLDS,
+    Tables, Weights,
+};
 pub use words::Words;
 
 /// Bumped whenever the reader can read the same notes differently (new weights, a new rule for hearing, decoding,
@@ -114,5 +120,7 @@ pub use words::Words;
 /// with no brackets, no 7alt: [`crate::chord`]); version 3 has the whole-app review's fixes of 2026-11-03 (a note
 /// played a little early is held as long as it was played, a bass let go a little late isn't the bass a chord's root
 /// moves from, and a 9 carried in costs nothing for passing by); version 4 has the first fitted weights, the hand-set
-/// ones moved a fifth of the way to the fit ([`FITTED`]).
-pub const CHORD_READER_VERSION: u32 = 4;
+/// ones moved a fifth of the way to the fit ([`FITTED`]); version 5 has the calibration's fit: how sharp the chances
+/// are, by how much music is heard and its texture ([`CALIBRATION`]), and the thresholds the answers are graded by
+/// ([`THRESHOLDS`]).
+pub const CHORD_READER_VERSION: u32 = 5;

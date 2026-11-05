@@ -501,6 +501,43 @@ w_N, what a stretch read as no chord scores. The counted tables stay as `tables`
   rules leave no numbers that keep them all. Each round takes at most `--steps` steps; the `--out` file says how
   many rounds were fitted and why they stopped. The two can go together.
 
+### The chord reader's calibration (`chordcal`)
+
+```
+cargo run -p mo-theorybench --release -- chordcal path/to/bench/pop909cl.jsonl path/to/voiced/billboard-A.jsonl --out calibration.json
+cargo run -p mo-theorybench --release -- chordcal path/to/voiced/billboard-B.jsonl --measure --calibration calibration.json
+```
+
+`chordcal` fits how sharp the reader's chances are (`chordread::Calibration`, the design's σ: 8 numbers, a curve over
+the bars heard with knots at 1, 2, 4, 8 and 16 bars, plus what an accompaniment, chords alone and one line alone add)
+and then the thresholds its answers are graded by (`chordread::Thresholds`).
+
+- **What it fits on.** Fold 1 (`--folds`) of the pieces whose licence lets fitted numbers ship: the fold the weights
+  built in were measured on and never learned from, so the chances are the reader's on music new to it. Give it the
+  files `chordfit` was given, so the folds are drawn the same. Each piece is heard every way `chordfit` hears it, whole
+  and cut into stretches of 1, 2, 4, 8 and 16 bars along its bar lines (`--picks` of each length, 2, picked by a hash
+  of the piece and the bar), each read as a window, as the MIDI page cuts a clip from a song.
+- **What is judged.** Each stretch the reader reads as a chord, against the chord labelled for most of it: right when
+  its first reading's root and core are among those the label accepts (`chordfit`'s accept sets, lenient on
+  POP909-CL). Each stretch counts once.
+- **The sharpness** is fitted by likelihood: minus the log of the chance the readings give the labelled chord (what
+  the readings kept leave when it's none of them, never under 1e-4). Each take is read at 64 sharpnesses (0.1 to 4,
+  6% apart), and the 8 numbers are found by coordinate descent on that grid (a straight line between its points on a
+  log scale). A texture heard in fewer than 30 songs keeps 0, as one line alone's does.
+- **The thresholds**, texture by texture, are each the least chance on a 0.01 grid, from 0.5, at which the answers
+  of that kind are wrong at most one time in ten, from at least 30 songs: one chord first (wrong when its root and
+  core aren't the label's), then the same notes on the stretches left (wrong when the label is outside the group). As
+  the key finder's, they're judged by the error itself; the upper end of its likely range (the songs' answers going
+  wrong together counted) is printed beside it.
+- **The report.** How true the chances are, by source, way of hearing and length, by texture, by length and in all:
+  minus the log chance of the labelled chord, the first reading's share right and mean chance, the calibration error
+  (15 bins of equal size), the Brier score, and how often the labelled chord is among the first 1, 2 and 3 readings
+  beside their chance. Then the numbers fitted, each threshold tried (every 0.05), and what each kind of answer the
+  thresholds give is, by source and texture: how often given, how often wrong.
+- `--measure` fits nothing: it reads every piece given, of any licence and fold, with the calibration built in (or
+  `--calibration`'s, a file `--out` wrote) and reports the same. `--keep-sharpness` fits only the thresholds, on the
+  calibration given.
+
 ## Charts played as music (`convert/voice.py`)
 
 `charts.py` plays Billboard's and RS200's charts as block chords over the label's bass: every note the label names,
@@ -954,3 +991,67 @@ the way and the whole fit:
   number a file leaves out is the hand-set one, and the run says how many it names): with no `--weights`, `chords`
   reads with the numbers built in. `chordfit` still starts from the hand-set numbers when given no `--from`, pulls
   towards them, and reports its gates and targets against them, not against the numbers built in.
+
+## The chord reader's calibration (2026-11-05)
+
+`chordcal pop909cl.jsonl billboard-A.jsonl` on the reader built in at version 4 (the first fit a fifth of the way):
+325 pieces of fold 1 (POP909-CL's four ways of hearing and Billboard set A), 9,749 takes, 163,065 stretches judged.
+Reading every take at the 64 sharpnesses took 28 minutes on 4 cores.
+
+**The sharpness.** The chances were near true already: the fit moves minus the log chance of the labelled chord from
+0.7794 a stretch to 0.7779. It comes out a little under 1 for a bar or two and for an accompaniment, a little over for
+16 bars or more and for chords alone:
+
+| texture | 1 bar | 2 bars | 4 bars | 8 bars | 16 bars or more |
+|---|---|---|---|---|---|
+| a full mix | 0.873 | 0.912 | 0.970 | 0.970 | 1.029 |
+| an accompaniment | 0.815 | 0.854 | 0.912 | 0.912 | 0.970 |
+| chords alone | 0.931 | 0.970 | 1.029 | 1.029 | 1.087 |
+
+| fold 1, by texture | stretches | -ln p: 1 / fitted | first right | its chance: 1 / fitted | ECE: 1 / fitted |
+|---|---|---|---|---|---|
+| a full mix | 55,626 | 0.6315 / 0.6311 | 85.4% | 0.809 / 0.813 | 0.058 / 0.055 |
+| an accompaniment | 38,348 | 0.7573 / 0.7563 | 82.5% | 0.815 / 0.799 | 0.042 / 0.048 |
+| chords alone | 69,071 | 0.9089 / 0.9072 | 78.3% | 0.710 / 0.734 | 0.089 / 0.067 |
+| all | 163,065 | 0.7790 / 0.7779 | 81.7% | 0.769 / 0.776 | 0.064 / 0.057 |
+
+(POP909-CL's first reading looks a little unsure beside how often it's right: its labels are triads, judged
+leniently, so a C read at 0.6 with Cmaj7 at 0.3 is right as the C label, at 0.6.)
+
+**The thresholds fitted** (on the stretches the reader gives a chord: not those with too few notes), wrong (and the
+upper end of its likely range) at each:
+
+| texture | one chord fitted | wrong there | at 0.8 | the same notes |
+|---|---|---|---|---|
+| a full mix | 0.58 | 10.0% (10.9%) | 6.3% (7.0%) | never: 20% wrong at any threshold |
+| an accompaniment | 0.80 | 9.9% (11.5%) | 9.9% (11.5%) | never: 18% |
+| chords alone | 0.83 | 10.0% (11.5%) | 10.7% (12.2%) | never: 11% to 13% |
+
+By the upper end of the likely range (the design's rule), chords alone could never be one chord (at 0.95 still 10.4%
+wrong), so the error itself is used, as the key finder's thresholds are.
+
+**Measured where it never fitted** (`--measure`, every piece, one stretch of each length a piece), the chords given as
+one chord and the share of them wrong: before (σ 1, the hand-set 0.8 and 0.9), with the fit's 0.59 for a full mix (a
+first run, before stretches with too few notes were left out of the fit), and as shipped (σ fitted, 0.8, 0.8, 0.83):
+
+| set | full mix: before / 0.59 / shipped | accompaniment: before / shipped | chords alone: before / shipped |
+|---|---|---|---|
+| Billboard set B | 64.8% (7.9%) / 84.2% (13.2%) / 65.9% (8.1%) | 62.9% (9.7%) / 58.5% (9.3%) | 74.2% (7.1%) / 68.0% (5.8%) |
+| RS200 set A | 86.1% (3.3%) / 94.9% (4.8%) / 86.6% (3.3%) | 82.5% (3.7%) / 80.2% (3.5%) | 92.9% (3.8%) / 92.4% (3.8%) |
+| RS200 set B | 67.2% (4.2%) / 86.7% (7.7%) / 68.1% (4.3%) | 62.6% (6.5%) / 58.5% (5.9%) | 58.5% (5.8%) / 53.4% (5.3%) |
+| RS200 block chords | - | 96.9% (0.8%) / 96.7% (0.8%) | 82.7% (0.3%) / 82.0% (0.2%) |
+| the sweep | - | 58.7% (21.3%) / 56.2% (20.0%) | 60.7% (12.8%) / 60.5% (12.8%) |
+
+The fit's full mix threshold misses the target on Billboard set B's voicings (13.2% wrong at 0.59), so the reader ships
+a full mix at the hand-set 0.8, with the fitted sharpness, 0.80 for an accompaniment and 0.83 for chords alone, and the
+same notes never given: `chordread::CALIBRATION` and `THRESHOLDS`, `CHORD_READER_VERSION` 5. (The sharpness was fitted
+with the few stretches of too few notes in, 0.06% of them.) The sweep's chords (45 qualities in every voicing, scored
+exactly) are wrong a fifth of the time over a bass at any threshold: the extensions are what it gets wrong, which no
+threshold mends.
+
+- **The hand cases.** Every gate holds, and every answer the cases ask for. Dm7 over a walk (38) and the walk under
+  F A C (36) are unclear now (0.75, under an accompaniment's 0.8), and C6 or Am7 with no bass (22) is unclear, leaning
+  to C6, where it was the same notes.
+- **Next.** With the keys alone that stopped the weights at a fifth of the way now under chords alone's 0.83 (and
+  read a little less surely in a bar or two), the weights can move further towards the fit: each step needs the
+  calibration fitted again on its own chances.

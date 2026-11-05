@@ -23,6 +23,8 @@ pub(crate) enum ToMixer {
         id: u64,
         sound: Arc<AudioData>,
         from: f64,
+        /// Goes round to its start at its end, with no gap, until it's stopped or replaced.
+        looping: bool,
     },
     /// Move the sound `id` to this frame, if it's still the one playing; from then on it's called `new_id`, so its
     /// place isn't mistaken for the one before the move.
@@ -90,6 +92,7 @@ struct Voice {
     at: f64,
     gain: f32,
     target: f32,
+    looping: bool,
 }
 
 /// How the mixer tells the player something; it must not wait.
@@ -139,10 +142,12 @@ impl Mixer {
     fn take_orders(&mut self) {
         loop {
             match self.from_player.try_recv() {
-                Ok(ToMixer::Play { id, sound, from }) => {
+                Ok(ToMixer::Play { id, sound, from, looping }) => {
                     self.fade_out_current();
                     let gain = if from > 0.0 { 0.0 } else { 1.0 };
-                    self.voice = Some(Voice { id, sound, at: from.max(0.0), gain, target: 1.0 });
+                    let at =
+                        if looping && !sound.is_empty() { from.max(0.0) % sound.len() as f64 } else { from.max(0.0) };
+                    self.voice = Some(Voice { id, sound, at, gain, target: 1.0, looping });
                 }
                 Ok(ToMixer::Seek { id, new_id, from }) => {
                     let Some(v) = self.voice.as_ref().filter(|v| v.id == id) else {
@@ -152,8 +157,19 @@ impl Mixer {
                         (self.to_player)(FromMixer::Ended(new_id));
                         continue;
                     };
-                    let moved =
-                        Voice { id: new_id, sound: Arc::clone(&v.sound), at: from.max(0.0), gain: 0.0, target: 1.0 };
+                    let at = if v.looping && !v.sound.is_empty() {
+                        from.max(0.0) % v.sound.len() as f64
+                    } else {
+                        from.max(0.0)
+                    };
+                    let moved = Voice {
+                        id: new_id,
+                        sound: Arc::clone(&v.sound),
+                        at,
+                        gain: 0.0,
+                        target: 1.0,
+                        looping: v.looping,
+                    };
                     self.fade_out_current();
                     self.voice = Some(moved);
                 }
@@ -197,9 +213,13 @@ fn mix(v: &mut Voice, out: &mut [f32], rate: u32, channels: usize, fade_step: f3
         [only] => (only.as_slice(), only.as_slice(), &[][..]),
         [l, r, rest @ ..] => (l.as_slice(), r.as_slice(), rest),
     };
+    let wrap = v.looping.then_some(len);
     for frame in out.chunks_exact_mut(channels) {
         if v.at >= len as f64 {
-            return true;
+            if !v.looping {
+                return true;
+            }
+            v.at -= len as f64;
         }
         if v.gain < v.target {
             v.gain = (v.gain + fade_step).min(v.target);
@@ -211,9 +231,9 @@ fn mix(v: &mut Voice, out: &mut [f32], rate: u32, channels: usize, fade_step: f3
         }
         // Channels past the first two (centre, surrounds, LFE) go into both sides at -3 dB, so nothing in a quad or
         // 5.1 file goes silent (as C#).
-        let folded: f32 = rest.iter().map(|ch| cubic(ch, v.at)).sum::<f32>() * FOLD_SHARE;
-        let l = (cubic(left, v.at) + folded) * v.gain;
-        let r = (cubic(right, v.at) + folded) * v.gain;
+        let folded: f32 = rest.iter().map(|ch| cubic(ch, v.at, wrap)).sum::<f32>() * FOLD_SHARE;
+        let l = (cubic(left, v.at, wrap) + folded) * v.gain;
+        let r = (cubic(right, v.at, wrap) + folded) * v.gain;
         match frame {
             [only] => *only += 0.5 * (l + r),
             [a, b, ..] => {
@@ -224,15 +244,26 @@ fn mix(v: &mut Voice, out: &mut [f32], rate: u32, channels: usize, fade_step: f3
         }
         v.at += step;
     }
+    // A loop's place is always inside it, also at the end of a buffer.
+    if v.looping && v.at >= len as f64 {
+        v.at -= len as f64;
+    }
     false
 }
 
-/// The sound between samples, by a cubic curve through the four nearest (silence before the start and after the end).
-fn cubic(s: &[f32], at: f64) -> f32 {
+/// The sound between samples, by a cubic curve through the four nearest (silence before the start and after the end,
+/// or, for a loop `wrap` frames long, the other end of the loop).
+fn cubic(s: &[f32], at: f64, wrap: Option<usize>) -> f32 {
     let i = at.floor();
     let t = (at - i) as f32;
     let i = i as isize;
-    let get = |k: isize| usize::try_from(i + k).ok().and_then(|k| s.get(k)).copied().unwrap_or(0.0);
+    let get = |k: isize| {
+        let k = match wrap {
+            Some(len) if len > 0 => Some((i + k).rem_euclid(len as isize) as usize),
+            _ => usize::try_from(i + k).ok(),
+        };
+        k.and_then(|k| s.get(k)).copied().unwrap_or(0.0)
+    };
     let (p0, p1, p2, p3) = (get(-1), get(0), get(1), get(2));
     if t == 0.0 {
         return p1;
@@ -246,6 +277,19 @@ fn cubic(s: &[f32], at: f64) -> f32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_loop_goes_round_with_no_gap() {
+        let (mut m, tx, rx, _) = mixer();
+        let ramp: Vec<f32> = (0..10).map(|i| i as f32 / 10.0).collect();
+        tx.send(ToMixer::Play { id: 1, sound: sound(100, vec![ramp.clone()]), from: 0.0, looping: true }).unwrap();
+        let mut out = vec![0.0; 25];
+        m.render(&mut out, 100, 1);
+        let want: Vec<f32> = (0..25).map(|i| ramp[i % 10]).collect();
+        assert!(out.iter().zip(&want).all(|(a, b)| (a - b).abs() < 1e-6), "{out:?}");
+        // It never says it ended.
+        assert!(rx.try_iter().all(|e| !matches!(e, FromMixer::Ended(_))));
+    }
+
     use std::sync::mpsc::{Receiver, Sender, channel};
 
     use super::*;
@@ -268,7 +312,8 @@ mod tests {
     fn same_rate_comes_out_unchanged_and_mono_goes_to_both_sides() {
         let (mut m, tx, rx, place) = mixer();
         let samples: Vec<f32> = (0..100).map(|i| (i as f32 / 100.0) - 0.5).collect();
-        tx.send(ToMixer::Play { id: 1, sound: sound(48_000, vec![samples.clone()]), from: 0.0 }).unwrap();
+        tx.send(ToMixer::Play { id: 1, sound: sound(48_000, vec![samples.clone()]), from: 0.0, looping: false })
+            .unwrap();
         let mut out = vec![0.0; 2 * 60];
         m.render(&mut out, 48_000, 2);
         for (i, f) in out.as_chunks::<2>().0.iter().enumerate() {
@@ -288,8 +333,13 @@ mod tests {
     #[test]
     fn half_rate_plays_twice_as_long() {
         let (mut m, tx, rx, _) = mixer();
-        tx.send(ToMixer::Play { id: 1, sound: sound(24_000, vec![vec![0.5; 100], vec![-0.5; 100]]), from: 0.0 })
-            .unwrap();
+        tx.send(ToMixer::Play {
+            id: 1,
+            sound: sound(24_000, vec![vec![0.5; 100], vec![-0.5; 100]]),
+            from: 0.0,
+            looping: false,
+        })
+        .unwrap();
         let mut out = vec![0.0; 2 * 300];
         m.render(&mut out, 48_000, 2);
         let heard = out.as_chunks::<2>().0.iter().take_while(|f| f[0] != 0.0).count();
@@ -302,7 +352,13 @@ mod tests {
     #[test]
     fn one_speaker_gets_both_sides_mixed() {
         let (mut m, tx, _rx, _) = mixer();
-        tx.send(ToMixer::Play { id: 1, sound: sound(100, vec![vec![0.4; 10], vec![0.2; 10]]), from: 0.0 }).unwrap();
+        tx.send(ToMixer::Play {
+            id: 1,
+            sound: sound(100, vec![vec![0.4; 10], vec![0.2; 10]]),
+            from: 0.0,
+            looping: false,
+        })
+        .unwrap();
         let mut out = vec![0.0; 4];
         m.render(&mut out, 100, 1);
         assert!((out[1] - 0.3).abs() < 1e-6);
@@ -311,10 +367,12 @@ mod tests {
     #[test]
     fn a_new_sound_fades_the_old_one_out_without_a_click() {
         let (mut m, tx, rx, place) = mixer();
-        tx.send(ToMixer::Play { id: 1, sound: sound(48_000, vec![vec![1.0; 48_000]]), from: 0.0 }).unwrap();
+        tx.send(ToMixer::Play { id: 1, sound: sound(48_000, vec![vec![1.0; 48_000]]), from: 0.0, looping: false })
+            .unwrap();
         let mut out = vec![0.0; 2 * 64];
         m.render(&mut out, 48_000, 2);
-        tx.send(ToMixer::Play { id: 2, sound: sound(48_000, vec![vec![0.0; 48_000]]), from: 0.0 }).unwrap();
+        tx.send(ToMixer::Play { id: 2, sound: sound(48_000, vec![vec![0.0; 48_000]]), from: 0.0, looping: false })
+            .unwrap();
         let mut out = vec![0.0; 2 * 400];
         m.render(&mut out, 48_000, 2);
         // The old sound comes down a little each frame (3 ms is 144 frames at 48 kHz), not all at once.
@@ -330,7 +388,7 @@ mod tests {
     fn seek_moves_only_the_sound_playing() {
         let (mut m, tx, rx, place) = mixer();
         let ramp: Vec<f32> = (0..1000).map(|i| i as f32 / 1000.0).collect();
-        tx.send(ToMixer::Play { id: 5, sound: sound(1000, vec![ramp]), from: 0.0 }).unwrap();
+        tx.send(ToMixer::Play { id: 5, sound: sound(1000, vec![ramp]), from: 0.0, looping: false }).unwrap();
         let mut out = vec![0.0; 10];
         m.render(&mut out, 1000, 1);
         tx.send(ToMixer::Seek { id: 4, new_id: 6, from: 900.0 }).unwrap();
@@ -346,7 +404,7 @@ mod tests {
     #[test]
     fn stop_fades_out_and_hands_the_sound_back() {
         let (mut m, tx, rx, _) = mixer();
-        tx.send(ToMixer::Play { id: 1, sound: sound(1000, vec![vec![1.0; 1000]]), from: 0.0 }).unwrap();
+        tx.send(ToMixer::Play { id: 1, sound: sound(1000, vec![vec![1.0; 1000]]), from: 0.0, looping: false }).unwrap();
         let mut out = vec![0.0; 10];
         m.render(&mut out, 1000, 1);
         tx.send(ToMixer::Stop).unwrap();
@@ -360,7 +418,7 @@ mod tests {
     fn surround_channels_fold_into_both_sides() {
         let (mut m, tx, _rx, _) = mixer();
         let five = vec![vec![0.1; 10], vec![0.2; 10], vec![0.3; 10], vec![0.4; 10], vec![0.0; 10]];
-        tx.send(ToMixer::Play { id: 1, sound: sound(100, five), from: 0.0 }).unwrap();
+        tx.send(ToMixer::Play { id: 1, sound: sound(100, five), from: 0.0, looping: false }).unwrap();
         let mut out = vec![0.0; 4];
         m.render(&mut out, 100, 2);
         assert!((out[0] - (0.1 + 0.7 * FOLD_SHARE)).abs() < 1e-6);
@@ -370,10 +428,10 @@ mod tests {
     #[test]
     fn cubic_passes_through_the_samples_and_stays_silent_outside() {
         let s = [0.0, 1.0, 0.0, -1.0];
-        assert_eq!(cubic(&s, 1.0), 1.0);
-        assert_eq!(cubic(&s, 3.0), -1.0);
-        assert_eq!(cubic(&s, 10.0), 0.0);
-        let mid = cubic(&s, 1.5);
+        assert_eq!(cubic(&s, 1.0, None), 1.0);
+        assert_eq!(cubic(&s, 3.0, None), -1.0);
+        assert_eq!(cubic(&s, 10.0, None), 0.0);
+        let mid = cubic(&s, 1.5, None);
         assert!(mid > 0.0 && mid < 1.0);
     }
 }

@@ -736,9 +736,7 @@ impl Plugins {
                 *counts.entry(*y).or_default() += 1;
             }
         }
-        let mut out: Vec<(i32, usize)> = counts.into_iter().collect();
-        out.sort_by_key(|a| std::cmp::Reverse(a.0));
-        out
+        crate::year_strip::strip(counts)
     }
 
     /// Each plugin your songs use (a DAW's own devices left out), with how many saves use each format. (The Space

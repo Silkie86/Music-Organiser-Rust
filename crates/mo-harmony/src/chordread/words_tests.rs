@@ -100,7 +100,7 @@ fn each_chord_is_told_by_its_bass_and_its_notes_degrees() {
         (
             "22 no bass",
             0,
-            "C6 or Am7 (the same notes): no bass plays, and the chords play C, E, G and A, its root, 3, 5 and 6.",
+            "Unclear, most likely C6: no bass plays, and the chords play C, E, G and A, its root, 3, 5 and 6.",
         ),
         (
             "19 Db13",
@@ -119,6 +119,15 @@ fn each_chord_is_told_by_its_bass_and_its_notes_degrees() {
         assert_eq!(case(name, span).chord, want, "{name} [{span}]");
     }
     assert!(case("41 C, D4 passing", 0).chord.starts_with("Unclear, most likely C: "));
+    // The same notes, where the thresholds give them (those built in never do: the label is outside the group more
+    // than one time in ten): C6 or Am7.
+    let (mut reading, all) = explained(&case_music("22 no bass"), &[], MOST_READINGS);
+    reading.spans[0].answer = ChordAnswer::SameNotes;
+    let words = words_of(&reading, &all, None).swap_remove(0).expect("no words");
+    assert_eq!(
+        words.chord,
+        "C6 or Am7 (the same notes): no bass plays, and the chords play C, E, G and A, its root, 3, 5 and 6."
+    );
 }
 
 #[test]

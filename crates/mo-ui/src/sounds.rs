@@ -66,8 +66,6 @@ const REDISCOVER: i32 = 4;
 const KITS: i32 = 5;
 /// The views, in the switch's order. Ctrl+K offers each one as a page of its own.
 pub const VIEWS: [&str; 6] = ["Tiles", "List", "Galaxy", "History", "Rediscover", "Kits"];
-/// The C# app's export folder setting in `library.db` (kits go in its Kits folder).
-const EXPORT_FOLDER_KEY: &str = "export_folder";
 
 /// Rediscover's How many choices (the C# app's), and the one it starts on.
 const COUNTS: [usize; 4] = [30, 60, 120, 250];
@@ -517,7 +515,12 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
             How::Open | How::InDaw => show_sound_by_id(app, id),
         }
     });
-    PAGE.with(|p| p.borrow_mut().galaxy.db = Some(sounds_db.clone()));
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.galaxy.db = Some(sounds_db.clone());
+        // Kits read the export folder from it as they're exported.
+        p.kit.library = Some(library_db.clone());
+    });
     reading(app);
     let here = HERE.with(|h| *h.borrow());
     let weak = app.as_weak();
@@ -619,7 +622,6 @@ struct Read {
     source: PathBuf,
     view: Option<String>,
     count: Option<String>,
-    export_folder: Option<String>,
     drum_machine: Option<String>,
     autoplay: Option<String>,
     step_ms: Option<String>,
@@ -676,8 +678,6 @@ struct Settings {
     view: Option<String>,
     /// How many sounds Rediscover digs out.
     count: Option<String>,
-    /// Where exports (kits) go.
-    export_folder: Option<String>,
     /// The Drum Machine's ID the C# app read from Bitwig's files, for kits sent to Bitwig.
     drum_machine: Option<String>,
     autoplay: Option<String>,
@@ -703,7 +703,6 @@ impl Settings {
         Settings {
             view: get(VIEW_KEY),
             count: get(COUNT_KEY),
-            export_folder: get(EXPORT_FOLDER_KEY),
             drum_machine: get(to_bitwig::DRUM_MACHINE_KEY),
             autoplay: get(AUTOPLAY_KEY),
             step_ms: get(list::STEP_KEY),
@@ -764,7 +763,6 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, send: impl
         source: first.source.clone(),
         view: settings.view.clone(),
         count: settings.count.clone(),
-        export_folder: settings.export_folder.clone(),
         drum_machine: settings.drum_machine.clone(),
         autoplay: settings.autoplay.clone(),
         step_ms: settings.step_ms.clone(),
@@ -1387,7 +1385,6 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
         let mut p = p.borrow_mut();
         p.galaxy.db = Some(read.source);
         p.re.count = count;
-        p.kit.export_folder = read.export_folder;
         p.kit.drum_machine = read.drum_machine;
         p.step = Duration::from_millis(list::step_ms(read.step_ms.as_deref()));
     });
@@ -2769,7 +2766,7 @@ mod tests {
     }
 
     /// A small song library like the C# app's: two songs, a kick in both, a pad with no notes in one, and settings.
-    fn song_library(name: &str, settings: &[(&str, &str)]) -> PathBuf {
+    pub(super) fn song_library(name: &str, settings: &[(&str, &str)]) -> PathBuf {
         let dir = std::env::temp_dir().join("mo-ui-sounds-test");
         let _ = std::fs::create_dir_all(&dir);
         let path = dir.join(name);

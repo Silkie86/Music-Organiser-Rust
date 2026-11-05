@@ -94,7 +94,7 @@ export global PresetsData {
     callback search-edited(string);
     // The filters, as chips of their own or menus (mo_app::filters).
     in property <FilterView> part-filter;
-    in property <FilterView> maker-filter;
+    in property <FilterView> format-filter;
     in property <FilterView> type-filter;
     in property <FilterView> plugin-filter;
     in property <FilterView> from-filter;
@@ -102,7 +102,7 @@ export global PresetsData {
     in property <string> song;
     in property <bool> any-filter;
     in property <bool> unused;
-    // A filter's choice was picked or unpicked: which filter ("part", "maker", "type", "plugin", "from", or the
+    // A filter's choice was picked or unpicked: which filter ("part", "format", "type", "plugin", "from", or the
     // Curves section's "found-in") and the choice's words; or its menu's Any was.
     callback toggle(string, string);
     callback clear-chip(string);
@@ -620,10 +620,11 @@ export component PresetsPage inherits Rectangle {
                 cleared => { PresetsData.clear-chip("part"); }
             }
             FilterPicks {
-                name: "Made by";
-                filter: PresetsData.maker-filter;
-                toggled(text) => { PresetsData.toggle("maker", text); }
-                cleared => { PresetsData.clear-chip("maker"); }
+                // The plugin's format (VST2, VST3, CLAP, AU, or Native: the DAW's own).
+                name: "Format";
+                filter: PresetsData.format-filter;
+                toggled(text) => { PresetsData.toggle("format", text); }
+                cleared => { PresetsData.clear-chip("format"); }
             }
             FilterPicks {
                 name: "Type";
@@ -632,7 +633,8 @@ export component PresetsPage inherits Rectangle {
                 cleared => { PresetsData.clear-chip("type"); }
             }
             FilterPicks {
-                name: "From";
+                // Where the sound was found: in a song, or as a preset file on disk.
+                name: "Found in";
                 filter: PresetsData.from-filter;
                 toggled(text) => { PresetsData.toggle("from", text); }
                 cleared => { PresetsData.clear-chip("from"); }
