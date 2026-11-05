@@ -21,11 +21,11 @@ use super::link::{CHANGE_TIMEOUT, CONNECT_TIMEOUT, TIMEOUT};
 use super::{DRUM_MACHINE_NAME, DeviceId, Error, Hello, Inserted, Link, PORT};
 
 /// The app's sends wait here for their turn, so they go in one at a time, in the order they came.
-static SENDS: Queue = Queue::new();
+pub(super) static SENDS: Queue = Queue::new();
 
 /// Turns in the order they were asked for, as at a counter: each send takes the next number and waits until it's
 /// called. (A lock on its own lets whichever waiting thread the system picks go next: on Windows, not the first.)
-struct Queue {
+pub(super) struct Queue {
     numbers: Mutex<Numbers>,
     called: Condvar,
 }
@@ -43,7 +43,7 @@ impl Queue {
     }
 
     /// Takes the next number and waits for its turn, which lasts until what this gives back goes.
-    fn wait_turn(&self) -> Turn<'_> {
+    pub(super) fn wait_turn(&self) -> Turn<'_> {
         let mut numbers = self.numbers.lock().unwrap_or_else(PoisonError::into_inner);
         let mine = numbers.next;
         numbers.next += 1;
@@ -55,7 +55,7 @@ impl Queue {
 }
 
 /// A send's turn. The next number is called when this goes, also when the send stopped with a panic.
-struct Turn<'a>(&'a Queue);
+pub(super) struct Turn<'a>(&'a Queue);
 
 impl Drop for Turn<'_> {
     fn drop(&mut self) {

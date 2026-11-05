@@ -44,7 +44,7 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 
 /// The commands that change or select something in Bitwig's project, as the link lists them: each carries
 /// [`Link::only_in`] when it's set. Not `recordabort`, which must reach the link whatever project is in front.
-const PROJECT_COMMANDS: [&str; 14] = [
+const PROJECT_COMMANDS: [&str; 15] = [
     "set",
     "insert",
     "newtrack",
@@ -59,6 +59,7 @@ const PROJECT_COMMANDS: [&str; 14] = [
     "record",
     "probe",
     "stoptracks",
+    "deleteclip",
 ];
 
 /// What the link in Bitwig says when the app connects (and to `hello`).
@@ -151,6 +152,16 @@ pub struct NewTrack {
     pub index: usize,
     pub name: String,
     pub id: Option<String>,
+}
+
+/// The track selected in Bitwig ([`Link::selected_track`], extension 3.19): its place in the project listing, the ID
+/// Bitwig keeps it under (when it says), its name and Bitwig's word for its kind ("Instrument", "Audio"...).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectedTrack {
+    pub index: usize,
+    pub id: Option<String>,
+    pub name: String,
+    pub kind: String,
 }
 
 /// A device in a track's chain, as Bitwig shows it.
@@ -356,6 +367,50 @@ impl Link {
     pub fn add_clip(&mut self, track: usize, path: &str) -> Result<usize, Error> {
         let answer = self.change(ask("clip", [("track", track.into()), ("path", path.into())]))?;
         index(answer.get("slot")).ok_or(Error::Unexpected)
+    }
+
+    /// The track selected in Bitwig, or none when no track is (or it's past the listing the link reaches). Only reads,
+    /// so it needs no changes allowed. Extension 3.19 and later.
+    pub fn selected_track(&mut self) -> Result<Option<SelectedTrack>, Error> {
+        let answer = self.request(ask("selectedtrack", []), self.timeout)?;
+        if !answer.is_object() {
+            return Err(Error::Unexpected);
+        }
+        let Some(index) = index(answer.get("index")) else {
+            return Ok(None);
+        };
+        let id = answer.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).map(str::to_owned);
+        Ok(Some(SelectedTrack { index, id, name: text(&answer, "name"), kind: text(&answer, "type") }))
+    }
+
+    /// Whether Bitwig is playing (`transport`, extension 3.16). Only reads.
+    pub fn is_playing(&mut self) -> Result<bool, Error> {
+        let answer = self.request(ask("transport", []), self.timeout)?;
+        answer.get("playing").and_then(Value::as_bool).ok_or(Error::Unexpected)
+    }
+
+    /// Puts a MIDI file in the first empty clip launcher slot of the track Bitwig keeps under `track_id` and launches
+    /// it (which starts Bitwig playing, in step with the song), noted as the app's audition clip so
+    /// [`Link::delete_audition_clip`] may take it out again. Gives back the slot. Extension 3.19 and later.
+    pub fn add_audition_clip(&mut self, track_id: &str, path: &str) -> Result<usize, Error> {
+        let fields =
+            [("trackId", track_id.into()), ("path", path.into()), ("launch", true.into()), ("audition", true.into())];
+        let answer = self.change(ask("clip", fields))?;
+        index(answer.get("slot")).ok_or(Error::Unexpected)
+    }
+
+    /// Stops the track's clips and takes out the audition clip in `slot` ([`Link::add_audition_clip`]), only while it
+    /// still has the name it came in with; with `stop_bitwig`, Bitwig stops playing too. Whether it was taken out:
+    /// false when it was renamed (so it's yours now) or is gone already.
+    pub fn delete_audition_clip(&mut self, track_id: &str, slot: usize, stop_bitwig: bool) -> Result<bool, Error> {
+        let fields = [
+            ("trackId", track_id.into()),
+            ("slot", slot.into()),
+            ("stop", true.into()),
+            ("transport", stop_bitwig.into()),
+        ];
+        let answer = self.change(ask("deleteclip", fields))?;
+        answer.get("deleted").and_then(Value::as_bool).ok_or(Error::Unexpected)
     }
 
     /// Adds one of Bitwig's own devices to the end of a track's chain, by its ID.

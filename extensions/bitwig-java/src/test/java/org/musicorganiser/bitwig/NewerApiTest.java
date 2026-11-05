@@ -433,4 +433,60 @@ class NewerApiTest {
         int stopped = bitwig.calls.indexOf(List.of("stopTrack", 1));
         assertTrue(launched >= 0 && stopped > launched, String.valueOf(bitwig.calls));
     }
+
+    // ---- playing a part on the selected track (extension 3.19) ----
+
+    @Test
+    @DisplayName("says which track is selected, without needing changes allowed")
+    void saysWhichTrackIsSelected() {
+        startWithABassClip();
+        assertJson(obj("index", 1, "id", "bass-id", "name", "Bass", "type", "Instrument"),
+                   app.ask(obj("id", 1, "cmd", "selectedtrack")).get("result"));
+    }
+
+    @Test
+    @DisplayName("says no track is selected when none is")
+    void saysNoTrackIsSelected() {
+        Model m = LinkTest.song();
+        m.selectedTrack = null;
+        start(m);
+        Map<String, Object> result = SelfCheckTest.map(app.ask(obj("id", 1, "cmd", "selectedtrack")).get("result"));
+        assertTrue(result.containsKey("index") && result.get("index") == null, Json.write(result));
+    }
+
+    @Test
+    @DisplayName("takes out an audition clip it put in, and stops Bitwig when asked")
+    void deletesAnAuditionClip() {
+        Model m = LinkTest.song();
+        m.scenes = 2;
+        m.tracks.get(1).id("bass-id").slots("old.mid");
+        start(m);
+        bitwig.allowChanges(true);
+        assertJson(obj("slot", 1, "launched", true),
+                   app.waitFor(obj("id", 1, "cmd", "clip", "trackId", "bass-id", "path", "C:\\MIDI\\MO Play 1.mid", "launch", true,
+                                   "audition", true)).get("result"));
+        assertJson(obj("deleted", true),
+                   app.waitFor(obj("id", 2, "cmd", "deleteclip", "trackId", "bass-id", "slot", 1, "stop", true, "transport", true))
+                      .get("result"));
+        assertTrue(bitwig.calls.contains(List.of("deleteClip", 1, 1)), String.valueOf(bitwig.calls));
+        assertTrue(bitwig.calls.contains(List.of("stopTrack", 1)), String.valueOf(bitwig.calls));
+        assertTrue(bitwig.calls.contains(List.of("stop")), String.valueOf(bitwig.calls));
+        // Your own clip stays where it is.
+        assertEquals("old.mid", bitwig.state.tracks.get(1).slots.get(0));
+        // Only once: a second ask finds nothing of the app's there.
+        assertJson(obj("deleted", false), app.waitFor(obj("id", 3, "cmd", "deleteclip", "trackId", "bass-id", "slot", 1)).get("result"));
+    }
+
+    @Test
+    @DisplayName("never takes out a clip it didn't put in for an audition")
+    void leavesOtherClipsAlone() {
+        startWithABassClip();
+        bitwig.allowChanges(true);
+        assertJson(obj("deleted", false), app.waitFor(obj("id", 1, "cmd", "deleteclip", "trackId", "bass-id", "slot", 0)).get("result"));
+        // A clip sent without "audition" isn't the app's to take out either.
+        app.waitFor(obj("id", 2, "cmd", "clip", "trackId", "bass-id", "slot", 0, "path", "C:\\MIDI\\Bass.mid", "replace", true));
+        assertJson(obj("deleted", false), app.waitFor(obj("id", 3, "cmd", "deleteclip", "trackId", "bass-id", "slot", 0)).get("result"));
+        assertFalse(bitwig.calls.stream().anyMatch(c -> c.get(0).equals("deleteClip")), String.valueOf(bitwig.calls));
+        assertEquals("Say which track, by its ID.", error(app.waitFor(obj("id", 4, "cmd", "deleteclip", "slot", 0))));
+    }
 }

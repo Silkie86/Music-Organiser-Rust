@@ -43,6 +43,12 @@ pub enum Error {
     KitMissing { sounds: usize, file: String, path: String },
     /// A kit with no sounds on it: nothing to send.
     NoPads,
+    /// Bitwig has an older extension than something needs: the version it has ("" for the script), and the one needed.
+    OldExtension { has: String, needs: &'static str },
+    /// No track is selected in Bitwig, for something that plays on the selected track.
+    NoTrackSelected,
+    /// The selected track can't play notes (an audio, group, effect or master track): its name and Bitwig's kind.
+    NotAnInstrumentTrack { name: String, kind: String },
 }
 
 impl fmt::Display for Error {
@@ -94,7 +100,37 @@ impl fmt::Display for Error {
                  was sent."
             ),
             Error::NoPads => f.write_str("Roll a kit first."),
+            Error::OldExtension { has, needs } if has.is_empty() => write!(
+                f,
+                "This needs the Music Organiser extension {needs} in Bitwig, and Bitwig has the older script. Install \
+                 the extension from Settings > DAWs (close Bitwig first on Windows), then try again."
+            ),
+            Error::OldExtension { has, needs } => write!(
+                f,
+                "This needs the Music Organiser extension {needs} in Bitwig, and Bitwig has {has}. Install it again \
+                 from Settings > DAWs (close Bitwig first on Windows), then try again."
+            ),
+            Error::NoTrackSelected => {
+                f.write_str("Select a track in Bitwig first: the part plays through what's on the selected track.")
+            }
+            Error::NotAnInstrumentTrack { name, kind } => write!(
+                f,
+                "\u{201c}{name}\u{201d} is {} track in Bitwig, so it can't play notes. Select an instrument track.",
+                a_kind(kind)
+            ),
         }
+    }
+}
+
+/// "an audio", "a group"... for Bitwig's word for a track's kind.
+fn a_kind(kind: &str) -> String {
+    let kind = kind.to_lowercase();
+    if kind.is_empty() {
+        "not an instrument".into()
+    } else if kind.starts_with(['a', 'e', 'i', 'o', 'u']) {
+        format!("an {kind}")
+    } else {
+        format!("a {kind}")
     }
 }
 
