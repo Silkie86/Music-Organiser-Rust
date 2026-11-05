@@ -23,9 +23,16 @@ param([string[]]$Folders)
 $ErrorActionPreference = 'Stop'
 # The C# helper and the twin write UTF-8; read them so, whatever the console's code page.
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
-$Data = Join-Path $env:LOCALAPPDATA 'MusicOrganiser'
-$Rust = Join-Path $Data 'run-latest-rust\app'
-$Cs = Join-Path $Data 'run-latest\app'
+$First = Join-Path $env:LOCALAPPDATA 'MusicOrganiser'
+# The launchers stay in the first data folder; the data itself may have moved (Settings, MusicOrganiser-folder.txt).
+$Data = $First
+$Pointer = Join-Path $env:LOCALAPPDATA 'MusicOrganiser-folder.txt'
+if (Test-Path -LiteralPath $Pointer) {
+    $moved = ((Get-Content -LiteralPath $Pointer -Raw -Encoding UTF8 -ErrorAction SilentlyContinue) + '').Trim()
+    if ($moved -and [IO.Path]::IsPathRooted($moved) -and (Test-Path -LiteralPath (Join-Path $moved 'moved-in.json'))) { $Data = $moved }
+}
+$Rust = Join-Path $First 'run-latest-rust\app'
+$Cs = Join-Path $First 'run-latest\app'
 $Logs = Join-Path $Data 'logs'
 $Helper = Join-Path $Data 'twin\cs'
 New-Item -ItemType Directory -Force -Path $Logs | Out-Null

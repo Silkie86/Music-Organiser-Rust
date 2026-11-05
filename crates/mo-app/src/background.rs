@@ -38,12 +38,19 @@ pub fn pool() -> Option<&'static rayon::ThreadPool> {
 /// own, at low priority, so the pages' quick jobs on [`on_pool`] still come back at once while it runs. A few threads
 /// keep a drive busy without making a USB drive jump between many files. Waits for it, so never on the window's thread.
 pub fn on_bulk_pool<T: Send>(work: impl FnOnce() -> T + Send) -> T {
+    install(bulk_pool(), work)
+}
+
+/// The bulk pool itself ([`on_bulk_pool`]), for work that hands jobs to a pool of its own choosing (the MIDI reader,
+/// which reads a whole drive of files: a few at a time keep one drive busy, where one per core made it jump between
+/// them). `None` when the system wouldn't start the threads.
+pub fn bulk_pool() -> Option<&'static rayon::ThreadPool> {
     static BULK: LazyLock<Option<rayon::ThreadPool>> = LazyLock::new(|| {
         let threads = POOL_THREADS.load(std::sync::atomic::Ordering::Relaxed);
         let threads = if threads == 0 { cores() } else { threads };
         build_bulk_pool("Bulk", threads.clamp(1, BULK_THREADS))
     });
-    install(BULK.as_ref(), work)
+    BULK.as_ref()
 }
 
 /// [`on_bulk_pool`] for a backup's copy, which can run for hours: a pool of its own again, so working out the next

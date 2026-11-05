@@ -94,6 +94,15 @@ export global SettingsData {
     in property <bool> output-busy;
     // Whether a Galaxy sweep holds the pointer to the star that's playing.
     in property <bool> sweep-hold;
+    // Where the app keeps its data, and moving it to another drive (mo_app::data_move): the line under it, whether a
+    // copy is running, and whether one is ready for the next start.
+    in property <string> data-folder;
+    in property <string> data-note;
+    in property <bool> data-moving;
+    in property <bool> data-ready;
+    callback move-data();
+    callback stop-data-move();
+    callback cancel-data-move();
     // About.
     in property <string> version;
     in property <string> credit;
@@ -467,6 +476,42 @@ component GeneralTab inherits VerticalLayout {
                 text: "Hold the pointer to the sound";
                 on: SettingsData.sweep-hold;
                 clicked => { SettingsData.toggle-sweep-hold(); }
+            }
+        }
+    }
+    SettingsCard {
+        title: "Where the app keeps its data";
+        intro: "Your library, sound lists, settings, notes and logs. A fast drive with room makes every page quicker. Moving copies everything there and checks each file while you work, then the app switches to it the next time it starts. The old folder stays as it was until you remove it.";
+        Text {
+            text: SettingsData.data-folder;
+            color: Theme.text;
+            font-family: Theme.number-font;
+            font-size: Type.body;
+            wrap: word-wrap;
+        }
+        if SettingsData.data-note != "": Text {
+            text: SettingsData.data-note;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        HorizontalLayout {
+            alignment: start;
+            spacing: Space.sm;
+            if !SettingsData.data-moving: StudioButton {
+                text: "Move to another drive\u{2026}";
+                tip: "Pick a drive or an empty folder: the data goes into a MusicOrganiser folder there";
+                clicked => { SettingsData.move-data(); }
+            }
+            if SettingsData.data-moving: StudioButton {
+                text: "Stop copying";
+                tip: "The copy so far stays: moving to the same place again goes on from there";
+                clicked => { SettingsData.stop-data-move(); }
+            }
+            if SettingsData.data-ready: StudioButton {
+                text: "Don't switch";
+                tip: "The app keeps using this folder; the copy stays where it is until you remove it";
+                clicked => { SettingsData.cancel-data-move(); }
             }
         }
     }
