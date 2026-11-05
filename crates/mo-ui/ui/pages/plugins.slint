@@ -49,6 +49,9 @@ export struct RoomFolder {
     // "Shared with Kontakt 7".
     shared: string,
     added: bool,
+    // "Not its" (or "Take off") can leave it out; `at` is its place in the list.
+    can-say: bool,
+    at: int,
 }
 
 // A song (or a save) using the picked plugin.
@@ -145,6 +148,10 @@ export global PluginsData {
     in property <string> room-shared;
     in property <[RoomBar]> room-bars;
     in property <[RoomFolder]> room-folders;
+    // "Add a folder…" can add one the guess missed.
+    in property <bool> can-add-folder;
+    callback folder-not-its(int);
+    callback add-folder();
     in property <string> sizes-note;
     // Clean up or Uninstall, on the On disk tab: 0 looking (checking the folders, or for its uninstaller), 1 the list to
     // tick (for Uninstall, its uninstallers to pick one of, or its plugin files), 2 working (sending to the Recycle Bin,
@@ -619,6 +626,12 @@ component PluginPanel inherits SidePanel {
                     font-family: Theme.number-font;
                     font-size: Type.meta;
                 }
+                if f.can-say: LinkText {
+                    text: f.added ? "Take off" : "Not its";
+                    tint: Theme.muted;
+                    font-size: Type.meta;
+                    clicked => { PluginsData.folder-not-its(f.at); }
+                }
             }
             Text {
                 text: f.path;
@@ -633,6 +646,13 @@ component PluginPanel inherits SidePanel {
                 font-size: Type.small;
                 wrap: word-wrap;
                 min-width: 0px;
+            }
+        }
+        if PluginsData.can-add-folder: HorizontalLayout {
+            alignment: start;
+            StudioButton {
+                text: "Add a folder…";
+                clicked => { PluginsData.add-folder(); }
             }
         }
         Text {

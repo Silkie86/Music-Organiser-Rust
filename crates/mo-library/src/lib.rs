@@ -10,10 +10,12 @@ mod db;
 pub mod folders;
 pub mod list_copy;
 pub mod moves;
+pub mod plugin_folders;
 pub mod plugins;
 pub mod read;
 pub mod samples;
 pub mod scan;
+mod setting_list;
 pub mod songs;
 pub mod watch;
 
