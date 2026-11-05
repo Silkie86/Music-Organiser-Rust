@@ -15,7 +15,8 @@
 //!    folder gets a note, [`MOVED_OUT_FILE`], and nothing in it is removed or changed.
 //!
 //! Left out of the copy: the launchers' own folders ([`LAUNCHER_FOLDERS`]: the launcher runs the app from there and
-//! stays where it is), what [`LEFT_BEHIND`] names, lock files (`*.lock`, only for a running app) and half-written
+//! stays where it is), what [`LEFT_BEHIND`] names, the app's own lock files ([`RUNNING_LOCKS`], only for a running app; other `.lock` files, such as a
+//! `Cargo.lock` in a tool's folder, are copied) and half-written
 //! saves (`*.mo-part`). A database's `-wal` and `-shm` files go with it, so the stamps the app keeps of its databases
 //! (which read them) still match after the move. A link or a junction in the folder (`logs` moved to another drive,
 //! say) is copied through: the new folder gets a plain folder with its files, so nothing the app reads goes missing; one
@@ -53,6 +54,8 @@ pub const MOVED_OUT_FILE: &str = "MOVED - the app now uses another folder.txt";
 /// In the data folder: every running copy of the app holds it shared; the switch needs it alone. An empty file that
 /// stays (like tidy's `tidy-notes.lock`).
 pub const OPEN_LOCK_FILE: &str = "app-open.lock";
+/// The app's own lock files, which only mean something while an app runs (and may be held locked): never copied.
+pub const RUNNING_LOCKS: [&str; 3] = [OPEN_LOCK_FILE, crate::tidy::NOTES_LOCK_FILE, crate::note::WRITING_FILE];
 /// Folders at the top of the data folder that are the launchers', not the app's data: never copied.
 pub const LAUNCHER_FOLDERS: [&str; 2] = ["run-latest-rust", "run-latest"];
 /// Files at the top of the data folder the app no longer opens, so not copied (the old databases once the Rust ones
@@ -226,7 +229,7 @@ fn walk(from: &Path, inside: &[&Path], notes: &mut Vec<String>, stop: &AtomicBoo
                     folders.push((entry.path(), here));
                 }
             } else if meta.is_file() {
-                if name.ends_with(".lock") || name.ends_with(PART) || name.ends_with(".mo-part") {
+                if RUNNING_LOCKS.contains(&name.as_str()) || name.ends_with(PART) || name.ends_with(".mo-part") {
                     continue;
                 }
                 match Stamp::of(&meta) {
@@ -838,6 +841,8 @@ mod tests {
             fs::write(first.join("logs").join("session.log"), b"line\n").unwrap();
             fs::write(first.join("notes").join("draft.txt"), b"words").unwrap();
             fs::write(first.join("notes").join("writing.lock"), b"123").unwrap();
+            fs::create_dir_all(first.join("keyrefit").join("repo")).unwrap();
+            fs::write(first.join("keyrefit").join("repo").join("Cargo.lock"), b"# lock").unwrap();
             fs::create_dir_all(first.join("run-latest-rust").join("app")).unwrap();
             fs::write(first.join("run-latest-rust").join("app").join("Cargo.toml"), b"x").unwrap();
             let to = root.join("I").join("MusicOrganiser");
@@ -859,7 +864,7 @@ mod tests {
     fn copies_checks_then_switches_at_the_next_start() {
         let s = Setup::new("whole");
         let copied = s.copy().unwrap();
-        assert_eq!(copied.files, 6);
+        assert_eq!(copied.files, 7);
         // Ready, not switched: the app still uses the first folder.
         assert_eq!(pending_in(&s.first), Some(s.to.clone()));
         assert_eq!(paths::folder_in_use(&s.first), s.first);
@@ -871,6 +876,8 @@ mod tests {
         assert!(s.to.join("library.db-shm").is_file());
         assert!(!s.to.join("run-latest-rust").exists());
         assert!(!s.to.join("notes").join("writing.lock").exists());
+        // Another program's .lock file (a tool's Cargo.lock) is data like any other.
+        assert!(s.to.join("keyrefit").join("repo").join("Cargo.lock").is_file());
 
         // The last run changed a setting and wrote its log, and a note went.
         fs::write(s.first.join("rust-settings.json"), b"{\"theme\":\"Paper\"}").unwrap();
@@ -900,7 +907,7 @@ mod tests {
             fs::write(s.first.join(name), b"C#").unwrap();
         }
         // No sounds-rust.db yet: sounds.db is the only sound library, so it goes.
-        assert_eq!(s.copy().unwrap().files, 9);
+        assert_eq!(s.copy().unwrap().files, 10);
         assert!(s.to.join("sounds.db").is_file());
         // There: sounds.db stays in the old folder for the archive step (and leaves the copy, as a file gone does).
         fs::write(s.first.join(mo_sounds::compact::FILE_NAME), b"Rust").unwrap();
@@ -934,7 +941,7 @@ mod tests {
         assert!(pending_in(&s.first).is_none());
         // Its own folder now (it holds the record), so going on is allowed.
         let copied = s.copy().unwrap();
-        assert_eq!(copied.files, 6);
+        assert_eq!(copied.files, 7);
     }
 
     #[test]
