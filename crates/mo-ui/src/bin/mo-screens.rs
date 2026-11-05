@@ -627,6 +627,14 @@ fn sounds_shots(
     data.invoke_select(0);
     capture(window);
     shots.push(("sounds-panel-long.png".into(), capture(window)));
+    // The same card's switch on its other side: the projects that use the sound, newest first, with the card turned
+    // down to them.
+    data.set_card_list(1);
+    capture(window);
+    let top = capture(window);
+    let down = card_down(window, &top, "sounds-panel-used-in.png").map_err(|e| e.to_string())?;
+    shots.push(("sounds-panel-used-in.png".into(), down));
+    data.set_card_list(0);
     let wide = data.get_panel_width();
     data.set_panel_width(320.0);
     capture(window);
@@ -1568,12 +1576,40 @@ fn sample_sounds() -> mo_ui::sounds::Library {
         .filter(|id| id % 3 != 0)
         .map(|id: i64| {
             let projects = (id * 7 % 11) as u32;
-            (id, mo_sounds::usage::Usage { projects, recent: projects / 2, years: vec![2025, 2026] })
+            // Which of the made-up projects below: each a different one.
+            let mut project_ids: Vec<i64> = (0..i64::from(projects)).map(|n| (id * 3 + n) % 12).collect();
+            project_ids.sort_unstable();
+            (id, mo_sounds::usage::Usage { projects, recent: projects / 2, years: vec![2025, 2026], project_ids })
         })
         .filter(|(_, u)| u.projects > 0)
         .collect();
+    // Twelve made-up projects for the card's Used in list, saved a week or so apart (names invented here, none of
+    // Solomon's: rule 4).
+    let names = [
+        "Night drive",
+        "Sunday loop",
+        "Glass rooms",
+        "Low tide",
+        "Paper planes",
+        "Static bloom",
+        "Late bus",
+        "Copper sky",
+        "Slow motion",
+        "Bright side",
+        "Field notes",
+        "Neon rain",
+    ];
+    let now = chrono::Local::now().timestamp();
+    let projects = (0i64..)
+        .zip(names)
+        .map(|(id, name)| {
+            let (daw, ending) = if id % 3 == 2 { ("Bitwig Studio", "bwproject") } else { ("FL Studio", "flp") };
+            let path = format!(r"C:\Music\{daw}\{name}.{ending}");
+            (id, mo_library::ProjectFile { id, path, mtime: now - id * 9 * 86_400 })
+        })
+        .collect();
     let weights = mo_sounds::liking::LikedWeights::default();
-    mo_ui::sounds::Library::new(sounds, played, &weights).with_usage(usage, &weights)
+    mo_ui::sounds::Library::new(sounds, played, &weights).with_usage(usage, projects, &weights)
 }
 
 /// A made-up library for the Songs page: names, plugins and dates invented here, none of Solomon's (rule 4).
@@ -1843,7 +1879,7 @@ const PAGE_DOWN: f32 = 300.0;
 /// doesn't scroll on its own, as the lists and the arrangement in it do.
 const NARROW_PANEL_WHEEL: (f32, f32, f32) = (760.0, 404.0, -2.0 * PAGE_DOWN);
 const OLDER_BUTTON: (f32, f32) = (1005.0, 368.0);
-/// Where the wheel turns the Space page's card down to its end, and by more than enough: on its list of parts.
+/// Where the wheel turns a page's card (Space's, or Sounds') down to its end, and by more than enough: on its parts.
 const SPACE_CARD_WHEEL: (f32, f32, f32) = (1240.0, 600.0, -10.0 * PAGE_DOWN);
 /// The second line on the galaxy's Swept card, after the sweep.
 const SWEPT_LINE: (f32, f32) = (760.0, 410.0);
@@ -1962,8 +1998,8 @@ fn scroll(window: &MinimalSoftwareWindow, x: f32, y: f32, dy: f32) {
     window.dispatch_event(slint::platform::WindowEvent::PointerScrolled { position, delta_x: 0.0, delta_y: dy });
 }
 
-/// The Space page's card turned down to its end (`top` is how it looked before; `name` names the shot), then back to its
-/// top for the shots that follow. Err when the wheel moved nothing: is it still on the card?
+/// A page's card (Space's, or Sounds') turned down to its end (`top` is how it looked before; `name` names the shot),
+/// then back to its top for the shots that follow. Err when the wheel moved nothing: is it still on the card?
 fn card_down(window: &MinimalSoftwareWindow, top: &[u8], name: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let (x, y, turn) = SPACE_CARD_WHEEL;
     scroll(window, x, y, turn);

@@ -111,6 +111,15 @@ export struct TrailDot {
     fade: float,
 }
 
+// A project on the picked sound's card: its save's id (to open it on the Songs page), name, DAW and the day it was
+// last saved.
+export struct UsedInLine {
+    id: int,
+    name: string,
+    daw: string,
+    saved: string,
+}
+
 export struct PickedSound {
     name: string,
     sound-type: string,
@@ -128,12 +137,22 @@ export struct PickedSound {
     character: string,
     // Why it's as liked as it is, once that's known: "Favourite, in 4 projects, played 12 times".
     liked-why: string,
+    // The projects that use it, newest first (or, for a sound Rediscover dug out that none use, those of the sound it
+    // sounds like), with the words on the card's switch ("Used in 4") and above the list.
+    projects: [UsedInLine],
+    projects-title: string,
+    projects-note: string,
 }
 
 export global SoundsData {
     // Sounds like the picked one, most alike first, and a word while there are none to show.
     in property <[AlikeLine]> alike;
     in property <string> alike-note;
+    // Which list the card shows under its switch: 0 the sounds like it, 1 the projects that use it. It stays as
+    // picked from sound to sound.
+    in-out property <int> card-list;
+    // A project on the card's Used in list was clicked: it opens on the Songs page.
+    callback open-project(int);
     callback pick-alike(int);
     callback play-alike(int);
     in property <string> summary;
@@ -901,6 +920,9 @@ component FoldersCard inherits Rectangle {
 // tags. Nothing in it may be wider than the card: long names and paths wrap, and so do the buttons and tags.
 component SoundPanel inherits SidePanel {
     close => { SoundsData.close-panel(); }
+    // How wide its parts are, inside the panel's padding: given to the words that wrap inside an `if`, which Slint
+    // would measure as one line otherwise.
+    property <length> inside: root.width - 2 * Space.xl;
     HorizontalLayout {
         spacing: Space.sm;
         alignment: start;
@@ -1029,56 +1051,112 @@ component SoundPanel inherits SidePanel {
     }
     VerticalLayout {
         spacing: Space.xs;
-        Caps { text: "SOUNDS LIKE THIS"; }
-        if SoundsData.alike-note != "": Text {
+        // The sounds like it, or the projects that use it: one switch, as the card has room for one list (Solomon's
+        // F12 note, 5 Nov 2026: "a list of projects used in ... on the card somewhere you can switch to see").
+        HorizontalLayout {
+            alignment: start;
+            Segmented {
+                choices: ["Sounds like this", SoundsData.picked.projects-title];
+                current: SoundsData.card-list;
+                picked(i) => { SoundsData.card-list = i; }
+            }
+        }
+        if SoundsData.card-list == 0 && SoundsData.alike-note != "": Text {
+            width: root.inside;
             text: SoundsData.alike-note;
             color: Theme.muted;
             font-size: Type.meta;
             wrap: word-wrap;
         }
-        for a in SoundsData.alike: ListLine {
-            height: 28px;
-            draggable: true;
-            lifted: a.place == SoundsData.lifted-alike;
-            landed: a.place == SoundsData.landed-alike;
-            drag-out => { SoundsData.drag-alike(a.place); }
-            drag-let-go => { SoundsData.drag-let-go(); }
-            clicked => { SoundsData.pick-alike(a.place); }
-            double-clicked => { SoundsData.play-alike(a.place); }
-            HorizontalLayout {
-                width: 100%;
-                height: 100%;
-                padding-left: Space.sm;
-                padding-right: Space.sm;
-                spacing: Space.sm;
-                VerticalLayout {
-                    alignment: center;
-                    Dot { tint: Theme.sound-type(a.colour); }
+        if SoundsData.card-list == 0: VerticalLayout {
+            spacing: Space.xs;
+            for a in SoundsData.alike: ListLine {
+                height: 28px;
+                draggable: true;
+                lifted: a.place == SoundsData.lifted-alike;
+                landed: a.place == SoundsData.landed-alike;
+                drag-out => { SoundsData.drag-alike(a.place); }
+                drag-let-go => { SoundsData.drag-let-go(); }
+                clicked => { SoundsData.pick-alike(a.place); }
+                double-clicked => { SoundsData.play-alike(a.place); }
+                HorizontalLayout {
+                    width: 100%;
+                    height: 100%;
+                    padding-left: Space.sm;
+                    padding-right: Space.sm;
+                    spacing: Space.sm;
+                    VerticalLayout {
+                        alignment: center;
+                        Dot { tint: Theme.sound-type(a.colour); }
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        preferred-width: 0px;
+                        min-width: 0px;
+                        text: a.name;
+                        color: Theme.text;
+                        font-size: Type.meta;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: a.sound-type;
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                        vertical-alignment: center;
+                    }
+                    Text {
+                        width: 36px;
+                        text: a.likeness;
+                        color: Theme.muted;
+                        font-family: Theme.number-font;
+                        font-size: Type.meta;
+                        vertical-alignment: center;
+                        horizontal-alignment: right;
+                    }
                 }
-                Text {
-                    horizontal-stretch: 1;
-                    preferred-width: 0px;
-                    min-width: 0px;
-                    text: a.name;
-                    color: Theme.text;
-                    font-size: Type.meta;
-                    vertical-alignment: center;
-                    overflow: elide;
-                }
-                Text {
-                    text: a.sound-type;
-                    color: Theme.muted;
-                    font-size: Type.meta;
-                    vertical-alignment: center;
-                }
-                Text {
-                    width: 36px;
-                    text: a.likeness;
-                    color: Theme.muted;
-                    font-family: Theme.number-font;
-                    font-size: Type.meta;
-                    vertical-alignment: center;
-                    horizontal-alignment: right;
+            }
+        }
+        if SoundsData.card-list == 1 && SoundsData.picked.projects-note != "": Text {
+            width: root.inside;
+            text: SoundsData.picked.projects-note;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        if SoundsData.card-list == 1: VerticalLayout {
+            spacing: Space.xs;
+            for u in SoundsData.picked.projects: ListLine {
+                height: 28px;
+                tip: "Open it on the Songs page";
+                clicked => { SoundsData.open-project(u.id); }
+                HorizontalLayout {
+                    width: 100%;
+                    height: 100%;
+                    padding-left: Space.sm;
+                    padding-right: Space.sm;
+                    spacing: Space.sm;
+                    VerticalLayout {
+                        alignment: center;
+                        Dot { tint: Theme.daw(u.daw); }
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        preferred-width: 0px;
+                        min-width: 0px;
+                        text: u.name;
+                        color: Theme.text;
+                        font-size: Type.meta;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    Text {
+                        text: u.saved;
+                        color: Theme.muted;
+                        font-family: Theme.number-font;
+                        font-size: Type.meta;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }
