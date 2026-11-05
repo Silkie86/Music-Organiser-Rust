@@ -28,6 +28,16 @@ pub enum LibraryError {
     /// A setting holds something that isn't what it should be (a folder list that isn't a list of text): what's
     /// wrong with it. Asked of where reading it as empty could let something of yours be removed.
     Setting { key: String, why: String },
+    /// A change wasn't made because another app (the C# app saving a scan) held the library for longer than the wait.
+    /// Nothing was changed; trying again later can work.
+    Busy { path: PathBuf },
+}
+
+impl LibraryError {
+    /// Whether trying again in a moment could work: the library was busy.
+    pub fn is_busy(&self) -> bool {
+        matches!(self, LibraryError::Busy { .. })
+    }
 }
 
 impl fmt::Display for LibraryError {
@@ -37,6 +47,13 @@ impl fmt::Display for LibraryError {
             LibraryError::Read(e) => write!(f, "Couldn't read the library: {e}"),
             LibraryError::Write { path, why } => write!(f, "Couldn't change the library {}: {why}", path.display()),
             LibraryError::Setting { key, why } => write!(f, "The library's {key} setting couldn't be read: {why}"),
+            LibraryError::Busy { path } => {
+                write!(
+                    f,
+                    "The library {} was busy (the old app may be saving a scan), so nothing was changed",
+                    path.display()
+                )
+            }
         }
     }
 }
@@ -372,6 +389,21 @@ impl Library {
     pub fn list_setting(&self, key: &str) -> Result<Vec<String>, LibraryError> {
         let Some(json) = self.setting(key)? else { return Ok(Vec::new()) };
         Ok(serde_json::from_str::<Vec<String>>(&json).unwrap_or_default())
+    }
+
+    /// A setting's text, or `None` when it isn't set (or is NULL); a value that isn't text is an error, never no value.
+    pub fn strict_setting(&self, key: &str) -> Result<Option<String>, LibraryError> {
+        if !self.has("settings") {
+            return Ok(None);
+        }
+        let mut st = self.conn.prepare("SELECT value FROM settings WHERE key = ?1")?;
+        let mut rows = st.query([key])?;
+        let Some(r) = rows.next()? else { return Ok(None) };
+        match r.get_ref("value")? {
+            ValueRef::Null => Ok(None),
+            ValueRef::Text(t) => Ok(Some(String::from_utf8_lossy(t).into_owned())),
+            _ => Err(LibraryError::Setting { key: key.to_owned(), why: "it isn't text".to_owned() }),
+        }
     }
 
     /// A list setting, as [`Library::list_setting`], but one that isn't a list of text is an error rather than no

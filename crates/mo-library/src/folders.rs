@@ -199,8 +199,11 @@ fn read_list(conn: &Connection, list: FolderList) -> Result<Vec<String>, String>
 }
 
 /// Opens an existing library to change it: never makes one.
-fn open(library: &Path) -> Result<Connection, LibraryError> {
+pub(crate) fn open(library: &Path) -> Result<Connection, LibraryError> {
     let open_error = |why: String| LibraryError::Open { path: library.to_owned(), why };
+    if !library.is_file() {
+        return Err(open_error("it isn't there".to_owned()));
+    }
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = Connection::open_with_flags(library, flags).map_err(|e| open_error(e.to_string()))?;
     // The C# app may be saving a scan: wait for it rather than fail.

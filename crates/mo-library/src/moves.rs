@@ -9,13 +9,14 @@
 //! or a table.
 
 use std::path::Path;
-use std::time::Duration;
 
 use rusqlite::types::ValueRef;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{ErrorCode, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::Value;
 
 use crate::LibraryError;
+use crate::folders::open;
+use crate::scan::path_key;
 
 /// The setting the C# app keeps its moved folders in.
 pub const MOVED_FOLDERS: &str = "space_moved_folders";
@@ -29,9 +30,11 @@ pub fn add_moved_folder(library: &Path, entry: &str) -> Result<(), LibraryError>
         .ok()
         .filter(Value::is_object)
         .ok_or_else(|| write_error("the move to record isn't one move, so nothing was changed".to_owned()))?;
-    let entry = &entry;
-    let sql = |e: rusqlite::Error| write_error(e.to_string());
-    let Some(from) = entry.get("From").and_then(Value::as_str).map(same_place) else {
+    let sql = |e: rusqlite::Error| match e.sqlite_error_code() {
+        Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => LibraryError::Busy { path: library.to_owned() },
+        _ => write_error(e.to_string()),
+    };
+    let Some(from) = entry.get("From").and_then(Value::as_str).map(path_key) else {
         return Err(write_error("the move to record has no From folder, so nothing was changed".to_owned()));
     };
     let mut conn = open(library)?;
@@ -46,7 +49,7 @@ pub fn add_moved_folder(library: &Path, entry: &str) -> Result<(), LibraryError>
     // IMMEDIATE takes the write lock at the start, so the list read is the one written over.
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql)?;
     let mut list = read(&tx).map_err(write_error)?;
-    list.retain(|m| m.get("From").and_then(Value::as_str).map(same_place).as_deref() != Some(from.as_str()));
+    list.retain(|m| m.get("From").and_then(Value::as_str).map(path_key).as_deref() != Some(from.as_str()));
     list.push(entry.clone());
     let json = serde_json::to_string(&list).map_err(|e| write_error(format!("couldn't write the list ({e})")))?;
     tx.execute(
@@ -60,11 +63,6 @@ pub fn add_moved_folder(library: &Path, entry: &str) -> Result<(), LibraryError>
     }
     tx.commit().map_err(sql)?;
     Ok(())
-}
-
-/// A folder as moves compare them: `/` between folders, no `/` at the end, letter case ignored.
-fn same_place(path: &str) -> String {
-    mo_formats::case::key(path.replace('\\', "/").trim_end_matches('/'))
 }
 
 /// The moved folders as kept now: NULL or missing is none; anything that isn't a JSON list is refused.
@@ -88,30 +86,30 @@ fn read(tx: &Transaction<'_>) -> Result<Vec<Value>, String> {
     }
 }
 
-/// Opens an existing library to change it: never makes one.
-fn open(library: &Path) -> Result<Connection, LibraryError> {
-    let open_error = |why: String| LibraryError::Open { path: library.to_owned(), why };
-    if !library.is_file() {
-        return Err(open_error("it isn't there".to_owned()));
-    }
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = Connection::open_with_flags(library, flags).map_err(|e| open_error(e.to_string()))?;
-    // The C# app may be saving a scan: wait for it rather than fail.
-    conn.busy_timeout(Duration::from_secs(5)).map_err(|e| open_error(e.to_string()))?;
-    Ok(conn)
-}
-
 #[cfg(test)]
 mod tests {
+    use rusqlite::Connection;
     use serde_json::json;
 
     use super::*;
 
+    /// A file in a folder of this run's own, so two runs at once don't share files; cleared first.
+    fn place(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("mo-library-moves-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(name);
+        for end in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{end}", path.display()));
+        }
+        path
+    }
+
     fn library(name: &str, value: Option<&str>) -> std::path::PathBuf {
-        let path = std::env::temp_dir().join(name);
-        let _ = std::fs::remove_file(&path);
+        let path = place(name);
         let conn = Connection::open(&path).unwrap();
-        conn.execute_batch("CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);").unwrap();
+        // As the C# app keeps it.
+        conn.execute_batch("PRAGMA journal_mode = WAL; CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);")
+            .unwrap();
         if let Some(v) = value {
             conn.execute("INSERT INTO settings VALUES (?1, ?2)", [MOVED_FOLDERS, v]).unwrap();
         }
@@ -130,7 +128,7 @@ mod tests {
     fn a_move_is_added_beside_the_ones_there_and_replaces_one_of_the_same_folder() {
         let csharp =
             r#"[{"From":"C:\\Old\\Kits","To":"E:\\Kits","OldCopy":"","Bytes":5,"Moved":"2026-10-26T14:03:12+01:00"}]"#;
-        let path = library("mo-library-moves-add.db", Some(csharp));
+        let path = library("add.db", Some(csharp));
         let entry = json!({"From": "C:\\Users\\me\\Documents\\Arcade", "To": "E:\\Arcade", "Bytes": 10});
         add_moved_folder(&path, &entry.to_string()).unwrap();
         let list: Vec<Value> = serde_json::from_str(&kept(&path).unwrap()).unwrap();
@@ -147,11 +145,11 @@ mod tests {
 
     #[test]
     fn a_setting_it_cant_read_is_left_as_it_is() {
-        let path = library("mo-library-moves-bad.db", Some("not json"));
+        let path = library("bad.db", Some("not json"));
         assert!(add_moved_folder(&path, &json!({"From": "C:\\A", "To": "E:\\A"}).to_string()).is_err());
         assert_eq!(kept(&path).as_deref(), Some("not json"));
         // None yet: the first one.
-        let path = library("mo-library-moves-none.db", None);
+        let path = library("none.db", None);
         add_moved_folder(&path, &json!({"From": "C:\\A", "To": "E:\\A"}).to_string()).unwrap();
         assert!(kept(&path).unwrap().contains("E:\\\\A"));
         // Something that isn't one move is refused.
@@ -159,8 +157,14 @@ mod tests {
         // An entry without its folder is refused.
         assert!(add_moved_folder(&path, &json!({"To": "E:\\B"}).to_string()).is_err());
         // A library that isn't there isn't made.
-        let gone = std::env::temp_dir().join("mo-library-moves-not-there.db");
-        let _ = std::fs::remove_file(&gone);
+        let gone = place("not-there.db");
         assert!(add_moved_folder(&gone, &json!({"From": "C:\\A"}).to_string()).is_err() && !gone.exists());
+    }
+
+    #[test]
+    fn a_setting_that_isnt_text_is_left_as_it_is() {
+        let path = library("blob.db", None);
+        Connection::open(&path).unwrap().execute("INSERT INTO settings VALUES (?1, x'00')", [MOVED_FOLDERS]).unwrap();
+        assert!(add_moved_folder(&path, &json!({"From": "C:\\A"}).to_string()).is_err());
     }
 }

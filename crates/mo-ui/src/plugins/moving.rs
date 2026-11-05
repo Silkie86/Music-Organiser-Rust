@@ -4,9 +4,10 @@
 //! worker. Then the move is added to the library's moved folders (`mo_library::moves`), so the old app and Space know
 //! of it and its old copy.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 
 use mo_app::log;
 use mo_app::plugins::moving::{self, Ask};
@@ -44,7 +45,12 @@ pub(super) fn start(app: &AppWindow) {
             warning: String::new(),
             id: p.clean_asked,
             stop: Arc::new(AtomicBool::new(false)),
-            stage: Stage::MovePick { intro, picked: (!ask.folders.is_empty()).then_some(0), ask: Arc::new(ask) },
+            stage: Stage::MovePick {
+                intro,
+                picked: (!ask.folders.is_empty()).then_some(0),
+                choosing: false,
+                ask: Arc::new(ask),
+            },
         });
         Some(())
     });
@@ -56,51 +62,120 @@ pub(super) fn start(app: &AppWindow) {
 
 /// The card's main button: pick where the folder goes, or move it.
 pub(super) fn confirm(app: &AppWindow) {
-    let what = PAGE.with(|p| match p.borrow().clean.as_ref().map(|c| &c.stage) {
-        Some(Stage::MovePick { ask, picked: Some(at), .. }) => Some((true, ask.clone(), *at, String::new())),
-        Some(Stage::MoveReady { ask, folder, destination, .. }) => {
-            Some((false, ask.clone(), *folder, destination.clone()))
-        }
-        _ => None,
-    });
-    let Some((picking, ask, at, destination)) = what else { return };
-    if picking {
-        let weak = app.as_weak();
-        crate::backup::pick_folder("Pick where the folder goes (on another drive)", move |path| {
-            if let Some(app) = weak.upgrade() {
-                check(&app, ask, at, path.to_string_lossy().into_owned());
+    enum Next {
+        Choose(u64, Arc<Ask>, usize),
+        Go(Arc<Ask>, usize, u64, String),
+    }
+    let next = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let c = p.clean.as_mut()?;
+        let id = c.id;
+        match &mut c.stage {
+            Stage::MovePick { ask, picked: Some(at), choosing, .. } if !*choosing => {
+                // One picker at a time, and the folder stays picked while it's open.
+                *choosing = true;
+                Some(Next::Choose(id, ask.clone(), *at))
             }
-        });
-    } else {
-        go(app, ask, at, destination);
+            Stage::MoveReady { ask, folder, bytes, destination, .. } => {
+                Some(Next::Go(ask.clone(), *folder, *bytes, destination.clone()))
+            }
+            _ => None,
+        }
+    });
+    match next {
+        Some(Next::Choose(id, ask, at)) => {
+            fill(app);
+            let weak = app.as_weak();
+            choose_folder(move |path| {
+                let Some(app) = weak.upgrade() else { return };
+                match path {
+                    Some(path) => check(&app, id, ask, at, path.to_string_lossy().into_owned()),
+                    None => chosen_none(&app, id),
+                }
+            });
+        }
+        Some(Next::Go(ask, at, bytes, destination)) => go(app, ask, at, bytes, destination),
+        None => {}
     }
 }
 
-/// Reads your folders and the moves made already, as the library keeps them now.
+/// The folder picker; `then` hears the folder, or `None` when it closed without one (or couldn't open).
+fn choose_folder(then: impl FnOnce(Option<PathBuf>) + 'static) {
+    let then = std::rc::Rc::new(std::cell::RefCell::new(Some(then)));
+    let later = then.clone();
+    let asked = slint::spawn_local(async move {
+        let folder = rfd::AsyncFileDialog::new()
+            .set_title("Pick where the folder goes (on another drive)")
+            .pick_folder()
+            .await
+            .map(|f| f.path().to_path_buf());
+        if let Some(then) = later.borrow_mut().take() {
+            then(folder);
+        }
+    });
+    if let Err(e) = asked {
+        log::error("Plugins", &format!("Couldn't open the folder picker: {e}"));
+        if let Some(then) = then.borrow_mut().take() {
+            then(None);
+        }
+    }
+}
+
+/// The picker closed without a folder: the card can pick again.
+fn chosen_none(app: &AppWindow, id: u64) {
+    PAGE.with(|p| {
+        if let Some(Cleaning { stage: Stage::MovePick { choosing, .. }, .. }) =
+            p.borrow_mut().clean.as_mut().filter(|c| c.id == id)
+        {
+            *choosing = false;
+        }
+    });
+    fill(app);
+}
+
+/// Reads your folders and the moves made already, as the library keeps them now. Each error is a whole sentence.
 fn library_now(library: &Path) -> Result<(Vec<String>, Vec<mo_space::folder_move::MovedFolder>), String> {
-    let lib = Library::open_read_only(library).map_err(|e| e.to_string())?;
-    let protected = lib.protected_roots().map_err(|e| e.to_string())?;
-    let moved = moving::moved_now(lib.setting(MOVED_FOLDERS).map_err(|e| e.to_string())?.as_deref())?;
+    let sentence = |e: mo_library::LibraryError| {
+        let t = e.to_string();
+        if t.ends_with('.') { t } else { format!("{t}.") }
+    };
+    let lib = Library::open_read_only(library).map_err(sentence)?;
+    let protected = lib.protected_roots().map_err(sentence)?;
+    let moved = moving::moved_now(lib.strict_setting(MOVED_FOLDERS).map_err(sentence)?.as_deref())?;
     Ok((protected, moved))
 }
 
-/// Checks the folder can move where you picked, on a worker.
-fn check(app: &AppWindow, ask: Arc<Ask>, at: usize, destination: String) {
+/// Checks the folder can move where you picked, on a worker, and measures it again: the page's size for it may be
+/// old, and a maker's folder is measured without the plugin folders inside it, which move with it.
+fn check(app: &AppWindow, id: u64, ask: Arc<Ask>, at: usize, destination: String) {
     let job = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let library = p.library.clone();
-        let c = p.clean.as_mut().filter(|c| matches!(c.stage, Stage::MovePick { .. }))?;
+        // Still the card, and the folder, the picker was opened for.
+        let c = p.clean.as_mut().filter(|c| {
+            c.id == id && matches!(c.stage, Stage::MovePick { picked: Some(now), choosing: true, .. } if now == at)
+        })?;
         c.stage = Stage::MoveChecking;
-        Some((c.id, c.stop.clone(), library))
+        Some((c.stop.clone(), library))
     });
-    let Some((id, stop, library)) = job else { return };
+    let Some((stop, library)) = job else { return };
     fill(app);
     let weak = app.as_weak();
     let spawned = mo_app::background::spawn("Plugins move check", move || {
-        let found = mo_app::background::guarded(|| -> Result<Option<CantMove>, String> {
+        let found = mo_app::background::guarded(|| -> Result<Result<u64, CantMove>, String> {
             let (protected, moved) = library_now(&library)?;
-            let Some(f) = ask.folders.get(at) else { return Ok(Some(CantMove::Gone)) };
-            Ok(problem(&f.path, &destination, f.bytes, &SystemDrives, &moved, &protected, &stop))
+            let Some(f) = ask.folders.get(at) else { return Ok(Err(CantMove::Gone)) };
+            Ok(mo_app::background::on_bulk_pool(|| {
+                let bytes = match mo_space::size::measure(Path::new(&f.path), &stop) {
+                    Ok(m) if m.bytes > 0 => m.bytes,
+                    Ok(_) => f.bytes,
+                    Err(_) => return Err(CantMove::Stopped),
+                };
+                match problem(&f.path, &destination, bytes, &SystemDrives, &moved, &protected, &stop) {
+                    Some(why) => Err(why),
+                    None => Ok(bytes),
+                }
+            }))
         })
         .and_then(|r| r);
         back(&weak, move |app| checked(app, id, ask, at, destination, found));
@@ -118,18 +193,19 @@ fn checked(
     ask: Arc<Ask>,
     at: usize,
     destination: String,
-    found: Result<Option<CantMove>, String>,
+    found: Result<Result<u64, CantMove>, String>,
 ) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let Some(c) = p.clean.as_mut().filter(|c| c.id == id) else { return };
         c.stage = match (found, ask.folders.get(at)) {
-            (Ok(None), Some(f)) => {
+            (Ok(Ok(bytes)), Some(f)) => {
                 let to = mo_space::folder_move::target(&f.path, &destination).to_string_lossy().into_owned();
-                Stage::MoveReady { text: moving::ready_text(&f.path, &to, f.bytes), ask, folder: at, destination }
+                let text = moving::ready_text(&f.path, &to, bytes);
+                Stage::MoveReady { text, ask, folder: at, bytes, destination }
             }
-            (Ok(Some(why)), _) => Stage::done(moving::cant_text(&why)),
-            (Ok(None), None) => Stage::done(moving::cant_text(&CantMove::Gone)),
+            (Ok(Err(why)), _) => Stage::done(why.text()),
+            (Ok(Ok(_)), None) => Stage::done(CantMove::Gone.text()),
             (Err(why), _) => Stage::done(format!("Couldn't check it can move there: {why}")),
         };
     });
@@ -137,7 +213,7 @@ fn checked(
 }
 
 /// Moves the folder on a worker, then adds the move to the library's moved folders.
-fn go(app: &AppWindow, ask: Arc<Ask>, at: usize, destination: String) {
+fn go(app: &AppWindow, ask: Arc<Ask>, at: usize, bytes: u64, destination: String) {
     let job = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let library = p.library.clone();
@@ -157,15 +233,26 @@ fn go(app: &AppWindow, ask: Arc<Ask>, at: usize, destination: String) {
         let moved = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| -> Result<_, CantMove> {
             // As the library is now: a move made meanwhile counts.
             let (protected, moved) = library_now(&library).map_err(CantMove::Failed)?;
+            // Heard for every file, from several threads: the card hears about every half percent (16 MB at least).
+            let step = (bytes / 200).max(16 << 20);
+            let next = AtomicU64::new(0);
             let progress = |copied: u64| {
-                let fraction = if folder.bytes == 0 { 0.0 } else { copied as f32 / folder.bytes as f32 };
+                let due = next.load(Ordering::Relaxed);
+                if copied < due
+                    || next
+                        .compare_exchange(due, copied.saturating_add(step), Ordering::Relaxed, Ordering::Relaxed)
+                        .is_err()
+                {
+                    return;
+                }
+                let fraction = if bytes == 0 { 0.0 } else { copied as f32 / bytes as f32 };
                 card.progress(fraction, Some(&format!("{} copied", mo_space::size_text(copied))));
             };
             mo_app::background::on_bulk_pool(|| {
                 move_folder(
                     &folder.path,
                     &destination,
-                    folder.bytes,
+                    bytes,
                     (&ask.key, folder.kind, &folder.shared_with),
                     &SystemDrives,
                     &moved,
@@ -175,23 +262,30 @@ fn go(app: &AppWindow, ask: Arc<Ask>, at: usize, destination: String) {
                 )
             })
         }));
+        let gone = matches!(moved, Ok(Ok(_))).then(|| folder.path.clone());
         let head = match moved {
             Ok(Ok(moved)) => {
-                let noted = moving::moved_entry(&moved)
-                    .and_then(|entry| add_moved_folder(&library, &entry).map_err(|e| e.to_string()));
+                let noted = moving::moved_entry(&moved).and_then(|entry| note(&library, &entry));
                 if let Err(why) = &noted {
-                    log::error("Plugins", &format!("Move: {} wasn't added to the moved folders: {why}", moved.from));
+                    // In full, so it can be added by hand.
+                    let entry = moving::moved_entry(&moved).unwrap_or_default();
+                    log::error(
+                        "Plugins",
+                        &format!("Move: {} wasn't added to the moved folders: {why}. {entry}", moved.from),
+                    );
                 }
                 let head = moving::moved_text(&moved, &noted);
                 card.done(&head);
                 head
             }
             Ok(Err(why)) => {
-                let head = moving::cant_text(&why);
+                let head = why.text();
+                log::warning("Plugins", &format!("Move {}: {head}", ask.name));
                 card.failed(&head);
                 head
             }
             Err(_) => {
+                log::error("Plugins", &format!("Move {}: stopped on a crash part way", ask.name));
                 let head = "The move stopped on something it didn't expect (the log says what). Look at the folder \
                             and the other drive before trying again."
                     .to_owned();
@@ -199,7 +293,7 @@ fn go(app: &AppWindow, ask: Arc<Ask>, at: usize, destination: String) {
                 head
             }
         };
-        back(&weak, move |app| moved_done(app, id, head));
+        back(&weak, move |app| moved_done(app, id, head, gone));
     });
     if let Err(e) = spawned {
         log::error("Plugins", &format!("Couldn't start the move: {e}"));
@@ -208,10 +302,31 @@ fn go(app: &AppWindow, ask: Arc<Ask>, at: usize, destination: String) {
     }
 }
 
-fn moved_done(app: &AppWindow, id: u64, head: String) {
+/// Adds the move to the library's moved folders, trying again a few times while the C# app holds the library (a
+/// scan being saved): the move is done by now, so it's worth the wait.
+fn note(library: &Path, entry: &str) -> Result<(), String> {
+    let mut tries = 0;
+    loop {
+        match add_moved_folder(library, entry) {
+            Ok(()) => return Ok(()),
+            Err(e) if tries < 5 && e.is_busy() => {
+                tries += 1;
+                std::thread::sleep(Duration::from_secs(3));
+            }
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
+fn moved_done(app: &AppWindow, id: u64, head: String, gone: Option<String>) {
     log::info("Plugins", &format!("Move: {head}"));
     PAGE.with(|p| {
-        if let Some(c) = p.borrow_mut().clean.as_mut().filter(|c| c.id == id) {
+        let mut p = p.borrow_mut();
+        // A link now: its room is on the other drive, and it can't move again.
+        if let (Some(gone), Some(pl)) = (&gone, p.plugins.as_mut()) {
+            pl.forget_paths(std::slice::from_ref(gone));
+        }
+        if let Some(c) = p.clean.as_mut().filter(|c| c.id == id) {
             c.stage = Stage::done(head);
         }
     });

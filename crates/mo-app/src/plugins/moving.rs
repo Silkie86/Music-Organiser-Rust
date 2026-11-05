@@ -5,7 +5,7 @@
 //! `mo_space::folder_move::move_folder`'s; the move is then added to the library's moved folders
 //! (`mo_library::moves`), as the C# app keeps them, so both apps (and Space's old-copy reminders) know of it.
 
-use mo_space::folder_move::{CantMove, MovedFolder};
+use mo_space::folder_move::MovedFolder;
 use mo_space::plugin_space::{SpaceFolder, SpaceKind};
 use mo_space::size_text;
 
@@ -72,7 +72,7 @@ pub fn moved_now(json: Option<&str>) -> Result<Vec<MovedFolder>, String> {
     match json.map(str::trim).filter(|j| !j.is_empty()) {
         None => Ok(Vec::new()),
         Some(j) => serde_json::from_str::<Vec<MovedFolder>>(j)
-            .map_err(|_| "The library's list of moved folders couldn't be read, so nothing was moved.".to_owned()),
+            .map_err(|_| "The library's list of moved folders couldn't be read.".to_owned()),
     }
 }
 
@@ -100,11 +100,6 @@ pub fn moved_text(moved: &MovedFolder, noted: &Result<(), String>) -> String {
 /// One move as the library's moved folders keep it (the C# app's shape), for `mo_library::moves::add_moved_folder`.
 pub fn moved_entry(moved: &MovedFolder) -> Result<String, String> {
     serde_json::to_string(moved).map_err(|e| e.to_string())
-}
-
-/// Why it can't move, in words.
-pub fn cant_text(why: &CantMove) -> String {
-    why.text()
 }
 
 #[cfg(test)]
