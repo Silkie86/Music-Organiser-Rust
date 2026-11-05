@@ -402,12 +402,12 @@ fn wire(app: &AppWindow) {
 
 /// The page came into view: the sounds are read the first time.
 pub fn shown(app: &AppWindow) {
+    // Not connected yet (the app starting on this page, before `connect`): `connect` shows it once it's wired.
+    if APP.with(|a| a.borrow().is_none()) {
+        return;
+    }
     let start = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        // Not connected yet (the app starting on this page): `connect` shows it again once it knows the library.
-        if p.library.as_os_str().is_empty() {
-            return false;
-        }
         !std::mem::replace(&mut p.started, true)
     });
     if start {
