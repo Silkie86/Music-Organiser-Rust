@@ -423,6 +423,8 @@ pub struct Plugins {
     /// Every measured plugin's room, as the old app last measured it (a row's `room` is one of these), less what Clean
     /// up has sent to the Recycle Bin since.
     spaces: Vec<PluginSpace>,
+    /// When each plugin's room was measured, by name key.
+    measured_at: HashMap<String, NaiveDateTime>,
     /// Places in `rows` the filters let through, in the sort's order.
     pub shown: Vec<usize>,
     pub filters: Filters,
@@ -489,11 +491,13 @@ impl Plugins {
         let measured = spaces.iter().filter_map(|s| s.measured).min();
         let cutoff = unused_since(now, unused_years);
         with_room(&mut rows, &spaces, cutoff);
+        let measured_at = spaces.iter().filter_map(|s| Some((s.key.clone(), s.measured?))).collect();
         let spaces: Vec<PluginSpace> = spaces.iter().map(space_of).collect();
 
         let mut p = Plugins {
             rows,
             spaces,
+            measured_at,
             shown: Vec::new(),
             filters: Filters::default(),
             saves,
@@ -924,6 +928,7 @@ impl Plugins {
                         format!("Shared with {}", names(&f.shared_with))
                     },
                     added: f.added,
+                    can_say: f.kind != SpaceKind::Program,
                 })
                 .collect(),
         }
@@ -988,6 +993,8 @@ pub struct FolderLine {
     /// "Shared with Kontakt 7", when it's another plugin's folder too.
     pub shared: String,
     pub added: bool,
+    /// Not its plugin file: "Not its" (or "Take off", when you added it) can leave it out.
+    pub can_say: bool,
 }
 
 /// The side card's songs.
@@ -1310,6 +1317,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 }
 
 pub mod clean;
+pub mod folder_fixes;
 pub mod moving;
 pub mod uninstall;
 

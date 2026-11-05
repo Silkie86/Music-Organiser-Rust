@@ -356,7 +356,8 @@ fn sub_folders(dir: &Path) -> Vec<String> {
     out
 }
 
-fn kind_of(m: Measured) -> SpaceKind {
+/// What a measured folder is: mostly sounds is Sounds, else Presets.
+pub fn kind_of(m: Measured) -> SpaceKind {
     if m.bytes > 0 && m.sound_bytes.saturating_mul(2) >= m.bytes { SpaceKind::Sounds } else { SpaceKind::Presets }
 }
 

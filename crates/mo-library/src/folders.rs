@@ -1,6 +1,7 @@
 //! Adding and removing the folders the app looks in (Settings › Folders), in the C# app's `library.db`: the project
-//! folders (`roots`) and the sample, MIDI and plugin folders (JSON lists in `settings`). This and [`crate::moves`]
-//! (a folder moved to another drive, from the Plugins page) are the only places the Rust app writes to `library.db`
+//! folders (`roots`) and the sample, MIDI and plugin folders (JSON lists in `settings`). This, [`crate::moves`]
+//! (a folder moved to another drive) and [`crate::plugin_folders`] (your say on a plugin's folders), both from the
+//! Plugins page, are the only places the Rust app writes to `library.db`
 //! (Solomon's OK: folders 2026-11-03, moves and the Plugins page's folder fixes 2026-11-05); everything else opens it
 //! read-only.
 //!
