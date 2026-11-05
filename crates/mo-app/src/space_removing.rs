@@ -30,7 +30,8 @@ pub fn progress_words(sent: usize, of: usize) -> String {
 
 /// A Recycle Bin that counts what it takes, so a clean-up's card can say how far Remove has got
 /// ([`progress_words`]): each thing goes to `bin`, and `each` hears how many have gone so far. Everything else is
-/// `bin`'s own.
+/// `bin`'s own: each of [`Bin`]'s ways is passed on to it, so one added to [`Bin`] later must be passed on here too
+/// (its default would stand in for `bin`'s own).
 pub struct Counting<'a> {
     bin: &'a (dyn Bin + Sync),
     sent: AtomicUsize,
