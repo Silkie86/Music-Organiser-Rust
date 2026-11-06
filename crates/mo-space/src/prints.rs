@@ -1,6 +1,8 @@
 //! Fingerprints of the Bitwig multisamples Space has read, kept between runs in `bitwig-prints.db` (the app's own, in
 //! its data folder), so a look for Bitwig copies after a restart doesn't read every same-size multisample again (on
-//! Solomon's PC, the first look after each start read hundreds of gigabytes and froze the window for a second).
+//! Solomon's PC, the first look after each start read hundreds of gigabytes and froze the window for a second). The
+//! Space page's look at your songs and the backup plan keep the prints of song saves the same way, each in a store of
+//! its own, to find the saves that are copies of another ([`crate::song`]).
 //!
 //! Each file is kept with its size and last-written time (to the nanosecond), and used again only while both are as
 //! they were. Two prints are kept: one of the file's first and last 64 KB (its "ends"), read first, and one of the
@@ -237,7 +239,7 @@ fn open(path: &Path) -> Result<Connection, String> {
     let conn = match Connection::open(path).and_then(|c| check_id(&c).map(|ours| (c, ours))) {
         Ok((conn, true)) => conn,
         Ok((_, false)) => {
-            return Err(format!("{} isn't the app's Bitwig prints store, so it's left as it is", path.display()));
+            return Err(format!("{} isn't one of the app's prints stores, so it's left as it is", path.display()));
         }
         // Not a database at all (damaged where SQLite keeps its header): only what was read before, made again.
         Err(e) if is_damage(&e) => {

@@ -42,6 +42,7 @@ use mo_space::app_files::{self, AppFilesPart};
 use mo_space::bitwig::{self, LibraryIndex};
 use mo_space::clean::{self, Bin, Done, Heard, Problem, Removed, SystemBin, What};
 use mo_space::old_copies::Leftover;
+use mo_space::prints::Prints;
 use mo_space::song::CompactSettings;
 use mo_space::spare::{SpareCopy, Used};
 use mo_space::{plugin_space, plugins};
@@ -1709,12 +1710,21 @@ fn look_for_songs(app: &AppWindow) {
     let Some(ask) = ask else { return };
     let weak = app.as_weak();
     // A crash in a look (logged as one) leaves the thread for the next look. One that found nothing to show says so
-    // too; one stopped for a newer one is passed over then, as the newer one's finds follow.
+    // too; one stopped for a newer one is passed over then, as the newer one's finds follow. The saves' fingerprints
+    // are kept on the thread between looks, and in their store between starts (the whole-app review of 6 Nov, E1-5);
+    // after a crash they're forgotten, in case what was kept is why.
+    let mut prints: Option<Prints> = None;
     let work = move |ask: SongsAsk| {
         let id = ask.id;
-        match catch_crash(AssertUnwindSafe(|| look_for_songs_now(&ask))) {
+        match catch_crash(AssertUnwindSafe(|| look_for_songs_now(&ask, &mut prints))) {
             Ok(Some(shown)) => arrive(&weak, Step::Songs(id, Box::new(shown))),
-            Ok(None) | Err(_) => arrive(&weak, Step::SongsNone(id)),
+            Ok(None) => arrive(&weak, Step::SongsNone(id)),
+            Err(_) => {
+                // Let go of the store first, so it can be removed.
+                prints = None;
+                mo_space::prints::forget(&paths::data_dir().join(mo_app::song_room::SPACE_PRINTS));
+                arrive(&weak, Step::SongsNone(id));
+            }
         }
     };
     let started = PAGE.with(|p| p.borrow_mut().songs_look.ask("Space songs", work, ask));
@@ -1729,9 +1739,9 @@ fn look_for_songs(app: &AppWindow) {
 
 /// One look at your songs, off the window's thread: the saves, the samples they use and your folders, from the
 /// library (read-only, and closed again before any song is measured), then every song measured, and what the page
-/// shows of it. None when it was stopped, or the library couldn't be read (said in the log); with no library there are
-/// no songs.
-fn look_for_songs_now(ask: &SongsAsk) -> Option<space_songs::Shown> {
+/// shows of it. `prints` are the saves' fingerprints the last looks read, taken from their store by the first look.
+/// None when it was stopped, or the library couldn't be read (said in the log); with no library there are no songs.
+fn look_for_songs_now(ask: &SongsAsk, prints: &mut Option<Prints>) -> Option<space_songs::Shown> {
     let from = match open_library(&ask.library) {
         Some(lib) => FromLibrary::read(&lib)
             .map_err(|e| log::warning("Space", &format!("Couldn't read your songs from the library: {e}")))
@@ -1739,9 +1749,13 @@ fn look_for_songs_now(ask: &SongsAsk) -> Option<space_songs::Shown> {
         None if ask.library.exists() => return None,
         None => FromLibrary::default(),
     };
+    let prints: &Prints = prints
+        .get_or_insert_with(|| mo_app::song_room::prints_in(&paths::data_dir().join(mo_app::song_room::SPACE_PRINTS)));
     // On the pool for long work that waits on a disk (it walks every song's folder and compares saves of the same
     // size), so the pages' quick jobs don't wait for it (rule 21).
-    let found = background::on_bulk_pool(|| space_songs::look(&from, CompactSettings::default(), &ask.stop)).ok()?;
+    let found =
+        background::on_bulk_pool(|| space_songs::look(&from, CompactSettings::default(), Some(prints), &ask.stop))
+            .ok()?;
     Some(space_songs::Shown::of(&found, chrono::Local::now().date_naive()))
 }
 

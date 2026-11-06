@@ -11,14 +11,15 @@ use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
 use chrono::{NaiveDate, NaiveDateTime};
-use mo_app::binned;
 use mo_app::space_bin::{self, PutBacks};
 use mo_app::space_removing::Removable;
 use mo_app::space_songs::{
     COMPACT, FromLibrary, Removing, Shown, SongItem, SongRoom, compact_card, lines, look, remove, tick,
 };
+use mo_app::{binned, song_room};
 use mo_library::Save;
 use mo_space::clean::{Bin, Problem, Refused, Removed, What, undo};
+use mo_space::prints::Prints;
 use mo_space::song::{CompactKind, CompactSettings};
 
 fn fixtures(name: &str) -> PathBuf {
@@ -102,7 +103,7 @@ fn every_song_is_measured_and_the_save_it_opens_always_stays() {
         ..FromLibrary::default()
     };
 
-    let found = look(&from, CompactSettings::default(), &AtomicBool::new(false)).unwrap();
+    let found = look(&from, CompactSettings::default(), None, &AtomicBool::new(false)).unwrap();
     let mut songs: Vec<&SongRoom> = found.songs.iter().collect();
     songs.sort_by(|a, b| a.name.cmp(&b.name));
     let names: Vec<&str> = songs.iter().map(|s| s.name.as_str()).collect();
@@ -129,7 +130,38 @@ fn every_song_is_measured_and_the_save_it_opens_always_stays() {
     assert_eq!(found.thin_bytes(), 210);
 
     // Stopped, it says so.
-    assert!(look(&from, CompactSettings::default(), &AtomicBool::new(true)).is_err());
+    assert!(look(&from, CompactSettings::default(), None, &AtomicBool::new(true)).is_err());
+}
+
+#[test]
+fn a_look_keeps_the_prints_of_the_saves_it_read_for_the_next_start() {
+    // The whole-app review of 6 Nov, E1-5: every look read each save of the same size as another whole, again.
+    let dir = fixtures("mo-app-space-song-prints");
+    let projects = dir.join("Projects");
+    let song = projects.join("Loop");
+    let first = song.join("Loop_1.bwproject");
+    let saves = vec![
+        save(1, &first, b"same", "2026-10-10 10:00"),
+        save(2, &song.join("Loop_2.bwproject"), b"same", "2026-10-10 18:00"),
+        save(3, &song.join("Loop_3.bwproject"), b"last", "2026-10-11 10:00"),
+    ];
+    let from = FromLibrary { saves, roots: vec![projects.to_string_lossy().into_owned()], ..FromLibrary::default() };
+    let store = dir.join("data").join(song_room::SPACE_PRINTS);
+    let copies = |prints: Option<&Prints>| -> Vec<(CompactKind, String)> {
+        let found = look(&from, CompactSettings::default(), prints, &AtomicBool::new(false)).unwrap();
+        found.songs.iter().flat_map(items).filter(|(kind, _)| *kind == CompactKind::SameSave).collect()
+    };
+    let copy = [(CompactKind::SameSave, "Loop_1.bwproject".to_owned())];
+    assert_eq!(copies(Some(&song_room::prints_in(&store))), copy);
+    assert!(store.exists());
+    // Written again with the same size and time (as a copy that keeps times can): a look after the next start goes by
+    // the prints kept in the store, so it doesn't read the save again. Read afresh, as Remove's last check reads
+    // every save, the two are told apart.
+    let written = fs::metadata(&first).unwrap().modified().unwrap();
+    write(&first, b"diff");
+    fs::File::options().write(true).open(&first).unwrap().set_modified(written).unwrap();
+    assert_eq!(copies(Some(&song_room::prints_in(&store))), copy);
+    assert!(copies(None).is_empty());
 }
 
 /// A folder standing in for the Recycle Bin (as in the spare copies test): what's sent is moved in, under a number, and
@@ -222,7 +254,7 @@ fn ticked_autosaves_and_caches_go_to_the_bin_each_checked_again_and_come_back() 
     let roots = vec![projects.to_string_lossy().into_owned()];
     let from = FromLibrary { saves, roots, ..FromLibrary::default() };
     let stop = AtomicBool::new(false);
-    let found = look(&from, CompactSettings::default(), &stop).unwrap();
+    let found = look(&from, CompactSettings::default(), None, &stop).unwrap();
     let shown = Shown::of(&found, NaiveDate::from_ymd_opt(2026, 11, 4).unwrap());
 
     // Every old autosave and cache is ticked out of the box, the caches first (they free more), each song's autosaves
@@ -349,7 +381,7 @@ fn remove_takes_only_old_autosaves_and_caches_and_stop_leaves_them_all() {
         written_at(&backup(n), 1_790_000_000 + n * 60);
     }
     let from = FromLibrary { saves, roots: vec![projects.to_string_lossy().into_owned()], ..FromLibrary::default() };
-    let found = look(&from, CompactSettings::default(), &AtomicBool::new(false)).unwrap();
+    let found = look(&from, CompactSettings::default(), None, &AtomicBool::new(false)).unwrap();
     let shown = Shown::of(&found, NaiveDate::from_ymd_opt(2026, 11, 4).unwrap());
     let items: Vec<SongItem> = mo_app::space_removing::Looked::items(&shown).to_vec();
     let kinds: Vec<CompactKind> = items.iter().map(|i| i.item.kind).collect();

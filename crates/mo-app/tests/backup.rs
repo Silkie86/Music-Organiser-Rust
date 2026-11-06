@@ -73,7 +73,7 @@ fn a_song_goes_with_the_sample_it_uses_from_outside_the_folders() {
         ],
         ..Settings::default()
     };
-    let prepared = prepare(&lib, &settings, &stop).unwrap();
+    let prepared = prepare(&lib, &settings, None, &stop).unwrap();
     let going: Vec<&Path> = prepared.plan.copy.iter().map(|f| f.path.as_path()).collect();
     assert!(going.contains(&kick.as_path()), "the sample the song uses goes, though its folder isn't on the list");
     assert!(going.contains(&save1.as_path()) && going.contains(&save2.as_path()));
@@ -130,7 +130,7 @@ fn a_song_whose_zip_cant_be_made_still_goes_as_plain_folders() {
         format: Format::Zips,
         ..Settings::default()
     };
-    let prepared = prepare(&lib, &settings, &stop).unwrap();
+    let prepared = prepare(&lib, &settings, None, &stop).unwrap();
     fs::rename(&save1, music.join("Song").join("Song old.flp")).unwrap();
 
     let ran = run(&prepared, &settings, &stop, &|_| {});
@@ -177,7 +177,7 @@ fn a_sample_named_through_a_link_goes_once_from_where_it_really_is() {
         ],
         ..Settings::default()
     };
-    let prepared = prepare(&lib, &settings, &AtomicBool::new(false)).unwrap();
+    let prepared = prepare(&lib, &settings, None, &AtomicBool::new(false)).unwrap();
     let kicks: Vec<&Path> =
         prepared.plan.copy.iter().map(|f| f.path.as_path()).filter(|p| p.ends_with("Kick.wav")).collect();
     assert_eq!(kicks, vec![moved.join("Kick.wav").as_path()]);
@@ -230,7 +230,7 @@ fn a_sample_named_where_it_really_is_matches_a_listed_link() {
         ],
         ..Settings::default()
     };
-    let prepared = prepare(&lib, &settings, &AtomicBool::new(false)).unwrap();
+    let prepared = prepare(&lib, &settings, None, &AtomicBool::new(false)).unwrap();
     let kicks: Vec<&Path> =
         prepared.plan.copy.iter().map(|f| f.path.as_path()).filter(|p| p.ends_with("Kick.wav")).collect();
     assert_eq!(kicks.len(), 1, "{kicks:?}");

@@ -10,7 +10,8 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeDelta};
 use mo_space::key;
-use mo_space::song::{CompactKind, CompactSettings, Elsewhere, SongSave, measure, thin};
+use mo_space::prints::Prints;
+use mo_space::song::{BackupFolders, CompactKind, CompactSettings, Elsewhere, SongSave, measure, thin};
 
 mod common;
 
@@ -120,7 +121,13 @@ fn audio_another_project_uses_or_in_a_sample_folder_is_never_offered() {
         names.iter().filter(|n| n.eq_ignore_ascii_case("pad.wav")).map(|n| mo_formats::case::key(n)).collect()
     };
     let shared = HashSet::new();
-    let elsewhere = Elsewhere { sample_folders: &samples, used_by_any: &used_by_any, shared_names: &shared };
+    let elsewhere = Elsewhere {
+        sample_folders: &samples,
+        used_by_any: &used_by_any,
+        shared_names: &shared,
+        backup_folders: &BackupFolders::default(),
+        prints: None,
+    };
     let report = measure(
         &[save(&v, 0)],
         &[s(&root.join("Projects"))],
@@ -174,10 +181,50 @@ fn fl_songs_sharing_a_folder_count_only_their_saves_and_their_autosaves() {
     // A name another song has too: its autosaves could be that song's, so they're left alone.
     let shared: HashSet<String> = [mo_formats::case::key("Night Drive_2")].into();
     let none = |_: &[String]| HashSet::new();
-    let elsewhere = Elsewhere { sample_folders: &[], used_by_any: &none, shared_names: &shared };
+    let elsewhere = Elsewhere {
+        sample_folders: &[],
+        used_by_any: &none,
+        shared_names: &shared,
+        backup_folders: &BackupFolders::default(),
+        prints: None,
+    };
     let report = measure(&saves, &roots, &[], settings, Some(&elsewhere), &stop).unwrap();
     assert_eq!(report.items.len(), 1);
     assert!(report.items[0].path.ends_with("Night Drive_14 (autosave).flp"));
+}
+
+#[test]
+fn songs_measured_together_list_fl_studios_backup_folder_once() {
+    // The whole-app review of 6 Nov, X2-1: FL Studio's one Backup folder was listed again for every FL song.
+    let root = fixtures("mo-space-fl-backup-once");
+    let projects = root.join("Projects");
+    let one = write(&projects, "Beats/One.flp", b"1", 0);
+    let two = write(&projects, "Beats/Two.flp", b"22", 0);
+    write(&projects, "Backup/One (autosave).flp", b"111", 1);
+    let backup_folders = BackupFolders::default();
+    let none = |_: &[String]| HashSet::new();
+    let shared = HashSet::new();
+    let elsewhere = Elsewhere {
+        sample_folders: &[],
+        used_by_any: &none,
+        shared_names: &shared,
+        backup_folders: &backup_folders,
+        prints: None,
+    };
+    let settings = CompactSettings { keep_backups: 0, sitting_hours: 0 };
+    let roots = [s(&projects)];
+    let stop = AtomicBool::new(false);
+    let measure_one = |save_of: &str, with: Option<&Elsewhere<'_>>| {
+        let report = measure(&[save(save_of, 0)], &roots, &[], settings, with, &stop).unwrap();
+        report.items.iter().map(|i| Path::new(&i.path).file_name().unwrap().to_string_lossy().into_owned()).collect()
+    };
+    let first: Vec<String> = measure_one(&one, Some(&elsewhere));
+    assert_eq!(first, ["One (autosave).flp"]);
+    // The folder as the first song found it serves the second: an autosave FL Studio writes in between is found by
+    // the next measure of every song, which lists the folder again.
+    write(&projects, "Backup/Two (autosave).flp", b"2222", 2);
+    assert!(measure_one(&two, Some(&elsewhere)).is_empty());
+    assert_eq!(measure_one(&two, None), ["Two (autosave).flp"]);
 }
 
 #[test]
@@ -373,6 +420,59 @@ fn of_two_identical_saves_the_one_ending_a_sitting_stays() {
         report.items.iter().map(|i| (i.kind, Path::new(&i.path).file_name().unwrap().to_str().unwrap())).collect();
     assert_eq!(lines, [(CompactKind::SameSave, "Y.bwproject")]);
     assert_eq!(report.items[0].same_as.as_deref(), Some(x.as_str()));
+}
+
+#[test]
+fn identical_saves_read_before_are_not_read_again_until_they_change() {
+    // The whole-app review of 6 Nov, E1-5: each look and each backup plan read every save of the same size whole.
+    let root = fixtures("mo-space-same-prints");
+    let song = root.join("Song");
+    let big = |fill: u8| vec![fill; 200 * 1024];
+    let mut ends_differ = big(b'a');
+    ends_differ[0] = b'b';
+    let mut middle_differs = big(b'a');
+    middle_differs[100 * 1024] = b'c';
+    let mut written_again = big(b'a');
+    written_again[150 * 1024] = b'd';
+    let a = write(&song, "A.bwproject", &big(b'a'), 0);
+    let b = write(&song, "B.bwproject", &big(b'a'), 1);
+    let c = write(&song, "C.bwproject", &ends_differ, 2);
+    let d = write(&song, "D.bwproject", &middle_differs, 3);
+    let saves = [save(&a, 0), save(&b, 1), save(&c, 2), save(&d, 3)];
+    let settings = CompactSettings { keep_backups: 5, sitting_hours: 0 };
+    let stop = AtomicBool::new(false);
+    let prints = Prints::default();
+    let none = |_: &[String]| HashSet::new();
+    let shared = HashSet::new();
+    let copies = |prints: Option<&Prints>| -> Vec<String> {
+        let elsewhere = Elsewhere {
+            sample_folders: &[],
+            used_by_any: &none,
+            shared_names: &shared,
+            backup_folders: &BackupFolders::default(),
+            prints,
+        };
+        let report = measure(&saves, &[s(&root)], &[], settings, Some(&elsewhere), &stop).unwrap();
+        let mut copies: Vec<String> = report
+            .items
+            .iter()
+            .filter(|i| i.kind == CompactKind::SameSave)
+            .map(|i| Path::new(&i.path).file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        copies.sort();
+        copies
+    };
+    // The same copies with the prints as reading every one whole; a middle that differs is still told apart.
+    assert_eq!(copies(None), ["A.bwproject"]);
+    assert_eq!(copies(Some(&prints)), ["A.bwproject"]);
+    // A save with the size and time it had isn't read again: its kept print stands. (One written again keeps neither,
+    // and Remove's last check reads every save afresh, without prints.)
+    write(&song, "B.bwproject", &written_again, 1);
+    assert_eq!(copies(Some(&prints)), ["A.bwproject"]);
+    assert!(copies(None).is_empty());
+    // Written again at another time: read again.
+    write(&song, "B.bwproject", &written_again, 4);
+    assert!(copies(Some(&prints)).is_empty());
 }
 
 #[test]
