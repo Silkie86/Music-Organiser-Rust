@@ -54,8 +54,8 @@ struct Page {
     plugins: Option<Plugins>,
     /// The picked plugin's row.
     picked: Option<usize>,
-    /// The side card's DAW chip ("" for any) and Every save.
-    use_daw: String,
+    /// The side card's DAW chips (none for every DAW) and Every save.
+    use_daws: Vec<String>,
     every_save: bool,
     /// The card's song lines as shown, for opening one.
     uses: Vec<i64>,
@@ -235,6 +235,12 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         }
     });
     let weak = app.as_weak();
+    data.on_step(move |by| {
+        if let Some(app) = weak.upgrade() {
+            step(&app, by);
+        }
+    });
+    let weak = app.as_weak();
     data.on_close_panel(move || {
         if let Some(app) = weak.upgrade() {
             pick(&app, None);
@@ -249,13 +255,14 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     let weak = app.as_weak();
     data.on_use_daw_picked(move |d| {
         let Some(app) = weak.upgrade() else { return };
-        // One DAW or every one: picking the one that's on shows every DAW again.
-        PAGE.with(|p| {
-            let mut p = p.borrow_mut();
-            let mut picked: Vec<String> = if p.use_daw.is_empty() { Vec::new() } else { vec![p.use_daw.clone()] };
-            mo_app::filters::toggle(&mut picked, &d, false);
-            p.use_daw = picked.pop().unwrap_or_default();
-        });
+        // As many DAWs as you like, as the list's DAW filter picks them (review X3-23).
+        PAGE.with(|p| mo_app::filters::toggle(&mut p.borrow_mut().use_daws, &d, true));
+        fill_uses(&app);
+    });
+    let weak = app.as_weak();
+    data.on_use_daws_cleared(move || {
+        let Some(app) = weak.upgrade() else { return };
+        PAGE.with(|p| p.borrow_mut().use_daws.clear());
         fill_uses(&app);
     });
     let weak = app.as_weak();
@@ -484,7 +491,13 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
         let pl = p.plugins.as_ref()?;
         let row = p.picked?;
         let r = pl.rows.get(row)?;
-        Some((r.name.clone(), r.vendor.clone(), pl.saves_using(row, &p.use_daw), p.use_daw.clone(), p.feed.clone()))
+        Some((
+            r.name.clone(),
+            r.vendor.clone(),
+            pl.saves_using(row, &p.use_daws),
+            p.use_daws.join(", "),
+            p.feed.clone(),
+        ))
     });
     let Some((name, vendor, saves, daw, feed)) = picked else { return false };
     match id {
@@ -829,6 +842,26 @@ fn fill_cards(app: &AppWindow) {
 }
 
 /// Picks the plugin at `row` (or none) and fills its card.
+/// Up or Down in the list (review X3-8): picks the line `by` away from the picked one (the first when none is), as
+/// the list shows them, and scrolls it into view.
+fn step(app: &AppWindow, by: i32) {
+    let next = PAGE.with(|p| {
+        let p = p.borrow();
+        let shown = &p.plugins.as_ref()?.shown;
+        let last = shown.len().checked_sub(1)?;
+        let at = match p.picked.and_then(|r| shown.iter().position(|&s| s == r)) {
+            None => 0,
+            Some(i) => i.saturating_add_signed(by as isize).min(last),
+        };
+        Some((at, shown[at]))
+    });
+    let Some((at, row)) = next else { return };
+    pick(app, Some(row));
+    let data = app.global::<PluginsData>();
+    data.set_show_row(i32::try_from(at).unwrap_or(i32::MAX));
+    data.set_show_ask(data.get_show_ask().wrapping_add(1));
+}
+
 fn pick(app: &AppWindow, row: Option<usize>) {
     let _doing = crate::watchdog::doing("Plugins: pick a plugin");
     let changed = PAGE.with(|p| {
@@ -837,7 +870,7 @@ fn pick(app: &AppWindow, row: Option<usize>) {
         let changed = p.picked != row;
         p.picked = row;
         if changed {
-            p.use_daw.clear();
+            p.use_daws.clear();
             p.every_save = false;
         }
         changed
@@ -969,14 +1002,12 @@ fn fill_uses(app: &AppWindow) {
     let data = app.global::<PluginsData>();
     let uses = PAGE.with(|p| {
         let p = p.borrow();
-        Some((p.plugins.as_ref()?.songs_using(p.picked?, p.every_save, &p.use_daw), p.use_daw.clone(), p.every_save))
+        Some((p.plugins.as_ref()?.songs_using(p.picked?, p.every_save, &p.use_daws), p.use_daws.clone(), p.every_save))
     });
-    let Some((uses, daw, every)) = uses else { return };
+    let Some((uses, picked, every)) = uses else { return };
     PAGE.with(|p| p.borrow_mut().uses = uses.lines.iter().map(|l| l.save).collect());
     let choices: Vec<(String, String)> = uses.daws.iter().map(|d| (d.clone(), String::new())).collect();
-    let picked: Vec<String> = if daw.is_empty() { Vec::new() } else { vec![daw.clone()] };
     FILTER_MODELS.with(|m| data.set_use_daws(m.use_daw.view(&mo_app::filters::show(&choices, &picked))));
-    data.set_use_daw(daw.into());
     data.set_every_save(every);
     data.set_uses_note(uses.note.into());
     // The tab says how many songs, like "Used in 12 songs".
