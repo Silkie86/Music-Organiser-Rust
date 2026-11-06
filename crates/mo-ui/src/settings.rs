@@ -223,7 +223,9 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     if let Some(to) = mo_app::data_move::catch_up_wanted().filter(|_| setup_live) {
         let weak = app.as_weak();
         slint::Timer::single_shot(std::time::Duration::from_secs(30), move || {
-            if let Some(app) = weak.upgrade() {
+            // Not if the move was called off (Don't switch) or changed meanwhile.
+            let still = mo_app::data_move::pending().is_some_and(|p| p == to);
+            if let (true, Some(app)) = (still, weak.upgrade()) {
                 move_data(&app, to);
             }
         });
@@ -954,14 +956,13 @@ fn move_data(app: &AppWindow, to: PathBuf) {
     let weak = app.as_weak();
     let job = feed.start(&format!("Copying the app's data to {}", to.display()), "Looking at what to copy");
     let started = background::spawn("Data folder move", move || {
-        // Gigabytes over the disk: low in the system's memory too, as all bulk disk work is (F-7).
-        let done = background::on_bulk_pool(|| {
-            mo_app::data_move::copy(&from, &to, &stop, &mut |done, total| {
-                let fraction = if total == 0 { 1.0 } else { done as f32 / total as f32 };
-                let detail =
-                    format!("{} of {}", mo_app::data_move::size_text(done), mo_app::data_move::size_text(total));
-                job.progress(fraction, Some(&detail));
-            })
+        // Gigabytes over the disk: low in the system's memory too, as all bulk disk work is (F-7). On this thread
+        // itself, not a bulk pool, where an hour's copy would hold up the other jobs behind it.
+        background::lower_memory_priority();
+        let done = mo_app::data_move::copy(&from, &to, &stop, &mut |done, total| {
+            let fraction = if total == 0 { 1.0 } else { done as f32 / total as f32 };
+            let detail = format!("{} of {}", mo_app::data_move::size_text(done), mo_app::data_move::size_text(total));
+            job.progress(fraction, Some(&detail));
         });
         let message = match &done {
             Ok(c) => {
