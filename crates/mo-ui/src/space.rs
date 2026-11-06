@@ -1749,8 +1749,9 @@ fn look_for_songs_now(ask: &SongsAsk, prints: &mut Option<Prints>) -> Option<spa
         None if ask.library.exists() => return None,
         None => FromLibrary::default(),
     };
-    let prints: &Prints = prints
-        .get_or_insert_with(|| mo_app::song_room::prints_in(&paths::data_dir().join(mo_app::song_room::SPACE_PRINTS)));
+    let prints: &Prints = prints.get_or_insert_with(|| {
+        mo_app::song_room::prints_in(&paths::data_dir().join(mo_app::song_room::SPACE_PRINTS), "Space")
+    });
     // On the pool for long work that waits on a disk (it walks every song's folder and compares saves of the same
     // size), so the pages' quick jobs don't wait for it (rule 21).
     let found =

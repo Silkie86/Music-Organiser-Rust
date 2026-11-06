@@ -11,7 +11,7 @@ use std::time::SystemTime;
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeDelta};
 use mo_space::key;
 use mo_space::prints::Prints;
-use mo_space::song::{BackupFolders, CompactKind, CompactSettings, Elsewhere, SongSave, measure, thin};
+use mo_space::song::{BackupFolders, CompactKind, CompactSettings, Compare, Elsewhere, SongSave, measure, thin};
 
 mod common;
 
@@ -126,7 +126,7 @@ fn audio_another_project_uses_or_in_a_sample_folder_is_never_offered() {
         used_by_any: &used_by_any,
         shared_names: &shared,
         backup_folders: &BackupFolders::default(),
-        prints: None,
+        compare: Compare::Afresh,
     };
     let report = measure(
         &[save(&v, 0)],
@@ -186,7 +186,7 @@ fn fl_songs_sharing_a_folder_count_only_their_saves_and_their_autosaves() {
         used_by_any: &none,
         shared_names: &shared,
         backup_folders: &BackupFolders::default(),
-        prints: None,
+        compare: Compare::Afresh,
     };
     let report = measure(&saves, &roots, &[], settings, Some(&elsewhere), &stop).unwrap();
     assert_eq!(report.items.len(), 1);
@@ -209,7 +209,7 @@ fn songs_measured_together_list_fl_studios_backup_folder_once() {
         used_by_any: &none,
         shared_names: &shared,
         backup_folders: &backup_folders,
-        prints: None,
+        compare: Compare::Afresh,
     };
     let settings = CompactSettings { keep_backups: 0, sitting_hours: 0 };
     let roots = [s(&projects)];
@@ -225,6 +225,14 @@ fn songs_measured_together_list_fl_studios_backup_folder_once() {
     write(&projects, "Backup/Two (autosave).flp", b"2222", 2);
     assert!(measure_one(&two, Some(&elsewhere)).is_empty());
     assert_eq!(measure_one(&two, None), ["Two (autosave).flp"]);
+    // An autosave the folder's list has is measured as it is when its song asks: FL Studio writes its autosave again
+    // every few minutes. One gone since isn't counted.
+    write(&projects, "Backup/One (autosave).flp", b"11111", 3);
+    let again = measure(&[save(&one, 0)], &roots, &[], settings, Some(&elsewhere), &stop).unwrap();
+    let measured: Vec<(u64, Option<NaiveDateTime>)> = again.items.iter().map(|i| (i.bytes, i.modified)).collect();
+    assert_eq!(measured, [(5, Some(day() + TimeDelta::hours(3)))]);
+    fs::remove_file(projects.join("Backup/One (autosave).flp")).unwrap();
+    assert!(measure_one(&one, Some(&elsewhere)).is_empty());
 }
 
 #[test]
@@ -444,15 +452,19 @@ fn identical_saves_read_before_are_not_read_again_until_they_change() {
     let prints = Prints::default();
     let none = |_: &[String]| HashSet::new();
     let shared = HashSet::new();
-    let copies = |prints: Option<&Prints>| -> Vec<String> {
+    let copies = |compare: Compare<'_>| -> Vec<String> {
         let elsewhere = Elsewhere {
             sample_folders: &[],
             used_by_any: &none,
             shared_names: &shared,
             backup_folders: &BackupFolders::default(),
-            prints,
+            compare,
         };
         let report = measure(&saves, &[s(&root)], &[], settings, Some(&elsewhere), &stop).unwrap();
+        // The end of a measure of every song, as a look's or a plan's.
+        if let Compare::Remembered(prints) | Compare::Confirmed(prints) = compare {
+            prints.keep(false).unwrap();
+        }
         let mut copies: Vec<String> = report
             .items
             .iter()
@@ -463,16 +475,19 @@ fn identical_saves_read_before_are_not_read_again_until_they_change() {
         copies
     };
     // The same copies with the prints as reading every one whole; a middle that differs is still told apart.
-    assert_eq!(copies(None), ["A.bwproject"]);
-    assert_eq!(copies(Some(&prints)), ["A.bwproject"]);
-    // A save with the size and time it had isn't read again: its kept print stands. (One written again keeps neither,
-    // and Remove's last check reads every save afresh, without prints.)
+    assert_eq!(copies(Compare::Afresh), ["A.bwproject"]);
+    assert_eq!(copies(Compare::Remembered(&prints)), ["A.bwproject"]);
+    assert_eq!(copies(Compare::Confirmed(&prints)), ["A.bwproject"]);
+    // A save with the size and time it had isn't read again: its kept print stands. (One written again keeping both is
+    // still on the Space page's list then, and Remove's last check reads every save afresh.)
     write(&song, "B.bwproject", &written_again, 1);
-    assert_eq!(copies(Some(&prints)), ["A.bwproject"]);
-    assert!(copies(None).is_empty());
+    assert_eq!(copies(Compare::Remembered(&prints)), ["A.bwproject"]);
+    assert!(copies(Compare::Afresh).is_empty());
+    // The backup plan reads a save its kept print calls a copy again before it's called one, so it isn't left out.
+    assert!(copies(Compare::Confirmed(&prints)).is_empty());
     // Written again at another time: read again.
     write(&song, "B.bwproject", &written_again, 4);
-    assert!(copies(Some(&prints)).is_empty());
+    assert!(copies(Compare::Remembered(&prints)).is_empty());
 }
 
 #[test]

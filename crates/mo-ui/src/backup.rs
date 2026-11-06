@@ -184,9 +184,10 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
         let mut broke = false;
         // Nothing to walk yet: only the drive's room is wanted.
         let result = (!settings.folders.is_empty()).then(|| {
-            let prints: &Prints = prints.get_or_insert_with(|| song_room::prints_in(&store));
-            // A plan that breaks says so on the page, instead of "Working out what goes…" for good.
+            // A plan that breaks says so on the page, instead of "Working out what goes…" for good; so does one whose
+            // store of prints breaks as it's opened.
             let planned = background::guarded(|| {
+                let prints: &Prints = prints.get_or_insert_with(|| song_room::prints_in(&store, "Backup"));
                 background::on_bulk_pool(|| {
                     let lib = Library::open_read_only(&library).map_err(|e| e.to_string())?;
                     backup::prepare(&lib, &settings, Some(prints), &stop).map(Arc::new)

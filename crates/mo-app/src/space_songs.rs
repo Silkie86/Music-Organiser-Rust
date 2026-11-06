@@ -28,7 +28,7 @@ use mo_space::clean::{self, Bin, Done, Guard, Problem, Refused, Removed, What};
 use mo_space::key;
 use mo_space::prints::Prints;
 use mo_space::size::size_text;
-use mo_space::song::{CompactItem, CompactKind, CompactSettings, SongSpaceReport};
+use mo_space::song::{CompactItem, CompactKind, CompactSettings, Compare, SongSpaceReport};
 use rayon::prelude::*;
 
 use crate::drag_out::count_of;
@@ -159,8 +159,9 @@ impl Found {
 
 /// Measures every song in the library: its saves still on disk, the DAW's autosaves of it and, when the song has a
 /// folder to itself, everything in that folder. `prints` are the fingerprints of saves the last looks read (see
-/// [`crate::song_room`]): a save unchanged since isn't read again. Spread over the pool it's called in (rule 21): call
-/// it on the app's low-priority pool, never the window's thread.
+/// [`crate::song_room`]): a save unchanged since isn't read again ([`Compare::Remembered`]: Remove reads every save
+/// afresh before anything goes). Spread over the pool it's called in (rule 21): call it on the app's low-priority
+/// pool, never the window's thread.
 pub fn look(
     from: &FromLibrary,
     settings: CompactSettings,
@@ -169,11 +170,10 @@ pub fn look(
 ) -> Result<Found, Stopped> {
     let songs = group_songs(&from.saves, &from.choices);
     let others = Others::new(&songs, &from.samples, from.sample_folders.clone());
+    let compare = prints.map_or(Compare::Afresh, Compare::Remembered);
     let measured: Result<Vec<Option<SongRoom>>, Stopped> =
-        songs.par_iter().map(|song| measure_song(song, from, &others, settings, prints, stop)).collect();
-    // One with a project folder away (a drive asleep or unplugged) isn't whole: its songs' prints are kept for when
-    // it's back.
-    keep_prints(prints, measured.is_ok() && from.roots.iter().all(|r| Path::new(r).is_dir()));
+        songs.par_iter().map(|song| measure_song(song, from, &others, settings, compare, stop)).collect();
+    keep_prints(prints, measured.is_ok(), "Space");
     Ok(Found { songs: measured?.into_iter().flatten().collect(), settings })
 }
 
@@ -190,7 +190,7 @@ fn measure_song(
     from: &FromLibrary,
     others: &Others,
     settings: CompactSettings,
-    prints: Option<&Prints>,
+    compare: Compare<'_>,
     stop: &AtomicBool,
 ) -> Result<Option<SongRoom>, Stopped> {
     let present = present(song);
@@ -198,7 +198,7 @@ fn measure_song(
     let used: Vec<String> =
         song.saves().chain(&song.copies).flat_map(|v| from.samples.get(&v.id).into_iter().flatten().cloned()).collect();
     let saves = song_saves(present.iter().copied());
-    let report = others.measure(&saves, Some(&opens.path), &from.roots, &used, settings, prints, stop)?;
+    let report = others.measure(&saves, Some(&opens.path), &from.roots, &used, settings, compare, stop)?;
     Ok((!report.items.is_empty()).then(|| SongRoom {
         name: song.name.clone(),
         opens: opens.path.clone(),
@@ -326,7 +326,7 @@ fn still_offered(
     // Every save read afresh, without the look's fingerprints: this is the last check before anything goes.
     let measured: Vec<Option<SongRoom>> = again
         .par_iter()
-        .map(|song| measure_song(song, from, others, settings, None, stop))
+        .map(|song| measure_song(song, from, others, settings, Compare::Afresh, stop))
         .collect::<Result<_, _>>()?;
     let offered: HashMap<String, &CompactItem> =
         measured.iter().flatten().flat_map(|s| s.report.items.iter().map(|i| (key(&i.path), i))).collect();

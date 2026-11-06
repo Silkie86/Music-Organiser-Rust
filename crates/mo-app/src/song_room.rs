@@ -3,8 +3,9 @@
 //! nothing itself: mo-space's [`measure`] reads the song's folder.
 //!
 //! The save fingerprints a look and a backup plan keep between runs are each in a store of their own in the app's data
-//! folder ([`SPACE_PRINTS`], [`BACKUP_PRINTS`]): each forgets, after a whole measure, the saves it didn't ask about, so
-//! neither holds more than one measure's saves (rule 28), and one can't make the other forget what it still needs.
+//! folder ([`SPACE_PRINTS`], [`BACKUP_PRINTS`]): each forgets, after a measure of every song that went to its end, the
+//! saves it didn't ask about, so neither holds more than one measure's saves (rule 28), and one can't make the other
+//! forget what it still needs.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::AtomicBool;
@@ -16,7 +17,7 @@ use mo_library::songs::Song;
 use mo_space::key;
 use mo_space::prints::Prints;
 use mo_space::size::Stopped;
-use mo_space::song::{BackupFolders, CompactSettings, Elsewhere, SongSave, SongSpaceReport, measure};
+use mo_space::song::{BackupFolders, CompactSettings, Compare, Elsewhere, SongSave, SongSpaceReport, measure};
 
 /// The store of the Space page's song look's save fingerprints, in the app's data folder.
 pub const SPACE_PRINTS: &str = "space-song-prints.db";
@@ -24,20 +25,23 @@ pub const SPACE_PRINTS: &str = "space-song-prints.db";
 pub const BACKUP_PRINTS: &str = "backup-song-prints.db";
 
 /// The save fingerprints a look or plan keeps between runs, from the store at `path` (made if it isn't there). One that
-/// can't be opened says why in the log: the fingerprints are then kept while the app runs only.
-pub fn prints_in(path: &std::path::Path) -> Prints {
+/// can't be opened says why in the log, under `area` (the page whose look or plan it is): the fingerprints are then
+/// kept while the app runs only.
+pub fn prints_in(path: &std::path::Path, area: &str) -> Prints {
     let mut prints = Prints::default();
     if let Err(e) = prints.remember_in(path) {
-        crate::log::warning("Space", &format!("Couldn't open {} to keep save fingerprints: {e}", path.display()));
+        crate::log::warning(area, &format!("Couldn't open {} to keep save fingerprints: {e}", path.display()));
     }
     prints
 }
 
-/// After a measure of every song that used `prints`: keeps what was read for next time, and after a whole one
-/// (`whole`: not stopped, nothing away) forgets the saves it didn't ask about.
-pub fn keep_prints(prints: Option<&Prints>, whole: bool) {
+/// After a measure of every song that used `prints`: keeps what was read for next time, and after one that went to its
+/// end (`whole`) forgets the saves it didn't ask about. That's so even with a drive away: its saves are read again when
+/// it's back, and a drive gone for good doesn't keep its saves' prints for ever (rule 28). Problems go in the log
+/// under `area`.
+pub fn keep_prints(prints: Option<&Prints>, whole: bool, area: &str) {
     if let Some(Err(e)) = prints.map(|p| p.keep(whole)) {
-        crate::log::warning("Space", &format!("Couldn't keep the save fingerprints for next time: {e}"));
+        crate::log::warning(area, &format!("Couldn't keep the save fingerprints for next time: {e}"));
     }
 }
 
@@ -82,8 +86,7 @@ impl Others {
     /// Measures one song's `saves` ([`measure`]): `roots` are your project folders, `used` every sample path the
     /// song's saves name. `opens` is the save the song opens (its highest-numbered one, as the Songs page has it): it's
     /// never on the list, even when by time alone it's from the middle of a sitting or a copy of a newer save (a copied
-    /// folder gives every save a new time). `prints` are the fingerprints of saves read before, used again while each
-    /// save's size and time are as they were; `None` reads every save afresh (Remove's check just before anything goes).
+    /// folder gives every save a new time). `compare` says how the saves of the same size are compared ([`Compare`]).
     /// Reads the song's folder: call it away from the window's thread.
     #[allow(clippy::too_many_arguments)]
     pub fn measure(
@@ -93,7 +96,7 @@ impl Others {
         roots: &[String],
         used: &[String],
         settings: CompactSettings,
-        prints: Option<&Prints>,
+        compare: Compare<'_>,
         stop: &AtomicBool,
     ) -> Result<SongSpaceReport, Stopped> {
         let used_by_any = |names: &[String]| -> HashSet<String> {
@@ -104,7 +107,7 @@ impl Others {
             used_by_any: &used_by_any,
             shared_names: &self.shared_names,
             backup_folders: &self.backup_folders,
-            prints,
+            compare,
         };
         let mut report = measure(saves, roots, used, settings, Some(&elsewhere), stop)?;
         if let Some(opens) = opens.map(key) {

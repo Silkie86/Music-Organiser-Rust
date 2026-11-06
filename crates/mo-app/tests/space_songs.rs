@@ -152,7 +152,7 @@ fn a_look_keeps_the_prints_of_the_saves_it_read_for_the_next_start() {
         found.songs.iter().flat_map(items).filter(|(kind, _)| *kind == CompactKind::SameSave).collect()
     };
     let copy = [(CompactKind::SameSave, "Loop_1.bwproject".to_owned())];
-    assert_eq!(copies(Some(&song_room::prints_in(&store))), copy);
+    assert_eq!(copies(Some(&song_room::prints_in(&store, "Space"))), copy);
     assert!(store.exists());
     // Written again with the same size and time (as a copy that keeps times can): a look after the next start goes by
     // the prints kept in the store, so it doesn't read the save again. Read afresh, as Remove's last check reads
@@ -160,7 +160,7 @@ fn a_look_keeps_the_prints_of_the_saves_it_read_for_the_next_start() {
     let written = fs::metadata(&first).unwrap().modified().unwrap();
     write(&first, b"diff");
     fs::File::options().write(true).open(&first).unwrap().set_modified(written).unwrap();
-    assert_eq!(copies(Some(&song_room::prints_in(&store))), copy);
+    assert_eq!(copies(Some(&song_room::prints_in(&store, "Space"))), copy);
     assert!(copies(None).is_empty());
 }
 

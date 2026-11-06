@@ -27,7 +27,7 @@ use mo_library::Library;
 use mo_library::songs::{Song, file_id, group_songs, marked};
 use mo_space::prints::Prints;
 use mo_space::size::{FileEntry, size_text};
-use mo_space::song::{CompactSettings, DEFAULT_KEEP_BACKUPS, SongSave, SongSpaceReport};
+use mo_space::song::{CompactSettings, Compare, DEFAULT_KEEP_BACKUPS, SongSave, SongSpaceReport};
 use rayon::prelude::*;
 
 use crate::song_room::{Others, keep_prints, song_saves};
@@ -420,8 +420,8 @@ fn shapes(saves: &[&mo_library::Save]) -> Vec<plan::SaveShape> {
 
 /// Walks the folders on the list, finds the songs saved in them and the samples they use (wherever those are), and
 /// makes the plan. `prints` are the fingerprints of saves the last plans read (see [`crate::song_room`]): a save
-/// unchanged since isn't read again to find its copies. Reads only. Slow: on the app's low-priority pool, never the
-/// window's thread.
+/// unchanged since isn't read again to find its copies, but one they call a copy is read again before the plan leaves
+/// it out ([`Compare::Confirmed`]). Reads only. Slow: on the app's low-priority pool, never the window's thread.
 pub fn prepare(
     library: &Library,
     settings: &Settings,
@@ -430,7 +430,6 @@ pub fn prepare(
 ) -> Result<Prepared, String> {
     let backup = settings.drive.clone().ok_or("Pick a backup drive first")?;
     let gathered = folders::gather(&settings.folders, &backup, stop).map_err(|_| "Stopped".to_owned())?;
-    let all_there = gathered.missing.is_empty();
     let saves = library.saves().map_err(|e| e.to_string())?;
     let choices = library.song_choices().map_err(|e| e.to_string())?;
     let samples = library.sample_paths().map_err(|e| e.to_string())?;
@@ -458,6 +457,8 @@ pub fn prepare(
         keep_backups: if settings.level == Level::Essentials { 0 } else { DEFAULT_KEEP_BACKUPS },
         ..CompactSettings::default()
     };
+    // A save the kept prints call a copy is read again before the plan leaves it out of the backup.
+    let compare = prints.map_or(Compare::Afresh, Compare::Confirmed);
     // Only songs with a save in the folders are this backup's (a song there only as a copy, too).
     let songs: Vec<_> = all_songs
         .into_iter()
@@ -490,7 +491,7 @@ pub fn prepare(
                     }
                 }
             }
-            let report = others.measure(&saves, opens, &roots, &used_text, compact, prints, stop).map_err(|_| ())?;
+            let report = others.measure(&saves, opens, &roots, &used_text, compact, compare, stop).map_err(|_| ())?;
             // Saves you mark as milestones by their name always go, and so do saves where the song changed a lot, and
             // the save the song opens (its highest-numbered one: the newest by time, which always goes, can be another).
             let mut milestones: Vec<String> =
@@ -500,9 +501,7 @@ pub fn prepare(
             Ok(Measured { saves, report, milestones, used, id: song_id(song) })
         })
         .collect::<Result<_, ()>>();
-    // A plan with a folder away (a drive asleep or unplugged) isn't whole: its songs' prints are kept for when it's
-    // back.
-    keep_prints(prints, measured.is_ok() && all_there);
+    keep_prints(prints, measured.is_ok(), "Backup");
     let mut measured: Vec<Measured> = measured.map_err(|()| "Stopped".to_owned())?;
 
     // The samples the songs use, wherever they are: one outside the folders is added, so a song's backup is whole.

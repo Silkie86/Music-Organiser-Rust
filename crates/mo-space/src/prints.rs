@@ -116,6 +116,14 @@ impl Prints {
         self.of(path, Kind::Whole, stop)
     }
 
+    /// As [`Prints::whole`], and whether the file was read since the last [`Prints::keep`], so the print is of it as it
+    /// is now, rather than known from before by its size and time alone.
+    pub fn whole_and_if_read(&self, path: &Path, stop: &AtomicBool) -> Option<([u8; 32], bool)> {
+        let print = self.whole(path, stop)?;
+        let read = self.state.lock().ok()?.read.contains(path);
+        Some((print, read))
+    }
+
     fn of(&self, path: &Path, kind: Kind, stop: &AtomicBool) -> Option<[u8; 32]> {
         let meta = fs::metadata(path).ok()?;
         let (len, modified) = (meta.len(), meta.modified().ok());
@@ -450,6 +458,21 @@ mod tests {
         let first = prints.whole(&a, &stop);
         fs::write(&a, b"two!").expect("write");
         assert_ne!(prints.whole(&a, &stop), first);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_print_says_whether_it_was_read_since_the_last_keep() {
+        let dir = folder("read-now");
+        let stop = AtomicBool::new(false);
+        let a = dir.join("a.flp");
+        fs::write(&a, b"one").expect("write");
+        let prints = Prints::default();
+        let (print, read) = prints.whole_and_if_read(&a, &stop).expect("read");
+        assert!(read, "read now");
+        assert_eq!(prints.whole_and_if_read(&a, &stop), Some((print, true)), "still the read of this look");
+        prints.keep(false).expect("kept");
+        assert_eq!(prints.whole_and_if_read(&a, &stop), Some((print, false)), "known from before by its size and time");
         let _ = fs::remove_dir_all(&dir);
     }
 

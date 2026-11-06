@@ -9,8 +9,9 @@ use std::sync::atomic::AtomicBool;
 use mo_app::backup::{Format, Settings, prepare, run};
 use mo_backup::folders::{Folder, Mode};
 use mo_backup::pack::SONGS;
-use mo_backup::plan::Level;
+use mo_backup::plan::{LeftOut, Level};
 use mo_library::Library;
+use mo_space::prints::Prints;
 use rusqlite::Connection;
 
 fn fixtures(name: &str) -> PathBuf {
@@ -107,6 +108,40 @@ fn a_song_goes_with_the_sample_it_uses_from_outside_the_folders() {
     let ran = run(&prepared, &settings, &stop, &|_| {});
     assert!(ran.last.line.starts_with("4 checked · 1 new or changed"), "{}", ran.last.line);
     assert_eq!(ran.kept_older, 1);
+}
+
+#[test]
+fn a_save_the_kept_prints_call_a_copy_is_read_again_before_the_plan_leaves_it_out() {
+    // The plan leaves a save that's the same as another out of the backup. Its kept print is only as good as the
+    // save's size and time, which a save written again can keep (a tool that puts the time back).
+    let root = fixtures("backup-screen-same-save");
+    let music = root.join("music");
+    let save1 = music.join("Song").join("Song.flp");
+    let save2 = music.join("Song").join("Song_2.flp");
+    let kick = root.join("elsewhere").join("Kick.wav");
+    write(&save1, b"same!");
+    write(&save2, b"same!");
+    write(&kick, b"kick");
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    let lib = library(&root, &save1, &save2, &kick);
+    let stop = AtomicBool::new(false);
+    let settings = Settings {
+        drive: Some(backup),
+        folders: vec![Folder { path: music.clone(), mode: Mode::Slimmed }],
+        ..Settings::default()
+    };
+    let prints = Prints::default();
+    let left_out = || -> Vec<(PathBuf, LeftOut)> {
+        let prepared = prepare(&lib, &settings, Some(&prints), &stop).unwrap();
+        prepared.plan.left_out.into_iter().map(|s| (s.file.path, s.why)).collect()
+    };
+    // The older of the two is the copy: the save the song opens stays.
+    assert_eq!(left_out(), [(save1.clone(), LeftOut::SameSave)]);
+    let when = fs::metadata(&save1).unwrap().modified().unwrap();
+    write(&save1, b"diff!");
+    fs::File::options().write(true).open(&save1).unwrap().set_modified(when).unwrap();
+    assert!(left_out().is_empty(), "read again, it isn't a copy any more: it goes");
 }
 
 #[test]
