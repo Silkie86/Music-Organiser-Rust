@@ -136,6 +136,13 @@ export global PresetsData {
     in property <[PartChip]> parts;
     // What the last export or send did.
     in property <string> message;
+    // The audition in Bitwig, whichever line is picked: what it says ("" when there's none), whether it plays yet (so
+    // it can be kept), and its buttons' keys.
+    in property <string> hearing;
+    in property <bool> hearing-playing;
+    in property <string> keep-audition-key;
+    callback stop-audition();
+    callback keep-audition();
     // The right-click menu: the card's actions and the part fixes, each with its key.
     in property <[MenuItem]> menu;
     callback menu-chosen(string);
@@ -685,6 +692,46 @@ export component PresetsPage inherits Rectangle {
                 text: "Show the curves I hid";
                 on: PresetsData.curve-hidden;
                 clicked => { PresetsData.curve-hidden-toggled(!PresetsData.curve-hidden); }
+            }
+        }
+        // The audition playing in Bitwig, whatever line is picked and whichever section is on show, with its
+        // Stop and Keep (the 6 Nov review's D-4 and X3-1).
+        if PresetsData.hearing != "": Rectangle {
+            height: 48px;
+            background: Theme.surface-raised;
+            HorizontalLayout {
+                padding-left: Space.md;
+                padding-right: Space.md;
+                spacing: Space.sm;
+                alignment: stretch;
+                Text {
+                    horizontal-stretch: 1;
+                    text: PresetsData.hearing;
+                    color: Theme.text;
+                    font-size: Type.meta;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    StudioButton {
+                        text: "Stop audition";
+                        tip: "Stop it and take its track out of Bitwig again";
+                        clicked => { PresetsData.stop-audition(); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    StudioButton {
+                        text: "Keep in Bitwig";
+                        tip: "Stop it playing and leave its track, preset and part in the project";
+                        key: PresetsData.keep-audition-key;
+                        enabled: PresetsData.hearing-playing;
+                        clicked => { PresetsData.keep-audition(); }
+                    }
+                }
             }
         }
         // The list, the year strip beside it, and the picked line's card.

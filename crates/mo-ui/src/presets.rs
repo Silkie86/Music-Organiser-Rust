@@ -92,6 +92,8 @@ struct Page {
     message: String,
     /// The line being auditioned in Bitwig ([`logic::audition_id`]) and how far it's got.
     hearing: Option<(String, logic::Hearing)>,
+    /// The auditioned line's name, for the strip under the list that shows the audition whatever line is picked.
+    hearing_name: String,
     /// The Curves section.
     curves: Vec<Curve>,
     /// What the search and the order go by, one for each of `curves`, worked out once (H-5).
@@ -312,8 +314,9 @@ fn show_preset(app: &AppWindow, at: usize) {
 pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     PAGE.with(|p| p.borrow_mut().shortcuts = shortcuts.clone());
     let key = shortcuts.key_of(act::EXPORT_SHOWN).to_owned();
-    app.global::<PresetsData>()
-        .set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
+    let data = app.global::<PresetsData>();
+    data.set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
+    data.set_keep_audition_key(shortcuts.key_of(act::KEEP).into());
     show_card(app);
     show_curve_card(app);
 }
@@ -407,6 +410,20 @@ fn wire(app: &AppWindow) {
     data.on_close_panel(move || {
         if let Some(app) = weak.upgrade() {
             pick(&app, None);
+            // Closing the card stops the audition, as on the MIDI page (the 6 Nov review's X3-1).
+            stop_audition_now(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_stop_audition(move || {
+        if let Some(app) = weak.upgrade() {
+            stop_audition_now(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_keep_audition(move || {
+        if let Some(app) = weak.upgrade() {
+            keep_audition(&app);
         }
     });
     data.on_panel_resized(|w| log::info("Presets", &format!("Panel width {w:.0}")));
@@ -679,6 +696,17 @@ fn show_everything(app: &AppWindow) {
     PAGE.with(|p| {
         let p = p.borrow();
         data.set_section(p.section.index() as i32);
+        let (hearing, playing) = match &p.hearing {
+            Some((_, logic::Hearing::Starting)) => {
+                (format!("Putting {} into Bitwig to hear it\u{2026}", p.hearing_name), false)
+            }
+            Some((_, logic::Hearing::Playing)) => {
+                (format!("Hearing {} in Bitwig, on a track of its own.", p.hearing_name), true)
+            }
+            _ => (String::new(), false),
+        };
+        data.set_hearing(hearing.into());
+        data.set_hearing_playing(playing);
         let search = match p.section {
             Section::Sounds => &p.filters.search,
             Section::Curves => &p.curve_filters.search,
@@ -1256,6 +1284,14 @@ fn run_sound_action(app: &AppWindow, id: &str) -> bool {
     if id == act::EXPORT_SHOWN {
         return export_shown(app);
     }
+    // Keep goes to the audition playing, whatever line is picked (the strip under the list has it too).
+    if id == act::KEEP {
+        let playing = PAGE.with(|p| matches!(p.borrow().hearing, Some((_, logic::Hearing::Playing))));
+        if playing {
+            keep_audition(app);
+        }
+        return playing;
+    }
     let Some(item) = PAGE.with(|p| {
         let p = p.borrow();
         p.picked.and_then(|i| p.items.get(i)).map(|i| i.as_fixed(&p.fixed_now).into_owned())
@@ -1287,7 +1323,6 @@ fn run_sound_action(app: &AppWindow, id: &str) -> bool {
             }
         }
         act::AUDITION if enabled(id) => toggle_audition(app, item),
-        act::KEEP if enabled(id) => keep_audition(app),
         _ => return false,
     }
     true
@@ -1642,7 +1677,8 @@ fn toggle_audition(app: &AppWindow, item: Item) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.hearing = Some((id, logic::Hearing::Starting));
-        p.message = format!("Putting {name} into Bitwig to hear it\u{2026}");
+        p.hearing_name.clone_from(&name);
+        p.message.clear();
     });
     show_all(app);
     let (library, templates, bitwig_folders, _) = export_setup();
@@ -1677,13 +1713,8 @@ fn toggle_audition(app: &AppWindow, item: Item) {
                     stop_audition_in(auditioning, Some(logic::audition_id(&item)), &turn);
                     return;
                 }
-                let words = format!(
-                    "Hearing {} in Bitwig, on a track of its own. Stop audition takes the track out again; Keep in \
-                     Bitwig leaves it there.",
-                    auditioning.track
-                );
                 *slot = Some(auditioning);
-                Ok(words)
+                Ok(())
             }
             Err(Some(why)) => {
                 log::warning("Presets", &format!("{name} couldn't be auditioned in Bitwig: {why}"));
@@ -1699,15 +1730,19 @@ fn toggle_audition(app: &AppWindow, item: Item) {
             PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 match made {
-                    Ok(words) => {
+                    // The strip under the list says it plays (the 6 Nov review's D-4): the card's words stay the
+                    // picked line's.
+                    Ok(()) => {
                         if let Some((_, hearing)) = &mut p.hearing {
                             *hearing = logic::Hearing::Playing;
                         }
-                        p.message = words;
                     }
                     Err(why) => {
+                        // Named when another line's card is on show.
+                        let picked = p.picked.and_then(|i| p.items.get(i)).map(logic::audition_id);
+                        let this = p.hearing.as_ref().map(|(id, _)| id.clone());
+                        p.message = if picked.is_some() && picked == this { why } else { format!("{name}: {why}") };
                         p.hearing = None;
-                        p.message = why;
                     }
                 }
             });
@@ -1812,6 +1847,7 @@ fn put_back(auditioning: mo_dawlink::bitwig::Auditioning, line: String, why: mo_
          press Stop audition again.",
         auditioning.track
     );
+    let track = auditioning.track.clone();
     let put = {
         let mut slot = audition_now();
         if slot.is_none() {
@@ -1825,7 +1861,11 @@ fn put_back(auditioning: mo_dawlink::bitwig::Auditioning, line: String, why: mo_
     on_window(move |app| {
         if let Some((at, midi)) = put {
             if audition_asked() == at {
-                PAGE.with(|p| p.borrow_mut().hearing = Some((line, logic::Hearing::Playing)));
+                PAGE.with(|p| {
+                    let mut p = p.borrow_mut();
+                    p.hearing = Some((line, logic::Hearing::Playing));
+                    p.hearing_name = track;
+                });
             }
             if let Some(midi) = midi {
                 crate::midi::called_off(app, midi);
@@ -1869,16 +1909,30 @@ pub(crate) fn call_off_for_closing() {
     AUDITION_ASKED.fetch_add(1, Ordering::SeqCst);
 }
 
+/// Stops the audition playing or starting, whatever line is picked: the strip's Stop audition, closing the card, and
+/// leaving the page.
+fn stop_audition_now(app: &AppWindow) {
+    let line = PAGE.with(|p| p.borrow().hearing.as_ref().map(|(id, _)| id.clone()));
+    if let Some(before) = stop_audition(app) {
+        stop_in_bitwig(before, line);
+    }
+}
+
+/// When another page comes to the front: the audition stops, so nothing plays in Bitwig that this page can't show (the
+/// 6 Nov review's X3-1).
+pub fn left(app: &AppWindow) {
+    if PAGE.with(|p| p.borrow().hearing.is_some()) {
+        stop_audition_now(app);
+    }
+}
+
 /// Stops an audition playing or starting, for Play in Bitwig on the MIDI page taking Bitwig over (the review's
 /// D-8): one thing plays there at a time.
 pub fn stop_audition_for_another(app: &AppWindow) {
     if PAGE.with(|p| p.borrow().hearing.is_none()) {
         return;
     }
-    let line = PAGE.with(|p| p.borrow().hearing.as_ref().map(|(id, _)| id.clone()));
-    if let Some(before) = stop_audition(app) {
-        stop_in_bitwig(before, line);
-    }
+    stop_audition_now(app);
     PAGE.with(|p| p.borrow_mut().message = "The audition stopped: Play in Bitwig on the MIDI page took over.".into());
     show_all(app);
 }
@@ -2262,13 +2316,7 @@ pub fn show_audition_sample(app: &AppWindow, on: bool) {
         let mut p = p.borrow_mut();
         let id = p.picked.and_then(|i| p.items.get(i)).map(logic::audition_id);
         p.hearing = if on { id.map(|id| (id, logic::Hearing::Playing)) } else { None };
-        p.message = if on {
-            "Hearing Atmos in Bitwig, on a track of its own. Stop audition takes the track out again; Keep in \
-             Bitwig leaves it there."
-                .into()
-        } else {
-            String::new()
-        };
+        p.hearing_name = if on { "Atmos".into() } else { String::new() };
     });
     show_all(app);
 }
