@@ -1715,6 +1715,8 @@ export component ProgressLine inherits HorizontalLayout {
     in property <string> text;
     // From 0 to 1.
     in property <float> done;
+    // The accent for a job that's working; a level that isn't a job (how full a drive is) passes its own.
+    in property <color> tint: Theme.accent;
     spacing: Space.sm;
     alignment: start;
     VerticalLayout {
@@ -1723,6 +1725,7 @@ export component ProgressLine inherits HorizontalLayout {
             width: 160px;
             height: 6px;
             level: root.done;
+            tint: root.tint;
         }
     }
     Text {

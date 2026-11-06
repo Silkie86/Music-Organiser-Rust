@@ -20,7 +20,7 @@ use mo_sounds::music::NOTE_NAMES;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use super::{FEED, HERE, PAGE, Page, pick, play_picked, strings};
-use crate::{AppWindow, PadLine, SoundsData};
+use crate::{AppWindow, MenuItem, PadLine, SoundsData};
 
 /// The kit builder's part of the page.
 pub(super) struct Kit {
@@ -596,7 +596,17 @@ pub(super) fn show(app: &AppWindow) {
         let key = k.options.key_tonic.and_then(|t| usize::try_from(t).ok()).and_then(|t| NOTE_NAMES.get(t));
         data.set_kit_key(key.copied().unwrap_or_default().into());
         data.set_kit_randomness(k.options.randomness as f32);
-        data.set_kit_types(strings(p.types.iter().map(|t| t.0.as_str())));
+        let types: Vec<MenuItem> = p
+            .types
+            .iter()
+            .map(|t| MenuItem {
+                what: t.0.as_str().into(),
+                key: Default::default(),
+                id: t.0.as_str().into(),
+                enabled: true,
+            })
+            .collect();
+        data.set_kit_types(ModelRc::new(VecModel::from(types)));
     });
     redraw();
 }
