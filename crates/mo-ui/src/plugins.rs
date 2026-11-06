@@ -89,8 +89,9 @@ enum Wanted {
 }
 
 /// The library, whether to read it whatever ([`read_again`]), and what Space's clean-ups have in the Recycle Bin then
-/// (a change there is shown by a fresh read, as the library itself doesn't change).
-type ReadJob = (PathBuf, bool, Vec<String>);
+/// (a change there is shown by a fresh read, as the library itself doesn't change): none until the Space page has
+/// looked in the bin this run, when the reader reads what they kept instead ([`crate::space::plugin_files_in_bin`]).
+type ReadJob = (PathBuf, bool, Option<Vec<String>>);
 type CopiesJob = (u64, PathBuf, String);
 
 thread_local! {
@@ -344,12 +345,15 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         let started = std::time::Instant::now();
         let stamp = mo_library::list_copy::stamp_of(&path);
         let today = Local::now().date_naive();
+        // Before Space has looked in the bin this run, what its clean-ups kept says (the whole-app review of 6 Nov,
+        // E1-4): what they sent yesterday isn't counted as installed today.
+        let in_bin = in_bin.unwrap_or_else(|| mo_app::binned::plugin_files(&mo_app::paths::data_dir()));
         let same = |(p, s, b, d): &Of| *p == path && Some(s) == stamp.as_ref() && *b == in_bin && *d == today;
         if !whatever && last.as_ref().is_some_and(same) {
             log::info("Plugins", "Nothing was written to the library since the last read: the list stays as it is");
             return;
         }
-        last = stamp.map(|s| (path.clone(), s, in_bin, today));
+        last = stamp.map(|s| (path.clone(), s, in_bin.clone(), today));
         let read = background::on_pool(|| {
             let lib = Library::open_read_only(&path).map_err(|e| e.to_string())?;
             plugins::read(&lib).map_err(|e| e.to_string())
@@ -369,7 +373,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
                 if let Some(found) = found {
                     crate::finder::add_source(&app, "plugins", found);
                 }
-                arrived(&app, built);
+                arrived(&app, built, in_bin);
             }
         });
     });
@@ -483,7 +487,8 @@ pub fn has_pick() -> bool {
     PAGE.with(|p| p.borrow().picked.is_some())
 }
 
-fn arrived(app: &AppWindow, built: Result<Plugins, String>) {
+/// A read of the library has arrived (`built`), read while Space's clean-ups had what's at `in_bin` in the Recycle Bin.
+fn arrived(app: &AppWindow, built: Result<Plugins, String>, in_bin: Vec<String>) {
     let _doing = crate::watchdog::doing("Plugins: show the list");
     let data = app.global::<PluginsData>();
     match built {
@@ -510,8 +515,9 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>) {
                 p.picked.and_then(|i| old.rows.get(i)).map(|r| (r.key.clone(), r.own.clone()))
             });
             clean::forget_binned(&mut fresh);
-            // And the plugin files Space's clean-ups sent to the Recycle Bin, as Space leaves them out.
-            fresh.forget_paths(&crate::space::plugin_files_in_bin());
+            // And the plugin files Space's clean-ups sent to the Recycle Bin, as Space leaves them out: as Space has
+            // them now, once it has looked in the bin.
+            fresh.forget_paths(&crate::space::plugin_files_in_bin().unwrap_or(in_bin));
             PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 p.folder_fixes = fresh.apply_folder_fixes(&p.folder_fixes);
@@ -953,7 +959,7 @@ fn strings<S: AsRef<str>>(items: impl IntoIterator<Item = S>) -> ModelRc<SharedS
 /// `tab`, and shows `copies` as its installed copies.
 pub fn show_sample(app: &AppWindow, plugins: Plugins, row: Option<usize>, tab: i32, copies: &[ScannedPlugin]) {
     PAGE.with(|p| p.borrow_mut().plugins = None);
-    arrived(app, Ok(plugins));
+    arrived(app, Ok(plugins), Vec::new());
     pick(app, row);
     app.global::<PluginsData>().set_tab(tab);
     let asked = PAGE.with(|p| p.borrow().copies_asked);

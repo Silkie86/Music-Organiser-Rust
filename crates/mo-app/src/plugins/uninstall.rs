@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use mo_library::scan::is_inside;
+use mo_library::scan::Inside;
 use mo_space::plugin_files::{self, FileLine};
 use mo_space::plugin_space::{PluginSpace, SpaceKind};
 use mo_space::plugins::is_waves;
@@ -81,10 +81,11 @@ impl Plugins {
     /// Leaves out these paths (and what's inside them) until the old app measures again: a plugin's files once its
     /// uninstaller removed them, or what went to the Recycle Bin.
     pub fn forget_paths<S: AsRef<str>>(&mut self, gone: &[S]) {
+        let gone = Inside::new(gone);
         if gone.is_empty() {
             return;
         }
-        let keep = |path: &str| !gone.iter().any(|g| is_inside(path, g.as_ref()));
+        let keep = |path: &str| !gone.holds(path);
         for s in &mut self.spaces {
             s.folders.retain(|f| keep(&f.path));
         }

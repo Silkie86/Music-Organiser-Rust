@@ -88,6 +88,45 @@ pub fn is_inside(path: &str, folder: &str) -> bool {
     key_inside(&path_key(path), &path_key(folder))
 }
 
+/// Some folders, ready to ask of many paths whether each is one of them or inside one ([`Inside::holds`]), as
+/// [`is_inside`] says of each pair: each folder is made into a key once, and a path is looked up by itself and each
+/// folder it's in, so it takes as long for thousands of folders as for one.
+#[derive(Clone, Debug, Default)]
+pub struct Inside {
+    keys: HashSet<String>,
+}
+
+impl Inside {
+    pub fn new<S: AsRef<str>>(folders: &[S]) -> Self {
+        Inside { keys: folders.iter().map(|f| path_key(f.as_ref())).collect() }
+    }
+
+    /// No folders: nothing is inside.
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+
+    /// Whether `path` is one of the folders or inside one, whichever way the slashes lean and ignoring case.
+    pub fn holds(&self, path: &str) -> bool {
+        if self.keys.is_empty() {
+            return false;
+        }
+        let key = path_key(path);
+        let mut at = key.as_str();
+        loop {
+            if self.keys.contains(at) {
+                return true;
+            }
+            match at.rfind('/') {
+                // The top: "/" holds everything below it.
+                Some(0) => return self.keys.contains("/"),
+                Some(end) => at = &at[..end],
+                None => return false,
+            }
+        }
+    }
+}
+
 /// Whether the scan leaves this file out: an autosave copy, or inside a skipped folder under its root (the innermost
 /// root, when one is inside another).
 pub fn is_ignored(path: &str, roots: &[String]) -> bool {
@@ -421,6 +460,34 @@ mod tests {
         assert!(!is_ignored(r"K:\Music\Old\Backup\a.flp", &nested));
         assert!(is_ignored(r"k:/music/Song/BACKUP/a.flp", &roots));
         assert!(is_inside("/m/a.flp", "/"));
+    }
+
+    #[test]
+    fn inside_any_of_many_folders_says_what_is_inside_says_of_each() {
+        let folders = [r"K:\Music", r"C:\Program Files\Common Files\VST3\", "/Users/s/Plug-Ins", "D:"];
+        let inside = Inside::new(&folders);
+        for path in [
+            r"K:\Music\a.flp",
+            r"k:/music",
+            r"K:\Music Old\a.flp",
+            r"K:\Musi",
+            r"C:\Program Files\Common Files\VST3\Serum.vst3\Contents",
+            r"c:/program files/common files/vst3",
+            r"C:\Program Files\Common Files\VST",
+            "/Users/s/Plug-Ins/Components/a.component",
+            "/Users/s/Plug-Ins2/a.component",
+            "/Users",
+            r"D:\a.dll",
+            "D:",
+            r"E:\D:",
+            "",
+        ] {
+            assert_eq!(inside.holds(path), folders.iter().any(|f| is_inside(path, f)), "{path}");
+        }
+        // The top of a Mac or Linux disk holds every path on it.
+        assert!(Inside::new(&["/"]).holds("/m/a.flp"));
+        assert!(!Inside::new::<&str>(&[]).holds("/m/a.flp"));
+        assert!(Inside::new::<&str>(&[]).is_empty());
     }
 
     #[test]

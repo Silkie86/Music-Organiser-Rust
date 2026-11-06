@@ -7,7 +7,7 @@
 //! page doesn't count it.
 
 use chrono::NaiveDateTime;
-use mo_library::scan::is_inside;
+use mo_library::scan::Inside;
 use mo_space::plugin_space::PluginSpace;
 use mo_space::size::size_text;
 
@@ -103,8 +103,9 @@ impl Found {
     }
 
     /// As it is when `years` make a plugin unused, counted back from `now`: the years are the Plugins page's pick,
-    /// which can change while the app runs, and `now` moves on when a look finds the library as it was. Quick, nothing
-    /// is read again; the Plugins page counts back the same way ([`unused_since`]).
+    /// which can change while the app runs, and `now` moves on when a look finds the library as it was. Nothing is read
+    /// again, but every plugin is copied and sorted: call it away from the window's thread. The Plugins page counts
+    /// back the same way ([`unused_since`]).
     pub fn as_of(&self, years: u32, now: NaiveDateTime) -> Found {
         let since = unused_since(now, years);
         let (mut plugins, mut used): (Vec<Measured>, Vec<Measured>) =
@@ -115,16 +116,17 @@ impl Found {
     }
 
     /// As it is now the app has removed what's at `gone` (sent to the Recycle Bin, or uninstalled) since the old app
-    /// measured: what's in there isn't counted, and a plugin with nothing left goes. Quick: the page works it out
-    /// each time it shows what was found, so a clean-up shows at once. The Plugins page leaves them out the same way
-    /// (`Plugins::forget_paths`).
+    /// measured: what's in there isn't counted, and a plugin with nothing left goes. Each folder is looked up once,
+    /// however much is gone ([`Inside`]), but it goes through every plugin's folders: call it away from the window's
+    /// thread. The Plugins page leaves them out the same way (`Plugins::forget_paths`).
     pub fn without(mut self, gone: &[String]) -> Found {
+        let gone = Inside::new(gone);
         if gone.is_empty() {
             return self;
         }
         let left = |plugins: &mut Vec<Measured>| {
             for p in plugins.iter_mut() {
-                p.room.folders.retain(|f| !gone.iter().any(|g| is_inside(&f.path, g)));
+                p.room.folders.retain(|f| !gone.holds(&f.path));
             }
             plugins.retain(|p| p.bytes() > 0);
             biggest_first(plugins);
