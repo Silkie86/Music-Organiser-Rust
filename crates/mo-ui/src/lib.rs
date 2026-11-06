@@ -475,12 +475,13 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed) -> bool {
         }
         // Where everything the app removes goes first, from any page.
         "app.recycleBin" => files::open_recycle_bin(feed),
-        // Space plays the picked sound on the Sounds page and loops the picked part on the MIDI page; elsewhere it's
-        // left for the page (a button, a text box).
+        // Space plays the picked sound on the Sounds page, loops the picked part on the MIDI page and auditions the
+        // picked sound in Bitwig on Presets (X3-13); elsewhere it's left for the page (a button, a text box).
         "app.play" => {
             let place = app.get_place();
             return (place == Place::Sounds.index() as i32 && sounds::toggle_play(&app))
-                || (place == Place::Midi.index() as i32 && midi::toggle_play(&app));
+                || (place == Place::Midi.index() as i32 && midi::toggle_play(&app))
+                || (place == Place::Presets.index() as i32 && presets::toggle_play(&app));
         }
         _ => {
             debug_assert!(!HANDLED.contains(&id), "{id} is in HANDLED but run() doesn't do it");

@@ -446,6 +446,18 @@ fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
+    data.on_curve_drag(move || {
+        if let Some(app) = weak.upgrade() {
+            carry_curve(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_curve_drag_let_go(move || {
+        if let Some(app) = weak.upgrade() {
+            crate::drag::let_go(&app);
+        }
+    });
+    let weak = app.as_weak();
     data.on_curve_chosen(move |id| {
         if let Some(app) = weak.upgrade() {
             run_curve_action(&app, &id);
@@ -1219,6 +1231,11 @@ fn add(items: Vec<Item>, songs: usize, files: usize, reading: Option<(usize, usi
 // ---------------------------------------------------------------------------------------------------------------------
 // What can be done with a sound
 
+/// Space on the page: auditions the picked sound in Bitwig, or stops it (as Audition in Bitwig does). Whether it did.
+pub fn toggle_play(app: &AppWindow) -> bool {
+    PAGE.with(|p| p.borrow().section) == Section::Sounds && run_sound_action(app, act::AUDITION)
+}
+
 /// Runs one of the Sounds section's actions (from its key, its card or its menu). Returns whether it did anything.
 pub fn run_action(app: &AppWindow, id: &str) -> bool {
     match PAGE.with(|p| p.borrow().section) {
@@ -1259,6 +1276,7 @@ fn run_sound_action(app: &AppWindow, id: &str) -> bool {
     match id {
         act::USE_GUESS if item.row.fixed.is_some() => set_fix(app, &item, None),
         act::REVEAL => crate::files::reveal(&feed, item.path(), mo_app::shell::folder_of(item.path())),
+        act::SHOW_IN_SONGS if !item.is_file() => show_in_songs(app, item.path()),
         act::COPY_PATH => crate::files::copy_path(&feed, item.path()),
         act::EXPORT if enabled(id) => export_one(app, item, false),
         act::TO_BITWIG if enabled(id) => {
@@ -2066,6 +2084,12 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
             };
             crate::files::reveal(&feed, &s.path, mo_app::shell::folder_of(&s.path));
         }
+        curve_act::SHOW_IN_SONGS => {
+            let Some(s) = curve.sources.iter().find(|s| s.kind != curves::SourceKind::BitwigCurve) else {
+                return false;
+            };
+            show_in_songs(app, &s.path);
+        }
         curve_act::REVEAL => {
             let folder = data_dir.join(curves::FOLDER);
             let started = background::spawn("Curve file", move || match curves::file(&curve, &folder) {
@@ -2106,6 +2130,58 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
         _ => return false,
     }
     true
+}
+
+/// Drags the picked curve's file (in the app's Curves folder, made on a thread of its own as the drag gets going) out,
+/// onto an automation lane in Bitwig (X3-15).
+fn carry_curve(app: &AppWindow) {
+    let Some((curve, folder)) = PAGE.with(|p| {
+        let p = p.borrow();
+        let c = p.curve_picked.as_deref().and_then(|id| p.curves.iter().find(|c| c.id == id)).cloned()?;
+        Some((c, p.data_dir.join(curves::FOLDER)))
+    }) else {
+        return;
+    };
+    let under_way = crate::drag::start(
+        app,
+        crate::drag::Drag {
+            make: Box::new(move || {
+                let path = curves::file(&curve, &folder)?;
+                let card = mo_app::drag_out::Card {
+                    title: curve.name.clone(),
+                    detail: ["Curve".to_owned(), logic::beats_words(curve.length_beats)]
+                        .into_iter()
+                        .filter(|t| !t.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                    ..Default::default()
+                };
+                Ok(mo_app::drag_out::Payload {
+                    files: vec![path],
+                    cards: vec![card],
+                    caption: "1 curve".into(),
+                    numbered: false,
+                })
+            }),
+            done: Box::new(|app, outcome| {
+                app.global::<PresetsData>().set_curve_lifted(false);
+                if outcome == crate::drag::Outcome::Landed {
+                    crate::drag::glow(app, |app, on| app.global::<PresetsData>().set_curve_landed(on));
+                }
+            }),
+        },
+    );
+    if under_way {
+        app.global::<PresetsData>().set_curve_lifted(true);
+    }
+}
+
+/// Opens the Songs page on the song a save belongs to (X3-10, as Plugins' Show in Songs does).
+fn show_in_songs(app: &AppWindow, save: &str) {
+    crate::go_to(app, Place::Songs.index() as i32);
+    if !crate::songs::show_save_path(app, save) {
+        log::info("Presets", "The song isn't on the Songs page yet (its list is still being read)");
+    }
 }
 
 fn curve_message(text: String) {

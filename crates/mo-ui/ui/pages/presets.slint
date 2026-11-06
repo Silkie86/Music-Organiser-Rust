@@ -3,7 +3,7 @@
 // to drop onto a Bitwig lane (Solomon, 2 Nov 2026). Only shared parts from studio.slint; mo-app decides every word
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Caps, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
 
 // One line of the sounds list.
 export struct PresetLine {
@@ -165,6 +165,12 @@ export global PresetsData {
     in property <[MenuItem]> curve-menu;
     in property <string> curve-message;
     callback curve-chosen(string);
+    // The card's handle drags the picked curve's file out (onto a Bitwig automation lane): `curve-drag`, then
+    // `curve-drag-let-go` if the button comes up before the drag has got going. Dimmed while carried, glows once landed.
+    callback curve-drag();
+    callback curve-drag-let-go();
+    in property <bool> curve-lifted;
+    in property <bool> curve-landed;
     // Renaming the picked curve: the box shows while this is on.
     in-out property <bool> renaming;
     in-out property <string> rename-text;
@@ -483,6 +489,15 @@ component CurvePanel inherits SidePanel {
             line: 2px;
         }
     }
+    // Where to take the curve from to drag it onto an automation lane: its file in the app's Curves folder.
+    DragHandle {
+        text: "Drag onto an automation lane";
+        tip: "Drag the curve's file onto an automation lane in Bitwig";
+        lifted: PresetsData.curve-lifted;
+        landed: PresetsData.curve-landed;
+        drag-out => { PresetsData.curve-drag(); }
+        drag-let-go => { PresetsData.curve-drag-let-go(); }
+    }
     CardActions {
         actions: PresetsData.curve-actions;
         chosen(id) => { PresetsData.curve-chosen(id); }
@@ -528,7 +543,7 @@ component CurvePanel inherits SidePanel {
         }
     }
     Text {
-        text: "Drag the curve file onto an automation lane in Bitwig, or save it to Bitwig's curves to find it in its browser.";
+        text: "Drag the curve onto an automation lane in Bitwig, or save it to Bitwig's curves to find it in its browser.";
         color: Theme.faint;
         font-size: Type.small;
         wrap: word-wrap;
