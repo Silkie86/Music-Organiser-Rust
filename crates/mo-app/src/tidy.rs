@@ -204,10 +204,14 @@ pub struct Places {
 impl Places {
     /// This computer's places. `library` is the song library, which keeps the export folder setting. Opens it, so
     /// never on the window's thread.
-    pub fn this_pc(library: Option<&Path>) -> Places {
-        let exports = library.and_then(|l| crate::bitwig_convert::export_setting_in(l).ok()).and_then(|set| {
-            crate::bitwig_convert::export_root(set.as_deref(), crate::bitwig_convert::documents().as_deref())
-        });
+    pub fn this_pc(library: &Path) -> Places {
+        // Only a full path, as every export checks: one that isn't would be looked for from wherever the app started.
+        let exports = crate::bitwig_convert::export_setting_in(library)
+            .ok()
+            .and_then(|set| {
+                crate::bitwig_convert::export_root(set.as_deref(), crate::bitwig_convert::documents().as_deref())
+            })
+            .filter(|e| e.is_absolute());
         Places { data: paths::data_dir(), temp: std::env::temp_dir(), exports }
     }
 }
@@ -218,7 +222,7 @@ impl Places {
 pub fn start(library: PathBuf) {
     let started = crate::background::spawn("Tidy up", move || {
         std::thread::sleep(WAIT);
-        let places = Places::this_pc(Some(&library));
+        let places = Places::this_pc(&library);
         let mut done = sweep(&places, SystemTime::now(), &mo_space::clean::SystemBin);
         if let Some(pruned) = crate::log::current().and_then(crate::log::SessionLog::take_pruned) {
             done.add(pruned);

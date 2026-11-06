@@ -884,6 +884,8 @@ pub enum Tempo {
     NotGiven,
     /// Its song or file couldn't be read just now (a drive not plugged in): it plays at [`PLAY_TEMPO`].
     Unread,
+    /// The song library hasn't read its project yet: it plays at [`PLAY_TEMPO`] until it has.
+    NotListed,
 }
 
 impl Tempo {
@@ -891,7 +893,7 @@ impl Tempo {
     pub fn bpm(self) -> f64 {
         match self {
             Tempo::Own(t) => t,
-            Tempo::NotGiven | Tempo::Unread => PLAY_TEMPO,
+            Tempo::NotGiven | Tempo::Unread | Tempo::NotListed => PLAY_TEMPO,
         }
     }
 }
@@ -900,7 +902,7 @@ impl Tempo {
 pub const TEMPO_FILE_LIMIT: u64 = 16 * 1024 * 1024;
 
 /// A tempo the loop can play at: not one a damaged file gives (0, or thousands).
-fn usable(tempo: Option<f64>) -> Option<f64> {
+pub fn usable_tempo(tempo: Option<f64>) -> Option<f64> {
     tempo.filter(|t| t.is_finite() && *t >= 20.0 && *t <= 400.0)
 }
 
@@ -908,13 +910,14 @@ fn usable(tempo: Option<f64>) -> Option<f64> {
 /// case aside, as every save's tempo is kept there), a MIDI file's from the file itself (its first tempo). It opens
 /// a file, so never on the window's thread.
 pub fn read_tempo(source: &mo_midi::Source, library: &std::path::Path) -> Tempo {
-    if let Some(t) = usable(source.tempo) {
+    if let Some(t) = usable_tempo(source.tempo) {
         return Tempo::Own(t);
     }
     match source.kind {
         mo_midi::SourceKind::Project => {
             match mo_library::Library::open_read_only(library).and_then(|l| l.save_at(&source.path)) {
-                Ok(save) => usable(save.and_then(|s| s.tempo)).map_or(Tempo::NotGiven, Tempo::Own),
+                Ok(Some(save)) => usable_tempo(save.tempo).map_or(Tempo::NotGiven, Tempo::Own),
+                Ok(None) => Tempo::NotListed,
                 Err(_) => Tempo::Unread,
             }
         }
@@ -934,7 +937,7 @@ pub fn read_tempo(source: &mo_midi::Source, library: &std::path::Path) -> Tempo 
 /// A MIDI file's first tempo, from its bytes. A damaged file can't stop the app: it reads as unread.
 pub fn tempo_in_midi(raw: &[u8], path: &std::path::Path) -> Tempo {
     match mo_catch::catch(std::panic::AssertUnwindSafe(|| mo_formats::midi::read_from(raw, path))) {
-        Ok(Ok(parts)) => usable(parts.iter().find_map(|p| p.tempo)).map_or(Tempo::NotGiven, Tempo::Own),
+        Ok(Ok(parts)) => usable_tempo(parts.iter().find_map(|p| p.tempo)).map_or(Tempo::NotGiven, Tempo::Own),
         _ => Tempo::Unread,
     }
 }
@@ -949,6 +952,9 @@ pub fn sound_line(sound: &mo_midi::gm::GmSound, tempo: Option<Tempo>) -> String 
         Some(Tempo::Own(t)) => format!("{head} · {} BPM", bpm(t)),
         Some(Tempo::NotGiven) => format!("{head} · {} BPM, as it gives no tempo", bpm(PLAY_TEMPO)),
         Some(Tempo::Unread) => format!("{head} · {} BPM, as its tempo couldn't be read", bpm(PLAY_TEMPO)),
+        Some(Tempo::NotListed) => {
+            format!("{head} · {} BPM, as the song library hasn't read this save yet", bpm(PLAY_TEMPO))
+        }
     }
 }
 

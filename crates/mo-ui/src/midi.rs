@@ -135,8 +135,6 @@ struct NotesRead {
     fact: Option<KeyFact>,
     /// The chord chart, read just now from the notes.
     chart: page::ChordChart,
-    /// The card's sound line, with the tempo read just now.
-    sound_line: String,
 }
 
 /// The card's key while the part's notes are read.
@@ -977,6 +975,7 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
         let id = ask.id;
         let read = read_notes(&ask, &mut None);
         notes_read(app, id, read);
+        tempo_read(app, id, sound_line_of(&ask));
         return;
     }
     NOTES.with(|n| {
@@ -988,10 +987,18 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
             match Newest::start("MIDI notes", move |ask: NotesAsk| {
                 let id = ask.id;
                 let read = read_notes(&ask, &mut open);
+                let weak_notes = weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = weak_notes.upgrade() {
+                        notes_read(&app, id, read);
+                    }
+                });
+                // Then its tempo, so the roll never waits for it, and the card has it even when the notes failed.
+                let line = sound_line_of(&ask);
                 let weak = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(app) = weak.upgrade() {
-                        notes_read(&app, id, read);
+                        tempo_read(&app, id, line);
                     }
                 });
             }) {
@@ -1042,8 +1049,19 @@ fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result
     // The chords too (their first 16 bars: quick even for a long part), spelled in the part's key.
     let chords = mo_midi::chart::read(&notes, ask.role, ask.cut);
     let chart = page::chord_chart(chords.as_ref(), page::chart_key(ask.key.as_ref().or(fact.as_ref())));
-    let sound_line = page::sound_line(&ask.sound, Some(tempo_of(&ask.from, &ask.source, &ask.library)));
-    Ok(NotesRead { read: notes.len(), roll: page::roll(&notes, ask.bars), fact, chart, sound_line })
+    Ok(NotesRead { read: notes.len(), roll: page::roll(&notes, ask.bars), fact, chart })
+}
+
+/// The card's sound line, with the part's tempo read now ([`tempo_of`]).
+fn sound_line_of(ask: &NotesAsk) -> String {
+    page::sound_line(&ask.sound, Some(tempo_of(&ask.from, &ask.source, &ask.library)))
+}
+
+/// The picked part's tempo has been read: its card says it, unless another part was picked meanwhile.
+fn tempo_read(app: &AppWindow, id: u64, line: String) {
+    if PAGE.with(|p| p.borrow().notes_asked) == id {
+        app.global::<MidiData>().set_sound_line(line.into());
+    }
 }
 
 /// The last tempo read, by the file's path and the size and time the index read it at: a part's card, its Play loop
@@ -1053,15 +1071,15 @@ static TEMPO: std::sync::Mutex<Option<(String, i64, i64, page::Tempo)>> = std::s
 /// A part's tempo ([`page::read_tempo`]), off the window's thread. Parts made up for the screenshots have no file.
 fn tempo_of(from: &NotesFrom, source: &mo_midi::Source, library: &Path) -> page::Tempo {
     if matches!(from, NotesFrom::Made(_)) {
-        return source.tempo.map_or(page::Tempo::NotGiven, page::Tempo::Own);
+        return page::usable_tempo(source.tempo).map_or(page::Tempo::NotGiven, page::Tempo::Own);
     }
     let same = |k: &(String, i64, i64, page::Tempo)| k.0 == source.path && k.1 == source.mtime && k.2 == source.size;
     if let Some(k) = TEMPO.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().filter(|k| same(k)) {
         return k.3;
     }
     let tempo = page::read_tempo(source, library);
-    // Not one that couldn't be read: it's tried again, as the drive may be back.
-    if tempo != page::Tempo::Unread {
+    // Not one that couldn't be read, nor a save the song library hasn't read yet: tried again next time.
+    if !matches!(tempo, page::Tempo::Unread | page::Tempo::NotListed) {
         *TEMPO.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
             Some((source.path.clone(), source.mtime, source.size, tempo));
     }
@@ -1076,7 +1094,6 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
     let mut picked = data.get_picked();
     match read {
         Ok(read) => {
-            data.set_sound_line(read.sound_line.as_str().into());
             let roll = &read.roll;
             if read.read == 0 {
                 picked.roll_note = "Its notes aren't in the index any more.".into();
@@ -1599,10 +1616,16 @@ fn look_for_soundfont(app: &AppWindow) {
             let found_one = found.is_some();
             SOUNDFONT.with(|s| *s.borrow_mut() = Some(found));
             if let Some(app) = weak.upgrade() {
-                show_soundfont(&app);
+                say_soundfont(&app);
+                // A Play pressed while it was being looked for: played now, or told what to do.
                 let data = app.global::<MidiData>();
-                if found_one && data.get_play_note() == "Looking for the SoundFont…" {
+                if data.get_play_note() == LOOKING_NOTE {
                     data.set_play_note("".into());
+                    if found_one {
+                        toggle_play(&app);
+                    } else {
+                        data.set_play_note(CHOOSE_NOTE.into());
+                    }
                 }
             }
         });
@@ -1622,11 +1645,14 @@ fn loop_playing() -> bool {
 /// nothing to play or stop.
 pub fn toggle_play(app: &AppWindow) -> bool {
     let playing = app.global::<MidiData>().get_playing();
-    if playing {
+    let (picked, looping) = PAGE.with(|p| (p.borrow().picked, p.borrow().looping));
+    // Stops the loop of the part picked (or of none); with another part picked (the menu of the line right-clicked),
+    // plays that one instead.
+    if playing && (picked.is_none() || picked == looping) {
         stop_playing(app);
         return true;
     }
-    match PAGE.with(|p| p.borrow().picked) {
+    match picked {
         Some(at) => {
             play(app, at);
             true
@@ -1659,6 +1685,15 @@ pub fn stop_for_another(app: &AppWindow) {
 /// Whether there's a SoundFont to play with, and if not what to do.
 fn show_soundfont(app: &AppWindow) {
     look_for_soundfont(app);
+    say_soundfont(app);
+}
+
+/// What the play note says while a Play waits for the SoundFont to be looked for, and once there's none.
+const LOOKING_NOTE: &str = "Looking for the SoundFont…";
+const CHOOSE_NOTE: &str = "Choose a SoundFont first.";
+
+/// The card says whether there's a SoundFont, as last looked for (no look at the disk).
+fn say_soundfont(app: &AppWindow) {
     let data = app.global::<MidiData>();
     // Not said missing until it's been looked for.
     let missing = SOUNDFONT.with(|s| matches!(*s.borrow(), Some(None)));
@@ -1683,7 +1718,7 @@ fn play(app: &AppWindow, at: usize) {
         stop_playing(app);
         let looked = SOUNDFONT.with(|s| s.borrow().is_some());
         show_soundfont(app);
-        data.set_play_note(if looked { "Choose a SoundFont first." } else { "Looking for the SoundFont…" }.into());
+        data.set_play_note(if looked { CHOOSE_NOTE } else { LOOKING_NOTE }.into());
         return;
     };
     let ask = PAGE.with(|p| {
@@ -2198,7 +2233,8 @@ mod tests {
         };
         let Ok(read) = read_notes(&ask, &mut None) else { panic!("the made-up notes should read") };
         // Made up, so its tempo is the sample's own, with no file opened for it.
-        assert!(read.sound_line.ends_with(" BPM") || read.sound_line.contains("BPM, as it gives no tempo"));
+        let line = sound_line_of(&ask);
+        assert!(line.ends_with(" BPM") || line.contains("BPM, as it gives no tempo"), "{line}");
         assert_eq!(read.roll.notes.len(), 12);
         assert!(read.fact.is_some());
         assert!(!read.chart.bars.is_empty(), "its chords are read too");
