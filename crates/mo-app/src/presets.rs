@@ -804,6 +804,16 @@ pub fn empty_words(
     )
 }
 
+/// The list's words when a song's sounds are asked for and none were read from it: why, in a few words.
+pub fn song_not_read(save: &str) -> (String, String) {
+    let text = if keeps_settings(save) {
+        "Its newest save has no plugin sounds the page can read, or it's a copy in the Bitwig export folder."
+    } else {
+        "Only FL Studio and Bitwig songs keep their plugins' settings where they can be read."
+    };
+    ("No sounds from this song".into(), text.into())
+}
+
 /// One line of the list, in words.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Line {

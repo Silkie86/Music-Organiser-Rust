@@ -86,6 +86,8 @@ struct Page {
     started: bool,
     reading: Option<(usize, usize)>,
     failed: Option<String>,
+    /// The name of the song the Song filter picks, as Songs gave it.
+    song_name: String,
     exporting: bool,
     message: String,
     /// The line being auditioned in Bitwig ([`logic::audition_id`]) and how far it's got.
@@ -474,9 +476,21 @@ pub fn shown(app: &AppWindow) {
     show_all(app);
 }
 
-/// Opens the page on one song's sounds (a song's Presets tab), by its save's path.
-pub fn show_song(app: &AppWindow, save: &str) {
-    PAGE.with(|p| p.borrow_mut().section = Section::Sounds);
+/// Opens the page on one song's sounds (a song's Presets tab), by its save's path; `name` is the song's, for its chip.
+/// A save the page hasn't read (saved since the page read your songs) has the songs read again (H-4).
+pub fn show_song(app: &AppWindow, save: &str, name: &str) {
+    let again = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.section = Section::Sounds;
+        p.song_name = name.to_owned();
+        p.started
+            && p.reading.is_none()
+            && logic::keeps_settings(save)
+            && !p.items.iter().chain(&p.pending).any(|i| i.path() == save)
+    });
+    if again {
+        read_again(app);
+    }
     change(app, |f| *f = Filters { song: Some(save.to_owned()), unused: f.unused, ..Filters::default() });
     // The page may have been left on Curves: the key sheet lists the Sounds keys now (H-12).
     crate::refresh_keys(app);
@@ -669,18 +683,19 @@ fn show_everything(app: &AppWindow) {
             data.set_from_filter(m.from.view(&p.chips.from));
             data.set_curve_found_in(m.found_in.view(&p.curve_found_in));
         });
+        // The song's name as Songs gave it: no looking through every line on each show.
         data.set_song(
             f.song
                 .as_ref()
-                .map(|s| p.items.iter().find(|i| i.path() == s).map_or_else(|| s.clone(), |i| i.song.clone()))
-                .unwrap_or_default()
+                .map(|s| if p.song_name.is_empty() { s.as_str() } else { &p.song_name })
+                .unwrap_or("")
                 .into(),
         );
         data.set_any_filter(f.any());
         data.set_unused(f.unused);
         data.set_shown(p.shown.len() as i32);
         let reading = p.reading.is_some();
-        let (title, text) = logic::empty_words(
+        let (mut title, mut text) = logic::empty_words(
             p.items.len() + p.pending.len(),
             p.shown.len(),
             reading,
@@ -688,6 +703,14 @@ fn show_everything(app: &AppWindow) {
             f.any(),
             p.failed.as_deref(),
         );
+        // A song with nothing read from it says why, not "No sounds match" (only looked for when nothing shows).
+        if !title.is_empty()
+            && !reading
+            && let Some(save) = &f.song
+            && !p.items.iter().any(|i| i.path() == save)
+        {
+            (title, text) = logic::song_not_read(save);
+        }
         data.set_empty_title(title.into());
         data.set_empty_text(text.into());
         data.set_format_note(p.format_note.as_str().into());
@@ -989,6 +1012,26 @@ fn read_sounds(_app: &AppWindow) {
     }
 }
 
+/// Reads every song and preset file again, from the start: what's unchanged comes from the stores, so it's quick.
+/// Ctrl+K forgets the old lines until the new ones are all in (its picks are places in them).
+fn read_again(app: &AppWindow) {
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        background::free_later(std::mem::take(&mut p.items));
+        background::free_later(std::mem::take(&mut p.pending));
+        p.shown.clear();
+        p.picked = None;
+        p.to_pick = None;
+        p.songs = 0;
+        p.files = 0;
+        p.failed = None;
+        p.finder_has = false;
+        refilter(&mut p);
+    });
+    crate::finder::add_source(app, "presets", Arc::new(mo_app::finder::Presets(Arc::new(Vec::new()))));
+    read_sounds(app);
+}
+
 /// Reads the library, every song's newest save and the preset files, handing each batch to the window.
 fn read_all(at: &Where) -> Result<(), String> {
     let lib = Library::open_read_only(&at.library).map_err(|e| format!("Couldn't open your library: {e}"))?;
@@ -1106,10 +1149,9 @@ fn read_all(at: &Where) -> Result<(), String> {
         ),
     );
     let (found, templates) = (kept.files, kept.templates);
-    let years: HashMap<String, Option<i32>> = background::on_pool(|| {
-        use rayon::prelude::*;
-        found.par_iter().map(|f| (f.path.clone(), file_year(&f.path))).collect()
-    });
+    // Each file's year from the time the store looked at already: no second look at every file (X2-4).
+    let years: HashMap<String, Option<i32>> =
+        found.iter().zip(&kept.modified).map(|(f, at)| (f.path.clone(), at.and_then(year_of_time))).collect();
     let mut items: Vec<Item> = plib::rows(&[], &found)
         .into_iter()
         .map(|row| {
@@ -1132,8 +1174,7 @@ fn read_all(at: &Where) -> Result<(), String> {
     Ok(())
 }
 
-fn file_year(path: &str) -> Option<i32> {
-    let m = std::fs::metadata(path).ok()?.modified().ok()?;
+fn year_of_time(m: std::time::SystemTime) -> Option<i32> {
     logic::year_of(m.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64)
 }
 

@@ -157,10 +157,10 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     data.on_show_presets(move || {
         let Some(app) = weak.upgrade() else { return };
         let mut save = None;
-        with_picked(|_, r| save = Some(r.song.latest.path.clone()));
-        if let Some(save) = save {
+        with_picked(|_, r| save = Some((r.song.latest.path.clone(), r.song.name.clone())));
+        if let Some((save, name)) = save {
             crate::go_to(&app, Place::Presets.index() as i32);
-            crate::presets::show_song(&app, &save);
+            crate::presets::show_song(&app, &save, &name);
         }
     });
     wire_filters(app);
