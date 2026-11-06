@@ -135,7 +135,7 @@ fn change(
         })
         .map_err(sql)?;
     if !has {
-        return Err(write_error(format!("it has no {table} table yet; open the C# app once to make it")));
+        return Err(write_error(format!("it has no {table} table, so nothing was changed")));
     }
     // IMMEDIATE takes the write lock at the start, so the list read is the one written over.
     let tx = conn.begin().map_err(sql)?;

@@ -488,19 +488,21 @@ fn pick_view(app: &AppWindow, index: usize) {
         let mut s = s.borrow_mut();
         let p = s.preview.as_ref()?;
         let a = p.views.get(index)?.clone();
+        // Measured with the views on the reader's thread: here it's only copied (a song can have millions of notes).
+        let measured = p.measured.get(index)?.clone();
         let mut view = match &p.found {
-            Some(found) => View::new(a.clone(), found.clone()),
-            None => View::new(a.clone(), Arc::default()).looking_for_files(),
+            Some(found) => View::measured(a.clone(), &measured, found.clone()),
+            None => View::measured(a.clone(), &measured, Arc::default()).looking_for_files(),
         };
         let notes = arr::notes(&a, p.found.as_deref());
         view.set_peaks(s.peaks.clone());
         view.resize(s.size.0, s.size.1);
         s.view = Some(view);
-        Some((a, notes))
+        Some((a, measured, notes))
     });
-    let Some((a, notes)) = shown else { return };
+    let Some((a, measured, notes)) = shown else { return };
     data.set_view(i32::try_from(index).unwrap_or(0));
-    data.set_summary(arr::summary(&a).into());
+    data.set_summary(measured.summary.as_str().into());
     if show_notes(&data, &a, notes) {
         redraw(app);
     }
@@ -906,7 +908,7 @@ pub fn sample_preview() -> Preview {
     let mut bitwig = playlist.clone();
     bitwig.view = "As it opens in Bitwig";
     let found = HashMap::from([(SAMPLE_TAKE.to_owned(), PathBuf::from(SAMPLE_TAKE))]);
-    Preview { views: vec![Arc::new(playlist), Arc::new(bitwig)], found: Some(Arc::new(found)) }
+    Preview::new(vec![Arc::new(playlist), Arc::new(bitwig)], Some(Arc::new(found)))
 }
 
 /// The made-up song's vocal take that's on this computer.

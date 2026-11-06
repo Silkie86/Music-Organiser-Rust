@@ -4,9 +4,10 @@
 //! The app's own library is `songs.db` ([`songs_db`]), made once from the C# app's `library.db` (in
 //! `%LOCALAPPDATA%\MusicOrganiser`); until it's made the app reads `library.db`. Everything that reads opens either
 //! read-only, so nothing that reads can change it. What writes: [`folders`] and its kin (the folders the app looks in,
-//! Solomon's OK 2026-11-03, one checked transaction at a time), and [`song_writes`], which keeps what the app reads of
-//! your saves, only ever in the app's own `songs.db`.
+//! Solomon's OK 2026-11-03, one checked transaction at a time), and [`song_writes`] and [`converts`], which keep what
+//! the app reads of your saves and the Bitwig copies it converts, only ever in the app's own `songs.db`.
 
+pub mod converts;
 mod db;
 pub mod folders;
 pub mod list_copy;

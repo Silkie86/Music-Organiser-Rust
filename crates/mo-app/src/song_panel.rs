@@ -1,7 +1,7 @@
 //! The song panel beside the Songs list: what it says about the picked song. The facts come from the list's row;
 //! the plugins, samples, tracks and details come from the library's record of the song's newest save, read on a
-//! background thread when the song is picked (rule 12). As the C# app's panel, less what needs writing (song fields
-//! stay read-only until the Rust app's database is trusted).
+//! background thread when the song is picked (rule 12). As the C# app's panel, less what needs writing: the song's own
+//! fields (status, rating, notes, tags) can't be changed here yet.
 
 use mo_formats::paths::file_name;
 use mo_library::{PluginKind, ProjectPlugin, ProjectSample, Save, SaveDetail, SaveRun};

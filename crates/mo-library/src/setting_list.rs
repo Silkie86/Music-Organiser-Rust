@@ -1,6 +1,6 @@
 //! Changing one setting, as the C# app keeps them in `settings`: the one safe way the Rust app's writers
-//! ([`crate::moves`], [`crate::plugin_folders`], [`crate::folders::set_export_folder`]) change one, a JSON list
-//! ([`change`]) or a line of text ([`change_text`]). As [`crate::folders`]: one transaction that reads the setting as
+//! ([`crate::moves`], [`crate::plugin_folders`], [`crate::folders::set_export_folder`], [`crate::converts`]) change
+//! one, a JSON list ([`change`]) or a line of text ([`change_text`]), or let go of ones done with ([`forget`]). As [`crate::folders`]: one transaction that reads the setting as
 //! it is now (the C# app may have changed it), changes it, reads it back to check, and only then keeps it. A setting it
 //! can't read (a list that isn't a JSON list, or one that isn't text) is refused, never read as empty: adding to an
 //! empty list there would wipe what the C# app keeps. It never makes a library or a table.
@@ -38,6 +38,26 @@ pub(crate) fn change_text(
     edit: impl FnOnce(Option<&str>) -> Option<String>,
 ) -> Result<bool, LibraryError> {
     change_with(library, key, read_text, |now| Ok(edit(now.as_deref()).map(|text| (text.clone(), Some(text)))))
+}
+
+/// Takes away the settings in `gone`, each a key with the text it was read with: one changed since (written again by
+/// another copy of the app, say) is left as it is. One transaction; says how many went.
+pub(crate) fn forget(library: &Path, gone: &[(String, String)]) -> Result<usize, LibraryError> {
+    if gone.is_empty() {
+        return Ok(0);
+    }
+    let sql = |e: rusqlite::Error| match e.sqlite_error_code() {
+        Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => LibraryError::Busy { path: library.to_owned() },
+        _ => LibraryError::Write { path: library.to_owned(), why: e.to_string() },
+    };
+    let mut conn = open_for_settings(library)?;
+    let tx = conn.begin().map_err(sql)?;
+    let mut went = 0;
+    for (key, text) in gone {
+        went += tx.execute("DELETE FROM settings WHERE key = ?1 AND value = ?2", [key, text]).map_err(sql)?;
+    }
+    tx.commit().map_err(sql)?;
+    Ok(went)
 }
 
 /// The one transaction every change makes: `read` reads the setting as it is now (refusing what it can't read), and

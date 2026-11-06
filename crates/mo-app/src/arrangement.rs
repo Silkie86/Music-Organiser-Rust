@@ -27,9 +27,51 @@ use crate::themes::Look;
 #[derive(Clone, Debug, Default)]
 pub struct Preview {
     pub views: Vec<Arc<Arrangement>>,
+    /// Each view's [`Measured`], in the same order: worked out with the views, off the window's thread.
+    pub measured: Vec<Arc<Measured>>,
     /// The audio files found on this computer, by the path the project saved: `None` while they're still to be looked
     /// for.
     pub found: Option<Arc<HashMap<String, PathBuf>>>,
+}
+
+impl Preview {
+    /// The views read, each [`Measured`] here: a song can have millions of notes, so never on the window's thread.
+    pub fn new(views: Vec<Arc<Arrangement>>, found: Option<Arc<HashMap<String, PathBuf>>>) -> Preview {
+        let measured = views.iter().map(|a| Arc::new(Measured::of(a))).collect();
+        Preview { views, measured, found }
+    }
+}
+
+/// What a [`View`] of an arrangement needs from going through all of it: how many beats it shows, how tall its lanes
+/// are, each lane's lowest and highest note (so the same note sits at the same height in every clip) and the line
+/// under the picture ([`summary`]). Worked out once, with the views ([`Preview::new`]), so picking a view on the
+/// window's thread only copies it (review A-3).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Measured {
+    song_beats: f64,
+    content_height: f64,
+    keys: Arc<Vec<(u8, u8)>>,
+    /// "140 BPM · 32 bars · 0:55 · 6 tracks · 18 clips · 412 notes".
+    pub summary: String,
+}
+
+impl Measured {
+    pub fn of(arrangement: &Arrangement) -> Measured {
+        // Never past the readers' longest song (mo_formats::arrangement::MOST_BEATS), so the bar numbers can count it.
+        let length = arrangement.length();
+        let song_beats = (arrangement.beats_per_bar.max(1) as f64).max(length * 1.02);
+        let content_height = arrangement.lanes.iter().map(lane_height).sum();
+        let keys = arrangement
+            .lanes
+            .iter()
+            .map(|l| {
+                let mut keys = l.clips.iter().flat_map(|c| &c.notes).map(|n| n.key);
+                let first = keys.next();
+                first.map_or((60, 60), |k| keys.fold((k, k), |(lo, hi), k| (lo.min(k), hi.max(k))))
+            })
+            .collect();
+        Measured { song_beats, content_height, keys: Arc::new(keys), summary: summary(arrangement) }
+    }
 }
 
 /// A step slower than this is written to the log, with how long it took.
@@ -95,7 +137,7 @@ pub fn read(project: &Path) -> Result<Preview, String> {
         crate::log::info("Arrangement", &format!("Read the arrangement of {name} in {}", seconds(took)));
     }
     let found = audio_parts(&views).next().is_none().then(Arc::default);
-    Ok(Preview { views, found })
+    Ok(Preview::new(views, found))
 }
 
 /// Every audio part the views play, in order, the same file as often as it's played.
@@ -418,20 +460,15 @@ fn lane_height(lane: &PreviewLane) -> f64 {
 }
 
 impl View {
+    /// A view of `arrangement`, measured here: [`View::measured`] takes what [`Preview::new`] worked out instead.
     pub fn new(arrangement: Arc<Arrangement>, found: Arc<HashMap<String, PathBuf>>) -> View {
-        // Never past the readers' longest song (mo_formats::arrangement::MOST_BEATS), so the bar numbers can count it.
-        let length = arrangement.length();
-        let song_beats = (arrangement.beats_per_bar.max(1) as f64).max(length * 1.02);
-        let content_height = arrangement.lanes.iter().map(lane_height).sum();
-        let keys = arrangement
-            .lanes
-            .iter()
-            .map(|l| {
-                let mut keys = l.clips.iter().flat_map(|c| &c.notes).map(|n| n.key);
-                let first = keys.next();
-                first.map_or((60, 60), |k| keys.fold((k, k), |(lo, hi), k| (lo.min(k), hi.max(k))))
-            })
-            .collect();
+        let measured = Measured::of(&arrangement);
+        View::measured(arrangement, &measured, found)
+    }
+
+    /// A view of `arrangement` with what going through all of it gave ([`Measured`]), so making one is quick.
+    pub fn measured(arrangement: Arc<Arrangement>, measured: &Measured, found: Arc<HashMap<String, PathBuf>>) -> View {
+        let (song_beats, content_height, keys) = (measured.song_beats, measured.content_height, measured.keys.clone());
         View {
             arrangement,
             found,
@@ -448,7 +485,7 @@ impl View {
             held: None,
             song_beats,
             content_height,
-            keys: Arc::new(keys),
+            keys,
         }
     }
 
@@ -1287,6 +1324,22 @@ mod tests {
         v.moved(880.0, 10.0);
         let _ = v.hover();
         v.frame(&palette(), 1.0);
+    }
+
+    #[test]
+    fn each_view_is_measured_once_with_the_views() {
+        let a = Arc::new(song());
+        let preview = Preview::new(vec![a.clone()], None);
+        let m = &preview.measured[0];
+        // Each lane's lowest and highest note: the Keys lane's, and middle C for the lanes with none.
+        assert_eq!(*m.keys, [(60, 72), (60, 60), (60, 60)]);
+        assert_eq!(m.summary, summary(&a));
+        assert_eq!(**m, Measured::of(&a));
+        // A view made from it is the one made in place.
+        let quick = View::measured(a.clone(), m, Arc::default());
+        let slow = View::new(a, Arc::default());
+        assert_eq!((quick.song_beats, quick.content_height), (slow.song_beats, slow.content_height));
+        assert_eq!(quick.keys, slow.keys);
     }
 
     #[test]
