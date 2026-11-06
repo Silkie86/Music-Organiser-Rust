@@ -1733,6 +1733,13 @@ fn in_daw() -> std::sync::MutexGuard<'static, Option<InDaw>> {
     IN_DAW.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// What plays in a DAW, taken, and a newer ask counted under the same lock: a start still on its way sees it.
+fn take_in_daw() -> Option<InDaw> {
+    let mut slot = in_daw();
+    DAW_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    slot.take()
+}
+
 /// Stops what plays in a DAW, without the window waiting: FL's notes let go by themselves, Bitwig's clip comes out
 /// on a thread of its own.
 fn stop_in_daw(playing: InDaw) {
@@ -1792,10 +1799,13 @@ fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
         .unwrap_or_else(|_| Err("It stopped before it started playing.".to_owned()));
         let note = match made {
             Ok((playing, note)) => {
+                // Checked and kept under the lock a Stop takes, so a Stop either finds it or is seen here.
+                let mut slot = in_daw();
                 if DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst) == asked {
-                    *in_daw() = Some(playing);
+                    *slot = Some(playing);
                     Ok(note)
                 } else {
+                    drop(slot);
                     // Stopped (or another part asked for) while it was starting.
                     stop_in_daw(playing);
                     return;
@@ -1839,8 +1849,7 @@ fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
 /// Stops what plays (or is starting) in a DAW, and the buttons say so at once. A start still on its way sees the
 /// newer ask and stops what it started.
 fn stop_daw(app: &AppWindow) {
-    DAW_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    if let Some(playing) = in_daw().take() {
+    if let Some(playing) = take_in_daw() {
         stop_in_daw(playing);
     }
     let data = app.global::<MidiData>();
@@ -1876,8 +1885,7 @@ fn watch_fl(app: &AppWindow) {
 /// When the app closes: stops a part playing in a DAW, so Bitwig's clip doesn't loop on and no note hangs in FL.
 /// Waits a moment at most (Bitwig answers on this computer).
 pub fn finish_up() {
-    DAW_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    match in_daw().take() {
+    match take_in_daw() {
         Some(InDaw::Fl(fl)) => fl.finish(),
         Some(InDaw::Bitwig(bitwig)) => {
             let to = mo_dawlink::bitwig::Bitwig {

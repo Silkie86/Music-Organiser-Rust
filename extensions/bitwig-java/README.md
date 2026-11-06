@@ -172,6 +172,8 @@ whether Bitwig's audio engine is on.) The rest is additions, which the app can i
   each whether its panel showed before and after each go (`visible`), whether the route `ran` it, and whether
   the link put the panel back as it was (`restored`). A panel that shows and hides with them means Bitwig
   carried them out for the link.
+- From 3.20, for the Presets page's Audition: `newtrack` with `audition` notes the track it makes, and
+  `deletetrack` takes out only a track so noted while it keeps the name it came in with (so never one of yours).
 - From 3.19, for the app's Play on selected track: `selectedtrack` says which track is selected, `clip` with
   `audition` notes the clip it makes, and `deleteclip` takes out only a clip so noted while it keeps the name it came
   in with (so never one of yours), stopping the track and Bitwig first when asked.

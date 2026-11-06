@@ -992,6 +992,10 @@ pub fn format_note(items: &[Item], shown: &[usize]) -> String {
 pub mod act {
     pub const EXPORT: &str = "presets.export";
     pub const TO_BITWIG: &str = "presets.toBitwig";
+    /// Audition in Bitwig (a preset on a track of its own, playing a part), and Stop audition while it plays.
+    pub const AUDITION: &str = "presets.audition";
+    /// Keep an audition in Bitwig: its track stays, as Send to Bitwig would have left it.
+    pub const KEEP: &str = "presets.keepAudition";
     pub const EXPORT_SHOWN: &str = "presets.exportShown";
     pub const REVEAL: &str = "presets.reveal";
     pub const COPY_PATH: &str = "presets.copyPath";
@@ -1012,23 +1016,54 @@ fn offer(text: &str, id: &'static str, enabled: bool) -> Offer {
     Offer { text: text.into(), id, enabled }
 }
 
-/// What the picked line offers, in the card's order. `busy` while an export runs.
-pub fn offers(i: &Item, busy: bool) -> Vec<Offer> {
+/// Whether the picked line is being auditioned in Bitwig: not, starting (its track going in), or playing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Hearing {
+    #[default]
+    Off,
+    Starting,
+    Playing,
+}
+
+/// What the picked line offers, in the card's order. `busy` while an export runs; `hearing` says whether this line is
+/// being auditioned (then Audition is Stop audition, and Keep in Bitwig shows beside it once it plays).
+pub fn offers(i: &Item, busy: bool, hearing: Hearing) -> Vec<Offer> {
     let ext = i.row.extension.to_lowercase();
-    if i.is_file() {
+    let file = i.is_file();
+    // A Bitwig preset file, or a sound a Bitwig preset can be made from (which waits for an export to finish).
+    let bitwig = if file { ext == ".bwpreset" } else { can_be_bitwig(&ext) };
+    let mut out = if file {
         // A preset file is already a file: show it, copy where it is, or send a Bitwig one into Bitwig.
-        return vec![
-            offer("Send to Bitwig", act::TO_BITWIG, ext == ".bwpreset" && !busy),
-            offer("Show in folder", act::REVEAL, true),
-            offer("Copy path", act::COPY_PATH, true),
-        ];
+        vec![offer("Send to Bitwig", act::TO_BITWIG, bitwig && !busy)]
+    } else {
+        vec![offer("Export", act::EXPORT, !busy), offer("Send to Bitwig", act::TO_BITWIG, !busy && bitwig)]
+    };
+    match hearing {
+        // Stop always works, so a part never plays on with no way to stop it from here.
+        Hearing::Starting => out.push(offer("Stop audition", act::AUDITION, true)),
+        Hearing::Playing => {
+            out.push(offer("Stop audition", act::AUDITION, true));
+            out.push(offer("Keep in Bitwig", act::KEEP, true));
+        }
+        Hearing::Off => out.push(offer("Audition in Bitwig", act::AUDITION, bitwig && (file || !busy))),
     }
-    vec![
-        offer("Export", act::EXPORT, !busy),
-        offer("Send to Bitwig", act::TO_BITWIG, !busy && can_be_bitwig(&ext)),
-        offer("Show the song", act::REVEAL, true),
-        offer("Copy the song's path", act::COPY_PATH, true),
-    ]
+    if file {
+        out.push(offer("Show in folder", act::REVEAL, true));
+        out.push(offer("Copy path", act::COPY_PATH, true));
+    } else {
+        out.push(offer("Show the song", act::REVEAL, true));
+        out.push(offer("Copy the song's path", act::COPY_PATH, true));
+    }
+    out
+}
+
+/// Which line an audition is of, however the list is filtered or sorted meanwhile: its song's save and the sound's key
+/// there, or the preset file.
+pub fn audition_id(i: &Item) -> String {
+    match &i.row.source {
+        Source::Song { save, key } => format!("{save}\0{key}"),
+        Source::File { .. } => i.path().to_owned(),
+    }
 }
 
 /// Whether a sound's settings can go into a Bitwig preset: a VST2 or VST3 plugin's (not an FL plugin's own state).
@@ -1705,12 +1740,22 @@ mod tests {
     #[test]
     fn offers_fit_the_line() {
         let all = items();
-        let ids = |i: &Item| offers(i, false).into_iter().filter(|o| o.enabled).map(|o| o.id).collect::<Vec<_>>();
-        assert_eq!(ids(&all[0]), [act::EXPORT, act::TO_BITWIG, act::REVEAL, act::COPY_PATH]);
+        let ids = |i: &Item| {
+            offers(i, false, Hearing::Off).into_iter().filter(|o| o.enabled).map(|o| o.id).collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&all[0]), [act::EXPORT, act::TO_BITWIG, act::AUDITION, act::REVEAL, act::COPY_PATH]);
         let mut fl_own = all[2].clone();
         fl_own.row.extension = ".flstate".into();
         assert!(!ids(&fl_own).contains(&act::TO_BITWIG), "an FL plugin's own state can't go into Bitwig");
-        assert_eq!(ids(&all[3]), [act::TO_BITWIG, act::REVEAL, act::COPY_PATH]);
+        assert!(!ids(&fl_own).contains(&act::AUDITION), "nor be auditioned there");
+        assert_eq!(ids(&all[3]), [act::TO_BITWIG, act::AUDITION, act::REVEAL, act::COPY_PATH]);
+        // While a preset file is auditioned: Stop audition, then Keep in Bitwig once it plays, even mid-export.
+        let texts = |h| offers(&all[3], true, h).into_iter().filter(|o| o.enabled).map(|o| o.text).collect::<Vec<_>>();
+        assert_eq!(texts(Hearing::Starting), ["Stop audition", "Show in folder", "Copy path"]);
+        assert_eq!(texts(Hearing::Playing), ["Stop audition", "Keep in Bitwig", "Show in folder", "Copy path"]);
+        // A sound in a song waits for an export to finish, as Send to Bitwig does.
+        assert!(!offers(&all[0], true, Hearing::Off).iter().any(|o| o.id == act::AUDITION && o.enabled));
+        assert_ne!(audition_id(&all[0]), audition_id(&all[3]));
         assert_eq!(part_of("presets.part.bass"), Some(Role::Bass));
         assert_eq!(part_of("presets.export"), None);
         let mut fixed = all[0].clone();

@@ -12,6 +12,8 @@
 //!
 //! Send to Bitwig makes the sound's Bitwig preset and puts it into the project open in Bitwig through the Bitwig link
 //! (`mo-dawlink`, [`send_to_bitwig`]); when Bitwig isn't there, the preset is shown in its folder to drag in.
+//! Audition in Bitwig does the same on a track of its own with a short part playing on it
+//! (`mo_app::preset_audition`), to hear it first: Stop audition takes the track out again, Keep in Bitwig leaves it.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -84,6 +86,8 @@ struct Page {
     failed: Option<String>,
     exporting: bool,
     message: String,
+    /// The line being auditioned in Bitwig ([`logic::audition_id`]) and how far it's got.
+    hearing: Option<(String, logic::Hearing)>,
     /// The Curves section.
     curves: Vec<Curve>,
     curve_shown: Vec<usize>,
@@ -749,7 +753,7 @@ fn show_card(app: &AppWindow) {
         data.set_facts(ModelRc::new(VecModel::from(
             c.facts.into_iter().map(|(n, v)| PresetFact { name: n.into(), value: v.into() }).collect::<Vec<_>>(),
         )));
-        let offers = logic::offers(item, p.exporting);
+        let offers = logic::offers(item, p.exporting, hearing_of(&p, item));
         let key = |id: &str| SharedString::from(p.shortcuts.key_of(id));
         data.set_actions(ModelRc::new(VecModel::from(
             offers
@@ -1169,8 +1173,12 @@ fn run_sound_action(app: &AppWindow, id: &str) -> bool {
         set_fix(app, &item, Some(role));
         return true;
     }
-    let enabled =
-        |id: &str| logic::offers(&item, PAGE.with(|p| p.borrow().exporting)).iter().any(|o| o.id == id && o.enabled);
+    let enabled = |id: &str| {
+        PAGE.with(|p| {
+            let p = p.borrow();
+            logic::offers(&item, p.exporting, hearing_of(&p, &item)).iter().any(|o| o.id == id && o.enabled)
+        })
+    };
     match id {
         act::USE_GUESS if item.row.fixed.is_some() => set_fix(app, &item, None),
         act::REVEAL => crate::files::reveal(&feed, item.path(), mo_app::shell::folder_of(item.path())),
@@ -1183,6 +1191,8 @@ fn run_sound_action(app: &AppWindow, id: &str) -> bool {
                 export_one(app, item, true);
             }
         }
+        act::AUDITION if enabled(id) => toggle_audition(app, item),
+        act::KEEP if enabled(id) => keep_audition(app),
         _ => return false,
     }
     true
@@ -1309,21 +1319,7 @@ fn export_one(app: &AppWindow, item: Item, send: bool) {
                             Ok(words) => (words, true),
                             Err(words) => (words, false),
                         },
-                        None => (
-                            match bw::state_format(&item.row.extension) {
-                                // FL Studio's own plugins' settings only FL Studio reads.
-                                "" => format!(
-                                    "{} is one of FL Studio's own plugins: Bitwig can't load it.",
-                                    item.row.plugin
-                                ),
-                                format => format!(
-                                    "No Bitwig preset could be made for {}: save a preset of any {format} plugin once \
-                                     in Bitwig (any plugin will do), then try again.",
-                                    item.row.plugin
-                                ),
-                            },
-                            false,
-                        ),
+                        None => (no_bitwig_preset(&item), false),
                     };
                     shown = if went { None } else { bwpreset.clone().or(shown) };
                 }
@@ -1349,6 +1345,19 @@ fn export_one(app: &AppWindow, item: Item, send: bool) {
     if let Err(e) = started {
         log::error("Presets", &format!("Couldn't start the export: {e}"));
         PAGE.with(|p| p.borrow_mut().exporting = false);
+    }
+}
+
+/// Why no Bitwig preset came out of an export of `item`.
+fn no_bitwig_preset(item: &Item) -> String {
+    match bw::state_format(&item.row.extension) {
+        // FL Studio's own plugins' settings only FL Studio reads.
+        "" => format!("{} is one of FL Studio's own plugins: Bitwig can't load it.", item.row.plugin),
+        format => format!(
+            "No Bitwig preset could be made for {}: save a preset of any {format} plugin once in Bitwig (any plugin \
+             will do), then try again.",
+            item.row.plugin
+        ),
     }
 }
 
@@ -1475,6 +1484,242 @@ fn send_to_bitwig(preset: &Path) -> Result<String, String> {
             Some(problem) => Err(logic::send_failed(&problem)),
         },
         Err(e) => Err(logic::send_failed(&e.to_string())),
+    }
+}
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Audition in Bitwig
+
+/// The audition playing in Bitwig, once it's in (the window's page knows which line it is).
+static AUDITION: std::sync::Mutex<Option<mo_dawlink::bitwig::Auditioning>> = std::sync::Mutex::new(None);
+/// The newest Audition, Stop or Keep: an audition that finishes starting after a newer one is taken out again.
+static AUDITION_ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn audition_now() -> std::sync::MutexGuard<'static, Option<mo_dawlink::bitwig::Auditioning>> {
+    AUDITION.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn audition_asked() -> u64 {
+    AUDITION_ASKED.load(Ordering::SeqCst)
+}
+
+/// Whether `item` is the line being auditioned, and how far it's got.
+fn hearing_of(p: &Page, item: &Item) -> logic::Hearing {
+    match &p.hearing {
+        Some((id, hearing)) if *id == logic::audition_id(item) => *hearing,
+        _ => logic::Hearing::Off,
+    }
+}
+
+/// Audition in Bitwig, and Stop audition: stops the audition playing (taking its track out again); unless it was this
+/// line's, puts this line's preset on a new track in Bitwig with a part for its kind playing on it.
+fn toggle_audition(app: &AppWindow, item: Item) {
+    let id = logic::audition_id(&item);
+    let was = PAGE.with(|p| p.borrow().hearing.as_ref().map(|(i, _)| i.clone()));
+    let before = stop_audition(app);
+    if was.as_deref() == Some(id.as_str()) {
+        if let Some(before) = before {
+            stop_in_bitwig(before);
+        }
+        return;
+    }
+    let asked = audition_asked();
+    let name = item.row.name.clone();
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.hearing = Some((id, logic::Hearing::Starting));
+        p.message = format!("Putting {name} into Bitwig to hear it\u{2026}");
+    });
+    show_all(app);
+    let (library, templates, bitwig_folders, _) = export_setup();
+    let started = background::spawn("Audition in Bitwig", move || {
+        // The one playing before goes first, so the two never cross in Bitwig (whether Bitwig was playing, and
+        // stopping it, belong to each in turn).
+        if let Some(before) = before
+            && let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_audition(&before)
+        {
+            log::warning("Presets", &format!("The audition in Bitwig before couldn't be stopped: {e}"));
+        }
+        let made = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
+            audition(&item, &library, templates, &bitwig_folders)
+        }))
+        .unwrap_or_else(|_| Err("It stopped before it started playing.".to_owned()));
+        let made = match made {
+            Ok(auditioning) => {
+                // Checked and kept under the lock a Stop takes, so a Stop either finds it or is seen here.
+                let mut slot = audition_now();
+                if audition_asked() != asked {
+                    drop(slot);
+                    // Stopped (or another line asked for) while it was starting.
+                    stop_in_bitwig(auditioning);
+                    return;
+                }
+                let words = format!(
+                    "Hearing {} in Bitwig, on a track of its own. Stop audition takes the track out again; Keep in \
+                     Bitwig leaves it there.",
+                    auditioning.track
+                );
+                *slot = Some(auditioning);
+                Ok(words)
+            }
+            Err(why) => {
+                log::warning("Presets", &format!("{name} couldn't be auditioned in Bitwig: {why}"));
+                Err(why)
+            }
+        };
+        on_window(move |app| {
+            // A Stop since cleared the card itself.
+            if audition_asked() != asked {
+                return;
+            }
+            PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                match made {
+                    Ok(words) => {
+                        if let Some((_, hearing)) = &mut p.hearing {
+                            *hearing = logic::Hearing::Playing;
+                        }
+                        p.message = words;
+                    }
+                    Err(why) => {
+                        p.hearing = None;
+                        p.message = why;
+                    }
+                }
+            });
+            show_all(app);
+        });
+    });
+    if let Err(e) = started {
+        log::error("Presets", &format!("Couldn't start an audition: {e}"));
+        PAGE.with(|p| p.borrow_mut().hearing = None);
+        show_all(app);
+    }
+}
+
+/// Puts the line's Bitwig preset on a new track in Bitwig with its part playing. A sound in a song gets its Bitwig
+/// preset made first, in the export folder, as Send to Bitwig makes it. Waits for Bitwig, so never on the window's
+/// thread.
+fn audition(
+    item: &Item,
+    library: &Path,
+    templates: Option<Arc<Templates>>,
+    bitwig_folders: &[PathBuf],
+) -> Result<mo_dawlink::bitwig::Auditioning, String> {
+    let preset = match &item.row.source {
+        Source::File { .. } => PathBuf::from(item.path()),
+        Source::Song { save, key } => {
+            let root = bitwig::export_folder_in(library)?;
+            let templates = templates_now(templates, bitwig_folders);
+            let done = background::on_pool(|| {
+                export::export_from_save(
+                    save,
+                    Choice::default(),
+                    Some(std::slice::from_ref(key)),
+                    &root,
+                    Some(&templates),
+                )
+            })
+            .map_err(|e| format!("Its Bitwig preset couldn't be made: {e}"))?;
+            done.files
+                .iter()
+                .find(|f| f.to_lowercase().ends_with(".bwpreset"))
+                .map(|f| done.folder.join(f))
+                .ok_or_else(|| no_bitwig_preset(item))?
+        }
+    };
+    let name = preset.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| item.row.name.clone());
+    let clip = mo_app::preset_audition::clip(&name, item.role());
+    let bytes = mo_formats::midi::write::write_clip(&clip)
+        .map_err(|e| format!("Its part's MIDI file couldn't be made: {e}."))?
+        .bytes;
+    let part = std::env::temp_dir().join(mo_app::midi::play_file_name());
+    std::fs::write(&part, &bytes).map_err(|e| format!("Its part's MIDI file couldn't be saved in Temp: {e}."))?;
+    // Bitwig has read both files once this answers, so the part goes at once (rule 28).
+    let heard = mo_dawlink::bitwig::Bitwig::default().audition_preset(&preset, &part, &name);
+    let _ = std::fs::remove_file(&part);
+    heard.map_err(|e| e.to_string())
+}
+
+/// Takes an audition's track out of Bitwig on a thread of its own, without the window waiting.
+fn stop_in_bitwig(auditioning: mo_dawlink::bitwig::Auditioning) {
+    let started = background::spawn("Stop audition", move || {
+        if let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_audition(&auditioning) {
+            log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped: {e}"));
+        }
+    });
+    if let Err(e) = started {
+        log::error("Presets", &format!("Couldn't start stopping the audition: {e}"));
+    }
+}
+
+/// The audition playing, taken (none when none is), and a newer ask counted under the same lock: one still starting
+/// sees it and takes its track out as soon as it's in.
+fn take_audition() -> Option<mo_dawlink::bitwig::Auditioning> {
+    let mut slot = audition_now();
+    AUDITION_ASKED.fetch_add(1, Ordering::SeqCst);
+    slot.take()
+}
+
+/// Stops the audition playing or starting as far as the card goes, at once, and gives back the one playing for the
+/// caller to take out of Bitwig.
+fn stop_audition(app: &AppWindow) -> Option<mo_dawlink::bitwig::Auditioning> {
+    let taken = take_audition();
+    let had = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let had = p.hearing.take().is_some();
+        if had {
+            p.message.clear();
+        }
+        had
+    });
+    if had {
+        show_all(app);
+    }
+    taken
+}
+
+/// Keep in Bitwig: the audition stops playing, and its track (the preset, and the part's clip) stays in the project.
+fn keep_audition(app: &AppWindow) {
+    let Some(auditioning) = take_audition() else { return };
+    let track = auditioning.track.clone();
+    let words = format!("Kept: {track} stays in Bitwig, on its own track with the part.");
+    let started = background::spawn("Keep audition", move || {
+        let kept = mo_dawlink::bitwig::Bitwig::default().keep_audition(auditioning);
+        if let Err(e) = kept {
+            log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped as it was kept: {e}"));
+            message_later(format!("{track} stays in Bitwig, but it couldn't be stopped there: {e}"));
+        }
+    });
+    if let Err(e) = started {
+        log::error("Presets", &format!("Couldn't start keeping the audition: {e}"));
+    }
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.hearing = None;
+        p.message = words;
+    });
+    show_all(app);
+}
+
+/// Shows words on the card from a thread away from the window.
+fn message_later(text: String) {
+    on_window(move |app| {
+        PAGE.with(|p| p.borrow_mut().message = text);
+        show_all(app);
+    });
+}
+
+/// When the app closes: takes an audition's track out of Bitwig, so it doesn't loop on. Waits a moment at most.
+pub fn finish_up() {
+    if let Some(auditioning) = take_audition() {
+        let to = mo_dawlink::bitwig::Bitwig {
+            change_timeout: Duration::from_secs(3),
+            ..mo_dawlink::bitwig::Bitwig::default()
+        };
+        if let Err(e) = to.stop_audition(&auditioning) {
+            log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped as the app closed: {e}"));
+        }
     }
 }
 
@@ -1704,6 +1949,23 @@ pub fn show_sample(app: &AppWindow) {
         p.bitwig = vec![PathBuf::from(r"K:\Bitwig Studio")];
         refilter(&mut p);
         (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
+    });
+    show_all(app);
+}
+
+/// Shows the picked line as auditioned in Bitwig, playing (screenshots: nothing reaches Bitwig); `false` puts it back.
+pub fn show_audition_sample(app: &AppWindow, on: bool) {
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let id = p.picked.and_then(|i| p.items.get(i)).map(logic::audition_id);
+        p.hearing = if on { id.map(|id| (id, logic::Hearing::Playing)) } else { None };
+        p.message = if on {
+            "Hearing Atmos in Bitwig, on a track of its own. Stop audition takes the track out again; Keep in \
+             Bitwig leaves it there."
+                .into()
+        } else {
+            String::new()
+        };
     });
     show_all(app);
 }
