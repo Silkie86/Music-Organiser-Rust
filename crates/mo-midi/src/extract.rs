@@ -63,10 +63,11 @@ pub struct Found {
 /// Why a file couldn't be read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unread {
-    /// Another program has it open (a backup, a virus check): what was read from it before is kept, and it's read
-    /// again next time.
+    /// Another program has it open (a backup, a virus check), or it couldn't be reached just now (a drive or network
+    /// share away for a moment): what was read from it before is kept, and it's read again next time. A file really
+    /// gone is forgotten by the next plan anyway.
     InUse(String),
-    /// Gone, not allowed, or damaged: noted once, and only tried again when asked.
+    /// Not allowed, or damaged: noted once, and only tried again when asked.
     Failed(String),
 }
 
@@ -93,7 +94,7 @@ pub fn is_unpitched_plugin(name: &str) -> bool {
 /// Reads a file from disk and finds its parts. `midi_folders` are the MIDI library folders, whose own names aren't
 /// hints for a `.mid` file inside them.
 pub fn read(path: &Path, midi_folders: &[String]) -> Result<Vec<Found>, Unread> {
-    let raw = std::fs::read(path).map_err(|e| unread(&e))?;
+    let raw = std::fs::read(path).map_err(|e| unread_file(&e))?;
     from_bytes(path, &raw, midi_folders)
 }
 
@@ -115,22 +116,56 @@ pub fn from_bytes(path: &Path, raw: &[u8], midi_folders: &[String]) -> Result<Ve
     }
 }
 
-/// Why a file couldn't be read, in a few plain words, for the list of failed ones (the C# `MidiIndexer.Why`).
+/// Why a file's contents couldn't be read, in a few plain words, for the list of failed ones (the C#
+/// `MidiIndexer.Why`): it's noted once, and only tried again when asked.
 pub fn unread(e: &io::Error) -> Unread {
-    // Windows' sharing and lock violations (32, 33); elsewhere the "would block" .NET gives for the same.
-    let in_use = matches!(e.raw_os_error(), Some(32 | 33)) && cfg!(windows) || e.kind() == io::ErrorKind::WouldBlock;
-    if in_use {
-        return Unread::InUse(format!("It couldn't be opened, maybe because another program had it open ({e})"));
-    }
     Unread::Failed(match e.kind() {
-        io::ErrorKind::PermissionDenied => "Windows didn't allow reading it".into(),
-        io::ErrorKind::NotFound => "It isn't there any more".into(),
         io::ErrorKind::UnexpectedEof | io::ErrorKind::InvalidData => {
             format!("It looks cut short or damaged, or saved in a way the reader doesn't know yet ({e})")
         }
-        _ => format!("It couldn't be opened, maybe because another program had it open ({e})"),
+        _ => format!("It couldn't be read ({e})"),
     })
 }
+
+/// Why a file couldn't be read from the disk. In use by another program, not there just now, or out of reach (a
+/// drive or network share that dropped out mid-reading): what was read from it before is kept and it's read again
+/// next time. A refusal, or anything else (a bad sector, a name too long), is noted as failed once.
+pub fn unread_file(e: &io::Error) -> Unread {
+    use io::ErrorKind as K;
+    // Windows: sharing and lock violations (32, 33); path not found (3), device not ready (21), network path or
+    // name gone (53, 64, 67), network unreachable (1231).
+    let code = if cfg!(windows) { e.raw_os_error() } else { None };
+    if matches!(code, Some(32 | 33)) || e.kind() == K::WouldBlock || e.kind() == K::ResourceBusy {
+        return Unread::InUse(format!("It couldn't be opened, maybe because another program had it open ({e})"));
+    }
+    let away = matches!(code, Some(3 | 21 | 53 | 64 | 67 | 1231))
+        || matches!(
+            e.kind(),
+            K::NotFound
+                | K::TimedOut
+                | K::Interrupted
+                | K::NotConnected
+                | K::ConnectionReset
+                | K::ConnectionAborted
+                | K::HostUnreachable
+                | K::NetworkUnreachable
+                | K::NetworkDown
+                | K::StaleNetworkFileHandle
+        );
+    if away {
+        return Unread::InUse(format!(
+            "It couldn't be reached just now (a drive or network share away?); it's read again next time ({e})"
+        ));
+    }
+    Unread::Failed(match e.kind() {
+        K::PermissionDenied => "Windows didn't allow reading it".into(),
+        _ => format!("It couldn't be read from the disk ({e})"),
+    })
+}
+
+/// What older readings noted for a file that wasn't there (before [`unread_file`] tried those again): such a row is
+/// read again once ([`crate::store::MidiStore::open`]).
+pub const GONE_BEFORE: &str = "It isn't there any more";
 
 fn damaged(what: &str) -> Unread {
     Unread::Failed(format!("It looks cut short or damaged, or saved in a way the reader doesn't know yet ({what})"))
@@ -279,6 +314,18 @@ mod tests {
     }
 
     #[test]
+    fn a_file_away_just_now_is_tried_again_and_damage_is_noted() {
+        let e = |kind| io::Error::new(kind, "x");
+        assert!(matches!(unread_file(&e(io::ErrorKind::NotFound)), Unread::InUse(_)));
+        assert!(matches!(unread_file(&e(io::ErrorKind::TimedOut)), Unread::InUse(_)));
+        assert!(matches!(unread_file(&e(io::ErrorKind::PermissionDenied)), Unread::Failed(_)));
+        assert!(matches!(unread_file(&e(io::ErrorKind::InvalidData)), Unread::Failed(_)));
+        assert!(matches!(unread_file(&e(io::ErrorKind::Other)), Unread::Failed(_)), "a bad sector is noted once");
+        // A file's contents that don't read stay failed.
+        assert!(matches!(unread(&e(io::ErrorKind::InvalidData)), Unread::Failed(_)));
+    }
+
+    #[test]
     fn a_midi_file_part() {
         let raw = smf(8, 0, "Groove");
         let folders = vec![r"D:\Packs".to_owned()];
@@ -303,9 +350,8 @@ mod tests {
         assert!(matches!(from_bytes(Path::new("x.mid"), &raw[..30], &[]), Err(Unread::Failed(_)) | Ok(_)));
         assert!(matches!(from_bytes(Path::new("x.flp"), b"not a project", &[]), Err(Unread::Failed(_))));
         assert_eq!(from_bytes(Path::new("x.bwproject"), b"not a project", &[]), Ok(Vec::new()));
-        assert!(
-            matches!(read(Path::new("/no/such/file.mid"), &[]), Err(Unread::Failed(w)) if w == "It isn't there any more")
-        );
+        // Not there just now (a drive away): tried again next time, with what was read before kept.
+        assert!(matches!(read(Path::new("/no/such/file.mid"), &[]), Err(Unread::InUse(_))));
     }
 
     #[test]
