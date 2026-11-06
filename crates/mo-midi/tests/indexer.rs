@@ -271,6 +271,8 @@ fn keeps_the_key_and_reads_it_again_when_the_finder_gets_better() {
     let leaning = fact.answer().and_then(|answer| answer.leaning_key());
     assert_eq!(leaning.map(|k| (k.tonic.number(), k.mode)), Some((0, mo_harmony::Mode::Major)), "{fact:?}");
     assert!(all.iter().all(|p| p.key_fact.is_some()));
+    // Whole parts, heard as loops, as their keys were read: the card's chart reads them the same way.
+    assert!(all.iter().all(|p| p.cut == Some(false)));
 
     // An older finder's readings: read again from the stored notes, to the same answer, without opening the files.
     let before: Vec<_> = all.iter().map(|p| (p.key_fact, p.features.clone())).collect();

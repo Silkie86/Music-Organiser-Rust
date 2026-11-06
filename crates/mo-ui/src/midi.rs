@@ -121,6 +121,11 @@ struct NotesAsk {
     bars: i32,
     /// The stored key reading, which the chord chart is spelled in; none: the key is read now, from the notes.
     key: Option<KeyFact>,
+    /// The file it's from, whose tempo is read too (for the card's sound line), and the song library that has a
+    /// project's.
+    source: Arc<mo_midi::Source>,
+    library: PathBuf,
+    sound: mo_midi::gm::GmSound,
 }
 
 struct NotesRead {
@@ -130,6 +135,8 @@ struct NotesRead {
     fact: Option<KeyFact>,
     /// The chord chart, read just now from the notes.
     chart: page::ChordChart,
+    /// The card's sound line, with the tempo read just now.
+    sound_line: String,
 }
 
 /// The card's key while the part's notes are read.
@@ -438,6 +445,8 @@ pub fn shown(app: &AppWindow) {
         app.global::<MidiData>().set_playing(false);
         PAGE.with(|p| p.borrow_mut().looping = None);
     }
+    // A SoundFont put in its folder since is found now.
+    show_soundfont(app);
     let library = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         // Before `connect` (the app opening on this page) there's no library yet: `connect` asks again.
@@ -511,23 +520,30 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
     let summary = loaded.summary;
     let empty = loaded.cat.entries.is_empty();
     log::info("MIDI", &summary);
-    let (picked, read_now) = PAGE.with(|p| {
+    let (picked, read_now, loop_gone) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        // The picked part stays picked when the index is read again, found by its notes.
+        // The picked part stays picked when the index is read again, found by its notes; so does the one playing.
         let hash = p.picked.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.hash.clone());
+        let looping = p.looping.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.hash.clone());
         p.years = loaded.years;
         // The old index goes on the freeing thread: tens of thousands of parts take a while to let go.
         background::free_later(std::mem::replace(&mut p.cat, Arc::new(loaded.cat)));
         p.notes = Some(loaded.notes);
         p.picked = hash.and_then(|h| p.cat.find(&h));
+        let was_looping = p.looping.is_some();
+        p.looping = looping.and_then(|h| p.cat.find(&h));
         p.picked_row = None;
         p.target = None;
         // The old list points into the old index: nothing shows until the new one is worked out.
         background::free_later(std::mem::replace(&mut p.shown, Arc::new(Vec::new())));
         let read_now = !p.read_once && !HERE.with(|h| *h.borrow());
         p.read_once = true;
-        (p.picked, read_now)
+        (p.picked, read_now, was_looping && p.looping.is_none())
     });
+    // The part playing isn't in the index any more: it stops, as its card (with its Stop) goes.
+    if loop_gone {
+        stop_playing(app);
+    }
     LINES.with(|l| l.notify.reset());
     data.set_shown(0);
     data.set_summary(summary.into());
@@ -931,7 +947,8 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
         data.set_facts(ModelRc::new(VecModel::from(facts)));
         data.set_actions(ModelRc::new(VecModel::from(actions)));
         data.set_menu(ModelRc::new(VecModel::from(menu)));
-        data.set_sound_line(page::sound_line(&page::gm_sound(e), page::play_tempo(e)).into());
+        // Its tempo follows with the notes (it's read from its song or file).
+        data.set_sound_line(page::sound_line(&page::gm_sound(e), None).into());
         crate::piano_roll::show(app, None);
         Some(NotesAsk {
             id,
@@ -939,9 +956,13 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
             phrase_id: e.phrase.id,
             hash: e.phrase.hash.clone(),
             role: e.role(),
-            cut: page::is_cut(&e.phrase.clip),
+            // As the stored key was read; the clip's name only for a part whose key isn't read yet.
+            cut: e.phrase.cut.unwrap_or_else(|| page::is_cut(&e.phrase.clip)),
             bars: e.phrase.bars,
             key: e.phrase.key_fact,
+            source: Arc::clone(&e.phrase.source),
+            library: p.library.clone(),
+            sound: page::gm_sound(e),
         })
     });
     data.set_panel_shown(true);
@@ -1021,7 +1042,30 @@ fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result
     // The chords too (their first 16 bars: quick even for a long part), spelled in the part's key.
     let chords = mo_midi::chart::read(&notes, ask.role, ask.cut);
     let chart = page::chord_chart(chords.as_ref(), page::chart_key(ask.key.as_ref().or(fact.as_ref())));
-    Ok(NotesRead { read: notes.len(), roll: page::roll(&notes, ask.bars), fact, chart })
+    let sound_line = page::sound_line(&ask.sound, Some(tempo_of(&ask.from, &ask.source, &ask.library)));
+    Ok(NotesRead { read: notes.len(), roll: page::roll(&notes, ask.bars), fact, chart, sound_line })
+}
+
+/// The last tempo read, by the file's path and the size and time the index read it at: a part's card, its Play loop
+/// and its Play in a DAW read it once between them.
+static TEMPO: std::sync::Mutex<Option<(String, i64, i64, page::Tempo)>> = std::sync::Mutex::new(None);
+
+/// A part's tempo ([`page::read_tempo`]), off the window's thread. Parts made up for the screenshots have no file.
+fn tempo_of(from: &NotesFrom, source: &mo_midi::Source, library: &Path) -> page::Tempo {
+    if matches!(from, NotesFrom::Made(_)) {
+        return source.tempo.map_or(page::Tempo::NotGiven, page::Tempo::Own);
+    }
+    let same = |k: &(String, i64, i64, page::Tempo)| k.0 == source.path && k.1 == source.mtime && k.2 == source.size;
+    if let Some(k) = TEMPO.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().filter(|k| same(k)) {
+        return k.3;
+    }
+    let tempo = page::read_tempo(source, library);
+    // Not one that couldn't be read: it's tried again, as the drive may be back.
+    if tempo != page::Tempo::Unread {
+        *TEMPO.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+            Some((source.path.clone(), source.mtime, source.size, tempo));
+    }
+    tempo
 }
 
 fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
@@ -1032,6 +1076,7 @@ fn notes_read(app: &AppWindow, id: u64, read: Result<NotesRead, String>) {
     let mut picked = data.get_picked();
     match read {
         Ok(read) => {
+            data.set_sound_line(read.sound_line.as_str().into());
             let roll = &read.roll;
             if read.read == 0 {
                 picked.roll_note = "Its notes aren't in the index any more.".into();
@@ -1116,8 +1161,9 @@ fn card(e: &mo_midi::Entry) -> PickedPart {
 
 /// The card's buttons and the line's right-click menu: one list (rule 15: each shows its key).
 fn actions(e: &mo_midi::Entry, shortcuts: &Shortcuts) -> (Vec<CardAction>, Vec<MenuItem>) {
+    // Into your DAW first, by the drag handle above them; then finding more.
     let mut list: Vec<(&str, &str, bool)> =
-        vec![("midi.moreLike", "More like this", true), ("midi.toBitwig", "Send to Bitwig", true)];
+        vec![("midi.toBitwig", "Send to Bitwig", true), ("midi.moreLike", "More like this", true)];
     if !e.within.is_empty() {
         list.push(("midi.within", "Show the whole phrase", true));
     }
@@ -1135,8 +1181,15 @@ fn actions(e: &mo_midi::Entry, shortcuts: &Shortcuts) -> (Vec<CardAction>, Vec<M
             danger: false,
         })
         .collect();
-    let menu = list
+    // The right-click menu starts with playing it, as Sounds' does: the card has those in its play row.
+    let play = [
+        ("app.play", "Play or stop the loop", true),
+        ("midi.playBitwig", "Play in Bitwig, or stop", true),
+        ("midi.playFl", "Play in FL Studio, or stop", true),
+    ];
+    let menu = play
         .iter()
+        .chain(&list)
         .map(|&(id, text, enabled)| MenuItem {
             what: text.into(),
             key: shortcuts.key_of(id).into(),
@@ -1189,6 +1242,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             send_to_bitwig(at);
             true
         }
+        ("app.play", _) => toggle_play(app),
         ("midi.playBitwig", _) => toggle_daw(app, Daw::Bitwig),
         ("midi.playFl", _) => toggle_daw(app, Daw::Fl),
         ("midi.copyPath", Some((_, path))) => {
@@ -1315,7 +1369,7 @@ pub fn sample() -> Loaded {
             },
             mtime,
             size: 2000,
-            tempo: None,
+            tempo: if file { None } else { Some(92.0) },
         })
     };
     let mut phrases = Vec::new();
@@ -1464,6 +1518,7 @@ pub fn sample() -> Loaded {
             track_name: String::new(),
             your_octave: None,
             shape: None,
+            cut: None,
         });
     }
     // An older save of the song with the same keys part: one line, "in 2 files".
@@ -1494,7 +1549,9 @@ struct PlayAsk {
     hash: String,
     bars: i32,
     sound: mo_midi::gm::GmSound,
-    tempo: f64,
+    /// Its file, whose tempo it plays at, and the song library that has a project's.
+    source: Arc<mo_midi::Source>,
+    library: PathBuf,
 }
 
 thread_local! {
@@ -1502,19 +1559,58 @@ thread_local! {
 }
 
 thread_local! {
-    /// Where the SoundFont is, looked for once (a look at the disk, so not on every pick) and again when one is chosen.
+    /// Where the SoundFont is, as last looked for off the window's thread (a look at the disk); none: not looked for
+    /// yet. Once found it's kept; while it's missing it's looked for again each time the page is shown or a part is
+    /// picked, so one put in its folder is found without a restart.
     static SOUNDFONT: RefCell<Option<Option<PathBuf>>> = const { RefCell::new(None) };
+    /// A look for the SoundFont is on its way.
+    static LOOKING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-/// The SoundFont parts play with now: the one picked in the app's settings, else GeneralUser GS in the app's folder.
+/// The SoundFont parts play with now, as last looked for ([`look_for_soundfont`]): the one picked in the app's
+/// settings, else GeneralUser GS in the app's folder.
 fn soundfont() -> Option<PathBuf> {
-    if let Some(known) = SOUNDFONT.with(|s| s.borrow().clone()) {
-        return known;
+    SOUNDFONT.with(|s| s.borrow().clone().flatten())
+}
+
+/// Looks for the SoundFont off the window's thread, unless it's been found already; the card follows when it's
+/// done.
+fn look_for_soundfont(app: &AppWindow) {
+    if soundfont().is_some() || LOOKING.with(std::cell::Cell::get) {
+        return;
     }
-    let folder = PAGE.with(|p| p.borrow().library.parent().map(Path::to_path_buf))?;
-    let found = page::soundfont_path(crate::settings::value(page::SOUNDFONT_KEY).as_deref(), &folder);
-    SOUNDFONT.with(|s| *s.borrow_mut() = Some(found.clone()));
-    found
+    let Some(folder) = PAGE.with(|p| p.borrow().library.parent().map(Path::to_path_buf)) else { return };
+    let chosen = crate::settings::value(page::SOUNDFONT_KEY);
+    if HERE.with(|h| *h.borrow()) {
+        // The screenshots: at once, so the picture shows the answer.
+        SOUNDFONT.with(|s| *s.borrow_mut() = Some(page::soundfont_path(chosen.as_deref(), &folder)));
+        return;
+    }
+    LOOKING.with(|l| l.set(true));
+    let weak = app.as_weak();
+    let started = background::spawn("Look for the SoundFont", move || {
+        let found = page::soundfont_path(chosen.as_deref(), &folder);
+        let _ = slint::invoke_from_event_loop(move || {
+            LOOKING.with(|l| l.set(false));
+            // One chosen meanwhile wins.
+            if soundfont().is_some() {
+                return;
+            }
+            let found_one = found.is_some();
+            SOUNDFONT.with(|s| *s.borrow_mut() = Some(found));
+            if let Some(app) = weak.upgrade() {
+                show_soundfont(&app);
+                let data = app.global::<MidiData>();
+                if found_one && data.get_play_note() == "Looking for the SoundFont…" {
+                    data.set_play_note("".into());
+                }
+            }
+        });
+    });
+    if let Err(e) = started {
+        LOOKING.with(|l| l.set(false));
+        log::warning("MIDI", &format!("Couldn't look for the SoundFont: {e}"));
+    }
 }
 
 /// Whether the MIDI page's loop is what the player is playing.
@@ -1552,10 +1648,20 @@ fn stop_playing(app: &AppWindow) {
     data.set_play_note("".into());
 }
 
+/// Another page is about to play (a sound on the Sounds page): the loop playing stops, and one still being made
+/// doesn't start on top of it, so the Play button doesn't go on saying it plays.
+pub fn stop_for_another(app: &AppWindow) {
+    if app.global::<MidiData>().get_playing() {
+        stop_playing(app);
+    }
+}
+
 /// Whether there's a SoundFont to play with, and if not what to do.
 fn show_soundfont(app: &AppWindow) {
+    look_for_soundfont(app);
     let data = app.global::<MidiData>();
-    let missing = soundfont().is_none();
+    // Not said missing until it's been looked for.
+    let missing = SOUNDFONT.with(|s| matches!(*s.borrow(), Some(None)));
     data.set_soundfont_missing(missing);
     if missing {
         let folder = PAGE.with(|p| p.borrow().library.parent().map(Path::to_path_buf)).unwrap_or_default();
@@ -1575,8 +1681,9 @@ fn play(app: &AppWindow, at: usize) {
     let data = app.global::<MidiData>();
     let Some(font) = soundfont() else {
         stop_playing(app);
-        data.set_soundfont_missing(true);
-        data.set_play_note("Choose a SoundFont first.".into());
+        let looked = SOUNDFONT.with(|s| s.borrow().is_some());
+        show_soundfont(app);
+        data.set_play_note(if looked { "Choose a SoundFont first." } else { "Looking for the SoundFont…" }.into());
         return;
     };
     let ask = PAGE.with(|p| {
@@ -1590,7 +1697,8 @@ fn play(app: &AppWindow, at: usize) {
             hash: e.phrase.hash.clone(),
             bars: e.phrase.bars,
             sound: page::gm_sound(e),
-            tempo: page::play_tempo(e),
+            source: Arc::clone(&e.phrase.source),
+            library: p.library.clone(),
         })
     });
     let Some(ask) = ask else {
@@ -1686,7 +1794,7 @@ fn make_loop(ask: &PlayAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<m
         notes: &notes,
         ppq: mo_midi::PPQ,
         length,
-        tempo: ask.tempo,
+        tempo: tempo_of(&ask.from, &ask.source, &ask.library).bpm(),
         program: ask.sound.program,
         drums: ask.sound.drums,
     };
@@ -1775,9 +1883,10 @@ fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
     let ask = PAGE.with(|p| {
         let p = p.borrow();
         let e = p.cat.entry(at)?;
-        Some((p.notes.clone()?, e.phrase.id, e.phrase.hash.clone(), e.phrase.bars, page::play_tempo(e), page::title(e)))
+        let place = (Arc::clone(&e.phrase.source), p.library.clone());
+        Some((p.notes.clone()?, e.phrase.id, e.phrase.hash.clone(), e.phrase.bars, place, page::title(e)))
     });
-    let Some((from, phrase_id, hash, bars, tempo, name)) = ask else {
+    let Some((from, phrase_id, hash, bars, (source, library), name)) = ask else {
         return false;
     };
     // The loop with a General MIDI sound would play over it.
@@ -1794,7 +1903,7 @@ fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
         let made = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
             let notes = notes_of(&from, phrase_id, &hash, &mut None)
                 .map_err(|e| format!("Its notes couldn't be read: {e}."))?;
-            start_in_daw(daw, &notes, bars, tempo, &name)
+            start_in_daw(daw, &notes, bars, tempo_of(&from, &source, &library).bpm(), &name)
         }))
         .unwrap_or_else(|_| Err("It stopped before it started playing.".to_owned()));
         let note = match made {
@@ -2083,8 +2192,13 @@ mod tests {
             cut: false,
             bars: e.phrase.bars,
             key: None,
+            source: Arc::clone(&e.phrase.source),
+            library: PathBuf::new(),
+            sound: page::gm_sound(e),
         };
         let Ok(read) = read_notes(&ask, &mut None) else { panic!("the made-up notes should read") };
+        // Made up, so its tempo is the sample's own, with no file opened for it.
+        assert!(read.sound_line.ends_with(" BPM") || read.sound_line.contains("BPM, as it gives no tempo"));
         assert_eq!(read.roll.notes.len(), 12);
         assert!(read.fact.is_some());
         assert!(!read.chart.bars.is_empty(), "its chords are read too");

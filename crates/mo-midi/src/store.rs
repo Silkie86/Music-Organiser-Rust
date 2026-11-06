@@ -1000,14 +1000,18 @@ impl MidiStore {
         cs_roles: &HashMap<String, Role>,
         cs_octaves: &HashMap<String, i32>,
     ) -> Result<Vec<StoredPhrase>, MidiError> {
-        let (key_fact, keys_join) =
-            if self.has_keys { ("k.fact", "LEFT JOIN keys k ON k.notes = n.id") } else { ("NULL", "") };
+        // A key not read yet (version 0) has no word on whether it's cut.
+        let (key_fact, key_cut, keys_join) = if self.has_keys {
+            ("k.fact", "CASE WHEN k.version > 0 THEN k.cut END", "LEFT JOIN keys k ON k.notes = n.id")
+        } else {
+            ("NULL", "NULL", "")
+        };
         let (shape, shapes_join) =
             if self.has_shapes { ("s.shape", "LEFT JOIN shapes s ON s.notes = n.id") } else { ("NULL", "") };
         let mut st = self.conn.prepare(&format!(
             "SELECT p.id, f.id, f.path, f.kind, f.mtime, f.size, p.part, p.clip, p.role, p.why, y.role, n.hash,
                     n.count, n.bars, n.lowest, n.highest, n.chroma, n.features, p.members, o.octaves, p.program,
-                    p.drums, p.track_name, {key_fact}, y.hash IS NOT NULL, o.hash IS NOT NULL, {shape}
+                    p.drums, p.track_name, {key_fact}, y.hash IS NOT NULL, o.hash IS NOT NULL, {shape}, {key_cut}
              FROM parts p JOIN files f ON f.id = p.file JOIN notes n ON n.id = p.notes
                   LEFT JOIN your_roles y ON y.hash = n.hash LEFT JOIN your_octaves o ON o.hash = n.hash
                   {keys_join} {shapes_join}
@@ -1080,6 +1084,7 @@ impl MidiStore {
                 your_octave,
                 // 0: kept for notes with no shape.
                 shape: r.get::<_, Option<i64>>(26)?.filter(|s| *s != 0),
+                cut: r.get(27)?,
             });
         }
         Ok(list)

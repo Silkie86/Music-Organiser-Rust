@@ -875,14 +875,81 @@ pub fn gm_sound(e: &Entry) -> mo_midi::gm::GmSound {
     )
 }
 
-/// The tempo a part plays at: its file's, else [`PLAY_TEMPO`].
-pub fn play_tempo(e: &Entry) -> f64 {
-    e.phrase.source.tempo.filter(|t| t.is_finite() && *t >= 20.0 && *t <= 400.0).unwrap_or(PLAY_TEMPO)
+/// A part's tempo, as [`read_tempo`] found it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Tempo {
+    /// Its song's, from the song library, or its MIDI file's first tempo.
+    Own(f64),
+    /// Its song or file gives none: it plays at [`PLAY_TEMPO`].
+    NotGiven,
+    /// Its song or file couldn't be read just now (a drive not plugged in): it plays at [`PLAY_TEMPO`].
+    Unread,
 }
 
-/// What the card says about the sound: "Electric Piano 1 · from its name: rhodes · 128 BPM".
-pub fn sound_line(sound: &mo_midi::gm::GmSound, tempo: f64) -> String {
-    format!("{} · {} · {} BPM", sound.name(), sound.why_text(), (tempo * 10.0).round() / 10.0)
+impl Tempo {
+    /// The beats a minute it plays at.
+    pub fn bpm(self) -> f64 {
+        match self {
+            Tempo::Own(t) => t,
+            Tempo::NotGiven | Tempo::Unread => PLAY_TEMPO,
+        }
+    }
+}
+
+/// A MIDI file bigger than this isn't opened again just for its tempo (a pack's loops are a few KB).
+pub const TEMPO_FILE_LIMIT: u64 = 16 * 1024 * 1024;
+
+/// A tempo the loop can play at: not one a damaged file gives (0, or thousands).
+fn usable(tempo: Option<f64>) -> Option<f64> {
+    tempo.filter(|t| t.is_finite() && *t >= 20.0 && *t <= 400.0)
+}
+
+/// Reads the tempo of the file a part is from: a project's from the song library at `library` (by its path, letter
+/// case aside, as every save's tempo is kept there), a MIDI file's from the file itself (its first tempo). It opens
+/// a file, so never on the window's thread.
+pub fn read_tempo(source: &mo_midi::Source, library: &std::path::Path) -> Tempo {
+    if let Some(t) = usable(source.tempo) {
+        return Tempo::Own(t);
+    }
+    match source.kind {
+        mo_midi::SourceKind::Project => {
+            match mo_library::Library::open_read_only(library).and_then(|l| l.save_at(&source.path)) {
+                Ok(save) => usable(save.and_then(|s| s.tempo)).map_or(Tempo::NotGiven, Tempo::Own),
+                Err(_) => Tempo::Unread,
+            }
+        }
+        mo_midi::SourceKind::File => {
+            let path = std::path::Path::new(&source.path);
+            match std::fs::metadata(path) {
+                Ok(m) if m.len() <= TEMPO_FILE_LIMIT => {}
+                Ok(_) => return Tempo::NotGiven,
+                Err(_) => return Tempo::Unread,
+            }
+            let Ok(raw) = std::fs::read(path) else { return Tempo::Unread };
+            tempo_in_midi(&raw, path)
+        }
+    }
+}
+
+/// A MIDI file's first tempo, from its bytes. A damaged file can't stop the app: it reads as unread.
+pub fn tempo_in_midi(raw: &[u8], path: &std::path::Path) -> Tempo {
+    match mo_catch::catch(std::panic::AssertUnwindSafe(|| mo_formats::midi::read_from(raw, path))) {
+        Ok(Ok(parts)) => usable(parts.iter().find_map(|p| p.tempo)).map_or(Tempo::NotGiven, Tempo::Own),
+        _ => Tempo::Unread,
+    }
+}
+
+/// What the card says about the sound: "Electric Piano 1 · from its name: rhodes · 128 BPM". With no tempo yet (it's
+/// being read), no BPM, rather than a made-up one.
+pub fn sound_line(sound: &mo_midi::gm::GmSound, tempo: Option<Tempo>) -> String {
+    let head = format!("{} · {}", sound.name(), sound.why_text());
+    let bpm = |t: f64| (t * 10.0).round() / 10.0;
+    match tempo {
+        None => head,
+        Some(Tempo::Own(t)) => format!("{head} · {} BPM", bpm(t)),
+        Some(Tempo::NotGiven) => format!("{head} · {} BPM, as it gives no tempo", bpm(PLAY_TEMPO)),
+        Some(Tempo::Unread) => format!("{head} · {} BPM, as its tempo couldn't be read", bpm(PLAY_TEMPO)),
+    }
 }
 
 /// A part's heard notes (muted ones left out) and how long it loops for, in ticks at [`mo_midi::PPQ`]: its bars, or
@@ -1037,6 +1104,15 @@ pub fn fl_part(notes: &[NoteEvent], bars: i32, tempo: f64) -> mo_dawlink::fl::Pa
     mo_dawlink::fl::Part { notes: heard, ppq: mo_midi::PPQ, length, tempo }
 }
 
+/// Whether `name` is one [`write_part`] gives a part while it's being written: `<name>.<process>-<count>.part`.
+pub fn is_half_sent(name: &str) -> bool {
+    let Some(rest) = name.strip_suffix(".part") else { return false };
+    let Some((before, tail)) = rest.rsplit_once('.') else { return false };
+    let Some((app, write)) = tail.split_once('-') else { return false };
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    !before.is_empty() && digits(app) && digits(write)
+}
+
 /// Writes a part's MIDI file into `dir` under `name` (made safe for a file name) as a new file: never over another.
 /// "Keys · Pattern 3.mid", or "Keys · Pattern 3 (2).mid" when that's taken. Written beside it first and only then
 /// given its name, so Bitwig never sees half a file.
@@ -1116,6 +1192,7 @@ mod tests {
             track_name: String::new(),
             your_octave: None,
             shape: None,
+            cut: None,
         }
     }
 
@@ -1406,14 +1483,68 @@ mod tests {
     }
 
     #[test]
+    fn a_midi_files_tempo_is_its_first_one() {
+        use mo_formats::midi::write::{SmfSong, SmfTrack, WriteOptions, write};
+        let note = NoteEvent {
+            start: 0,
+            length: 96,
+            key: 60,
+            velocity: 50_000,
+            muted: false,
+            step: false,
+            attribute: mo_formats::NoteAttribute::NONE,
+        };
+        let song = |tempo| SmfSong {
+            name: "Loop".into(),
+            ppq: 96,
+            tempo,
+            tracks: vec![SmfTrack { name: "Bass".into(), notes: vec![note], ..Default::default() }],
+            ..Default::default()
+        };
+        let with = write(&song(Some(85.0)), &WriteOptions { tempo: true, ..Default::default() }).unwrap().bytes;
+        let without = write(&song(None), &WriteOptions::default()).unwrap().bytes;
+        let path = std::path::Path::new("Loop 85.mid");
+        assert_eq!(tempo_in_midi(&with, path), Tempo::Own(85.0));
+        assert_eq!(tempo_in_midi(&without, path), Tempo::NotGiven);
+        assert_eq!(tempo_in_midi(b"MThd broken", path), Tempo::Unread);
+        assert_eq!(Tempo::NotGiven.bpm(), PLAY_TEMPO);
+    }
+
+    #[test]
+    fn a_tempo_that_cant_be_read_plays_at_120() {
+        let missing = std::path::Path::new("/no/such/folder/library.db");
+        let source = |path: &str, kind, tempo| mo_midi::Source {
+            path: path.into(),
+            kind,
+            daw: String::new(),
+            mtime: 0,
+            size: 1,
+            tempo,
+        };
+        let song = source("/no/such/folder/Song.flp", mo_midi::SourceKind::Project, None);
+        assert_eq!(read_tempo(&song, missing), Tempo::Unread);
+        let file = source("/no/such/folder/Loop.mid", mo_midi::SourceKind::File, None);
+        assert_eq!(read_tempo(&file, missing), Tempo::Unread);
+        // A tempo the index already holds (the C# app's midi.db) is used as it is, and a damaged one isn't.
+        let kept = source("/no/such/folder/Loop.mid", mo_midi::SourceKind::File, Some(93.0));
+        assert_eq!(read_tempo(&kept, missing), Tempo::Own(93.0));
+        let damaged = source("/no/such/folder/Song.flp", mo_midi::SourceKind::Project, Some(0.0));
+        assert_eq!(read_tempo(&damaged, missing), Tempo::Unread);
+    }
+
+    #[test]
     fn a_part_plays_with_its_matched_sound() {
         let cat = catalogue();
         let bass = cat.entry(cat.find("A").unwrap()).unwrap();
         let sound = gm_sound(bass);
         assert_eq!(sound.program, 38);
         assert!(gm_sound(cat.entry(cat.find("C").unwrap()).unwrap()).drums);
-        assert_eq!(play_tempo(bass), PLAY_TEMPO);
-        assert_eq!(sound_line(&sound, 120.0), "Synth Bass 1 · from its name: bass · 120 BPM");
+        assert_eq!(sound_line(&sound, None), "Synth Bass 1 · from its name: bass");
+        assert_eq!(sound_line(&sound, Some(Tempo::Own(85.0))), "Synth Bass 1 · from its name: bass · 85 BPM");
+        assert_eq!(
+            sound_line(&sound, Some(Tempo::NotGiven)),
+            "Synth Bass 1 · from its name: bass · 120 BPM, as it gives no tempo"
+        );
     }
 
     #[test]

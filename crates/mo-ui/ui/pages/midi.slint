@@ -3,7 +3,7 @@
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, StudioButton, CloseButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
 
 // One part in the list.
 export struct MidiLine {
@@ -451,10 +451,9 @@ component PartPanel inherits SidePanel {
         color: Theme.muted;
         font-size: Type.meta;
     }
-    // Play: the part round and round with a General MIDI sound matched to it.
-    HorizontalLayout {
+    // Play: the part round and round with a General MIDI sound matched to it. The buttons wrap on a narrow card.
+    FlexboxLayout {
         spacing: Space.sm;
-        alignment: start;
         StudioButton {
             main: true;
             horizontal-stretch: 0;
@@ -478,16 +477,14 @@ component PartPanel inherits SidePanel {
             key: MidiData.fl-key;
             clicked => { MidiData.daw-play("fl"); }
         }
-        VerticalLayout {
-            alignment: center;
-            Text {
-                text: MidiData.sound-line;
-                color: Theme.muted;
-                font-size: Type.meta;
-                overflow: elide;
-                min-width: 0px;
-            }
-        }
+    }
+    // The sound it plays with, and at what tempo: a line of its own below the buttons.
+    Text {
+        text: MidiData.sound-line;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
     }
     if MidiData.daw-note != "": Text {
         text: MidiData.daw-note;
@@ -717,32 +714,22 @@ export component MidiPage inherits Rectangle {
                 toggled(text) => { MidiData.toggle("key", text); }
                 cleared => { MidiData.clear-chip("key"); }
             }
+            if MidiData.any-filter: ToggleChip {
+                text: "Clear";
+                on: false;
+                clicked => { MidiData.clear(); }
+            }
         }
         HorizontalLayout {
             spacing: Space.sm;
             vertical-stretch: 0;
-            if MidiData.target != "": Rectangle {
-                height: 24px;
-                y: (parent.height - self.height) / 2;
-                width: target-row.preferred-width + 2 * Space.sm;
-                border-radius: 12px;
-                background: Theme.surface-raised;
-                border-width: 1px;
-                border-color: Theme.accent;
-                target-row := HorizontalLayout {
-                    padding-left: Space.sm;
-                    padding-right: Space.xs;
-                    spacing: Space.xs;
-                    Text {
-                        text: MidiData.target;
-                        color: Theme.text;
-                        font-size: Type.meta;
-                        vertical-alignment: center;
-                    }
-                    VerticalLayout {
-                        alignment: center;
-                        CloseButton { clicked => { MidiData.clear-target(); } }
-                    }
+            // Only the parts like this one: the shared chip, as on the other pages; a click shows them all again.
+            if MidiData.target != "": VerticalLayout {
+                alignment: center;
+                ToggleChip {
+                    text: MidiData.target + "  ×";
+                    on: true;
+                    clicked => { MidiData.clear-target(); }
                 }
             }
             Text {

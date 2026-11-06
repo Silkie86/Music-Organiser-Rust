@@ -196,21 +196,30 @@ impl Tidied {
 pub struct Places {
     pub data: PathBuf,
     pub temp: PathBuf,
+    /// The export folder (the one set, else the one in Documents), whose "MIDI browser" folder Send to Bitwig writes
+    /// parts to; none when it can't be told.
+    pub exports: Option<PathBuf>,
 }
 
 impl Places {
-    pub fn this_pc() -> Places {
-        Places { data: paths::data_dir(), temp: std::env::temp_dir() }
+    /// This computer's places. `library` is the song library, which keeps the export folder setting. Opens it, so
+    /// never on the window's thread.
+    pub fn this_pc(library: Option<&Path>) -> Places {
+        let exports = library.and_then(|l| crate::bitwig_convert::export_setting_in(l).ok()).and_then(|set| {
+            crate::bitwig_convert::export_root(set.as_deref(), crate::bitwig_convert::documents().as_deref())
+        });
+        Places { data: paths::data_dir(), temp: std::env::temp_dir(), exports }
     }
 }
 
 /// Starts the sweep on a low-priority thread of its own, a little after the app opens, and says in the log what it
 /// cleared, with what keeping the logs folder in bounds did as the app opened. Never on the window's thread (rules 12
 /// and 21).
-pub fn start() {
-    let started = crate::background::spawn("Tidy up", || {
+pub fn start(library: PathBuf) {
+    let started = crate::background::spawn("Tidy up", move || {
         std::thread::sleep(WAIT);
-        let mut done = sweep(&Places::this_pc(), SystemTime::now(), &mo_space::clean::SystemBin);
+        let places = Places::this_pc(Some(&library));
+        let mut done = sweep(&places, SystemTime::now(), &mo_space::clean::SystemBin);
         if let Some(pruned) = crate::log::current().and_then(crate::log::SessionLog::take_pruned) {
             done.add(pruned);
         }
@@ -266,6 +275,10 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     done.add(remove_older(&places.temp, mo_space::admin::is_temp_file, DAY, now, true));
     // Play in Bitwig's MIDI files, which go again as soon as Bitwig has read them: a crash can leave one.
     done.add(remove_older(&places.temp, crate::midi::is_play_file, DAY, now, true));
+    // A part Send to Bitwig was still writing when the app stopped (its own name, given only while it's written).
+    if let Some(sent) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::midi::EXPORT_SUBFOLDER])) {
+        done.add(remove_older(&sent, crate::midi::is_half_sent, WRITING, now, false));
+    }
     if let Some(notes) = real_folder(&places.data, &[crate::note::FOLDER]) {
         done.add(old_notes_to_bin(&notes, &places.data.join(NOTES_DONE_FILE), NOTES_KEPT_FOR, now, bin));
     }
@@ -1258,7 +1271,7 @@ mod tests {
     #[test]
     fn crash_logs_and_reports_keep_their_newest_and_nothing_else_goes() {
         let dir = test_folder("logs");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let logs = places.data.join("logs");
         let now = SystemTime::now();
@@ -1413,7 +1426,7 @@ mod tests {
     fn a_leftover_that_cant_be_removed_is_counted() {
         use std::os::unix::fs::PermissionsExt;
         let dir = test_folder("locked");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let part = places.data.join("backup.txt.mo-part");
         let list = places.temp.join("mo-admin-1-2-3.txt");
@@ -1441,7 +1454,7 @@ mod tests {
     #[test]
     fn the_saves_list_copy_goes_once_songs_db_is_the_apps_own() {
         let dir = test_folder("list-copy");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let now = SystemTime::now();
         let copy = places.data.join(mo_library::list_copy::FILE_NAME);
@@ -1471,9 +1484,37 @@ mod tests {
     }
 
     #[test]
+    fn a_part_send_to_bitwig_was_still_writing_goes_and_nothing_else_there() {
+        let dir = test_folder("midi-browser");
+        let exports = dir.join("Music Organiser Exports");
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: Some(exports.clone()) };
+        let bin = TestBin(dir.join("bin"));
+        let now = SystemTime::now();
+        let sent = exports.join(crate::midi::EXPORT_SUBFOLDER);
+        let half = sent.join("Keys · Pattern 3.4120-0.part");
+        changed_at(&half, now);
+        // Never: a part sent, files named otherwise, and the same name in the export folder itself.
+        let kept = [
+            sent.join("Keys · Pattern 3.mid"),
+            sent.join("Keys.part"),
+            sent.join("Keys.12.part"),
+            sent.join("Keys.12-x.part"),
+            exports.join("Keys.4120-0.part"),
+        ];
+        for k in &kept {
+            changed_at(k, now);
+        }
+        // Not while it may still be being written.
+        assert_eq!(sweep(&places, now + Duration::from_secs(60), &bin).removed, 0);
+        assert_eq!(sweep(&places, now + WRITING * 2, &bin).removed, 1);
+        assert!(!half.exists() && kept.iter().all(|k| k.exists()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn leftovers_dated_far_on_go_and_ones_a_little_ahead_wait() {
         let dir = test_folder("ahead");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let now = SystemTime::now();
         // Written when the clock was plainly wrong: a leftover as old as can be.
@@ -1492,7 +1533,7 @@ mod tests {
     #[test]
     fn leftovers_go_once_old_enough_and_the_users_files_never() {
         let dir = test_folder("leftovers");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let data = &places.data;
         // Gone an hour after they were written: what's left of a write.
@@ -1590,7 +1631,7 @@ mod tests {
     #[test]
     fn notes_go_to_the_bin_3_months_after_they_were_saved_and_drafts_never() {
         let dir = test_folder("notes");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let notes = places.data.join("notes");
         // Saved notes, named as both apps name them: words, and a picture beside them. The newest was saved on the
@@ -1663,7 +1704,7 @@ mod tests {
     #[test]
     fn a_note_put_back_from_the_bin_stays() {
         let dir = test_folder("put-back");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let notes = places.data.join("notes");
         let note = notes.join("note-2026-07-01_10-00-00.md");
@@ -1687,7 +1728,7 @@ mod tests {
     #[test]
     fn a_clock_months_ahead_makes_no_note_old_by_itself() {
         let dir = test_folder("clock");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let notes = places.data.join("notes");
         let saved = [notes.join("note-2026-09-01_10-00-00.md"), notes.join("note-2026-10-30_09-00-00.md")];
@@ -1704,7 +1745,7 @@ mod tests {
     #[test]
     fn old_notes_stay_while_the_bin_cant_take_them_quietly() {
         let dir = test_folder("picky");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let words = notes.join("note-2026-07-01_10-00-00.md");
         let picture = notes.join("note-2026-07-01_10-00-00.png");
@@ -1778,7 +1819,7 @@ mod tests {
     #[test]
     fn a_note_the_bin_wont_take_stays_and_the_rest_wait_for_the_next_start() {
         let dir = test_folder("stubborn");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let words = notes.join("note-2026-07-01_10-00-00.md");
         let picture = notes.join("note-2026-07-01_10-00-00.png");
@@ -1807,7 +1848,7 @@ mod tests {
     #[test]
     fn notes_stay_while_what_says_how_far_the_sweep_went_cant_be_read() {
         let dir = test_folder("done-file");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let notes = places.data.join("notes");
         let note = notes.join("note-2026-07-01_10-00-00.md");
@@ -1850,7 +1891,7 @@ mod tests {
     #[test]
     fn a_newest_note_a_few_hours_ahead_still_counts_but_old_runs_from_now() {
         let dir = test_folder("hours-ahead");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let notes = places.data.join("notes");
         // Now is the 3rd of November at 12:00; the newest note was saved at 18:00 that day, on a clock 6 hours fast.
@@ -1885,7 +1926,7 @@ mod tests {
     #[test]
     fn no_more_notes_go_by_themselves_once_windows_has_asked() {
         let dir = test_folder("asks");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let [first, second, third] = three_old_notes(&notes);
         let now = local("2026-11-03_12-00-00");
@@ -1919,7 +1960,7 @@ mod tests {
     #[test]
     fn no_more_notes_go_by_themselves_once_one_isnt_in_the_bin_after() {
         let dir = test_folder("loses");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let [first, second, third] = three_old_notes(&notes);
         let picture = first.with_extension("png");
@@ -1943,7 +1984,7 @@ mod tests {
     #[test]
     fn a_note_gone_though_windows_didnt_move_it_stops_them_all() {
         let dir = test_folder("gone-but-kept");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let [first, second, third] = three_old_notes(&notes);
         let done_file = places.data.join(NOTES_DONE_FILE);
@@ -1960,7 +2001,7 @@ mod tests {
     #[test]
     fn the_bin_is_looked_in_once_a_start_and_a_picture_goes_before_its_words() {
         let dir = test_folder("watched");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let [first, ..] = three_old_notes(&notes);
         fresh(&first.with_extension("png"));
@@ -1979,7 +2020,7 @@ mod tests {
     #[test]
     fn a_stop_another_copy_of_the_app_writes_holds() {
         let dir = test_folder("other-copy");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let [first, second, third] = three_old_notes(&notes);
         let done_file = places.data.join(NOTES_DONE_FILE);
@@ -1994,7 +2035,7 @@ mod tests {
 
         // The same while it sends the last note it has: what it writes once it's done leaves the line too.
         let dir = test_folder("other-copy-last");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         fresh(&notes.join("note-2026-07-01_10-00-00.md"));
         fresh(&notes.join("note-2026-10-30_09-00-00.md"));
@@ -2010,7 +2051,7 @@ mod tests {
     #[test]
     fn a_note_another_copy_of_the_app_has_looked_at_meanwhile_stays() {
         let dir = test_folder("copy-ahead");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let [first, second, third] = three_old_notes(&notes);
         let done_file = places.data.join(NOTES_DONE_FILE);
@@ -2031,7 +2072,7 @@ mod tests {
     #[test]
     fn how_far_the_sweep_went_never_goes_back() {
         let dir = test_folder("never-back");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let [first, second, third] = three_old_notes(&notes);
         let done_file = places.data.join(NOTES_DONE_FILE);
@@ -2053,7 +2094,7 @@ mod tests {
     #[test]
     fn a_stop_written_while_a_note_is_looked_at_holds() {
         let dir = test_folder("stop-while-looking");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let [first, second, third] = three_old_notes(&notes);
         let done_file = places.data.join(NOTES_DONE_FILE);
@@ -2072,7 +2113,7 @@ mod tests {
     #[test]
     fn notes_wait_while_another_copy_of_the_app_goes_through_them() {
         let dir = test_folder("lock");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let notes = places.data.join("notes");
         let [first, second, third] = three_old_notes(&notes);
@@ -2102,7 +2143,7 @@ mod tests {
 
         // A folder of that name isn't the app's: it's left as it is, and so are the notes.
         let dir = test_folder("lock-folder");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let [first, ..] = three_old_notes(&places.data.join("notes"));
         fs::create_dir_all(places.data.join(NOTES_LOCK_FILE)).unwrap();
         let done = sweep(&places, now, &TestBin(dir.join("bin")));
@@ -2117,7 +2158,7 @@ mod tests {
     fn the_lock_is_never_taken_through_a_link() {
         use std::os::unix::fs::symlink;
         let dir = test_folder("lock-link");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let [first, ..] = three_old_notes(&places.data.join("notes"));
         let lock = places.data.join(NOTES_LOCK_FILE);
         let now = local("2026-11-03_12-00-00");
@@ -2143,7 +2184,7 @@ mod tests {
     #[test]
     fn a_note_that_cant_be_looked_at_stays_and_the_rest_go() {
         let dir = test_folder("cant-look");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let [first, second, third] = three_old_notes(&notes);
         let now = local("2026-11-03_12-00-00");
@@ -2170,7 +2211,7 @@ mod tests {
         let now = local("2026-11-03_12-00-00");
         for odd in [Odd::StillThere, Odd::Lingers] {
             let dir = test_folder("still-there");
-            let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+            let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
             let notes = places.data.join("notes");
             let [first, second, third] = three_old_notes(&notes);
             let done_file = places.data.join(NOTES_DONE_FILE);
@@ -2213,7 +2254,7 @@ mod tests {
     #[test]
     fn a_stop_that_cant_be_written_down_says_notes_may_go_again() {
         let dir = test_folder("stop-unwritten");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let [first, second, third] = three_old_notes(&notes);
         let done_file = places.data.join(NOTES_DONE_FILE);
@@ -2231,7 +2272,7 @@ mod tests {
     #[test]
     fn notes_wait_for_the_next_start_while_the_bin_cant_be_read() {
         let dir = test_folder("unread-bin");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let [first, second, third] = three_old_notes(&notes);
         let picture = first.with_extension("png");
@@ -2255,7 +2296,7 @@ mod tests {
     #[test]
     fn notes_the_sweep_hadnt_reached_when_the_app_closed_go_at_the_next_start() {
         let dir = test_folder("closed");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let [first, second, third] = three_old_notes(&notes);
         let now = local("2026-11-03_12-00-00");
@@ -2279,7 +2320,7 @@ mod tests {
     #[test]
     fn notes_wait_while_what_says_how_far_the_sweep_went_is_after_now() {
         let dir = test_folder("done-ahead");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let notes = places.data.join("notes");
         let note = notes.join("note-2026-07-01_10-00-00.md");
@@ -2307,7 +2348,7 @@ mod tests {
     #[test]
     fn a_note_gone_before_its_turn_is_neither_counted_nor_a_reason_to_stop() {
         let dir = test_folder("gone-before");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let [first, second, third] = three_old_notes(&notes);
         let done_file = places.data.join(NOTES_DONE_FILE);
@@ -2323,7 +2364,7 @@ mod tests {
     #[test]
     fn a_note_gone_after_windows_said_it_couldnt_go_stops_them_all() {
         let dir = test_folder("gone-after");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let notes = places.data.join("notes");
         let [first, second, third] = three_old_notes(&notes);
         let done_file = places.data.join(NOTES_DONE_FILE);
@@ -2343,7 +2384,7 @@ mod tests {
     fn what_says_how_far_the_sweep_went_is_never_written_through_a_link() {
         use std::os::unix::fs::symlink;
         let dir = test_folder("done-link");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let notes = places.data.join("notes");
         fresh(&notes.join("note-2026-07-01_10-00-00.md"));
@@ -2364,7 +2405,7 @@ mod tests {
     fn what_says_how_far_the_sweep_went_is_put_in_place_whole() {
         use std::io::Read as _;
         let dir = test_folder("done-whole");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let [first, ..] = three_old_notes(&places.data.join("notes"));
         let done_file = places.data.join(NOTES_DONE_FILE);
@@ -2412,7 +2453,7 @@ mod tests {
     #[test]
     fn a_copy_keeps_its_old_changed_time_but_is_as_new_as_when_it_was_made() {
         let dir = test_folder("copied");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let now = SystemTime::now();
         let list = places.temp.join("mo-admin-1-2-3.txt");
@@ -2439,7 +2480,7 @@ mod tests {
     #[test]
     fn the_launchers_folders_and_folders_inside_are_never_gone_into() {
         let dir = test_folder("launcher");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let logs = places.data.join("logs");
         // Files named as the sweep clears them, but inside folders: the launcher's, beside the code, and wherever
@@ -2484,7 +2525,7 @@ mod tests {
     fn nothing_is_removed_through_a_link() {
         use std::os::unix::fs::symlink;
         let dir = test_folder("links");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let yours = dir.join("yours");
         let song = yours.join("Song.flp");
@@ -2533,7 +2574,7 @@ mod tests {
     fn logs_are_kept_in_bounds_through_a_linked_folder() {
         use std::os::unix::fs::symlink;
         let dir = test_folder("linked-logs");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let elsewhere = dir.join("D").join("logs");
         for i in 0..40 {
@@ -2564,7 +2605,7 @@ mod tests {
     #[test]
     fn nothing_is_removed_through_a_junction() {
         let dir = test_folder("junctions");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         let yours = dir.join("yours");
         let junction = |at: &Path, to: &Path| {
@@ -2628,7 +2669,7 @@ mod tests {
     #[test]
     fn nothing_there_is_nothing_to_do() {
         let dir = test_folder("empty");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp") };
+        let places = Places { data: dir.join("data"), temp: dir.join("temp"), exports: None };
         let bin = TestBin(dir.join("bin"));
         assert_eq!(sweep(&places, SystemTime::now(), &bin), Tidied::default());
         assert_eq!(prune_logs(&places.data.join("logs"), None, SystemTime::now()), Tidied::default());

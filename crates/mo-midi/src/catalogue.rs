@@ -508,6 +508,7 @@ mod tests {
             track_name: String::new(),
             your_octave: None,
             shape: None,
+            cut: None,
         }
     }
 
