@@ -78,9 +78,9 @@ struct Page {
     counts: page::ChoiceCounts,
     /// The part playing as a loop (or being made into one), as its place in the catalogue's entries.
     looping: Option<usize>,
-    /// The part playing (or starting) in a DAW, as its place in the catalogue's entries: picking another plays that
-    /// one there instead (the 6 Nov review's D-3).
-    in_daw: Option<usize>,
+    /// The part playing (or starting) in a DAW, as its phrase's ID (which a fresh read of the list keeps): picking
+    /// another plays that one there instead (the 6 Nov review's D-3).
+    in_daw: Option<i64>,
     /// The picked part, as its place in the catalogue's entries, and its row in the list on show (kept, so stepping
     /// down a long list never searches it).
     picked: Option<usize>,
@@ -990,8 +990,10 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
     // A part playing in a DAW follows the pick the same way (the review's D-3). Clicking down the list asks for each
     // in turn, and each start no longer wanted as its turn comes stops before it connects.
     let daw_now = if data.get_daw_starting() != "" { data.get_daw_starting() } else { data.get_daw_playing() };
+    let phrase = PAGE.with(|p| p.borrow().cat.entry(at).map(|e| e.phrase.id));
     if let Some(daw) = Daw::from_id(&daw_now)
-        && PAGE.with(|p| p.borrow().in_daw) != Some(at)
+        && phrase.is_some()
+        && PAGE.with(|p| p.borrow().in_daw) != phrase
     {
         stop_daw(app);
         start_daw(app, daw, at);
@@ -1787,7 +1789,7 @@ fn take_in_daw() -> Option<InDaw> {
 
 /// Stops what plays in a DAW, without the window waiting: FL's notes let go by themselves, Bitwig's clip comes out
 /// on a thread of its own, in its place in the line taken now (so a Play pressed after it goes after it).
-fn stop_in_daw(playing: InDaw, weak: Option<slint::Weak<AppWindow>>) {
+fn stop_in_daw(playing: InDaw, part: Option<i64>, weak: Option<slint::Weak<AppWindow>>) {
     match playing {
         InDaw::Fl(fl) => fl.stop(),
         InDaw::Bitwig(bitwig) => {
@@ -1799,7 +1801,7 @@ fn stop_in_daw(playing: InDaw, weak: Option<slint::Weak<AppWindow>>) {
                 // In its turn, behind what was asked for before it, so it never stops Bitwig in the middle of a newer
                 // start (the 6 Nov review's D-fp3).
                 let turn = ticket.wait();
-                stop_bitwig_in(bitwig, &turn, weak);
+                stop_bitwig_in(bitwig, part, &turn, weak);
             });
             if let Err(e) = started {
                 log::error("MIDI", &format!("Couldn't start stopping the part in Bitwig: {e}"));
@@ -1814,6 +1816,7 @@ fn stop_in_daw(playing: InDaw, weak: Option<slint::Weak<AppWindow>>) {
 /// before the turn ends, so the start behind sees it. The card says why.
 fn stop_bitwig_in(
     bitwig: mo_dawlink::bitwig::Playing,
+    part: Option<i64>,
     turn: &mo_dawlink::bitwig::Turn<'_>,
     weak: Option<slint::Weak<AppWindow>>,
 ) {
@@ -1841,6 +1844,8 @@ fn stop_bitwig_in(
             if DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst) == at {
                 data.set_daw_starting("".into());
                 data.set_daw_playing(Daw::Bitwig.id().into());
+                // Picking its part again leaves it as it is.
+                PAGE.with(|p| p.borrow_mut().in_daw = part);
             }
             if let Some(audition) = audition {
                 crate::presets::called_off(&app, audition);
@@ -1906,7 +1911,7 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
     // The loop with a General MIDI sound would play over it.
     stop_playing(app);
     let asked = DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst);
-    PAGE.with(|p| p.borrow_mut().in_daw = Some(at));
+    PAGE.with(|p| p.borrow_mut().in_daw = Some(phrase_id));
     data.set_daw_starting(daw.id().into());
     if HERE.with(|h| *h.borrow()) {
         data.set_daw_starting("".into());
@@ -1944,8 +1949,10 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
                     drop(slot);
                     // Stopped (or another part asked for) just as it went in: stopped inside its own turn.
                     match (playing, &turn) {
-                        (InDaw::Bitwig(bitwig), Some(turn)) => stop_bitwig_in(bitwig, turn, Some(weak)),
-                        (playing, _) => stop_in_daw(playing, Some(weak)),
+                        (InDaw::Bitwig(bitwig), Some(turn)) => {
+                            stop_bitwig_in(bitwig, Some(phrase_id), turn, Some(weak));
+                        }
+                        (playing, _) => stop_in_daw(playing, Some(phrase_id), Some(weak)),
                     }
                     return;
                 }
@@ -1989,9 +1996,9 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
 /// Stops what plays (or is starting) in a DAW, and the buttons say so at once. A start still on its way sees the
 /// newer ask and stops what it started.
 fn stop_daw(app: &AppWindow) {
-    PAGE.with(|p| p.borrow_mut().in_daw = None);
+    let part = PAGE.with(|p| p.borrow_mut().in_daw.take());
     if let Some(playing) = take_in_daw() {
-        stop_in_daw(playing, Some(app.as_weak()));
+        stop_in_daw(playing, part, Some(app.as_weak()));
     }
     let data = app.global::<MidiData>();
     data.set_daw_starting("".into());
@@ -2061,6 +2068,26 @@ pub fn finish_up() {
     }
 }
 
+/// FL starts go one at a time ([`start_in_daw`]).
+static FL_STARTS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Opens the MIDI port to FL Studio. The part playing before lets go of it a moment after it's stopped (on Windows a
+/// port takes one program, and one part, at a time), so it's tried again for a second while the start is still
+/// wanted.
+fn fl_port(wanted: &dyn Fn() -> bool) -> Result<Box<dyn mo_dawlink::fl::NoteOut>, Option<String>> {
+    let tried = std::time::Instant::now();
+    loop {
+        match mo_dawlink::fl::open_port() {
+            Ok(port) => return Ok(port),
+            Err(_) if tried.elapsed() < Duration::from_secs(1) && wanted() => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(_) if !wanted() => return Err(None),
+            Err(e) => return Err(Some(e.to_string())),
+        }
+    }
+}
+
 /// Starts the part in the DAW, and says where it plays. Waits for Bitwig, so never on the window's thread.
 ///
 /// `Err(None)` when it was no longer `wanted` (it put nothing in, or took it back); `Err(Some)` says why it can't play.
@@ -2075,11 +2102,13 @@ fn start_in_daw(
 ) -> Result<(InDaw, String), Option<String>> {
     match daw {
         Daw::Fl => {
+            // One start at a time: clicking down the list asks for each part, and the port takes one at a time.
+            let _one_at_a_time = FL_STARTS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if !wanted() {
                 return Err(None);
             }
             let part = page::fl_part(notes, bars, tempo);
-            let port = mo_dawlink::fl::open_port().map_err(|e| Some(e.to_string()))?;
+            let port = fl_port(wanted)?;
             let playing = mo_dawlink::fl::play(port, &part).map_err(|e| Some(e.to_string()))?;
             let bpm = (tempo * 10.0).round() / 10.0;
             Ok((InDaw::Fl(playing), format!("Playing {name} on the channel selected in FL Studio, at {bpm} BPM.")))

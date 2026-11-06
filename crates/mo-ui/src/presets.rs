@@ -314,7 +314,6 @@ pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     let key = shortcuts.key_of(act::EXPORT_SHOWN).to_owned();
     let data = app.global::<PresetsData>();
     data.set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
-    data.set_stop_audition_key(shortcuts.key_of(act::AUDITION).into());
     data.set_keep_audition_key(shortcuts.key_of(act::KEEP).into());
     show_card(app);
     show_curve_card(app);
@@ -1655,9 +1654,8 @@ fn toggle_audition(app: &AppWindow, item: Item) {
                     stop_audition_in(auditioning, Some(logic::audition_id(&item)), &turn);
                     return;
                 }
-                let track = auditioning.track.clone();
                 *slot = Some(auditioning);
-                Ok(track)
+                Ok(())
             }
             Err(Some(why)) => {
                 log::warning("Presets", &format!("{name} couldn't be auditioned in Bitwig: {why}"));
@@ -1675,15 +1673,17 @@ fn toggle_audition(app: &AppWindow, item: Item) {
                 match made {
                     // The strip under the list says it plays (the 6 Nov review's D-4): the card's words stay the
                     // picked line's.
-                    Ok(track) => {
+                    Ok(()) => {
                         if let Some((_, hearing)) = &mut p.hearing {
                             *hearing = logic::Hearing::Playing;
                         }
-                        p.hearing_name = track;
                     }
                     Err(why) => {
+                        // Named when another line's card is on show.
+                        let picked = p.picked.and_then(|i| p.items.get(i)).map(logic::audition_id);
+                        let this = p.hearing.as_ref().map(|(id, _)| id.clone());
+                        p.message = if picked.is_some() && picked == this { why } else { format!("{name}: {why}") };
                         p.hearing = None;
-                        p.message = format!("{name} couldn't be auditioned in Bitwig: {why}");
                     }
                 }
             });
@@ -1873,10 +1873,7 @@ pub fn stop_audition_for_another(app: &AppWindow) {
     if PAGE.with(|p| p.borrow().hearing.is_none()) {
         return;
     }
-    let line = PAGE.with(|p| p.borrow().hearing.as_ref().map(|(id, _)| id.clone()));
-    if let Some(before) = stop_audition(app) {
-        stop_in_bitwig(before, line);
-    }
+    stop_audition_now(app);
     PAGE.with(|p| p.borrow_mut().message = "The audition stopped: Play in Bitwig on the MIDI page took over.".into());
     show_all(app);
 }
