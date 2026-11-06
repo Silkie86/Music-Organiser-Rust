@@ -25,6 +25,14 @@ use super::{DRUM_MACHINE_NAME, DeviceId, Error, Hello, Inserted, Link, PORT};
 /// The app's sends wait here for their turn, so they go in one at a time, in the order they came.
 pub(super) static SENDS: Queue = Queue::new();
 
+/// A place in the line for the app's next change in Bitwig, taken now and waited on later ([`Ticket::wait`]): a
+/// screen takes it on the window's thread as the button is pressed, so a Stop and the Play pressed after it go in
+/// that order, whichever of their threads runs first (the 6 Nov review's D-fp3). Plays, auditions and their stops
+/// take one (sends take theirs themselves).
+pub fn ticket() -> Ticket<'static> {
+    SENDS.ticket()
+}
+
 /// Turns in the order they were asked for, as at a counter: each send takes the next number and waits until it's
 /// called. (A lock on its own lets whichever waiting thread the system picks go next: on Windows, not the first.)
 pub(super) struct Queue {
@@ -37,31 +45,90 @@ struct Numbers {
     next: u64,
     /// The number whose turn it is.
     now: u64,
+    /// Numbers given up before their turn came: skipped when it does.
+    given_up: BTreeSet<u64>,
+}
+
+impl Numbers {
+    /// Calls the next number still waiting.
+    fn call_next(&mut self) {
+        self.now += 1;
+        while self.given_up.remove(&self.now) {
+            self.now += 1;
+        }
+    }
 }
 
 impl Queue {
     const fn new() -> Queue {
-        Queue { numbers: Mutex::new(Numbers { next: 0, now: 0 }), called: Condvar::new() }
+        Queue { numbers: Mutex::new(Numbers { next: 0, now: 0, given_up: BTreeSet::new() }), called: Condvar::new() }
+    }
+
+    fn numbers(&self) -> std::sync::MutexGuard<'_, Numbers> {
+        self.numbers.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Takes the next number, without waiting.
+    pub(super) fn ticket(&self) -> Ticket<'_> {
+        let mut numbers = self.numbers();
+        let number = numbers.next;
+        numbers.next += 1;
+        Ticket { queue: self, number, waited: false }
     }
 
     /// Takes the next number and waits for its turn, which lasts until what this gives back goes.
     pub(super) fn wait_turn(&self) -> Turn<'_> {
-        let mut numbers = self.numbers.lock().unwrap_or_else(PoisonError::into_inner);
-        let mine = numbers.next;
-        numbers.next += 1;
-        while numbers.now != mine {
-            numbers = self.called.wait(numbers).unwrap_or_else(PoisonError::into_inner);
-        }
-        Turn(self)
+        self.ticket().wait()
     }
 }
 
-/// A send's turn. The next number is called when this goes, also when the send stopped with a panic.
-pub(super) struct Turn<'a>(&'a Queue);
+/// A number in the line, not yet called ([`ticket`]). Waiting on it gives the turn; dropping it unused gives the place
+/// up without waiting, so the ones after it never wait for it.
+pub struct Ticket<'a> {
+    queue: &'a Queue,
+    number: u64,
+    /// Waited on, so its turn gives the place up instead.
+    waited: bool,
+}
+
+impl<'a> Ticket<'a> {
+    /// Waits for this number's turn, behind every one taken before it.
+    pub fn wait(mut self) -> Turn<'a> {
+        let (queue, mine) = (self.queue, self.number);
+        self.waited = true;
+        let mut numbers = queue.numbers();
+        while numbers.now != mine {
+            numbers = queue.called.wait(numbers).unwrap_or_else(PoisonError::into_inner);
+        }
+        Turn(queue)
+    }
+}
+
+impl Drop for Ticket<'_> {
+    fn drop(&mut self) {
+        if self.waited {
+            return;
+        }
+        let mine = self.number;
+        let mut numbers = self.queue.numbers();
+        if numbers.now == mine {
+            numbers.call_next();
+            drop(numbers);
+            self.queue.called.notify_all();
+        } else {
+            numbers.given_up.insert(mine);
+        }
+    }
+}
+
+/// A change's turn: the app's other changes in Bitwig wait until it goes. The next number is called when this goes,
+/// also when the change stopped with a panic. The audition and play steps take one, so a caller may do more inside
+/// the same turn (put back what couldn't be stopped, say) before the next change goes.
+pub struct Turn<'a>(&'a Queue);
 
 impl Drop for Turn<'_> {
     fn drop(&mut self) {
-        self.0.numbers.lock().unwrap_or_else(PoisonError::into_inner).now += 1;
+        self.0.numbers().call_next();
         self.0.called.notify_all();
     }
 }
@@ -716,5 +783,35 @@ mod tests {
             let _ = went.send(7);
         });
         assert_eq!(order.recv_timeout(Duration::from_secs(10)).unwrap(), 7);
+    }
+
+    #[test]
+    fn a_ticket_keeps_its_place_and_one_given_up_is_skipped() {
+        let queue = Queue::new();
+        let first = queue.ticket();
+        let given_up = queue.ticket();
+        let third = queue.ticket();
+        let (went, order) = mpsc::channel();
+        thread::scope(|s| {
+            let went_too = went.clone();
+            // The third waits first, but goes after the first.
+            s.spawn(move || {
+                let _turn = third.wait();
+                let _ = went_too.send(3);
+            });
+            thread::sleep(Duration::from_millis(20));
+            drop(given_up);
+            let turn = first.wait();
+            let _ = went.send(1);
+            drop(turn);
+        });
+        let came: Vec<u64> = (0..2).map(|_| order.recv_timeout(Duration::from_secs(10)).unwrap()).collect();
+        assert_eq!(came, [1, 3]);
+        // A ticket given up as its turn comes calls the next at once.
+        let now = queue.ticket();
+        let after = queue.ticket();
+        drop(now);
+        drop(after.wait());
+        assert!(queue.numbers().given_up.is_empty());
     }
 }

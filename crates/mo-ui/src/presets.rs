@@ -1534,38 +1534,35 @@ fn toggle_audition(app: &AppWindow, item: Item) {
     });
     show_all(app);
     let (library, templates, bitwig_folders, _) = export_setup();
+    // Its place in Bitwig's line, taken now, behind the stop just asked for on the MIDI page.
+    let ticket = mo_dawlink::bitwig::ticket();
     let on_its_way = crate::in_flight::Start::begin();
     let started = background::spawn("Audition in Bitwig", move || {
         let _on_its_way = on_its_way;
-        // The one playing before goes first, so the two never cross in Bitwig (whether Bitwig was playing, and
-        // stopping it, belong to each in turn). If it can't be stopped, this one doesn't start: the one before is put
-        // back, so Stop can be pressed again (the review's D-2).
+        let turn = ticket.wait();
+        // The one playing before goes first, in the same turn, so the two never cross in Bitwig (whether Bitwig was
+        // playing, and stopping it, belong to each in turn). If it can't be stopped, this one doesn't start: the one
+        // before is put back, so Stop can be pressed again (the review's D-2).
         if let (Some(before), Some(was)) = (before, was.clone())
-            && let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_audition(&before)
+            && !stop_audition_in(before, Some(was), &turn)
         {
-            log::warning("Presets", &format!("The audition in Bitwig before couldn't be stopped: {e}"));
-            put_back(before, was, asked, e);
             return;
         }
         let wanted = move || audition_asked() == asked;
         let made = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
-            audition(&item, &library, templates, &bitwig_folders, &wanted)
+            audition(&item, &library, templates, &bitwig_folders, &turn, &wanted)
         }))
         .unwrap_or_else(|_| Err(Some("It stopped before it started playing.".to_owned())));
         let made = match made {
             // Something newer was asked for while it waited: it took back what it put in, and says nothing.
             Err(None) => return,
-            Err(Some(why)) => Err(why),
-            Ok(auditioning) => Ok(auditioning),
-        };
-        let made = match made {
             Ok(auditioning) => {
                 // Checked and kept under the lock a Stop takes, so a Stop either finds it or is seen here.
                 let mut slot = audition_now();
                 if audition_asked() != asked {
                     drop(slot);
-                    // Stopped (or another line asked for) just as it went in.
-                    stop_in_bitwig(auditioning, None);
+                    // Stopped (or another line asked for) just as it went in: stopped inside its own turn.
+                    stop_audition_in(auditioning, Some(logic::audition_id(&item)), &turn);
                     return;
                 }
                 let words = format!(
@@ -1576,11 +1573,12 @@ fn toggle_audition(app: &AppWindow, item: Item) {
                 *slot = Some(auditioning);
                 Ok(words)
             }
-            Err(why) => {
+            Err(Some(why)) => {
                 log::warning("Presets", &format!("{name} couldn't be auditioned in Bitwig: {why}"));
                 Err(why)
             }
         };
+        drop(turn);
         on_window(move |app| {
             // A Stop since cleared the card itself.
             if audition_asked() != asked {
@@ -1619,6 +1617,7 @@ fn audition(
     library: &Path,
     templates: Option<Arc<Templates>>,
     bitwig_folders: &[PathBuf],
+    turn: &mo_dawlink::bitwig::Turn<'_>,
     wanted: &dyn Fn() -> bool,
 ) -> Result<mo_dawlink::bitwig::Auditioning, Option<String>> {
     // Nothing is made for one that's no longer wanted (the review's D-5).
@@ -1655,48 +1654,107 @@ fn audition(
     let part = std::env::temp_dir().join(mo_app::midi::play_file_name());
     std::fs::write(&part, &bytes).map_err(|e| format!("Its part's MIDI file couldn't be saved in Temp: {e}."))?;
     // Bitwig has read both files once this answers, so the part goes at once (rule 28).
-    let heard = mo_dawlink::bitwig::Bitwig::default().audition_preset(&preset, &part, &name, wanted);
+    let heard = mo_dawlink::bitwig::Bitwig::default().audition_preset(&preset, &part, &name, turn, wanted);
     let _ = std::fs::remove_file(&part);
     heard.map_err(|e| (e != mo_dawlink::bitwig::Error::Cancelled).then(|| e.to_string()))
 }
 
-/// Takes an audition's track out of Bitwig on a thread of its own, without the window waiting, in its turn behind
-/// what was asked for before it (the review's D-fp2). When it can't, and `line` names the line it was of, the card
-/// says why and the audition is put back so Stop can be pressed again (D-2).
+/// Takes an audition's track out of Bitwig on a thread of its own, without the window waiting, in its place in the
+/// line taken now, behind what was asked for before it (the review's D-fp2 and D-fp3). When it can't, and `line` names
+/// the line it was of, the card says why and the audition is put back so Stop can be pressed again (D-2).
 fn stop_in_bitwig(auditioning: mo_dawlink::bitwig::Auditioning, line: Option<String>) {
-    let asked = audition_asked();
+    let ticket = mo_dawlink::bitwig::ticket();
+    // Counted, so the app waits a moment for it as it closes (the review's D-fp4).
+    let on_its_way = crate::in_flight::Start::begin();
     let started = background::spawn("Stop audition", move || {
-        if let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_audition(&auditioning) {
-            log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped: {e}"));
-            if let Some(line) = line {
-                put_back(auditioning, line, asked, e);
-            }
-        }
+        let _on_its_way = on_its_way;
+        let turn = ticket.wait();
+        stop_audition_in(auditioning, line, &turn);
     });
     if let Err(e) = started {
         log::error("Presets", &format!("Couldn't start stopping the audition: {e}"));
     }
 }
 
-/// An audition that couldn't be stopped: back in its place (unless something newer was asked for since, as `asked`
-/// says), and the card says why and what to do.
-fn put_back(auditioning: mo_dawlink::bitwig::Auditioning, line: String, asked: u64, why: mo_dawlink::bitwig::Error) {
+/// Stops an audition inside `turn`. Whether it stopped; when it didn't and `line` names its line, it's put back
+/// before the turn ends (see [`put_back`]).
+fn stop_audition_in(
+    auditioning: mo_dawlink::bitwig::Auditioning,
+    line: Option<String>,
+    turn: &mo_dawlink::bitwig::Turn<'_>,
+) -> bool {
+    let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_audition(&auditioning, turn) else { return true };
+    log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped: {e}"));
+    if let Some(line) = line {
+        put_back(auditioning, line, e);
+    }
+    false
+}
+
+/// An audition that couldn't be stopped: back in its place, unless another plays by now, and a start in Bitwig still
+/// on its way behind it (from this page or the MIDI page) is called off, so one thing plays there at a time (the
+/// review's D-8). Run inside the stop's turn, so the start behind sees it. The card says why and what to do.
+fn put_back(auditioning: mo_dawlink::bitwig::Auditioning, line: String, why: mo_dawlink::bitwig::Error) {
     let words = format!(
         "{} couldn't be stopped in Bitwig: {why} Bring its project to the front in Bitwig (with changes on), then \
          press Stop audition again.",
         auditioning.track
     );
+    let put = {
+        let mut slot = audition_now();
+        if slot.is_none() {
+            *slot = Some(auditioning);
+            AUDITION_ASKED.fetch_add(1, Ordering::SeqCst);
+            Some((audition_asked(), crate::midi::call_off_start()))
+        } else {
+            None
+        }
+    };
     on_window(move |app| {
-        {
-            let mut slot = audition_now();
-            if audition_asked() == asked && slot.is_none() {
-                *slot = Some(auditioning);
+        if let Some((at, midi)) = put {
+            if audition_asked() == at {
                 PAGE.with(|p| p.borrow_mut().hearing = Some((line, logic::Hearing::Playing)));
+            }
+            if let Some(midi) = midi {
+                crate::midi::called_off(app, midi);
             }
         }
         PAGE.with(|p| p.borrow_mut().message = words);
         show_all(app);
     });
+}
+
+/// Calls off an audition still on its way, for a part from the MIDI page that couldn't be stopped in Bitwig. Run
+/// inside that stop's turn; gives back the ask to hand to [`called_off`] on the window's thread. None when an
+/// audition plays already (so none was starting).
+pub(crate) fn call_off_start() -> Option<u64> {
+    let slot = audition_now();
+    if slot.is_some() {
+        return None;
+    }
+    AUDITION_ASKED.fetch_add(1, Ordering::SeqCst);
+    Some(audition_asked())
+}
+
+/// The card after [`call_off_start`]: an audition called off as it started says why, unless something newer was asked.
+pub(crate) fn called_off(app: &AppWindow, at: u64) {
+    let starting = PAGE.with(|p| matches!(p.borrow().hearing, Some((_, logic::Hearing::Starting))));
+    if audition_asked() != at || !starting {
+        return;
+    }
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.hearing = None;
+        p.message =
+            "The audition didn't start: the part from the MIDI page couldn't be stopped in Bitwig (see there).".into();
+    });
+    show_all(app);
+}
+
+/// As the app closes: an audition still on its way sees it's no longer wanted (the MIDI page's finish_up calls this, so
+/// the app waits once for both pages).
+pub(crate) fn call_off_for_closing() {
+    AUDITION_ASKED.fetch_add(1, Ordering::SeqCst);
 }
 
 /// Stops an audition playing or starting, for Play in Bitwig on the MIDI page taking Bitwig over (the review's
@@ -1744,8 +1802,11 @@ fn keep_audition(app: &AppWindow) {
     let Some(auditioning) = take_audition() else { return };
     let track = auditioning.track.clone();
     let words = format!("Kept: {track} stays in Bitwig, on its own track with the part.");
+    let ticket = mo_dawlink::bitwig::ticket();
+    let on_its_way = crate::in_flight::Start::begin();
     let started = background::spawn("Keep audition", move || {
-        let kept = mo_dawlink::bitwig::Bitwig::default().keep_audition(auditioning);
+        let _on_its_way = on_its_way;
+        let kept = mo_dawlink::bitwig::Bitwig::default().keep_audition(auditioning, &ticket.wait());
         if let Err(e) = kept {
             log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped as it was kept: {e}"));
             message_later(format!("{track} stays in Bitwig, but it couldn't be stopped there: {e}"));

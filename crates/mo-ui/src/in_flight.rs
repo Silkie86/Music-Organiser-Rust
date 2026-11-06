@@ -1,6 +1,6 @@
-//! Starts in a DAW still on their way (an audition, or a part played in Bitwig or FL Studio), counted so the app can
-//! wait a moment for them as it closes: each one no longer wanted then takes back what it put in, inside its own turn,
-//! before the app goes (the 6 Nov review's D-fp4).
+//! Starts and stops in a DAW still on their way (an audition, a part played in Bitwig or FL Studio, their stops),
+//! counted so the app can wait a moment for them as it closes: each start no longer wanted then takes back what it put
+//! in, inside its own turn, and each stop goes in, before the app goes (the 6 Nov review's D-fp4).
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};

@@ -42,11 +42,11 @@ pub(super) const MAX_MESSAGE: usize = 64 << 20;
 /// The longest wait for anything, so a deadline never runs past what the clock can count.
 const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 
-/// The commands that change or select something in Bitwig's project, as the link lists them: each carries
-/// [`Link::only_in`] when it's set. Not `recordabort`, which must reach the link whatever project is in front.
 /// The extension version from which `insert` and `pads` find a track by its ID too, as `clip` does.
 pub const TRACK_IDS_EVERYWHERE: &str = "3.21";
 
+/// The commands that change or select something in Bitwig's project, as the link lists them: each carries
+/// [`Link::only_in`] when it's set. Not `recordabort`, which must reach the link whatever project is in front.
 const PROJECT_COMMANDS: [&str; 16] = [
     "set",
     "insert",
