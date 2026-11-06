@@ -1,6 +1,6 @@
 // The window shell: the rail on the left and the page on show. Agreed map (2026-10-29): Songs, Sounds, Presets, MIDI,
 // Plugins and Space, with Settings at the bottom.
-import { Theme, Type, Space, Motion, Icons, RailItem, Groove, Caps, ActionKey, TipLayer, TipState, StudioButton, JumpField } from "studio.slint";
+import { Theme, Type, Space, Motion, Icons, RailItem, Groove, Caps, ActionKey, TipLayer, TipState, StudioButton, JumpField, AppKeys } from "studio.slint";
 import { ComingPage } from "pages/coming.slint";
 import { PartsGallery } from "pages/parts.slint";
 import { SoundsPage, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook } from "pages/sounds.slint";
@@ -14,6 +14,7 @@ import { MidiPage, MidiData, MidiLine, RollLabel, RollRoom, MidiFact, PickedPart
 // The waveforms drawn on the graphics card (mo-ui's waves.rs).
 import { Waves, WavePicture } from "studio.slint";
 export { Waves, WavePicture }
+export { AppKeys }
 import { SpacePage, SpaceData, DriveCard, RoomLine, CardPart } from "pages/space.slint";
 import { ActivityCards, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
 import { Finder, FinderData, FinderLine } from "finder.slint";
@@ -96,6 +97,8 @@ export component AppWindow inherits Window {
     callback try-job();
 
     // The key sheet (F1 or ?).
+    // The key sheet's lines: the page's own keys, then the ones that work everywhere.
+    in property <[KeyRow]> page-key-rows;
     in property <[KeyRow]> key-rows;
     in-out property <bool> sheet-open;
 
@@ -324,6 +327,7 @@ export component AppWindow inherits Window {
         }
 
         if root.sheet-open: KeySheet {
+            page-rows: root.page-key-rows;
             rows: root.key-rows;
             close => {
                 root.sheet-open = false;

@@ -3,7 +3,7 @@
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
 
 // One part in the list.
 export struct MidiLine {
@@ -90,10 +90,16 @@ export global MidiData {
     // Your MIDI being read into the Rust index.
     in property <bool> reading;
     callback read-again();
+    // The Read MIDI again button's key (it stops a reading too), from the one shortcut list (rule 15).
+    in property <string> read-again-key;
     callback stop-reading();
 
     in-out property <string> search;
     callback search-edited(string);
+    // Esc (app.escape), the same order on every page: what's playing stops (here and in a DAW), else the list goes back
+    // to the whole list, else the search is cleared, else the picked part's card closes. False when there was nothing
+    // to do.
+    callback escape() -> bool;
     // The filters, the same as every page's (FilterPicks): the kinds of part, where they come from (neither picked
     // is both) and the keys, each choice with how many parts it would show.
     in property <FilterView> kind-filter;
@@ -639,6 +645,9 @@ component PartPanel inherits SidePanel {
 
 export component MidiPage inherits Rectangle {
     forward-focus: search-box;
+    // Ctrl+F (app.search): the keys go to the search box, its words picked so typing replaces them (review X3-22).
+    property <int> search-asked: AppKeys.search;
+    changed search-asked => { search-box.focus-all(); }
 
     VerticalLayout {
         padding: Space.xl;
@@ -661,10 +670,9 @@ export component MidiPage inherits Rectangle {
                 text <=> MidiData.search;
                 edited(t) => { MidiData.search-edited(t); }
                 key(k) => {
-                    if (k == Key.Escape && MidiData.search != "") {
-                        MidiData.search = "";
-                        MidiData.search-edited("");
-                        return true;
+                    // Esc takes the page's next step back, as it does anywhere on the page (app.escape).
+                    if (k == Key.Escape) {
+                        return MidiData.escape();
                     }
                     if (k == Key.DownArrow) {
                         keys.focus();
@@ -682,6 +690,7 @@ export component MidiPage inherits Rectangle {
                     text: MidiData.reading ? "Stop" : "Read MIDI again";
                     tip: MidiData.reading ? "Stop reading: it carries on from there next time"
                         : "Look for new and changed projects and MIDI files, and try the ones that failed again. Only those are read.";
+                    key: MidiData.read-again-key;
                     clicked => {
                         if (MidiData.reading) {
                             MidiData.stop-reading();

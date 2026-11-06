@@ -4,7 +4,7 @@
 // there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
 // fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, TickBox, FilterPicks, FilterView, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TickBox, FilterPicks, FilterView, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
 
 // One line of the list.
 export struct PluginListLine {
@@ -192,6 +192,9 @@ export global PluginsData {
     in property <string> scanner-note;
 
     callback search-edited(string);
+    // Esc (app.escape), the same order on every page: the search is cleared, else the picked plugin's card closes.
+    // False when there was nothing to do.
+    callback escape() -> bool;
     // A filter's choice picked or unpicked: the filter ("show", "kind", "format", "daw") and the choice's words.
     callback toggle(string, string);
     callback clear-filter(string);
@@ -755,6 +758,9 @@ component PluginPanel inherits SidePanel {
 
 export component PluginsPage inherits Rectangle {
     forward-focus: search-box;
+    // Ctrl+F (app.search): the keys go to the search box, its words picked so typing replaces them (review X3-22).
+    property <int> search-asked: AppKeys.search;
+    changed search-asked => { search-box.focus-all(); }
 
     VerticalLayout {
         padding: Space.xl;
@@ -778,10 +784,9 @@ export component PluginsPage inherits Rectangle {
                 text <=> PluginsData.search;
                 edited(t) => { PluginsData.search-edited(t); }
                 key(k) => {
-                    if (k == Key.Escape && PluginsData.search != "") {
-                        PluginsData.search = "";
-                        PluginsData.search-edited("");
-                        return true;
+                    // Esc takes the page's next step back, as it does anywhere on the page (app.escape).
+                    if (k == Key.Escape) {
+                        return PluginsData.escape();
                     }
                     // Down goes into the list, as on Sounds, MIDI and Presets, when a line shows.
                     if (k == Key.DownArrow && PluginsData.message == "" && PluginsData.lines.length > 0) {

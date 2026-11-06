@@ -195,6 +195,8 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     let weak = app.as_weak();
     data.on_search_edited(move |t| change(&weak, |f| f.search = t.to_string()));
     let weak = app.as_weak();
+    data.on_escape(move || weak.upgrade().is_some_and(|app| escape(&app)));
+    let weak = app.as_weak();
     data.on_show_unused(move || change(&weak, |f| f.show(Chip::BigUnused)));
     let weak = app.as_weak();
     data.on_toggle(move |filter, c| {
@@ -529,6 +531,23 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
 /// Whether a plugin is picked, for the page's keys.
 pub fn has_pick() -> bool {
     PAGE.with(|p| p.borrow().picked.is_some())
+}
+
+/// Esc on the page (`app.escape`, in the search box or anywhere else), the same order on every page, one step a press
+/// (the whole-app review of 6 Nov, X3-12): the search is cleared, else the picked plugin's card closes (nothing plays
+/// here). Says whether it did either (when not, the key goes on).
+pub fn escape(app: &AppWindow) -> bool {
+    let data = app.global::<PluginsData>();
+    if !data.get_search().is_empty() {
+        data.set_search(SharedString::new());
+        data.invoke_search_edited(SharedString::new());
+        return true;
+    }
+    if has_pick() {
+        pick(app, None);
+        return true;
+    }
+    false
 }
 
 /// A read of the library has arrived (`built`), read while Space's clean-ups had what's at `in_bin` in the Recycle Bin.

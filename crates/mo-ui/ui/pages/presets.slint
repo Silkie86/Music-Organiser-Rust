@@ -3,7 +3,7 @@
 // to drop onto a Bitwig lane (Solomon, 2 Nov 2026). Only shared parts from studio.slint; mo-app decides every word
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
 
 // One line of the sounds list.
 export struct PresetLine {
@@ -92,6 +92,9 @@ export global PresetsData {
     in-out property <string> search;
     // The Sounds section.
     callback search-edited(string);
+    // Esc (app.escape), the same order on every page: the audition in Bitwig stops, else the search is cleared, else
+    // the picked line's card closes. False when there was nothing to do.
+    callback escape() -> bool;
     // The filters, as chips of their own or menus (mo_app::filters).
     in property <FilterView> part-filter;
     in property <FilterView> format-filter;
@@ -561,6 +564,9 @@ component CurvePanel inherits SidePanel {
 
 export component PresetsPage inherits Rectangle {
     forward-focus: search-box;
+    // Ctrl+F (app.search): the keys go to the search box, its words picked so typing replaces them (review X3-22).
+    property <int> search-asked: AppKeys.search;
+    changed search-asked => { search-box.focus-all(); }
 
     VerticalLayout {
         padding: Space.xl;
@@ -592,10 +598,9 @@ export component PresetsPage inherits Rectangle {
                 text <=> PresetsData.search;
                 edited(t) => { PresetsData.search-edited(t); }
                 key(k) => {
-                    if (k == Key.Escape && PresetsData.search != "") {
-                        PresetsData.search = "";
-                        PresetsData.search-edited("");
-                        return true;
+                    // Esc takes the page's next step back, as it does anywhere on the page (app.escape).
+                    if (k == Key.Escape) {
+                        return PresetsData.escape();
                     }
                     if (k == Key.DownArrow) {
                         keys.focus();

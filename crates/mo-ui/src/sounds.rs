@@ -1861,6 +1861,8 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     let weak = app.as_weak();
     data.on_search_edited(move |text| change(&weak, |f| f.search = text.to_string()));
     let weak = app.as_weak();
+    data.on_escape(move || weak.upgrade().is_some_and(|app| escape(&app)));
+    let weak = app.as_weak();
     data.on_toggle_choice(move |chip, choice| change(&weak, |f| f.pick(&chip, &choice)));
     let weak = app.as_weak();
     data.on_clear_chip(move |chip| {
@@ -3088,6 +3090,27 @@ fn stop(app: &AppWindow) {
     playing_changed(app);
 }
 
+/// Esc on the page (`app.escape`, in the search box or anywhere else), the same order on every page: the sound playing
+/// stops; else the search is cleared; else the picked sound's card closes (the whole-app review of 6 Nov, X3-12). Says
+/// whether it did any of them (when not, the key goes on).
+pub fn escape(app: &AppWindow) -> bool {
+    if PAGE.with(|p| p.borrow().playing.is_some()) {
+        stop(app);
+        return true;
+    }
+    let data = app.global::<SoundsData>();
+    if !data.get_search().is_empty() {
+        data.set_search(SharedString::new());
+        data.invoke_search_edited(SharedString::new());
+        return true;
+    }
+    if PAGE.with(|p| p.borrow().picked.is_some()) {
+        data.invoke_close_panel();
+        return true;
+    }
+    false
+}
+
 /// Another page is about to play (the MIDI page's loop): the sound shown playing here stops, so this page doesn't go
 /// on saying it plays.
 pub fn stop_for_another(app: &AppWindow) {
@@ -3173,12 +3196,6 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
     });
     let feed = FEED.with(|f| f.borrow().clone());
     match (id, picked, feed) {
-        ("sounds.stop", _, _) => {
-            if PAGE.with(|p| p.borrow().playing.is_none()) {
-                return false;
-            }
-            stop(app);
-        }
         (TO_BITWIG, Some((path, name)), Some(feed)) => send_to_bitwig(app, &feed, path, name),
         ("sounds.reveal", Some((path, _)), Some(feed)) => {
             crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));

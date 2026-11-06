@@ -987,9 +987,10 @@ fn song_menu(daw: &str, keys: &Shortcuts) -> Vec<MenuItem> {
     items
 }
 
-/// Esc on the page, in the search box or on the list: clears the search first, then puts the panel away. Says whether
-/// it did either (when not, the key goes on).
-fn escape(app: &AppWindow) -> bool {
+/// Esc on the page (`app.escape`, in the search box or anywhere else): the same order as on every page, so with nothing
+/// playing here it clears the search first, then puts the panel away (the whole-app review of 6 Nov, X3-12). Says
+/// whether it did either (when not, the key goes on).
+pub fn escape(app: &AppWindow) -> bool {
     let data = app.global::<SongsData>();
     if !data.get_search().is_empty() {
         data.set_search(SharedString::new());

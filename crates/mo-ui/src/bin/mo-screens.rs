@@ -122,7 +122,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.global::<mo_ui::MidiData>().set_roll_names(false);
     mo_ui::midi::run_action(&app, "midi.moreLike");
     shots.push(("midi-more-like.png".into(), capture(&window)));
-    mo_ui::midi::run_action(&app, "midi.back");
+    // Esc: back to the whole list (nothing plays now), as the page's one step back.
+    mo_ui::midi::escape(&app);
     // Two kinds and a place picked on the shared filter chips, each choice with its count.
     let midi = app.global::<mo_ui::MidiData>();
     midi.invoke_toggle("kind".into(), "Basslines".into());
@@ -534,6 +535,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     finder_shots(&app, &window, &mut shots);
 
+    // The sheet lists the keys of the page on show (Songs): the shots before set the place without the page change.
+    mo_ui::refresh_keys(&app);
     app.set_sheet_open(true);
     shots.push(("key-sheet.png".into(), capture(&window)));
     app.set_sheet_open(false);

@@ -344,6 +344,8 @@ fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
+    data.on_escape(move || weak.upgrade().is_some_and(|app| escape(&app)));
+    let weak = app.as_weak();
     // A filter's choice was picked or unpicked, by its words.
     data.on_toggle(move |chip, choice| {
         let Some(app) = weak.upgrade() else { return };
@@ -1953,6 +1955,32 @@ fn stop_audition_now(app: &AppWindow) {
     if let Some(before) = stop_audition(app) {
         stop_in_bitwig(before, line);
     }
+}
+
+/// Esc on the page (`app.escape`, in the search box or anywhere else), the same order on every page, one step a press
+/// (the whole-app review of 6 Nov, X3-12): the audition in Bitwig stops; else the search is cleared; else the picked
+/// line's card closes (a sound's, or a curve's on Curves). Says whether it did any of them (when not, the key goes on).
+pub fn escape(app: &AppWindow) -> bool {
+    if PAGE.with(|p| p.borrow().hearing.is_some()) {
+        stop_audition_now(app);
+        return true;
+    }
+    let data = app.global::<PresetsData>();
+    if !data.get_search().is_empty() {
+        data.set_search(SharedString::new());
+        data.invoke_search_edited(SharedString::new());
+        return true;
+    }
+    let (section, sound, curve) = PAGE.with(|p| {
+        let p = p.borrow();
+        (p.section, p.picked.is_some(), p.curve_picked.is_some())
+    });
+    match section {
+        Section::Sounds if sound => pick(app, None),
+        Section::Curves if curve => pick_curve(app, None),
+        _ => return false,
+    }
+    true
 }
 
 /// When another page comes to the front: the audition stops, so nothing plays in Bitwig that this page can't show (the

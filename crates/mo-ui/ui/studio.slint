@@ -164,6 +164,17 @@ export global TipState {
     }
 }
 
+// The app's own keys, for the pages and the controls on them (rule 15).
+export global AppKeys {
+    // Bumped by Ctrl+F (app.search): the page on show puts the keys in its search box. Only the page on show is there
+    // to see it change.
+    in-out property <int> search;
+    // A key a search box would only use to move its cursor (Up or Down with Ctrl, Alt or Meta, in one line of text),
+    // passed on to the app's shortcuts, so Ctrl+Up and Ctrl+Down step through the list even while you type: whether it
+    // ran. The text and Ctrl, Shift, Alt, Meta and repeat, as the window's own `key`.
+    callback key(string, bool, bool, bool, bool, bool) -> bool;
+}
+
 // The one tooltip (rules 15 and 16): after the mouse rests on a control for a moment, says what it does and shows its
 // key. Put it in a control with `hovering` from the control's TouchArea; `at-x`/`at-y` is where its top left goes, in
 // the control's own space, and `above-y` where its bottom goes when there's no room below.
@@ -651,13 +662,27 @@ export component SearchBox inherits Rectangle {
         selection-background-color: Theme.accent.transparentize(60%);
         edited => { root.edited(self.text); }
         key-pressed(event) => {
-            if (event.text == Key.DownArrow || event.text == Key.Return || event.text == Key.Escape) {
+            // Down, Enter and Esc on their own go to the page; held with Ctrl, Alt or Meta they're other keys.
+            if (!event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta
+                && (event.text == Key.DownArrow || event.text == Key.Return || event.text == Key.Escape)) {
                 if (root.key(event.text)) {
+                    return accept;
+                }
+            }
+            if ((event.modifiers.control || event.modifiers.alt || event.modifiers.meta)
+                && (event.text == Key.UpArrow || event.text == Key.DownArrow)) {
+                if (AppKeys.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta, event.repeat)) {
                     return accept;
                 }
             }
             reject
         }
+    }
+
+    // Ctrl+F: the keys come here with the words picked, so what you type replaces them.
+    public function focus-all() {
+        input.focus();
+        input.select-all();
     }
 }
 
