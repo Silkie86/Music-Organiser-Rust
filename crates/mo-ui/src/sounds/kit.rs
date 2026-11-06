@@ -4,7 +4,7 @@
 //! open in Bitwig.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -414,16 +414,19 @@ fn rolled_in(app: &AppWindow, r: Rolled) {
     show(app);
 }
 
-/// What an export copies: the pads, the sounds they're from, the song library the export folder is read from, the new
-/// folder's name, and how the samples are written.
-type ToExport = (Vec<KitSlot>, Arc<SoundList>, Option<PathBuf>, String, ExportOptions);
+/// What an export copies: the pads, the sounds they're from (with where each id is among them), the song library the
+/// export folder is read from, the new folder's name, and how the samples are written.
+type ToExport = (Vec<KitSlot>, Sounds, Option<PathBuf>, String, ExportOptions);
+
+/// The page's sounds and where each id is among them, so a pad's sound is found in one step (review G-6).
+type Sounds = (Arc<SoundList>, Arc<HashMap<i64, usize>>);
 
 /// Copies the kit into a new folder under the export folder's Kits, off the window's thread, saying on a card how it
 /// went. Never writes over a kit already there.
 fn export(app: &AppWindow) {
     let ready = PAGE.with(|p| ready_to_export(&mut p.borrow_mut()));
     show(app);
-    let Some((slots, list, library, name, options)) = ready else { return };
+    let Some((slots, (list, places), library, name, options)) = ready else { return };
     let feed = FEED.with(|f| f.borrow().clone());
     let weak = app.as_weak();
     let started = background::spawn("Kit export", move || {
@@ -434,7 +437,7 @@ fn export(app: &AppWindow) {
             // is there wait on the disk.
             let done = kits_folder(library.as_deref()).and_then(|folder| {
                 background::on_pool(|| {
-                    let get = |id: i64| list.find(id).and_then(|i| list.sound(i));
+                    let get = |id: i64| places.get(&id).and_then(|&i| list.sound(i));
                     kits::export(&slots, get, &folder, &name, options)
                 })
                 .map_err(|e| e.to_string())
@@ -494,7 +497,7 @@ fn ready_to_export(p: &mut Page) -> Option<ToExport> {
     k.exporting = true;
     k.status = "Exporting the kit…".to_owned();
     let name = format!("Kit {} #{}", Local::now().format("%Y-%m-%d %H%M"), k.seed);
-    Some((k.slots.clone(), p.list.clone(), k.library.clone(), name, k.export))
+    Some((k.slots.clone(), (p.list.clone(), p.places.clone()), k.library.clone(), name, k.export))
 }
 
 /// Puts the kit on a Drum Machine in the project open in Bitwig, off the window's thread: on a new track named after
@@ -510,7 +513,10 @@ fn send_to_bitwig(app: &AppWindow) {
         if k.sending || k.busy {
             return Err(None);
         }
-        let pads = to_bitwig::kit_pads(&to_bitwig::kit_sounds(&k.slots, &p.list));
+        // Each pad's sound found by its id in one step, not a walk through every sound (review G-6).
+        let pads = to_bitwig::kit_pads(&to_bitwig::kit_sounds(&k.slots, |id| {
+            p.places.get(&id).and_then(|&i| p.list.sound(i))
+        }));
         if pads.is_empty() {
             return Err(Some("Roll a kit first."));
         }

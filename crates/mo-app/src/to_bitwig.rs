@@ -12,10 +12,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use mo_dawlink::bitwig::{self, KitTarget};
 pub use mo_dawlink::bitwig::{Bitwig, DRUM_MACHINE_KEY, KitSound, Pad, kit_name, kit_pads};
+use mo_sounds::Sound;
 use mo_sounds::kits::KitSlot;
 
 use crate::activity::{Feed, Job};
-use crate::sounds::SoundList;
 
 /// The card for a sound on its way, shown at once: "Putting Kick 909 into Bitwig", "On a Sampler, on a new track".
 pub fn sound_card(feed: &Feed, name: &str) -> Job {
@@ -72,12 +72,13 @@ pub fn send_part(job: Job, to: &Bitwig, path: &str, name: &str) -> bool {
 
 /// The kit on show as the link takes it: each pad that has a sound, by the pad's name, with the kind of sound the pad
 /// is for (its first type, which places it the General MIDI way) and the sound's file, in the kit's order. Pads with no
-/// sound, and sounds no longer in the list, are left out. Give it to [`kit_pads`] for the pads.
-pub fn kit_sounds(slots: &[KitSlot], list: &SoundList) -> Vec<KitSound> {
+/// sound, and sounds no longer in the list, are left out. `sound` finds a sound by its id: the page's own map of them,
+/// not a walk through the whole list for each pad (review G-6). Give it to [`kit_pads`] for the pads.
+pub fn kit_sounds<'a>(slots: &[KitSlot], sound: impl Fn(i64) -> Option<&'a Sound>) -> Vec<KitSound> {
     slots
         .iter()
         .filter_map(|slot| {
-            let sound = list.sound(list.find(slot.sound?)?)?;
+            let sound = sound(slot.sound?)?;
             Some(KitSound {
                 name: slot.name.clone(),
                 kind: slot.types.first().cloned().unwrap_or_default(),

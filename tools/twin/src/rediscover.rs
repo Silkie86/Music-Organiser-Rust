@@ -131,13 +131,20 @@ fn queries() -> Vec<Options> {
     let o = Options::default();
     vec![
         Options { seed: 7, count: 10, ..o.clone() },
-        Options { sound_type: Some("Kick".into()), count: 5, adventure: 0.0, seed: 3, ..o.clone() },
-        Options { sound_type: Some("Closed hat".into()), count: 8, adventure: 0.6, seed: 11, max_uses: 1, ..o.clone() },
+        Options { sound_types: vec!["Kick".into()], count: 5, adventure: 0.0, seed: 3, ..o.clone() },
+        Options {
+            sound_types: vec!["Closed hat".into()],
+            count: 8,
+            adventure: 0.6,
+            seed: 11,
+            max_uses: 1,
+            ..o.clone()
+        },
         Options { years: Some((2020, 2020)), count: 6, seed: 5, ..o.clone() },
-        Options { sound_type: Some("808".into()), count: 60, seed: 13, ..o.clone() },
-        Options { sound_type: Some("Vocal".into()), seed: 2, ..o.clone() },
+        Options { sound_types: vec!["808".into()], count: 60, seed: 13, ..o.clone() },
+        Options { sound_types: vec!["Vocal".into()], seed: 2, ..o.clone() },
         Options { years: Some((1999, 1999)), seed: 2, ..o.clone() },
-        Options { sound_type: Some("Snare".into()), years: Some((2018, 2018)), max_uses: 99, count: 4, seed: 17, ..o },
+        Options { sound_types: vec!["Snare".into()], years: Some((2018, 2018)), max_uses: 99, count: 4, seed: 17, ..o },
     ]
 }
 
@@ -175,7 +182,8 @@ fn kit_json(k: &Kit) -> Value {
 
 fn query_json(o: &Options) -> Value {
     json!({
-        "Type": o.sound_type,
+        // The C# app picked one type at most: each question here asks for one at most.
+        "Type": o.sound_types.first(),
         "Count": o.count,
         "Adventure": o.adventure,
         "Seed": o.seed,

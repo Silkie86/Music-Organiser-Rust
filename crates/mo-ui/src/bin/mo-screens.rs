@@ -816,6 +816,12 @@ fn sounds_shots(
     capture(window);
     shots.push(("sounds-rediscover-years.png".into(), capture(window)));
     data.invoke_re_years_cleared();
+    // Two types picked on Rediscover, as on the Type filter, with its Clear types chip.
+    data.invoke_re_pick("type".into(), "Kick".into());
+    data.invoke_re_pick("type".into(), "Snare".into());
+    capture(window);
+    shots.push(("sounds-rediscover-types.png".into(), capture(window)));
+    data.invoke_re_pick("type".into(), "".into());
     // A forgotten folder clicked on Rediscover: the List shows its own sounds, with a chip saying which folder.
     data.invoke_pick_folder(r"D:\Samples\Drums".into());
     capture(window);

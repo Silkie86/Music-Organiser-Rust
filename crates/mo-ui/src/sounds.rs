@@ -51,13 +51,14 @@ use crate::{
 };
 use mo_library::ProjectFile;
 
-/// The C# app's settings in `library.db` for the view shown last and autoplay, read (not written: it's read-only).
+/// The view shown last and Autoplay: kept in the app's own settings file under these names as you change them (never
+/// in `library.db`). Until you have, the C# app's own, in `library.db`, stand ([`own_or`], review G-3).
 const VIEW_KEY: &str = "sounds_view";
 const AUTOPLAY_KEY: &str = "sound_lab_autoplay";
 /// The C# app's Settings in `library.db` for which songs count as using a sound.
 const USED_NEEDS_NOTES_KEY: &str = "used_in_needs_notes";
 const USED_NOT_MUTED_KEY: &str = "used_in_not_muted_newest";
-/// The C# app's setting in `library.db` for how many sounds Rediscover digs out.
+/// How many sounds Rediscover digs out: kept as the view is ([`VIEW_KEY`]).
 const COUNT_KEY: &str = "rediscover_count";
 
 /// The views, in the order of the page's view buttons.
@@ -600,8 +601,13 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
                 } else {
                     crate::settings::value(list::HIDE_COPIES_KEY).as_deref() == Some("on")
                 };
-                (p.order == Order::Shuffled && !hiding)
-                    .then_some(Opening { seed: p.seed, view: p.chose_view.then_some(p.view) })
+                // The view you picked while the page waited, or else the one you left it on in this app.
+                let view = if p.chose_view {
+                    Some(p.view)
+                } else {
+                    crate::settings::value(VIEW_KEY).map(|v| opening_view(Some(&v)))
+                };
+                (p.order == Order::Shuffled && !hiding).then_some(Opening { seed: p.seed, view })
             });
             let read = move || {
                 read_all(&sounds_db, &library_db, Some(cards), opening, send);
@@ -633,9 +639,13 @@ pub fn wanted() {
     }
 }
 
-/// What every view says in the list's place when the sound library has no sounds in it (made, but nothing scanned
-/// into it yet): the words Rediscover has for it (`rediscover::why_nothing`).
-const NO_SOUNDS: (&str, &str) = ("No sounds yet", "Add your sample folders in Settings and let the scan finish.");
+/// What every view says in the list's place when the sound library has no sounds in it: the words Rediscover has for
+/// it (`rediscover::why_nothing`). What's true for now: this version doesn't look through sample folders yet, so it
+/// can't add any (review B-6; the sound library's own plan brings that).
+const NO_SOUNDS: (&str, &str) = (
+    "No sounds yet",
+    "The sound library has none in it, and this version can't look through your sample folders for sounds yet.",
+);
 
 /// While the sounds are read, every view shows one word in the list's place: not "No sounds match" (nothing is
 /// filtered out yet), and not the galaxy's own word on top of it (Solomon's F12 note, 2026-11-02 04:25). Said once,
@@ -1709,7 +1719,10 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
             );
             data.set_empty_text(
                 if why.is_empty() {
-                    "The C# app's Sound Lab makes it when it scans your sample folders. This page reads it.".to_string()
+                    // Not the old app's Sound Lab, which is retired (review B-6).
+                    "This version can't make one yet. The page shows the sound library the old app made (sounds.db in \
+                     the app's data folder), and there isn't one there."
+                        .to_string()
                 } else {
                     why
                 }
@@ -1718,7 +1731,8 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
             return;
         }
     };
-    let count = read.count.and_then(|c| c.parse().ok()).filter(|c| COUNTS.contains(c)).unwrap_or(COUNT);
+    let count =
+        own_or(COUNT_KEY, read.count).and_then(|c| c.parse().ok()).filter(|c| COUNTS.contains(c)).unwrap_or(COUNT);
     if read.partial.is_some() {
         // The first sounds come with their waveforms, the rest without them, these among them: kept, so the tiles on
         // show keep theirs whatever list they're in.
@@ -1732,7 +1746,14 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
         p.step = Duration::from_millis(list::step_ms(read.step_ms.as_deref()));
         p.partial = read.partial;
     });
-    show(app, read.library, read.view.as_deref(), read.autoplay.as_deref());
+    let (view, autoplay) = (own_or(VIEW_KEY, read.view), own_or(AUTOPLAY_KEY, read.autoplay));
+    show(app, read.library, view.as_deref(), autoplay.as_deref());
+}
+
+/// One of the page's own choices as you left it: the app's own setting once you've changed it in this app, else the
+/// C# app's (`old`, read from `library.db`). On the window's thread, where the app's settings are (review G-3).
+fn own_or(key: &str, old: Option<String>) -> Option<String> {
+    crate::settings::value(key).or(old)
 }
 
 /// All the sounds have arrived after the first few: they take those's place, which keep theirs on show.
@@ -1942,11 +1963,17 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         let Some(app) = weak.upgrade() else { return };
         let on = PAGE.with(|p| p.borrow_mut().toggle_autoplay());
         app.global::<SoundsData>().set_autoplay(on);
+        // Kept for the next start (review G-3).
+        crate::settings::remember(AUTOPLAY_KEY, if on { "1" } else { "0" });
     });
     let weak = app.as_weak();
     data.on_pick_view(move |v| {
         let Some(app) = weak.upgrade() else { return };
         PAGE.with(|p| p.borrow_mut().pick_view(v));
+        // The page opens on it next time (review G-3).
+        if let Some(name) = usize::try_from(v).ok().and_then(|i| VIEWS.get(i)) {
+            crate::settings::remember(VIEW_KEY, name);
+        }
         show_lists(&app);
         bring_picked_into_view(&app);
         // Rediscover fills itself the first time it's opened, so it never greets you empty (as in the C# app).
@@ -2232,8 +2259,8 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
             "Your projects haven't been counted yet, so these are a varied pick. They fit your taste once they are."
                 .to_owned()
         } else if a.learned_from == 0 {
-            "None of your sounds show up in scanned projects yet, so these are a varied pick. Star favourites or scan \
-             your projects to teach it your taste."
+            "None of your sounds show up in your projects yet, so these are a varied pick. They fit your taste once \
+             your songs use some of them."
                 .to_owned()
         } else {
             format!(
@@ -2248,26 +2275,16 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
 }
 
 /// Picks `value` on Rediscover's `what`, saying whether that changed anything (its years are picked on the year
-/// strip). "type": one at most, so a click on the one picked unpicks it, as on the filters, and "" is any type.
-/// "more-types": the More types menu's Any, which unpicks a type picked in that menu but keeps one picked on a chip of its own (one of
+/// strip). "type": as on the Type filter, a click picks one more type or unpicks it, and "" is any type (the
+/// whole-app review of 6 Nov, X3-23: it picked one at most, so Kick then Snare lost Kick). "more-types": the More
+/// types menu's Any, which unpicks the types picked in that menu but keeps the ones picked on chips of their own (in
 /// `chip_types`), as the Type filter's does. "count": one of the counts is always picked.
 fn re_pick(re: &mut rediscover::Options, what: &str, value: &str, chip_types: &[&str]) -> bool {
-    let before = (re.sound_type.clone(), re.count);
+    let before = (re.sound_types.clone(), re.count);
     match what {
-        "type" => {
-            let mut picked: Vec<String> = re.sound_type.take().into_iter().collect();
-            if value.is_empty() {
-                picked.clear();
-            } else {
-                filters::toggle(&mut picked, value, false);
-            }
-            re.sound_type = picked.pop();
-        }
-        "more-types" => {
-            if re.sound_type.as_ref().is_some_and(|t| !chip_types.iter().any(|c| c.eq_ignore_ascii_case(t))) {
-                re.sound_type = None;
-            }
-        }
+        "type" if value.is_empty() => re.sound_types.clear(),
+        "type" => filters::toggle(&mut re.sound_types, value, true),
+        "more-types" => re.sound_types.retain(|t| chip_types.iter().any(|c| c.eq_ignore_ascii_case(t))),
         "count" => {
             if let Some(c) = value.parse().ok().filter(|c| COUNTS.contains(c)) {
                 re.count = c;
@@ -2275,7 +2292,7 @@ fn re_pick(re: &mut rediscover::Options, what: &str, value: &str, chip_types: &[
         }
         _ => {}
     }
-    before != (re.sound_type.clone(), re.count)
+    before != (re.sound_types.clone(), re.count)
 }
 
 /// Rediscover's choices as they are now, each on show: the types as the Type filter shows them (the most used as
@@ -2286,8 +2303,8 @@ fn show_rediscover_chips(app: &AppWindow) {
     PAGE.with(|p| {
         let p = p.borrow();
         let types: Vec<(String, String)> = p.types.iter().map(|(t, _)| (t.clone(), String::new())).collect();
-        let picked: Vec<String> = p.re.sound_type.iter().cloned().collect();
-        let types = filters::show_split(&types, &picked, list::TYPE_CHIPS);
+        let types = filters::show_split(&types, &p.re.sound_types, list::TYPE_CHIPS);
+        data.set_re_any_type(!p.re.sound_types.is_empty());
         let counts = filters::one_of(&COUNTS.map(|c| c.to_string()), &p.re.count.to_string());
         CHOICES.with(|c| {
             data.set_re_type_filter(c.re_type.view(&types));
@@ -2336,13 +2353,18 @@ fn wire_rediscover(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_re_pick(move |what, value| {
         let Some(app) = weak.upgrade() else { return };
-        let again = PAGE.with(|p| {
+        let (again, count) = PAGE.with(|p| {
             let mut p = p.borrow_mut();
             let p = &mut *p;
             let chip_types: Vec<&str> = p.types.iter().take(list::TYPE_CHIPS).map(|(t, _)| t.as_str()).collect();
             // Picking again only when something changed: a click on the count picked already keeps the list.
-            re_pick(&mut p.re, &what, &value, &chip_types) && p.re_started
+            let changed = re_pick(&mut p.re, &what, &value, &chip_types);
+            (changed && p.re_started, (changed && what == "count").then_some(p.re.count))
         });
+        // How many is kept for the next start (review G-3).
+        if let Some(count) = count {
+            crate::settings::remember(COUNT_KEY, &count.to_string());
+        }
         show_rediscover_chips(&app);
         if again {
             rediscover_now(&app);
@@ -3235,19 +3257,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rediscover_picks_one_type_at_most_and_always_a_count() {
+    fn rediscover_picks_types_as_the_type_filter_does_and_always_a_count() {
         let mut re = rediscover::Options { count: COUNT, ..rediscover::Options::default() };
         let chips = ["Kick", "Snare"];
         let mut pick = |what: &str, value: &str| re_pick(&mut re, what, value, &chips);
-        // A type is picked alone; another takes its place; a click on the one picked unpicks it.
+        // As on the Type filter: each click picks one more type, and a click on one picked unpicks it (X3-23).
         assert!(pick("type", "Kick"));
         assert!(pick("type", "Snare"));
         assert!(pick("type", "snare"));
+        assert!(pick("type", "Snare"));
+        // Any type unpicks them all, and changes nothing when none is picked.
+        assert!(pick("type", ""));
         assert!(!pick("type", ""));
-        // The More types menu's Any keeps a type picked on its chip, and unpicks one picked in the menu.
+        // The More types menu's Any keeps the types picked on their chips, and unpicks the ones picked in the menu.
         assert!(pick("type", "Snare"));
         assert!(!pick("more-types", ""));
         assert!(pick("type", "Riser"));
+        assert!(pick("type", "Kick"));
         assert!(pick("more-types", ""));
         // The years are the year strip's, not a pick here.
         assert!(!pick("year", "2024"));
@@ -3255,7 +3281,7 @@ mod tests {
         assert!(pick("count", "120"));
         assert!(!pick("count", "120"));
         assert!(!pick("count", "7"));
-        assert_eq!((re.sound_type, re.years, re.count), (None, None, 120));
+        assert_eq!((re.sound_types, re.years, re.count), (vec!["Snare".to_owned(), "Kick".to_owned()], None, 120));
     }
 
     /// A small song library like the C# app's: two songs, a kick in both, a pad with no notes in one, and settings.
