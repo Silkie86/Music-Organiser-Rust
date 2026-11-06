@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
 use mo_sounds::compact::backup::{self, BackedUp};
+use mo_sounds::compact::grow::{self, Kept, Listened};
 use mo_sounds::compact::{self, LaidOut, PageRead, Synced};
 use mo_sounds::index::{Gathered, SoundIndex, held, unheld};
 use mo_sounds::{ChordSpan, Everything, SoundAnalysis, SoundsDb, SoundsError};
@@ -1852,4 +1853,158 @@ fn a_damaged_library_is_mended_from_its_backup_copy() {
     assert!(e.damaged());
     let said = e.to_string();
     assert!(said.contains(compact::FILE_NAME) && said.contains("there's no backup copy"), "{said}");
+}
+
+/// What listening found for a test sound: `seconds` long, with a small waveform and features.
+fn heard(seconds: f64) -> mo_sounds::analyse::Analysed {
+    mo_sounds::analyse::Analysed {
+        analysis: SoundAnalysis {
+            seconds,
+            sample_rate: 44_100,
+            channel_count: 2,
+            waveform: mo_sounds::Peaks::new(&[0.25, 0.5, 1.0, 0.125]),
+            ..SoundAnalysis::default()
+        },
+        features: vec![0.5; 73],
+    }
+}
+
+fn id_of(copy: &Path, path: &str) -> Option<i64> {
+    use rusqlite::OptionalExtension;
+    Connection::open(copy)
+        .unwrap()
+        .query_row("SELECT id FROM sounds WHERE path = ?1", [path], |r| r.get(0))
+        .optional()
+        .unwrap()
+}
+
+fn count(db: &Path, sql: &str, id: i64) -> i64 {
+    Connection::open(db).unwrap().query_row(sql, [id], |r| r.get(0)).unwrap()
+}
+
+/// What a scan found is kept in the app's own sound library (stage 2, review finding X1-own1): new sounds added with
+/// what listening found and the type their name says; changed ones listened to again, keeping your stars and tags;
+/// moved ones followed, keeping theirs; gone ones forgotten with theirs. A forgotten sound's number is never given
+/// again. A library that isn't the app's own yet isn't written.
+#[test]
+fn what_a_scan_found_is_kept_in_the_apps_own_library() {
+    let dir = folder("grow");
+    let old = library(&dir, 60);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    let new_kick = "D:\\Samples\\New Pack\\Kick 01.wav".to_owned();
+    let listened =
+        |path: &str, size, analysed| Listened { path: path.to_owned(), size, mtime: unix(2026, 11, 6), analysed };
+    // Still following sounds.db: not written.
+    let Err(e) = grow::keep(&old, &[listened(&new_kick, 1000, Ok(heard(0.5)))]) else {
+        panic!("not the app's own yet")
+    };
+    assert!(e.to_string().contains("isn't the app's own"), "{e}");
+    compact::last_sync(&old, &copy).unwrap();
+    // Rows the fixture leaves pointing at no sound (as a damaged sounds.db might): none more after.
+    let orphans = rows(&copy, "PRAGMA foreign_key_check");
+    let ids: Vec<(i64, String)> = {
+        let c = Connection::open(&copy).unwrap();
+        let mut st = c.prepare("SELECT id, path FROM sounds ORDER BY id LIMIT 3").unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
+    };
+    let [(changed_id, changed), (moved_id, moved), (gone_id, gone)] = ids.as_slice() else { panic!("three sounds") };
+    {
+        let c = Connection::open(&copy).unwrap();
+        for id in [changed_id, moved_id, gone_id] {
+            c.execute("INSERT OR IGNORE INTO sound_tags (sound_id, tag, source) VALUES (?1, 'keep', 'you')", [id])
+                .unwrap();
+            c.execute("UPDATE sounds SET rating = 4 WHERE id = ?1", [id]).unwrap();
+        }
+    }
+    let highest: i64 =
+        Connection::open(&copy).unwrap().query_row("SELECT MAX(id) FROM sounds", [], |r| r.get(0)).unwrap();
+    let before = backup::back_up(&old);
+    assert!(matches!(before, Some(BackedUp::Made { .. })), "{before:?}");
+    // New, unreadable and changed.
+    let broken = "D:\\Samples\\New Pack\\broken.wav".to_owned();
+    let kept = grow::keep(
+        &old,
+        &[
+            listened(&new_kick, 1000, Ok(heard(0.5))),
+            listened(&broken, 10, Err("Couldn't read the file: unsupported format".into())),
+            listened(changed, 2000, Ok(heard(2.0))),
+        ],
+    )
+    .unwrap();
+    assert_eq!(kept, Kept { added: 2, updated: 1, ..Kept::default() });
+    let sounds = SoundsDb::open_read_only(&copy).unwrap().all(now()).unwrap();
+    let find = |path: &str| sounds.iter().find(|s| s.path == path).unwrap_or_else(|| panic!("{path}")).clone();
+    let kick = find(&new_kick);
+    assert!(kick.id > highest);
+    assert_eq!(kick.analysis.as_ref().map(|a| a.seconds), Some(0.5));
+    // Its waveform kept apart, read when it's shown.
+    let waves = SoundsDb::open_read_only(&copy).unwrap().waves(&[kick.id]).unwrap();
+    assert_eq!(waves, vec![(kick.id, heard(0.5).analysis.waveform)]);
+    let named = mo_sounds::types::from_path(&new_kick);
+    assert_eq!(kick.name_type.as_deref(), named);
+    assert_eq!(kick.sound_type.as_str(), named.unwrap_or("Unknown"));
+    assert_eq!((kick.rating, kick.plays, kick.favourite, kick.tags.len()), (0, 0, false, 0));
+    let unreadable = find(&broken);
+    assert_eq!(unreadable.error.as_deref(), Some("Couldn't read the file: unsupported format"));
+    assert!(unreadable.analysis.is_none());
+    let again = find(changed);
+    assert_eq!(again.id, *changed_id);
+    assert_eq!(again.analysis.as_ref().map(|a| a.seconds), Some(2.0));
+    assert_eq!(again.rating, 4);
+    assert!(again.tags.contains(&"keep".to_owned()), "{:?}", again.tags);
+    // What the scan plans from, a damaged row too (its size and time aren't numbers: listened to again).
+    let known = SoundsDb::open_read_only(&copy).unwrap().known_files().unwrap();
+    assert!(known.iter().any(|k| k.path == *changed && k.size == 2000 && k.mtime == unix(2026, 11, 6)));
+    assert!(known.iter().any(|k| k.path == "D:\\Damaged\\two.wav" && k.size == 0 && k.mtime == 0));
+    assert_eq!(count(&copy, "SELECT size FROM sounds WHERE id = ?1", *changed_id), 2000);
+    assert_eq!(count(&copy, "SELECT mtime FROM sounds WHERE id = ?1", *changed_id), unix(2026, 11, 6));
+    assert_eq!(count(&copy, "SELECT COUNT(*) FROM sound_features WHERE sound_id = ?1", kick.id), 1);
+    assert_eq!(count(&copy, "SELECT COUNT(*) FROM sound_features WHERE sound_id = ?1", unreadable.id), 0);
+    // Moved and gone.
+    let to = "E:\\Moved\\here.wav".to_owned();
+    let tagged = count(&copy, "SELECT COUNT(*) FROM sound_tags WHERE sound_id = ?1", *moved_id);
+    assert!(tagged > 0);
+    let kept = grow::follow(&old, &[(moved.clone(), to.clone())], &[gone.clone(), kick.path.clone()]).unwrap();
+    assert_eq!(kept, Kept { moved: 1, forgotten: 2, ..Kept::default() });
+    assert_eq!(id_of(&copy, &to), Some(*moved_id));
+    assert_eq!(id_of(&copy, moved), None);
+    assert_eq!(count(&copy, "SELECT COUNT(*) FROM sound_tags WHERE sound_id = ?1", *moved_id), tagged);
+    assert_eq!(id_of(&copy, gone), None);
+    for table in ["sound_tags", "sound_waves", "sound_features"] {
+        assert_eq!(count(&copy, &format!("SELECT COUNT(*) FROM {table} WHERE sound_id = ?1"), *gone_id), 0, "{table}");
+    }
+    // The kick forgotten and added again: a number of its own, not the one it had.
+    grow::keep(&old, &[listened(&new_kick, 1000, Ok(heard(0.5)))]).unwrap();
+    assert!(id_of(&copy, &new_kick).unwrap() > kick.id);
+    assert_eq!(pragma(&copy, "integrity_check"), "ok");
+    assert!(rows(&copy, "PRAGMA foreign_key_check").iter().all(|r| orphans.contains(r)));
+    // The backup copy follows.
+    assert!(matches!(backup::back_up(&old), Some(BackedUp::Made { .. })));
+    assert!(id_of(&backup::backup_of(&copy), &new_kick).is_some());
+}
+
+/// A library without the duplicate finder's prints is written all the same, and the highest sound forgotten before
+/// anything was ever added keeps its number from being given again.
+#[test]
+fn a_scan_is_kept_without_prints_and_never_gives_a_number_again() {
+    let dir = folder("grow-plain");
+    let old = library(&dir, 20);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    compact::last_sync(&old, &copy).unwrap();
+    Connection::open(&copy).unwrap().execute_batch("DROP TABLE IF EXISTS sound_prints;").unwrap();
+    let (highest, path): (i64, String) = Connection::open(&copy)
+        .unwrap()
+        .query_row("SELECT id, path FROM sounds ORDER BY id DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap();
+    let first: String =
+        Connection::open(&copy).unwrap().query_row("SELECT MIN(path) FROM sounds", [], |r| r.get(0)).unwrap();
+    assert_eq!(grow::follow(&old, &[], &[path]).unwrap(), Kept { forgotten: 1, ..Kept::default() });
+    let new = "D:\\Samples\\Snare.wav".to_owned();
+    let listened = |path: &str| Listened { path: path.to_owned(), size: 5, mtime: 6, analysed: Ok(heard(1.0)) };
+    let kept = grow::keep(&old, &[listened(&new), listened(&first)]).unwrap();
+    assert_eq!(kept, Kept { added: 1, updated: 1, ..Kept::default() });
+    assert!(id_of(&copy, &new).unwrap() > highest);
+    assert!(!grow::Kept::default().any() && kept.any());
 }
