@@ -40,6 +40,7 @@ pub mod song_panel;
 pub mod song_room;
 pub mod songs;
 pub mod sound_library;
+pub mod sound_scan;
 pub mod sounds;
 pub mod space;
 pub mod space_bin;

@@ -604,10 +604,15 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
                 (p.order == Order::Shuffled && !hiding).then_some(Opening { seed: p.seed, view })
             });
             let read = move || {
-                read_all(&sounds_db, &library_db, Some(cards), opening, send);
+                let on_show = read_all(&sounds_db, &library_db, Some(cards.clone()), opening, &send);
                 // Once the page has all it needs from the library: its backup copy, when there's none or the library
-                // has changed since.
+                // has changed since. Made before the scan writes into it.
                 say_backed_up(compact::backup::back_up(&sounds_db));
+                if let Some(mut on_show) = on_show
+                    && scan_for_sounds(&sounds_db, &library_db, &cards, &mut on_show, &send)
+                {
+                    say_backed_up(compact::backup::back_up(&sounds_db));
+                }
             };
             if let Err(e) = background::spawn("Sounds library", read)
                 && let Some(app) = weak.upgrade()
@@ -633,13 +638,10 @@ pub fn wanted() {
     }
 }
 
-/// What every view says in the list's place when the sound library has no sounds in it: the words Rediscover has for
-/// it (`rediscover::why_nothing`). What's true for now: this version doesn't look through sample folders yet, so it
-/// can't add any (review B-6; the sound library's own plan brings that).
-const NO_SOUNDS: (&str, &str) = (
-    "No sounds yet",
-    "The sound library has none in it, and this version can't look through your sample folders for sounds yet.",
-);
+/// What every view says in the list's place when the sound library has no sounds in it (made, but nothing scanned
+/// into it yet): the words Rediscover has for it (`rediscover::why_nothing`). The page scans the sample folders at
+/// each start ([`scan_for_sounds`]).
+const NO_SOUNDS: (&str, &str) = ("No sounds yet", "Add your sample folders in Settings and let the scan finish.");
 
 /// While the sounds are read, every view shows one word in the list's place: not "No sounds match" (nothing is
 /// filtered out yet), and not the galaxy's own word on top of it (Solomon's F12 note, 2026-11-02 04:25). Said once,
@@ -804,11 +806,17 @@ impl Settings {
 /// With `opening` (how the page opens: shuffled), when it opens on Tiles or List, the first sounds its shuffle puts on
 /// top are read from the copy on their own and sent first ([`FIRST`]), so they show in a moment; all of them follow
 /// ([`Step::Rest`]). Reading half a million takes seconds.
-fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, opening: Option<Opening>, send: impl Fn(Step)) {
+fn read_all(
+    sounds_db: &Path,
+    library_db: &Path,
+    cards: Option<Feed>,
+    opening: Option<Opening>,
+    send: impl Fn(Step),
+) -> Option<OnShow> {
     // No library at all. Once the copy is the app's own, it's all there is: `sounds.db` may have been archived.
     if !sounds_db.exists() && (cards.is_none() || !compact::copy_of(sounds_db).exists()) {
         send(Step::Read(Err(String::new())));
-        return;
+        return None;
     }
     let lib = library_db.exists().then(|| mo_library::Library::open_read_only(library_db)).and_then(|lib| {
         lib.map_err(|e| log::warning("Sounds", &format!("Couldn't read the song library for how sounds are used: {e}")))
@@ -858,12 +866,14 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, opening: O
         Ok(first) => first,
         Err(e) => {
             send(Step::Read(Err(e.to_string())));
-            return;
+            return None;
         }
     };
     let read_in = began.elapsed();
     let sounds = std::mem::take(&mut first.sounds);
-    let analysed = mo_sounds::count_analysed(&sounds);
+    // Sounds the app's own scan added aren't counted for CLAP: it never hears them in this app.
+    let new_since = compact::grow::new_since(&first.source);
+    let analysed = mo_sounds::count_clap_could_hear(&sounds, new_since);
     let library = Library::new(sounds, std::mem::take(&mut first.played), &settings.weights);
     log::info(
         "Sounds",
@@ -902,7 +912,7 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, opening: O
             send(Step::Source(first.source.clone()));
         }
         let (features, clap) = (std::mem::take(&mut everything.features), std::mem::take(&mut everything.clap));
-        let analysed = everything.analysed();
+        let analysed = mo_sounds::count_clap_could_hear(&everything.sounds, compact::grow::new_since(&first.source));
         *remade = Some(everything.sounds);
         Ok((features, clap, analysed))
     };
@@ -981,8 +991,10 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, opening: O
             Some(laid_out) => say_laid_out(&laid_out, card_for(job), began),
         }
     }
+    let mut on_show =
+        OnShow { list, uses, weights: settings.weights, source: first.source.clone(), new_since, analysed };
     if !first.behind && remade.is_none() {
-        return;
+        return Some(on_show);
     }
     // The sounds shown were as the copy had them before the C# app's changes (or before it was found damaged): the
     // page takes them again, as they were read just now to make the copy again, or else from the copy once it's
@@ -990,10 +1002,12 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, opening: O
     let (sounds, db, synced) = match remade {
         Some(sounds) => (sounds, SoundsDb::open_read_only(&first.source), None),
         None => {
-            let Some(synced) = bring_up_to_date(sounds_db, &first.source, cards.as_ref()) else { return };
+            let Some(synced) = bring_up_to_date(sounds_db, &first.source, cards.as_ref()) else {
+                return Some(on_show);
+            };
             // Only what the C# app keeps for itself changed (its settings, the galaxy's saved places, copies found).
             if !synced.changed_the_list() {
-                return;
+                return Some(on_show);
             }
             match SoundsDb::open_read_only(&first.source).and_then(|db| Ok((db.all(now)?, db))) {
                 Ok((sounds, db)) => (sounds, Ok(db), Some(synced)),
@@ -1002,11 +1016,135 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, opening: O
                         "Sounds",
                         &format!("Couldn't read the sounds again once they were brought up to date: {e}"),
                     );
-                    return;
+                    return Some(on_show);
                 }
             }
         }
     };
+    // The fingerprints read before stay right unless the copy was made afresh (or the count that says whether CLAP
+    // has heard enough changed); with the sounds made again from sounds.db, they came with them.
+    let prints = match synced {
+        None => PrintsAgain::CameWith,
+        Some(s) if s.made => PrintsAgain::Again,
+        Some(_) => PrintsAgain::IfCountChanged,
+    };
+    take_again(sounds, db, prints, &mut on_show, &send);
+    Some(on_show)
+}
+
+/// Scans the sample folders for new, changed, moved and gone sounds and keeps them in the app's own sound library
+/// (stage 2 of "the sound library grows again", review finding X1-own1), once the page has its sounds: the page takes
+/// them again when anything changed ([`take_again`]). A card shows while sounds are listened to. Nothing when the
+/// sounds on show aren't from the app's own library (it's made from `sounds.db` first), or there are no sample
+/// folders. Whether the library changed.
+fn scan_for_sounds(
+    sounds_db: &Path,
+    library_db: &Path,
+    cards: &Feed,
+    on_show: &mut OnShow,
+    send: &impl Fn(Step),
+) -> bool {
+    let copy = compact::copy_of(sounds_db);
+    // No song library, no sample folders: nothing to say.
+    if on_show.source != copy || !library_db.exists() {
+        return false;
+    }
+    let folders = match mo_library::Library::open_read_only(library_db).and_then(|l| l.list_setting("sample_folders")) {
+        Ok(folders) => folders,
+        Err(e) => {
+            log::warning("Sounds", &format!("Couldn't read your sample folders, so they weren't scanned: {e}"));
+            return false;
+        }
+    };
+    let job: RefCell<Option<Job>> = RefCell::new(None);
+    let scanned = mo_app::sound_scan::scan(sounds_db, &folders, &|done, of| {
+        let mut job = job.borrow_mut();
+        let job = job.get_or_insert_with(|| cards.start("Listening to new sounds", "Sounds works as usual meanwhile."));
+        job.progress(done as f32 / of.max(1) as f32, Some(&format!("{} of {}", thousands(done), thousands(of))));
+    });
+    let job = job.into_inner();
+    let scanned = match scanned {
+        Ok(Some(scanned)) => scanned,
+        Ok(None) => return false,
+        Err(e) => {
+            log::warning("Sounds", &format!("Couldn't scan your sample folders: {e}"));
+            if let Some(job) = job {
+                job.failed_as("Couldn't keep your new sounds", &e);
+            }
+            return false;
+        }
+    };
+    let line = mo_app::sound_scan::scanned_line(&scanned);
+    // Stopped part way: what was kept before stays kept, and the page takes it.
+    if scanned.stopped.is_some() {
+        log::warning("Sounds", &line);
+        if let Some(job) = job {
+            let (title, detail) = mo_app::sound_scan::stopped_card(&scanned);
+            job.failed_as(&title, &detail);
+        }
+    } else {
+        log::info("Sounds", &line);
+        if let Some(job) = job {
+            let (title, detail) = mo_app::sound_scan::scanned_card(&scanned);
+            job.done_as(&title, &detail);
+        }
+    }
+    if scanned.not_forgotten > 0 {
+        cards.notice("Some sounds look gone", &mo_app::sound_scan::not_forgotten_line(&scanned));
+    }
+    if !scanned.kept.any() {
+        return false;
+    }
+    // The first new sound the scan numbered, now there may be one: CLAP's count leaves it out.
+    on_show.new_since = compact::grow::new_since(&copy);
+    // Sounds listened to bring fingerprints of their own: read again. Moved and gone ones don't, unless the count
+    // that says whether CLAP has heard enough changed.
+    let k = &scanned.kept;
+    let prints = if k.added + k.updated > 0 { PrintsAgain::Again } else { PrintsAgain::IfCountChanged };
+    let now = Local::now().naive_local();
+    match SoundsDb::open_read_only(&copy).and_then(|db| Ok((db.all(now)?, db))) {
+        Ok((sounds, db)) => take_again(sounds, Ok(db), prints, on_show, send),
+        Err(e) => log::warning("Sounds", &format!("Couldn't read the sounds again once the scan kept them: {e}")),
+    }
+    true
+}
+
+/// What the page shows once its first read is done, for sounds read again to take its place ([`take_again`]): the
+/// list sent last, how your songs use samples (counted again for the sounds read again), the Most liked weights, where
+/// the sounds come from, the first number the app's own scan gave a sound ([`compact::grow::new_since`]), and how many
+/// analysed sounds CLAP could have heard.
+struct OnShow {
+    list: Arc<SoundList>,
+    uses: Option<Uses>,
+    weights: LikedWeights,
+    source: PathBuf,
+    new_since: Option<i64>,
+    analysed: usize,
+}
+
+/// How your songs use samples, and the file of each project counted.
+type Uses = (Vec<mo_library::SampleUse>, Arc<HashMap<i64, ProjectFile>>);
+
+/// When [`take_again`] reads the sounds' fingerprints again too.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PrintsAgain {
+    /// Never: they came with the sounds (made again from `sounds.db`).
+    CameWith,
+    /// Only when the count that says whether CLAP has heard enough changed.
+    IfCountChanged,
+    /// Always: the library was made afresh, or sounds were listened to.
+    Again,
+}
+
+/// The sounds read again (`sounds`, from `db`) take the place of those on show: the page moves what it holds by place
+/// with each sound ([`Step::Refreshed`]). Their fingerprints are read again too as `prints` says.
+fn take_again(
+    sounds: Vec<Sound>,
+    db: Result<SoundsDb, SoundsError>,
+    prints: PrintsAgain,
+    on_show: &mut OnShow,
+    send: &impl Fn(Step),
+) {
     // What was played: the sounds are in hand, so a History that can't be read just now stays empty.
     let played = db
         .as_ref()
@@ -1016,26 +1154,31 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, opening: O
         log::warning("Sounds", &format!("Couldn't read what was played once the sounds were read again: {e}"));
         Vec::new()
     });
-    let analysed_now = mo_sounds::count_analysed(&sounds);
-    let mut library = Library::new(sounds, played, &settings.weights);
-    if let Some((uses, projects)) = &uses {
-        library.list = Arc::new(with_usage(&library.list, usage_of(&library.list, uses), projects, &settings.weights));
+    let analysed_now = mo_sounds::count_clap_could_hear(&sounds, on_show.new_since);
+    let mut library = Library::new(sounds, played, &on_show.weights);
+    if let Some((uses, projects)) = &on_show.uses {
+        library.list = Arc::new(with_usage(&library.list, usage_of(&library.list, uses), projects, &on_show.weights));
     }
+    let list = &on_show.list;
     // Where each sound on show is in the new list, when they aren't the same sounds in the same order: worked out
     // here, off the window's thread, for the page to move what it holds by place (half a million sounds to look up).
-    let moved = (!list.same_sounds_as(&library.list)).then(|| Arc::new(places_in(&list, &library.places)));
+    let moved = (!list.same_sounds_as(&library.list)).then(|| Arc::new(places_in(list, &library.places)));
     // The same sounds in the same places, one given another type (in the C# app): the galaxy colours its stars, and
     // names its neighbourhoods, by type.
     let retyped =
         moved.is_none() && list.sounds().iter().zip(library.list.sounds()).any(|(a, b)| a.sound_type != b.sound_type);
-    send(Step::Refreshed(Refreshed { library, was: list, moved, retyped }));
-    // The fingerprints read before stay right unless the copy was made afresh (or the count that says whether CLAP
-    // has heard enough changed).
-    if let (Some(synced), Ok(db)) = (synced, db)
-        && (synced.made || analysed_now != analysed)
-    {
-        send_index(db.fingerprints(analysed_now).map(|(f, c)| (f, c, analysed_now)), &send);
+    let now_shown = library.list.clone();
+    send(Step::Refreshed(Refreshed { library, was: list.clone(), moved, retyped }));
+    let again = match prints {
+        PrintsAgain::CameWith => false,
+        PrintsAgain::IfCountChanged => analysed_now != on_show.analysed,
+        PrintsAgain::Again => true,
+    };
+    if again && let Ok(db) = db {
+        send_index(db.fingerprints(analysed_now).map(|(f, c)| (f, c, analysed_now)), send);
     }
+    on_show.list = now_shown;
+    on_show.analysed = analysed_now;
 }
 
 /// How many plays History lists.
@@ -3386,46 +3529,95 @@ mod tests {
         let got = std::sync::Mutex::new(Vec::new());
         let opening = seed.map(|seed| Opening { seed, view: TILES });
         read_all(sounds_db, library_db, Some(cards.clone()), opening, |step| {
-            let said = match step {
-                Step::Read(Ok(read)) => {
-                    let plays: i64 = read.library.list.sounds().iter().map(|s| i64::from(s.plays)).sum();
-                    let from = read.source.file_name().unwrap_or_default().to_string_lossy().into_owned();
-                    let of = read.partial.map(|all| format!(" (the first of {all})")).unwrap_or_default();
-                    format!("{} sounds{of} from {from}, {plays} plays", read.library.list.len())
-                }
-                Step::Rest(r) => {
-                    let kept = r.moved.as_ref().map_or(0, |m| m.iter().flatten().count());
-                    format!("the rest: {} sounds, the first {kept} kept", r.library.list.len())
-                }
-                Step::Read(Err(why)) => format!("couldn't read: {why}"),
-                Step::Index(index) => format!("{} fingerprints", index.features.len()),
-                Step::NoIndex(why) => format!("no fingerprints: {why}"),
-                Step::Used(list) => format!("used: {}", list.used_in(0).is_some()),
-                Step::Refreshed(r) => {
-                    let plays: i64 = r.library.list.sounds().iter().map(|s| i64::from(s.plays)).sum();
-                    let same = match (&r.moved, r.retyped) {
-                        (Some(_), _) => "other sounds",
-                        (None, true) => "the same sounds, retyped",
-                        (None, false) => "the same sounds",
-                    };
-                    format!(
-                        "again: {same}, {} sounds, {plays} plays, used: {}",
-                        r.library.list.len(),
-                        r.library.list.knows_use()
-                    )
-                }
-                Step::Source(source) => format!("the rest from {}", source.display()),
-            };
             if let Ok(mut got) = got.lock() {
-                got.push(said);
+                got.push(said(step));
             }
         });
         got.into_inner().unwrap_or_default()
     }
 
+    /// What a step the page is sent says, in words.
+    fn said(step: Step) -> String {
+        match step {
+            Step::Read(Ok(read)) => {
+                let plays: i64 = read.library.list.sounds().iter().map(|s| i64::from(s.plays)).sum();
+                let from = read.source.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                let of = read.partial.map(|all| format!(" (the first of {all})")).unwrap_or_default();
+                format!("{} sounds{of} from {from}, {plays} plays", read.library.list.len())
+            }
+            Step::Rest(r) => {
+                let kept = r.moved.as_ref().map_or(0, |m| m.iter().flatten().count());
+                format!("the rest: {} sounds, the first {kept} kept", r.library.list.len())
+            }
+            Step::Read(Err(why)) => format!("couldn't read: {why}"),
+            Step::Index(index) => format!("{} fingerprints", index.features.len()),
+            Step::NoIndex(why) => format!("no fingerprints: {why}"),
+            Step::Used(list) => format!("used: {}", list.used_in(0).is_some()),
+            Step::Refreshed(r) => {
+                let plays: i64 = r.library.list.sounds().iter().map(|s| i64::from(s.plays)).sum();
+                let same = match (&r.moved, r.retyped) {
+                    (Some(_), _) => "other sounds",
+                    (None, true) => "the same sounds, retyped",
+                    (None, false) => "the same sounds",
+                };
+                format!(
+                    "again: {same}, {} sounds, {plays} plays, used: {}",
+                    r.library.list.len(),
+                    r.library.list.knows_use()
+                )
+            }
+            Step::Source(source) => format!("the rest from {}", source.display()),
+        }
+    }
+
     /// The cards' titles and lines, as the feed shows them now.
     fn cards_said(cards: &Feed) -> Vec<String> {
         cards.visible(Instant::now()).iter().map(|c| format!("{}: {}", c.title, c.detail)).collect()
+    }
+
+    #[test]
+    fn the_page_scans_the_sample_folders_and_takes_the_new_sounds() {
+        let sounds_db = sound_library("scan");
+        // The samples in the build's own fixtures folder, under a fixed name: a scan reads types from folder names.
+        let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp/mo-ui-sound-scan/Samples");
+        let _ = std::fs::remove_dir_all(&samples);
+        let folders = format!("[\"{}\"]", samples.to_string_lossy().replace('\\', "\\\\"));
+        let library_db = song_library("scan-songs.db", &[("sample_folders", &folders)]);
+        // Two new samples (one a hit, one a longer pad), and the five sounds the C# app found elsewhere.
+        for (name, seconds, hz) in [("Kick 02.wav", 0.3, 60.0), ("Pad Long.wav", 1.5, 220.0)] {
+            let wave: Vec<f32> = (0..(44_100.0 * seconds) as usize)
+                .map(|i| (i as f32 * hz * std::f32::consts::TAU / 44_100.0).sin())
+                .collect();
+            let path = samples.join("Pack").join(name);
+            assert!(std::fs::create_dir_all(samples.join("Pack")).is_ok());
+            assert!(mo_audio::write_wav(&path, &[wave], 44_100, 16).is_ok());
+        }
+        // The first start makes the app's own library from sounds.db.
+        one_start(&sounds_db, &library_db, &Feed::default());
+        assert!(compact::own_since(&compact::copy_of(&sounds_db)).is_some());
+        // The next: the new samples are listened to and kept, the page takes them with their fingerprints, a card
+        // says what was found, and the C# app's sounds elsewhere are left as they are.
+        let cards = Feed::default();
+        let Some(mut on_show) = read_all(&sounds_db, &library_db, Some(cards.clone()), None, |_| {}) else {
+            panic!("no sounds read")
+        };
+        assert_eq!(on_show.list.len(), 5);
+        let steps = std::sync::Mutex::new(Vec::new());
+        let send = |step: Step| {
+            if let Ok(mut steps) = steps.lock() {
+                steps.push(said(step));
+            }
+        };
+        assert!(scan_for_sounds(&sounds_db, &library_db, &cards, &mut on_show, &send));
+        let got = steps.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default();
+        assert_eq!(got, ["again: other sounds, 7 sounds, 0 plays, used: true", "7 fingerprints"]);
+        assert_eq!(on_show.list.len(), 7);
+        // The two new sounds (analysed, unlike the five) are left out of CLAP's count from this start on.
+        assert_eq!((on_show.new_since, on_show.analysed), (Some(6), 0));
+        assert_eq!(cards_said(&cards), ["Found 2 new sounds: They're in your sound library now."]);
+        // Nothing new: nothing kept, nothing sent.
+        assert!(!scan_for_sounds(&sounds_db, &library_db, &cards, &mut on_show, &send));
+        assert!(steps.lock().map(|s| s.is_empty()).unwrap_or_default());
     }
 
     #[test]

@@ -270,15 +270,13 @@ fn reason(
 pub fn why_nothing(sounds: &[Sound], index: &SoundIndex, o: &Options) -> String {
     let visible: Vec<&Sound> = sounds.iter().filter(|s| !s.hidden).collect();
     if visible.is_empty() {
-        // What's true for now: the app doesn't look through sample folders yet (the whole-app review of 6 Nov, B-6).
-        return "No sounds yet: the sound library has none in it, and this version can't look through your sample \
-                folders for sounds yet."
-            .to_owned();
+        // The Sounds page scans the sample folders at each start.
+        return "No sounds yet. Add your sample folders in Settings and let the scan finish.".to_owned();
     }
     let analysed: Vec<&Sound> = visible.into_iter().filter(|s| s.analysis.is_some()).collect();
     if analysed.is_empty() || index.active().is_empty() {
-        return "None of your sounds have been listened to yet. The old app listened to each one as it added it, and \
-                this version can't do that yet."
+        return "None of your sounds have been listened to yet. Let the scan of your sample folders finish, then \
+                shuffle again."
             .to_owned();
     }
     let of_type: Vec<&Sound> = analysed.into_iter().filter(|s| s.is_of_types(&o.sound_types)).collect();
@@ -290,7 +288,8 @@ pub fn why_nothing(sounds: &[Sound], index: &SoundIndex, o: &Options) -> String 
     // Only sounds the index has can be suggested (deep listening may not have heard these yet).
     let mut of_type: Vec<&Sound> = of_type.into_iter().filter(|s| index.active().contains(s.id)).collect();
     if of_type.is_empty() {
-        // With no type picked there's no other to pick: what's true for now instead.
+        // With no type picked there's no other to pick: what's true for now instead. Closely is deep listening
+        // (CLAP), which this version doesn't run: the scan's new sounds are measured, but CLAP never hears them.
         let next = if kind.is_empty() {
             "The old app did that as it added them, and this version can't yet."
         } else {
