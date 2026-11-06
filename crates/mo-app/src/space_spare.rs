@@ -955,7 +955,7 @@ mod tests {
         assert_eq!(removing.put_back_button(true, &put_backs), Some(("Put back".to_owned(), true)));
         // Every copy stays, saying why, when Remove couldn't check them again or stopped with an error.
         assert!(stayed(&picked, CANT_CHECK).problems.iter().all(|p| p.why == CANT_CHECK));
-        assert!(crashed_words().ends_with(&format!("is in the {BIN}.")));
+        assert!(crashed_words().ends_with("so it stays."));
     }
 
     #[test]

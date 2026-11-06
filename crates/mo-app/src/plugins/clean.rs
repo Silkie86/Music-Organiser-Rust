@@ -439,4 +439,7 @@ impl Bin for Watched<'_> {
     fn refuses_quietly(&self, path: &Path, bytes: u64) -> Option<String> {
         self.bin.refuses_quietly(path, bytes)
     }
+    fn going(&self, removed: &Removed) {
+        self.bin.going(removed);
+    }
 }

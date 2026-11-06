@@ -45,26 +45,34 @@ fn copy_of(path: &str, twin: &str) -> CompactItem {
     CompactItem { same_as: Some(twin.to_owned()), ..line(CompactKind::SameSave, path) }
 }
 
-/// A bin that's a folder: each thing goes in under a number, and comes back if nothing has its name.
+/// A bin that's a folder: each thing goes in under a number, and comes back if nothing has its name. It keeps what
+/// it's told of each thing on its way ([`Bin::going`]), and how many it had been told of at each send.
 struct FolderBin {
     dir: PathBuf,
     held: RefCell<Vec<(String, PathBuf)>>,
+    told: RefCell<Vec<Removed>>,
+    told_at_send: RefCell<Vec<usize>>,
 }
 
 impl FolderBin {
     fn new(dir: PathBuf) -> FolderBin {
         fs::create_dir_all(&dir).unwrap();
-        FolderBin { dir, held: RefCell::new(Vec::new()) }
+        FolderBin { dir, held: RefCell::new(Vec::new()), told: RefCell::default(), told_at_send: RefCell::default() }
     }
 }
 
 impl Bin for FolderBin {
     fn send(&self, path: &Path) -> Result<(), String> {
+        self.told_at_send.borrow_mut().push(self.told.borrow().len());
         let mut held = self.held.borrow_mut();
         let to = self.dir.join(held.len().to_string());
         fs::rename(path, &to).map_err(|e| e.to_string())?;
         held.push((path.to_string_lossy().into_owned(), to));
         Ok(())
+    }
+
+    fn going(&self, removed: &Removed) {
+        self.told.borrow_mut().push(removed.clone());
     }
 
     fn find(&self, removed: &mut [Removed]) -> Vec<Problem> {
@@ -256,6 +264,37 @@ fn removing_goes_to_the_bin_and_undo_puts_it_back() {
     assert_eq!(problems[0].path, auto);
     assert!(Path::new(&inside_cache).exists());
     assert_eq!(fs::read(&auto).unwrap(), b"new");
+}
+
+#[test]
+fn each_thing_is_told_as_it_goes_with_what_put_back_needs() {
+    // So the app can keep what went as it goes: a close or a crash part way through loses no Put back.
+    let dir = fixtures("mo-space-clean-told");
+    let projects = dir.join("Projects");
+    let song = projects.join("Slow Orbit");
+    write(&song, "Slow Orbit.song", b"song");
+    let first = write(&song, "History/Slow Orbit (1).song", b"old");
+    let second = write(&song, "History/Slow Orbit (2).song", b"older");
+    let lib =
+        Library { roots: vec![projects.to_string_lossy().into_owned()], samples: Vec::new(), keep: HashSet::new() };
+    let guard = Guard {
+        project_roots: &lib.roots,
+        sample_folders: &lib.samples,
+        keep: &lib.keep,
+        sample_in_use: &no_sample_in_use,
+    };
+    let plan = preview(&[line(CompactKind::Backup, &first), line(CompactKind::Backup, &second)], &guard);
+    let bin = FolderBin::new(dir.join("bin"));
+    let done = apply(&plan, &guard, &bin, &AtomicBool::new(false));
+    assert_eq!(done.removed.len(), 2);
+    // Each one was told as soon as it was in the bin, before the next one was sent.
+    assert_eq!(*bin.told_at_send.borrow(), [0, 1]);
+    // With what the clean-up keeps of it (where it was and really is, its size, when it went): all Put back needs
+    // to find it in the bin. Only what the bin calls it comes later, from the look in the bin at the end.
+    let told = bin.told.borrow();
+    let unfound: Vec<Removed> = done.removed.iter().map(|r| Removed { bin_id: None, ..r.clone() }).collect();
+    assert_eq!(*told, unfound);
+    assert!(done.removed.iter().all(|r| r.bin_id.is_some()));
 }
 
 #[test]

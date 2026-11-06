@@ -302,7 +302,6 @@ pub const MOVED_SINCE: &str = "It isn't where it was when the page looked (a fol
 const UNKNOWN: &str = "No move was kept for it, so the app can't tell whether anything is only in it. Look in it \
     before deleting it yourself.";
 
-/// What a picked one is, as the app's records have it now.
 /// What goes: a move's old copy, or a folder left behind (or files kept aside), as the app's records have it.
 #[derive(Clone, Copy)]
 pub(crate) enum Going<'a> {

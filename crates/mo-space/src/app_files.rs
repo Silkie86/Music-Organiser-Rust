@@ -31,13 +31,28 @@ pub struct AppDatabase {
     pub path: PathBuf,
 }
 
-/// The three databases, by where they are.
+/// The three databases the app reads, by where they are.
 pub fn databases(library: PathBuf, sounds: PathBuf, midi: PathBuf) -> Vec<AppDatabase> {
     vec![
         AppDatabase { name: "Your library", what: "Projects, plugins, samples, tags and ratings", path: library },
         AppDatabase { name: "Sound Lab", what: "Every sound's details, likes and look-alikes", path: sounds },
         AppDatabase { name: "MIDI parts", what: "The MIDI read from your projects and MIDI files", path: midi },
     ]
+}
+
+/// What the part with the old app's databases is called ([`old_databases`]).
+pub const OLD_DATABASES: &str = "Old app's databases";
+
+/// The old app's databases in the app's `folder` (`library.db`, `sounds.db` and `midi.db`), as one part of their own:
+/// once the app has made its own (`songs.db`, `sounds-rust.db`, `midi-index.db`), they're only kept from the old app,
+/// and could be archived (the whole-app review of 6 Nov, X1-4). Listed after [`databases`], so one the app still reads
+/// (its own isn't made yet) counts there instead: each file counts once ([`measure`]).
+pub fn old_databases(folder: &Path) -> Vec<AppDatabase> {
+    let what = "Kept from the old app: this app has its own now";
+    ["library.db", "sounds.db", "midi.db"]
+        .into_iter()
+        .map(|file| AppDatabase { name: OLD_DATABASES, what, path: folder.join(file) })
+        .collect()
 }
 
 /// One part of the app's own files: a database, the search models, the logs.
