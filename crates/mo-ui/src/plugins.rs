@@ -154,6 +154,8 @@ struct FilterChips {
     daw: FilterModels,
     /// The card's songs tab: one DAW or every one.
     use_daw: FilterModels,
+    /// The list's order.
+    sort: FilterModels,
 }
 
 /// Wires the page. The library at `library` is read when the page is first shown.
@@ -166,7 +168,9 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     });
     let data = app.global::<PluginsData>();
     data.set_lines(ModelRc::from(LINES.with(|m| m.clone()) as Rc<dyn Model<Data = PluginListLine>>));
-    data.set_sorts(strings(Sort::ALL.iter().map(|s| s.name())));
+    // The order's picks are on show before the list is read.
+    let order = mo_app::filters::one_of(&Sort::ALL.map(Sort::name), Sort::default().name());
+    data.set_sort_filter(FILTER_MODELS.with(|m| m.sort.view(&order)));
     data.set_tabs(strings(TABS));
     data.set_card_counts(strings(
         NEEDED_COUNT_CHOICES.iter().map(|&n| if n == 0 { "Off".to_owned() } else { n.to_string() }),
@@ -772,9 +776,10 @@ fn refresh(app: &AppWindow) {
             data.set_kind_filter(m.kind.view(&pl.filter(Group::Kind)));
             data.set_format_filter(m.format.view(&pl.filter(Group::Format)));
             data.set_daw_filter(m.daw.view(&pl.daw_filter()));
+            // Every order on show behind its name, the one picked lit, as on Sounds and MIDI (review X3-5).
+            let order = mo_app::filters::one_of(&Sort::ALL.map(Sort::name), pl.filters.sort.name());
+            data.set_sort_filter(m.sort.view(&order));
         });
-        data.set_sort(pl.filters.sort.name().into());
-        data.set_sort_index(Sort::ALL.iter().position(|&s| s == pl.filters.sort).map_or(-1, |i| i as i32));
         data.set_has_sizes(pl.has_sizes());
         data.set_measure_text(measuring::line(pl.measured).into());
         data.set_any_filter(pl.filters.any());

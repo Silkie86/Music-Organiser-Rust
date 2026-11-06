@@ -2,7 +2,7 @@
 // "Made with Slint" credit in General's About part (Slint's royalty-free licence, decided 2026-10-30). Only shared
 // parts from studio.slint; mo-app decides every word (mo_app::settings), mo-ui/src/settings.rs fills it.
 import { AboutSlint } from "std-widgets.slint";
-import { Theme, Type, Space, StudioButton, Segmented, MenuChip, PageHeader, Caps, Well, TabBar, EmptyState, Dot, ToggleChip } from "../studio.slint";
+import { Theme, Type, Space, StudioButton, Segmented, MenuChip, PageHeader, Caps, Well, TabBar, EmptyState, Dot, ToggleChip, FolderRow } from "../studio.slint";
 
 // One theme to pick, drawn as a little picture of it in its own colours.
 export struct ThemeCardInfo {
@@ -581,30 +581,18 @@ component FoldersTab inherits VerticalLayout {
             color: Theme.faint;
             font-size: Type.meta;
         }
-        for f in g.folders: HorizontalLayout {
-            spacing: Space.md;
-            Text {
-                horizontal-stretch: 1;
-                min-width: 0px;
-                text: f;
-                color: Theme.text;
-                font-family: Theme.number-font;
-                font-size: Type.meta;
-                vertical-alignment: center;
-                wrap: word-wrap;
-            }
-            if g.editable: StudioButton {
-                horizontal-stretch: 0;
-                text: "Remove";
-                tip: "Takes the folder off this list. Nothing on disk is moved or deleted.";
-                enabled: !SettingsData.folders-busy;
-                clicked => { SettingsData.remove-folder(gi, f); }
-            }
+        // The shared folder row, as on Backup (the whole-app review of 6 Nov, X3-18): its × takes the folder off this
+        // list, and nothing on disk changes.
+        for f in g.folders: FolderRow {
+            path: f;
+            removable: g.editable;
+            enabled: !SettingsData.folders-busy;
+            remove => { SettingsData.remove-folder(gi, f); }
         }
         if g.editable: HorizontalLayout {
             alignment: start;
             StudioButton {
-                text: "Add folder\u{2026}";
+                text: "Add a folder\u{2026}";
                 enabled: !SettingsData.folders-busy;
                 clicked => { SettingsData.add-folder(gi); }
             }

@@ -138,6 +138,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // Space: the drives your folders are on and the app's own files, looked at once the page shows.
     mo_ui::space::connect(&app, library.clone(), feed.clone());
     mo_ui::startup::step("Space page");
+    // The rail's "In your DAWs": what Bitwig has open, asked on a thread of its own.
+    mo_ui::daws::connect(&app);
     app.window().set_maximized(true);
     // A little after start, the MIDI files older drags left in Temp (rule 28).
     mo_ui::drag::sweep_later();

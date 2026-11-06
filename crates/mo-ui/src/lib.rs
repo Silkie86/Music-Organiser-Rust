@@ -13,6 +13,7 @@ pub mod arrangement;
 pub mod backup;
 mod canvas;
 pub mod cards;
+pub mod daws;
 pub mod drag;
 pub mod files;
 pub mod filters;

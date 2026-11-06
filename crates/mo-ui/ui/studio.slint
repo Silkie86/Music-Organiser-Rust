@@ -441,8 +441,11 @@ export component Well inherits Rectangle {
     border-color: Theme.edge;
 }
 
-// A small × button, for putting a card away.
+// A small × button, for putting a card away or taking a line off a list.
 export component CloseButton inherits Rectangle {
+    // What it does, shown when the mouse rests on it; none for a card's own ×.
+    in property <string> tip;
+    in property <bool> enabled: true;
     callback clicked;
     width: 20px;
     height: 20px;
@@ -450,13 +453,19 @@ export component CloseButton inherits Rectangle {
     background: touch.has-hover ? Theme.hover : transparent;
     Text {
         text: "×";
-        color: Theme.muted;
+        color: root.enabled ? Theme.muted : Theme.faint;
         font-size: Type.body;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
     touch := TouchArea {
+        enabled: root.enabled;
         clicked => { root.clicked(); }
+    }
+    Tip {
+        text: root.tip;
+        hovering: touch.has-hover && !touch.pressed;
+        at-y: root.height + Space.xs;
     }
 }
 
@@ -2381,6 +2390,10 @@ export component FolderRow inherits Rectangle {
     in property <[string]> modes;
     // The picked mode; the page sets it when told of a pick.
     in property <int> mode;
+    // Whether the row has its × (a list you can't change has none), whether it can be pressed now, and what it does.
+    in property <bool> removable: true;
+    in property <bool> enabled: true;
+    in property <string> remove-tip: "Take this folder off the list (nothing on disk changes)";
     callback mode-picked(int);
     callback remove;
     height: 44px;
@@ -2411,9 +2424,11 @@ export component FolderRow inherits Rectangle {
                 picked(i) => { root.mode-picked(i); }
             }
         }
-        VerticalLayout {
+        if root.removable: VerticalLayout {
             alignment: center;
             CloseButton {
+                tip: root.remove-tip;
+                enabled: root.enabled;
                 clicked => { root.remove(); }
             }
         }

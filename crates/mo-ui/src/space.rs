@@ -1,13 +1,13 @@
 //! The Space page: the drives your projects, samples, backup and the app's own files are on, how full each is, what
 //! the app's own files take (part 1), Bitwig's copies of Library multisamples in your projects (part 2), with Fix for
 //! the saves you tick, the old copies moving plugin folders to another drive left (part 3) and the spare plugin copies
-//! (part 4), each with Remove for the ones you tick, what compacting your songs and thinning their older saves could
-//! free (part 5), with Remove for the old autosaves and caches you tick, the plugins no song has used lately (part 6),
-//! the copies of the same sound in your sample folders (information only), and the Recycle Bin, with Put back for what
-//! the app put there. mo_app's `space`, `space_bitwig`, `space_old`, `space_spare`, `space_songs`, `space_plugins`,
+//! (part 4), each with Send to the Recycle Bin for the ones you tick, what compacting your songs and thinning their
+//! older saves could free (part 5), with the same for the old autosaves and caches you tick, the plugins no song has
+//! used lately (part 6), the copies of the same sound in your sample folders (information only), and the Recycle Bin,
+//! with Put back for what the app put there. mo_app's `space`, `space_bitwig`, `space_old`, `space_spare`, `space_songs`, `space_plugins`,
 //! `space_sounds`, `space_removing` and `space_bin` decide every word. It looks the first time the page shows, on
 //! low-priority threads, and again when it shows after five minutes or on Measure again, so nothing on the window's
-//! thread waits for a disk (rule 12). Fix only writes new "(fixed)" projects beside the saves you ticked; Remove sends
+//! thread waits for a disk (rule 12). Fix only writes new "(fixed)" projects beside the saves you ticked; Send sends
 //! the old copies, spare copies or songs' old autosaves and caches you ticked to the Recycle Bin, each checked again
 //! first, and Put back returns them (`mo_app::binned` keeps what went, so Put back works after a restart too). The
 //! library and the sound library are only read.
@@ -856,27 +856,23 @@ fn chosen(app: &AppWindow, id: &str) {
     }
 }
 
-/// A button: its id, words and whether it can be pressed now; the card's main one is in the accent colour (Put back),
-/// and one that removes things in the colour for missing things (Remove), as the mock-up has them.
+/// A button: its id, words and whether it can be pressed now; the card's main one is in the accent colour (Send to the
+/// Recycle Bin, or Put back once it has run). None is in the colour for removing for good: nothing on Space goes for
+/// good, as everything it sends to the bin can come back (the whole-app review of 6 Nov, X3-11).
 struct Button {
     id: &'static str,
     text: String,
     enabled: bool,
     main: bool,
-    danger: bool,
 }
 
 impl Button {
     fn new(id: &'static str, text: impl Into<String>, enabled: bool) -> Button {
-        Button { id, text: text.into(), enabled, main: false, danger: false }
+        Button { id, text: text.into(), enabled, main: false }
     }
 
     fn main(self) -> Button {
         Button { main: true, ..self }
-    }
-
-    fn danger(self) -> Button {
-        Button { danger: true, ..self }
     }
 }
 
@@ -892,7 +888,7 @@ fn actions(buttons: Vec<Button>) -> ModelRc<CardAction> {
             id: b.id.into(),
             enabled: b.enabled,
             main: b.main,
-            danger: b.danger,
+            danger: false,
         })
         .collect();
     ModelRc::new(VecModel::from(actions))
@@ -1281,7 +1277,7 @@ fn send_to_bin<T: Removable + Send + 'static>(
     });
     if let Err(e) = started {
         log::error("Space", &format!("Couldn't start removing {}: {e}", clean.many));
-        let why = format!("Remove couldn't start ({e}), so it stays.");
+        let why = format!("Sending to the {BIN} couldn't start ({e}), so it stays.");
         PAGE.with(|p| (clean.removing)(&mut p.borrow_mut()).sent(when, space_removing::stayed(&picked, &why)));
         looks_after(app);
     }
@@ -1328,7 +1324,7 @@ pub fn finish_up() {
     log::warning(
         "Space",
         &format!(
-            "The app closed while things were going to the {BIN}: Remove stops (what went stays there, for Put back)"
+            "The app closed while things were going to the {BIN}: sending stops (what went stays there, for Put back)"
         ),
     );
     for stop in removes.iter() {
@@ -1341,7 +1337,7 @@ pub fn finish_up() {
             log::warning(
                 "Space",
                 &format!(
-                    "Remove didn't stop in time: what went to the {BIN} was noted as it went, and the Space page keeps \
+                    "Sending didn't stop in time: what went to the {BIN} was noted as it went, and the Space page keeps \
                      it the next time it looks"
                 ),
             );
@@ -2407,14 +2403,15 @@ fn show_card(app: &AppWindow) {
                 let card = space_bitwig::card(p.bitwig.as_ref(), p.bitwig_looking, &p.fixes);
                 (card, fix.into_iter().chain([measure_button(&p)]).collect())
             }
-            // Remove first (it removes, so in the colour for that), or once it has run, Put back (the main button) and
-            // the Recycle Bin; Measure again waits while a look is on (which it shows) or something goes or comes back.
+            // Send to the Recycle Bin first (the main button, as Plugins' clean-up is), or once it has run, Put back (the
+            // main button then) and the Recycle Bin; Measure again waits while a look is on (which it shows) or something
+            // goes or comes back.
             OLD_COPIES => {
                 let guarded = |path: &str| plugin_space::is_install_folder(path);
                 let card = space_old::card(p.old.as_ref(), &p.old_removing, CAN_PUT_BACK, guarded);
                 let mut buttons = Vec::new();
                 if let Some((words, enabled)) = old_remove_button(&p) {
-                    buttons.push(Button::new(REMOVE, words, enabled).danger());
+                    buttons.push(Button::new(REMOVE, words, enabled).main());
                 }
                 if let Some((words, enabled)) = old_stop_button(&p) {
                     buttons.push(Button::new(STOP, words, enabled));
@@ -2430,14 +2427,14 @@ fn show_card(app: &AppWindow) {
                 buttons.push(Button { enabled, ..measure });
                 (card, buttons)
             }
-            // Remove first (it removes, so in the colour for that), or once it has run, Put back (the main button) and
+            // Send to the Recycle Bin first (the main button), or once it has run, Put back (the main button then) and
             // the Recycle Bin; Measure again waits while a look is on or something goes or comes back.
             SPARE_COPIES => {
                 let guarded = |path: &str| plugin_space::is_install_folder(path);
                 let card = space_spare::card(p.spare.as_ref(), p.spare_looking, &p.removing, CAN_PUT_BACK, guarded);
                 let mut buttons = Vec::new();
                 if let Some((words, enabled)) = spare_remove_button(&p) {
-                    buttons.push(Button::new(REMOVE, words, enabled).danger());
+                    buttons.push(Button::new(REMOVE, words, enabled).main());
                 }
                 if let Some((words, enabled)) = p.removing.put_back_button(CAN_PUT_BACK, &p.put_backs) {
                     buttons.push(Button::new(PUT_BACK, words, enabled).main());
@@ -2450,14 +2447,14 @@ fn show_card(app: &AppWindow) {
                 buttons.push(Button { enabled, ..measure });
                 (card, buttons)
             }
-            // Remove first (it removes, so in the colour for that) with Stop while it's on, or once it has run, Put back
-            // (the main button) and the Recycle Bin; Measure again waits while a look is on or something goes or comes
+            // Send to the Recycle Bin first (the main button) with Stop while it's on, or once it has run, Put back (the
+            // main button then) and the Recycle Bin; Measure again waits while a look is on or something goes or comes
             // back.
             COMPACT => {
                 let card = space_songs::compact_card(p.songs.as_ref(), &p.songs_removing, CAN_PUT_BACK);
                 let mut buttons = Vec::new();
                 if let Some((words, enabled)) = songs_remove_button(&p) {
-                    buttons.push(Button::new(REMOVE, words, enabled).danger());
+                    buttons.push(Button::new(REMOVE, words, enabled).main());
                 }
                 if let Some((words, enabled)) = songs_stop_button(&p) {
                     buttons.push(Button::new(STOP, words, enabled));

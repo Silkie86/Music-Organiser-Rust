@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
+use mo_app::filters;
 use mo_app::finder::Kind;
 use mo_app::midi::{self as page, Filters, Order, Roll, Target};
 use mo_app::places::Place;
@@ -157,6 +158,8 @@ thread_local! {
     static HERE: RefCell<bool> = const { RefCell::new(false) };
     /// The filter chips' lines, kept between showings: kinds, From and Key.
     static CHIPS: [FilterModels; 3] = Default::default();
+    /// The Order picks, changed in place as the filters' are.
+    static ORDER_CHIPS: FilterModels = FilterModels::default();
 }
 
 struct Lines {
@@ -288,11 +291,17 @@ pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     }
 }
 
+/// The Order picks: every order on show behind its name, with the one picked lit, as on Sounds and Plugins (the
+/// whole-app review of 6 Nov, X3-5).
+fn show_order(data: &MidiData, order: Order) {
+    let picks = filters::one_of(&Order::ALL.map(Order::name), order.name());
+    data.set_order_filter(ORDER_CHIPS.with(|m| m.view(&picks)));
+}
+
 fn wire(app: &AppWindow) {
     let data = app.global::<MidiData>();
     data.set_lines(ModelRc::from(LINES.with(Rc::clone) as Rc<dyn Model<Data = MidiLine>>));
-    data.set_orders(strings(Order::ALL.map(Order::name)));
-    data.set_order(Order::default().name().into());
+    show_order(&data, Order::default());
     show_chips(app);
 
     let weak = app.as_weak();
@@ -325,16 +334,15 @@ fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_pick(move |what, value| {
         let Some(app) = weak.upgrade() else { return };
-        let data = app.global::<MidiData>();
-        PAGE.with(|p| {
-            let mut p = p.borrow_mut();
-            if what == "order" {
-                p.order = Order::from_name(&value);
-                p.seed = None;
-            }
-        });
         if what == "order" {
-            data.set_order(value);
+            // The order already picked stays picked (one is always on), and a shuffle ends.
+            let order = Order::from_name(&value);
+            PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.order = order;
+                p.seed = None;
+            });
+            show_order(&app.global::<MidiData>(), order);
         }
         relist(&app);
     });

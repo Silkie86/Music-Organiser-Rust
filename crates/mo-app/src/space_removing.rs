@@ -324,14 +324,14 @@ impl<T: Removable> Removing<T> {
         put_backs: &PutBacks,
     ) -> Option<(String, bool)> {
         match &self.stage {
-            Stage::Sending(_) => Some(("Removing…".to_owned(), false)),
+            Stage::Sending(_) => Some((sending_words(), false)),
             Stage::Picking if found.is_some_and(|f| f.items().iter().any(Removable::can_go)) => {
                 let mut ticked = self.each_ticked(found).peekable();
                 if ticked.peek().is_none() {
                     Some(("Nothing ticked".to_owned(), false))
                 } else {
                     let can = !wait && put_backs.going.is_none();
-                    Some((format!("Remove {}", size_text(free_bytes(ticked))), can))
+                    Some((send_words(free_bytes(ticked)), can))
                 }
             }
             _ => None,
@@ -385,25 +385,37 @@ pub fn after_crash<T: Removable>(picked: &[T], went: Vec<Removed>, still_there: 
     Done { removed, problems, went_with: Vec::new() }
 }
 
-/// Why one picked stays when Remove stopped with an error (logged as a crash) before it was sent.
-pub fn crashed_words() -> String {
-    "Remove stopped with an error (the log says which) before this went, so it stays.".to_owned()
+/// The clean-up button's words: "Send 12 GB to the Recycle Bin" (the whole-app review of 6 Nov, X3-11). It's the main
+/// button, as Plugins' clean-up is: what goes can come back (Put back), and "Remove" in red is kept for what goes for
+/// good.
+pub fn send_words(bytes: u64) -> String {
+    format!("Send {} to the {BIN}", size_text(bytes))
 }
 
-/// Why one picked that waited for Windows' administrator step is said to be where it was, when Remove stopped with an
+/// The clean-up button's words while it runs.
+pub fn sending_words() -> String {
+    format!("Sending to the {BIN}\u{2026}")
+}
+
+/// Why one picked stays when sending to the bin stopped with an error (logged as a crash) before it was sent.
+pub fn crashed_words() -> String {
+    format!("Sending to the {BIN} stopped with an error (the log says which) before this went, so it stays.")
+}
+
+/// Why one picked that waited for Windows' administrator step is said to be where it was, when sending stopped with an
 /// error (logged as a crash) as Windows was asked: the step goes on by itself, so it may go yet.
 pub fn crashed_waiting_words() -> String {
     format!(
-        "Remove stopped with an error (the log says which) as Windows was asked about this: it was still there then, \
+        "Sending stopped with an error (the log says which) as Windows was asked about this: it was still there then, \
          but may go to the {BIN} yet. Measure again shows where it is."
     )
 }
 
-/// Why one picked isn't said to have gone, though it isn't where it was, when Remove stopped with an error (logged as a
-/// crash): it may have gone just as it stopped, without being noted.
+/// Why one picked isn't said to have gone, though it isn't where it was, when sending stopped with an error (logged as
+/// a crash): it may have gone just as it stopped, without being noted.
 pub fn crashed_gone_words() -> String {
     format!(
-        "Remove stopped with an error (the log says which) as this went: it isn't where it was, so it may be in the \
+        "Sending stopped with an error (the log says which) as this went: it isn't where it was, so it may be in the \
          {BIN}."
     )
 }

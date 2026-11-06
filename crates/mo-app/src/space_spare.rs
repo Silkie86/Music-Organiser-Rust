@@ -39,8 +39,12 @@ pub const NONE_FOUND: &str = "No spare plugin copies were found. ";
 
 pub use crate::space_removing::{ADMIN, ADMIN_BACK};
 
-/// The activity card's title while Remove is on.
-pub const REMOVING: &str = "Removing spare plugin copies";
+/// The activity card's title while they're sent to the bin.
+pub const REMOVING: &str = if cfg!(windows) {
+    "Sending spare plugin copies to the Recycle Bin"
+} else {
+    "Sending spare plugin copies to the Trash"
+};
 
 /// Why every ticked copy stays when Remove couldn't read your plugin folders or which plugins your saves use, to check
 /// each copy is still spare.
@@ -145,7 +149,7 @@ pub fn remove(
             let now = spare::find(&files, used, pro_tools, |_| (0, None));
             spare::remove(picked, &now, bin, stop)
         }
-        Err(Stopped) => stayed(picked, "Remove stopped before it went."),
+        Err(Stopped) => stayed(picked, "Sending stopped before it went."),
     }
 }
 
@@ -319,8 +323,8 @@ fn group_part(g: &Group<'_>, bytes: u64) -> Part {
 /// them) go together, Windows asking once, and come back together the same way.
 fn remove_note(can_put_back: bool, guarded: bool) -> String {
     let checks = format!(
-        "Remove sends the ticked copies to the {BIN}, each checked again just before it goes: one that changed since, \
-         or that a save uses now, stays."
+        "The ticked copies go to the {BIN}, each checked again just before it goes: one that changed since, or that a \
+         save uses now, stays."
     );
     match (can_put_back, guarded) {
         (true, false) => format!("{checks} Put back returns them until you empty the {BIN}."),
@@ -742,12 +746,12 @@ mod tests {
         let mut removing = Removing::default();
         assert_eq!(
             removing.remove_button(Some(&found), false, &PutBacks::default()),
-            Some(("Remove 650 MB".to_owned(), true))
+            Some((format!("Send 650 MB to the {BIN}"), true))
         );
         // While a look is on, Remove waits for it.
         assert_eq!(
             removing.remove_button(Some(&found), true, &PutBacks::default()),
-            Some(("Remove 650 MB".to_owned(), false))
+            Some((format!("Send 650 MB to the {BIN}"), false))
         );
         // Unticking one AAX copy: its format's tick shows a dash, and Remove frees the rest.
         let pro_q = found.copies.iter().find(|c| c.name == "Pro-Q 3").unwrap();
@@ -756,7 +760,7 @@ mod tests {
         assert_eq!((card.parts[0].tick.as_ref().map(|t| t.1), card.parts[0].partly), (Some(false), true));
         assert_eq!(
             removing.remove_button(Some(&found), false, &PutBacks::default()),
-            Some(("Remove 590 MB".to_owned(), true))
+            Some((format!("Send 590 MB to the {BIN}"), true))
         );
         // The format's tick then ticks them all again; unticked, none of them goes.
         let all_aax = card.parts[0].tick.clone().unwrap().0;
@@ -847,7 +851,7 @@ mod tests {
         assert!(removing.busy());
         assert_eq!(
             removing.remove_button(Some(&found), false, &PutBacks::default()),
-            Some(("Removing…".to_owned(), false))
+            Some((format!("Sending to the {BIN}…"), false))
         );
         // Ticks wait while it's on.
         removing.tick(&[path(&picked[0])], false);
@@ -945,7 +949,10 @@ mod tests {
         // While a clean-up is put back from the Recycle Bin card, Remove waits.
         let mut put_backs = PutBacks::default();
         put_backs.start(SPARE_COPIES, 5);
-        assert_eq!(removing.remove_button(Some(&found), false, &put_backs), Some(("Remove 650 MB".to_owned(), false)));
+        assert_eq!(
+            removing.remove_button(Some(&found), false, &put_backs),
+            Some((format!("Send 650 MB to the {BIN}"), false))
+        );
         // And this card's Put back waits for it too.
         let picked = removing.ticked_copies(Some(&found));
         removing.start(picked.clone());
