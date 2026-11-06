@@ -638,13 +638,10 @@ pub fn wanted() {
     }
 }
 
-/// What every view says in the list's place when the sound library has no sounds in it: the words Rediscover has for
-/// it (`rediscover::why_nothing`). What's true for now: this version doesn't look through sample folders yet, so it
-/// can't add any (review B-6; the sound library's own plan brings that).
-const NO_SOUNDS: (&str, &str) = (
-    "No sounds yet",
-    "The sound library has none in it, and this version can't look through your sample folders for sounds yet.",
-);
+/// What every view says in the list's place when the sound library has no sounds in it (made, but nothing scanned
+/// into it yet): the words Rediscover has for it (`rediscover::why_nothing`). The page scans the sample folders at
+/// each start ([`scan_for_sounds`]).
+const NO_SOUNDS: (&str, &str) = ("No sounds yet", "Add your sample folders in Settings and let the scan finish.");
 
 /// While the sounds are read, every view shows one word in the list's place: not "No sounds match" (nothing is
 /// filtered out yet), and not the galaxy's own word on top of it (Solomon's F12 note, 2026-11-02 04:25). Said once,
