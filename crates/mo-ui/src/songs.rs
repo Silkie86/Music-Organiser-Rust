@@ -157,10 +157,10 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     data.on_show_presets(move || {
         let Some(app) = weak.upgrade() else { return };
         let mut save = None;
-        with_picked(|_, r| save = Some(r.song.latest.path.clone()));
-        if let Some(save) = save {
+        with_picked(|_, r| save = Some((r.song.latest.path.clone(), r.song.name.clone())));
+        if let Some((save, name)) = save {
             crate::go_to(&app, Place::Presets.index() as i32);
-            crate::presets::show_song(&app, &save);
+            crate::presets::show_song(&app, &save, &name);
         }
     });
     wire_filters(app);
@@ -730,6 +730,8 @@ fn fill_detail(app: &AppWindow) {
         let p = &*p;
         let Some(r) = p.songs.rows.get(picked) else { return };
         let detail = p.detail.as_ref();
+        // Only a save that keeps its plugins' settings, and is there, has sounds on Presets (H-4).
+        data.set_has_presets(!r.song.latest.file_missing && mo_app::presets::keeps_settings(&r.song.latest.path));
         data.set_counts(model(panel::counts(r, detail).into_iter().map(|c| CountLine {
             text: c.text.into(),
             missing: c.missing.into(),
