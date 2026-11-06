@@ -730,8 +730,6 @@ fn fill_detail(app: &AppWindow) {
         let p = &*p;
         let Some(r) = p.songs.rows.get(picked) else { return };
         let detail = p.detail.as_ref();
-        // Only a save that keeps its plugins' settings, and is there, has sounds on Presets (H-4).
-        data.set_has_presets(!r.song.latest.file_missing && mo_app::presets::keeps_settings(&r.song.latest.path));
         data.set_counts(model(panel::counts(r, detail).into_iter().map(|c| CountLine {
             text: c.text.into(),
             missing: c.missing.into(),

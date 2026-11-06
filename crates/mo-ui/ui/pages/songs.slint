@@ -123,8 +123,6 @@ export global SongsData {
     in property <[string]> tabs;
     in-out property <int> tab;
     in property <[CountLine]> counts;
-    // Whether the song's newest save has sounds the Presets page can read (an FL or Bitwig save that's there).
-    in property <bool> has-presets;
     in property <[string]> runs;
     // "Reading…" while the newest save's record loads, or why it couldn't be read.
     in property <string> detail-message;
@@ -467,7 +465,7 @@ component SongPanel inherits Rectangle {
                                 clicked => { SongsData.tab = c.tab; }
                             }
                         }
-                        if SongsData.has-presets: HorizontalLayout {
+                        HorizontalLayout {
                             spacing: Space.sm;
                             if SongsData.counts.length > 0: Text {
                                 text: "·";
