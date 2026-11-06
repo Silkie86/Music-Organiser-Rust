@@ -561,16 +561,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 /// Keys pressed on the window as on a keyboard, and what they did (the 6 Nov review's X3-12 and X3-22, and the code
 /// review on them): the keys still work after Ctrl+F and a page change, Esc closes the key sheet before the page under
 /// it sees the key (and Ctrl+K over the sheet first), Esc stops what plays on another page, a held Esc takes one step,
-/// and Ctrl+F leaves Ctrl+K open.
+/// and Ctrl+F leaves Ctrl+K open. Each check starts with the keys on the window, so one going wrong doesn't hide
+/// another.
 fn key_checks(app: &mo_ui::AppWindow) -> Result<(), String> {
     use slint::platform::Key;
     let songs = app.global::<mo_ui::SongsData>();
+    let midi = app.global::<mo_ui::MidiData>();
+    let finder = app.global::<mo_ui::FinderData>();
     let searched = |want: &str| songs.get_search() == want;
-    // A page change gives the keys to the window (the note had them): two, so one is a change whatever was on show.
-    for place in [Place::Sounds, Place::Midi] {
-        app.invoke_place_chosen(place.index() as i32);
-        slint::platform::update_timers_and_animations();
-    }
+    app.set_note_open(false);
+    // Songs: Ctrl+F puts the keys in its search box, so typing searches.
+    keys_to_window(app);
     press(app, "1", true);
     press(app, "f", true);
     press(app, "a", false);
@@ -584,7 +585,9 @@ fn key_checks(app: &mo_ui::AppWindow) -> Result<(), String> {
         return Err("keys: after Ctrl+F and Ctrl+2, Ctrl+1 didn't go back to Songs".into());
     }
     // Esc closes the key sheet, and the search under it, which has the keys, stays.
+    keys_to_window(app);
     press(app, "f", true);
+    press(app, "a", false);
     press(app, Key::F1, false);
     if !app.get_sheet_open() {
         return Err("keys: F1 in the search box didn't open the key sheet".into());
@@ -594,12 +597,20 @@ fn key_checks(app: &mo_ui::AppWindow) -> Result<(), String> {
         return Err(format!("keys: Esc on the key sheet left it open or searched {:?}", songs.get_search()));
     }
     // Esc stops the MIDI page's loop from here (it plays on after its page goes), and does only that.
-    app.global::<mo_ui::MidiData>().set_playing(true);
+    app.set_sheet_open(false);
+    keys_to_window(app);
+    press(app, "f", true);
+    press(app, "a", false);
+    midi.set_playing(true);
     press(app, Key::Escape, false);
-    if app.global::<mo_ui::MidiData>().get_playing() || !searched("a") {
+    if midi.get_playing() || !searched("a") {
         return Err("keys: Esc on Songs didn't stop the MIDI loop first".into());
     }
     // A held Esc takes one step: the search clears, and the song's panel stays until Esc is pressed again.
+    midi.set_playing(false);
+    keys_to_window(app);
+    press(app, "f", true);
+    press(app, "a", false);
     mo_ui::songs::show_picked(app, 1, sample_detail(), Tab::Overview);
     press(app, Key::Escape, false);
     for _ in 0..3 {
@@ -613,7 +624,7 @@ fn key_checks(app: &mo_ui::AppWindow) -> Result<(), String> {
         return Err("keys: Esc didn't put the song's panel away".into());
     }
     // Ctrl+F leaves Ctrl+K open, its box keeping the keys; Esc closes it.
-    let finder = app.global::<mo_ui::FinderData>();
+    keys_to_window(app);
     press(app, "k", true);
     let asked = app.global::<mo_ui::AppKeys>().get_search();
     press(app, "f", true);
@@ -625,6 +636,8 @@ fn key_checks(app: &mo_ui::AppWindow) -> Result<(), String> {
         return Err("keys: Esc didn't close Ctrl+K".into());
     }
     // Ctrl+K over the key sheet closes first, then the sheet.
+    mo_ui::finder::close(app);
+    keys_to_window(app);
     press(app, Key::F1, false);
     press(app, "k", true);
     press(app, Key::Escape, false);
@@ -636,6 +649,15 @@ fn key_checks(app: &mo_ui::AppWindow) -> Result<(), String> {
         return Err("keys: the second Esc didn't close the key sheet".into());
     }
     Ok(())
+}
+
+/// Gives the keys to the window, as Ctrl+K does when it closes, with nothing open over the page.
+fn keys_to_window(app: &mo_ui::AppWindow) {
+    app.set_sheet_open(false);
+    mo_ui::finder::toggle(app);
+    slint::platform::update_timers_and_animations();
+    mo_ui::finder::close(app);
+    slint::platform::update_timers_and_animations();
 }
 
 /// Presses and lets go of `key` on the window, with Ctrl held when `ctrl`, then lets the window catch up.
