@@ -11,12 +11,13 @@
 //! or a crash part way through is taken into the list by the next look ([`refresh`]), so what went can still be put
 //! back, and the page's Recycle Bin line still counts it (the whole-app review of 6 Nov, E1-1).
 
+use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use mo_space::clean::{Bin, Done, Removed, What};
 use mo_space::in_bin::{self, InBin};
@@ -225,9 +226,18 @@ fn note_path(folder: &Path, kind: &str, when: i64) -> PathBuf {
     folder.join(format!("{NOTE_START}{kind}-{when}-{}{NOTE_END}", std::process::id()))
 }
 
-/// Takes away a note that's done with: one that's already gone is fine; one that can't be taken away (said in the log)
-/// is taken in again by a later look, which adds nothing twice.
+/// A note that can't be read for this long (since it last changed) is taken away, so it doesn't stay for ever (rule
+/// 28): what it names stays in the bin, to put back from there.
+const UNREADABLE_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Takes away a note that's done with, unless another copy of the app running at once holds it locked: its clean-up is
+/// running there (it was taken in just as it started), and keeps it all itself ([`add`]). One that's already gone is
+/// fine; one that can't be taken away (said in the log) is taken in again by a later look, which adds nothing twice.
 fn remove_note(path: &Path) {
+    let written = fs::File::open(path).is_ok_and(|file| matches!(file.try_lock(), Err(fs::TryLockError::WouldBlock)));
+    if written {
+        return;
+    }
     if let Err(e) = fs::remove_file(path)
         && e.kind() != io::ErrorKind::NotFound
     {
@@ -265,10 +275,20 @@ fn notes_in(folder: &Path) -> Vec<(PathBuf, Vec<NoteLine>)> {
             Ok(Some(text)) => text,
             Ok(None) => continue,
             Err(e) => {
-                log::warning(
-                    "Space",
-                    &format!("Couldn't read a note of what went to the {BIN} ({}): {e}", path.display()),
-                );
+                let at = path.display();
+                let age = entry.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok());
+                if age.is_some_and(|age| age >= UNREADABLE_FOR) {
+                    log::warning(
+                        "Space",
+                        &format!(
+                            "A note of what went to the {BIN} couldn't be read for a month, so it's taken away: what it \
+                             names stays in the {BIN}, to put back from there ({at}): {e}"
+                        ),
+                    );
+                    remove_note(&path);
+                } else {
+                    log::warning("Space", &format!("Couldn't read a note of what went to the {BIN} ({at}): {e}"));
+                }
                 continue;
             }
         };
@@ -290,23 +310,46 @@ fn notes_in(folder: &Path) -> Vec<(PathBuf, Vec<NoteLine>)> {
     notes
 }
 
-/// Takes into `list` (oldest first) what notes say went: each thing the list doesn't have yet (the same thing, gone at
-/// the same time), with its clean-up when that's in the list already (a note left just as its clean-up was being kept),
-/// else as a clean-up of its own, in its place by time.
-fn take_in(list: &mut Vec<Binned>, lines: impl IntoIterator<Item = NoteLine>) {
-    let mut have: HashSet<(String, i64)> =
-        list.iter().flat_map(|b| &b.done.removed).map(|r| (key(&r.real), r.when)).collect();
-    for NoteLine { kind, when, removed } in lines {
-        if !have.insert((key(&removed.real), removed.when)) {
-            continue;
+/// Takes into `list` (oldest first) what `notes` say went: each thing the list doesn't have yet (the same thing, gone
+/// at the same time), with its clean-up when the list has some of that already (a note left beside its clean-up: by a
+/// crash, or because it couldn't be taken away), else as a clean-up of its own, in its place by time (a second or more
+/// later when another of its kind is kept under that time: [`free_time`]). Never with another clean-up because it has
+/// the same time: the clock may have been put back since that one.
+fn take_in(list: &mut Vec<Binned>, notes: &[(PathBuf, Vec<NoteLine>)]) {
+    let pair = |r: &Removed| (key(&r.real), r.when);
+    // Which clean-up has each thing kept (none for one this takes in as a clean-up of its own).
+    let mut have: HashMap<(String, i64), Option<usize>> = HashMap::new();
+    for (at, binned) in list.iter().enumerate() {
+        for r in &binned.done.removed {
+            have.insert(pair(r), Some(at));
         }
-        match list.iter_mut().find(|b| b.kind == kind && b.when == when) {
-            Some(binned) => binned.done.removed.push(removed),
-            None => {
-                let at = list.iter().position(|b| b.when > when).unwrap_or(list.len());
-                list.insert(at, Binned { kind, when, done: Done { removed: vec![removed], ..Done::default() } });
+    }
+    let mut own = Vec::new();
+    for (_, lines) in notes {
+        let Some(NoteLine { kind, when, .. }) = lines.first() else { continue };
+        let with = lines.iter().find_map(|line| match have.get(&pair(&line.removed)) {
+            Some(Some(at)) if list.get(*at).is_some_and(|b| b.kind == *kind) => Some(*at),
+            _ => None,
+        });
+        let mut new = Vec::new();
+        for line in lines {
+            if let Entry::Vacant(spot) = have.entry(pair(&line.removed)) {
+                spot.insert(None);
+                new.push(line.removed.clone());
             }
         }
+        match with.and_then(|at| list.get_mut(at)) {
+            _ if new.is_empty() => {}
+            Some(binned) => binned.done.removed.extend(new),
+            None => {
+                own.push(Binned { kind: kind.clone(), when: *when, done: Done { removed: new, ..Done::default() } })
+            }
+        }
+    }
+    for binned in own {
+        let when = free_time(list, &binned.kind, binned.when);
+        let at = list.iter().position(|b| b.when > when).unwrap_or(list.len());
+        list.insert(at, Binned { when, ..binned });
     }
 }
 
@@ -362,9 +405,22 @@ pub fn write(folder: &Path, list: &[Binned]) -> io::Result<()> {
 }
 
 /// Adds a clean-up of `kind` that ran at `when`: only what went, and nothing when nothing did. The newest goes last.
-/// Gives the time it's kept under: `when`, or a second or more later when another of its kind is kept under that time
-/// (the computer's clock was put back since), as Put back knows each one by its kind and time.
+/// What of it the list has already, taken in from its note while it ran (by another copy of the app running at once:
+/// kept under its kind and time), is kept once, as this says it: the note's copy goes, with a clean-up that's left with
+/// nothing. Gives the time it's kept under: `when`, or a second or more later when another of its kind is kept under
+/// that time (the computer's clock was put back since), as Put back knows each one by its kind and time.
 pub fn add(list: &mut Vec<Binned>, kind: &str, when: i64, done: &Done) -> i64 {
+    if !done.removed.is_empty() && list.iter().any(|b| b.kind == kind && b.when == when) {
+        let its: HashSet<(String, i64)> = done.removed.iter().map(|r| (key(&r.real), r.when)).collect();
+        list.retain_mut(|b| {
+            if b.kind != kind || b.when != when {
+                return true;
+            }
+            let before = b.done.removed.len();
+            b.done.removed.retain(|r| !its.contains(&(key(&r.real), r.when)));
+            before == b.done.removed.len() || !b.done.removed.is_empty()
+        });
+    }
     let when = free_time(list, kind, when);
     if !done.removed.is_empty() {
         let done = Done { removed: done.removed.clone(), problems: Vec::new(), went_with: done.went_with.clone() };
@@ -498,7 +554,7 @@ fn update(folder: &Path, bin: &dyn Bin, change: impl FnOnce(&mut Vec<Binned>)) -
     // it's all kept. While the file can't be read (above) they wait where they are.
     let notes = notes_in(folder);
     if !notes.is_empty() {
-        take_in(&mut list, notes.iter().flat_map(|(_, lines)| lines.iter().cloned()));
+        take_in(&mut list, &notes);
     }
     let looked = look(list, bin);
     let noted = file.as_ref() == Some(&looked.keep)
@@ -891,6 +947,46 @@ mod tests {
     }
 
     #[test]
+    fn a_note_beside_a_clean_up_kept_a_second_later_goes_with_it() {
+        let dir = folder("mo-app-binned-note-later");
+        let bin = holding(Some(vec!["C:/old.dll", "C:/a.dll", "C:/b.dll"]));
+        // A clean-up at 30 is kept; the clock is put back, and the next one, at 30 too, is kept at 31.
+        record(&dir, &bin, "spare-copies", 30, &Done { removed: vec![going("C:/old.dll", 30)], ..Done::default() });
+        let note = Going::start(&dir, "spare-copies", 30);
+        for r in [going("C:/a.dll", 30), going("C:/b.dll", 30)] {
+            note.went(&r);
+        }
+        // It stopped with an error just as b went: kept with a only, and its note left.
+        let (kept, at) =
+            record(&dir, &bin, "spare-copies", 30, &Done { removed: vec![going("C:/a.dll", 30)], ..Done::default() });
+        assert_eq!((at, whens(&kept.list)), (31, vec![30, 31]));
+        note.finish(false);
+        // b goes with a, not with the clean-up that was at 30 first.
+        let now = refresh(&dir, &bin);
+        assert_eq!(whens(&now.list), [30, 31]);
+        assert_eq!((paths(&now.list[0]), paths(&now.list[1])), (vec!["C:/old.dll"], vec!["C:/a.dll", "C:/b.dll"]));
+    }
+
+    #[test]
+    fn a_clean_up_taken_in_from_its_note_while_it_ran_is_kept_once() {
+        let dir = folder("mo-app-binned-note-early");
+        let bin = holding(Some(vec!["C:/a.dll", "C:/b.dll"]));
+        // Another copy of the app took in the first line of its note just as it started (before it was locked).
+        let line = NoteLine { kind: "spare-copies".to_owned(), when: 40, removed: going("C:/a.dll", 40) };
+        let other = dir.join(format!("{NOTE_START}spare-copies-40-1{NOTE_END}"));
+        fs::write(&other, format!("{}\n", serde_json::to_string(&line).unwrap())).unwrap();
+        assert_eq!(whens(&refresh(&dir, &bin).list), [40]);
+        // Once it ends, it's kept whole, once, as it says it (found in the bin), at its own time.
+        let mut found = Done { removed: vec![going("C:/a.dll", 40), going("C:/b.dll", 40)], ..Done::default() };
+        for r in &mut found.removed {
+            r.bin_id = Some(format!("bin:{}", r.path));
+        }
+        let (kept, at) = record(&dir, &bin, "spare-copies", 40, &found);
+        assert_eq!((at, whens(&kept.list)), (40, vec![40]));
+        assert_eq!(kept.list[0].done.removed, found.removed);
+    }
+
+    #[test]
     fn a_note_another_copy_of_the_app_is_writing_is_left_be() {
         let dir = folder("mo-app-binned-note-locked");
         let bin = holding(Some(vec!["C:/a.dll"]));
@@ -902,6 +998,9 @@ mod tests {
         let held = fs::OpenOptions::new().append(true).open(&path).unwrap();
         held.try_lock().unwrap();
         assert!(refresh(&dir, &bin).list.is_empty());
+        assert!(path.exists());
+        // Nor is it taken away while it's held, however it was taken in.
+        remove_note(&path);
         assert!(path.exists());
         // Once it's let go, it's taken in.
         drop(held);

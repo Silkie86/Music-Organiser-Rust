@@ -360,18 +360,25 @@ pub fn stayed<T: Removable>(picked: &[T], why: &str) -> Done {
 
 /// What Remove did when it stopped with an error part way (logged as a crash): what had gone to the Recycle Bin by
 /// then, as each one was noted going (`went`, [`crate::binned::Going::went_so_far`]), but for what's still where it
-/// really was (`still_there`: what waited for Windows' administrator step and didn't go); every other one picked
-/// stays, saying so ([`crashed_words`]), or, when it isn't where it was any more (it may have gone just as Remove
-/// stopped), saying that ([`crashed_gone_words`]). Looks at each place on the disk: call it off the window's thread.
+/// really was (`still_there`). What's still there of what was noted as it waited for Windows' administrator step may
+/// go yet (the step goes on by itself), and says so ([`crashed_waiting_words`]): the page's next look finds it in the
+/// bin if it went. Every other one picked stays, saying so ([`crashed_words`]), or, when it isn't where it was any more
+/// (it may have gone just as Remove stopped), saying that ([`crashed_gone_words`]). Looks at each place on the disk:
+/// call it off the window's thread.
 pub fn after_crash<T: Removable>(picked: &[T], went: Vec<Removed>, still_there: impl Fn(&str) -> bool) -> Done {
-    let removed: Vec<Removed> = went.into_iter().filter(|r| !still_there(&r.real)).collect();
+    let (removed, waiting): (Vec<Removed>, Vec<Removed>) = went.into_iter().partition(|r| !still_there(&r.real));
     let gone: HashSet<&str> = removed.iter().map(|r| r.path.as_str()).collect();
-    let (stays, moved) = (crashed_words(), crashed_gone_words());
+    let waits: HashSet<&str> = waiting.iter().map(|r| r.path.as_str()).collect();
+    let (stays, moved, may_go) = (crashed_words(), crashed_gone_words(), crashed_waiting_words());
     let problems = picked
         .iter()
         .filter(|t| !gone.contains(t.path()))
         .map(|t| {
-            let why = if still_there(t.path()) { &stays } else { &moved };
+            let why = match (waits.contains(t.path()), still_there(t.path())) {
+                (true, _) => &may_go,
+                (false, true) => &stays,
+                (false, false) => &moved,
+            };
             Problem { path: t.path().to_owned(), why: why.clone() }
         })
         .collect();
@@ -381,6 +388,15 @@ pub fn after_crash<T: Removable>(picked: &[T], went: Vec<Removed>, still_there: 
 /// Why one picked stays when Remove stopped with an error (logged as a crash) before it was sent.
 pub fn crashed_words() -> String {
     "Remove stopped with an error (the log says which) before this went, so it stays.".to_owned()
+}
+
+/// Why one picked that waited for Windows' administrator step is said to be where it was, when Remove stopped with an
+/// error (logged as a crash) as Windows was asked: the step goes on by itself, so it may go yet.
+pub fn crashed_waiting_words() -> String {
+    format!(
+        "Remove stopped with an error (the log says which) as Windows was asked about this: it was still there then, \
+         but may go to the {BIN} yet. Measure again shows where it is."
+    )
 }
 
 /// Why one picked isn't said to have gone, though it isn't where it was, when Remove stopped with an error (logged as a
@@ -738,7 +754,7 @@ mod tests {
         assert_eq!(
             done.problems,
             [
-                problem("b", &crashed_words()),
+                problem("b", &crashed_waiting_words()),
                 problem("c", &crashed_words()),
                 problem("d", &crashed_gone_words()),
                 problem("e", &crashed_gone_words())

@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
@@ -133,14 +133,14 @@ struct PluginsAsk {
 }
 
 /// What the plugins line is worked out from, off the window's thread ([`work_out_plugins`]): what the look on show
-/// found and when it counts back from, the plugin files gone since (in the Recycle Bin from here, none while the page
-/// hasn't looked in the bin this run: then what its clean-ups kept is read instead; and what the Plugins page's Clean
-/// ups, uninstalls and moves took this session), and the years the Plugins page has picked.
+/// found and when it counts back from, what's in the Recycle Bin from here (by which change to it the page has: none
+/// while the page hasn't looked in the bin this run), what the Plugins page's Clean ups, uninstalls and moves took this
+/// session, and the years the Plugins page has picked.
 #[derive(Clone)]
 struct PluginsOf {
     found: Arc<space_plugins::Found>,
     at: chrono::NaiveDateTime,
-    binned: Option<Vec<String>>,
+    kept: Option<u64>,
     session: Vec<String>,
     years: u32,
 }
@@ -148,11 +148,14 @@ struct PluginsOf {
 impl PartialEq for PluginsOf {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.found, &other.found)
-            && (self.at, self.years) == (other.at, other.years)
-            && self.binned == other.binned
+            && (self.at, self.kept, self.years) == (other.at, other.kept, other.years)
             && self.session == other.session
     }
 }
+
+/// What [`work_out_plugins`] gives its thread: which time it asked, what it's worked out from, and the plugin files in
+/// the Recycle Bin from here (none while the page hasn't looked in the bin: [`recorded_plugin_files`]).
+type PluginsWork = (u64, PluginsOf, Option<Vec<String>>);
 
 /// One look at the copies of the same sound: what the old app's duplicate finder found, read from the sound library
 /// the Sounds page read (`db`, read-only), grouped with that page's list of the sounds (`list`, with your songs' use
@@ -329,7 +332,7 @@ struct Page {
     /// the years picked there, or what's in the Recycle Bin from here), and the thread that works it out.
     plugins_shown: Option<space_plugins::Found>,
     plugins_of: Option<PluginsOf>,
-    plugins_work: Looks<(u64, PluginsOf)>,
+    plugins_work: Looks<PluginsWork>,
     /// The look at the copies of the same sound, what the last one found (it stays on show while the next one looks),
     /// and whether one is on; the Sounds page's list the newest look was asked for (held weakly: the list itself is
     /// that page's to let go; none once that look failed), and what the look on show read from the sound library, with
@@ -1812,16 +1815,17 @@ fn work_out_plugins(app: &AppWindow) {
         }
         p.plugins_of = Some(of.clone());
         let (id, _) = p.plugins_work.next();
-        Some((id, of))
+        Some((id, of, binned_plugin_files(&p)))
     });
     let Some(ask) = ask else { return };
     let weak = app.as_weak();
-    let data = paths::data_dir();
-    // A crash (logged as one) leaves the line as it was, until what it's worked out from changes again.
-    let work = move |(id, of): (u64, PluginsOf)| {
-        if let Ok(found) = catch_crash(AssertUnwindSafe(|| plugins_as_shown(&of, &data))) {
-            arrive(&weak, Step::PluginsNow(id, Box::new(found)));
-        }
+    // A crash (logged as one) shows the look's plugins as they were found, until what they're worked out from changes
+    // again: the line doesn't say it's reading for ever.
+    let work = move |(id, of, binned): PluginsWork| {
+        let binned = binned.unwrap_or_else(recorded_plugin_files);
+        let found = catch_crash(AssertUnwindSafe(|| plugins_as_shown(&of, &binned)))
+            .unwrap_or_else(|_| of.found.as_ref().clone());
+        arrive(&weak, Step::PluginsNow(id, Box::new(found)));
     };
     let started = PAGE.with(|p| p.borrow_mut().plugins_work.ask("Space plugins line", work, ask));
     if let Err(e) = started {
@@ -1831,21 +1835,21 @@ fn work_out_plugins(app: &AppWindow) {
     }
 }
 
-/// What the plugins line is worked out from now: none before a look has found anything.
+/// What the plugins line is worked out from now: none before a look has found anything. Quick: what's in the Recycle
+/// Bin is told by which change to it the page has.
 fn plugins_of(p: &Page) -> Option<PluginsOf> {
     let (found, at) = p.plugins.clone()?;
     let session = plugins_page::gone_this_session();
     let years = plugins_page::unused_years().unwrap_or(found.years);
-    Some(PluginsOf { found, at, binned: binned_plugin_files(p), session, years })
+    Some(PluginsOf { found, at, kept: p.kept.as_ref().map(|k| k.seq), session, years })
 }
 
 /// What the plugins line shows, as `of` says: what the look found, with the years the Plugins page has picked, less
-/// what's gone since (what the app's clean-ups here sent to the Recycle Bin and is still there, as `data`'s record has
-/// it before the page has looked in the bin, and what the Plugins page's Clean ups and uninstalls took this session).
-/// Copies, sorts and goes through every plugin's folders: call it off the window's thread.
-fn plugins_as_shown(of: &PluginsOf, data: &Path) -> space_plugins::Found {
-    let mut gone = of.binned.clone().unwrap_or_else(|| binned::plugin_files(data));
-    gone.extend(of.session.iter().cloned());
+/// what's gone since (`binned`: what the app's clean-ups here sent to the Recycle Bin that's still there; and what the
+/// Plugins page's Clean ups and uninstalls took this session). Copies, sorts and goes through every plugin's folders:
+/// call it off the window's thread.
+fn plugins_as_shown(of: &PluginsOf, binned: &[String]) -> space_plugins::Found {
+    let gone: Vec<String> = binned.iter().chain(&of.session).cloned().collect();
     of.found.as_of(of.years, of.at).without(&gone)
 }
 
@@ -1940,6 +1944,14 @@ fn binned_plugin_files(p: &Page) -> Option<Vec<String>> {
 /// The same, for the Plugins page: it leaves them out of what it counts, as this page does, so the two pages agree.
 pub fn plugin_files_in_bin() -> Option<Vec<String>> {
     PAGE.with(|p| binned_plugin_files(&p.borrow()))
+}
+
+/// The plugin files the app's clean-ups here kept as sent to the Recycle Bin, as the app's folder had them when first
+/// asked this run ([`binned::plugin_files`]): for before the page has looked in the bin. Only a clean-up here changes
+/// what's kept, and once one has, the page has looked. Reads the disk the first time: call it off the window's thread.
+pub fn recorded_plugin_files() -> Vec<String> {
+    static RECORDED: OnceLock<Vec<String>> = OnceLock::new();
+    RECORDED.get_or_init(|| binned::plugin_files(&paths::data_dir())).clone()
 }
 
 /// The folders to look for spare copies in and which formats your saves use, from the library (read-only, and closed
@@ -2572,8 +2584,7 @@ pub fn show_sample(app: &AppWindow, sample: Sample, picked: &str) {
         // Worked out here, with no thread to send it back, and nothing read from the disk for it: with no made-up
         // bin, nothing in it is a plugin's.
         if let Some(of) = plugins_of(&p) {
-            let made_up = PluginsOf { binned: Some(of.binned.clone().unwrap_or_default()), ..of.clone() };
-            p.plugins_shown = Some(plugins_as_shown(&made_up, Path::new("")));
+            p.plugins_shown = Some(plugins_as_shown(&of, &binned_plugin_files(&p).unwrap_or_default()));
             p.plugins_of = Some(of);
         }
         p.put_backs = sample.put_backs;

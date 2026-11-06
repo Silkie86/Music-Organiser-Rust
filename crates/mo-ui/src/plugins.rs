@@ -347,7 +347,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         let today = Local::now().date_naive();
         // Before Space has looked in the bin this run, what its clean-ups kept says (the whole-app review of 6 Nov,
         // E1-4): what they sent yesterday isn't counted as installed today.
-        let in_bin = in_bin.unwrap_or_else(|| mo_app::binned::plugin_files(&mo_app::paths::data_dir()));
+        let in_bin = in_bin.unwrap_or_else(crate::space::recorded_plugin_files);
         let same = |(p, s, b, d): &Of| *p == path && Some(s) == stamp.as_ref() && *b == in_bin && *d == today;
         if !whatever && last.as_ref().is_some_and(same) {
             log::info("Plugins", "Nothing was written to the library since the last read: the list stays as it is");
