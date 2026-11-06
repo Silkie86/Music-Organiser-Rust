@@ -29,6 +29,8 @@ struct Look {
     /// Stops the look under way.
     stop: Option<Arc<AtomicBool>>,
     found: CopiesFound,
+    /// The Space page counts the copies too (its Copies of the same sound): they're looked for with the switch off.
+    for_space: bool,
 }
 
 thread_local! {
@@ -48,17 +50,41 @@ pub(super) fn found() -> CopiesFound {
     LOOK.with(|l| l.borrow().found)
 }
 
+/// The Space page wants the copies (its Copies of the same sound, the same copies as Hide duplicates hides): they're
+/// looked for from now on whether the switch is on or not, and Space is told as they come ([`crate::space::sounds_changed`]).
+pub(crate) fn for_space(app: &AppWindow) {
+    LOOK.with(|l| l.borrow_mut().for_space = true);
+    wanted(app);
+}
+
+/// Look again at these sounds' files (as they're now on disk) when nothing's under way: after Hide duplicates is
+/// turned on (`failed_only`: only if the last look failed, so it's tried again), or on Space's Measure again (every
+/// time: only files changed since are read).
+pub(crate) fn look_again(app: &AppWindow, failed_only: bool) {
+    LOOK.with(|l| {
+        let mut l = l.borrow_mut();
+        if l.stop.is_none() && (!failed_only || l.found == CopiesFound::Failed) {
+            l.of = None;
+            l.found = CopiesFound::NotLooked;
+        }
+    });
+    wanted(app);
+}
+
 /// Whether the look is for (or was for) a list sharing `list`'s sounds.
 fn looks_at(l: &Look, list: &SoundList) -> bool {
     l.of.as_ref().is_some_and(|of| of.is_of(list))
 }
 
-/// The page's list or switch changed: with Hide duplicates on and every sound read, the copies are looked for in them,
-/// unless they're already being (or have been). With it off, a look under way stops.
+/// The page's list or switch changed: with Hide duplicates on (or the Space page counting copies) and every sound
+/// read, the copies are looked for in them, unless they're already being (or have been, or that look failed: it's
+/// tried again when the switch is turned off and on, or the sounds are read again). With it off, a look under way
+/// stops.
 pub(super) fn wanted(app: &AppWindow) {
+    let for_space = LOOK.with(|l| l.borrow().for_space);
     let (list, on, whole) = PAGE.with(|p| {
         let p = p.borrow();
-        (p.list.clone(), p.filters.hide_copies, p.read && p.partial.is_none() && !p.list.is_empty())
+        (p.list.clone(), p.filters.hide_copies || for_space, p.read && p.partial.is_none() && !p.list.is_empty())
     });
     if super::HERE.with(|h| *h.borrow()) {
         // The screenshots and tests that work on the window's thread never read files.
@@ -69,7 +95,7 @@ pub(super) fn wanted(app: &AppWindow) {
             let mut l = l.borrow_mut();
             if let Some(stop) = l.stop.take() {
                 stop.store(true, Ordering::Relaxed);
-                // Looked for again from what was kept, next time it's on.
+                // Looked for again from what was kept, next time it's on. A finished look stays known.
                 l.of = None;
                 l.found = CopiesFound::NotLooked;
             }
@@ -178,7 +204,14 @@ fn heard(app: &AppWindow, look: u64, word: Word) {
                     l.stop = None;
                 }
             });
-            super::refresh(app);
+            // The list changes only with the switch on; its chip says how far it's got either way.
+            if PAGE.with(|p| p.borrow().filters.hide_copies) {
+                super::refresh(app);
+            } else {
+                super::show_chips(app);
+            }
+            // The Space page counts these copies too (as final only once they're found: [`found`]).
+            crate::space::sounds_changed(app);
         }
         Word::Reading { done, of } => {
             LOOK.with(|l| l.borrow_mut().found = CopiesFound::Looking { done, of });
@@ -188,11 +221,12 @@ fn heard(app: &AppWindow, look: u64, word: Word) {
             LOOK.with(|l| {
                 let mut l = l.borrow_mut();
                 l.found = CopiesFound::Failed;
+                // Kept as looked at, so a filter or search doesn't start the whole look again (review B-2): tried
+                // again when the switch is turned off and on, or the sounds are read again.
                 l.stop = None;
-                // Tried again when the switch is turned off and on, or the sounds are read again.
-                l.of = None;
             });
             super::show_chips(app);
+            crate::space::sounds_changed(app);
         }
     }
 }

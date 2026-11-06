@@ -260,6 +260,39 @@ pub struct Copies {
     group_of: HashMap<usize, u32>,
     /// How many sounds are copies of another (each group's sounds but one).
     copies: usize,
+    /// Each group's sounds, by place.
+    groups: Vec<Vec<usize>>,
+    /// Each grouped sound's file size in bytes, by place, when known.
+    sizes: HashMap<usize, u64>,
+}
+
+/// What told a sound to keep from its copy ([`SoundList::why_kept`]): the first of these that does, in this order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeptFor {
+    /// Your projects use it more.
+    Used,
+    Favourite,
+    Stars,
+    Plays,
+    Tags,
+    /// The older file (most likely the first).
+    Older,
+    /// Nothing else did: by path.
+    Path,
+}
+
+/// A sound's copies (the same audio), as [`SoundList::copy_groups`] gives them: by place in the list, the one to keep
+/// first, each with its file's size in bytes (0 when not known).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopyGroup {
+    pub sounds: Vec<(usize, u64)>,
+}
+
+impl CopyGroup {
+    /// The room the copies take: every file but the one to keep.
+    pub fn spare_bytes(&self) -> u64 {
+        self.sounds.iter().skip(1).fold(0u64, |sum, (_, b)| sum.saturating_add(*b))
+    }
 }
 
 impl Copies {
@@ -390,18 +423,25 @@ impl SoundList {
     pub fn copies_in(&self, same: &SameAudio) -> Arc<Copies> {
         let places: HashMap<i64, usize> = self.shared.sounds.iter().enumerate().map(|(i, s)| (s.id, i)).collect();
         let mut group_of = HashMap::new();
+        let mut groups = Vec::new();
+        let mut sizes = HashMap::new();
         let mut copies = 0;
-        let mut n = 0u32;
         for group in &same.groups {
             let here: Vec<usize> = group.iter().filter_map(|id| places.get(id).copied()).collect();
             if here.len() < 2 {
                 continue;
             }
             copies += here.len() - 1;
-            group_of.extend(here.into_iter().map(|i| (i, n)));
-            n += 1;
+            let n = groups.len() as u32;
+            for (&id, &i) in group.iter().filter_map(|id| Some((id, places.get(id)?))) {
+                group_of.insert(i, n);
+                if let Some(&size) = same.sizes.get(&id) {
+                    sizes.insert(i, size);
+                }
+            }
+            groups.push(here);
         }
-        Arc::new(Copies { group_of, copies })
+        Arc::new(Copies { group_of, copies, groups, sizes })
     }
 
     /// This list with `copies` (from [`SoundList::copies_in`] on a list sharing its sounds). What it holds is shared,
@@ -418,6 +458,26 @@ impl SoundList {
         if self.copies.is_none() && self.shares_with(other) {
             self.copies = other.copies.clone();
         }
+    }
+
+    /// Every sound's copies, once known (empty before), the one to keep first by [`SoundList::keep_first`] (what the
+    /// Sounds page shows with Hide duplicates on and no other filter), the groups whose copies take the most room
+    /// first. For the Space page's Copies of the same sound: call it off the window's thread.
+    pub fn copy_groups(&self) -> Vec<CopyGroup> {
+        let Some(copies) = self.copies.as_deref() else { return Vec::new() };
+        let mut groups: Vec<CopyGroup> = copies
+            .groups
+            .iter()
+            .map(|g| {
+                let mut places = g.clone();
+                places.sort_by(|&a, &b| self.keep_first(a, b));
+                CopyGroup {
+                    sounds: places.into_iter().map(|i| (i, copies.sizes.get(&i).copied().unwrap_or(0))).collect(),
+                }
+            })
+            .collect();
+        groups.sort_by(|a, b| b.spare_bytes().cmp(&a.spare_bytes()).then_with(|| a.sounds.cmp(&b.sounds)));
+        groups
     }
 
     /// Whether the sound at `i` has a copy (the same audio) that Hide duplicates may show instead.
@@ -438,17 +498,31 @@ impl SoundList {
     /// Of two copies of the same sound, the one to keep showing first: the one your projects use most, then a
     /// favourite, more stars, more plays, more tags, the older file (the first, most likely), and then by path.
     fn keep_first(&self, a: usize, b: usize) -> std::cmp::Ordering {
+        self.keep_by(a, b).0
+    }
+
+    /// [`SoundList::keep_first`], and what told the two apart (the first rule that does): one list of rules for the
+    /// order and for what the Space page says of it ([`SoundList::why_kept`]).
+    fn keep_by(&self, a: usize, b: usize) -> (std::cmp::Ordering, KeptFor) {
         let (sa, sb) = (&self.shared.sounds[a], &self.shared.sounds[b]);
         let used = |s: &Sound| self.used.as_ref().and_then(|u| u.get(&s.id)).map_or(0, |u| u.projects);
-        used(sb)
-            .cmp(&used(sa))
-            .then(sb.favourite.cmp(&sa.favourite))
-            .then(sb.rating.cmp(&sa.rating))
-            .then(sb.plays.cmp(&sa.plays))
-            .then(sb.tags.len().cmp(&sa.tags.len()))
-            .then(sa.added.cmp(&sb.added))
-            .then_with(|| sa.path.cmp(&sb.path))
-            .then(a.cmp(&b))
+        let rules = [
+            (KeptFor::Used, used(sb).cmp(&used(sa))),
+            (KeptFor::Favourite, sb.favourite.cmp(&sa.favourite)),
+            (KeptFor::Stars, sb.rating.cmp(&sa.rating)),
+            (KeptFor::Plays, sb.plays.cmp(&sa.plays)),
+            (KeptFor::Tags, sb.tags.len().cmp(&sa.tags.len())),
+            (KeptFor::Older, sa.added.cmp(&sb.added)),
+        ];
+        if let Some((rule, by)) = rules.into_iter().find(|(_, by)| by.is_ne()) {
+            return (by, rule);
+        }
+        (sa.path.cmp(&sb.path).then(a.cmp(&b)), KeptFor::Path)
+    }
+
+    /// Why the sound at `a` is kept before its copy at `b` ([`SoundList::keep_first`]).
+    pub fn why_kept(&self, a: usize, b: usize) -> KeptFor {
+        self.keep_by(a, b).1
     }
 
     /// The best to keep of each group's sounds in `places` (by [`SoundList::keep_first`]), by group.
@@ -1505,7 +1579,7 @@ mod tests {
         sounds[1].sound_type = "Snare".into();
         let mut list = SoundList::new(sounds);
         assert_eq!(list.copies(), None);
-        list.set_copies(&SameAudio { groups: vec![vec![1, 2, 3], vec![5, 99]] });
+        list.set_copies(&SameAudio { groups: vec![vec![1, 2, 3], vec![5, 99]], ..SameAudio::default() });
         // The group with a sound not in the list is none.
         assert_eq!(list.copies(), Some(2));
         let ids = |v: &[usize]| v.iter().map(|&i| list.sound(i).unwrap().id).collect::<Vec<_>>();
@@ -1543,7 +1617,7 @@ mod tests {
         sounds[1].tags = vec!["dark".into()];
         let mut list = SoundList::new(sounds);
         let with_use = list.sharing();
-        list.set_copies(&SameAudio { groups: vec![vec![1, 2]] });
+        list.set_copies(&SameAudio { groups: vec![vec![1, 2]], ..SameAudio::default() });
         let on = Filters { hide_copies: true, ..Filters::default() };
         let (shown, counts) = list.view_counted(&on, Order::Name, 0);
         assert_eq!(shown.len(), 1);

@@ -1,22 +1,19 @@
 //! The Space page's copies of the same sound: information only, as its question round agreed (question 4). How many
-//! sounds your sample folders hold more than once, even renamed, converted to another format or trimmed, as the old
-//! app's duplicate finder found them, and the room the copies that are the same sound take. [`mo_sounds::duplicates`]
-//! groups them, the one to keep first, as the old app's Duplicates page did. Nothing here moves, hides or removes
-//! anything: samples never move or go (rule 2), and copies only ever hide in the app.
+//! sounds your sample folders hold more than once, as the Sounds page's Hide duplicates finds them: only sounds whose
+//! audio is exactly the same ([`mo_sounds::copies`]), never ones that only sound alike (review E1-2, 6 Nov: the card
+//! and the switch agree on what a copy is, which one to keep and which are hidden). The one to keep is the one that
+//! page shows ([`SoundList::copy_groups`]). Nothing here moves, hides or removes anything: samples never move or go
+//! (rule 2), and copies only ever hide in the app.
 
-use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 use mo_formats::paths;
-use mo_sounds::Sound;
-pub use mo_sounds::duplicates::Finds;
-use mo_sounds::duplicates::{self, DuplicateGroup};
-use mo_sounds::usage::Usage;
 use mo_space::size::size_text;
 
 use crate::drag_out::count_of;
 use crate::shell::{folder_of, wrappable_path};
 use crate::songs::thousands;
+use crate::sounds::{CopyGroup, KeptFor, SoundList};
 use crate::space::{Card, Line, Opens, Part};
 
 /// The line's id, and its card's.
@@ -36,19 +33,22 @@ const KIND: &str = "SOUND COPIES";
 const TITLE: &str = "Copies of the same sound";
 
 /// What the card says of what its copies are, before how many there are.
-const WHAT_THEY_ARE: &str =
-    "Sounds your sample folders hold more than once, even renamed, converted to another format or trimmed.";
+const WHAT_THEY_ARE: &str = "Sounds your sample folders hold more than once: the very same audio, even renamed or \
+    saved in another file.";
 
-/// What the card says of where the copies come from, what its room is, and that nothing goes from here.
-const NOTE: &str = "As the old app's duplicate finder found them. The room is what the copies that are the same sound \
-    take, hidden ones too (hiding leaves the file where it is); very similar ones may differ on purpose, so they don't \
-    count. Nothing goes from here: your samples stay where they are.";
+/// What the card says of how copies are found, which one is kept, and that nothing goes from here.
+pub const NOTE: &str = "Only sounds whose audio is exactly the same count, as the Sounds page's Hide duplicates finds \
+    them: sounds that only sound alike never do. The one to keep is the one that page shows: the one your projects \
+    use most, then a favourite, more stars, more plays. Nothing goes from here: your samples stay where they are.";
 
-/// What a hidden file's line says.
-const HIDDEN: &str = "Hidden in the app";
+/// What a copy's line says while Hide duplicates is on.
+pub const HIDDEN: &str = "Hidden by Hide duplicates";
 
-/// One file of a sound with copies: where it is, its size, whether it's hidden in the app, and why it's the one to
-/// keep or how it's a copy ("Exact copy, renamed").
+/// Why a copy is one.
+const SAME: &str = "The very same audio";
+
+/// One file of a sound with copies: where it is, its size, whether Hide duplicates hides it, and why it's the one to
+/// keep or that it's a copy.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct File {
     pub path: String,
@@ -60,119 +60,103 @@ pub struct File {
 /// A sound with copies, as the card lists it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Copied {
-    /// The one to keep's name, and its id for its link to the Sounds page (none when it's hidden: that page doesn't
-    /// list it).
+    /// The one to keep's name, and its id for its link to the Sounds page.
     pub name: String,
     pub id: Option<i64>,
     /// Its files, the one to keep first: the first [`FILES`] of them, and how many more there are.
     pub files: Vec<File>,
     pub more: usize,
-    /// Of its copies: how many are the same sound, only very similar, and hidden (of either; the one to keep is
-    /// hidden only when every file is).
-    pub same: usize,
-    pub similar: usize,
+    /// How many copies it has (its files but the one to keep), and how many of them Hide duplicates hides.
+    pub copies: usize,
     pub hidden: usize,
-    /// The room its copies that are the same sound take.
+    /// The room its copies take.
     pub bytes: u64,
 }
 
 /// What a look found.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Found {
-    /// How many sounds have copies; of their copies, how many are the same sound, only very similar, and hidden (of
-    /// either).
+    /// How many sounds have copies; how many copies there are, and how many of them Hide duplicates hides.
     pub sounds: usize,
-    pub same: usize,
-    pub similar: usize,
+    pub copies: usize,
     pub hidden: usize,
-    /// The room the copies that are the same sound take, hidden ones too: hiding leaves the file where it is.
+    /// The room the copies take, the ones Hide duplicates hides too: hiding leaves the file where it is. (Sounds hidden
+    /// in the old app aren't on the Sounds page, so they aren't counted.)
     pub bytes: u64,
     /// The sounds whose copies take the most room, the first [`LISTED`].
     pub listed: Vec<Copied>,
 }
 
-/// Groups the copies `finds` holds of `sounds` (the Sounds page's list, which leaves hidden copies out: `finds` has
-/// those) as the old app did, the one to keep first (`usage`: how your songs use each sound, once that's known; one
-/// they use is the one to keep), and what the page shows of them. Goes through the whole list once, and every copy the
-/// finder found: call it away from the window's thread.
-pub fn look(sounds: &[Sound], usage: Option<&HashMap<i64, Usage>>, finds: &Finds) -> Found {
-    // The sounds with copies, found once: the grouping and the card only ever look up these.
-    let copied: HashSet<i64> =
-        finds.matches.iter().flat_map(|m| [m.a, m.b]).chain(finds.exact.iter().map(|e| e.0)).collect();
-    let by_id: HashMap<i64, &Sound> =
-        sounds.iter().chain(&finds.hidden).filter(|s| copied.contains(&s.id)).map(|s| (s.id, s)).collect();
-    let none = HashMap::new();
-    let groups =
-        duplicates::groups(by_id.values().copied(), usage.unwrap_or(&none), &finds.matches, &finds.exact, &finds.sizes);
-    let hidden: HashSet<i64> = finds.hidden.iter().map(|s| s.id).collect();
-    found_of(&groups, &by_id, &hidden)
-}
-
-/// What the page shows of `groups` (biggest saving first): every count, and the first [`LISTED`] with their files,
-/// each sound found in `by_id`. `hidden`: the sounds you've hidden.
-fn found_of(groups: &[DuplicateGroup], by_id: &HashMap<i64, &Sound>, hidden: &HashSet<i64>) -> Found {
-    let listed = groups.get(..LISTED.min(groups.len())).unwrap_or_default();
+/// What the card shows of the copies the Sounds page's `list` knows ([`SoundList::copy_groups`]; none before a look
+/// has found them), with Hide duplicates on (`hiding`) or off. Goes through every group: call it away from the
+/// window's thread.
+pub fn look(list: &SoundList, hiding: bool) -> Found {
+    let groups = list.copy_groups();
     let mut found = Found { sounds: groups.len(), ..Found::default() };
-    for g in groups {
-        let (same, similar, hid) = counts_of(g, hidden);
-        found.same += same;
-        found.similar += similar;
-        found.hidden += hid;
-        found.bytes = found.bytes.saturating_add(bytes(g.spare_bytes));
+    for g in &groups {
+        let copies = g.sounds.len() - 1;
+        found.copies += copies;
+        if hiding {
+            found.hidden += copies;
+        }
+        found.bytes = found.bytes.saturating_add(g.spare_bytes());
     }
-    found.listed = listed.iter().map(|g| copied(g, by_id, hidden)).collect();
+    found.listed = groups.iter().take(LISTED).map(|g| copied(list, g, hiding)).collect();
     found
 }
 
-/// Of a group's copies (not the one to keep): how many are the same sound as the one to keep, only very similar, and
-/// hidden.
-fn counts_of(g: &DuplicateGroup, hidden: &HashSet<i64>) -> (usize, usize, usize) {
-    let copies = || g.members.iter().filter(|m| !m.keep);
-    (g.same_copies(), copies().filter(|m| !m.same).count(), copies().filter(|m| hidden.contains(&m.id)).count())
-}
-
-fn copied(g: &DuplicateGroup, by_id: &HashMap<i64, &Sound>, hidden: &HashSet<i64>) -> Copied {
-    let keep = g.members.first();
-    let (same, similar, hid) = counts_of(g, hidden);
-    let files = g.members.iter().take(FILES).filter_map(|m| {
-        let s = by_id.get(&m.id)?;
-        Some(File { path: s.path.clone(), bytes: bytes(m.size), hidden: hidden.contains(&m.id), why: m.why.clone() })
+fn copied(list: &SoundList, g: &CopyGroup, hiding: bool) -> Copied {
+    let keep = g.sounds.first().and_then(|&(i, _)| list.sound(i));
+    let copies = g.sounds.len() - 1;
+    let files = g.sounds.iter().take(FILES).enumerate().filter_map(|(n, &(i, bytes))| {
+        let s = list.sound(i)?;
+        let why = if n == 0 { keep_why(list, g) } else { SAME.to_owned() };
+        Some(File { path: s.path.clone(), bytes, hidden: hiding && n > 0, why })
     });
     Copied {
-        name: keep.and_then(|m| by_id.get(&m.id)).map(|s| s.name().to_owned()).unwrap_or_default(),
-        id: keep.filter(|m| !hidden.contains(&m.id)).map(|m| m.id),
+        name: keep.map(|s| s.name().to_owned()).unwrap_or_default(),
+        id: keep.map(|s| s.id),
         files: files.collect(),
-        more: g.members.len().saturating_sub(FILES),
-        same,
-        similar,
-        hidden: hid,
-        bytes: bytes(g.spare_bytes),
+        more: g.sounds.len().saturating_sub(FILES),
+        copies,
+        hidden: if hiding { copies } else { 0 },
+        bytes: g.spare_bytes(),
     }
 }
 
-/// A size the library keeps (none known, or damaged, below 0: none).
-fn bytes(size: i64) -> u64 {
-    u64::try_from(size).unwrap_or(0)
+/// Why the first of `g` is the one to keep, against the next: the first thing [`SoundList::copy_groups`]' order
+/// goes by that tells them apart.
+fn keep_why(list: &SoundList, g: &CopyGroup) -> String {
+    let (Some(&(a, _)), Some(&(b, _))) = (g.sounds.first(), g.sounds.get(1)) else { return String::new() };
+    let reason = match list.why_kept(a, b) {
+        KeptFor::Used => format!("used in {}", count_of(list.used_in(a).unwrap_or(0) as usize, "project", "projects")),
+        KeptFor::Favourite => "a favourite".to_owned(),
+        KeptFor::Stars => "more stars".to_owned(),
+        KeptFor::Plays => "played more".to_owned(),
+        KeptFor::Tags => "more tags".to_owned(),
+        KeptFor::Older => "the oldest file".to_owned(),
+        KeptFor::Path => "first by its folder".to_owned(),
+    };
+    format!("Best to keep: {reason}")
 }
 
-/// "2 the same sound, 1 only very similar, 1 hidden", as the old app said it, leaving out what there's none of.
-fn kinds(same: usize, similar: usize, hidden: usize) -> String {
-    let said: Vec<String> = [(same, "the same sound"), (similar, "only very similar"), (hidden, "hidden")]
-        .into_iter()
-        .filter(|(n, _)| *n > 0)
-        .map(|(n, what)| format!("{} {what}", thousands(n)))
-        .collect();
-    said.join(", ")
+/// "2 copies, 1 hidden by Hide duplicates", leaving out what there's none of.
+fn kinds(copies: usize, hidden: usize) -> String {
+    let mut said = count_of(copies, "copy", "copies");
+    if hidden > 0 {
+        said.push_str(&format!(", {} hidden by Hide duplicates", thousands(hidden)));
+    }
+    said
 }
 
-/// "1,234 sounds have copies: 2,345 the same sound, 456 only very similar, 12 hidden".
+/// "1,234 sounds have copies: 2,345 copies, 2,345 hidden by Hide duplicates".
 fn counts(f: &Found) -> String {
-    format!("{} copies: {}", count_of(f.sounds, "sound has", "sounds have"), kinds(f.same, f.similar, f.hidden))
+    format!("{}: {}", count_of(f.sounds, "sound has copies", "sounds have copies"), kinds(f.copies, f.hidden))
 }
 
-/// The line under Also taking room: how many sounds have copies and what's in them, with the room the copies that are
-/// the same sound take. While the sounds are read or the first look counts their copies (`looking`, nothing found
-/// yet) it says so; none when a look found no copies, or none has finished and none is on.
+/// The line under Also taking room: how many sounds have copies and what's in them, with the room the copies take.
+/// While the sounds are read or the first look counts their copies (`looking`, nothing found yet) it says so; none
+/// when a look found no copies, or none has finished and none is on.
 pub fn line(found: Option<&Found>, looking: bool) -> Option<Line> {
     let line = |why: String, size: String| Line { id: SOUND_COPIES, title: TITLE, why, size };
     match found {
@@ -182,21 +166,17 @@ pub fn line(found: Option<&Found>, looking: bool) -> Option<Line> {
     }
 }
 
-/// The card: the room the copies that are the same sound take, how many sounds have copies and what they are, then
-/// the sounds whose copies take the most room, the first [`LISTED`], each with a link that shows it on the Sounds page
-/// and its files under it, the one to keep first (the first [`FILES`]), each with why, where it is and a link that
-/// shows it in its folder. The rest add up in one line.
+/// The card: the room the copies take, how many sounds have copies, then the sounds whose copies take the most room,
+/// the first [`LISTED`], each with a link that shows it on the Sounds page and its files under it, the one to keep
+/// first (the first [`FILES`]), each with why, where it is and a link that shows it in its folder. The rest add up in
+/// one line.
 pub fn card(found: Option<&Found>, looking: bool) -> Card {
     let mut parts = Vec::new();
     if let Some(f) = found {
         for c in &f.listed {
             parts.push(Part {
                 name: c.name.clone(),
-                what: format!(
-                    "{}: {}",
-                    count_of(c.same + c.similar, "copy", "copies"),
-                    kinds(c.same, c.similar, c.hidden)
-                ),
+                what: kinds(c.copies, c.hidden),
                 size: size_or_none(c.bytes),
                 sound: c.id,
                 ..Part::default()
@@ -229,12 +209,12 @@ pub fn card(found: Option<&Found>, looking: bool) -> Card {
             Some(f) => size_text(f.bytes),
         },
         big_note: match found {
-            Some(f) if f.same > 0 => format!("in {}", count_of(f.same, "copy", "copies")),
+            Some(f) if f.copies > 0 => format!("in {}", count_of(f.copies, "copy", "copies")),
             _ => String::new(),
         },
         lead: match found {
             Some(f) if f.sounds > 0 => format!("{WHAT_THEY_ARE} {}.", counts(f)),
-            Some(_) => "The old app's duplicate finder found no copies of the same sound.".to_owned(),
+            Some(_) => "No two of your sounds have exactly the same audio.".to_owned(),
             None if looking => LOOKING.to_owned(),
             None => String::new(),
         },
@@ -251,8 +231,8 @@ fn size_or_none(bytes: u64) -> String {
     if bytes == 0 { String::new() } else { size_text(bytes) }
 }
 
-/// A file's line under its sound: its name, why it's kept or how it's a copy and the folder it's in, its size, whether
-/// it's hidden in the app, and a link that shows it in its folder.
+/// A file's line under its sound: its name, why it's kept or that it's a copy and the folder it's in, its size,
+/// whether Hide duplicates hides it, and a link that shows it in its folder.
 fn file_part(f: &File) -> Part {
     let folder = wrappable_path(folder_of(&f.path));
     Part {
@@ -268,182 +248,110 @@ fn file_part(f: &File) -> Part {
 
 #[cfg(test)]
 mod tests {
-    use mo_sounds::{SoundAnalysis, SoundMatch};
+    use std::collections::HashMap;
+
+    use mo_sounds::Sound;
+    use mo_sounds::copies::SameAudio;
+    use mo_sounds::usage::Usage;
 
     use super::*;
 
-    fn sound(id: i64, path: &str, seconds: f64) -> Sound {
-        let mut s = Sound::new(id, path);
-        s.analysis = Some(SoundAnalysis { seconds, sample_rate: 44_100, peak_db: -1.0, ..SoundAnalysis::default() });
-        s
-    }
-
-    fn matched(a: i64, b: i64, kind: &str, apart: f64) -> SoundMatch {
-        SoundMatch { a, b, kind: kind.to_owned(), score: 1.0, offset: 0.0, apart: Some(apart), typical: Some(0.2) }
-    }
-
-    /// Kicks: one your songs use, an exact copy of it, one you've hidden, and an MP3 close enough to be the same sound;
-    /// and a snare with a trimmed copy, only very similar.
-    fn library() -> (Vec<Sound>, Finds) {
+    /// Kicks: three files of the very same audio, the second one your songs use; and two snares, the same too.
+    fn library() -> SoundList {
         let sounds = vec![
-            sound(1, r"D:\Samples\Kicks\Kick.wav", 1.0),
-            sound(2, r"D:\Packs\Drums\Kick copy.wav", 1.0),
-            sound(3, r"D:\Old\Kick.mp3", 1.02),
-            sound(4, r"D:\Samples\Snares\Snare.wav", 2.0),
-            sound(5, r"D:\Samples\Snares\Snare short.wav", 0.5),
+            Sound::new(1, r"D:\Samples\Kicks\Kick.wav"),
+            Sound::new(2, r"D:\Packs\Drums\Kick copy.wav"),
+            Sound::new(3, r"E:\Backup\Kick (2).wav"),
+            Sound::new(4, r"D:\Samples\Snares\Snare.wav"),
+            Sound::new(5, r"D:\Samples\Snares\Snare again.wav"),
+            Sound::new(6, r"D:\Samples\Hat.wav"),
         ];
-        let mut hidden = sound(6, r"E:\Backup\Kick (2).wav", 1.0);
-        hidden.hidden = true;
-        let finds = Finds {
-            matches: vec![matched(1, 3, "Converted", 0.5), matched(4, 5, "Trimmed", 0.2)],
-            exact: vec![(1, "AB".to_owned()), (2, "AB".to_owned()), (6, "AB".to_owned())],
-            sizes: HashMap::from([
-                (1, 1_000_000),
-                (2, 1_000_000),
-                (3, 400_000),
-                (4, 3_000_000),
-                (5, 800_000),
-                (6, 1_000_000),
-            ]),
-            hidden: vec![hidden],
-        };
-        (sounds, finds)
-    }
-
-    /// Your songs use the first kick.
-    fn usage() -> HashMap<i64, Usage> {
-        HashMap::from([(1, Usage { projects: 3, ..Usage::default() })])
+        let mut list = SoundList::new(sounds);
+        list.set_used(HashMap::from([(2, Usage { projects: 3, ..Usage::default() })]));
+        list.set_copies(&SameAudio {
+            groups: vec![vec![1, 2, 3], vec![4, 5]],
+            sizes: HashMap::from([(1, 1_000_000), (2, 1_000_000), (3, 1_000_000), (4, 200_000), (5, 200_000)]),
+        });
+        list
     }
 
     #[test]
-    fn copies_are_counted_with_the_hidden_ones_and_the_one_your_songs_use_kept() {
-        let (sounds, finds) = library();
-        let found = look(&sounds, Some(&usage()), &finds);
-        // The kicks: the one your songs use is kept; the exact copies (one hidden) and the MP3 are the same sound and
-        // count, 2.4 MB in all. The snare's trimmed copy is only very similar: it doesn't count.
-        assert_eq!((found.sounds, found.same, found.similar, found.hidden), (2, 3, 1, 1));
-        assert_eq!(found.bytes, 2_400_000);
+    fn copies_are_the_ones_hide_duplicates_finds_and_the_one_it_shows_is_kept() {
+        let list = library();
+        let found = look(&list, false);
+        assert_eq!((found.sounds, found.copies, found.hidden, found.bytes), (2, 3, 0, 2_200_000));
         let kick = &found.listed[0];
-        assert_eq!((kick.name.as_str(), kick.id), ("Kick", Some(1)));
+        assert_eq!((kick.name.as_str(), kick.id, kick.copies, kick.bytes), ("Kick copy", Some(2), 2, 2_000_000));
         let files: Vec<(&str, bool, &str)> =
             kick.files.iter().map(|f| (f.path.as_str(), f.hidden, f.why.as_str())).collect();
         assert_eq!(
             files,
             [
-                (r"D:\Samples\Kicks\Kick.wav", false, "Best to keep: 3 of your projects use this one"),
-                (r"D:\Packs\Drums\Kick copy.wav", false, "Exact copy, renamed"),
-                (r"E:\Backup\Kick (2).wav", true, "Exact copy, renamed"),
-                (r"D:\Old\Kick.mp3", false, "Same sound, converted to MP3"),
+                (r"D:\Packs\Drums\Kick copy.wav", false, "Best to keep: used in 3 projects"),
+                (r"D:\Samples\Kicks\Kick.wav", false, SAME),
+                (r"E:\Backup\Kick (2).wav", false, SAME),
             ]
         );
-        assert_eq!((kick.same, kick.similar, kick.hidden, kick.bytes, kick.more), (3, 0, 1, 2_400_000, 0));
-        let snare = &found.listed[1];
-        assert_eq!((snare.name.as_str(), snare.same, snare.similar, snare.bytes), ("Snare", 0, 1, 0));
-
-        // Before your songs' use is known, the best of the files is kept: the counts stay.
-        let found = look(&sounds, None, &finds);
-        let keep = &found.listed[0].files[0];
-        assert_eq!(
-            (keep.path.as_str(), keep.why.as_str()),
-            (r"D:\Packs\Drums\Kick copy.wav", "Best to keep: full quality, not compressed")
-        );
-        assert_eq!((found.sounds, found.same, found.similar, found.hidden, found.bytes), (2, 3, 1, 1, 2_400_000));
-        // With every file of a sound hidden, the kept one has no link to the Sounds page, which doesn't list it.
-        let hidden = sounds.into_iter().map(|s| Sound { hidden: true, ..s }).chain(finds.hidden.clone()).collect();
-        let found = look(&[], None, &Finds { hidden, ..finds });
-        // Only the copies count as hidden, as they're what the counts break down: 3 kicks and the snare's.
-        assert_eq!((found.listed[0].id, found.hidden, found.listed[0].hidden), (None, 4, 3));
+        // Hide duplicates on: its copies count as hidden, the one to keep doesn't.
+        let on = look(&list, true);
+        assert_eq!((on.hidden, on.listed[0].hidden, on.listed[1].hidden), (3, 2, 1));
+        assert_eq!(on.listed[0].files.iter().map(|f| f.hidden).collect::<Vec<_>>(), [false, true, true]);
+        // Nothing found yet: nothing counted.
+        assert_eq!(look(&SoundList::new(vec![Sound::new(1, "a.wav")]), true), Found::default());
     }
 
     #[test]
-    fn the_line_says_how_many_sounds_have_copies_and_their_room() {
-        let (sounds, finds) = library();
-        let found = look(&sounds, None, &finds);
-        let line = line(Some(&found), false).unwrap();
+    fn the_line_and_card_say_how_many_sounds_have_copies_and_their_room() {
+        let found = look(&library(), true);
+        let line = super::line(Some(&found), false).unwrap();
         assert_eq!(line.id, SOUND_COPIES);
-        assert_eq!(line.why, "2 sounds have copies: 3 the same sound, 1 only very similar, 1 hidden");
-        assert_eq!(line.size, "2.29 MB");
-        // While the sounds are read, and before the first look has found anything, it says so.
+        assert_eq!(line.why, "2 sounds have copies: 3 copies, 3 hidden by Hide duplicates");
+        assert_eq!(line.size, "2.1 MB");
         assert_eq!(super::line(None, true).map(|l| l.why), Some(LOOKING.to_owned()));
-        // No line when none are found, or nothing is known and nothing is looking.
         assert_eq!(super::line(Some(&Found::default()), true), None);
         assert_eq!(super::line(None, false), None);
-        let one = Found { sounds: 1, similar: 1, ..Found::default() };
-        assert_eq!(super::line(Some(&one), false).unwrap().why, "1 sound has copies: 1 only very similar");
-    }
-
-    #[test]
-    fn the_card_lists_the_sounds_whose_copies_take_most_with_their_files() {
-        let (sounds, finds) = library();
-        let found = look(&sounds, Some(&usage()), &finds);
         let card = card(Some(&found), false);
-        assert_eq!(card.big, "2.29 MB");
-        assert_eq!(card.big_note, "in 3 copies");
-        assert_eq!(
-            card.lead,
-            "Sounds your sample folders hold more than once, even renamed, converted to another format or trimmed. 2 \
-             sounds have copies: 3 the same sound, 1 only very similar, 1 hidden."
-        );
+        assert_eq!((card.big.as_str(), card.big_note.as_str()), ("2.1 MB", "in 3 copies"));
         assert_eq!(card.note, NOTE);
-        let rows: Vec<(&str, &str, &str, bool)> =
-            card.parts.iter().map(|p| (p.name.as_str(), p.what.as_str(), p.size.as_str(), p.under)).collect();
-        assert_eq!(
-            rows[..3],
-            [
-                ("Kick", "3 copies: 3 the same sound, 1 hidden", "2.29 MB", false),
-                (
-                    "Kick.wav",
-                    "Best to keep: 3 of your projects use this one · in D:\\\u{200B}Samples\\\u{200B}Kicks",
-                    "977 KB",
-                    true
-                ),
-                ("Kick copy.wav", "Exact copy, renamed · in D:\\\u{200B}Packs\\\u{200B}Drums", "977 KB", true),
-            ]
-        );
-        // The kept one's link shows it on the Sounds page; each file's shows it in its folder; a hidden file says so.
-        assert_eq!(card.parts[0].sound, Some(1));
-        assert_eq!(card.parts[1].open, Some((Opens::InFolder, PathBuf::from(r"D:\Samples\Kicks\Kick.wav"))));
-        assert_eq!((card.parts[3].name.as_str(), card.parts[3].status.as_str()), ("Kick (2).wav", HIDDEN));
-        assert_eq!(card.parts[4].what, "Same sound, converted to MP3 · in D:\\\u{200B}Old");
-        // The snare has nothing that counts: no size.
-        assert_eq!(
-            (card.parts[5].name.as_str(), card.parts[5].what.as_str(), card.parts[5].size.as_str()),
-            ("Snare", "1 copy: 1 only very similar", "")
-        );
-        assert_eq!(card.parts.len(), 8);
+        assert_eq!(card.parts[0].sound, Some(2));
+        assert_eq!(card.parts[0].what, "2 copies, 2 hidden by Hide duplicates");
+        assert_eq!((card.parts[2].name.as_str(), card.parts[2].status.as_str()), ("Kick.wav", HIDDEN));
+        assert_eq!(card.parts[1].status, "");
+        assert_eq!(card.parts.len(), 7);
         assert!(card.parts.iter().all(|p| p.tick.is_none()), "nothing goes from here");
-        // While looking, before anything's found.
+        let none = super::card(Some(&Found::default()), false);
+        assert_eq!(none.lead, "No two of your sounds have exactly the same audio.");
         let looking = super::card(None, true);
         assert_eq!((looking.big.as_str(), looking.lead.as_str()), ("Measuring…", LOOKING));
-        assert!(looking.parts.is_empty() && looking.note.is_empty());
     }
 
     #[test]
     fn a_long_list_shows_the_biggest_and_adds_up_the_rest() {
-        // 22 sounds with an exact copy each, the bigger the later; and the biggest has 6 more copies.
+        // 22 sounds with copies: sound n has n + 1 files of n thousand bytes each, the 22nd eight.
         let mut sounds = Vec::new();
-        let mut finds = Finds::default();
-        for n in 0..22i64 {
-            for copy in 0..if n == 21 { 8 } else { 2 } {
-                let id = n * 100 + copy;
-                sounds.push(sound(id, &format!(r"D:\Samples\Sound {n} ({copy}).wav"), 1.0));
-                finds.exact.push((id, format!("{n:04}")));
-                finds.sizes.insert(id, (n + 1) * 1000);
+        let mut groups = Vec::new();
+        let mut sizes = HashMap::new();
+        let mut id = 0;
+        for n in 1..=22u64 {
+            let files = if n == 22 { 8 } else { 2 };
+            let mut g = Vec::new();
+            for f in 0..files {
+                id += 1;
+                sounds.push(Sound::new(id, &format!(r"D:\S\{n}\{f}.wav")));
+                sizes.insert(id, if n == 22 { 22_000 } else { n * 1000 });
+                g.push(id);
             }
+            groups.push(g);
         }
-        let found = look(&sounds, None, &finds);
-        assert_eq!((found.sounds, found.same, found.listed.len()), (22, 21 + 7, LISTED));
+        let mut list = SoundList::new(sounds);
+        list.set_copies(&SameAudio { groups, sizes });
+        let found = look(&list, false);
+        assert_eq!((found.sounds, found.copies, found.listed.len()), (22, 21 + 7, LISTED));
         let biggest = &found.listed[0];
         assert_eq!((biggest.files.len(), biggest.more, biggest.bytes), (FILES, 3, 7 * 22_000));
         let card = card(Some(&found), false);
-        // The biggest's sixth to eighth files add up in a line under it.
         assert_eq!((card.parts[FILES + 1].name.as_str(), card.parts[FILES + 1].under), ("And 3 more files", true));
-        // The two smallest add up at the end: 1 KB and 2 KB of copies.
-        let last = card.parts.last().unwrap();
-        assert_eq!(
-            (last.name.as_str(), last.size.as_str(), last.under),
-            ("And 2 more sounds with copies", "2.93 KB", false)
-        );
+        assert_eq!(card.parts.last().map(|p| p.name.as_str()), Some("And 2 more sounds with copies"));
         assert_eq!(found.bytes, 7 * 22_000 + (1..=21).map(|n| n * 1000).sum::<u64>());
     }
 }

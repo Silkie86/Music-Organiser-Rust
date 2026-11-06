@@ -25,7 +25,7 @@ use mo_app::binned::{self, Kept};
 use mo_app::places::Place;
 use mo_app::plugins::folder_fixes::FolderFix;
 use mo_app::shortcuts::what_of;
-use mo_app::sounds::SoundList;
+use mo_app::sounds::{CopiesFound, SoundList};
 use mo_app::space::{self, Drive, Holds, OnPlugins, Opens, Part};
 use mo_app::space_bin::{self, BIN, CAN_PUT_BACK, PutBacks};
 use mo_app::space_bitwig::{self, BITWIG_COPIES, Copies, Fixes, Fixing, ToFix};
@@ -38,8 +38,6 @@ use mo_app::space_spare::{self, Removing, SPARE_COPIES, Stage};
 use mo_app::{backup, log, paths, shell};
 use mo_catch::catch_crash;
 use mo_library::folders::FolderList;
-use mo_sounds::SoundsDb;
-use mo_sounds::duplicates::Finds;
 use mo_space::app_files::{self, AppFilesPart};
 use mo_space::bitwig::{self, LibraryIndex};
 use mo_space::clean::{self, Bin, Done, Heard, Problem, SystemBin, What};
@@ -132,28 +130,15 @@ struct PluginsAsk {
     fixes: Vec<FolderFix>,
 }
 
-/// One look at the copies of the same sound: what the old app's duplicate finder found, read from the sound library
-/// the Sounds page read (`db`, read-only), grouped with that page's list of the sounds (`list`, with your songs' use
-/// once it's known), on the page's own low-priority thread. It's asked for on the page's first look, once what it
-/// shows is five minutes old, on Measure again, and when the Sounds page's list changes. It reads the sound library
-/// again only when that has changed since the look on show read it (`read`, with the library's stamp then,
-/// [`SoundsDb::stamp`]; none on Measure again): else a new list is grouped from what it read, and the same list's look
-/// stands (`same_list`).
+/// One look at the copies of the same sound: the copies the Sounds page's Hide duplicates found in its list of the
+/// sounds (`list`, with your songs' use once it's known), grouped as that page keeps them, with the switch on or off
+/// (`hiding`), on the page's own low-priority thread. Asked for on the page's first look, once what it shows is five
+/// minutes old, on Measure again, when the Sounds page's list changes (as the copies come), and when the switch does.
 struct CopiesAsk {
     id: u64,
     list: Arc<SoundList>,
-    db: PathBuf,
-    read: Option<(Arc<Finds>, String)>,
-    same_list: bool,
+    hiding: bool,
     stop: Arc<AtomicBool>,
-}
-
-/// What a look at the copies of the same sound brings back.
-enum CopiesLooked {
-    /// What it found, what it read from the sound library for it, and the library's stamp when it read that.
-    Found(space_sounds::Found, Arc<Finds>, String),
-    /// The list and the sound library are as the look on show found them: that stands.
-    Same,
 }
 
 /// What a look at the plugins no song has used lately brings back.
@@ -186,7 +171,7 @@ enum Step {
     SongsNone(u64),
     Plugins(u64, Box<PluginsLooked>),
     PluginsNone(u64),
-    Copies(u64, Box<CopiesLooked>),
+    Copies(u64, Box<space_sounds::Found>),
     CopiesNone(u64),
     Fixed(PathBuf, Fixing),
     FixDone,
@@ -305,13 +290,12 @@ struct Page {
     plugins_shown: Option<space_plugins::Found>,
     /// The look at the copies of the same sound, what the last one found (it stays on show while the next one looks),
     /// and whether one is on; the Sounds page's list the newest look was asked for (held weakly: the list itself is
-    /// that page's to let go; none once that look failed), and what the look on show read from the sound library, with
-    /// the library's stamp then.
+    /// that page's to let go; none once that look failed), and whether Hide duplicates was on for it.
     copies_look: Looks<CopiesAsk>,
     copies: Option<space_sounds::Found>,
     copies_looking: bool,
     copies_of: Weak<SoundList>,
-    copies_read: Option<(Arc<Finds>, String)>,
+    copies_hiding: bool,
     /// What the app's clean-ups put in the Recycle Bin that's still there: none until the bin has been looked in. Of
     /// two that arrive, the later change wins ([`Kept::seq`]).
     kept: Option<Kept>,
@@ -450,7 +434,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
             if !sounds_page::show_sound_by_id(&app, id) {
                 log::info("Space", "A sound on the copies card isn't on the Sounds page any more: counting again");
                 PAGE.with(|p| p.borrow_mut().copies_of = Weak::new());
-                look_for_sound_copies(&app, sounds_page::known(), false);
+                look_for_sound_copies(&app, sounds_page::known());
             }
             return;
         }
@@ -530,7 +514,7 @@ pub fn shown(app: &AppWindow) {
         show_wins(app);
     }
     if copies {
-        look_for_sound_copies(app, sounds, false);
+        look_for_sound_copies(app, sounds);
     }
     // What arrived while the page was off show, unless a look above has drawn it all since.
     if PAGE.with(|p| p.borrow().redraw) {
@@ -551,7 +535,7 @@ pub fn sounds_changed(app: &AppWindow) {
     }
     let sounds = sounds_page::known();
     if PAGE.with(|p| copies_due(&p.borrow(), &sounds, false)) {
-        look_for_sound_copies(app, sounds, false);
+        look_for_sound_copies(app, sounds);
     } else {
         show_also(app);
         show_card(app);
@@ -561,12 +545,14 @@ pub fn sounds_changed(app: &AppWindow) {
 /// Whether the copies of the same sound are due a look, with the Sounds page's sounds as `sounds` has them: none is
 /// while that page hasn't read them. One is when the newest look was for another of its lists than the one it has now
 /// (one with your songs' use counted in, or brought up to date), even while that look is on; else, with none on, when
-/// nothing's found yet, or when what's on show is five minutes old (`stale`: the look then reads the sound library
-/// again only if it changed).
+/// nothing's found yet, or when what's on show is five minutes old (`stale`), or Hide duplicates was turned on or off
+/// since (the copies it hides count as hidden).
 fn copies_due(p: &Page, sounds: &Known, stale: bool) -> bool {
     let Known::Read(list, _) = sounds else { return false };
-    let other = !Weak::ptr_eq(&p.copies_of, &Arc::downgrade(list));
-    other || (!p.copies_looking && (stale || p.copies.is_none()))
+    let other = !Weak::ptr_eq(&p.copies_of, &Arc::downgrade(list)) || p.copies_hiding != sounds_page::hides_copies();
+    // Measuring while the Sounds page looked, and that look failed: the page stops saying it's measuring.
+    let failed = p.copies_looking && sounds_page::copies_found() == CopiesFound::Failed;
+    other || failed || (!p.copies_looking && (stale || p.copies.is_none()))
 }
 
 /// Whether old copies are due a look as the page comes on show, with `moves` of the Plugins page's moves finished
@@ -771,7 +757,9 @@ fn chosen(app: &AppWindow, id: &str) {
                 look_for_plugins(app);
             }
             if !PAGE.with(|p| p.borrow().copies_looking) {
-                look_for_sound_copies(app, sounds_page::known(), true);
+                // The files as they are now: copies made since are found (only files changed since are read).
+                sounds_page::copies_look_again(app);
+                look_for_sound_copies(app, sounds_page::known());
             }
         }
         (REVEAL, Some(feed)) => crate::files::open_folder(&feed, &paths::data_dir().to_string_lossy()),
@@ -1695,76 +1683,69 @@ fn plugins_now(p: &Page) -> Option<space_plugins::Found> {
 }
 
 /// Asks for a new look at the copies of the same sound in the Sounds page's list as `sounds` has it, on the page's
-/// seventh low-priority thread ([`CopiesAsk`]); `again`: the sound library is read again even if it looks as it was
-/// (Measure again). With no list yet, or none coming, it only shows that.
-fn look_for_sound_copies(app: &AppWindow, sounds: Known, again: bool) {
-    let Known::Read(list, db) = sounds else {
+/// seventh low-priority thread ([`CopiesAsk`]). The copies are the ones the Sounds page's Hide duplicates finds: until
+/// that page has found them for this list it's asked to ([`sounds_page::copies_for_space`]), and this page looks again
+/// as they come ([`sounds_changed`]). With no list yet, or none coming, it only shows that.
+fn look_for_sound_copies(app: &AppWindow, sounds: Known) {
+    let Known::Read(list, _) = sounds else {
         show_also(app);
         show_card(app);
         return;
     };
+    sounds_page::copies_for_space(app);
+    let hiding = sounds_page::hides_copies();
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.feed.as_ref()?;
+        p.copies_of = Arc::downgrade(&list);
+        p.copies_hiding = hiding;
+        let state = sounds_page::copies_found();
+        if list.copies().is_none() || matches!(state, CopiesFound::Looking { .. } | CopiesFound::NotLooked) {
+            // Not all found for this list yet: measuring while the Sounds page looks (what's on show stays), and a
+            // look of this page's still on its way is for an older list, so it's dropped. Nothing new to show if the
+            // Sounds page's look failed.
+            let _ = p.copies_look.next();
+            p.copies_looking = !matches!(state, CopiesFound::Failed);
+            return None;
+        }
         let (id, stop) = p.copies_look.next();
         p.copies_looking = true;
-        let same_list = p.copies.is_some() && Weak::ptr_eq(&p.copies_of, &Arc::downgrade(&list));
-        p.copies_of = Arc::downgrade(&list);
-        // What the look on show read stands while the sound library is as it was then, unless Measure again asks.
-        let read = if again { None } else { p.copies_read.clone() };
-        Some(CopiesAsk { id, list, db, read, same_list, stop })
+        Some(CopiesAsk { id, list, hiding, stop })
     });
-    let Some(ask) = ask else { return };
-    let weak = app.as_weak();
-    // A crash in a look (logged as one) leaves the thread for the next look, and says so, as one that found nothing to
-    // show does.
-    let work = move |ask: CopiesAsk| {
-        let id = ask.id;
-        match catch_crash(AssertUnwindSafe(|| look_for_sound_copies_now(&ask))) {
-            Ok(Some(looked)) => arrive(&weak, Step::Copies(id, Box::new(looked))),
-            Ok(None) | Err(_) => arrive(&weak, Step::CopiesNone(id)),
+    if let Some(ask) = ask {
+        let weak = app.as_weak();
+        // A crash in a look (logged as one) leaves the thread for the next look, and says so, as one that found
+        // nothing to show does.
+        let work = move |ask: CopiesAsk| {
+            let id = ask.id;
+            match catch_crash(AssertUnwindSafe(|| look_for_sound_copies_now(&ask))) {
+                Ok(Some(found)) => arrive(&weak, Step::Copies(id, Box::new(found))),
+                Ok(None) | Err(_) => arrive(&weak, Step::CopiesNone(id)),
+            }
+        };
+        let started = PAGE.with(|p| p.borrow_mut().copies_look.ask("Space copies", work, ask));
+        if let Err(e) = started {
+            log::error("Space", &format!("Couldn't start counting the copies of your sounds: {e}"));
+            // Measure again can try again, and so can the page the next time it shows.
+            PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.copies_looking = false;
+                p.copies_of = Weak::new();
+            });
         }
-    };
-    let started = PAGE.with(|p| p.borrow_mut().copies_look.ask("Space copies", work, ask));
-    if let Err(e) = started {
-        log::error("Space", &format!("Couldn't start counting the copies of your sounds: {e}"));
-        // Measure again can try again, and so can the page the next time it shows.
-        PAGE.with(|p| {
-            let mut p = p.borrow_mut();
-            p.copies_looking = false;
-            p.copies_of = Weak::new();
-        });
     }
     // The first look's line says it's reading, and the card's Measure again waits for it.
     show_also(app);
     show_card(app);
 }
 
-/// One look at the copies of the same sound, off the window's thread: what the old app's duplicate finder found and
-/// the sounds you've hidden, from the sound library (read-only, and closed again first), or as the look on show read
-/// them while the library is as it was then, grouped with the Sounds page's list; or, when that's the same list too,
-/// only that. None when it was stopped, or the sound library couldn't be read (said in the log).
-fn look_for_sound_copies_now(ask: &CopiesAsk) -> Option<CopiesLooked> {
-    let stamp = SoundsDb::stamp(&ask.db);
-    let kept = ask.read.as_ref().filter(|(_, at)| *at == stamp).map(|(finds, _)| finds.clone());
-    if kept.is_some() && ask.same_list {
-        return Some(CopiesLooked::Same);
-    }
-    let finds = match kept {
-        Some(finds) => finds,
-        None => {
-            let read = SoundsDb::open_read_only(&ask.db).and_then(|db| db.finds());
-            let said = |e: mo_sounds::SoundsError| {
-                log::warning("Space", &format!("Couldn't read the copies of your sounds: {e}"));
-            };
-            Arc::new(read.map_err(said).ok()?)
-        }
-    };
+/// One look at the copies of the same sound, off the window's thread: the copies the Sounds page's list knows,
+/// grouped as that page keeps them. None when it was stopped.
+fn look_for_sound_copies_now(ask: &CopiesAsk) -> Option<space_sounds::Found> {
     if ask.stop.load(Ordering::Relaxed) {
         return None;
     }
-    let found = space_sounds::look(ask.list.sounds(), ask.list.usage_map(), &finds);
-    Some(CopiesLooked::Found(found, finds, stamp))
+    Some(space_sounds::look(&ask.list, ask.hiding))
 }
 
 /// The plugin files the app's clean-ups here sent to the Recycle Bin that are still there (spare plugin copies).
@@ -1933,12 +1914,8 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     p.plugins_looking = false;
                     Changed::Wins
                 }
-                Step::Copies(id, looked) if id == p.copies_look.asked => {
-                    if let CopiesLooked::Found(found, finds, stamp) = *looked {
-                        p.copies = Some(found);
-                        // What the last look read (every copy found) is let go on the freeing thread.
-                        background::free_later(p.copies_read.replace((finds, stamp)));
-                    }
+                Step::Copies(id, found) if id == p.copies_look.asked => {
+                    p.copies = Some(*found);
                     p.copies_looking = false;
                     Changed::Also
                 }

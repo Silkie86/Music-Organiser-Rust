@@ -588,10 +588,17 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
     START_READ.with(|s| {
         *s.borrow_mut() = Some(Box::new(move || {
             // The shuffle the page opens on: the sounds it puts first are read first. Not when you've picked another
-            // order meanwhile.
+            // order meanwhile, nor with Hide duplicates on: copies among the first would go again once the copies
+            // are known, and the tiles after them move (review B-5).
             let opening = PAGE.with(|p| {
                 let p = p.borrow();
-                (p.order == Order::Shuffled).then_some(Opening { seed: p.seed, view: p.chose_view.then_some(p.view) })
+                let hiding = if p.hide_copies_chosen {
+                    p.filters.hide_copies
+                } else {
+                    crate::settings::value(list::HIDE_COPIES_KEY).as_deref() == Some("on")
+                };
+                (p.order == Order::Shuffled && !hiding)
+                    .then_some(Opening { seed: p.seed, view: p.chose_view.then_some(p.view) })
             });
             let read = move || read_all(&sounds_db, &library_db, Some(cards), opening, send);
             if let Err(e) = background::spawn("Sounds library", read)
@@ -1781,6 +1788,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         }
     });
     let weak = app.as_weak();
+    let weak_again = app.as_weak();
     data.on_toggle(move |kind| {
         change(&weak, |f| f.toggle(&kind));
         if kind == list::HIDE_COPIES {
@@ -1791,6 +1799,10 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
                 p.filters.hide_copies
             });
             crate::settings::remember(list::HIDE_COPIES_KEY, if on { "on" } else { "off" });
+            // Turned on after a look that failed: it's tried again.
+            if on && let Some(app) = weak_again.upgrade() {
+                copies::look_again(&app, true);
+            }
         }
     });
     let weak = app.as_weak();
@@ -2427,6 +2439,27 @@ fn listed(app: &AppWindow, id: u64, new: Listed) {
             pick(app, at);
         }
     }
+}
+
+/// The Space page counts the copies of the same sound: they're looked for (as Hide duplicates does) from now on.
+pub fn copies_for_space(app: &AppWindow) {
+    copies::for_space(app);
+}
+
+/// Space's Measure again: the copies are looked for again in the files as they are now (only files changed since the
+/// last look are read).
+pub fn copies_look_again(app: &AppWindow) {
+    copies::look_again(app, false);
+}
+
+/// Whether Hide duplicates is on.
+pub fn hides_copies() -> bool {
+    PAGE.with(|p| p.borrow().filters.hide_copies)
+}
+
+/// How far looking for the copies has got (Hide duplicates', which the Space page counts too).
+pub fn copies_found() -> list::CopiesFound {
+    copies::found()
 }
 
 /// For the screenshots: the copies Hide duplicates hides, as if they'd been found (`None`: none, not looked for).
