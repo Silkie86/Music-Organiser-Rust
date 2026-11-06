@@ -78,6 +78,9 @@ struct Page {
     counts: page::ChoiceCounts,
     /// The part playing as a loop (or being made into one), as its place in the catalogue's entries.
     looping: Option<usize>,
+    /// The part playing (or starting) in a DAW, as its place in the catalogue's entries: picking another plays that
+    /// one there instead (the 6 Nov review's D-3).
+    in_daw: Option<usize>,
     /// The picked part, as its place in the catalogue's entries, and its row in the list on show (kept, so stepping
     /// down a long list never searches it).
     picked: Option<usize>,
@@ -984,6 +987,15 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
     if data.get_playing() && PAGE.with(|p| p.borrow().looping) != Some(at) {
         play(app, at);
     }
+    // A part playing in a DAW follows the pick the same way (the review's D-3). Clicking down the list asks for each
+    // in turn, and each start no longer wanted as its turn comes stops before it connects.
+    let daw_now = if data.get_daw_starting() != "" { data.get_daw_starting() } else { data.get_daw_playing() };
+    if let Some(daw) = Daw::from_id(&daw_now)
+        && PAGE.with(|p| p.borrow().in_daw) != Some(at)
+    {
+        stop_daw(app);
+        start_daw(app, daw, at);
+    }
     let Some(ask) = ask else { return };
     if HERE.with(|h| *h.borrow()) {
         let id = ask.id;
@@ -1876,6 +1888,13 @@ fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
     let Some(at) = PAGE.with(|p| p.borrow().picked) else {
         return !was.is_empty();
     };
+    start_daw(app, daw, at)
+}
+
+/// Plays the part at `at` in the catalogue's entries in that DAW (after [`stop_daw`]). False when there's nothing to
+/// play.
+fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
+    let data = app.global::<MidiData>();
     let ask = PAGE.with(|p| {
         let p = p.borrow();
         let e = p.cat.entry(at)?;
@@ -1887,6 +1906,7 @@ fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
     // The loop with a General MIDI sound would play over it.
     stop_playing(app);
     let asked = DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst);
+    PAGE.with(|p| p.borrow_mut().in_daw = Some(at));
     data.set_daw_starting(daw.id().into());
     if HERE.with(|h| *h.borrow()) {
         data.set_daw_starting("".into());
@@ -1969,6 +1989,7 @@ fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
 /// Stops what plays (or is starting) in a DAW, and the buttons say so at once. A start still on its way sees the
 /// newer ask and stops what it started.
 fn stop_daw(app: &AppWindow) {
+    PAGE.with(|p| p.borrow_mut().in_daw = None);
     if let Some(playing) = take_in_daw() {
         stop_in_daw(playing, Some(app.as_weak()));
     }
@@ -2061,7 +2082,7 @@ fn start_in_daw(
             let port = mo_dawlink::fl::open_port().map_err(|e| Some(e.to_string()))?;
             let playing = mo_dawlink::fl::play(port, &part).map_err(|e| Some(e.to_string()))?;
             let bpm = (tempo * 10.0).round() / 10.0;
-            Ok((InDaw::Fl(playing), format!("Playing on the channel selected in FL Studio, at {bpm} BPM.")))
+            Ok((InDaw::Fl(playing), format!("Playing {name} on the channel selected in FL Studio, at {bpm} BPM.")))
         }
         Daw::Bitwig => {
             let Some(turn) = turn else { return Err(Some("It couldn't take its turn in Bitwig.".to_owned())) };
@@ -2079,7 +2100,7 @@ fn start_in_daw(
             let played = mo_dawlink::bitwig::Bitwig::default().play_on_selected(&file, turn, wanted);
             let _ = std::fs::remove_file(&file);
             let playing = played.map_err(|e| (e != mo_dawlink::bitwig::Error::Cancelled).then(|| e.to_string()))?;
-            let note = format!("Playing through \u{201c}{}\u{201d} in Bitwig.", playing.track);
+            let note = format!("Playing {name} through \u{201c}{}\u{201d} in Bitwig.", playing.track);
             Ok((InDaw::Bitwig(playing), note))
         }
     }

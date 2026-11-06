@@ -292,8 +292,13 @@ fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
 pub(crate) fn go_to(app: &AppWindow, index: i32) {
     let Some(place) = usize::try_from(index).ok().and_then(Place::from_index) else { return };
     let _doing = watchdog::doing("go to a page");
-    if PAGE.swap(place.index(), Ordering::Relaxed) != place.index() || app.get_place() != index {
+    let before = PAGE.swap(place.index(), Ordering::Relaxed);
+    if before != place.index() || app.get_place() != index {
         log::info("Page", place.name());
+    }
+    // An audition in Bitwig stops as its page goes (the 6 Nov review's X3-1).
+    if before == Place::Presets.index() && place != Place::Presets {
+        presets::left(app);
     }
     // The place's colour first, so the new page's mark never shows the old place's colour for a frame (the window's
     // own `changed place` comes a frame late).
