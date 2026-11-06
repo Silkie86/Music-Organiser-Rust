@@ -284,6 +284,7 @@ fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     let action = |id: &str| ActionKey { what: what_of(id).into(), key: shortcuts.key_of(id).into() };
     let data = app.global::<SongsData>();
     data.set_open_key(action("projects.open"));
+    data.set_open_own_key(action("projects.openOwn"));
     data.set_reveal_key(action("projects.reveal"));
     data.set_copy_key(action("projects.copyPath"));
 }

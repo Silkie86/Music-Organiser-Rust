@@ -91,7 +91,7 @@ pub fn moved_text(moved: &MovedFolder, noted: &Result<(), String>) -> String {
     match noted {
         Ok(()) => head,
         Err(why) => format!(
-            "{head} But the move couldn't be added to the library's moved folders ({why}), so the old app and Space \
+            "{head} But the move couldn't be added to the library's moved folders ({why}), so Space and this page \
              don't know of it yet: tell Claude, or note where it went."
         ),
     }

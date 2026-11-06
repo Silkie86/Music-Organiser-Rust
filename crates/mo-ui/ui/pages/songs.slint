@@ -2,7 +2,7 @@
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
 import { ListView } from "std-widgets.slint";
 import { ArrangementPreview } from "arrangement.slint";
-import { Theme, Type, Space, PageHeader, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Stars, YearRange, YearBar, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip } from "../studio.slint";
+import { Theme, Type, Space, PageHeader, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Stars, YearRange, YearBar, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
 export struct SongLine {
@@ -101,8 +101,12 @@ export global SongsData {
     callback years-picked(int, int);
     callback years-cleared();
     in property <string> count;
-    // Shown instead of the list while it loads, or when the library can't be read.
+    // Shown instead of the list while it loads, or when the library can't be read or has no songs: a title, and a
+    // line under it.
     in property <string> message: "Reading your library…";
+    in property <string> message-text;
+    // How many songs the filters let through: with none, the list says so and offers to clear them.
+    in property <int> shown;
     in-out property <string> search;
     // The filters (mo-app's `songs::SongChips`): the DAW, the status and the tag, more than one of each.
     in property <FilterView> daw-filter;
@@ -115,6 +119,10 @@ export global SongsData {
     // "Using Serum", while the list shows only the songs of one plugin (the Plugins page's Show in Songs).
     in property <string> only;
     in property <int> selected: -1;
+    // Up and Down on the list (and Down from the search box): the song above or below the one picked.
+    callback step(int);
+    // Esc, in the search box or on the list: clears the search, else puts the panel away. Says whether it did either.
+    callback escape() -> bool;
     // Bring a song into view: its line's top in the list, and a count that goes up each time it's asked.
     in property <length> show-y;
     in property <int> show-ask;
@@ -156,6 +164,7 @@ export global SongsData {
     callback select(int);
     // The buttons' tooltips and keys, from the shortcut list.
     in property <ActionKey> open-key;
+    in property <ActionKey> open-own-key;
     in property <ActionKey> reveal-key;
     in property <ActionKey> copy-key;
     // Opens the picked song's newest save: FL Studio songs go to Bitwig, the rest to their own DAW.
@@ -168,6 +177,11 @@ export global SongsData {
     in property <[MenuItem]> save-menu;
     callback save-menu-for(string);
     callback save-menu-chosen(string);
+    // A song line right-clicked (it's picked first): `song-menu-for` fills `song-menu` for its song, with the panel's
+    // buttons and their keys; `song-menu-chosen` runs a line, by its action's id.
+    in property <[MenuItem]> song-menu;
+    callback song-menu-for(int);
+    callback song-menu-chosen(string);
     // A button on a save's line on the Saves tab: the save's path, and "open", "bitwig", "reveal" or "copy", as the
     // lines of its right-click menu.
     callback save-chosen(string, string);
@@ -341,7 +355,8 @@ component SongPanel inherits Rectangle {
                 }
                 if SongsData.song.daw == "FL Studio": StudioButton {
                     text: "Open in FL Studio";
-                    tip: "Open the newest save in FL Studio itself";
+                    tip: SongsData.open-own-key.what;
+                    key: SongsData.open-own-key.key;
                     clicked => { SongsData.open-own(); }
                 }
                 if SongsData.older.length > 0: HorizontalLayout {
@@ -790,14 +805,14 @@ export component SongsPage inherits Rectangle {
             text <=> SongsData.search;
             edited(t) => { SongsData.search-edited(t); }
             key(k) => {
-                if (k == Key.Escape && SongsData.search != "") {
-                    SongsData.search = "";
-                    SongsData.search-edited("");
-                    return true;
+                // Clears the search, else puts the song panel away.
+                if (k == Key.Escape) {
+                    return SongsData.escape();
                 }
-                // With the search already empty, Esc puts the song panel away.
-                if (k == Key.Escape && SongsData.selected >= 0) {
-                    SongsData.close-panel();
+                // Down goes on into the list, as on Sounds and MIDI, when it has a song to go to.
+                if (k == Key.DownArrow && SongsData.shown > 0) {
+                    keys.focus();
+                    SongsData.step(1);
                     return true;
                 }
                 false
@@ -856,141 +871,191 @@ export component SongsPage inherits Rectangle {
         // the panel (spec 3.2), never so little that the names can't be read.
         area := Rectangle {
             vertical-stretch: 1;
-            list-well := Well {
+            // Up and Down step through the list once it has the keys (a line clicked, or Down from the search box);
+            // Esc clears the search, then puts the panel away, as the search box does.
+            keys := FocusScope {
                 x: 0;
                 y: 0;
                 height: parent.height;
                 width: SongsData.selected >= 0 ? max(380px, (parent.width - 16px) / 3) : parent.width;
-                // Narrow beside the panel: what's missing and the status make room for the name.
-                property <bool> wide: SongsData.selected < 0 || self.width > 640px;
-                if SongsData.message != "": Text {
-                    text: SongsData.message;
-                    color: Theme.muted;
-                    font-size: Type.body;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                    wrap: word-wrap;
-                }
-                if SongsData.message == "": HorizontalLayout {
-                    property <int> show-ask: SongsData.show-ask;
-                    // Scrolls only when the line is out of sight.
-                    changed show-ask => {
-                        if (SongsData.show-y < -list.content-y
-                            || SongsData.show-y + SongsData.line-height > -list.content-y + list.visible-height) {
-                            list.content-y = -clamp(SongsData.show-y - list.visible-height / 3, 0px,
-                                max(0px, list.content-height - list.visible-height));
-                        }
+                key-pressed(event) => {
+                    if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                        return reject;
                     }
-                    list := ListView {
-                        horizontal-stretch: 1;
-                        for line in SongsData.lines: Rectangle {
-                            height: SongsData.line-height;
-                            if line.heading != "": Caps {
-                                x: Space.lg;
-                                y: parent.height - self.height - Space.sm;
-                                text: line.heading;
+                    if (event.text == Key.UpArrow) {
+                        SongsData.step(-1);
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        SongsData.step(1);
+                        return accept;
+                    }
+                    if (event.text == Key.Escape) {
+                        if (SongsData.escape()) {
+                            return accept;
+                        }
+                        return reject;
+                    }
+                    reject
+                }
+                list-well := Well {
+                    x: 0;
+                    y: 0;
+                    height: parent.height;
+                    width: parent.width;
+                    // Narrow beside the panel: what's missing and the status make room for the name.
+                    property <bool> wide: SongsData.selected < 0 || self.width > 640px;
+                    if SongsData.message != "": EmptyState {
+                        title: SongsData.message;
+                        text: SongsData.message-text;
+                    }
+                    if SongsData.message == "": HorizontalLayout {
+                        property <int> show-ask: SongsData.show-ask;
+                        // Scrolls only when the line is out of sight.
+                        changed show-ask => {
+                            if (SongsData.show-y < -list.content-y
+                                || SongsData.show-y + SongsData.line-height > -list.content-y + list.visible-height) {
+                                list.content-y = -clamp(SongsData.show-y - list.visible-height / 3, 0px,
+                                    max(0px, list.content-height - list.visible-height));
                             }
-                            if line.heading == "": ListLine {
-                                x: Space.xs;
-                                width: parent.width - 2 * Space.xs;
-                                selected: line.row == SongsData.selected;
-                                // The date's tooltip, over the date at the right.
-                                tip: line.date-tip;
-                                tip-from: self.width - Space.md - 90px;
-                                clicked => { SongsData.select(line.row); }
-                                double-clicked => {
-                                    SongsData.select(line.row);
-                                    SongsData.open();
+                        }
+                        list := ListView {
+                            horizontal-stretch: 1;
+                            for line in SongsData.lines: Rectangle {
+                                height: SongsData.line-height;
+                                if line.heading != "": Caps {
+                                    x: Space.lg;
+                                    y: parent.height - self.height - Space.sm;
+                                    text: line.heading;
                                 }
-                                // The DAW's colour, as a thin bar at the left (the design system's song row).
-                                Rectangle {
-                                    x: Space.xs + 2px;
-                                    y: (parent.height - self.height) / 2;
-                                    width: 3px;
-                                    height: parent.height - 2 * Space.md;
-                                    border-radius: 1.5px;
-                                    background: Theme.daw(line.daw);
-                                }
-                                HorizontalLayout {
-                                    padding-left: Space.md;
-                                    padding-right: Space.md;
-                                    spacing: Space.md;
-                                    VerticalLayout {
-                                        alignment: center;
-                                        spacing: Space.xs;
-                                        horizontal-stretch: 1;
-                                        HorizontalLayout {
-                                            spacing: Space.sm;
-                                            alignment: start;
+                                if line.heading == "": ListLine {
+                                    x: Space.xs;
+                                    width: parent.width - 2 * Space.xs;
+                                    selected: line.row == SongsData.selected;
+                                    // The date's tooltip, over the date at the right.
+                                    tip: line.date-tip;
+                                    tip-from: self.width - Space.md - 90px;
+                                    clicked => {
+                                        SongsData.select(line.row);
+                                        keys.focus();
+                                    }
+                                    double-clicked => {
+                                        SongsData.select(line.row);
+                                        SongsData.open();
+                                    }
+                                    // The line is picked first (ListLine does that), so the menu acts on it.
+                                    right-clicked(x, y) => {
+                                        keys.focus();
+                                        SongsData.song-menu-for(line.row);
+                                        song-menu.open-at(x, y);
+                                    }
+                                    // The DAW's colour, as a thin bar at the left (the design system's song row).
+                                    Rectangle {
+                                        x: Space.xs + 2px;
+                                        y: (parent.height - self.height) / 2;
+                                        width: 3px;
+                                        height: parent.height - 2 * Space.md;
+                                        border-radius: 1.5px;
+                                        background: Theme.daw(line.daw);
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: Space.md;
+                                        padding-right: Space.md;
+                                        spacing: Space.md;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            spacing: Space.xs;
+                                            horizontal-stretch: 1;
+                                            HorizontalLayout {
+                                                spacing: Space.sm;
+                                                alignment: start;
+                                                Text {
+                                                    text: line.name;
+                                                    color: Theme.text;
+                                                    font-size: Type.row-title;
+                                                    font-weight: 500;
+                                                    overflow: elide;
+                                                }
+                                                if line.favourite: Heart { y: (parent.height - self.height) / 2; }
+                                            }
                                             Text {
-                                                text: line.name;
-                                                color: Theme.text;
-                                                font-size: Type.row-title;
-                                                font-weight: 500;
+                                                text: line.details;
+                                                color: Theme.muted;
+                                                font-size: Type.meta;
                                                 overflow: elide;
                                             }
-                                            if line.favourite: Heart { y: (parent.height - self.height) / 2; }
                                         }
-                                        Text {
-                                            text: line.details;
-                                            color: Theme.muted;
-                                            font-size: Type.meta;
-                                            overflow: elide;
+                                        if list-well.wide: VerticalLayout {
+                                            alignment: center;
+                                            spacing: Space.xs;
+                                            width: 150px;
+                                            Text {
+                                                text: line.missing;
+                                                color: Theme.missing;
+                                                font-size: Type.meta;
+                                                horizontal-alignment: right;
+                                                overflow: elide;
+                                            }
+                                            if line.status != "": Text {
+                                                text: line.status;
+                                                color: Theme.muted;
+                                                font-size: Type.meta;
+                                                horizontal-alignment: right;
+                                            }
                                         }
-                                    }
-                                    if list-well.wide: VerticalLayout {
-                                        alignment: center;
-                                        spacing: Space.xs;
-                                        width: 150px;
-                                        Text {
-                                            text: line.missing;
-                                            color: Theme.missing;
-                                            font-size: Type.meta;
-                                            horizontal-alignment: right;
-                                            overflow: elide;
-                                        }
-                                        if line.status != "": Text {
-                                            text: line.status;
-                                            color: Theme.muted;
-                                            font-size: Type.meta;
-                                            horizontal-alignment: right;
-                                        }
-                                    }
-                                    VerticalLayout {
-                                        alignment: center;
-                                        spacing: Space.xs;
-                                        width: 90px;
-                                        Text {
-                                            text: line.date;
-                                            color: Theme.muted;
-                                            font-family: Theme.number-font;
-                                            font-size: Type.meta;
-                                            horizontal-alignment: right;
-                                        }
-                                        if line.rating > 0: HorizontalLayout {
-                                            alignment: end;
-                                            Stars { rating: line.rating; }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            spacing: Space.xs;
+                                            width: 90px;
+                                            Text {
+                                                text: line.date;
+                                                color: Theme.muted;
+                                                font-family: Theme.number-font;
+                                                font-size: Type.meta;
+                                                horizontal-alignment: right;
+                                            }
+                                            if line.rating > 0: HorizontalLayout {
+                                                alignment: end;
+                                                Stars { rating: line.rating; }
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
+                        if SongsData.years.length > 1: YearRange {
+                            width: 56px;
+                            years: SongsData.years;
+                            picked-from: SongsData.years-from;
+                            picked-to: SongsData.years-to;
+                            picked(a, b) => { SongsData.years-picked(a, b); }
+                            cleared => { SongsData.years-cleared(); }
+                        }
                     }
-                    if SongsData.years.length > 1: YearRange {
-                        width: 56px;
-                        years: SongsData.years;
-                        picked-from: SongsData.years-from;
-                        picked-to: SongsData.years-to;
-                        picked(a, b) => { SongsData.years-picked(a, b); }
-                        cleared => { SongsData.years-cleared(); }
+                    // Over the empty list (which stays, so a song shown from elsewhere still scrolls into sight),
+                    // beside the year strip: what Sounds and MIDI say when nothing matches (review X3-7).
+                    if SongsData.message == "" && SongsData.shown == 0: EmptyState {
+                        x: 0;
+                        y: 0;
+                        width: parent.width - (SongsData.years.length > 1 ? 56px : 0px);
+                        height: parent.height;
+                        title: "No songs match";
+                        text: "Try fewer filters or other words.";
+                        action: SongsData.any-filter ? "Clear the filters" : "";
+                        act => { SongsData.clear(); }
                     }
                 }
             }
             if SongsData.selected >= 0: SongPanel {
-                x: list-well.width + 16px;
+                x: keys.width + 16px;
                 y: 0;
                 height: parent.height;
                 width: parent.width - self.x;
+            }
+            // A song line's right-click menu: the panel's buttons, each with its key (rule 15; review X3-24).
+            song-menu := RightClickMenu {
+                items: SongsData.song-menu;
+                chosen(id) => { SongsData.song-menu-chosen(id); }
             }
         }
     }

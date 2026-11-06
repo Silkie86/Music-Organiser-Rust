@@ -247,7 +247,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     data.set_keys_note(page::KEYS_NOTE.into());
     data.set_daws_note(page::DAWS_NOTE.into());
     data.set_kept_note(
-        format!("Your changes are kept in {}; the C# app's settings are only read", app_settings::FILE).into(),
+        format!("Your changes are kept in {}, and your folders in the song library", app_settings::FILE).into(),
     );
     show(app);
 
@@ -727,7 +727,7 @@ fn edit_folder(app: &AppWindow, list: FolderList, folder: String, add: bool) {
             Err(e) => log::warning("Settings", &format!("Couldn't change the {list:?} folders: {e}")),
         }
         let done = done.map(|d| matches!(d, folders::Changed::Done(_))).map_err(|e| e.to_string());
-        changed_folders(weak, page::folder_change_note(add, &folder, done));
+        changed_folders(weak, page::folder_change_note(list, add, &folder, done));
     });
     if let Err(e) = started {
         log::error("Settings", &format!("Couldn't start changing the folders: {e}"));

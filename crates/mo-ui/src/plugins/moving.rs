@@ -1,8 +1,8 @@
 //! The Plugins page's Move to another drive, on the side card's On disk tab, in Clean up's place
 //! ([`super::clean`]): pick one of the plugin's preset or sound folders, then where on another drive it goes. It's
 //! checked there first, then copied, every file checked, and swapped for a link (`mo_space::folder_move`), all on a
-//! worker. Then the move is added to the library's moved folders (`mo_library::moves`), so the old app and Space know
-//! of it and its old copy.
+//! worker. Then the move is added to the library's moved folders (`mo_library::moves`), so Space and this page know of
+//! it and its old copy.
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

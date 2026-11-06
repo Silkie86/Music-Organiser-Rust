@@ -89,7 +89,7 @@ impl Inputs {
 
 impl Plugins {
     /// Whether the plugin at `row` has anything Clean up could look at: installed, with a preset or sound folder the
-    /// old app measured (its plugin files are Uninstall's).
+    /// last measure has (its plugin files are Uninstall's).
     pub fn can_clean(&self, row: usize) -> bool {
         self.rows.get(row).is_some_and(|r| {
             r.installed && r.room.as_ref().is_some_and(|s| s.folders.iter().any(|f| f.kind != SpaceKind::Program))
@@ -143,7 +143,7 @@ impl Plugins {
         })
     }
 
-    /// Leaves out what a clean-up sent to the Recycle Bin (and what went inside it), until the old app measures again.
+    /// Leaves out what a clean-up sent to the Recycle Bin (and what went inside it), until the next measure.
     pub fn forget_removed(&mut self, done: &Done) {
         // What went with another went inside it, so the folders sent cover it.
         let gone: Vec<String> = done.removed.iter().map(|r| r.path.clone()).collect();

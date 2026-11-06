@@ -378,6 +378,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     shots.push(("songs-filters.png".into(), after));
     songs.invoke_clear();
+    // A search nothing matches: the list says so, with Clear the filters, as Sounds and MIDI do (review X3-7).
+    songs.invoke_search_edited("no song is called this".into());
+    if songs.get_shown() != 0 {
+        return Err("songs-no-match.png: the search still matches a song".into());
+    }
+    shots.push(("songs-no-match.png".into(), capture(&window)));
+    songs.invoke_clear();
+    // A song line's right-click menu (Night Drive, an FL Studio song): the panel's buttons with their keys (X3-24).
+    let before = capture(&window);
+    right_click(&window, 400.0, 290.0);
+    let menu = capture(&window);
+    if before == menu {
+        return Err("songs-menu.png: the right click on Night Drive opened nothing; has the list moved?".into());
+    }
+    shots.push(("songs-menu.png".into(), menu));
+    // Away again: a click above the page shuts the menu, and the panel is put away.
+    click(&window, 600.0, 20.0);
+    songs.invoke_close_panel();
     // The narrowest window the app allows: a filter too long for a line of its own wraps inside, so every chip stays
     // in sight.
     save_narrow(&window, &out, "songs-narrow.png")?;
@@ -2034,6 +2052,14 @@ fn card_down(window: &MinimalSoftwareWindow, top: &[u8], name: &str) -> Result<V
         return Err(format!("{name}: the wheel at {x}, {y} moved nothing; is it still on the card?").into());
     }
     Ok(down)
+}
+
+/// A right click at a point in the window.
+fn right_click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
+    let position = slint::LogicalPosition::new(x, y);
+    let button = slint::platform::PointerEventButton::Right;
+    window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position, button });
+    window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position, button });
 }
 
 /// A left click at a point in the window.

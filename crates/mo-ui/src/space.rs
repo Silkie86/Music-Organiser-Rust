@@ -312,6 +312,8 @@ struct Page {
     /// finding the same of both doesn't read it again.
     plugins_stamp: Option<String>,
     plugins_fixes: Vec<FolderFix>,
+    /// Your plugins were measured again since the last look at them ([`plugins_measured`]): the next show looks again.
+    plugins_measured: bool,
     /// What the plugins line shows, as last worked out off the window's thread ([`work_out_plugins`]), what it was
     /// worked out from (it's worked out again once that changes: a look, a Clean up or uninstall on the Plugins page,
     /// the years picked there, or what's in the Recycle Bin from here), and the thread that works it out.
@@ -518,7 +520,7 @@ pub fn shown(app: &AppWindow) {
         let old = wired && old_due(&p, moves, stale, held.old);
         let songs = wired && p.songs.is_none() && !p.songs_looking && !held.songs;
         let fixed = p.plugins.is_some() && plugins_page::folder_fixes_this_session() != p.plugins_fixes;
-        let plugins = wired && !p.plugins_looking && (stale || p.plugins.is_none() || fixed);
+        let plugins = wired && !p.plugins_looking && (stale || p.plugins.is_none() || fixed || p.plugins_measured);
         let copies = wired && copies_due(&p, &sounds, stale);
         (stale, bitwig, old, spare, songs, plugins, copies)
     });
@@ -612,6 +614,20 @@ pub fn plugin_moved(app: &AppWindow) {
     });
     if now {
         look_for_old(app);
+    }
+}
+
+/// Your plugins were measured again and kept: while this page is on show and has looked, it looks at the plugins no
+/// song has used lately again now; else it does when it next shows.
+pub fn plugins_measured(app: &AppWindow) {
+    let on_show = app.get_place() == Place::Space.index() as i32;
+    let now = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.plugins_measured = true;
+        on_show && p.feed.is_some() && p.plugins.is_some() && !p.plugins_looking
+    });
+    if now {
+        look_for_plugins(app);
     }
 }
 
@@ -1739,12 +1755,16 @@ fn look_for_plugins(app: &AppWindow) {
         p.feed.as_ref()?;
         let (id, _) = p.plugins_look.next();
         p.plugins_looking = true;
+        p.plugins_measured = false;
         let fixes = plugins_page::folder_fixes_this_session();
         // The look on show stands only while the fixes it counted are the page's still.
         let stamp = p.plugins.as_ref().filter(|_| fixes == p.plugins_fixes).and(p.plugins_stamp.clone());
         Some(PluginsAsk { id, library: p.library.clone(), stamp, fixes })
     });
     let Some(ask) = ask else { return };
+    // Your plugins measured again when the last measure is a day old, once a run (review X1-2): this look shows the
+    // last measure meanwhile, and looks again once it's kept ([`plugins_measured`]).
+    plugins_page::measure_when_due(app);
     let weak = app.as_weak();
     // A crash in a look (logged as one) leaves the thread for the next look, and says so, as one that found nothing to
     // show does.
@@ -1766,7 +1786,7 @@ fn look_for_plugins(app: &AppWindow) {
 }
 
 /// One look at the plugins no song has used lately, off the window's thread: every plugin your songs use and the
-/// sizes the old app measured, from the library (read-only, and closed again first), as the Plugins page reads them;
+/// sizes last measured, from the library (read-only, and closed again first), as the Plugins page reads them;
 /// or, when the library is as the look on show found it, only that. None when the library couldn't be read (said in
 /// the log); with no library there are no plugins.
 fn look_for_plugins_now(ask: &PluginsAsk) -> Option<PluginsLooked> {

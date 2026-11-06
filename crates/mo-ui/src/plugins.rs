@@ -12,6 +12,7 @@
 
 mod clean;
 mod folder_fixes;
+mod measuring;
 mod moving;
 mod uninstall;
 
@@ -346,6 +347,12 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         }
     });
     let weak = app.as_weak();
+    data.on_measure_plugins(move || {
+        if let Some(app) = weak.upgrade() {
+            measuring::now(&app);
+        }
+    });
+    let weak = app.as_weak();
     data.on_clear_half_copies(move || {
         if let Some(app) = weak.upgrade() {
             moving::clear_half_copies(&app);
@@ -559,6 +566,8 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>, in_bin: Vec<String>)
                 moving::look_for_half_copies(app);
                 // And what earlier runs' clean-ups put in the Recycle Bin, for their Put back (review X1-3).
                 clean::load_binned(app);
+                // And your plugins measured again, when the last measure is a day old (review X1-2).
+                measuring::when_due(app);
             }
             // And the plugin files Space's clean-ups sent to the Recycle Bin, as Space leaves them out: as Space has
             // them now, once it has looked in the bin.
@@ -581,7 +590,7 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>, in_bin: Vec<String>)
                 p.picked = picked;
             });
             data.set_message(
-                if empty { "No plugins yet: the old app reads them when it scans your projects." } else { "" }.into(),
+                if empty { "No plugins yet: they show once the app has read your songs." } else { "" }.into(),
             );
             refresh(app);
             fill_cards(app);
@@ -682,6 +691,12 @@ pub fn put_back_elsewhere(kind: &str, when: i64, all: bool) {
 /// When the window has closed, first: a move still copying is told to stop ([`moving::stop_moves`]).
 pub fn stop_moves() {
     moving::stop_moves();
+    measuring::stop();
+}
+
+/// Space looked at your plugins: they're measured again when the last measure is a day old (once a run).
+pub fn measure_when_due(app: &AppWindow) {
+    measuring::when_due(app);
 }
 
 /// When the window has closed, after the quick jobs: waits for a move told to stop ([`moving::finish_up`]).
@@ -731,6 +746,7 @@ fn refresh(app: &AppWindow) {
         data.set_sort(pl.filters.sort.name().into());
         data.set_sort_index(Sort::ALL.iter().position(|&s| s == pl.filters.sort).map_or(-1, |i| i as i32));
         data.set_has_sizes(pl.has_sizes());
+        data.set_measure_text(measuring::line(pl.measured).into());
         data.set_any_filter(pl.filters.any());
         if data.get_search().as_str() != pl.filters.search {
             data.set_search(pl.filters.search.as_str().into());
