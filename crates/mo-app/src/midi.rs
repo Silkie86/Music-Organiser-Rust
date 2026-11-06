@@ -1172,6 +1172,23 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_k_finds_a_loop_by_its_other_keys_file_names() {
+        let loop_in = |tonic: u8, hash: &str| {
+            let mut p =
+                phrase(&format!("L:/New Midi/Pack/Pad Loop {hash}.mid"), "Lead", Role::Melody, hash, 1_760_000_000);
+            p.key = sure(tonic, true);
+            p.lowest = 57 + tonic % 12;
+            p.shape = Some(42);
+            p
+        };
+        let cat = Catalogue::new(vec![loop_in(9, "Am"), loop_in(6, "Fsm")]);
+        let parts: std::sync::Arc<dyn crate::finder::Source> = std::sync::Arc::new(crate::finder::midi_parts(&cat));
+        assert_eq!(parts.len(), 1, "one line for the loop");
+        let g = crate::finder::find(&[parts], "pad loop fsm", None, 4);
+        assert_eq!(g.len(), 1, "the other key's file is found by its own name");
+    }
+
+    #[test]
     fn the_same_loop_in_other_keys_is_one_line() {
         let day = 86_400;
         let loop_in = |tonic: u8, hash: &str, age: i64| {

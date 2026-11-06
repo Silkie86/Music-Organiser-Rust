@@ -4,8 +4,10 @@
 //!
 //! Each send connects, checks the link's greeting, and keeps every change in the project Bitwig had open as it began
 //! ([`Link::stay_in_open_project`]): if another project comes to the front part way, the send stops there rather
-//! than going on in that one. The app makes one send at a time, in the order they came, so one send's new track never
-//! lands in the middle of another's. Nothing is ever taken out of a project: the link can't delete.
+//! than going on in that one. The app makes one change at a time (sends, auditions, plays and their stops), in the
+//! order they came, so one send's new track never lands in the middle of another's; and from extension 3.21 each
+//! step finds the new track by its ID, however tracks move meanwhile. Sends never take anything out of a project:
+//! only an audition's own track or clip is ever deleted ([`super::audition`]).
 //!
 //! A send fails, with nothing changed, when Bitwig can't take it; once it may have changed something, it gives back
 //! what happened instead, with words for what may not have (Bitwig may have added a track all the same).
@@ -23,6 +25,14 @@ use super::{DRUM_MACHINE_NAME, DeviceId, Error, Hello, Inserted, Link, PORT};
 /// The app's sends wait here for their turn, so they go in one at a time, in the order they came.
 pub(super) static SENDS: Queue = Queue::new();
 
+/// A place in the line for the app's next change in Bitwig, taken now and waited on later ([`Ticket::wait`]): a
+/// screen takes it on the window's thread as the button is pressed, so a Stop and the Play pressed after it go in
+/// that order, whichever of their threads runs first (the 6 Nov review's D-fp3). Plays, auditions and their stops
+/// take one (sends take theirs themselves).
+pub fn ticket() -> Ticket<'static> {
+    SENDS.ticket()
+}
+
 /// Turns in the order they were asked for, as at a counter: each send takes the next number and waits until it's
 /// called. (A lock on its own lets whichever waiting thread the system picks go next: on Windows, not the first.)
 pub(super) struct Queue {
@@ -35,31 +45,90 @@ struct Numbers {
     next: u64,
     /// The number whose turn it is.
     now: u64,
+    /// Numbers given up before their turn came: skipped when it does.
+    given_up: BTreeSet<u64>,
+}
+
+impl Numbers {
+    /// Calls the next number still waiting.
+    fn call_next(&mut self) {
+        self.now += 1;
+        while self.given_up.remove(&self.now) {
+            self.now += 1;
+        }
+    }
 }
 
 impl Queue {
     const fn new() -> Queue {
-        Queue { numbers: Mutex::new(Numbers { next: 0, now: 0 }), called: Condvar::new() }
+        Queue { numbers: Mutex::new(Numbers { next: 0, now: 0, given_up: BTreeSet::new() }), called: Condvar::new() }
+    }
+
+    fn numbers(&self) -> std::sync::MutexGuard<'_, Numbers> {
+        self.numbers.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Takes the next number, without waiting.
+    pub(super) fn ticket(&self) -> Ticket<'_> {
+        let mut numbers = self.numbers();
+        let number = numbers.next;
+        numbers.next += 1;
+        Ticket { queue: self, number, waited: false }
     }
 
     /// Takes the next number and waits for its turn, which lasts until what this gives back goes.
     pub(super) fn wait_turn(&self) -> Turn<'_> {
-        let mut numbers = self.numbers.lock().unwrap_or_else(PoisonError::into_inner);
-        let mine = numbers.next;
-        numbers.next += 1;
-        while numbers.now != mine {
-            numbers = self.called.wait(numbers).unwrap_or_else(PoisonError::into_inner);
-        }
-        Turn(self)
+        self.ticket().wait()
     }
 }
 
-/// A send's turn. The next number is called when this goes, also when the send stopped with a panic.
-pub(super) struct Turn<'a>(&'a Queue);
+/// A number in the line, not yet called ([`ticket`]). Waiting on it gives the turn; dropping it unused gives the place
+/// up without waiting, so the ones after it never wait for it.
+pub struct Ticket<'a> {
+    queue: &'a Queue,
+    number: u64,
+    /// Waited on, so its turn gives the place up instead.
+    waited: bool,
+}
+
+impl<'a> Ticket<'a> {
+    /// Waits for this number's turn, behind every one taken before it.
+    pub fn wait(mut self) -> Turn<'a> {
+        let (queue, mine) = (self.queue, self.number);
+        self.waited = true;
+        let mut numbers = queue.numbers();
+        while numbers.now != mine {
+            numbers = queue.called.wait(numbers).unwrap_or_else(PoisonError::into_inner);
+        }
+        Turn(queue)
+    }
+}
+
+impl Drop for Ticket<'_> {
+    fn drop(&mut self) {
+        if self.waited {
+            return;
+        }
+        let mine = self.number;
+        let mut numbers = self.queue.numbers();
+        if numbers.now == mine {
+            numbers.call_next();
+            drop(numbers);
+            self.queue.called.notify_all();
+        } else {
+            numbers.given_up.insert(mine);
+        }
+    }
+}
+
+/// A change's turn: the app's other changes in Bitwig wait until it goes. The next number is called when this goes,
+/// also when the change stopped with a panic. The audition and play steps take one, so a caller may do more inside
+/// the same turn (put back what couldn't be stopped, say) before the next change goes.
+pub struct Turn<'a>(&'a Queue);
 
 impl Drop for Turn<'_> {
     fn drop(&mut self) {
-        self.0.numbers.lock().unwrap_or_else(PoisonError::into_inner).now += 1;
+        self.0.numbers().call_next();
         self.0.called.notify_all();
     }
 }
@@ -238,7 +307,7 @@ fn on_new_track(mut link: Link, path: &Path, name: &str, load: Load) -> Result<S
         }
     };
     sent.track = Some(track.index);
-    sent.problem = match link.insert_file(track.index, &shown) {
+    sent.problem = match link.insert_file_on(&track, &shown) {
         Ok(Inserted { added: false, .. }) => Some(format!("Bitwig didn't load {file}")),
         Ok(Inserted { device: Some(device), .. })
             if load == Load::Sound && !device.name.is_empty() && !device.name.to_lowercase().contains("sampler") =>
@@ -323,7 +392,7 @@ fn part(link: &mut Link, path: &Path, name: &str) -> Result<SentPart, Error> {
         }
     };
     sent.track = Some(track.index);
-    match link.add_clip(track.index, &shown) {
+    match link.add_clip_on(&track, &shown) {
         Ok(slot) => sent.slot = Some(slot),
         // Bitwig may have made the clip all the same: the link gave up waiting, or the connection went.
         Err(e) => {
@@ -574,14 +643,14 @@ fn kit(link: &mut Link, name: &str, pads: &[Pad], target: KitTarget) -> Result<S
                 }
             };
             sent.track = Some(track.index);
-            match link.insert_device(track.index, id) {
+            match link.insert_device_on(&track, id) {
                 // An ID Bitwig doesn't know adds nothing; one read wrongly adds some other device. One Bitwig hasn't
                 // named yet goes ahead: the link says when it isn't a Drum Machine (below).
                 Ok(Inserted { added: true, index: Some(at), device })
                     if device.as_ref().is_none_or(|d| d.name.is_empty() || d.name == DRUM_MACHINE_NAME) =>
                 {
                     let named = device.is_some_and(|d| d.name == DRUM_MACHINE_NAME);
-                    Some((track.index, at, named))
+                    Some((track, at, named))
                 }
                 Ok(_) => {
                     sent.drum_machine = false;
@@ -598,7 +667,11 @@ fn kit(link: &mut Link, name: &str, pads: &[Pad], target: KitTarget) -> Result<S
             }
         }
     };
-    match link.fill_pads(&pads, on.map(|(t, d, _)| (t, d))) {
+    let filling = match &on {
+        Some((track, device, _)) => link.fill_pads_on(&pads, track, *device),
+        None => link.fill_pads(&pads, None),
+    };
+    match filling {
         Ok(filled) => {
             let of = |notes: &[u8]| pads.iter().filter(|p| notes.contains(&p.note)).cloned().collect::<Vec<_>>();
             sent.filled = of(&filled.filled);
@@ -612,9 +685,12 @@ fn kit(link: &mut Link, name: &str, pads: &[Pad], target: KitTarget) -> Result<S
         // The link waited for the new device's pads and they didn't show, so it put nothing on them. For a device
         // Bitwig named Drum Machine, Bitwig was slow; for one it hadn't named, the ID may have given something else.
         Err(Error::Bitwig(words))
-            if on.is_some_and(|(t, d, _)| words == format!("Device {d} on track {t} isn't a Drum Machine.")) =>
+            if on.as_ref().is_some_and(|(_, d, _)| {
+                // The track's place as the link found it, by its ID: it may have moved since it was made.
+                words.starts_with(&format!("Device {d} on track ")) && words.ends_with(" isn't a Drum Machine.")
+            }) =>
         {
-            if on.is_some_and(|(_, _, named)| named) {
+            if on.as_ref().is_some_and(|(_, _, named)| *named) {
                 sent.problem = Some(
                     "Bitwig added the Drum Machine but didn't show its pads in time, so the sounds didn't go on it"
                         .into(),
@@ -661,7 +737,7 @@ pub fn note_name(note: u8) -> String {
 }
 
 /// An error's words to go inside a sentence: without the full stop.
-fn sentence(e: &Error) -> String {
+pub(super) fn sentence(e: &Error) -> String {
     e.to_string().trim_end_matches('.').to_owned()
 }
 
@@ -707,5 +783,35 @@ mod tests {
             let _ = went.send(7);
         });
         assert_eq!(order.recv_timeout(Duration::from_secs(10)).unwrap(), 7);
+    }
+
+    #[test]
+    fn a_ticket_keeps_its_place_and_one_given_up_is_skipped() {
+        let queue = Queue::new();
+        let first = queue.ticket();
+        let given_up = queue.ticket();
+        let third = queue.ticket();
+        let (went, order) = mpsc::channel();
+        thread::scope(|s| {
+            let went_too = went.clone();
+            // The third waits first, but goes after the first.
+            s.spawn(move || {
+                let _turn = third.wait();
+                let _ = went_too.send(3);
+            });
+            thread::sleep(Duration::from_millis(20));
+            drop(given_up);
+            let turn = first.wait();
+            let _ = went.send(1);
+            drop(turn);
+        });
+        let came: Vec<u64> = (0..2).map(|_| order.recv_timeout(Duration::from_secs(10)).unwrap()).collect();
+        assert_eq!(came, [1, 3]);
+        // A ticket given up as its turn comes calls the next at once.
+        let now = queue.ticket();
+        let after = queue.ticket();
+        drop(now);
+        drop(after.wait());
+        assert!(queue.numbers().given_up.is_empty());
     }
 }

@@ -571,6 +571,7 @@ component PluginPanel inherits SidePanel {
             wrap: word-wrap;
             min-width: 0px;
         }
+        // Its parts in three greys: a kind of file isn't a DAW, a sound type or a warning, whose colours mean those.
         if PluginsData.room-bars.length > 0: Rectangle {
             height: 10px;
             border-radius: 5px;
@@ -579,7 +580,7 @@ component PluginPanel inherits SidePanel {
             HorizontalLayout {
                 for b in PluginsData.room-bars: Rectangle {
                     horizontal-stretch: max(0.01, b.share);
-                    background: b.kind == 0 ? Theme.fl-studio : b.kind == 1 ? Theme.sound-type(5) : Theme.warning;
+                    background: b.kind == 0 ? Theme.text : b.kind == 1 ? Theme.muted : Theme.faint;
                 }
             }
         }
@@ -587,7 +588,7 @@ component PluginPanel inherits SidePanel {
             spacing: Space.sm;
             VerticalLayout {
                 alignment: center;
-                Dot { tint: b.kind == 0 ? Theme.fl-studio : b.kind == 1 ? Theme.sound-type(5) : Theme.warning; }
+                Dot { tint: b.kind == 0 ? Theme.text : b.kind == 1 ? Theme.muted : Theme.faint; }
             }
             Text {
                 text: b.name;

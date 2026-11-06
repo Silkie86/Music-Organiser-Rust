@@ -277,7 +277,8 @@ component MidiLineView inherits ListLine {
                 }
                 if root.line.phrase != "": Text {
                     text: root.line.phrase;
-                    color: Theme.accent;
+                    // Plain information, so not the accent (that means picked or playing).
+                    color: Theme.text;
                     font-size: Type.meta;
                 }
             }
@@ -617,7 +618,7 @@ component PartPanel inherits SidePanel {
     }
     if MidiData.picked.phrase != "": Text {
         text: MidiData.picked.phrase;
-        color: Theme.accent;
+        color: Theme.text;
         font-size: Type.meta;
     }
     if MidiData.picked.others.length > 0: VerticalLayout {

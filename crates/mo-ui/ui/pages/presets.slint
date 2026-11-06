@@ -265,7 +265,7 @@ component PresetHeading inherits HorizontalLayout {
 // A curve's shape, drawn in its box (the renderer draws it on the graphics card when there is one).
 component CurveShape inherits Rectangle {
     in property <string> shape;
-    in property <color> tint: Theme.accent;
+    in property <color> tint: Theme.text;
     in property <length> line: 1.5px;
     Path {
         x: root.line;
@@ -302,7 +302,8 @@ component CurveLineView inherits ListLine {
             y: (parent.height - self.height) / 2;
             CurveShape {
                 shape: root.line.shape;
-                tint: root.line.hidden ? Theme.faint : Theme.accent;
+                // A curve is information, not something on: plain ink, fainter when hidden.
+                tint: root.line.hidden ? Theme.faint : Theme.text;
             }
         }
         VerticalLayout {

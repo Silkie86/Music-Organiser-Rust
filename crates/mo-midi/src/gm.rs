@@ -13,7 +13,7 @@
 use crate::{Family, Role};
 
 /// A sound to play a part with: a General MIDI program (0 to 127), or the drum kit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GmSound {
     /// The GM program, 0 to 127. For the drum kit it's 0 (the standard kit), played on channel 10.
     pub program: u8,
@@ -23,14 +23,15 @@ pub struct GmSound {
 }
 
 /// What a sound was matched by.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Why {
     /// A drum part.
     Drums,
     /// The MIDI file's own program change.
     Program,
-    /// A word in a name (the word, as it was matched).
-    Name(&'static str),
+    /// A word in a name, as the name writes it (in small letters): "harpsichord", not the "harpsi" it was matched by;
+    /// for two words that name a sound together, that sound ("synth strings", "e-piano").
+    Name(String),
     /// The instrument the instrument finder names.
     Instrument(Family),
     /// The kind of part.
@@ -47,7 +48,7 @@ impl GmSound {
 
     /// The words under its name ("from its name: rhodes").
     pub fn why_text(&self) -> String {
-        match self.why {
+        match &self.why {
             Why::Drums => "a drum part".to_owned(),
             Why::Program => "the file's own instrument".to_owned(),
             Why::Name(word) => format!("from its name: {word}"),
@@ -167,6 +168,8 @@ const WORDS: &[(&str, Match, u8)] = &[
     ("sub", Whole, 38),
     ("fretless", Start, 35),
     ("slap", Start, 36),
+    // Before "bass", which it starts with.
+    ("bassoon", Start, 70),
     ("bass", Start, 38),
     ("piano", Start, 0),
     ("grand", Whole, 0),
@@ -216,6 +219,10 @@ const WORDS: &[(&str, Match, u8)] = &[
 
 /// Whether `word` (from [`WORDS`]) is the name's word `w`.
 fn matches(w: &str, word: &str, how: Match) -> bool {
+    // A bassoon isn't a bass, in a pair ("synth bassoon") too.
+    if word == "bass" && w.starts_with("bassoon") {
+        return false;
+    }
     match how {
         Start => w.starts_with(word),
         Whole => w == word || w.strip_prefix(word).is_some_and(|rest| rest == "s" || rest == "es"),
@@ -234,12 +241,12 @@ fn by_name(name: &str) -> Option<GmSound> {
             words.iter().any(|w| matches(w, a, Start)) && words.iter().any(|w| matches(w, b, Start))
         };
         if found {
-            return Some(GmSound { program, drums: false, why: Why::Name(said) });
+            return Some(GmSound { program, drums: false, why: Why::Name(said.to_owned()) });
         }
     }
     for &(word, how, program) in WORDS {
-        if words.iter().any(|w| matches(w, word, how)) {
-            return Some(GmSound { program, drums: false, why: Why::Name(word) });
+        if let Some(w) = words.iter().find(|w| matches(w, word, how)) {
+            return Some(GmSound { program, drums: false, why: Why::Name((*w).to_owned()) });
         }
     }
     None
@@ -394,7 +401,7 @@ mod tests {
     #[test]
     fn a_files_own_program_comes_before_its_name() {
         let s = sound_for(Role::Chords, false, Some(48), &["Piano"], None);
-        assert_eq!((s.program, s.why, s.name()), (48, Why::Program, "String Ensemble 1"));
+        assert_eq!((s.program, s.why.clone(), s.name()), (48, Why::Program, "String Ensemble 1"));
         // Program 0 is mostly a maker leaving it as it was: the name says more.
         assert_eq!(sound_for(Role::Bass, false, Some(0), &["808 slide"], None).program, 38);
         assert_eq!(sound_for(Role::Bass, false, Some(0), &["Untitled"], None).program, 0);
@@ -414,13 +421,17 @@ mod tests {
         assert_eq!(named(Role::Melody, &["Bassline"]).program, 38);
         // The first name with a word in it wins: the track's before the file's.
         assert_eq!(named(Role::Chords, &["Organ", "Night drive pad"]).program, 16);
-        assert_eq!(named(Role::Chords, &["Organ"]).why, Why::Name("organ"));
+        assert_eq!(named(Role::Chords, &["Organ"]).why, Why::Name("organ".into()));
         // Some words only on their own (or with an s).
         assert_eq!(named(Role::Chords, &["Subtle panic"]).why, Why::Kind);
         assert_eq!(named(Role::Chords, &["Ambient Pads"]).program, 89);
         assert_eq!(named(Role::Bass, &["808s"]).program, 38);
         assert_eq!(named(Role::Melody, &["Tenor Saxophone"]).program, 65);
         assert_eq!(named(Role::Chords, &["Harpsichord"]).program, 6);
+        // A bassoon isn't a bass; and the card says the word as the name has it, not the start it's matched by.
+        assert_eq!(named(Role::Melody, &["Bassoon"]).program, 70);
+        assert_eq!(named(Role::Melody, &["Synth Bassoon"]).program, 70);
+        assert_eq!(named(Role::Chords, &["Harpsichord"]).why_text(), "from its name: harpsichord");
         assert_eq!(named(Role::Chords, &["Organic pad"]).program, 89);
         // Two words that say more together, and electric piano only when it says so.
         assert_eq!(named(Role::Chords, &["Synth Strings"]).program, 50);

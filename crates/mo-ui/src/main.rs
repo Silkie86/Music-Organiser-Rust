@@ -21,6 +21,15 @@ fn main() -> Result<(), slint::PlatformError> {
     log_crashes();
     // The graphics card takes a while to wake up: it's looked for while the log and the settings start.
     mo_ui::gpu::look_ahead();
+    // The data folder was moved to a drive that isn't there now: ask what to do before anything opens the old copy
+    // (F-2), rather than quietly opening on it.
+    while let Some(problem) = mo_app::paths::missing_now() {
+        match mo_ui::startup::data_folder_missing(&problem) {
+            mo_ui::startup::Missing::TryAgain => {}
+            mo_ui::startup::Missing::UseOldCopy => break,
+            mo_ui::startup::Missing::Close => return Ok(()),
+        }
+    }
     // A data folder copied to another drive last run is caught up and switched to now, before any of the app's files is
     // opened (Settings, Move to another drive).
     let moved = mo_app::data_move::finish_at_start();
@@ -42,6 +51,10 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_app::tidy::start();
     mo_ui::startup::step("log");
     let feed = Feed::default();
+    // Using the old copy of the data this run: a card says so until it's put away (Settings says so too).
+    if let Some(problem) = mo_app::paths::problem() {
+        feed.notice("Using the old copy of your data", &problem);
+    }
     // This app's own settings over the C# app's, which library.db keeps and the app only reads.
     let data = mo_app::paths::data_dir();
     // The app's own song library, songs.db, once it's been made and checked; the C# app's library.db until then (and

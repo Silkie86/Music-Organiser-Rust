@@ -94,8 +94,9 @@ fn build_bulk_pool(name: &'static str, threads: usize) -> Option<rayon::ThreadPo
 }
 
 /// Puts what the thread it's called on reads and uses low in the system's memory (Windows; elsewhere nothing changes).
+/// The bulk pools' threads do it themselves; a thread of its own from [`spawn`] that reads gigabytes calls it first.
 #[allow(unsafe_code)]
-fn lower_memory_priority() {
+pub fn lower_memory_priority() {
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Threading::{

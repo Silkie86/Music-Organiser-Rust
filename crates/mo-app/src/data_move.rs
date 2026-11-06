@@ -351,9 +351,7 @@ fn copy_one(f: &Found, to_file: &Path, stop: &AtomicBool) -> Result<(), NotCopie
         }
         let wrote: [u8; 32] = hash.finalize().into();
         if hash_file(&part, stop)? != wrote {
-            return Err(NotCopied::Failed(io::Error::other(
-                "the copy read back differently: is the new drive failing?",
-            )));
+            return Err(NotCopied::Failed(io::Error::other("the copy read back differently from what was read")));
         }
         fs::rename(&part, to_file)?;
         Ok(())
@@ -598,6 +596,9 @@ pub enum AtStart {
     NotYet { to: PathBuf, why: String, catch_up: bool },
     /// Called off: the ready copy can't be used.
     Dropped { to: PathBuf, why: String },
+    /// Another copy of the app was switching folders as this one started: this one waited for it to finish, and
+    /// there was nothing left to do after it, so it opens on whichever folder that copy left in use.
+    Waited { to: PathBuf, took: Duration },
 }
 
 impl AtStart {
@@ -620,6 +621,11 @@ impl AtStart {
             }
             AtStart::NotYet { to, why, .. } => format!("Not switching to {} yet: {why}", to.display()),
             AtStart::Dropped { to, why } => format!("The move to {} is called off: {why}", to.display()),
+            AtStart::Waited { to, took } => format!(
+                "Another copy of the app was switching to {}: waited {:.1} s for it to finish",
+                to.display(),
+                took.as_secs_f64()
+            ),
         }
     }
 }
@@ -697,7 +703,30 @@ fn finish_in(first: &Path) -> Option<AtStart> {
     };
     match lock.try_lock() {
         Ok(()) => {}
-        Err(fs::TryLockError::WouldBlock) => return not_yet("another copy of the app is open".to_owned()),
+        // Held shared: another copy of the app is open on this folder, so not now. Held alone: another copy is
+        // switching folders right now (F-1), so wait for it, then open on whatever folder it left in use.
+        // (A copy that closes or opens between the two asks only makes this say "not now": the next start tries again.)
+        Err(fs::TryLockError::WouldBlock) => {
+            let started = Instant::now();
+            return match lock.try_lock_shared() {
+                Ok(()) => {
+                    let _ = lock.unlock();
+                    not_yet("another copy of the app is open".to_owned())
+                }
+                Err(fs::TryLockError::WouldBlock) => {
+                    if !wait_for_switch(&lock) {
+                        return not_yet(format!(
+                            "another copy of the app was still switching folders after {} s",
+                            SWITCH_WAIT.as_secs()
+                        ));
+                    }
+                    // It's done: look again, as that copy may have switched, called the move off or left it for later.
+                    drop(lock);
+                    finish_in(first).or(Some(AtStart::Waited { to: to.clone(), took: started.elapsed() }))
+                }
+                Err(fs::TryLockError::Error(e)) => not_yet(format!("{OPEN_LOCK_FILE} couldn't be locked ({e})")),
+            };
+        }
         Err(fs::TryLockError::Error(e)) => return not_yet(format!("{OPEN_LOCK_FILE} couldn't be locked ({e})")),
     }
     let started = Instant::now();
@@ -740,16 +769,7 @@ fn finish_in(first: &Path) -> Option<AtStart> {
     }
     let _ = fs::remove_file(to.join(MOVING_IN_FILE));
     let _ = fs::remove_file(&pending_file);
-    let _ = fs::write(
-        from.join(MOVED_OUT_FILE),
-        format!(
-            "Music Organiser copied its data from this folder to\r\n\r\n    {}\r\n\r\non {} and uses that folder now. \
-             Nothing here was changed or removed.\r\nYou can remove this folder once you're happy the app works from \
-             the new one.\r\n",
-            to.display(),
-            moved.switched
-        ),
-    );
+    let _ = fs::write(from.join(MOVED_OUT_FILE), moved_out_note(&from, first, &to, &moved.switched));
     let _ = lock.unlock();
     Some(AtStart::Switched {
         from,
@@ -759,6 +779,69 @@ fn finish_in(first: &Path) -> Option<AtStart> {
         took: started.elapsed(),
         notes: pass.notes,
     })
+}
+
+/// Waits (at most [`SWITCH_WAIT`]) until no other copy of the app holds `lock` alone, as one does only while it
+/// catches up and switches folders. Whether it let go in time.
+fn wait_for_switch(lock: &File) -> bool {
+    let started = Instant::now();
+    while started.elapsed() < SWITCH_WAIT {
+        match lock.try_lock_shared() {
+            Ok(()) => {
+                let _ = lock.unlock();
+                return true;
+            }
+            Err(fs::TryLockError::WouldBlock) => std::thread::sleep(Duration::from_millis(250)),
+            Err(fs::TryLockError::Error(_)) => return false,
+        }
+    }
+    false
+}
+
+/// The longest a start waits, before its window opens, for another copy of the app that is switching folders: a
+/// switch catches up at most [`START_LIMIT`], under a minute on a slow drive. Longer, and this start opens on the old
+/// folder and the move waits for the next one.
+const SWITCH_WAIT: Duration = Duration::from_secs(90);
+
+/// The note left in the folder the data moved out of, `from` (to `to`, at `when`). What to keep there: the launcher
+/// and the pointer only when it's the system's own folder `first` (a second move, out of a folder a move went to,
+/// has neither), and the old files the copy left behind for the archive step, as there are any.
+fn moved_out_note(from: &Path, first: &Path, to: &Path, when: &str) -> String {
+    let mut keep = Vec::new();
+    let is_first = paths_match(from, first);
+    if is_first {
+        let launchers: Vec<&str> = LAUNCHER_FOLDERS.iter().copied().filter(|f| from.join(f).is_dir()).collect();
+        if !launchers.is_empty() {
+            keep.push(format!("{}: the launcher, which the Desktop shortcut starts", launchers.join(" and ")));
+        }
+    }
+    let left: Vec<&str> = LEFT_BEHIND
+        .iter()
+        .map(|&(old, _)| old)
+        .filter(|old| from.join(old).is_file() && left_behind(from, old))
+        .collect();
+    if !left.is_empty() {
+        keep.push(format!("{}: not copied, kept here until the app has archived them", left.join(", ")));
+    }
+    let mut note = format!(
+        "Music Organiser copied its data from this folder to\r\n\r\n    {}\r\n\r\non {when} and uses that folder now. \
+         Nothing here was changed or removed.\r\n",
+        to.display()
+    );
+    if !keep.is_empty() {
+        note.push_str("\r\nKeep in this folder:\r\n");
+        for k in &keep {
+            note.push_str(&format!("  - {k}\r\n"));
+        }
+    }
+    if is_first {
+        note.push_str(&format!(
+            "\r\nKeep {} beside this folder too: it tells the app where its data is now.\r\n",
+            paths::POINTER_FILE
+        ));
+    }
+    note.push_str("\r\nThe rest can go once you're happy the app works from the new folder.\r\n");
+    note
 }
 
 /// Whether two folder paths name the same folder as written (Windows and a Mac ignore case).
@@ -771,9 +854,23 @@ fn paths_match(a: &Path, b: &Path) -> bool {
 pub fn hold_open_lock() {
     static HELD: OnceLock<File> = OnceLock::new();
     let path = paths::data_dir().join(OPEN_LOCK_FILE);
-    let Ok(file) = File::options().create(true).truncate(false).write(true).open(&path) else { return };
-    if file.try_lock_shared().is_ok() {
-        let _ = HELD.set(file);
+    let held = File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&path)
+        .map_err(|e| format!("couldn't open it ({e})"))
+        .and_then(|file| file.try_lock_shared().map(|()| file).map_err(|e| e.to_string()));
+    match held {
+        Ok(file) => {
+            let _ = HELD.set(file);
+        }
+        Err(e) => crate::log::warning(
+            "Data folder",
+            &format!(
+                "Couldn't hold {OPEN_LOCK_FILE} ({e}): another copy started now could switch folders under this one"
+            ),
+        ),
     }
 }
 
@@ -801,7 +898,23 @@ pub fn status_note(pending: Option<&Path>, moved_from: Option<&Path>, problems: 
             to.display()
         ));
     } else if let Some(from) = moved_from {
-        lines.push(format!("Moved here from {}. That folder stays as it was until you remove it.", from.display()));
+        let mut line = format!("Moved here from {}. That folder stays as it was.", from.display());
+        if paths_match(from, &paths::first_dir()) {
+            line.push_str(&format!(
+                " Keep its {} folders (the launcher and its Desktop shortcut) and {} beside it.",
+                LAUNCHER_FOLDERS.join(" and "),
+                paths::POINTER_FILE
+            ));
+        }
+        let left: Vec<&str> = LEFT_BEHIND
+            .iter()
+            .map(|&(old, _)| old)
+            .filter(|old| from.join(old).is_file() && left_behind(from, old))
+            .collect();
+        if !left.is_empty() {
+            line.push_str(&format!(" Keep {} there until the app has archived it.", left.join(", ")));
+        }
+        lines.push(line);
     }
     lines.join("\n")
 }
@@ -1041,5 +1154,48 @@ mod tests {
         symlink(&s.first, &into).unwrap();
         let err = copy_with(&s.first, &into.join("MusicOrganiser"), &s.first, &AtomicBool::new(false), &mut |_, _| {});
         assert!(err.unwrap_err().contains("outside"));
+    }
+
+    #[test]
+    fn a_start_while_another_copy_switches_waits_for_it() {
+        let s = Setup::new("waits");
+        s.copy().unwrap();
+        // Another copy is switching: it holds the lock alone.
+        let other =
+            File::options().create(true).truncate(false).write(true).open(s.first.join(OPEN_LOCK_FILE)).unwrap();
+        other.lock().unwrap();
+        let first = s.first.clone();
+        let start = std::thread::spawn(move || finish_in(&first));
+        std::thread::sleep(Duration::from_millis(600));
+        assert!(!start.is_finished());
+        // It let go without switching: this start switches itself.
+        other.unlock().unwrap();
+        assert!(matches!(start.join().unwrap(), Some(AtStart::Switched { .. })));
+
+        // It switched (the move is no longer waiting) before letting go: nothing left for this start to do.
+        let s = Setup::new("waits-done");
+        s.copy().unwrap();
+        let other =
+            File::options().create(true).truncate(false).write(true).open(s.first.join(OPEN_LOCK_FILE)).unwrap();
+        other.lock().unwrap();
+        let first = s.first.clone();
+        let start = std::thread::spawn(move || finish_in(&first));
+        std::thread::sleep(Duration::from_millis(600));
+        fs::remove_file(s.first.with_file_name(PENDING_FILE)).unwrap();
+        other.unlock().unwrap();
+        assert!(matches!(start.join().unwrap(), Some(AtStart::Waited { .. })));
+    }
+
+    #[test]
+    fn the_moved_out_note_names_only_what_that_folder_has() {
+        let s = Setup::new("note");
+        fs::write(s.first.join("sounds.db"), b"old").unwrap();
+        fs::write(s.first.join(mo_sounds::compact::FILE_NAME), b"new").unwrap();
+        let note = moved_out_note(&s.first, &s.first, &s.to, "now");
+        assert!(note.contains("run-latest-rust:") && note.contains(paths::POINTER_FILE));
+        assert!(note.contains("sounds.db:") && !note.contains("sounds.db-wal"));
+        // A second move, out of a folder a move went to: no launcher or pointer there.
+        let note = moved_out_note(&s.to, &s.first, &s.root.join("G"), "now");
+        assert!(!note.contains("run-latest") && !note.contains(paths::POINTER_FILE) && !note.contains("Keep in"));
     }
 }
