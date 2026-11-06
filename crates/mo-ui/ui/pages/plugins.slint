@@ -149,7 +149,6 @@ export global PluginsData {
     in property <string> uses-note;
     in property <[UseRow]> uses;
     in property <FilterView> use-daws;
-    in property <string> use-daw;
     in property <bool> every-save;
     in property <string> room-summary;
     in property <string> room-shared;
@@ -201,9 +200,14 @@ export global PluginsData {
     callback sort-picked(string);
     callback clear();
     callback select(int);
+    // Up and Down step through the list (review X3-8); the list scrolls to the line at show-row when show-ask changes.
+    callback step(int);
+    in property <int> show-row;
+    in property <int> show-ask;
     callback close-panel();
     callback menu-chosen(string);
     callback use-daw-picked(string);
+    callback use-daws-cleared();
     callback every-save-toggled();
     callback open-use(int);
     callback panel-resized(length);
@@ -342,12 +346,12 @@ component PluginPanel inherits SidePanel {
         HorizontalLayout {
             spacing: Space.sm;
             alignment: start;
-            // Each DAW its songs come from, as a chip: picking the one that's on shows every DAW again.
+            // Each DAW its songs come from, as a chip: pick as many as you like, as the list's DAW filter.
             if PluginsData.use-daws.chips.length > 0: FilterPicks {
                 name: "DAW";
                 filter: PluginsData.use-daws;
                 toggled(text) => { PluginsData.use-daw-picked(text); }
-                cleared => { PluginsData.use-daw-picked(PluginsData.use-daw); }
+                cleared => { PluginsData.use-daws-cleared(); }
             }
             ToggleChip {
                 text: "Every save";
@@ -779,6 +783,12 @@ export component PluginsPage inherits Rectangle {
                         PluginsData.search-edited("");
                         return true;
                     }
+                    // Down goes into the list, as on Sounds, MIDI and Presets, when a line shows.
+                    if (k == Key.DownArrow && PluginsData.message == "" && PluginsData.lines.length > 0) {
+                        keys.focus();
+                        PluginsData.step(1);
+                        return true;
+                    }
                     false
                 }
             }
@@ -948,78 +958,105 @@ export component PluginsPage inherits Rectangle {
             property <length> list-width: max(380px, self.width - PluginsData.panel-width - divider.width);
             property <length> years-width: PluginsData.years.length > 1 && PluginsData.message == "" ? 56px : 0px;
             property <bool> wide: self.list-width > 640px;
-            Well {
+            keys := FocusScope {
                 x: 0;
                 width: area.list-width - area.years-width;
                 height: parent.height;
-                if PluginsData.message != "": EmptyState {
-                    x: Space.xl;
-                    width: parent.width - 2 * Space.xl;
-                    title: PluginsData.message;
+                key-pressed(event) => {
+                    if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                        return reject;
+                    }
+                    if (event.text == Key.UpArrow) {
+                        PluginsData.step(-1);
+                        return accept;
+                    }
+                    if (event.text == Key.DownArrow) {
+                        PluginsData.step(1);
+                        return accept;
+                    }
+                    reject
                 }
-                if PluginsData.message == "" && PluginsData.lines.length == 0: EmptyState {
-                    x: Space.xl;
-                    width: parent.width - 2 * Space.xl;
-                    title: "No plugins like that";
-                    text: "Try fewer filters, or another search.";
-                }
-                if PluginsData.message == "": ListView {
-                    for line in PluginsData.lines: ListLine {
-                        height: 56px;
-                        selected: line.row == PluginsData.selected;
-                        clicked => { PluginsData.select(line.row); }
-                        right-clicked(x, y) => { menu.open-at(x, y); }
-                        HorizontalLayout {
-                            padding-left: Space.md;
-                            padding-right: Space.md;
-                            spacing: Space.md;
-                            VerticalLayout {
-                                alignment: center;
-                                Dot { tint: line.state == 1 ? Theme.missing : line.state == 2 ? Theme.warning : Theme.ok; }
+                Well {
+                    if PluginsData.message != "": EmptyState {
+                        x: Space.xl;
+                        width: parent.width - 2 * Space.xl;
+                        title: PluginsData.message;
+                    }
+                    if PluginsData.message == "" && PluginsData.lines.length == 0: EmptyState {
+                        x: Space.xl;
+                        width: parent.width - 2 * Space.xl;
+                        title: "No plugins like that";
+                        text: "Try fewer filters, or another search.";
+                    }
+                    if PluginsData.message == "": ListView {
+                        property <int> show-ask: PluginsData.show-ask;
+                        changed show-ask => {
+                            if (PluginsData.show-row * 56px < -self.content-y
+                                || (PluginsData.show-row + 1) * 56px > -self.content-y + self.visible-height) {
+                                self.content-y = -clamp(PluginsData.show-row * 56px - self.visible-height / 3, 0px,
+                                    max(0px, self.content-height - self.visible-height));
                             }
-                            VerticalLayout {
-                                alignment: center;
-                                spacing: Space.xs;
-                                horizontal-stretch: 1;
+                        }
+                        for line in PluginsData.lines: ListLine {
+                            height: 56px;
+                            selected: line.row == PluginsData.selected;
+                            clicked => {
+                                keys.focus();
+                                PluginsData.select(line.row);
+                            }
+                            right-clicked(x, y) => { menu.open-at(x, y); }
+                            HorizontalLayout {
+                                padding-left: Space.md;
+                                padding-right: Space.md;
+                                spacing: Space.md;
+                                VerticalLayout {
+                                    alignment: center;
+                                    Dot { tint: line.state == 1 ? Theme.missing : line.state == 2 ? Theme.warning : Theme.ok; }
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    spacing: Space.xs;
+                                    horizontal-stretch: 1;
+                                    Text {
+                                        text: line.name;
+                                        color: Theme.text;
+                                        font-size: Type.row-title;
+                                        font-weight: 500;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: line.details;
+                                        color: Theme.muted;
+                                        font-size: Type.meta;
+                                        overflow: elide;
+                                    }
+                                }
                                 Text {
-                                    text: line.name;
+                                    width: 80px;
+                                    text: line.songs;
                                     color: Theme.text;
-                                    font-size: Type.row-title;
-                                    font-weight: 500;
-                                    overflow: elide;
+                                    font-size: Type.meta;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
+                                }
+                                if area.wide: Text {
+                                    width: 76px;
+                                    text: line.last;
+                                    color: Theme.muted;
+                                    font-family: Theme.number-font;
+                                    font-size: Type.meta;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
                                 }
                                 Text {
-                                    text: line.details;
-                                    color: Theme.muted;
+                                    width: 72px;
+                                    text: line.size;
+                                    color: line.state == 2 ? Theme.warning : Theme.muted;
+                                    font-family: Theme.number-font;
                                     font-size: Type.meta;
-                                    overflow: elide;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
                                 }
-                            }
-                            Text {
-                                width: 80px;
-                                text: line.songs;
-                                color: Theme.text;
-                                font-size: Type.meta;
-                                vertical-alignment: center;
-                                horizontal-alignment: right;
-                            }
-                            if area.wide: Text {
-                                width: 76px;
-                                text: line.last;
-                                color: Theme.muted;
-                                font-family: Theme.number-font;
-                                font-size: Type.meta;
-                                vertical-alignment: center;
-                                horizontal-alignment: right;
-                            }
-                            Text {
-                                width: 72px;
-                                text: line.size;
-                                color: line.state == 2 ? Theme.warning : Theme.muted;
-                                font-family: Theme.number-font;
-                                font-size: Type.meta;
-                                vertical-alignment: center;
-                                horizontal-alignment: right;
                             }
                         }
                     }

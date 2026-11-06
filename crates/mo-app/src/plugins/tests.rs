@@ -259,7 +259,7 @@ fn chips_search_and_years_filter_the_list() {
 fn the_card_lists_songs_newest_first_each_once() {
     let p = plugins();
     let serum = p.find("serum", "").unwrap();
-    let s = p.songs_using(serum, false, "");
+    let s = p.songs_using(serum, false, &[]);
     assert_eq!(s.title, "Used in 2 songs");
     assert_eq!(s.note, "4 saves in all. Each song shows its newest save that uses it.");
     let names: Vec<(&str, usize)> = s.lines.iter().map(|l| (l.name.as_str(), l.saves)).collect();
@@ -267,11 +267,15 @@ fn the_card_lists_songs_newest_first_each_once() {
     assert_eq!(s.lines[1].saves_text(), "3 saves");
     assert_eq!(s.daws, ["Bitwig", "FL Studio"]);
 
-    let every = p.songs_using(serum, true, "FL Studio");
+    let every = p.songs_using(serum, true, &["FL Studio".to_owned()]);
     assert_eq!(every.title, "Used in 1 song in FL Studio");
     assert_eq!(every.lines.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(), ["Didums_3", "Didums_2", "Didums"]);
     assert_eq!(every.note, "Every one of its 3 saves, newest first.");
-    assert_eq!(p.saves_using(serum, "Bitwig"), HashSet::from([5]));
+    assert_eq!(p.saves_using(serum, &["Bitwig".to_owned()]), HashSet::from([5]));
+    // Many DAWs picked, as the list's DAW filter picks them (review X3-23).
+    let both = p.songs_using(serum, false, &["Bitwig".to_owned(), "FL Studio".to_owned()]);
+    assert_eq!((both.title.as_str(), both.lines.len()), ("Used in 2 songs in Bitwig, FL Studio", 2));
+    assert_eq!(p.saves_using(serum, &["Bitwig".to_owned(), "FL Studio".to_owned()]).len(), 4);
 
     let card = p.card(serum).unwrap();
     assert_eq!(card.state, State::Installed);

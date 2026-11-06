@@ -863,10 +863,10 @@ impl Plugins {
 
     /// The picked plugin's songs, newest first: each song once, with its newest save that uses it, or every save
     /// with `every`. Only `daw`'s, unless that's empty.
-    pub fn songs_using(&self, row: usize, every: bool, daw: &str) -> SongsUsing {
+    pub fn songs_using(&self, row: usize, every: bool, daws_picked: &[String]) -> SongsUsing {
         let Some(r) = self.rows.get(row) else { return SongsUsing::default() };
         let saves: Vec<&SaveBrief> =
-            r.saves.iter().filter_map(|id| self.saves.get(id)).filter(|s| daw.is_empty() || s.daw == daw).collect();
+            r.saves.iter().filter_map(|id| self.saves.get(id)).filter(|s| in_daws(&s.daw, daws_picked)).collect();
         let mut daws: Vec<String> = r.saves.iter().filter_map(|id| self.saves.get(id)).map(|s| s.daw.clone()).collect();
         daws.sort();
         daws.dedup();
@@ -888,7 +888,7 @@ impl Plugins {
         }
         let song_count = songs.len();
         let lines = if every { saves.iter().map(|s| UseLine::of(s, s.name.clone())).collect() } else { songs };
-        let place = if daw.is_empty() { String::new() } else { format!(" in {daw}") };
+        let place = if daws_picked.is_empty() { String::new() } else { format!(" in {}", daws_picked.join(", ")) };
         let title = format!("Used in {}{place}", plural(song_count, "song", "songs"));
         let note = if saves.len() == song_count {
             String::new()
@@ -900,12 +900,12 @@ impl Plugins {
         SongsUsing { title, note, lines, daws: if daws.len() > 1 { daws } else { Vec::new() } }
     }
 
-    /// The saves using the picked plugin (only `daw`'s, unless that's empty), for Show in Songs.
-    pub fn saves_using(&self, row: usize, daw: &str) -> HashSet<i64> {
+    /// The saves using the picked plugin (only the picked DAWs' ones, when any are picked), for Show in Songs.
+    pub fn saves_using(&self, row: usize, daws: &[String]) -> HashSet<i64> {
         let Some(r) = self.rows.get(row) else { return HashSet::new() };
         r.saves
             .iter()
-            .filter(|id| daw.is_empty() || self.saves.get(id).is_some_and(|s| s.daw == daw))
+            .filter(|id| daws.is_empty() || self.saves.get(id).is_some_and(|s| in_daws(&s.daw, daws)))
             .copied()
             .collect()
     }
@@ -1371,6 +1371,11 @@ fn with_room(rows: &mut Vec<PluginRow>, spaces: &[StoredSpace], cutoff: NaiveDat
             give(rows, &mut claimed, at, s);
         }
     }
+}
+
+/// Whether a save in `daw` is among the DAWs picked (none picked: every DAW).
+fn in_daws(daw: &str, picked: &[String]) -> bool {
+    picked.is_empty() || picked.iter().any(|d| d == daw)
 }
 
 /// The version a plugin's name gives after its family: 4 for "AmpliTube 4", 7 for "Guitar Rig 7", 3 for "FabFilter
