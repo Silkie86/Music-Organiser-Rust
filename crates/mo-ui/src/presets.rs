@@ -13,7 +13,7 @@
 //! Send to Bitwig makes the sound's Bitwig preset and puts it into the project open in Bitwig through the Bitwig link
 //! (`mo-dawlink`, [`send_to_bitwig`]); when Bitwig isn't there, the preset is shown in its folder to drag in.
 //! Audition in Bitwig does the same on a track of its own with a short part playing on it
-//! (`mo_app::preset_audition`), to hear it first: Stop audition takes the track out again, Keep in Bitwig leaves it.
+//! (`mo_app::preset_audition`), to hear it first: Stop playing in Bitwig takes the track out again, Keep in Bitwig leaves it.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -849,7 +849,7 @@ fn show_card(app: &AppWindow) {
                     key: key(o.id),
                     id: o.id.into(),
                     enabled: o.enabled,
-                    main: false,
+                    main: o.id == act::AUDITION,
                     danger: false,
                 })
                 .collect::<Vec<_>>(),
@@ -1658,7 +1658,7 @@ fn hearing_of(p: &Page, item: &Item) -> logic::Hearing {
     }
 }
 
-/// Audition in Bitwig, and Stop audition: stops the audition playing (taking its track out again); unless it was this
+/// Audition in Bitwig, and Stop playing in Bitwig: stops the audition playing (taking its track out again); unless it was this
 /// line's, puts this line's preset on a new track in Bitwig with a part for its kind playing on it.
 fn toggle_audition(app: &AppWindow, item: Item) {
     let id = logic::audition_id(&item);
@@ -1681,7 +1681,7 @@ fn toggle_audition(app: &AppWindow, item: Item) {
         p.message.clear();
     });
     show_all(app);
-    let (library, templates, bitwig_folders, _) = export_setup();
+    let (_, templates, bitwig_folders, _) = export_setup();
     // Its place in Bitwig's line, taken now, behind the stop just asked for on the MIDI page.
     let ticket = mo_dawlink::bitwig::ticket();
     let on_its_way = crate::in_flight::Start::begin();
@@ -1698,7 +1698,7 @@ fn toggle_audition(app: &AppWindow, item: Item) {
         }
         let wanted = move || audition_asked() == asked;
         let made = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
-            audition(&item, &library, templates, &bitwig_folders, &turn, &wanted)
+            audition(&item, templates, &bitwig_folders, &turn, &wanted)
         }))
         .unwrap_or_else(|_| Err(Some("It stopped before it started playing.".to_owned())));
         let made = match made {
@@ -1761,7 +1761,6 @@ fn toggle_audition(app: &AppWindow, item: Item) {
 /// thread. `Err(None)` when it was no longer `wanted` (it put nothing in, or took it back).
 fn audition(
     item: &Item,
-    library: &Path,
     templates: Option<Arc<Templates>>,
     bitwig_folders: &[PathBuf],
     turn: &mo_dawlink::bitwig::Turn<'_>,
@@ -1771,29 +1770,20 @@ fn audition(
     if !wanted() {
         return Err(None);
     }
-    let preset = match &item.row.source {
-        Source::File { .. } => PathBuf::from(item.path()),
+    // A song's sound gets its Bitwig preset made in Temp, under a name the sweep knows, and it goes once Bitwig has
+    // loaded it: never in the export folder, among the presets you exported (the 6 Nov review's D-fp5, rule 28).
+    let (preset, name, made) = match &item.row.source {
+        Source::File { .. } => {
+            let preset = PathBuf::from(item.path());
+            let name = preset.file_stem().map(|n| n.to_string_lossy().into_owned());
+            (preset, name, false)
+        }
         Source::Song { save, key } => {
-            let root = bitwig::export_folder_in(library)?;
-            let templates = templates_now(templates, bitwig_folders, |t| without_template(&[item], t).is_empty());
-            let done = background::on_pool(|| {
-                export::export_from_save(
-                    save,
-                    Choice::default(),
-                    Some(std::slice::from_ref(key)),
-                    &root,
-                    Some(&templates),
-                )
-            })
-            .map_err(|e| format!("Its Bitwig preset couldn't be made: {e}"))?;
-            done.files
-                .iter()
-                .find(|f| f.to_lowercase().ends_with(".bwpreset"))
-                .map(|f| done.folder.join(f))
-                .ok_or_else(|| Some(no_bitwig_preset(item)))?
+            let (preset, name) = audition_preset_of(item, save, key, templates, bitwig_folders)?;
+            (preset, Some(name), true)
         }
     };
-    let name = preset.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| item.row.name.clone());
+    let name = name.unwrap_or_else(|| item.row.name.clone());
     let clip = mo_app::preset_audition::clip(&name, item.role());
     let bytes = mo_formats::midi::write::write_clip(&clip)
         .map_err(|e| format!("Its part's MIDI file couldn't be made: {e}."))?
@@ -1803,7 +1793,54 @@ fn audition(
     // Bitwig has read both files once this answers, so the part goes at once (rule 28).
     let heard = mo_dawlink::bitwig::Bitwig::default().audition_preset(&preset, &part, &name, turn, wanted);
     let _ = std::fs::remove_file(&part);
+    if made {
+        let _ = std::fs::remove_file(&preset);
+    }
     heard.map_err(|e| (e != mo_dawlink::bitwig::Error::Cancelled).then(|| e.to_string()))
+}
+
+/// Makes a song's sound into a Bitwig preset for an audition: exported into a folder of its own in Temp, then the
+/// `.bwpreset` moved beside it under a play file's name ([`mo_app::midi::play_preset_name`]) and the rest of the export
+/// removed, each file by the name the export gave it. Gives the preset and the sound's name for the track.
+fn audition_preset_of(
+    item: &Item,
+    save: &str,
+    key: &str,
+    templates: Option<Arc<Templates>>,
+    bitwig_folders: &[PathBuf],
+) -> Result<(PathBuf, String), Option<String>> {
+    let temp = std::env::temp_dir();
+    let file = mo_app::midi::play_preset_name();
+    let root = temp.join(file.strip_suffix(".bwpreset").unwrap_or(&file));
+    let templates = templates_now(templates, bitwig_folders, |t| without_template(&[item], t).is_empty());
+    let done = background::on_pool(|| {
+        export::export_from_save(save, Choice::default(), Some(&[key.to_owned()]), &root, Some(&templates))
+    });
+    let kept = done.as_ref().ok().and_then(|done| {
+        let found = done.files.iter().find(|f| f.to_lowercase().ends_with(".bwpreset"))?;
+        let stem = Path::new(found).file_stem().map(|n| n.to_string_lossy().into_owned())?;
+        std::fs::rename(done.folder.join(found), temp.join(&file)).ok()?;
+        Some(stem)
+    });
+    // What else the export wrote goes now, then its folders once they're empty (one with anything else in it stays).
+    if let Ok(done) = &done {
+        for f in &done.files {
+            let _ = std::fs::remove_file(done.folder.join(f));
+        }
+        let mut folder = Some(done.folder.as_path());
+        while let Some(f) = folder.filter(|f| f.starts_with(&root)) {
+            let _ = std::fs::remove_dir(f);
+            folder = f.parent();
+        }
+    }
+    let done = done.map_err(|e| format!("Its Bitwig preset couldn't be made: {e}"))?;
+    match kept {
+        Some(name) => Ok((temp.join(&file), name)),
+        None if done.files.iter().any(|f| f.to_lowercase().ends_with(".bwpreset")) => {
+            Err(Some("Its Bitwig preset couldn't be moved in Temp.".to_owned()))
+        }
+        None => Err(Some(no_bitwig_preset(item))),
+    }
 }
 
 /// Takes an audition's track out of Bitwig on a thread of its own, without the window waiting, in its place in the
@@ -1844,7 +1881,7 @@ fn stop_audition_in(
 fn put_back(auditioning: mo_dawlink::bitwig::Auditioning, line: String, why: mo_dawlink::bitwig::Error) {
     let words = format!(
         "{} couldn't be stopped in Bitwig: {why} Bring its project to the front in Bitwig (with changes on), then \
-         press Stop audition again.",
+         press Stop playing in Bitwig again.",
         auditioning.track
     );
     let track = auditioning.track.clone();
@@ -1909,7 +1946,7 @@ pub(crate) fn call_off_for_closing() {
     AUDITION_ASKED.fetch_add(1, Ordering::SeqCst);
 }
 
-/// Stops the audition playing or starting, whatever line is picked: the strip's Stop audition, closing the card, and
+/// Stops the audition playing or starting, whatever line is picked: the strip's Stop playing in Bitwig, closing the card, and
 /// leaving the page.
 fn stop_audition_now(app: &AppWindow) {
     let line = PAGE.with(|p| p.borrow().hearing.as_ref().map(|(id, _)| id.clone()));
@@ -1995,6 +2032,22 @@ fn message_later(text: String) {
         PAGE.with(|p| p.borrow_mut().message = text);
         show_all(app);
     });
+}
+
+/// In the crash hook, when the crash ends the app: the audition's track comes out of Bitwig, a second at most. Never
+/// waits for the lock: the thread that crashed may hold it.
+pub fn after_crash() {
+    let Ok(mut slot) = AUDITION.try_lock() else { return };
+    if let Some(auditioning) = slot.take() {
+        let second = Duration::from_secs(1);
+        let to = mo_dawlink::bitwig::Bitwig {
+            connect_timeout: second,
+            timeout: second,
+            change_timeout: second,
+            ..mo_dawlink::bitwig::Bitwig::default()
+        };
+        let _ = to.stop_audition_as_app_closes(&auditioning);
+    }
 }
 
 /// When the app closes: takes an audition's track out of Bitwig, so it doesn't loop on. Waits a moment at most.

@@ -194,18 +194,26 @@ fn main() -> Result<(), slint::PlatformError> {
 /// (`mo_catch::catch`: a damaged file tripped a reader) isn't a crash: it's one warning line ([`caught`]). Nothing in
 /// here may crash itself: std would end the app on the spot.
 fn log_crashes() {
-    set_crash_hook(mo_app::paths::logs_dir, mo_ui::note::after_crash, flush_the_log, || {});
+    set_crash_hook(mo_app::paths::logs_dir, mo_ui::note::after_crash, flush_the_log, |fatal| {
+        // A crash that ends the app lets go of FL's notes and takes out what plays in Bitwig, as closing does (the 6
+        // Nov review's D-10): the threads that would do it go with the app.
+        if fatal {
+            mo_ui::midi::after_crash();
+            mo_ui::presets::after_crash();
+        }
+    });
 }
 
 /// Puts in the crash handler. A panic a [`mo_catch::catch`] catches is only a warning line ([`caught`]). Anything else
 /// is a crash: what the app does with it ([`on_crash`], into the logs folder `logs` gives, with `keep_note` and
-/// `flush`), then `after` (nothing in the app; a test counts the crashes), then std's own report of it, on the console
+/// `flush`), then `after`, told whether it ends the app (the app stops what plays in a DAW then; a test counts the
+/// crashes), then std's own report of it, on the console
 /// when there is one. Std's report comes last: it can wait for ever on a console nobody reads.
 fn set_crash_hook(
     logs: impl Fn() -> PathBuf + Send + Sync + 'static,
     keep_note: impl Fn(bool) + Send + Sync + 'static,
     flush: impl Fn() + Send + Sync + 'static,
-    after: impl Fn() + Send + Sync + 'static,
+    after: impl Fn(bool) + Send + Sync + 'static,
 ) {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -217,7 +225,7 @@ fn set_crash_hook(
             return;
         }
         on_crash(info, fatal, &logs(), &keep_note, &flush);
-        after();
+        after(fatal);
         default(info);
     }));
 }
@@ -406,7 +414,7 @@ mod tests {
             move || logs.clone(),
             keep_note,
             flush,
-            || {
+            |_| {
                 HANDLED.fetch_add(1, Ordering::SeqCst);
             },
         );
@@ -545,7 +553,7 @@ mod tests {
                 flush_the_log();
                 did(&flushed, &format!("{} flushed", this_thread()));
             },
-            || {},
+            |_| {},
         );
         let on = |thread: &str, work: fn()| {
             let ran = std::thread::Builder::new().name(thread.into()).spawn(work).expect("started").join();

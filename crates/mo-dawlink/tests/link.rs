@@ -79,7 +79,7 @@ fn something_else_on_the_port_isnt_taken_for_the_link() {
         assert_eq!(
             err.to_string(),
             format!(
-                "Something answered on port {}, but not the Music Organiser script in Bitwig. If Bitwig is busy \
+                "Something answered on port {}, but not the Music Organiser extension in Bitwig. If Bitwig is busy \
                  (opening a project, say), try again in a moment.",
                 bitwig.port()
             )
