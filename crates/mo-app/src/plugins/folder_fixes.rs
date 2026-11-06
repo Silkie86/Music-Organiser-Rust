@@ -1,8 +1,8 @@
 //! Your say on a plugin's folders, on the Plugins page's On disk tab, as the C# app's Space card has it: "Not its" on a
 //! guessed folder that isn't the plugin's (left out from now on), "Take off" on one you added, and "Add a folder…" for
-//! one the guess missed (a sound library on another drive). It's kept in library.db (`mo_library::plugin_folders`), so
-//! the C# app's next measure follows it. Until then, the page shows the change itself ([`Plugins::apply_folder_fixes`]),
-//! and keeps showing it over every new read this session.
+//! one the guess missed (a sound library on another drive). It's kept in library.db (`mo_library::plugin_folders`), and
+//! every read applies it over the stored measure ([`saved`], [`Plugins::apply_folder_fixes`]), so it lasts past a
+//! restart; this session's changes are shown over each read too.
 
 use chrono::NaiveDateTime;
 use mo_library::plugins::{StoredSpace, added_folders_key, ruled_out_key};

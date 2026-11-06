@@ -1,5 +1,5 @@
 //! The On disk tab's "Not its", "Take off" and "Add a folder…" ([`mo_app::plugins::folder_fixes`]): each is kept in
-//! library.db on a worker (`mo_library::plugin_folders`), then shown on the page until the old app measures again.
+//! library.db on a worker (`mo_library::plugin_folders`), and read back with every read of the page.
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;

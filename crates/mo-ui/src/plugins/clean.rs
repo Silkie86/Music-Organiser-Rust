@@ -2,7 +2,8 @@
 //! may go to the Recycle Bin and why the others stay, then what went, with Put back. The checks are
 //! `mo_space::plugin_clean`'s, run on worker threads (rule 12): the folders are read for samples your songs use before
 //! the list shows, and every picked folder is checked again just before it goes. Nothing goes anywhere but the
-//! Recycle Bin, and nothing is written to library.db: the page leaves out what went until the old app measures again.
+//! Recycle Bin: what went is kept in the app's list of what's there (`mo_app::binned`, shared with Space), and every
+//! read leaves out what isn't there now (nothing is written to library.db).
 //! Uninstall's card ([`super::uninstall`]) is shown the same way, in the same place.
 
 use std::sync::Arc;
