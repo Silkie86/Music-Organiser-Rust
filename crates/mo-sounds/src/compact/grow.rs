@@ -34,6 +34,20 @@ use crate::analyse::Analysed;
 /// forgotten sound's number is never given again.
 pub const LAST_ID: &str = "last_id";
 
+/// The key in `copy_info` that holds the first number the app gave a sound of its own scan: from it on, CLAP has
+/// never heard them (this app has no way to run it), so they aren't counted when deciding whether it has heard enough
+/// ([`crate::count_clap_could_hear`]).
+pub const NEW_SINCE: &str = "new_since";
+
+/// The first number the app gave a sound of its own scan ([`NEW_SINCE`]) in the library at `copy`; `None` when it has
+/// added none (or the library can't be read just now).
+pub fn new_since(copy: &Path) -> Option<i64> {
+    let conn =
+        Connection::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX).ok()?;
+    conn.busy_timeout(WAIT).ok()?;
+    info_value(&conn, NEW_SINCE).ok().flatten()
+}
+
 /// One sound file a scan listened to: where it is, its size and time as the folder listing gave them, and what
 /// listening found, or why the file couldn't be listened to.
 #[derive(Clone, Debug)]
@@ -70,6 +84,7 @@ pub fn keep(sounds_db: &Path, listened: &[Listened]) -> Result<Kept, SoundsError
     write(sounds_db, |tx| {
         let mut kept = Kept::default();
         let mut last = last_id(tx)?;
+        let first_new = last + 1;
         let update = update_sql();
         let gone_with = tables_of(tx, &["sound_waves", "sound_features", "sound_prints"])?;
         for l in listened {
@@ -132,6 +147,10 @@ pub fn keep(sounds_db: &Path, listened: &[Listened]) -> Result<Kept, SoundsError
             if let Some(features) = &features {
                 write_features(tx, id, ValueRef::Blob(features))?;
             }
+        }
+        if kept.added > 0 {
+            // The first the app numbered itself: CLAP never hears it, nor any after it.
+            tx.execute("INSERT OR IGNORE INTO copy_info (key, value) VALUES (?1, ?2)", params![NEW_SINCE, first_new])?;
         }
         set_info(tx, LAST_ID, last)?;
         // Checked before it's kept: each file is there once, as listened to.

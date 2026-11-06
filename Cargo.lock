@@ -3112,6 +3112,7 @@ dependencies = [
  "fs4",
  "junction",
  "known-folders",
+ "mo-audio",
  "mo-backup",
  "mo-catch",
  "mo-convert",

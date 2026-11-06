@@ -137,6 +137,17 @@ pub fn count_analysed(sounds: &[Sound]) -> usize {
     sounds.iter().filter(|s| s.analysis.is_some()).count()
 }
 
+/// [`count_analysed`] for deciding whether CLAP has heard enough, in the app's own library: the sounds its own scan
+/// added (numbered from `new_since`, [`crate::compact::grow::new_since`]) are left out, as CLAP never hears them in
+/// this app (it has no way to run it). Otherwise every new sample would count against the 9 in 10 CLAP must have
+/// heard, until the app stopped using it.
+pub fn count_clap_could_hear(sounds: &[Sound], new_since: Option<i64>) -> usize {
+    match new_since {
+        Some(from) => sounds.iter().filter(|s| s.analysis.is_some() && s.id < from).count(),
+        None => count_analysed(sounds),
+    }
+}
+
 /// A sound's columns, in the order [`sound_at`] takes them: one list for every read of them (the copy's too, as it's
 /// made), so they can't drift apart.
 macro_rules! sound_columns {

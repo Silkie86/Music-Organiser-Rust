@@ -50,6 +50,8 @@ windows-sys = { version = "0.61", features = ["Win32_System_Threading"] }
 known-folders = "1.4"
 
 [dev-dependencies]
+# The sample files the sound scan test listens to.
+mo-audio = { path = "../mo-audio" }
 # The stand-in Bitwig, for the Send to Bitwig tests: no test reaches a real Bitwig (rule 11).
 mo-dawlink = { path = "../mo-dawlink", features = ["fake-bitwig"] }
 # The made-up Bitwig projects the Space Fix test writes (mo-formats' test projects pack a part with it).
