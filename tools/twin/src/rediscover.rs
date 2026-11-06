@@ -131,13 +131,20 @@ fn queries() -> Vec<Options> {
     let o = Options::default();
     vec![
         Options { seed: 7, count: 10, ..o.clone() },
-        Options { sound_type: Some("Kick".into()), count: 5, adventure: 0.0, seed: 3, ..o.clone() },
-        Options { sound_type: Some("Closed hat".into()), count: 8, adventure: 0.6, seed: 11, max_uses: 1, ..o.clone() },
+        Options { sound_types: vec!["Kick".into()], count: 5, adventure: 0.0, seed: 3, ..o.clone() },
+        Options {
+            sound_types: vec!["Closed hat".into()],
+            count: 8,
+            adventure: 0.6,
+            seed: 11,
+            max_uses: 1,
+            ..o.clone()
+        },
         Options { years: Some((2020, 2020)), count: 6, seed: 5, ..o.clone() },
-        Options { sound_type: Some("808".into()), count: 60, seed: 13, ..o.clone() },
-        Options { sound_type: Some("Vocal".into()), seed: 2, ..o.clone() },
+        Options { sound_types: vec!["808".into()], count: 60, seed: 13, ..o.clone() },
+        Options { sound_types: vec!["Vocal".into()], seed: 2, ..o.clone() },
         Options { years: Some((1999, 1999)), seed: 2, ..o.clone() },
-        Options { sound_type: Some("Snare".into()), years: Some((2018, 2018)), max_uses: 99, count: 4, seed: 17, ..o },
+        Options { sound_types: vec!["Snare".into()], years: Some((2018, 2018)), max_uses: 99, count: 4, seed: 17, ..o },
     ]
 }
 
@@ -173,16 +180,24 @@ fn kit_json(k: &Kit) -> Value {
     })
 }
 
-fn query_json(o: &Options) -> Value {
-    json!({
-        "Type": o.sound_type,
+/// A question as the C# app takes it: one type and one year at most. One asking for more is refused, not cut down to
+/// what C# takes, which would ask the two apps different questions (review of 7cc595f).
+fn query_json(o: &Options) -> Result<Value, String> {
+    if o.sound_types.len() > 1 {
+        return Err(format!("The C# app picks one type at most, so this can't be asked of it: {o:?}"));
+    }
+    if o.years.is_some_and(|(first, last)| first != last) {
+        return Err(format!("The C# app picks one year at most, so this can't be asked of it: {o:?}"));
+    }
+    Ok(json!({
+        "Type": o.sound_types.first(),
         "Count": o.count,
         "Adventure": o.adventure,
         "Seed": o.seed,
         "MaxUses": o.max_uses,
-        // The C# app picked one year: each question here asks for one (a span of one year on the Rust strip).
+        // A span of one year on the Rust app's strip.
         "Year": o.years.map(|(first, _)| first),
-    })
+    }))
 }
 
 /// What the Rust app answers, read from the sounds.db the C# app saved.
@@ -319,6 +334,7 @@ fn short(v: &Value) -> String {
 /// with the Rust app, and gives every difference.
 pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
     let cases = [("features", library(101, false)), ("deep listening", library(202, true))];
+    let questions = queries().iter().map(query_json).collect::<Result<Vec<_>, _>>()?;
     let mut files = Vec::new();
     for (i, (_, (sounds, uses))) in cases.iter().enumerate() {
         let path = dir.join(format!("rediscover-{i}.json"));
@@ -329,7 +345,7 @@ pub fn compare(helper: &Path, dir: &Path) -> Result<Vec<String>, String> {
             "Usage": uses,
             "Prints": prints,
             "Matches": copies_found,
-            "Queries": queries().iter().map(query_json).collect::<Vec<_>>(),
+            "Queries": questions,
             "Kits": kits().iter().map(kit_json).collect::<Vec<_>>(),
         });
         std::fs::write(&path, body.to_string()).map_err(|e| format!("Couldn't write a Rediscover case: {e}"))?;
@@ -394,5 +410,16 @@ mod tests {
         assert!(sounds.iter().any(|s| s["Hidden"] == json!(true)));
         assert!(sounds.iter().any(|s| s["Favourite"] == json!(true)));
         assert!(uses.len() > 20);
+    }
+
+    #[test]
+    fn every_question_is_one_the_c_sharp_app_can_take() {
+        for o in queries() {
+            assert!(query_json(&o).is_ok(), "{o:?}");
+        }
+        let two_types = Options { sound_types: vec!["Kick".into(), "Snare".into()], ..Options::default() };
+        assert!(query_json(&two_types).is_err());
+        let two_years = Options { years: Some((2019, 2020)), ..Options::default() };
+        assert!(query_json(&two_years).is_err());
     }
 }

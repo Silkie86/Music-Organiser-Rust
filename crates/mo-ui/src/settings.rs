@@ -94,6 +94,10 @@ fn save_unless_closed(folder: &Path, json: &str) -> Option<std::io::Result<PathB
 
 thread_local! {
     static PAGE: RefCell<Option<Page>> = const { RefCell::new(None) };
+    /// The settings [`load`] read before the window opened, for the pages connected before this one (the Sounds page
+    /// opens on the view you left it on, and may start reading at once): [`value`] goes by them until [`connect`]
+    /// keeps them in [`PAGE`] (review of 7cc595f).
+    static EARLY: RefCell<Option<AppSettings>> = const { RefCell::new(None) };
     /// Writes the settings file, newest first.
     static WRITER: RefCell<Option<Newest<(PathBuf, String)>>> = const { RefCell::new(None) };
     /// The size of everything the window is drawn at now, as a part of the system's own scale (1 is 100%).
@@ -124,6 +128,7 @@ pub fn load(folder: &Path, library: &Path) -> (AppSettings, bool) {
     for p in &loaded.problems {
         log::warning("Settings", p);
     }
+    EARLY.with(|e| *e.borrow_mut() = Some(loaded.settings.clone()));
     (loaded.settings, loaded.writable)
 }
 
@@ -216,6 +221,8 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             feed: setup.feed,
         })
     });
+    // The page has them now, changes and all.
+    EARLY.with(|e| e.borrow_mut().take());
     app.set_settings_built(true);
     // The start found too much changed since a move's copy to switch before the window opened: catch it up now, so
     // the next start switches.
@@ -526,9 +533,13 @@ fn change(key: &str, value: &str) {
     }
 }
 
-/// A setting as it stands: this app's change, else the C# app's choice (for the pages that remember things).
+/// A setting as it stands: this app's change, else the C# app's choice (for the pages that remember things). Before
+/// this page is connected, as [`load`] read them.
 pub fn value(key: &str) -> Option<String> {
-    PAGE.with(|p| p.borrow().as_ref().and_then(|p| p.settings.get(key).map(str::to_owned)))
+    PAGE.with(|p| match p.borrow().as_ref() {
+        Some(p) => p.settings.get(key).map(str::to_owned),
+        None => EARLY.with(|e| e.borrow().as_ref().and_then(|s| s.get(key).map(str::to_owned))),
+    })
 }
 
 /// Changes a setting and keeps it in the app's own settings file (never in `library.db`). False when it can't be

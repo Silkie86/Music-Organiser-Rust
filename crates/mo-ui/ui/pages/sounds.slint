@@ -182,9 +182,11 @@ export global SoundsData {
     callback re-adventure-set(float);
     in property <FilterView> re-count-filter;
     in property <bool> re-rarely;
-    // "type" or "count", and the choice clicked: the type picked already is unpicked, and "" is any;
-    // or "more-types" for the More types menu's Any, which keeps a type picked on its chip.
+    // "type" and the type clicked, which joins or leaves the ones picked as on the Type filter ("" is any type);
+    // "more-types" for the More types menu's Any, which keeps the types picked on their chips; or "count" and how many.
     callback re-pick(string, string);
+    // Whether Rediscover has a type picked, for its Clear types chip.
+    in property <bool> re-any-type;
     callback re-toggle-rarely();
     callback re-shuffle();
     in property <bool> re-busy;
@@ -1282,6 +1284,11 @@ export component SoundsPage inherits Rectangle {
                 filter: SoundsData.re-type-filter;
                 toggled(text) => { SoundsData.re-pick("type", text); }
                 cleared => { SoundsData.re-pick("more-types", ""); }
+            }
+            if SoundsData.re-any-type: ToggleChip {
+                text: "Clear types";
+                on: false;
+                clicked => { SoundsData.re-pick("type", ""); }
             }
             StudioSlider {
                 low: "Safe";

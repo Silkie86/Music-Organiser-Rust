@@ -129,7 +129,7 @@ fn the_kit_on_show_goes_on_a_new_drum_machine() {
         slot("FX", "FX", Some(4)),
         slot("Tom", "Tom", Some(99)),
     ];
-    let sounds = to_bitwig::kit_sounds(&slots, &list);
+    let sounds = to_bitwig::kit_sounds(&slots, |id| list.find(id).and_then(|i| list.sound(i)));
     let names: Vec<_> = sounds.iter().map(|s| (s.name.as_str(), s.kind.as_str())).collect();
     assert_eq!(names, [("Kick", "Kick"), ("Snare", "Snare"), ("Closed hat", "Closed hat"), ("FX", "FX")]);
     assert_eq!(sounds[0].path, dir.join("Boom Kick.wav").to_string_lossy());

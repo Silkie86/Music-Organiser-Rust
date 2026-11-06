@@ -93,6 +93,14 @@ pub const TEMPOS: [(&str, Option<f64>, Option<f64>); 5] = [
 /// How many types are chips of their own, the most used; the rest are in the type filter's More menu.
 pub const TYPE_CHIPS: usize = 9;
 
+/// A More types menu's Any (the Type filter's and Rediscover's alike): unpicks from `picked` the types picked in the
+/// menu, and keeps the ones picked on chips of their own, in any case. `types` is [`SoundList::type_counts`], as the
+/// chips were shown from.
+pub fn keep_chip_types(picked: &mut Vec<String>, types: &[(String, usize)]) {
+    let on_chips = &types[..types.len().min(TYPE_CHIPS)];
+    picked.retain(|t| on_chips.iter().any(|(c, _)| c.eq_ignore_ascii_case(t)));
+}
+
 /// What the page's chips and boxes ask for. Empty means everything.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Filters {
@@ -161,8 +169,7 @@ impl Filters {
     /// The type filter's More menu's Any: unpicks the types in the menu, and keeps the ones picked on chips of their
     /// own. `types` is [`SoundList::type_counts`], as the chips were shown from.
     pub fn clear_more_types(&mut self, types: &[(String, usize)]) {
-        let on_chips = &types[..types.len().min(TYPE_CHIPS)];
-        self.sound_types.retain(|t| on_chips.iter().any(|(c, _)| c.eq_ignore_ascii_case(t)));
+        keep_chip_types(&mut self.sound_types, types);
     }
 
     /// Picks nothing on the filter `chip`: its menu's Any, or Clear types.
@@ -862,7 +869,7 @@ fn facets(s: &Sound, t: &Test) -> [bool; FACETS] {
     let is_loop = a.is_some_and(|a| a.is_loop);
     let bpm = a.and_then(|a| a.bpm);
     [
-        t.sound_types.is_empty() || t.sound_types.iter().any(|w| w.eq_ignore_ascii_case(s.sound_type.as_str())),
+        s.is_of_types(t.sound_types),
         match t.length {
             Length::All => true,
             Length::Hits => !is_loop,
@@ -1081,6 +1088,13 @@ fn key_order(s: &Sound) -> i32 {
 
 /// The setting Hide duplicates is kept in, in the app's own settings ("on" or "off").
 pub const HIDE_COPIES_KEY: &str = "sounds_hide_duplicates";
+
+/// The page's view as you left it ("Tiles", "List", "Galaxy"...), whether Autoplay is on ("1" or "0") and how many
+/// sounds Rediscover digs out: kept in the app's own settings as you change them (never in `library.db`), and until
+/// you have, the C# app's own under the same names (`crate::app_settings::FROM_CSHARP`, review G-3).
+pub const VIEW_KEY: &str = "sounds_view";
+pub const AUTOPLAY_KEY: &str = "sound_lab_autoplay";
+pub const REDISCOVER_COUNT_KEY: &str = "rediscover_count";
 
 /// How far finding the copies for Hide duplicates has got.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
