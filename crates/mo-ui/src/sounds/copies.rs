@@ -57,6 +57,20 @@ pub(crate) fn for_space(app: &AppWindow) {
     wanted(app);
 }
 
+/// Look again at these sounds' files (as they're now on disk) when nothing's under way: after Hide duplicates is
+/// turned on (`failed_only`: only if the last look failed, so it's tried again), or on Space's Measure again (every
+/// time: only files changed since are read).
+pub(crate) fn look_again(app: &AppWindow, failed_only: bool) {
+    LOOK.with(|l| {
+        let mut l = l.borrow_mut();
+        if l.stop.is_none() && (!failed_only || l.found == CopiesFound::Failed) {
+            l.of = None;
+            l.found = CopiesFound::NotLooked;
+        }
+    });
+    wanted(app);
+}
+
 /// Whether the look is for (or was for) a list sharing `list`'s sounds.
 fn looks_at(l: &Look, list: &SoundList) -> bool {
     l.of.as_ref().is_some_and(|of| of.is_of(list))
@@ -81,10 +95,10 @@ pub(super) fn wanted(app: &AppWindow) {
             let mut l = l.borrow_mut();
             if let Some(stop) = l.stop.take() {
                 stop.store(true, Ordering::Relaxed);
+                // Looked for again from what was kept, next time it's on. A finished look stays known.
+                l.of = None;
+                l.found = CopiesFound::NotLooked;
             }
-            // Looked for again from what was kept, next time it's on (after a failed look too).
-            l.of = None;
-            l.found = CopiesFound::NotLooked;
         });
         return;
     }
@@ -179,8 +193,6 @@ fn heard(app: &AppWindow, look: u64, word: Word) {
             if !put {
                 return;
             }
-            // The Space page counts these copies too.
-            crate::space::sounds_changed(app);
             LOOK.with(|l| {
                 let mut l = l.borrow_mut();
                 l.found = match left {
@@ -192,7 +204,14 @@ fn heard(app: &AppWindow, look: u64, word: Word) {
                     l.stop = None;
                 }
             });
-            super::refresh(app);
+            // The list changes only with the switch on; its chip says how far it's got either way.
+            if PAGE.with(|p| p.borrow().filters.hide_copies) {
+                super::refresh(app);
+            } else {
+                super::show_chips(app);
+            }
+            // The Space page counts these copies too (as final only once they're found: [`found`]).
+            crate::space::sounds_changed(app);
         }
         Word::Reading { done, of } => {
             LOOK.with(|l| l.borrow_mut().found = CopiesFound::Looking { done, of });

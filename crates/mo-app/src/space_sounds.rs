@@ -13,7 +13,7 @@ use mo_space::size::size_text;
 use crate::drag_out::count_of;
 use crate::shell::{folder_of, wrappable_path};
 use crate::songs::thousands;
-use crate::sounds::{CopyGroup, SoundList};
+use crate::sounds::{CopyGroup, KeptFor, SoundList};
 use crate::space::{Card, Line, Opens, Part};
 
 /// The line's id, and its card's.
@@ -80,7 +80,8 @@ pub struct Found {
     pub sounds: usize,
     pub copies: usize,
     pub hidden: usize,
-    /// The room the copies take, hidden ones too: hiding leaves the file where it is.
+    /// The room the copies take, the ones Hide duplicates hides too: hiding leaves the file where it is. (Sounds hidden
+    /// in the old app aren't on the Sounds page, so they aren't counted.)
     pub bytes: u64,
     /// The sounds whose copies take the most room, the first [`LISTED`].
     pub listed: Vec<Copied>,
@@ -127,22 +128,14 @@ fn copied(list: &SoundList, g: &CopyGroup, hiding: bool) -> Copied {
 /// goes by that tells them apart.
 fn keep_why(list: &SoundList, g: &CopyGroup) -> String {
     let (Some(&(a, _)), Some(&(b, _))) = (g.sounds.first(), g.sounds.get(1)) else { return String::new() };
-    let (Some(sa), Some(sb)) = (list.sound(a), list.sound(b)) else { return String::new() };
-    let used = |i: usize| list.used_in(i).unwrap_or(0);
-    let reason = if used(a) != used(b) {
-        format!("used in {}", count_of(used(a) as usize, "project", "projects"))
-    } else if sa.favourite != sb.favourite {
-        "a favourite".to_owned()
-    } else if sa.rating != sb.rating {
-        "more stars".to_owned()
-    } else if sa.plays != sb.plays {
-        "played more".to_owned()
-    } else if sa.tags.len() != sb.tags.len() {
-        "more tags".to_owned()
-    } else if sa.added != sb.added {
-        "the oldest file".to_owned()
-    } else {
-        "first by its folder".to_owned()
+    let reason = match list.why_kept(a, b) {
+        KeptFor::Used => format!("used in {}", count_of(list.used_in(a).unwrap_or(0) as usize, "project", "projects")),
+        KeptFor::Favourite => "a favourite".to_owned(),
+        KeptFor::Stars => "more stars".to_owned(),
+        KeptFor::Plays => "played more".to_owned(),
+        KeptFor::Tags => "more tags".to_owned(),
+        KeptFor::Older => "the oldest file".to_owned(),
+        KeptFor::Path => "first by its folder".to_owned(),
     };
     format!("Best to keep: {reason}")
 }

@@ -266,6 +266,21 @@ pub struct Copies {
     sizes: HashMap<usize, u64>,
 }
 
+/// What told a sound to keep from its copy ([`SoundList::why_kept`]): the first of these that does, in this order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeptFor {
+    /// Your projects use it more.
+    Used,
+    Favourite,
+    Stars,
+    Plays,
+    Tags,
+    /// The older file (most likely the first).
+    Older,
+    /// Nothing else did: by path.
+    Path,
+}
+
 /// A sound's copies (the same audio), as [`SoundList::copy_groups`] gives them: by place in the list, the one to keep
 /// first, each with its file's size in bytes (0 when not known).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -483,17 +498,31 @@ impl SoundList {
     /// Of two copies of the same sound, the one to keep showing first: the one your projects use most, then a
     /// favourite, more stars, more plays, more tags, the older file (the first, most likely), and then by path.
     fn keep_first(&self, a: usize, b: usize) -> std::cmp::Ordering {
+        self.keep_by(a, b).0
+    }
+
+    /// [`SoundList::keep_first`], and what told the two apart (the first rule that does): one list of rules for the
+    /// order and for what the Space page says of it ([`SoundList::why_kept`]).
+    fn keep_by(&self, a: usize, b: usize) -> (std::cmp::Ordering, KeptFor) {
         let (sa, sb) = (&self.shared.sounds[a], &self.shared.sounds[b]);
         let used = |s: &Sound| self.used.as_ref().and_then(|u| u.get(&s.id)).map_or(0, |u| u.projects);
-        used(sb)
-            .cmp(&used(sa))
-            .then(sb.favourite.cmp(&sa.favourite))
-            .then(sb.rating.cmp(&sa.rating))
-            .then(sb.plays.cmp(&sa.plays))
-            .then(sb.tags.len().cmp(&sa.tags.len()))
-            .then(sa.added.cmp(&sb.added))
-            .then_with(|| sa.path.cmp(&sb.path))
-            .then(a.cmp(&b))
+        let rules = [
+            (KeptFor::Used, used(sb).cmp(&used(sa))),
+            (KeptFor::Favourite, sb.favourite.cmp(&sa.favourite)),
+            (KeptFor::Stars, sb.rating.cmp(&sa.rating)),
+            (KeptFor::Plays, sb.plays.cmp(&sa.plays)),
+            (KeptFor::Tags, sb.tags.len().cmp(&sa.tags.len())),
+            (KeptFor::Older, sa.added.cmp(&sb.added)),
+        ];
+        if let Some((rule, by)) = rules.into_iter().find(|(_, by)| by.is_ne()) {
+            return (by, rule);
+        }
+        (sa.path.cmp(&sb.path).then(a.cmp(&b)), KeptFor::Path)
+    }
+
+    /// Why the sound at `a` is kept before its copy at `b` ([`SoundList::keep_first`]).
+    pub fn why_kept(&self, a: usize, b: usize) -> KeptFor {
+        self.keep_by(a, b).1
     }
 
     /// The best to keep of each group's sounds in `places` (by [`SoundList::keep_first`]), by group.

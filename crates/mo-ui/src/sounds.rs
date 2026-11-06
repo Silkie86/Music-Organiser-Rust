@@ -1788,7 +1788,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         }
     });
     let weak = app.as_weak();
-    let weak_space = app.as_weak();
+    let weak_again = app.as_weak();
     data.on_toggle(move |kind| {
         change(&weak, |f| f.toggle(&kind));
         if kind == list::HIDE_COPIES {
@@ -1799,9 +1799,9 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
                 p.filters.hide_copies
             });
             crate::settings::remember(list::HIDE_COPIES_KEY, if on { "on" } else { "off" });
-            // The Space page counts what the switch hides.
-            if let Some(app) = weak_space.upgrade() {
-                crate::space::sounds_changed(&app);
+            // Turned on after a look that failed: it's tried again.
+            if on && let Some(app) = weak_again.upgrade() {
+                copies::look_again(&app, true);
             }
         }
     });
@@ -2444,6 +2444,12 @@ fn listed(app: &AppWindow, id: u64, new: Listed) {
 /// The Space page counts the copies of the same sound: they're looked for (as Hide duplicates does) from now on.
 pub fn copies_for_space(app: &AppWindow) {
     copies::for_space(app);
+}
+
+/// Space's Measure again: the copies are looked for again in the files as they are now (only files changed since the
+/// last look are read).
+pub fn copies_look_again(app: &AppWindow) {
+    copies::look_again(app, false);
 }
 
 /// Whether Hide duplicates is on.

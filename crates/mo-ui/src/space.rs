@@ -545,12 +545,14 @@ pub fn sounds_changed(app: &AppWindow) {
 /// Whether the copies of the same sound are due a look, with the Sounds page's sounds as `sounds` has them: none is
 /// while that page hasn't read them. One is when the newest look was for another of its lists than the one it has now
 /// (one with your songs' use counted in, or brought up to date), even while that look is on; else, with none on, when
-/// nothing's found yet, or when what's on show is five minutes old (`stale`: the look then reads the sound library
-/// again only if it changed).
+/// nothing's found yet, or when what's on show is five minutes old (`stale`), or Hide duplicates was turned on or off
+/// since (the copies it hides count as hidden).
 fn copies_due(p: &Page, sounds: &Known, stale: bool) -> bool {
     let Known::Read(list, _) = sounds else { return false };
     let other = !Weak::ptr_eq(&p.copies_of, &Arc::downgrade(list)) || p.copies_hiding != sounds_page::hides_copies();
-    other || (!p.copies_looking && (stale || p.copies.is_none()))
+    // Measuring while the Sounds page looked, and that look failed: the page stops saying it's measuring.
+    let failed = p.copies_looking && sounds_page::copies_found() == CopiesFound::Failed;
+    other || failed || (!p.copies_looking && (stale || p.copies.is_none()))
 }
 
 /// Whether old copies are due a look as the page comes on show, with `moves` of the Plugins page's moves finished
@@ -755,6 +757,8 @@ fn chosen(app: &AppWindow, id: &str) {
                 look_for_plugins(app);
             }
             if !PAGE.with(|p| p.borrow().copies_looking) {
+                // The files as they are now: copies made since are found (only files changed since are read).
+                sounds_page::copies_look_again(app);
                 look_for_sound_copies(app, sounds_page::known());
             }
         }
@@ -1695,9 +1699,13 @@ fn look_for_sound_copies(app: &AppWindow, sounds: Known) {
         p.feed.as_ref()?;
         p.copies_of = Arc::downgrade(&list);
         p.copies_hiding = hiding;
-        if list.copies().is_none() {
-            // Not found for this list yet: measuring while the Sounds page looks; nothing to show if its look failed.
-            p.copies_looking = !matches!(sounds_page::copies_found(), CopiesFound::Failed);
+        let state = sounds_page::copies_found();
+        if list.copies().is_none() || matches!(state, CopiesFound::Looking { .. } | CopiesFound::NotLooked) {
+            // Not all found for this list yet: measuring while the Sounds page looks (what's on show stays), and a
+            // look of this page's still on its way is for an older list, so it's dropped. Nothing new to show if the
+            // Sounds page's look failed.
+            let _ = p.copies_look.next();
+            p.copies_looking = !matches!(state, CopiesFound::Failed);
             return None;
         }
         let (id, stop) = p.copies_look.next();
