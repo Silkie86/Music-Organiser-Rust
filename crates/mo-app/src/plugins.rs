@@ -451,7 +451,7 @@ pub struct Needed {
 #[derive(Clone, Debug, Default)]
 pub struct Plugins {
     pub rows: Vec<PluginRow>,
-    /// Every measured plugin's room, as the old app last measured it (a row's `room` is one of these), less what Clean
+    /// Every measured plugin's room, as last measured (a row's `room` is one of these), less what Clean
     /// up has sent to the Recycle Bin since.
     spaces: Vec<PluginSpace>,
     /// When each plugin's room was measured, by name key.
@@ -726,7 +726,7 @@ impl Plugins {
         !self.missing_now.is_empty()
     }
 
-    /// The old app measured some plugin's room.
+    /// Some plugin's room is measured.
     pub fn has_sizes(&self) -> bool {
         self.rows.iter().any(|r| r.room.is_some())
     }
@@ -751,7 +751,7 @@ impl Plugins {
     pub fn sizes_note(&self) -> String {
         match self.measured {
             Some(t) => format!("Sizes measured {}.", t.format("%-d %b %Y")),
-            None => "Sizes aren't measured yet: the old app measures them in the background after a scan.".to_owned(),
+            None => format!("Sizes aren't measured yet: {}", measure::WHEN),
         }
     }
 
@@ -918,7 +918,7 @@ impl Plugins {
                 } else if self.measured.is_none() {
                     "Not measured yet.".to_owned()
                 } else {
-                    "Not measured: the old app found no files of its own for it.".to_owned()
+                    "Not measured: the last measure found no files of its own for it.".to_owned()
                 },
                 ..RoomLines::default()
             };
@@ -1412,6 +1412,7 @@ fn plural(n: usize, one: &str, many: &str) -> String {
 
 pub mod clean;
 pub mod folder_fixes;
+pub mod measure;
 pub mod moves_under_way;
 pub mod moving;
 pub mod uninstall;

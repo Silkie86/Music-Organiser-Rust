@@ -13,7 +13,7 @@ use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind, is_install_fol
 use super::Plugins;
 
 /// One change to a plugin's folders, by the plugin's name key (its room's key), with when its room was measured then:
-/// once the old app measures it again, the measure follows the change itself and this is dropped.
+/// once it's measured again, the measure follows the change itself and this is dropped.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FolderFix {
     /// A folder you added, measured when you added it.
@@ -194,7 +194,7 @@ impl Plugins {
     }
 
     /// Every measured folder (any plugin's) inside `path`, with its size: an added folder is measured without them,
-    /// as the old app's measure does, so nothing is counted twice.
+    /// as the measure does, so nothing is counted twice.
     pub fn folders_inside(&self, path: &str) -> Vec<(String, u64)> {
         let mut seen = std::collections::HashSet::new();
         self.spaces
@@ -205,7 +205,7 @@ impl Plugins {
             .collect()
     }
 
-    /// Shows these changes until the old app measures the plugin again, and gives back the ones still to show (one
+    /// Shows these changes until the plugin is measured again, and gives back the ones still to show (one
     /// for a plugin measured since is dropped: the measure follows it). Each is shown once, however often it's applied.
     pub fn apply_folder_fixes(&mut self, fixes: &[FolderFix]) -> Vec<FolderFix> {
         let fixes: Vec<FolderFix> =

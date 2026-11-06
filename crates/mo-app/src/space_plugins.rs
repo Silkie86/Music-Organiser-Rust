@@ -2,7 +2,7 @@
 //! used it for 2 years, like the old app", or as many years as the Plugins page is set to). Read-only here, as the
 //! question round agreed (question 2): Clean up and Uninstall are on each plugin's card on the Plugins page, which each
 //! plugin's line here opens. The list, the sizes and the rule are the Plugins page's own ([`crate::plugins`]), so the
-//! two pages say the same: an installed plugin the old app has measured that no song has used in those years, or
+//! two pages say the same: an installed plugin measured that no song has used in those years, or
 //! ever. Its room is its own: a folder it shares with another plugin (a maker's folder) isn't counted, as the Plugins
 //! page doesn't count it.
 
@@ -29,16 +29,17 @@ pub const LISTED: usize = 30;
 const KIND: &str = "PLUGINS NOT USED LATELY";
 const TITLE: &str = "Plugins you haven't used";
 
-/// What the page says while the old app hasn't measured any plugin's size.
-const NOT_MEASURED: &str =
-    "Plugins' sizes aren't measured yet: the old app measures them in the background after a scan.";
+/// What the page says while no plugin's size is measured.
+fn not_measured() -> String {
+    format!("Plugins' sizes aren't measured yet: {}", crate::plugins::measure::WHEN)
+}
 
 /// What the card says of where a plugin's Clean up and Uninstall are, and what each takes (Solomon's rules of 25 Oct
 /// 2026, as `mo_space::plugin_clean` checks them).
 const ON_ITS_CARD: &str = "Each plugin's card on the Plugins page has Clean up, which takes its presets, and its sounds \
     when no song has ever used it (the plugin stays installed), and Uninstall, which takes the plugin itself.";
 
-/// One installed plugin the old app measured, with its room and when a song last used it.
+/// One installed plugin measured, with its room and when a song last used it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Measured {
     pub name: String,
@@ -81,11 +82,11 @@ impl Measured {
 }
 
 /// What a look found: every plugin no song has used lately, biggest first, how many years make one unused, and
-/// whether and when the old app measured plugin sizes (without them, none can be counted).
+/// whether and when plugin sizes were measured (without them, none can be counted).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Found {
     pub plugins: Vec<Measured>,
-    /// The other installed plugins the old app measured that take room of their own: a song used each in those
+    /// The other installed plugins measured that take room of their own: a song used each in those
     /// years. Kept so the years can change without reading again ([`Found::as_of`]).
     pub used: Vec<Measured>,
     pub years: u32,
@@ -94,7 +95,7 @@ pub struct Found {
     pub sizes: bool,
     /// When the sizes were measured (the oldest measure).
     pub measured: Option<NaiveDateTime>,
-    /// How many of those no song has used lately the app has taken off since the old app measured them (cleaned up or
+    /// How many of those no song has used lately the app has taken off since they were measured (cleaned up or
     /// uninstalled to nothing): [`Found::without`] counts them.
     pub gone: usize,
 }
@@ -122,7 +123,7 @@ impl Found {
         Found { plugins, used, years, now, sizes: self.sizes, measured: self.measured, gone: self.gone }
     }
 
-    /// As it is now the app has removed what's at `gone` (sent to the Recycle Bin, or uninstalled) since the old app
+    /// As it is now the app has removed what's at `gone` (sent to the Recycle Bin, or uninstalled) since they were
     /// measured: what's in there isn't counted, and a plugin with nothing left goes. Each folder is looked up once,
     /// however much is gone ([`Inside`]), but it goes through every plugin's folders: call it away from the window's
     /// thread. The Plugins page leaves them out the same way (`Plugins::forget_paths`).
@@ -222,17 +223,17 @@ pub fn line(found: Option<&Found>, looking: bool) -> Option<(u64, Line)> {
     }
 }
 
-/// What the page says under Biggest wins first about plugins you haven't used when there's no line: that the old app
-/// hasn't measured their sizes yet, that the ones a look found have gone since, or that it found none; or nothing.
+/// What the page says under Biggest wins first about plugins you haven't used when there's no line: that their sizes
+/// aren't measured yet, that the ones a look found have gone since, or that it found none; or nothing.
 pub fn none_note(found: Option<&Found>) -> String {
     match found {
-        Some(f) if !f.sizes => format!("{NOT_MEASURED} "),
+        Some(f) if !f.sizes => format!("{} ", not_measured()),
         Some(f) if f.plugins.is_empty() && f.gone > 0 => {
-            "The plugins your songs haven't used have gone since the old app measured them. ".to_owned()
+            "The plugins your songs haven't used have gone since they were measured. ".to_owned()
         }
         Some(f) if f.plugins.is_empty() => {
             let years = if f.years == 1 { "year".to_owned() } else { format!("{} years", f.years) };
-            format!("Every plugin the old app measured was used in the last {years}. ")
+            format!("Every plugin measured was used in the last {years}. ")
         }
         _ => String::new(),
     }
@@ -312,10 +313,10 @@ fn lead(found: Option<&Found>, years: u32) -> String {
 fn note(found: &Found) -> String {
     let when = found.measured.map(|t| format!(", on {}", t.format("%-d %b %Y"))).unwrap_or_default();
     match (found.sizes, found.plugins.is_empty()) {
-        (false, _) => NOT_MEASURED.to_owned(),
+        (false, _) => not_measured(),
         (true, true) => String::new(),
         (true, false) => format!(
-            "Sizes are the old app's last measure{when}, without any folder a plugin shares with another. Nothing goes \
+            "Sizes are the last measure{when}, without any folder a plugin shares with another. Nothing goes \
              from here."
         ),
     }
@@ -432,10 +433,7 @@ mod tests {
         assert_eq!(super::line(None, true).map(|(_, l)| l.why), Some(LOOKING.to_owned()));
         assert_eq!(super::line(None, false), None);
         assert_eq!(super::line(Some(&found(Vec::new())), false), None);
-        assert_eq!(
-            none_note(Some(&found(Vec::new()))),
-            "Every plugin the old app measured was used in the last 2 years. "
-        );
+        assert_eq!(none_note(Some(&found(Vec::new()))), "Every plugin measured was used in the last 2 years. ");
         let unmeasured = Found { sizes: false, ..found(Vec::new()) };
         assert!(none_note(Some(&unmeasured)).starts_with("Plugins' sizes aren't measured yet"));
         assert_eq!(none_note(None), "");
@@ -546,7 +544,7 @@ mod tests {
         let ten_on = f.as_of(2, at(2036, 11));
         assert_eq!(ten_on, look(read.clone(), at(2036, 11), &[]));
         assert_eq!(ten_on.plugins.len(), 5);
-        // Kontakt's library went to the bin since the old app measured it, and Pro-Q 3 was uninstalled: Kontakt's
+        // Kontakt's library went to the bin since it was measured, and Pro-Q 3 was uninstalled: Kontakt's
         // library isn't counted any more, and Pro-Q 3 goes with nothing left (its presets folder was inside).
         let gone = f.clone().without(&[
             r"D:\Libraries".to_owned(),
@@ -560,10 +558,7 @@ mod tests {
         // Once every one has gone, the note says so, not that they were used.
         let all = gone.without(&[r"C:\VST3\Kontakt 7.vst3".to_owned()]);
         assert!(all.plugins.is_empty() && all.gone == 2);
-        assert_eq!(
-            none_note(Some(&all)),
-            "The plugins your songs haven't used have gone since the old app measured them. "
-        );
+        assert_eq!(none_note(Some(&all)), "The plugins your songs haven't used have gone since they were measured. ");
     }
 
     fn line_of(f: &Found) -> String {

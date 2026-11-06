@@ -118,9 +118,13 @@ export global PluginsData {
     in property <string> half-copy-text;
     in property <bool> can-clear-half-copies;
     callback clear-half-copies();
+    // When the plugins were last measured (or that a measure is running), and Measure again (review X1-2).
+    in property <string> measure-text;
+    in property <bool> can-measure: true;
+    callback measure-plugins();
 
     // The page's options, shown on the page beside what they change. has-missing: some song's newest save misses a
-    // plugin (so the cards' count shows even when they're off); has-sizes: the old app measured the plugins' room.
+    // plugin (so the cards' count shows even when they're off); has-sizes: some plugin's room is measured.
     in property <bool> has-missing;
     in property <bool> has-sizes;
     in property <[string]> card-counts;
@@ -917,6 +921,26 @@ export component PluginsPage inherits Rectangle {
                     clicked => { PluginsData.clear-half-copies(); }
                 }
             }
+        }
+        if PluginsData.measure-text != "": HorizontalLayout {
+            spacing: Space.sm;
+            vertical-stretch: 0;
+            Text {
+                text: PluginsData.measure-text;
+                color: Theme.faint;
+                font-size: Type.meta;
+                vertical-alignment: center;
+                overflow: elide;
+            }
+            if PluginsData.can-measure: VerticalLayout {
+                alignment: center;
+                LinkText {
+                    text: "Measure again";
+                    font-size: Type.meta;
+                    clicked => { PluginsData.measure-plugins(); }
+                }
+            }
+            Rectangle { horizontal-stretch: 1; }
         }
         // The list, the year strip and the picked plugin's card.
         area := Rectangle {

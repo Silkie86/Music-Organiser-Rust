@@ -57,7 +57,7 @@ pub enum Plan {
 }
 
 impl Plugins {
-    /// Whether the plugin at `row` can be uninstalled here: installed, and the old app measured where it is.
+    /// Whether the plugin at `row` can be uninstalled here: installed, and measured where it is.
     pub fn can_uninstall(&self, row: usize) -> bool {
         self.rows.get(row).is_some_and(|r| r.installed && r.room.is_some())
     }
@@ -83,7 +83,7 @@ impl Plugins {
         })
     }
 
-    /// Leaves out these paths (and what's inside them) until the old app measures again: a plugin's files once its
+    /// Leaves out these paths (and what's inside them) until the next measure: a plugin's files once its
     /// uninstaller removed them, or what went to the Recycle Bin.
     pub fn forget_paths<S: AsRef<str>>(&mut self, gone: &[S]) {
         let gone = Inside::new(gone);
@@ -184,12 +184,15 @@ impl Ask {
             Plan::Files(_) => "Its plugin files can go to the Bin:".to_owned(),
             Plan::Waves => plugin_files::WAVES.to_owned(),
             Plan::Nothing if cfg!(windows) => format!(
-                "Windows has no uninstaller for {} and the old app found none of its plugin files, so there's \
-                 nothing to remove here.",
+                "Windows has no uninstaller for {} and the last measure found none of its plugin files, so \
+                 there's nothing to remove here.",
                 self.name
             ),
             Plan::Nothing => {
-                format!("The old app found none of {}'s plugin files, so there's nothing to remove here.", self.name)
+                format!(
+                    "The last measure found none of {}'s plugin files, so there's nothing to remove here.",
+                    self.name
+                )
             }
         }
     }
@@ -293,15 +296,16 @@ fn sleep_unless_stopped(d: Duration, stop: &AtomicBool) {
 pub fn ran_text(name: &str, ran: &Ran, waited: Waited) -> String {
     match waited {
         Waited::Gone => format!(
-            "{name} is uninstalled. The page still lists it as installed until the old app looks for plugins again."
+            "{name} is uninstalled, and its files are off the page. It leaves the list of installed plugins at the \
+             next measure (Measure again)."
         ),
         Waited::Stopped => format!(
-            "Stopped waiting for {name}'s uninstaller. It may still be open in its own window; once it's done, the old \
-             app's Rescan updates the list."
+            "Stopped waiting for {name}'s uninstaller. It may still be open in its own window; once it's done, \
+             Measure again updates the list."
         ),
         Waited::Unknown => format!(
             "{name}'s uninstaller ended without saying it finished ({}), and there are no plugin files to tell by. \
-             The old app's Rescan shows whether it's still installed.",
+             Measure again shows whether it's still installed.",
             ran.text().trim_end_matches('.')
         ),
         Waited::StillThere => match ran {
@@ -358,7 +362,7 @@ mod tests {
 
     #[test]
     fn what_the_card_says_once_it_ran() {
-        assert!(ran_text("Arcade", &Ran::Finished, Waited::Gone).starts_with("Arcade is uninstalled."));
+        assert!(ran_text("Arcade", &Ran::Finished, Waited::Gone).starts_with("Arcade is uninstalled,"));
         let cancelled = Ran::NothingChanged("It was cancelled.".into());
         assert!(ran_text("Arcade", &cancelled, Waited::StillThere).ends_with("It was cancelled."));
         assert!(ran_text("Arcade", &Ran::Finished, Waited::StillThere).contains("still there"));
