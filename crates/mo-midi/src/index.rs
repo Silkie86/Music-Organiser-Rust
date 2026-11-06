@@ -182,6 +182,9 @@ pub struct StoredPhrase {
     /// The notes' shape in any key ([`crate::analyser::shape_of`]): the same loop moved up or down has the same one.
     /// None from the C# app's `midi.db`, or before the index has worked it out.
     pub shape: Option<i64>,
+    /// A piece cut from a longer stretch, which the key finder heard as a window, not a loop: as the stored key was
+    /// read (`keys.cut`). None from the C# app's `midi.db`, or before its key is read.
+    pub cut: Option<bool>,
 }
 
 impl StoredPhrase {
@@ -418,6 +421,7 @@ fn phrase_of(r: &Row<'_>, source: Arc<Source>) -> rusqlite::Result<StoredPhrase>
         drums: int(26)? == 1,
         track_name: text(27)?,
         shape: None,
+        cut: None,
     })
 }
 

@@ -2902,6 +2902,8 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
     }) else {
         return;
     };
+    // A MIDI loop playing, or one still being made, would play over it (or start on top of it later).
+    crate::midi::stop_for_another(app);
     // The screenshots show a sound playing without a sound card.
     let here = HERE.with(|h| *h.borrow());
     let ask = if here { 0 } else { PLAYS.fetch_add(1, Ordering::SeqCst) + 1 };

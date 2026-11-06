@@ -47,8 +47,6 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_app::data_move::hold_open_lock();
     // Programs the app opens (DAWs, folders) start at the window's priority, not a background thread's.
     mo_app::shell::get_ready();
-    // Rule 28: what an earlier run or a stopped tool left behind is cleared, a little later, at low priority.
-    mo_app::tidy::start();
     mo_ui::startup::step("log");
     let feed = Feed::default();
     // Using the old copy of the data this run: a card says so until it's put away (Settings says so too).
@@ -62,6 +60,8 @@ fn main() -> Result<(), slint::PlatformError> {
     let songs_db = mo_library::songs_db::at_start(&data, &mo_app::version::version());
     log::info("Song library", &songs_db.line());
     let library = songs_db.library.clone();
+    // Rule 28: what an earlier run or a stopped tool left behind is cleared, a little later, at low priority.
+    mo_app::tidy::start(library.clone());
     if !songs_db.is_songs_db() {
         // The saves list is read from a small copy of the app's own while library.db hasn't changed (it's slow to
         // read out of library.db itself; songs.db needs no copy).

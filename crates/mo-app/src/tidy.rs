@@ -209,23 +209,36 @@ pub struct Places {
     /// system gives no whole path for it (the first data folder is then the folder the app was started in, which
     /// says nothing about where an earlier run wrote).
     pub beside_first: Option<PathBuf>,
+    /// The export folder (the one set, else the one in Documents), whose "MIDI browser" folder Send to Bitwig writes
+    /// parts to; none when it can't be told.
+    pub exports: Option<PathBuf>,
 }
 
 impl Places {
-    pub fn this_pc() -> Places {
+    /// This computer's places. `library` is the song library, which keeps the export folder setting. Opens it, so
+    /// never on the window's thread.
+    pub fn this_pc(library: &Path) -> Places {
         let first = paths::first_dir();
         let beside_first = first.is_absolute().then(|| first.parent().map(Path::to_path_buf)).flatten();
-        Places { data: paths::data_dir(), temp: std::env::temp_dir(), beside_first }
+        // Only a full path, as every export checks: one that isn't would be looked for from wherever the app started.
+        let exports = crate::bitwig_convert::export_setting_in(library)
+            .ok()
+            .and_then(|set| {
+                crate::bitwig_convert::export_root(set.as_deref(), crate::bitwig_convert::documents().as_deref())
+            })
+            .filter(|e| e.is_absolute());
+        Places { data: paths::data_dir(), temp: std::env::temp_dir(), beside_first, exports }
     }
 }
 
 /// Starts the sweep on a low-priority thread of its own, a little after the app opens, and says in the log what it
 /// cleared, with what keeping the logs folder in bounds did as the app opened. Never on the window's thread (rules 12
 /// and 21).
-pub fn start() {
-    let started = crate::background::spawn("Tidy up", || {
+pub fn start(library: PathBuf) {
+    let started = crate::background::spawn("Tidy up", move || {
         std::thread::sleep(WAIT);
-        let mut done = sweep(&Places::this_pc(), SystemTime::now(), &mo_space::clean::SystemBin);
+        let places = Places::this_pc(&library);
+        let mut done = sweep(&places, SystemTime::now(), &mo_space::clean::SystemBin);
         if let Some(pruned) = crate::log::current().and_then(crate::log::SessionLog::take_pruned) {
             done.add(pruned);
         }
@@ -284,6 +297,10 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     done.add(remove_older(&places.temp, mo_space::admin::is_temp_file, DAY, now, true));
     // Play in Bitwig's MIDI files, which go again as soon as Bitwig has read them: a crash can leave one.
     done.add(remove_older(&places.temp, crate::midi::is_play_file, DAY, now, true));
+    // A part Send to Bitwig was still writing when the app stopped (its own name, given only while it's written).
+    if let Some(sent) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::midi::EXPORT_SUBFOLDER])) {
+        done.add(remove_older(&sent, crate::midi::is_half_sent, WRITING, now, false));
+    }
     if let Some(notes) = real_folder(&places.data, &[crate::note::FOLDER]) {
         done.add(old_notes_to_bin(&notes, &places.data.join(NOTES_DONE_FILE), NOTES_KEPT_FOR, now, bin));
     }
@@ -920,7 +937,7 @@ mod tests {
 
     /// The sweep's folders for a test in `dir`; tests that need the folder beside the first data folder set it.
     fn test_places(dir: &Path) -> Places {
-        Places { data: dir.join("data"), temp: dir.join("temp"), beside_first: None }
+        Places { data: dir.join("data"), temp: dir.join("temp"), beside_first: None, exports: None }
     }
 
     /// A folder for one test, made by the test and removed after: never a real data or temp folder (rule 11).
@@ -1504,6 +1521,34 @@ mod tests {
     }
 
     #[test]
+    fn a_part_send_to_bitwig_was_still_writing_goes_and_nothing_else_there() {
+        let dir = test_folder("midi-browser");
+        let exports = dir.join("Music Organiser Exports");
+        let places = Places { exports: Some(exports.clone()), ..test_places(&dir) };
+        let bin = TestBin(dir.join("bin"));
+        let now = SystemTime::now();
+        let sent = exports.join(crate::midi::EXPORT_SUBFOLDER);
+        let half = sent.join("Keys · Pattern 3.4120-0.part");
+        changed_at(&half, now);
+        // Never: a part sent, files named otherwise, and the same name in the export folder itself.
+        let kept = [
+            sent.join("Keys · Pattern 3.mid"),
+            sent.join("Keys.part"),
+            sent.join("Keys.12.part"),
+            sent.join("Keys.12-x.part"),
+            exports.join("Keys.4120-0.part"),
+        ];
+        for k in &kept {
+            changed_at(k, now);
+        }
+        // Not while it may still be being written.
+        assert_eq!(sweep(&places, now + Duration::from_secs(60), &bin).removed, 0);
+        assert_eq!(sweep(&places, now + WRITING * 2, &bin).removed, 1);
+        assert!(!half.exists() && kept.iter().all(|k| k.exists()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn leftovers_dated_far_on_go_and_ones_a_little_ahead_wait() {
         let dir = test_folder("ahead");
         let places = test_places(&dir);
@@ -1526,7 +1571,8 @@ mod tests {
     fn leftovers_go_once_old_enough_and_the_users_files_never() {
         let dir = test_folder("leftovers");
         let local = dir.join("local");
-        let places = Places { data: dir.join("data"), temp: dir.join("temp"), beside_first: Some(local.clone()) };
+        let places =
+            Places { data: dir.join("data"), temp: dir.join("temp"), beside_first: Some(local.clone()), exports: None };
         let bin = TestBin(dir.join("bin"));
         let data = &places.data;
         // Gone an hour after they were written: what's left of a write.
