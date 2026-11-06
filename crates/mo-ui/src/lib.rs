@@ -18,6 +18,7 @@ pub mod files;
 pub mod filters;
 pub mod finder;
 pub mod gpu;
+mod in_flight;
 pub mod midi;
 pub mod note;
 mod piano_roll;

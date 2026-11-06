@@ -28,6 +28,7 @@ use crate::clean::{Bin, Done, on_network};
 use crate::half_copy::{
     self, Claim, MARKER, busy_now, claim, clear_own, going_into_use, not_in_use, own_room, remove_marked, unmark,
 };
+use crate::plugin_clean::system_folder_in;
 use crate::plugin_space::SpaceKind;
 use crate::size::{self, is_link, is_online_only, size_text};
 use crate::{is_dir, key, not_there, real_folder, real_path, really, text};
@@ -287,6 +288,9 @@ pub enum CantMove {
     Gone,
     /// It's one of your project or sample folders, holds one, or is inside one: those never move (rule 2).
     Protected,
+    /// It's one of the computer's own folders (home, Documents, AppData, ProgramData…), or holds one (that one): moving
+    /// it behind a link would break other programs (review E2-9).
+    SystemFolder { holds: Option<String> },
     /// It's a link already (moved, or set up that way).
     Link,
     /// It was moved before (to there), and a real folder is back where its link was.
@@ -339,6 +343,15 @@ impl CantMove {
             CantMove::Protected => "It's one of your project or sample folders, holds one, or is inside one, and \
                                     those are never moved. Nothing was moved."
                 .to_owned(),
+            CantMove::SystemFolder { holds: None } => {
+                "It's one of the computer's own folders, and other programs keep \
+                                                         their things there, so it's never moved. Nothing was moved."
+                    .to_owned()
+            }
+            CantMove::SystemFolder { holds: Some(f) } => format!(
+                "It holds {f}, one of the computer's own folders, and other programs keep their things there, so it's \
+                 never moved. Nothing was moved."
+            ),
             CantMove::Link => "It's moved already: it points to another place.".to_owned(),
             CantMove::MovedBefore(to) => format!(
                 "It was moved to {to} before, and a real folder is back where its link was (an update may have put it \
@@ -428,6 +441,11 @@ fn protected_folder(from: &str, protected: &[String]) -> bool {
     })
 }
 
+/// [`CantMove::SystemFolder`] for `from`, which is or holds `system`.
+fn system_folder(from: &str, system: String) -> CantMove {
+    CantMove::SystemFolder { holds: (key(&system) != key(from)).then_some(system) }
+}
+
 /// [`problem`], for a move that holds `mine`, its claim on the copy it makes: its own claim doesn't count as the app
 /// being busy there.
 fn problem_with(
@@ -446,6 +464,9 @@ fn problem_with(
     }
     if protected_folder(from, protected) {
         return Some(CantMove::Protected);
+    }
+    if let Some(system) = system_folder_in(from) {
+        return Some(system_folder(from, system));
     }
     if !fs::symlink_metadata(from_path).is_ok_and(|m| m.is_dir()) {
         return Some(CantMove::Gone);
@@ -576,6 +597,9 @@ pub fn move_folder(
     // Before anything is made there (the claim, a half copy cleared).
     if protected_folder(&from, protected) {
         return Err(CantMove::Protected);
+    }
+    if let Some(system) = system_folder_in(&from) {
+        return Err(system_folder(&from, system));
     }
     // The app or the computer stopped in the moment the folder was called "… (checking)": it gets its name back.
     put_back_checked(&from)?;

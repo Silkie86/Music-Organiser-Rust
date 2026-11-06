@@ -766,6 +766,7 @@ pub fn show_lines(app: &AppWindow, lines: PageLines) {
     let data = app.global::<BackupData>();
     data.set_drive(lines.drive.into());
     data.set_drive_fill(lines.drive_fill);
+    data.set_drive_state(lines.drive_state);
     data.set_drive_line(lines.drive_line.into());
     data.set_last_line(lines.last_line.into());
     data.set_level(lines.level as i32);

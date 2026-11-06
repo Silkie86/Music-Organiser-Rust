@@ -13,9 +13,10 @@ export struct FinderLine {
     // The kind's or place's icon, from Icons ("" for none), and that place (rail order, -1 for none) for its colour.
     icon: string,
     place: int,
-    // Whether it has a Play button (sounds) and an Open in its DAW button (songs), shown on the line itself.
+    // Whether it has a Play button (sounds), and the DAW its Open in button opens it in (songs: FL Studio songs go to
+    // Bitwig, as on Songs; "" for none), shown on the line itself.
     plays: bool,
-    daw: bool,
+    daw: string,
 }
 
 export global FinderData {
@@ -100,7 +101,7 @@ export component Finder inherits Rectangle {
                     horizontal-stretch: 1;
                     Text {
                         x: 0;
-                        text: "Jump to a song, sound, page or action";
+                        text: "Jump to a song, sound, preset, MIDI part, plugin, setting, page or action";
                         visible: input.text == "";
                         color: Theme.faint;
                         font-size: Type.heading;
@@ -247,11 +248,11 @@ export component Finder inherits Rectangle {
                                         input.focus();
                                     }
                                 }
-                                if line.daw: StudioButton {
+                                if line.daw != "": StudioButton {
                                     y: (parent.height - self.height) / 2;
-                                    text: "Open in its DAW";
+                                    text: "Open in " + line.daw;
                                     width: self.min-width;
-                                    tip: "Open the song in its DAW (FL Studio songs go to Bitwig)";
+                                    tip: "Open the song in " + line.daw + " (an FL Studio song is converted for Bitwig, as on Songs)";
                                     key: FinderData.daw-key;
                                     clicked => { FinderData.chosen(i, true); }
                                 }

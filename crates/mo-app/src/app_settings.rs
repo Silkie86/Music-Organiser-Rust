@@ -23,6 +23,11 @@ use crate::{places, shortcuts, themes};
 /// The file's name, in the app's folder.
 pub const FILE: &str = "rust-settings.json";
 
+/// Every file in the data folder written through [`write_checked`] (as `<name>.mo-part` first): the app's settings and
+/// the Space page's list of what it put in the Recycle Bin. A new caller adds its file's name here, so the start-up
+/// sweep clears what a crash leaves of it (`crate::tidy::is_cut_short`).
+pub const WRITTEN_CHECKED: [&str; 2] = [FILE, crate::binned::FILE];
+
 /// Which page the app opens on: a page's name, or [`places::LAST_PAGE_CHOICE`]. The C# app's name.
 pub const START_PAGE_KEY: &str = "start_page";
 /// The page last shown, for "Last page I used". The C# app's name.
@@ -193,6 +198,8 @@ pub fn save(folder: &Path, json: &str) -> io::Result<PathBuf> {
 /// (rule 28) clears that one, by its whole name, so each file written this way is on its list
 /// (`crate::tidy::is_cut_short`). The app's settings and the Space page's list of what it put in the Recycle Bin
 /// ([`crate::binned`]) are written this way. Waits for the disk: call it off the window's thread.
+///
+/// Its file's name must be on [`WRITTEN_CHECKED`] (rule 28).
 pub fn write_checked(path: &Path, text: &str) -> io::Result<()> {
     let mut part = path.as_os_str().to_owned();
     part.push(crate::backup::PART_ENDING);

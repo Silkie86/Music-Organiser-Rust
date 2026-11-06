@@ -96,9 +96,10 @@ pub trait Source: Send + Sync {
     fn plays(&self) -> bool {
         false
     }
-    /// Whether Ctrl+Enter opens it in its DAW (songs).
-    fn opens_in_daw(&self) -> bool {
-        false
+    /// The DAW Ctrl+Enter opens it in (a song: its own, or Bitwig for an FL Studio song, as Songs opens it); "" for
+    /// none.
+    fn opens_in(&self, _at: usize) -> &str {
+        ""
     }
 }
 
@@ -111,7 +112,8 @@ pub struct Hit {
     pub key: String,
     pub id: String,
     pub plays: bool,
-    pub opens_in_daw: bool,
+    /// The DAW Ctrl+Enter opens it in, "" for none.
+    pub opens_in: String,
 }
 
 /// The best things of one kind, best first, and how many matched in all.
@@ -301,7 +303,7 @@ fn hit(source: &dyn Source, at: usize) -> Hit {
         key: source.key(at),
         id: source.id(at),
         plays: source.plays(),
-        opens_in_daw: source.opens_in_daw(),
+        opens_in: source.opens_in(at).to_owned(),
     }
 }
 
@@ -450,8 +452,9 @@ pub fn nothing_found(text: &str, only: Option<Kind>) -> String {
 /// the arrows have `moved` to something it plays (before that, Space is a space in the box).
 pub fn hints(picked: Option<&Hit>, moved: bool) -> String {
     let mut parts = vec!["↑↓ move", "Enter open"];
-    if picked.is_some_and(|h| h.opens_in_daw) {
-        parts.push("Ctrl+Enter open in its DAW");
+    let daw = picked.filter(|h| !h.opens_in.is_empty()).map(|h| format!("Ctrl+Enter open in {}", h.opens_in));
+    if let Some(daw) = &daw {
+        parts.push(daw);
     }
     if moved && picked.is_some_and(|h| h.plays) {
         parts.push("Space play");
@@ -466,7 +469,8 @@ pub struct Lines {
     pub kind: Option<Kind>,
     pub lines: Vec<Found>,
     pub plays: bool,
-    pub opens_in_daw: bool,
+    /// Each line's DAW for Ctrl+Enter ([`Source::opens_in`]), in the same order; empty when none opens in one.
+    pub opens_in: Vec<String>,
 }
 
 /// One thing of a [`Lines`] source.
@@ -508,8 +512,8 @@ impl Source for Lines {
     fn plays(&self) -> bool {
         self.plays
     }
-    fn opens_in_daw(&self) -> bool {
-        self.opens_in_daw
+    fn opens_in(&self, at: usize) -> &str {
+        self.opens_in.get(at).map_or("", String::as_str)
     }
 }
 
@@ -588,6 +592,11 @@ pub fn actions<'a>(shortcuts: &Shortcuts, list: impl IntoIterator<Item = &'a Act
 /// Every song, newest save first, found by its name and by its save's file name, folder, DAW and tags.
 pub fn songs(songs: &Songs, now: NaiveDateTime) -> Lines {
     let n = songs.rows.len().max(1) as f32;
+    let opens_in = songs
+        .rows
+        .iter()
+        .map(|r| if r.song.latest.daw == "FL Studio" { "Bitwig".to_owned() } else { r.song.latest.daw.clone() })
+        .collect();
     let lines = songs
         .rows
         .iter()
@@ -612,7 +621,7 @@ pub fn songs(songs: &Songs, now: NaiveDateTime) -> Lines {
             }
         })
         .collect();
-    Lines { kind: Some(Kind::Song), lines, plays: false, opens_in_daw: true }
+    Lines { kind: Some(Kind::Song), lines, plays: false, opens_in }
 }
 
 /// Every sound the Sounds page lists, shared with it rather than copied: found by its name and its folder.
@@ -728,14 +737,25 @@ impl Source for Presets {
 /// Every MIDI part the MIDI page lists, found by its title, then where it's from. Its id is its notes' fingerprint, so
 /// the page finds it again after the index is read again.
 pub fn midi_parts(cat: &mo_midi::Catalogue) -> Lines {
-    // A line each, as the MIDI page lists them: the same loop in other keys once.
+    // A line each, as the MIDI page lists them: the same loop in other keys once, found by those files' names too, as
+    // the page's own search finds them ("Pad Loop F#m" when "Pad Loop Am" heads the group).
+    let mut others: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
+    for (at, e) in cat.entries.iter().enumerate() {
+        if let Some(head) = e.key_group.filter(|&g| g != at) {
+            let words = others.entry(head).or_default();
+            for name in [crate::midi::title(e).as_str(), e.source_name()] {
+                words.push(' ');
+                words.push_str(name);
+            }
+        }
+    }
     let lines = cat
         .entries
         .iter()
         .enumerate()
         .filter(|(at, _)| cat.is_line(*at))
-        .map(|(_, e)| {
-            let from = crate::midi::from_text(e);
+        .map(|(at, e)| {
+            let mut from = crate::midi::from_text(e);
             let details = crate::midi::details(e);
             Found {
                 name: crate::midi::title(e),
@@ -744,7 +764,12 @@ pub fn midi_parts(cat: &mo_midi::Catalogue) -> Lines {
                     .filter(|s| !s.is_empty())
                     .collect::<Vec<_>>()
                     .join(" · "),
-                also: from,
+                also: {
+                    if let Some(words) = others.remove(&at) {
+                        from.push_str(&words);
+                    }
+                    from
+                },
                 key: String::new(),
                 id: e.phrase.hash.clone(),
                 // Notes found in many files first among equals.
@@ -855,7 +880,7 @@ mod tests {
                 Found { name: "Kick 1".into(), also: "Drums".into(), id: "2".into(), ..Found::default() },
             ],
             plays: true,
-            opens_in_daw: false,
+            opens_in: Vec::new(),
         });
         let g = find(&[s], "kick", None, 10);
         assert_eq!(titles(&g[0]), ["Kick 1", "Thump"]);
@@ -920,7 +945,7 @@ mod tests {
             key: String::new(),
             id: t.into(),
             plays: false,
-            opens_in_daw: true,
+            opens_in: "Bitwig".into(),
         };
         recent.add(hit("A"));
         recent.add(hit("B"));
@@ -981,11 +1006,11 @@ mod tests {
             key: String::new(),
             id: "a".into(),
             plays: false,
-            opens_in_daw: true,
+            opens_in: "Bitwig".into(),
         };
-        assert!(hints(Some(&song), true).contains("Ctrl+Enter open in its DAW"));
+        assert!(hints(Some(&song), true).contains("Ctrl+Enter open in Bitwig"));
         assert!(!hints(Some(&song), true).contains("Space"));
-        let sound = Hit { plays: true, opens_in_daw: false, ..song };
+        let sound = Hit { plays: true, opens_in: String::new(), ..song };
         assert!(hints(Some(&sound), true).contains("Space play"));
         assert!(!hints(Some(&sound), false).contains("Space"));
     }

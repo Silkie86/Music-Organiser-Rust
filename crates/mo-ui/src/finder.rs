@@ -46,6 +46,8 @@ struct State {
     asked: u64,
     /// Search on the window's thread (the screenshots), not the pool.
     here: bool,
+    /// What the lines on show were found for: what was typed and the kind shown.
+    shown_for: Option<(String, Option<Kind>)>,
 }
 
 /// A search for the pool: everything it needs, so the box can go on changing meanwhile.
@@ -68,7 +70,10 @@ thread_local! {
 pub fn add_source(app: &AppWindow, name: &'static str, source: Arc<dyn Source>) {
     STATE.with(|s| {
         let mut s = s.borrow_mut();
-        s.sources.retain(|(n, _)| *n != name);
+        // The list it replaces can be big (every MIDI part): it's let go on the freeing thread, not here.
+        if let Some(at) = s.sources.iter().position(|(n, _)| *n == name) {
+            background::free_later(s.sources.swap_remove(at));
+        }
         s.sources.push((name, source));
     });
     if app.global::<FinderData>().get_open() {
@@ -155,6 +160,7 @@ pub fn toggle(app: &AppWindow) {
         s.query.clear();
         s.only = None;
         s.moved = false;
+        s.shown_for = None;
     });
     data.set_query(SharedString::new());
     data.set_open(true);
@@ -241,8 +247,22 @@ fn found(app: &AppWindow, id: u64, groups: Vec<Group>) {
             return None;
         }
         let typed = !s.query.trim().is_empty();
+        // A list that arrives while the box is unchanged (a page's read finishing) keeps the line picked with the
+        // arrows, when it's still there; a new search starts at the top.
+        let now = (s.query.clone(), s.only);
+        let kept = match (&s.shown_for, s.selected.and_then(|i| s.lines.get(i))) {
+            (Some(was), Some(Line::Hit(h))) if *was == now => Some((h.kind, h.id.clone())),
+            _ => None,
+        };
         s.lines = finder::lines(&groups, &s.recent, typed, s.only);
-        s.selected = s.lines.iter().position(|l| matches!(l, Line::Hit(_)));
+        let again = kept.and_then(|(kind, id)| {
+            s.lines.iter().position(|l| matches!(l, Line::Hit(h) if h.kind == kind && h.id == id))
+        });
+        s.selected = again.or_else(|| s.lines.iter().position(|l| matches!(l, Line::Hit(_))));
+        if again.is_none() {
+            s.moved = false;
+        }
+        s.shown_for = Some(now);
         let note = if typed && groups.is_empty() { finder::nothing_found(&s.query, s.only) } else { String::new() };
         Some(note)
     });
@@ -269,7 +289,7 @@ fn finder_line(app: &AppWindow, line: &Line) -> FinderLine {
             icon: icon(app, h),
             place: place_of(h).map_or(-1, |p| p.index() as i32),
             plays: h.plays,
-            daw: h.opens_in_daw,
+            daw: h.opens_in.as_str().into(),
         },
     }
 }

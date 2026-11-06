@@ -26,7 +26,7 @@ use mo_library::watch::Changes;
 use mo_library::{Library, LibraryError, Save, SaveDetail, SongChoices};
 use rayon::prelude::*;
 
-use crate::background::on_pool;
+use crate::background::{on_bulk_pool, on_pool};
 use crate::shell;
 use crate::songs::{ASK_DOUBTS, DOUBTS_ACROSS_FOLDERS, RUN_GAP, Songs, run_gap};
 
@@ -440,7 +440,9 @@ impl Live {
         // folder the outer walk skips is only found that way), and judge what's left out by the innermost.
         let mut walk: Vec<String> = overflowed.to_vec();
         walk.extend(self.roots.iter().filter(|r| overflowed.iter().any(|o| scan::is_inside(r, o))).cloned());
-        let found = on_pool(|| scan::find_projects(&walk));
+        // A walk waits on the disk (a cold drive takes seconds a level): on the bulk pool, so the pages' quick jobs on
+        // the shared pool (search, filters, the galaxy's pictures) don't queue behind it (F-4, 2026-11-06 review).
+        let found = on_bulk_pool(|| scan::find_projects(&walk));
         let known: Vec<KnownFile> = self
             .saves
             .iter()

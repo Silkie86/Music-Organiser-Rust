@@ -149,6 +149,24 @@ impl Plugins {
     }
 }
 
+/// What of a clean-up really is in your Recycle Bin, for Put back: what went but wasn't found in it (removed outright,
+/// [`NOT_IN_BIN`], or sent as administrator to another account's bin) has a problem of its own path, can't be put back,
+/// and isn't offered (review E2-7), nor what went inside it. Problems about what stayed are kept out too: they were
+/// said already. Leave out [`removed_for_good`]'s paths too, apart.
+pub fn in_the_bin(done: &Done) -> Done {
+    let not_found = |path: &str| done.problems.iter().any(|p| p.path == path);
+    let removed: Vec<Removed> = done.removed.iter().filter(|r| !not_found(&r.path)).cloned().collect();
+    let went_with =
+        done.went_with.iter().filter(|(_, outer)| removed.iter().any(|r| &r.path == outer)).cloned().collect();
+    Done { removed, problems: Vec::new(), went_with }
+}
+
+/// What a clean-up removed that isn't in your Recycle Bin ([`in_the_bin`]'s other part): still left out of the sizes.
+pub fn removed_for_good(done: &Done) -> Vec<String> {
+    let not_found = |path: &str| done.problems.iter().any(|p| p.path == path);
+    done.removed.iter().filter(|r| not_found(&r.path)).map(|r| r.path.clone()).collect()
+}
+
 /// One line of the Clean up card.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CleanRow {

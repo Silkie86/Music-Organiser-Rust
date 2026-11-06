@@ -49,6 +49,8 @@ pub enum Error {
     NoTrackSelected,
     /// The selected track can't play notes (an audio, group, effect or master track): its name and Bitwig's kind.
     NotAnInstrumentTrack { name: String, kind: String },
+    /// Something newer was asked for while this waited its turn, so it stopped (and took back what it had put in).
+    Cancelled,
 }
 
 impl fmt::Display for Error {
@@ -118,6 +120,7 @@ impl fmt::Display for Error {
                 "\u{201c}{name}\u{201d} is {} track in Bitwig, so it can't play notes. Select an instrument track.",
                 a_kind(kind)
             ),
+            Error::Cancelled => f.write_str("Something newer was asked for, so this stopped."),
         }
     }
 }

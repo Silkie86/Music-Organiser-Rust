@@ -594,7 +594,8 @@ pub enum Outcome {
     Parts(Vec<Found>),
     /// It couldn't be read; noted once and only tried again when asked.
     Failed(String),
-    /// Another program had it open: what was read from it before is kept, and it's read again next time.
+    /// Another program had it open, or it couldn't be reached just now: what was read from it before is kept, and
+    /// it's read again next time.
     InUse(String),
 }
 
@@ -673,6 +674,10 @@ fn open_for_writing(path: &Path) -> Result<(MidiStore, Option<(i64, i64)>), Midi
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
             .and_then(|()| conn.execute_batch(TABLES))
             .and_then(|()| conn.execute_batch(INDEXES))
+            // Files an older reading marked gone mid-reading (a drive away) are read again once: their stamp goes.
+            .and_then(|()| {
+                conn.execute("UPDATE files SET mtime = -1 WHERE error = ?1", [crate::extract::GONE_BEFORE]).map(|_| ())
+            })
             // A new index: of this layout from the start.
             .and_then(|()| if layout == LAYOUT { Ok(()) } else { conn.pragma_update(None, "user_version", LAYOUT) })
             .map_err(|e| open_error(e.to_string()))?;
@@ -705,8 +710,8 @@ impl MidiStore {
         drop(one);
         conn.busy_timeout(Duration::from_secs(2)).map_err(|e| open_error(e.to_string()))?;
         conn.pragma_update(None, "query_only", true).map_err(|e| open_error(e.to_string()))?;
-        // The list is sorted newest first: in memory, not in a file on the system's disk, with room to read it in
-        // (32 MB; no memory-mapping, so a bad sector is a "damaged" message, not a crash).
+        // Any temporary work in memory, not in a file on the system's disk, with room to read the list in (32 MB; no
+        // memory-mapping, so a bad sector is a "damaged" message, not a crash). The list is sorted in Rust (all()).
         conn.pragma_update(None, "temp_store", "MEMORY").map_err(|e| open_error(e.to_string()))?;
         conn.pragma_update(None, "cache_size", -32_000).map_err(|e| open_error(e.to_string()))?;
         let id: i64 =
@@ -1010,8 +1015,7 @@ impl MidiStore {
                     p.drums, p.track_name, {key_fact}, y.hash IS NOT NULL, o.hash IS NOT NULL, {shape}
              FROM parts p JOIN files f ON f.id = p.file JOIN notes n ON n.id = p.notes
                   LEFT JOIN your_roles y ON y.hash = n.hash LEFT JOIN your_octaves o ON o.hash = n.hash
-                  {keys_join} {shapes_join}
-             ORDER BY f.mtime DESC, p.id"
+                  {keys_join} {shapes_join}"
         ))?;
         let mut rows = st.query([])?;
         // One shared copy of each file's facts.
@@ -1082,6 +1086,9 @@ impl MidiStore {
                 shape: r.get::<_, Option<i64>>(26)?.filter(|s| *s != 0),
             });
         }
+        // Newest file first, sorted here rather than in SQLite: no index has that order, so SQLite would hold a whole
+        // sorted copy of every row in memory beside this list.
+        list.sort_unstable_by_key(|p| (std::cmp::Reverse(p.source.mtime), p.id));
         Ok(list)
     }
 

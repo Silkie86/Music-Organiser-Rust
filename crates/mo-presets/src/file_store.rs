@@ -56,6 +56,9 @@ pub struct Found {
     pub read: usize,
     /// Why what was read couldn't be kept for next time, when it couldn't (the files are still all here).
     pub not_kept: Option<String>,
+    /// When each of `files` was last changed, in the same order, as it was looked at to decide whether to read it
+    /// (so the page needn't look again, X2-4); `None` when it couldn't be looked at.
+    pub modified: Vec<Option<SystemTime>>,
 }
 
 /// One file as kept: what it says, and its template when it's one.
@@ -294,46 +297,56 @@ impl FileStore {
                     && size == *k_size
                 {
                     let found = FoundPreset { path: text, file: entry.file.clone() };
-                    return (found, entry.template.clone(), None, false);
+                    return (found, entry.template.clone(), None, false, now.map(|n| n.2));
                 }
                 let Some(entry) = read_entry(path) else {
                     // Couldn't be read just now: listed as the page always listed it, and read again next time.
                     let found = crate::library::read_preset_file(path);
-                    return (found, None, None, true);
+                    return (found, None, None, true, now.map(|n| n.2));
                 };
-                // A file that couldn't be looked at, or changed while it was read, is read again next time.
-                let keep = now.filter(|(at, size, _)| stamp(path).is_some_and(|(a, s, _)| a == *at && s == *size));
+                // A file that couldn't be looked at, or changed while it was read, is read again next time. Its time
+                // is the one after the read, so a file changed meanwhile gets its newer time.
+                let after = stamp(path);
+                let keep = now.filter(|(at, size, _)| after.is_some_and(|(a, s, _)| a == *at && s == *size));
                 let template = entry.template.map(|mut t| {
                     t.modified = now.map(|(_, _, m)| m).or(t.modified);
                     t
                 });
                 let found = FoundPreset { path: text, file: entry.file };
-                (found, template, keep.map(|(at, size, _)| (at, size)), true)
+                (found, template, keep.map(|(at, size, _)| (at, size)), true, after.or(now).map(|n| n.2))
             })
             .collect();
         let read = done.iter().filter(|d| d.3).count();
+        // A kept file is gone only when its folder was looked through: one on a drive that's away now (unplugged or
+        // asleep) is kept as it was, as curves.db keeps what it can't reach, and not read again when it's back (H-13).
+        let walked: Vec<&PathBuf> = roots.iter().filter(|r| r.is_dir()).collect();
         let listed: std::collections::HashSet<&str> = done.iter().map(|d| d.0.path.as_str()).collect();
-        let gone = kept.keys().any(|p| !listed.contains(p.as_str()));
+        let gone: Vec<&String> = kept
+            .keys()
+            .filter(|p| !listed.contains(p.as_str()) && walked.iter().any(|r| Path::new(p.as_str()).starts_with(r)))
+            .collect();
         drop(listed);
         // Nothing read and nothing gone: the store is as it should be, so it isn't written.
-        let not_kept = if read == 0 && !gone { None } else { self.write(&done, &kept).err().map(|e| e.to_string()) };
+        let not_kept =
+            if read == 0 && gone.is_empty() { None } else { self.write(&done, &gone).err().map(|e| e.to_string()) };
         let mut files = Vec::with_capacity(done.len());
+        let mut modified = Vec::with_capacity(done.len());
         let mut templates = Vec::new();
-        for (found, template, _, _) in done {
+        for (found, template, _, _, at) in done {
             files.push(found);
+            modified.push(at);
             templates.extend(template);
         }
-        Found { files, templates: bw::newest_templates(templates), read, not_kept }
+        Found { files, templates: bw::newest_templates(templates), read, not_kept, modified }
     }
 
     /// Keeps what was read now, and forgets the files no longer found, in one go.
-    fn write(&mut self, done: &[Done], kept: &HashMap<String, (i64, i64, Entry)>) -> rusqlite::Result<()> {
+    fn write(&mut self, done: &[Done], gone: &[&String]) -> rusqlite::Result<()> {
         let tx = self.conn.transaction()?;
         {
-            let listed: std::collections::HashSet<&str> = done.iter().map(|d| d.0.path.as_str()).collect();
-            let mut gone = tx.prepare_cached("DELETE FROM files WHERE path = ?1")?;
-            for path in kept.keys().filter(|p| !listed.contains(p.as_str())) {
-                gone.execute([path])?;
+            let mut forget = tx.prepare_cached("DELETE FROM files WHERE path = ?1")?;
+            for path in gone {
+                forget.execute([path])?;
             }
             let mut put = tx.prepare_cached(
                 "INSERT OR REPLACE INTO files (path, size, modified, error, format, name, plugin, plugin_id, kind,
@@ -341,7 +354,7 @@ impl FileStore {
                     t_plugin_id)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             )?;
-            for (found, template, keep, _) in done {
+            for (found, template, keep, _, _) in done {
                 let Some((at, size)) = keep else { continue };
                 let blank = PresetFile::default();
                 let (error, file) = match &found.file {
@@ -379,7 +392,9 @@ impl FileStore {
 
 /// One file found: what it says, its template, its stamp when what was read now is to be kept, and whether it was read
 /// now.
-type Done = (FoundPreset, Option<Template>, Option<(i64, i64)>, bool);
+/// A file found: what it says, its template, its stamp to keep (when it's to be kept), whether it was read now, and
+/// when it was last changed.
+type Done = (FoundPreset, Option<Template>, Option<(i64, i64)>, bool, Option<SystemTime>);
 
 /// Why the store couldn't be opened as it is.
 enum Damage {
@@ -400,7 +415,8 @@ pub fn find(roots: &[PathBuf], store: &Path) -> (Found, Option<String>) {
             let files = crate::library::find_preset_files(roots);
             let templates = bw::templates(&files);
             let read = files.len();
-            (Found { files, templates, read, not_kept: None }, Some(e))
+            let modified = files.iter().map(|f| stamp(Path::new(&f.path)).map(|s| s.2)).collect();
+            (Found { files, templates, read, not_kept: None, modified }, Some(e))
         }
     }
 }
@@ -460,6 +476,32 @@ mod tests {
             .and_then(|c| c.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)))
             .expect("rows");
         assert_eq!(rows, 2, "the removed file is forgotten");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn files_on_a_folder_thats_away_are_kept_and_not_read_again() {
+        let dir = folder("away");
+        let (here, away) = (dir.join("here"), dir.join("away"));
+        std::fs::create_dir_all(&here).expect("folders");
+        std::fs::create_dir_all(&away).expect("folders");
+        std::fs::write(here.join("Lead.fxp"), fxp(b"Abcd", "Lead")).expect("write");
+        std::fs::write(away.join("Pad.fxp"), fxp(b"Abcd", "Pad")).expect("write");
+        let store = dir.join("data").join(FILE_NAME);
+        let roots = [here.clone(), away.clone()];
+        let (first, _) = find(&roots, &store);
+        assert_eq!(first.read, 2);
+        assert_eq!(first.modified.len(), 2);
+        assert!(first.modified.iter().all(Option::is_some), "each file's time comes with it");
+
+        // The drive is unplugged: its file isn't listed, but it isn't forgotten either.
+        let hidden = dir.join("away-unplugged");
+        std::fs::rename(&away, &hidden).expect("rename");
+        let (second, _) = find(&roots, &store);
+        assert_eq!((second.files.len(), second.read), (1, 0));
+        std::fs::rename(&hidden, &away).expect("rename back");
+        let (third, _) = find(&roots, &store);
+        assert_eq!((third.files.len(), third.read), (2, 0), "back, and not read again");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

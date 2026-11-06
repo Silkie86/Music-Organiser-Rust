@@ -400,7 +400,11 @@ pub(super) fn removed(app: &AppWindow, id: u64, row_key: (String, String), outco
             if let Some(pl) = p.plugins.as_mut() {
                 pl.forget_removed(&done);
             }
-            p.binned.push(Binned { row_key, done });
+            p.removed_for_good.extend(clean::removed_for_good(&done));
+            let in_bin = clean::in_the_bin(&done);
+            if !in_bin.removed.is_empty() {
+                p.binned.push(Binned { row_key, done: in_bin });
+            }
         }
         if let Some(c) = p.clean.as_mut().filter(|c| c.id == id) {
             c.stage = Stage::Done { head, problems, offer_clean: false };
@@ -549,6 +553,7 @@ pub(super) fn forget_binned(plugins: &mut mo_app::plugins::Plugins) {
             plugins.forget_removed(&b.done);
         }
         plugins.forget_paths(&p.uninstalled);
+        plugins.forget_paths(&p.removed_for_good);
         plugins.forget_paths(&p.moved);
     });
 }

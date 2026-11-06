@@ -82,6 +82,9 @@ enum Found {
     Software,
     /// None found here (why): Slint looks for one itself, as it did before.
     NoCard(String),
+    /// Looking for it panicked (a driver or wgpu bug): the views draw on the processor, and Slint isn't asked to
+    /// draw with wgpu either, where the same bug would likely end the app at every start.
+    Panicked,
 }
 
 /// Starts looking for the graphics card on a thread of its own, the first thing the app does. Finding one and making
@@ -211,14 +214,21 @@ fn try_one(asked: wgpu::InstanceDescriptor, name: &str, steps: &mut Vec<String>)
 /// usual way and the views draw on the processor.
 pub fn choose() {
     let ahead = AHEAD.lock().ok().and_then(|mut a| a.take());
-    let found = ahead.and_then(|f| f.join().ok()).unwrap_or_else(find);
-    let config = match found {
+    let config = match settle(ahead.map(std::thread::JoinHandle::join), find) {
         Found::Asked => {
             log::info("Graphics", "MO_DRAW_CPU is set: the views draw on the processor");
             return;
         }
         Found::Software => {
             log::warning("Graphics", "Only a software graphics card here, so the views draw on the processor");
+            return;
+        }
+        Found::Panicked => {
+            log::warning(
+                "Graphics",
+                "Looking for the graphics card went wrong (see the crash above), so the window and the views draw \
+                 on the processor",
+            );
             return;
         }
         Found::Card(config, steps) => {
@@ -237,6 +247,16 @@ pub fn choose() {
             "Graphics",
             &format!("Couldn't draw with the graphics card, so the views draw on the processor: {e}"),
         );
+    }
+}
+
+/// What the look-ahead found: its answer; when it panicked, [`Found::Panicked`], never a second look on the window's
+/// thread (the same bug there would end the app); when it never started, a look now, caught all the same.
+fn settle(joined: Option<std::thread::Result<Found>>, find: fn() -> Found) -> Found {
+    match joined {
+        Some(Ok(found)) => found,
+        Some(Err(_)) => Found::Panicked,
+        None => mo_catch::catch(find).unwrap_or(Found::Panicked),
     }
 }
 
@@ -587,5 +607,17 @@ mod tests {
             made
         });
         assert_eq!(painter.copied(), Ok(2), "made again on the next card");
+    }
+
+    // Review F-6: a look that panics is never run again on the window's thread, and the window draws on the processor.
+    #[test]
+    fn a_look_that_panicked_is_not_tried_again() {
+        fn panics() -> Found {
+            panic!("a driver bug")
+        }
+        assert!(matches!(settle(Some(Err(Box::new("a driver bug"))), panics), Found::Panicked));
+        assert!(matches!(settle(None, panics), Found::Panicked));
+        assert!(matches!(settle(Some(Ok(Found::Software)), panics), Found::Software));
+        assert!(matches!(settle(None, || Found::Asked), Found::Asked));
     }
 }

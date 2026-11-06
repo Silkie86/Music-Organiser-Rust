@@ -539,4 +539,23 @@ class NewerApiTest {
         assertFalse(bitwig.calls.stream().anyMatch(c -> c.get(0).equals("deleteTrack")), String.valueOf(bitwig.calls));
         assertEquals("Say which track, by its ID.", error(app.waitFor(obj("id", 7, "cmd", "deletetrack"))));
     }
+
+    @Test
+    @DisplayName("still takes out an audition track once the app that asked has closed (extension 3.21)")
+    void deletesAnAuditionTrackAfterTheAppHasClosed() {
+        // The app sends deletetrack as it closes, and may give up waiting while a slow change runs in front of it.
+        Model m = LinkTest.song();
+        m.newTrackIds = true;
+        start(m);
+        bitwig.allowChanges(true);
+        int before = bitwig.state.tracks.size();
+        String id = (String) SelfCheckTest.map(
+            app.waitFor(obj("id", 1, "cmd", "newtrack", "name", "Warm Pad", "audition", true)).get("result")).get("id");
+        bitwig.model.clipDelay = 1000;
+        app.send(obj("id", 2, "cmd", "clip", "trackId", id, "path", "C:\\MIDI\\MO Play 1.mid", "launch", true, "audition", true));
+        app.send(obj("id", 3, "cmd", "deletetrack", "trackId", id, "transport", true));
+        app.close();
+        bitwig.clock.advance(10000);
+        assertEquals(before, bitwig.state.tracks.size());
+    }
 }

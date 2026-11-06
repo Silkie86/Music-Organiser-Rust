@@ -62,6 +62,8 @@ struct Page {
     binned: Vec<clean::Binned>,
     /// The plugin files this session's uninstalls removed: left out of every read until the old app looks again.
     uninstalled: Vec<String>,
+    /// What this session's clean-ups removed that isn't in your Recycle Bin (no Put back for it): left out too.
+    removed_for_good: Vec<String>,
     /// The folders this session's moves swapped for a link: their room is on the other drive now, so they're left out
     /// of every read too.
     moved: Vec<String>,
@@ -514,14 +516,17 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>, in_bin: Vec<String>)
                 }
                 p.picked.and_then(|i| old.rows.get(i)).map(|r| (r.key.clone(), r.own.clone()))
             });
-            clean::forget_binned(&mut fresh);
-            // And the plugin files Space's clean-ups sent to the Recycle Bin, as Space leaves them out: as Space has
-            // them now, once it has looked in the bin.
-            fresh.forget_paths(&crate::space::plugin_files_in_bin().unwrap_or(in_bin));
+            // This session's folder fixes first, then what went: a folder added and binned or moved since stays out, as
+            // Space has it (review E2-4).
             PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 p.folder_fixes = fresh.apply_folder_fixes(&p.folder_fixes);
             });
+            fresh.forget_gone();
+            clean::forget_binned(&mut fresh);
+            // And the plugin files Space's clean-ups sent to the Recycle Bin, as Space leaves them out: as Space has
+            // them now, once it has looked in the bin.
+            fresh.forget_paths(&crate::space::plugin_files_in_bin().unwrap_or(in_bin));
             fresh.refilter();
             // What another page asked for before the first read comes first; with every unused plugin asked for, the
             // plugin picked before stays picked only when it's among them.
@@ -622,7 +627,8 @@ pub fn gone_this_session() -> Vec<String> {
     PAGE.with(|p| {
         let p = p.borrow();
         let binned = p.binned.iter().flat_map(|b| b.done.removed.iter().map(|r| r.path.clone()));
-        binned.chain(p.uninstalled.iter().cloned()).chain(p.moved.iter().cloned()).collect()
+        let left_out = p.uninstalled.iter().chain(&p.removed_for_good).chain(&p.moved).cloned();
+        binned.chain(left_out).collect()
     })
 }
 

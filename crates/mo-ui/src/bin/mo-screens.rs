@@ -1876,6 +1876,8 @@ fn sample_plugins() -> (mo_app::plugins::Plugins, Vec<mo_library::plugins::Scann
         looked_for_installed: true,
         unused_years: 2,
         needed_count: 6,
+        saved_fixes: Vec::new(),
+        gone: Vec::new(),
     };
     let copies = vec![
         mo_library::plugins::ScannedPlugin {

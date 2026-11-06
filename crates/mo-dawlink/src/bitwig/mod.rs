@@ -1,7 +1,7 @@
 //! The Bitwig link: the app talks to the Music Organiser extension (or the script it took over from) running inside
 //! Bitwig Studio, over a connection on this computer, and Send to Bitwig puts things into the project open there.
 //!
-//! The extension itself lives in this repo (`extensions/bitwig-java`, version 3.19; the C# app's copy is frozen):
+//! The extension itself lives in this repo (`extensions/bitwig-java`, version 3.21; the C# app's copy is frozen):
 //! Bitwig only runs Java extensions. Settings > DAWs installs it. Changing anything needs "Let the app make changes"
 //! on in Bitwig (Settings > Controllers > Music Organiser); reading never does.
 //!
@@ -13,9 +13,13 @@
 //! - [`Bitwig::check`]: what Bitwig has open, and whether a send would go in now.
 //! - [`Bitwig::play_on_selected`] then [`Bitwig::stop_playing`]: a MIDI part looping through what's on the track
 //!   selected in Bitwig, for auditioning (extension 3.19).
+//! - [`Bitwig::audition_preset`] then [`Bitwig::stop_audition`] or [`Bitwig::keep_audition`]: a preset on a track of
+//!   its own playing a part (extension 3.20).
 //!
 //! Each waits for Bitwig, so a screen calls them on a background thread (`mo_app::background::spawn`), never the
-//! window's. Sends asked for at the same time go in one after the other, in the order they came. Every error, and
+//! window's. Everything that changes the project (sends, plays, auditions and their stops) goes in one after the
+//! other, in the order it came: a play, an audition or a stop goes in a [`Turn`] from a [`ticket`] the screen takes
+//! as the button is pressed. A play or audition asked for again meanwhile stops as its turn comes. Every error, and
 //! every result, has words to show as they are.
 
 mod audition;
@@ -35,6 +39,6 @@ pub use link::{
 };
 pub use send::{
     Bitwig, KIT_FAILED, KitSound, KitTarget, PART_FAILED, PART_IN, PART_PLACE, Pad, SOUND_FAILED, SOUND_PLACE, SentKit,
-    SentPart, SentSound, kit_name, kit_pads, note_name, send_kit, send_part, send_preset, send_sound, sending_kit,
-    sending_part, sending_sound,
+    SentPart, SentSound, Ticket, Turn, kit_name, kit_pads, note_name, send_kit, send_part, send_preset, send_sound,
+    sending_kit, sending_part, sending_sound, ticket,
 };

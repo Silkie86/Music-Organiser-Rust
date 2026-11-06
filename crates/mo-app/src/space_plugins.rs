@@ -146,6 +146,7 @@ pub fn look(read: Read, now: NaiveDateTime, fixes: &[FolderFix]) -> Found {
     let mut plugins = Plugins::new(read, now);
     // Your say on a plugin's folders on the Plugins page (Not its, Take off, Add a folder) counts here too, as there.
     plugins.apply_folder_fixes(fixes);
+    plugins.forget_gone();
     let (mut unused, mut used) = (Vec::new(), Vec::new());
     // What "Big and unused" on the Plugins page picks from: installed, measured, with room of its own.
     for r in plugins.rows.iter().filter(|r| r.installed && r.bytes() > 0) {
@@ -508,6 +509,8 @@ mod tests {
             looked_for_installed: true,
             unused_years: 2,
             needed_count: 6,
+            saved_fixes: Vec::new(),
+            gone: Vec::new(),
         };
         let f = look(read.clone(), at(2026, 11), &[]);
         let names: Vec<(&str, usize, u64)> = f.plugins.iter().map(|p| (p.name.as_str(), p.songs, p.bytes())).collect();

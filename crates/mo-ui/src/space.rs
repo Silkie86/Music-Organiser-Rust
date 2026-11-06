@@ -26,7 +26,7 @@ use mo_app::places::Place;
 use mo_app::plugins::folder_fixes::FolderFix;
 use mo_app::shortcuts::what_of;
 use mo_app::sounds::SoundList;
-use mo_app::space::{self, Drive, Fill, Holds, OnPlugins, Opens, Part};
+use mo_app::space::{self, Drive, Holds, OnPlugins, Opens, Part};
 use mo_app::space_bin::{self, BIN, CAN_PUT_BACK, PutBacks};
 use mo_app::space_bitwig::{self, BITWIG_COPIES, Copies, Fixes, Fixing, ToFix};
 use mo_app::space_old::{self, Found, OLD_COPIES};
@@ -2278,11 +2278,7 @@ pub fn show(app: &AppWindow) {
                 used: d.used(),
                 holds: space::holds_line(d).into(),
                 note: space::fill_note(d, app_bytes).into(),
-                fill: match d.fill(app_bytes) {
-                    Fill::Roomy => 0,
-                    Fill::Nearly => 1,
-                    Fill::Almost => 2,
-                },
+                fill: d.fill(app_bytes).index(),
                 here: d.here,
             })
             .collect();
