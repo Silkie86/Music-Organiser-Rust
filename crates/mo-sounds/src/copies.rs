@@ -5,8 +5,9 @@
 //! Two sounds are the same when their files decode to the very same audio: the same sample rate, the same number of
 //! channels, the same number of frames and every sample the same, bit for bit. A file copied to another folder is
 //! one, and so is the same audio saved again with other notes in the file (a renamed pack, a WAV with its tags
-//! changed) or in another lossless format (WAV and FLAC). The same sound at another sample rate or bit depth, an MP3
-//! of it, or a trimmed one, isn't: those may differ on purpose.
+//! changed) or in another lossless format (WAV and FLAC), or at a higher bit depth whose samples are the same (a
+//! 16-bit sound saved as 24 bits). The same sound at another sample rate, at another bit depth whose samples differ
+//! (a new render), an MP3 of it, or a trimmed one, isn't: those may differ on purpose.
 //!
 //! Nothing here moves, deletes or hides a file (rule 2): the page only leaves the copies out of its list while the
 //! switch is on.
@@ -58,10 +59,12 @@ const SAVE_EVERY: usize = 256;
 pub type Print = [u8; 32];
 
 /// Groups of sounds (by id) whose audio is exactly the same, each of at least two, every group's ids in order and
-/// the groups in the order of their first ids.
+/// the groups in the order of their first ids; with the size of each grouped sound's file, in bytes, as it was when
+/// looked at (for the room the copies take).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SameAudio {
     pub groups: Vec<Vec<i64>>,
+    pub sizes: HashMap<i64, u64>,
 }
 
 impl SameAudio {
@@ -70,7 +73,7 @@ impl SameAudio {
         self.groups.iter().map(|g| g.len() - 1).sum()
     }
 
-    fn of(prints: impl IntoIterator<Item = (i64, Print)>) -> SameAudio {
+    fn of(prints: impl IntoIterator<Item = (i64, Print)>, size_of: &HashMap<i64, u64>) -> SameAudio {
         let mut by: HashMap<Print, Vec<i64>> = HashMap::new();
         for (id, print) in prints {
             by.entry(print).or_default().push(id);
@@ -86,7 +89,8 @@ impl SameAudio {
             .filter(|g| g.len() > 1)
             .collect();
         groups.sort_unstable();
-        SameAudio { groups }
+        let sizes = groups.iter().flatten().filter_map(|id| Some((*id, *size_of.get(id)?))).collect();
+        SameAudio { groups, sizes }
     }
 }
 
@@ -265,15 +269,29 @@ impl Kept {
         let layout: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         let tables: i64 = conn.query_row("SELECT COUNT(*) FROM sqlite_schema", [], |r| r.get(0))?;
         if id == 0 && layout == 0 && tables == 0 {
+            // All at once (the header's id and layout are written in the same transaction): a file stopped half way
+            // through being made is still empty, never marked as this app's without its table.
             conn.execute_batch(&format!(
-                "PRAGMA application_id = {APP_ID};
+                "BEGIN IMMEDIATE;
+                 PRAGMA application_id = {APP_ID};
                  PRAGMA user_version = {LAYOUT};
                  CREATE TABLE prints (path TEXT PRIMARY KEY, size INTEGER NOT NULL, changed INTEGER NOT NULL,
-                                      print BLOB NOT NULL) WITHOUT ROWID;"
+                                      print BLOB NOT NULL) WITHOUT ROWID;
+                 COMMIT;"
             ))?;
         } else if id != APP_ID {
             return Ok(Opened::Foreign);
         } else if layout != LAYOUT {
+            return Ok(Opened::Remake);
+        }
+        // Marked as this app's but without its table (made by a build before the marks and table went in together, and
+        // stopped half way): made afresh.
+        let has_prints: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM sqlite_schema WHERE type = 'table' AND name = 'prints'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_prints {
             return Ok(Opened::Remake);
         }
         let check: String = match conn.query_row("PRAGMA quick_check", [], |r| r.get(0)) {
@@ -380,6 +398,11 @@ pub fn find(
     let candidates = candidates(sounds);
     // Each one's file as it is now: one that can't be looked at (a drive not plugged in) isn't taken for a copy.
     let stamps: Vec<Option<Stamp>> = candidates.par_iter().map(|&i| stamp_of(Path::new(&sounds[i].path))).collect();
+    let size_of: HashMap<i64, u64> = candidates
+        .iter()
+        .zip(&stamps)
+        .filter_map(|(&i, st)| Some((sounds[i].id, u64::try_from(st.as_ref()?.size).unwrap_or(0))))
+        .collect();
     let mut kept = Kept::open(kept_at)?;
     let known = kept.known()?;
     let mut prints: Vec<(i64, Print)> = Vec::with_capacity(candidates.len());
@@ -393,14 +416,14 @@ pub fn find(
         }
     }
     drop(known);
-    said(Finding::Known { same: SameAudio::of(prints.iter().copied()), left: to_read.len() });
+    said(Finding::Known { same: SameAudio::of(prints.iter().copied(), &size_of), left: to_read.len() });
 
     let of = to_read.len();
     let mut done = 0;
     let mut told = Instant::now();
     for part in to_read.chunks(SAVE_EVERY) {
         if stop.load(Ordering::Relaxed) {
-            return Ok(SameAudio::of(prints));
+            return Ok(SameAudio::of(prints, &size_of));
         }
         let read: Vec<(usize, Stamp, Print)> = part
             .par_iter()
@@ -428,5 +451,5 @@ pub fn find(
         let keep: HashSet<&str> = candidates.iter().map(|&i| sounds[i].path.as_str()).collect();
         kept.keep_only(&keep)?;
     }
-    Ok(SameAudio::of(prints))
+    Ok(SameAudio::of(prints, &size_of))
 }

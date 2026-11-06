@@ -522,6 +522,21 @@ pub fn show_only(app: &AppWindow, label: &str, saves: HashSet<i64>) {
 
 /// Picks the song with this save and brings it into view (the Plugins page's song lines). Returns whether the list has
 /// it (not while the library is still being read).
+/// Shows the song a save belongs to, by the save's path (Presets and Curves know their saves by path). Whether it was
+/// found.
+pub fn show_save_path(app: &AppWindow, save: &str) -> bool {
+    let row = PAGE.with(|p| {
+        p.borrow().songs.rows.iter().position(|r| r.song.saves().chain(&r.song.copies).any(|s| s.path == save))
+    });
+    match row {
+        Some(row) => {
+            show_song(app, row);
+            true
+        }
+        None => false,
+    }
+}
+
 pub fn show_save(app: &AppWindow, save: i64) -> bool {
     let row = PAGE.with(|p| {
         p.borrow().songs.rows.iter().position(|r| r.song.saves().chain(&r.song.copies).any(|s| s.id == save))

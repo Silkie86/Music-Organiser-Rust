@@ -3,7 +3,7 @@
 // to drop onto a Bitwig lane (Solomon, 2 Nov 2026). Only shared parts from studio.slint; mo-app decides every word
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Caps, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
+import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
 
 // One line of the sounds list.
 export struct PresetLine {
@@ -136,6 +136,13 @@ export global PresetsData {
     in property <[PartChip]> parts;
     // What the last export or send did.
     in property <string> message;
+    // The audition in Bitwig, whichever line is picked: what it says ("" when there's none), whether it plays yet (so
+    // it can be kept), and its buttons' keys.
+    in property <string> hearing;
+    in property <bool> hearing-playing;
+    in property <string> keep-audition-key;
+    callback stop-audition();
+    callback keep-audition();
     // The right-click menu: the card's actions and the part fixes, each with its key.
     in property <[MenuItem]> menu;
     callback menu-chosen(string);
@@ -165,6 +172,12 @@ export global PresetsData {
     in property <[MenuItem]> curve-menu;
     in property <string> curve-message;
     callback curve-chosen(string);
+    // The card's handle drags the picked curve's file out (onto a Bitwig automation lane): `curve-drag`, then
+    // `curve-drag-let-go` if the button comes up before the drag has got going. Dimmed while carried, glows once landed.
+    callback curve-drag();
+    callback curve-drag-let-go();
+    in property <bool> curve-lifted;
+    in property <bool> curve-landed;
     // Renaming the picked curve: the box shows while this is on.
     in-out property <bool> renaming;
     in-out property <string> rename-text;
@@ -483,6 +496,15 @@ component CurvePanel inherits SidePanel {
             line: 2px;
         }
     }
+    // Where to take the curve from to drag it onto an automation lane: its file in the app's Curves folder.
+    DragHandle {
+        text: "Drag onto an automation lane";
+        tip: "Drag the curve's file onto an automation lane in Bitwig";
+        lifted: PresetsData.curve-lifted;
+        landed: PresetsData.curve-landed;
+        drag-out => { PresetsData.curve-drag(); }
+        drag-let-go => { PresetsData.curve-drag-let-go(); }
+    }
     CardActions {
         actions: PresetsData.curve-actions;
         chosen(id) => { PresetsData.curve-chosen(id); }
@@ -528,7 +550,7 @@ component CurvePanel inherits SidePanel {
         }
     }
     Text {
-        text: "Drag the curve file onto an automation lane in Bitwig, or save it to Bitwig's curves to find it in its browser.";
+        text: "Drag the curve onto an automation lane in Bitwig, or save it to Bitwig's curves to find it in its browser.";
         color: Theme.faint;
         font-size: Type.small;
         wrap: word-wrap;
@@ -670,6 +692,46 @@ export component PresetsPage inherits Rectangle {
                 text: "Show the curves I hid";
                 on: PresetsData.curve-hidden;
                 clicked => { PresetsData.curve-hidden-toggled(!PresetsData.curve-hidden); }
+            }
+        }
+        // The audition playing in Bitwig, whatever line is picked and whichever section is on show, with its
+        // Stop and Keep (the 6 Nov review's D-4 and X3-1).
+        if PresetsData.hearing != "": Rectangle {
+            height: 48px;
+            background: Theme.surface-raised;
+            HorizontalLayout {
+                padding-left: Space.md;
+                padding-right: Space.md;
+                spacing: Space.sm;
+                alignment: stretch;
+                Text {
+                    horizontal-stretch: 1;
+                    text: PresetsData.hearing;
+                    color: Theme.text;
+                    font-size: Type.meta;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    StudioButton {
+                        text: "Stop audition";
+                        tip: "Stop it and take its track out of Bitwig again";
+                        clicked => { PresetsData.stop-audition(); }
+                    }
+                }
+                VerticalLayout {
+                    alignment: center;
+                    horizontal-stretch: 0;
+                    StudioButton {
+                        text: "Keep in Bitwig";
+                        tip: "Stop it playing and leave its track, preset and part in the project";
+                        key: PresetsData.keep-audition-key;
+                        enabled: PresetsData.hearing-playing;
+                        clicked => { PresetsData.keep-audition(); }
+                    }
+                }
             }
         }
         // The list, the year strip beside it, and the picked line's card.

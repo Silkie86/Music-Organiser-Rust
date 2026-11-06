@@ -67,8 +67,9 @@ struct Page {
     /// The folders this session's moves swapped for a link: their room is on the other drive now, so they're left out
     /// of every read too.
     moved: Vec<String>,
-    /// How many of this session's moves have finished, whatever came of them: each leaves an old copy beside its link,
-    /// or, cut short, what it had copied, for Space to look for ([`moves_this_session`]).
+    /// How many of this session's moves have finished, whatever came of them: each leaves an old copy beside its link
+    /// for Space to look for ([`moves_this_session`]). What a move cut off left is found here ([`moving`]'s half
+    /// copies).
     moves: u64,
     clean_asked: u64,
     /// The picked plugin's folder lines' paths, as the On disk tab shows them.
@@ -79,6 +80,11 @@ struct Page {
     wanted: Option<Wanted>,
     /// Ctrl+K asked for the library to be read before the page was first shown.
     finder_asked: bool,
+    /// The half copies moves cut off part way left (a close or a crash), with Clear (review E2-3).
+    half_copies: Vec<mo_space::half_copy::HalfCopy>,
+    clearing_half_copies: bool,
+    /// The half copies were looked for once this run (then again only after a move or a clear).
+    looked_for_half_copies: bool,
 }
 
 /// What another page can ask this one to show.
@@ -330,6 +336,12 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         }
     });
     let weak = app.as_weak();
+    data.on_clear_half_copies(move || {
+        if let Some(app) = weak.upgrade() {
+            moving::clear_half_copies(&app);
+        }
+    });
+    let weak = app.as_weak();
     data.on_put_back(move || {
         if let Some(app) = weak.upgrade() {
             clean::put_back(&app);
@@ -524,6 +536,12 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>, in_bin: Vec<String>)
             });
             fresh.forget_gone();
             clean::forget_binned(&mut fresh);
+            // A move a close or a crash cut off part way may have left a half copy (review E2-3): looked for once.
+            if !PAGE.with(|p| std::mem::replace(&mut p.borrow_mut().looked_for_half_copies, true)) {
+                moving::look_for_half_copies(app);
+                // And what earlier runs' clean-ups put in the Recycle Bin, for their Put back (review X1-3).
+                clean::load_binned(app);
+            }
             // And the plugin files Space's clean-ups sent to the Recycle Bin, as Space leaves them out: as Space has
             // them now, once it has looked in the bin.
             fresh.forget_paths(&crate::space::plugin_files_in_bin().unwrap_or(in_bin));
@@ -619,6 +637,26 @@ pub fn unused_years() -> Option<u32> {
 /// How many moves have finished this session, whatever came of them: Space looks for old copies again after each.
 pub fn moves_this_session() -> u64 {
     PAGE.with(|p| p.borrow().moves)
+}
+
+/// Space put back one of this page's clean-ups or uninstalls (`kind`, kept at `when`): its Put back here goes when all
+/// of it came back, and the list is read again, so the plugin's folders show again (review X1-3).
+pub fn put_back_elsewhere(kind: &str, when: i64, all: bool) {
+    if all {
+        let kept = Some((kind.to_owned(), when));
+        PAGE.with(|p| p.borrow_mut().binned.retain(|b| b.kept != kept));
+    }
+    read_again();
+}
+
+/// When the window has closed, first: a move still copying is told to stop ([`moving::stop_moves`]).
+pub fn stop_moves() {
+    moving::stop_moves();
+}
+
+/// When the window has closed, after the quick jobs: waits for a move told to stop ([`moving::finish_up`]).
+pub fn finish_up() {
+    moving::finish_up();
 }
 
 /// Where this session's Clean ups, uninstalls and moves took things from: Space leaves them out of the plugins it

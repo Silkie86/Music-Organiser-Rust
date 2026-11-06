@@ -1013,6 +1013,8 @@ pub mod act {
     pub const KEEP: &str = "presets.keepAudition";
     pub const EXPORT_SHOWN: &str = "presets.exportShown";
     pub const REVEAL: &str = "presets.reveal";
+    /// The sound's song on the Songs page (Show in Songs, as Plugins has it).
+    pub const SHOW_IN_SONGS: &str = "presets.showInSongs";
     pub const COPY_PATH: &str = "presets.copyPath";
     pub const USE_GUESS: &str = "presets.useGuess";
     /// A part fix: this, then the part's key ("presets.part.bass").
@@ -1066,7 +1068,8 @@ pub fn offers(i: &Item, busy: bool, hearing: Hearing) -> Vec<Offer> {
         out.push(offer("Show in folder", act::REVEAL, true));
         out.push(offer("Copy path", act::COPY_PATH, true));
     } else {
-        out.push(offer("Show the song", act::REVEAL, true));
+        out.push(offer("Show in Songs", act::SHOW_IN_SONGS, true));
+        out.push(offer("Show the song's file", act::REVEAL, true));
         out.push(offer("Copy the song's path", act::COPY_PATH, true));
     }
     out
@@ -1202,6 +1205,7 @@ pub mod curve_act {
     pub const RENAME: &str = "curves.rename";
     pub const HIDE: &str = "curves.hide";
     pub const OPEN_SONG: &str = "curves.revealSong";
+    pub const SHOW_IN_SONGS: &str = "curves.showInSongs";
 }
 
 /// What the curves list is filtered by.
@@ -1482,12 +1486,14 @@ pub fn curve_card(c: &Curve) -> CurveCard {
 
 /// What the picked curve offers, in the card's order.
 pub fn curve_offers(c: &Curve, has_bitwig: bool) -> Vec<Offer> {
+    let in_song = c.sources.iter().any(|s| s.kind != SourceKind::BitwigCurve);
     vec![
         offer("Save to Bitwig's curves", curve_act::TO_BITWIG, has_bitwig),
         offer("Show curve file", curve_act::REVEAL, true),
         offer("Rename", curve_act::RENAME, true),
         offer(if c.hidden { "Show again" } else { "Hide" }, curve_act::HIDE, true),
-        offer("Show the song", curve_act::OPEN_SONG, c.sources.iter().any(|s| s.kind != SourceKind::BitwigCurve)),
+        offer("Show in Songs", curve_act::SHOW_IN_SONGS, in_song),
+        offer("Show the song's file", curve_act::OPEN_SONG, in_song),
     ]
 }
 
@@ -1806,7 +1812,10 @@ mod tests {
         let ids = |i: &Item| {
             offers(i, false, Hearing::Off).into_iter().filter(|o| o.enabled).map(|o| o.id).collect::<Vec<_>>()
         };
-        assert_eq!(ids(&all[0]), [act::EXPORT, act::TO_BITWIG, act::AUDITION, act::REVEAL, act::COPY_PATH]);
+        assert_eq!(
+            ids(&all[0]),
+            [act::EXPORT, act::TO_BITWIG, act::AUDITION, act::SHOW_IN_SONGS, act::REVEAL, act::COPY_PATH]
+        );
         let mut fl_own = all[2].clone();
         fl_own.row.extension = ".flstate".into();
         assert!(!ids(&fl_own).contains(&act::TO_BITWIG), "an FL plugin's own state can't go into Bitwig");
@@ -1872,10 +1881,25 @@ mod tests {
             let id = format!("{}{}", act::PART, r.key());
             assert!(crate::shortcuts::PRESETS_ACTIONS.iter().any(|a| a.id == id), "{id}");
         }
-        for id in [act::EXPORT, act::TO_BITWIG, act::EXPORT_SHOWN, act::REVEAL, act::COPY_PATH, act::USE_GUESS] {
+        for id in [
+            act::EXPORT,
+            act::TO_BITWIG,
+            act::EXPORT_SHOWN,
+            act::REVEAL,
+            act::SHOW_IN_SONGS,
+            act::COPY_PATH,
+            act::USE_GUESS,
+        ] {
             assert!(crate::shortcuts::PRESETS_ACTIONS.iter().any(|a| a.id == id), "{id}");
         }
-        for id in [curve_act::TO_BITWIG, curve_act::REVEAL, curve_act::RENAME, curve_act::HIDE, curve_act::OPEN_SONG] {
+        for id in [
+            curve_act::TO_BITWIG,
+            curve_act::REVEAL,
+            curve_act::RENAME,
+            curve_act::HIDE,
+            curve_act::OPEN_SONG,
+            curve_act::SHOW_IN_SONGS,
+        ] {
             assert!(crate::shortcuts::CURVES_ACTIONS.iter().any(|a| a.id == id), "{id}");
         }
     }
