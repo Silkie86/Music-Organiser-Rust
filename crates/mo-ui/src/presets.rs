@@ -68,6 +68,8 @@ struct Page {
     shown: Vec<usize>,
     /// Counts the filterings asked for, so an older one finishing late is dropped (newest wins).
     asked: u64,
+    /// The last filtering taken: while it's behind `asked`, what's shown is still being worked out.
+    answered: u64,
     /// The file types' notes for the lines shown, worked out with them.
     format_note: String,
     /// Filter here, not on the worker (the screenshots, which show the page at once).
@@ -90,6 +92,10 @@ struct Page {
     hearing: Option<(String, logic::Hearing)>,
     /// The Curves section.
     curves: Vec<Curve>,
+    /// What the search and the order go by, one for each of `curves`, worked out once (H-5).
+    curve_keys: Vec<logic::CurveKey>,
+    /// The curve whose places the card shows: they're only made again when another curve is picked or it changes.
+    curve_places_of: Option<String>,
     curve_shown: Vec<usize>,
     curve_filters: CurveFilters,
     /// The Found in filter as its chips show it now.
@@ -256,7 +262,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         p.shortcuts = shortcuts.clone();
         // The filters show from the start, before any song is read (with no lines, each choice counts none).
         refilter(&mut p);
-        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
+        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
     });
     wire(app);
     crate::finder::on_open(Kind::Preset, |app, hit, _| {
@@ -291,7 +297,9 @@ fn show_preset(app: &AppWindow, at: usize) {
     }
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        p.filters = Filters::default();
+        // A synth that plays nothing is hidden unless that's shown: keep it shown, or the line stays hidden (H-1).
+        let plays_nothing = p.items.get(at).is_some_and(|i| i.row.plays_nothing);
+        p.filters = Filters { unused: p.filters.unused || plays_nothing, ..Filters::default() };
         p.to_pick = Some(at);
         refilter(&mut p);
     });
@@ -470,6 +478,8 @@ pub fn shown(app: &AppWindow) {
 pub fn show_song(app: &AppWindow, save: &str) {
     PAGE.with(|p| p.borrow_mut().section = Section::Sounds);
     change(app, |f| *f = Filters { song: Some(save.to_owned()), unused: f.unused, ..Filters::default() });
+    // The page may have been left on Curves: the key sheet lists the Sounds keys now (H-12).
+    crate::refresh_keys(app);
 }
 
 fn pick_section(app: &AppWindow, s: Section) {
@@ -502,7 +512,7 @@ fn change_curves(app: &AppWindow, f: impl FnOnce(&mut CurveFilters)) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         f(&mut p.curve_filters);
-        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
+        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
     });
     show_all(app);
 }
@@ -588,6 +598,11 @@ fn take_waiting(p: &mut Page) -> bool {
     }
     let Page { items, pending, .. } = p;
     let Some(all) = Arc::get_mut(items) else { return false };
+    // Room for at least twice the lines when it grows, so a big batch (every preset file at once) moves the list
+    // rarely.
+    if all.capacity() - all.len() < pending.len() {
+        all.reserve(pending.len().max(all.len()));
+    }
     all.append(pending);
     true
 }
@@ -610,6 +625,7 @@ fn take_filtered(p: &mut Page, a: FilterAnswer) -> bool {
     if a.id != p.asked {
         return false;
     }
+    p.answered = a.id;
     p.shown = a.shown;
     p.years = a.years;
     p.chips = a.chips;
@@ -664,8 +680,14 @@ fn show_everything(app: &AppWindow) {
         data.set_unused(f.unused);
         data.set_shown(p.shown.len() as i32);
         let reading = p.reading.is_some();
-        let (title, text) =
-            logic::empty_words(p.items.len() + p.pending.len(), p.shown.len(), reading, f.any(), p.failed.as_deref());
+        let (title, text) = logic::empty_words(
+            p.items.len() + p.pending.len(),
+            p.shown.len(),
+            reading,
+            p.answered != p.asked,
+            f.any(),
+            p.failed.as_deref(),
+        );
         data.set_empty_title(title.into());
         data.set_empty_text(text.into());
         data.set_format_note(p.format_note.as_str().into());
@@ -801,20 +823,28 @@ fn show_card(app: &AppWindow) {
 fn show_curve_card(app: &AppWindow) {
     let data = app.global::<PresetsData>();
     PAGE.with(|p| {
-        let p = p.borrow();
+        let mut p = p.borrow_mut();
         let Some(c) = p.curve_picked.as_deref().and_then(|id| p.curves.iter().find(|c| c.id == id)) else {
             data.set_curve_panel_shown(false);
+            p.curve_places_of = None;
             return;
         };
         let card = logic::curve_card(c);
+        let new_places = p.curve_places_of.as_deref() != Some(c.id.as_str());
+        let id = c.id.clone();
         data.set_curve_panel_shown(true);
         data.set_curve_card(CurveCardInfo { name: card.name.into(), shape: card.shape.into(), hidden: card.hidden });
         data.set_curve_facts(ModelRc::new(VecModel::from(
             card.facts.into_iter().map(|(n, v)| PresetFact { name: n.into(), value: v.into() }).collect::<Vec<_>>(),
         )));
-        data.set_curve_places(ModelRc::new(VecModel::from(
-            card.places.into_iter().map(|(t, a)| CurvePlace { title: t.into(), about: a.into() }).collect::<Vec<_>>(),
-        )));
+        if new_places {
+            data.set_curve_places(ModelRc::new(VecModel::from(
+                card.places
+                    .into_iter()
+                    .map(|(t, a)| CurvePlace { title: t.into(), about: a.into() })
+                    .collect::<Vec<_>>(),
+            )));
+        }
         let offers = logic::curve_offers(c, logic::bitwig_curves_folder(&p.bitwig).is_some());
         let key = |id: &str| SharedString::from(p.shortcuts.key_of(id));
         data.set_curve_actions(ModelRc::new(VecModel::from(
@@ -838,6 +868,7 @@ fn show_curve_card(app: &AppWindow) {
                 .collect::<Vec<_>>(),
         )));
         data.set_curve_message(p.curve_message.as_str().into());
+        p.curve_places_of = Some(id);
     });
 }
 
@@ -1114,7 +1145,12 @@ fn add(items: Vec<Item>, songs: usize, files: usize, reading: Option<(usize, usi
             let mut p = p.borrow_mut();
             // Fixes made since the reading began are laid over these lines too (`fixed_now`): they're never written
             // into them. While a filtering holds the lines, the new ones wait: its answer puts them in (`take_waiting`).
-            p.pending.extend(items);
+            // Moved in when nothing waits, not copied (H-8).
+            if p.pending.is_empty() {
+                p.pending = items;
+            } else {
+                p.pending.extend(items);
+            }
             take_waiting(&mut p);
             p.songs += songs;
             p.files += files;
@@ -1254,17 +1290,28 @@ fn export_stopped(job: Job, why: String) {
     set_exporting(false, Some(why));
 }
 
-fn templates_now(have: Option<Arc<Templates>>, bitwig: &[PathBuf]) -> Arc<Templates> {
-    have.unwrap_or_else(|| {
-        let roots = logic::preset_folders(&plib::default_folders(), bitwig);
-        // The same folder the page keeps the store in (`Page::data_dir` is set from it).
-        let store = mo_app::paths::data_dir().join(file_store::FILE_NAME);
-        let (found, why) = background::on_pool(|| file_store::find(&roots, &store));
-        if let Some(why) = why.or(found.not_kept) {
-            log::warning("Presets", &format!("The preset files read for Send to Bitwig weren't kept: {why}"));
-        }
-        Arc::new(found.templates)
-    })
+/// The Bitwig presets to make others from. The page's own, unless they don't have what `enough` asks for: then the
+/// preset folders are looked through again (only new and changed files are read), so 'save a preset in Bitwig, then
+/// try again' works without a restart (H-2), and the page keeps what was found.
+fn templates_now(
+    have: Option<Arc<Templates>>,
+    bitwig: &[PathBuf],
+    enough: impl Fn(&Templates) -> bool,
+) -> Arc<Templates> {
+    if let Some(t) = have.filter(|t| enough(t)) {
+        return t;
+    }
+    let roots = logic::preset_folders(&plib::default_folders(), bitwig);
+    // The same folder the page keeps the store in (`Page::data_dir` is set from it).
+    let store = mo_app::paths::data_dir().join(file_store::FILE_NAME);
+    let (found, why) = background::on_pool(|| file_store::find(&roots, &store));
+    if let Some(why) = why.or(found.not_kept) {
+        log::warning("Presets", &format!("The preset files read for Send to Bitwig weren't kept: {why}"));
+    }
+    let fresh = Arc::new(found.templates);
+    let kept = Arc::clone(&fresh);
+    on_window(move |_| PAGE.with(|p| p.borrow_mut().templates = Some(kept)));
+    fresh
 }
 
 fn set_exporting(on: bool, message: Option<String>) {
@@ -1293,7 +1340,7 @@ fn export_one(app: &AppWindow, item: Item, send: bool) {
             Ok(root) => root,
             Err(why) => return export_stopped(job, why),
         };
-        let templates = templates_now(templates, &bitwig_folders);
+        let templates = templates_now(templates, &bitwig_folders, |t| without_template(&[&item], t).is_empty());
         let done = background::on_pool(|| {
             export::export_from_save(
                 &save,
@@ -1381,19 +1428,19 @@ fn without_template(items: &[&Item], templates: &Templates) -> Vec<String> {
 
 /// Export these: every sound shown, save by save, into the export folder. Preset files are left (they're files).
 fn export_shown(app: &AppWindow) -> bool {
-    let (plan, files, items) = PAGE.with(|p| {
+    // A key still reaches here while an export runs (the button is off): it says so rather than anything else (H-11).
+    if PAGE.with(|p| p.borrow().exporting) {
+        set_message(app, "An export is running: wait for it to finish, then try again.");
+        return false;
+    }
+    // Only counted here: the plan and the plugins with no template are made on the export's thread (H-3).
+    let (items, shown, files) = PAGE.with(|p| {
         let p = p.borrow();
-        let (plan, files) = logic::export_plan(&p.items, &p.shown);
-        let items: Vec<Item> = p
-            .shown
-            .iter()
-            .filter_map(|&i| p.items.get(i))
-            .filter(|i| !i.is_file())
-            .map(|i| i.as_fixed(&p.fixed_now).into_owned())
-            .collect();
-        (plan, files, items)
+        let files = p.shown.iter().filter(|&&i| p.items.get(i).is_some_and(Item::is_file)).count();
+        (Arc::clone(&p.items), p.shown.clone(), files)
     });
-    if plan.is_empty() || PAGE.with(|p| p.borrow().exporting) {
+    if files == shown.len() {
+        drop(items);
         if files > 0 {
             set_message(app, "The list shows only preset files, which are files already: nothing to export.");
         }
@@ -1402,13 +1449,20 @@ fn export_shown(app: &AppWindow) -> bool {
     let (library, templates, bitwig_folders, feed) = export_setup();
     PAGE.with(|p| p.borrow_mut().exporting = true);
     show_all(app);
-    let job = feed.start("Exporting presets", &format!("{} songs", logic::thousands(plan.len())));
+    let job = feed.start("Exporting presets", &format!("{} sounds", logic::thousands(shown.len() - files)));
     let started = background::spawn("Preset export", move || {
         let root = match bitwig::export_folder_in(&library) {
             Ok(root) => root,
             Err(why) => return export_stopped(job, why),
         };
-        let templates = templates_now(templates, &bitwig_folders);
+        // The lines are let go of straight after, so lines read during the export join the list.
+        let (plan, without, templates) = {
+            let (plan, _) = logic::export_plan(&items, &shown);
+            let songs: Vec<&Item> = shown.iter().filter_map(|&i| items.get(i)).filter(|i| !i.is_file()).collect();
+            let templates = templates_now(templates, &bitwig_folders, |t| without_template(&songs, t).is_empty());
+            (plan, without_template(&songs, &templates), templates)
+        };
+        drop((items, shown));
         let (mut done, mut failed) = (Vec::new(), Vec::new());
         let total = plan.len();
         for (n, (save, keys)) in plan.iter().enumerate() {
@@ -1420,8 +1474,7 @@ fn export_shown(app: &AppWindow) -> bool {
             }
             job.progress((n + 1) as f32 / total as f32, Some(&format!("{} of {}", n + 1, total)));
         }
-        let refs: Vec<&Item> = items.iter().collect();
-        let mut text = logic::export_summary(&done, &without_template(&refs, &templates), &failed);
+        let mut text = logic::export_summary(&done, &without, &failed);
         if files > 0 {
             text += &format!(
                 " The {} preset files shown are files already, so they were left as they are.",
@@ -1610,7 +1663,7 @@ fn audition(
         Source::File { .. } => PathBuf::from(item.path()),
         Source::Song { save, key } => {
             let root = bitwig::export_folder_in(library)?;
-            let templates = templates_now(templates, bitwig_folders);
+            let templates = templates_now(templates, bitwig_folders, |t| without_template(&[item], t).is_empty());
             let done = background::on_pool(|| {
                 export::export_from_save(
                     save,
@@ -1755,9 +1808,12 @@ fn read_curves(_app: &AppWindow) {
 }
 
 fn set_curves(p: &mut Page, list: Vec<Curve>) {
-    p.curves = list;
+    // Worked out once here, then each key typed in the search makes no copies; the old list goes on its own thread.
+    p.curve_keys = logic::CurveKey::all(&list);
+    background::free_later(std::mem::replace(&mut p.curves, list));
+    p.curve_places_of = None;
     p.curves_failed = None;
-    (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
+    (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
     if let Some(id) = &p.curve_picked
         && !p.curves.iter().any(|c| &c.id == id)
     {
@@ -1911,10 +1967,12 @@ fn curve_db_change(
             Ok(Some(c)) => on_window(move |app| {
                 PAGE.with(|p| {
                     let mut p = p.borrow_mut();
-                    if let Some(old) = p.curves.iter_mut().find(|o| o.id == c.id) {
-                        *old = c;
+                    if let Some(at) = p.curves.iter().position(|o| o.id == c.id) {
+                        p.curve_keys[at] = logic::CurveKey::of(&c);
+                        p.curve_places_of = None;
+                        p.curves[at] = c;
                     }
-                    (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
+                    (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
                 });
                 show_all(app);
             }),
@@ -1946,9 +2004,10 @@ pub fn show_sample(app: &AppWindow) {
         p.files = p.items.iter().filter(|i| i.is_file()).count();
         p.plugins = logic::plugins(&p.items);
         p.curves = sample_curves();
+        p.curve_keys = logic::CurveKey::all(&p.curves);
         p.bitwig = vec![PathBuf::from(r"K:\Bitwig Studio")];
         refilter(&mut p);
-        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
+        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
     });
     show_all(app);
 }
