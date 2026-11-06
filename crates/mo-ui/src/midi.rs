@@ -1774,21 +1774,92 @@ fn take_in_daw() -> Option<InDaw> {
 }
 
 /// Stops what plays in a DAW, without the window waiting: FL's notes let go by themselves, Bitwig's clip comes out
-/// on a thread of its own.
-fn stop_in_daw(playing: InDaw) {
+/// on a thread of its own, in its place in the line taken now (so a Play pressed after it goes after it).
+fn stop_in_daw(playing: InDaw, weak: Option<slint::Weak<AppWindow>>) {
     match playing {
         InDaw::Fl(fl) => fl.stop(),
         InDaw::Bitwig(bitwig) => {
+            let ticket = mo_dawlink::bitwig::ticket();
+            // Counted, so the app waits a moment for it as it closes (the review's D-fp4).
+            let on_its_way = crate::in_flight::Start::begin();
             let started = background::spawn("Stop in Bitwig", move || {
-                if let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_playing(&bitwig) {
-                    log::warning("MIDI", &format!("The part playing in Bitwig couldn't be stopped: {e}"));
-                }
+                let _on_its_way = on_its_way;
+                // In its turn, behind what was asked for before it, so it never stops Bitwig in the middle of a newer
+                // start (the 6 Nov review's D-fp3).
+                let turn = ticket.wait();
+                stop_bitwig_in(bitwig, &turn, weak);
             });
             if let Err(e) = started {
                 log::error("MIDI", &format!("Couldn't start stopping the part in Bitwig: {e}"));
             }
         }
     }
+}
+
+/// Stops a part playing in Bitwig, inside `turn`. When it can't, the part is put back, so Stop can be pressed again,
+/// unless something else plays from this page by now; and a start in Bitwig still on its way behind it (from this
+/// page or Presets) is called off, so one thing plays there at a time (the review's D-2 and D-8). Both are settled
+/// before the turn ends, so the start behind sees it. The card says why.
+fn stop_bitwig_in(
+    bitwig: mo_dawlink::bitwig::Playing,
+    turn: &mo_dawlink::bitwig::Turn<'_>,
+    weak: Option<slint::Weak<AppWindow>>,
+) {
+    let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_playing(&bitwig, turn) else { return };
+    log::warning("MIDI", &format!("The part playing in Bitwig couldn't be stopped: {e}"));
+    let put_back = {
+        let mut slot = in_daw();
+        if slot.is_none() {
+            *slot = Some(InDaw::Bitwig(bitwig));
+            DAW_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Some((DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst), crate::presets::call_off_start()))
+        } else {
+            None
+        }
+    };
+    let Some(weak) = weak else { return };
+    let words = format!(
+        "It couldn't be stopped in Bitwig: {e} Bring its project to the front in Bitwig (with changes on), then press \
+         Stop again."
+    );
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let data = app.global::<MidiData>();
+        if let Some((at, audition)) = put_back {
+            if DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst) == at {
+                data.set_daw_starting("".into());
+                data.set_daw_playing(Daw::Bitwig.id().into());
+            }
+            if let Some(audition) = audition {
+                crate::presets::called_off(&app, audition);
+            }
+        }
+        data.set_daw_note(words.into());
+    });
+}
+
+/// Calls off a start still on its way from this page, for a part from Presets that couldn't be stopped in Bitwig (so
+/// one thing plays there at a time). Run inside that stop's turn; gives back the ask to hand to [`called_off`] on the
+/// window's thread. None when a part plays from here already (so none was starting).
+pub(crate) fn call_off_start() -> Option<u64> {
+    let slot = in_daw();
+    if slot.is_some() {
+        return None;
+    }
+    DAW_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    Some(DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// The buttons and card after [`call_off_start`]: a start called off says why, unless something newer was asked for.
+pub(crate) fn called_off(app: &AppWindow, at: u64) {
+    let data = app.global::<MidiData>();
+    if DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst) != at || data.get_daw_starting() == "" {
+        return;
+    }
+    data.set_daw_starting("".into());
+    data.set_daw_note(
+        "It didn't start: the audition from the Presets page couldn't be stopped in Bitwig (see there).".into(),
+    );
 }
 
 /// Play in Bitwig / Play in FL, and their keys: stops the part playing in that DAW, else plays the picked part there
@@ -1822,15 +1893,27 @@ fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
         data.set_daw_playing(daw.id().into());
         return true;
     }
+    if daw == Daw::Bitwig {
+        // One thing plays in Bitwig at a time: an audition on the Presets page stops (the review's D-8).
+        crate::presets::stop_audition_for_another(app);
+    }
+    // Its place in Bitwig's line, taken now, behind the stops just asked for (FL needs none).
+    let ticket = (daw == Daw::Bitwig).then(mo_dawlink::bitwig::ticket);
     let weak = app.as_weak();
+    let on_its_way = crate::in_flight::Start::begin();
     let started = background::spawn("Play in a DAW", move || {
+        let _on_its_way = on_its_way;
+        let turn = ticket.map(mo_dawlink::bitwig::Ticket::wait);
+        let wanted = move || DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst) == asked;
         let made = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
             let notes = notes_of(&from, phrase_id, &hash, &mut None)
-                .map_err(|e| format!("Its notes couldn't be read: {e}."))?;
-            start_in_daw(daw, &notes, bars, tempo, &name)
+                .map_err(|e| Some(format!("Its notes couldn't be read: {e}.")))?;
+            start_in_daw(daw, &notes, bars, tempo, &name, turn.as_ref(), &wanted)
         }))
-        .unwrap_or_else(|_| Err("It stopped before it started playing.".to_owned()));
+        .unwrap_or_else(|_| Err(Some("It stopped before it started playing.".to_owned())));
         let note = match made {
+            // Something newer was asked for while it waited: it took back what it put in, and says nothing.
+            Err(None) => return,
             Ok((playing, note)) => {
                 // Checked and kept under the lock a Stop takes, so a Stop either finds it or is seen here.
                 let mut slot = in_daw();
@@ -1839,12 +1922,15 @@ fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
                     Ok(note)
                 } else {
                     drop(slot);
-                    // Stopped (or another part asked for) while it was starting.
-                    stop_in_daw(playing);
+                    // Stopped (or another part asked for) just as it went in: stopped inside its own turn.
+                    match (playing, &turn) {
+                        (InDaw::Bitwig(bitwig), Some(turn)) => stop_bitwig_in(bitwig, turn, Some(weak)),
+                        (playing, _) => stop_in_daw(playing, Some(weak)),
+                    }
                     return;
                 }
             }
-            Err(why) => {
+            Err(Some(why)) => {
                 log::warning(
                     "MIDI",
                     &format!("{name} couldn't play in {}: {why}", if daw == Daw::Fl { "FL Studio" } else { "Bitwig" }),
@@ -1852,6 +1938,7 @@ fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
                 Err(why)
             }
         };
+        drop(turn);
         let _ = slint::invoke_from_event_loop(move || {
             let Some(app) = weak.upgrade() else { return };
             // A Stop since cleared the buttons itself.
@@ -1883,12 +1970,23 @@ fn toggle_daw(app: &AppWindow, daw: Daw) -> bool {
 /// newer ask and stops what it started.
 fn stop_daw(app: &AppWindow) {
     if let Some(playing) = take_in_daw() {
-        stop_in_daw(playing);
+        stop_in_daw(playing, Some(app.as_weak()));
     }
     let data = app.global::<MidiData>();
     data.set_daw_starting("".into());
     data.set_daw_playing("".into());
     data.set_daw_note("".into());
+}
+
+/// Stops a part playing (or starting) in Bitwig from the MIDI page, for an audition on the Presets page that takes
+/// Bitwig over (the review's D-8): one thing plays there at a time, and the card says why it stopped.
+pub fn stop_bitwig_for_another(app: &AppWindow) {
+    let data = app.global::<MidiData>();
+    if data.get_daw_playing() != Daw::Bitwig.id() && data.get_daw_starting() != Daw::Bitwig.id() {
+        return;
+    }
+    stop_daw(app);
+    data.set_daw_note("It stopped: an audition on the Presets page is playing in Bitwig now.".into());
 }
 
 thread_local! {
@@ -1918,14 +2016,23 @@ fn watch_fl(app: &AppWindow) {
 /// When the app closes: stops a part playing in a DAW, so Bitwig's clip doesn't loop on and no note hangs in FL.
 /// Waits a moment at most (Bitwig answers on this computer).
 pub fn finish_up() {
-    match take_in_daw() {
+    // A start still on its way sees it's no longer wanted and takes back what it put in: waited for a moment (the
+    // review's D-fp4; the Presets page's finish_up waits for its own the same way).
+    let first = take_in_daw();
+    // The Presets page's starts are called off now too, so the app waits once for both pages (its finish_up then finds
+    // none on their way).
+    crate::presets::call_off_for_closing();
+    crate::in_flight::wait_for_all(Duration::from_secs(3));
+    match first.or_else(take_in_daw) {
         Some(InDaw::Fl(fl)) => fl.finish(),
         Some(InDaw::Bitwig(bitwig)) => {
             let to = mo_dawlink::bitwig::Bitwig {
                 change_timeout: Duration::from_secs(3),
                 ..mo_dawlink::bitwig::Bitwig::default()
             };
-            if let Err(e) = to.stop_playing(&bitwig) {
+            // Without waiting its turn: what would go first is closing too, and the extension still makes the stop
+            // once the app has gone.
+            if let Err(e) = to.stop_playing_as_app_closes(&bitwig) {
                 log::warning("MIDI", &format!("The part playing in Bitwig couldn't be stopped as the app closed: {e}"));
             }
         }
@@ -1934,29 +2041,44 @@ pub fn finish_up() {
 }
 
 /// Starts the part in the DAW, and says where it plays. Waits for Bitwig, so never on the window's thread.
-fn start_in_daw(daw: Daw, notes: &[NoteEvent], bars: i32, tempo: f64, name: &str) -> Result<(InDaw, String), String> {
+///
+/// `Err(None)` when it was no longer `wanted` (it put nothing in, or took it back); `Err(Some)` says why it can't play.
+fn start_in_daw(
+    daw: Daw,
+    notes: &[NoteEvent],
+    bars: i32,
+    tempo: f64,
+    name: &str,
+    turn: Option<&mo_dawlink::bitwig::Turn<'_>>,
+    wanted: &dyn Fn() -> bool,
+) -> Result<(InDaw, String), Option<String>> {
     match daw {
         Daw::Fl => {
+            if !wanted() {
+                return Err(None);
+            }
             let part = page::fl_part(notes, bars, tempo);
-            let port = mo_dawlink::fl::open_port().map_err(|e| e.to_string())?;
-            let playing = mo_dawlink::fl::play(port, &part).map_err(|e| e.to_string())?;
+            let port = mo_dawlink::fl::open_port().map_err(|e| Some(e.to_string()))?;
+            let playing = mo_dawlink::fl::play(port, &part).map_err(|e| Some(e.to_string()))?;
             let bpm = (tempo * 10.0).round() / 10.0;
             Ok((InDaw::Fl(playing), format!("Playing on the channel selected in FL Studio, at {bpm} BPM.")))
         }
         Daw::Bitwig => {
+            let Some(turn) = turn else { return Err(Some("It couldn't take its turn in Bitwig.".to_owned())) };
             if !notes.iter().any(|n| !n.muted) {
-                return Err("Every note in it is muted, so there's nothing to play.".to_owned());
+                return Err(Some("Every note in it is muted, so there's nothing to play.".to_owned()));
             }
             let clip = page::part_clip(name, notes, bars);
             let bytes = mo_formats::midi::write::write_clip(&clip)
-                .map_err(|e| format!("Its MIDI file couldn't be made: {e}."))?
+                .map_err(|e| Some(format!("Its MIDI file couldn't be made: {e}.")))?
                 .bytes;
             let file = std::env::temp_dir().join(page::play_file_name());
-            std::fs::write(&file, &bytes).map_err(|e| format!("Its MIDI file couldn't be saved in Temp: {e}."))?;
+            std::fs::write(&file, &bytes)
+                .map_err(|e| Some(format!("Its MIDI file couldn't be saved in Temp: {e}.")))?;
             // Bitwig has read the file into its clip once this answers, so it goes at once (rule 28).
-            let played = mo_dawlink::bitwig::Bitwig::default().play_on_selected(&file);
+            let played = mo_dawlink::bitwig::Bitwig::default().play_on_selected(&file, turn, wanted);
             let _ = std::fs::remove_file(&file);
-            let playing = played.map_err(|e| e.to_string())?;
+            let playing = played.map_err(|e| (e != mo_dawlink::bitwig::Error::Cancelled).then(|| e.to_string()))?;
             let note = format!("Playing through \u{201c}{}\u{201d} in Bitwig.", playing.track);
             Ok((InDaw::Bitwig(playing), note))
         }

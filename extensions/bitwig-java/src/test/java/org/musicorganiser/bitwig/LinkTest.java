@@ -972,6 +972,25 @@ class LinkTest {
         return items.stream().map(t -> at(t, "name")).collect(Collectors.toList());
     }
 
+    @Test
+    @DisplayName("finds the track to insert on and fill pads on by its ID, wherever it has moved to (extension 3.21)")
+    void insertsAndFillsPadsByTrackId() {
+        studio(m -> m.newTrackIds = true);
+        Map<String, Object> kit = app.waitFor(obj("id", 1, "cmd", "newtrack", "name", "Kit #8"));
+        String id = (String) at(kit, "result", "id");
+        // A track goes in above it meanwhile, so the kit's place moves on: its ID still finds it.
+        bitwig.state.tracks.add(0, track("Pads", "Instrument"));
+        bitwig.refresh();
+        Map<String, Object> machine = app.waitFor(obj("id", 2, "cmd", "insert", "trackId", id, "kind", "bitwig", "device", DRUM_MACHINE));
+        assertEquals("Drum Machine", at(machine, "result", "device", "name"));
+        assertEquals(List.of("Drum Machine"), deviceNames(bitwig.state.tracks.get(2)));
+        assertTrue(bitwig.state.tracks.get(0).devices.isEmpty(), "nothing on the track that took its old place");
+        Map<String, Object> filled = app.waitFor(obj("id", 3, "cmd", "pads", "trackId", id, "device", 0,
+                                                     "pads", list(obj("note", 36, "path", "C:\\Kit\\Kick.wav", "name", "Kick"))));
+        assertJson(list(36), at(filled, "result", "filled"));
+        assertMatches("no track with ID", error(app.waitFor(obj("id", 4, "cmd", "insert", "trackId", "gone", "kind", "file", "path", "x.wav"))));
+    }
+
     private static List<String> deviceNames(TrackSpec track) {
         return track.devices.stream().map(d -> d.name).collect(Collectors.toList());
     }
