@@ -178,10 +178,13 @@ impl Going {
                     if let Some(folder) = self.path.parent() {
                         fs::create_dir_all(folder)?;
                     }
-                    let file = fs::OpenOptions::new().create(true).append(true).open(&self.path)?;
+                    let file = open_note(&self.path)?;
                     // Held while the clean-up runs, so another copy of the app running at once leaves it be. Where
-                    // files can't be locked, this run's own looks still do (`RUNNING`).
-                    let _ = file.try_lock();
+                    // files can't be locked (said in the log), this run's own looks still do (`RUNNING`).
+                    if let Err(fs::TryLockError::Error(e)) = file.try_lock() {
+                        let at = self.path.display();
+                        log::warning("Space", &format!("Couldn't lock the note of what goes to the {BIN} ({at}): {e}"));
+                    }
                     file
                 }
             };
@@ -219,6 +222,12 @@ impl Drop for Going {
             running.swap_remove(at);
         }
     }
+}
+
+/// Opens a note to add to, made if it isn't there yet. It's opened to read as well: Windows locks a file only through
+/// a handle that may read or write it, and one that may only add to the end is neither.
+fn open_note(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new().create(true).read(true).append(true).open(path)
 }
 
 /// Where the note of a clean-up of `kind` that ran at `when` in this run of the app is kept in `folder`.
@@ -992,10 +1001,12 @@ mod tests {
         let bin = holding(Some(vec!["C:/a.dll"]));
         let note = Going::start(&dir, "spare-copies", 11);
         note.went(&going("C:/a.dll", 11));
+        // Locked while its clean-up runs, so another copy of the app can tell.
+        let path = notes(&dir).remove(0);
+        assert!(matches!(fs::File::open(&path).unwrap().try_lock(), Err(fs::TryLockError::WouldBlock)));
         drop(note);
         // Held as a running clean-up in another copy of the app holds its note.
-        let path = notes(&dir).remove(0);
-        let held = fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let held = open_note(&path).unwrap();
         held.try_lock().unwrap();
         assert!(refresh(&dir, &bin).list.is_empty());
         assert!(path.exists());
