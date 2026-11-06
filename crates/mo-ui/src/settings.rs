@@ -80,6 +80,18 @@ struct Page {
     feed: Feed,
 }
 
+/// One settings save at a time in this app (review F-5): the writer thread and the last save as the app closes both
+/// write through the same `rust-settings.json.mo-part`, so two at once would spoil each other's part. Holding it, the
+/// close sets the `bool` to true: the writer then skips any save it hadn't started, which can only be older than the
+/// close's own.
+static SAVING: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+/// Saves `json` unless the app has closed (see [`SAVING`]); `None` means it was skipped.
+fn save_unless_closed(folder: &Path, json: &str) -> Option<std::io::Result<PathBuf>> {
+    let closed = SAVING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    (!*closed).then(|| app_settings::save(folder, json))
+}
+
 thread_local! {
     static PAGE: RefCell<Option<Page>> = const { RefCell::new(None) };
     /// Writes the settings file, newest first.
@@ -136,7 +148,7 @@ pub struct Setup {
 pub fn connect(app: &AppWindow, setup: Setup) {
     let setup_live = setup.live;
     let writer = Newest::start("Save settings", |(folder, json): (PathBuf, String)| {
-        let saved = app_settings::save(&folder, &json);
+        let Some(saved) = save_unless_closed(&folder, &json) else { return };
         if saved.is_ok() {
             let _ = slint::invoke_from_event_loop(move || {
                 PAGE.with(|p| {
@@ -595,6 +607,9 @@ pub fn finish_up() {
         let p = p.as_ref()?;
         (p.unsaved && p.writable).then(|| (p.folder.clone(), p.settings.to_json()))
     });
+    // Waits for a save the writer is part way through, and stops it starting another.
+    let mut closed = SAVING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *closed = true;
     if let Some((folder, json)) = job
         && let Err(e) = app_settings::save(&folder, &json)
     {
