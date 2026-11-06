@@ -1,5 +1,8 @@
 # Handover: carry on the whole Rust rebuild (2026-11-02)
 
+> **Newer:** start with [CONTINUE.md](CONTINUE.md) (2026-11-06). This file is the 2026-11-02 handover; its "How to
+> work" part still holds, its "Where things stand" part is out of date.
+
 Until now the work was done by several Claude sessions inside one claude.ai project, each owning one part (screens,
 harmony, Sounds, MIDI, Space, Backup, Presets, converter). Solomon is moving ALL of it to one Claude Code cloud session.
 This folder is everything that session needs. Those other sessions have stopped, so nothing here is owned by anyone

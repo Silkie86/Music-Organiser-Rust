@@ -1,0 +1,74 @@
+- 2026-11-05 08:08: merge freeze (from 08:03) LIFTED by Solomon; threads may merge again on green CI.
+- [rust-rebuild-rules](rust-rebuild-rules.md): Solomon's 20 standing rules for the Rust rebuild, PR/review/effort process
+- [rust-rebuild-status](rust-rebuild-status.md): current phase, repo state, open questions
+- [fl-to-bitwig-converter-plan](fl-to-bitwig-converter-plan.md): C# converter's automation gaps, FL-native-plugin plan (phase 5)
+- [bitwig-automation-lanes](bitwig-automation-lanes.md): how Bitwig saves tempo/volume/pan/on-off lanes; converter automation-gap progress
+- [bitwig-multisample-relink](bitwig-multisample-relink.md): relink of Bitwig multisample copies (fix_bitwig_project), verified facts
+- [rust-app-design-decisions](rust-app-design-decisions.md): agreed app map, keys, page ideas, FL reader notes
+- [external-format-references](external-format-references.md): other FL/Bitwig readers checked (Lynx-Share, PyFLP fork, bwpreset...), licences and facts to verify
+- [harmony-engine-plan](harmony-engine-plan.md): mo-harmony plan, "very precise" rule, twin-check keys against library.db
+- [midi-page-backend](midi-page-backend.md): mo-midi crate, MIDI page backend parts, plan and improvements
+- [sounds-backend-status](sounds-backend-status.md): Sounds backend scope, lessons for every change (no ORDER BY, no parallel sounds.db reads), done and next
+- [sounds-backend-prs](sounds-backend-prs.md): one line per merged Sounds backend PR (#39-#196)
+- [harmony-engine-status](harmony-engine-status.md): phase 6: naming #200, review fixes #230 (reader v3) merged; first chord fit #257 merged (reader v4, a fifth of the way), naming rules, fingerprints, next: calibration fit
+- [key-finder-refit](key-finder-refit.md): key finder rescaled on Solomon's packs: version 5 shipped (#185, c429c68), his "ship it now" choice, measure songs before Songs reads keys, rescale-again steps, keycheck command
+- Solomon's Bitwig Studio folder is on K: (not Documents): <Bitwig folder>\ (its Library and Projects). Clean-up of Bitwig multisample copies ("kick select33333", byte-identical to Library files): Clean and Storage thread.
+- [music-backup-plan](music-backup-plan.md): backup feature options doc, recommendation A (mirror), Space answers, waiting on Solomon
+- [backup-older-and-gone](backup-older-and-gone.md): backup keeps Older versions (#175) and deleted files (#178), merged
+- [space-backend](space-backend.md): Clean/Storage thread, mo-space crate parts 1-8, Bitwig multisample copies hand-off
+- [app-screens-ui](app-screens-ui.md): UI/UX thread owns all pages + shared style; plan doc, page order, open questions
+- [outside-cloud-session](outside-cloud-session.md): ALL work handed to an outside cloud session 2026-11-02; docs/handover in repo (PR #165)
+- 2026-11-03: work resumed from docs/handover/CONTINUE-REPORT.md (branch claude/affectionate-noether-wip-status). Threads: handover (#171 + whole-app review), star look, app clean-up (#172), harmony (+ naming PR), key-finder refit (RC on PC), mo-space old copies + move marker, mo-backup versions. Solomon wants max effort, many parallel threads.
+- Solomon's answers 2026-11-03: F12 notes remove older than ~3 months; app never auto-empties Recycle Bin (warn, leave to him); always remind about "(old copy)" folders; crash-cut moves leave a marker; backup Older versions kept for ever with option to remove; files deleted from music stay on backup with a warning. MIDI packs at <MIDI packs folder>. Chord names: no brackets on any altered name (C13#11, C9#11, C7#9#5, C7b9#11, C7#9...); but non-altered extras KEEP brackets (Cm(maj7), Cm(add9), C7(no3), Csus4(add9)); NO slash chords at all (neither Eb/E nor Eb/Fb). FL/Bitwig test copies: Solomon checks later.
+- 2026-11-03 23:32: Solomon OK'd the Rust app installing DAW scripts into his Bitwig/FL folders and editing music folders in library.db (Settings thread).
+- 2026-11-04 05:18 STANDING RULE (Solomon): anything that can lock the screens or slow the UI must be taken off the main/UI thread where possible. Freezes thread owns the sweep. Galaxy sweep: 40 ms turn chosen; "hold the pointer" setting (off by default) being built.
+- 2026-11-04 08:42 STANDING RULE (Solomon): always look for the most efficient way to do things (no rescanning unchanged files; cache by size/date like midi-index.db). App-wide speed/startup thread: "Speed up the app and its startup" (startup ~7 s to first draw; Presets re-reads ~3,000 saves each start, being fixed).
+- 2026-11-05 03:12 DECISION (Solomon): the C# app is DEAD. Everything is Rust-only now; no need to stay compatible with C# formats. He's fine scrapping the old databases (library.db, sounds.db etc.) and building new Rust ones if it makes loading faster. Goal: app feels instant (smart/lazy loading, nothing holding the UI thread). Thread: "Make the app feel instant" (starts after outstanding PRs merge).
+- 2026-11-05 08:03 live test on PC: 2nd start window 4.66 s (1st 7.95 s); shutdown TLS panic in debug builds, fix PR #318; launcher always builds debug, release option being added (thread "Check the live test for a crash").
+- [app-cleanup-rule-28](app-cleanup-rule-28.md): rule 28 (mo_app::tidy sweep, #224 merged 2026-11-04), how old F12 notes go to the Recycle Bin, Solomon's 2026-11-03 answers on notes, bin, old copies, backups
+- [cleanup-notes-sweep-decisions](cleanup-notes-sweep-decisions.md): when an old F12 note may go to the Recycle Bin (Windows checks, Stopped line, tidy-notes.txt), accepted trade-offs, untested on Windows
+- [f12-note-draft-safety](f12-note-draft-safety.md): how F12 notes keep typed words safe (part files, unsaved.txt, the turn, crash hook order), accepted trade-offs
+- [crash-logging](crash-logging.md): crash hook order, crash file limits (#224); caught panics via mo-catch (#242 merged): catch = damaged file (one warning line), catch_crash = bug; limits, how to pick
+- [galaxy-star-look](galaxy-star-look.md): star look PR #176 (replaced #173), review facts, open look questions for Solomon (Paper middles, close-up core brightness)
+- [galaxy-brightness-smooth](galaxy-brightness-smooth.md): galaxy brightness smooth with zoom (notes x44/x69/x87): #198 and freeze fix #187 both merged; rule, constants, render check, what Solomon checks next
+- [dawlink-bitwig-send](dawlink-bitwig-send.md): mo-dawlink Send to Bitwig API for the screens (PR #182)
+- [ci-notes](ci-notes.md): CI: main's Mac job may get no runner (re-run once); PR CI tests the merge ref
+- [gpu-for-graphics](gpu-for-graphics.md): ALL custom views on the GPU (wgpu), CPU only as fallback; shared painter mo_app::shapes + mo-ui canvas.rs (#184), Slint wgpu limits, look test
+- [waveforms-on-gpu](waveforms-on-gpu.md): Sounds waveforms on the GPU (#209 + review fixes #240, both merged): sub-pixel phase fix, pictures per place/phase/scale, shown-based LRU, 4 ms a frame, femtovg-exact edges, look test, what's next
+- [piano-roll-on-gpu](piano-roll-on-gpu.md): MIDI piano roll as one GPU picture off the UI thread (PR #261 merged 0d3aa81), RollLabel/RollRoom, shared canvas helpers; Solomon to try it on his PC
+- [arrangement-loading](arrangement-loading.md): PR #249 merged: Songs arrangement shows after the parse; audio files found after (SampleFinder 60 s, FL factory fast path), [Arrangement] log lines, overlaps with #242/#206
+- [screenshot-compare-traps](screenshot-compare-traps.md): comparing mo-screens shots between commits: Pillow alpha-only getbbox, hold the Sounds shuffle seed (faketime ticks), same folder path
+- [small-database-files](small-database-files.md): Solomon wants small database files; where sounds.db's 4.6 GB goes; DECIDED compact Rust sound library beside the old one
+- [compact-sound-library](compact-sound-library.md): sounds-rust.db design: tables, exact encodings, 32 KB pages, verified SQLite facts
+- [compact-sound-library-sync](compact-sound-library-sync.md): part 1 #219 and part 2 #236 (page reads the copy) both merged 2026-11-04: damage, disk-room, refresh rules, stamp test trap
+- [solomon-pc-disks](solomon-pc-disks.md): Solomon's PC: C: SATA SSD 98.8% full, RAM 88% used, fast NVMe I:/G:; sounds.db read times there; parallel reads don't help
+- [year-strip](year-strip.md): year strip after #180; never merge claude/year-strip-review-fixes; History filter chips question open
+- [screens-queue](screens-queue.md): screens thread owns Space, Sounds, Songs, shared style; 5 Nov notes merged (#325 exports, #332 Space, #333 year strip + drag handle), Used in #336, export folder row #342 (all merged), what waits on Solomon, lessons
+- [sounds-card-used-in](sounds-card-used-in.md): Sounds card "Used in" switch (#336 merged): projects read in the same join as the use counts, each project counted once, click opens on Songs, Rediscover look-alike's projects
+- [space-page-ui](space-page-ui.md): Space page UI: spare plugin copies #275, Remove + Put back + Recycle Bin line #279, admin Put back PR #282 (design, accepted trade-off), next Space steps
+- [space-songs-remove](space-songs-remove.md): Space songs card: read-only #284 merged; Remove + Put back for old autosaves and caches #287 merged (how each is checked, review facts); identical/older saves wait on the library.db card
+- [space-plugins-unused](space-plugins-unused.md): Space part 6 unused plugins PR #288: same count as the Plugins page (years, gone, moves), stamp re-read rule, folder-fixes follow-up after #290
+- [space-sound-copies](space-sound-copies.md): Space copies-of-the-same-sound line/card #302 merged: finds() one transaction, Weak list + stamp cache, Known; Rust finder now built by the Hide duplicates thread (Solomon 5 Nov 20:47)
+- [slint-layout-traps](slint-layout-traps.md): Slint 1.18 traps: FlexboxLayout measuring and cross-axis-alignment, filters inside `if`, wide HorizontalLayout rows, opaque GPU pictures, mo-screens fixed points
+- [cloud-build-disk](cloud-build-disk.md): cloud session disk (~39 GB) fills with target/debug (23 GB); delete incremental, CARGO_INCREMENTAL=0, long timeout for workspace tests
+- [presets-page-ui](presets-page-ui.md): Presets page UI, PR #194 (Sounds + Curves), Send to Bitwig via mo-dawlink Link, defaults picked, follow-ups
+- [plugins-page](plugins-page.md): Plugins page thread, PR #192 part 1 read-only, choices vs C#, part 2 (Clean up/Uninstall/Move) plan
+- [slint-frame-speed](slint-frame-speed.md): why every frame was slow (femtovg 0.27 rebuilt GPU pipelines each frame), vendor/femtovg patch PR #203, how to bench the real window here
+- [drag-out](drag-out.md): drag sounds/clips/tracks out to a DAW, MERGED #206 (eae7fd9, 2026-11-04); Slint/winit drag facts; follow-ups (tidy fold-in, GPU tile dimming, Mac/Linux)
+- [space-library-review-fixes](space-library-review-fixes.md): review fixes for Space/library/kits: #207 #212 #214 merged; #237 #239 merged (all review points done)
+- [review-fixes-formats-presets-convert](review-fixes-formats-presets-convert.md): 2026-11-04 review fixes PRs #208/#213/#218/#222/#226/#229, curves.db new tables, deferred items
+- [whole-app-review-2026-11-03](whole-app-review-2026-11-03.md): whole-app review report, fix owners, #216 status, unpushed Songs patch, next steps
+- [off-the-ui-thread](off-the-ui-thread.md): Solomon 2026-11-04: anything that can lock/slow the screens goes off the UI thread; app-wide sweep owned by the tiles-speed thread
+- [ui-show-dont-hide](ui-show-dont-hide.md): Solomon's standing UI rules 4 Nov 2026: filters the same on every page (FilterPicks), useful things on the page, not hidden in menus
+- [startup-speed](startup-speed.md): startup push 2026-11-04: library.db list read slow (info mid-row), saves-list copy + graphics card once + [Start] line (PR #266), Presets re-reads 3k saves, next: DB query audit
+- [app-look](app-look.md): app-wide look direction (docs/look.md "the rack"): place colours, Motion, Meter, title face; PR #269 step 1, next steps
+- [library-db-writers](library-db-writers.md): who may write library.db: folders.rs (OK 11-03), moves + Plugins folder fixes, export folder (OK 11-05), the safe-write pattern
+- [release-binary-size](release-binary-size.md): Windows release .exe measured 2026-11-05: 71 MB stripped now, 48.6 MB with LTO, 35 MB opt-s; no panic=abort (mo-catch)
+- [app-feel-instant](app-feel-instant.md): "Make the app feel instant" thread: whole-app speed audit, Rust-only DBs (C# dead), plan then PRs
+- [new-rust-databases](new-rust-databases.md): "Build the new Rust databases" thread: steps 1-5 merged (#337 format 2, #338 first 200, #339 waves on show), next step 6 (archive, from 12 Nov)
+- [new-rust-databases-steps-3-4](new-rust-databases-steps-3-4.md): details of step 3a (song writes, #316) and step 4 (midi-index.db layout 2, #327)
+- [data-folder-move](data-folder-move.md): data folder move to I: (#299 merged): pointer file, copy/check/switch at next start, Solomon still to run it
+- [f12-notes-2026-11-05](f12-notes-2026-11-05.md): 5 Nov F12 notes (now in I:\MusicOrganiser\notes), owners, ADPCM fix PR #321
+- [preset-audition](preset-audition.md): audition presets with MIDI: A chosen + play on selected track/channel (Bitwig and FL); PR #340 Bitwig part, next FL MIDI out + buttons
+- [galaxy-arrow-keys](galaxy-arrow-keys.md): Galaxy arrows go to the nearest star that way + Swept card Up/Down; Rediscover year strip; PR #334 merged
+- [hide-duplicates](hide-duplicates.md): Sounds Hide duplicates switch PR #344 (merged): strict same-audio prints, sound-copies.db cache, wiring

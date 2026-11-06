@@ -15,7 +15,7 @@ read-only reference (public; scratch clone, never push).
 4. Never commit Solomon's projects, samples, MIDI packs, Bitwig template/binaries or model files.
 5. Only counts/averages from Solomon's MIDI go in code (2026-11-01 exception: ~20 key-finder weights, see
    [[harmony-engine-status]]).
-6. Never add a column to `plugins`; schema changes only add.
+6. Never add a column to `plugins`; schema changes only add. RELAXED (Solomon, 2026-11-05, C# dead): each Rust DB carries a version; a new version may rebuild its file by copy, check, rename. See [[app-feel-instant]].
 7. Bump a reader's version when what it finds changes.
 8. Bitwig: objects defined at first use; no class-1 ref in single-object field; decode must end at the zip offset.
 9. FL: 3-byte event 172 from FL 25; note size by FL version; read damaged saves on with a warning.
@@ -57,14 +57,5 @@ Work through the phase plan without pausing for check-ins; message only for real
 25. (Solomon, 2026-10-31) Show every screenshot taken (mo-screens): copy the new/changed ones to
     `/mnt/project-files/screenshots/<page>/` and attach them (max 6 per message) when posting the result.
 
-Rule 26 is the effort rule in the "Effort" paragraph above.
-
 27. (Solomon, 2026-10-31) Don't wait for merges: start the next job while a PR's CI runs, as long as it won't get in
     the way (different files, branched so it can be rebased).
-28. (Solomon, 2026-11-02) The app cleans up after itself: every cache, temp file and report it writes has a limit or
-    is removed when done, and a start-up sweep clears leftovers (`mo_app::tidy`). It removes only plain files whose
-    whole name the app gives them, in the folders it writes them to; never by folder alone, never through a link in
-    them (the logs folder is the one it follows: the app writes its logs through it), never what the user made. The one
-    exception (2026-11-03): F12 notes and their pictures about 3 months old go to the Recycle Bin, only when it can
-    take them without asking, never the drafts; the app never empties the Recycle Bin itself ("leave it to me with a
-    warning": the app warns him what's in it). Also in CLAUDE.md.

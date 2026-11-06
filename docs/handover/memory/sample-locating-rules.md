@@ -16,6 +16,6 @@ locator (`mo-library/src/samples.rs`, step 7) then looks in the Sounds library (
 No DAW saves a sample's file size: FL keeps only the path; Studio One's mediapool.xml keeps frameCount/sampleRate
 (a possible later length check). Merged as PR #66; mo-app `sound_library` caches the library for 60 s.
 
-**Why:** old saves (e.g. FL 6.0 jazzy_2.flp, 2006) point at drives long gone ("<a drive long gone>\…").
+**Why:** old saves (e.g. FL 6.0 jazzy_2.flp, 2006) point at drives long gone ("<a project folder> samples\…").
 **How to apply:** don't widen the search further (whole drives, name-only guesses) without asking Solomon.
 Related: [[rust-rebuild-rules]], [[rust-app-design-decisions]].
