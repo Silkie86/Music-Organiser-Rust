@@ -11,8 +11,9 @@
 //! 4. Once they're let go, the card lands with a pulse where they went (or goes away), the page is told how it went
 //!    (it brings the thing back, with a pulse of its own when it landed), and the window hears the mouse is up again.
 //!
-//! Windows first. Elsewhere a drag says it isn't there yet: a Mac's and Linux's own drag and drop go in beside the
-//! Windows one, taking the same files and the same card.
+//! Windows first. Elsewhere a drag says it isn't there yet, before anything is made (a MIDI drag's files in Temp would
+//! never be cleared there): a Mac's and Linux's own drag and drop go in beside the Windows one, taking the same files
+//! and the same card.
 
 use std::cell::{Cell, RefCell};
 use std::time::Duration;
@@ -77,6 +78,9 @@ pub fn connect(feed: Feed) {
     FEED.with(|f| *f.borrow_mut() = Some(feed));
 }
 
+/// Said for a drag off Windows, where the system's drag and drop isn't in the app yet.
+const NOT_YET: &str = "Dragging out of the app works on Windows for now.";
+
 /// How long after start the sweep of older drags' files waits, so it never competes with the first page for the disk.
 const SWEEP_WAIT: Duration = Duration::from_secs(20);
 
@@ -123,6 +127,13 @@ fn say_swept(done: mo_app::drag_out::Swept) {
 /// then dims its thing (after this, as a drag still being made is called off here first, and brings its own back).
 /// False when it was over at once, and `done` has been called already.
 pub fn start(app: &AppWindow, drag: Drag) -> bool {
+    // Refused before anything is made: a MIDI drag writes its files in Temp, and only Windows clears them so far (rule
+    // 28). This goes once a Mac's and Linux's own drag goes in, with their sweep.
+    if !cfg!(windows) {
+        tell(NOT_YET);
+        (drag.done)(app, Outcome::Refused);
+        return false;
+    }
     if CARRYING.with(Cell::get) {
         (drag.done)(app, Outcome::Cancelled);
         return false;
@@ -264,7 +275,7 @@ fn hand_over(app: &AppWindow, payload: &Payload) -> Result<Outcome, String> {
 
 #[cfg(not(windows))]
 fn hand_over(_app: &AppWindow, _payload: &Payload) -> Result<Outcome, String> {
-    Err("Dragging out of the app works on Windows for now.".to_owned())
+    Err(NOT_YET.to_owned())
 }
 
 /// The theme's text family for the card, at the weights the app's lines use: 400 for the facts, 600 for the names.

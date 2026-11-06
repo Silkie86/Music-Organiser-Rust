@@ -556,22 +556,61 @@ static FOLDERS_MADE: AtomicU64 = AtomicU64::new(1);
 
 /// Writes `files` (their names are made safe and kept apart here: "Chords.mid", "Chords 2.mid") into a new drag
 /// folder in `temp`: the list first, with each file's exact name and size from the bytes in hand, then the files, so
-/// a crash between them leaves nothing unlisted. Gives the files' paths, in order.
+/// a crash between them leaves nothing unlisted. A write that fails (Temp full, say) takes back everything this one
+/// made: a file cut short doesn't have the size on its list, so the sweep would leave it for good. Gives the files'
+/// paths, in order.
 pub fn write_drag_files(temp: &Path, files: &[MidiFile]) -> io::Result<Vec<PathBuf>> {
+    write_drag_files_with(temp, files, |file, bytes| file.write_all(bytes))
+}
+
+/// [`write_drag_files`], putting each file's bytes in with `put` (a test's fails part way, as a full disk does).
+fn write_drag_files_with(
+    temp: &Path,
+    files: &[MidiFile],
+    mut put: impl FnMut(&mut fs::File, &[u8]) -> io::Result<()>,
+) -> io::Result<Vec<PathBuf>> {
     let names = unique_names(files.iter().map(|f| f.name.as_str()));
     let folder = new_folder(temp)?;
     let mut list = format!("{MANIFEST_HEADER}\n");
     for (name, f) in names.iter().zip(files) {
         list.push_str(&format!("{}\t{name}\n", f.bytes.len()));
     }
-    write_new(&folder.join(MANIFEST), list.as_bytes())?;
-    let mut paths = Vec::new();
-    for (name, f) in names.iter().zip(files) {
+    // Each file made, the list first, noted as soon as it's there: one whose write then fails is this call's too.
+    let mut made = Vec::with_capacity(files.len() + 1);
+    let mut write = |name: &str, bytes: &[u8]| {
         let path = folder.join(name);
-        write_new(&path, &f.bytes)?;
-        paths.push(path);
+        // Never one that's there already: the folder is new, so anything in it that this didn't make isn't the app's.
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&path)?;
+        made.push(path);
+        put(&mut file, bytes)
+    };
+    let written = write(MANIFEST, list.as_bytes())
+        .and_then(|()| names.iter().zip(files).try_for_each(|(name, f)| write(name, &f.bytes)));
+    if let Err(e) = written {
+        take_back(&folder, &made);
+        return Err(e);
     }
-    Ok(paths)
+    // The files, without the list.
+    Ok(made.split_off(1))
+}
+
+/// Takes back what a drag write that failed made in its new folder (`made`, the list first): the files, then the list
+/// and the folder once they've all gone. A file that wouldn't go keeps the list, so the sweep clears it later when it
+/// was written whole.
+fn take_back(folder: &Path, made: &[PathBuf]) {
+    if let Some((list, files)) = made.split_first() {
+        let mut all_gone = true;
+        for file in files {
+            if fs::remove_file(file).is_err() {
+                all_gone = false;
+            }
+        }
+        if !all_gone || fs::remove_file(list).is_err() {
+            return;
+        }
+    }
+    // Only goes when empty, as in the sweep.
+    let _ = fs::remove_dir(folder);
 }
 
 /// The names made safe for a file ending `.mid` and kept apart, letter case aside (Windows doesn't tell "a" from "A").
@@ -606,12 +645,6 @@ fn new_folder(temp: &Path) -> io::Result<PathBuf> {
         }
     }
     Err(io::Error::new(ErrorKind::AlreadyExists, "every drag folder name tried is taken"))
-}
-
-/// Writes a file that mustn't be there already.
-fn write_new(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut f = fs::OpenOptions::new().write(true).create_new(true).open(path)?;
-    f.write_all(bytes)
 }
 
 /// What clearing drag files removed, and what it couldn't (in use), which is tried again next time.
@@ -1119,6 +1152,31 @@ mod tests {
         // The next drag gets a folder of its own.
         let again = write_drag_files(&temp, &files[..1]).unwrap();
         assert_ne!(again[0].parent().unwrap(), folder);
+    }
+
+    #[test]
+    fn a_write_that_fails_takes_back_all_it_made() {
+        let temp = test_temp("fails");
+        let files = [midi("One.mid", b"1111"), midi("Two.mid", b"2222")];
+        // The disk fills up part way through the list, the first file or the second.
+        for failing in 1..=3 {
+            let mut writes = 0;
+            let full = |file: &mut fs::File, bytes: &[u8]| {
+                writes += 1;
+                if writes < failing {
+                    return file.write_all(bytes);
+                }
+                file.write_all(&bytes[..2])?;
+                Err(io::Error::new(ErrorKind::StorageFull, "the disk is full"))
+            };
+            let e = write_drag_files_with(&temp, &files, full).unwrap_err();
+            assert_eq!(e.kind(), ErrorKind::StorageFull);
+            // Nothing is left: a file cut short wouldn't match its size on the list, so the sweep would never clear it.
+            assert_eq!(fs::read_dir(&temp).unwrap().count(), 0, "failing at write {failing}");
+        }
+        // With room again, it all goes as before.
+        let paths = write_drag_files(&temp, &files).unwrap();
+        assert_eq!(fs::read(&paths[1]).unwrap(), b"2222");
     }
 
     #[test]

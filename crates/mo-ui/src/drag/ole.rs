@@ -63,6 +63,9 @@ use super::Outcome;
 struct Shared {
     /// Over somewhere that takes the files.
     over: AtomicBool,
+    /// Let go over the app's own window, as the button came up: by the time Windows' drag hands back, whatever took
+    /// the files has finished taking them (a DAW may take a while), and the mouse may be back over the app.
+    let_go_on_own: AtomicBool,
     /// [`GOING`] while it goes on, then how it ended.
     ended: AtomicU8,
 }
@@ -106,7 +109,7 @@ fn drag_files(own: Option<HWND>, files: &[PathBuf], flight: Flight) -> Result<Ou
     }
     // Let go over the app's own window: nothing there takes files, though the window says it does (winit's own file
     // drop, which the app doesn't use).
-    let on_own = own.is_some_and(over_window);
+    let on_own = shared.let_go_on_own.load(Ordering::Relaxed);
     let landed = hr == DRAGDROP_S_DROP && effect.0 & DROPEFFECT_COPY.0 != 0 && !on_own;
     shared.ended.store(if landed { LANDED } else { NOT_LANDED }, Ordering::Release);
     if hr == DRAGDROP_S_DROP || hr == DRAGDROP_S_CANCEL {
@@ -228,6 +231,8 @@ impl IDropSource_Impl for Source_Impl {
             // Esc, or another button pressed as well: called off, as Explorer does.
             DRAGDROP_S_CANCEL
         } else if keys.0 & MK_LBUTTON.0 == 0 {
+            // Where it's let go is noted now, not once Windows hands back (see `Shared::let_go_on_own`).
+            self.shared.let_go_on_own.store(self.own.is_some_and(over_window), Ordering::Relaxed);
             DRAGDROP_S_DROP
         } else {
             S_OK
