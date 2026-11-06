@@ -841,7 +841,6 @@ fn fill_cards(app: &AppWindow) {
     });
 }
 
-/// Picks the plugin at `row` (or none) and fills its card.
 /// Up or Down in the list (review X3-8): picks the line `by` away from the picked one (the first when none is), as
 /// the list shows them, and scrolls it into view.
 fn step(app: &AppWindow, by: i32) {
@@ -862,6 +861,7 @@ fn step(app: &AppWindow, by: i32) {
     data.set_show_ask(data.get_show_ask().wrapping_add(1));
 }
 
+/// Picks the plugin at `row` (or none) and fills its card.
 fn pick(app: &AppWindow, row: Option<usize>) {
     let _doing = crate::watchdog::doing("Plugins: pick a plugin");
     let changed = PAGE.with(|p| {
