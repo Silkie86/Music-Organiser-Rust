@@ -99,6 +99,11 @@ struct Page {
     scroll_to_pick: bool,
     /// Ctrl+K read the index for its own list before the page was first shown.
     finder_read: bool,
+    /// That read, kept until the page first shows, so the page doesn't read and group the whole index again (nothing
+    /// writes the index before then, so it can't be stale).
+    finder_loaded: Option<Result<Loaded, String>>,
+    /// The page first showed while that read was still going: it's handed to the page when it ends.
+    finder_for_page: bool,
 }
 
 struct Ask {
@@ -220,18 +225,24 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         let Some(library) = library else { return };
         let weak = app.as_weak();
         let started = background::spawn("MIDI index for Ctrl+K", move || {
-            let Ok(loaded) = load(&library) else { return };
+            let loaded = load(&library);
             let _ = slint::invoke_from_event_loop(move || {
-                // The page's own read, if it has started since, hands over its list itself.
-                if let Some(app) = weak.upgrade()
-                    && !PAGE.with(|p| p.borrow().started)
-                {
-                    crate::finder::add_source(&app, "midi", loaded.found);
+                let Some(app) = weak.upgrade() else { return };
+                // The page showed meanwhile and is waiting for this read: it takes it (and hands Ctrl+K its list).
+                if PAGE.with(|p| std::mem::take(&mut p.borrow_mut().finder_for_page)) {
+                    show(&app, loaded);
+                    return;
                 }
+                if let Ok(l) = &loaded {
+                    crate::finder::add_source(&app, "midi", l.found.clone());
+                }
+                PAGE.with(|p| p.borrow_mut().finder_loaded = Some(loaded));
             });
         });
         if let Err(e) = started {
             log::error("MIDI", &format!("Couldn't start reading the index for Ctrl+K: {e}"));
+            // Nothing is coming, so the page reads it itself.
+            PAGE.with(|p| p.borrow_mut().finder_read = false);
         }
     });
     PAGE.with(|p| {
@@ -448,6 +459,28 @@ pub fn shown(app: &AppWindow) {
         Some(p.library.clone())
     });
     let Some(library) = library else { return };
+    // Ctrl+K read the index already: the page takes that read, or waits for it if it's still going.
+    enum Kept {
+        Read(Result<Loaded, String>),
+        Coming,
+        None,
+    }
+    let kept = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        match p.finder_loaded.take() {
+            Some(read) => Kept::Read(read),
+            None if p.finder_read => {
+                p.finder_for_page = true;
+                Kept::Coming
+            }
+            None => Kept::None,
+        }
+    });
+    match kept {
+        Kept::Read(read) => return show(app, read),
+        Kept::Coming => return,
+        Kept::None => {}
+    }
     let weak = app.as_weak();
     let started = background::spawn("MIDI index", move || {
         let loaded = load(&library);
