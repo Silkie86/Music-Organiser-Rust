@@ -116,38 +116,56 @@ pub fn from_bytes(path: &Path, raw: &[u8], midi_folders: &[String]) -> Result<Ve
     }
 }
 
-/// Why a file couldn't be read, in a few plain words, for the list of failed ones (the C# `MidiIndexer.Why`).
+/// Why a file's contents couldn't be read, in a few plain words, for the list of failed ones (the C#
+/// `MidiIndexer.Why`): it's noted once, and only tried again when asked.
 pub fn unread(e: &io::Error) -> Unread {
-    // Windows' sharing and lock violations (32, 33); elsewhere the "would block" .NET gives for the same.
-    let in_use = matches!(e.raw_os_error(), Some(32 | 33)) && cfg!(windows) || e.kind() == io::ErrorKind::WouldBlock;
-    if in_use {
-        return Unread::InUse(format!("It couldn't be opened, maybe because another program had it open ({e})"));
-    }
     Unread::Failed(match e.kind() {
-        io::ErrorKind::PermissionDenied => "Windows didn't allow reading it".into(),
-        io::ErrorKind::NotFound => "It isn't there any more".into(),
         io::ErrorKind::UnexpectedEof | io::ErrorKind::InvalidData => {
             format!("It looks cut short or damaged, or saved in a way the reader doesn't know yet ({e})")
         }
-        _ => format!("It couldn't be opened, maybe because another program had it open ({e})"),
+        _ => format!("It couldn't be read ({e})"),
     })
 }
 
-/// Why a file couldn't be read from the disk: as [`unread`], but a file that wasn't there or couldn't be reached just
-/// now (a drive or network share that dropped out mid-reading) is tried again next time with what was read from it
-/// before kept, not marked failed. Only a refusal or damage is noted as failed.
+/// Why a file couldn't be read from the disk. In use by another program, not there just now, or out of reach (a
+/// drive or network share that dropped out mid-reading): what was read from it before is kept and it's read again
+/// next time. A refusal, or anything else (a bad sector, a name too long), is noted as failed once.
 pub fn unread_file(e: &io::Error) -> Unread {
-    match e.kind() {
-        io::ErrorKind::PermissionDenied | io::ErrorKind::UnexpectedEof | io::ErrorKind::InvalidData => unread(e),
-        io::ErrorKind::NotFound => {
-            Unread::InUse("It wasn't there just now (a drive or network share away?); it's read again next time".into())
-        }
-        _ => match unread(e) {
-            Unread::Failed(why) => Unread::InUse(format!("{why}; it's read again next time")),
-            in_use => in_use,
-        },
+    use io::ErrorKind as K;
+    // Windows: sharing and lock violations (32, 33); path not found (3), device not ready (21), network path or
+    // name gone (53, 64, 67), network unreachable (1231).
+    let code = if cfg!(windows) { e.raw_os_error() } else { None };
+    if matches!(code, Some(32 | 33)) || e.kind() == K::WouldBlock || e.kind() == K::ResourceBusy {
+        return Unread::InUse(format!("It couldn't be opened, maybe because another program had it open ({e})"));
     }
+    let away = matches!(code, Some(3 | 21 | 53 | 64 | 67 | 1231))
+        || matches!(
+            e.kind(),
+            K::NotFound
+                | K::TimedOut
+                | K::Interrupted
+                | K::NotConnected
+                | K::ConnectionReset
+                | K::ConnectionAborted
+                | K::HostUnreachable
+                | K::NetworkUnreachable
+                | K::NetworkDown
+                | K::StaleNetworkFileHandle
+        );
+    if away {
+        return Unread::InUse(format!(
+            "It couldn't be reached just now (a drive or network share away?); it's read again next time ({e})"
+        ));
+    }
+    Unread::Failed(match e.kind() {
+        K::PermissionDenied => "Windows didn't allow reading it".into(),
+        _ => format!("It couldn't be read from the disk ({e})"),
+    })
 }
+
+/// What older readings noted for a file that wasn't there (before [`unread_file`] tried those again): such a row is
+/// read again once ([`crate::store::MidiStore::open`]).
+pub const GONE_BEFORE: &str = "It isn't there any more";
 
 fn damaged(what: &str) -> Unread {
     Unread::Failed(format!("It looks cut short or damaged, or saved in a way the reader doesn't know yet ({what})"))
@@ -302,8 +320,9 @@ mod tests {
         assert!(matches!(unread_file(&e(io::ErrorKind::TimedOut)), Unread::InUse(_)));
         assert!(matches!(unread_file(&e(io::ErrorKind::PermissionDenied)), Unread::Failed(_)));
         assert!(matches!(unread_file(&e(io::ErrorKind::InvalidData)), Unread::Failed(_)));
+        assert!(matches!(unread_file(&e(io::ErrorKind::Other)), Unread::Failed(_)), "a bad sector is noted once");
         // A file's contents that don't read stay failed.
-        assert!(matches!(unread(&e(io::ErrorKind::Other)), Unread::Failed(_)));
+        assert!(matches!(unread(&e(io::ErrorKind::InvalidData)), Unread::Failed(_)));
     }
 
     #[test]

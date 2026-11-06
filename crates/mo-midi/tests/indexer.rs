@@ -374,7 +374,8 @@ fn a_file_away_mid_reading_keeps_its_parts_and_is_read_again() {
     assert_eq!(count(&db, "parts"), 1);
 
     // It changes, the reading is planned, and then the drive drops before it's read.
-    std::fs::write(&file, smf(TUNE)).unwrap();
+    // Longer, so its size says it changed even within the same second.
+    std::fs::write(&file, smf(&[TUNE, TUNE].concat())).unwrap();
     let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
     let plan = indexer::plan(&wanted(&dir), &store.stamps().unwrap(), &[], false);
     assert_eq!(plan.todo.len(), 1);

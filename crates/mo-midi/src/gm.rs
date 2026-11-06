@@ -29,7 +29,8 @@ pub enum Why {
     Drums,
     /// The MIDI file's own program change.
     Program,
-    /// A word in a name, as the name writes it (in small letters): "harpsichord", not the "harpsi" it was matched by.
+    /// A word in a name, as the name writes it (in small letters): "harpsichord", not the "harpsi" it was matched by;
+    /// for two words that name a sound together, that sound ("synth strings", "e-piano").
     Name(String),
     /// The instrument the instrument finder names.
     Instrument(Family),
@@ -218,6 +219,10 @@ const WORDS: &[(&str, Match, u8)] = &[
 
 /// Whether `word` (from [`WORDS`]) is the name's word `w`.
 fn matches(w: &str, word: &str, how: Match) -> bool {
+    // A bassoon isn't a bass, in a pair ("synth bassoon") too.
+    if word == "bass" && w.starts_with("bassoon") {
+        return false;
+    }
     match how {
         Start => w.starts_with(word),
         Whole => w == word || w.strip_prefix(word).is_some_and(|rest| rest == "s" || rest == "es"),
@@ -425,6 +430,7 @@ mod tests {
         assert_eq!(named(Role::Chords, &["Harpsichord"]).program, 6);
         // A bassoon isn't a bass; and the card says the word as the name has it, not the start it's matched by.
         assert_eq!(named(Role::Melody, &["Bassoon"]).program, 70);
+        assert_eq!(named(Role::Melody, &["Synth Bassoon"]).program, 70);
         assert_eq!(named(Role::Chords, &["Harpsichord"]).why_text(), "from its name: harpsichord");
         assert_eq!(named(Role::Chords, &["Organic pad"]).program, 89);
         // Two words that say more together, and electric piano only when it says so.

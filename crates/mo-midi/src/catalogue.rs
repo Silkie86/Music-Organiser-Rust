@@ -246,14 +246,23 @@ impl Catalogue {
         }
         let mut line_count = entries.len();
         // One loop saved as several files: two tracks of one file (a tune doubled, a riff played again higher) are two
-        // parts, so a part from a file the group already has stays a line of its own.
-        let groups = by_shape.into_values().map(|g| {
-            let mut files = std::collections::HashSet::new();
-            g.into_iter()
-                .filter(|&at| entries.get(at).is_some_and(|e| files.insert(case::to_lower(&e.phrase.source.path))))
-                .collect::<Vec<usize>>()
-        });
-        let groups: Vec<Vec<usize>> = groups.filter(|g| g.len() > 1).collect();
+        // parts, so each group holds one part a file. A file's next track with the shape starts or joins the next
+        // group: the "Lead" of each key's file together, and the "Lead high" of each together.
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for g in by_shape.into_values().filter(|g| g.len() > 1) {
+            let mut split: Vec<Vec<usize>> = Vec::new();
+            for at in g {
+                let Some(src) = entries.get(at).map(|e| &e.phrase.source) else { continue };
+                let has = |s: &Vec<usize>| {
+                    s.iter().any(|&o| entries.get(o).is_some_and(|e| Arc::ptr_eq(&e.phrase.source, src)))
+                };
+                match split.iter_mut().find(|s| !has(s)) {
+                    Some(s) => s.push(at),
+                    None => split.push(vec![at]),
+                }
+            }
+            groups.extend(split.into_iter().filter(|s| s.len() > 1));
+        }
         for group in groups {
             // In entries' order, newest first: the first stands for them.
             let mut keys: Vec<u8> =
@@ -559,6 +568,15 @@ mod tests {
         assert_eq!(cat.entries[2].key_group, Some(0));
         assert_eq!(cat.entries[0].in_keys, Some(InKeys::Keys(2)));
         assert_eq!(cat.line_count, 2);
+        // Both files with both tracks: two lines, each track's copies together.
+        let cat = Catalogue::new(vec![
+            shaped(phrase(1, &a, "Lead", "Loop Am", Role::Melody, "A1"), 57),
+            shaped(phrase(2, &a, "Lead high", "Loop Am", Role::Melody, "A2"), 69),
+            shaped(phrase(3, &b, "Lead", "Loop Dm", Role::Melody, "D1"), 62),
+            shaped(phrase(4, &b, "Lead high", "Loop Dm", Role::Melody, "D2"), 74),
+        ]);
+        assert_eq!(cat.line_count, 2);
+        assert_eq!((cat.entries[1].key_group, cat.entries[3].key_group), (Some(1), Some(1)));
     }
 
     #[test]

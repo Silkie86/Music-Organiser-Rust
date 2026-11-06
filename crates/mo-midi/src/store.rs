@@ -674,6 +674,10 @@ fn open_for_writing(path: &Path) -> Result<(MidiStore, Option<(i64, i64)>), Midi
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON;")
             .and_then(|()| conn.execute_batch(TABLES))
             .and_then(|()| conn.execute_batch(INDEXES))
+            // Files an older reading marked gone mid-reading (a drive away) are read again once: their stamp goes.
+            .and_then(|()| {
+                conn.execute("UPDATE files SET mtime = -1 WHERE error = ?1", [crate::extract::GONE_BEFORE]).map(|_| ())
+            })
             // A new index: of this layout from the start.
             .and_then(|()| if layout == LAYOUT { Ok(()) } else { conn.pragma_update(None, "user_version", LAYOUT) })
             .map_err(|e| open_error(e.to_string()))?;
@@ -706,8 +710,8 @@ impl MidiStore {
         drop(one);
         conn.busy_timeout(Duration::from_secs(2)).map_err(|e| open_error(e.to_string()))?;
         conn.pragma_update(None, "query_only", true).map_err(|e| open_error(e.to_string()))?;
-        // The list is sorted newest first: in memory, not in a file on the system's disk, with room to read it in
-        // (32 MB; no memory-mapping, so a bad sector is a "damaged" message, not a crash).
+        // Any temporary work in memory, not in a file on the system's disk, with room to read the list in (32 MB; no
+        // memory-mapping, so a bad sector is a "damaged" message, not a crash). The list is sorted in Rust (all()).
         conn.pragma_update(None, "temp_store", "MEMORY").map_err(|e| open_error(e.to_string()))?;
         conn.pragma_update(None, "cache_size", -32_000).map_err(|e| open_error(e.to_string()))?;
         let id: i64 =
