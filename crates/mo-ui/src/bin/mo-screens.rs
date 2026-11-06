@@ -1235,7 +1235,15 @@ fn sample_songs_removed(
     };
     removing.sent(WHEN, done.clone());
     let compact = mo_app::space_songs::COMPACT;
-    (removing, vec![Binned { kind: compact.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done } }])
+    (
+        removing,
+        vec![Binned {
+            kind: compact.to_owned(),
+            when: WHEN,
+            done: Done { problems: Vec::new(), ..done },
+            plugin: None,
+        }],
+    )
 }
 
 /// Made-up spare plugin copies, written as on Windows, biggest first: AAX copies in Avid's folder (Pro Tools isn't
@@ -1356,8 +1364,8 @@ fn sample_removed(found: &mo_app::space_spare::Found) -> (mo_app::space_spare::R
     };
     let spare = mo_app::space_spare::SPARE_COPIES;
     let list = vec![
-        Binned { kind: spare.to_owned(), when: BEFORE, done: older },
-        Binned { kind: spare.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done } },
+        Binned { kind: spare.to_owned(), when: BEFORE, done: older, plugin: None },
+        Binned { kind: spare.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done }, plugin: None },
     ];
     (removing, list)
 }
@@ -1396,7 +1404,10 @@ fn sample_old_removed(found: &mo_app::space_old::Found) -> (mo_app::space_old::R
     };
     removing.sent(WHEN, done.clone());
     let old = mo_app::space_old::OLD_COPIES;
-    (removing, vec![Binned { kind: old.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done } }])
+    (
+        removing,
+        vec![Binned { kind: old.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done }, plugin: None }],
+    )
 }
 
 /// Made-up old copies left after moving plugin folders to I:, written as on Windows, biggest first: two that can go,

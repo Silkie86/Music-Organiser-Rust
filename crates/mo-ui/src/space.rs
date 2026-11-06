@@ -1773,6 +1773,12 @@ fn binned_plugin_files(p: &Page) -> Vec<String> {
     binned.filter(|r| matches!(r.what, What::Plugin(_))).map(|r| r.path.clone()).collect()
 }
 
+/// The Plugins page changed what the app keeps of the Recycle Bin (a clean-up, an uninstall, a Put back: review X1-3):
+/// the Recycle Bin line and the plugin files left out follow, as a look's finding would.
+pub fn bin_changed(app: &AppWindow, kept: Kept) {
+    arrive(&app.as_weak(), Step::Kept(kept));
+}
+
 /// The same, for the Plugins page: it leaves them out of what it counts, as this page does, so the two pages agree.
 pub fn plugin_files_in_bin() -> Vec<String> {
     PAGE.with(|p| binned_plugin_files(&p.borrow()))
@@ -1852,6 +1858,8 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
     let _ = slint::invoke_from_event_loop(move || {
         let Some(app) = weak.upgrade() else { return };
         let _doing = crate::watchdog::doing("Space: a look arrived");
+        // A Plugins page clean-up put back from here: that page hears once this one is done with its own state.
+        let mut plugins_put_back = None;
         let changed = PAGE.with(|p| {
             let mut p = p.borrow_mut();
             match step {
@@ -1986,6 +1994,9 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                 }
                 Step::PutBack(kind, when, problems, kept) => {
                     keep(&mut p, kept);
+                    if kind == space_bin::PLUGIN_CLEAN || kind == space_bin::PLUGIN_UNINSTALL {
+                        plugins_put_back = Some((kind.clone(), when, problems.is_empty()));
+                    }
                     match kind.as_str() {
                         SPARE_COPIES => p.removing.put_back(when, problems.clone()),
                         OLD_COPIES => p.old_removing.put_back(when, problems.clone()),
@@ -2005,6 +2016,9 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                 _ => Changed::Nothing,
             }
         });
+        if let Some((kind, when, all)) = plugins_put_back {
+            plugins_page::put_back_elsewhere(&kind, when, all);
+        }
         // Off show the page draws nothing, as what arrives can take tens of milliseconds to draw and some comes
         // several times a second (rule 12): it's drawn once when it comes back ([`shown`]). The looks a step asks
         // for still start.
