@@ -447,8 +447,8 @@ pub fn thin(saves: &[SongSave], sitting_hours: u32) -> Vec<&SongSave> {
 /// audio here that this song's saves don't. A link to another place isn't walked (it can't be shown to hold only the
 /// song's saves), nor a folder that can't be read.
 ///
-/// The walk ends at the first project file that isn't the song's: a folder of many songs isn't walked to its end for
-/// each of them, nor every file in it kept meanwhile.
+/// The walk stops at the first project file that isn't the song's, so a folder of many songs isn't walked to its end
+/// for each of them, and what the walk meets after that file isn't kept.
 fn own_folder_files(
     folder: &str,
     save_keys: &HashSet<String>,
@@ -467,7 +467,8 @@ fn own_folder_files(
     // Ends the walk: set by the first project file that isn't the song's, or by `stop`.
     let enough = AtomicBool::new(false);
     let files = size::walk(dir, true, &enough, |path, meta| {
-        if stop.load(Ordering::Relaxed) {
+        // The walk looks at its stop between batches of files: the rest of a batch is let go.
+        if stop.load(Ordering::Relaxed) || enough.load(Ordering::Relaxed) {
             enough.store(true, Ordering::Relaxed);
             return None;
         }
@@ -600,7 +601,7 @@ fn same_saves(
         let hashes: Vec<Option<[u8; 32]>> = match compare {
             Compare::Afresh => set.par_iter().map(|s| size::file_hash(Path::new(&s.path), stop)).collect(),
             Compare::Remembered(prints) => fingerprints(&set, prints, stop).into_iter().map(|p| Some(p?.0)).collect(),
-            Compare::Confirmed(prints) => confirmed(&set, fingerprints(&set, prints, stop), stop),
+            Compare::Confirmed(prints) => confirmed(&set, prints, fingerprints(&set, prints, stop), stop),
         };
         if stop.load(Ordering::Relaxed) {
             return Err(Stopped);
@@ -656,17 +657,32 @@ fn fingerprints(set: &[&SongSave], prints: &Prints, stop: &AtomicBool) -> Vec<Op
         .collect()
 }
 
-/// `prints` (one for each save of `set`, from [`fingerprints`]) with every one that says a save is the same as another
-/// read again from the save, unless it was read just now ([`Compare::Confirmed`]).
-fn confirmed(set: &[&SongSave], prints: Vec<Option<([u8; 32], bool)>>, stop: &AtomicBool) -> Vec<Option<[u8; 32]>> {
-    let shared = more_than_one(prints.iter().flatten().map(|(print, _)| print));
-    set.par_iter()
-        .zip(prints)
-        .map(|(s, print)| {
-            let (print, read_now) = print?;
-            if shared.contains(&print) && !read_now { size::file_hash(Path::new(&s.path), stop) } else { Some(print) }
-        })
-        .collect()
+/// `found` (one print for each save of `set`, from [`fingerprints`]) once every print that says a save is the same as
+/// another was read just now ([`Compare::Confirmed`]): one kept from before is read again from the save, and `prints`
+/// keeps what it reads. Again until none is left, as a print read again can be the same as another one kept from
+/// before (that save changed too).
+fn confirmed(
+    set: &[&SongSave],
+    prints: &Prints,
+    mut found: Vec<Option<([u8; 32], bool)>>,
+    stop: &AtomicBool,
+) -> Vec<Option<[u8; 32]>> {
+    // Each round reads at least one print that wasn't read just now, so it ends.
+    while !stop.load(Ordering::Relaxed) {
+        let shared = more_than_one(found.iter().flatten().map(|(print, _)| print));
+        let again: Vec<usize> = (0..found.len())
+            .filter(|&i| found[i].is_some_and(|(print, read_now)| !read_now && shared.contains(&print)))
+            .collect();
+        if again.is_empty() {
+            break;
+        }
+        let read: Vec<Option<[u8; 32]>> =
+            again.par_iter().map(|&i| prints.whole_afresh(Path::new(&set[i].path), stop)).collect();
+        for (i, print) in again.into_iter().zip(read) {
+            found[i] = print.map(|print| (print, true));
+        }
+    }
+    found.into_iter().map(|p| Some(p?.0)).collect()
 }
 
 /// The prints that more than one of `prints` has.

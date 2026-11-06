@@ -491,6 +491,56 @@ fn identical_saves_read_before_are_not_read_again_until_they_change() {
 }
 
 #[test]
+fn a_save_read_again_is_compared_with_saves_read_again_too() {
+    // The backup plan reads a save its kept print calls a copy again. What it reads can be another save's kept print,
+    // and that save may have been written again too, so it's read again as well before either is called a copy.
+    let root = fixtures("mo-space-confirmed-again");
+    let song = root.join("Song");
+    // The same first and last 64 KB: only the whole print tells them apart.
+    let body = |middle: u8| {
+        let mut bytes = vec![b'a'; 200 * 1024];
+        bytes[100 * 1024] = middle;
+        bytes
+    };
+    let x = write(&song, "X.bwproject", &body(b'p'), 0);
+    let y = write(&song, "Y.bwproject", &body(b'p'), 1);
+    let z = write(&song, "Z.bwproject", &body(b'q'), 2);
+    let saves = [save(&x, 0), save(&y, 1), save(&z, 2)];
+    let settings = CompactSettings { keep_backups: 5, sitting_hours: 0 };
+    let stop = AtomicBool::new(false);
+    let prints = Prints::default();
+    let none = |_: &[String]| HashSet::new();
+    let shared = HashSet::new();
+    let copies = |compare: Compare<'_>| -> Vec<String> {
+        let elsewhere = Elsewhere {
+            sample_folders: &[],
+            used_by_any: &none,
+            shared_names: &shared,
+            backup_folders: &BackupFolders::default(),
+            compare,
+        };
+        let report = measure(&saves, &[s(&root)], &[], settings, Some(&elsewhere), &stop).unwrap();
+        prints.keep(false).unwrap();
+        let mut copies: Vec<String> = report
+            .items
+            .iter()
+            .filter(|i| i.kind == CompactKind::SameSave)
+            .map(|i| Path::new(&i.path).file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        copies.sort();
+        copies
+    };
+    assert_eq!(copies(Compare::Confirmed(&prints)), ["X.bwproject"]);
+    // X is written again with what Z had, and Z with something new, each keeping its size and time: X read again
+    // matches Z's kept print, so Z is read again too, and nothing is a copy.
+    write(&song, "X.bwproject", &body(b'q'), 0);
+    write(&song, "Z.bwproject", &body(b'r'), 2);
+    assert!(copies(Compare::Confirmed(&prints)).is_empty());
+    // What was read again is kept in place of the older prints: a look that goes by the kept prints finds no copy now.
+    assert!(copies(Compare::Remembered(&prints)).is_empty());
+}
+
+#[test]
 fn only_the_daws_own_autosaves_are_autosaves() {
     let root = fixtures("mo-space-own-backups");
     let song = root.join("MySong");
