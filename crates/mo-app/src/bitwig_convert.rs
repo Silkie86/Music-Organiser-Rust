@@ -4,9 +4,10 @@
 //! [`Converted::file`] with [`crate::shell`] in Bitwig Studio.
 //!
 //! Safety: the FL project and the template are only read; the new project goes in the export folder, never over a copy
-//! that may hold work (see `mo_convert::save`). Settings are only read here: while the Rust app opens `library.db`
-//! read-only, the stamp that lets a later convert replace this one ([`Converted::written`]) isn't kept, so an earlier
-//! convert is always kept and the new one gets the next name ("Name (2)").
+//! that may hold work (see `mo_convert::save`). Settings are only read here: the Songs page keeps the stamp that lets
+//! a later convert replace this one ([`Converted::written`]) in the app's own songs.db afterwards
+//! ([`mo_library::converts`]); without one (`library.db` is never written) an earlier convert is kept and the new one
+//! gets the next name ("Name (2)").
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -26,7 +27,7 @@ pub const TEMPLATE_FILE: &str = "Music Organiser template.bwproject";
 
 /// The setting that remembers a converted copy (the C# app's key), so a later convert may replace it.
 pub fn convert_key(file: &Path) -> String {
-    format!("bitwig_convert:{}", file.display())
+    mo_library::converts::key(file)
 }
 
 /// Where every export goes (Bitwig converts, kits, MIDI parts): the export folder setting, or "Music Organiser
@@ -150,7 +151,7 @@ pub struct Converted {
     pub name: String,
     /// What didn't come across (also saved beside it).
     pub notes: Vec<String>,
-    /// What to remember under [`convert_key`] once the library can be written, so a later convert may replace it.
+    /// What to remember under [`convert_key`] ([`mo_library::converts::remember`]), so a later convert may replace it.
     pub written: String,
     /// What the screen says, in the C# app's words.
     pub message: String,

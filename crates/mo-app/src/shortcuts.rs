@@ -59,9 +59,15 @@ pub const APP_ACTIONS: &[Action] = &[
 ];
 
 /// The Songs page's own actions. The ids are the C# app's Projects page's, so a key changed in either app carries
-/// across.
+/// across; `projects.openOwn` is new here, so the song line's menu and the panel's "Open in FL Studio" have a key too
+/// (rule 15).
 pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.open", "Open the picked song (FL Studio songs go to Bitwig)", "Ctrl+O"),
+    action(
+        "projects.openOwn",
+        "Open the picked song in the DAW it was made in (an FL Studio song in FL Studio itself)",
+        "Ctrl+Shift+O",
+    ),
     action("projects.openInBitwig", "Open the picked song in Bitwig (FL Studio songs are converted)", "Ctrl+B"),
     action("projects.reveal", "Show the picked song's file in its folder", "Ctrl+Shift+E"),
     action("projects.copyPath", "Copy where the picked song's file is", "Ctrl+Shift+C"),
@@ -492,6 +498,7 @@ mod tests {
         let s = Shortcuts::default();
         assert_eq!(s.page_action_for("Ctrl+O", SONGS_ACTIONS), Some("projects.open"));
         assert_eq!(s.page_action_for("ctrl+shift+e", SONGS_ACTIONS), Some("projects.reveal"));
+        assert_eq!(s.page_action_for("Ctrl+Shift+O", SONGS_ACTIONS), Some("projects.openOwn"));
         assert_eq!(s.page_action_for("Ctrl+O", &[]), None);
         assert_eq!(s.key_of("projects.copyPath"), "Ctrl+Shift+C");
         // A key changed in the C# app's Projects page carries across.

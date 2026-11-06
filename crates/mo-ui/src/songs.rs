@@ -19,6 +19,7 @@ use mo_app::live::{Live, LiveDetails, Updated};
 use mo_app::log;
 use mo_app::places::Place;
 use mo_app::shell;
+use mo_app::shortcuts::Shortcuts;
 use mo_app::song_panel::{self as panel, Go, SaveLine as PanelSaveLine, Tab};
 use mo_app::songs::{Entry, Filters, SongRow, Songs, View};
 use mo_app::{paths, sound_library, year_strip};
@@ -164,6 +165,7 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
         }
     });
     wire_filters(app);
+    wire_list(app);
     let weak = app.as_weak();
     data.on_select(move |row| {
         if let Some(app) = weak.upgrade() {
@@ -240,7 +242,9 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
             Err(e) => {
                 log::warning("Songs", &e.to_string());
                 let _ = weak.upgrade_in_event_loop(move |app| {
-                    app.global::<SongsData>().set_message(format!("{e}").into());
+                    let data = app.global::<SongsData>();
+                    data.set_message(CANT_READ.into());
+                    data.set_message_text(e.to_string().into());
                 });
                 return;
             }
@@ -259,8 +263,10 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
                 (began.elapsed() - read_in).as_secs_f32()
             ),
         );
+        // The year strip is counted here too, not on the window's thread (review A-4).
+        let years = songs.year_counts();
         let _ = weak.upgrade_in_event_loop(move |app| {
-            show(&app, songs);
+            show(&app, songs, years);
             crate::finder::add_source(&app, "songs", found);
         });
         watch(&mut live, &weak);
@@ -284,8 +290,19 @@ const CATCH_UP_AFTER: Duration = Duration::from_secs(20);
 /// How long after what was read couldn't be kept in songs.db (another copy of the app holding it) it's tried again.
 const KEEP_AGAIN_AFTER: Duration = Duration::from_secs(60);
 
-/// What the page says when the library has no songs.
-const NO_SONGS: &str = "No songs in the library yet.";
+/// What the page says when the library has no songs, and the line under it.
+const NO_SONGS: &str = "No songs in the library yet";
+const NO_SONGS_TEXT: &str =
+    "Add the folders your projects are in on Settings › Folders: the songs in them are listed from the next start.";
+
+/// What the page says when the library can't be read (the reason goes under it).
+const CANT_READ: &str = "Your songs couldn't be read";
+
+/// Says over the list that the library has no songs, or takes that away.
+fn say_empty(data: &SongsData, empty: bool) {
+    data.set_message(if empty { NO_SONGS.into() } else { SharedString::new() });
+    data.set_message_text(if empty { NO_SONGS_TEXT.into() } else { SharedString::new() });
+}
 
 /// Watches the project folders while the app is open and keeps the list up to date, on this background thread: each
 /// time saves change, the list is made again and put on the page with a card. A little after the start every folder is
@@ -387,8 +404,9 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
         // Made again when a save's id changed too, so the page picks it by the id the library has.
         let songs = live.songs();
         let found = Arc::new(finder::songs(&songs, Local::now().naive_local()));
+        let years = songs.year_counts();
         let _ = weak.upgrade_in_event_loop(move |app| {
-            show_again(&app, songs);
+            show_again(&app, songs, years);
             crate::finder::add_source(&app, "songs", found);
             if !updated.for_card() {
                 return;
@@ -403,7 +421,6 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
     }
 }
 
-/// Puts a list made again on the page, keeping the filters, the song picked and its tab.
 /// The log's words for saves read again only to mend their muted samples, if there were any.
 fn mended_line(mended: usize) -> String {
     match mended {
@@ -412,7 +429,9 @@ fn mended_line(mended: usize) -> String {
     }
 }
 
-fn show_again(app: &AppWindow, songs: Songs) {
+/// Puts a list made again on the page, keeping the filters, the song picked and its tab, with its year strip (`years`,
+/// [`Songs::year_counts`], counted where the list was made: not on the window's thread).
+fn show_again(app: &AppWindow, songs: Songs, years: Vec<(i32, usize)>) {
     let _doing = crate::watchdog::doing("Songs: show the list again");
     let data = app.global::<SongsData>();
     let tab = data.get_tab();
@@ -420,7 +439,7 @@ fn show_again(app: &AppWindow, songs: Songs) {
         let p = p.borrow();
         p.picked.and_then(|i| p.songs.rows.get(i)).map(|r| r.song.key.clone())
     });
-    data.set_message(if songs.rows.is_empty() { NO_SONGS.into() } else { SharedString::new() });
+    say_empty(&data, songs.rows.is_empty());
     let row = key.and_then(|k| songs.rows.iter().position(|r| r.song.key == k));
     // Read again only when the picked song's newest save changed: a save of another song leaves its panel as it is.
     let same = PAGE.with(|p| {
@@ -429,6 +448,8 @@ fn show_again(app: &AppWindow, songs: Songs) {
         let new = row.and_then(|i| songs.rows.get(i)).map(|r| &r.song.latest);
         let same = matches!((old, new), (Some(a), Some(b)) if a.id == b.id && a.mtime == b.mtime && a.size == b.size
             && a.file_missing == b.file_missing);
+        // The year strip counts the new list, as a fresh read does: a save made this year moves its song (review A-4).
+        p.years = years;
         // The old list (thousands of songs) is let go on the freeing thread, not the window's.
         background::free_later(std::mem::replace(&mut p.songs, songs));
         p.picked = if same { row } else { None };
@@ -486,22 +507,58 @@ fn wire_filters(app: &AppWindow) {
     data.on_years_cleared(move || change(&weak, |f| f.years = None));
 }
 
+/// The list's keys and its lines' right-click menu: Up and Down, Esc, and the menu (review X3-8, X3-24). For the
+/// screenshots too.
+fn wire_list(app: &AppWindow) {
+    let data = app.global::<SongsData>();
+    let weak = app.as_weak();
+    data.on_step(move |by| {
+        if let Some(app) = weak.upgrade() {
+            step(&app, by);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_escape(move || weak.upgrade().is_some_and(|app| escape(&app)));
+    // Made here, for the song right-clicked (picked first), so each line names its DAW and shows its key as the
+    // shortcut list has it now.
+    let weak = app.as_weak();
+    data.on_song_menu_for(move |row| {
+        let Some(app) = weak.upgrade() else { return };
+        let daw = PAGE.with(|p| {
+            let p = p.borrow();
+            usize::try_from(row).ok().and_then(|i| p.songs.rows.get(i)).map(|r| r.song.latest.daw.clone())
+        });
+        let items = daw.map(|daw| song_menu(&daw, &crate::shortcuts())).unwrap_or_default();
+        app.global::<SongsData>().set_song_menu(ModelRc::new(VecModel::from(items)));
+    });
+    let weak = app.as_weak();
+    data.on_song_menu_chosen(move |id| {
+        if let Some(app) = weak.upgrade() {
+            run_action(&app, &id);
+        }
+    });
+}
+
 /// Shows made-up songs with the filters wired, for mo-screens (no library, nothing read).
 pub fn show_sample(app: &AppWindow, songs: Songs) {
     wire_filters(app);
-    show(app, songs);
+    wire_list(app);
+    // A handful of songs: counted here.
+    let years = songs.year_counts();
+    show(app, songs, years);
 }
 
-/// Puts a freshly read list on the page, keeping the filters as they are.
-pub fn show(app: &AppWindow, songs: Songs) {
+/// Puts a freshly read list on the page, keeping the filters as they are, with its year strip (`years`, as
+/// [`show_again`] has it).
+fn show(app: &AppWindow, songs: Songs, years: Vec<(i32, usize)>) {
     let _doing = crate::watchdog::doing("Songs: show the list");
     let data = app.global::<SongsData>();
     data.set_tabs(strings(Tab::ALL.iter().map(|t| t.name())));
     data.set_saves_tab(Tab::Saves.index() as i32);
-    data.set_message(if songs.rows.is_empty() { NO_SONGS.into() } else { SharedString::new() });
+    say_empty(&data, songs.rows.is_empty());
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        p.years = songs.year_counts();
+        p.years = years;
         // The old list (thousands of songs) is let go on the freeing thread, not the window's.
         background::free_later(std::mem::replace(&mut p.songs, songs));
     });
@@ -561,12 +618,19 @@ pub fn show_save(app: &AppWindow, save: i64) -> bool {
     }
 }
 
-/// Picks the song at `row` and brings it into view in the list, clearing the filters first when they hide it.
+/// Picks the song at `row` and brings it into view in the list, clearing the filters first when they hide it (but
+/// Hide archived, unless the song is archived itself).
 fn show_song(app: &AppWindow, row: usize) {
     let _doing = crate::watchdog::doing("Songs: show a song");
     let hidden = PAGE.with(|p| !p.borrow().view.entries.contains(&Entry::Song(row)));
     if hidden {
-        PAGE.with(|p| p.borrow_mut().filters = Filters::default());
+        PAGE.with(|p| {
+            let mut page = p.borrow_mut();
+            let page = &mut *page;
+            if let Some(song) = page.songs.rows.get(row) {
+                page.filters = page.filters.to_show(song);
+            }
+        });
         refresh(app);
     }
     let data = app.global::<SongsData>();
@@ -581,6 +645,18 @@ fn show_song(app: &AppWindow, row: usize) {
         data.set_show_ask(data.get_show_ask().wrapping_add(1));
     }
     pick(app, Some(row));
+}
+
+/// Picks the song above (`by` -1) or below (1) the one picked, the first one shown when none is, and brings it into
+/// sight: Up and Down on the list, and Down from the search box (review X3-8).
+fn step(app: &AppWindow, by: i32) {
+    let next = PAGE.with(|p| {
+        let p = p.borrow();
+        p.view.step(p.picked, by)
+    });
+    if let Some(row) = next {
+        show_song(app, row);
+    }
 }
 
 /// Works out what the rows and filters let through and shows it.
@@ -607,6 +683,7 @@ fn refresh(app: &AppWindow) {
         data.set_years_from(from);
         data.set_years_to(to);
         data.set_count(view.count.as_str().into());
+        data.set_shown(i32::try_from(view.shown).unwrap_or(i32::MAX));
         let chips = p.songs.chips(f, &view.counts);
         FILTER_MODELS.with(|m| {
             data.set_daw_filter(m[0].view(&chips.daw));
@@ -826,6 +903,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
     }
     match id {
         "projects.open" => data.invoke_open(),
+        "projects.openOwn" => data.invoke_open_own(),
         "projects.openInBitwig" => {
             let mut done = false;
             with_picked(|p, r| {
@@ -888,6 +966,43 @@ fn save_menu(daw: &str) -> Vec<MenuItem> {
     items
 }
 
+/// The lines of a song's right-click menu: the panel's buttons, each with its key from `keys` (rule 15; review X3-24).
+/// Open, as Ctrl+O does (an FL Studio song goes to Bitwig), an FL Studio song also in FL Studio itself, then Show in
+/// folder and Copy path. Each line's id is its action's, so choosing it runs what its key does ([`run_action`]).
+fn song_menu(daw: &str, keys: &Shortcuts) -> Vec<MenuItem> {
+    let item = |what: String, id: &str| MenuItem {
+        what: what.into(),
+        key: keys.key_of(id).into(),
+        id: id.into(),
+        enabled: true,
+    };
+    let mut items = if daw == FL {
+        vec![item(format!("Open in {BITWIG}"), "projects.open"), item(format!("Open in {FL}"), "projects.openOwn")]
+    } else {
+        vec![item(format!("Open in {daw}"), "projects.open")]
+    };
+    items.push(MenuItem { enabled: true, ..MenuItem::default() });
+    items.push(item("Show in folder".into(), "projects.reveal"));
+    items.push(item("Copy path".into(), "projects.copyPath"));
+    items
+}
+
+/// Esc on the page, in the search box or on the list: clears the search first, then puts the panel away. Says whether
+/// it did either (when not, the key goes on).
+fn escape(app: &AppWindow) -> bool {
+    let data = app.global::<SongsData>();
+    if !data.get_search().is_empty() {
+        data.set_search(SharedString::new());
+        data.invoke_search_edited(SharedString::new());
+        return true;
+    }
+    if has_pick() {
+        pick(app, None);
+        return true;
+    }
+    false
+}
+
 fn with_picked(f: impl FnOnce(&Page, &SongRow)) {
     PAGE.with(|p| {
         let p = p.borrow();
@@ -914,17 +1029,21 @@ pub fn has_pick() -> bool {
     PAGE.with(|p| p.borrow().picked.is_some())
 }
 
-/// Opens a save in its DAW: the one picked in Settings (shared with the C# app), else whatever opens its kind of
-/// file. Off the window's thread: handing a file to a DAW that's already running can keep the system busy for
-/// seconds. The library is read-only for now, so the save's "last opened" isn't noted yet.
+/// What Open says when the save isn't where the library last saw it: the list catches up by itself (the folder watch,
+/// or the walk a little after the start, marks it missing or finds where it went), as there's no Rescan (review A-6).
+const MOVED_OR_DELETED: &str =
+    "It has moved or been deleted. The list catches up by itself when it next looks in that folder.";
+
+/// Opens a save in its DAW: the one picked in Settings, else whatever opens its kind of file. Off the window's
+/// thread: handing a file to a DAW that's already running can keep the system busy for seconds. The save's "last
+/// opened" isn't noted yet.
 fn open_save(page: &Page, save: &mo_library::Save) {
     let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
     let exe = page.songs.daw_exes.get(&save.daw).cloned();
     let (path, daw, name) = (save.path.clone(), save.daw.clone(), save.name.clone());
     let started = background::spawn("Open", move || {
         if !shell::exists(&path) {
-            feed.start(&format!("Can't find {name}"), "")
-                .failed("It has moved or been deleted since the library last looked. Rescan to update the library.");
+            feed.start(&format!("Can't find {name}"), "").failed(MOVED_OR_DELETED);
             return;
         }
         let exe = exe.filter(|e| shell::usable_exe(e));
@@ -966,8 +1085,7 @@ fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
     let (db, path, name) = (page.db.clone(), save.path.clone(), save.name.clone());
     let started = background::spawn("Convert", move || {
         if !shell::exists(&path) {
-            feed.start(&format!("Can't find {name}"), "")
-                .failed("It has moved or been deleted since the library last looked. Rescan to update the library.");
+            feed.start(&format!("Can't find {name}"), "").failed(MOVED_OR_DELETED);
             return;
         }
         let job = feed.start(&format!("Converting {name} for Bitwig"), "");
@@ -980,7 +1098,7 @@ fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
                 match shell::run(&shell::open(&file, exe.as_deref(), shell::Os::THIS)) {
                     Ok(()) => {
                         if let Ok(mut opened) = OPENED.lock() {
-                            opened.insert(c.name);
+                            opened.insert(c.name.clone());
                         }
                         job.done(&c.message);
                     }
@@ -989,6 +1107,9 @@ fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
                         job.failed(&format!("Converted to {file}, but couldn't open it in Bitwig: {e}"));
                     }
                 }
+                // Remembered once Bitwig has been asked to open it, so a library busy with another change never holds
+                // the opening up; the copy is written, so it's remembered either way.
+                remember_convert(&db, &c);
             }
             Err(e) => {
                 log::warning("Convert", &format!("{path}: {e}"));
@@ -1003,8 +1124,18 @@ fn open_in_bitwig(page: &Page, save: &mo_library::Save) {
     }
 }
 
+/// Remembers a convert in the song library while it's the app's own songs.db (library.db is never written), so the next
+/// convert of the same FL project, in this run or a later one, may save over this copy while nothing has changed it
+/// rather than keeping it and taking the next name (review X1-5). Not being able to only costs that: the log says why.
+/// Reads and writes the disk: never on the window's thread.
+fn remember_convert(db: &Path, c: &Converted) {
+    if let Err(e) = mo_library::converts::remember(db, &c.file, &c.written) {
+        log::warning("Convert", &format!("Couldn't remember {} in the library: {e}", c.file.display()));
+    }
+}
+
 /// Reads the settings (export folder, template, how steps play) and converts `project` on the low-priority pool.
-/// The library stays read-only, so what was written isn't remembered (see [`bitwig_convert`](mo_app::bitwig_convert)).
+/// What was written is remembered after, in songs.db ([`remember_convert`]).
 fn convert_save(db: &Path, project: &Path) -> Result<Converted, String> {
     let lib = Library::open_read_only(db).map_err(|e| format!("Couldn't read the library: {e}"))?;
     let setting = |key: &str| lib.setting(key).map_err(|e| format!("Couldn't read the settings: {e}"));
@@ -1046,6 +1177,38 @@ mod tests {
         assert_eq!(ids(FL), ["open", "bitwig", "", "reveal", "copy"]);
         assert_eq!(ids("Bitwig Studio"), ["open", "", "reveal", "copy"]);
         assert_eq!(save_menu(FL)[0].what, "Open in FL Studio");
+    }
+
+    /// Review X3-24: a song line's menu has the panel's buttons, each line with its key (rule 15), and each id an
+    /// action the page's keys run.
+    #[test]
+    fn a_song_s_menu_has_the_panel_s_buttons_with_their_keys() {
+        let lines = |daw: &str, keys: &Shortcuts| {
+            song_menu(daw, keys).iter().map(|i| (i.what.to_string(), i.key.to_string(), i.id.to_string())).collect()
+        };
+        let line = |what: &str, key: &str, id: &str| (what.to_owned(), key.to_owned(), id.to_owned());
+        let keys = Shortcuts::default();
+        let fl: Vec<_> = lines(FL, &keys);
+        assert_eq!(
+            fl,
+            [
+                line("Open in Bitwig", "Ctrl+O", "projects.open"),
+                line("Open in FL Studio", "Ctrl+Shift+O", "projects.openOwn"),
+                line("", "", ""),
+                line("Show in folder", "Ctrl+Shift+E", "projects.reveal"),
+                line("Copy path", "Ctrl+Shift+C", "projects.copyPath"),
+            ]
+        );
+        let bitwig: Vec<_> = lines(BITWIG_STUDIO, &keys);
+        assert_eq!(bitwig[0], line("Open in Bitwig Studio", "Ctrl+O", "projects.open"));
+        assert_eq!(bitwig.len(), 4);
+        // Every line runs a Songs action, so its key and its line do the same thing.
+        for (_, _, id) in fl.iter().filter(|(_, _, id)| !id.is_empty()) {
+            assert!(mo_app::shortcuts::SONGS_ACTIONS.iter().any(|a| a.id == id), "{id}");
+        }
+        // A key changed in Settings shows on its line.
+        let changed = Shortcuts::from_setting(Some(r#"{"projects.reveal":"Ctrl+R"}"#));
+        assert_eq!(lines(BITWIG_STUDIO, &changed)[2], line("Show in folder", "Ctrl+R", "projects.reveal"));
     }
 
     #[test]

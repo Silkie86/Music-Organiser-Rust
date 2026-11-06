@@ -97,7 +97,8 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::watchdog::watch_window(&app);
     // Dragging sounds and clips out to a DAW says here when it can't.
     mo_ui::drag::connect(feed.clone());
-    // The Songs page reads the C# app's library, read-only (CLAUDE.md: until the Rust page is trusted).
+    // The Songs page reads the song library (the C# app's library.db, read-only, until songs.db is the app's own), and
+    // keeps what it reads of your saves, and the Bitwig copies it converts, only ever in songs.db.
     mo_ui::songs::connect(&app, library.clone(), feed.clone());
     mo_ui::startup::step("Songs page");
     mo_ui::sounds::connect(
@@ -114,7 +115,7 @@ fn main() -> Result<(), slint::PlatformError> {
     // Space, Backup: the backup settings live in a file of their own; the library is only read.
     mo_ui::backup::connect(&app, library.clone(), feed.clone());
     mo_ui::startup::step("Backup page");
-    // Settings: changes are kept in the app's own file, never in library.db.
+    // Settings: changes are kept in the app's own file; the folder lists and the export folder in the song library.
     mo_ui::settings::connect(
         &app,
         mo_ui::settings::Setup {

@@ -195,7 +195,7 @@ pub fn connect(app: &AppWindow) {
     let weak = app.as_weak();
     let reader = Newest::start("Arrangement", move |(asked, path): (u64, PathBuf)| {
         let read = arr::read(&path);
-        let looking = read.as_ref().ok().filter(|p| p.found.is_none()).map(|p| p.views.clone());
+        let looking = read.as_ref().ok().filter(|p| p.found.is_none()).map(|p| p.views().to_vec());
         let _ = weak.upgrade_in_event_loop(move |app| arrived(&app, asked, read));
         if let (Some(views), Some(finder)) = (looking, &finder) {
             finder.ask((asked, path, views));
@@ -264,7 +264,7 @@ pub fn show_song(app: &AppWindow, path: Option<&str>, missing: bool) {
             && p.found.is_none()
         {
             let locator = mo_app::sound_library::locator(None);
-            p.found = arr::find_samples(&p.views, &path, &locator, || true).map(Arc::new);
+            p.found = arr::find_samples(p.views(), &path, &locator, || true).map(Arc::new);
         }
         arrived(app, asked, read);
         return;
@@ -316,11 +316,11 @@ fn arrived(app: &AppWindow, asked: u64, read: Result<Preview, String>) {
             return;
         }
     };
-    if preview.views.is_empty() {
+    if preview.views().is_empty() {
         data.set_message(NOT_YET.into());
         return;
     }
-    data.set_views(strings(preview.views.iter().map(|a| a.view.to_owned())));
+    data.set_views(strings(preview.views().iter().map(|a| a.view.to_owned())));
     STATE.with(|s| s.borrow_mut().preview = Some(preview));
     pick_view(app, 0);
 }
@@ -487,20 +487,21 @@ fn pick_view(app: &AppWindow, index: usize) {
     let shown = STATE.with(|s| {
         let mut s = s.borrow_mut();
         let p = s.preview.as_ref()?;
-        let a = p.views.get(index)?.clone();
+        // Measured with the views on the reader's thread: here it's only copied (a song can have millions of notes).
+        let (a, measured) = p.view(index).map(|(a, m)| (a.clone(), m.clone()))?;
         let mut view = match &p.found {
-            Some(found) => View::new(a.clone(), found.clone()),
-            None => View::new(a.clone(), Arc::default()).looking_for_files(),
+            Some(found) => View::measured(a.clone(), &measured, found.clone()),
+            None => View::measured(a.clone(), &measured, Arc::default()).looking_for_files(),
         };
         let notes = arr::notes(&a, p.found.as_deref());
         view.set_peaks(s.peaks.clone());
         view.resize(s.size.0, s.size.1);
         s.view = Some(view);
-        Some((a, notes))
+        Some((a, measured, notes))
     });
-    let Some((a, notes)) = shown else { return };
+    let Some((a, measured, notes)) = shown else { return };
     data.set_view(i32::try_from(index).unwrap_or(0));
-    data.set_summary(arr::summary(&a).into());
+    data.set_summary(measured.summary.as_str().into());
     if show_notes(&data, &a, notes) {
         redraw(app);
     }
@@ -906,7 +907,7 @@ pub fn sample_preview() -> Preview {
     let mut bitwig = playlist.clone();
     bitwig.view = "As it opens in Bitwig";
     let found = HashMap::from([(SAMPLE_TAKE.to_owned(), PathBuf::from(SAMPLE_TAKE))]);
-    Preview { views: vec![Arc::new(playlist), Arc::new(bitwig)], found: Some(Arc::new(found)) }
+    Preview::new(vec![Arc::new(playlist), Arc::new(bitwig)], Some(Arc::new(found)))
 }
 
 /// The made-up song's vocal take that's on this computer.
@@ -972,7 +973,7 @@ mod tests {
             ("paper-zoomed-2x", paper, 2.0, |v| v.wheel(560.0, 0.0, 6.0, true, false)),
         ];
         for (name, palette, scale, setup) in views {
-            let mut view = View::new(preview.views[0].clone(), preview.found.clone().unwrap_or_default());
+            let mut view = View::new(preview.views()[0].clone(), preview.found.clone().unwrap_or_default());
             view.set_peaks(peaks.clone());
             view.resize(900.0, 300.0);
             setup(&mut view);

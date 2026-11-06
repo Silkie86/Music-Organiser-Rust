@@ -28,8 +28,8 @@ pub enum LibraryError {
     /// A setting holds something that isn't what it should be (a folder list that isn't a list of text): what's
     /// wrong with it. Asked of where reading it as empty could let something of yours be removed.
     Setting { key: String, why: String },
-    /// A change wasn't made because another app (the C# app saving a scan) held the library for longer than the wait.
-    /// Nothing was changed; trying again later can work.
+    /// A change wasn't made because another write held the library for longer than the wait (the app's own keeping of
+    /// what it read, or another copy of the app). Nothing was changed; trying again later can work.
     Busy { path: PathBuf },
 }
 
@@ -50,7 +50,7 @@ impl fmt::Display for LibraryError {
             LibraryError::Busy { path } => {
                 write!(
                     f,
-                    "The library {} was busy (the old app may be saving a scan), so nothing was changed",
+                    "The library {} was busy with another change, so nothing was changed: try it again in a moment",
                     path.display()
                 )
             }
@@ -408,6 +408,25 @@ impl Library {
         let rows: Vec<(String, String, String)> =
             st.query_map([], |r| Ok((text(r, "kind"), text(r, "a"), text(r, "b"))))?.collect::<Result<_, _>>()?;
         Ok(SongChoices::from_rows(rows.iter().map(|(k, a, b)| (k.as_str(), a.as_str(), b.as_str()))))
+    }
+
+    /// Every setting whose key starts with `prefix` (as spelt), with its text; one that isn't text is left out. The
+    /// settings are a short table, so they're all looked at: no character in `prefix` is read as a pattern.
+    pub fn settings_starting(&self, prefix: &str) -> Result<Vec<(String, String)>, LibraryError> {
+        if !self.has("settings") {
+            return Ok(Vec::new());
+        }
+        let mut st = self.conn.prepare("SELECT key, value FROM settings")?;
+        let mut rows = st.query([])?;
+        let mut found = Vec::new();
+        while let Some(r) = rows.next()? {
+            if let (ValueRef::Text(key), ValueRef::Text(value)) = (r.get_ref("key")?, r.get_ref("value")?)
+                && key.starts_with(prefix.as_bytes())
+            {
+                found.push((String::from_utf8_lossy(key).into_owned(), String::from_utf8_lossy(value).into_owned()));
+            }
+        }
+        Ok(found)
     }
 
     /// A setting the C# app keeps, if it's set.

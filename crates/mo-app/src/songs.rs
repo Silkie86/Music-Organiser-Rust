@@ -473,6 +473,22 @@ pub struct View {
     pub counts: SongCounts,
 }
 
+impl View {
+    /// The song `by` lines on from `from` (Up is -1, Down 1), stepping over the headings and stopping at the first and
+    /// the last; the first song shown when none is picked or the picked one isn't shown. Its place in
+    /// [`Songs::rows`]; none when nothing is shown (review X3-8).
+    pub fn step(&self, from: Option<usize>, by: i32) -> Option<usize> {
+        let songs = || self.entries.iter().filter_map(|e| if let Entry::Song(row) = e { Some(*row) } else { None });
+        let at = from.and_then(|row| songs().position(|r| r == row));
+        let last = self.shown.checked_sub(1)?;
+        let to = match at {
+            Some(at) => at.saturating_add_signed(by as isize).min(last),
+            None => 0,
+        };
+        songs().nth(to)
+    }
+}
+
 /// How many songs each DAW, status and tag would show, with the other filters as they are.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct SongCounts {
@@ -601,6 +617,14 @@ impl Filters {
     /// Whether any filter is set (the Clear button shows).
     pub fn any(&self) -> bool {
         *self != Filters { hide_archived: self.hide_archived, ..Filters::default() }
+    }
+
+    /// The filters that show `row` when these hide it (a song picked on another page or with Ctrl+K): every filter
+    /// goes but Hide archived, which is a choice the user keeps (as Clear keeps it), unless the song is archived
+    /// itself (review A-5).
+    pub fn to_show(&self, row: &SongRow) -> Filters {
+        let hide_archived = self.hide_archived && !row.status.eq_ignore_ascii_case(ARCHIVED);
+        Filters { hide_archived, ..Filters::default() }
     }
 }
 
@@ -780,6 +804,57 @@ mod tests {
         let s = songs(&[newest, older, oldest]);
         let r = &s.rows[0];
         assert_eq!((r.rating, r.notes.as_str(), r.status.as_str(), r.favourite), (4, "needs a drop", "Mixing", true));
+    }
+
+    #[test]
+    fn a_song_shown_from_another_page_keeps_hide_archived_unless_it_is_archived() {
+        let a = save("Alpha", day(2025, 1, 1));
+        let b = Save { status: "Archived".into(), ..save("Bravo", day(2025, 1, 2)) };
+        let s = songs(&[b, a]);
+        let row = |name: &str| s.rows.iter().find(|r| r.song.name == name).unwrap();
+        let shown = |f: &Filters, name: &str| {
+            s.view(f, day(2026, 1, 1))
+                .entries
+                .iter()
+                .any(|e| matches!(e, Entry::Song(i) if s.rows[*i].song.name == name))
+        };
+        let hiding =
+            Filters { search: "nothing like it".into(), favourites: true, hide_archived: true, ..Filters::default() };
+        assert!(!shown(&hiding, "Alpha"));
+        let for_alpha = hiding.to_show(row("Alpha"));
+        assert_eq!(for_alpha, Filters { hide_archived: true, ..Filters::default() });
+        assert!(shown(&for_alpha, "Alpha"));
+        // Kept on, an archived song would stay hidden: the toggle goes for it alone.
+        let for_bravo = hiding.to_show(row("Bravo"));
+        assert_eq!(for_bravo, Filters::default());
+        assert!(shown(&for_bravo, "Bravo"));
+        // Off stays off.
+        assert_eq!(Filters { search: "x".into(), ..Filters::default() }.to_show(row("Alpha")), Filters::default());
+    }
+
+    #[test]
+    fn up_and_down_step_over_the_headings_and_stop_at_the_ends() {
+        let now = day(2026, 10, 31);
+        let s =
+            songs(&[save("Didums", day(2026, 10, 30)), save("Night", day(2026, 3, 1)), save("Old", day(2019, 1, 1))]);
+        let v = s.view(&Filters::default(), now);
+        let name = |row: Option<usize>| row.map(|r| s.rows[r].song.name.clone());
+        let row = |n: &str| s.rows.iter().position(|r| r.song.name == n);
+        // Nothing picked: the first song, either way.
+        assert_eq!(name(v.step(None, 1)).as_deref(), Some("Didums"));
+        assert_eq!(name(v.step(None, -1)).as_deref(), Some("Didums"));
+        // Over the "Earlier in 2026" heading, and back.
+        assert_eq!(name(v.step(row("Didums"), 1)).as_deref(), Some("Night"));
+        assert_eq!(name(v.step(row("Night"), -1)).as_deref(), Some("Didums"));
+        // The first and the last hold.
+        assert_eq!(name(v.step(row("Didums"), -1)).as_deref(), Some("Didums"));
+        assert_eq!(name(v.step(row("Old"), 1)).as_deref(), Some("Old"));
+        // A picked song the filters hide: the first one shown.
+        let only_old = s.view(&Filters { search: "Old".into(), ..Filters::default() }, now);
+        assert_eq!(name(only_old.step(row("Didums"), 1)).as_deref(), Some("Old"));
+        // Nothing shown: nothing to step to.
+        let none = s.view(&Filters { search: "no such song".into(), ..Filters::default() }, now);
+        assert_eq!(none.step(None, 1), None);
     }
 
     #[test]
