@@ -42,11 +42,17 @@ pub const SETTINGS_FILE: &str = "backup.txt";
 /// saved again.
 pub const PART_ENDING: &str = ".mo-part";
 
-/// Every file written through [`write_whole`] in the data folder: the Backup page's two, and a data folder move's
-/// notes in the folder it moved to ([`crate::data_move`]). A new caller adds its file's name here (or to
+/// Every file written through [`write_whole`] in the data folder: the Backup page's two, a data folder move's notes in
+/// the folder it moved to ([`crate::data_move`]), and the Plugins page's moves under way
+/// ([`crate::plugins::moves_under_way`]). A new caller adds its file's name here (or to
 /// [`WRITTEN_WHOLE_BESIDE_FIRST`]), so the start-up sweep clears what a crash leaves of it.
-pub const WRITTEN_WHOLE: [&str; 4] =
-    [SETTINGS_FILE, SONGS_FILE, crate::paths::MOVED_IN_FILE, crate::data_move::MOVING_IN_FILE];
+pub const WRITTEN_WHOLE: [&str; 5] = [
+    SETTINGS_FILE,
+    SONGS_FILE,
+    crate::paths::MOVED_IN_FILE,
+    crate::data_move::MOVING_IN_FILE,
+    crate::plugins::moves_under_way::FILE_NAME,
+];
 
 /// Every file written through [`write_whole`] beside the first data folder (`%LOCALAPPDATA%`): a data folder move's
 /// pointer and its "ready to switch" file.
