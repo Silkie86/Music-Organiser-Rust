@@ -263,6 +263,19 @@ fn system_folders() -> Vec<String> {
     out.into_iter().map(|p| p.to_string_lossy().into_owned()).filter(|p| !p.is_empty() && seen.insert(key(p))).collect()
 }
 
+/// The computer's own folder (see [`system_folders`]) that `path` is or holds, as written or where it really is, or
+/// `None`. Add a folder and Move refuse those, as Clean up does (review E2-9): moving AppData behind a link, or adding
+/// it to a plugin, would break other programs. A folder inside one (a plugin's own folder in AppData) is fine. On
+/// Windows it asks the system, so call it away from the window's thread.
+pub fn system_folder_in(path: &str) -> Option<String> {
+    let path = path.trim_end_matches(['/', '\\']);
+    let real = real_path(path).unwrap_or_else(|| path.to_owned());
+    system_folders().into_iter().find(|f| {
+        let (written, real_f) = both(f);
+        is_inside(written, path) || is_inside(&real_f, &real)
+    })
+}
+
 /// The folders Windows keeps besides [`data_roots`]' (Documents, AppData, ProgramData, Program Files), wherever
 /// you've moved them.
 #[cfg(windows)]
