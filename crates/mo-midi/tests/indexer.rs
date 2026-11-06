@@ -362,3 +362,30 @@ fn the_same_loop_in_other_keys_is_one_set_and_old_notes_get_their_shape() {
     let low = catalogue.entries.iter().find(|e| e.phrase.clip == "Low C").unwrap();
     assert_eq!(low.in_keys, Some(InKeys::Octaves(2)));
 }
+
+#[test]
+fn a_file_away_mid_reading_keeps_its_parts_and_is_read_again() {
+    let dir = folder("mo-midi-indexer-away");
+    let file = dir.join("Pack").join("Basslines").join("Low 01.mid");
+    std::fs::write(&file, smf(BASS)).unwrap();
+    let db = dir.join("midi-index.db");
+    let mut store = MidiStore::open(&db).unwrap();
+    run(&mut store, &dir, false);
+    assert_eq!(count(&db, "parts"), 1);
+
+    // It changes, the reading is planned, and then the drive drops before it's read.
+    std::fs::write(&file, smf(TUNE)).unwrap();
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let plan = indexer::plan(&wanted(&dir), &store.stamps().unwrap(), &[], false);
+    assert_eq!(plan.todo.len(), 1);
+    std::fs::rename(&file, dir.join("away.tmp")).unwrap();
+    let folders = vec![dir.to_string_lossy().into_owned()];
+    indexer::run(&mut store, &plan, &folders, &pool, 2, &AtomicBool::new(false), &|_, _, _| {}).unwrap();
+    assert_eq!(count(&db, "parts"), 1, "what was read before is kept");
+
+    // Back again: a plain reading (not Read again) reads it.
+    std::fs::rename(dir.join("away.tmp"), &file).unwrap();
+    let again = run(&mut store, &dir, false);
+    assert_eq!(again.read, 1);
+    assert!(store.failures().unwrap().is_empty());
+}

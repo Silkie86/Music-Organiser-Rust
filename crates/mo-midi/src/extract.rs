@@ -63,10 +63,11 @@ pub struct Found {
 /// Why a file couldn't be read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unread {
-    /// Another program has it open (a backup, a virus check): what was read from it before is kept, and it's read
-    /// again next time.
+    /// Another program has it open (a backup, a virus check), or it couldn't be reached just now (a drive or network
+    /// share away for a moment): what was read from it before is kept, and it's read again next time. A file really
+    /// gone is forgotten by the next plan anyway.
     InUse(String),
-    /// Gone, not allowed, or damaged: noted once, and only tried again when asked.
+    /// Not allowed, or damaged: noted once, and only tried again when asked.
     Failed(String),
 }
 
@@ -93,7 +94,7 @@ pub fn is_unpitched_plugin(name: &str) -> bool {
 /// Reads a file from disk and finds its parts. `midi_folders` are the MIDI library folders, whose own names aren't
 /// hints for a `.mid` file inside them.
 pub fn read(path: &Path, midi_folders: &[String]) -> Result<Vec<Found>, Unread> {
-    let raw = std::fs::read(path).map_err(|e| unread(&e))?;
+    let raw = std::fs::read(path).map_err(|e| unread_file(&e))?;
     from_bytes(path, &raw, midi_folders)
 }
 
@@ -130,6 +131,22 @@ pub fn unread(e: &io::Error) -> Unread {
         }
         _ => format!("It couldn't be opened, maybe because another program had it open ({e})"),
     })
+}
+
+/// Why a file couldn't be read from the disk: as [`unread`], but a file that wasn't there or couldn't be reached just
+/// now (a drive or network share that dropped out mid-reading) is tried again next time with what was read from it
+/// before kept, not marked failed. Only a refusal or damage is noted as failed.
+pub fn unread_file(e: &io::Error) -> Unread {
+    match e.kind() {
+        io::ErrorKind::PermissionDenied | io::ErrorKind::UnexpectedEof | io::ErrorKind::InvalidData => unread(e),
+        io::ErrorKind::NotFound => {
+            Unread::InUse("It wasn't there just now (a drive or network share away?); it's read again next time".into())
+        }
+        _ => match unread(e) {
+            Unread::Failed(why) => Unread::InUse(format!("{why}; it's read again next time")),
+            in_use => in_use,
+        },
+    }
 }
 
 fn damaged(what: &str) -> Unread {
@@ -279,6 +296,17 @@ mod tests {
     }
 
     #[test]
+    fn a_file_away_just_now_is_tried_again_and_damage_is_noted() {
+        let e = |kind| io::Error::new(kind, "x");
+        assert!(matches!(unread_file(&e(io::ErrorKind::NotFound)), Unread::InUse(_)));
+        assert!(matches!(unread_file(&e(io::ErrorKind::TimedOut)), Unread::InUse(_)));
+        assert!(matches!(unread_file(&e(io::ErrorKind::PermissionDenied)), Unread::Failed(_)));
+        assert!(matches!(unread_file(&e(io::ErrorKind::InvalidData)), Unread::Failed(_)));
+        // A file's contents that don't read stay failed.
+        assert!(matches!(unread(&e(io::ErrorKind::Other)), Unread::Failed(_)));
+    }
+
+    #[test]
     fn a_midi_file_part() {
         let raw = smf(8, 0, "Groove");
         let folders = vec![r"D:\Packs".to_owned()];
@@ -303,9 +331,8 @@ mod tests {
         assert!(matches!(from_bytes(Path::new("x.mid"), &raw[..30], &[]), Err(Unread::Failed(_)) | Ok(_)));
         assert!(matches!(from_bytes(Path::new("x.flp"), b"not a project", &[]), Err(Unread::Failed(_))));
         assert_eq!(from_bytes(Path::new("x.bwproject"), b"not a project", &[]), Ok(Vec::new()));
-        assert!(
-            matches!(read(Path::new("/no/such/file.mid"), &[]), Err(Unread::Failed(w)) if w == "It isn't there any more")
-        );
+        // Not there just now (a drive away): tried again next time, with what was read before kept.
+        assert!(matches!(read(Path::new("/no/such/file.mid"), &[]), Err(Unread::InUse(_))));
     }
 
     #[test]

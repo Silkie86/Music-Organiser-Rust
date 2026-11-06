@@ -594,7 +594,8 @@ pub enum Outcome {
     Parts(Vec<Found>),
     /// It couldn't be read; noted once and only tried again when asked.
     Failed(String),
-    /// Another program had it open: what was read from it before is kept, and it's read again next time.
+    /// Another program had it open, or it couldn't be reached just now: what was read from it before is kept, and
+    /// it's read again next time.
     InUse(String),
 }
 
@@ -1010,8 +1011,7 @@ impl MidiStore {
                     p.drums, p.track_name, {key_fact}, y.hash IS NOT NULL, o.hash IS NOT NULL, {shape}
              FROM parts p JOIN files f ON f.id = p.file JOIN notes n ON n.id = p.notes
                   LEFT JOIN your_roles y ON y.hash = n.hash LEFT JOIN your_octaves o ON o.hash = n.hash
-                  {keys_join} {shapes_join}
-             ORDER BY f.mtime DESC, p.id"
+                  {keys_join} {shapes_join}"
         ))?;
         let mut rows = st.query([])?;
         // One shared copy of each file's facts.
@@ -1082,6 +1082,9 @@ impl MidiStore {
                 shape: r.get::<_, Option<i64>>(26)?.filter(|s| *s != 0),
             });
         }
+        // Newest file first, sorted here rather than in SQLite: no index has that order, so SQLite would hold a whole
+        // sorted copy of every row in memory beside this list.
+        list.sort_unstable_by_key(|p| (std::cmp::Reverse(p.source.mtime), p.id));
         Ok(list)
     }
 

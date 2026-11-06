@@ -245,7 +245,16 @@ impl Catalogue {
             }
         }
         let mut line_count = entries.len();
-        for group in by_shape.into_values().filter(|g| g.len() > 1) {
+        // One loop saved as several files: two tracks of one file (a tune doubled, a riff played again higher) are two
+        // parts, so a part from a file the group already has stays a line of its own.
+        let groups = by_shape.into_values().map(|g| {
+            let mut files = std::collections::HashSet::new();
+            g.into_iter()
+                .filter(|&at| entries.get(at).is_some_and(|e| files.insert(case::to_lower(&e.phrase.source.path))))
+                .collect::<Vec<usize>>()
+        });
+        let groups: Vec<Vec<usize>> = groups.filter(|g| g.len() > 1).collect();
+        for group in groups {
             // In entries' order, newest first: the first stands for them.
             let mut keys: Vec<u8> =
                 group.iter().filter_map(|&at| entries.get(at)).map(|e| e.phrase.lowest % 12).collect();
@@ -531,6 +540,25 @@ mod tests {
 
     fn titles(c: &Catalogue, hits: &[Hit]) -> Vec<String> {
         hits.iter().map(|h| c.entries[h.entry].title()).collect()
+    }
+
+    #[test]
+    fn the_same_loop_in_other_keys_is_grouped_only_across_files() {
+        let a = source(r"L:\Pack\Loop Am.mid", SourceKind::File, 300);
+        let b = source(r"L:\Pack\Loop Dm.mid", SourceKind::File, 200);
+        let shaped = |p: StoredPhrase, lowest: u8| StoredPhrase { shape: Some(7), lowest, ..p };
+        let cat = Catalogue::new(vec![
+            // One file with the tune doubled an octave up on a second track: two parts.
+            shaped(phrase(1, &a, "Lead", "Loop Am", Role::Melody, "A1"), 57),
+            shaped(phrase(2, &a, "Lead high", "Loop Am", Role::Melody, "A2"), 69),
+            // The same loop in another file, in D minor: grouped with the first.
+            shaped(phrase(3, &b, "Lead", "Loop Dm", Role::Melody, "D1"), 62),
+        ]);
+        assert_eq!(cat.entries[0].key_group, Some(0));
+        assert_eq!(cat.entries[1].key_group, None, "a second track of the same file stays a line");
+        assert_eq!(cat.entries[2].key_group, Some(0));
+        assert_eq!(cat.entries[0].in_keys, Some(InKeys::Keys(2)));
+        assert_eq!(cat.line_count, 2);
     }
 
     #[test]
