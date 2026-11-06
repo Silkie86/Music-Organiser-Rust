@@ -284,7 +284,7 @@ fn backed_up(lib: &Library, root: &Path, music: &Path, level: Level) -> Vec<Path
         folders: vec![Folder { path: music.to_owned(), mode: Mode::Slimmed }],
         ..Settings::default()
     };
-    prepare(lib, &settings, &AtomicBool::new(false)).unwrap().plan.copy.into_iter().map(|f| f.path).collect()
+    prepare(lib, &settings, None, &AtomicBool::new(false)).unwrap().plan.copy.into_iter().map(|f| f.path).collect()
 }
 
 #[test]
