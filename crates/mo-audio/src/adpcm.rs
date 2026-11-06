@@ -15,6 +15,10 @@ const MS_COEFS: [(i32, i32); 7] = [(256, 0), (512, -256), (0, 0), (192, 64), (24
 /// How Microsoft ADPCM's step grows or shrinks after each nibble.
 const MS_ADAPT: [i32; 16] = [230, 230, 230, 230, 307, 409, 512, 614, 768, 614, 512, 409, 307, 230, 230, 230];
 
+/// The biggest step Microsoft ADPCM may grow to, as ffmpeg holds it: so the next growth (at most 768 / 256) can't
+/// overflow. A good file never comes near it; a damaged one (nibble 8 again and again triples the step) would.
+const MS_MOST_DELTA: i32 = i32::MAX / 768;
+
 const IMA_INDEX: [i32; 16] = [-1, -1, -1, -1, 2, 4, 6, 8, -1, -1, -1, -1, 2, 4, 6, 8];
 
 const IMA_STEPS: [i32; 89] = [
@@ -127,11 +131,13 @@ impl Layout {
             for nibble in [byte >> 4, byte & 0x0F] {
                 let (c1, c2, delta, s1, s2) = &mut state[c];
                 let signed = i32::from(nibble as i8) << 28 >> 28;
-                let predicted = ((*s1 * *c1 + *s2 * *c2) >> 8) + signed * *delta;
-                let s = predicted.clamp(-32768, 32767);
+                // Worked out in i64: two samples at full scale times the biggest coefficients can pass i32.
+                let predicted = ((i64::from(*s1) * i64::from(*c1) + i64::from(*s2) * i64::from(*c2)) >> 8)
+                    + i64::from(signed) * i64::from(*delta);
+                let s = predicted.clamp(-32768, 32767) as i32;
                 *s2 = *s1;
                 *s1 = s;
-                *delta = ((MS_ADAPT[usize::from(nibble)] * *delta) >> 8).max(16);
+                *delta = ((MS_ADAPT[usize::from(nibble)] * *delta) >> 8).clamp(16, MS_MOST_DELTA);
                 out[c].push(s as f32 / 32768.0);
                 c = (c + 1) % ch;
             }
@@ -229,6 +235,27 @@ mod tests {
         let got: Vec<i32> = out[0].iter().map(|s| (s * 32768.0).round() as i32).collect();
         assert_eq!(got.len(), 9);
         assert_eq!(&got[..4], &[100, 107, 108, 109]);
+    }
+
+    #[test]
+    fn a_damaged_ms_block_never_overflows() {
+        // Review finding G-1: nibble 8 over and over triples the step each time; it must stop growing, not overflow.
+        // Full-scale samples with the biggest coefficients test the prediction's sum too.
+        let mut f = fmt(MS, 1, 1024);
+        f.extend_from_slice(&[32, 0, 0xF4, 0x07, 7, 0]);
+        for _ in 0..14 {
+            f.extend_from_slice(&i16::MIN.to_le_bytes());
+        }
+        let l = Layout::from_fmt(MS, 1, &f).unwrap();
+        assert_eq!(l.coefs[0], (-32768, -32768));
+        let mut b = vec![0u8];
+        for v in [i16::MAX, i16::MIN, i16::MIN] {
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b.resize(1024, 0x88);
+        let out = l.decode(&b);
+        assert_eq!(out[0].len(), 2036);
+        assert!(out[0].iter().all(|s| (-1.0..1.0).contains(s)));
     }
 
     #[test]
