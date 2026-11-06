@@ -1690,7 +1690,8 @@ fn sample_detail() -> mo_library::SaveDetail {
         path: String::new(),
         installed,
     };
-    let sample = |path: &str, found: bool, unplayed: bool| ProjectSample { path: path.into(), found, unplayed };
+    let sample =
+        |path: &str, found: bool, unplayed: bool| ProjectSample { path: path.into(), found, unplayed, muted: false };
     mo_library::SaveDetail {
         plugins: vec![
             plugin("Night Pad", "Made Up Audio", PluginKind::Instrument, true),

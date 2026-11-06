@@ -86,6 +86,21 @@ pub struct ProjectSample {
     pub found: bool,
     /// It's loaded but no note plays it.
     pub unplayed: bool,
+    /// It has notes, but all of them are muted: it still counts as played, unless Settings says a sound muted in a
+    /// song's newest save isn't used ([`crate::UsageRules::not_muted_in_newest`]).
+    pub muted: bool,
+}
+
+impl ProjectSample {
+    /// How the library keeps whether the save plays it (the C# app's `SampleUse`): 0 it plays, 1 no notes, 2 all its
+    /// notes muted.
+    pub fn use_number(&self) -> i64 {
+        match (self.unplayed, self.muted) {
+            (true, _) => 1,
+            (false, true) => 2,
+            (false, false) => 0,
+        }
+    }
 }
 
 /// Everything the library keeps on one save, for the song panel.
@@ -355,6 +370,7 @@ impl Library {
                         path: text(r, "path"),
                         found: int(r, "found") == Some(1),
                         unplayed: int(r, "unplayed") == Some(1),
+                        muted: int(r, "unplayed") == Some(2),
                     })
                 })?
                 .collect::<Result<_, _>>()?;
