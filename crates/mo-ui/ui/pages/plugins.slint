@@ -88,7 +88,6 @@ export global PluginsData {
     in property <string> summary;
     // Shown instead of the list while it loads, or when the library can't be read.
     in property <string> message: "Reading your plugins…";
-    in property <string> count;
     in property <[PluginListLine]> lines;
     in property <int> selected: -1;
     in-out property <string> search;
@@ -1029,11 +1028,6 @@ export component PluginsPage inherits Rectangle {
                 items: PluginsData.menu;
                 chosen(id) => { PluginsData.menu-chosen(id); }
             }
-        }
-        if PluginsData.count != "": Text {
-            text: PluginsData.count;
-            color: Theme.faint;
-            font-size: Type.small;
         }
     }
 }

@@ -988,6 +988,7 @@ fn sample_unused_plugins() -> mo_app::space_plugins::Found {
                         })
                         .collect(),
                 },
+                stands_in: false,
             }
         };
     let (program, presets, sounds) = (SpaceKind::Program, SpaceKind::Presets, SpaceKind::Sounds);

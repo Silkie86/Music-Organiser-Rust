@@ -193,8 +193,12 @@ pub struct PluginRow {
     /// The years its saves were made in, newest first.
     pub years: Vec<i32>,
     pub room: Option<PluginSpace>,
-    /// Installed, measured, and no song has used it in the years asked about (or ever).
+    /// Installed, measured, and no song has used it in the years asked about (or ever), nor stands in for a missing
+    /// version ([`Self::stands_in`]).
     pub unused: bool,
+    /// The missing version of this plugin whose songs may open with it ("AmpliTube 4" for AmpliTube 5), as the Install
+    /// these card says: then it isn't unused, so Clean up never offers what the card points to (review E2-6).
+    pub stands_in: Option<String>,
     /// Its name and maker in small letters, made once for the search box (not again for every row on every key).
     lower: (String, String),
 }
@@ -523,6 +527,7 @@ impl Plugins {
         let measured = spaces.iter().filter_map(|s| s.measured).min();
         let cutoff = unused_since(now, unused_years);
         with_room(&mut rows, &spaces, cutoff);
+        stand_ins(&mut rows, cutoff);
         let measured_at = spaces.iter().filter_map(|s| Some((s.key.clone(), s.measured?))).collect();
         let spaces: Vec<PluginSpace> = spaces.iter().map(space_of).collect();
 
@@ -1233,6 +1238,7 @@ fn row(
         years,
         room: None,
         unused: false,
+        stands_in: None,
     }
 }
 
@@ -1255,7 +1261,34 @@ fn kind_of(n: u8) -> PluginKind {
 }
 
 fn unused(r: &PluginRow, cutoff: NaiveDateTime) -> bool {
-    r.room.is_some() && r.installed && !r.last_used.is_some_and(|t| t >= cutoff)
+    r.room.is_some() && r.installed && r.stands_in.is_none() && !r.last_used.is_some_and(|t| t >= cutoff)
+}
+
+/// Marks the installed plugin the Install these card names for each missing one some song's newest save uses
+/// ([`PluginRow::stands_in`]): of its family, another name, the highest by name ([`other_version`]).
+fn stand_ins(rows: &mut [PluginRow], cutoff: NaiveDateTime) {
+    let missing: Vec<(String, String)> = rows
+        .iter()
+        .filter(|r| !r.installed && r.missing_now > 0 && r.format != "Native")
+        .map(|r| (family(&r.name), r.name.clone()))
+        .filter(|(f, _)| f.chars().count() >= 3)
+        .collect();
+    if missing.is_empty() {
+        return;
+    }
+    let families: Vec<Option<String>> =
+        rows.iter().map(|r| (r.installed && r.format != "Native").then(|| family(&r.name))).collect();
+    for (fam, name) in &missing {
+        let named = (0..rows.len())
+            .filter(|&i| families[i].as_ref() == Some(fam) && !case::eq_ignore_case(&rows[i].name, name))
+            .max_by_key(|&i| case::to_lower(&rows[i].name));
+        if let Some(i) = named
+            && rows[i].stands_in.is_none()
+        {
+            rows[i].stands_in = Some(name.clone());
+            rows[i].unused = unused(&rows[i], cutoff);
+        }
+    }
 }
 
 /// Gives each row its measured room, and adds the installed plugins no song uses (they aren't in the songs' list at
@@ -1328,6 +1361,7 @@ fn with_room(rows: &mut Vec<PluginRow>, spaces: &[StoredSpace], cutoff: NaiveDat
                 years: Vec::new(),
                 room: Some(space_of(s)),
                 unused: false,
+                stands_in: None,
             };
             r.unused = unused(&r, cutoff);
             rows.push(r);
@@ -1339,18 +1373,15 @@ fn with_room(rows: &mut Vec<PluginRow>, spaces: &[StoredSpace], cutoff: NaiveDat
     }
 }
 
-/// The version a plugin's name gives after its family: "4" for "AmpliTube 4", "" for "Serum".
-fn version_of(name: &str) -> String {
-    let lower = case::to_lower(name.trim());
-    let fam = case::to_lower(&family(name));
-    let rest = lower.strip_prefix(fam.as_str()).unwrap_or("");
-    rest.trim_start_matches([' ', '_', '-', 'v']).chars().take_while(char::is_ascii_digit).collect()
+/// The version a plugin's name gives after its family: 4 for "AmpliTube 4", 7 for "Guitar Rig 7", 3 for "FabFilter
+/// Pro-Q 3", none for "Serum". Found the way names are compared, past the family's letters and digits (review E2-5).
+fn version_of(name: &str) -> Option<u32> {
+    mo_space::uninstallers::major_after(name, &family(name))
 }
 
 /// Whether two names are different versions of one plugin: both name a version, and not the same one.
 fn other_versions(a: &str, b: &str) -> bool {
-    let (va, vb) = (version_of(a), version_of(b));
-    !va.is_empty() && !vb.is_empty() && va != vb
+    matches!((version_of(a), version_of(b)), (Some(va), Some(vb)) if va != vb)
 }
 
 fn matched(a: &str, b: &str) -> bool {

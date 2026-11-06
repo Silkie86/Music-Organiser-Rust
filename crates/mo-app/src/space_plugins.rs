@@ -52,6 +52,9 @@ pub struct Measured {
     /// Its files and folders, as the Plugins page has them: what it counts is its own room, without a folder it shares
     /// with another plugin (a maker's folder).
     pub room: PluginSpace,
+    /// Another version a missing plugin's songs may open with (`PluginRow::stands_in`): never unused, whatever the
+    /// years (review E2-6).
+    pub stands_in: bool,
 }
 
 impl Measured {
@@ -107,8 +110,12 @@ impl Found {
     /// is read again; the Plugins page counts back the same way ([`unused_since`]).
     pub fn as_of(&self, years: u32, now: NaiveDateTime) -> Found {
         let since = unused_since(now, years);
-        let (mut plugins, mut used): (Vec<Measured>, Vec<Measured>) =
-            self.plugins.iter().chain(&self.used).cloned().partition(|p| !p.last_used.is_some_and(|t| t >= since));
+        let (mut plugins, mut used): (Vec<Measured>, Vec<Measured>) = self
+            .plugins
+            .iter()
+            .chain(&self.used)
+            .cloned()
+            .partition(|p| !p.stands_in && !p.last_used.is_some_and(|t| t >= since));
         biggest_first(&mut plugins);
         biggest_first(&mut used);
         Found { plugins, used, years, now, sizes: self.sizes, measured: self.measured, gone: self.gone }
@@ -177,6 +184,7 @@ fn measured_of(r: &PluginRow) -> Option<Measured> {
         last_used: r.last_used,
         songs: r.songs,
         room: r.room.clone()?,
+        stands_in: r.stands_in.is_some(),
     })
 }
 
@@ -388,6 +396,7 @@ mod tests {
             last_used: last,
             songs,
             room: PluginSpace { key: name.to_lowercase(), name: name.to_owned(), vendor: "Maker".to_owned(), folders },
+            stands_in: false,
         }
     }
 

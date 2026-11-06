@@ -10,8 +10,7 @@
 //! - None otherwise: its plugin files can go to the Recycle Bin instead, each checked again just before
 //!   (`mo_space::plugin_files`), with Put back.
 //!
-//! Nothing is written to library.db: the page leaves out the plugin's files once they've gone, until the old app
-//! looks for plugins again.
+//! Nothing is written to library.db: every read of the page leaves out the plugin's files once they've gone.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,8 +31,12 @@ pub struct Ask {
     pub row_key: (String, String),
     pub name: String,
     pub vendor: String,
-    /// How many saves use it.
-    pub projects: usize,
+    /// How many songs use it (any save), as its card's Used tab counts them, and how many of their newest saves do
+    /// (those open with it missing) (review E2-10).
+    pub songs: usize,
+    pub songs_now: usize,
+    /// The missing version whose songs may open with it, as the Install these card says (review E2-6).
+    pub stands_in: Option<String>,
     pub space: PluginSpace,
     installed: Vec<String>,
     names: HashMap<String, String>,
@@ -71,7 +74,9 @@ impl Plugins {
             row_key: (r.key.clone(), r.own.clone()),
             name: r.name.clone(),
             vendor: r.vendor.clone(),
-            projects: r.saves.len(),
+            songs: r.songs,
+            songs_now: r.songs_now,
+            stands_in: r.stands_in.clone(),
             space: r.room.clone()?,
             installed,
             names,
@@ -132,13 +137,25 @@ impl Ask {
         format!("Uninstall {}?", self.name)
     }
 
-    /// What the card warns of first: projects that use it ("" for none).
+    /// What the card warns of first: songs that use it ("" for none).
     pub fn warning(&self) -> String {
-        match self.projects {
-            0 => String::new(),
-            1 => format!("1 project uses it. It'll open with {} missing.", self.name),
-            n => format!("{n} projects use it. They'll open with {} missing.", self.name),
+        let mut parts = Vec::new();
+        match (self.songs, self.songs_now) {
+            (0, _) => {}
+            (1, 1) => parts.push(format!("1 song uses it. It'll open with {} missing.", self.name)),
+            (n, now) if now == n => parts.push(format!("{n} songs use it. They'll open with {} missing.", self.name)),
+            (n, 0) => parts.push(format!("{} used it in older saves; their newest saves don't need it.", songs(n))),
+            (n, 1) => {
+                parts.push(format!("{} used it; 1 still does, and will open with {} missing.", songs(n), self.name))
+            }
+            (n, now) => {
+                parts.push(format!("{} used it; {now} still do, and will open with {} missing.", songs(n), self.name))
+            }
         }
+        if let Some(other) = &self.stands_in {
+            parts.push(format!("Songs that use {other} may open with it now, and won't once it's gone."));
+        }
+        parts.join(" ")
     }
 
     /// What the card says over its lines.
@@ -297,6 +314,11 @@ pub fn ran_text(name: &str, ran: &Ran, waited: Waited) -> String {
 /// Which of the plugin's files have gone now.
 pub fn gone_now(files: &[String]) -> Vec<String> {
     files.iter().filter(|f| std::fs::symlink_metadata(f).is_err()).cloned().collect()
+}
+
+/// "1 song", "3 songs".
+fn songs(n: usize) -> String {
+    if n == 1 { "1 song".to_owned() } else { format!("{n} songs") }
 }
 
 #[cfg(test)]

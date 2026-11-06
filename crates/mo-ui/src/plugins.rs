@@ -1,8 +1,14 @@
 //! Fills the Plugins page from `mo_app::plugins` and answers its search box, chips, cards and side card. The library
 //! is read on a low-priority thread when the page is shown (rules 12 and 21), when anything was written to it since
-//! the last read, Space's Recycle Bin changed or the day did; until it's back the page shows what it read before. The picked plugin's installed copies are
-//! read on a thread of their own, newest pick wins. Nothing here writes to library.db; Clean up (`clean`) sends
-//! folders you tick to the Recycle Bin, and nowhere else.
+//! the last read, Space's Recycle Bin changed or the day did; until it's back the page shows what it read before. The
+//! picked plugin's installed copies are read on a thread of their own, newest pick wins.
+//!
+//! What the page changes, all on workers: Clean up and Uninstall send what you tick to the Recycle Bin and keep it in
+//! the app's list of what's there (`mo_app::binned`, shared with Space); Uninstall runs the plugin's own uninstaller;
+//! Move copies a folder to another drive and leaves a link (`moving`, noting each move under way so a cut-off one's
+//! half copy is found); and two writes to library.db, Solomon's OK of 5 Nov 2026: the moved folders
+//! (`mo_library::moves`) and your say on a plugin's folders (`mo_library::plugin_folders`). Your picks of the years
+//! and the cards go in the app's own settings.
 
 mod clean;
 mod folder_fixes;
@@ -28,7 +34,7 @@ use mo_app::shell;
 use mo_app::shortcuts::{PLUGINS_ACTIONS, Shortcuts};
 use mo_app::year_strip;
 use mo_library::Library;
-use mo_library::plugins::ScannedPlugin;
+use mo_library::plugins::{NEEDED_COUNT_KEY, ScannedPlugin, UNUSED_YEARS_KEY};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel, Weak};
 
 use crate::filters::FilterModels;
@@ -60,7 +66,7 @@ struct Page {
     /// Clean up for the picked plugin, if one is open, and what this session's clean-ups sent to the Recycle Bin.
     clean: Option<clean::Cleaning>,
     binned: Vec<clean::Binned>,
-    /// The plugin files this session's uninstalls removed: left out of every read until the old app looks again.
+    /// The plugin files this session's uninstalls removed: left out of every read (a later read finds them gone too).
     uninstalled: Vec<String>,
     /// What this session's clean-ups removed that isn't in your Recycle Bin (no Put back for it): left out too.
     removed_for_good: Vec<String>,
@@ -74,7 +80,8 @@ struct Page {
     clean_asked: u64,
     /// The picked plugin's folder lines' paths, as the On disk tab shows them.
     room_paths: Vec<String>,
-    /// This session's "Not its", "Take off" and "Add a folder": shown over every read until the old app measures.
+    /// This session's "Not its", "Take off" and "Add a folder": shown over every read (each read also reads them back
+    /// from the library).
     folder_fixes: Vec<mo_app::plugins::folder_fixes::FolderFix>,
     /// What another page asked this one to show (Space's Show on Plugins page) before the library was first read.
     wanted: Option<Wanted>,
@@ -278,6 +285,8 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
                 pl.needed_count = n;
             }
         });
+        // Kept for the next start too (review E2-8), in the app's own settings.
+        crate::settings::remember(NEEDED_COUNT_KEY, &n.to_string());
         fill_cards(&app);
     });
     let weak = app.as_weak();
@@ -289,6 +298,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
                 pl.set_unused_years(y);
             }
         });
+        crate::settings::remember(UNUSED_YEARS_KEY, &y.to_string());
         refresh(&app);
         fill_panel(&app);
     });
@@ -512,15 +522,23 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>) {
         Ok(mut fresh) => {
             // What another page asked for before the library was read (a read that fails drops it too).
             let wanted = PAGE.with(|p| p.borrow_mut().wanted.take());
-            // The filters and the pick carry over a fresh read.
+            // The filters and the pick carry over a fresh read; the years and the cards too, or before the first read,
+            // your picks as kept in the app's settings (review E2-8), over the library's.
+            let before = PAGE.with(|p| p.borrow().plugins.as_ref().map(|old| (old.unused_years, old.needed_count)));
+            let (years, cards) = match before {
+                Some((y, n)) => (Some(y), Some(n)),
+                None => (saved_unused_years(), saved_needed_count()),
+            };
+            if let Some(n) = cards {
+                fresh.needed_count = n;
+            }
+            if let Some(y) = years.filter(|&y| y != fresh.unused_years) {
+                fresh.set_unused_years(y);
+            }
             let kept = PAGE.with(|p| {
                 let p = p.borrow();
                 let old = p.plugins.as_ref()?;
                 fresh.filters = old.filters.clone();
-                fresh.needed_count = old.needed_count;
-                if old.unused_years != fresh.unused_years {
-                    fresh.set_unused_years(old.unused_years);
-                }
                 p.picked.and_then(|i| old.rows.get(i)).map(|r| (r.key.clone(), r.own.clone()))
             });
             // This session's folder fixes first, then what went: a folder added and binned or moved since stays out, as
@@ -622,10 +640,22 @@ fn show_in(pl: &mut Plugins, wanted: &Wanted) -> Option<usize> {
     }
 }
 
-/// How many years make a plugin unused on this page (its pick can change while the app runs), once the library is
-/// read: Space counts the same ones.
+/// How many years make a plugin unused on this page (its pick can change while the app runs; before the library is
+/// read, as you last picked it): Space counts the same ones.
 pub fn unused_years() -> Option<u32> {
-    PAGE.with(|p| p.borrow().plugins.as_ref().map(|pl| pl.unused_years))
+    PAGE.with(|p| p.borrow().plugins.as_ref().map(|pl| pl.unused_years)).or_else(saved_unused_years)
+}
+
+/// The "Unused after" years you picked, as kept in the app's settings (one of [`UNUSED_YEARS_CHOICES`]).
+fn saved_unused_years() -> Option<u32> {
+    let y = crate::settings::value(UNUSED_YEARS_KEY)?.trim().parse::<u32>().ok()?;
+    UNUSED_YEARS_CHOICES.contains(&y).then_some(y)
+}
+
+/// How many Install these cards you picked, as kept in the app's settings (one of [`NEEDED_COUNT_CHOICES`]).
+fn saved_needed_count() -> Option<usize> {
+    let n = crate::settings::value(NEEDED_COUNT_KEY)?.trim().parse::<usize>().ok()?;
+    NEEDED_COUNT_CHOICES.contains(&n).then_some(n)
 }
 
 /// How many moves have finished this session, whatever came of them: Space looks for old copies again after each.
@@ -654,7 +684,7 @@ pub fn finish_up() {
 }
 
 /// Where this session's Clean ups, uninstalls and moves took things from: Space leaves them out of the plugins it
-/// counts, as this page does, until the old app measures again.
+/// counts, as this page does.
 pub fn gone_this_session() -> Vec<String> {
     PAGE.with(|p| {
         let p = p.borrow();
@@ -683,8 +713,9 @@ fn refresh(app: &AppWindow) {
     PAGE.with(|p| {
         let p = p.borrow();
         let Some(pl) = p.plugins.as_ref() else { return };
-        data.set_summary(pl.summary().into());
-        data.set_count(pl.count_text().into());
+        // In the header, as the other pages have it (review X3-27): while filters leave some out, how many show.
+        let count = pl.count_text();
+        data.set_summary(if count.is_empty() { pl.summary() } else { count }.into());
         FILTER_MODELS.with(|m| {
             data.set_show_filter(m.show.view(&pl.filter(Group::Show)));
             data.set_kind_filter(m.kind.view(&pl.filter(Group::Kind)));
@@ -802,6 +833,17 @@ fn pick(app: &AppWindow, row: Option<usize>) {
     ask_copies(app);
 }
 
+/// What an action is called on the card's buttons and in the right-click menu alike.
+fn action_words(id: &str) -> &'static str {
+    match id {
+        "plugins.projects" => "Show in Songs",
+        "plugins.cleanUp" => "Clean up…",
+        "plugins.uninstall" => "Uninstall…",
+        "plugins.move" => "Move to another drive…",
+        _ => "Search online",
+    }
+}
+
 /// The card's buttons and the right-click menu: Clean up only for a plugin with folders it could look at.
 fn fill_actions(app: &AppWindow) {
     let data = app.global::<PluginsData>();
@@ -817,10 +859,11 @@ fn fill_actions(app: &AppWindow) {
         "plugins.move" => can_move,
         _ => true,
     };
+    // The menu says what the card's buttons say (review X3-4); the shortcut list's longer words are the buttons' tips.
     let menu: Vec<MenuItem> = PLUGINS_ACTIONS
         .iter()
         .map(|a| MenuItem {
-            what: a.what.into(),
+            what: action_words(a.id).into(),
             key: shortcuts.key_of(a.id).into(),
             id: a.id.into(),
             enabled: enabled(a.id),
@@ -830,14 +873,7 @@ fn fill_actions(app: &AppWindow) {
     let actions: Vec<CardAction> = PLUGINS_ACTIONS
         .iter()
         .map(|a| CardAction {
-            text: match a.id {
-                "plugins.projects" => "Show in Songs",
-                "plugins.cleanUp" => "Clean up…",
-                "plugins.uninstall" => "Uninstall…",
-                "plugins.move" => "Move to another drive…",
-                _ => "Search online",
-            }
-            .into(),
+            text: action_words(a.id).into(),
             tip: a.what.into(),
             key: shortcuts.key_of(a.id).into(),
             id: a.id.into(),
