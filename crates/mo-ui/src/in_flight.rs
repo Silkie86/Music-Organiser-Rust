@@ -5,6 +5,16 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+/// A link to Bitwig for when the app closes or crashes: every wait `longest` at most, so the app never hangs there.
+pub(crate) fn closing_link(longest: Duration) -> mo_dawlink::bitwig::Bitwig {
+    mo_dawlink::bitwig::Bitwig {
+        connect_timeout: longest,
+        timeout: longest,
+        change_timeout: longest,
+        ..mo_dawlink::bitwig::Bitwig::default()
+    }
+}
+
 /// How many starts are on their way.
 static ON_THEIR_WAY: AtomicUsize = AtomicUsize::new(0);
 

@@ -703,8 +703,7 @@ pub fn installed_note(done: &Installed) -> String {
 /// Under the DAW rows: where the scripts are installed from for now.
 pub const DAWS_NOTE: &str = "The scripts that let the app talk to Bitwig and FL Studio. Checking Bitwig only \
     reads. Install puts the app's own copy in the DAW's folders: on FL Studio's row its script (keeping your setting \
-    for letting the app make changes), on Bitwig's its extension (close Bitwig first on Windows). The live tests stay \
-    in the old app's Settings > DAW links for now.";
+    for letting the app make changes), on Bitwig's its extension (close Bitwig first on Windows).";
 
 pub const SLINT_CREDIT: &str = "Music Organiser's screens are made with Slint, under its royalty-free licence.";
 

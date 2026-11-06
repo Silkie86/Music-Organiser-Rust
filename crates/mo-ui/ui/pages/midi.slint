@@ -467,14 +467,14 @@ component PartPanel inherits SidePanel {
         }
         StudioButton {
             horizontal-stretch: 0;
-            text: MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig" ? "Stop Bitwig" : "Play in Bitwig";
+            text: MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig" ? "Stop in Bitwig" : "Play in Bitwig";
             tip: MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig" ? "Stop the part and take its clip out of Bitwig" : "Play the part round and round through what's on the track selected in Bitwig";
             key: MidiData.bitwig-key;
             clicked => { MidiData.daw-play("bitwig"); }
         }
         StudioButton {
             horizontal-stretch: 0;
-            text: MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl" ? "Stop FL" : "Play in FL";
+            text: MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl" ? "Stop in FL Studio" : "Play in FL Studio";
             tip: MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl" ? "Stop the part in FL Studio" : "Play the part round and round through the channel selected in FL Studio";
             key: MidiData.fl-key;
             clicked => { MidiData.daw-play("fl"); }

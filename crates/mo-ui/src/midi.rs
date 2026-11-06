@@ -1926,7 +1926,7 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
     let ticket = (daw == Daw::Bitwig).then(mo_dawlink::bitwig::ticket);
     let weak = app.as_weak();
     let on_its_way = crate::in_flight::Start::begin();
-    let started = background::spawn("Play in a DAW", move || {
+    let work = move || {
         let _on_its_way = on_its_way;
         let turn = ticket.map(mo_dawlink::bitwig::Ticket::wait);
         let wanted = move || DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst) == asked;
@@ -1985,7 +1985,15 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
                 Err(why) => data.set_daw_note(why.into()),
             }
         });
-    });
+    };
+    // FL's notes are timed on a thread the start makes, which takes the priority of the thread that makes it on Linux
+    // and Mac: so FL's start runs at normal priority, not the background's lowest, or notes come late (the 6 Nov
+    // review's D-11). It's short: a read of the part's notes and the port opening.
+    let started = if daw == Daw::Fl {
+        std::thread::Builder::new().name("Play in FL".to_owned()).spawn(work)
+    } else {
+        background::spawn("Play in Bitwig", work)
+    };
     if let Err(e) = started {
         data.set_daw_starting("".into());
         log::error("MIDI", &format!("Couldn't start playing in a DAW: {e}"));
@@ -2054,15 +2062,32 @@ pub fn finish_up() {
     match first.or_else(take_in_daw) {
         Some(InDaw::Fl(fl)) => fl.finish(),
         Some(InDaw::Bitwig(bitwig)) => {
-            let to = mo_dawlink::bitwig::Bitwig {
-                change_timeout: Duration::from_secs(3),
-                ..mo_dawlink::bitwig::Bitwig::default()
-            };
+            let to = crate::in_flight::closing_link(Duration::from_secs(3));
             // Without waiting its turn: what would go first is closing too, and the extension still makes the stop
             // once the app has gone.
             if let Err(e) = to.stop_playing_as_app_closes(&bitwig) {
                 log::warning("MIDI", &format!("The part playing in Bitwig couldn't be stopped as the app closed: {e}"));
             }
+        }
+        None => {}
+    }
+}
+
+/// In the crash hook, when the crash ends the app: FL's notes let go (waited for a moment, so the offs go out before
+/// the app does) and Bitwig's clip comes out, a second at most. Never waits for the lock: the thread that crashed may
+/// hold it.
+pub fn after_crash() {
+    // A start still on its way takes back what it put in, as when the app closes.
+    DAW_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut slot = match IN_DAW.try_lock() {
+        Ok(slot) => slot,
+        Err(std::sync::TryLockError::Poisoned(slot)) => slot.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    match slot.take() {
+        Some(InDaw::Fl(fl)) => fl.finish(),
+        Some(InDaw::Bitwig(bitwig)) => {
+            let _ = crate::in_flight::closing_link(Duration::from_millis(500)).stop_playing_as_app_closes(&bitwig);
         }
         None => {}
     }
