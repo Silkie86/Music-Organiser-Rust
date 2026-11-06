@@ -137,6 +137,8 @@ struct Page {
     places: Arc<HashMap<i64, usize>>,
     /// Every sound's fingerprint, once read, for Sounds like this and Rediscover.
     index: Option<Arc<SoundIndex>>,
+    /// Why the fingerprints couldn't be read, when they couldn't: nothing waits for them then ([`index_failed`]).
+    no_index: Option<String>,
     /// What Rediscover dug out, as places in `list` with why, best first.
     rediscover: Vec<(usize, String)>,
     /// What Rediscover digs out next time.
@@ -193,6 +195,7 @@ impl Default for Page {
             play_reads: 0.0,
             places: Arc::default(),
             index: None,
+            no_index: None,
             rediscover: Vec::new(),
             re: rediscover::Options { count: COUNT, ..rediscover::Options::default() },
             re_asked: 0,
@@ -588,12 +591,24 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
     START_READ.with(|s| {
         *s.borrow_mut() = Some(Box::new(move || {
             // The shuffle the page opens on: the sounds it puts first are read first. Not when you've picked another
-            // order meanwhile.
+            // order meanwhile, nor with Hide duplicates on: copies among the first would go again once the copies
+            // are known, and the tiles after them move (review B-5).
             let opening = PAGE.with(|p| {
                 let p = p.borrow();
-                (p.order == Order::Shuffled).then_some(Opening { seed: p.seed, view: p.chose_view.then_some(p.view) })
+                let hiding = if p.hide_copies_chosen {
+                    p.filters.hide_copies
+                } else {
+                    crate::settings::value(list::HIDE_COPIES_KEY).as_deref() == Some("on")
+                };
+                (p.order == Order::Shuffled && !hiding)
+                    .then_some(Opening { seed: p.seed, view: p.chose_view.then_some(p.view) })
             });
-            let read = move || read_all(&sounds_db, &library_db, Some(cards), opening, send);
+            let read = move || {
+                read_all(&sounds_db, &library_db, Some(cards), opening, send);
+                // Once the page has all it needs from the library: its backup copy, when there's none or the library
+                // has changed since.
+                say_backed_up(compact::backup::back_up(&sounds_db));
+            };
             if let Err(e) = background::spawn("Sounds library", read)
                 && let Some(app) = weak.upgrade()
             {
@@ -650,6 +665,8 @@ enum Step {
     Used(Arc<SoundList>),
     /// Every sound's fingerprint, for Sounds like this.
     Index(Arc<SoundIndex>),
+    /// The fingerprints couldn't be read, and why: Sounds like this, the galaxy and Rediscover say so rather than wait.
+    NoIndex(String),
     /// The sounds again, once the app's copy of the library was brought up to date with what the C# app changed.
     Refreshed(Refreshed),
     /// Where the galaxy's saved maps are read from now: `sounds.db`, as the copy damaged couldn't be made again.
@@ -663,6 +680,7 @@ fn arrive(app: &AppWindow, step: Step) {
         Step::Rest(rest) => rest_arrived(app, rest),
         Step::Used(list) => use_known(app, list),
         Step::Index(index) => index_known(app, index),
+        Step::NoIndex(why) => index_failed(app, why),
         Step::Refreshed(refreshed) => brought_up_to_date(app, refreshed),
         Step::Source(source) => PAGE.with(|p| p.borrow_mut().galaxy.db = Some(source)),
     }
@@ -885,9 +903,10 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, opening: O
     // The copy made again from sounds.db, which gives the fingerprints, and the sounds as they are now, on the same
     // pass: for one found damaged inside (a bad sector). The sounds are taken in place of the copy's shown: those were
     // as the damaged copy had them, which (once it's the app's own library) needn't be how sounds.db has them.
-    let remake = |first: &mut FirstRead, remade: &mut Option<Vec<Sound>>| {
-        let (mut everything, made) = compact::remake_reading(sounds_db, &first.source, now)?;
+    let remake = |first: &mut FirstRead, remade: &mut Option<Vec<Sound>>, from_backup: &mut bool| {
+        let (mut everything, made) = compact::mend_reading(sounds_db, &first.source, now)?;
         say_made(&made, &first.source, sounds_db, cards.as_ref(), true);
+        *from_backup = made.as_ref().is_ok_and(|m| m.from_backup.is_some());
         if made.is_err() {
             // Not made again: the rest is read from sounds.db, as it is without a copy.
             first.source = sounds_db.to_owned();
@@ -909,7 +928,7 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, opening: O
                     "Sounds",
                     &format!("The app's copy of the sound library is damaged, so it's made again: {e}"),
                 );
-                remake(&mut first, &mut remade)
+                remake(&mut first, &mut remade, &mut false)
             }
             Err(e) => Err(e),
         },
@@ -941,9 +960,12 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, opening: O
         match laid_out {
             // Nothing to do after all (laid out meanwhile, or sounds.db changed since).
             None => {}
-            Some(compact::LaidOut::Damaged(why)) if sounds_db.exists() => {
-                log::warning("Sounds", &format!("The app's own sound library is damaged ({why}), so it's made again"));
-                let made = remake(&mut first, &mut remade);
+            Some(compact::LaidOut::Damaged(why))
+                if sounds_db.exists() || compact::backup::backup_of(&first.source).exists() =>
+            {
+                log::warning("Sounds", &format!("The app's own sound library is damaged ({why}), so it's mended"));
+                let mut remade_from_backup = false;
+                let made = remake(&mut first, &mut remade, &mut remade_from_backup);
                 let job = card_for(job);
                 match made {
                     Ok(prints) => {
@@ -951,7 +973,11 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, opening: O
                         if let Some(job) = job {
                             job.done_as(
                                 "Made your sound library smaller",
-                                "It was damaged, so it was made again from sounds.db.",
+                                if remade_from_backup {
+                                    "It was damaged, so it was put back from its backup copy."
+                                } else {
+                                    "It was damaged, so it was made again from sounds.db."
+                                },
                             );
                         }
                     }
@@ -1056,7 +1082,10 @@ fn send_index(prints: Result<(Gathered, Gathered, usize), SoundsError>, send: &i
             let index = background::on_pool(move || SoundIndex::from_gathered(features, clap, analysed));
             send(Step::Index(Arc::new(index)));
         }
-        Err(e) => log::warning("Sounds", &format!("Couldn't read the sounds' fingerprints: {e}")),
+        Err(e) => {
+            log::warning("Sounds", &format!("Couldn't read the sounds' fingerprints: {e}"));
+            send(Step::NoIndex(e.to_string()));
+        }
     }
 }
 
@@ -1184,6 +1213,25 @@ fn say_laid_out(laid_out: &compact::LaidOut, job: Option<Job>, began: Instant) {
     }
 }
 
+/// Says in the log how making the sound library's backup copy went ([`compact::backup::back_up`]): nothing when there
+/// was nothing to do.
+fn say_backed_up(backed_up: Option<compact::backup::BackedUp>) {
+    match backed_up {
+        None => {}
+        Some(compact::backup::BackedUp::Made { bytes, took }) => log::info(
+            "Sounds",
+            &format!(
+                "Made the sound library's backup copy ({}) and checked it, in {:.1} s",
+                mo_space::size::size_text(bytes),
+                took.as_secs_f32()
+            ),
+        ),
+        Some(compact::backup::BackedUp::NotNow(why)) => {
+            log::warning("Sounds", &format!("Couldn't make the sound library's backup copy this time: {why}"));
+        }
+    }
+}
+
 /// Says in the log, once, that the app's copy of the sound library is its own library from now on (the C# app is
 /// retired, Solomon 2026-11-05): `sounds.db` isn't read again.
 fn say_adopted() {
@@ -1210,7 +1258,18 @@ fn say_made(
         say_adopted();
     }
     match made {
+        Ok(synced) if synced.made && synced.from_backup.is_some() => {
+            let made = synced.from_backup.map(chrono::DateTime::<Local>::from).unwrap_or_else(Local::now);
+            let line = list::put_back_line(made);
+            log::warning("Sounds", &format!("The app's own sound library was damaged: {line}"));
+            if let Some(cards) = cards {
+                cards.start("Mended your sound library from its backup copy", "").done(&line);
+            }
+        }
         Ok(synced) if synced.made => {
+            if let Some(why) = &synced.backup_unused {
+                log::warning("Sounds", &format!("The sound library was made again from sounds.db, as {why}"));
+            }
             let line = list::copy_made_line(size(copy), size(sounds_db));
             log::info("Sounds", &format!("Made the app's own copy of the sound library: {line}"));
             let title = if again {
@@ -1307,6 +1366,7 @@ pub fn index_known(app: &AppWindow, index: Arc<SoundIndex>) {
     let (picked, first) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let first = p.index.replace(index).is_none();
+        p.no_index = None;
         // New ones in place of those the galaxy was laid out from (sounds new since, or heard again once the library
         // was brought up to date): it's laid out again from these.
         if !first {
@@ -1324,11 +1384,45 @@ pub fn index_known(app: &AppWindow, index: Arc<SoundIndex>) {
     }
 }
 
+/// The fingerprints couldn't be read (`why`): what was waiting for them says so (review finding B-1).
+fn index_failed(app: &AppWindow, why: String) {
+    let picked = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        // Fingerprints the page has already (read before, on another pass) are kept.
+        if p.index.is_some() {
+            return None;
+        }
+        p.no_index = Some(why);
+        Some(p.picked)
+    });
+    let Some(picked) = picked else { return };
+    if let Some(at) = picked {
+        find_alike(app, at);
+    }
+    galaxy::index_known(app);
+    if PAGE.with(|p| p.borrow().re_started) {
+        rediscover_now(app);
+    }
+}
+
+/// What waits for the fingerprints says when they couldn't be read (`why`): that `what` can't be done, and why.
+pub(super) fn no_index_note(what: &str, why: &str) -> String {
+    format!("The sounds' fingerprints couldn't be read, so {what} ({why}).")
+}
+
 fn find_alike(app: &AppWindow, at: usize) {
     let data = app.global::<SoundsData>();
     data.set_alike(ModelRc::default());
-    if PAGE.with(|p| p.borrow().index.is_none()) {
-        data.set_alike_note("Not ready yet: the sounds' fingerprints are still being read.".into());
+    let (none, no_index) = PAGE.with(|p| {
+        let p = p.borrow();
+        (p.index.is_none(), p.no_index.clone())
+    });
+    if none {
+        let note = match no_index {
+            Some(why) => no_index_note("nothing can listen for sounds like it", &why),
+            None => "Not ready yet: the sounds' fingerprints are still being read.".to_owned(),
+        };
+        data.set_alike_note(note.into());
         return;
     }
     data.set_alike_note("Listening for sounds like it…".into());
@@ -1609,12 +1703,15 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
             }
             PAGE.with(|p| p.borrow_mut().unread = true);
             crate::space::sounds_changed(app);
-            data.set_empty_title("No sound library yet".into());
+            // One there that couldn't be read is said to be so, not missing (review finding B-1).
+            data.set_empty_title(
+                if why.is_empty() { "No sound library yet" } else { "The sound library couldn't be read" }.into(),
+            );
             data.set_empty_text(
                 if why.is_empty() {
                     "The C# app's Sound Lab makes it when it scans your sample folders. This page reads it.".to_string()
                 } else {
-                    format!("The sound library couldn't be read: {why}")
+                    why
                 }
                 .into(),
             );
@@ -1781,6 +1878,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         }
     });
     let weak = app.as_weak();
+    let weak_again = app.as_weak();
     data.on_toggle(move |kind| {
         change(&weak, |f| f.toggle(&kind));
         if kind == list::HIDE_COPIES {
@@ -1791,6 +1889,10 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
                 p.filters.hide_copies
             });
             crate::settings::remember(list::HIDE_COPIES_KEY, if on { "on" } else { "off" });
+            // Turned on after a look that failed: it's tried again.
+            if on && let Some(app) = weak_again.upgrade() {
+                copies::look_again(&app, true);
+            }
         }
     });
     let weak = app.as_weak();
@@ -2048,10 +2150,13 @@ fn rediscover_now(app: &AppWindow) {
     data.set_re_empty_title("Picking sounds…".into());
     data.set_re_empty_text("".into());
     let Some(ask) = ask else {
-        data.set_re_intro(
-            "Listening to your sounds first: their fingerprints are still being read, and the list fills in by itself."
-                .into(),
-        );
+        let intro = match PAGE.with(|p| p.borrow().no_index.clone()) {
+            Some(why) => no_index_note("there's nothing to dig sounds out by", &why),
+            None => "Listening to your sounds first: their fingerprints are still being read, and the list fills in \
+                     by itself."
+                .to_owned(),
+        };
+        data.set_re_intro(intro.into());
         return;
     };
     data.set_re_intro(format!("Looking through {} sounds…", thousands(total)).into());
@@ -2427,6 +2532,27 @@ fn listed(app: &AppWindow, id: u64, new: Listed) {
             pick(app, at);
         }
     }
+}
+
+/// The Space page counts the copies of the same sound: they're looked for (as Hide duplicates does) from now on.
+pub fn copies_for_space(app: &AppWindow) {
+    copies::for_space(app);
+}
+
+/// Space's Measure again: the copies are looked for again in the files as they are now (only files changed since the
+/// last look are read).
+pub fn copies_look_again(app: &AppWindow) {
+    copies::look_again(app, false);
+}
+
+/// Whether Hide duplicates is on.
+pub fn hides_copies() -> bool {
+    PAGE.with(|p| p.borrow().filters.hide_copies)
+}
+
+/// How far looking for the copies has got (Hide duplicates', which the Space page counts too).
+pub fn copies_found() -> list::CopiesFound {
+    copies::found()
 }
 
 /// For the screenshots: the copies Hide duplicates hides, as if they'd been found (`None`: none, not looked for).
@@ -3267,6 +3393,7 @@ mod tests {
                 }
                 Step::Read(Err(why)) => format!("couldn't read: {why}"),
                 Step::Index(index) => format!("{} fingerprints", index.features.len()),
+                Step::NoIndex(why) => format!("no fingerprints: {why}"),
                 Step::Used(list) => format!("used: {}", list.used_in(0).is_some()),
                 Step::Refreshed(r) => {
                     let plays: i64 = r.library.list.sounds().iter().map(|s| i64::from(s.plays)).sum();
@@ -3293,6 +3420,43 @@ mod tests {
     /// The cards' titles and lines, as the feed shows them now.
     fn cards_said(cards: &Feed) -> Vec<String> {
         cards.visible(Instant::now()).iter().map(|c| format!("{}: {}", c.title, c.detail)).collect()
+    }
+
+    #[test]
+    fn a_damaged_library_is_mended_from_its_backup_copy_and_named_when_it_cant_be() {
+        let sounds_db = sound_library("mend");
+        for id in 10..40 {
+            add_sound(&sounds_db, id, &format!("hit {id}"));
+        }
+        let library_db = song_library("mend-songs.db", &[]);
+        // The first start makes the app's own library from sounds.db; then the page makes its backup copy.
+        one_start(&sounds_db, &library_db, &Feed::default());
+        let copy = compact::copy_of(&sounds_db);
+        assert!(compact::own_since(&copy).is_some());
+        assert!(matches!(compact::backup::back_up(&sounds_db), Some(compact::backup::BackedUp::Made { .. })));
+        // sounds.db gone, and the library's list damaged: put back from its backup copy, and a card says so.
+        for end in ["", "-wal", "-shm"] {
+            let _ = std::fs::remove_file(format!("{}{end}", sounds_db.display()));
+        }
+        damage_first_page(&copy, "sounds");
+        let cards = Feed::default();
+        let said = one_start(&sounds_db, &library_db, &cards);
+        assert_eq!(said.first().map(String::as_str), Some("35 sounds from sounds-rust.db, 0 plays"), "{said:?}");
+        let shown = cards_said(&cards);
+        assert!(
+            shown.iter().any(|c| c.starts_with("Mended your sound library from its backup copy: It was damaged")),
+            "{shown:?}"
+        );
+        // No backup copy any more, and the fingerprints damaged: what waits for them is told why (review finding B-1).
+        let _ = std::fs::remove_file(compact::backup::backup_of(&copy));
+        damage_first_page(&copy, "sound_features");
+        let said = one_start(&sounds_db, &library_db, &Feed::default());
+        assert!(said.iter().any(|s| s.starts_with("no fingerprints: The sound library")), "{said:?}");
+        // Its list damaged too: the page says the library itself couldn't be read.
+        damage_first_page(&copy, "sounds");
+        let said = one_start(&sounds_db, &library_db, &Feed::default());
+        let first = said.first().cloned().unwrap_or_default();
+        assert!(first.starts_with("couldn't read: The sound library") && first.contains("is damaged"), "{said:?}");
     }
 
     #[test]

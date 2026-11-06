@@ -75,19 +75,15 @@ pub fn keeps_settings(path: &str) -> bool {
 /// The saves the Sounds section reads: the newest save of each song that keeps its settings, newest first, leaving
 /// out saves that have gone and the converter's own copies in the export folder (they'd show every sound twice).
 pub fn newest_saves(songs: &[Song], export_root: Option<&Path>) -> Vec<SongSave> {
+    // Each song gives its own name: no looking it up again among every song (H-14).
     let mut out: Vec<SongSave> = songs
         .iter()
-        .map(|s| &s.latest)
-        .filter(|s| !s.file_missing && keeps_settings(&s.path))
-        .filter(|s| !mo_presets::curves::is_export(Path::new(&s.path), export_root))
-        .map(|s| SongSave { path: s.path.clone(), song: song_name(songs, s), modified: s.mtime })
+        .filter(|s| !s.latest.file_missing && keeps_settings(&s.latest.path))
+        .filter(|s| !mo_presets::curves::is_export(Path::new(&s.latest.path), export_root))
+        .map(|s| SongSave { path: s.latest.path.clone(), song: s.name.clone(), modified: s.latest.mtime })
         .collect();
     out.sort_by(|a, b| b.modified.cmp(&a.modified).then_with(|| a.path.cmp(&b.path)));
     out
-}
-
-fn song_name(songs: &[Song], save: &Save) -> String {
-    songs.iter().find(|s| std::ptr::eq(&s.latest, save)).map_or_else(|| save.name.clone(), |s| s.name.clone())
 }
 
 /// The saves the Curves section looks in: every save of every song that keeps its settings (a knob move may be in an
@@ -767,11 +763,14 @@ pub fn summary(total: usize, shown: usize, songs: usize, files: usize, reading: 
     if shown == total { what } else { format!("Showing {} of {}: {what}", thousands(shown), thousands(total)) }
 }
 
-/// The list's words when it shows nothing: a title and a line, or ("", "") when there are lines.
+/// The list's words when it shows nothing: a title and a line, or ("", "") when there are lines. `filtering`: what's
+/// shown is still being worked out. "No sounds match" only shows once it's sure: not while songs are still being read
+/// or a filtering is on its way (H-9).
 pub fn empty_words(
     total: usize,
     shown: usize,
     reading: bool,
+    filtering: bool,
     any_filter: bool,
     failed: Option<&str>,
 ) -> (String, String) {
@@ -793,10 +792,26 @@ pub fn empty_words(
             )
         };
     }
+    if reading {
+        return ("Reading your songs".into(), "The sounds that match show here as each song is read.".into());
+    }
+    if filtering {
+        return (String::new(), String::new());
+    }
     (
         "No sounds match".into(),
         if any_filter { "Try fewer filters or other words.".into() } else { "Try other words.".into() },
     )
+}
+
+/// The list's words when a song's sounds are asked for and none were read from it: why, in a few words.
+pub fn song_not_read(save: &str) -> (String, String) {
+    let text = if keeps_settings(save) {
+        "Its newest save has no plugin sounds the page can read, or it's a copy in the Bitwig export folder."
+    } else {
+        "Only FL Studio and Bitwig songs keep their plugins' settings where they can be read."
+    };
+    ("No sounds from this song".into(), text.into())
 }
 
 /// One line of the list, in words.
@@ -992,12 +1007,14 @@ pub fn format_note(items: &[Item], shown: &[usize]) -> String {
 pub mod act {
     pub const EXPORT: &str = "presets.export";
     pub const TO_BITWIG: &str = "presets.toBitwig";
-    /// Audition in Bitwig (a preset on a track of its own, playing a part), and Stop audition while it plays.
+    /// Audition in Bitwig (a preset on a track of its own, playing a part), and Stop in Bitwig while it plays.
     pub const AUDITION: &str = "presets.audition";
     /// Keep an audition in Bitwig: its track stays, as Send to Bitwig would have left it.
     pub const KEEP: &str = "presets.keepAudition";
     pub const EXPORT_SHOWN: &str = "presets.exportShown";
     pub const REVEAL: &str = "presets.reveal";
+    /// The sound's song on the Songs page (Show in Songs, as Plugins has it).
+    pub const SHOW_IN_SONGS: &str = "presets.showInSongs";
     pub const COPY_PATH: &str = "presets.copyPath";
     pub const USE_GUESS: &str = "presets.useGuess";
     /// A part fix: this, then the part's key ("presets.part.bass").
@@ -1026,7 +1043,7 @@ pub enum Hearing {
 }
 
 /// What the picked line offers, in the card's order. `busy` while an export runs; `hearing` says whether this line is
-/// being auditioned (then Audition is Stop audition, and Keep in Bitwig shows beside it once it plays).
+/// being auditioned (then Audition is Stop in Bitwig, and Keep in Bitwig shows beside it once it plays).
 pub fn offers(i: &Item, busy: bool, hearing: Hearing) -> Vec<Offer> {
     let ext = i.row.extension.to_lowercase();
     let file = i.is_file();
@@ -1040,9 +1057,9 @@ pub fn offers(i: &Item, busy: bool, hearing: Hearing) -> Vec<Offer> {
     };
     match hearing {
         // Stop always works, so a part never plays on with no way to stop it from here.
-        Hearing::Starting => out.push(offer("Stop audition", act::AUDITION, true)),
+        Hearing::Starting => out.push(offer("Stop in Bitwig", act::AUDITION, true)),
         Hearing::Playing => {
-            out.push(offer("Stop audition", act::AUDITION, true));
+            out.push(offer("Stop in Bitwig", act::AUDITION, true));
             out.push(offer("Keep in Bitwig", act::KEEP, true));
         }
         Hearing::Off => out.push(offer("Audition in Bitwig", act::AUDITION, bitwig && (file || !busy))),
@@ -1051,7 +1068,8 @@ pub fn offers(i: &Item, busy: bool, hearing: Hearing) -> Vec<Offer> {
         out.push(offer("Show in folder", act::REVEAL, true));
         out.push(offer("Copy path", act::COPY_PATH, true));
     } else {
-        out.push(offer("Show the song", act::REVEAL, true));
+        out.push(offer("Show in Songs", act::SHOW_IN_SONGS, true));
+        out.push(offer("Show the song's file", act::REVEAL, true));
         out.push(offer("Copy the song's path", act::COPY_PATH, true));
     }
     out
@@ -1187,6 +1205,7 @@ pub mod curve_act {
     pub const RENAME: &str = "curves.rename";
     pub const HIDE: &str = "curves.hide";
     pub const OPEN_SONG: &str = "curves.revealSong";
+    pub const SHOW_IN_SONGS: &str = "curves.showInSongs";
 }
 
 /// What the curves list is filtered by.
@@ -1247,16 +1266,45 @@ fn curve_texts(c: &Curve) -> Vec<String> {
     out
 }
 
+/// What the curves list searches and sorts a curve by, worked out once when the curves are read or one changes, so a
+/// key typed in the search makes no copies (H-5).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CurveKey {
+    /// Every text a search looks in, in lower case, joined.
+    words: String,
+    /// Its newest place's time.
+    newest: i64,
+    /// Its name in lower case.
+    name: String,
+}
+
+impl CurveKey {
+    pub fn of(c: &Curve) -> CurveKey {
+        CurveKey {
+            words: curve_texts(c).iter().map(|t| t.to_lowercase()).collect::<Vec<_>>().join("\u{1f}"),
+            newest: c.sources.iter().map(|s| s.modified).max().unwrap_or(0),
+            name: c.name.to_lowercase(),
+        }
+    }
+
+    pub fn all(curves: &[Curve]) -> Vec<CurveKey> {
+        curves.iter().map(CurveKey::of).collect()
+    }
+}
+
 /// The curves shown, as places in `curves`: newest found first (by their newest place), then by name. With them, the
 /// Found in filter as its chips show it: each way curves are found, with how many of them the search and Show hidden
-/// let through. Both come from one look at each curve, as this runs with each key typed in the search.
-pub fn shown_curves(curves: &[Curve], f: &CurveFilters) -> (Vec<usize>, Filter) {
-    let newest = |c: &Curve| c.sources.iter().map(|s| s.modified).max().unwrap_or(0);
+/// let through. Both come from one look at each curve, as this runs with each key typed in the search. `keys` are
+/// [`CurveKey::all`] of `curves`.
+pub fn shown_curves(curves: &[Curve], keys: &[CurveKey], f: &CurveFilters) -> (Vec<usize>, Filter) {
+    let words: Vec<String> = f.search.split_whitespace().map(str::to_lowercase).collect();
+    let passes =
+        |c: &Curve, k: &CurveKey| (f.hidden || !c.hidden) && words.iter().all(|w| k.words.contains(w.as_str()));
     let mut found = [0usize; KINDS.len()];
     let mut out = Vec::new();
-    for (i, c) in curves.iter().enumerate().filter(|(_, c)| f.passes_rest(c)) {
-        for (n, k) in found.iter_mut().zip(KINDS) {
-            if c.sources.iter().any(|s| s.kind == k) {
+    for (i, (c, _)) in curves.iter().zip(keys).enumerate().filter(|(_, (c, k))| passes(c, k)) {
+        for (n, kind) in found.iter_mut().zip(KINDS) {
+            if c.sources.iter().any(|s| s.kind == kind) {
                 *n += 1;
             }
         }
@@ -1264,11 +1312,7 @@ pub fn shown_curves(curves: &[Curve], f: &CurveFilters) -> (Vec<usize>, Filter) 
             out.push(i);
         }
     }
-    out.sort_by(|&a, &b| {
-        newest(&curves[b])
-            .cmp(&newest(&curves[a]))
-            .then_with(|| curves[a].name.to_lowercase().cmp(&curves[b].name.to_lowercase()))
-    });
+    out.sort_by(|&a, &b| keys[b].newest.cmp(&keys[a].newest).then_with(|| keys[a].name.cmp(&keys[b].name)));
     let choices: Vec<(String, String)> =
         KINDS.iter().zip(found).map(|(&k, n)| (kind_label(k).to_owned(), thousands(n))).collect();
     let picked: Vec<String> = f.kinds.iter().map(|&k| kind_label(k).to_owned()).collect();
@@ -1393,13 +1437,20 @@ fn bar_words(at: f64) -> String {
     format!("bar {}", (at / 4.0).floor() as i64 + 1)
 }
 
+/// How many places a curve's card lists, newest first.
+pub const PLACES_UP_TO: usize = 20;
+
 pub fn curve_card(c: &Curve) -> CurveCard {
     let mut facts =
         vec![("LENGTH".to_owned(), beats_words(c.length_beats)), ("POINTS".into(), c.points.len().to_string())];
     facts.push(("FOUND".into(), found_words(c)));
-    let places = c
-        .sources
-        .iter()
+    // The newest places only: a common shape (any ramp) can be found in hundreds, and the card isn't a list (H-7).
+    let mut sources: Vec<&mo_presets::curves::CurveSource> = c.sources.iter().collect();
+    sources.sort_by_key(|s| std::cmp::Reverse(s.modified));
+    let more = sources.len().saturating_sub(PLACES_UP_TO);
+    sources.truncate(PLACES_UP_TO);
+    let mut places: Vec<(String, String)> = sources
+        .into_iter()
         .map(|s| {
             let what =
                 [s.device.as_str(), s.setting.as_str()].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>();
@@ -1418,6 +1469,12 @@ pub fn curve_card(c: &Curve) -> CurveCard {
             (title, about.join(" · "))
         })
         .collect();
+    if more > 0 {
+        places.push((
+            format!("And {} more {}", thousands(more), if more == 1 { "place" } else { "places" }),
+            String::new(),
+        ));
+    }
     CurveCard {
         name: c.name.clone(),
         shape: curve_path(&c.points, SHAPE_BOX.0, SHAPE_BOX.1),
@@ -1429,12 +1486,14 @@ pub fn curve_card(c: &Curve) -> CurveCard {
 
 /// What the picked curve offers, in the card's order.
 pub fn curve_offers(c: &Curve, has_bitwig: bool) -> Vec<Offer> {
+    let in_song = c.sources.iter().any(|s| s.kind != SourceKind::BitwigCurve);
     vec![
         offer("Save to Bitwig's curves", curve_act::TO_BITWIG, has_bitwig),
         offer("Show curve file", curve_act::REVEAL, true),
         offer("Rename", curve_act::RENAME, true),
         offer(if c.hidden { "Show again" } else { "Hide" }, curve_act::HIDE, true),
-        offer("Show the song", curve_act::OPEN_SONG, c.sources.iter().any(|s| s.kind != SourceKind::BitwigCurve)),
+        offer("Show in Songs", curve_act::SHOW_IN_SONGS, in_song),
+        offer("Show the song's file", curve_act::OPEN_SONG, in_song),
     ]
 }
 
@@ -1559,6 +1618,16 @@ mod tests {
         assert_eq!(with(".flstate", true), Format::Native);
         assert_eq!(with(".bwpreset", true), Format::Native);
         assert_eq!(with(".bwpreset", false), Format::Other);
+    }
+
+    #[test]
+    fn no_sounds_match_only_once_reading_and_filtering_are_done() {
+        let words = |reading, filtering| empty_words(100, 0, reading, filtering, true, None).0;
+        assert_eq!(words(true, false), "Reading your songs");
+        assert_eq!(words(true, true), "Reading your songs");
+        assert_eq!(words(false, true), "");
+        assert_eq!(words(false, false), "No sounds match");
+        assert_eq!(empty_words(100, 3, true, true, true, None).0, "");
     }
 
     #[test]
@@ -1743,16 +1812,19 @@ mod tests {
         let ids = |i: &Item| {
             offers(i, false, Hearing::Off).into_iter().filter(|o| o.enabled).map(|o| o.id).collect::<Vec<_>>()
         };
-        assert_eq!(ids(&all[0]), [act::EXPORT, act::TO_BITWIG, act::AUDITION, act::REVEAL, act::COPY_PATH]);
+        assert_eq!(
+            ids(&all[0]),
+            [act::EXPORT, act::TO_BITWIG, act::AUDITION, act::SHOW_IN_SONGS, act::REVEAL, act::COPY_PATH]
+        );
         let mut fl_own = all[2].clone();
         fl_own.row.extension = ".flstate".into();
         assert!(!ids(&fl_own).contains(&act::TO_BITWIG), "an FL plugin's own state can't go into Bitwig");
         assert!(!ids(&fl_own).contains(&act::AUDITION), "nor be auditioned there");
         assert_eq!(ids(&all[3]), [act::TO_BITWIG, act::AUDITION, act::REVEAL, act::COPY_PATH]);
-        // While a preset file is auditioned: Stop audition, then Keep in Bitwig once it plays, even mid-export.
+        // While a preset file is auditioned: Stop in Bitwig, then Keep in Bitwig once it plays, even mid-export.
         let texts = |h| offers(&all[3], true, h).into_iter().filter(|o| o.enabled).map(|o| o.text).collect::<Vec<_>>();
-        assert_eq!(texts(Hearing::Starting), ["Stop audition", "Show in folder", "Copy path"]);
-        assert_eq!(texts(Hearing::Playing), ["Stop audition", "Keep in Bitwig", "Show in folder", "Copy path"]);
+        assert_eq!(texts(Hearing::Starting), ["Stop in Bitwig", "Show in folder", "Copy path"]);
+        assert_eq!(texts(Hearing::Playing), ["Stop in Bitwig", "Keep in Bitwig", "Show in folder", "Copy path"]);
         // A sound in a song waits for an export to finish, as Send to Bitwig does.
         assert!(!offers(&all[0], true, Hearing::Off).iter().any(|o| o.id == act::AUDITION && o.enabled));
         assert_ne!(audition_id(&all[0]), audition_id(&all[3]));
@@ -1809,10 +1881,25 @@ mod tests {
             let id = format!("{}{}", act::PART, r.key());
             assert!(crate::shortcuts::PRESETS_ACTIONS.iter().any(|a| a.id == id), "{id}");
         }
-        for id in [act::EXPORT, act::TO_BITWIG, act::EXPORT_SHOWN, act::REVEAL, act::COPY_PATH, act::USE_GUESS] {
+        for id in [
+            act::EXPORT,
+            act::TO_BITWIG,
+            act::EXPORT_SHOWN,
+            act::REVEAL,
+            act::SHOW_IN_SONGS,
+            act::COPY_PATH,
+            act::USE_GUESS,
+        ] {
             assert!(crate::shortcuts::PRESETS_ACTIONS.iter().any(|a| a.id == id), "{id}");
         }
-        for id in [curve_act::TO_BITWIG, curve_act::REVEAL, curve_act::RENAME, curve_act::HIDE, curve_act::OPEN_SONG] {
+        for id in [
+            curve_act::TO_BITWIG,
+            curve_act::REVEAL,
+            curve_act::RENAME,
+            curve_act::HIDE,
+            curve_act::OPEN_SONG,
+            curve_act::SHOW_IN_SONGS,
+        ] {
             assert!(crate::shortcuts::CURVES_ACTIONS.iter().any(|a| a.id == id), "{id}");
         }
     }
@@ -1880,7 +1967,8 @@ mod tests {
         ];
         list[2].hidden = true;
         let f = CurveFilters::default();
-        let shown = |f: &CurveFilters| shown_curves(&list, f).0;
+        let keys = CurveKey::all(&list);
+        let shown = |f: &CurveFilters| shown_curves(&list, &keys, f).0;
         assert_eq!(shown(&f), [1, 0]);
         assert_eq!(shown(&CurveFilters { hidden: true, ..f.clone() }), [1, 0, 2]);
         assert_eq!(shown(&CurveFilters { kinds: vec![SourceKind::FlKnobMoves], ..f.clone() }), [0]);
@@ -1889,7 +1977,7 @@ mod tests {
         let mut both = CurveFilters { hidden: true, ..f.clone() };
         both.toggle_kind("FL knob moves");
         both.toggle_kind("Bitwig's library");
-        let (two, chips) = shown_curves(&list, &both);
+        let (two, chips) = shown_curves(&list, &keys, &both);
         assert_eq!(two, [0, 2]);
         let words: Vec<(&str, &str, bool)> =
             chips.chips.iter().map(|c| (c.text.as_str(), c.count.as_str(), c.on)).collect();
@@ -1899,7 +1987,7 @@ mod tests {
         );
         both.toggle_kind("FL knob moves");
         assert_eq!(both.kinds, [SourceKind::BitwigCurve]);
-        assert!(shown_curves(&list, &f).1.chips.iter().all(|c| !c.on));
+        assert!(shown_curves(&list, &keys, &f).1.chips.iter().all(|c| !c.on));
         assert_eq!(curves_summary(3, 2, 1), "2 curves, 1 hidden");
         // What's shown is set against every line, preset files too (5 sounds from 2 songs and 3 preset files).
         assert_eq!(summary(8, 8, 2, 3, false), "5 sounds from 2 songs, 3 preset files");
@@ -1916,6 +2004,19 @@ mod tests {
         assert_eq!(beats_words(6.0), "6 beats");
         let card = curve_card(&c);
         assert_eq!(card.places, [("Didums".to_owned(), "FL knob moves · Serum · Cutoff · bar 17".to_owned())]);
+        let mut many = c.clone();
+        many.sources = (0..25)
+            .map(|n| CurveSource {
+                song: format!("Song {n}"),
+                name: String::new(),
+                modified: n,
+                ..c.sources[0].clone()
+            })
+            .collect();
+        let card = curve_card(&many);
+        assert_eq!(card.places.len(), PLACES_UP_TO + 1);
+        assert_eq!(card.places[0].0, "Song 24");
+        assert_eq!(card.places[PLACES_UP_TO].0, "And 5 more places");
         let lib = curve("Wobble", SourceKind::BitwigCurve, "Wobble", 5);
         assert_eq!(found_words(&lib), "In Bitwig's library");
         assert!(!curve_offers(&lib, true).iter().any(|o| o.id == curve_act::OPEN_SONG && o.enabled));

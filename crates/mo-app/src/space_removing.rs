@@ -358,10 +358,54 @@ pub fn stayed<T: Removable>(picked: &[T], why: &str) -> Done {
     Done { problems, ..Done::default() }
 }
 
-/// Why every one picked is said to have stayed when Remove stopped with an error (logged as a crash): what went before
-/// it stopped is in the bin, but which isn't known.
+/// What Remove did when it stopped with an error part way (logged as a crash): what had gone to the Recycle Bin by
+/// then, as each one was noted going (`went`, [`crate::binned::Going::went_so_far`]), but for what's still where it
+/// really was (`still_there`). What's still there of what was noted as it waited for Windows' administrator step may
+/// go yet (the step goes on by itself), and says so ([`crashed_waiting_words`]): the page's next look finds it in the
+/// bin if it went. Every other one picked stays, saying so ([`crashed_words`]), or, when it isn't where it was any more
+/// (it may have gone just as Remove stopped), saying that ([`crashed_gone_words`]). Looks at each place on the disk:
+/// call it off the window's thread.
+pub fn after_crash<T: Removable>(picked: &[T], went: Vec<Removed>, still_there: impl Fn(&str) -> bool) -> Done {
+    let (removed, waiting): (Vec<Removed>, Vec<Removed>) = went.into_iter().partition(|r| !still_there(&r.real));
+    let gone: HashSet<&str> = removed.iter().map(|r| r.path.as_str()).collect();
+    let waits: HashSet<&str> = waiting.iter().map(|r| r.path.as_str()).collect();
+    let (stays, moved, may_go) = (crashed_words(), crashed_gone_words(), crashed_waiting_words());
+    let problems = picked
+        .iter()
+        .filter(|t| !gone.contains(t.path()))
+        .map(|t| {
+            let why = match (waits.contains(t.path()), still_there(t.path())) {
+                (true, _) => &may_go,
+                (false, true) => &stays,
+                (false, false) => &moved,
+            };
+            Problem { path: t.path().to_owned(), why: why.clone() }
+        })
+        .collect();
+    Done { removed, problems, went_with: Vec::new() }
+}
+
+/// Why one picked stays when Remove stopped with an error (logged as a crash) before it was sent.
 pub fn crashed_words() -> String {
-    format!("Remove stopped with an error (the log says which). Anything that went before it stopped is in the {BIN}.")
+    "Remove stopped with an error (the log says which) before this went, so it stays.".to_owned()
+}
+
+/// Why one picked that waited for Windows' administrator step is said to be where it was, when Remove stopped with an
+/// error (logged as a crash) as Windows was asked: the step goes on by itself, so it may go yet.
+pub fn crashed_waiting_words() -> String {
+    format!(
+        "Remove stopped with an error (the log says which) as Windows was asked about this: it was still there then, \
+         but may go to the {BIN} yet. Measure again shows where it is."
+    )
+}
+
+/// Why one picked isn't said to have gone, though it isn't where it was, when Remove stopped with an error (logged as a
+/// crash): it may have gone just as it stopped, without being noted.
+pub fn crashed_gone_words() -> String {
+    format!(
+        "Remove stopped with an error (the log says which) as this went: it isn't where it was, so it may be in the \
+         {BIN}."
+    )
 }
 
 /// How many places the log names of what one removal sent, and of what stayed for each reason (and how many reasons it
@@ -678,6 +722,50 @@ mod tests {
             said.last(),
             Some(&(true, format!("…and 3 more old copies stayed or aren't in the {BIN}, for 3 other reasons")))
         );
+    }
+
+    /// Something picked, where it is.
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct Picked(&'static str);
+
+    impl Removable for Picked {
+        fn path(&self) -> &str {
+            self.0
+        }
+        fn bytes(&self) -> u64 {
+            1
+        }
+        fn can_go(&self) -> bool {
+            true
+        }
+    }
+
+    #[test]
+    fn a_crash_part_way_keeps_what_was_noted_going() {
+        let picked = [Picked("a"), Picked("b"), Picked("c"), Picked("d"), Picked("e")];
+        // a went; b waited for Windows' administrator step and was noted just before it, but is still there (you said
+        // no); c, d and e were never sent, and d and e aren't where they were (they may have gone just as Remove
+        // stopped).
+        let mut waited = removed("b");
+        waited.stamp = Some("stamp".to_owned());
+        let still_there = |at: &str| ["b", "c"].contains(&at);
+        let done = after_crash(&picked, vec![removed("a"), waited], still_there);
+        assert_eq!(done.removed, [removed("a")]);
+        assert_eq!(
+            done.problems,
+            [
+                problem("b", &crashed_waiting_words()),
+                problem("c", &crashed_words()),
+                problem("d", &crashed_gone_words()),
+                problem("e", &crashed_gone_words())
+            ]
+        );
+        assert!(done.went_with.is_empty());
+        // What waited and went is kept as it went, with its stamp, for Put back to check.
+        let mut went = removed("b");
+        went.stamp = Some("stamp".to_owned());
+        let done = after_crash(&picked[..2], vec![removed("a"), went.clone()], |_| false);
+        assert_eq!((done.removed, done.problems), (vec![removed("a"), went], Vec::new()));
     }
 
     const NOT_THERE: &str = "It isn't in the Recycle Bin, so it may have been removed for good.";

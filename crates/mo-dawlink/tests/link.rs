@@ -31,7 +31,7 @@ fn greets_and_says_what_bitwig_has_open() {
     assert_eq!((hello.link, hello.product.as_str(), hello.version.as_str()), (3, "Bitwig Studio", "6.1.5"));
     assert_eq!((hello.project.as_str(), hello.modified, hello.engine), ("Night Drive", false, true));
     assert_eq!((hello.changes, hello.only_in, hello.loopback), (true, true, Some(true)));
-    assert_eq!(hello.answering(), "the Music Organiser extension 3.20");
+    assert_eq!(hello.answering(), "the Music Organiser extension 3.21");
     assert_eq!(hello.can_send(), Ok(()));
 
     // Asking again sees what changed in Bitwig meanwhile.
@@ -79,7 +79,7 @@ fn something_else_on_the_port_isnt_taken_for_the_link() {
         assert_eq!(
             err.to_string(),
             format!(
-                "Something answered on port {}, but not the Music Organiser script in Bitwig. If Bitwig is busy \
+                "Something answered on port {}, but not the Music Organiser extension in Bitwig. If Bitwig is busy \
                  (opening a project, say), try again in a moment.",
                 bitwig.port()
             )

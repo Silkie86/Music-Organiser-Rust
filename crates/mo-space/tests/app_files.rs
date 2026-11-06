@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 
-use mo_space::app_files::{databases, measure};
+use mo_space::app_files::{OLD_DATABASES, databases, measure, old_databases};
 
 #[test]
 fn databases_count_with_their_journals_and_the_rest_by_top_folder() {
@@ -30,4 +30,23 @@ fn databases_count_with_their_journals_and_the_rest_by_top_folder() {
     // The app's folder can't be read: the databases still count.
     let elsewhere = measure(&dir.join("not there"), &dbs, &stop).unwrap();
     assert_eq!(elsewhere.iter().map(|p| p.bytes).sum::<u64>(), 170);
+}
+
+#[test]
+fn the_old_apps_databases_count_on_their_own_once_the_app_reads_its_own() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-space-app-files-old");
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("songs.db"), [0; 40]).unwrap();
+    fs::write(dir.join("library.db"), [0; 100]).unwrap();
+    fs::write(dir.join("library.db-wal"), [0; 20]).unwrap();
+    // Its own sound library isn't made yet: the old one is still the one read.
+    fs::write(dir.join("sounds.db"), [0; 50]).unwrap();
+    fs::write(dir.join("midi.db"), [0; 30]).unwrap();
+    fs::write(dir.join("midi-index.db"), [0; 8]).unwrap();
+    let mut dbs = databases(dir.join("songs.db"), dir.join("sounds.db"), dir.join("midi-index.db"));
+    dbs.extend(old_databases(&dir));
+    let stop = AtomicBool::new(false);
+    let parts: Vec<(&str, u64)> = measure(&dir, &dbs, &stop).unwrap().iter().map(|p| (p.name, p.bytes)).collect();
+    assert_eq!(parts, [(OLD_DATABASES, 150), ("Sound Lab", 50), ("Your library", 40), ("MIDI parts", 8)]);
 }

@@ -48,7 +48,7 @@ pub const APP_ACTIONS: &[Action] = &[
     action("app.nextItem", "The item below in the list (even while typing a search)", "Ctrl+Down"),
     action("app.prevTab", "The tab to the left on this page", "Ctrl+Left"),
     action("app.nextTab", "The tab to the right on this page", "Ctrl+Right"),
-    action("app.play", "Play or stop the picked sound or MIDI part", "Space"),
+    action("app.play", "Play or stop the picked sound or MIDI part (on Presets, audition it in Bitwig)", "Space"),
     action("app.rescan", "Look for new and changed projects", "F5"),
     action("app.fullRescan", "Rescan everything: re-read every project, even unchanged ones", ""),
     action("app.fullScreen", "Full screen on or off", "F11"),
@@ -103,7 +103,8 @@ pub const PRESETS_ACTIONS: &[Action] = &[
     ),
     action("presets.keepAudition", "Keep the sound you're hearing in Bitwig: its track stays", "Ctrl+Shift+K"),
     action("presets.exportShown", "Export every sound in the list as it's filtered now", "Ctrl+Shift+S"),
-    action("presets.reveal", "Show the picked sound's song or file in its folder", "Ctrl+Shift+E"),
+    action("presets.reveal", "Show the picked sound's song file or preset file in its folder", "Ctrl+Shift+E"),
+    action("presets.showInSongs", "Show the picked sound's song on the Songs page", "Ctrl+O"),
     action("presets.copyPath", "Copy where the picked sound's song or file is", "Ctrl+Shift+C"),
     action("presets.useGuess", "Take your part fix away and use the guess again", "Ctrl+Backspace"),
     action("presets.part.bass", "The picked sound is really a bass", "Alt+1"),
@@ -119,10 +120,11 @@ pub const PRESETS_ACTIONS: &[Action] = &[
 /// The Presets page's Curves section's own actions (a list of its own: its keys are the Sounds section's).
 pub const CURVES_ACTIONS: &[Action] = &[
     action("curves.toBitwig", "Save the picked curve into Bitwig's curves library", "Ctrl+B"),
-    action("curves.reveal", "Show the picked curve's file, to drag onto a Bitwig lane", "Ctrl+Shift+E"),
+    action("curves.reveal", "Show the picked curve's file, to drag onto a Bitwig lane", "Ctrl+Shift+F"),
     action("curves.rename", "Rename the picked curve", "F2"),
     action("curves.hide", "Hide the picked curve, or show it again", "Delete"),
-    action("curves.revealSong", "Show the song the picked curve came from", "Ctrl+Shift+O"),
+    action("curves.revealSong", "Show the file of the song the picked curve came from in its folder", "Ctrl+Shift+E"),
+    action("curves.showInSongs", "Show the song the picked curve came from on the Songs page", "Ctrl+O"),
 ];
 
 /// The MIDI page's own actions, with the C# MIDI page's ids where it had them. What goes with this (midi.fit),
@@ -474,7 +476,10 @@ mod tests {
 
     #[test]
     fn what_an_action_does_is_found_in_any_list() {
-        assert_eq!(what_of("app.play"), "Play or stop the picked sound or MIDI part");
+        assert_eq!(
+            what_of("app.play"),
+            "Play or stop the picked sound or MIDI part (on Presets, audition it in Bitwig)"
+        );
         assert_eq!(what_of("projects.reveal"), "Show the picked song's file in its folder");
         assert_eq!(what_of("sounds.copyPath"), "Copy where the sound's file is");
         assert_eq!(what_of("space.reveal"), "Show the picked line's folder");

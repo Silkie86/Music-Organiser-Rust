@@ -72,8 +72,12 @@ fn only_the_very_same_audio_counts_and_unchanged_files_are_not_read_again() {
     ];
     assert_eq!(copies::candidates(&sounds), [0, 1, 2, 3, 4]);
     let (same, said) = find(&sounds, &kept);
-    assert_eq!(same, SameAudio { groups: vec![vec![1, 2, 3]] });
+    assert_eq!(same.groups, vec![vec![1, 2, 3]]);
     assert_eq!(same.copies(), 2);
+    // With each copy's file size, for the room they take.
+    let size = fs::metadata(&a).unwrap().len();
+    assert_eq!(same.sizes.get(&1), Some(&size));
+    assert_eq!(same.sizes.get(&4), None);
     assert_eq!(said.first(), Some(&Finding::Known { same: SameAudio::default(), left: 5 }));
     assert_eq!(said.last(), Some(&Finding::Reading { done: 5, of: 5 }));
 
@@ -88,13 +92,13 @@ fn only_the_very_same_audio_counts_and_unchanged_files_are_not_read_again() {
     let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
     fs::File::options().write(true).open(&d).unwrap().set_modified(later).unwrap();
     let (changed, said) = find(&sounds, &kept);
-    assert_eq!(changed, SameAudio { groups: vec![vec![1, 2, 3, 4]] });
+    assert_eq!(changed.groups, vec![vec![1, 2, 3, 4]]);
     assert!(matches!(said.first(), Some(Finding::Known { left: 1, .. })), "{said:?}");
 
     // A sound no longer a candidate is forgotten; one whose file is gone isn't a copy.
     fs::remove_file(&b).unwrap();
     let (gone, _) = find(&sounds[..3], &kept);
-    assert_eq!(gone, SameAudio { groups: vec![vec![1, 3]] });
+    assert_eq!(gone.groups, vec![vec![1, 3]]);
 }
 
 #[test]
@@ -111,7 +115,7 @@ fn a_damaged_or_foreign_file_where_the_prints_are_kept_is_made_afresh() {
         s.analysis.as_mut().unwrap().channel_count = 1;
     }
     let (same, _) = find(&sounds, &kept);
-    assert_eq!(same, SameAudio { groups: vec![vec![7, 8]] });
+    assert_eq!(same.groups, vec![vec![7, 8]]);
     let (_, said) = find(&sounds, &kept);
     assert!(matches!(said.first(), Some(Finding::Known { left: 0, .. })), "{said:?}");
 }
@@ -201,4 +205,25 @@ fn another_apps_database_where_the_prints_are_kept_is_left_alone() {
     let other = rusqlite::Connection::open(&kept).unwrap();
     let n: i64 = other.query_row("SELECT COUNT(*) FROM theirs", [], |r| r.get(0)).unwrap();
     assert_eq!(n, 0);
+}
+
+#[test]
+fn a_file_marked_as_ours_without_its_table_is_made_afresh() {
+    let dir = folder("mo-sounds-copies-half-made");
+    let kept = dir.join(copies::FILE_NAME);
+    {
+        // As a build before the marks and the table went in together left it, stopped half way.
+        let half = rusqlite::Connection::open(&kept).unwrap();
+        half.execute_batch("PRAGMA application_id = 1297044291; PRAGMA user_version = 1;").unwrap();
+    }
+    let a = dir.join("Hat.wav");
+    mo_audio::write_wav(&a, &[tone(800, 0.7)], 22_050, 16).unwrap();
+    let b = dir.join("Hat 2.wav");
+    fs::copy(&a, &b).unwrap();
+    let mut sounds = [sound(7, &a, 0.036, 22_050, -6.0), sound(8, &b, 0.036, 22_050, -6.0)];
+    for s in &mut sounds {
+        s.analysis.as_mut().unwrap().channel_count = 1;
+    }
+    let (same, _) = find(&sounds, &kept);
+    assert_eq!(same.groups, vec![vec![7, 8]]);
 }

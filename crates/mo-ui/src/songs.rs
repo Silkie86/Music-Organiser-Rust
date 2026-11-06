@@ -157,10 +157,10 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     data.on_show_presets(move || {
         let Some(app) = weak.upgrade() else { return };
         let mut save = None;
-        with_picked(|_, r| save = Some(r.song.latest.path.clone()));
-        if let Some(save) = save {
+        with_picked(|_, r| save = Some((r.song.latest.path.clone(), r.song.name.clone())));
+        if let Some((save, name)) = save {
             crate::go_to(&app, Place::Presets.index() as i32);
-            crate::presets::show_song(&app, &save);
+            crate::presets::show_song(&app, &save, &name);
         }
     });
     wire_filters(app);
@@ -328,10 +328,11 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
                 log::info(
                     "Watch",
                     &format!(
-                        "Project folders: {} read, {} moved, {} gone ({} changes seen)",
+                        "Project folders: {} read, {} moved, {} gone{} ({} changes seen)",
                         updated.read.len(),
                         updated.moved.len(),
                         updated.gone,
+                        mended_line(updated.mended),
                         changes.files.len()
                     ),
                 );
@@ -346,24 +347,26 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
             log::info(
                 "Songs",
                 &format!(
-                    "Caught up with the project folders in {:.1} s: {} read, {} moved, {} gone",
+                    "Caught up with the project folders in {:.1} s: {} read, {} moved, {} gone{}",
                     began.elapsed().as_secs_f32(),
                     caught.read.len(),
                     caught.moved.len(),
-                    caught.gone
+                    caught.gone,
+                    mended_line(caught.mended)
                 ),
             );
             updated = updated.and(caught);
         }
         // Kept in songs.db with each change, or a while after it couldn't be kept.
         let mut renumbered = false;
-        if !updated.is_empty() || keep_again_at.is_some_and(|at| Instant::now() >= at) {
+        if !updated.is_empty() || live.note_to_keep() || keep_again_at.is_some_and(|at| Instant::now() >= at) {
             keep_again_at = match live.keep() {
                 Some(Ok(kept)) => {
                     let w = &kept.written;
+                    let noted = if w.mended { ", and that the muted samples are mended" } else { "" };
                     log::info(
                         "Songs",
-                        &format!("Kept in songs.db: {} saves read, {} marked missing", w.put, w.missing),
+                        &format!("Kept in songs.db: {} saves read, {} marked missing{noted}", w.put, w.missing),
                     );
                     for (path, why) in &kept.not_kept {
                         log::warning("Songs", &format!("Couldn't keep {path} in songs.db: {why}"));
@@ -387,7 +390,7 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
         let _ = weak.upgrade_in_event_loop(move |app| {
             show_again(&app, songs);
             crate::finder::add_source(&app, "songs", found);
-            if updated.is_empty() {
+            if !updated.for_card() {
                 return;
             }
             let (title, line) = updated.card();
@@ -401,6 +404,14 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
 }
 
 /// Puts a list made again on the page, keeping the filters, the song picked and its tab.
+/// The log's words for saves read again only to mend their muted samples, if there were any.
+fn mended_line(mended: usize) -> String {
+    match mended {
+        0 => String::new(),
+        n => format!(", {n} read again for their muted samples"),
+    }
+}
+
 fn show_again(app: &AppWindow, songs: Songs) {
     let _doing = crate::watchdog::doing("Songs: show the list again");
     let data = app.global::<SongsData>();
@@ -522,6 +533,21 @@ pub fn show_only(app: &AppWindow, label: &str, saves: HashSet<i64>) {
 
 /// Picks the song with this save and brings it into view (the Plugins page's song lines). Returns whether the list has
 /// it (not while the library is still being read).
+/// Shows the song a save belongs to, by the save's path (Presets and Curves know their saves by path). Whether it was
+/// found.
+pub fn show_save_path(app: &AppWindow, save: &str) -> bool {
+    let row = PAGE.with(|p| {
+        p.borrow().songs.rows.iter().position(|r| r.song.saves().chain(&r.song.copies).any(|s| s.path == save))
+    });
+    match row {
+        Some(row) => {
+            show_song(app, row);
+            true
+        }
+        None => false,
+    }
+}
+
 pub fn show_save(app: &AppWindow, save: i64) -> bool {
     let row = PAGE.with(|p| {
         p.borrow().songs.rows.iter().position(|r| r.song.saves().chain(&r.song.copies).any(|s| s.id == save))

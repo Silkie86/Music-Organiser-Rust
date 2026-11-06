@@ -2,6 +2,7 @@
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 
 use crate::{AudioData, AudioError, adpcm};
@@ -207,7 +208,12 @@ fn read_wav(f: &mut File, len: u64, max_seconds: f64, from_frame: u64) -> Result
     };
     if format == adpcm::MS || format == adpcm::IMA {
         let layout = adpcm::Layout::from_fmt(format, channels, &fmt_bytes)?;
-        return read_adpcm(f, &layout, rate, start_byte, length, fact, max_seconds, from_frame).map(|mut a| {
+        // Caught as read_other does, as a backstop: a damaged file gives an error, never a crash (review finding G-1).
+        let read = mo_catch::catch(AssertUnwindSafe(|| {
+            read_adpcm(f, &layout, rate, start_byte, length, fact, max_seconds, from_frame)
+        }))
+        .unwrap_or_else(|_| Err(AudioError::Format("This ADPCM WAV couldn't be decoded (it may be damaged)".into())));
+        return read.map(|mut a| {
             (a.embedded_tempo, a.embedded_root_note, a.embedded_is_loop) = (tempo, root, is_loop);
             a
         });

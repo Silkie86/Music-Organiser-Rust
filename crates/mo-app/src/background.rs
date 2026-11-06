@@ -6,8 +6,9 @@ use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError, mpsc};
 use std::thread::JoinHandle;
 
 /// Starts `work` on a thread of its own called `name`, at low priority. Only the watchdog, which must notice the
-/// window freezing however busy the computer is, and the session log's writer, which a crash waits for, start their
-/// threads another way.
+/// window freezing however busy the computer is, the session log's writer, which a crash waits for, and Play in FL
+/// Studio's start, whose note-timing thread takes its priority on Linux and Mac (a short read of the part's notes
+/// first), start their threads another way.
 pub fn spawn<T: Send + 'static>(name: &str, work: impl FnOnce() -> T + Send + 'static) -> io::Result<JoinHandle<T>> {
     std::thread::Builder::new().name(name.to_owned()).spawn(move || {
         lower_priority();
@@ -94,8 +95,9 @@ fn build_bulk_pool(name: &'static str, threads: usize) -> Option<rayon::ThreadPo
 }
 
 /// Puts what the thread it's called on reads and uses low in the system's memory (Windows; elsewhere nothing changes).
+/// The bulk pools' threads do it themselves; a thread of its own from [`spawn`] that reads gigabytes calls it first.
 #[allow(unsafe_code)]
-fn lower_memory_priority() {
+pub fn lower_memory_priority() {
     #[cfg(windows)]
     {
         use windows_sys::Win32::System::Threading::{

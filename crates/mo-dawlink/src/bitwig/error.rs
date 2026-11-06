@@ -1,6 +1,6 @@
 //! What can go wrong talking to Bitwig, in words to show as they are (`to_string()`). The words are the C# app's
-//! (`BitwigLink`, `BitwigSend`), which Solomon has seen there, except where the Rust app has no screen for what they
-//! pointed at yet (Settings > DAW links): those point at the old app's.
+//! (`BitwigLink`, `BitwigSend`), which Solomon has seen there, except that installing points at this app's Settings >
+//! DAWs (the old app is retired).
 
 use std::fmt;
 
@@ -49,6 +49,8 @@ pub enum Error {
     NoTrackSelected,
     /// The selected track can't play notes (an audio, group, effect or master track): its name and Bitwig's kind.
     NotAnInstrumentTrack { name: String, kind: String },
+    /// Something newer was asked for while this waited its turn, so it stopped (and took back what it had put in).
+    Cancelled,
 }
 
 impl fmt::Display for Error {
@@ -66,12 +68,12 @@ impl fmt::Display for Error {
             // The link greets from Bitwig's controller thread, which may be slow to come to it while Bitwig is busy.
             Error::NotTheLink { port } => write!(
                 f,
-                "Something answered on port {port}, but not the Music Organiser script in Bitwig. If Bitwig is busy \
+                "Something answered on port {port}, but not the Music Organiser extension in Bitwig. If Bitwig is busy \
                  (opening a project, say), try again in a moment."
             ),
             Error::OldLink => f.write_str(
-                "Bitwig has an older copy of the Music Organiser script. Install it again from the old app's Settings \
-                 > DAW links (Bitwig picks up the new one by itself), then try again.",
+                "Bitwig has an older copy of the Music Organiser extension. Install it again from Settings > DAWs \
+                 (Install on Bitwig's row; Bitwig picks up the new one by itself), then try again.",
             ),
             Error::ChangesOff => f.write_str(
                 "Bitwig isn't letting the app make changes. Turn on \"Let the app make changes\" in Bitwig (Settings \
@@ -89,8 +91,8 @@ impl fmt::Display for Error {
             Error::Lost(why) if why.is_empty() => f.write_str("Lost the connection to Bitwig."),
             Error::Lost(why) => write!(f, "Lost the connection to Bitwig ({why})."),
             Error::Unexpected => f.write_str(
-                "Bitwig's answer wasn't what the app expected. Install the extension again from the old app's \
-                 Settings > DAW links, in case Bitwig has an older version.",
+                "Bitwig's answer wasn't what the app expected. Install the extension again from Settings > DAWs \
+                 (Install on Bitwig's row), in case Bitwig has an older version.",
             ),
             Error::Invalid(why) => f.write_str(why),
             Error::Missing { file, path } => write!(f, "{file} isn't at {path} any more."),
@@ -118,6 +120,7 @@ impl fmt::Display for Error {
                 "\u{201c}{name}\u{201d} is {} track in Bitwig, so it can't play notes. Select an instrument track.",
                 a_kind(kind)
             ),
+            Error::Cancelled => f.write_str("Something newer was asked for, so this stopped."),
         }
     }
 }

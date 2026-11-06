@@ -245,7 +245,25 @@ impl Catalogue {
             }
         }
         let mut line_count = entries.len();
-        for group in by_shape.into_values().filter(|g| g.len() > 1) {
+        // One loop saved as several files: two tracks of one file (a tune doubled, a riff played again higher) are two
+        // parts, so each group holds one part a file. A file's next track with the shape starts or joins the next
+        // group: the "Lead" of each key's file together, and the "Lead high" of each together.
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for g in by_shape.into_values().filter(|g| g.len() > 1) {
+            let mut split: Vec<Vec<usize>> = Vec::new();
+            for at in g {
+                let Some(src) = entries.get(at).map(|e| &e.phrase.source) else { continue };
+                let has = |s: &Vec<usize>| {
+                    s.iter().any(|&o| entries.get(o).is_some_and(|e| Arc::ptr_eq(&e.phrase.source, src)))
+                };
+                match split.iter_mut().find(|s| !has(s)) {
+                    Some(s) => s.push(at),
+                    None => split.push(vec![at]),
+                }
+            }
+            groups.extend(split.into_iter().filter(|s| s.len() > 1));
+        }
+        for group in groups {
             // In entries' order, newest first: the first stands for them.
             let mut keys: Vec<u8> =
                 group.iter().filter_map(|&at| entries.get(at)).map(|e| e.phrase.lowest % 12).collect();
@@ -532,6 +550,34 @@ mod tests {
 
     fn titles(c: &Catalogue, hits: &[Hit]) -> Vec<String> {
         hits.iter().map(|h| c.entries[h.entry].title()).collect()
+    }
+
+    #[test]
+    fn the_same_loop_in_other_keys_is_grouped_only_across_files() {
+        let a = source(r"L:\Pack\Loop Am.mid", SourceKind::File, 300);
+        let b = source(r"L:\Pack\Loop Dm.mid", SourceKind::File, 200);
+        let shaped = |p: StoredPhrase, lowest: u8| StoredPhrase { shape: Some(7), lowest, ..p };
+        let cat = Catalogue::new(vec![
+            // One file with the tune doubled an octave up on a second track: two parts.
+            shaped(phrase(1, &a, "Lead", "Loop Am", Role::Melody, "A1"), 57),
+            shaped(phrase(2, &a, "Lead high", "Loop Am", Role::Melody, "A2"), 69),
+            // The same loop in another file, in D minor: grouped with the first.
+            shaped(phrase(3, &b, "Lead", "Loop Dm", Role::Melody, "D1"), 62),
+        ]);
+        assert_eq!(cat.entries[0].key_group, Some(0));
+        assert_eq!(cat.entries[1].key_group, None, "a second track of the same file stays a line");
+        assert_eq!(cat.entries[2].key_group, Some(0));
+        assert_eq!(cat.entries[0].in_keys, Some(InKeys::Keys(2)));
+        assert_eq!(cat.line_count, 2);
+        // Both files with both tracks: two lines, each track's copies together.
+        let cat = Catalogue::new(vec![
+            shaped(phrase(1, &a, "Lead", "Loop Am", Role::Melody, "A1"), 57),
+            shaped(phrase(2, &a, "Lead high", "Loop Am", Role::Melody, "A2"), 69),
+            shaped(phrase(3, &b, "Lead", "Loop Dm", Role::Melody, "D1"), 62),
+            shaped(phrase(4, &b, "Lead high", "Loop Dm", Role::Melody, "D2"), 74),
+        ]);
+        assert_eq!(cat.line_count, 2);
+        assert_eq!((cat.entries[1].key_group, cat.entries[3].key_group), (Some(1), Some(1)));
     }
 
     #[test]

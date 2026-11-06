@@ -31,6 +31,12 @@ pub const CAN_PUT_BACK: bool =
 pub const LEAD: &str = "Everything the app removes goes here first. Empty it yourself once you're sure: the app never \
     does.";
 
+/// The Plugins page's Clean up, as kept in the list of what the app put in the bin (review X1-3).
+pub const PLUGIN_CLEAN: &str = "plugin-clean";
+
+/// The plugin files the Plugins page's Uninstall sent to the bin after its uninstaller ran.
+pub const PLUGIN_UNINSTALL: &str = "plugin-uninstall";
+
 /// The words of a clean-up's Put back link on the card.
 pub const PUT_BACK: &str = "Put back";
 
@@ -78,6 +84,8 @@ pub fn kind_title(kind: &str) -> &'static str {
         SPARE_COPIES => "Spare plugin copies",
         OLD_COPIES => "Old copies after moving folders",
         COMPACT => "Songs that can be compacted",
+        PLUGIN_CLEAN => "A plugin's clean-up",
+        PLUGIN_UNINSTALL => "Files an uninstall left",
         _ => "A clean-up",
     }
 }
@@ -88,6 +96,8 @@ pub fn putting_back_title(kind: &str) -> &'static str {
         SPARE_COPIES => "Putting back spare plugin copies",
         OLD_COPIES => "Putting back old copies",
         COMPACT => "Putting back old autosaves and caches",
+        PLUGIN_CLEAN => "Putting back what a plugin's clean-up removed",
+        PLUGIN_UNINSTALL => "Putting back the files an uninstall left",
         _ => "Putting back what a clean-up removed",
     }
 }
@@ -106,6 +116,8 @@ fn things(b: &Binned) -> String {
         SPARE_COPIES => format!("{} plugin copies", thousands(n)),
         OLD_COPIES if n == 1 => "1 old copy".to_owned(),
         OLD_COPIES => format!("{} old copies", thousands(n)),
+        PLUGIN_UNINSTALL if n == 1 => "1 plugin file".to_owned(),
+        PLUGIN_UNINSTALL => format!("{} plugin files", thousands(n)),
         _ if n == 1 => "1 file or folder".to_owned(),
         _ => format!("{} files and folders", thousands(n)),
     }
@@ -273,7 +285,7 @@ mod tests {
                 stamp: None,
             })
             .collect();
-        Binned { kind: SPARE_COPIES.to_owned(), when, done: Done { removed, ..Done::default() } }
+        Binned { kind: SPARE_COPIES.to_owned(), when, done: Done { removed, ..Done::default() }, plugin: None }
     }
 
     fn kept(list: Vec<Binned>, looked: bool) -> Kept {

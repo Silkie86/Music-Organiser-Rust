@@ -186,7 +186,8 @@ fn remove_files(app: &AppWindow) {
             }
         };
         clean::report(card, &outcome);
-        back(&weak, move |app| clean::removed(app, id, row_key, outcome));
+        let kept = clean::record(mo_app::space_bin::PLUGIN_UNINSTALL, &row_key, &outcome);
+        back(&weak, move |app| clean::removed(app, id, row_key, outcome, kept));
     });
     if let Err(e) = spawned {
         log::error("Plugins", &format!("Couldn't start removing the plugin files: {e}"));

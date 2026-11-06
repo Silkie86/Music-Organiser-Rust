@@ -100,6 +100,8 @@ fn library() -> Read {
         looked_for_installed: true,
         unused_years: 2,
         needed_count: 6,
+        saved_fixes: Vec::new(),
+        gone: Vec::new(),
     }
 }
 
@@ -428,10 +430,39 @@ fn another_page_can_show_one_plugin_or_every_unused_one() {
 #[test]
 fn another_version_is_another_plugin() {
     use super::{other_versions, version_of};
-    assert_eq!(version_of("AmpliTube 4"), "4");
-    assert_eq!(version_of("Serum"), "");
+    assert_eq!(version_of("AmpliTube 4"), Some(4));
+    assert_eq!(version_of("Serum"), None);
+    // Review E2-5: names with spaces and dashes.
+    assert_eq!(version_of("Guitar Rig 7"), Some(7));
+    assert_eq!(version_of("FabFilter Pro-Q 3"), Some(3));
+    assert!(other_versions("Guitar Rig 6", "Guitar Rig 7") && other_versions("Pro-Q 3", "Pro-Q 4"));
     assert!(other_versions("AmpliTube 4", "AmpliTube 5"));
     assert!(!other_versions("Kontakt 7", "Kontakt 7"));
     // One naming no version may still be the same plugin.
     assert!(!other_versions("Serum", "Serum 2") && !other_versions("FabFilter Pro-Q 3", "Pro-Q"));
+}
+
+/// Review E2-6: Ozone 11 is installed and measured, no song uses it, and Ozone 9's songs may open with it (the Install
+/// these card says so): it isn't unused, so Clean up never offers it.
+#[test]
+fn the_version_a_missing_plugins_songs_may_open_with_isnt_unused() {
+    let mut read = library();
+    read.spaces.push(space("Ozone 11", &[(r"C:\VST3\Ozone 11.vst3", 0, 20_000_000), (r"D:\Ozone", 2, 900_000_000)]));
+    let p = Plugins::new(read, now());
+    let ozone = row(&p, "Ozone 11");
+    assert_eq!(ozone.stands_in.as_deref(), Some("Ozone 9"));
+    assert!(!ozone.unused && ozone.room.is_some());
+    // Kontakt 7, no song's other version, is unused as before.
+    assert!(row(&p, "Kontakt 7").unused && row(&p, "Kontakt 7").stands_in.is_none());
+    // Space agrees, whatever the years.
+    let mut read = library();
+    read.spaces.push(space("Ozone 11", &[(r"C:\VST3\Ozone 11.vst3", 0, 20_000_000)]));
+    let found = crate::space_plugins::look(read, now(), &[]);
+    for years in [1, 2, 5] {
+        assert!(!found.as_of(years, now()).plugins.iter().any(|m| m.name == "Ozone 11"));
+    }
+    // Its Uninstall warns of the songs that may open with it.
+    let at = p.rows.iter().position(|r| r.name == "Ozone 11").unwrap();
+    let ask = p.uninstall_ask(at).unwrap();
+    assert!(ask.warning().contains("Songs that use Ozone 9 may open with it"), "{}", ask.warning());
 }

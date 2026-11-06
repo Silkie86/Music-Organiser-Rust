@@ -5,15 +5,17 @@
 //! of it and its old copy.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::Duration;
 
 use mo_app::log;
+use mo_app::plugins::moves_under_way;
 use mo_app::plugins::moving::{self, Ask};
 use mo_library::Library;
 use mo_library::moves::{MOVED_FOLDERS, add_moved_folder};
 use mo_space::folder_move::{CantMove, SystemDrives, move_folder, problem};
+use mo_space::half_copy::{self, Cleared, State};
 use slint::ComponentHandle;
 
 use super::clean::{self, Cleaning, Stage, back, fill};
@@ -228,11 +230,18 @@ fn go(app: &AppWindow, ask: Arc<Ask>, at: usize, bytes: u64, destination: String
     fill(app);
     log::info("Plugins", &format!("Move {}: {} to {destination}", ask.name, folder.path));
     let weak = app.as_weak();
+    let running = Running::start(&folder.path, &stop);
     let spawned = mo_app::background::spawn("Plugins move", move || {
+        let _running = running;
         // Not `guarded`: this changes things, so a stop part way is said as it is.
         let moved = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| -> Result<_, CantMove> {
             // As the library is now: a move made meanwhile counts.
             let (protected, moved) = library_now(&library).map_err(CantMove::Failed)?;
+            // Noted before anything is copied, so a half copy a close or a crash leaves is found next time (review
+            // E2-3).
+            if let Err(e) = moves_under_way::start(&moves_under_way::file(), &folder.path, &destination) {
+                log::warning("Plugins", &format!("Move: the move under way couldn't be noted: {e}"));
+            }
             // Heard for every file, from several threads: the card hears about every half percent (16 MB at least).
             let step = (bytes / 200).max(16 << 20);
             let next = AtomicU64::new(0);
@@ -263,6 +272,13 @@ fn go(app: &AppWindow, ask: Arc<Ask>, at: usize, bytes: u64, destination: String
             })
         }));
         let gone = matches!(moved, Ok(Ok(_))).then(|| folder.path.clone());
+        // Done: its copy is in use now. A move that stopped or failed cleared its copy, or left a half copy for the next
+        // look to find; that look drops the note when there's nothing.
+        if gone.is_some()
+            && let Err(e) = moves_under_way::finished(&moves_under_way::file(), &folder.path)
+        {
+            log::warning("Plugins", &format!("Move: the move under way's note couldn't be taken out: {e}"));
+        }
         let head = match moved {
             Ok(Ok(moved)) => {
                 let noted = moving::moved_entry(&moved).and_then(|entry| note(&library, &entry));
@@ -342,6 +358,179 @@ fn moved_done(app: &AppWindow, id: u64, head: String, gone: Option<String>) {
     });
     refresh(app);
     fill_panel(app);
-    // The old copy it left (or what a move cut short had copied) shows on Space.
+    // The old copy it left shows on Space; what a move cut short left shows here.
     crate::space::plugin_moved(app);
+    look_for_half_copies(app);
+}
+
+/// The folders being moved in this run, with their Stop, from any thread: a move's note isn't dropped while it runs, and
+/// closing the app stops it and waits ([`finish_up`]). [`ENDED`] hears each one end.
+static RUNNING: Mutex<Vec<(String, Arc<AtomicBool>)>> = Mutex::new(Vec::new());
+static ENDED: Condvar = Condvar::new();
+
+/// One move in [`RUNNING`], taken out when dropped (however the move ends).
+struct Running(String);
+
+impl Running {
+    fn start(from: &str, stop: &Arc<AtomicBool>) -> Running {
+        RUNNING.lock().unwrap_or_else(PoisonError::into_inner).push((from.to_owned(), stop.clone()));
+        Running(from.to_owned())
+    }
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = running.iter().position(|(f, _)| f == &self.0) {
+            running.remove(at);
+        }
+        ENDED.notify_all();
+    }
+}
+
+/// When the window has closed: a move still copying is told to stop (its copy is cleared, as Stop does). Quick: the
+/// waiting is [`finish_up`]'s, once the app's other jobs have been told to stop too.
+pub(super) fn stop_moves() {
+    let running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+    if running.is_empty() {
+        return;
+    }
+    log::info("Plugins", "Move: the app is closing, so the move under way stops");
+    for (_, stop) in running.iter() {
+        stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Waits for the moves [`stop_moves`] stopped, a minute at most; one cut off even so is found at the next start
+/// (review E2-3).
+pub(super) fn finish_up() {
+    stop_moves();
+    let running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+    let (running, waited) = ENDED
+        .wait_timeout_while(running, Duration::from_secs(60), |r| !r.is_empty())
+        .unwrap_or_else(PoisonError::into_inner);
+    if waited.timed_out() && !running.is_empty() {
+        log::warning("Plugins", "Move: still stopping after a minute; what it left is found at the next start");
+    }
+}
+
+/// Counts the looks for half copies: only the newest one's finding is shown (rule 12, newest wins).
+static LOOKS: AtomicU64 = AtomicU64::new(0);
+
+/// Looks, on a worker, for the half copies moves cut off part way left ([`moves_under_way::cut_off`]), and shows them:
+/// at the page's first read, and after each move and each clear (not at every read: a half copy is read in full).
+pub(super) fn look_for_half_copies(app: &AppWindow) {
+    let look = LOOKS.fetch_add(1, Ordering::Relaxed) + 1;
+    let file = moves_under_way::file();
+    let library = PAGE.with(|p| p.borrow().library.clone());
+    let weak = app.as_weak();
+    let spawned = mo_app::background::spawn("Plugins half copies", move || {
+        let found = mo_app::background::guarded(|| -> Result<_, String> {
+            if moves_under_way::under_way(&file).is_empty() {
+                return Ok(Vec::new());
+            }
+            let (_, moved) = library_now(&library)?;
+            let running: Vec<String> =
+                RUNNING.lock().unwrap_or_else(PoisonError::into_inner).iter().map(|(f, _)| f.clone()).collect();
+            let never = AtomicBool::new(false);
+            mo_app::background::on_bulk_pool(|| {
+                moves_under_way::cut_off(&file, &moved, &running, &SystemDrives, &never)
+            })
+            .map_err(|_| "Stopped.".to_owned())
+        })
+        .and_then(|r| r);
+        match found {
+            Ok(found) => back(&weak, move |app| {
+                if LOOKS.load(Ordering::Relaxed) != look {
+                    return;
+                }
+                PAGE.with(|p| p.borrow_mut().half_copies = found);
+                fill_half_copies(app);
+            }),
+            Err(why) => log::warning("Plugins", &format!("Couldn't look for half copies: {why}")),
+        }
+    });
+    if let Err(e) = spawned {
+        log::warning("Plugins", &format!("Couldn't look for half copies: {e}"));
+    }
+}
+
+/// Shows what moves cut off left, with Clear (not while a clear runs).
+pub(super) fn fill_half_copies(app: &AppWindow) {
+    let (text, can) = PAGE.with(|p| {
+        let p = p.borrow();
+        let text = if p.clearing_half_copies {
+            "Clearing what cut-off moves left…".to_owned()
+        } else {
+            moves_under_way::found_text(&p.half_copies)
+        };
+        (text, !p.clearing_half_copies && moves_under_way::can_clear(&p.half_copies))
+    });
+    let data = app.global::<PluginsData>();
+    data.set_half_copy_text(text.into());
+    data.set_can_clear_half_copies(can);
+}
+
+/// Clears the half copies moves cut off left, on a worker: each looked at again first (`half_copy::clear`), so only
+/// a copy nothing uses goes for good; one in use only loses its marker. One clear at a time. Closing the app part way
+/// leaves what's left of a copy marked, for the next start.
+pub(super) fn clear_half_copies(app: &AppWindow) {
+    let job = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.clearing_half_copies {
+            return None;
+        }
+        let found: Vec<_> = p.half_copies.iter().filter(|h| !matches!(h.state, State::Stays(_))).cloned().collect();
+        if found.is_empty() {
+            return None;
+        }
+        p.clearing_half_copies = true;
+        Some((p.library.clone(), p.feed.clone(), found))
+    });
+    let Some((library, feed, found)) = job else { return };
+    // A look already under way is older than the clear: what it finds isn't shown.
+    LOOKS.fetch_add(1, Ordering::Relaxed);
+    fill_half_copies(app);
+    let weak = app.as_weak();
+    let spawned = mo_app::background::spawn("Plugins clear half copies", move || {
+        let card = feed.start("Clearing what cut-off moves left", "Checking each copy first");
+        let cleared = mo_app::background::guarded(|| -> Result<(u64, Vec<String>), String> {
+            let (_, moved) = library_now(&library)?;
+            let never = AtomicBool::new(false);
+            let (mut freed, mut stays) = (0u64, Vec::new());
+            for h in &found {
+                let tried = mo_app::background::on_bulk_pool(|| {
+                    half_copy::clear(Path::new(&h.path), &moved, &SystemDrives, &never)
+                });
+                match tried {
+                    Ok(Cleared::Copy(bytes)) => {
+                        log::info("Plugins", &format!("Cleared the half copy {}", h.path));
+                        freed = freed.saturating_add(bytes);
+                    }
+                    Ok(_) => log::info("Plugins", &format!("Took the marker out of {}: it's in use", h.path)),
+                    Err(why) => {
+                        log::warning("Plugins", &format!("The half copy {} stays: {why}", h.path));
+                        stays.push(format!("{}: {why}", h.path));
+                    }
+                }
+            }
+            Ok((freed, stays))
+        });
+        match cleared {
+            Ok(Ok((freed, stays))) if stays.is_empty() => {
+                card.done(&format!("Cleared, freeing {}.", mo_space::size_text(freed)))
+            }
+            Ok(Ok((_, stays))) => card.failed(&format!("Some stay: {}", stays.join(" "))),
+            Ok(Err(why)) | Err(why) => card.failed(&format!("Nothing was cleared: {why}")),
+        }
+        back(&weak, |app| {
+            PAGE.with(|p| p.borrow_mut().clearing_half_copies = false);
+            look_for_half_copies(app);
+        });
+    });
+    if let Err(e) = spawned {
+        log::warning("Plugins", &format!("Couldn't clear the half copies: {e}"));
+        PAGE.with(|p| p.borrow_mut().clearing_half_copies = false);
+        fill_half_copies(app);
+    }
 }

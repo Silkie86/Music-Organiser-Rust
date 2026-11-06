@@ -5,16 +5,23 @@
 //! warning"). The file only keeps what may still be in the bin (rule 28): each look in the bin drops what it no longer
 //! holds, but for what was on a drive that isn't plugged in (its bin can't be looked in until it's back); and of the
 //! clean-ups the bin can't vouch for (a Mac's Trash can't be looked in at all), at most [`KEEP`].
+//!
+//! A clean-up can take minutes (thousands of autosaves), so what it sends is noted as it goes, a line each, in a file
+//! of its own beside the list ([`Going`]). Once the clean-up is kept in the list its note goes; a note left by a close
+//! or a crash part way through is taken into the list by the next look ([`refresh`]), so what went can still be put
+//! back, and the page's Recycle Bin line still counts it (the whole-app review of 6 Nov, E1-1).
 
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, PoisonError};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use mo_space::clean::{Bin, Done, Removed};
+use mo_space::clean::{Bin, Done, Removed, What};
 use mo_space::in_bin::{self, InBin};
+use mo_space::key;
 use serde::{Deserialize, Serialize};
 
 use crate::app_settings::write_checked;
@@ -28,6 +35,14 @@ pub const FILE: &str = "space-binned.json";
 /// are kept: the oldest go first. What the bin still holds is always kept.
 pub const KEEP: usize = 50;
 
+/// How a running clean-up's note is named, beside [`FILE`]: this, its kind, `-`, when it ran, `-`, the number Windows
+/// gave this run of the app (so two copies of the app running at once, or a run whose clock was put back, never write
+/// into one another's), then [`NOTE_END`] ([`Going`]).
+pub const NOTE_START: &str = "space-binned-going-";
+
+/// How a running clean-up's note's name ends.
+pub const NOTE_END: &str = ".jsonl";
+
 /// One clean-up: which of the page's it was, when it ran, and what it sent to the bin.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Binned {
@@ -37,6 +52,11 @@ pub struct Binned {
     pub when: i64,
     /// What went, with what the bin calls each: what Put back needs. What couldn't go isn't kept.
     pub done: Done,
+    /// For the Plugins page's clean-ups and uninstalls ([`crate::space_bin::PLUGIN_CLEAN`],
+    /// [`crate::space_bin::PLUGIN_UNINSTALL`]): the plugin's line, by its name key and own, so its Put back is on its
+    /// card after a restart too (review X1-3). None for Space's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<(String, String)>,
 }
 
 impl Binned {
@@ -53,7 +73,7 @@ impl Binned {
         let went_with =
             self.done.went_with.iter().filter(|(_, with)| removed.iter().any(|r| &r.path == with)).cloned().collect();
         let done = Done { removed, problems: self.done.problems.clone(), went_with };
-        Binned { kind: self.kind.clone(), when: self.when, done }
+        Binned { kind: self.kind.clone(), when: self.when, done, plugin: self.plugin.clone() }
     }
 }
 
@@ -102,6 +122,275 @@ pub fn now() -> i64 {
     *last
 }
 
+/// One line of a clean-up's note ([`Going`]): which clean-up (its kind and when it ran), and one thing it sent.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct NoteLine {
+    kind: String,
+    when: i64,
+    removed: Removed,
+}
+
+/// Where the notes of the clean-ups running in this run of the app are: they aren't taken into the list while they run
+/// (each is kept there whole once it ends). Another copy of the app running at once tells its own apart by the lock it
+/// holds on each ([`Going::went`]).
+static RUNNING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// A running clean-up's note of what it has sent, beside [`FILE`] in the app's folder: each thing is added the moment
+/// it goes ([`Going::went`], told by [`mo_space::clean::Bin::going`]), a line of its own, so however the app ends after,
+/// what went is on the disk (a power cut can still lose the last few lines: they aren't waited on, as thousands of
+/// waits would slow Remove down). The file is made when the first thing goes (a clean-up that sends nothing leaves
+/// none), and taken away once the clean-up is kept in the list ([`Going::finish`]). One left behind is taken into the
+/// list by the next look ([`refresh`]).
+pub struct Going {
+    kind: String,
+    when: i64,
+    path: PathBuf,
+    note: Mutex<Note>,
+}
+
+/// What a note holds while its clean-up runs: the file, once made (locked while it's open), and what went.
+#[derive(Default)]
+struct Note {
+    file: Option<fs::File>,
+    /// Set once the file couldn't be made or written to (said in the log once): from then on what goes is only kept
+    /// here, for [`Going::went_so_far`].
+    failed: bool,
+    went: Vec<Removed>,
+}
+
+impl Going {
+    /// The note of a clean-up of `kind` that runs at `when` ([`now`]), in `folder`.
+    pub fn start(folder: &Path, kind: &str, when: i64) -> Going {
+        let path = note_path(folder, kind, when);
+        RUNNING.lock().unwrap_or_else(PoisonError::into_inner).push(path.clone());
+        Going { kind: kind.to_owned(), when, path, note: Mutex::default() }
+    }
+
+    /// Notes one more thing on its way to the bin, a line written at once. What can't be written (said in the log) is
+    /// still kept here.
+    pub fn went(&self, removed: &Removed) {
+        let mut note = self.note.lock().unwrap_or_else(PoisonError::into_inner);
+        note.went.push(removed.clone());
+        if note.failed {
+            return;
+        }
+        let line = NoteLine { kind: self.kind.clone(), when: self.when, removed: removed.clone() };
+        let written = serde_json::to_string(&line).map_err(io::Error::other).and_then(|mut text| {
+            text.push('\n');
+            let file = match note.file.take() {
+                Some(file) => file,
+                None => {
+                    if let Some(folder) = self.path.parent() {
+                        fs::create_dir_all(folder)?;
+                    }
+                    let file = open_note(&self.path)?;
+                    // Held while the clean-up runs, so another copy of the app running at once leaves it be. Where
+                    // files can't be locked (said in the log), this run's own looks still do (`RUNNING`).
+                    if let Err(fs::TryLockError::Error(e)) = file.try_lock() {
+                        let at = self.path.display();
+                        log::warning("Space", &format!("Couldn't lock the note of what goes to the {BIN} ({at}): {e}"));
+                    }
+                    file
+                }
+            };
+            let file = note.file.insert(file);
+            file.write_all(text.as_bytes())
+        });
+        if let Err(e) = written {
+            note.failed = true;
+            note.file = None;
+            let at = self.path.display();
+            log::warning("Space", &format!("Couldn't note what goes to the {BIN} as it goes ({at}): {e}"));
+        }
+    }
+
+    /// What it noted so far, in the order it went: what had gone when a clean-up stopped with an error.
+    pub fn went_so_far(&self) -> Vec<Removed> {
+        self.note.lock().unwrap_or_else(PoisonError::into_inner).went.clone()
+    }
+
+    /// The clean-up has ended: once it's `kept` in the list ([`Kept::noted`]), its note goes. When it couldn't be kept
+    /// there, the note stays for the next look to take in.
+    pub fn finish(self, kept: bool) {
+        // Closed (and so let go) first: a file that's open may not be taken away.
+        self.note.lock().unwrap_or_else(PoisonError::into_inner).file = None;
+        if kept {
+            remove_note(&self.path);
+        }
+    }
+}
+
+impl Drop for Going {
+    fn drop(&mut self) {
+        let mut running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = running.iter().position(|path| *path == self.path) {
+            running.swap_remove(at);
+        }
+    }
+}
+
+/// Opens a note to add to, made if it isn't there yet. It's opened to read as well: Windows locks a file only through
+/// a handle that may read or write it, and one that may only add to the end is neither.
+fn open_note(path: &Path) -> io::Result<fs::File> {
+    fs::OpenOptions::new().create(true).read(true).append(true).open(path)
+}
+
+/// Where the note of a clean-up of `kind` that ran at `when` in this run of the app is kept in `folder`.
+fn note_path(folder: &Path, kind: &str, when: i64) -> PathBuf {
+    folder.join(format!("{NOTE_START}{kind}-{when}-{}{NOTE_END}", std::process::id()))
+}
+
+/// A note that can't be read for this long (since it last changed) is taken away, so it doesn't stay for ever (rule
+/// 28): what it names stays in the bin, to put back from there.
+const UNREADABLE_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+
+/// Takes away a note that's done with, unless another copy of the app running at once holds it locked: its clean-up is
+/// running there (it was taken in just as it started), and keeps it all itself ([`add`]). One that's already gone is
+/// fine; one that can't be taken away (said in the log) is taken in again by a later look, which adds nothing twice.
+fn remove_note(path: &Path) {
+    let written = fs::File::open(path).is_ok_and(|file| matches!(file.try_lock(), Err(fs::TryLockError::WouldBlock)));
+    if written {
+        return;
+    }
+    if let Err(e) = fs::remove_file(path)
+        && e.kind() != io::ErrorKind::NotFound
+    {
+        log::warning(
+            "Space",
+            &format!("Couldn't take away a note of what went to the {BIN} ({}): {e}", path.display()),
+        );
+    }
+}
+
+/// The notes in `folder` ([`Going`]), each with what it holds, but for those of clean-ups still running (in this run of
+/// the app, or another copy of it running at once): what a close or a crash part way through left, or a clean-up whose
+/// list couldn't be written. A line a crash cut short, or one that can't be read, is left out (said in the log). Reads
+/// the folder and each note: call it off the window's thread.
+fn notes_in(folder: &Path) -> Vec<(PathBuf, Vec<NoteLine>)> {
+    let running = RUNNING.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    let Ok(entries) = fs::read_dir(folder) else { return Vec::new() };
+    let mut notes = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let is_note = name.to_str().is_some_and(|n| n.starts_with(NOTE_START) && n.ends_with(NOTE_END));
+        let path = entry.path();
+        if !is_note || running.contains(&path) || !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let read = fs::File::open(&path).and_then(|file| {
+            // Locked by the clean-up writing it, in another copy of the app: it's still running. (Where files can't be
+            // locked, it's read.)
+            if matches!(file.try_lock_shared(), Err(fs::TryLockError::WouldBlock)) {
+                return Ok(None);
+            }
+            io::read_to_string(file).map(Some)
+        });
+        let text = match read {
+            Ok(Some(text)) => text,
+            Ok(None) => continue,
+            Err(e) => {
+                let at = path.display();
+                let age = entry.metadata().ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok());
+                if age.is_some_and(|age| age >= UNREADABLE_FOR) {
+                    log::warning(
+                        "Space",
+                        &format!(
+                            "A note of what went to the {BIN} couldn't be read for a month, so it's taken away: what it \
+                             names stays in the {BIN}, to put back from there ({at}): {e}"
+                        ),
+                    );
+                    remove_note(&path);
+                } else {
+                    log::warning("Space", &format!("Couldn't read a note of what went to the {BIN} ({at}): {e}"));
+                }
+                continue;
+            }
+        };
+        let mut unread = 0;
+        let lines: Vec<NoteLine> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .filter_map(|line| serde_json::from_str(line).map_err(|_| unread += 1).ok())
+            .collect();
+        if unread > 0 {
+            let at = path.display();
+            log::warning(
+                "Space",
+                &format!("{unread} lines of a note of what went to the {BIN} couldn't be read ({at})"),
+            );
+        }
+        notes.push((path, lines));
+    }
+    notes
+}
+
+/// Takes into `list` (oldest first) what `notes` say went: each thing the list doesn't have yet (the same thing, gone
+/// at the same time), with its clean-up when the list has some of that already (a note left beside its clean-up: by a
+/// crash, or because it couldn't be taken away), else as a clean-up of its own, in its place by time (a second or more
+/// later when another of its kind is kept under that time: [`free_time`]). Never with another clean-up because it has
+/// the same time: the clock may have been put back since that one.
+fn take_in(list: &mut Vec<Binned>, notes: &[(PathBuf, Vec<NoteLine>)]) {
+    let pair = |r: &Removed| (key(&r.real), r.when);
+    // Which clean-up has each thing kept (none for one this takes in as a clean-up of its own).
+    let mut have: HashMap<(String, i64), Option<usize>> = HashMap::new();
+    for (at, binned) in list.iter().enumerate() {
+        for r in &binned.done.removed {
+            have.insert(pair(r), Some(at));
+        }
+    }
+    let mut own = Vec::new();
+    for (_, lines) in notes {
+        let Some(NoteLine { kind, when, .. }) = lines.first() else { continue };
+        let with = lines.iter().find_map(|line| match have.get(&pair(&line.removed)) {
+            Some(Some(at)) if list.get(*at).is_some_and(|b| b.kind == *kind) => Some(*at),
+            _ => None,
+        });
+        let mut new = Vec::new();
+        for line in lines {
+            if let Entry::Vacant(spot) = have.entry(pair(&line.removed)) {
+                spot.insert(None);
+                new.push(line.removed.clone());
+            }
+        }
+        match with.and_then(|at| list.get_mut(at)) {
+            _ if new.is_empty() => {}
+            Some(binned) => binned.done.removed.extend(new),
+            // A note's own clean-up is Space's: the Plugins page's don't write notes yet.
+            None => own.push(Binned {
+                kind: kind.clone(),
+                when: *when,
+                done: Done { removed: new, ..Done::default() },
+                plugin: None,
+            }),
+        }
+    }
+    for binned in own {
+        let when = free_time(list, &binned.kind, binned.when);
+        let at = list.iter().position(|b| b.when > when).unwrap_or(list.len());
+        list.insert(at, Binned { when, ..binned });
+    }
+}
+
+/// Where the plugin files the app's clean-ups put in the bin were, as kept in `folder` and in the notes of clean-ups
+/// cut short ([`Going`]): those that aren't back in their place. The Plugins page leaves them out of what it counts, as
+/// the Space page does, even before the Space page has looked in the bin this run (the whole-app review of 6 Nov,
+/// E1-4). Reads the list and the notes and looks at each place on the disk, but not in the bin: call it off the
+/// window's thread.
+pub fn plugin_files(folder: &Path) -> Vec<String> {
+    let kept = read(folder).unwrap_or_else(|e| {
+        log::warning("Space", &format!("Couldn't read what the app put in the {BIN} ({FILE}): {e}"));
+        Vec::new()
+    });
+    let kept = kept.into_iter().flat_map(|b| b.done.removed);
+    let noted = notes_in(folder).into_iter().flat_map(|(_, lines)| lines).map(|line| line.removed);
+    let mut seen = HashSet::new();
+    kept.chain(noted)
+        .filter(|r| matches!(r.what, What::Plugin(_)))
+        .filter(|r| fs::symlink_metadata(&r.path).is_err() && seen.insert(key(&r.path)))
+        .map(|r| r.path)
+        .collect()
+}
+
 /// The clean-ups kept in `folder`, oldest first: none when there's no file yet, and none from a damaged one (said in
 /// the log), which the next clean-up writes over. Err when it's there but can't be read (another program has it open,
 /// say): then it mustn't be written over.
@@ -134,13 +423,31 @@ pub fn write(folder: &Path, list: &[Binned]) -> io::Result<()> {
 }
 
 /// Adds a clean-up of `kind` that ran at `when`: only what went, and nothing when nothing did. The newest goes last.
-/// Gives the time it's kept under: `when`, or a second or more later when another of its kind is kept under that time
-/// (the computer's clock was put back since), as Put back knows each one by its kind and time.
+/// What of it the list has already, taken in from its note while it ran (by another copy of the app running at once:
+/// kept under its kind and time), is kept once, as this says it: the note's copy goes, with a clean-up that's left with
+/// nothing. Gives the time it's kept under: `when`, or a second or more later when another of its kind is kept under
+/// that time (the computer's clock was put back since), as Put back knows each one by its kind and time.
 pub fn add(list: &mut Vec<Binned>, kind: &str, when: i64, done: &Done) -> i64 {
+    add_for(list, kind, when, done, None)
+}
+
+/// [`add`], for the plugin line `plugin` (the Plugins page's clean-ups).
+fn add_for(list: &mut Vec<Binned>, kind: &str, when: i64, done: &Done, plugin: Option<(String, String)>) -> i64 {
+    if !done.removed.is_empty() && list.iter().any(|b| b.kind == kind && b.when == when) {
+        let its: HashSet<(String, i64)> = done.removed.iter().map(|r| (key(&r.real), r.when)).collect();
+        list.retain_mut(|b| {
+            if b.kind != kind || b.when != when {
+                return true;
+            }
+            let before = b.done.removed.len();
+            b.done.removed.retain(|r| !its.contains(&(key(&r.real), r.when)));
+            before == b.done.removed.len() || !b.done.removed.is_empty()
+        });
+    }
     let when = free_time(list, kind, when);
     if !done.removed.is_empty() {
         let done = Done { removed: done.removed.clone(), problems: Vec::new(), went_with: done.went_with.clone() };
-        list.push(Binned { kind: kind.to_owned(), when, done });
+        list.push(Binned { kind: kind.to_owned(), when, done, plugin });
     }
     when
 }
@@ -227,12 +534,12 @@ fn trim(list: Vec<(Binned, bool)>) -> Vec<Binned> {
     out
 }
 
-/// Reads the clean-ups kept in `folder`, lets `change` change them, keeps what may still be in the bin ([`look`]), and
-/// writes them back when that changed them. One at a time, so two changes can't lose each other's. A list that
-/// couldn't be written (said in the log) is kept here instead while the app runs: the next change starts from it, not
-/// the file, and writes it. A file that couldn't be read isn't written over: what's added meanwhile is kept here, and
-/// goes with what it holds once it can be read. Looks in the bin and waits for the disk: call it off the window's
-/// thread.
+/// Reads the clean-ups kept in `folder`, lets `change` change them, takes in what the notes of clean-ups cut short say
+/// went ([`Going`]), keeps what may still be in the bin ([`look`]), and writes them back when that changed them. One at
+/// a time, so two changes can't lose each other's. A list that couldn't be written (said in the log) is kept here
+/// instead while the app runs: the next change starts from it, not the file, and writes it. A file that couldn't be
+/// read isn't written over: what's added meanwhile is kept here, and goes with what it holds once it can be read.
+/// Looks in the bin and waits for the disk: call it off the window's thread.
 fn update(folder: &Path, bin: &dyn Bin, change: impl FnOnce(&mut Vec<Binned>)) -> Kept {
     let mut changes = CHANGES.lock().unwrap_or_else(PoisonError::into_inner);
     changes.seq += 1;
@@ -266,12 +573,22 @@ fn update(folder: &Path, bin: &dyn Bin, change: impl FnOnce(&mut Vec<Binned>)) -
         },
     };
     change(&mut list);
+    // What clean-ups cut short noted as they went (or one whose list couldn't be kept): taken in, their notes go once
+    // it's all kept. While the file can't be read (above) they wait where they are.
+    let notes = notes_in(folder);
+    if !notes.is_empty() {
+        take_in(&mut list, &notes);
+    }
     let looked = look(list, bin);
     let noted = file.as_ref() == Some(&looked.keep)
         || write(folder, &looked.keep)
             .map_err(|e| log::warning("Space", &format!("Couldn't keep what the app put in the {BIN} ({FILE}): {e}")))
             .is_ok();
-    if !noted {
+    if noted {
+        for (path, _) in &notes {
+            remove_note(path);
+        }
+    } else {
         changes.behind.get_or_insert_with(HashMap::new).insert(folder.to_owned(), Behind::Unwritten(looked.keep));
     }
     Kept { seq, list: looked.shown, in_bin: looked.in_bin, noted }
@@ -286,8 +603,20 @@ pub fn refresh(folder: &Path, bin: &dyn Bin) -> Kept {
 /// Keeps a clean-up of `kind` that ran at `when` in `folder` ([`add`]), and says what's kept now, and the time it's
 /// kept under ([`add`] says which). Looks in the bin and waits for the disk: call it off the window's thread.
 pub fn record(folder: &Path, bin: &dyn Bin, kind: &str, when: i64, done: &Done) -> (Kept, i64) {
+    record_for(folder, bin, kind, when, done, None)
+}
+
+/// [`record`], for a clean-up of the plugin line `plugin` (the Plugins page's Clean up and Uninstall: review X1-3).
+pub fn record_for(
+    folder: &Path,
+    bin: &dyn Bin,
+    kind: &str,
+    when: i64,
+    done: &Done,
+    plugin: Option<(String, String)>,
+) -> (Kept, i64) {
     let mut kept_at = when;
-    let kept = update(folder, bin, |list| kept_at = add(list, kind, when, done));
+    let kept = update(folder, bin, |list| kept_at = add_for(list, kind, when, done, plugin));
     (kept, kept_at)
 }
 
@@ -382,6 +711,24 @@ mod tests {
         write(&dir, &[]).unwrap();
         assert!(!dir.join(FILE).exists());
         write(&dir, &[]).unwrap();
+    }
+
+    /// Review X1-3: a Plugins page clean-up is kept with its plugin's line, read back with it; one kept before (no
+    /// plugin in the file) still reads, and Space's own aren't written with one.
+    #[test]
+    fn a_plugin_clean_up_keeps_its_plugin() {
+        let dir = folder("mo-app-binned-plugin");
+        let mut list = Vec::new();
+        add(&mut list, "spare-copies", 1_762_268_400, &done(&["C:/a.dll"]));
+        let plugin = Some(("serum".to_owned(), String::new()));
+        add_for(&mut list, crate::space_bin::PLUGIN_CLEAN, 1_762_268_401, &done(&["C:/Serum"]), plugin.clone());
+        write(&dir, &list).unwrap();
+        let text = fs::read_to_string(dir.join(FILE)).unwrap();
+        assert_eq!(text.matches("\"plugin\"").count(), 1, "{text}");
+        let back = read(&dir).unwrap();
+        assert_eq!(back, list);
+        assert_eq!(back[1].plugin, plugin);
+        assert_eq!(back[0].plugin, None);
     }
 
     #[test]
@@ -555,6 +902,225 @@ mod tests {
         assert!(written.noted);
         assert_eq!(read(&blocked).unwrap(), second.list);
         assert!(refresh(&blocked, &bin).noted);
+    }
+
+    /// What a clean-up sends, as it's noted going: not yet found in the bin.
+    fn going(path: &str, when: i64) -> Removed {
+        Removed { when, bin_id: None, ..removed(path, 10) }
+    }
+
+    fn paths(binned: &Binned) -> Vec<&str> {
+        binned.done.removed.iter().map(|r| r.path.as_str()).collect()
+    }
+
+    fn notes(dir: &Path) -> Vec<PathBuf> {
+        let mut notes: Vec<PathBuf> = fs::read_dir(dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(NOTE_START)))
+            .collect();
+        notes.sort();
+        notes
+    }
+
+    #[test]
+    fn what_a_clean_up_cut_short_sent_is_kept_by_the_next_look() {
+        let dir = folder("mo-app-binned-cut-short");
+        let bin = holding(Some(vec!["C:/a.dll", "C:/b.dll"]));
+        let note = Going::start(&dir, "spare-copies", 5);
+        // Nothing sent yet: no note.
+        assert!(notes(&dir).is_empty());
+        note.went(&going("C:/a.dll", 5));
+        note.went(&going("C:/b.dll", 6));
+        assert_eq!(notes(&dir).len(), 1);
+        assert_eq!(note.went_so_far().len(), 2);
+        // While it runs, a look leaves its note be: it's kept whole once it ends.
+        let looked = refresh(&dir, &bin);
+        assert!(looked.list.is_empty() && looked.noted);
+        assert_eq!(notes(&dir).len(), 1);
+        // The app closes (or crashes) before it's kept: the next look keeps what went, and the note goes.
+        drop(note);
+        let kept = refresh(&dir, &bin);
+        assert!(kept.noted);
+        assert_eq!((whens(&kept.list), paths(&kept.list[0])), (vec![5], vec!["C:/a.dll", "C:/b.dll"]));
+        assert_eq!((kept.in_bin.items, kept.in_bin.bytes), (2, 20));
+        assert_eq!(read(&dir).unwrap(), kept.list);
+        assert!(notes(&dir).is_empty());
+        // Looked at again, nothing is added twice.
+        assert_eq!(refresh(&dir, &bin).list, kept.list);
+    }
+
+    #[test]
+    fn a_clean_up_kept_whole_takes_its_note_away() {
+        let dir = folder("mo-app-binned-note-kept");
+        let bin = holding(Some(vec!["C:/a.dll", "C:/b.dll"]));
+        let note = Going::start(&dir, "spare-copies", 7);
+        let went = Done { removed: vec![going("C:/a.dll", 7), going("C:/b.dll", 8)], ..Done::default() };
+        for r in &went.removed {
+            note.went(r);
+        }
+        let (kept, _) = record(&dir, &bin, "spare-copies", 7, &went);
+        assert!(kept.noted);
+        note.finish(kept.noted);
+        assert!(notes(&dir).is_empty());
+        // One whose list couldn't be kept leaves its note for the next look.
+        let note = Going::start(&dir, "spare-copies", 9);
+        note.went(&going("C:/a.dll", 9));
+        note.finish(false);
+        assert_eq!(notes(&dir).len(), 1);
+    }
+
+    #[test]
+    fn a_note_beside_its_kept_clean_up_adds_only_what_the_list_lacks() {
+        let dir = folder("mo-app-binned-note-beside");
+        let bin = holding(Some(vec!["C:/a.dll", "C:/b.dll", "C:/c.dll"]));
+        let note = Going::start(&dir, "old-copies", 3);
+        for r in [going("C:/a.dll", 3), going("C:/b.dll", 4)] {
+            note.went(&r);
+        }
+        // Kept with only the first (a crash in Windows' administrator step, say, before the second had gone), and the
+        // note left for the next look, which adds the second to the same clean-up.
+        let (kept, _) =
+            record(&dir, &bin, "old-copies", 3, &Done { removed: vec![going("C:/a.dll", 3)], ..Done::default() });
+        assert_eq!(kept.list[0].done.removed.len(), 1);
+        note.finish(false);
+        // Another clean-up, kept since, stays as it is, after it.
+        record(&dir, &bin, "old-copies", 10, &Done { removed: vec![going("C:/c.dll", 10)], ..Done::default() });
+        let now = refresh(&dir, &bin);
+        assert_eq!(whens(&now.list), [3, 10]);
+        assert_eq!(paths(&now.list[0]), ["C:/a.dll", "C:/b.dll"]);
+        assert!(notes(&dir).is_empty());
+        // What the bin doesn't hold (it stayed where it was after all) isn't kept from a note either.
+        let note = Going::start(&dir, "old-copies", 20);
+        note.went(&going("C:/d.dll", 20));
+        drop(note);
+        assert_eq!(whens(&refresh(&dir, &bin).list), [3, 10]);
+        assert!(notes(&dir).is_empty());
+    }
+
+    #[test]
+    fn a_note_beside_a_clean_up_kept_a_second_later_goes_with_it() {
+        let dir = folder("mo-app-binned-note-later");
+        let bin = holding(Some(vec!["C:/old.dll", "C:/a.dll", "C:/b.dll"]));
+        // A clean-up at 30 is kept; the clock is put back, and the next one, at 30 too, is kept at 31.
+        record(&dir, &bin, "spare-copies", 30, &Done { removed: vec![going("C:/old.dll", 30)], ..Done::default() });
+        let note = Going::start(&dir, "spare-copies", 30);
+        for r in [going("C:/a.dll", 30), going("C:/b.dll", 30)] {
+            note.went(&r);
+        }
+        // It stopped with an error just as b went: kept with a only, and its note left.
+        let (kept, at) =
+            record(&dir, &bin, "spare-copies", 30, &Done { removed: vec![going("C:/a.dll", 30)], ..Done::default() });
+        assert_eq!((at, whens(&kept.list)), (31, vec![30, 31]));
+        note.finish(false);
+        // b goes with a, not with the clean-up that was at 30 first.
+        let now = refresh(&dir, &bin);
+        assert_eq!(whens(&now.list), [30, 31]);
+        assert_eq!((paths(&now.list[0]), paths(&now.list[1])), (vec!["C:/old.dll"], vec!["C:/a.dll", "C:/b.dll"]));
+    }
+
+    #[test]
+    fn a_clean_up_taken_in_from_its_note_while_it_ran_is_kept_once() {
+        let dir = folder("mo-app-binned-note-early");
+        let bin = holding(Some(vec!["C:/a.dll", "C:/b.dll"]));
+        // Another copy of the app took in the first line of its note just as it started (before it was locked).
+        let line = NoteLine { kind: "spare-copies".to_owned(), when: 40, removed: going("C:/a.dll", 40) };
+        let other = dir.join(format!("{NOTE_START}spare-copies-40-1{NOTE_END}"));
+        fs::write(&other, format!("{}\n", serde_json::to_string(&line).unwrap())).unwrap();
+        assert_eq!(whens(&refresh(&dir, &bin).list), [40]);
+        // Once it ends, it's kept whole, once, as it says it (found in the bin), at its own time.
+        let mut found = Done { removed: vec![going("C:/a.dll", 40), going("C:/b.dll", 40)], ..Done::default() };
+        for r in &mut found.removed {
+            r.bin_id = Some(format!("bin:{}", r.path));
+        }
+        let (kept, at) = record(&dir, &bin, "spare-copies", 40, &found);
+        assert_eq!((at, whens(&kept.list)), (40, vec![40]));
+        assert_eq!(kept.list[0].done.removed, found.removed);
+    }
+
+    #[test]
+    fn a_note_another_copy_of_the_app_is_writing_is_left_be() {
+        let dir = folder("mo-app-binned-note-locked");
+        let bin = holding(Some(vec!["C:/a.dll"]));
+        let note = Going::start(&dir, "spare-copies", 11);
+        note.went(&going("C:/a.dll", 11));
+        // Locked while its clean-up runs, so another copy of the app can tell.
+        let path = notes(&dir).remove(0);
+        assert!(matches!(fs::File::open(&path).unwrap().try_lock(), Err(fs::TryLockError::WouldBlock)));
+        drop(note);
+        // Held as a running clean-up in another copy of the app holds its note.
+        let held = open_note(&path).unwrap();
+        held.try_lock().unwrap();
+        assert!(refresh(&dir, &bin).list.is_empty());
+        assert!(path.exists());
+        // Nor is it taken away while it's held, however it was taken in.
+        remove_note(&path);
+        assert!(path.exists());
+        // Once it's let go, it's taken in.
+        drop(held);
+        assert_eq!(whens(&refresh(&dir, &bin).list), [11]);
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_line_a_crash_cut_short_is_left_out() {
+        let dir = folder("mo-app-binned-note-cut");
+        let line = NoteLine { kind: "spare-copies".to_owned(), when: 12, removed: going("C:/a.dll", 12) };
+        let text = format!("{}\n{{\"kind\": \"spare-co", serde_json::to_string(&line).unwrap());
+        fs::write(dir.join(format!("{NOTE_START}spare-copies-12-1{NOTE_END}")), text).unwrap();
+        // Something else of a name like it, but not a file, isn't one.
+        fs::create_dir_all(dir.join(format!("{NOTE_START}spare-copies-13-1{NOTE_END}"))).unwrap();
+        let kept = refresh(&dir, &holding(Some(vec!["C:/a.dll"])));
+        assert_eq!((whens(&kept.list), paths(&kept.list[0])), (vec![12], vec!["C:/a.dll"]));
+        assert_eq!(notes(&dir).len(), 1);
+    }
+
+    #[test]
+    fn a_note_waits_while_the_list_cant_be_read_or_written() {
+        let dir = folder("mo-app-binned-note-waits");
+        let bin = holding(Some(vec!["C:/a.dll"]));
+        let note = Going::start(&dir, "spare-copies", 14);
+        note.went(&going("C:/a.dll", 14));
+        drop(note);
+        // The list can't be read: the note isn't taken in, so nothing in it is lost.
+        fs::create_dir_all(dir.join(FILE)).unwrap();
+        assert!(refresh(&dir, &bin).list.is_empty());
+        assert_eq!(notes(&dir).len(), 1);
+        // It can be read again: taken in, and kept.
+        fs::remove_dir(dir.join(FILE)).unwrap();
+        let kept = refresh(&dir, &bin);
+        assert_eq!((whens(&kept.list), kept.noted), (vec![14], true));
+        assert!(notes(&dir).is_empty());
+    }
+
+    #[test]
+    fn the_plugins_page_hears_of_plugin_files_in_the_bin_before_a_look() {
+        let dir = folder("mo-app-binned-plugin-files");
+        let back = dir.join("Back.dll");
+        fs::write(&back, "put back since").unwrap();
+        let back = back.to_string_lossy().into_owned();
+        let mut song = going("C:/Songs/old.flp", 1);
+        song.what = What::Song(mo_space::song::CompactKind::Backup);
+        let mut list = Vec::new();
+        add(
+            &mut list,
+            "spare-copies",
+            1,
+            &Done { removed: vec![going("C:/a.dll", 1), going(&back, 1)], ..Done::default() },
+        );
+        add(&mut list, "compact", 2, &Done { removed: vec![song], ..Done::default() });
+        write(&dir, &list).unwrap();
+        let note = Going::start(&dir, "spare-copies", 3);
+        note.went(&going("C:/b.dll", 3));
+        // The same one noted again (another copy of the app's note, say) is said once.
+        note.went(&going("C:/a.dll", 3));
+        drop(note);
+        // What's back where it was, and what isn't a plugin's, is left out.
+        assert_eq!(plugin_files(&dir), ["C:/a.dll", "C:/b.dll"]);
+        // Nothing is changed: the note waits for a look.
+        assert_eq!(notes(&dir).len(), 1);
+        assert_eq!(read(&dir).unwrap(), list);
     }
 
     #[test]

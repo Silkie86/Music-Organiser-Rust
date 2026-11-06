@@ -1094,9 +1094,20 @@ pub fn play_file_name() -> String {
     format!("{PLAY_FILE_PREFIX}{}-{n}.mid", std::process::id())
 }
 
-/// Whether a file's whole name is one [`play_file_name`] gives (rule 28: the sweep removes only those).
+/// A new name for an audition's Bitwig preset in Temp, made from a song's sound for the Presets page's Audition: "MO
+/// Play <process id>-<count>.bwpreset". It goes once Bitwig has loaded it, and the sweep knows it as a play file.
+pub fn play_preset_name() -> String {
+    let mid = play_file_name();
+    format!("{}.bwpreset", mid.strip_suffix(".mid").unwrap_or(&mid))
+}
+
+/// Whether a file's whole name is one [`play_file_name`] or [`play_preset_name`] gives (rule 28: the sweep removes
+/// only those).
 pub fn is_play_file(name: &str) -> bool {
-    let Some(numbers) = name.strip_prefix(PLAY_FILE_PREFIX).and_then(|r| r.strip_suffix(".mid")) else {
+    let Some(numbers) = name
+        .strip_prefix(PLAY_FILE_PREFIX)
+        .and_then(|r| r.strip_suffix(".mid").or_else(|| r.strip_suffix(".bwpreset")))
+    else {
         return false;
     };
     let digits = |p: &str| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit());
@@ -1252,6 +1263,23 @@ mod tests {
         let f = Filters { years: Some((y, y)), ..Filters::default() };
         assert_eq!(titles(&cat, &list(&cat, &f, Order::Newest, None, None)), ["Kick"]);
         assert!(year_counts(&cat).first().is_some_and(|(year, n)| *year == year_of(1_760_000_000) && *n == 2));
+    }
+
+    #[test]
+    fn ctrl_k_finds_a_loop_by_its_other_keys_file_names() {
+        let loop_in = |tonic: u8, hash: &str| {
+            let mut p =
+                phrase(&format!("L:/New Midi/Pack/Pad Loop {hash}.mid"), "Lead", Role::Melody, hash, 1_760_000_000);
+            p.key = sure(tonic, true);
+            p.lowest = 57 + tonic % 12;
+            p.shape = Some(42);
+            p
+        };
+        let cat = Catalogue::new(vec![loop_in(9, "Am"), loop_in(6, "Fsm")]);
+        let parts: std::sync::Arc<dyn crate::finder::Source> = std::sync::Arc::new(crate::finder::midi_parts(&cat));
+        assert_eq!(parts.len(), 1, "one line for the loop");
+        let g = crate::finder::find(&[parts], "pad loop fsm", None, 4);
+        assert_eq!(g.len(), 1, "the other key's file is found by its own name");
     }
 
     #[test]
@@ -1689,6 +1717,11 @@ mod tests {
         assert!(!is_play_file("MO Play Bass.mid"));
         assert!(!is_play_file("MO Play 4120-3.mid.part"));
         assert!(!is_play_file("Keys \u{b7} Pattern 3.mid"));
+        // An audition's Bitwig preset, made from a song's sound.
+        let preset = play_preset_name();
+        assert!(preset.ends_with(".bwpreset") && is_play_file(&preset), "{preset}");
+        assert!(!is_play_file("MO Play 4120-3.bwpreset.part"));
+        assert!(!is_play_file("Serum - Pad.bwpreset"));
     }
 
     #[test]

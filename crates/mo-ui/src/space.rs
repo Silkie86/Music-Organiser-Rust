@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Condvar, Mutex, OnceLock, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
@@ -25,8 +25,8 @@ use mo_app::binned::{self, Kept};
 use mo_app::places::Place;
 use mo_app::plugins::folder_fixes::FolderFix;
 use mo_app::shortcuts::what_of;
-use mo_app::sounds::SoundList;
-use mo_app::space::{self, Drive, Fill, Holds, OnPlugins, Opens, Part};
+use mo_app::sounds::{CopiesFound, SoundList};
+use mo_app::space::{self, Drive, Holds, OnPlugins, Opens, Part};
 use mo_app::space_bin::{self, BIN, CAN_PUT_BACK, PutBacks};
 use mo_app::space_bitwig::{self, BITWIG_COPIES, Copies, Fixes, Fixing, ToFix};
 use mo_app::space_old::{self, Found, OLD_COPIES};
@@ -38,11 +38,9 @@ use mo_app::space_spare::{self, Removing, SPARE_COPIES, Stage};
 use mo_app::{backup, log, paths, shell};
 use mo_catch::catch_crash;
 use mo_library::folders::FolderList;
-use mo_sounds::SoundsDb;
-use mo_sounds::duplicates::Finds;
 use mo_space::app_files::{self, AppFilesPart};
 use mo_space::bitwig::{self, LibraryIndex};
-use mo_space::clean::{self, Bin, Done, Heard, Problem, SystemBin, What};
+use mo_space::clean::{self, Bin, Done, Heard, Problem, Removed, SystemBin, What};
 use mo_space::old_copies::Leftover;
 use mo_space::song::CompactSettings;
 use mo_space::spare::{SpareCopy, Used};
@@ -132,28 +130,40 @@ struct PluginsAsk {
     fixes: Vec<FolderFix>,
 }
 
-/// One look at the copies of the same sound: what the old app's duplicate finder found, read from the sound library
-/// the Sounds page read (`db`, read-only), grouped with that page's list of the sounds (`list`, with your songs' use
-/// once it's known), on the page's own low-priority thread. It's asked for on the page's first look, once what it
-/// shows is five minutes old, on Measure again, and when the Sounds page's list changes. It reads the sound library
-/// again only when that has changed since the look on show read it (`read`, with the library's stamp then,
-/// [`SoundsDb::stamp`]; none on Measure again): else a new list is grouped from what it read, and the same list's look
-/// stands (`same_list`).
+/// What the plugins line is worked out from, off the window's thread ([`work_out_plugins`]): what the look on show
+/// found and when it counts back from, what's in the Recycle Bin from here (by which change to it the page has: none
+/// while the page hasn't looked in the bin this run), what the Plugins page's Clean ups, uninstalls and moves took this
+/// session, and the years the Plugins page has picked.
+#[derive(Clone)]
+struct PluginsOf {
+    found: Arc<space_plugins::Found>,
+    at: chrono::NaiveDateTime,
+    kept: Option<u64>,
+    session: Vec<String>,
+    years: u32,
+}
+
+impl PartialEq for PluginsOf {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.found, &other.found)
+            && (self.at, self.kept, self.years) == (other.at, other.kept, other.years)
+            && self.session == other.session
+    }
+}
+
+/// What [`work_out_plugins`] gives its thread: which time it asked, what it's worked out from, and the plugin files in
+/// the Recycle Bin from here (none while the page hasn't looked in the bin: [`recorded_plugin_files`]).
+type PluginsWork = (u64, PluginsOf, Option<Vec<String>>);
+
+/// One look at the copies of the same sound: the copies the Sounds page's Hide duplicates found in its list of the
+/// sounds (`list`, with your songs' use once it's known), grouped as that page keeps them, with the switch on or off
+/// (`hiding`), on the page's own low-priority thread. Asked for on the page's first look, once what it shows is five
+/// minutes old, on Measure again, when the Sounds page's list changes (as the copies come), and when the switch does.
 struct CopiesAsk {
     id: u64,
     list: Arc<SoundList>,
-    db: PathBuf,
-    read: Option<(Arc<Finds>, String)>,
-    same_list: bool,
+    hiding: bool,
     stop: Arc<AtomicBool>,
-}
-
-/// What a look at the copies of the same sound brings back.
-enum CopiesLooked {
-    /// What it found, what it read from the sound library for it, and the library's stamp when it read that.
-    Found(space_sounds::Found, Arc<Finds>, String),
-    /// The list and the sound library are as the look on show found them: that stands.
-    Same,
 }
 
 /// What a look at the plugins no song has used lately brings back.
@@ -186,7 +196,8 @@ enum Step {
     SongsNone(u64),
     Plugins(u64, Box<PluginsLooked>),
     PluginsNone(u64),
-    Copies(u64, Box<CopiesLooked>),
+    PluginsNow(u64, Box<space_plugins::Found>),
+    Copies(u64, Box<space_sounds::Found>),
     CopiesNone(u64),
     Fixed(PathBuf, Fixing),
     FixDone,
@@ -292,26 +303,29 @@ struct Page {
     /// While they're going to the Recycle Bin: what stops their checks (Stop).
     songs_stop: Option<Arc<AtomicBool>>,
     /// The look at the plugins no song has used lately, what the last one found (it stays on show while the next one
-    /// looks), and whether one is on.
+    /// looks) with when it counts back from (a later look that found the library as it was moves that on), and
+    /// whether one is on.
     plugins_look: Looks<PluginsAsk>,
-    plugins: Option<space_plugins::Found>,
+    plugins: Option<(Arc<space_plugins::Found>, chrono::NaiveDateTime)>,
     plugins_looking: bool,
     /// The library's stamp when the look on show read it, and the Plugins page's folder fixes it counted: a look
     /// finding the same of both doesn't read it again.
     plugins_stamp: Option<String>,
     plugins_fixes: Vec<FolderFix>,
-    /// What the plugins line last showed: shown again when the page comes back on show and that has changed (a Clean
-    /// up or uninstall on the Plugins page, or the years picked there).
+    /// What the plugins line shows, as last worked out off the window's thread ([`work_out_plugins`]), what it was
+    /// worked out from (it's worked out again once that changes: a look, a Clean up or uninstall on the Plugins page,
+    /// the years picked there, or what's in the Recycle Bin from here), and the thread that works it out.
     plugins_shown: Option<space_plugins::Found>,
+    plugins_of: Option<PluginsOf>,
+    plugins_work: Looks<PluginsWork>,
     /// The look at the copies of the same sound, what the last one found (it stays on show while the next one looks),
     /// and whether one is on; the Sounds page's list the newest look was asked for (held weakly: the list itself is
-    /// that page's to let go; none once that look failed), and what the look on show read from the sound library, with
-    /// the library's stamp then.
+    /// that page's to let go; none once that look failed), and whether Hide duplicates was on for it.
     copies_look: Looks<CopiesAsk>,
     copies: Option<space_sounds::Found>,
     copies_looking: bool,
     copies_of: Weak<SoundList>,
-    copies_read: Option<(Arc<Finds>, String)>,
+    copies_hiding: bool,
     /// What the app's clean-ups put in the Recycle Bin that's still there: none until the bin has been looked in. Of
     /// two that arrive, the later change wins ([`Kept::seq`]).
     kept: Option<Kept>,
@@ -450,7 +464,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
             if !sounds_page::show_sound_by_id(&app, id) {
                 log::info("Space", "A sound on the copies card isn't on the Sounds page any more: counting again");
                 PAGE.with(|p| p.borrow_mut().copies_of = Weak::new());
-                look_for_sound_copies(&app, sounds_page::known(), false);
+                look_for_sound_copies(&app, sounds_page::known());
             }
             return;
         }
@@ -492,7 +506,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
 pub fn shown(app: &AppWindow) {
     let sounds = sounds_page::known();
     let moves = plugins_page::moves_this_session();
-    let (stale, bitwig, old, spare, songs, plugins, plugins_changed, copies) = PAGE.with(|p| {
+    let (stale, bitwig, old, spare, songs, plugins, copies) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let wired = p.feed.is_some();
         let stale = wired && p.looked.is_none_or(|at| at.elapsed() >= FRESH);
@@ -505,9 +519,8 @@ pub fn shown(app: &AppWindow) {
         let songs = wired && p.songs.is_none() && !p.songs_looking && !held.songs;
         let fixed = p.plugins.is_some() && plugins_page::folder_fixes_this_session() != p.plugins_fixes;
         let plugins = wired && !p.plugins_looking && (stale || p.plugins.is_none() || fixed);
-        let plugins_changed = wired && plugins_now(&p) != p.plugins_shown;
         let copies = wired && copies_due(&p, &sounds, stale);
-        (stale, bitwig, old, spare, songs, plugins, plugins_changed, copies)
+        (stale, bitwig, old, spare, songs, plugins, copies)
     });
     if stale {
         look_again(app);
@@ -526,11 +539,12 @@ pub fn shown(app: &AppWindow) {
     }
     if plugins {
         look_for_plugins(app);
-    } else if plugins_changed {
-        show_wins(app);
+    } else {
+        // A Clean up or uninstall on the Plugins page, or the years picked there, show here once worked out.
+        work_out_plugins(app);
     }
     if copies {
-        look_for_sound_copies(app, sounds, false);
+        look_for_sound_copies(app, sounds);
     }
     // What arrived while the page was off show, unless a look above has drawn it all since.
     if PAGE.with(|p| p.borrow().redraw) {
@@ -551,7 +565,7 @@ pub fn sounds_changed(app: &AppWindow) {
     }
     let sounds = sounds_page::known();
     if PAGE.with(|p| copies_due(&p.borrow(), &sounds, false)) {
-        look_for_sound_copies(app, sounds, false);
+        look_for_sound_copies(app, sounds);
     } else {
         show_also(app);
         show_card(app);
@@ -561,12 +575,14 @@ pub fn sounds_changed(app: &AppWindow) {
 /// Whether the copies of the same sound are due a look, with the Sounds page's sounds as `sounds` has them: none is
 /// while that page hasn't read them. One is when the newest look was for another of its lists than the one it has now
 /// (one with your songs' use counted in, or brought up to date), even while that look is on; else, with none on, when
-/// nothing's found yet, or when what's on show is five minutes old (`stale`: the look then reads the sound library
-/// again only if it changed).
+/// nothing's found yet, or when what's on show is five minutes old (`stale`), or Hide duplicates was turned on or off
+/// since (the copies it hides count as hidden).
 fn copies_due(p: &Page, sounds: &Known, stale: bool) -> bool {
     let Known::Read(list, _) = sounds else { return false };
-    let other = !Weak::ptr_eq(&p.copies_of, &Arc::downgrade(list));
-    other || (!p.copies_looking && (stale || p.copies.is_none()))
+    let other = !Weak::ptr_eq(&p.copies_of, &Arc::downgrade(list)) || p.copies_hiding != sounds_page::hides_copies();
+    // Measuring while the Sounds page looked, and that look failed: the page stops saying it's measuring.
+    let failed = p.copies_looking && sounds_page::copies_found() == CopiesFound::Failed;
+    other || failed || (!p.copies_looking && (stale || p.copies.is_none()))
 }
 
 /// Whether old copies are due a look as the page comes on show, with `moves` of the Plugins page's moves finished
@@ -771,7 +787,9 @@ fn chosen(app: &AppWindow, id: &str) {
                 look_for_plugins(app);
             }
             if !PAGE.with(|p| p.borrow().copies_looking) {
-                look_for_sound_copies(app, sounds_page::known(), true);
+                // The files as they are now: copies made since are found (only files changed since are read).
+                sounds_page::copies_look_again(app);
+                look_for_sound_copies(app, sounds_page::known());
             }
         }
         (REVEAL, Some(feed)) => crate::files::open_folder(&feed, &paths::data_dir().to_string_lossy()),
@@ -1053,20 +1071,23 @@ fn remove_ticked(app: &AppWindow, feed: Feed) {
         Some((picked, p.library.clone()))
     });
     let Some((picked, library)) = job else { return };
-    send_to_bin(app, feed, &SPARE, picked, move |picked, bin| remove_now(picked, &library, bin));
+    // Its card has no Stop (a few copies go quickly); only the app closing stops it ([`finish_up`]).
+    let stop = Arc::new(AtomicBool::new(false));
+    send_to_bin(app, feed, &SPARE, picked, stop, move |picked, bin, stop| remove_now(picked, &library, bin, stop));
 }
 
 /// Remove's own work, off the window's thread: your plugin folders and which plugins your saves use, from the library
 /// (read-only, and closed again first), then each picked copy checked again and sent. When those can't be read, every
-/// copy stays (said in the log): what's spare can't be checked. What goes, goes to `bin`.
-fn remove_now(picked: &[SpareCopy], library: &Path, bin: &(dyn Bin + Sync)) -> Done {
+/// copy stays (said in the log): what's spare can't be checked. What goes, goes to `bin`; `stop` leaves what hasn't
+/// gone yet where it is.
+fn remove_now(picked: &[SpareCopy], library: &Path, bin: &(dyn Bin + Sync), stop: &AtomicBool) -> Done {
     let Some((folders, used)) = plugin_folders_and_uses(library) else {
         return space_removing::stayed(picked, space_spare::CANT_CHECK);
     };
     let pro_tools = plugins::pro_tools_installed();
-    // On the pool for long work that waits on a disk, as the look is (rule 21). Nothing stops it once it's on: each
-    // copy is checked just before it goes, and the one administrator step asks Windows once, at the end.
-    background::on_bulk_pool(|| space_spare::remove(picked, &folders, &used, pro_tools, bin, &AtomicBool::new(false)))
+    // On the pool for long work that waits on a disk, as the look is (rule 21). Each copy is checked just before it
+    // goes, and the one administrator step asks Windows once, at the end.
+    background::on_bulk_pool(|| space_spare::remove(picked, &folders, &used, pro_tools, bin, stop))
 }
 
 /// Remove for old copies: sends the ticked ones to the Recycle Bin together ([`send_to_bin`]), each found again in the
@@ -1091,7 +1112,9 @@ fn remove_old_ticked(app: &AppWindow, feed: Feed) {
         Some((picked, found, p.library.clone(), stop))
     });
     let Some((picked, found, library, stop)) = job else { return };
-    send_to_bin(app, feed, &OLD, picked, move |picked, bin| remove_old_now(picked, &found, &library, bin, &stop));
+    send_to_bin(app, feed, &OLD, picked, stop, move |picked, bin, stop| {
+        remove_old_now(picked, &found, &library, bin, stop)
+    });
 }
 
 /// Remove for your songs' old autosaves and caches: sends the ticked ones to the Recycle Bin together ([`send_to_bin`]),
@@ -1116,7 +1139,10 @@ fn remove_songs_ticked(app: &AppWindow, feed: Feed) {
         Some((picked, settings, p.library.clone(), stop))
     });
     let Some((picked, settings, library, stop)) = job else { return };
-    send_to_bin(app, feed, &SONGS, picked, move |picked, bin| remove_songs_now(picked, settings, &library, bin, &stop));
+    let work = move |picked: &[SongItem], bin: &(dyn Bin + Sync), stop: &AtomicBool| {
+        remove_songs_now(picked, settings, &library, bin, stop)
+    };
+    send_to_bin(app, feed, &SONGS, picked, stop, work);
 }
 
 /// Remove's own work for your songs' things, off the window's thread: the saves, the samples they use and your folders
@@ -1181,35 +1207,48 @@ fn remove_old_now(
 }
 
 /// Remove's own thread for one clean-up (`clean`): sends `picked` to the Recycle Bin with `work` on a low-priority
-/// thread, with an activity card saying how it went. Then what went is kept (`mo_app::binned`), so Put back works
-/// after a restart too, before the page hears it's done, so it shows both at once: what went and what stayed. Call it
-/// once `picked` is on its way ([`space_removing::Removing::start`]).
+/// thread, with an activity card saying how it went; `stop` (its card's Stop, and the app closing: [`finish_up`])
+/// leaves what hasn't gone yet where it is. What goes is noted as it goes ([`binned::Going`]), so a close or a crash
+/// part way through doesn't lose it; at the end it's all kept (`mo_app::binned`), so Put back works after a restart
+/// too, before the page hears it's done, so it shows both at once: what went and what stayed. Call it once `picked`
+/// is on its way ([`space_removing::Removing::start`]).
 fn send_to_bin<T: Removable + Send + 'static>(
     app: &AppWindow,
     feed: Feed,
     clean: &'static Clean<T>,
     picked: Vec<T>,
-    work: impl FnOnce(&[T], &(dyn Bin + Sync)) -> Done + Send + 'static,
+    stop: Arc<AtomicBool>,
+    work: impl FnOnce(&[T], &(dyn Bin + Sync), &AtomicBool) -> Done + Send + 'static,
 ) {
     let weak = app.as_weak();
     let folder = paths::data_dir();
     let (when, sending) = (binned::now(), picked.clone());
+    // Counted from here, so the app closing now waits for it too, until the thread ends (or never starts).
+    let on_its_way = OnItsWay::new(stop);
     let started = background::spawn(clean.thread, move || {
-        let note = (clean.words)();
-        let card = feed.start(clean.title, &note);
+        let on_its_way = on_its_way;
+        let words = (clean.words)();
+        let card = feed.start(clean.title, &words);
         // The card says how far it has got (thousands of autosaves can take minutes), under what it said at the start.
         let of = sending.len();
         let tally = Mutex::new(Tally::new(SystemBin.admin().can_ask()));
         let hear = |_: &Path, sent: &Result<(), String>| {
             let mut tally = tally.lock().unwrap_or_else(PoisonError::into_inner);
             tally.heard(sent);
-            card.progress(tally.fraction(of), Some(&tally.words(&note, of)));
+            card.progress(tally.fraction(of), Some(&tally.words(&words, of)));
         };
-        let bin = Heard::new(&SystemBin, &hear);
-        // A crash (logged as one) still finishes Remove, so the page isn't busy for ever: what went before it is in the
-        // bin, but which isn't known.
-        let done = catch_crash(AssertUnwindSafe(|| work(&sending, &bin)))
-            .unwrap_or_else(|_| space_removing::stayed(&sending, &space_removing::crashed_words()));
+        let note = binned::Going::start(&folder, clean.kind, when);
+        let goes = |removed: &Removed| note.went(removed);
+        let bin = Heard::new(&SystemBin, &hear).noting(&goes);
+        // A crash (logged as one) still finishes Remove, so the page isn't busy for ever: what went before it was noted
+        // as it went, and is kept as usual.
+        let (done, crashed) = match catch_crash(AssertUnwindSafe(|| work(&sending, &bin, &on_its_way.0))) {
+            Ok(done) => (done, false),
+            Err(_) => {
+                let still_there = |at: &str| std::fs::symlink_metadata(at).is_ok();
+                (space_removing::after_crash(&sending, note.went_so_far(), still_there), true)
+            }
+        };
         for (warning, line) in space_removing::log_lines(&done, clean.one, clean.many) {
             if warning { log::warning("Space", &line) } else { log::info("Space", &line) }
         }
@@ -1218,6 +1257,9 @@ fn send_to_bin<T: Removable + Send + 'static>(
             Err(words) => card.failed(&words),
         }
         let kept = catch_crash(AssertUnwindSafe(|| binned::record(&folder, &SystemBin, clean.kind, when, &done))).ok();
+        // Its note goes once it's all kept; after a crash it stays for the next look, as Windows' administrator step
+        // goes on by itself and may still send some of what waited for it.
+        note.finish(!crashed && kept.as_ref().is_some_and(|(kept, _)| kept.noted));
         let when = kept.as_ref().map_or(when, |(_, at)| *at);
         arrive(&weak, (clean.sent)(when, done, kept.map(|(kept, _)| kept)));
     });
@@ -1228,6 +1270,69 @@ fn send_to_bin<T: Removable + Send + 'static>(
         looks_after(app);
     }
     show_wins(app);
+}
+
+/// The Removes sending things to the Recycle Bin now, each by what stops it: as the app closes, each is stopped and
+/// given a little time to keep what went ([`finish_up`]).
+static REMOVES: Mutex<Vec<Arc<AtomicBool>>> = Mutex::new(Vec::new());
+static REMOVE_ENDED: Condvar = Condvar::new();
+
+/// The longest the app waits, as it closes, for a Remove it stopped to keep what went.
+const CLOSE_WAIT: Duration = Duration::from_secs(15);
+
+/// One Remove on its way, in [`REMOVES`] (with what stops it) until it ends, however it ends.
+struct OnItsWay(Arc<AtomicBool>);
+
+impl OnItsWay {
+    fn new(stop: Arc<AtomicBool>) -> Self {
+        REMOVES.lock().unwrap_or_else(PoisonError::into_inner).push(stop.clone());
+        OnItsWay(stop)
+    }
+}
+
+impl Drop for OnItsWay {
+    fn drop(&mut self) {
+        let mut removes = REMOVES.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = removes.iter().position(|stop| Arc::ptr_eq(stop, &self.0)) {
+            removes.swap_remove(at);
+        }
+        REMOVE_ENDED.notify_all();
+    }
+}
+
+/// As the app closes: a Remove still sending things to the Recycle Bin stops (what hasn't gone yet stays where it is)
+/// and is given a little time to keep what went, for Put back (the whole-app review of 6 Nov, E1-1). One that doesn't
+/// end in time (Windows' administrator step may still be waiting for you) noted what went as it went: the page's next
+/// look keeps it.
+pub fn finish_up() {
+    let mut removes = REMOVES.lock().unwrap_or_else(PoisonError::into_inner);
+    if removes.is_empty() {
+        return;
+    }
+    log::warning(
+        "Space",
+        &format!(
+            "The app closed while things were going to the {BIN}: Remove stops (what went stays there, for Put back)"
+        ),
+    );
+    for stop in removes.iter() {
+        stop.store(true, Ordering::Relaxed);
+    }
+    let deadline = Instant::now() + CLOSE_WAIT;
+    while !removes.is_empty() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            log::warning(
+                "Space",
+                &format!(
+                    "Remove didn't stop in time: what went to the {BIN} was noted as it went, and the Space page keeps \
+                     it the next time it looks"
+                ),
+            );
+            return;
+        }
+        removes = REMOVE_ENDED.wait_timeout(removes, left).unwrap_or_else(PoisonError::into_inner).0;
+    }
 }
 
 /// Before what a clean-up of `kind` removed goes to the Recycle Bin or comes back: a look that's on whose finds that
@@ -1394,9 +1499,11 @@ fn look(ask: Ask, weak: &slint::Weak<AppWindow>) {
     let drives = space::drives(&folders, space::look);
     arrive(weak, Step::Drives(ask.id, drives));
     let data = &ask.app_folder;
-    // The song and sound libraries the app reads (its own songs.db and sounds-rust.db once they're made).
-    let databases =
-        app_files::databases(ask.library.clone(), mo_app::sound_library::database_in(data), data.join("midi.db"));
+    // The song and sound libraries and the MIDI index the app reads (its own songs.db and sounds-rust.db once they're
+    // made), then the old app's databases it doesn't read any more, as one part of their own.
+    let midi = mo_midi::store::MidiStore::path_beside(&ask.library);
+    let mut databases = app_files::databases(ask.library.clone(), mo_app::sound_library::database_in(data), midi);
+    databases.extend(app_files::old_databases(data));
     // On the pool for long work that waits on a disk, as Space's other walks are (rule 21): the app's folder can hold
     // thousands of files, and on the pages' quick pool the walk would hold up their asks (Ctrl+K, a filter) until it
     // ended. A look stopped for a newer one says nothing: the newer one's sizes follow.
@@ -1683,99 +1790,155 @@ fn look_for_plugins_now(ask: &PluginsAsk) -> Option<PluginsLooked> {
     Some(PluginsLooked::Found(found, stamp, ask.fixes.clone()))
 }
 
-/// What the last look at the plugins no song has used lately found, as it is now: with the years the Plugins page has
-/// picked, less what the app's clean-ups here sent to the Recycle Bin and are still there, and what the Plugins page's
-/// Clean ups and uninstalls took this time.
-fn plugins_now(p: &Page) -> Option<space_plugins::Found> {
-    let found = p.plugins.as_ref()?;
-    let mut gone = binned_plugin_files(p);
-    gone.extend(plugins_page::gone_this_session());
+/// Works out again what the plugins line shows ([`plugins_as_shown`]) when what it's worked out from has changed
+/// ([`PluginsOf`]), on the page's own low-priority thread: it copies, sorts and goes through every plugin's folders, so
+/// not on the window's thread (the whole-app review of 6 Nov, E1-3). The line and its card show it once it's in, and
+/// what they showed stays meanwhile.
+fn work_out_plugins(app: &AppWindow) {
+    let ask = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let of = plugins_of(&p)?;
+        if p.plugins_of.as_ref() == Some(&of) {
+            return None;
+        }
+        p.plugins_of = Some(of.clone());
+        let (id, _) = p.plugins_work.next();
+        Some((id, of, binned_plugin_files(&p)))
+    });
+    let Some(ask) = ask else { return };
+    let weak = app.as_weak();
+    // A crash (logged as one) shows the look's plugins as they were found, until what they're worked out from changes
+    // again: the line doesn't say it's reading for ever.
+    let work = move |(id, of, binned): PluginsWork| {
+        let binned = binned.unwrap_or_else(recorded_plugin_files);
+        let found = catch_crash(AssertUnwindSafe(|| plugins_as_shown(&of, &binned)))
+            .unwrap_or_else(|_| of.found.as_ref().clone());
+        arrive(&weak, Step::PluginsNow(id, Box::new(found)));
+    };
+    let started = PAGE.with(|p| p.borrow_mut().plugins_work.ask("Space plugins line", work, ask));
+    if let Err(e) = started {
+        log::error("Space", &format!("Couldn't start working out the plugins you haven't used: {e}"));
+        // Tried again the next time the page shows.
+        PAGE.with(|p| p.borrow_mut().plugins_of = None);
+    }
+}
+
+/// What the plugins line is worked out from now: none before a look has found anything. Quick: what's in the Recycle
+/// Bin is told by which change to it the page has.
+fn plugins_of(p: &Page) -> Option<PluginsOf> {
+    let (found, at) = p.plugins.clone()?;
+    let session = plugins_page::gone_this_session();
     let years = plugins_page::unused_years().unwrap_or(found.years);
-    Some(found.as_of(years, found.now).without(&gone))
+    Some(PluginsOf { found, at, kept: p.kept.as_ref().map(|k| k.seq), session, years })
+}
+
+/// What the plugins line shows, as `of` says: what the look found, with the years the Plugins page has picked, less
+/// what's gone since (`binned`: what the app's clean-ups here sent to the Recycle Bin that's still there; and what the
+/// Plugins page's Clean ups and uninstalls took this session). Copies, sorts and goes through every plugin's folders:
+/// call it off the window's thread.
+fn plugins_as_shown(of: &PluginsOf, binned: &[String]) -> space_plugins::Found {
+    let gone: Vec<String> = binned.iter().chain(&of.session).cloned().collect();
+    of.found.as_of(of.years, of.at).without(&gone)
+}
+
+/// Whether the plugins line says it's reading: while a look is on with nothing found yet, and while what the first
+/// look found is still being worked out ([`work_out_plugins`]).
+fn plugins_reading(p: &Page) -> bool {
+    p.plugins_looking || (p.plugins_shown.is_none() && p.plugins.is_some())
 }
 
 /// Asks for a new look at the copies of the same sound in the Sounds page's list as `sounds` has it, on the page's
-/// seventh low-priority thread ([`CopiesAsk`]); `again`: the sound library is read again even if it looks as it was
-/// (Measure again). With no list yet, or none coming, it only shows that.
-fn look_for_sound_copies(app: &AppWindow, sounds: Known, again: bool) {
-    let Known::Read(list, db) = sounds else {
+/// seventh low-priority thread ([`CopiesAsk`]). The copies are the ones the Sounds page's Hide duplicates finds: until
+/// that page has found them for this list it's asked to ([`sounds_page::copies_for_space`]), and this page looks again
+/// as they come ([`sounds_changed`]). With no list yet, or none coming, it only shows that.
+fn look_for_sound_copies(app: &AppWindow, sounds: Known) {
+    let Known::Read(list, _) = sounds else {
         show_also(app);
         show_card(app);
         return;
     };
+    sounds_page::copies_for_space(app);
+    let hiding = sounds_page::hides_copies();
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.feed.as_ref()?;
+        p.copies_of = Arc::downgrade(&list);
+        p.copies_hiding = hiding;
+        let state = sounds_page::copies_found();
+        if list.copies().is_none() || matches!(state, CopiesFound::Looking { .. } | CopiesFound::NotLooked) {
+            // Not all found for this list yet: measuring while the Sounds page looks (what's on show stays), and a
+            // look of this page's still on its way is for an older list, so it's dropped. Nothing new to show if the
+            // Sounds page's look failed.
+            let _ = p.copies_look.next();
+            p.copies_looking = !matches!(state, CopiesFound::Failed);
+            return None;
+        }
         let (id, stop) = p.copies_look.next();
         p.copies_looking = true;
-        let same_list = p.copies.is_some() && Weak::ptr_eq(&p.copies_of, &Arc::downgrade(&list));
-        p.copies_of = Arc::downgrade(&list);
-        // What the look on show read stands while the sound library is as it was then, unless Measure again asks.
-        let read = if again { None } else { p.copies_read.clone() };
-        Some(CopiesAsk { id, list, db, read, same_list, stop })
+        Some(CopiesAsk { id, list, hiding, stop })
     });
-    let Some(ask) = ask else { return };
-    let weak = app.as_weak();
-    // A crash in a look (logged as one) leaves the thread for the next look, and says so, as one that found nothing to
-    // show does.
-    let work = move |ask: CopiesAsk| {
-        let id = ask.id;
-        match catch_crash(AssertUnwindSafe(|| look_for_sound_copies_now(&ask))) {
-            Ok(Some(looked)) => arrive(&weak, Step::Copies(id, Box::new(looked))),
-            Ok(None) | Err(_) => arrive(&weak, Step::CopiesNone(id)),
+    if let Some(ask) = ask {
+        let weak = app.as_weak();
+        // A crash in a look (logged as one) leaves the thread for the next look, and says so, as one that found
+        // nothing to show does.
+        let work = move |ask: CopiesAsk| {
+            let id = ask.id;
+            match catch_crash(AssertUnwindSafe(|| look_for_sound_copies_now(&ask))) {
+                Ok(Some(found)) => arrive(&weak, Step::Copies(id, Box::new(found))),
+                Ok(None) | Err(_) => arrive(&weak, Step::CopiesNone(id)),
+            }
+        };
+        let started = PAGE.with(|p| p.borrow_mut().copies_look.ask("Space copies", work, ask));
+        if let Err(e) = started {
+            log::error("Space", &format!("Couldn't start counting the copies of your sounds: {e}"));
+            // Measure again can try again, and so can the page the next time it shows.
+            PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.copies_looking = false;
+                p.copies_of = Weak::new();
+            });
         }
-    };
-    let started = PAGE.with(|p| p.borrow_mut().copies_look.ask("Space copies", work, ask));
-    if let Err(e) = started {
-        log::error("Space", &format!("Couldn't start counting the copies of your sounds: {e}"));
-        // Measure again can try again, and so can the page the next time it shows.
-        PAGE.with(|p| {
-            let mut p = p.borrow_mut();
-            p.copies_looking = false;
-            p.copies_of = Weak::new();
-        });
     }
     // The first look's line says it's reading, and the card's Measure again waits for it.
     show_also(app);
     show_card(app);
 }
 
-/// One look at the copies of the same sound, off the window's thread: what the old app's duplicate finder found and
-/// the sounds you've hidden, from the sound library (read-only, and closed again first), or as the look on show read
-/// them while the library is as it was then, grouped with the Sounds page's list; or, when that's the same list too,
-/// only that. None when it was stopped, or the sound library couldn't be read (said in the log).
-fn look_for_sound_copies_now(ask: &CopiesAsk) -> Option<CopiesLooked> {
-    let stamp = SoundsDb::stamp(&ask.db);
-    let kept = ask.read.as_ref().filter(|(_, at)| *at == stamp).map(|(finds, _)| finds.clone());
-    if kept.is_some() && ask.same_list {
-        return Some(CopiesLooked::Same);
-    }
-    let finds = match kept {
-        Some(finds) => finds,
-        None => {
-            let read = SoundsDb::open_read_only(&ask.db).and_then(|db| db.finds());
-            let said = |e: mo_sounds::SoundsError| {
-                log::warning("Space", &format!("Couldn't read the copies of your sounds: {e}"));
-            };
-            Arc::new(read.map_err(said).ok()?)
-        }
-    };
+/// One look at the copies of the same sound, off the window's thread: the copies the Sounds page's list knows,
+/// grouped as that page keeps them. None when it was stopped.
+fn look_for_sound_copies_now(ask: &CopiesAsk) -> Option<space_sounds::Found> {
     if ask.stop.load(Ordering::Relaxed) {
         return None;
     }
-    let found = space_sounds::look(ask.list.sounds(), ask.list.usage_map(), &finds);
-    Some(CopiesLooked::Found(found, finds, stamp))
+    Some(space_sounds::look(&ask.list, ask.hiding))
 }
 
-/// The plugin files the app's clean-ups here sent to the Recycle Bin that are still there (spare plugin copies).
-fn binned_plugin_files(p: &Page) -> Vec<String> {
-    let binned = p.kept.iter().flat_map(|k| &k.list).flat_map(|b| &b.done.removed);
-    binned.filter(|r| matches!(r.what, What::Plugin(_))).map(|r| r.path.clone()).collect()
+/// The plugin files the app's clean-ups here sent to the Recycle Bin that are still there (spare plugin copies): none
+/// until the page has looked in the bin this run (then what they kept is read, off the window's thread:
+/// [`binned::plugin_files`]).
+fn binned_plugin_files(p: &Page) -> Option<Vec<String>> {
+    let kept = p.kept.as_ref()?;
+    let binned = kept.list.iter().flat_map(|b| &b.done.removed);
+    Some(binned.filter(|r| matches!(r.what, What::Plugin(_))).map(|r| r.path.clone()).collect())
+}
+
+/// The Plugins page changed what the app keeps of the Recycle Bin (a clean-up, an uninstall, a Put back: review X1-3):
+/// the Recycle Bin line and the plugin files left out follow, as a look's finding would.
+pub fn bin_changed(app: &AppWindow, kept: Kept) {
+    arrive(&app.as_weak(), Step::Kept(kept));
 }
 
 /// The same, for the Plugins page: it leaves them out of what it counts, as this page does, so the two pages agree.
-pub fn plugin_files_in_bin() -> Vec<String> {
+pub fn plugin_files_in_bin() -> Option<Vec<String>> {
     PAGE.with(|p| binned_plugin_files(&p.borrow()))
+}
+
+/// The plugin files the app's clean-ups here kept as sent to the Recycle Bin, as the app's folder had them when first
+/// asked this run ([`binned::plugin_files`]): for before the page has looked in the bin. Only a clean-up here changes
+/// what's kept, and once one has, the page has looked. Reads the disk the first time: call it off the window's thread.
+pub fn recorded_plugin_files() -> Vec<String> {
+    static RECORDED: OnceLock<Vec<String>> = OnceLock::new();
+    RECORDED.get_or_init(|| binned::plugin_files(&paths::data_dir())).clone()
 }
 
 /// The folders to look for spare copies in and which formats your saves use, from the library (read-only, and closed
@@ -1852,6 +2015,8 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
     let _ = slint::invoke_from_event_loop(move || {
         let Some(app) = weak.upgrade() else { return };
         let _doing = crate::watchdog::doing("Space: a look arrived");
+        // A Plugins page clean-up put back from here: that page hears once this one is done with its own state.
+        let mut plugins_put_back = None;
         let changed = PAGE.with(|p| {
             let mut p = p.borrow_mut();
             match step {
@@ -1917,12 +2082,16 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                 Step::Plugins(id, looked) if id == p.plugins_look.asked => {
                     match *looked {
                         PluginsLooked::Found(found, stamp, fixes) => {
-                            p.plugins = Some(found);
+                            let now = found.now;
+                            p.plugins = Some((Arc::new(found), now));
                             p.plugins_stamp = stamp;
                             p.plugins_fixes = fixes;
                         }
+                        // Counted back from now: worked out again as the line shows ([`work_out_plugins`]).
                         PluginsLooked::Same(now) => {
-                            p.plugins = p.plugins.take().map(|f| f.as_of(f.years, now));
+                            if let Some((_, at)) = p.plugins.as_mut() {
+                                *at = now;
+                            }
                         }
                     }
                     p.plugins_looking = false;
@@ -1933,12 +2102,16 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     p.plugins_looking = false;
                     Changed::Wins
                 }
-                Step::Copies(id, looked) if id == p.copies_look.asked => {
-                    if let CopiesLooked::Found(found, finds, stamp) = *looked {
-                        p.copies = Some(found);
-                        // What the last look read (every copy found) is let go on the freeing thread.
-                        background::free_later(p.copies_read.replace((finds, stamp)));
+                Step::PluginsNow(id, found) if id == p.plugins_work.asked => {
+                    if p.plugins_shown.as_ref() == Some(&*found) {
+                        Changed::Nothing
+                    } else {
+                        p.plugins_shown = Some(*found);
+                        Changed::Wins
                     }
+                }
+                Step::Copies(id, found) if id == p.copies_look.asked => {
+                    p.copies = Some(*found);
                     p.copies_looking = false;
                     Changed::Also
                 }
@@ -1986,6 +2159,9 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                 }
                 Step::PutBack(kind, when, problems, kept) => {
                     keep(&mut p, kept);
+                    if kind == space_bin::PLUGIN_CLEAN || kind == space_bin::PLUGIN_UNINSTALL {
+                        plugins_put_back = Some((kind.clone(), when, problems.is_empty()));
+                    }
                     match kind.as_str() {
                         SPARE_COPIES => p.removing.put_back(when, problems.clone()),
                         OLD_COPIES => p.old_removing.put_back(when, problems.clone()),
@@ -2005,6 +2181,9 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                 _ => Changed::Nothing,
             }
         });
+        if let Some((kind, when, all)) = plugins_put_back {
+            plugins_page::put_back_elsewhere(&kind, when, all);
+        }
         // Off show the page draws nothing, as what arrives can take tens of milliseconds to draw and some comes
         // several times a second (rule 12): it's drawn once when it comes back ([`shown`]). The looks a step asks
         // for still start.
@@ -2035,6 +2214,8 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
             Changed::Also => {
                 show_also(&app);
                 show_card(&app);
+                // What's in the Recycle Bin from here counts on the plugins line too.
+                work_out_plugins(&app);
             }
             Changed::Bin { spare, old, songs } => {
                 show_also(&app);
@@ -2088,11 +2269,7 @@ pub fn show(app: &AppWindow) {
                 used: d.used(),
                 holds: space::holds_line(d).into(),
                 note: space::fill_note(d, app_bytes).into(),
-                fill: match d.fill(app_bytes) {
-                    Fill::Roomy => 0,
-                    Fill::Nearly => 1,
-                    Fill::Almost => 2,
-                },
+                fill: d.fill(app_bytes).index(),
                 here: d.here,
             })
             .collect();
@@ -2127,6 +2304,9 @@ fn show_also(app: &AppWindow) {
 /// spare copies, or at your songs, goes on. A picked line that's gone from the list (none found this time) has its card
 /// closed.
 fn show_wins(app: &AppWindow) {
+    // The plugins line as last worked out; once what it's worked out from has changed, it's worked out again, and
+    // shows when that's in.
+    work_out_plugins(app);
     let data = app.global::<SpaceData>();
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -2134,9 +2314,8 @@ fn show_wins(app: &AppWindow) {
         let old = space_old::line(p.old.as_ref(), &p.old_removing);
         let spare = space_spare::line(p.spare.as_ref(), p.spare_looking, &p.removing);
         let [compact, thin] = space_songs::lines(p.songs.as_ref(), p.songs_looking, &p.songs_removing);
-        let found = plugins_now(&p);
-        let unused = space_plugins::line(found.as_ref(), p.plugins_looking);
-        p.plugins_shown.clone_from(&found);
+        let found = p.plugins_shown.as_ref();
+        let unused = space_plugins::line(found, plugins_reading(&p));
         if (bitwig.is_none() && p.picked == BITWIG_COPIES)
             || (old.is_none() && p.picked == OLD_COPIES)
             || (spare.is_none() && p.picked == SPARE_COPIES)
@@ -2152,7 +2331,7 @@ fn show_wins(app: &AppWindow) {
         let wins: Vec<RoomLine> = lines.into_iter().map(room_line).collect();
         let shown = wins.len();
         data.set_wins(ModelRc::new(VecModel::from(wins)));
-        let unused_none = space_plugins::none_note(found.as_ref());
+        let unused_none = space_plugins::none_note(p.plugins_shown.as_ref());
         let nones = [
             space_bitwig::none_note(p.bitwig.as_ref()),
             space_spare::none_note(p.spare.as_ref()),
@@ -2284,7 +2463,7 @@ fn show_card(app: &AppWindow) {
             // Read-only: each plugin's link shows it on the Plugins page. Measure again waits while a look is on.
             // As the line last showed it (the page shows the line again whenever that changes).
             UNUSED_PLUGINS => {
-                let card = space_plugins::card(p.plugins_shown.as_ref(), p.plugins_looking);
+                let card = space_plugins::card(p.plugins_shown.as_ref(), plugins_reading(&p));
                 let measure = measure_button(&p);
                 let enabled = measure.enabled && !p.plugins_looking;
                 (card, vec![Button { enabled, ..measure }])
@@ -2385,9 +2564,16 @@ pub fn show_sample(app: &AppWindow, sample: Sample, picked: &str) {
         p.removing = sample.removing;
         p.songs = Some(space_songs::Shown::of(&sample.songs, chrono::Local::now().date_naive()));
         p.songs_removing = sample.songs_removing;
-        p.plugins = Some(sample.plugins);
+        let now = sample.plugins.now;
+        p.plugins = Some((Arc::new(sample.plugins), now));
         p.copies = Some(sample.copies);
         p.kept = sample.kept;
+        // Worked out here, with no thread to send it back, and nothing read from the disk for it: with no made-up
+        // bin, nothing in it is a plugin's.
+        if let Some(of) = plugins_of(&p) {
+            p.plugins_shown = Some(plugins_as_shown(&of, &binned_plugin_files(&p).unwrap_or_default()));
+            p.plugins_of = Some(of);
+        }
         p.put_backs = sample.put_backs;
         p.picked = picked.to_owned();
         // Shown now, so showing the page doesn't look at the real drives or projects.

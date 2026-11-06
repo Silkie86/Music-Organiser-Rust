@@ -172,6 +172,9 @@ whether Bitwig's audio engine is on.) The rest is additions, which the app can i
   each whether its panel showed before and after each go (`visible`), whether the route `ran` it, and whether
   the link put the panel back as it was (`restored`). A panel that shows and hides with them means Bitwig
   carried them out for the link.
+- From 3.21, `insert` and `pads` find a track by `trackId` too (as `clip` does), so a send lands on its new track
+  however tracks move meanwhile, and an audition's `deleteclip` and `deletetrack` still run after the app that asked
+  has closed (as `stoptracks` does).
 - From 3.20, for the Presets page's Audition: `newtrack` with `audition` notes the track it makes, and
   `deletetrack` takes out only a track so noted while it keeps the name it came in with (so never one of yours).
 - From 3.19, for the app's Play on selected track: `selectedtrack` says which track is selected, `clip` with

@@ -589,6 +589,7 @@ mod tests {
             path: r"D:\Samples\Kicks\Kick 01.wav".into(),
             found: false,
             unplayed: true,
+            muted: false,
         });
         assert_eq!((s.name.as_str(), s.folder.as_str(), s.missing), ("Kick 01.wav", r"D:\Samples\Kicks", true));
         assert_eq!(folder_of("/home/me/a.wav"), "/home/me");

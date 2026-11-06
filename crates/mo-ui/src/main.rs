@@ -21,6 +21,15 @@ fn main() -> Result<(), slint::PlatformError> {
     log_crashes();
     // The graphics card takes a while to wake up: it's looked for while the log and the settings start.
     mo_ui::gpu::look_ahead();
+    // The data folder was moved to a drive that isn't there now: ask what to do before anything opens the old copy
+    // (F-2), rather than quietly opening on it.
+    while let Some(problem) = mo_app::paths::missing_now() {
+        match mo_ui::startup::data_folder_missing(&problem) {
+            mo_ui::startup::Missing::TryAgain => {}
+            mo_ui::startup::Missing::UseOldCopy => break,
+            mo_ui::startup::Missing::Close => return Ok(()),
+        }
+    }
     // A data folder copied to another drive last run is caught up and switched to now, before any of the app's files is
     // opened (Settings, Move to another drive).
     let moved = mo_app::data_move::finish_at_start();
@@ -40,6 +49,10 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_app::shell::get_ready();
     mo_ui::startup::step("log");
     let feed = Feed::default();
+    // Using the old copy of the data this run: a card says so until it's put away (Settings says so too).
+    if let Some(problem) = mo_app::paths::problem() {
+        feed.notice("Using the old copy of your data", &problem);
+    }
     // This app's own settings over the C# app's, which library.db keeps and the app only reads.
     let data = mo_app::paths::data_dir();
     // The app's own song library, songs.db, once it's been made and checked; the C# app's library.db until then (and
@@ -150,8 +163,12 @@ fn main() -> Result<(), slint::PlatformError> {
         // A line of how the run ends: it shows even once the log is full.
         log::last(log::Level::Error, "App", &format!("The window stopped with an error: {e}"));
     }
+    // A plugin move still copying is told to stop, its copy cleared, rather than leave a half copy on the other drive.
+    mo_ui::plugins::stop_moves();
     // A settings change still waiting to be written goes now.
     mo_ui::settings::finish_up();
+    // A Remove still sending things to the Recycle Bin stops, and keeps what went for Put back.
+    mo_ui::space::finish_up();
     // A backup still running stops tidily, and its settings and songs list waiting to be written go now.
     mo_ui::backup::finish_up();
     // A note left open keeps its draft for next time, but the launcher shouldn't wait on it any more.
@@ -163,6 +180,8 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::midi::finish_up();
     // So does a preset being auditioned there.
     mo_ui::presets::finish_up();
+    // And waited for, a minute at most, once everything else has been told to stop.
+    mo_ui::plugins::finish_up();
     // The sweep's and the frames' last few seconds, before the log closes.
     mo_app::sweep_timing::finish();
     mo_app::frame_timing::finish();
@@ -177,18 +196,26 @@ fn main() -> Result<(), slint::PlatformError> {
 /// (`mo_catch::catch`: a damaged file tripped a reader) isn't a crash: it's one warning line ([`caught`]). Nothing in
 /// here may crash itself: std would end the app on the spot.
 fn log_crashes() {
-    set_crash_hook(mo_app::paths::logs_dir, mo_ui::note::after_crash, flush_the_log, || {});
+    set_crash_hook(mo_app::paths::logs_dir, mo_ui::note::after_crash, flush_the_log, |fatal| {
+        // A crash that ends the app lets go of FL's notes and takes out what plays in Bitwig, as closing does (the 6
+        // Nov review's D-10): the threads that would do it go with the app.
+        if fatal {
+            mo_ui::midi::after_crash();
+            mo_ui::presets::after_crash();
+        }
+    });
 }
 
 /// Puts in the crash handler. A panic a [`mo_catch::catch`] catches is only a warning line ([`caught`]). Anything else
 /// is a crash: what the app does with it ([`on_crash`], into the logs folder `logs` gives, with `keep_note` and
-/// `flush`), then `after` (nothing in the app; a test counts the crashes), then std's own report of it, on the console
+/// `flush`), then `after`, told whether it ends the app (the app stops what plays in a DAW then; a test counts the
+/// crashes), then std's own report of it, on the console
 /// when there is one. Std's report comes last: it can wait for ever on a console nobody reads.
 fn set_crash_hook(
     logs: impl Fn() -> PathBuf + Send + Sync + 'static,
     keep_note: impl Fn(bool) + Send + Sync + 'static,
     flush: impl Fn() + Send + Sync + 'static,
-    after: impl Fn() + Send + Sync + 'static,
+    after: impl Fn(bool) + Send + Sync + 'static,
 ) {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -200,7 +227,7 @@ fn set_crash_hook(
             return;
         }
         on_crash(info, fatal, &logs(), &keep_note, &flush);
-        after();
+        after(fatal);
         default(info);
     }));
 }
@@ -389,7 +416,7 @@ mod tests {
             move || logs.clone(),
             keep_note,
             flush,
-            || {
+            |_| {
                 HANDLED.fetch_add(1, Ordering::SeqCst);
             },
         );
@@ -528,7 +555,7 @@ mod tests {
                 flush_the_log();
                 did(&flushed, &format!("{} flushed", this_thread()));
             },
-            || {},
+            |_| {},
         );
         let on = |thread: &str, work: fn()| {
             let ran = std::thread::Builder::new().name(thread.into()).spawn(work).expect("started").join();

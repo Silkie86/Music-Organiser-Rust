@@ -2640,6 +2640,22 @@ fn project_and_sample_folders_never_move() {
     assert!(!d.join("Production").exists() && !is_link(&c.join("Production")));
 }
 
+/// Review E2-9: the computer's own folders (here /tmp) never move, nor one holding them (the root). Only the check is
+/// tried: a real move is never started on them.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_computers_own_folders_never_move() {
+    let dir = fixtures("mo-space-move-system");
+    let d = dir.join("D");
+    fs::create_dir_all(&d).unwrap();
+    let stop = AtomicBool::new(false);
+    let p = |from: &str| problem(from, &s(&d), 1, &ROOMY, &[], &[], &stop);
+    assert_eq!(p("/tmp"), Some(CantMove::SystemFolder { holds: None }));
+    assert!(matches!(p("/"), Some(CantMove::SystemFolder { holds: Some(_) })));
+    assert!(CantMove::SystemFolder { holds: None }.text().contains("computer's own folders"));
+    assert!(CantMove::SystemFolder { holds: Some("/tmp".into()) }.text().starts_with("It holds /tmp,"));
+}
+
 #[test]
 fn a_folder_left_called_checking_gets_its_name_back() {
     let dir = fixtures("mo-space-move-checking");

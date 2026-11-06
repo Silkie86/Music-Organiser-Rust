@@ -13,7 +13,7 @@
 //! Send to Bitwig makes the sound's Bitwig preset and puts it into the project open in Bitwig through the Bitwig link
 //! (`mo-dawlink`, [`send_to_bitwig`]); when Bitwig isn't there, the preset is shown in its folder to drag in.
 //! Audition in Bitwig does the same on a track of its own with a short part playing on it
-//! (`mo_app::preset_audition`), to hear it first: Stop audition takes the track out again, Keep in Bitwig leaves it.
+//! (`mo_app::preset_audition`), to hear it first: Stop in Bitwig takes the track out again, Keep in Bitwig leaves it.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -68,6 +68,8 @@ struct Page {
     shown: Vec<usize>,
     /// Counts the filterings asked for, so an older one finishing late is dropped (newest wins).
     asked: u64,
+    /// The last filtering taken: while it's behind `asked`, what's shown is still being worked out.
+    answered: u64,
     /// The file types' notes for the lines shown, worked out with them.
     format_note: String,
     /// Filter here, not on the worker (the screenshots, which show the page at once).
@@ -84,12 +86,20 @@ struct Page {
     started: bool,
     reading: Option<(usize, usize)>,
     failed: Option<String>,
+    /// The name of the song the Song filter picks, as Songs gave it.
+    song_name: String,
     exporting: bool,
     message: String,
     /// The line being auditioned in Bitwig ([`logic::audition_id`]) and how far it's got.
     hearing: Option<(String, logic::Hearing)>,
+    /// The auditioned line's name, for the strip under the list that shows the audition whatever line is picked.
+    hearing_name: String,
     /// The Curves section.
     curves: Vec<Curve>,
+    /// What the search and the order go by, one for each of `curves`, worked out once (H-5).
+    curve_keys: Vec<logic::CurveKey>,
+    /// The curve whose places the card shows: they're only made again when another curve is picked or it changes.
+    curve_places_of: Option<String>,
     curve_shown: Vec<usize>,
     curve_filters: CurveFilters,
     /// The Found in filter as its chips show it now.
@@ -256,7 +266,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         p.shortcuts = shortcuts.clone();
         // The filters show from the start, before any song is read (with no lines, each choice counts none).
         refilter(&mut p);
-        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
+        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
     });
     wire(app);
     crate::finder::on_open(Kind::Preset, |app, hit, _| {
@@ -291,7 +301,9 @@ fn show_preset(app: &AppWindow, at: usize) {
     }
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        p.filters = Filters::default();
+        // A synth that plays nothing is hidden unless that's shown: keep it shown, or the line stays hidden (H-1).
+        let plays_nothing = p.items.get(at).is_some_and(|i| i.row.plays_nothing);
+        p.filters = Filters { unused: p.filters.unused || plays_nothing, ..Filters::default() };
         p.to_pick = Some(at);
         refilter(&mut p);
     });
@@ -302,8 +314,9 @@ fn show_preset(app: &AppWindow, at: usize) {
 pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     PAGE.with(|p| p.borrow_mut().shortcuts = shortcuts.clone());
     let key = shortcuts.key_of(act::EXPORT_SHOWN).to_owned();
-    app.global::<PresetsData>()
-        .set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
+    let data = app.global::<PresetsData>();
+    data.set_export_shown_key(ActionKey { what: what_of(act::EXPORT_SHOWN).into(), key: key.into() });
+    data.set_keep_audition_key(shortcuts.key_of(act::KEEP).into());
     show_card(app);
     show_curve_card(app);
 }
@@ -397,6 +410,20 @@ fn wire(app: &AppWindow) {
     data.on_close_panel(move || {
         if let Some(app) = weak.upgrade() {
             pick(&app, None);
+            // Closing the card stops the audition, as on the MIDI page (the 6 Nov review's X3-1).
+            stop_audition_now(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_stop_audition(move || {
+        if let Some(app) = weak.upgrade() {
+            stop_audition_now(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_keep_audition(move || {
+        if let Some(app) = weak.upgrade() {
+            keep_audition(&app);
         }
     });
     data.on_panel_resized(|w| log::info("Presets", &format!("Panel width {w:.0}")));
@@ -436,6 +463,18 @@ fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
+    data.on_curve_drag(move || {
+        if let Some(app) = weak.upgrade() {
+            carry_curve(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_curve_drag_let_go(move || {
+        if let Some(app) = weak.upgrade() {
+            crate::drag::let_go(&app);
+        }
+    });
+    let weak = app.as_weak();
     data.on_curve_chosen(move |id| {
         if let Some(app) = weak.upgrade() {
             run_curve_action(&app, &id);
@@ -466,10 +505,24 @@ pub fn shown(app: &AppWindow) {
     show_all(app);
 }
 
-/// Opens the page on one song's sounds (a song's Presets tab), by its save's path.
-pub fn show_song(app: &AppWindow, save: &str) {
-    PAGE.with(|p| p.borrow_mut().section = Section::Sounds);
+/// Opens the page on one song's sounds (a song's Presets tab), by its save's path; `name` is the song's, for its chip.
+/// A save the page hasn't read (saved since the page read your songs) has the songs read again (H-4).
+pub fn show_song(app: &AppWindow, save: &str, name: &str) {
+    let again = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.section = Section::Sounds;
+        p.song_name = name.to_owned();
+        p.started
+            && p.reading.is_none()
+            && logic::keeps_settings(save)
+            && !p.items.iter().chain(&p.pending).any(|i| i.path() == save)
+    });
+    if again {
+        read_again(app);
+    }
     change(app, |f| *f = Filters { song: Some(save.to_owned()), unused: f.unused, ..Filters::default() });
+    // The page may have been left on Curves: the key sheet lists the Sounds keys now (H-12).
+    crate::refresh_keys(app);
 }
 
 fn pick_section(app: &AppWindow, s: Section) {
@@ -502,7 +555,7 @@ fn change_curves(app: &AppWindow, f: impl FnOnce(&mut CurveFilters)) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         f(&mut p.curve_filters);
-        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
+        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
     });
     show_all(app);
 }
@@ -588,6 +641,11 @@ fn take_waiting(p: &mut Page) -> bool {
     }
     let Page { items, pending, .. } = p;
     let Some(all) = Arc::get_mut(items) else { return false };
+    // Room for at least twice the lines when it grows, so a big batch (every preset file at once) moves the list
+    // rarely.
+    if all.capacity() - all.len() < pending.len() {
+        all.reserve(pending.len().max(all.len()));
+    }
     all.append(pending);
     true
 }
@@ -610,6 +668,7 @@ fn take_filtered(p: &mut Page, a: FilterAnswer) -> bool {
     if a.id != p.asked {
         return false;
     }
+    p.answered = a.id;
     p.shown = a.shown;
     p.years = a.years;
     p.chips = a.chips;
@@ -637,6 +696,17 @@ fn show_everything(app: &AppWindow) {
     PAGE.with(|p| {
         let p = p.borrow();
         data.set_section(p.section.index() as i32);
+        let (hearing, playing) = match &p.hearing {
+            Some((_, logic::Hearing::Starting)) => {
+                (format!("Putting {} into Bitwig to hear it\u{2026}", p.hearing_name), false)
+            }
+            Some((_, logic::Hearing::Playing)) => {
+                (format!("Hearing {} in Bitwig, on a track of its own.", p.hearing_name), true)
+            }
+            _ => (String::new(), false),
+        };
+        data.set_hearing(hearing.into());
+        data.set_hearing_playing(playing);
         let search = match p.section {
             Section::Sounds => &p.filters.search,
             Section::Curves => &p.curve_filters.search,
@@ -653,19 +723,34 @@ fn show_everything(app: &AppWindow) {
             data.set_from_filter(m.from.view(&p.chips.from));
             data.set_curve_found_in(m.found_in.view(&p.curve_found_in));
         });
+        // The song's name as Songs gave it: no looking through every line on each show.
         data.set_song(
             f.song
                 .as_ref()
-                .map(|s| p.items.iter().find(|i| i.path() == s).map_or_else(|| s.clone(), |i| i.song.clone()))
-                .unwrap_or_default()
+                .map(|s| if p.song_name.is_empty() { s.as_str() } else { &p.song_name })
+                .unwrap_or("")
                 .into(),
         );
         data.set_any_filter(f.any());
         data.set_unused(f.unused);
         data.set_shown(p.shown.len() as i32);
         let reading = p.reading.is_some();
-        let (title, text) =
-            logic::empty_words(p.items.len() + p.pending.len(), p.shown.len(), reading, f.any(), p.failed.as_deref());
+        let (mut title, mut text) = logic::empty_words(
+            p.items.len() + p.pending.len(),
+            p.shown.len(),
+            reading,
+            p.answered != p.asked,
+            f.any(),
+            p.failed.as_deref(),
+        );
+        // A song with nothing read from it says why, not "No sounds match" (only looked for when nothing shows).
+        if !title.is_empty()
+            && !reading
+            && let Some(save) = &f.song
+            && !p.items.iter().any(|i| i.path() == save)
+        {
+            (title, text) = logic::song_not_read(save);
+        }
         data.set_empty_title(title.into());
         data.set_empty_text(text.into());
         data.set_format_note(p.format_note.as_str().into());
@@ -764,7 +849,7 @@ fn show_card(app: &AppWindow) {
                     key: key(o.id),
                     id: o.id.into(),
                     enabled: o.enabled,
-                    main: false,
+                    main: o.id == act::AUDITION,
                     danger: false,
                 })
                 .collect::<Vec<_>>(),
@@ -801,20 +886,28 @@ fn show_card(app: &AppWindow) {
 fn show_curve_card(app: &AppWindow) {
     let data = app.global::<PresetsData>();
     PAGE.with(|p| {
-        let p = p.borrow();
+        let mut p = p.borrow_mut();
         let Some(c) = p.curve_picked.as_deref().and_then(|id| p.curves.iter().find(|c| c.id == id)) else {
             data.set_curve_panel_shown(false);
+            p.curve_places_of = None;
             return;
         };
         let card = logic::curve_card(c);
+        let new_places = p.curve_places_of.as_deref() != Some(c.id.as_str());
+        let id = c.id.clone();
         data.set_curve_panel_shown(true);
         data.set_curve_card(CurveCardInfo { name: card.name.into(), shape: card.shape.into(), hidden: card.hidden });
         data.set_curve_facts(ModelRc::new(VecModel::from(
             card.facts.into_iter().map(|(n, v)| PresetFact { name: n.into(), value: v.into() }).collect::<Vec<_>>(),
         )));
-        data.set_curve_places(ModelRc::new(VecModel::from(
-            card.places.into_iter().map(|(t, a)| CurvePlace { title: t.into(), about: a.into() }).collect::<Vec<_>>(),
-        )));
+        if new_places {
+            data.set_curve_places(ModelRc::new(VecModel::from(
+                card.places
+                    .into_iter()
+                    .map(|(t, a)| CurvePlace { title: t.into(), about: a.into() })
+                    .collect::<Vec<_>>(),
+            )));
+        }
         let offers = logic::curve_offers(c, logic::bitwig_curves_folder(&p.bitwig).is_some());
         let key = |id: &str| SharedString::from(p.shortcuts.key_of(id));
         data.set_curve_actions(ModelRc::new(VecModel::from(
@@ -838,6 +931,7 @@ fn show_curve_card(app: &AppWindow) {
                 .collect::<Vec<_>>(),
         )));
         data.set_curve_message(p.curve_message.as_str().into());
+        p.curve_places_of = Some(id);
     });
 }
 
@@ -958,6 +1052,26 @@ fn read_sounds(_app: &AppWindow) {
     }
 }
 
+/// Reads every song and preset file again, from the start: what's unchanged comes from the stores, so it's quick.
+/// Ctrl+K forgets the old lines until the new ones are all in (its picks are places in them).
+fn read_again(app: &AppWindow) {
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        background::free_later(std::mem::take(&mut p.items));
+        background::free_later(std::mem::take(&mut p.pending));
+        p.shown.clear();
+        p.picked = None;
+        p.to_pick = None;
+        p.songs = 0;
+        p.files = 0;
+        p.failed = None;
+        p.finder_has = false;
+        refilter(&mut p);
+    });
+    crate::finder::add_source(app, "presets", Arc::new(mo_app::finder::Presets(Arc::new(Vec::new()))));
+    read_sounds(app);
+}
+
 /// Reads the library, every song's newest save and the preset files, handing each batch to the window.
 fn read_all(at: &Where) -> Result<(), String> {
     let lib = Library::open_read_only(&at.library).map_err(|e| format!("Couldn't open your library: {e}"))?;
@@ -1075,10 +1189,9 @@ fn read_all(at: &Where) -> Result<(), String> {
         ),
     );
     let (found, templates) = (kept.files, kept.templates);
-    let years: HashMap<String, Option<i32>> = background::on_pool(|| {
-        use rayon::prelude::*;
-        found.par_iter().map(|f| (f.path.clone(), file_year(&f.path))).collect()
-    });
+    // Each file's year from the time the store looked at already: no second look at every file (X2-4).
+    let years: HashMap<String, Option<i32>> =
+        found.iter().zip(&kept.modified).map(|(f, at)| (f.path.clone(), at.and_then(year_of_time))).collect();
     let mut items: Vec<Item> = plib::rows(&[], &found)
         .into_iter()
         .map(|row| {
@@ -1101,8 +1214,7 @@ fn read_all(at: &Where) -> Result<(), String> {
     Ok(())
 }
 
-fn file_year(path: &str) -> Option<i32> {
-    let m = std::fs::metadata(path).ok()?.modified().ok()?;
+fn year_of_time(m: std::time::SystemTime) -> Option<i32> {
     logic::year_of(m.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64)
 }
 
@@ -1114,7 +1226,12 @@ fn add(items: Vec<Item>, songs: usize, files: usize, reading: Option<(usize, usi
             let mut p = p.borrow_mut();
             // Fixes made since the reading began are laid over these lines too (`fixed_now`): they're never written
             // into them. While a filtering holds the lines, the new ones wait: its answer puts them in (`take_waiting`).
-            p.pending.extend(items);
+            // Moved in when nothing waits, not copied (H-8).
+            if p.pending.is_empty() {
+                p.pending = items;
+            } else {
+                p.pending.extend(items);
+            }
             take_waiting(&mut p);
             p.songs += songs;
             p.files += files;
@@ -1142,6 +1259,11 @@ fn add(items: Vec<Item>, songs: usize, files: usize, reading: Option<(usize, usi
 // ---------------------------------------------------------------------------------------------------------------------
 // What can be done with a sound
 
+/// Space on the page: auditions the picked sound in Bitwig, or stops it (as Audition in Bitwig does). Whether it did.
+pub fn toggle_play(app: &AppWindow) -> bool {
+    PAGE.with(|p| p.borrow().section) == Section::Sounds && run_sound_action(app, act::AUDITION)
+}
+
 /// Runs one of the Sounds section's actions (from its key, its card or its menu). Returns whether it did anything.
 pub fn run_action(app: &AppWindow, id: &str) -> bool {
     match PAGE.with(|p| p.borrow().section) {
@@ -1161,6 +1283,14 @@ pub fn page_actions() -> &'static [mo_app::shortcuts::Action] {
 fn run_sound_action(app: &AppWindow, id: &str) -> bool {
     if id == act::EXPORT_SHOWN {
         return export_shown(app);
+    }
+    // Keep goes to the audition playing, whatever line is picked (the strip under the list has it too).
+    if id == act::KEEP {
+        let playing = PAGE.with(|p| matches!(p.borrow().hearing, Some((_, logic::Hearing::Playing))));
+        if playing {
+            keep_audition(app);
+        }
+        return playing;
     }
     let Some(item) = PAGE.with(|p| {
         let p = p.borrow();
@@ -1182,6 +1312,7 @@ fn run_sound_action(app: &AppWindow, id: &str) -> bool {
     match id {
         act::USE_GUESS if item.row.fixed.is_some() => set_fix(app, &item, None),
         act::REVEAL => crate::files::reveal(&feed, item.path(), mo_app::shell::folder_of(item.path())),
+        act::SHOW_IN_SONGS if !item.is_file() => show_in_songs(app, item.path()),
         act::COPY_PATH => crate::files::copy_path(&feed, item.path()),
         act::EXPORT if enabled(id) => export_one(app, item, false),
         act::TO_BITWIG if enabled(id) => {
@@ -1192,7 +1323,6 @@ fn run_sound_action(app: &AppWindow, id: &str) -> bool {
             }
         }
         act::AUDITION if enabled(id) => toggle_audition(app, item),
-        act::KEEP if enabled(id) => keep_audition(app),
         _ => return false,
     }
     true
@@ -1254,17 +1384,28 @@ fn export_stopped(job: Job, why: String) {
     set_exporting(false, Some(why));
 }
 
-fn templates_now(have: Option<Arc<Templates>>, bitwig: &[PathBuf]) -> Arc<Templates> {
-    have.unwrap_or_else(|| {
-        let roots = logic::preset_folders(&plib::default_folders(), bitwig);
-        // The same folder the page keeps the store in (`Page::data_dir` is set from it).
-        let store = mo_app::paths::data_dir().join(file_store::FILE_NAME);
-        let (found, why) = background::on_pool(|| file_store::find(&roots, &store));
-        if let Some(why) = why.or(found.not_kept) {
-            log::warning("Presets", &format!("The preset files read for Send to Bitwig weren't kept: {why}"));
-        }
-        Arc::new(found.templates)
-    })
+/// The Bitwig presets to make others from. The page's own, unless they don't have what `enough` asks for: then the
+/// preset folders are looked through again (only new and changed files are read), so 'save a preset in Bitwig, then
+/// try again' works without a restart (H-2), and the page keeps what was found.
+fn templates_now(
+    have: Option<Arc<Templates>>,
+    bitwig: &[PathBuf],
+    enough: impl Fn(&Templates) -> bool,
+) -> Arc<Templates> {
+    if let Some(t) = have.filter(|t| enough(t)) {
+        return t;
+    }
+    let roots = logic::preset_folders(&plib::default_folders(), bitwig);
+    // The same folder the page keeps the store in (`Page::data_dir` is set from it).
+    let store = mo_app::paths::data_dir().join(file_store::FILE_NAME);
+    let (found, why) = background::on_pool(|| file_store::find(&roots, &store));
+    if let Some(why) = why.or(found.not_kept) {
+        log::warning("Presets", &format!("The preset files read for Send to Bitwig weren't kept: {why}"));
+    }
+    let fresh = Arc::new(found.templates);
+    let kept = Arc::clone(&fresh);
+    on_window(move |_| PAGE.with(|p| p.borrow_mut().templates = Some(kept)));
+    fresh
 }
 
 fn set_exporting(on: bool, message: Option<String>) {
@@ -1293,7 +1434,7 @@ fn export_one(app: &AppWindow, item: Item, send: bool) {
             Ok(root) => root,
             Err(why) => return export_stopped(job, why),
         };
-        let templates = templates_now(templates, &bitwig_folders);
+        let templates = templates_now(templates, &bitwig_folders, |t| without_template(&[&item], t).is_empty());
         let done = background::on_pool(|| {
             export::export_from_save(
                 &save,
@@ -1381,19 +1522,19 @@ fn without_template(items: &[&Item], templates: &Templates) -> Vec<String> {
 
 /// Export these: every sound shown, save by save, into the export folder. Preset files are left (they're files).
 fn export_shown(app: &AppWindow) -> bool {
-    let (plan, files, items) = PAGE.with(|p| {
+    // A key still reaches here while an export runs (the button is off): it says so rather than anything else (H-11).
+    if PAGE.with(|p| p.borrow().exporting) {
+        set_message(app, "An export is running: wait for it to finish, then try again.");
+        return false;
+    }
+    // Only counted here: the plan and the plugins with no template are made on the export's thread (H-3).
+    let (items, shown, files) = PAGE.with(|p| {
         let p = p.borrow();
-        let (plan, files) = logic::export_plan(&p.items, &p.shown);
-        let items: Vec<Item> = p
-            .shown
-            .iter()
-            .filter_map(|&i| p.items.get(i))
-            .filter(|i| !i.is_file())
-            .map(|i| i.as_fixed(&p.fixed_now).into_owned())
-            .collect();
-        (plan, files, items)
+        let files = p.shown.iter().filter(|&&i| p.items.get(i).is_some_and(Item::is_file)).count();
+        (Arc::clone(&p.items), p.shown.clone(), files)
     });
-    if plan.is_empty() || PAGE.with(|p| p.borrow().exporting) {
+    if files == shown.len() {
+        drop(items);
         if files > 0 {
             set_message(app, "The list shows only preset files, which are files already: nothing to export.");
         }
@@ -1402,13 +1543,20 @@ fn export_shown(app: &AppWindow) -> bool {
     let (library, templates, bitwig_folders, feed) = export_setup();
     PAGE.with(|p| p.borrow_mut().exporting = true);
     show_all(app);
-    let job = feed.start("Exporting presets", &format!("{} songs", logic::thousands(plan.len())));
+    let job = feed.start("Exporting presets", &format!("{} sounds", logic::thousands(shown.len() - files)));
     let started = background::spawn("Preset export", move || {
         let root = match bitwig::export_folder_in(&library) {
             Ok(root) => root,
             Err(why) => return export_stopped(job, why),
         };
-        let templates = templates_now(templates, &bitwig_folders);
+        // The lines are let go of straight after, so lines read during the export join the list.
+        let (plan, without, templates) = {
+            let (plan, _) = logic::export_plan(&items, &shown);
+            let songs: Vec<&Item> = shown.iter().filter_map(|&i| items.get(i)).filter(|i| !i.is_file()).collect();
+            let templates = templates_now(templates, &bitwig_folders, |t| without_template(&songs, t).is_empty());
+            (plan, without_template(&songs, &templates), templates)
+        };
+        drop((items, shown));
         let (mut done, mut failed) = (Vec::new(), Vec::new());
         let total = plan.len();
         for (n, (save, keys)) in plan.iter().enumerate() {
@@ -1420,8 +1568,7 @@ fn export_shown(app: &AppWindow) -> bool {
             }
             job.progress((n + 1) as f32 / total as f32, Some(&format!("{} of {}", n + 1, total)));
         }
-        let refs: Vec<&Item> = items.iter().collect();
-        let mut text = logic::export_summary(&done, &without_template(&refs, &templates), &failed);
+        let mut text = logic::export_summary(&done, &without, &failed);
         if files > 0 {
             text += &format!(
                 " The {} preset files shown are files already, so they were left as they are.",
@@ -1511,62 +1658,70 @@ fn hearing_of(p: &Page, item: &Item) -> logic::Hearing {
     }
 }
 
-/// Audition in Bitwig, and Stop audition: stops the audition playing (taking its track out again); unless it was this
+/// Audition in Bitwig, and Stop in Bitwig: stops the audition playing (taking its track out again); unless it was this
 /// line's, puts this line's preset on a new track in Bitwig with a part for its kind playing on it.
 fn toggle_audition(app: &AppWindow, item: Item) {
     let id = logic::audition_id(&item);
     let was = PAGE.with(|p| p.borrow().hearing.as_ref().map(|(i, _)| i.clone()));
     let before = stop_audition(app);
     if was.as_deref() == Some(id.as_str()) {
-        if let Some(before) = before {
-            stop_in_bitwig(before);
+        if let (Some(before), Some(was)) = (before, was) {
+            stop_in_bitwig(before, Some(was));
         }
         return;
     }
+    // One thing plays in Bitwig at a time: a part playing from the MIDI page stops (the 6 Nov review's D-8).
+    crate::midi::stop_bitwig_for_another(app);
     let asked = audition_asked();
     let name = item.row.name.clone();
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.hearing = Some((id, logic::Hearing::Starting));
-        p.message = format!("Putting {name} into Bitwig to hear it\u{2026}");
+        p.hearing_name.clone_from(&name);
+        p.message.clear();
     });
     show_all(app);
-    let (library, templates, bitwig_folders, _) = export_setup();
+    let (_, templates, bitwig_folders, _) = export_setup();
+    // Its place in Bitwig's line, taken now, behind the stop just asked for on the MIDI page.
+    let ticket = mo_dawlink::bitwig::ticket();
+    let on_its_way = crate::in_flight::Start::begin();
     let started = background::spawn("Audition in Bitwig", move || {
-        // The one playing before goes first, so the two never cross in Bitwig (whether Bitwig was playing, and
-        // stopping it, belong to each in turn).
-        if let Some(before) = before
-            && let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_audition(&before)
+        let _on_its_way = on_its_way;
+        let turn = ticket.wait();
+        // The one playing before goes first, in the same turn, so the two never cross in Bitwig (whether Bitwig was
+        // playing, and stopping it, belong to each in turn). If it can't be stopped, this one doesn't start: the one
+        // before is put back, so Stop can be pressed again (the review's D-2).
+        if let (Some(before), Some(was)) = (before, was.clone())
+            && !stop_audition_in(before, Some(was), &turn)
         {
-            log::warning("Presets", &format!("The audition in Bitwig before couldn't be stopped: {e}"));
+            return;
         }
+        let wanted = move || audition_asked() == asked;
         let made = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
-            audition(&item, &library, templates, &bitwig_folders)
+            audition(&item, templates, &bitwig_folders, &turn, &wanted)
         }))
-        .unwrap_or_else(|_| Err("It stopped before it started playing.".to_owned()));
+        .unwrap_or_else(|_| Err(Some("It stopped before it started playing.".to_owned())));
         let made = match made {
+            // Something newer was asked for while it waited: it took back what it put in, and says nothing.
+            Err(None) => return,
             Ok(auditioning) => {
                 // Checked and kept under the lock a Stop takes, so a Stop either finds it or is seen here.
                 let mut slot = audition_now();
                 if audition_asked() != asked {
                     drop(slot);
-                    // Stopped (or another line asked for) while it was starting.
-                    stop_in_bitwig(auditioning);
+                    // Stopped (or another line asked for) just as it went in: stopped inside its own turn.
+                    stop_audition_in(auditioning, Some(logic::audition_id(&item)), &turn);
                     return;
                 }
-                let words = format!(
-                    "Hearing {} in Bitwig, on a track of its own. Stop audition takes the track out again; Keep in \
-                     Bitwig leaves it there.",
-                    auditioning.track
-                );
                 *slot = Some(auditioning);
-                Ok(words)
+                Ok(())
             }
-            Err(why) => {
+            Err(Some(why)) => {
                 log::warning("Presets", &format!("{name} couldn't be auditioned in Bitwig: {why}"));
                 Err(why)
             }
         };
+        drop(turn);
         on_window(move |app| {
             // A Stop since cleared the card itself.
             if audition_asked() != asked {
@@ -1575,15 +1730,19 @@ fn toggle_audition(app: &AppWindow, item: Item) {
             PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 match made {
-                    Ok(words) => {
+                    // The strip under the list says it plays (the 6 Nov review's D-4): the card's words stay the
+                    // picked line's.
+                    Ok(()) => {
                         if let Some((_, hearing)) = &mut p.hearing {
                             *hearing = logic::Hearing::Playing;
                         }
-                        p.message = words;
                     }
                     Err(why) => {
+                        // Named when another line's card is on show.
+                        let picked = p.picked.and_then(|i| p.items.get(i)).map(logic::audition_id);
+                        let this = p.hearing.as_ref().map(|(id, _)| id.clone());
+                        p.message = if picked.is_some() && picked == this { why } else { format!("{name}: {why}") };
                         p.hearing = None;
-                        p.message = why;
                     }
                 }
             });
@@ -1598,37 +1757,35 @@ fn toggle_audition(app: &AppWindow, item: Item) {
 }
 
 /// Puts the line's Bitwig preset on a new track in Bitwig with its part playing. A sound in a song gets its Bitwig
-/// preset made first, in the export folder, as Send to Bitwig makes it. Waits for Bitwig, so never on the window's
-/// thread.
+/// preset made first, in Temp ([`audition_preset_of`]), and it goes again once Bitwig has loaded it. Waits for Bitwig,
+/// so never on the window's thread. `Err(None)` when it was no longer `wanted` (it put nothing in, or took it back).
 fn audition(
     item: &Item,
-    library: &Path,
     templates: Option<Arc<Templates>>,
     bitwig_folders: &[PathBuf],
-) -> Result<mo_dawlink::bitwig::Auditioning, String> {
-    let preset = match &item.row.source {
-        Source::File { .. } => PathBuf::from(item.path()),
+    turn: &mo_dawlink::bitwig::Turn<'_>,
+    wanted: &dyn Fn() -> bool,
+) -> Result<mo_dawlink::bitwig::Auditioning, Option<String>> {
+    // Nothing is made for one that's no longer wanted (the review's D-5).
+    if !wanted() {
+        return Err(None);
+    }
+    // A song's sound gets its Bitwig preset made in Temp, under a name the sweep knows, and it goes once Bitwig has
+    // loaded it: never in the export folder, among the presets you exported (the 6 Nov review's D-fp5, rule 28).
+    let (preset, name, made) = match &item.row.source {
+        Source::File { .. } => {
+            let preset = PathBuf::from(item.path());
+            let name = preset.file_stem().map(|n| n.to_string_lossy().into_owned());
+            (preset, name, false)
+        }
         Source::Song { save, key } => {
-            let root = bitwig::export_folder_in(library)?;
-            let templates = templates_now(templates, bitwig_folders);
-            let done = background::on_pool(|| {
-                export::export_from_save(
-                    save,
-                    Choice::default(),
-                    Some(std::slice::from_ref(key)),
-                    &root,
-                    Some(&templates),
-                )
-            })
-            .map_err(|e| format!("Its Bitwig preset couldn't be made: {e}"))?;
-            done.files
-                .iter()
-                .find(|f| f.to_lowercase().ends_with(".bwpreset"))
-                .map(|f| done.folder.join(f))
-                .ok_or_else(|| no_bitwig_preset(item))?
+            let (preset, name) = audition_preset_of(item, save, key, templates, bitwig_folders)?;
+            (preset, Some(name), true)
         }
     };
-    let name = preset.file_stem().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| item.row.name.clone());
+    // The preset made for it goes however this ends.
+    let _made = made.then(|| Gone(preset.clone()));
+    let name = name.unwrap_or_else(|| item.row.name.clone());
     let clip = mo_app::preset_audition::clip(&name, item.role());
     let bytes = mo_formats::midi::write::write_clip(&clip)
         .map_err(|e| format!("Its part's MIDI file couldn't be made: {e}."))?
@@ -1636,21 +1793,185 @@ fn audition(
     let part = std::env::temp_dir().join(mo_app::midi::play_file_name());
     std::fs::write(&part, &bytes).map_err(|e| format!("Its part's MIDI file couldn't be saved in Temp: {e}."))?;
     // Bitwig has read both files once this answers, so the part goes at once (rule 28).
-    let heard = mo_dawlink::bitwig::Bitwig::default().audition_preset(&preset, &part, &name);
+    let heard = mo_dawlink::bitwig::Bitwig::default().audition_preset(&preset, &part, &name, turn, wanted);
     let _ = std::fs::remove_file(&part);
-    heard.map_err(|e| e.to_string())
+    heard.map_err(|e| (e != mo_dawlink::bitwig::Error::Cancelled).then(|| e.to_string()))
 }
 
-/// Takes an audition's track out of Bitwig on a thread of its own, without the window waiting.
-fn stop_in_bitwig(auditioning: mo_dawlink::bitwig::Auditioning) {
-    let started = background::spawn("Stop audition", move || {
-        if let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_audition(&auditioning) {
-            log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped: {e}"));
+/// A file the app made in Temp, removed when this goes.
+struct Gone(PathBuf);
+
+impl Drop for Gone {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Makes a song's sound into a Bitwig preset for an audition: exported into a folder of its own in Temp, then the
+/// `.bwpreset` moved beside it under a play file's name ([`mo_app::midi::play_preset_name`]) and the rest of the export
+/// removed, each file by the name the export gave it. Gives the preset and the sound's name for the track.
+fn audition_preset_of(
+    item: &Item,
+    save: &str,
+    key: &str,
+    templates: Option<Arc<Templates>>,
+    bitwig_folders: &[PathBuf],
+) -> Result<(PathBuf, String), Option<String>> {
+    let temp = std::env::temp_dir();
+    let file = mo_app::midi::play_preset_name();
+    let root = temp.join(file.strip_suffix(".bwpreset").unwrap_or(&file));
+    let templates = templates_now(templates, bitwig_folders, |t| without_template(&[item], t).is_empty());
+    let done = background::on_pool(|| {
+        export::export_from_save(save, Choice::default(), Some(&[key.to_owned()]), &root, Some(&templates))
+    });
+    let kept = done.as_ref().ok().and_then(|done| {
+        let found = done.files.iter().find(|f| f.to_lowercase().ends_with(".bwpreset"))?;
+        let stem = Path::new(found).file_stem().map(|n| n.to_string_lossy().into_owned())?;
+        std::fs::rename(done.folder.join(found), temp.join(&file)).ok()?;
+        Some(stem)
+    });
+    // What else the export wrote goes now, with its folder: one this audition made just now, under a name of its
+    // own, so all in it is the export's (also when the export failed part way).
+    let _ = std::fs::remove_dir_all(&root);
+    let done = done.map_err(|e| format!("Its Bitwig preset couldn't be made: {e}"))?;
+    match kept {
+        Some(name) => Ok((temp.join(&file), name)),
+        None if done.files.iter().any(|f| f.to_lowercase().ends_with(".bwpreset")) => {
+            Err(Some("Its Bitwig preset couldn't be moved in Temp.".to_owned()))
         }
+        None => Err(Some(no_bitwig_preset(item))),
+    }
+}
+
+/// Takes an audition's track out of Bitwig on a thread of its own, without the window waiting, in its place in the
+/// line taken now, behind what was asked for before it (the review's D-fp2 and D-fp3). When it can't, and `line` names
+/// the line it was of, the card says why and the audition is put back so Stop can be pressed again (D-2).
+fn stop_in_bitwig(auditioning: mo_dawlink::bitwig::Auditioning, line: Option<String>) {
+    let ticket = mo_dawlink::bitwig::ticket();
+    // Counted, so the app waits a moment for it as it closes (the review's D-fp4).
+    let on_its_way = crate::in_flight::Start::begin();
+    let started = background::spawn("Stop audition", move || {
+        let _on_its_way = on_its_way;
+        let turn = ticket.wait();
+        stop_audition_in(auditioning, line, &turn);
     });
     if let Err(e) = started {
         log::error("Presets", &format!("Couldn't start stopping the audition: {e}"));
     }
+}
+
+/// Stops an audition inside `turn`. Whether it stopped; when it didn't and `line` names its line, it's put back
+/// before the turn ends (see [`put_back`]).
+fn stop_audition_in(
+    auditioning: mo_dawlink::bitwig::Auditioning,
+    line: Option<String>,
+    turn: &mo_dawlink::bitwig::Turn<'_>,
+) -> bool {
+    let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_audition(&auditioning, turn) else { return true };
+    log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped: {e}"));
+    if let Some(line) = line {
+        put_back(auditioning, line, e);
+    }
+    false
+}
+
+/// An audition that couldn't be stopped: back in its place, unless another plays by now, and a start in Bitwig still
+/// on its way behind it (from this page or the MIDI page) is called off, so one thing plays there at a time (the
+/// review's D-8). Run inside the stop's turn, so the start behind sees it. The card says why and what to do.
+fn put_back(auditioning: mo_dawlink::bitwig::Auditioning, line: String, why: mo_dawlink::bitwig::Error) {
+    let words = format!(
+        "{} couldn't be stopped in Bitwig: {why} Bring its project to the front in Bitwig (with changes on), then \
+         press Stop in Bitwig again.",
+        auditioning.track
+    );
+    let track = auditioning.track.clone();
+    let put = {
+        let mut slot = audition_now();
+        if slot.is_none() {
+            *slot = Some(auditioning);
+            AUDITION_ASKED.fetch_add(1, Ordering::SeqCst);
+            Some((audition_asked(), crate::midi::call_off_start()))
+        } else {
+            None
+        }
+    };
+    on_window(move |app| {
+        if let Some((at, midi)) = put {
+            if audition_asked() == at {
+                PAGE.with(|p| {
+                    let mut p = p.borrow_mut();
+                    p.hearing = Some((line, logic::Hearing::Playing));
+                    p.hearing_name = track;
+                });
+            }
+            if let Some(midi) = midi {
+                crate::midi::called_off(app, midi);
+            }
+        }
+        PAGE.with(|p| p.borrow_mut().message = words);
+        show_all(app);
+    });
+}
+
+/// Calls off an audition still on its way, for a part from the MIDI page that couldn't be stopped in Bitwig. Run
+/// inside that stop's turn; gives back the ask to hand to [`called_off`] on the window's thread. None when an
+/// audition plays already (so none was starting).
+pub(crate) fn call_off_start() -> Option<u64> {
+    let slot = audition_now();
+    if slot.is_some() {
+        return None;
+    }
+    AUDITION_ASKED.fetch_add(1, Ordering::SeqCst);
+    Some(audition_asked())
+}
+
+/// The card after [`call_off_start`]: an audition called off as it started says why, unless something newer was asked.
+pub(crate) fn called_off(app: &AppWindow, at: u64) {
+    let starting = PAGE.with(|p| matches!(p.borrow().hearing, Some((_, logic::Hearing::Starting))));
+    if audition_asked() != at || !starting {
+        return;
+    }
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.hearing = None;
+        p.message =
+            "The audition didn't start: the part from the MIDI page couldn't be stopped in Bitwig (see there).".into();
+    });
+    show_all(app);
+}
+
+/// As the app closes: an audition still on its way sees it's no longer wanted (the MIDI page's finish_up calls this, so
+/// the app waits once for both pages).
+pub(crate) fn call_off_for_closing() {
+    AUDITION_ASKED.fetch_add(1, Ordering::SeqCst);
+}
+
+/// Stops the audition playing or starting, whatever line is picked: the strip's Stop in Bitwig, closing the card, and
+/// leaving the page.
+fn stop_audition_now(app: &AppWindow) {
+    let line = PAGE.with(|p| p.borrow().hearing.as_ref().map(|(id, _)| id.clone()));
+    if let Some(before) = stop_audition(app) {
+        stop_in_bitwig(before, line);
+    }
+}
+
+/// When another page comes to the front: the audition stops, so nothing plays in Bitwig that this page can't show (the
+/// 6 Nov review's X3-1).
+pub fn left(app: &AppWindow) {
+    if PAGE.with(|p| p.borrow().hearing.is_some()) {
+        stop_audition_now(app);
+    }
+}
+
+/// Stops an audition playing or starting, for Play in Bitwig on the MIDI page taking Bitwig over (the review's
+/// D-8): one thing plays there at a time.
+pub fn stop_audition_for_another(app: &AppWindow) {
+    if PAGE.with(|p| p.borrow().hearing.is_none()) {
+        return;
+    }
+    stop_audition_now(app);
+    PAGE.with(|p| p.borrow_mut().message = "The audition stopped: Play in Bitwig on the MIDI page took over.".into());
+    show_all(app);
 }
 
 /// The audition playing, taken (none when none is), and a newer ask counted under the same lock: one still starting
@@ -1684,8 +2005,11 @@ fn keep_audition(app: &AppWindow) {
     let Some(auditioning) = take_audition() else { return };
     let track = auditioning.track.clone();
     let words = format!("Kept: {track} stays in Bitwig, on its own track with the part.");
+    let ticket = mo_dawlink::bitwig::ticket();
+    let on_its_way = crate::in_flight::Start::begin();
     let started = background::spawn("Keep audition", move || {
-        let kept = mo_dawlink::bitwig::Bitwig::default().keep_audition(auditioning);
+        let _on_its_way = on_its_way;
+        let kept = mo_dawlink::bitwig::Bitwig::default().keep_audition(auditioning, &ticket.wait());
         if let Err(e) = kept {
             log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped as it was kept: {e}"));
             message_later(format!("{track} stays in Bitwig, but it couldn't be stopped there: {e}"));
@@ -1710,14 +2034,32 @@ fn message_later(text: String) {
     });
 }
 
+/// In the crash hook, when the crash ends the app: the audition's track comes out of Bitwig, a second at most. Never
+/// waits for the lock: the thread that crashed may hold it.
+pub fn after_crash() {
+    // A start still on its way takes its track out, as when the app closes.
+    call_off_for_closing();
+    let mut slot = match AUDITION.try_lock() {
+        Ok(slot) => slot,
+        Err(std::sync::TryLockError::Poisoned(slot)) => slot.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
+    if let Some(auditioning) = slot.take() {
+        let _ = crate::in_flight::closing_link(Duration::from_millis(500)).stop_audition_as_app_closes(&auditioning);
+    }
+}
+
 /// When the app closes: takes an audition's track out of Bitwig, so it doesn't loop on. Waits a moment at most.
 pub fn finish_up() {
-    if let Some(auditioning) = take_audition() {
-        let to = mo_dawlink::bitwig::Bitwig {
-            change_timeout: Duration::from_secs(3),
-            ..mo_dawlink::bitwig::Bitwig::default()
-        };
-        if let Err(e) = to.stop_audition(&auditioning) {
+    // A start still on its way sees it's no longer wanted and takes its track out inside its own turn: waited for a
+    // moment (the review's D-fp4).
+    let first = take_audition();
+    crate::in_flight::wait_for_all(Duration::from_secs(3));
+    if let Some(auditioning) = first.or_else(take_audition) {
+        let to = crate::in_flight::closing_link(Duration::from_secs(3));
+        // Without waiting its turn: what would go first is closing too, and the extension still makes the stop once
+        // the app has gone (3.21).
+        if let Err(e) = to.stop_audition_as_app_closes(&auditioning) {
             log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped as the app closed: {e}"));
         }
     }
@@ -1755,9 +2097,12 @@ fn read_curves(_app: &AppWindow) {
 }
 
 fn set_curves(p: &mut Page, list: Vec<Curve>) {
-    p.curves = list;
+    // Worked out once here, then each key typed in the search makes no copies; the old list goes on its own thread.
+    p.curve_keys = logic::CurveKey::all(&list);
+    background::free_later(std::mem::replace(&mut p.curves, list));
+    p.curve_places_of = None;
     p.curves_failed = None;
-    (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
+    (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
     if let Some(id) = &p.curve_picked
         && !p.curves.iter().any(|c| &c.id == id)
     {
@@ -1842,6 +2187,12 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
             };
             crate::files::reveal(&feed, &s.path, mo_app::shell::folder_of(&s.path));
         }
+        curve_act::SHOW_IN_SONGS => {
+            let Some(s) = curve.sources.iter().find(|s| s.kind != curves::SourceKind::BitwigCurve) else {
+                return false;
+            };
+            show_in_songs(app, &s.path);
+        }
         curve_act::REVEAL => {
             let folder = data_dir.join(curves::FOLDER);
             let started = background::spawn("Curve file", move || match curves::file(&curve, &folder) {
@@ -1884,6 +2235,58 @@ fn run_curve_action(app: &AppWindow, id: &str) -> bool {
     true
 }
 
+/// Drags the picked curve's file (in the app's Curves folder, made on a thread of its own as the drag gets going) out,
+/// onto an automation lane in Bitwig (X3-15).
+fn carry_curve(app: &AppWindow) {
+    let Some((curve, folder)) = PAGE.with(|p| {
+        let p = p.borrow();
+        let c = p.curve_picked.as_deref().and_then(|id| p.curves.iter().find(|c| c.id == id)).cloned()?;
+        Some((c, p.data_dir.join(curves::FOLDER)))
+    }) else {
+        return;
+    };
+    let under_way = crate::drag::start(
+        app,
+        crate::drag::Drag {
+            make: Box::new(move || {
+                let path = curves::file(&curve, &folder)?;
+                let card = mo_app::drag_out::Card {
+                    title: curve.name.clone(),
+                    detail: ["Curve".to_owned(), logic::beats_words(curve.length_beats)]
+                        .into_iter()
+                        .filter(|t| !t.is_empty())
+                        .collect::<Vec<_>>()
+                        .join(" · "),
+                    ..Default::default()
+                };
+                Ok(mo_app::drag_out::Payload {
+                    files: vec![path],
+                    cards: vec![card],
+                    caption: "1 curve".into(),
+                    numbered: false,
+                })
+            }),
+            done: Box::new(|app, outcome| {
+                app.global::<PresetsData>().set_curve_lifted(false);
+                if outcome == crate::drag::Outcome::Landed {
+                    crate::drag::glow(app, |app, on| app.global::<PresetsData>().set_curve_landed(on));
+                }
+            }),
+        },
+    );
+    if under_way {
+        app.global::<PresetsData>().set_curve_lifted(true);
+    }
+}
+
+/// Opens the Songs page on the song a save belongs to (X3-10, as Plugins' Show in Songs does).
+fn show_in_songs(app: &AppWindow, save: &str) {
+    crate::go_to(app, Place::Songs.index() as i32);
+    if !crate::songs::show_save_path(app, save) {
+        log::info("Presets", "The song isn't on the Songs page yet (its list is still being read)");
+    }
+}
+
 fn curve_message(text: String) {
     on_window(move |app| {
         PAGE.with(|p| p.borrow_mut().curve_message = text);
@@ -1911,10 +2314,12 @@ fn curve_db_change(
             Ok(Some(c)) => on_window(move |app| {
                 PAGE.with(|p| {
                     let mut p = p.borrow_mut();
-                    if let Some(old) = p.curves.iter_mut().find(|o| o.id == c.id) {
-                        *old = c;
+                    if let Some(at) = p.curves.iter().position(|o| o.id == c.id) {
+                        p.curve_keys[at] = logic::CurveKey::of(&c);
+                        p.curve_places_of = None;
+                        p.curves[at] = c;
                     }
-                    (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
+                    (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
                 });
                 show_all(app);
             }),
@@ -1946,9 +2351,10 @@ pub fn show_sample(app: &AppWindow) {
         p.files = p.items.iter().filter(|i| i.is_file()).count();
         p.plugins = logic::plugins(&p.items);
         p.curves = sample_curves();
+        p.curve_keys = logic::CurveKey::all(&p.curves);
         p.bitwig = vec![PathBuf::from(r"K:\Bitwig Studio")];
         refilter(&mut p);
-        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_filters);
+        (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
     });
     show_all(app);
 }
@@ -1959,13 +2365,7 @@ pub fn show_audition_sample(app: &AppWindow, on: bool) {
         let mut p = p.borrow_mut();
         let id = p.picked.and_then(|i| p.items.get(i)).map(logic::audition_id);
         p.hearing = if on { id.map(|id| (id, logic::Hearing::Playing)) } else { None };
-        p.message = if on {
-            "Hearing Atmos in Bitwig, on a track of its own. Stop audition takes the track out again; Keep in \
-             Bitwig leaves it there."
-                .into()
-        } else {
-            String::new()
-        };
+        p.hearing_name = if on { "Atmos".into() } else { String::new() };
     });
     show_all(app);
 }

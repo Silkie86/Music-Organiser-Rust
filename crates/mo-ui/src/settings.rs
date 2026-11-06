@@ -80,6 +80,18 @@ struct Page {
     feed: Feed,
 }
 
+/// One settings save at a time in this app (review F-5): the writer thread and the last save as the app closes both
+/// write through the same `rust-settings.json.mo-part`, so two at once would spoil each other's part. Holding it, the
+/// close sets the `bool` to true: the writer then skips any save it hadn't started, which can only be older than the
+/// close's own.
+static SAVING: std::sync::Mutex<bool> = std::sync::Mutex::new(false);
+
+/// Saves `json` unless the app has closed (see [`SAVING`]); `None` means it was skipped.
+fn save_unless_closed(folder: &Path, json: &str) -> Option<std::io::Result<PathBuf>> {
+    let closed = SAVING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    (!*closed).then(|| app_settings::save(folder, json))
+}
+
 thread_local! {
     static PAGE: RefCell<Option<Page>> = const { RefCell::new(None) };
     /// Writes the settings file, newest first.
@@ -136,7 +148,7 @@ pub struct Setup {
 pub fn connect(app: &AppWindow, setup: Setup) {
     let setup_live = setup.live;
     let writer = Newest::start("Save settings", |(folder, json): (PathBuf, String)| {
-        let saved = app_settings::save(&folder, &json);
+        let Some(saved) = save_unless_closed(&folder, &json) else { return };
         if saved.is_ok() {
             let _ = slint::invoke_from_event_loop(move || {
                 PAGE.with(|p| {
@@ -207,8 +219,16 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     app.set_settings_built(true);
     // The start found too much changed since a move's copy to switch before the window opened: catch it up now, so
     // the next start switches.
+    // Not at once: after start-up loading has had its turn at the disk (F-7), as tidy waits.
     if let Some(to) = mo_app::data_move::catch_up_wanted().filter(|_| setup_live) {
-        move_data(app, to);
+        let weak = app.as_weak();
+        slint::Timer::single_shot(std::time::Duration::from_secs(30), move || {
+            // Not if the move was called off (Don't switch) or changed meanwhile.
+            let still = mo_app::data_move::pending().is_some_and(|p| p == to);
+            if let (true, Some(app)) = (still, weak.upgrade()) {
+                move_data(&app, to);
+            }
+        });
     }
 
     let data = app.global::<SettingsData>();
@@ -595,6 +615,9 @@ pub fn finish_up() {
         let p = p.as_ref()?;
         (p.unsaved && p.writable).then(|| (p.folder.clone(), p.settings.to_json()))
     });
+    // Waits for a save the writer is part way through, and stops it starting another.
+    let mut closed = SAVING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    *closed = true;
     if let Some((folder, json)) = job
         && let Err(e) = app_settings::save(&folder, &json)
     {
@@ -933,6 +956,9 @@ fn move_data(app: &AppWindow, to: PathBuf) {
     let weak = app.as_weak();
     let job = feed.start(&format!("Copying the app's data to {}", to.display()), "Looking at what to copy");
     let started = background::spawn("Data folder move", move || {
+        // Gigabytes over the disk: low in the system's memory too, as all bulk disk work is (F-7). On this thread
+        // itself, not a bulk pool, where an hour's copy would hold up the other jobs behind it.
+        background::lower_memory_priority();
         let done = mo_app::data_move::copy(&from, &to, &stop, &mut |done, total| {
             let fraction = if total == 0 { 1.0 } else { done as f32 / total as f32 };
             let detail = format!("{} of {}", mo_app::data_move::size_text(done), mo_app::data_move::size_text(total));

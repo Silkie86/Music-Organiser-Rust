@@ -20,9 +20,9 @@
 //! **Made once.** The C# app is retired (Solomon, 2026-11-05). The Sounds page makes this file from `sounds.db` on
 //! the pass that reads `sounds.db` for the page ([`sync_reading`]), and from then on it *is* the sound library: its
 //! `copy_info` notes since when ([`own_since`]), and `sounds.db` is never read into it again. `sounds.db` itself is
-//! only ever read. The file is made again from `sounds.db` only when it's found damaged while `sounds.db` is still
-//! there. Nothing the Rust app has written lives only in it yet, so that loses nothing; it has to change once the app
-//! writes plays, stars or scans into it. A copy made while the C# app still ran that's behind `sounds.db` is made
+//! only ever read. One found damaged is mended from its backup copy ([`backup`]: what the app wrote into it lives only
+//! there), and only without a whole one made again from `sounds.db` while that's still there ([`mend_reading`]). A
+//! copy made while the C# app still ran that's behind `sounds.db` is made
 //! afresh from it one last time ([`last_sync`]): nothing follows the C# app's saves one by one any more, so the copy
 //! keeps no hash of each row.
 //!
@@ -46,6 +46,9 @@ use rusqlite::{
 use crate::db::{Reading, SOUND_COLUMNS, int_at, real_at, sound_at, sound_columns, text_at, word_at};
 use crate::index::{held, held_bytes};
 use crate::{ChordSpan, Everything, Peaks, Sound, SoundAnalysis, SoundsDb, SoundsError};
+
+pub mod backup;
+pub mod grow;
 
 /// The copy's name, beside `sounds.db`.
 pub const FILE_NAME: &str = "sounds-rust.db";
@@ -223,6 +226,10 @@ pub struct Synced {
     pub sounds: usize,
     /// This pass made the copy the app's own sound library ([`own_since`]): `sounds.db` won't be read into it again.
     pub adopted: bool,
+    /// Found damaged, it was put back from its backup copy made at this time ([`backup`]), not from `sounds.db`.
+    pub from_backup: Option<SystemTime>,
+    /// Found damaged, it was made again from `sounds.db` because its backup copy couldn't be used, and why.
+    pub backup_unused: Option<String>,
 }
 
 impl Synced {
@@ -303,8 +310,9 @@ pub enum LaidOut {
     /// Not done this time, and why (something else holding it, the disk short of room…): it's left as it was, read as
     /// it is, and laid out anew another time.
     NotNow(String),
-    /// SQLite found the copy damaged on the way, and where: it's left as it was. While `sounds.db` is there, the copy
-    /// is made again from it ([`remake_reading`]); without, it's read for whatever of it can be.
+    /// SQLite found the copy damaged on the way, and where: it's left as it was. It's mended from its backup copy, or
+    /// made again from `sounds.db` while that's there ([`mend_reading`]); without either, it's read for whatever of it
+    /// can be.
     Damaged(String),
 }
 
@@ -324,18 +332,20 @@ pub fn read_for_page(
     let copy = copy_of(sounds_db);
     // One look at the copy's own note, waiting its turn: a copy busy just then isn't taken for one that's behind.
     // Looked at before reading, so a save the C# app makes while this reads counts as one next time.
-    let (own, behind) = match look_at(&copy, WAIT) {
-        Ok(Found::Copy { format, own: Some(_), .. }) if readable(format) => (true, false),
-        Ok(Found::Copy { format, stamp: made_from, .. }) if readable(format) => {
+    let looked = look_at(&copy, WAIT);
+    let (own, behind) = match &looked {
+        Ok(Found::Copy { format, own: Some(_), .. }) if readable(*format) => (true, false),
+        Ok(Found::Copy { format, stamp: made_from, .. }) if readable(*format) => {
             (false, has_more_for(sounds_db, made_from.as_deref()))
         }
         _ => (false, true),
     };
     // The app's own library is never left for `sounds.db` when it can't be read just now: only when it's damaged
-    // (made again from `sounds.db`, while that's still there).
-    let mut damaged = false;
-    match SoundsDb::open_read_only(&copy) {
-        Ok(db) if db.is_copy() => {
+    // (mended from its backup copy, or made again from `sounds.db` while that's still there). One so damaged nothing
+    // can be read from it (its first page, or its list of tables) is the app's own if it has a backup copy.
+    let mut damaged = matches!(looked, Ok(Found::Unreadable)) && backup::backup_of(&copy).exists();
+    match (!damaged).then(|| SoundsDb::open_read_only(&copy)) {
+        Some(Ok(db)) if db.is_copy() => {
             first(&db);
             match db.all(now) {
                 Ok(sounds) => {
@@ -352,13 +362,14 @@ pub fn read_for_page(
                 Err(_) => {}
             }
         }
-        Err(e) if own => return Err(e),
+        Some(Err(e)) if e.damaged() => damaged = true,
+        Some(Err(e)) if own => return Err(e),
         _ => {}
     }
-    // None, or none this version can read: made (or made afresh) on the page's own read. One damaged inside is made
-    // again even when it's the app's own.
+    // None, or none this version can read: made (or made afresh) on the page's own read. One damaged inside is mended
+    // even when it's the app's own: from its backup copy, or else made again from `sounds.db`.
     let (everything, made) =
-        if damaged { remake_reading(sounds_db, &copy, now)? } else { sync_reading(sounds_db, &copy, now)? };
+        if damaged { mend_reading(sounds_db, &copy, now)? } else { sync_reading(sounds_db, &copy, now)? };
     Ok(PageRead::Library { everything, made })
 }
 
@@ -826,18 +837,43 @@ pub fn sync_reading(
     read_while(sounds_db, copy, now, false)
 }
 
-/// [`sync_reading`], making the copy afresh even when there's one this version can read: for a copy SQLite found
-/// damaged inside ([`SoundsError::damaged`]), which bringing up to date would leave damaged. The copy must not be
-/// open meanwhile (Windows won't remove an open file).
-pub fn remake_reading(
+/// Mends the copy at `copy`, found damaged inside ([`SoundsError::damaged`]), and reads it for the page: put back
+/// from its backup copy when there's a whole one ([`backup`]: what the app wrote into it is there, up to the last
+/// backup), else made again from `sounds_db` while that's there, reading it on the same pass as [`sync_reading`] does
+/// (a copy that was the app's own stays so, from the same time). With neither, an error that names the copy as damaged
+/// ([`SoundsError::Damaged`]). The copy must not be open meanwhile (Windows won't move an open file).
+pub fn mend_reading(
     sounds_db: &Path,
     copy: &Path,
     now: NaiveDateTime,
 ) -> Result<(Everything, Result<Synced, SoundsError>), SoundsError> {
-    read_while(sounds_db, copy, now, true)
+    let unused = match backup::restore(copy) {
+        Ok(made) => {
+            let everything = SoundsDb::open_read_only(copy)?.everything(now)?;
+            let sounds = everything.sounds.len();
+            return Ok((everything, Ok(Synced { made: true, sounds, from_backup: Some(made), ..Synced::default() })));
+        }
+        // There's a backup copy, but it can't be put back just now: never made again from `sounds.db` meanwhile,
+        // which would lose what the app wrote into it.
+        Err(backup::NotRestored::NotNow(why)) => {
+            return Err(SoundsError::Damaged {
+                path: copy.to_owned(),
+                why: format!("{why}; it's tried again the next time the app starts"),
+            });
+        }
+        Err(backup::NotRestored::NoBackup(why)) => why,
+    };
+    if library_gone(sounds_db) {
+        return Err(SoundsError::Damaged {
+            path: copy.to_owned(),
+            why: format!("{unused}, and there's no sounds.db to make it again from"),
+        });
+    }
+    let (everything, made) = read_while(sounds_db, copy, now, true)?;
+    Ok((everything, made.map(|synced| Synced { backup_unused: Some(unused), ..synced })))
 }
 
-/// [`sync_reading`] or [`remake_reading`]: the page's own passes, so the copy becomes the app's own library on them
+/// [`sync_reading`] or [`mend_reading`]: the page's own passes, so the copy becomes the app's own library on them
 /// (or stays it, from the same moment, when it's made again).
 fn read_while(
     sounds_db: &Path,
@@ -862,7 +898,7 @@ struct Job {
     read_for: Option<NaiveDateTime>,
     /// The copy becomes the app's own sound library in the same transaction ([`own_since`]).
     adopt: bool,
-    /// A copy of this version is made again rather than brought up to date ([`remake_reading`]).
+    /// A copy of this version is made again rather than brought up to date ([`mend_reading`]).
     afresh: bool,
 }
 
@@ -909,10 +945,15 @@ fn run(sounds_db: &Path, copy: &Path, job: Job, read: &mut Option<Everything>) -
                 Some(since) => note_own(copy, Some(&stamp), since).map_err(|e| failed(e.to_string()))?,
                 None => false,
             };
-            Ok(Synced { made: false, sounds: 0, adopted })
+            Ok(Synced { made: false, sounds: 0, adopted, ..Synced::default() })
         }
         Found::Copy { format, .. } if format > FORMAT => {
             Err(failed(format!("a newer version of the app made it (format {format}), so it's left as it is")))
+        }
+        // So damaged nothing can be read from it, and with a backup copy: it was the app's own, so it's mended from
+        // that ([`mend_reading`]), never made again from `sounds.db` unasked.
+        Found::Unreadable if !afresh && backup::backup_of(copy).exists() => {
+            Err(failed("it's damaged, and it's mended from its backup copy, not made again from sounds.db".into()))
         }
         // Behind `sounds.db`, older, or (`afresh`) made again: nothing follows each save any more, so it's made anew.
         // One this version reads is kept until the new one is whole: made from a `sounds.db` found damaged on the way,

@@ -7,7 +7,7 @@
 //! page doesn't count it.
 
 use chrono::NaiveDateTime;
-use mo_library::scan::is_inside;
+use mo_library::scan::Inside;
 use mo_space::plugin_space::PluginSpace;
 use mo_space::size::size_text;
 
@@ -52,6 +52,9 @@ pub struct Measured {
     /// Its files and folders, as the Plugins page has them: what it counts is its own room, without a folder it shares
     /// with another plugin (a maker's folder).
     pub room: PluginSpace,
+    /// Another version a missing plugin's songs may open with (`PluginRow::stands_in`): never unused, whatever the
+    /// years (review E2-6).
+    pub stands_in: bool,
 }
 
 impl Measured {
@@ -103,28 +106,34 @@ impl Found {
     }
 
     /// As it is when `years` make a plugin unused, counted back from `now`: the years are the Plugins page's pick,
-    /// which can change while the app runs, and `now` moves on when a look finds the library as it was. Quick, nothing
-    /// is read again; the Plugins page counts back the same way ([`unused_since`]).
+    /// which can change while the app runs, and `now` moves on when a look finds the library as it was. Nothing is read
+    /// again, but every plugin is copied and sorted: call it away from the window's thread. The Plugins page counts
+    /// back the same way ([`unused_since`]).
     pub fn as_of(&self, years: u32, now: NaiveDateTime) -> Found {
         let since = unused_since(now, years);
-        let (mut plugins, mut used): (Vec<Measured>, Vec<Measured>) =
-            self.plugins.iter().chain(&self.used).cloned().partition(|p| !p.last_used.is_some_and(|t| t >= since));
+        let (mut plugins, mut used): (Vec<Measured>, Vec<Measured>) = self
+            .plugins
+            .iter()
+            .chain(&self.used)
+            .cloned()
+            .partition(|p| !p.stands_in && !p.last_used.is_some_and(|t| t >= since));
         biggest_first(&mut plugins);
         biggest_first(&mut used);
         Found { plugins, used, years, now, sizes: self.sizes, measured: self.measured, gone: self.gone }
     }
 
     /// As it is now the app has removed what's at `gone` (sent to the Recycle Bin, or uninstalled) since the old app
-    /// measured: what's in there isn't counted, and a plugin with nothing left goes. Quick: the page works it out
-    /// each time it shows what was found, so a clean-up shows at once. The Plugins page leaves them out the same way
-    /// (`Plugins::forget_paths`).
+    /// measured: what's in there isn't counted, and a plugin with nothing left goes. Each folder is looked up once,
+    /// however much is gone ([`Inside`]), but it goes through every plugin's folders: call it away from the window's
+    /// thread. The Plugins page leaves them out the same way (`Plugins::forget_paths`).
     pub fn without(mut self, gone: &[String]) -> Found {
+        let gone = Inside::new(gone);
         if gone.is_empty() {
             return self;
         }
         let left = |plugins: &mut Vec<Measured>| {
             for p in plugins.iter_mut() {
-                p.room.folders.retain(|f| !gone.iter().any(|g| is_inside(&f.path, g)));
+                p.room.folders.retain(|f| !gone.holds(&f.path));
             }
             plugins.retain(|p| p.bytes() > 0);
             biggest_first(plugins);
@@ -144,6 +153,7 @@ pub fn look(read: Read, now: NaiveDateTime, fixes: &[FolderFix]) -> Found {
     let mut plugins = Plugins::new(read, now);
     // Your say on a plugin's folders on the Plugins page (Not its, Take off, Add a folder) counts here too, as there.
     plugins.apply_folder_fixes(fixes);
+    plugins.forget_gone();
     let (mut unused, mut used) = (Vec::new(), Vec::new());
     // What "Big and unused" on the Plugins page picks from: installed, measured, with room of its own.
     for r in plugins.rows.iter().filter(|r| r.installed && r.bytes() > 0) {
@@ -176,6 +186,7 @@ fn measured_of(r: &PluginRow) -> Option<Measured> {
         last_used: r.last_used,
         songs: r.songs,
         room: r.room.clone()?,
+        stands_in: r.stands_in.is_some(),
     })
 }
 
@@ -387,6 +398,7 @@ mod tests {
             last_used: last,
             songs,
             room: PluginSpace { key: name.to_lowercase(), name: name.to_owned(), vendor: "Maker".to_owned(), folders },
+            stands_in: false,
         }
     }
 
@@ -506,6 +518,8 @@ mod tests {
             looked_for_installed: true,
             unused_years: 2,
             needed_count: 6,
+            saved_fixes: Vec::new(),
+            gone: Vec::new(),
         };
         let f = look(read.clone(), at(2026, 11), &[]);
         let names: Vec<(&str, usize, u64)> = f.plugins.iter().map(|p| (p.name.as_str(), p.songs, p.bytes())).collect();

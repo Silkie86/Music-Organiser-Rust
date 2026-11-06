@@ -689,7 +689,7 @@ fn sounds_shots(
     };
     ids.sort_unstable();
     ids.truncate(3);
-    let same = mo_sounds::copies::SameAudio { groups: vec![ids] };
+    let same = mo_sounds::copies::SameAudio { groups: vec![ids], ..Default::default() };
     mo_ui::sounds::show_copies_for_screens(app, Some(&same));
     let all = capture(window);
     data.invoke_toggle("hide-copies".into());
@@ -920,78 +920,41 @@ fn sample_space() -> mo_ui::space::Sample {
     }
 }
 
-/// Made-up copies of the same sound, as the old app's duplicate finder found them, grouped by the Space page's own
-/// look: a pad with a 48 kHz copy and a trimmed one, a kick your songs use with an exact copy, one hidden in the app
-/// and an MP3, a vocal chop copied and renamed, a snare with only a very similar copy, and small hats.
+/// Made-up copies of the same sound, as Hide duplicates finds them, grouped by the Space page's own look with the switch
+/// on: a kick your songs use with two exact copies, a vocal chop copied and renamed, and small hats.
 fn sample_sound_copies() -> mo_app::space_sounds::Found {
     use std::collections::HashMap;
 
-    use mo_app::space_sounds::{Finds, look};
+    use mo_app::sounds::SoundList;
+    use mo_app::space_sounds::look;
+    use mo_sounds::Sound;
+    use mo_sounds::copies::SameAudio;
     use mo_sounds::usage::Usage;
-    use mo_sounds::{Sound, SoundAnalysis, SoundMatch};
-    const KB: i64 = 1024;
-    let sound = |id: i64, path: &str, seconds: f64, rate: i32, peak_db: f64| {
-        let mut s = Sound::new(id, path);
-        s.analysis = Some(SoundAnalysis { seconds, sample_rate: rate, peak_db, ..SoundAnalysis::default() });
-        s
-    };
-    let matched = |a: i64, b: i64, kind: &str, apart: f64| SoundMatch {
-        a,
-        b,
-        kind: kind.to_owned(),
-        score: 0.9,
-        offset: 0.0,
-        apart: Some(apart),
-        typical: Some(apart),
-    };
+    const KB: u64 = 1024;
     let mut sounds = vec![
-        sound(1, r"D:\Samples\Drums\Kicks\Kick 808 Long.wav", 1.8, 44_100, -0.5),
-        sound(2, r"D:\Samples\Packs\Trap Essentials\Kicks\Kick 808 Long.wav", 1.8, 44_100, -0.5),
-        sound(4, r"D:\Downloads\Kick 808 Long.mp3", 1.82, 44_100, -0.5),
-        sound(5, r"D:\Samples\Pads\Warm Pad C.wav", 12.0, 44_100, -3.0),
-        sound(6, r"E:\Sample Packs\Ambient Worlds\Warm Pad C 48k.wav", 12.0, 48_000, -3.0),
-        sound(7, r"D:\Samples\Pads\Warm Pad C short.wav", 5.0, 44_100, -3.0),
-        sound(8, r"D:\Samples\Vocals\Vox Chop 03.wav", 0.9, 44_100, -1.0),
-        sound(9, r"D:\Samples\Vox\Vox Chop 03 copy.wav", 0.9, 44_100, -1.0),
-        sound(10, r"D:\Samples\Drums\Snares\Snare Tight.wav", 0.4, 44_100, -1.0),
-        sound(11, r"D:\Samples\Packs\Lo-Fi Kit\Snare Tight.wav", 0.4, 44_100, -7.0),
+        Sound::new(1, r"D:\Samples\Drums\Kicks\Kick 808 Long.wav"),
+        Sound::new(2, r"D:\Samples\Packs\Trap Essentials\Kicks\Kick 808 Long.wav"),
+        Sound::new(3, r"E:\Old Backup\Samples\Kicks\Kick 808 Long.wav"),
+        Sound::new(8, r"D:\Samples\Vocals\Vox Chop 03.wav"),
+        Sound::new(9, r"D:\Samples\Vox\Vox Chop 03 copy.wav"),
     ];
-    let mut hidden = sound(3, r"E:\Old Backup\Samples\Kicks\Kick 808 Long.wav", 1.8, 44_100, -0.5);
-    hidden.hidden = true;
-    let mut finds = Finds {
-        matches: vec![
-            matched(1, 4, "Converted", 0.6),
-            matched(5, 6, "Converted", 0.05),
-            matched(5, 7, "Trimmed", 0.1),
-            matched(10, 11, "Converted", 0.9),
-        ],
-        exact: [(1, "A1"), (2, "A1"), (3, "A1"), (8, "B2"), (9, "B2")].map(|(id, hash)| (id, hash.to_owned())).into(),
-        sizes: HashMap::from([
-            (1, 310 * KB),
-            (2, 310 * KB),
-            (3, 310 * KB),
-            (4, 45 * KB),
-            (5, 4_140 * KB),
-            (6, 4_500 * KB),
-            (7, 1_720 * KB),
-            (8, 160 * KB),
-            (9, 160 * KB),
-            (10, 70 * KB),
-            (11, 70 * KB),
-        ]),
-        hidden: vec![hidden],
-    };
+    let mut groups = vec![vec![1, 2, 3], vec![8, 9]];
+    let mut sizes = HashMap::from([(1, 310 * KB), (2, 310 * KB), (3, 310 * KB), (8, 160 * KB), (9, 160 * KB)]);
     // Small hats, each with an exact copy in a pack you downloaded.
     for n in 0..6 {
+        let mut group = Vec::new();
         for (copy, folder) in [r"D:\Samples\Drums\Hats", r"E:\Downloads\Hat Pack"].into_iter().enumerate() {
             let id = 100 + n * 2 + copy as i64;
-            sounds.push(sound(id, &format!(r"{folder}\Hat {:02}.wav", n + 1), 0.2, 44_100, -2.0));
-            finds.exact.push((id, format!("H{n}")));
-            finds.sizes.insert(id, 18 * KB);
+            sounds.push(Sound::new(id, &format!(r"{folder}\Hat {:02}.wav", n + 1)));
+            sizes.insert(id, 18 * KB);
+            group.push(id);
         }
+        groups.push(group);
     }
-    let usage = HashMap::from([(1, Usage { projects: 4, ..Usage::default() })]);
-    look(&sounds, Some(&usage), &finds)
+    let mut list = SoundList::new(sounds);
+    list.set_used(HashMap::from([(1, Usage { projects: 4, ..Usage::default() })]));
+    list.set_copies(&SameAudio { groups, sizes });
+    look(&list, true)
 }
 
 /// Made-up plugins no song has used lately, as the old app measured them: some never used, some not in over 2 years.
@@ -1025,6 +988,7 @@ fn sample_unused_plugins() -> mo_app::space_plugins::Found {
                         })
                         .collect(),
                 },
+                stands_in: false,
             }
         };
     let (program, presets, sounds) = (SpaceKind::Program, SpaceKind::Presets, SpaceKind::Sounds);
@@ -1235,7 +1199,15 @@ fn sample_songs_removed(
     };
     removing.sent(WHEN, done.clone());
     let compact = mo_app::space_songs::COMPACT;
-    (removing, vec![Binned { kind: compact.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done } }])
+    (
+        removing,
+        vec![Binned {
+            kind: compact.to_owned(),
+            when: WHEN,
+            done: Done { problems: Vec::new(), ..done },
+            plugin: None,
+        }],
+    )
 }
 
 /// Made-up spare plugin copies, written as on Windows, biggest first: AAX copies in Avid's folder (Pro Tools isn't
@@ -1356,8 +1328,8 @@ fn sample_removed(found: &mo_app::space_spare::Found) -> (mo_app::space_spare::R
     };
     let spare = mo_app::space_spare::SPARE_COPIES;
     let list = vec![
-        Binned { kind: spare.to_owned(), when: BEFORE, done: older },
-        Binned { kind: spare.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done } },
+        Binned { kind: spare.to_owned(), when: BEFORE, done: older, plugin: None },
+        Binned { kind: spare.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done }, plugin: None },
     ];
     (removing, list)
 }
@@ -1396,7 +1368,10 @@ fn sample_old_removed(found: &mo_app::space_old::Found) -> (mo_app::space_old::R
     };
     removing.sent(WHEN, done.clone());
     let old = mo_app::space_old::OLD_COPIES;
-    (removing, vec![Binned { kind: old.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done } }])
+    (
+        removing,
+        vec![Binned { kind: old.to_owned(), when: WHEN, done: Done { problems: Vec::new(), ..done }, plugin: None }],
+    )
 }
 
 /// Made-up old copies left after moving plugin folders to I:, written as on Windows, biggest first: two that can go,
@@ -1716,7 +1691,8 @@ fn sample_detail() -> mo_library::SaveDetail {
         path: String::new(),
         installed,
     };
-    let sample = |path: &str, found: bool, unplayed: bool| ProjectSample { path: path.into(), found, unplayed };
+    let sample =
+        |path: &str, found: bool, unplayed: bool| ProjectSample { path: path.into(), found, unplayed, muted: false };
     mo_library::SaveDetail {
         plugins: vec![
             plugin("Night Pad", "Made Up Audio", PluginKind::Instrument, true),
@@ -1876,6 +1852,8 @@ fn sample_plugins() -> (mo_app::plugins::Plugins, Vec<mo_library::plugins::Scann
         looked_for_installed: true,
         unused_years: 2,
         needed_count: 6,
+        saved_fixes: Vec::new(),
+        gone: Vec::new(),
     };
     let copies = vec![
         mo_library::plugins::ScannedPlugin {

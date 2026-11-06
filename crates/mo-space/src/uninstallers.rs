@@ -109,8 +109,9 @@ pub fn is_other_version(plugin: &str, u: &Uninstaller, installed: &[String]) -> 
 }
 
 /// The whole number written straight after the plugin's family in a name ("iZotope Ozone 11 Advanced": 11, "Serum2":
-/// 2, "Diva v1.4.5": 1), or `None` when none follows it.
-fn major_after(name: &str, family: &str) -> Option<u32> {
+/// 2, "Diva v1.4.5": 1), or `None` when none follows it. `family` is as [`crate::plugins::family`] gives it (small
+/// letters and digits only), so a name with spaces or dashes ("Guitar Rig 7", "Pro-Q 3") is found too.
+pub fn major_after(name: &str, family: &str) -> Option<u32> {
     // Each letter or digit of the name in small letters, with where it ends, so the family is found the way names are
     // compared.
     let mut kept = String::new();

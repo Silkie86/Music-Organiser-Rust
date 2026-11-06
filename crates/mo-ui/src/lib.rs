@@ -18,6 +18,7 @@ pub mod files;
 pub mod filters;
 pub mod finder;
 pub mod gpu;
+mod in_flight;
 pub mod midi;
 pub mod note;
 mod piano_roll;
@@ -291,8 +292,13 @@ fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
 pub(crate) fn go_to(app: &AppWindow, index: i32) {
     let Some(place) = usize::try_from(index).ok().and_then(Place::from_index) else { return };
     let _doing = watchdog::doing("go to a page");
-    if PAGE.swap(place.index(), Ordering::Relaxed) != place.index() || app.get_place() != index {
+    let before = PAGE.swap(place.index(), Ordering::Relaxed);
+    if before != place.index() || app.get_place() != index {
         log::info("Page", place.name());
+    }
+    // An audition in Bitwig stops as its page goes (the 6 Nov review's X3-1).
+    if before == Place::Presets.index() && place != Place::Presets {
+        presets::left(app);
     }
     // The place's colour first, so the new page's mark never shows the old place's colour for a frame (the window's
     // own `changed place` comes a frame late).
@@ -474,12 +480,13 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed) -> bool {
         }
         // Where everything the app removes goes first, from any page.
         "app.recycleBin" => files::open_recycle_bin(feed),
-        // Space plays the picked sound on the Sounds page and loops the picked part on the MIDI page; elsewhere it's
-        // left for the page (a button, a text box).
+        // Space plays the picked sound on the Sounds page, loops the picked part on the MIDI page and auditions the
+        // picked sound in Bitwig on Presets (X3-13); elsewhere it's left for the page (a button, a text box).
         "app.play" => {
             let place = app.get_place();
             return (place == Place::Sounds.index() as i32 && sounds::toggle_play(&app))
-                || (place == Place::Midi.index() as i32 && midi::toggle_play(&app));
+                || (place == Place::Midi.index() as i32 && midi::toggle_play(&app))
+                || (place == Place::Presets.index() as i32 && presets::toggle_play(&app));
         }
         _ => {
             debug_assert!(!HANDLED.contains(&id), "{id} is in HANDLED but run() doesn't do it");

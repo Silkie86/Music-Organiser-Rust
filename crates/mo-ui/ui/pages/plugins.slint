@@ -88,7 +88,6 @@ export global PluginsData {
     in property <string> summary;
     // Shown instead of the list while it loads, or when the library can't be read.
     in property <string> message: "Reading your plugins…";
-    in property <string> count;
     in property <[PluginListLine]> lines;
     in property <int> selected: -1;
     in-out property <string> search;
@@ -115,6 +114,10 @@ export global PluginsData {
     in property <bool> all-installed;
     // "46.7 GB in 2 plugins none of your songs have used in over 2 years."
     in property <string> freeable;
+    // What moves cut off part way (the app or the computer stopped) left on the other drive, with Clear.
+    in property <string> half-copy-text;
+    in property <bool> can-clear-half-copies;
+    callback clear-half-copies();
 
     // The page's options, shown on the page beside what they change. has-missing: some song's newest save misses a
     // plugin (so the cards' count shows even when they're off); has-sizes: the old app measured the plugins' room.
@@ -571,6 +574,7 @@ component PluginPanel inherits SidePanel {
             wrap: word-wrap;
             min-width: 0px;
         }
+        // Its parts in three greys: a kind of file isn't a DAW, a sound type or a warning, whose colours mean those.
         if PluginsData.room-bars.length > 0: Rectangle {
             height: 10px;
             border-radius: 5px;
@@ -579,7 +583,7 @@ component PluginPanel inherits SidePanel {
             HorizontalLayout {
                 for b in PluginsData.room-bars: Rectangle {
                     horizontal-stretch: max(0.01, b.share);
-                    background: b.kind == 0 ? Theme.fl-studio : b.kind == 1 ? Theme.sound-type(5) : Theme.warning;
+                    background: b.kind == 0 ? Theme.text : b.kind == 1 ? Theme.muted : Theme.faint;
                 }
             }
         }
@@ -587,7 +591,7 @@ component PluginPanel inherits SidePanel {
             spacing: Space.sm;
             VerticalLayout {
                 alignment: center;
-                Dot { tint: b.kind == 0 ? Theme.fl-studio : b.kind == 1 ? Theme.sound-type(5) : Theme.warning; }
+                Dot { tint: b.kind == 0 ? Theme.text : b.kind == 1 ? Theme.muted : Theme.faint; }
             }
             Text {
                 text: b.name;
@@ -894,6 +898,26 @@ export component PluginsPage inherits Rectangle {
                 picked(i) => { PluginsData.unused-picked(i); }
             }
         }
+        if PluginsData.half-copy-text != "": HorizontalLayout {
+            spacing: Space.sm;
+            vertical-stretch: 0;
+            Text {
+                text: PluginsData.half-copy-text;
+                color: Theme.warning;
+                font-size: Type.meta;
+                wrap: word-wrap;
+                min-width: 0px;
+                horizontal-stretch: 1;
+            }
+            if PluginsData.can-clear-half-copies: VerticalLayout {
+                alignment: center;
+                LinkText {
+                    text: "Clear it";
+                    font-size: Type.meta;
+                    clicked => { PluginsData.clear-half-copies(); }
+                }
+            }
+        }
         // The list, the year strip and the picked plugin's card.
         area := Rectangle {
             vertical-stretch: 1;
@@ -1004,11 +1028,6 @@ export component PluginsPage inherits Rectangle {
                 items: PluginsData.menu;
                 chosen(id) => { PluginsData.menu-chosen(id); }
             }
-        }
-        if PluginsData.count != "": Text {
-            text: PluginsData.count;
-            color: Theme.faint;
-            font-size: Type.small;
         }
     }
 }

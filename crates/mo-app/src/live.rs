@@ -26,7 +26,7 @@ use mo_library::watch::Changes;
 use mo_library::{Library, LibraryError, Save, SaveDetail, SongChoices};
 use rayon::prelude::*;
 
-use crate::background::on_pool;
+use crate::background::{on_bulk_pool, on_pool};
 use crate::shell;
 use crate::songs::{ASK_DOUBTS, DOUBTS_ACROSS_FOLDERS, RUN_GAP, Songs, run_gap};
 
@@ -68,6 +68,42 @@ pub struct Live {
     /// gone missing.
     to_put: BTreeMap<i64, bool>,
     to_mark: BTreeSet<i64>,
+    /// Reading again the saves whose "muted" sample marks were lost ([`song_writes::to_mend`]).
+    mend: Mend,
+}
+
+/// Where reading again the saves whose "muted" sample marks were lost is (review finding A-1): looked for once a start,
+/// at the catch-up, read with it, and noted in the library once they're all read again and kept.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum Mend {
+    /// Not looked for yet this time.
+    #[default]
+    NotLooked,
+    /// The saves still to be read again (by id, unchanged or not), and whether one couldn't be read or kept: then
+    /// nothing is noted, and they're all read again at the next start.
+    Reading { ids: HashSet<i64>, missed: bool },
+    /// Nothing (more) to do this time.
+    Done,
+}
+
+impl Mend {
+    fn has(&self, id: i64) -> bool {
+        matches!(self, Mend::Reading { ids, .. } if ids.contains(&id))
+    }
+
+    /// `id` was read again (`read`), or couldn't be.
+    fn tried(&mut self, id: i64, read: bool) {
+        if let Mend::Reading { ids, missed } = self
+            && ids.remove(&id)
+        {
+            *missed |= !read;
+        }
+    }
+
+    /// Every save has been read again and kept: to be noted with the next batch.
+    fn to_note(&self) -> bool {
+        matches!(self, Mend::Reading { ids, missed: false } if ids.is_empty())
+    }
 }
 
 /// What [`Live::update`] did, for its card.
@@ -79,6 +115,9 @@ pub struct Updated {
     pub moved: Vec<String>,
     /// How many saves' files have gone (moved somewhere the app doesn't watch, or deleted).
     pub gone: usize,
+    /// How many unchanged saves were read again for their "muted" sample marks ([`song_writes::to_mend`]): kept, but
+    /// not on the card.
+    pub mended: usize,
 }
 
 impl Updated {
@@ -87,11 +126,17 @@ impl Updated {
         self.read.extend(more.read);
         self.moved.extend(more.moved);
         self.gone += more.gone;
+        self.mended += more.mended;
         self
     }
 
     pub fn is_empty(&self) -> bool {
-        self.read.is_empty() && self.moved.is_empty() && self.gone == 0
+        !self.for_card() && self.mended == 0
+    }
+
+    /// Whether there's anything to say on the card: a save read, moved or gone.
+    pub fn for_card(&self) -> bool {
+        !self.read.is_empty() || !self.moved.is_empty() || self.gone > 0
     }
 
     /// The card's title and line, as the C# app words them: "Updated Night Drive_15", "Saved in its folder, so the
@@ -165,6 +210,7 @@ impl Live {
             writes: None,
             to_put: BTreeMap::new(),
             to_mark: BTreeSet::new(),
+            mend: Mend::NotLooked,
         })
     }
 
@@ -211,12 +257,51 @@ impl Live {
     /// Walks every project folder once, as the C# app's scan did at its start: saves made or changed while the app was
     /// closed are read, and ones whose file has gone are marked missing. Only what differs from the library (by size
     /// and date) is read. Asks the disk, so never on the window's thread.
+    ///
+    /// The first time, saves whose "muted" sample marks the app lost are read again too, unchanged or not
+    /// ([`song_writes::to_mend`]); once they're kept, the library notes it ([`Live::keep`]) and they aren't read again.
     pub fn catch_up(&mut self) -> Updated {
+        self.look_for_mends();
         let roots = self.roots.clone();
         if roots.is_empty() {
+            self.mend = Mend::Done;
             return Updated::default();
         }
-        self.update(&Changes { overflowed: roots, ..Changes::default() })
+        let done = self.update(&Changes { overflowed: roots, ..Changes::default() });
+        // One the walk didn't find (gone, so marked missing, or outside the project folders now) has nothing to read
+        // again: only those waiting to be tried again are still to come.
+        if let Mend::Reading { ids, .. } = &mut self.mend {
+            let waiting: HashSet<String> = self.retry.keys().map(|p| case::key(p)).collect();
+            let waiting: HashSet<i64> =
+                self.saves.iter().filter(|s| waiting.contains(&case::key(&s.path))).map(|s| s.id).collect();
+            ids.retain(|id| waiting.contains(id));
+        }
+        done
+    }
+
+    /// Asks the library once a start which saves to read again for their "muted" sample marks. One it can't tell is
+    /// asked again at the next start.
+    fn look_for_mends(&mut self) {
+        if self.mend != Mend::NotLooked {
+            return;
+        }
+        self.mend = Mend::Done;
+        let Some(songs_db) = &self.writes else { return };
+        match song_writes::to_mend(songs_db) {
+            Ok(Some(ids)) => {
+                let listed: HashSet<i64> = self.saves.iter().map(|s| s.id).collect();
+                let ids = ids.into_iter().filter(|id| listed.contains(id)).collect();
+                self.mend = Mend::Reading { ids, missed: false };
+            }
+            Ok(None) => {}
+            Err(e) => crate::log::warning("Songs", &format!("{e}; the muted samples are mended at the next start")),
+        }
+    }
+
+    /// Whether the note that the muted samples were mended is still to be kept, though nothing else may be
+    /// ([`Live::keep`]).
+    pub fn note_to_keep(&self) -> bool {
+        self.mend.to_note()
     }
 
     /// Keeps what's been read since the last time in the app's own `songs.db` ([`Live::with_writes`]): `None` when
@@ -226,7 +311,8 @@ impl Live {
     /// ([`Kept::not_kept`]). Writes to the disk, so never on the window's thread.
     pub fn keep(&mut self) -> Option<Result<Kept, LibraryError>> {
         let songs_db = self.writes.clone()?;
-        let batch = self.batch();
+        let mut batch = self.batch();
+        batch.mended = self.mend.to_note();
         if batch.is_empty() {
             self.to_put.clear();
             self.to_mark.clear();
@@ -257,6 +343,14 @@ impl Live {
         drop(details);
         self.to_put.clear();
         self.to_mark.clear();
+        if kept.written.mended {
+            self.mend = Mend::Done;
+        } else if let Mend::Reading { missed, .. } = &mut self.mend
+            && !kept.not_kept.is_empty()
+        {
+            // One the library wouldn't take may be one of them.
+            *missed = true;
+        }
         Some(Ok(kept))
     }
 
@@ -350,13 +444,20 @@ impl Live {
                 }
             }
         }
+        // Unchanged saves read again only to mend their muted samples, by path: not on the card.
+        let mut mends = HashSet::new();
         here.retain(|(path, at, meta)| {
-            let unchanged = at.and_then(|i| self.saves.get(i)).is_some_and(|s| {
+            let listed = at.and_then(|i| self.saves.get(i));
+            let unchanged = listed.is_some_and(|s| {
                 !s.file_missing
                     && s.error.is_none()
                     && s.mtime == scan::mtime(meta)
                     && s.size == i64::try_from(meta.len()).unwrap_or(i64::MAX)
             });
+            if unchanged && listed.is_some_and(|s| self.mend.has(s.id)) {
+                mends.insert(path.clone());
+                return true;
+            }
             // A new "(fixed)" copy is Fix's, waiting for Keep or Delete: left out, as when the list is loaded.
             !unchanged && !(at.is_none() && songs::is_fixed_copy(paths::stem(path)))
         });
@@ -385,6 +486,10 @@ impl Live {
                 }
                 if *tries == 0 {
                     self.retry.remove(&path);
+                    // Can't be read: it keeps what the library has.
+                    if let Some(s) = at.and_then(|i| self.saves.get(i)) {
+                        self.mend.tried(s.id, false);
+                    }
                 }
                 if at.and_then(|i| self.saves.get(i)).is_some_and(|s| s.error.is_none() && !s.file_missing) {
                     continue;
@@ -407,9 +512,12 @@ impl Live {
                             done.gone -= 1;
                         }
                         done.moved.push(detail.save.name.clone());
+                    } else if mends.contains(&path) {
+                        done.mended += 1;
                     } else {
                         done.read.push(detail.save.name.clone());
                     }
+                    self.mend.tried(old.id, true);
                     self.to_put.entry(old.id).or_insert(false);
                     self.to_mark.remove(&old.id);
                     self.saves[i] = detail.save.clone();
@@ -440,7 +548,9 @@ impl Live {
         // folder the outer walk skips is only found that way), and judge what's left out by the innermost.
         let mut walk: Vec<String> = overflowed.to_vec();
         walk.extend(self.roots.iter().filter(|r| overflowed.iter().any(|o| scan::is_inside(r, o))).cloned());
-        let found = on_pool(|| scan::find_projects(&walk));
+        // A walk waits on the disk (a cold drive takes seconds a level): on the bulk pool, so the pages' quick jobs on
+        // the shared pool (search, filters, the galaxy's pictures) don't queue behind it (F-4, 2026-11-06 review).
+        let found = on_bulk_pool(|| scan::find_projects(&walk));
         let known: Vec<KnownFile> = self
             .saves
             .iter()
@@ -451,8 +561,8 @@ impl Live {
                 size: s.size,
                 mtime: s.mtime,
                 missing: s.file_missing,
-                // A missing save whose file is back is read again, even unchanged.
-                reread: s.file_missing,
+                // A missing save whose file is back is read again, even unchanged, as is one to mend.
+                reread: s.file_missing || self.mend.has(s.id),
             })
             .collect();
         let plan = scan::plan(&found, &known, &self.roots, &|_| false, false);
@@ -549,7 +659,7 @@ pub struct Kept {
 /// stops it: everything is tried again the next time (what's written already is the same written again).
 fn one_by_one(songs_db: &std::path::Path, batch: Batch) -> Result<Kept, LibraryError> {
     let mut kept = Kept::default();
-    let Batch { put, missing } = batch;
+    let Batch { put, missing, mended } = batch;
     let alone = put
         .into_iter()
         .map(|p| (p.detail.save.path.clone(), Batch { put: vec![p], ..Batch::default() }))
@@ -563,6 +673,15 @@ fn one_by_one(songs_db: &std::path::Path, batch: Batch) -> Result<Kept, LibraryE
             }
             Err(e) if e.is_busy() => return Err(e),
             Err(e) => kept.not_kept.push((path, e.to_string())),
+        }
+    }
+    // The note that the muted samples were mended goes last, on its own, and only if the library took every save (a
+    // save it refused may be one of them): if it isn't kept, they're mended again at the next start.
+    if mended && kept.not_kept.is_empty() {
+        match song_writes::write(songs_db, &Batch { mended: true, ..Batch::default() }) {
+            Ok(w) => kept.written.mended = w.mended,
+            Err(e) if e.is_busy() => return Err(e),
+            Err(_) => {}
         }
     }
     Ok(kept)
@@ -622,6 +741,7 @@ mod tests {
             writes: None,
             to_put: BTreeMap::new(),
             to_mark: BTreeSet::new(),
+            mend: Mend::NotLooked,
         }
     }
 
@@ -645,13 +765,17 @@ mod tests {
             one.card(),
             ("Updated Night Drive_15".into(), "Saved in its folder, so the app read it again".into())
         );
-        let some = Updated { read: vec!["a".into(), "b".into()], moved: vec!["c".into()], gone: 1 };
+        let some = Updated { read: vec!["a".into(), "b".into()], moved: vec!["c".into()], gone: 1, mended: 7 };
         assert_eq!(some.card(), ("Updated 4 projects".into(), "2 saved, 1 moved, 1 missing".into()));
         let gone = Updated { gone: 1, ..Updated::default() };
         assert_eq!(gone.card(), ("Updated 1 project".into(), "Missing: moved or deleted".into()));
         let moved = Updated { moved: vec!["Night_11".into()], ..Updated::default() };
         assert_eq!(moved.card(), ("Updated Night_11".into(), "Found in its new folder".into()));
         assert!(Updated::default().is_empty());
+        // Saves read again only to mend their muted samples are kept, but not on the card.
+        let mended = Updated { mended: 3, ..Updated::default() };
+        assert!(!mended.is_empty() && !mended.for_card());
+        assert!(some.for_card());
     }
 
     #[test]
@@ -768,6 +892,73 @@ mod tests {
             .unwrap();
         assert_eq!(Library::open_read_only(&songs).unwrap().saves().unwrap().len(), 2);
         assert_eq!(open().saves.len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saves_that_lost_their_muted_samples_are_read_again_once() {
+        let dir = std::env::temp_dir().join(format!("mo-live-mend-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let projects = dir.join("Projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        // Three saves, as they are on disk: two FL Studio ones and a Bitwig one.
+        let mut rows = Vec::new();
+        for (id, file, daw) in
+            [(1, "Night_1.flp", "FL Studio"), (2, "Night_2.flp", "FL Studio"), (3, "Day_1.bwproject", "Bitwig Studio")]
+        {
+            let path = projects.join(file);
+            std::fs::write(&path, tiny_flp()).unwrap();
+            let meta = std::fs::metadata(&path).unwrap();
+            let name = paths::stem(&path.display().to_string()).to_owned();
+            rows.push(format!(
+                "({id}, '{}', '{name}', '{daw}', '{}', {}, {})",
+                path.display(),
+                projects.display(),
+                meta.len(),
+                scan::mtime(&meta)
+            ));
+        }
+        rusqlite::Connection::open(dir.join("library.db"))
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE roots (path TEXT PRIMARY KEY);
+                 CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                     name TEXT NOT NULL, daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, info TEXT);
+                 INSERT INTO roots VALUES ('{}');
+                 INSERT INTO projects (id, path, name, daw, folder, size, mtime) VALUES {};",
+                projects.display(),
+                rows.join(", ")
+            ))
+            .unwrap();
+        let songs = dir.join(mo_library::songs_db::FILE_NAME);
+        mo_library::songs_db::make(&dir.join("library.db"), &songs, &mut |_| {}).unwrap();
+        assert!(mo_library::songs_db::at_start(&dir, "test").is_songs_db());
+        // The C# app read Night_1 and Day_1 before they last changed, and the app kept them since (losing Night_1's
+        // muted samples); Night_2 is as the C# app read it.
+        rusqlite::Connection::open(dir.join("library.db"))
+            .unwrap()
+            .execute_batch("UPDATE projects SET mtime = mtime - 1000 WHERE id IN (1, 3)")
+            .unwrap();
+        let open = || {
+            let lib = Library::open_read_only(&songs).unwrap();
+            Live::load(&lib, 6, LiveDetails::default()).unwrap().with_writes(songs.clone())
+        };
+        // Nothing changed, but the FL Studio save the app kept is read again, and that's not on the card.
+        let mut live = open();
+        assert_eq!(live.saves.len(), 3);
+        let caught = live.catch_up();
+        assert_eq!((caught.read.len(), caught.moved.len(), caught.gone, caught.mended), (0, 0, 0, 1));
+        assert!(!caught.for_card());
+        assert!(live.note_to_keep());
+        let kept = live.keep().unwrap().unwrap();
+        assert_eq!((kept.written.put, kept.written.mended), (1, true));
+        assert_eq!(live.mend, Mend::Done);
+        assert!(live.keep().is_none(), "kept once");
+        // Noted: the next start reads nothing again.
+        let mut next = open();
+        assert!(next.catch_up().is_empty());
+        assert!(next.keep().is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

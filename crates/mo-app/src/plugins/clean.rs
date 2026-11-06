@@ -29,8 +29,8 @@ pub struct Ask {
     pub row: usize,
     pub row_key: (String, String),
     pub name: String,
-    /// How many saves use it.
-    pub projects: usize,
+    /// How many songs use it (any save), as its card's Used tab counts them (review E2-10).
+    pub songs: usize,
     pub space: PluginSpace,
     pub all: Vec<PluginSpace>,
     uses: HashMap<String, CleanUse>,
@@ -125,7 +125,9 @@ impl Plugins {
         // (one claimed by a row that has its own) isn't listed, so it counts as used.
         for r in &self.rows {
             if let Some(room) = r.room.as_ref().filter(|_| r.installed) {
-                let projects = u32::try_from(r.saves.len()).unwrap_or(u32::MAX);
+                // A stand-in for a missing version counts as used by that version's songs (review E2-6).
+                let saves = if r.stands_in.is_some() { r.saves.len().max(1) } else { r.saves.len() };
+                let projects = u32::try_from(saves).unwrap_or(u32::MAX);
                 uses.insert(room.key.clone(), CleanUse { projects, unused: r.unused });
             }
         }
@@ -133,7 +135,7 @@ impl Plugins {
             row,
             row_key: (r.key.clone(), r.own.clone()),
             name: r.name.clone(),
-            projects: r.saves.len(),
+            songs: r.songs,
             space,
             all: self.spaces.clone(),
             uses,
@@ -147,6 +149,24 @@ impl Plugins {
         let gone: Vec<String> = done.removed.iter().map(|r| r.path.clone()).collect();
         self.forget_paths(&gone);
     }
+}
+
+/// What of a clean-up really is in your Recycle Bin, for Put back: what went but wasn't found in it (removed outright,
+/// [`NOT_IN_BIN`], or sent as administrator to another account's bin) has a problem of its own path, can't be put back,
+/// and isn't offered (review E2-7), nor what went inside it. Problems about what stayed are kept out too: they were
+/// said already. Leave out [`removed_for_good`]'s paths too, apart.
+pub fn in_the_bin(done: &Done) -> Done {
+    let not_found = |path: &str| done.problems.iter().any(|p| p.path == path);
+    let removed: Vec<Removed> = done.removed.iter().filter(|r| !not_found(&r.path)).cloned().collect();
+    let went_with =
+        done.went_with.iter().filter(|(_, outer)| removed.iter().any(|r| &r.path == outer)).cloned().collect();
+    Done { removed, problems: Vec::new(), went_with }
+}
+
+/// What a clean-up removed that isn't in your Recycle Bin ([`in_the_bin`]'s other part): still left out of the sizes.
+pub fn removed_for_good(done: &Done) -> Vec<String> {
+    let not_found = |path: &str| done.problems.iter().any(|p| p.path == path);
+    done.removed.iter().filter(|r| not_found(&r.path)).map(|r| r.path.clone()).collect()
 }
 
 /// One line of the Clean up card.
@@ -212,14 +232,10 @@ pub fn intro(inputs: &Inputs, lines: &[CleanLine]) -> String {
     }
     let mut s = "Tick what to remove. Everything goes to the Recycle Bin, so you can still put it back.".to_owned();
     let presets_can_go = lines.iter().any(|l| l.stays.is_none() && l.folder.kind == SpaceKind::Presets);
-    if inputs.ask.projects > 0 && presets_can_go {
+    if inputs.ask.songs > 0 && presets_can_go {
         s.push_str(&format!(
-            " {} {}. Its presets are safe to remove: projects keep their own settings.",
-            if inputs.ask.projects == 1 {
-                "1 project uses".to_owned()
-            } else {
-                format!("{} projects use", inputs.ask.projects)
-            },
+            " {} {}. Its presets are safe to remove: songs keep their own settings.",
+            if inputs.ask.songs == 1 { "1 song uses".to_owned() } else { format!("{} songs use", inputs.ask.songs) },
             inputs.ask.name
         ));
     }
@@ -420,5 +436,8 @@ impl Bin for Watched<'_> {
     }
     fn refuses_quietly(&self, path: &Path, bytes: u64) -> Option<String> {
         self.bin.refuses_quietly(path, bytes)
+    }
+    fn going(&self, removed: &Removed) {
+        self.bin.going(removed);
     }
 }

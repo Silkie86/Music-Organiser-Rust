@@ -1,5 +1,5 @@
 //! The On disk tab's "Not its", "Take off" and "Add a folder…" ([`mo_app::plugins::folder_fixes`]): each is kept in
-//! library.db on a worker (`mo_library::plugin_folders`), then shown on the page until the old app measures again.
+//! library.db on a worker (`mo_library::plugin_folders`), and read back with every read of the page.
 
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
@@ -88,6 +88,8 @@ pub(super) fn add(app: &AppWindow) {
                 let measured_now =
                     mo_app::background::on_bulk_pool(|| mo_space::size::measure(Path::new(&path), &stop))
                         .map_err(|_| "Measuring it stopped.".to_owned())?;
+                // Before the library hears of it: the read that follows uses this measure, not one of its own.
+                folder_fixes::remember_measure(&path, measured_now);
                 let folder = folder_fixes::added_folder(&path, measured_now, &inside);
                 kept_when_free(|| add_plugin_folder(&library, &room.key, &folder.path))?;
                 Ok(FolderFix::Added { key: room.key.clone(), folder, measured })

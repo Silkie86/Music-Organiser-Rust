@@ -2,15 +2,18 @@
 //! may go to the Recycle Bin and why the others stay, then what went, with Put back. The checks are
 //! `mo_space::plugin_clean`'s, run on worker threads (rule 12): the folders are read for samples your songs use before
 //! the list shows, and every picked folder is checked again just before it goes. Nothing goes anywhere but the
-//! Recycle Bin, and nothing is written to library.db: the page leaves out what went until the old app measures again.
+//! Recycle Bin: what went is kept in the app's list of what's there (`mo_app::binned`, shared with Space), and every
+//! read leaves out what isn't there now (nothing is written to library.db).
 //! Uninstall's card ([`super::uninstall`]) is shown the same way, in the same place.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use mo_app::binned::Kept;
 use mo_app::log;
 use mo_app::plugins::clean::{self, Inputs, Watched};
 use mo_app::plugins::uninstall;
+use mo_app::space_bin::{PLUGIN_CLEAN, PLUGIN_UNINSTALL};
 use mo_library::Library;
 use mo_space::clean::{Done, SystemBin, undo};
 use mo_space::plugin_clean::{CleanLine, apply, lines};
@@ -101,6 +104,85 @@ impl Stage {
 pub(super) struct Binned {
     pub(super) row_key: (String, String),
     pub(super) done: Done,
+    /// What it's kept under in the app's list of what's in the bin ([`record`]): its kind and when, if it was kept.
+    pub(super) kept: Option<(String, i64)>,
+}
+
+/// Keeps what a clean-up or an uninstall of the plugin at `row_key` sent to the Recycle Bin in the app's list, as Space's
+/// clean-ups are (`mo_app::binned`): Space's Recycle Bin line counts it, and its Put back is here after a restart too
+/// (review X1-3). What it's kept under and the list now, or `None` when nothing went to the bin or it couldn't be kept
+/// (said in the log). Looks in the bin and writes a file: call it off the window's thread.
+pub(super) fn record(kind: &str, row_key: &(String, String), outcome: &Outcome) -> Option<((String, i64), Kept)> {
+    let (Outcome::Done(done) | Outcome::Stopped(done)) = outcome else { return None };
+    let in_bin = clean::in_the_bin(done);
+    if in_bin.removed.is_empty() {
+        return None;
+    }
+    let when = mo_app::binned::now();
+    let folder = mo_app::paths::data_dir();
+    let kept = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
+        mo_app::binned::record_for(&folder, &SystemBin, kind, when, &in_bin, Some(row_key.clone()))
+    }));
+    match kept {
+        Ok((kept, at)) => {
+            if !kept.noted {
+                log::warning(
+                    "Plugins",
+                    "What went to the Recycle Bin couldn't be kept in its list: Put back works until the app closes",
+                );
+            }
+            Some(((kind.to_owned(), at), kept))
+        }
+        Err(_) => None,
+    }
+}
+
+/// What the app keeps of the Recycle Bin now, from any thread: `mo_app::binned::refresh`, or `None` when it stopped on
+/// a crash (said in the log). Looks in the bin: call it off the window's thread.
+fn kept_now() -> Option<Kept> {
+    let folder = mo_app::paths::data_dir();
+    mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| mo_app::binned::refresh(&folder, &SystemBin))).ok()
+}
+
+/// Once a run, on a worker: the Plugins page's clean-ups and uninstalls from earlier runs that are still in the Recycle
+/// Bin, as the app's list keeps them, so their Put back is on their plugin's card (review X1-3).
+pub(super) fn load_binned(app: &AppWindow) {
+    let weak = app.as_weak();
+    let spawned = mo_app::background::spawn("Plugins binned", move || {
+        let Some(kept) = kept_now() else { return };
+        let mine: Vec<Binned> = kept
+            .list
+            .clone()
+            .into_iter()
+            .filter(|b| b.kind == PLUGIN_CLEAN || b.kind == PLUGIN_UNINSTALL)
+            .filter_map(|b| {
+                let row_key = b.plugin?;
+                Some(Binned { row_key, done: b.done, kept: Some((b.kind, b.when)) })
+            })
+            .collect();
+        back(&weak, move |app| {
+            crate::space::bin_changed(app, kept);
+            if mine.is_empty() {
+                return;
+            }
+            PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                for b in mine {
+                    if !p.binned.iter().any(|o| o.kept.is_some() && o.kept == b.kept) {
+                        if let Some(pl) = p.plugins.as_mut() {
+                            pl.forget_removed(&b.done);
+                        }
+                        p.binned.push(b);
+                    }
+                }
+            });
+            refresh(app);
+            fill(app);
+        });
+    });
+    if let Err(e) = spawned {
+        log::warning("Plugins", &format!("Couldn't read what earlier clean-ups put in the Recycle Bin: {e}"));
+    }
 }
 
 impl Cleaning {
@@ -335,7 +417,8 @@ pub(super) fn confirm(app: &AppWindow) {
             }
         };
         report(card, &outcome);
-        back(&weak, move |app| removed(app, id, row_key, outcome));
+        let kept = record(PLUGIN_CLEAN, &row_key, &outcome);
+        back(&weak, move |app| removed(app, id, row_key, outcome, kept));
     });
     if let Err(e) = spawned {
         log::error("Plugins", &format!("Couldn't start the clean-up: {e}"));
@@ -374,7 +457,17 @@ pub(super) fn held(p: &super::Page) -> bool {
     true
 }
 
-pub(super) fn removed(app: &AppWindow, id: u64, row_key: (String, String), outcome: Outcome) {
+pub(super) fn removed(
+    app: &AppWindow,
+    id: u64,
+    row_key: (String, String),
+    outcome: Outcome,
+    recorded: Option<((String, i64), Kept)>,
+) {
+    let (kept, list) = recorded.map_or((None, None), |(at, list)| (Some(at), Some(list)));
+    if let Some(list) = list {
+        crate::space::bin_changed(app, list);
+    }
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let (head, problems, done) = match outcome {
@@ -400,7 +493,11 @@ pub(super) fn removed(app: &AppWindow, id: u64, row_key: (String, String), outco
             if let Some(pl) = p.plugins.as_mut() {
                 pl.forget_removed(&done);
             }
-            p.binned.push(Binned { row_key, done });
+            p.removed_for_good.extend(clean::removed_for_good(&done));
+            let in_bin = clean::in_the_bin(&done);
+            if !in_bin.removed.is_empty() {
+                p.binned.push(Binned { row_key, done: in_bin, kept });
+            }
         }
         if let Some(c) = p.clean.as_mut().filter(|c| c.id == id) {
             c.stage = Stage::Done { head, problems, offer_clean: false };
@@ -447,6 +544,8 @@ pub(super) fn put_back(app: &AppWindow) {
     let (kept_done, kept_key) = (done.clone(), row_key.clone());
     let spawned = mo_app::background::spawn("Plugins put back", move || {
         let problems = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| undo(&done, &SystemBin)));
+        // What came back isn't in the bin any more: the app's list of what's there drops it (Space's line too).
+        let kept = kept_now();
         let (head, lines, still) = match &problems {
             Ok(problems) => {
                 let (head, lines) = clean::undone_text(&done, problems);
@@ -461,13 +560,18 @@ pub(super) fn put_back(app: &AppWindow) {
         } else {
             card.failed(&head)
         }
-        back(&weak, move |app| put_back_done(app, id, row_key, head, lines, still));
+        back(&weak, move |app| {
+            if let Some(kept) = kept {
+                crate::space::bin_changed(app, kept);
+            }
+            put_back_done(app, id, row_key, head, lines, still);
+        });
     });
     if let Err(e) = spawned {
         log::error("Plugins", &format!("Couldn't start putting back: {e}"));
         PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            p.binned.push(Binned { row_key: kept_key, done: kept_done });
+            p.binned.push(Binned { row_key: kept_key, done: kept_done, kept: None });
             p.clean = None;
         });
         fill(app);
@@ -489,7 +593,7 @@ fn put_back_done(
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         if let Some(done) = still {
-            p.binned.push(Binned { row_key, done });
+            p.binned.push(Binned { row_key, done, kept: None });
         }
         if let Some(c) = p.clean.as_mut().filter(|c| c.id == id) {
             c.stage = Stage::Done { head, problems, offer_clean: false };
@@ -549,6 +653,7 @@ pub(super) fn forget_binned(plugins: &mut mo_app::plugins::Plugins) {
             plugins.forget_removed(&b.done);
         }
         plugins.forget_paths(&p.uninstalled);
+        plugins.forget_paths(&p.removed_for_good);
         plugins.forget_paths(&p.moved);
     });
 }

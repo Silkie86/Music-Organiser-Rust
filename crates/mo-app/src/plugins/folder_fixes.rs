@@ -1,10 +1,11 @@
 //! Your say on a plugin's folders, on the Plugins page's On disk tab, as the C# app's Space card has it: "Not its" on a
 //! guessed folder that isn't the plugin's (left out from now on), "Take off" on one you added, and "Add a folder…" for
-//! one the guess missed (a sound library on another drive). It's kept in library.db (`mo_library::plugin_folders`), so
-//! the C# app's next measure follows it. Until then, the page shows the change itself ([`Plugins::apply_folder_fixes`]),
-//! and keeps showing it over every new read this session.
+//! one the guess missed (a sound library on another drive). It's kept in library.db (`mo_library::plugin_folders`), and
+//! every read applies it over the stored measure ([`saved`], [`Plugins::apply_folder_fixes`]), so it lasts past a
+//! restart; this session's changes are shown over each read too.
 
 use chrono::NaiveDateTime;
+use mo_library::plugins::{StoredSpace, added_folders_key, ruled_out_key};
 use mo_library::scan::is_inside;
 use mo_space::Measured;
 use mo_space::plugin_space::{PluginSpace, SpaceFolder, SpaceKind, is_install_folder, kind_of};
@@ -33,6 +34,129 @@ impl FolderFix {
             FolderFix::Added { measured, .. } | FolderFix::Removed { measured, .. } => *measured,
         }
     }
+}
+
+/// Your say on each stored plugin's folders, as the library keeps it (`plugin_space_not:<key>` and
+/// `plugin_space_added:<key>`), as fixes to apply over the stored measure ([`Plugins::apply_folder_fixes`]): a folder
+/// ruled out, one the measure has as added that's no longer on your list (taken off), and one on your list the measure
+/// hasn't got (added since), measured here. A list that can't be read is an error, never no say: a ruled-out folder
+/// read as the plugin's could be ticked in Clean up. Reads the disk for an added folder: call it away from the window.
+pub fn saved(lib: &mo_library::Library, spaces: &[StoredSpace]) -> Result<Vec<FolderFix>, mo_library::LibraryError> {
+    let mut fixes = Vec::new();
+    for s in spaces {
+        let not = lib.strict_list_setting(&ruled_out_key(&s.key))?;
+        let added = lib.strict_list_setting(&added_folders_key(&s.key))?;
+        let on_list = |path: &str| added.iter().any(|a| same(a, path));
+        for path in not.iter().filter(|p| !p.trim().is_empty()) {
+            fixes.push(FolderFix::Removed { key: s.key.clone(), path: path.clone(), measured: s.measured });
+        }
+        for f in s.folders.iter().filter(|f| f.added && !on_list(&f.path)) {
+            fixes.push(FolderFix::Removed { key: s.key.clone(), path: f.path.clone(), measured: s.measured });
+        }
+        for path in added.iter().filter(|a| !a.trim().is_empty() && !s.folders.iter().any(|f| same(&f.path, a))) {
+            let Some(measured) = measured_once(path) else { continue };
+            let inside: Vec<(String, u64)> = spaces
+                .iter()
+                .flat_map(|o| &o.folders)
+                // One gone since isn't in the fresh measure either, so it isn't taken off twice.
+                .filter(|f| !same(&f.path, path) && is_inside(&f.path, path) && is_real(&f.path))
+                .map(|f| (f.path.clone(), f.bytes))
+                .collect();
+            let folder = added_folder(path, measured, &inside);
+            fixes.push(FolderFix::Added { key: s.key.clone(), folder, measured: s.measured });
+        }
+    }
+    Ok(fixes)
+}
+
+/// The sizes of the folders you added, measured once a run (the page reads the library again often; the folder rarely
+/// changes while the app runs), by path key. Adding a folder puts its fresh measure here ([`remember_measure`]).
+static SIZES: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Measured>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// A folder you added, measured once a run, or `None` when it isn't a real folder there now. The lock is held while it
+/// measures, so the Plugins page and Space reading at once measure it once, not twice.
+fn measured_once(path: &str) -> Option<Measured> {
+    let key = mo_space::key(path);
+    let mut sizes = SIZES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(m) = sizes.get(&key) {
+        return Some(*m);
+    }
+    let p = std::path::Path::new(path);
+    if !p.is_dir() || mo_space::size::is_link(p) {
+        return None;
+    }
+    let m = mo_space::size::measure(p, &std::sync::atomic::AtomicBool::new(false)).ok()?;
+    sizes.insert(key, m);
+    Some(m)
+}
+
+/// Keeps a folder's fresh measure (taken when you add it) for [`saved`], over one taken before.
+pub fn remember_measure(path: &str, measured: Measured) {
+    SIZES.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(mo_space::key(path), measured);
+}
+
+/// Whether a stored folder is a real folder there now (not a link: a measure doesn't go through one).
+fn is_real(path: &str) -> bool {
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.is_dir())
+}
+
+/// Whether a stored folder or plugin file has gone from where it was measured: the system says nothing is there and
+/// its drive is there (one on a drive that isn't plugged in, or a network place that can't be reached, is still
+/// counted), or it's a link now that the app put there moving it (`moved`, the moves' "from" folders as keys). A link
+/// you made yourself (a library kept on another drive) is still the plugin's folder. One that can't be looked at (no
+/// rights) counts as there.
+fn is_gone(path: &str, moved: &std::collections::HashSet<String>) -> bool {
+    let p = std::path::Path::new(path);
+    match std::fs::symlink_metadata(p) {
+        Ok(_) => mo_space::size::is_link(p) && moved.contains(&mo_space::key(path)),
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound && drive_there(p),
+    }
+}
+
+/// Whether the drive a path is on is there: its drive letter or network place on Windows; elsewhere a drive mounted
+/// in /Volumes, /media, /run/media or /mnt, or the system's own.
+fn drive_there(path: &std::path::Path) -> bool {
+    use std::path::Component;
+    let root = if cfg!(windows) {
+        path.ancestors().last().map(std::path::Path::to_path_buf)
+    } else {
+        let names: Vec<&std::ffi::OsStr> =
+            path.components().filter_map(|c| if let Component::Normal(n) = c { Some(n) } else { None }).collect();
+        let is = |name: &std::ffi::OsStr, wanted: &str| name.to_str().is_some_and(|n| n.eq_ignore_ascii_case(wanted));
+        let depth = match names.as_slice() {
+            [volumes, _, ..] if is(volumes, "Volumes") => 2,
+            [media, _, _, ..] if is(media, "media") => 3,
+            [run, media, _, _, ..] if is(run, "run") && is(media, "media") => 4,
+            [mnt, _, ..] if is(mnt, "mnt") => 2,
+            _ => 0,
+        };
+        let mut root = std::path::PathBuf::from("/");
+        root.extend(&names[..depth.min(names.len())]);
+        Some(root)
+    };
+    root.is_some_and(|r| r.as_os_str().is_empty() || r.is_dir())
+}
+
+/// Each stored folder and plugin file (and each folder added since) that has gone from where it was measured
+/// ([`is_gone`]): sent to the Recycle Bin, removed by an uninstaller, or moved to another drive (`moved`, the moves'
+/// "from" folders, as the library keeps them). One look at each, without following links. Call it away from the
+/// window's thread.
+pub fn gone(spaces: &[StoredSpace], fixes: &[FolderFix], moved: &[String]) -> Vec<String> {
+    let moved: std::collections::HashSet<String> = moved.iter().map(|m| mo_space::key(m)).collect();
+    let added = fixes.iter().filter_map(|f| match f {
+        FolderFix::Added { folder, .. } => Some(&folder.path),
+        FolderFix::Removed { .. } => None,
+    });
+    let mut seen = std::collections::HashSet::new();
+    spaces
+        .iter()
+        .flat_map(|s| s.folders.iter().map(|f| &f.path))
+        .chain(added)
+        .filter(|p| seen.insert(mo_space::key(p)))
+        .filter(|p| is_gone(p, &moved))
+        .cloned()
+        .collect()
 }
 
 /// What "Not its" does to a folder line: rule out a guessed folder, or take off one you added.
@@ -180,6 +304,13 @@ pub fn add_problem(path: &str, room: &PluginSpace, protected: &[String], plugin_
     if is_install_folder(path) {
         return Some("It's where programs are installed: those go with Uninstall.".to_owned());
     }
+    if let Some(system) = mo_space::plugin_clean::system_folder_in(path) {
+        return Some(if same(&system, path) {
+            "It's one of the computer's own folders: other programs keep their things there.".to_owned()
+        } else {
+            format!("It holds {system}, one of the computer's own folders: pick the plugin's folder inside it.")
+        });
+    }
     let overlaps = |roots: &[String]| -> Option<String> {
         roots.iter().find(|r| !r.trim().is_empty() && (is_inside(path, r) || is_inside(r, path))).cloned()
     };
@@ -291,6 +422,120 @@ mod tests {
         assert!(add_problem("/", &room, &[], &[]).unwrap().contains("whole drive"));
         let has = space("arcade", vec![folder(&samples, SpaceKind::Sounds, &[], false)]);
         assert!(add_problem(&kits, &has, &[], &[]).unwrap().contains("overlaps"));
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    fn stored(key: &str, folders: Vec<mo_library::plugins::StoredFolder>) -> StoredSpace {
+        StoredSpace { key: key.into(), name: key.into(), vendor: String::new(), folders, measured: None }
+    }
+
+    fn stored_folder(path: &str, bytes: u64, added: bool) -> mo_library::plugins::StoredFolder {
+        mo_library::plugins::StoredFolder { path: path.into(), kind: 2, bytes, shared_with: Vec::new(), added }
+    }
+
+    /// A library holding only `settings`, with these (key, value) rows.
+    fn library_with(dir: &std::path::Path, rows: &[(String, &str)]) -> mo_library::Library {
+        let path = dir.join("library.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE projects (id INTEGER PRIMARY KEY); CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);",
+        )
+        .unwrap();
+        for (k, v) in rows {
+            conn.execute("INSERT INTO settings (key, value) VALUES (?1, ?2)", [k.as_str(), v]).unwrap();
+        }
+        drop(conn);
+        mo_library::Library::open_read_only(&path).unwrap()
+    }
+
+    /// Review E2-1: your say on a plugin's folders is read back from the library after a restart: a folder ruled out,
+    /// one taken off your list (stored as added), and one added since the measure (measured, less what's inside it).
+    #[test]
+    fn your_say_on_folders_is_read_back_after_a_restart() {
+        let d = std::env::temp_dir().join(format!("mo-app-folder-fixes-saved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let new = d.join("New");
+        std::fs::create_dir_all(new.join("Kit")).unwrap();
+        std::fs::write(new.join("a.wav"), [0u8; 100]).unwrap();
+        let (new_s, kit_s) = (new.to_string_lossy().into_owned(), new.join("Kit").to_string_lossy().into_owned());
+        let added = serde_json::to_string(&[&new_s]).unwrap();
+        let lib = library_with(
+            &d,
+            &[(ruled_out_key("arcade"), r#"["C:\\Guess"]"#), (added_folders_key("arcade"), added.as_str())],
+        );
+        let spaces = [
+            stored("arcade", vec![stored_folder("C:\\Guess", 5, false), stored_folder("C:\\Old", 5, true)]),
+            stored("other", vec![stored_folder(&kit_s, 40, false)]),
+        ];
+        let fixes = saved(&lib, &spaces).unwrap();
+        assert_eq!(fixes.len(), 3, "{fixes:?}");
+        assert!(fixes.contains(&FolderFix::Removed { key: "arcade".into(), path: "C:\\Guess".into(), measured: None }));
+        assert!(fixes.contains(&FolderFix::Removed { key: "arcade".into(), path: "C:\\Old".into(), measured: None }));
+        let Some(FolderFix::Added { key, folder, .. }) = fixes.iter().find(|f| matches!(f, FolderFix::Added { .. }))
+        else {
+            panic!("no added folder in {fixes:?}")
+        };
+        assert_eq!(key, "arcade");
+        assert!(folder.added && same(&folder.path, &new_s));
+        // What the other plugin's folder inside it holds is the other plugin's.
+        assert!(folder.bytes < 100);
+        // Only stored plugins are looked at: no say, no fixes.
+        assert!(saved(&lib, &[stored("other", Vec::new())]).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A list that can't be read is an error, never "no say": a ruled-out folder read as the plugin's could be ticked.
+    #[test]
+    fn a_say_that_cant_be_read_is_an_error() {
+        let d = std::env::temp_dir().join(format!("mo-app-folder-fixes-bad-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let lib = library_with(&d, &[(ruled_out_key("arcade"), "not a list")]);
+        assert!(saved(&lib, &[stored("arcade", Vec::new())]).is_err());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Review E2-2: a stored folder that isn't there now (binned, uninstalled) or that the app moved (a link now) is
+    /// gone, each listed once; one that's there, a link you made yourself, and one on a drive that isn't there stay.
+    #[test]
+    fn folders_moved_or_removed_since_are_gone() {
+        let d = std::env::temp_dir().join(format!("mo-app-folder-fixes-gone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let (here, moved, yours, away) = (d.join("Here"), d.join("Moved"), d.join("Yours"), d.join("Elsewhere"));
+        std::fs::create_dir_all(&here).unwrap();
+        std::fs::create_dir_all(&away).unwrap();
+        for link in [&moved, &yours] {
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(&away, link).unwrap();
+            // A junction, as a move makes: a symbolic link needs administrator rights on Windows.
+            #[cfg(windows)]
+            junction::create(&away, link).unwrap();
+        }
+        let s = |p: &std::path::Path| p.to_string_lossy().into_owned();
+        let binned = s(&d.join("Binned"));
+        let unplugged = if cfg!(windows) { r"Q:\Not plugged in\Kits" } else { "/Volumes/Not plugged in/Kits" };
+        let spaces = [
+            stored("a", vec![stored_folder(&s(&here), 1, false), stored_folder(&binned, 1, false)]),
+            stored("b", vec![stored_folder(&binned, 1, false), stored_folder(&s(&moved), 1, false)]),
+            stored("c", vec![stored_folder(&s(&yours), 1, false), stored_folder(unplugged, 1, false)]),
+        ];
+        let mut gone = gone(&spaces, &[], &[s(&moved)]);
+        gone.sort();
+        let mut want = vec![binned, s(&moved)];
+        want.sort();
+        assert_eq!(gone, want);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Review E2-9: the computer's own folders, and a folder holding one, aren't a plugin's (here /tmp and the root).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_computers_own_folders_cant_be_added() {
+        let room = space("arcade", Vec::new());
+        assert!(add_problem("/tmp", &room, &[], &[]).unwrap().contains("computer's own folders"));
+        let d = std::env::temp_dir().join(format!("mo-app-system-folders-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        assert!(add_problem(&d.to_string_lossy(), &room, &[], &[]).is_none());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

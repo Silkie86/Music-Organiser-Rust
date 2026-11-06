@@ -1192,12 +1192,16 @@ fn load(app: &AppWindow, fresh: bool) {
         let index = p.index.clone();
         let list = p.list.clone();
         let places = p.places.clone();
+        let no_index = p.no_index.clone();
         let g = &mut p.galaxy;
         if let Some(old) = g.loading.take() {
             old.store(true, Ordering::Relaxed);
         }
         let Some(index) = index.filter(|_| !list.is_empty()) else {
-            g.note = "Listening to your sounds first: their fingerprints are still being read.".to_owned();
+            g.note = match no_index {
+                Some(why) => super::no_index_note("the galaxy can't be laid out", &why),
+                None => "Listening to your sounds first: their fingerprints are still being read.".to_owned(),
+            };
             return None;
         };
         let cancel = Arc::new(AtomicBool::new(false));

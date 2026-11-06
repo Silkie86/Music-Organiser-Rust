@@ -22,6 +22,8 @@ pub enum SoundsError {
     Read(rusqlite::Error),
     /// The Rust app's own copy of the library ([`crate::compact`]) couldn't be made or brought up to date.
     Copy { path: PathBuf, why: String },
+    /// The app's own sound library is damaged, and couldn't be mended ([`crate::compact::mend_reading`]): why not.
+    Damaged { path: PathBuf, why: String },
 }
 
 impl fmt::Display for SoundsError {
@@ -36,6 +38,9 @@ impl fmt::Display for SoundsError {
                     path.display()
                 )
             }
+            SoundsError::Damaged { path, why } => {
+                write!(f, "The sound library {} is damaged, and it couldn't be mended: {why}", path.display())
+            }
         }
     }
 }
@@ -46,7 +51,7 @@ impl SoundsError {
     /// Whether SQLite found the file damaged (a file cut short, a page spoilt) or the disk couldn't read part of it
     /// (a bad sector): reading it again won't help.
     pub fn damaged(&self) -> bool {
-        matches!(self, SoundsError::Read(e) if is_damage(e))
+        matches!(self, SoundsError::Read(e) if is_damage(e)) || matches!(self, SoundsError::Damaged { .. })
     }
 }
 
@@ -331,19 +336,32 @@ impl SoundsDb {
         Ok(self.conn.query_row(sql, [], |r| r.get(0))?)
     }
 
-    /// Every file the library knows, as the last scan saw it.
+    /// Every file the library knows, as the last scan saw it. A size or time that isn't a whole number (a damaged
+    /// row) reads as 0, so the file is listened to again; a path that isn't readable text, as near to it as it can be.
     pub fn known_files(&self) -> Result<Vec<KnownSound>, SoundsError> {
         let mut st = self.conn.prepare(match self.layout {
-            Layout::Copy => "SELECT path, COALESCE(size, 0), COALESCE(mtime, 0), clap_numbers IS NOT NULL FROM sounds",
+            Layout::Copy => {
+                "SELECT path, iif(typeof(size) = 'integer', size, 0), iif(typeof(mtime) = 'integer', mtime, 0),
+                     clap_numbers IS NOT NULL
+                 FROM sounds"
+            }
             Layout::Formerly => {
-                "SELECT path, COALESCE(size, 0), COALESCE(mtime, 0),
+                "SELECT path, iif(typeof(size) = 'integer', size, 0), iif(typeof(mtime) = 'integer', mtime, 0),
                      EXISTS (SELECT 1 FROM sound_hashes h WHERE h.sound_id = sounds.id AND h.clap_len IS NOT NULL)
                  FROM sounds"
             }
-            Layout::Library => "SELECT path, COALESCE(size, 0), COALESCE(mtime, 0), clap IS NOT NULL FROM sounds",
+            Layout::Library => {
+                "SELECT path, iif(typeof(size) = 'integer', size, 0), iif(typeof(mtime) = 'integer', mtime, 0),
+                     clap IS NOT NULL
+                 FROM sounds"
+            }
         })?;
         let rows = st.query_map([], |r| {
-            Ok(KnownSound { path: r.get(0)?, size: r.get(1)?, mtime: r.get(2)?, has_clap: r.get(3)? })
+            let path = match r.get_ref(0)? {
+                rusqlite::types::ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
+                _ => String::new(),
+            };
+            Ok(KnownSound { path, size: r.get(1)?, mtime: r.get(2)?, has_clap: r.get(3)? })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
