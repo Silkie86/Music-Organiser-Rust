@@ -13,7 +13,8 @@
 //!   left alone; and, as old, a file the app wrote once but no longer reads ([`RETIRED`]).
 //! - `Curves\`: a curve file whose writing a crash cut short (`… .mo-part-<number>-<number>`), an hour old.
 //! - `twin\cs\`: the twin test's copy of your library (`library-copy.db`), left when the test was stopped, a day old.
-//! - Your Temp folder: the Space page's lists for the administrator step (`mo-admin-<n>-<n>-<n>.txt`), a day old.
+//! - Your Temp folder: the Space page's lists for the administrator step (`mo-admin-<n>-<n>-<n>.txt`), a day old;
+//!   and the MIDI page's Play in Bitwig files (`MO Play <n>-<n>.mid`, removed once Bitwig has read one), a day old.
 //! - `notes\`: F12 notes (`note-<time>.md`) and their pictures (`note-<time>.png`), as both apps save them, about 3
 //!   months after they were saved (Solomon, 2026-11-03: "remove older ones"), to the Recycle Bin: see below.
 //!
@@ -263,6 +264,8 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
         done.add(remove_older(&twin, is_library_copy, DAY, now, false));
     }
     done.add(remove_older(&places.temp, mo_space::admin::is_temp_file, DAY, now, true));
+    // Play in Bitwig's MIDI files, which go again as soon as Bitwig has read them: a crash can leave one.
+    done.add(remove_older(&places.temp, crate::midi::is_play_file, DAY, now, true));
     if let Some(notes) = real_folder(&places.data, &[crate::note::FOLDER]) {
         done.add(old_notes_to_bin(&notes, &places.data.join(NOTES_DONE_FILE), NOTES_KEPT_FOR, now, bin));
     }

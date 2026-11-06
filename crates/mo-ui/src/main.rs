@@ -159,6 +159,10 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::note::finish_up();
     // The MIDI files this run's drags wrote, once the DAW has long read them (rule 28).
     mo_ui::drag::finish_up();
+    // A part playing in Bitwig or FL stops with the app.
+    mo_ui::midi::finish_up();
+    // So does a preset being auditioned there.
+    mo_ui::presets::finish_up();
     // The sweep's and the frames' last few seconds, before the log closes.
     mo_app::sweep_timing::finish();
     mo_app::frame_timing::finish();

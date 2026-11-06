@@ -27,7 +27,7 @@ metadata:
 RTX 3060 (60 fps all stages). Whole-library twin test: 266,466 same, 14,901 differ; all judged (DIFFERENCES.md):
 only real Rust fix was FL created ms (cut like .NET AddDays, v11). Local branches style-tokens (Type/Space tokens,
 proposed scale agreed by Solomon) and twin-fixes wait for #31 to merge. Solomon's PC: folder access via
-remote-devices (<FL old projects folder>, MO Test, <a Studio One songs folder> granted).
+remote-devices (<FL backup folder>, MO Test, <Studio One songs folder> granted).
 2026-10-31 ~10:00: #32 (Type/Space tokens) merged. #33 = CI scope (tools/dev/ci_scope.py: PRs test only changed crates;
 full on main + workflow_dispatch before ultracode) + twin fixes (FL v11 date, DIFFERENCES rows incl. FL 20 playlist
 tracks: C# counts from tracks kept, not 500 = Rust Better). Local branch `tips`: shared Tip/TipLayer/TipState in

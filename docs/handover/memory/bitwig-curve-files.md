@@ -9,7 +9,7 @@ Solomon (2026-11-02): a curve file can be dropped onto an automation lane in Bit
 moves) turned into curve files. Plan given: keep the automation clips; also write one .bwcurve per knob-move pattern in
 a "Curves" folder next to each convert (never into his Bitwig library unless he picks); later a library of all songs.
 
-Format (RC decode, read-only, of <Bitwig Studio folder>\Library\Curves: Filter Rhythm 001 2, Gararge 1, London City):
+Format (RC decode, read-only, of <Bitwig folder>\Library\Curves: Filter Rhythm 001 2, Gararge 1, London City):
 - Same BtWg container as .bwproject: 'BtWg' 0003 0002, body offset in 8 hex, no zip; metadata then ~5 KB space padding.
 - Metadata: application_version_name, beat_length (f64, optional), branch, comment, creator, curve_category
   ('Sequence'|'Periodic'), curve_kind u8 0, revision_id/no, tags, type 'application/bitwig-curve'.

@@ -26,7 +26,7 @@ pub mod fake;
 mod link;
 mod send;
 
-pub use audition::{PLAY_NEEDS, Playing};
+pub use audition::{AUDITION_NEEDS, Auditioning, PLAY_NEEDS, Playing};
 pub use device::{DRUM_MACHINE_KEY, DRUM_MACHINE_NAME, DeviceId, drum_machine};
 pub use error::{Error, LOOPBACK_PORT};
 pub use link::{

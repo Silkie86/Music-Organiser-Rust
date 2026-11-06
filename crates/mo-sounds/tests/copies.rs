@@ -84,6 +84,9 @@ fn only_the_very_same_audio_counts_and_unchanged_files_are_not_read_again() {
 
     // A changed file is read again: the nudged one made the same as the rest.
     fs::copy(&a, &d).unwrap();
+    // Windows' copy keeps the file's date (and the size is the same), so it's dated now as a file you changed would be.
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+    fs::File::options().write(true).open(&d).unwrap().set_modified(later).unwrap();
     let (changed, said) = find(&sounds, &kept);
     assert_eq!(changed, SameAudio { groups: vec![vec![1, 2, 3, 4]] });
     assert!(matches!(said.first(), Some(Finding::Known { left: 1, .. })), "{said:?}");

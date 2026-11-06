@@ -490,4 +490,53 @@ class NewerApiTest {
         assertFalse(bitwig.calls.stream().anyMatch(c -> c.get(0).equals("deleteClip")), String.valueOf(bitwig.calls));
         assertEquals("Say which track, by its ID.", error(app.waitFor(obj("id", 4, "cmd", "deleteclip", "slot", 0))));
     }
+
+    // ---- auditioning a preset on a track of its own (extension 3.20) ----
+
+    @Test
+    @DisplayName("takes out a track it made for an audition, and stops Bitwig when asked")
+    void deletesAnAuditionTrack() {
+        Model m = LinkTest.song();
+        m.newTrackIds = true;
+        start(m);
+        bitwig.allowChanges(true);
+        int before = bitwig.state.tracks.size();
+        Map<String, Object> made = SelfCheckTest.map(
+            app.waitFor(obj("id", 1, "cmd", "newtrack", "name", "Warm Pad", "audition", true)).get("result"));
+        String id = (String) made.get("id");
+        assertEquals(before + 1, bitwig.state.tracks.size());
+        assertJson(obj("deleted", true),
+                   app.waitFor(obj("id", 2, "cmd", "deletetrack", "trackId", id, "transport", true)).get("result"));
+        assertEquals(before, bitwig.state.tracks.size());
+        assertTrue(bitwig.calls.contains(List.of("stop")), String.valueOf(bitwig.calls));
+        // Only once: a second ask finds nothing of the app's there.
+        assertJson(obj("deleted", false), app.waitFor(obj("id", 3, "cmd", "deletetrack", "trackId", id)).get("result"));
+    }
+
+    @Test
+    @DisplayName("never takes out a track it didn't make for an audition, or one renamed since")
+    void leavesOtherTracksAlone() {
+        Model m = LinkTest.song();
+        m.newTrackIds = true;
+        m.tracks.get(1).id("bass-id");
+        start(m);
+        bitwig.allowChanges(true);
+        int before = bitwig.state.tracks.size();
+        assertJson(obj("deleted", false), app.waitFor(obj("id", 1, "cmd", "deletetrack", "trackId", "bass-id")).get("result"));
+        // A track made without "audition" isn't the app's to take out.
+        String plain = (String) SelfCheckTest.map(
+            app.waitFor(obj("id", 2, "cmd", "newtrack", "name", "Keys")).get("result")).get("id");
+        assertJson(obj("deleted", false), app.waitFor(obj("id", 3, "cmd", "deletetrack", "trackId", plain)).get("result"));
+        // Nor one you renamed after it came in.
+        Map<String, Object> made = SelfCheckTest.map(
+            app.waitFor(obj("id", 4, "cmd", "newtrack", "name", "Warm Pad", "audition", true)).get("result"));
+        int at = ((Number) made.get("index")).intValue();
+        bitwig.state.tracks.get(at).name = "My Pad";
+        bitwig.refresh();
+        assertJson(obj("deleted", false),
+                   app.waitFor(obj("id", 6, "cmd", "deletetrack", "trackId", made.get("id"))).get("result"));
+        assertEquals(before + 2, bitwig.state.tracks.size());
+        assertFalse(bitwig.calls.stream().anyMatch(c -> c.get(0).equals("deleteTrack")), String.valueOf(bitwig.calls));
+        assertEquals("Say which track, by its ID.", error(app.waitFor(obj("id", 7, "cmd", "deletetrack"))));
+    }
 }
