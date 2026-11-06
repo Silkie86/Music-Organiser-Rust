@@ -534,6 +534,8 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>) {
             // A move a close or a crash cut off part way may have left a half copy (review E2-3): looked for once.
             if !PAGE.with(|p| std::mem::replace(&mut p.borrow_mut().looked_for_half_copies, true)) {
                 moving::look_for_half_copies(app);
+                // And what earlier runs' clean-ups put in the Recycle Bin, for their Put back (review X1-3).
+                clean::load_binned(app);
             }
             // And the plugin files Space's clean-ups sent to the Recycle Bin, as Space leaves them out.
             fresh.forget_paths(&crate::space::plugin_files_in_bin());
@@ -629,6 +631,16 @@ pub fn unused_years() -> Option<u32> {
 /// How many moves have finished this session, whatever came of them: Space looks for old copies again after each.
 pub fn moves_this_session() -> u64 {
     PAGE.with(|p| p.borrow().moves)
+}
+
+/// Space put back one of this page's clean-ups or uninstalls (`kind`, kept at `when`): its Put back here goes when all
+/// of it came back, and the list is read again, so the plugin's folders show again (review X1-3).
+pub fn put_back_elsewhere(kind: &str, when: i64, all: bool) {
+    if all {
+        let kept = Some((kind.to_owned(), when));
+        PAGE.with(|p| p.borrow_mut().binned.retain(|b| b.kept != kept));
+    }
+    read_again();
 }
 
 /// When the window has closed, first: a move still copying is told to stop ([`moving::stop_moves`]).

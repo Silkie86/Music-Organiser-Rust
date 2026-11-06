@@ -37,6 +37,11 @@ pub struct Binned {
     pub when: i64,
     /// What went, with what the bin calls each: what Put back needs. What couldn't go isn't kept.
     pub done: Done,
+    /// For the Plugins page's clean-ups and uninstalls ([`crate::space_bin::PLUGIN_CLEAN`],
+    /// [`crate::space_bin::PLUGIN_UNINSTALL`]): the plugin's line, by its name key and own, so its Put back is on its
+    /// card after a restart too (review X1-3). None for Space's own.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<(String, String)>,
 }
 
 impl Binned {
@@ -53,7 +58,7 @@ impl Binned {
         let went_with =
             self.done.went_with.iter().filter(|(_, with)| removed.iter().any(|r| &r.path == with)).cloned().collect();
         let done = Done { removed, problems: self.done.problems.clone(), went_with };
-        Binned { kind: self.kind.clone(), when: self.when, done }
+        Binned { kind: self.kind.clone(), when: self.when, done, plugin: self.plugin.clone() }
     }
 }
 
@@ -137,10 +142,15 @@ pub fn write(folder: &Path, list: &[Binned]) -> io::Result<()> {
 /// Gives the time it's kept under: `when`, or a second or more later when another of its kind is kept under that time
 /// (the computer's clock was put back since), as Put back knows each one by its kind and time.
 pub fn add(list: &mut Vec<Binned>, kind: &str, when: i64, done: &Done) -> i64 {
+    add_for(list, kind, when, done, None)
+}
+
+/// [`add`], for the plugin line `plugin` (the Plugins page's clean-ups).
+fn add_for(list: &mut Vec<Binned>, kind: &str, when: i64, done: &Done, plugin: Option<(String, String)>) -> i64 {
     let when = free_time(list, kind, when);
     if !done.removed.is_empty() {
         let done = Done { removed: done.removed.clone(), problems: Vec::new(), went_with: done.went_with.clone() };
-        list.push(Binned { kind: kind.to_owned(), when, done });
+        list.push(Binned { kind: kind.to_owned(), when, done, plugin });
     }
     when
 }
@@ -286,8 +296,20 @@ pub fn refresh(folder: &Path, bin: &dyn Bin) -> Kept {
 /// Keeps a clean-up of `kind` that ran at `when` in `folder` ([`add`]), and says what's kept now, and the time it's
 /// kept under ([`add`] says which). Looks in the bin and waits for the disk: call it off the window's thread.
 pub fn record(folder: &Path, bin: &dyn Bin, kind: &str, when: i64, done: &Done) -> (Kept, i64) {
+    record_for(folder, bin, kind, when, done, None)
+}
+
+/// [`record`], for a clean-up of the plugin line `plugin` (the Plugins page's Clean up and Uninstall: review X1-3).
+pub fn record_for(
+    folder: &Path,
+    bin: &dyn Bin,
+    kind: &str,
+    when: i64,
+    done: &Done,
+    plugin: Option<(String, String)>,
+) -> (Kept, i64) {
     let mut kept_at = when;
-    let kept = update(folder, bin, |list| kept_at = add(list, kind, when, done));
+    let kept = update(folder, bin, |list| kept_at = add_for(list, kind, when, done, plugin));
     (kept, kept_at)
 }
 
@@ -382,6 +404,24 @@ mod tests {
         write(&dir, &[]).unwrap();
         assert!(!dir.join(FILE).exists());
         write(&dir, &[]).unwrap();
+    }
+
+    /// Review X1-3: a Plugins page clean-up is kept with its plugin's line, read back with it; one kept before (no
+    /// plugin in the file) still reads, and Space's own aren't written with one.
+    #[test]
+    fn a_plugin_clean_up_keeps_its_plugin() {
+        let dir = folder("mo-app-binned-plugin");
+        let mut list = Vec::new();
+        add(&mut list, "spare-copies", 1_762_268_400, &done(&["C:/a.dll"]));
+        let plugin = Some(("serum".to_owned(), String::new()));
+        add_for(&mut list, crate::space_bin::PLUGIN_CLEAN, 1_762_268_401, &done(&["C:/Serum"]), plugin.clone());
+        write(&dir, &list).unwrap();
+        let text = fs::read_to_string(dir.join(FILE)).unwrap();
+        assert_eq!(text.matches("\"plugin\"").count(), 1, "{text}");
+        let back = read(&dir).unwrap();
+        assert_eq!(back, list);
+        assert_eq!(back[1].plugin, plugin);
+        assert_eq!(back[0].plugin, None);
     }
 
     #[test]
