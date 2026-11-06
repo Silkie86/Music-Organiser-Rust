@@ -28,7 +28,7 @@ fn with(change: impl FnOnce(&mut World)) -> FakeBitwig {
 fn plays_a_part_on_the_selected_track_and_takes_it_out_again() {
     let bitwig = with(|w| w.tracks[2].clips = vec!["C:\\MIDI\\Yours.mid".into()]);
     let file = part("MO Play 1");
-    let playing = bitwig.bitwig().play_on_selected(&file).unwrap();
+    let playing = bitwig.bitwig().play_on_selected(&file, &|| true).unwrap();
     assert_eq!(playing.track, "Bass");
     assert_eq!(playing.slot(), 1);
     {
@@ -52,7 +52,7 @@ fn plays_a_part_on_the_selected_track_and_takes_it_out_again() {
 #[test]
 fn leaves_bitwig_playing_when_it_already_was() {
     let bitwig = with(|w| w.playing = true);
-    let playing = bitwig.bitwig().play_on_selected(part("MO Play 2")).unwrap();
+    let playing = bitwig.bitwig().play_on_selected(part("MO Play 2"), &|| true).unwrap();
     assert!(bitwig.bitwig().stop_playing(&playing).unwrap());
     let world = bitwig.world();
     assert!(world.playing);
@@ -62,7 +62,7 @@ fn leaves_bitwig_playing_when_it_already_was() {
 #[test]
 fn a_clip_you_renamed_is_yours_and_stays() {
     let bitwig = FakeBitwig::start().unwrap();
-    let playing = bitwig.bitwig().play_on_selected(part("MO Play 3")).unwrap();
+    let playing = bitwig.bitwig().play_on_selected(part("MO Play 3"), &|| true).unwrap();
     bitwig.world().tracks[2].clips[0] = "C:\\MIDI\\Kept it.mid".into();
     assert!(!bitwig.bitwig().stop_playing(&playing).unwrap());
     // It still stops playing.
@@ -75,9 +75,9 @@ fn a_clip_you_renamed_is_yours_and_stays() {
 #[test]
 fn needs_an_instrument_track_selected() {
     let none = with(|w| w.selected_track = None);
-    assert_eq!(none.bitwig().play_on_selected(part("MO Play 4")), Err(Error::NoTrackSelected));
+    assert_eq!(none.bitwig().play_on_selected(part("MO Play 4"), &|| true), Err(Error::NoTrackSelected));
     let audio = with(|w| w.selected_track = Some(1));
-    let refused = audio.bitwig().play_on_selected(part("MO Play 5")).unwrap_err();
+    let refused = audio.bitwig().play_on_selected(part("MO Play 5"), &|| true).unwrap_err();
     assert_eq!(refused, Error::NotAnInstrumentTrack { name: "Kick".into(), kind: "Audio".into() });
     assert_eq!(
         refused.to_string(),
@@ -93,7 +93,7 @@ fn needs_the_extension_3_19() {
     let old = with(|w| {
         w.hello.insert("extension".into(), json!("3.18"));
     });
-    let refused = old.bitwig().play_on_selected(part("MO Play 6")).unwrap_err();
+    let refused = old.bitwig().play_on_selected(part("MO Play 6"), &|| true).unwrap_err();
     assert_eq!(refused, Error::OldExtension { has: "the Music Organiser extension 3.18".into(), needs: "3.19" });
     let script = with(|w| {
         w.hello.insert("link".into(), json!(2));
@@ -101,7 +101,7 @@ fn needs_the_extension_3_19() {
         w.hello.remove("extension");
     });
     assert_eq!(
-        script.bitwig().play_on_selected(part("MO Play 7")),
+        script.bitwig().play_on_selected(part("MO Play 7"), &|| true),
         Err(Error::OldExtension { has: String::new(), needs: "3.19" })
     );
     // Only the greeting: nothing was asked of Bitwig.
@@ -112,7 +112,7 @@ fn needs_the_extension_3_19() {
 fn a_part_that_isnt_there_isnt_played() {
     let bitwig = FakeBitwig::start().unwrap();
     let gone = part("MO Play 8").with_file_name("Gone.mid");
-    assert!(matches!(bitwig.bitwig().play_on_selected(&gone), Err(Error::Missing { .. })));
+    assert!(matches!(bitwig.bitwig().play_on_selected(&gone, &|| true), Err(Error::Missing { .. })));
 }
 
 // ---- Audition: a preset on a track of its own, playing a part (extension 3.20) ----
@@ -131,7 +131,7 @@ fn auditions_a_preset_on_a_track_of_its_own_and_takes_it_out_again() {
     let bitwig = FakeBitwig::start().unwrap();
     let before = bitwig.world().tracks.len();
     let file = preset("Warm Pad");
-    let auditioning = bitwig.bitwig().audition_preset(&file, part("MO Play 8"), "Warm Pad").unwrap();
+    let auditioning = bitwig.bitwig().audition_preset(&file, part("MO Play 8"), "Warm Pad", &|| true).unwrap();
     assert_eq!(auditioning.track, "Warm Pad");
     {
         let world = bitwig.world();
@@ -155,7 +155,7 @@ fn auditions_a_preset_on_a_track_of_its_own_and_takes_it_out_again() {
 #[test]
 fn keep_leaves_the_track_and_stops_it_playing() {
     let bitwig = FakeBitwig::start().unwrap();
-    let auditioning = bitwig.bitwig().audition_preset(preset("Keeper"), part("MO Play 9"), "Keeper").unwrap();
+    let auditioning = bitwig.bitwig().audition_preset(preset("Keeper"), part("MO Play 9"), "Keeper", &|| true).unwrap();
     // Kept, it's yours: keeping takes the audition, so the app can't stop it (and take its track out) later.
     bitwig.bitwig().keep_audition(auditioning).unwrap();
     let world = bitwig.world();
@@ -171,7 +171,8 @@ fn keep_leaves_the_track_and_stops_it_playing() {
 #[test]
 fn a_track_you_renamed_is_yours_and_stays() {
     let bitwig = with(|w| w.playing = true);
-    let auditioning = bitwig.bitwig().audition_preset(preset("Renamed"), part("MO Play 10"), "Renamed").unwrap();
+    let auditioning =
+        bitwig.bitwig().audition_preset(preset("Renamed"), part("MO Play 10"), "Renamed", &|| true).unwrap();
     bitwig.world().tracks[3].name = "My Pad".into();
     assert!(!bitwig.bitwig().stop_audition(&auditioning).unwrap());
     let world = bitwig.world();
@@ -184,7 +185,8 @@ fn a_track_you_renamed_is_yours_and_stays() {
 fn a_preset_bitwig_doesnt_load_leaves_no_track() {
     let bitwig = with(|w| w.unloadable = vec!["Broken.bwpreset".into()]);
     let before = bitwig.world().tracks.len();
-    let refused = bitwig.bitwig().audition_preset(preset("Broken"), part("MO Play 11"), "Broken").unwrap_err();
+    let refused =
+        bitwig.bitwig().audition_preset(preset("Broken"), part("MO Play 11"), "Broken", &|| true).unwrap_err();
     assert_eq!(refused.to_string(), "Bitwig didn't load Broken.bwpreset.");
     let world = bitwig.world();
     assert_eq!(world.tracks.len(), before);
@@ -196,7 +198,68 @@ fn audition_needs_the_extension_3_20() {
     let old = with(|w| {
         w.hello.insert("extension".into(), json!("3.19"));
     });
-    let refused = old.bitwig().audition_preset(preset("Old"), part("MO Play 12"), "Old").unwrap_err();
+    let refused = old.bitwig().audition_preset(preset("Old"), part("MO Play 12"), "Old", &|| true).unwrap_err();
     assert_eq!(refused, Error::OldExtension { has: "the Music Organiser extension 3.19".into(), needs: "3.20" });
     assert!(old.world().requests.is_empty());
+}
+
+// ---- Newest wins, and tracks found by their ID (the 6 Nov review: D-1, D-5) ----
+
+#[test]
+fn a_start_no_longer_wanted_as_its_turn_comes_changes_nothing() {
+    let bitwig = FakeBitwig::start().unwrap();
+    let refused = bitwig.bitwig().audition_preset(preset("Late"), part("MO Play 13"), "Late", &|| false);
+    assert_eq!(refused.unwrap_err(), Error::Cancelled);
+    assert_eq!(bitwig.bitwig().play_on_selected(part("MO Play 14"), &|| false), Err(Error::Cancelled));
+    assert!(bitwig.world().requests.is_empty(), "it didn't even connect");
+}
+
+#[test]
+fn a_start_superseded_part_way_takes_its_track_out_inside_its_turn() {
+    let bitwig = FakeBitwig::start().unwrap();
+    let before = bitwig.world().tracks.len();
+    // Wanted as its turn comes, then no longer (a newer Audition was pressed meanwhile).
+    let asked = std::cell::Cell::new(0);
+    let wanted = || {
+        asked.set(asked.get() + 1);
+        asked.get() == 1
+    };
+    let refused = bitwig.bitwig().audition_preset(preset("Superseded"), part("MO Play 15"), "Superseded", &wanted);
+    assert_eq!(refused.unwrap_err(), Error::Cancelled);
+    let world = bitwig.world();
+    assert_eq!(world.tracks.len(), before);
+    assert!(world.requests.iter().all(|r| r["cmd"] != "clip"), "it stopped before the clip launched");
+    assert!(!world.playing);
+}
+
+#[test]
+fn a_part_superseded_once_its_clip_is_in_takes_the_clip_out() {
+    let bitwig = FakeBitwig::start().unwrap();
+    let asked = std::cell::Cell::new(0);
+    let wanted = || {
+        asked.set(asked.get() + 1);
+        asked.get() == 1
+    };
+    assert_eq!(bitwig.bitwig().play_on_selected(part("MO Play 16"), &wanted), Err(Error::Cancelled));
+    let world = bitwig.world();
+    assert!(world.tracks[2].clips.iter().all(String::is_empty));
+    assert!(!world.playing, "it started Bitwig, so it stops it again");
+}
+
+#[test]
+fn the_preset_goes_on_the_new_track_by_its_id() {
+    let bitwig = FakeBitwig::start().unwrap();
+    bitwig.bitwig().audition_preset(preset("By Id"), part("MO Play 17"), "By Id", &|| true).unwrap();
+    let world = bitwig.world();
+    let insert = world.requests.iter().find(|r| r["cmd"] == "insert").unwrap();
+    assert_eq!(insert["trackId"], world.tracks[3].id.as_str());
+    assert!(insert.get("track").is_none());
+    // An extension older than 3.21 doesn't take the ID there: it gets the place.
+    let old = with(|w| {
+        w.hello.insert("extension".into(), json!("3.20"));
+    });
+    old.bitwig().audition_preset(preset("By Place"), part("MO Play 18"), "By Place", &|| true).unwrap();
+    let world = old.world();
+    let insert = world.requests.iter().find(|r| r["cmd"] == "insert").unwrap();
+    assert_eq!(insert["track"], 3);
 }

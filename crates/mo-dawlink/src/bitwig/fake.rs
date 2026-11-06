@@ -1,5 +1,5 @@
 //! A stand-in for the Music Organiser link in Bitwig, for tests: no test reaches a real Bitwig (rule 11). It listens
-//! on a free port on this computer, greets each connection as extension 3.20 does, and answers `hello`, `newtrack`,
+//! on a free port on this computer, greets each connection as extension 3.21 does, and answers `hello`, `newtrack`,
 //! `insert`, `pads`, `clip`, `selectedtrack`, `transport`, `stoptracks`, `deleteclip` and `deletetrack` the way the extension does, in its words (`extensions/bitwig-java`'s `Link.java`), on a made-up project:
 //! the C# app's stand-in's, "Night Drive", with Drums, Kick, Bass and Master. It handles one request at a time,
 //! whichever connection it came on, as the extension makes changes one at a time.
@@ -181,13 +181,13 @@ pub struct World {
 }
 
 impl Default for World {
-    /// "Night Drive" open, changes allowed, extension 3.20 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
+    /// "Night Drive" open, changes allowed, extension 3.21 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
     /// Drums (a group), Kick (audio, with EQ+), Bass (an instrument: Serum, then a Compressor, selected) and the
     /// Master (with a Peak Limiter).
     fn default() -> World {
         let hello = json!({
             "link": 3, "product": "Bitwig Studio", "version": "6.1.5", "api": 23, "platform": "WINDOWS",
-            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.20", "loopback": true,
+            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.21", "loopback": true,
         });
         let mut serum = FakeDevice::new("Serum", "instrument");
         serum.preset = "Reese".into();
@@ -617,7 +617,10 @@ impl World {
         if at.is_some() && !start && at.and_then(Value::as_str) != Some("end") {
             return Err("Insert at the \"start\" or the \"end\" of the chain.".into());
         }
+        // By its place, or (extension 3.21) by its ID.
+        let by_id = request.get("trackId").is_some_and(|t| !t.is_null());
         let given_track = match request.get("track").filter(|t| !t.is_null()) {
+            _ if by_id => Some(self.requested_track(request)?),
             None if start => return Err("Say which track's chain to insert at the start of.".into()),
             None => None,
             Some(t) => Some(self.check_track(t)?),
@@ -704,9 +707,11 @@ impl World {
             };
             pads.push((note, path, name));
         }
-        let (track, device) = match request.get("track").filter(|t| !t.is_null()) {
+        let by_id = request.get("trackId").is_some_and(|t| !t.is_null());
+        let (track, device) = match request.get("track").filter(|t| !t.is_null()).or(by_id.then_some(&Value::Null)) {
             Some(t) => {
-                let track = self.check_track(t)?;
+                // By its place, or (extension 3.21) by its ID.
+                let track = if by_id { self.requested_track(request)? } else { self.check_track(t)? };
                 let d = request.get("device").filter(|d| !d.is_null()).cloned().unwrap_or(json!(0));
                 let device = index(Some(&d), MAX_DEVICES)
                     .filter(|&d| self.device(track, d).is_some())

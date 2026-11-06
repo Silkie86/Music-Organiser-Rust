@@ -250,6 +250,8 @@ final class Link {
     private final Track[] trackItems = new Track[MAX_TRACKS];
     /** The clips put in for auditions (extension 3.19), as "trackId#slot", with the name each came in with. */
     private final Map<String, String> auditionClips = new HashMap<>();
+    /** The changes still made after their app has gone (see nextJob): the stops it sends as it closes. */
+    private static final Set<Object> STOPS_AFTER_CLOSE = Set.of("stoptracks", "deleteclip", "deletetrack");
     /** The tracks made for auditions (`newtrack` with `audition`, extension 3.20), by ID, with the name each came in with. */
     private final Map<String, String> auditionTracks = new HashMap<>();
     private final DeviceBank[] trackDevices = new DeviceBank[MAX_TRACKS];
@@ -946,8 +948,10 @@ final class Link {
      * still runs: stopping twice does no harm, and the app sends it as it closes, so it often waits behind a clip.
      */
     private void nextJob() {
+        // (STOPS_AFTER_CLOSE: from 3.21 an audition's deleteclip and deletetrack run too, as the app sends them as it
+        // closes; each checks the noted ID and name, so running one late can't take out anything of yours.)
         Job next = jobs.poll();
-        while (next != null && !next.ask().client().open && !"stoptracks".equals(next.request().get("cmd"))) {
+        while (next != null && !next.ask().client().open && !STOPS_AFTER_CLOSE.contains(next.request().get("cmd"))) {
             reply(next.ask(), null, APP_GONE);
             next = jobs.poll();
         }
@@ -1754,7 +1758,8 @@ final class Link {
      * waits to say whether Bitwig added a device, since it quietly ignores what it can't use.
      */
     private void insert(Map<String, Object> request, Finish finish) {
-        Object t = field(request, "track");
+        // The track by its place, or (extension 3.21) by the ID Bitwig keeps it under, which holds however tracks move.
+        Object t = absent(field(request, "trackId")) ? field(request, "track") : field(request, "trackId");
         Object at = field(request, "at");
         boolean start = "start".equals(at);
         if (!absent(at) && !start && !"end".equals(at)) throw new LinkError("Insert at the \"start\" or the \"end\" of the chain.");
@@ -1766,7 +1771,7 @@ final class Link {
             if (!cursorTrack.exists().get()) throw new LinkError("No track is selected in Bitwig.");
             point = cursorEnd;
         } else {
-            int track = checkTrack(t);
+            int track = requestedTrack(request);
             chain = trackDevices[track];
             before = chain.itemCount().get();
             point = start ? trackStarts[track] : trackEnds[track];
@@ -2091,14 +2096,15 @@ final class Link {
             if (!absent(name) && !(name instanceof String)) throw new LinkError("A pad's name is text.");
             list.add(new Pad(index(note), path, absent(name) ? "" : (String) name));
         }
-        Object t = field(request, "track");
+        // The Drum Machine's track by its place, or (extension 3.21) by its ID.
+        Object t = absent(field(request, "trackId")) ? field(request, "track") : field(request, "trackId");
         Object dGiven = field(request, "device");
         Object d = absent(dGiven) ? (Object) 0.0 : dGiven;
         boolean onTrack = !absent(t);
         int track = -1;
         int position = -1;
         if (onTrack) {
-            track = checkTrack(t);
+            track = requestedTrack(request);
             Device device = trackDevice(track, d);
             position = index(d);
             cursorTrack.selectChannel(trackItems[track]);

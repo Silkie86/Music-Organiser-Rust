@@ -4,8 +4,10 @@
 //!
 //! Each send connects, checks the link's greeting, and keeps every change in the project Bitwig had open as it began
 //! ([`Link::stay_in_open_project`]): if another project comes to the front part way, the send stops there rather
-//! than going on in that one. The app makes one send at a time, in the order they came, so one send's new track never
-//! lands in the middle of another's. Nothing is ever taken out of a project: the link can't delete.
+//! than going on in that one. The app makes one change at a time (sends, auditions, plays and their stops), in the
+//! order they came, so one send's new track never lands in the middle of another's; and from extension 3.21 each
+//! step finds the new track by its ID, however tracks move meanwhile. Sends never take anything out of a project:
+//! only an audition's own track or clip is ever deleted ([`super::audition`]).
 //!
 //! A send fails, with nothing changed, when Bitwig can't take it; once it may have changed something, it gives back
 //! what happened instead, with words for what may not have (Bitwig may have added a track all the same).
@@ -238,7 +240,7 @@ fn on_new_track(mut link: Link, path: &Path, name: &str, load: Load) -> Result<S
         }
     };
     sent.track = Some(track.index);
-    sent.problem = match link.insert_file(track.index, &shown) {
+    sent.problem = match link.insert_file_on(&track, &shown) {
         Ok(Inserted { added: false, .. }) => Some(format!("Bitwig didn't load {file}")),
         Ok(Inserted { device: Some(device), .. })
             if load == Load::Sound && !device.name.is_empty() && !device.name.to_lowercase().contains("sampler") =>
@@ -323,7 +325,7 @@ fn part(link: &mut Link, path: &Path, name: &str) -> Result<SentPart, Error> {
         }
     };
     sent.track = Some(track.index);
-    match link.add_clip(track.index, &shown) {
+    match link.add_clip_on(&track, &shown) {
         Ok(slot) => sent.slot = Some(slot),
         // Bitwig may have made the clip all the same: the link gave up waiting, or the connection went.
         Err(e) => {
@@ -574,14 +576,14 @@ fn kit(link: &mut Link, name: &str, pads: &[Pad], target: KitTarget) -> Result<S
                 }
             };
             sent.track = Some(track.index);
-            match link.insert_device(track.index, id) {
+            match link.insert_device_on(&track, id) {
                 // An ID Bitwig doesn't know adds nothing; one read wrongly adds some other device. One Bitwig hasn't
                 // named yet goes ahead: the link says when it isn't a Drum Machine (below).
                 Ok(Inserted { added: true, index: Some(at), device })
                     if device.as_ref().is_none_or(|d| d.name.is_empty() || d.name == DRUM_MACHINE_NAME) =>
                 {
                     let named = device.is_some_and(|d| d.name == DRUM_MACHINE_NAME);
-                    Some((track.index, at, named))
+                    Some((track, at, named))
                 }
                 Ok(_) => {
                     sent.drum_machine = false;
@@ -598,7 +600,11 @@ fn kit(link: &mut Link, name: &str, pads: &[Pad], target: KitTarget) -> Result<S
             }
         }
     };
-    match link.fill_pads(&pads, on.map(|(t, d, _)| (t, d))) {
+    let filling = match &on {
+        Some((track, device, _)) => link.fill_pads_on(&pads, track, *device),
+        None => link.fill_pads(&pads, None),
+    };
+    match filling {
         Ok(filled) => {
             let of = |notes: &[u8]| pads.iter().filter(|p| notes.contains(&p.note)).cloned().collect::<Vec<_>>();
             sent.filled = of(&filled.filled);
@@ -612,9 +618,12 @@ fn kit(link: &mut Link, name: &str, pads: &[Pad], target: KitTarget) -> Result<S
         // The link waited for the new device's pads and they didn't show, so it put nothing on them. For a device
         // Bitwig named Drum Machine, Bitwig was slow; for one it hadn't named, the ID may have given something else.
         Err(Error::Bitwig(words))
-            if on.is_some_and(|(t, d, _)| words == format!("Device {d} on track {t} isn't a Drum Machine.")) =>
+            if on.as_ref().is_some_and(|(_, d, _)| {
+                // The track's place as the link found it, by its ID: it may have moved since it was made.
+                words.starts_with(&format!("Device {d} on track ")) && words.ends_with(" isn't a Drum Machine.")
+            }) =>
         {
-            if on.is_some_and(|(_, _, named)| named) {
+            if on.as_ref().is_some_and(|(_, _, named)| *named) {
                 sent.problem = Some(
                     "Bitwig added the Drum Machine but didn't show its pads in time, so the sounds didn't go on it"
                         .into(),
@@ -661,7 +670,7 @@ pub fn note_name(note: u8) -> String {
 }
 
 /// An error's words to go inside a sentence: without the full stop.
-fn sentence(e: &Error) -> String {
+pub(super) fn sentence(e: &Error) -> String {
     e.to_string().trim_end_matches('.').to_owned()
 }
 

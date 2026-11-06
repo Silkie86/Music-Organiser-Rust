@@ -19,7 +19,7 @@ use std::path::Path;
 
 use mo_formats::paths::file_name;
 
-use super::send::SENDS;
+use super::send::{SENDS, sentence};
 use super::{Bitwig, Error, Hello, Link};
 
 /// The extension version Play on the selected track needs.
@@ -49,19 +49,10 @@ impl Playing {
     }
 }
 
-/// Whether the extension answering is `needs` ("3.19") or later; the script never is.
-fn at_least(hello: &Hello, needs: &str) -> bool {
-    fn parts(v: &str) -> Option<(u32, u32)> {
-        let (major, minor) = v.trim().split_once('.')?;
-        Some((major.parse().ok()?, minor.split('.').next()?.parse().ok()?))
-    }
-    hello.runtime == "java" && matches!((parts(&hello.extension), parts(needs)), (Some(has), Some(n)) if has >= n)
-}
-
 /// Refuses, with nothing sent, when the extension is older than `needs`.
 fn check_version(hello: &Hello, needs: &'static str) -> Result<(), Error> {
     hello.can_send()?;
-    if !at_least(hello, needs) {
+    if !hello.at_least(needs) {
         let has = if hello.runtime == "java" { hello.answering() } else { String::new() };
         return Err(Error::OldExtension { has, needs });
     }
@@ -93,9 +84,16 @@ impl Bitwig {
     /// the track's first empty launcher slot and is launched in step with the song (which starts Bitwig if it's
     /// stopped). Bitwig has read the file once this returns, so the caller may delete it then. Fails with nothing
     /// changed when no instrument track is selected, the extension is older than 3.19, or changes are off.
-    pub fn play_on_selected(&self, path: impl AsRef<Path>) -> Result<Playing, Error> {
+    ///
+    /// It waits its turn behind the sends, plays and stops asked for before it. `wanted` says whether it's still
+    /// wanted: asked as its turn comes and again once the clip is in, so one asked for again meanwhile (or stopped)
+    /// stops at once, taking out its clip inside its own turn ([`Error::Cancelled`]), and newest wins.
+    pub fn play_on_selected(&self, path: impl AsRef<Path>, wanted: &dyn Fn() -> bool) -> Result<Playing, Error> {
         let path = path.as_ref();
         let _turn = SENDS.wait_turn();
+        if !wanted() {
+            return Err(Error::Cancelled);
+        }
         let mut link = self.connect()?;
         check_version(link.hello(), PLAY_NEEDS)?;
         let shown = there(path)?;
@@ -106,29 +104,45 @@ impl Bitwig {
         }
         let track_id = track.id.ok_or_else(|| {
             Error::Bitwig(
-                "Bitwig didn't say the selected track's ID, so the app couldn't take the part out again. Ask the \
-                 extension for a selftest in Settings > DAWs to see why."
+                "Bitwig didn't say the selected track's ID, so the app couldn't take the part out again. Install the \
+                 extension again from Settings > DAWs."
                     .into(),
             )
         })?;
         // If Bitwig can't say, take it as playing: stopping then leaves Bitwig as it is.
         let was_playing = link.is_playing().unwrap_or(true);
         let slot = link.add_audition_clip(&track_id, &shown)?;
-        Ok(Playing {
+        let playing = Playing {
             track: track.name,
             track_id,
             slot,
             started_bitwig: !was_playing,
             project: link.only_in().map(str::to_owned),
-        })
+        };
+        if !wanted() {
+            let _ = link.delete_audition_clip(&playing.track_id, playing.slot, playing.started_bitwig);
+            return Err(Error::Cancelled);
+        }
+        Ok(playing)
     }
 
     /// Stops a part [`Bitwig::play_on_selected`] started and takes its clip out of the track; Bitwig stops too when
     /// the part started it. Whether the clip was taken out: false when it was renamed (it's yours now) or is gone.
     ///
-    /// It doesn't wait in line behind the sends asked for before it (a kit can take seconds): it adds no track, so it
-    /// can't land in the middle of one, and the link makes one change at a time anyway.
+    /// It waits its turn like everything that changes the project, so it never lands between another start's steps
+    /// (where stopping Bitwig would silence that one).
     pub fn stop_playing(&self, playing: &Playing) -> Result<bool, Error> {
+        let _turn = SENDS.wait_turn();
+        self.stop_playing_now(playing)
+    }
+
+    /// [`Bitwig::stop_playing`] without waiting its turn, for when the app closes: the threads that would go first
+    /// are going too, and the extension (3.21) still makes the stop after the app has gone.
+    pub fn stop_playing_as_app_closes(&self, playing: &Playing) -> Result<bool, Error> {
+        self.stop_playing_now(playing)
+    }
+
+    fn stop_playing_now(&self, playing: &Playing) -> Result<bool, Error> {
         let mut link: Link = self.connect()?;
         check_version(link.hello(), PLAY_NEEDS)?;
         link.set_only_in(playing.project.clone());
@@ -139,13 +153,20 @@ impl Bitwig {
     /// looping on it in step with the song (which starts Bitwig if it's stopped). Bitwig has read both files once this
     /// returns. When the preset or the part doesn't go in, the track comes out again and the error says why. Fails
     /// with nothing changed when the extension is older than 3.20 or changes are off.
+    ///
+    /// Like [`Bitwig::play_on_selected`], it waits its turn and asks `wanted` as the turn comes and before the clip
+    /// launches; one no longer wanted takes its track out inside its own turn ([`Error::Cancelled`]).
     pub fn audition_preset(
         &self,
         preset: impl AsRef<Path>,
         part: impl AsRef<Path>,
         name: &str,
+        wanted: &dyn Fn() -> bool,
     ) -> Result<Auditioning, Error> {
         let _turn = SENDS.wait_turn();
+        if !wanted() {
+            return Err(Error::Cancelled);
+        }
         let mut link = self.connect()?;
         check_version(link.hello(), AUDITION_NEEDS)?;
         let preset = there(preset.as_ref())?;
@@ -153,21 +174,25 @@ impl Bitwig {
         link.stay_in_open_project();
         // If Bitwig can't say, take it as playing: stopping then leaves Bitwig as it is.
         let was_playing = link.is_playing().unwrap_or(true);
-        let track = link.new_audition_track(name)?;
+        let track = link.new_audition_track(name).map_err(|e| {
+            // Bitwig may have made the track before the link stopped (another project came to the front, say).
+            Error::Bitwig(format!("{}. There may be an empty track named {name} in Bitwig.", sentence(&e)))
+        })?;
         let Some(track_id) = track.id.clone() else {
-            return Err(Error::Bitwig(
-                "Bitwig didn't say the new track's ID, so the app couldn't take it out again: the track is in Bitwig \
-                 with nothing on it. Ask the extension for a selftest in Settings > DAWs to see why."
-                    .into(),
-            ));
+            return Err(Error::Bitwig(format!(
+                "Bitwig didn't say the new track's ID, so the app couldn't take it out again: there's an empty track \
+                 named {name} in Bitwig. Install the extension again from Settings > DAWs."
+            )));
         };
         // Whatever goes wrong from here, the track comes out again, so a failed audition leaves nothing behind (and
-        // Bitwig stops if its clip launched after all and started it).
-        let undo = |link: &mut Link, why: Error| {
-            let _ = link.delete_audition_track(&track_id, !was_playing);
-            why
+        // Bitwig stops if its clip launched after all and started it). When the link can't take it out (the
+        // connection went, say), the words say there may be a track left.
+        let undo = |link: &mut Link, why: Error| match link.delete_audition_track(&track_id, !was_playing) {
+            Ok(_) => why,
+            Err(_) if why == Error::Cancelled => why,
+            Err(_) => Error::Bitwig(format!("{}. There may be a track named {name} left in Bitwig.", sentence(&why))),
         };
-        match link.insert_file(track.index, &preset) {
+        match link.insert_file_on(&track, &preset) {
             Ok(inserted) if inserted.added => {}
             Ok(_) => {
                 let why = Error::Bitwig(format!("Bitwig didn't load {}.", file_name(&preset)));
@@ -175,8 +200,14 @@ impl Bitwig {
             }
             Err(e) => return Err(undo(&mut link, e)),
         }
+        if !wanted() {
+            return Err(undo(&mut link, Error::Cancelled));
+        }
         if let Err(e) = link.add_audition_clip(&track_id, &part) {
             return Err(undo(&mut link, e));
+        }
+        if !wanted() {
+            return Err(undo(&mut link, Error::Cancelled));
         }
         Ok(Auditioning {
             track: track.name,
@@ -188,8 +219,18 @@ impl Bitwig {
 
     /// Stops an audition and takes its track out of the project, only while it keeps the name it came in with; Bitwig
     /// stops too when the audition started it. Whether the track was taken out: false when it was renamed (it's yours
-    /// now) or is gone. Like [`Bitwig::stop_playing`], it doesn't wait behind the sends asked for before it.
+    /// now) or is gone. It waits its turn, as [`Bitwig::stop_playing`] does.
     pub fn stop_audition(&self, auditioning: &Auditioning) -> Result<bool, Error> {
+        let _turn = SENDS.wait_turn();
+        self.stop_audition_now(auditioning)
+    }
+
+    /// [`Bitwig::stop_audition`] without waiting its turn, for when the app closes.
+    pub fn stop_audition_as_app_closes(&self, auditioning: &Auditioning) -> Result<bool, Error> {
+        self.stop_audition_now(auditioning)
+    }
+
+    fn stop_audition_now(&self, auditioning: &Auditioning) -> Result<bool, Error> {
         let mut link = self.connect()?;
         check_version(link.hello(), AUDITION_NEEDS)?;
         link.set_only_in(auditioning.project.clone());
@@ -198,8 +239,9 @@ impl Bitwig {
 
     /// Keeps an audition: it stops playing (and Bitwig too, when the audition started it), and the track, its preset
     /// and the part's clip stay in the project as yours. It takes the audition, so nothing can stop it (and take the
-    /// track out) after.
+    /// track out) after. It waits its turn.
     pub fn keep_audition(&self, auditioning: Auditioning) -> Result<(), Error> {
+        let _turn = SENDS.wait_turn();
         let mut link = self.connect()?;
         check_version(link.hello(), AUDITION_NEEDS)?;
         link.set_only_in(auditioning.project.clone());
@@ -217,13 +259,13 @@ mod tests {
 
     #[test]
     fn needs_the_extension_3_19() {
-        assert!(at_least(&hello("java", "3.19"), PLAY_NEEDS));
-        assert!(at_least(&hello("java", "3.20"), PLAY_NEEDS));
-        assert!(at_least(&hello("java", "4.0"), PLAY_NEEDS));
-        assert!(at_least(&hello("java", "3.19.1"), PLAY_NEEDS));
-        assert!(!at_least(&hello("java", "3.18"), PLAY_NEEDS));
-        assert!(!at_least(&hello("java", "3.2"), PLAY_NEEDS));
-        assert!(!at_least(&hello("java", ""), PLAY_NEEDS));
-        assert!(!at_least(&hello("", "3.19"), PLAY_NEEDS));
+        assert!(hello("java", "3.19").at_least(PLAY_NEEDS));
+        assert!(hello("java", "3.20").at_least(PLAY_NEEDS));
+        assert!(hello("java", "4.0").at_least(PLAY_NEEDS));
+        assert!(hello("java", "3.19.1").at_least(PLAY_NEEDS));
+        assert!(!hello("java", "3.18").at_least(PLAY_NEEDS));
+        assert!(!hello("java", "3.2").at_least(PLAY_NEEDS));
+        assert!(!hello("java", "").at_least(PLAY_NEEDS));
+        assert!(!hello("", "3.19").at_least(PLAY_NEEDS));
     }
 }

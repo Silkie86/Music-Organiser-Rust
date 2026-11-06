@@ -44,6 +44,9 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 
 /// The commands that change or select something in Bitwig's project, as the link lists them: each carries
 /// [`Link::only_in`] when it's set. Not `recordabort`, which must reach the link whatever project is in front.
+/// The extension version from which `insert` and `pads` find a track by its ID too, as `clip` does.
+pub const TRACK_IDS_EVERYWHERE: &str = "3.21";
+
 const PROJECT_COMMANDS: [&str; 16] = [
     "set",
     "insert",
@@ -129,6 +132,15 @@ impl Hello {
         } else {
             "the Music Organiser script".to_owned()
         }
+    }
+
+    /// Whether the extension answering is `needs` ("3.21") or later; the script never is.
+    pub fn at_least(&self, needs: &str) -> bool {
+        fn parts(v: &str) -> Option<(u32, u32)> {
+            let (major, minor) = v.trim().split_once('.')?;
+            Some((major.parse().ok()?, minor.split('.').next()?.parse().ok()?))
+        }
+        self.runtime == "java" && matches!((parts(&self.extension), parts(needs)), (Some(has), Some(n)) if has >= n)
     }
 
     /// Whether the app may send things in: the link started, is new enough, and has changes allowed. Says why not.
@@ -440,6 +452,36 @@ impl Link {
         answer.get("deleted").and_then(Value::as_bool).ok_or(Error::Unexpected)
     }
 
+    /// The fields that find `track` for `cmd`: its ID when Bitwig said one and the link takes it there (`clip` from
+    /// extension 3.9, `insert` and `pads` from 3.21), so the change lands on it however the tracks move meanwhile;
+    /// else its place in the project listing.
+    fn track_fields(&self, track: &NewTrack, cmd: &str) -> (&'static str, Value) {
+        let takes_id = self.hello.runtime == "java" && (cmd == "clip" || self.hello.at_least(TRACK_IDS_EVERYWHERE));
+        match &track.id {
+            Some(id) if takes_id => ("trackId", id.as_str().into()),
+            _ => ("track", track.index.into()),
+        }
+    }
+
+    /// [`Link::insert_file`] on a track the app just made, found by its ID where the link can ([`NewTrack`]).
+    pub fn insert_file_on(&mut self, track: &NewTrack, path: &str) -> Result<Inserted, Error> {
+        let at = self.track_fields(track, "insert");
+        inserted(&self.change(ask("insert", [at, ("kind", "file".into()), ("path", path.into())]))?)
+    }
+
+    /// [`Link::insert_device`] on a track the app just made, found by its ID where the link can.
+    pub fn insert_device_on(&mut self, track: &NewTrack, device: DeviceId) -> Result<Inserted, Error> {
+        let at = self.track_fields(track, "insert");
+        inserted(&self.change(ask("insert", [at, ("kind", "bitwig".into()), ("device", device.to_string().into())]))?)
+    }
+
+    /// [`Link::add_clip`] on a track the app just made, found by its ID where the link can.
+    pub fn add_clip_on(&mut self, track: &NewTrack, path: &str) -> Result<usize, Error> {
+        let at = self.track_fields(track, "clip");
+        let answer = self.change(ask("clip", [at, ("path", path.into())]))?;
+        index(answer.get("slot")).ok_or(Error::Unexpected)
+    }
+
     /// Adds one of Bitwig's own devices to the end of a track's chain, by its ID.
     pub fn insert_device(&mut self, track: usize, device: DeviceId) -> Result<Inserted, Error> {
         let fields = [("track", track.into()), ("kind", "bitwig".into()), ("device", device.to_string().into())];
@@ -452,6 +494,18 @@ impl Link {
     /// put on every pad) counts as free. The Drum Machine is `drum_machine` (a track's place in the project listing,
     /// and the device's place in its chain), which this selects, or else the device selected in Bitwig.
     pub fn fill_pads(&mut self, pads: &[Pad], drum_machine: Option<(usize, usize)>) -> Result<PadsFilled, Error> {
+        let on = drum_machine.map(|(track, device)| (("track", Value::from(track)), device));
+        self.fill(pads, on)
+    }
+
+    /// [`Link::fill_pads`] on the Drum Machine at `device` on a track the app just made, found by its ID where the link
+    /// can.
+    pub fn fill_pads_on(&mut self, pads: &[Pad], track: &NewTrack, device: usize) -> Result<PadsFilled, Error> {
+        let at = self.track_fields(track, "pads");
+        self.fill(pads, Some((at, device)))
+    }
+
+    fn fill(&mut self, pads: &[Pad], on: Option<((&'static str, Value), usize)>) -> Result<PadsFilled, Error> {
         let list: Vec<Value> = pads
             .iter()
             .map(|p| {
@@ -460,8 +514,8 @@ impl Link {
             })
             .collect();
         let mut request = ask("pads", [("pads", list.into())]);
-        if let Some((track, device)) = drum_machine {
-            request.insert("track".into(), track.into());
+        if let Some(((key, track), device)) = on {
+            request.insert(key.into(), track);
             request.insert("device".into(), device.into());
         }
         let answer = self.change(request)?;
