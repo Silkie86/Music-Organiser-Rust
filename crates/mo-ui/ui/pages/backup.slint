@@ -32,6 +32,8 @@ export global BackupData {
     in property <string> drive;
     // How full the drive is, 0 to 1, and in words.
     in property <float> drive-fill;
+    // How full the backup drive is, by Space's rule: 0 roomy, 1 nearly full, 2 almost full.
+    in property <int> drive-state;
     in property <string> drive-line;
     in property <string> last-line;
     // The run working now, in words; empty when none runs.
@@ -125,6 +127,8 @@ export component BackupPage inherits Rectangle {
                         if BackupData.drive != "": ProgressLine {
                             text: BackupData.drive-line;
                             done: BackupData.drive-fill;
+                            // The colours Space's drive bars use, never the accent: the drive isn't "on".
+                            tint: BackupData.drive-state == 2 ? Theme.missing : BackupData.drive-state == 1 ? Theme.warning : Theme.ok;
                         }
                         Text {
                             text: BackupData.last-line;
@@ -347,6 +351,8 @@ export component BackupPage inherits Rectangle {
                             if BackupData.goes != "": ProgressLine {
                                 text: "";
                                 done: BackupData.goes-part;
+                                // A share of the folders, not something that's on.
+                                tint: Theme.muted;
                             }
                             if BackupData.left-out.length > 0: Groove { }
                             if BackupData.left-out.length > 0: Caps { text: "LEFT OUT, AND WHY"; }

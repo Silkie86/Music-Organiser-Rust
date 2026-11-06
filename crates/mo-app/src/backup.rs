@@ -941,6 +941,8 @@ pub struct FolderLine {
 pub struct PageLines {
     pub drive: String,
     pub drive_fill: f32,
+    /// How full the backup drive is, by Space's rule (`space::fill_of`): 0 roomy, 1 nearly full, 2 almost full.
+    pub drive_state: i32,
     pub drive_line: String,
     pub last_line: String,
     /// 0 Full, 1 Slim, 2 Essentials: the order of the switch.
@@ -1020,15 +1022,19 @@ pub fn page_lines(settings: &Settings, room: Option<DriveRoom>, plan: PlanState<
         PlanState::Failed(why) => format!("Couldn't work out what goes: {why}"),
         _ => "Working out what goes…".to_owned(),
     };
-    let (drive_fill, drive_line) = match room {
-        Some(r) if r.total > 0 => {
-            ((r.total.saturating_sub(r.free) as f64 / r.total as f64) as f32, drive_line(r.free, r.total))
-        }
-        _ => (0.0, String::new()),
+    let (drive_fill, drive_state, drive_line) = match room {
+        Some(r) if r.total > 0 => (
+            (r.total.saturating_sub(r.free) as f64 / r.total as f64) as f32,
+            // The app keeps its own files on its own drive, not the backup drive.
+            crate::space::fill_of(r.free, 0).index(),
+            drive_line(r.free, r.total),
+        ),
+        _ => (0.0, 0, String::new()),
     };
     PageLines {
         drive: settings.drive.as_ref().map(|d| d.display().to_string()).unwrap_or_default(),
         drive_fill,
+        drive_state,
         drive_line,
         last_line: last_run_line(settings.last_run.as_ref(), now),
         level: match settings.level {
@@ -1218,6 +1224,10 @@ mod tests {
         let l = page_lines(&s, room, PlanState::Ready(&prepared), now);
         assert_eq!(l.goes, "300 bytes");
         assert!((l.goes_part - 0.3).abs() < 1e-6 && (l.drive_fill - 0.75).abs() < 1e-6);
+        // 25 bytes left is under Space's "almost full" line, so the drive line is red there and here (X3-16).
+        assert_eq!(l.drive_state, 2);
+        let roomy = Some(DriveRoom { free: 500 * 1024 * 1024 * 1024, total: 1000 * 1024 * 1024 * 1024 });
+        assert_eq!(page_lines(&s, roomy, PlanState::Ready(&prepared), now).drive_state, 0);
         assert_eq!(l.folders[1].size, "Not plugged in");
         assert_eq!(l.left_out[0].0, "Big unused sounds");
         assert_eq!(l.left_out[0].1, "Big sound no project uses · 1 file");

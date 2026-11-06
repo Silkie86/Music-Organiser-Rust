@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // Read-only for now (favourites, tags and types are shown, not changed), like the C# app's sounds.db until it's trusted.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, DragHandle, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, DragHandle, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -292,7 +292,8 @@ export global SoundsData {
     // 0 (the best fits) to 1 (anything that fits).
     in-out property <float> kit-randomness;
     callback kit-randomness-set(float);
-    in property <[string]> kit-types;
+    // The sound types a pad can be added for, as the "Add a pad" menu lists them (each one's id is its type).
+    in property <[MenuItem]> kit-types;
     callback kit-add(string);
     callback kit-roll();
     callback kit-export();
@@ -1356,12 +1357,11 @@ export component SoundsPage inherits Rectangle {
                 value <=> SoundsData.kit-randomness;
                 released(v) => { SoundsData.kit-randomness-set(v); }
             }
-            MenuChip {
-                name: "Add a pad";
-                value: "";
-                choices: SoundsData.kit-types;
-                has-any: false;
-                picked(v) => { SoundsData.kit-add(v); }
+            // An action with a menu, so a button, not a filter's chip.
+            MenuButton {
+                text: "Add a pad";
+                items: SoundsData.kit-types;
+                chosen(id) => { SoundsData.kit-add(id); }
             }
         }
         if SoundsData.view == 5: HorizontalLayout {

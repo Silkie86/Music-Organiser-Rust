@@ -42,6 +42,29 @@ pub struct Drive {
     pub holds: Vec<Holds>,
 }
 
+/// How full a drive is with `free` bytes left and the app's own files taking `app_bytes` on it (0 when they're
+/// elsewhere): the one rule for Space's drive bars and Backup's drive line, so a drive looks the same on both.
+pub fn fill_of(free: u64, app_bytes: u64) -> Fill {
+    if free < VERY_LOW_SPACE {
+        Fill::Almost
+    } else if app_files::is_low(free, app_bytes) {
+        Fill::Nearly
+    } else {
+        Fill::Roomy
+    }
+}
+
+impl Fill {
+    /// 0 roomy, 1 nearly full, 2 almost full: what the pages' `fill` numbers mean.
+    pub fn index(self) -> i32 {
+        match self {
+            Fill::Roomy => 0,
+            Fill::Nearly => 1,
+            Fill::Almost => 2,
+        }
+    }
+}
+
 /// How full a drive is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Fill {
@@ -57,15 +80,7 @@ impl Drive {
     /// How full it is, with the app's own files taking `app_bytes` (they only count on their own drive).
     pub fn fill(&self, app_bytes: u64) -> Fill {
         let app = if self.holds.contains(&Holds::AppFiles) { app_bytes } else { 0 };
-        if !self.here {
-            Fill::Roomy
-        } else if self.free < VERY_LOW_SPACE {
-            Fill::Almost
-        } else if app_files::is_low(self.free, app) {
-            Fill::Nearly
-        } else {
-            Fill::Roomy
-        }
+        if !self.here { Fill::Roomy } else { fill_of(self.free, app) }
     }
 
     /// How much of it is used, from 0 to 1.
