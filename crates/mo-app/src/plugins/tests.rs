@@ -403,7 +403,7 @@ fn another_page_can_show_one_plugin_or_every_unused_one() {
     // And the same when the years change on the page.
     p.set_unused_years(10);
     assert_eq!(space.as_of(10, space.now).plugins.iter().map(|u| u.name.clone()).collect::<Vec<_>>(), shown(&p));
-    // And when files went since the old app measured: both leave them out the same way.
+    // And when files went since they were measured: both leave them out the same way.
     p.set_unused_years(2);
     let gone = [r"D:\Libraries".to_owned()];
     p.forget_paths(&gone);

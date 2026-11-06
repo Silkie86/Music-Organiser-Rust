@@ -57,7 +57,8 @@ pub struct ScanCounts {
     pub failed: u32,
 }
 
-/// A plugin's room on disk as the C# app measured it (table `plugin_space`).
+/// A plugin's room on disk as last measured (table `plugin_space`): by the app ([`crate::plugin_writes`]), or before
+/// that by the C# app.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoredSpace {
     pub key: String,
@@ -166,13 +167,38 @@ impl Library {
         Ok(index)
     }
 
-    /// The names of the plugins on this computer, as the C# app last found them in the plugin folders.
+    /// The names of the plugins on this computer, as the app last found them in the plugin folders
+    /// ([`crate::plugin_writes`]; before that, the C# app).
     pub fn installed_names(&self) -> Result<Vec<String>, LibraryError> {
         if !self.has("installed_plugins") {
             return Ok(Vec::new());
         }
         let mut st = self.conn.prepare("SELECT name FROM installed_plugins ORDER BY name")?;
         Ok(st.query_map([], |r| Ok(text(r, "name")))?.collect::<Result<_, _>>()?)
+    }
+
+    /// When the oldest plugin's room was measured, if any was.
+    pub fn oldest_plugin_measure(&self) -> Result<Option<NaiveDateTime>, LibraryError> {
+        if !self.has("plugin_space") {
+            return Ok(None);
+        }
+        let oldest: Option<i64> =
+            self.conn.query_row("SELECT MIN(measured) FROM plugin_space WHERE measured > 0", [], |r| r.get(0))?;
+        Ok(oldest.and_then(local))
+    }
+
+    /// Each plugin's maker as the plugin scanner read it from its files, by name key (the first one found).
+    pub fn scanned_vendors(&self) -> Result<HashMap<String, String>, LibraryError> {
+        if !self.has("scanned_plugins") {
+            return Ok(HashMap::new());
+        }
+        let mut st = self.conn.prepare("SELECT name_key, vendor FROM scanned_plugins WHERE vendor != ''")?;
+        let mut out = HashMap::new();
+        for row in st.query_map([], |r| Ok((text(r, "name_key"), text(r, "vendor"))))? {
+            let (key, vendor) = row?;
+            out.entry(key).or_insert(vendor);
+        }
+        Ok(out)
     }
 
     /// The installed plugins a project's plugin name refers to, as the C# app's `ScannedPluginsNamed`: the same name,
