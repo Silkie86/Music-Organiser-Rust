@@ -1360,13 +1360,24 @@ pub fn damaged_not_laid_out_line() -> String {
 }
 
 /// What the card says when the app's own sound library was found damaged as it was laid out anew, and couldn't be
-/// made again from `sounds.db` either: why, without the library's whole path.
+/// mended (from its backup copy, or made again from `sounds.db`) either: why, without the library's whole path.
 pub fn not_remade_line(e: &SoundsError) -> String {
     let why = match e {
-        SoundsError::Copy { why, .. } => why.clone(),
+        SoundsError::Copy { why, .. } | SoundsError::Damaged { why, .. } => why.clone(),
         e => e.to_string(),
     };
-    format!("It's damaged, and it couldn't be made again from sounds.db ({why}), so it's read as it is.")
+    format!("It's damaged, and it couldn't be mended ({why}), so it's read as it is.")
+}
+
+/// What the card says when the app's own sound library was found damaged and put back from its backup copy made at
+/// `made` (`mo_sounds::compact::backup`): from when, and that the damaged one is kept a while.
+pub fn put_back_line(made: chrono::DateTime<chrono::Local>) -> String {
+    format!(
+        "It was damaged, so it was put back from its backup copy of {}. The damaged one is kept beside it for a week, \
+         as {}.",
+        made.format("%-d %b %H:%M"),
+        mo_sounds::compact::backup::damaged_of(std::path::Path::new(mo_sounds::compact::FILE_NAME)).display()
+    )
 }
 
 /// Why the app's own copy of the sound library couldn't be made or brought up to date, for a card: what went wrong,
@@ -1421,7 +1432,7 @@ impl Stepping {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
+    use chrono::{NaiveDate, TimeZone};
     use mo_sounds::SoundAnalysis;
 
     #[test]
@@ -1976,7 +1987,7 @@ mod tests {
             copy_made_line(1_621_000_000, 4_896_000_000),
             "1.51 GB beside sounds.db's 4.56 GB. Sounds opens from it from now on."
         );
-        let synced = |made, sounds| Synced { made, sounds, adopted: false };
+        let synced = |made, sounds| Synced { made, sounds, ..Synced::default() };
         assert_eq!(copy_synced_line(&synced(false, 0)), "Nothing had changed");
         assert_eq!(copy_synced_line(&synced(true, 453_885)), "Made afresh from 453,885 sounds");
         assert_eq!(
@@ -1994,7 +2005,13 @@ mod tests {
             SoundsError::Copy { path: "I:\\MusicOrganiser\\sounds-rust.db".into(), why: "only 0.4 GB is free".into() };
         assert_eq!(
             not_remade_line(&short),
-            "It's damaged, and it couldn't be made again from sounds.db (only 0.4 GB is free), so it's read as it is."
+            "It's damaged, and it couldn't be mended (only 0.4 GB is free), so it's read as it is."
+        );
+        let made = chrono::Local.with_ymd_and_hms(2026, 11, 6, 21, 14, 30).unwrap();
+        assert_eq!(
+            put_back_line(made),
+            "It was damaged, so it was put back from its backup copy of 6 Nov 21:14. The damaged one is kept beside \
+             it for a week, as sounds-rust.db.damaged."
         );
         let full = SoundsError::Copy {
             path: "C:\\Users\\Solomon\\AppData\\Local\\MusicOrganiser\\sounds-rust.db".into(),

@@ -22,6 +22,8 @@ pub enum SoundsError {
     Read(rusqlite::Error),
     /// The Rust app's own copy of the library ([`crate::compact`]) couldn't be made or brought up to date.
     Copy { path: PathBuf, why: String },
+    /// The app's own sound library is damaged, and couldn't be mended ([`crate::compact::mend_reading`]): why not.
+    Damaged { path: PathBuf, why: String },
 }
 
 impl fmt::Display for SoundsError {
@@ -36,6 +38,9 @@ impl fmt::Display for SoundsError {
                     path.display()
                 )
             }
+            SoundsError::Damaged { path, why } => {
+                write!(f, "The sound library {} is damaged, and it couldn't be mended: {why}", path.display())
+            }
         }
     }
 }
@@ -46,7 +51,7 @@ impl SoundsError {
     /// Whether SQLite found the file damaged (a file cut short, a page spoilt) or the disk couldn't read part of it
     /// (a bad sector): reading it again won't help.
     pub fn damaged(&self) -> bool {
-        matches!(self, SoundsError::Read(e) if is_damage(e))
+        matches!(self, SoundsError::Read(e) if is_damage(e)) || matches!(self, SoundsError::Damaged { .. })
     }
 }
 
