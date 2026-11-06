@@ -573,10 +573,19 @@ pub trait Bin {
     fn refuses_quietly(&self, _path: &Path, _bytes: u64) -> Option<String> {
         None
     }
+    /// Told of each thing on its way to the bin, with what Put back needs, before the clean-up ends ([`Sending`] tells
+    /// it): what went, as soon as it's in the bin; what Windows guards, just before the administrator step, which goes
+    /// on even if the app closes and may still leave some of it where it is. So what went can be kept as it goes, and
+    /// a close or a crash part way through a clean-up doesn't lose it. What didn't go after all is told apart later by
+    /// the bin itself ([`Bin::holds`]). By default nothing is done with it.
+    fn going(&self, _removed: &Removed) {}
 }
 
 /// What a clean-up hears of each send ([`Heard`]): where, and how it went.
 pub type Hear<'a> = dyn Fn(&Path, &Result<(), String>) + Sync + 'a;
+
+/// What a clean-up is told of each thing on its way to the bin ([`Bin::going`], through [`Heard::noting`]).
+pub type Goes<'a> = dyn Fn(&Removed) + Sync + 'a;
 
 /// A bin that tells `hear` how each send went, so a clean-up's card can count what has gone so far. Everything else is
 /// `bin`'s own: each of [`Bin`]'s ways is passed on to it (a test checks each one), so a way added to [`Bin`] later must
@@ -584,11 +593,17 @@ pub type Hear<'a> = dyn Fn(&Path, &Result<(), String>) + Sync + 'a;
 pub struct Heard<'a> {
     bin: &'a (dyn Bin + Sync),
     hear: &'a Hear<'a>,
+    goes: Option<&'a Goes<'a>>,
 }
 
 impl<'a> Heard<'a> {
     pub fn new(bin: &'a (dyn Bin + Sync), hear: &'a Hear<'a>) -> Self {
-        Heard { bin, hear }
+        Heard { bin, hear, goes: None }
+    }
+
+    /// The same, telling `goes` too of each thing on its way to the bin ([`Bin::going`]).
+    pub fn noting(self, goes: &'a Goes<'a>) -> Self {
+        Heard { goes: Some(goes), ..self }
     }
 }
 
@@ -618,6 +633,12 @@ impl Bin for Heard<'_> {
     }
     fn refuses_quietly(&self, path: &Path, bytes: u64) -> Option<String> {
         self.bin.refuses_quietly(path, bytes)
+    }
+    fn going(&self, removed: &Removed) {
+        self.bin.going(removed);
+        if let Some(goes) = self.goes {
+            goes(removed);
+        }
     }
 }
 
@@ -797,6 +818,7 @@ impl<'a> Sending<'a> {
         };
         let why = match self.bin.send(Path::new(path)) {
             Ok(()) => {
+                self.bin.going(&removed);
                 self.sent.insert(real_key, removed.path.clone());
                 done.removed.push(removed);
                 return Sent::Went;
@@ -859,6 +881,11 @@ impl<'a> Sending<'a> {
             return;
         }
         let when = now_seconds();
+        // Told before Windows asks: once you say yes, the step goes on even if the app closes meanwhile. What it leaves
+        // where it is, the bin tells apart later.
+        for (r, line) in sent.iter().zip(&lines) {
+            self.bin.going(&Removed { when, stamp: line.get(1).cloned(), ..r.clone() });
+        }
         let said = ask_for(self.bin.admin(), Step::Bin, &lines);
         self.not_asked = Some(match &said {
             Err(why) => why.clone(),
@@ -1728,6 +1755,9 @@ mod tests {
                 self.note("refuses_quietly");
                 Some("quietly".to_owned())
             }
+            fn going(&self, _: &Removed) {
+                self.note("going");
+            }
         }
 
         let inner = Noting::default();
@@ -1735,7 +1765,9 @@ mod tests {
         let hear = |path: &Path, sent: &Result<(), String>| {
             heard.lock().unwrap().push((path.to_string_lossy().into_owned(), sent.clone()));
         };
-        let bin = Heard::new(&inner, &hear);
+        let noted = Mutex::new(Vec::new());
+        let goes = |r: &Removed| noted.lock().unwrap().push(r.path.clone());
+        let bin = Heard::new(&inner, &hear).noting(&goes);
         let one = Removed {
             path: "a".to_owned(),
             real: "a".to_owned(),
@@ -1764,6 +1796,9 @@ mod tests {
         assert_eq!(back, [(0, None)]);
         assert!(!bin.can_look_for(&one));
         assert_eq!(bin.refuses_quietly(Path::new("a"), 1).as_deref(), Some("quietly"));
+        bin.going(&one);
+        // What's told as it goes reaches the clean-up too.
+        assert_eq!(*noted.lock().unwrap(), ["a"]);
         // Each way reached the bin inside, none of them a default.
         assert_eq!(
             *inner.0.lock().unwrap(),
@@ -1776,7 +1811,8 @@ mod tests {
                 "holds",
                 "put_back_checked",
                 "can_look_for",
-                "refuses_quietly"
+                "refuses_quietly",
+                "going"
             ]
         );
     }

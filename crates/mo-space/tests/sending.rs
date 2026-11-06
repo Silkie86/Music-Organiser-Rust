@@ -118,13 +118,15 @@ impl Admin for AsAdmin {
 struct GuardedBin {
     admin: AsAdmin,
     meanwhile: Box<dyn Fn(&Path)>,
+    /// What it was told of each thing on its way ([`Bin::going`]), with how many times Windows had asked by then.
+    told: Mutex<Vec<(Removed, usize)>>,
 }
 
 impl GuardedBin {
     fn new(dir: &Path, meanwhile: impl Fn(&Path) + 'static) -> Self {
         let step = StepBin { dir: dir.join("bin"), held: Held::default() };
         let admin = AsAdmin { step, asked: AtomicUsize::new(0), first: Mutex::new(None), no: AtomicBool::new(false) };
-        GuardedBin { admin, meanwhile: Box::new(meanwhile) }
+        GuardedBin { admin, meanwhile: Box::new(meanwhile), told: Mutex::default() }
     }
 
     /// What changes the first time Windows asks, before the step starts.
@@ -158,6 +160,9 @@ impl Bin for GuardedBin {
     }
     fn holds(&self, removed: &[Removed]) -> Option<Vec<bool>> {
         Some(removed.iter().map(|r| kept_at(r).is_some()).collect())
+    }
+    fn going(&self, removed: &Removed) {
+        self.told.lock().unwrap().push((removed.clone(), self.asked()));
     }
 }
 
@@ -335,6 +340,43 @@ fn three_caches_gone(dir: &Path) -> (GuardedBin, Done, Vec<PathBuf>) {
     assert!(done.removed.iter().all(|r| r.stamp.is_some() && kept_at(r).is_some()), "{:?}", done.removed);
     assert_eq!(bin.asked(), 1);
     (bin, done, caches)
+}
+
+#[test]
+fn what_waits_for_windows_is_told_before_it_asks_as_it_will_be_kept() {
+    // The step goes on once you say yes, even if the app closes meanwhile: what it may bin is told first, so the app
+    // can keep it for Put back; what the step leaves, the bin tells apart later.
+    let dir = fixtures("mo-space-sending-told");
+    let (bin, done, _) = three_caches_gone(&dir);
+    let told = bin.told.lock().unwrap();
+    assert_eq!(told.len(), 3);
+    assert!(told.iter().all(|(_, asked)| *asked == 0), "told after Windows asked");
+    // As it's kept once it went: the same time and the stamp the step checks. Only what the bin calls it comes later.
+    let told: Vec<Removed> = told.iter().map(|(r, _)| r.clone()).collect();
+    let unfound: Vec<Removed> = done.removed.iter().map(|r| Removed { bin_id: None, ..r.clone() }).collect();
+    assert_eq!(told, unfound);
+    // Each is told once, whether or not the step bins it.
+    let left = fixtures("mo-space-sending-told-no");
+    let projects = left.join("Projects");
+    write(&projects, "A/A.song", "song");
+    write(&projects, "A/Cache/a.peak", "peak");
+    let roots = vec![s(&projects)];
+    let keep = HashSet::new();
+    let no_sample = |_: &str| false;
+    let guard = Guard { project_roots: &roots, sample_folders: &[], keep: &keep, sample_in_use: &no_sample };
+    let cache = CompactItem {
+        kind: CompactKind::Cache,
+        path: s(&projects.join("A/Cache")),
+        bytes: 4,
+        modified: None,
+        same_as: None,
+    };
+    let bin = GuardedBin::new(&left, |_| {});
+    bin.admin.no.store(true, Ordering::SeqCst);
+    let done = apply(&preview(&[cache], &guard), &guard, &bin, &AtomicBool::new(false));
+    assert!(done.removed.is_empty());
+    assert_eq!(bin.told.lock().unwrap().len(), 1);
+    assert!(projects.join("A/Cache/a.peak").exists());
 }
 
 /// What went from `path`.

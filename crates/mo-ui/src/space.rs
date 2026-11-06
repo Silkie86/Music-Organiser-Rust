@@ -16,7 +16,7 @@ use std::cell::RefCell;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Condvar, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
@@ -42,7 +42,7 @@ use mo_sounds::SoundsDb;
 use mo_sounds::duplicates::Finds;
 use mo_space::app_files::{self, AppFilesPart};
 use mo_space::bitwig::{self, LibraryIndex};
-use mo_space::clean::{self, Bin, Done, Heard, Problem, SystemBin, What};
+use mo_space::clean::{self, Bin, Done, Heard, Problem, Removed, SystemBin, What};
 use mo_space::old_copies::Leftover;
 use mo_space::song::CompactSettings;
 use mo_space::spare::{SpareCopy, Used};
@@ -1053,20 +1053,23 @@ fn remove_ticked(app: &AppWindow, feed: Feed) {
         Some((picked, p.library.clone()))
     });
     let Some((picked, library)) = job else { return };
-    send_to_bin(app, feed, &SPARE, picked, move |picked, bin| remove_now(picked, &library, bin));
+    // Its card has no Stop (a few copies go quickly); only the app closing stops it ([`finish_up`]).
+    let stop = Arc::new(AtomicBool::new(false));
+    send_to_bin(app, feed, &SPARE, picked, stop, move |picked, bin, stop| remove_now(picked, &library, bin, stop));
 }
 
 /// Remove's own work, off the window's thread: your plugin folders and which plugins your saves use, from the library
 /// (read-only, and closed again first), then each picked copy checked again and sent. When those can't be read, every
-/// copy stays (said in the log): what's spare can't be checked. What goes, goes to `bin`.
-fn remove_now(picked: &[SpareCopy], library: &Path, bin: &(dyn Bin + Sync)) -> Done {
+/// copy stays (said in the log): what's spare can't be checked. What goes, goes to `bin`; `stop` leaves what hasn't
+/// gone yet where it is.
+fn remove_now(picked: &[SpareCopy], library: &Path, bin: &(dyn Bin + Sync), stop: &AtomicBool) -> Done {
     let Some((folders, used)) = plugin_folders_and_uses(library) else {
         return space_removing::stayed(picked, space_spare::CANT_CHECK);
     };
     let pro_tools = plugins::pro_tools_installed();
-    // On the pool for long work that waits on a disk, as the look is (rule 21). Nothing stops it once it's on: each
-    // copy is checked just before it goes, and the one administrator step asks Windows once, at the end.
-    background::on_bulk_pool(|| space_spare::remove(picked, &folders, &used, pro_tools, bin, &AtomicBool::new(false)))
+    // On the pool for long work that waits on a disk, as the look is (rule 21). Each copy is checked just before it
+    // goes, and the one administrator step asks Windows once, at the end.
+    background::on_bulk_pool(|| space_spare::remove(picked, &folders, &used, pro_tools, bin, stop))
 }
 
 /// Remove for old copies: sends the ticked ones to the Recycle Bin together ([`send_to_bin`]), each found again in the
@@ -1091,7 +1094,9 @@ fn remove_old_ticked(app: &AppWindow, feed: Feed) {
         Some((picked, found, p.library.clone(), stop))
     });
     let Some((picked, found, library, stop)) = job else { return };
-    send_to_bin(app, feed, &OLD, picked, move |picked, bin| remove_old_now(picked, &found, &library, bin, &stop));
+    send_to_bin(app, feed, &OLD, picked, stop, move |picked, bin, stop| {
+        remove_old_now(picked, &found, &library, bin, stop)
+    });
 }
 
 /// Remove for your songs' old autosaves and caches: sends the ticked ones to the Recycle Bin together ([`send_to_bin`]),
@@ -1116,7 +1121,10 @@ fn remove_songs_ticked(app: &AppWindow, feed: Feed) {
         Some((picked, settings, p.library.clone(), stop))
     });
     let Some((picked, settings, library, stop)) = job else { return };
-    send_to_bin(app, feed, &SONGS, picked, move |picked, bin| remove_songs_now(picked, settings, &library, bin, &stop));
+    let work = move |picked: &[SongItem], bin: &(dyn Bin + Sync), stop: &AtomicBool| {
+        remove_songs_now(picked, settings, &library, bin, stop)
+    };
+    send_to_bin(app, feed, &SONGS, picked, stop, work);
 }
 
 /// Remove's own work for your songs' things, off the window's thread: the saves, the samples they use and your folders
@@ -1181,35 +1189,48 @@ fn remove_old_now(
 }
 
 /// Remove's own thread for one clean-up (`clean`): sends `picked` to the Recycle Bin with `work` on a low-priority
-/// thread, with an activity card saying how it went. Then what went is kept (`mo_app::binned`), so Put back works
-/// after a restart too, before the page hears it's done, so it shows both at once: what went and what stayed. Call it
-/// once `picked` is on its way ([`space_removing::Removing::start`]).
+/// thread, with an activity card saying how it went; `stop` (its card's Stop, and the app closing: [`finish_up`])
+/// leaves what hasn't gone yet where it is. What goes is noted as it goes ([`binned::Going`]), so a close or a crash
+/// part way through doesn't lose it; at the end it's all kept (`mo_app::binned`), so Put back works after a restart
+/// too, before the page hears it's done, so it shows both at once: what went and what stayed. Call it once `picked`
+/// is on its way ([`space_removing::Removing::start`]).
 fn send_to_bin<T: Removable + Send + 'static>(
     app: &AppWindow,
     feed: Feed,
     clean: &'static Clean<T>,
     picked: Vec<T>,
-    work: impl FnOnce(&[T], &(dyn Bin + Sync)) -> Done + Send + 'static,
+    stop: Arc<AtomicBool>,
+    work: impl FnOnce(&[T], &(dyn Bin + Sync), &AtomicBool) -> Done + Send + 'static,
 ) {
     let weak = app.as_weak();
     let folder = paths::data_dir();
     let (when, sending) = (binned::now(), picked.clone());
+    // Counted from here, so the app closing now waits for it too, until the thread ends (or never starts).
+    let on_its_way = OnItsWay::new(stop);
     let started = background::spawn(clean.thread, move || {
-        let note = (clean.words)();
-        let card = feed.start(clean.title, &note);
+        let on_its_way = on_its_way;
+        let words = (clean.words)();
+        let card = feed.start(clean.title, &words);
         // The card says how far it has got (thousands of autosaves can take minutes), under what it said at the start.
         let of = sending.len();
         let tally = Mutex::new(Tally::new(SystemBin.admin().can_ask()));
         let hear = |_: &Path, sent: &Result<(), String>| {
             let mut tally = tally.lock().unwrap_or_else(PoisonError::into_inner);
             tally.heard(sent);
-            card.progress(tally.fraction(of), Some(&tally.words(&note, of)));
+            card.progress(tally.fraction(of), Some(&tally.words(&words, of)));
         };
-        let bin = Heard::new(&SystemBin, &hear);
-        // A crash (logged as one) still finishes Remove, so the page isn't busy for ever: what went before it is in the
-        // bin, but which isn't known.
-        let done = catch_crash(AssertUnwindSafe(|| work(&sending, &bin)))
-            .unwrap_or_else(|_| space_removing::stayed(&sending, &space_removing::crashed_words()));
+        let note = binned::Going::start(&folder, clean.kind, when);
+        let goes = |removed: &Removed| note.went(removed);
+        let bin = Heard::new(&SystemBin, &hear).noting(&goes);
+        // A crash (logged as one) still finishes Remove, so the page isn't busy for ever: what went before it was noted
+        // as it went, and is kept as usual.
+        let (done, crashed) = match catch_crash(AssertUnwindSafe(|| work(&sending, &bin, &on_its_way.0))) {
+            Ok(done) => (done, false),
+            Err(_) => {
+                let still_there = |at: &str| std::fs::symlink_metadata(at).is_ok();
+                (space_removing::after_crash(&sending, note.went_so_far(), still_there), true)
+            }
+        };
         for (warning, line) in space_removing::log_lines(&done, clean.one, clean.many) {
             if warning { log::warning("Space", &line) } else { log::info("Space", &line) }
         }
@@ -1218,6 +1239,9 @@ fn send_to_bin<T: Removable + Send + 'static>(
             Err(words) => card.failed(&words),
         }
         let kept = catch_crash(AssertUnwindSafe(|| binned::record(&folder, &SystemBin, clean.kind, when, &done))).ok();
+        // Its note goes once it's all kept; after a crash it stays for the next look, as Windows' administrator step
+        // goes on by itself and may still send some of what waited for it.
+        note.finish(!crashed && kept.as_ref().is_some_and(|(kept, _)| kept.noted));
         let when = kept.as_ref().map_or(when, |(_, at)| *at);
         arrive(&weak, (clean.sent)(when, done, kept.map(|(kept, _)| kept)));
     });
@@ -1228,6 +1252,69 @@ fn send_to_bin<T: Removable + Send + 'static>(
         looks_after(app);
     }
     show_wins(app);
+}
+
+/// The Removes sending things to the Recycle Bin now, each by what stops it: as the app closes, each is stopped and
+/// given a little time to keep what went ([`finish_up`]).
+static REMOVES: Mutex<Vec<Arc<AtomicBool>>> = Mutex::new(Vec::new());
+static REMOVE_ENDED: Condvar = Condvar::new();
+
+/// The longest the app waits, as it closes, for a Remove it stopped to keep what went.
+const CLOSE_WAIT: Duration = Duration::from_secs(15);
+
+/// One Remove on its way, in [`REMOVES`] (with what stops it) until it ends, however it ends.
+struct OnItsWay(Arc<AtomicBool>);
+
+impl OnItsWay {
+    fn new(stop: Arc<AtomicBool>) -> Self {
+        REMOVES.lock().unwrap_or_else(PoisonError::into_inner).push(stop.clone());
+        OnItsWay(stop)
+    }
+}
+
+impl Drop for OnItsWay {
+    fn drop(&mut self) {
+        let mut removes = REMOVES.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = removes.iter().position(|stop| Arc::ptr_eq(stop, &self.0)) {
+            removes.swap_remove(at);
+        }
+        REMOVE_ENDED.notify_all();
+    }
+}
+
+/// As the app closes: a Remove still sending things to the Recycle Bin stops (what hasn't gone yet stays where it is)
+/// and is given a little time to keep what went, for Put back (the whole-app review of 6 Nov, E1-1). One that doesn't
+/// end in time (Windows' administrator step may still be waiting for you) noted what went as it went: the page's next
+/// look keeps it.
+pub fn finish_up() {
+    let mut removes = REMOVES.lock().unwrap_or_else(PoisonError::into_inner);
+    if removes.is_empty() {
+        return;
+    }
+    log::warning(
+        "Space",
+        &format!(
+            "The app closed while things were going to the {BIN}: Remove stops (what went stays there, for Put back)"
+        ),
+    );
+    for stop in removes.iter() {
+        stop.store(true, Ordering::Relaxed);
+    }
+    let deadline = Instant::now() + CLOSE_WAIT;
+    while !removes.is_empty() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            log::warning(
+                "Space",
+                &format!(
+                    "Remove didn't stop in time: what went to the {BIN} was noted as it went, and the Space page keeps \
+                     it the next time it looks"
+                ),
+            );
+            return;
+        }
+        removes = REMOVE_ENDED.wait_timeout(removes, left).unwrap_or_else(PoisonError::into_inner).0;
+    }
 }
 
 /// Before what a clean-up of `kind` removed goes to the Recycle Bin or comes back: a look that's on whose finds that
