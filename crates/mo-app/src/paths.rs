@@ -41,6 +41,12 @@ pub fn problem() -> Option<String> {
     resolved().problem.clone()
 }
 
+/// Why the folder a move went to can't be used, read now (the run's own folder isn't fixed by it): at start, so the
+/// app can ask what to do before anything opens the old copy (F-2). `None` when all is well.
+pub fn problem_now() -> Option<String> {
+    resolve_in(&first_dir()).problem
+}
+
 /// The system's own place for the app's data, where it starts out and where [`POINTER_FILE`] sits beside it.
 pub fn first_dir() -> PathBuf {
     let base = if cfg!(windows) {

@@ -219,8 +219,14 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     app.set_settings_built(true);
     // The start found too much changed since a move's copy to switch before the window opened: catch it up now, so
     // the next start switches.
+    // Not at once: after start-up loading has had its turn at the disk (F-7), as tidy waits.
     if let Some(to) = mo_app::data_move::catch_up_wanted().filter(|_| setup_live) {
-        move_data(app, to);
+        let weak = app.as_weak();
+        slint::Timer::single_shot(std::time::Duration::from_secs(30), move || {
+            if let Some(app) = weak.upgrade() {
+                move_data(&app, to);
+            }
+        });
     }
 
     let data = app.global::<SettingsData>();
@@ -948,10 +954,14 @@ fn move_data(app: &AppWindow, to: PathBuf) {
     let weak = app.as_weak();
     let job = feed.start(&format!("Copying the app's data to {}", to.display()), "Looking at what to copy");
     let started = background::spawn("Data folder move", move || {
-        let done = mo_app::data_move::copy(&from, &to, &stop, &mut |done, total| {
-            let fraction = if total == 0 { 1.0 } else { done as f32 / total as f32 };
-            let detail = format!("{} of {}", mo_app::data_move::size_text(done), mo_app::data_move::size_text(total));
-            job.progress(fraction, Some(&detail));
+        // Gigabytes over the disk: low in the system's memory too, as all bulk disk work is (F-7).
+        let done = background::on_bulk_pool(|| {
+            mo_app::data_move::copy(&from, &to, &stop, &mut |done, total| {
+                let fraction = if total == 0 { 1.0 } else { done as f32 / total as f32 };
+                let detail =
+                    format!("{} of {}", mo_app::data_move::size_text(done), mo_app::data_move::size_text(total));
+                job.progress(fraction, Some(&detail));
+            })
         });
         let message = match &done {
             Ok(c) => {
