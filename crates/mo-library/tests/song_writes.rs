@@ -36,7 +36,7 @@ fn library(name: &str) -> PathBuf {
     songs
 }
 
-/// A save as the reader gives it, with two plugins, a missing sample, its tracks and details.
+/// A save as the reader gives it, with two plugins, three missing samples, its tracks and details.
 fn read(id: i64, path: &str) -> SaveDetail {
     let (folder, name) = path.rsplit_once('\\').unwrap();
     let save = Save {
@@ -75,7 +75,12 @@ fn read(id: i64, path: &str) -> SaveDetail {
                 installed: false,
             },
         ],
-        samples: vec![ProjectSample { path: "C:\\Samples\\kick \"1\".wav".into(), found: false, unplayed: true }],
+        // One with all its notes muted, one with none, one played: each kept as it is (the muted one isn't played).
+        samples: vec![
+            ProjectSample { path: "C:\\Samples\\hat.wav".into(), found: false, unplayed: false, muted: true },
+            ProjectSample { path: "C:\\Samples\\kick \"1\".wav".into(), found: false, unplayed: true, muted: false },
+            ProjectSample { path: "C:\\Samples\\snare.wav".into(), found: false, unplayed: false, muted: false },
+        ],
         tracks: vec!["Lead".into(), "Drums".into()],
         details: vec![("Time signature".into(), "4/4".into()), ("Bars".into(), "64".into())],
         warnings: vec!["A plugin's state couldn't be read".into()],
@@ -101,12 +106,19 @@ fn a_save_read_is_kept_and_reads_back_as_it_was_read() {
     assert_eq!((back.save.size, back.save.mtime, back.save.tempo), (2_000, 1_700_000_500, Some(128.0)));
     assert_eq!((back.save.status.as_str(), back.save.hardware.clone()), ("Mixing", vec!["Digitakt".to_owned()]));
     assert_eq!((back.save.plugin_count, back.save.missing_plugins), (2, 1));
-    assert_eq!((back.save.sample_count, back.save.missing_samples), (1, 1));
+    assert_eq!((back.save.sample_count, back.save.missing_samples), (3, 3));
     assert_eq!(back.save.tags, vec!["digitakt".to_owned()]);
     assert_eq!((back.save.track_count, back.save.note_count), (2, -1));
     assert_eq!(back.title, "Night");
     assert_eq!(back.plugins, new.plugins);
     assert_eq!(back.samples, new.samples);
+    // As the C# app keeps them: 1 has no notes, 2 has all its notes muted, 0 plays.
+    let conn = Connection::open(&songs).unwrap();
+    let mut st = conn.prepare("SELECT path, unplayed FROM samples WHERE project_id = 2 ORDER BY path").unwrap();
+    let uses: Vec<(String, i64)> =
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<Result<_, _>>().unwrap();
+    let uses: Vec<(&str, i64)> = uses.iter().map(|(p, u)| (p.rsplit('\\').next().unwrap(), *u)).collect();
+    assert_eq!(uses, [("hat.wav", 2), ("kick \"1\".wav", 1), ("snare.wav", 0)]);
     assert_eq!(back.tracks, new.tracks);
     assert_eq!(back.details, new.details, "the details keep their order");
     assert_eq!(back.warnings, new.warnings);
@@ -173,7 +185,7 @@ fn a_gone_save_is_marked_missing_and_keeps_all_it_had() {
     assert_eq!(saves.len(), 2);
     let night_12 = saves.iter().find(|s| s.id == 2).unwrap();
     assert!(night_12.file_missing);
-    assert_eq!((night_12.plugin_count, night_12.sample_count), (2, 1), "a missing save keeps what it had");
+    assert_eq!((night_12.plugin_count, night_12.sample_count), (2, 3), "a missing save keeps what it had");
     assert!(!saves.iter().find(|s| s.id == 1).unwrap().file_missing);
 }
 
@@ -199,4 +211,49 @@ fn only_the_apps_own_songs_db_is_written_and_a_busy_one_is_left_as_it_was() {
     assert_eq!(Library::open_read_only(&songs).unwrap().saves().unwrap().len(), 1);
     song_writes::write(&songs, &put(read(2, "C:\\a.flp"), true)).unwrap();
     assert_eq!(Library::open_read_only(&songs).unwrap().saves().unwrap().len(), 2);
+}
+
+#[test]
+fn the_fl_studio_saves_the_app_kept_are_read_again_once_for_their_muted_samples() {
+    let songs = library("mend");
+    let dir = songs.parent().unwrap();
+    // Only the app's own songs.db has any to mend: not library.db, nor a songs.db that isn't its own yet.
+    assert_eq!(song_writes::to_mend(&dir.join("library.db")).unwrap(), None);
+    let not_own = dir.join("other").join(songs_db::FILE_NAME);
+    std::fs::create_dir_all(not_own.parent().unwrap()).unwrap();
+    songs_db::make(&dir.join("library.db"), &not_own, &mut |_| {}).unwrap();
+    assert_eq!(song_writes::to_mend(&not_own).unwrap(), None);
+    // Just made from library.db: none of its rows the app's.
+    assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(Vec::new()));
+    // Read again (changed since), changed lately, two months ago, a Bitwig save, and one gone.
+    let now = chrono::Local::now().timestamp();
+    let day = 24 * 60 * 60;
+    let mut again = read(1, "C:\\Music\\Night\\Night_11.flp");
+    again.save.mtime = now - 90 * day;
+    let mut lately = read(2, "C:\\Music\\Night\\Night_12.flp");
+    lately.save.mtime = now - 20 * day;
+    let mut long_ago = read(3, "C:\\Music\\Night\\Night_10.flp");
+    long_ago.save.mtime = now - 60 * day;
+    let mut bitwig = read(4, "C:\\Music\\Night\\Night.bwproject");
+    bitwig.save.daw = "Bitwig Studio".into();
+    bitwig.save.mtime = now - day;
+    let mut gone = read(5, "C:\\Music\\Night\\Night_13.flp");
+    gone.save.mtime = now - day;
+    gone.save.file_missing = true;
+    let put = [(again, false), (lately, true), (long_ago, true), (bitwig, true), (gone, true)]
+        .into_iter()
+        .map(|(detail, new)| Put { detail, new })
+        .collect();
+    song_writes::write(&songs, &Batch { put, ..Batch::default() }).unwrap();
+    // The FL Studio ones that aren't in library.db as they are, whenever they changed.
+    let mut ids = song_writes::to_mend(&songs).unwrap().unwrap();
+    ids.sort_unstable();
+    assert_eq!(ids, [1, 2, 3]);
+    // With library.db gone: a guess, those changed since a month before the library became the app's own.
+    std::fs::rename(dir.join("library.db"), dir.join("library.db.away")).unwrap();
+    assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![2]));
+    // Once they're read again, a batch notes it (on its own too): none after that.
+    let noted = song_writes::write(&songs, &Batch { mended: true, ..Batch::default() }).unwrap();
+    assert!(noted.mended);
+    assert_eq!(song_writes::to_mend(&songs).unwrap(), None);
 }

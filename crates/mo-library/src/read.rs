@@ -161,8 +161,9 @@ fn fill(mut save: Save, info: ProjectInfo, installed: &Installed, samples: &Samp
             path: s.clone(),
             found: samples.found(s, &save.path),
             // Only a sample with no notes at all is "unplayed", as the library keeps it; one whose notes are all
-            // muted still counts as played.
+            // muted still counts as played, but is kept as muted.
             unplayed: info.unplayed.get(s) == Some(&SampleUse::NoNotes),
+            muted: info.unplayed.get(s) == Some(&SampleUse::Muted),
         })
         .collect();
     // Missing ones first, then by path.
@@ -239,9 +240,10 @@ mod tests {
         assert_eq!((d.save.sample_count, d.save.missing_samples), (3, 2));
         // Instruments first, then by name; missing samples first.
         assert_eq!(d.save.plugin_names, ["Digitakt", "Gone Synth", "Pro-Q 3"]);
+        // The one with no notes is unplayed; the one whose notes are all muted is kept as muted, still played.
         assert_eq!(
-            d.samples.iter().map(|s| (s.found, s.unplayed)).collect::<Vec<_>>(),
-            [(false, true), (false, false), (true, false)]
+            d.samples.iter().map(|s| (s.found, s.unplayed, s.muted, s.use_number())).collect::<Vec<_>>(),
+            [(false, true, false, 1), (false, false, true, 2), (true, false, false, 0)]
         );
         assert_eq!(d.save.hardware, ["Digitakt"]);
     }

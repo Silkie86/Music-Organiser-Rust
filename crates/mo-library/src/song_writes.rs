@@ -11,6 +11,7 @@
 //! id when it isn't new. A new one takes the id the app gave it while that's free, or the next free one, and
 //! [`Written::ids`] says so.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Duration;
@@ -43,12 +44,94 @@ pub struct Missing {
 pub struct Batch {
     pub put: Vec<Put>,
     pub missing: Vec<Missing>,
+    /// The saves [`to_mend`] gave have been read again (they're in this batch or one kept before it): noted, so
+    /// they aren't read again at the next start.
+    pub mended: bool,
 }
 
 impl Batch {
     pub fn is_empty(&self) -> bool {
-        self.put.is_empty() && self.missing.is_empty()
+        self.put.is_empty() && self.missing.is_empty() && !self.mended
     }
+}
+
+/// The note in `songs_info` that the saves [`to_mend`] gives were read again, with when.
+const MENDED_KEY: &str = "muted_marks_mended";
+
+/// When `library.db` has gone: how long before the library became the app's own a save the app kept since may have
+/// last changed (the C# app kept the library up to date until about then).
+const MEND_SINCE: i64 = 30 * 24 * 60 * 60;
+
+/// The FL Studio saves to read again once so their "muted" sample marks come back, by id: until this version the app
+/// kept a sample whose notes are all muted as one that plays (review finding A-1). Only the rows the app wrote itself
+/// were kept so: those that differ from the C# app's `library.db` beside it (as it was when the C# app stopped), or
+/// aren't in it. When that's gone (or can't be read), those of the saves changed since a month before the library
+/// became the app's own. Saves whose file is missing are left: one that comes back is read again anyway. `None` when
+/// there's nothing to do: they've been read again already ([`Batch::mended`]), or the library at `songs_db` isn't the
+/// app's own.
+pub fn to_mend(songs_db: &Path) -> Result<Option<Vec<i64>>, LibraryError> {
+    let Some(own_since) = crate::songs_db::own_since(songs_db) else {
+        return Ok(None);
+    };
+    let conn = open_read_only(songs_db)?;
+    let noted: Option<rusqlite::types::Value> =
+        conn.query_row("SELECT value FROM songs_info WHERE key = ?1", [MENDED_KEY], |r| r.get(0)).optional()?;
+    if noted.is_some() {
+        return Ok(None);
+    }
+    let library_db = songs_db.with_file_name(crate::songs_db::OLD_FILE_NAME);
+    let before = library_db.is_file().then(|| fl_rows(&library_db).ok()).flatten();
+    let mut ids = Vec::new();
+    for (id, row) in fl_rows_of(&conn, "file_missing", "error", "AND COALESCE(file_missing, 0) = 0")? {
+        let wanted = match &before {
+            Some(before) => before.get(&id) != Some(&row),
+            None => row.mtime.is_some_and(|t| t >= own_since - MEND_SINCE),
+        };
+        if wanted {
+            ids.push(id);
+        }
+    }
+    Ok(Some(ids))
+}
+
+/// What [`to_mend`] compares of a save's row: what a read sets that says the app read it again.
+#[derive(Debug, PartialEq, Eq)]
+struct FlRow {
+    path: String,
+    size: Option<i64>,
+    mtime: Option<i64>,
+    missing: i64,
+    error: Option<String>,
+}
+
+/// The FL Studio saves' rows in the library at `library_db` (an older C# app's has no `file_missing` or `error`).
+fn fl_rows(library_db: &Path) -> Result<HashMap<i64, FlRow>, LibraryError> {
+    let conn = open_read_only(library_db)?;
+    let mut st = conn.prepare("SELECT name FROM pragma_table_info('projects')")?;
+    let columns: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    let has = |c: &str| columns.iter().any(|n| n == c);
+    let missing = if has("file_missing") { "file_missing" } else { "0" };
+    let error = if has("error") { "error" } else { "NULL" };
+    Ok(fl_rows_of(&conn, missing, error, "")?.into_iter().collect())
+}
+
+fn fl_rows_of(conn: &Connection, missing: &str, error: &str, and: &str) -> rusqlite::Result<Vec<(i64, FlRow)>> {
+    let mut st = conn.prepare(&format!(
+        "SELECT id, path, size, mtime, COALESCE({missing}, 0), {error} FROM projects WHERE daw = 'FL Studio' {and}"
+    ))?;
+    st.query_map([], |r| {
+        let row = FlRow { path: r.get(1)?, size: r.get(2)?, mtime: r.get(3)?, missing: r.get(4)?, error: r.get(5)? };
+        Ok((r.get(0)?, row))
+    })?
+    .collect()
+}
+
+fn open_read_only(path: &Path) -> Result<Connection, LibraryError> {
+    let open_error = |e: rusqlite::Error| LibraryError::Open { path: path.to_owned(), why: e.to_string() };
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(path, flags).map_err(open_error)?;
+    conn.busy_timeout(WAIT).map_err(open_error)?;
+    Ok(conn)
 }
 
 /// What a batch did.
@@ -60,6 +143,8 @@ pub struct Written {
     /// Saves kept under another id than the app gave them, as (given, kept): the file was in the library already
     /// under another, or the id was taken meanwhile (another copy of the app).
     pub ids: Vec<(i64, i64)>,
+    /// The note that the saves [`to_mend`] gave were read again was kept ([`Batch::mended`]).
+    pub mended: bool,
 }
 
 /// How long a batch waits for another copy of the app to finish its own: this runs in the background.
@@ -108,6 +193,14 @@ pub fn write(songs_db: &Path, batch: &Batch) -> Result<Written, LibraryError> {
         written.missing += tx
             .execute("UPDATE projects SET file_missing = 1 WHERE id = ?1 AND path = ?2", params![m.id, m.path])
             .map_err(sql)?;
+    }
+    if batch.mended {
+        tx.execute(
+            "INSERT OR REPLACE INTO songs_info (key, value) VALUES (?1, ?2)",
+            params![MENDED_KEY, Local::now().timestamp()],
+        )
+        .map_err(sql)?;
+        written.mended = true;
     }
     check(&tx, &kept, batch).map_err(|e| match e {
         Checked::Sql(e) => sql(e),
@@ -159,7 +252,7 @@ fn put_one(tx: &Transaction<'_>, put: &Put) -> rusqlite::Result<i64> {
     let mut sample =
         tx.prepare_cached("INSERT INTO samples (project_id, path, found, unplayed) VALUES (?1, ?2, ?3, ?4)")?;
     for s in &put.detail.samples {
-        sample.execute(params![id, s.path, s.found, s.unplayed])?;
+        sample.execute(params![id, s.path, s.found, s.use_number()])?;
     }
     let mut tag = tx.prepare_cached("INSERT OR IGNORE INTO tags (project_id, tag) VALUES (?1, ?2)")?;
     for t in &save.tags {
