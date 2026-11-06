@@ -121,9 +121,6 @@ export global SongsData {
     in property <int> selected: -1;
     // Up and Down on the list (and Down from the search box): the song above or below the one picked.
     callback step(int);
-    // Esc (app.escape), the same order on every page: clears the search, else puts the panel away (nothing plays
-    // here). Says whether it did either.
-    callback escape() -> bool;
     // Bring a song into view: its line's top in the list, and a count that goes up each time it's asked.
     in property <length> show-y;
     in property <int> show-ask;
@@ -805,14 +802,13 @@ export component SongsPage inherits Rectangle {
             job-line: false;
         }
         search-box := SearchBox {
+            // Esc goes on to the window's keys (the page's next step back, app.escape), and Ctrl+Up and Ctrl+Down step
+            // through the list from here.
+            page-search: true;
             hint: "Search songs, plugins, tags, notes, a key or a year";
             text <=> SongsData.search;
             edited(t) => { SongsData.search-edited(t); }
             key(k) => {
-                // Clears the search, else puts the song panel away.
-                if (k == Key.Escape) {
-                    return SongsData.escape();
-                }
                 // Down goes on into the list, as on Sounds and MIDI, when it has a song to go to.
                 if (k == Key.DownArrow && SongsData.shown > 0) {
                     keys.focus();

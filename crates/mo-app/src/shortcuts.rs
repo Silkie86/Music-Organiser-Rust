@@ -215,9 +215,12 @@ pub fn list_keys(place: Place) -> &'static [(&'static str, &'static str)] {
     const DOWN: (&str, &str) = ("Down", "From the search box into the list");
     match place {
         Place::Songs => &[("Up, Down", "The song above or below in the list"), DOWN],
-        Place::Sounds => {
-            &[("Up, Down, Left, Right", "The sound above, below or beside the picked one"), ("Enter", "Play it"), DOWN]
-        }
+        Place::Sounds => &[
+            ("Up, Down", "The sound above or below the picked one"),
+            ("Left, Right", "The sound beside it (on Tiles and Galaxy)"),
+            ("Enter", "Play or stop it"),
+            DOWN,
+        ],
         Place::Presets => &[("Up, Down", "The sound or curve above or below in the list"), DOWN],
         Place::Midi => &[("Up, Down", "The part above or below in the list"), DOWN],
         Place::Plugins => &[("Up, Down", "The plugin above or below in the list"), DOWN],

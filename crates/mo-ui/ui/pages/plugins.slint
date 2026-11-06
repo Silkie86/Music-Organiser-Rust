@@ -192,9 +192,6 @@ export global PluginsData {
     in property <string> scanner-note;
 
     callback search-edited(string);
-    // Esc (app.escape), the same order on every page: the search is cleared, else the picked plugin's card closes.
-    // False when there was nothing to do.
-    callback escape() -> bool;
     // A filter's choice picked or unpicked: the filter ("show", "kind", "format", "daw") and the choice's words.
     callback toggle(string, string);
     callback clear-filter(string);
@@ -779,15 +776,14 @@ export component PluginsPage inherits Rectangle {
             spacing: Space.sm;
             vertical-stretch: 0;
             search-box := SearchBox {
+                // Esc goes on to the window's keys (the page's next step back, app.escape), and Ctrl+Up and
+                // Ctrl+Down step through the list from here.
+                page-search: true;
                 horizontal-stretch: 1;
                 hint: "Search plugins or makers";
                 text <=> PluginsData.search;
                 edited(t) => { PluginsData.search-edited(t); }
                 key(k) => {
-                    // Esc takes the page's next step back, as it does anywhere on the page (app.escape).
-                    if (k == Key.Escape) {
-                        return PluginsData.escape();
-                    }
                     // Down goes into the list, as on Sounds, MIDI and Presets, when a line shows.
                     if (k == Key.DownArrow && PluginsData.message == "" && PluginsData.lines.length > 0) {
                         keys.focus();

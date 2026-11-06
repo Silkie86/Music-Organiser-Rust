@@ -1861,8 +1861,6 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     let weak = app.as_weak();
     data.on_search_edited(move |text| change(&weak, |f| f.search = text.to_string()));
     let weak = app.as_weak();
-    data.on_escape(move || weak.upgrade().is_some_and(|app| escape(&app)));
-    let weak = app.as_weak();
     data.on_toggle_choice(move |chip, choice| change(&weak, |f| f.pick(&chip, &choice)));
     let weak = app.as_weak();
     data.on_clear_chip(move |chip| {
@@ -3090,14 +3088,10 @@ fn stop(app: &AppWindow) {
     playing_changed(app);
 }
 
-/// Esc on the page (`app.escape`, in the search box or anywhere else), the same order on every page: the sound playing
-/// stops; else the search is cleared; else the picked sound's card closes (the whole-app review of 6 Nov, X3-12). Says
-/// whether it did any of them (when not, the key goes on).
+/// Esc on the page (`app.escape`, in the search box or anywhere else), the same order on every page, once nothing plays
+/// ([`stop_on_escape`]): the search is cleared; else the picked sound's card closes (the whole-app review of 6 Nov,
+/// X3-12). Says whether it did either (when not, the key goes on).
 pub fn escape(app: &AppWindow) -> bool {
-    if PAGE.with(|p| p.borrow().playing.is_some()) {
-        stop(app);
-        return true;
-    }
     let data = app.global::<SoundsData>();
     if !data.get_search().is_empty() {
         data.set_search(SharedString::new());
@@ -3109,6 +3103,16 @@ pub fn escape(app: &AppWindow) -> bool {
         return true;
     }
     false
+}
+
+/// Esc's first step, on any page (`app.escape`): the sound playing stops, as it plays on for a while after its page
+/// goes. Whether one was playing.
+pub fn stop_on_escape(app: &AppWindow) -> bool {
+    let playing = PAGE.with(|p| p.borrow().playing.is_some());
+    if playing {
+        stop(app);
+    }
+    playing
 }
 
 /// Another page is about to play (the MIDI page's loop): the sound shown playing here stops, so this page doesn't go

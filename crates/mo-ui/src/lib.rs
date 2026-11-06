@@ -273,14 +273,16 @@ pub fn shortcuts() -> Shortcuts {
 }
 
 /// A key was changed in Settings: everything that shows or runs a key takes the new list at once (the rail's tooltips,
-/// the key sheet, the Songs buttons, the Sounds and Presets cards and menus, the Space buttons). Every page's keys run
-/// from this one list.
+/// the key sheet, the Songs buttons, the Sounds, Presets, MIDI and Plugins cards and menus, the Space buttons). Every
+/// page's keys run from this one list.
 pub fn keys_changed(app: &AppWindow, shortcuts: &Shortcuts) {
     KEYS.with(|k| *k.borrow_mut() = Some(std::rc::Rc::new(shortcuts.clone())));
     show_places(app, shortcuts);
     show_button_keys(app, shortcuts);
     sounds::show_keys(app, shortcuts);
     presets::show_keys(app, shortcuts);
+    midi::show_keys(app, shortcuts);
+    plugins::show_keys(app, shortcuts);
     space::show(app);
     if let Some(place) = place() {
         show_key_rows(app, shortcuts, place);
@@ -536,16 +538,25 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
                 || (place == Place::Presets.index() as i32 && presets::toggle_play(&app));
         }
         // Ctrl+F: the keys go to the page's search box, its words picked (review X3-22). The page on show sees the
-        // count change; a page without a search box lets the key go on.
+        // count change; a page without a search box lets the key go on. Not while Ctrl+K or the F12 note is open, as
+        // the keys would go to a box under it; the key sheet closes first, so the search is in sight.
         "app.search" => {
-            if !place().is_some_and(|p| SEARCHED.contains(&p)) {
+            if app.global::<FinderData>().get_open()
+                || app.get_note_open()
+                || !place().is_some_and(|p| SEARCHED.contains(&p))
+            {
                 return false;
             }
+            app.set_sheet_open(false);
             let keys = app.global::<AppKeys>();
             keys.set_search(keys.get_search().wrapping_add(1));
         }
-        // Esc: one step back, in the same order on every page (review X3-12).
+        // Esc: one step back, in the same order on every page (review X3-12), and first what plays stops, whichever
+        // page started it.
         "app.escape" => {
+            if stop_what_plays(&app) {
+                return true;
+            }
             return match place() {
                 Some(Place::Songs) => songs::escape(&app),
                 Some(Place::Sounds) => sounds::escape(&app),
@@ -566,6 +577,16 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
     }
     debug_assert!(handles(id), "run() does {id}: add it to HANDLED so the key sheet doesn't say (coming)");
     true
+}
+
+/// Esc's first step on every page: whatever plays stops, whichever page started it (a sound on Sounds, the MIDI page's
+/// loop or a part playing in a DAW go on after their page goes; an audition in Bitwig stops as its page goes). Each
+/// one, as two can play at once. Whether anything was playing.
+fn stop_what_plays(app: &AppWindow) -> bool {
+    let sound = sounds::stop_on_escape(app);
+    let midi = midi::stop_on_escape(app);
+    let audition = presets::stop_on_escape(app);
+    sound || midi || audition
 }
 
 /// Moves the pick of the list on show one line up (`by` -1) or down (1), as its Up and Down keys do (on Sounds' Tiles, a

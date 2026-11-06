@@ -517,8 +517,6 @@ fn wire_list(app: &AppWindow) {
             step(&app, by);
         }
     });
-    let weak = app.as_weak();
-    data.on_escape(move || weak.upgrade().is_some_and(|app| escape(&app)));
     // Made here, for the song right-clicked (picked first), so each line names its DAW and shows its key as the
     // shortcut list has it now.
     let weak = app.as_weak();

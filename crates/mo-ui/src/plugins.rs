@@ -195,8 +195,6 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     let weak = app.as_weak();
     data.on_search_edited(move |t| change(&weak, |f| f.search = t.to_string()));
     let weak = app.as_weak();
-    data.on_escape(move || weak.upgrade().is_some_and(|app| escape(&app)));
-    let weak = app.as_weak();
     data.on_show_unused(move || change(&weak, |f| f.show(Chip::BigUnused)));
     let weak = app.as_weak();
     data.on_toggle(move |filter, c| {
@@ -916,6 +914,12 @@ fn action_words(id: &str) -> &'static str {
         "plugins.move" => "Move to another drive…",
         _ => "Search online",
     }
+}
+
+/// A key was changed in Settings: the card's buttons and the right-click menu show the new keys.
+pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
+    PAGE.with(|p| p.borrow_mut().shortcuts = shortcuts.clone());
+    fill_actions(app);
 }
 
 /// The card's buttons and the right-click menu: Clean up only for a plugin with folders it could look at.

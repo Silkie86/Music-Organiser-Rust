@@ -96,10 +96,6 @@ export global MidiData {
 
     in-out property <string> search;
     callback search-edited(string);
-    // Esc (app.escape), the same order on every page: what's playing stops (here and in a DAW), else the list goes back
-    // to the whole list, else the search is cleared, else the picked part's card closes. False when there was nothing
-    // to do.
-    callback escape() -> bool;
     // The filters, the same as every page's (FilterPicks): the kinds of part, where they come from (neither picked
     // is both) and the keys, each choice with how many parts it would show.
     in property <FilterView> kind-filter;
@@ -663,6 +659,9 @@ export component MidiPage inherits Rectangle {
             spacing: Space.sm;
             vertical-stretch: 0;
             search-box := SearchBox {
+                // Esc goes on to the window's keys (the page's next step back, app.escape), and Ctrl+Up and
+                // Ctrl+Down step through the list from here.
+                page-search: true;
                 horizontal-stretch: 1;
                 min-width: 320px;
                 max-width: 480px;
@@ -670,10 +669,6 @@ export component MidiPage inherits Rectangle {
                 text <=> MidiData.search;
                 edited(t) => { MidiData.search-edited(t); }
                 key(k) => {
-                    // Esc takes the page's next step back, as it does anywhere on the page (app.escape).
-                    if (k == Key.Escape) {
-                        return MidiData.escape();
-                    }
                     if (k == Key.DownArrow) {
                         keys.focus();
                         MidiData.step(1);

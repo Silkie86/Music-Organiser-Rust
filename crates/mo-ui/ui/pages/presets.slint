@@ -92,9 +92,6 @@ export global PresetsData {
     in-out property <string> search;
     // The Sounds section.
     callback search-edited(string);
-    // Esc (app.escape), the same order on every page: the audition in Bitwig stops, else the search is cleared, else
-    // the picked line's card closes. False when there was nothing to do.
-    callback escape() -> bool;
     // The filters, as chips of their own or menus (mo_app::filters).
     in property <FilterView> part-filter;
     in property <FilterView> format-filter;
@@ -591,6 +588,9 @@ export component PresetsPage inherits Rectangle {
             }
             // One box for both sections: the page keeps each section's words and puts them back on a switch.
             search-box := SearchBox {
+                // Esc goes on to the window's keys (the page's next step back, app.escape), and Ctrl+Up and
+                // Ctrl+Down step through the list from here.
+                page-search: true;
                 horizontal-stretch: 1;
                 min-width: 320px;
                 max-width: 480px;
@@ -598,10 +598,6 @@ export component PresetsPage inherits Rectangle {
                 text <=> PresetsData.search;
                 edited(t) => { PresetsData.search-edited(t); }
                 key(k) => {
-                    // Esc takes the page's next step back, as it does anywhere on the page (app.escape).
-                    if (k == Key.Escape) {
-                        return PresetsData.escape();
-                    }
                     if (k == Key.DownArrow) {
                         keys.focus();
                         if (PresetsData.section == 0) {

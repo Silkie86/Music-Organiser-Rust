@@ -169,9 +169,9 @@ export global AppKeys {
     // Bumped by Ctrl+F (app.search): the page on show puts the keys in its search box. Only the page on show is there
     // to see it change.
     in-out property <int> search;
-    // A key a search box would only use to move its cursor (Up or Down with Ctrl, Alt or Meta, in one line of text),
-    // passed on to the app's shortcuts, so Ctrl+Up and Ctrl+Down step through the list even while you type: whether it
-    // ran. The text and Ctrl, Shift, Alt, Meta and repeat, as the window's own `key`.
+    // A key a page's search box would only use to move its cursor (Up or Down with Ctrl, Alt or Meta, in one line of
+    // text), passed on to the app's shortcuts, so Ctrl+Up and Ctrl+Down step through the list even while you type:
+    // whether it ran. The text and Ctrl, Shift, Alt, Meta and repeat, as the window's own `key`.
     callback key(string, bool, bool, bool, bool, bool) -> bool;
 }
 
@@ -619,8 +619,12 @@ export component StudioSlider inherits HorizontalLayout {
 export component SearchBox inherits Rectangle {
     in property <string> hint: "Search";
     in-out property <string> text <=> input.text;
+    // The page's own search, not a box for a name: Ctrl+Up and Ctrl+Down step through the page's list from it, and Esc
+    // goes on to the app's keys (the page's next step back), as anywhere on the page.
+    in property <bool> page-search;
     callback edited(string);
-    // Down, Enter and Esc go to the page first; it returns true when it used the key.
+    // Down and Enter go to the page first (and Esc, in a box that isn't the page's search); it returns true when it
+    // used the key.
     callback key(string) -> bool;
     forward-focus: input;
     // One height for every control in a row (buttons, view switches, search): the row lines up.
@@ -662,14 +666,19 @@ export component SearchBox inherits Rectangle {
         selection-background-color: Theme.accent.transparentize(60%);
         edited => { root.edited(self.text); }
         key-pressed(event) => {
-            // Down, Enter and Esc on their own go to the page; held with Ctrl, Alt or Meta they're other keys.
+            // Down, Enter and Esc on their own go to the page; held with Ctrl, Alt or Meta they're other keys. The
+            // page's search leaves Esc alone: it goes on to the window, whose keys follow the shortcut list (rule 15)
+            // and do a held key's step once.
             if (!event.modifiers.control && !event.modifiers.alt && !event.modifiers.meta
-                && (event.text == Key.DownArrow || event.text == Key.Return || event.text == Key.Escape)) {
+                && (event.text == Key.DownArrow || event.text == Key.Return
+                    || (event.text == Key.Escape && !root.page-search))) {
                 if (root.key(event.text)) {
                     return accept;
                 }
             }
-            if ((event.modifiers.control || event.modifiers.alt || event.modifiers.meta)
+            // In the page's search, Up and Down with Ctrl, Alt or Meta go to the app's keys (the line above or below in
+            // the list). A box for a name keeps them to move its cursor: stepping would pick another line and lose it.
+            if (root.page-search && (event.modifiers.control || event.modifiers.alt || event.modifiers.meta)
                 && (event.text == Key.UpArrow || event.text == Key.DownArrow)) {
                 if (AppKeys.key(event.text, event.modifiers.control, event.modifiers.shift, event.modifiers.alt, event.modifiers.meta, event.repeat)) {
                     return accept;

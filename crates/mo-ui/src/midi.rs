@@ -257,18 +257,34 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         let mut p = p.borrow_mut();
         p.library = library;
         p.feed = Some(feed);
-        p.shortcuts = shortcuts.clone();
     });
     wire(app);
     crate::piano_roll::connect(app);
+    show_keys(app, shortcuts);
     let data = app.global::<MidiData>();
-    data.set_play_key(shortcuts.key_of("app.play").into());
-    data.set_bitwig_key(shortcuts.key_of("midi.playBitwig").into());
-    data.set_fl_key(shortcuts.key_of("midi.playFl").into());
     data.set_empty_title("Reading your MIDI…".into());
     data.set_empty_text("".into());
     if app.get_place() == mo_app::places::Place::Midi.index() as i32 {
         shown(app);
+    }
+}
+
+/// The keys as they are now, from the one shortcut list (rule 15): the play row's, and the picked part's card and
+/// menu. Again after a key is changed in Settings, so none shows an old key.
+pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
+    let data = app.global::<MidiData>();
+    data.set_play_key(shortcuts.key_of("app.play").into());
+    data.set_bitwig_key(shortcuts.key_of("midi.playBitwig").into());
+    data.set_fl_key(shortcuts.key_of("midi.playFl").into());
+    let card = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.shortcuts = shortcuts.clone();
+        let e = p.cat.entry(p.picked?)?;
+        Some(actions(e, shortcuts))
+    });
+    if let Some((actions, menu)) = card {
+        data.set_actions(ModelRc::new(VecModel::from(actions)));
+        data.set_menu(ModelRc::new(VecModel::from(menu)));
     }
 }
 
@@ -389,8 +405,6 @@ fn wire(app: &AppWindow) {
             pick(&app, None);
         }
     });
-    let weak = app.as_weak();
-    data.on_escape(move || weak.upgrade().is_some_and(|app| escape(&app)));
     let weak = app.as_weak();
     data.on_read_again(move || {
         if let Some(app) = weak.upgrade() {
@@ -1323,23 +1337,27 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
     }
 }
 
-/// Esc on the page (`app.escape`, in the search box or anywhere else), the same order on every page, one step a press
-/// (the whole-app review of 6 Nov, X3-12): what's playing stops (the loop here, and a part playing in a DAW); else the
-/// list goes back to the whole list from parts shaped like one (or the phrases one is in); else the search is cleared;
-/// else the picked part's card closes. Says whether it did any of them (when not, the key goes on).
-pub fn escape(app: &AppWindow) -> bool {
+/// Esc's first step, on any page (`app.escape`): the loop playing stops, and a part playing in a DAW, as both play on
+/// after the page goes. Whether either was playing.
+pub fn stop_on_escape(app: &AppWindow) -> bool {
     let data = app.global::<MidiData>();
     let looping = data.get_playing() || PAGE.with(|p| p.borrow().looping.is_some());
     let in_daw = data.get_daw_playing() != "" || data.get_daw_starting() != "";
-    if looping || in_daw {
-        if looping {
-            stop_playing(app);
-        }
-        if in_daw {
-            stop_daw(app);
-        }
-        return true;
+    if looping {
+        stop_playing(app);
     }
+    if in_daw {
+        stop_daw(app);
+    }
+    looping || in_daw
+}
+
+/// Esc on the page (`app.escape`, in the search box or anywhere else), the same order on every page, one step a press
+/// once nothing plays ([`stop_on_escape`]; the whole-app review of 6 Nov, X3-12): the list goes back to the whole list
+/// from parts shaped like one (or the phrases one is in); else the search is cleared; else the picked part's card
+/// closes. Says whether it did any of them (when not, the key goes on).
+pub fn escape(app: &AppWindow) -> bool {
+    let data = app.global::<MidiData>();
     if PAGE.with(|p| p.borrow_mut().target.take().is_some()) {
         relist(app);
         return true;

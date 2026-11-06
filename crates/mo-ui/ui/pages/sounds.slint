@@ -309,9 +309,6 @@ export global SoundsData {
 
     in-out property <string> search;
     callback search-edited(string);
-    // Esc (app.escape), the same order on every page: the sound playing stops, else the search is cleared, else the
-    // picked sound's card closes. False when there was nothing to do.
-    callback escape() -> bool;
     // The filters, the same as on every page: the types (the most used as chips, the rest in More types), hits or
     // loops, the key, the tempo and the tags, each choice with how many sounds it would show.
     in property <FilterView> type-filter;
@@ -1195,6 +1192,9 @@ export component SoundsPage inherits Rectangle {
             spacing: Space.sm;
             vertical-stretch: 0;
             search-box := SearchBox {
+                // Esc goes on to the window's keys (the page's next step back, app.escape), and Ctrl+Up and
+                // Ctrl+Down step through the list from here.
+                page-search: true;
                 // Wide enough for its hint, whatever else the row holds (it showed cut short on Tiles and List).
                 min-width: 320px;
                 preferred-width: 400px;
@@ -1202,10 +1202,6 @@ export component SoundsPage inherits Rectangle {
                 text <=> SoundsData.search;
                 edited(t) => { SoundsData.search-edited(t); }
                 key(k) => {
-                    // Esc takes the page's next step back, as it does anywhere on the page (app.escape).
-                    if (k == Key.Escape) {
-                        return SoundsData.escape();
-                    }
                     if (k == Key.DownArrow) {
                         keys.focus();
                         SoundsData.step(2, false);
