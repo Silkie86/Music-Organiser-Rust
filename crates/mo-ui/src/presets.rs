@@ -13,7 +13,7 @@
 //! Send to Bitwig makes the sound's Bitwig preset and puts it into the project open in Bitwig through the Bitwig link
 //! (`mo-dawlink`, [`send_to_bitwig`]); when Bitwig isn't there, the preset is shown in its folder to drag in.
 //! Audition in Bitwig does the same on a track of its own with a short part playing on it
-//! (`mo_app::preset_audition`), to hear it first: Stop playing in Bitwig takes the track out again, Keep in Bitwig leaves it.
+//! (`mo_app::preset_audition`), to hear it first: Stop in Bitwig takes the track out again, Keep in Bitwig leaves it.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -1658,7 +1658,7 @@ fn hearing_of(p: &Page, item: &Item) -> logic::Hearing {
     }
 }
 
-/// Audition in Bitwig, and Stop playing in Bitwig: stops the audition playing (taking its track out again); unless it was this
+/// Audition in Bitwig, and Stop in Bitwig: stops the audition playing (taking its track out again); unless it was this
 /// line's, puts this line's preset on a new track in Bitwig with a part for its kind playing on it.
 fn toggle_audition(app: &AppWindow, item: Item) {
     let id = logic::audition_id(&item);
@@ -1757,8 +1757,8 @@ fn toggle_audition(app: &AppWindow, item: Item) {
 }
 
 /// Puts the line's Bitwig preset on a new track in Bitwig with its part playing. A sound in a song gets its Bitwig
-/// preset made first, in the export folder, as Send to Bitwig makes it. Waits for Bitwig, so never on the window's
-/// thread. `Err(None)` when it was no longer `wanted` (it put nothing in, or took it back).
+/// preset made first, in Temp ([`audition_preset_of`]), and it goes again once Bitwig has loaded it. Waits for Bitwig,
+/// so never on the window's thread. `Err(None)` when it was no longer `wanted` (it put nothing in, or took it back).
 fn audition(
     item: &Item,
     templates: Option<Arc<Templates>>,
@@ -1783,6 +1783,8 @@ fn audition(
             (preset, Some(name), true)
         }
     };
+    // The preset made for it goes however this ends.
+    let _made = made.then(|| Gone(preset.clone()));
     let name = name.unwrap_or_else(|| item.row.name.clone());
     let clip = mo_app::preset_audition::clip(&name, item.role());
     let bytes = mo_formats::midi::write::write_clip(&clip)
@@ -1793,10 +1795,16 @@ fn audition(
     // Bitwig has read both files once this answers, so the part goes at once (rule 28).
     let heard = mo_dawlink::bitwig::Bitwig::default().audition_preset(&preset, &part, &name, turn, wanted);
     let _ = std::fs::remove_file(&part);
-    if made {
-        let _ = std::fs::remove_file(&preset);
-    }
     heard.map_err(|e| (e != mo_dawlink::bitwig::Error::Cancelled).then(|| e.to_string()))
+}
+
+/// A file the app made in Temp, removed when this goes.
+struct Gone(PathBuf);
+
+impl Drop for Gone {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
 }
 
 /// Makes a song's sound into a Bitwig preset for an audition: exported into a folder of its own in Temp, then the
@@ -1822,17 +1830,9 @@ fn audition_preset_of(
         std::fs::rename(done.folder.join(found), temp.join(&file)).ok()?;
         Some(stem)
     });
-    // What else the export wrote goes now, then its folders once they're empty (one with anything else in it stays).
-    if let Ok(done) = &done {
-        for f in &done.files {
-            let _ = std::fs::remove_file(done.folder.join(f));
-        }
-        let mut folder = Some(done.folder.as_path());
-        while let Some(f) = folder.filter(|f| f.starts_with(&root)) {
-            let _ = std::fs::remove_dir(f);
-            folder = f.parent();
-        }
-    }
+    // What else the export wrote goes now, with its folder: one this audition made just now, under a name of its
+    // own, so all in it is the export's (also when the export failed part way).
+    let _ = std::fs::remove_dir_all(&root);
     let done = done.map_err(|e| format!("Its Bitwig preset couldn't be made: {e}"))?;
     match kept {
         Some(name) => Ok((temp.join(&file), name)),
@@ -1881,7 +1881,7 @@ fn stop_audition_in(
 fn put_back(auditioning: mo_dawlink::bitwig::Auditioning, line: String, why: mo_dawlink::bitwig::Error) {
     let words = format!(
         "{} couldn't be stopped in Bitwig: {why} Bring its project to the front in Bitwig (with changes on), then \
-         press Stop playing in Bitwig again.",
+         press Stop in Bitwig again.",
         auditioning.track
     );
     let track = auditioning.track.clone();
@@ -1946,7 +1946,7 @@ pub(crate) fn call_off_for_closing() {
     AUDITION_ASKED.fetch_add(1, Ordering::SeqCst);
 }
 
-/// Stops the audition playing or starting, whatever line is picked: the strip's Stop playing in Bitwig, closing the card, and
+/// Stops the audition playing or starting, whatever line is picked: the strip's Stop in Bitwig, closing the card, and
 /// leaving the page.
 fn stop_audition_now(app: &AppWindow) {
     let line = PAGE.with(|p| p.borrow().hearing.as_ref().map(|(id, _)| id.clone()));
@@ -2037,16 +2037,15 @@ fn message_later(text: String) {
 /// In the crash hook, when the crash ends the app: the audition's track comes out of Bitwig, a second at most. Never
 /// waits for the lock: the thread that crashed may hold it.
 pub fn after_crash() {
-    let Ok(mut slot) = AUDITION.try_lock() else { return };
+    // A start still on its way takes its track out, as when the app closes.
+    call_off_for_closing();
+    let mut slot = match AUDITION.try_lock() {
+        Ok(slot) => slot,
+        Err(std::sync::TryLockError::Poisoned(slot)) => slot.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
     if let Some(auditioning) = slot.take() {
-        let second = Duration::from_secs(1);
-        let to = mo_dawlink::bitwig::Bitwig {
-            connect_timeout: second,
-            timeout: second,
-            change_timeout: second,
-            ..mo_dawlink::bitwig::Bitwig::default()
-        };
-        let _ = to.stop_audition_as_app_closes(&auditioning);
+        let _ = crate::in_flight::closing_link(Duration::from_millis(500)).stop_audition_as_app_closes(&auditioning);
     }
 }
 
@@ -2057,10 +2056,7 @@ pub fn finish_up() {
     let first = take_audition();
     crate::in_flight::wait_for_all(Duration::from_secs(3));
     if let Some(auditioning) = first.or_else(take_audition) {
-        let to = mo_dawlink::bitwig::Bitwig {
-            change_timeout: Duration::from_secs(3),
-            ..mo_dawlink::bitwig::Bitwig::default()
-        };
+        let to = crate::in_flight::closing_link(Duration::from_secs(3));
         // Without waiting its turn: what would go first is closing too, and the extension still makes the stop once
         // the app has gone (3.21).
         if let Err(e) = to.stop_audition_as_app_closes(&auditioning) {

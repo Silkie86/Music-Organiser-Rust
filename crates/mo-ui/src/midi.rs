@@ -2062,10 +2062,7 @@ pub fn finish_up() {
     match first.or_else(take_in_daw) {
         Some(InDaw::Fl(fl)) => fl.finish(),
         Some(InDaw::Bitwig(bitwig)) => {
-            let to = mo_dawlink::bitwig::Bitwig {
-                change_timeout: Duration::from_secs(3),
-                ..mo_dawlink::bitwig::Bitwig::default()
-            };
+            let to = crate::in_flight::closing_link(Duration::from_secs(3));
             // Without waiting its turn: what would go first is closing too, and the extension still makes the stop
             // once the app has gone.
             if let Err(e) = to.stop_playing_as_app_closes(&bitwig) {
@@ -2080,18 +2077,17 @@ pub fn finish_up() {
 /// the app does) and Bitwig's clip comes out, a second at most. Never waits for the lock: the thread that crashed may
 /// hold it.
 pub fn after_crash() {
-    let Ok(mut slot) = IN_DAW.try_lock() else { return };
+    // A start still on its way takes back what it put in, as when the app closes.
+    DAW_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let mut slot = match IN_DAW.try_lock() {
+        Ok(slot) => slot,
+        Err(std::sync::TryLockError::Poisoned(slot)) => slot.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return,
+    };
     match slot.take() {
         Some(InDaw::Fl(fl)) => fl.finish(),
         Some(InDaw::Bitwig(bitwig)) => {
-            let second = Duration::from_secs(1);
-            let to = mo_dawlink::bitwig::Bitwig {
-                connect_timeout: second,
-                timeout: second,
-                change_timeout: second,
-                ..mo_dawlink::bitwig::Bitwig::default()
-            };
-            let _ = to.stop_playing_as_app_closes(&bitwig);
+            let _ = crate::in_flight::closing_link(Duration::from_millis(500)).stop_playing_as_app_closes(&bitwig);
         }
         None => {}
     }
