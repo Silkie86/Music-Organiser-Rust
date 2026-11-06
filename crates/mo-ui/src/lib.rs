@@ -575,6 +575,7 @@ fn step_list(app: &AppWindow, by: i32, held: bool) -> bool {
         Some(Place::Songs) => app.global::<SongsData>().invoke_step(by),
         Some(Place::Sounds) => app.global::<SoundsData>().invoke_step(by * 2, held),
         Some(Place::Midi) => app.global::<MidiData>().invoke_step(by),
+        Some(Place::Plugins) => app.global::<PluginsData>().invoke_step(by),
         Some(Place::Presets) => {
             let data = app.global::<PresetsData>();
             if data.get_section() == 0 {

@@ -220,7 +220,8 @@ pub fn list_keys(place: Place) -> &'static [(&'static str, &'static str)] {
         }
         Place::Presets => &[("Up, Down", "The sound or curve above or below in the list"), DOWN],
         Place::Midi => &[("Up, Down", "The part above or below in the list"), DOWN],
-        Place::Plugins | Place::Space | Place::Backup | Place::Settings => &[],
+        Place::Plugins => &[("Up, Down", "The plugin above or below in the list"), DOWN],
+        Place::Space | Place::Backup | Place::Settings => &[],
     }
 }
 
@@ -706,7 +707,7 @@ mod tests {
         assert_eq!(keys.set("app.search", "Alt+Up"), "");
         assert_eq!(keys.key_of("app.search"), "Alt+Up");
         // Each page with a list says what its arrows do on the key sheet; the pages without one say nothing.
-        for place in [Place::Songs, Place::Sounds, Place::Presets, Place::Midi] {
+        for place in [Place::Songs, Place::Sounds, Place::Presets, Place::Midi, Place::Plugins] {
             assert!(list_keys(place).iter().any(|(k, _)| k.contains("Up")), "{place:?}");
         }
         assert!(list_keys(Place::Space).is_empty() && list_keys(Place::Settings).is_empty());
