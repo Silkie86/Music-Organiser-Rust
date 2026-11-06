@@ -121,6 +121,8 @@ export global SongsData {
     in property <int> selected: -1;
     // Up and Down on the list (and Down from the search box): the song above or below the one picked.
     callback step(int);
+    // Esc, in the search box or on the list: clears the search, else puts the panel away. Says whether it did either.
+    callback escape() -> bool;
     // Bring a song into view: its line's top in the list, and a count that goes up each time it's asked.
     in property <length> show-y;
     in property <int> show-ask;
@@ -162,6 +164,7 @@ export global SongsData {
     callback select(int);
     // The buttons' tooltips and keys, from the shortcut list.
     in property <ActionKey> open-key;
+    in property <ActionKey> open-own-key;
     in property <ActionKey> reveal-key;
     in property <ActionKey> copy-key;
     // Opens the picked song's newest save: FL Studio songs go to Bitwig, the rest to their own DAW.
@@ -174,6 +177,11 @@ export global SongsData {
     in property <[MenuItem]> save-menu;
     callback save-menu-for(string);
     callback save-menu-chosen(string);
+    // A song line right-clicked (it's picked first): `song-menu-for` fills `song-menu` for its song, with the panel's
+    // buttons and their keys; `song-menu-chosen` runs a line, by its action's id.
+    in property <[MenuItem]> song-menu;
+    callback song-menu-for(int);
+    callback song-menu-chosen(string);
     // A button on a save's line on the Saves tab: the save's path, and "open", "bitwig", "reveal" or "copy", as the
     // lines of its right-click menu.
     callback save-chosen(string, string);
@@ -347,7 +355,8 @@ component SongPanel inherits Rectangle {
                 }
                 if SongsData.song.daw == "FL Studio": StudioButton {
                     text: "Open in FL Studio";
-                    tip: "Open the newest save in FL Studio itself";
+                    tip: SongsData.open-own-key.what;
+                    key: SongsData.open-own-key.key;
                     clicked => { SongsData.open-own(); }
                 }
                 if SongsData.older.length > 0: HorizontalLayout {
@@ -796,18 +805,12 @@ export component SongsPage inherits Rectangle {
             text <=> SongsData.search;
             edited(t) => { SongsData.search-edited(t); }
             key(k) => {
-                if (k == Key.Escape && SongsData.search != "") {
-                    SongsData.search = "";
-                    SongsData.search-edited("");
-                    return true;
+                // Clears the search, else puts the song panel away.
+                if (k == Key.Escape) {
+                    return SongsData.escape();
                 }
-                // With the search already empty, Esc puts the song panel away.
-                if (k == Key.Escape && SongsData.selected >= 0) {
-                    SongsData.close-panel();
-                    return true;
-                }
-                // Down goes on into the list, as on Sounds and MIDI.
-                if (k == Key.DownArrow) {
+                // Down goes on into the list, as on Sounds and MIDI, when it has a song to go to.
+                if (k == Key.DownArrow && SongsData.shown > 0) {
                     keys.focus();
                     SongsData.step(1);
                     return true;
@@ -887,14 +890,11 @@ export component SongsPage inherits Rectangle {
                         SongsData.step(1);
                         return accept;
                     }
-                    if (event.text == Key.Escape && SongsData.search != "") {
-                        SongsData.search = "";
-                        SongsData.search-edited("");
-                        return accept;
-                    }
-                    if (event.text == Key.Escape && SongsData.selected >= 0) {
-                        SongsData.close-panel();
-                        return accept;
+                    if (event.text == Key.Escape) {
+                        if (SongsData.escape()) {
+                            return accept;
+                        }
+                        return reject;
                     }
                     reject
                 }
@@ -946,6 +946,7 @@ export component SongsPage inherits Rectangle {
                                     // The line is picked first (ListLine does that), so the menu acts on it.
                                     right-clicked(x, y) => {
                                         keys.focus();
+                                        SongsData.song-menu-for(line.row);
                                         song-menu.open-at(x, y);
                                     }
                                     // The DAW's colour, as a thin bar at the left (the design system's song row).
@@ -1053,30 +1054,8 @@ export component SongsPage inherits Rectangle {
             }
             // A song line's right-click menu: the panel's buttons, each with its key (rule 15; review X3-24).
             song-menu := RightClickMenu {
-                items: SongsData.song.daw == "FL Studio" ? [
-                    { what: "Open in Bitwig", key: SongsData.open-key.key, id: "projects.open", enabled: true },
-                    { what: "Open in FL Studio", key: "", id: "own", enabled: true },
-                    { what: "", key: "", id: "", enabled: true },
-                    { what: "Show in folder", key: SongsData.reveal-key.key, id: "projects.reveal", enabled: true },
-                    { what: "Copy path", key: SongsData.copy-key.key, id: "projects.copyPath", enabled: true },
-                ] : [
-                    { what: "Open in " + SongsData.song.daw, key: SongsData.open-key.key, id: "projects.open",
-                        enabled: true },
-                    { what: "", key: "", id: "", enabled: true },
-                    { what: "Show in folder", key: SongsData.reveal-key.key, id: "projects.reveal", enabled: true },
-                    { what: "Copy path", key: SongsData.copy-key.key, id: "projects.copyPath", enabled: true },
-                ];
-                chosen(id) => {
-                    if (id == "projects.open") {
-                        SongsData.open();
-                    } else if (id == "own") {
-                        SongsData.open-own();
-                    } else if (id == "projects.reveal") {
-                        SongsData.reveal();
-                    } else if (id == "projects.copyPath") {
-                        SongsData.copy-path();
-                    }
-                }
+                items: SongsData.song-menu;
+                chosen(id) => { SongsData.song-menu-chosen(id); }
             }
         }
     }

@@ -85,6 +85,29 @@ fn a_convert_is_remembered_in_the_apps_own_songs_db_and_gone_copies_are_let_go()
 }
 
 #[test]
+fn a_record_that_cant_be_kept_lets_no_other_go() {
+    let dir = folder("one-change");
+    let gone = dir.join("Exports").join("Old").join("Old.bwproject");
+    let record = (converts::key(&gone), "638000000000000000 C:\\Music\\Old.flp".to_owned());
+    library(&dir, std::slice::from_ref(&record));
+    let songs = dir.join(songs_db::FILE_NAME);
+    songs_db::make(&dir.join("library.db"), &songs, &mut |_| {}).unwrap();
+    assert_eq!(songs_db::at_start(&dir, "test").state, State::Switched);
+    // What's kept for the new copy isn't text, so it's left as it is: the change is refused whole, and the gone copy's
+    // record stays with it (one transaction).
+    let new = copy(&dir, "Day");
+    let conn = Connection::open(&songs).unwrap();
+    conn.execute("INSERT INTO settings (key, value) VALUES (?1, x'00')", [converts::key(&new)]).unwrap();
+    drop(conn);
+    assert!(converts::remember(&songs, &new, "638100000000000000 C:\\Music\\Day.flp").is_err());
+    let conn = Connection::open(&songs).unwrap();
+    let kept = |key: &str| -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM settings WHERE key = ?1", [key], |r| r.get(0)).unwrap()
+    };
+    assert_eq!((kept(&record.0), kept(&converts::key(&new))), (1, 1));
+}
+
+#[test]
 fn library_db_is_never_written() {
     let dir = folder("library-db");
     let gone = dir.join("Exports").join("Old").join("Old.bwproject");

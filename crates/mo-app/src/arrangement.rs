@@ -26,9 +26,10 @@ use crate::themes::Look;
 /// read whole folder trees and the Sounds library).
 #[derive(Clone, Debug, Default)]
 pub struct Preview {
-    pub views: Vec<Arc<Arrangement>>,
+    /// Only made with each one's [`Measured`] ([`Preview::new`]), so the two always go together.
+    views: Vec<Arc<Arrangement>>,
     /// Each view's [`Measured`], in the same order: worked out with the views, off the window's thread.
-    pub measured: Vec<Arc<Measured>>,
+    measured: Vec<Arc<Measured>>,
     /// The audio files found on this computer, by the path the project saved: `None` while they're still to be looked
     /// for.
     pub found: Option<Arc<HashMap<String, PathBuf>>>,
@@ -39,6 +40,16 @@ impl Preview {
     pub fn new(views: Vec<Arc<Arrangement>>, found: Option<Arc<HashMap<String, PathBuf>>>) -> Preview {
         let measured = views.iter().map(|a| Arc::new(Measured::of(a))).collect();
         Preview { views, measured, found }
+    }
+
+    /// The views read, in the order the project has them.
+    pub fn views(&self) -> &[Arc<Arrangement>] {
+        &self.views
+    }
+
+    /// The view at `index`, with its [`Measured`]: none past the last.
+    pub fn view(&self, index: usize) -> Option<(&Arc<Arrangement>, &Arc<Measured>)> {
+        Some((self.views.get(index)?, self.measured.get(index)?))
     }
 }
 
@@ -1330,7 +1341,7 @@ mod tests {
     fn each_view_is_measured_once_with_the_views() {
         let a = Arc::new(song());
         let preview = Preview::new(vec![a.clone()], None);
-        let m = &preview.measured[0];
+        let (_, m) = preview.view(0).unwrap();
         // Each lane's lowest and highest note: the Keys lane's, and middle C for the lanes with none.
         assert_eq!(*m.keys, [(60, 72), (60, 60), (60, 60)]);
         assert_eq!(m.summary, summary(&a));

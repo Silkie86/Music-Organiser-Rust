@@ -1,9 +1,10 @@
 //! Changing one setting, as the C# app keeps them in `settings`: the one safe way the Rust app's writers
 //! ([`crate::moves`], [`crate::plugin_folders`], [`crate::folders::set_export_folder`], [`crate::converts`]) change
-//! one, a JSON list ([`change`]) or a line of text ([`change_text`]), or let go of ones done with ([`forget`]). As [`crate::folders`]: one transaction that reads the setting as
-//! it is now (the C# app may have changed it), changes it, reads it back to check, and only then keeps it. A setting it
-//! can't read (a list that isn't a JSON list, or one that isn't text) is refused, never read as empty: adding to an
-//! empty list there would wipe what the C# app keeps. It never makes a library or a table.
+//! one, a JSON list ([`change`]) or a line of text ([`change_text`], which may also let go of settings done with:
+//! [`change_text_and_forget`]). As [`crate::folders`]: one transaction that reads the setting as it is now (the C# app
+//! may have changed it), changes it, reads it back to check, and only then keeps it. A setting it can't read (a list
+//! that isn't a JSON list, or one that isn't text) is refused, never read as empty: adding to an empty list there would
+//! wipe what the C# app keeps. It never makes a library or a table.
 
 use std::path::Path;
 
@@ -21,7 +22,7 @@ pub(crate) fn change(
     key: &str,
     edit: impl FnOnce(&mut Vec<Value>) -> bool,
 ) -> Result<bool, LibraryError> {
-    change_with(library, key, read, |mut list| {
+    change_with(library, key, &[], read, |mut list| {
         if !edit(&mut list) {
             return Ok(None);
         }
@@ -37,34 +38,28 @@ pub(crate) fn change_text(
     key: &str,
     edit: impl FnOnce(Option<&str>) -> Option<String>,
 ) -> Result<bool, LibraryError> {
-    change_with(library, key, read_text, |now| Ok(edit(now.as_deref()).map(|text| (text.clone(), Some(text)))))
+    change_text_and_forget(library, key, edit, &[])
 }
 
-/// Takes away the settings in `gone`, each a key with the text it was read with: one changed since (written again by
-/// another copy of the app, say) is left as it is. One transaction; says how many went.
-pub(crate) fn forget(library: &Path, gone: &[(String, String)]) -> Result<usize, LibraryError> {
-    if gone.is_empty() {
-        return Ok(0);
-    }
-    let sql = |e: rusqlite::Error| match e.sqlite_error_code() {
-        Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => LibraryError::Busy { path: library.to_owned() },
-        _ => LibraryError::Write { path: library.to_owned(), why: e.to_string() },
-    };
-    let mut conn = open_for_settings(library)?;
-    let tx = conn.begin().map_err(sql)?;
-    let mut went = 0;
-    for (key, text) in gone {
-        went += tx.execute("DELETE FROM settings WHERE key = ?1 AND value = ?2", [key, text]).map_err(sql)?;
-    }
-    tx.commit().map_err(sql)?;
-    Ok(went)
+/// [`change_text`], letting go of the settings in `gone` in the same transaction, so both are kept or neither is. Each
+/// is a key with the text it was read with: one changed since (written again by another copy of the app, say) is left
+/// as it is, and so is `key` itself. Says whether `key` changed.
+pub(crate) fn change_text_and_forget(
+    library: &Path,
+    key: &str,
+    edit: impl FnOnce(Option<&str>) -> Option<String>,
+    gone: &[(String, String)],
+) -> Result<bool, LibraryError> {
+    change_with(library, key, gone, read_text, |now| Ok(edit(now.as_deref()).map(|text| (text.clone(), Some(text)))))
 }
 
 /// The one transaction every change makes: `read` reads the setting as it is now (refusing what it can't read), and
-/// `edit` gives the text to keep in its place with what reading it back must give, or none when there's nothing to do.
+/// `edit` gives the text to keep in its place with what reading it back must give, or none when there's nothing to do;
+/// the settings in `gone` go with it ([`change_text_and_forget`]).
 fn change_with<T: PartialEq>(
     library: &Path,
     key: &str,
+    gone: &[(String, String)],
     read: impl Fn(&Transaction<'_>, &str) -> Result<T, String>,
     edit: impl FnOnce(T) -> Result<Option<(String, T)>, String>,
 ) -> Result<bool, LibraryError> {
@@ -85,20 +80,29 @@ fn change_with<T: PartialEq>(
     // IMMEDIATE takes the write lock at the start, so the setting read is the one written over.
     let tx = conn.begin().map_err(sql)?;
     let now = read(&tx, key).map_err(write_error)?;
-    let Some((text, meant)) = edit(now).map_err(write_error)? else {
+    let change = edit(now).map_err(write_error)?;
+    if let Some((text, meant)) = &change {
+        tx.execute(
+            "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [key, text.as_str()],
+        )
+        .map_err(sql)?;
+        if read(&tx, key).map_err(write_error)? != *meant {
+            // Dropping the transaction undoes it.
+            return Err(write_error(format!(
+                "its {key} setting read back wasn't the one written, so nothing was changed"
+            )));
+        }
+    }
+    let mut went = 0;
+    for (gone_key, text) in gone.iter().filter(|(gone_key, _)| gone_key != key) {
+        went += tx.execute("DELETE FROM settings WHERE key = ?1 AND value = ?2", [gone_key, text]).map_err(sql)?;
+    }
+    if change.is_none() && went == 0 {
         return Ok(false);
-    };
-    tx.execute(
-        "INSERT INTO settings (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        [key, text.as_str()],
-    )
-    .map_err(sql)?;
-    if read(&tx, key).map_err(write_error)? != meant {
-        // Dropping the transaction undoes it.
-        return Err(write_error(format!("its {key} setting read back wasn't the one written, so nothing was changed")));
     }
     tx.commit().map_err(sql)?;
-    Ok(true)
+    Ok(change.is_some())
 }
 
 /// The text kept now: none when it's missing or NULL; one that isn't text is refused rather than read as none, so a
