@@ -10,8 +10,8 @@ use std::sync::atomic::AtomicBool;
 
 use chrono::{NaiveDate, NaiveDateTime};
 use mo_app::plugins::clean::{
-    Inputs, Watched, binned_text, check_failed_text, done_text, freed_text, intro, joined, picked, rows, still_binned,
-    undone_text,
+    Inputs, Watched, binned_text, check_failed_text, done_text, freed_text, in_the_bin, intro, joined, picked,
+    removed_for_good, rows, still_binned, undone_text,
 };
 use mo_app::plugins::{Plugins, Read, SaveBrief, SongBrief};
 use mo_library::PluginKind;
@@ -136,6 +136,8 @@ fn clean_up_sends_what_may_go_to_the_bin_and_puts_it_back() {
         looked_for_installed: true,
         unused_years: 2,
         needed_count: 6,
+        saved_fixes: Vec::new(),
+        gone: Vec::new(),
     };
     let mut plugins = Plugins::new(read, at(2026, 11));
     let arcade = plugins.rows.iter().position(|r| r.name == "Arcade").unwrap();
@@ -239,6 +241,16 @@ fn what_didnt_come_back_stays_to_try_again() {
     let mut gone = both.clone();
     gone.problems = vec![Problem { path: "D:/A".into(), why: NOT_IN_BIN.into() }];
     assert!(done_text(&gone).0.contains("1 folder is in the Recycle Bin"), "{}", done_text(&gone).0);
+    // Review E2-7: only what's in the bin is offered for Put back, without what went inside one that isn't; the rest is
+    // still left out of the sizes.
+    let mut gone_b = both.clone();
+    gone_b.problems = vec![Problem { path: "D:/B".into(), why: "It went to the Recycle Bin as administrator".into() }];
+    let in_bin = in_the_bin(&gone_b);
+    assert_eq!(in_bin.removed.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(), ["D:/A"]);
+    assert!(in_bin.went_with.is_empty() && in_bin.problems.is_empty());
+    assert_eq!(removed_for_good(&gone_b), ["D:/B"]);
+    assert_eq!(in_the_bin(&both).removed.len(), 2);
+    assert!(removed_for_good(&both).is_empty());
 
     assert_eq!(
         check_failed_text("Arcade", "it stopped on something it didn't expect (the log says what)"),
@@ -289,6 +301,8 @@ fn a_missing_or_unmeasured_plugin_has_nothing_to_clean() {
         looked_for_installed: true,
         unused_years: 2,
         needed_count: 6,
+        saved_fixes: Vec::new(),
+        gone: Vec::new(),
     };
     let plugins = Plugins::new(read, at(2026, 11));
     assert!(plugins.clean_ask(0).is_none());
@@ -314,6 +328,8 @@ fn a_plugin_with_only_its_plugin_files_has_nothing_to_clean() {
         looked_for_installed: true,
         unused_years: 2,
         needed_count: 6,
+        saved_fixes: Vec::new(),
+        gone: Vec::new(),
     };
     let plugins = Plugins::new(read, at(2026, 11));
     let row = plugins.rows.iter().position(|r| r.name == "Lone").unwrap();

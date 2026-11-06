@@ -50,6 +50,12 @@ pub struct Read {
     pub looked_for_installed: bool,
     pub unused_years: u32,
     pub needed_count: usize,
+    /// Your say on the plugins' folders, as kept in the library (Not its, Take off, Add a folder): applied over the
+    /// stored measure on every read, so it lasts past a restart (review E2-1).
+    pub saved_fixes: Vec<folder_fixes::FolderFix>,
+    /// Measured folders and plugin files that aren't there now, or are a link now (moved, binned, uninstalled): left
+    /// out of every read (review E2-2).
+    pub gone: Vec<String>,
 }
 
 /// What the side card needs of a save.
@@ -93,6 +99,23 @@ pub fn read(lib: &Library) -> Result<Read, LibraryError> {
     let mut spaces: Vec<StoredSpace> = lib.plugin_spaces()?.into_values().collect();
     spaces.sort_by(|a, b| a.key.cmp(&b.key));
     let installed_names = lib.installed_names()?;
+    let saved_fixes = folder_fixes::saved(lib, &spaces)?;
+    // The folders the app moved, so a link it left there is told from one you made. A list that can't be read only
+    // leaves moved folders shown (and Clean up and Move refuse a link), so it's a warning, not an error.
+    let moved: Vec<String> = match lib.strict_setting(mo_library::moves::MOVED_FOLDERS) {
+        Ok(json) => moving::moved_now(json.as_deref()).unwrap_or_else(|why| {
+            crate::log::warning("Plugins", &why);
+            Vec::new()
+        }),
+        Err(e) => {
+            crate::log::warning("Plugins", &format!("The library's list of moved folders couldn't be read: {e}"));
+            Vec::new()
+        }
+    }
+    .into_iter()
+    .map(|m| m.from)
+    .collect();
+    let gone = folder_fixes::gone(&spaces, &saved_fixes, &moved);
     let setting = |key: &str| lib.setting(key).ok().flatten().and_then(|v| v.trim().parse::<u32>().ok());
     Ok(Read {
         uses: lib.plugin_uses()?.into_iter().filter(|u| song_of.contains_key(&u.save)).collect(),
@@ -110,6 +133,8 @@ pub fn read(lib: &Library) -> Result<Read, LibraryError> {
             .and_then(|n| usize::try_from(n).ok())
             .filter(|n| NEEDED_COUNT_CHOICES.contains(n))
             .unwrap_or(DEFAULT_NEEDED_COUNT),
+        saved_fixes,
+        gone,
     })
 }
 
@@ -443,6 +468,9 @@ pub struct Plugins {
     /// When the sizes were measured (the oldest measure), if ever.
     pub measured: Option<NaiveDateTime>,
     now: NaiveDateTime,
+    /// What the read found gone from the disk ([`Read::gone`]), to leave out again after this session's folder fixes
+    /// ([`Plugins::forget_gone`]).
+    gone: Vec<String>,
 }
 
 impl Plugins {
@@ -459,6 +487,8 @@ impl Plugins {
             looked_for_installed,
             unused_years,
             needed_count,
+            saved_fixes,
+            gone,
         } = read;
         let saves: HashMap<i64, SaveBrief> = saves.into_iter().map(|s| (s.id, s)).collect();
         let newest: HashSet<i64> = songs.iter().map(|s| s.latest).collect();
@@ -513,9 +543,21 @@ impl Plugins {
             needed_count,
             measured,
             now,
+            gone,
         };
+        // Your say first, then what isn't there now: a folder you added that went since stays out (review E2-4).
+        p.apply_folder_fixes(&saved_fixes);
+        p.forget_gone();
         p.refilter();
         p
+    }
+
+    /// Leaves out again what the read found gone from the disk: call it after applying folder fixes, which can put a
+    /// folder you added back (review E2-4).
+    pub fn forget_gone(&mut self) {
+        let gone = std::mem::take(&mut self.gone);
+        self.forget_paths(&gone);
+        self.gone = gone;
     }
 
     /// Works out the shown rows again after a filter changed.

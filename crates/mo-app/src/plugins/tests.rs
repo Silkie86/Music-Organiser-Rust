@@ -100,6 +100,8 @@ fn library() -> Read {
         looked_for_installed: true,
         unused_years: 2,
         needed_count: 6,
+        saved_fixes: Vec::new(),
+        gone: Vec::new(),
     }
 }
 
