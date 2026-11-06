@@ -115,6 +115,10 @@ export global PluginsData {
     in property <bool> all-installed;
     // "46.7 GB in 2 plugins none of your songs have used in over 2 years."
     in property <string> freeable;
+    // What moves cut off part way (the app or the computer stopped) left on the other drive, with Clear.
+    in property <string> half-copy-text;
+    in property <bool> can-clear-half-copies;
+    callback clear-half-copies();
 
     // The page's options, shown on the page beside what they change. has-missing: some song's newest save misses a
     // plugin (so the cards' count shows even when they're off); has-sizes: the old app measured the plugins' room.
@@ -893,6 +897,26 @@ export component PluginsPage inherits Rectangle {
                 choices: PluginsData.unused-choices;
                 current: PluginsData.unused-index;
                 picked(i) => { PluginsData.unused-picked(i); }
+            }
+        }
+        if PluginsData.half-copy-text != "": HorizontalLayout {
+            spacing: Space.sm;
+            vertical-stretch: 0;
+            Text {
+                text: PluginsData.half-copy-text;
+                color: Theme.warning;
+                font-size: Type.meta;
+                wrap: word-wrap;
+                min-width: 0px;
+                horizontal-stretch: 1;
+            }
+            if PluginsData.can-clear-half-copies: VerticalLayout {
+                alignment: center;
+                LinkText {
+                    text: "Clear it";
+                    font-size: Type.meta;
+                    clicked => { PluginsData.clear-half-copies(); }
+                }
             }
         }
         // The list, the year strip and the picked plugin's card.
