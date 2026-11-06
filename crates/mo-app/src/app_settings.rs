@@ -56,6 +56,9 @@ pub const FROM_CSHARP: &[&str] = &[
     TAB_KEY,
     shortcuts::SETTING_KEY,
     crate::midi::SOUNDFONT_KEY,
+    crate::sounds::VIEW_KEY,
+    crate::sounds::AUTOPLAY_KEY,
+    crate::sounds::REDISCOVER_COUNT_KEY,
 ];
 
 /// The settings in use: this app's own changes, over the C# app's choices.

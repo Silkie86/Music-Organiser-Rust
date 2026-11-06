@@ -30,7 +30,9 @@ use mo_app::filters::{self, Filter, Shown};
 use mo_app::finder::{self, Kind};
 use mo_app::places::Place;
 use mo_app::shortcuts::{Shortcuts, what_of};
-use mo_app::sounds::{self as list, Filters, Order, SoundCounts, SoundList};
+use mo_app::sounds::{
+    self as list, AUTOPLAY_KEY, Filters, Order, REDISCOVER_COUNT_KEY as COUNT_KEY, SoundCounts, SoundList, VIEW_KEY,
+};
 use mo_app::{log, sweep_timing, to_bitwig, year_strip};
 use mo_audio::play::Player;
 use mo_library::UsageRules;
@@ -51,15 +53,9 @@ use crate::{
 };
 use mo_library::ProjectFile;
 
-/// The view shown last and Autoplay: kept in the app's own settings file under these names as you change them (never
-/// in `library.db`). Until you have, the C# app's own, in `library.db`, stand ([`own_or`], review G-3).
-const VIEW_KEY: &str = "sounds_view";
-const AUTOPLAY_KEY: &str = "sound_lab_autoplay";
 /// The C# app's Settings in `library.db` for which songs count as using a sound.
 const USED_NEEDS_NOTES_KEY: &str = "used_in_needs_notes";
 const USED_NOT_MUTED_KEY: &str = "used_in_not_muted_newest";
-/// How many sounds Rediscover digs out: kept as the view is ([`VIEW_KEY`]).
-const COUNT_KEY: &str = "rediscover_count";
 
 /// The views, in the order of the page's view buttons.
 const TILES: i32 = 0;
@@ -601,12 +597,10 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
                 } else {
                     crate::settings::value(list::HIDE_COPIES_KEY).as_deref() == Some("on")
                 };
-                // The view you picked while the page waited, or else the one you left it on in this app.
-                let view = if p.chose_view {
-                    Some(p.view)
-                } else {
-                    crate::settings::value(VIEW_KEY).map(|v| opening_view(Some(&v)))
-                };
+                // The view you picked while the page waited, or else the one you left it on (read before the Settings
+                // page connects when the app opens on this page: `crate::settings::value`).
+                let view =
+                    if p.chose_view { p.view } else { opening_view(crate::settings::value(VIEW_KEY).as_deref()) };
                 (p.order == Order::Shuffled && !hiding).then_some(Opening { seed: p.seed, view })
             });
             let read = move || {
@@ -704,10 +698,7 @@ struct Read {
     partial: Option<usize>,
     /// Where the galaxy's saved maps are read from: the app's copy of the library, or `sounds.db` without one.
     source: PathBuf,
-    view: Option<String>,
-    count: Option<String>,
     drum_machine: Option<String>,
-    autoplay: Option<String>,
     step_ms: Option<String>,
 }
 
@@ -767,16 +758,13 @@ fn with_usage(
     })
 }
 
-/// The C# app's settings the page uses, from the song library (`library.db`): the view and autoplay you had last,
-/// which songs count as using a sound, and the Most liked weights.
+/// The C# app's settings the page reads from the song library (`library.db`): which songs count as using a sound, and
+/// the Most liked weights. The view, Autoplay and Rediscover's count are the app's own settings, which fall back to the
+/// C# app's (`mo_app::app_settings::FROM_CSHARP`).
 #[derive(Default)]
 struct Settings {
-    view: Option<String>,
-    /// How many sounds Rediscover digs out.
-    count: Option<String>,
     /// The Drum Machine's ID the C# app read from Bitwig's files, for kits sent to Bitwig.
     drum_machine: Option<String>,
-    autoplay: Option<String>,
     /// How long each sound plays while a held arrow key steps through them.
     step_ms: Option<String>,
     rules: UsageRules,
@@ -797,10 +785,7 @@ impl Settings {
         };
         let on = |key: &str| get(key).as_deref() == Some("1");
         Settings {
-            view: get(VIEW_KEY),
-            count: get(COUNT_KEY),
             drum_machine: get(to_bitwig::DRUM_MACHINE_KEY),
-            autoplay: get(AUTOPLAY_KEY),
             step_ms: get(list::STEP_KEY),
             rules: UsageRules { needs_notes: on(USED_NEEDS_NOTES_KEY), not_muted_in_newest: on(USED_NOT_MUTED_KEY) },
             weights: LikedWeights::from_json(get(LIKED_WEIGHTS_KEY).as_deref()),
@@ -836,19 +821,13 @@ fn read_all(sounds_db: &Path, library_db: &Path, cards: Option<Feed>, opening: O
         library,
         partial,
         source,
-        view: settings.view.clone(),
-        count: settings.count.clone(),
         drum_machine: settings.drum_machine.clone(),
-        autoplay: settings.autoplay.clone(),
         step_ms: settings.step_ms.clone(),
     };
     // The list of the first sounds shown, once they're sent: the rest take its place.
     let mut shown_first: Option<Arc<SoundList>> = None;
-    // Only for Tiles and List, which show the shuffled list from its start: the other views need every sound. The
-    // view you picked while the page waited for its sounds, or else the one you had last.
-    let seed = opening
-        .filter(|o| matches!(o.view.unwrap_or_else(|| opening_view(settings.view.as_deref())), TILES | LIST))
-        .map(|o| o.seed);
+    // Only for Tiles and List, which show the shuffled list from its start: the other views need every sound.
+    let seed = opening.filter(|o| matches!(o.view, TILES | LIST)).map(|o| o.seed);
     let first = match &cards {
         Some(cards) => read_through_copy(sounds_db, now, cards, |db| {
             let Some(seed) = seed else { return };
@@ -1066,15 +1045,15 @@ const HISTORY_LENGTH: usize = 500;
 /// to look through and pick from meanwhile.
 const FIRST: usize = 200;
 
-/// How the page opens, as its sounds are about to be read ([`read_all`]): shuffled by `seed`, on the view you picked
-/// while it waited for them (`None`: the one you had last).
+/// How the page opens, as its sounds are about to be read ([`read_all`]): shuffled by `seed`, on `view` (the one you
+/// picked while it waited for them, or else the one you left it on).
 #[derive(Clone, Copy, Debug)]
 struct Opening {
     seed: u64,
-    view: Option<i32>,
+    view: i32,
 }
 
-/// The view the page opens on, with the one you had last as the song library has it (`name`).
+/// The view the page opens on, with the one you left it on by its name (`name`, as kept in the settings).
 fn opening_view(name: Option<&str>) -> i32 {
     name.and_then(|v| VIEWS.iter().position(|n| *n == v)).map_or(TILES, |i| i as i32)
 }
@@ -1732,7 +1711,7 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
         }
     };
     let count =
-        own_or(COUNT_KEY, read.count).and_then(|c| c.parse().ok()).filter(|c| COUNTS.contains(c)).unwrap_or(COUNT);
+        crate::settings::value(COUNT_KEY).and_then(|c| c.parse().ok()).filter(|c| COUNTS.contains(c)).unwrap_or(COUNT);
     if read.partial.is_some() {
         // The first sounds come with their waveforms, the rest without them, these among them: kept, so the tiles on
         // show keep theirs whatever list they're in.
@@ -1746,14 +1725,9 @@ fn loaded(app: &AppWindow, read: Result<Box<Read>, String>) {
         p.step = Duration::from_millis(list::step_ms(read.step_ms.as_deref()));
         p.partial = read.partial;
     });
-    let (view, autoplay) = (own_or(VIEW_KEY, read.view), own_or(AUTOPLAY_KEY, read.autoplay));
+    // As you left them: the app's own settings, else the C# app's (review G-3).
+    let (view, autoplay) = (crate::settings::value(VIEW_KEY), crate::settings::value(AUTOPLAY_KEY));
     show(app, read.library, view.as_deref(), autoplay.as_deref());
-}
-
-/// One of the page's own choices as you left it: the app's own setting once you've changed it in this app, else the
-/// C# app's (`old`, read from `library.db`). On the window's thread, where the app's settings are (review G-3).
-fn own_or(key: &str, old: Option<String>) -> Option<String> {
-    crate::settings::value(key).or(old)
 }
 
 /// All the sounds have arrived after the first few: they take those's place, which keep theirs on show.
@@ -1970,10 +1944,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.on_pick_view(move |v| {
         let Some(app) = weak.upgrade() else { return };
         PAGE.with(|p| p.borrow_mut().pick_view(v));
-        // The page opens on it next time (review G-3).
-        if let Some(name) = usize::try_from(v).ok().and_then(|i| VIEWS.get(i)) {
-            crate::settings::remember(VIEW_KEY, name);
-        }
+        keep_view(v);
         show_lists(&app);
         bring_picked_into_view(&app);
         // Rediscover fills itself the first time it's opened, so it never greets you empty (as in the C# app).
@@ -2277,14 +2248,15 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
 /// Picks `value` on Rediscover's `what`, saying whether that changed anything (its years are picked on the year
 /// strip). "type": as on the Type filter, a click picks one more type or unpicks it, and "" is any type (the
 /// whole-app review of 6 Nov, X3-23: it picked one at most, so Kick then Snare lost Kick). "more-types": the More
-/// types menu's Any, which unpicks the types picked in that menu but keeps the ones picked on chips of their own (in
-/// `chip_types`), as the Type filter's does. "count": one of the counts is always picked.
-fn re_pick(re: &mut rediscover::Options, what: &str, value: &str, chip_types: &[&str]) -> bool {
+/// types menu's Any, which unpicks the types picked in that menu but keeps the ones picked on chips of their own, by
+/// the Type filter's own rule (`types` is the type counts the chips are shown from). "count": one of the counts is
+/// always picked.
+fn re_pick(re: &mut rediscover::Options, what: &str, value: &str, types: &[(String, usize)]) -> bool {
     let before = (re.sound_types.clone(), re.count);
     match what {
         "type" if value.is_empty() => re.sound_types.clear(),
         "type" => filters::toggle(&mut re.sound_types, value, true),
-        "more-types" => re.sound_types.retain(|t| chip_types.iter().any(|c| c.eq_ignore_ascii_case(t))),
+        "more-types" => list::keep_chip_types(&mut re.sound_types, types),
         "count" => {
             if let Some(c) = value.parse().ok().filter(|c| COUNTS.contains(c)) {
                 re.count = c;
@@ -2356,9 +2328,8 @@ fn wire_rediscover(app: &AppWindow) {
         let (again, count) = PAGE.with(|p| {
             let mut p = p.borrow_mut();
             let p = &mut *p;
-            let chip_types: Vec<&str> = p.types.iter().take(list::TYPE_CHIPS).map(|(t, _)| t.as_str()).collect();
             // Picking again only when something changed: a click on the count picked already keeps the list.
-            let changed = re_pick(&mut p.re, &what, &value, &chip_types);
+            let changed = re_pick(&mut p.re, &what, &value, &p.types);
             (changed && p.re_started, (changed && what == "count").then_some(p.re.count))
         });
         // How many is kept for the next start (review G-3).
@@ -2416,6 +2387,7 @@ fn wire_rediscover(app: &AppWindow) {
             p.filters = Filters { folder: Some(folder.to_string()), hide_copies, ..Filters::default() };
             p.pick_view(LIST);
         });
+        keep_view(LIST);
         app.global::<SoundsData>().set_search(SharedString::new());
         refresh(&app);
         show_lists(&app);
@@ -2424,6 +2396,14 @@ fn wire_rediscover(app: &AppWindow) {
 
 /// Each year on the year strip, newest first, with how many sounds it holds.
 type YearCounts = Vec<(i32, usize)>;
+
+/// Keeps the view `v` you moved to for the next start: the page opens on the view you left it on (review G-3), however
+/// you got there.
+fn keep_view(v: i32) {
+    if let Some(name) = usize::try_from(v).ok().and_then(|i| VIEWS.get(i)) {
+        crate::settings::remember(VIEW_KEY, name);
+    }
+}
 
 fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
     let Some(app) = weak.upgrade() else { return };
@@ -3259,8 +3239,8 @@ mod tests {
     #[test]
     fn rediscover_picks_types_as_the_type_filter_does_and_always_a_count() {
         let mut re = rediscover::Options { count: COUNT, ..rediscover::Options::default() };
-        let chips = ["Kick", "Snare"];
-        let mut pick = |what: &str, value: &str| re_pick(&mut re, what, value, &chips);
+        let types = [("Kick".to_owned(), 9), ("Snare".to_owned(), 5)];
+        let mut pick = |what: &str, value: &str| re_pick(&mut re, what, value, &types);
         // As on the Type filter: each click picks one more type, and a click on one picked unpicks it (X3-23).
         assert!(pick("type", "Kick"));
         assert!(pick("type", "Snare"));
@@ -3402,7 +3382,7 @@ mod tests {
     /// The same for a page that opens shuffled by `seed` (the first sounds come first).
     fn one_start_shuffled(sounds_db: &Path, library_db: &Path, cards: &Feed, seed: Option<u64>) -> Vec<String> {
         let got = std::sync::Mutex::new(Vec::new());
-        let opening = seed.map(|seed| Opening { seed, view: None });
+        let opening = seed.map(|seed| Opening { seed, view: TILES });
         read_all(sounds_db, library_db, Some(cards.clone()), opening, |step| {
             let said = match step {
                 Step::Read(Ok(read)) => {
@@ -3514,7 +3494,7 @@ mod tests {
         );
         // They're the start of the whole shuffled list, so nothing on show moves when the rest arrive.
         let (first, rest) = (std::sync::Mutex::new(None), std::sync::Mutex::new(None));
-        read_all(&sounds_db, &library_db, Some(Feed::default()), Some(Opening { seed: 7, view: None }), |step| {
+        read_all(&sounds_db, &library_db, Some(Feed::default()), Some(Opening { seed: 7, view: TILES }), |step| {
             match step {
                 Step::Read(Ok(read)) => {
                     *first.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(read.library.list)
@@ -3558,24 +3538,23 @@ mod tests {
         read.sort_unstable_by_key(|w| w.0);
         assert_eq!(read, wanted);
         // Opening on the galaxy (it needs every star), or with no shuffle to go by (the screenshots): all at once.
-        let galaxy = song_library("first-galaxy-songs.db", &[(VIEW_KEY, "Galaxy")]);
-        let said = one_start_shuffled(&sounds_db, &galaxy, &Feed::default(), Some(7));
-        assert_eq!(said[0], "255 sounds from sounds-rust.db, 0 plays");
-        assert!(!said.iter().any(|s| s.starts_with("the rest")), "{said:?}");
-        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default())[0], "255 sounds from sounds-rust.db, 0 plays");
-        // A view you picked while the page waited counts, not the one you had last.
-        let first_of = |songs: &Path, view: i32| -> Option<usize> {
-            let got = std::sync::Mutex::new(None);
-            let opening = Some(Opening { seed: 7, view: Some(view) });
-            read_all(&sounds_db, songs, Some(Feed::default()), opening, |step| {
-                if let Step::Read(Ok(read)) = step {
-                    *got.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(read.library.list.len());
-                }
+        let first_of = |view: i32| -> Vec<String> {
+            let said = std::sync::Mutex::new(Vec::new());
+            let opening = Some(Opening { seed: 7, view });
+            read_all(&sounds_db, &library_db, Some(Feed::default()), opening, |step| {
+                let line = match step {
+                    Step::Read(Ok(read)) => format!("{} sounds", read.library.list.len()),
+                    Step::Rest(_) => "the rest".to_owned(),
+                    _ => return,
+                };
+                said.lock().unwrap_or_else(std::sync::PoisonError::into_inner).push(line);
             });
-            got.into_inner().ok().flatten()
+            said.into_inner().unwrap_or_default()
         };
-        assert_eq!(first_of(&galaxy, LIST), Some(200));
-        assert_eq!(first_of(&library_db, GALAXY), Some(255));
+        assert_eq!(first_of(GALAXY), ["255 sounds"]);
+        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default())[0], "255 sounds from sounds-rust.db, 0 plays");
+        // List shows the shuffle from its start too.
+        assert_eq!(first_of(LIST), ["200 sounds", "the rest"]);
     }
 
     #[test]
@@ -3893,21 +3872,25 @@ mod tests {
         assert_eq!(used.get(&1).map(|u| u.projects), Some(2));
         assert_eq!(used.get(&2).map(|u| (u.projects, u.recent)), Some((2, 1)));
         assert!(!used.contains_key(&3));
-        assert_eq!((s.view, s.autoplay), (None, None));
         assert_eq!(s.weights, LikedWeights::default());
         // "Only where it has notes": the pad isn't played in Song. And the page's own settings come through.
-        let (s, used) = read(
-            "notes.db",
-            &[
-                (USED_NEEDS_NOTES_KEY, "1"),
-                (VIEW_KEY, "List"),
-                (AUTOPLAY_KEY, "1"),
-                (LIKED_WEIGHTS_KEY, r#"{"Project":7}"#),
-            ],
-        );
+        let (s, used) = read("notes.db", &[(USED_NEEDS_NOTES_KEY, "1"), (LIKED_WEIGHTS_KEY, r#"{"Project":7}"#)]);
         assert_eq!(used.get(&2).map(|u| u.projects), Some(1));
-        assert_eq!((s.view.as_deref(), s.autoplay.as_deref()), (Some("List"), Some("1")));
         assert_eq!(s.weights, LikedWeights { project: 7.0, ..LikedWeights::default() });
+    }
+
+    #[test]
+    fn the_view_autoplay_and_count_you_left_are_there_before_settings_connect() {
+        // The app opening on this page reads its sounds before the Settings page is connected (review of 7cc595f).
+        // Here only the C# app's choices, from the song library: the folder for the app's own settings file isn't there.
+        let kept = [(VIEW_KEY, "List"), (AUTOPLAY_KEY, "1"), (COUNT_KEY, "50")];
+        let library = song_library("kept-choices.db", &kept);
+        let (settings, writable) = crate::settings::load(&library.with_file_name("no-settings-folder"), &library);
+        assert!(writable);
+        for (key, value) in kept {
+            assert_eq!(settings.get(key), Some(value), "{key}");
+            assert_eq!(crate::settings::value(key).as_deref(), Some(value), "{key}");
+        }
     }
 
     #[test]
