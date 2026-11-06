@@ -48,6 +48,7 @@ use crate::index::{held, held_bytes};
 use crate::{ChordSpan, Everything, Peaks, Sound, SoundAnalysis, SoundsDb, SoundsError};
 
 pub mod backup;
+pub mod grow;
 
 /// The copy's name, beside `sounds.db`.
 pub const FILE_NAME: &str = "sounds-rust.db";
