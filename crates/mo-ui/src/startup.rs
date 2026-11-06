@@ -66,6 +66,35 @@ fn secs(d: Duration) -> String {
     format!("{:.2} s", d.as_secs_f64())
 }
 
+/// What to do when the data folder was moved to a drive that isn't there at start.
+pub enum Missing {
+    /// Look again (the drive was just plugged in).
+    TryAgain,
+    /// Open on the old copy in the first folder, knowing changes made now stay there.
+    UseOldCopy,
+    /// Don't open the app.
+    Close,
+}
+
+/// Asks, before the window opens and before any file of the app is opened, what to do about a moved data folder that
+/// can't be found (F-2): `problem` is why. Windows' own buttons (Yes, No, Cancel) carry the three choices.
+pub fn data_folder_missing(problem: &str) -> Missing {
+    let answer = rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Warning)
+        .set_title("Music Organiser: data folder not found")
+        .set_description(format!(
+            "{problem}.\n\nYes: look again (plug the drive in first).\nNo: open on the old copy. It is from before the \
+             move, and changes made now stay in it, not in the moved folder.\nCancel: close the app."
+        ))
+        .set_buttons(rfd::MessageButtons::YesNoCancel)
+        .show();
+    match answer {
+        rfd::MessageDialogResult::Yes => Missing::TryAgain,
+        rfd::MessageDialogResult::No => Missing::UseOldCopy,
+        _ => Missing::Close,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

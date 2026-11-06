@@ -106,6 +106,24 @@ impl Feed {
         Job { feed: self.clone(), id, finished: false }
     }
 
+    /// A card that isn't a job: a warning that stays until its × takes it away (it never times out, as a failed job's
+    /// card does), for something true the whole run, such as the app using an old copy of its data.
+    pub fn notice(&self, title: &str, detail: &str) {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.lock().cards.push(Card {
+            id,
+            title: title.to_owned(),
+            detail: detail.to_owned(),
+            progress: None,
+            state: State::Failed,
+            put_away: false,
+            started: Instant::now(),
+            ended: None,
+        });
+        log::warning("Notice", &format!("{title}{}", bracket(detail)));
+        self.changed();
+    }
+
     /// The cards to show now, oldest first: put-away ones and finished ones past their time are left out.
     pub fn visible(&self, now: Instant) -> Vec<Card> {
         self.lock().cards.iter().filter(|c| !c.put_away && !c.gone_by(now)).cloned().collect()
@@ -387,5 +405,17 @@ mod tests {
         feed.send_held_progress();
         assert_eq!(calls.load(Ordering::Relaxed), before + 1, "only once");
         job.done("");
+    }
+
+    #[test]
+    fn a_notice_stays_until_its_cross() {
+        let feed = Feed::default();
+        feed.notice("Using the old copy of your data", "The drive is missing");
+        let later = Instant::now() + FAILED_STAYS * 100;
+        assert_eq!(feed.visible(later).len(), 1);
+        assert!(!feed.tidy(later));
+        assert_eq!(feed.running(), 0);
+        feed.dismiss(feed.visible(later)[0].id);
+        assert!(feed.visible(later).is_empty());
     }
 }
