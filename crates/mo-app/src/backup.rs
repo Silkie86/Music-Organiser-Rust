@@ -35,9 +35,9 @@ use crate::song_room::{Others, song_saves};
 pub const SETTINGS_FILE: &str = "backup.txt";
 
 /// The ending of a settings file's temporary name, renamed once it's whole, so a crash part way leaves the old one
-/// whole. The app's own settings ([`crate::app_settings::save`]) use `<name>.mo-part`, which the start-up sweep (rule 28)
-/// clears; [`Settings::save`] and [`BackedUp::save`] use one of each save's own ([`write_whole`]), which the next save
-/// clears.
+/// whole. The app's own settings ([`crate::app_settings::save`]) use `<name>.mo-part`; [`Settings::save`] and
+/// [`BackedUp::save`] use one of each save's own, `<name>.<process>-<count>.mo-part` ([`write_whole`]), which the next
+/// save of the same file clears. The start-up sweep (rule 28) clears both kinds ([`is_part_of`]).
 pub const PART_ENDING: &str = ".mo-part";
 
 /// The two formats.
@@ -176,7 +176,7 @@ pub fn write_whole(path: &Path, text: &str) -> io::Result<()> {
     let (mut f, part) = loop {
         tries += 1;
         let n = SAVES.fetch_add(1, Ordering::Relaxed);
-        let part = path.with_file_name(format!("{name}.{}-{n}.mo-part", std::process::id()));
+        let part = path.with_file_name(part_name(&name, std::process::id(), n));
         match fs::File::create_new(&part) {
             Ok(f) => break (f, part),
             // Left by an earlier app with the same process number: the next name.
@@ -196,14 +196,31 @@ pub fn write_whole(path: &Path, text: &str) -> io::Result<()> {
     written
 }
 
-/// Removes temporary files of `path` (named `<name>.mo-part` or `<name>.<…>.mo-part`) ten minutes old or more.
+/// The temporary name [`write_whole`] gives the file named `name` in the app with process id `process`, for its
+/// save number `count`: `<name>.<process>-<count>.mo-part`.
+fn part_name(name: &str, process: u32, count: u64) -> String {
+    format!("{name}.{process}-{count}{PART_ENDING}")
+}
+
+/// Whether `name` is a temporary name of the file named `file`, as the app writes one: `<file>.mo-part`
+/// ([`crate::app_settings::write_checked`]) or `<file>.<process>-<count>.mo-part` ([`write_whole`]), the process id
+/// and the count both digits only. Nothing else: not `<file>.mo-part.bak`, nor `<file>.old.mo-part`.
+pub fn is_part_of(name: &str, file: &str) -> bool {
+    let Some(middle) = name.strip_prefix(file).and_then(|rest| rest.strip_suffix(PART_ENDING)) else { return false };
+    middle.is_empty()
+        || middle
+            .strip_prefix('.')
+            .and_then(|m| m.split_once('-'))
+            .is_some_and(|(process, count)| crate::tidy::is_number(process) && crate::tidy::is_number(count))
+}
+
+/// Removes temporary files of `path` ([`is_part_of`]) ten minutes old or more.
 fn clear_left_parts(path: &Path, name: &str) {
     let Some(folder) = path.parent() else { return };
     let Ok(dir) = fs::read_dir(folder) else { return };
     for entry in dir.flatten() {
         let other = entry.file_name().to_string_lossy().into_owned();
-        let Some(middle) = other.strip_prefix(name).and_then(|rest| rest.strip_suffix(".mo-part")) else { continue };
-        if !(middle.is_empty() || middle.starts_with('.')) {
+        if !is_part_of(&other, name) {
             continue;
         }
         let old = entry.metadata().ok().filter(fs::Metadata::is_file).and_then(|m| m.modified().ok());
@@ -1139,6 +1156,32 @@ pub fn when_text(when: NaiveDateTime, now: NaiveDateTime) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_temporary_names_the_app_gives_and_no_others_are_a_files_parts() {
+        // Both ways the app names one: written whole by this file, and by the app's settings.
+        assert!(is_part_of(&part_name(SETTINGS_FILE, 4120, 0), SETTINGS_FILE));
+        assert!(is_part_of(&part_name(SONGS_FILE, u32::MAX, u64::MAX), SONGS_FILE));
+        assert!(is_part_of("backup.txt.mo-part", SETTINGS_FILE));
+        assert!(is_part_of("backup.txt.1-22.mo-part", SETTINGS_FILE));
+        for not in [
+            "backup.txt",
+            "backup.txt.mo-part.bak",
+            "backup.txt.old.mo-part",
+            "backup.txt.4120.mo-part",
+            "backup.txt.4120-.mo-part",
+            "backup.txt.-0.mo-part",
+            "backup.txt.41a-0.mo-part",
+            "backup.txt.1-2-3.mo-part",
+            "backup.txt.+1-2.mo-part",
+            "backup.txt4120-0.mo-part",
+            "my backup.txt.1-2.mo-part",
+            "backup-songs.txt.1-2.mo-part",
+            "backup.txt.1-2.mo-part-3",
+        ] {
+            assert!(!is_part_of(not, SETTINGS_FILE), "{not}");
+        }
+    }
 
     #[test]
     fn settings_keep_through_their_file() {
