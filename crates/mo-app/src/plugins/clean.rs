@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use mo_library::plugins::SampleIndex;
 use mo_library::{Library, LibraryError};
 use mo_space::admin::Admin;
-use mo_space::clean::{Bin, Done, NOT_IN_BIN, Problem, Removed, What};
+use mo_space::clean::{Bin, Done, NOT_IN_BIN, Problem, Removed, Room, What};
 use mo_space::key;
 use mo_space::plugin_clean::{self, CleanLine, PluginUse as CleanUse};
 use mo_space::plugin_space::{PluginSpace, SpaceKind};
@@ -242,7 +242,8 @@ pub fn intro(inputs: &Inputs, lines: &[CleanLine]) -> String {
     s
 }
 
-/// What a clean-up did: "Freed 4.2 GB. 2 folders are in the Recycle Bin.", and each problem.
+/// What a clean-up did: "Sent 4.2 GB: 2 folders are in the Recycle Bin, so you can put them back.", and each problem.
+/// Not "freed": the Recycle Bin is on the same drive, so the room comes back once you empty it (as on Space).
 pub fn done_text(done: &Done) -> (String, Vec<String>) {
     let went = done.removed.len();
     // One Windows removed for good (too big for the bin, and you said yes) isn't there to put back.
@@ -254,8 +255,14 @@ pub fn done_text(done: &Done) -> (String, Vec<String>) {
     } else if binned == 0 {
         format!("Freed {}. None of it is in the Recycle Bin: the lines below say why.", size_text(done.bytes()))
     } else {
+        // What went but Windows removed for good counts in what was sent, as on Space, and says so.
+        let lost = match lost {
+            0 => String::new(),
+            1 => " 1 went but wasn't found there: the lines below say why.".to_owned(),
+            n => format!(" {n} went but weren't found there: the lines below say why."),
+        };
         format!(
-            "Freed {}. {} in the Recycle Bin, so you can put {} back.",
+            "Sent {}: {} in the Recycle Bin, so you can put {} back.{lost}",
             size_text(done.bytes()),
             {
                 let (one, many) = things(done.removed.iter());
@@ -355,8 +362,8 @@ fn sentence(why: &str) -> String {
 /// A bin that notes what it sent, so a clean-up that stopped on a bug part way still knows what went
 /// ([`Watched::went`]). What went in Windows' administrator step goes another way and isn't noted: after such a stop
 /// that is only found in the Recycle Bin by hand.
-/// Each of [`Bin`]'s ways is passed on to `bin` (as `mo_space::clean::Heard` does): a way added to [`Bin`] later must be
-/// passed on here too, or its default would stand in for `bin`'s own.
+/// Each of [`Bin`]'s ways is passed on to `bin` (as `mo_space::clean::Heard` does, and a test checks each one): a way
+/// added to [`Bin`] later must be passed on here too, or its default would stand in for `bin`'s own.
 pub struct Watched<'a> {
     bin: &'a (dyn Bin + Sync),
     sent: Mutex<Vec<(String, i64)>>,
@@ -436,6 +443,9 @@ impl Bin for Watched<'_> {
     }
     fn refuses_quietly(&self, path: &Path, bytes: u64) -> Option<String> {
         self.bin.refuses_quietly(path, bytes)
+    }
+    fn room(&self, real: &Path) -> Option<Result<Room, String>> {
+        self.bin.room(real)
     }
     fn going(&self, removed: &Removed) {
         self.bin.going(removed);

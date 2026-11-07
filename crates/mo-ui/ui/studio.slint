@@ -191,11 +191,16 @@ export component Tip {
     height: 0;
     property <bool> wanted: hovering && (text != "" || key != "");
     property <bool> mine;
+    // The words it put up: once its own words change, they're how it knows the tip on show is still its own.
+    property <string> put-text;
+    property <string> put-key;
     Timer {
         interval: 600ms;
         running: root.wanted && !root.mine;
         triggered => {
             root.mine = true;
+            root.put-text = root.text;
+            root.put-key = root.key;
             TipState.text = root.text;
             TipState.key = root.key;
             TipState.x = root.absolute-position.x + root.at-x;
@@ -220,7 +225,7 @@ export component Tip {
     function put-away() {
         if (root.mine) {
             root.mine = false;
-            if (TipState.text == root.text && TipState.key == root.key) {
+            if (TipState.text == root.put-text && TipState.key == root.put-key) {
                 TipState.shown = false;
             }
         }
@@ -441,8 +446,11 @@ export component Well inherits Rectangle {
     border-color: Theme.edge;
 }
 
-// A small × button, for putting a card away.
+// A small × button, for putting a card away or taking a line off a list.
 export component CloseButton inherits Rectangle {
+    // What it does, shown when the mouse rests on it; none for a card's own ×.
+    in property <string> tip;
+    in property <bool> enabled: true;
     callback clicked;
     width: 20px;
     height: 20px;
@@ -450,13 +458,19 @@ export component CloseButton inherits Rectangle {
     background: touch.has-hover ? Theme.hover : transparent;
     Text {
         text: "×";
-        color: Theme.muted;
+        color: root.enabled ? Theme.muted : Theme.faint;
         font-size: Type.body;
         horizontal-alignment: center;
         vertical-alignment: center;
     }
     touch := TouchArea {
+        enabled: root.enabled;
         clicked => { root.clicked(); }
+    }
+    Tip {
+        text: root.tip;
+        hovering: touch.has-hover && !touch.pressed;
+        at-y: root.height + Space.xs;
     }
 }
 
@@ -1721,6 +1735,59 @@ export component Dot inherits Rectangle {
     background: tint;
 }
 
+// One line under the rail's "In your DAWs": the DAW, what it has open (or that it isn't linked), whether its link
+// answers, and the tooltip (mo_app::rail_daws::RailDaw).
+export struct DawLine {
+    daw: string,
+    text: string,
+    linked: bool,
+    tip: string,
+}
+
+// A DAW's line on the rail: a light (lit while its link answers), its name, and what it has open under it. A click
+// shows the song open there on Songs when it's one of yours, or Settings on the DAWs tab.
+export component RailDawLine inherits Rectangle {
+    in property <DawLine> line;
+    callback clicked;
+    height: 36px;
+    border-radius: Theme.radius;
+    background: touch.has-hover ? Theme.hover : transparent;
+    HorizontalLayout {
+        padding-left: Space.md;
+        padding-right: Space.sm;
+        spacing: Space.sm;
+        VerticalLayout {
+            alignment: center;
+            Dot {
+                tint: root.line.linked ? Theme.ok : Theme.faint;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: root.line.daw;
+                color: Theme.muted;
+                font-size: Type.meta;
+            }
+            Text {
+                text: root.line.text;
+                color: root.line.linked ? Theme.text : Theme.faint;
+                font-size: Type.meta;
+                overflow: elide;
+            }
+        }
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    Tip {
+        text: root.line.tip;
+        hovering: touch.has-hover && !touch.pressed;
+        at-x: root.width + Space.xs;
+        at-y: Space.xs;
+    }
+}
+
 // How full or how far, as a level meter: lit segments like the LEDs on a mixer's channel, the same everywhere a
 // share is shown. Segments 4px wide (one gap of 2px between), as many as fit.
 export component Meter inherits Rectangle {
@@ -2381,6 +2448,10 @@ export component FolderRow inherits Rectangle {
     in property <[string]> modes;
     // The picked mode; the page sets it when told of a pick.
     in property <int> mode;
+    // Whether the row has its × (a list you can't change has none), whether it can be pressed now, and what it does.
+    in property <bool> removable: true;
+    in property <bool> enabled: true;
+    in property <string> remove-tip: "Take this folder off the list (nothing on disk changes)";
     callback mode-picked(int);
     callback remove;
     height: 44px;
@@ -2388,7 +2459,7 @@ export component FolderRow inherits Rectangle {
         padding-left: Space.md;
         padding-right: Space.sm;
         spacing: Space.md;
-        Text {
+        path-text := Text {
             text: root.path;
             color: Theme.text;
             font-size: Type.body;
@@ -2411,11 +2482,26 @@ export component FolderRow inherits Rectangle {
                 picked(i) => { root.mode-picked(i); }
             }
         }
-        VerticalLayout {
+        if root.removable: VerticalLayout {
             alignment: center;
             CloseButton {
+                tip: root.remove-tip;
+                enabled: root.enabled;
                 clicked => { root.remove(); }
             }
         }
+    }
+    // The whole path, for one cut short with "…" (two long ones that differ only at the end look the same).
+    path-touch := TouchArea {
+        x: path-text.x;
+        y: 0;
+        width: path-text.width;
+        height: root.height;
+    }
+    Tip {
+        text: root.path;
+        hovering: path-touch.has-hover;
+        at-x: path-text.x;
+        at-y: root.height;
     }
 }

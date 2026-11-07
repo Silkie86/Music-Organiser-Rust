@@ -60,19 +60,31 @@ pub const SONGS_LISTED: usize = 10;
 /// How many songs the thinning card lists before it adds up the rest in one line.
 pub const THIN_LISTED: usize = 30;
 
-/// The activity card's title while Remove is on.
-pub const REMOVING: &str = "Removing old autosaves and caches";
+/// The activity card's title while they're sent to the bin.
+pub const REMOVING: &str = if cfg!(windows) {
+    "Sending old autosaves and caches to the Recycle Bin"
+} else {
+    "Sending old autosaves and caches to the Trash"
+};
 
 /// Why every ticked one stays when Remove couldn't read your songs from the library, to measure them again.
 pub const CANT_CHECK: &str =
     "Your songs couldn't be read from the library to check it again (the log says why), so it stays.";
 
-/// What a kind's line says when Remove doesn't take it yet: identical saves (the library lists them) and audio no save
-/// seems to use (you listen to each first).
-pub const NOT_YET: &str = "Remove doesn't take these yet.";
+/// What a kind's line says when the card can't send it to the bin yet: identical saves (the library lists them) and
+/// audio no save seems to use (you listen to each first).
+pub const NOT_YET: &str = if cfg!(windows) {
+    "These can't go to the Recycle Bin from here yet."
+} else {
+    "These can't go to the Trash from here yet."
+};
 
-/// Why one picked stays when Remove doesn't take its kind yet.
-const NOT_YET_STAYS: &str = "Remove doesn't take these from here yet, so it stays.";
+/// Why one picked stays when the card can't send its kind to the bin yet.
+pub const NOT_YET_STAYS: &str = if cfg!(windows) {
+    "This kind can't go to the Recycle Bin from here yet, so it stays."
+} else {
+    "This kind can't go to the Trash from here yet, so it stays."
+};
 
 /// What the compact card says always stays.
 const STAYS: &str = "The save each song opens stays where it is, and so does every sample.";
@@ -454,8 +466,8 @@ pub fn removing_words() -> String {
     format!("Each one is checked again just before it goes to the {BIN}.")
 }
 
-/// The activity card's line once Remove is done: what was freed, what's in the bin, what went but wasn't found there,
-/// and what stayed. Err when nothing went (the card then fails).
+/// The activity card's line once Remove is done: how much was sent to the bin, what's in it, what went but wasn't found
+/// there, and what stayed. Err when nothing went (the card then fails).
 pub fn removed_words(done: &Done) -> Result<String, String> {
     let said: HashSet<&str> = done.problems.iter().map(|p| p.path.as_str()).collect();
     let in_bin = done.removed.iter().filter(|r| !said.contains(r.path.as_str()));
@@ -890,8 +902,8 @@ fn remove_note(keep: usize, can_put_back: bool, guarded: bool) -> String {
         n => format!(", and so do the newest {n} autosaves of each song"),
     };
     let checks = format!(
-        "Remove sends the ticked autosaves and caches to the {BIN}, each checked again just before it goes: one that \
-         changed since stays{newest}."
+        "The ticked autosaves and caches go to the {BIN}, each checked again just before it goes: one that changed \
+         since stays{newest}."
     );
     let back = match (can_put_back, guarded) {
         (true, false) => format!("Put back returns them until you empty the {BIN}."),
@@ -1403,7 +1415,7 @@ mod tests {
         let free: u64 = picked.iter().map(|i| i.item.bytes).sum();
         assert_eq!(
             removing.remove_button(Some(&shown), false, &PutBacks::default()),
-            Some((format!("Remove {}", size_text(free)), true))
+            Some((space_removing::send_words(free), true))
         );
         // A file's own path on a tick isn't one of the card's: nothing changes.
         let before = removing.clone();
@@ -1420,7 +1432,7 @@ mod tests {
         assert_eq!(card.note, format!("Checking each ticked one again, then sending it to the {BIN}…"));
         assert_eq!(
             removing.remove_button(Some(&shown), false, &PutBacks::default()),
-            Some(("Removing…".into(), false))
+            Some((space_removing::sending_words(), false))
         );
     }
 
@@ -1429,9 +1441,9 @@ mod tests {
         assert_eq!(
             remove_note(5, true, false),
             format!(
-                "Remove sends the ticked autosaves and caches to the {BIN}, each checked again just before it goes: \
-                 one that changed since stays, and so do the newest 5 autosaves of each song. Put back returns them \
-                 until you empty the {BIN}. {STAYS}"
+                "The ticked autosaves and caches go to the {BIN}, each checked again just before it goes: one that \
+                 changed since stays, and so do the newest 5 autosaves of each song. Put back returns them until you \
+                 empty the {BIN}. {STAYS}"
             )
         );
         assert!(remove_note(1, true, false).contains("stays, and so does the newest autosave of each song."));
@@ -1491,7 +1503,7 @@ mod tests {
         removing.sent(WHEN, done);
         let card = compact_card(Some(&shown), &removing, true);
         let freed: u64 = picked.iter().filter(|i| i.item.path != changed).map(|i| i.item.bytes).sum();
-        assert_eq!(card.big, format!("Freed {}", size_text(freed)));
+        assert_eq!(card.big, format!("Sent {}", size_text(freed)));
         // What's in the bin is counted by kind; what stayed only by how many.
         let in_bin = picked.len() - 2;
         assert_eq!(card.big_note, format!("{in_bin} old autosaves and 1 cache are in the {BIN}, and 1 stayed"));
@@ -1638,7 +1650,7 @@ mod tests {
         let done = Done { removed, ..Done::default() };
         assert_eq!(
             removed_words(&done),
-            Ok(format!("Freed {}: 3 old autosaves and 1 cache are in the {BIN}.", size_text(done.bytes())))
+            Ok(format!("Sent {}: 3 old autosaves and 1 cache are in the {BIN}.", size_text(done.bytes())))
         );
         // One that went but wasn't found in the bin is counted on its own.
         let first = done.removed.first().map(|r| r.path.clone()).unwrap_or_default();
@@ -1646,7 +1658,7 @@ mod tests {
         assert_eq!(
             removed_words(&lost),
             Ok(format!(
-                "Freed {}: 2 old autosaves and 1 cache are in the {BIN}, and 1 went but wasn't found there.",
+                "Sent {}: 2 old autosaves and 1 cache are in the {BIN}, and 1 went but wasn't found there.",
                 size_text(done.bytes())
             ))
         );
@@ -1654,7 +1666,7 @@ mod tests {
             removed: done.removed.iter().filter(|r| r.what == What::Song(CompactKind::Cache)).cloned().collect(),
             ..Done::default()
         };
-        assert_eq!(removed_words(&caches), Ok(format!("Freed 30 MB: 1 cache is in the {BIN}.")));
+        assert_eq!(removed_words(&caches), Ok(format!("Sent 30 MB: 1 cache is in the {BIN}.")));
         assert_eq!(removed_words(&Done::default()), Err("Nothing was removed.".to_owned()));
     }
 

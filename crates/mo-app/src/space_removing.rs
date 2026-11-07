@@ -324,14 +324,14 @@ impl<T: Removable> Removing<T> {
         put_backs: &PutBacks,
     ) -> Option<(String, bool)> {
         match &self.stage {
-            Stage::Sending(_) => Some(("Removing…".to_owned(), false)),
+            Stage::Sending(_) => Some((sending_words(), false)),
             Stage::Picking if found.is_some_and(|f| f.items().iter().any(Removable::can_go)) => {
                 let mut ticked = self.each_ticked(found).peekable();
                 if ticked.peek().is_none() {
                     Some(("Nothing ticked".to_owned(), false))
                 } else {
                     let can = !wait && put_backs.going.is_none();
-                    Some((format!("Remove {}", size_text(free_bytes(ticked))), can))
+                    Some((send_words(free_bytes(ticked)), can))
                 }
             }
             _ => None,
@@ -385,25 +385,37 @@ pub fn after_crash<T: Removable>(picked: &[T], went: Vec<Removed>, still_there: 
     Done { removed, problems, went_with: Vec::new() }
 }
 
-/// Why one picked stays when Remove stopped with an error (logged as a crash) before it was sent.
-pub fn crashed_words() -> String {
-    "Remove stopped with an error (the log says which) before this went, so it stays.".to_owned()
+/// The clean-up button's words: "Send 12 GB to the Recycle Bin" (the whole-app review of 6 Nov, X3-11). It's the main
+/// button, as Plugins' clean-up is: what goes can come back (Put back), and "Remove" in red is kept for what goes for
+/// good.
+pub fn send_words(bytes: u64) -> String {
+    format!("Send {} to the {BIN}", size_text(bytes))
 }
 
-/// Why one picked that waited for Windows' administrator step is said to be where it was, when Remove stopped with an
+/// The clean-up button's words while it runs.
+pub fn sending_words() -> String {
+    format!("Sending to the {BIN}\u{2026}")
+}
+
+/// Why one picked stays when sending to the bin stopped with an error (logged as a crash) before it was sent.
+pub fn crashed_words() -> String {
+    format!("Sending to the {BIN} stopped with an error (the log says which) before this went, so it stays.")
+}
+
+/// Why one picked that waited for Windows' administrator step is said to be where it was, when sending stopped with an
 /// error (logged as a crash) as Windows was asked: the step goes on by itself, so it may go yet.
 pub fn crashed_waiting_words() -> String {
     format!(
-        "Remove stopped with an error (the log says which) as Windows was asked about this: it was still there then, \
+        "Sending stopped with an error (the log says which) as Windows was asked about this: it was still there then, \
          but may go to the {BIN} yet. Measure again shows where it is."
     )
 }
 
-/// Why one picked isn't said to have gone, though it isn't where it was, when Remove stopped with an error (logged as a
-/// crash): it may have gone just as it stopped, without being noted.
+/// Why one picked isn't said to have gone, though it isn't where it was, when sending stopped with an error (logged as
+/// a crash): it may have gone just as it stopped, without being noted.
 pub fn crashed_gone_words() -> String {
     format!(
-        "Remove stopped with an error (the log says which) as this went: it isn't where it was, so it may be in the \
+        "Sending stopped with an error (the log says which) as this went: it isn't where it was, so it may be in the \
          {BIN}."
     )
 }
@@ -482,9 +494,10 @@ impl<F: Fn(usize) -> String> Noun for F {
     }
 }
 
-/// "Freed 9.1 GB" once something went; "" when nothing did.
+/// "Sent 9.1 GB" once something went to the bin; "" when nothing did. Not "freed": the bin is on the same drive, so
+/// the room only comes back once you empty it (the Space page counts what's in it as taking room).
 pub fn freed_words<T>(sent: &Sent<T>) -> String {
-    if sent.done.removed.is_empty() { String::new() } else { format!("Freed {}", size_text(sent.done.bytes())) }
+    if sent.done.removed.is_empty() { String::new() } else { format!("Sent {}", size_text(sent.done.bytes())) }
 }
 
 /// How a removal went, as the card's big figures' note and the line say it, counting with `noun` ("1 spare copy", "10
@@ -554,8 +567,8 @@ pub fn gone<T: Removable>(item: &T, sent: &Sent<T>, stage: &Stage<T>) -> bool {
     sent.went(item) && !back
 }
 
-/// The activity card's line once Remove is done, counting with `noun` ("1 copy", "10 copies"): what was freed, what's
-/// in the bin, what went but wasn't found there, and what stayed. Err when nothing went (the card then fails).
+/// The activity card's line once Remove is done, counting with `noun` ("1 copy", "10 copies"): how much was sent to the
+/// bin, what's in it, what went but wasn't found there, and what stayed. Err when nothing went (the card then fails).
 pub fn removed_words(done: &Done, noun: &dyn Noun) -> Result<String, String> {
     let said: HashSet<&str> = done.problems.iter().map(|p| p.path.as_str()).collect();
     let went: HashSet<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
@@ -584,12 +597,13 @@ pub fn removed_words(done: &Done, noun: &dyn Noun) -> Result<String, String> {
         0 => String::new(),
         m => format!("; {} stayed (the Space page says why)", thousands(m)),
     };
-    Ok(format!("Freed {}: {}{stayed}.", size_text(done.bytes()), clauses(&said)))
+    Ok(format!("Sent {}: {}{stayed}.", size_text(done.bytes()), clauses(&said)))
 }
 
-/// A card's big figure, its note and the note under its list once Remove has run, counting with `noun`: what was freed
-/// and how it went, and what Put back does (`can_put_back`: the app can put things back here, which a Mac's Trash
-/// doesn't let it; for what went as administrator, Windows asks once); then, once Put back has run, what came back.
+/// A card's big figure, its note and the note under its list once Remove has run, counting with `noun`: how much was
+/// sent to the bin and how it went (its room comes back once you empty the bin), and what Put back does
+/// (`can_put_back`: the app can put things back here, which a Mac's Trash doesn't let it; for what went as
+/// administrator, Windows asks once); then, once Put back has run, what came back.
 pub fn result_figures<T: Removable>(
     sent: &Sent<T>,
     stage: &Stage<T>,
@@ -605,19 +619,19 @@ pub fn result_figures<T: Removable>(
     let note = match (sent.binned().next().is_some(), can_put_back) {
         (false, _) => String::new(),
         (true, true) if from_guarded => format!(
-            "They're in the {BIN}. Put back returns each one to where it was, until you empty the {BIN}. {ADMIN_BACK} \
-             The app never empties it for you."
+            "They're in the {BIN}: their room comes back once you empty it. Until then, Put back returns each one to \
+             where it was. {ADMIN_BACK} The app never empties it for you."
         ),
         (true, true) => format!(
-            "They're in the {BIN}. Put back returns each one to where it was, until you empty the {BIN}. The app never \
-             empties it for you."
+            "They're in the {BIN}: their room comes back once you empty it. Until then, Put back returns each one to \
+             where it was. The app never empties it for you."
         ),
         (true, false) => format!(
-            "They're in the {BIN}. Until you empty it, Finder's Put Back returns each one to where it was: select them \
-             there and choose Put Back. The app never empties it for you."
+            "They're in the {BIN}: their room comes back once you empty it. Until then, Finder's Put Back returns each \
+             one to where it was: select them there and choose Put Back. The app never empties it for you."
         ),
     };
-    let big = if sent.done.removed.is_empty() { "Nothing freed".to_owned() } else { freed_words(sent) };
+    let big = if sent.done.removed.is_empty() { "Nothing sent".to_owned() } else { freed_words(sent) };
     let big_note =
         if matches!(stage, Stage::PuttingBack(_)) { "Putting them back…".to_owned() } else { sent_words(sent, noun) };
     (big, big_note, note)

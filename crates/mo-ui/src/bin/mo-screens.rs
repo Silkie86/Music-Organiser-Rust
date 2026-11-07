@@ -46,6 +46,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let feed = Feed::default();
     let app = mo_ui::new_app(&graphite, Shortcuts::default(), Place::Songs, feed.clone())?;
     app.show()?;
+    // The rail's "In your DAWs", as when Bitwig has a song open: the screenshots never reach a real DAW (rule 11).
+    let open = "Open in Bitwig now. A click shows it on Songs, or Settings \u{203a} DAWs when it isn't one of your \
+                songs.";
+    mo_ui::daws::show(
+        &app,
+        &[mo_app::rail_daws::RailDaw {
+            daw: "Bitwig",
+            text: "Night Drive".into(),
+            linked: true,
+            tip: open.into(),
+            project: "Night Drive".into(),
+        }],
+    );
     mo_ui::songs::show_sample(&app, sample_songs());
     // The Sounds page, worked out in place too, from made-up sounds.
     mo_ui::sounds::compute_here();
@@ -555,6 +568,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     app.set_note_open(false);
     key_checks(&app)?;
+    rail_checks(&app)?;
+    Ok(())
+}
+
+/// The rail's "In your DAWs" line (the 6 Nov review's X3-9, and the code review on it): a click shows the song Bitwig
+/// has open on Songs when it's one of yours (by the name Bitwig shows, in any case), or Settings on its DAWs tab when
+/// it isn't. The lines are made up: nothing here reaches a real DAW (rule 11).
+fn rail_checks(app: &mo_ui::AppWindow) -> Result<(), String> {
+    use mo_app::rail_daws::RailDaw;
+    use mo_app::settings::Tab;
+    mo_ui::daws::wire(app);
+    let open = |project: &str| RailDaw {
+        daw: "Bitwig",
+        text: project.into(),
+        linked: true,
+        project: project.into(),
+        ..RailDaw::default()
+    };
+    start_on_songs(app);
+    mo_ui::daws::show(app, &[open("glass harbour")]);
+    app.invoke_daw_line_clicked(0);
+    let shown = app.global::<mo_ui::SongsData>().get_song().name;
+    if app.get_place() != Place::Songs.index() as i32 || shown != "Glass Harbour" {
+        return Err(format!("rail: a click on Bitwig's glass harbour showed {shown:?} (place {})", app.get_place()));
+    }
+    // Not one of your songs: Settings, on the DAWs tab.
+    mo_ui::daws::show(app, &[open("Not One Of Yours")]);
+    app.invoke_daw_line_clicked(0);
+    let tab = app.global::<mo_ui::SettingsData>().get_tab();
+    if app.get_place() != Place::Settings.index() as i32 || tab != Tab::Daws.index() as i32 {
+        return Err(format!("rail: a click on a song not yours went to place {}, tab {tab}", app.get_place()));
+    }
     Ok(())
 }
 
@@ -1827,6 +1872,10 @@ fn sample_songs() -> mo_app::songs::Songs {
         Save { tempo: Some(85.0), ..save("Old Tapes", "FL Studio", 2200) },
     ];
     saves.sort_by_key(|s| std::cmp::Reverse(s.modified));
+    // Each save its own id, as in the library (the rail's line finds a song by its save's id).
+    for (id, save) in (1..).zip(&mut saves) {
+        save.id = id;
+    }
     let tags = vec!["dark".into(), "live set".into()];
     mo_app::songs::Songs::from_saves(&saves, &mo_library::SongChoices::default(), tags, 3, Some(false))
 }

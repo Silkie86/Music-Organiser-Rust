@@ -138,6 +138,8 @@ fn main() -> Result<(), slint::PlatformError> {
     // Space: the drives your folders are on and the app's own files, looked at once the page shows.
     mo_ui::space::connect(&app, library.clone(), feed.clone());
     mo_ui::startup::step("Space page");
+    // The rail's "In your DAWs": what Bitwig has open, asked on a thread of its own.
+    mo_ui::daws::connect(&app);
     app.window().set_maximized(true);
     // A little after start, the MIDI files older drags left in Temp (rule 28).
     mo_ui::drag::sweep_later();
@@ -164,6 +166,8 @@ fn main() -> Result<(), slint::PlatformError> {
         // A line of how the run ends: it shows even once the log is full.
         log::last(log::Level::Error, "App", &format!("The window stopped with an error: {e}"));
     }
+    // The rail's DAW watch stops asking Bitwig.
+    mo_ui::daws::finish_up();
     // A plugin move still copying is told to stop, its copy cleared, rather than leave a half copy on the other drive.
     mo_ui::plugins::stop_moves();
     // A settings change still waiting to be written goes now.

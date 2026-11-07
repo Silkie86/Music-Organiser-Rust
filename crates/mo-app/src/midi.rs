@@ -37,13 +37,26 @@ pub enum Order {
 impl Order {
     pub const ALL: [Order; 5] = [Order::Newest, Order::Name, Order::Key, Order::Bars, Order::Copies];
 
+    /// The order's chip, in the words Sounds and Plugins use for theirs ("Newest", not "Newest first": the whole-app
+    /// review of 6 Nov, X3-5).
     pub fn name(self) -> &'static str {
         match self {
-            Order::Newest => "Newest first",
+            Order::Newest => "Newest",
             Order::Name => "Name",
             Order::Key => "Key",
-            Order::Bars => "Longest first",
+            Order::Bars => "Longest",
             Order::Copies => "In most files",
+        }
+    }
+
+    /// The order as the line over the list says it: "newest first".
+    pub fn words(self) -> &'static str {
+        match self {
+            Order::Newest => "newest first",
+            Order::Name => "by name",
+            Order::Key => "by key",
+            Order::Bars => "longest first",
+            Order::Copies => "in most files first",
         }
     }
 
@@ -816,8 +829,8 @@ pub fn result_text(shown: usize, all: usize, order: Order, target: Option<Target
             format!("{n} longer {}, longest first", if shown == 1 { "phrase" } else { "phrases" })
         }
         None if shuffled => format!("Shuffled · {n} of {}", thousands(all)),
-        None if shown == all => format!("{n} parts, {}", order.name().to_lowercase()),
-        None => format!("{n} of {} parts, {}", thousands(all), order.name().to_lowercase()),
+        None if shown == all => format!("{n} parts, {}", order.words()),
+        None => format!("{n} of {} parts, {}", thousands(all), order.words()),
     }
 }
 
@@ -1398,6 +1411,10 @@ mod tests {
         assert_eq!(bars_text(1), "1 bar");
         assert_eq!(summary(&cat), "3 MIDI parts from 4 files · 1 copy kept as one");
         assert_eq!(result_text(2, 3, Order::Newest, None, false), "2 of 3 parts, newest first");
+        // The chips say the orders as Sounds and Plugins do; the line over the list says them in a sentence.
+        assert_eq!(Order::ALL.map(Order::name), ["Newest", "Name", "Key", "Longest", "In most files"]);
+        assert_eq!(result_text(3, 3, Order::Bars, None, false), "3 parts, longest first");
+        assert_eq!(result_text(1_200, 1_500, Order::Name, None, false), "1,200 of 1,500 parts, by name");
     }
 
     #[test]

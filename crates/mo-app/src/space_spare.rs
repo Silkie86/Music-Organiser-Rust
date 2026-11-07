@@ -39,8 +39,12 @@ pub const NONE_FOUND: &str = "No spare plugin copies were found. ";
 
 pub use crate::space_removing::{ADMIN, ADMIN_BACK};
 
-/// The activity card's title while Remove is on.
-pub const REMOVING: &str = "Removing spare plugin copies";
+/// The activity card's title while they're sent to the bin.
+pub const REMOVING: &str = if cfg!(windows) {
+    "Sending spare plugin copies to the Recycle Bin"
+} else {
+    "Sending spare plugin copies to the Trash"
+};
 
 /// Why every ticked copy stays when Remove couldn't read your plugin folders or which plugins your saves use, to check
 /// each copy is still spare.
@@ -145,7 +149,7 @@ pub fn remove(
             let now = spare::find(&files, used, pro_tools, |_| (0, None));
             spare::remove(picked, &now, bin, stop)
         }
-        Err(Stopped) => stayed(picked, "Remove stopped before it went."),
+        Err(Stopped) => stayed(picked, "Sending stopped before it went."),
     }
 }
 
@@ -319,8 +323,8 @@ fn group_part(g: &Group<'_>, bytes: u64) -> Part {
 /// them) go together, Windows asking once, and come back together the same way.
 fn remove_note(can_put_back: bool, guarded: bool) -> String {
     let checks = format!(
-        "Remove sends the ticked copies to the {BIN}, each checked again just before it goes: one that changed since, \
-         or that a save uses now, stays."
+        "The ticked copies go to the {BIN}, each checked again just before it goes: one that changed since, or that a \
+         save uses now, stays."
     );
     match (can_put_back, guarded) {
         (true, false) => format!("{checks} Put back returns them until you empty the {BIN}."),
@@ -742,12 +746,12 @@ mod tests {
         let mut removing = Removing::default();
         assert_eq!(
             removing.remove_button(Some(&found), false, &PutBacks::default()),
-            Some(("Remove 650 MB".to_owned(), true))
+            Some((format!("Send 650 MB to the {BIN}"), true))
         );
         // While a look is on, Remove waits for it.
         assert_eq!(
             removing.remove_button(Some(&found), true, &PutBacks::default()),
-            Some(("Remove 650 MB".to_owned(), false))
+            Some((format!("Send 650 MB to the {BIN}"), false))
         );
         // Unticking one AAX copy: its format's tick shows a dash, and Remove frees the rest.
         let pro_q = found.copies.iter().find(|c| c.name == "Pro-Q 3").unwrap();
@@ -756,7 +760,7 @@ mod tests {
         assert_eq!((card.parts[0].tick.as_ref().map(|t| t.1), card.parts[0].partly), (Some(false), true));
         assert_eq!(
             removing.remove_button(Some(&found), false, &PutBacks::default()),
-            Some(("Remove 590 MB".to_owned(), true))
+            Some((format!("Send 590 MB to the {BIN}"), true))
         );
         // The format's tick then ticks them all again; unticked, none of them goes.
         let all_aax = card.parts[0].tick.clone().unwrap().0;
@@ -847,7 +851,7 @@ mod tests {
         assert!(removing.busy());
         assert_eq!(
             removing.remove_button(Some(&found), false, &PutBacks::default()),
-            Some(("Removing…".to_owned(), false))
+            Some((format!("Sending to the {BIN}…"), false))
         );
         // Ticks wait while it's on.
         removing.tick(&[path(&picked[0])], false);
@@ -865,7 +869,7 @@ mod tests {
         };
         assert_eq!(
             removed_words(&done),
-            Ok(format!("Freed 610 MB: 3 copies are in the {BIN}; 1 stayed (the Space page says why)."))
+            Ok(format!("Sent 610 MB: 3 copies are in the {BIN}; 1 stayed (the Space page says why)."))
         );
         removing.sent(42, done.clone());
         assert!(!removing.busy() && removing.shows_result());
@@ -876,9 +880,9 @@ mod tests {
         let card = super::card(Some(&found), false, &removing, true, |_| false);
         assert_eq!(
             (card.big.as_str(), card.big_note.as_str()),
-            ("Freed 610 MB", format!("3 spare copies are in the {BIN}, and 1 stayed").as_str())
+            ("Sent 610 MB", format!("3 spare copies are in the {BIN}, and 1 stayed").as_str())
         );
-        assert!(card.note.starts_with(&format!("They're in the {BIN}. Put back returns each one")));
+        assert!(card.note.starts_with(&format!("They're in the {BIN}: their room comes back once you empty it.")));
         assert!(!card.ticks && card.parts.iter().all(|p| p.tick.is_none()));
         let status = |card: &Card, name: &str, size: &str| {
             let p = card.parts.iter().find(|p| p.under && p.name == name && p.size == size).unwrap();
@@ -899,7 +903,7 @@ mod tests {
         let (bytes, l) = line(Some(&found), false, &removing).unwrap();
         assert_eq!(
             (bytes, l.why.as_str(), l.size.as_str()),
-            (0, format!("3 spare copies are in the {BIN}, and 1 stayed").as_str(), "Freed 610 MB")
+            (0, format!("3 spare copies are in the {BIN}, and 1 stayed").as_str(), "Sent 610 MB")
         );
 
         // Put back: one couldn't come back.
@@ -945,7 +949,10 @@ mod tests {
         // While a clean-up is put back from the Recycle Bin card, Remove waits.
         let mut put_backs = PutBacks::default();
         put_backs.start(SPARE_COPIES, 5);
-        assert_eq!(removing.remove_button(Some(&found), false, &put_backs), Some(("Remove 650 MB".to_owned(), false)));
+        assert_eq!(
+            removing.remove_button(Some(&found), false, &put_backs),
+            Some((format!("Send 650 MB to the {BIN}"), false))
+        );
         // And this card's Put back waits for it too.
         let picked = removing.ticked_copies(Some(&found));
         removing.start(picked.clone());
@@ -970,7 +977,7 @@ mod tests {
         let done = Done { removed: picked.iter().map(removed).collect(), problems: vec![lost], went_with: Vec::new() };
         assert_eq!(
             removed_words(&done),
-            Ok(format!("Freed 650 MB: 3 copies are in the {BIN}, and 1 went but wasn't found there."))
+            Ok(format!("Sent 650 MB: 3 copies are in the {BIN}, and 1 went but wasn't found there."))
         );
         removing.sent(9, done);
         let status = |card: &Card, size: &str| {
@@ -980,7 +987,7 @@ mod tests {
         let card = super::card(Some(&found), false, &removing, true, |_| false);
         assert_eq!(
             (card.big.as_str(), card.big_note.as_str()),
-            ("Freed 650 MB", format!("3 spare copies are in the {BIN}, and 1 went but wasn't found there").as_str())
+            ("Sent 650 MB", format!("3 spare copies are in the {BIN}, and 1 went but wasn't found there").as_str())
         );
         let gone = (mo_space::clean::NOT_IN_BIN.to_owned(), true, false, String::new());
         assert_eq!(status(&card, "300 MB"), gone);
@@ -1005,7 +1012,7 @@ mod tests {
             problems: picked.iter().map(lost).collect(),
             went_with: Vec::new(),
         };
-        assert_eq!(removed_words(&done), Ok(format!("Freed 650 MB: 4 copies went but weren't found in the {BIN}.")));
+        assert_eq!(removed_words(&done), Ok(format!("Sent 650 MB: 4 copies went but weren't found in the {BIN}.")));
         removing.sent(10, done);
         assert_eq!((removing.to_put_back(), removing.put_back_button(true, &PutBacks::default())), (None, None));
         let card = super::card(Some(&found), false, &removing, true, |_| false);
@@ -1027,7 +1034,7 @@ mod tests {
         let card = super::card(Some(&found), false, &removing, true, |_| false);
         assert_eq!(
             (card.big.as_str(), card.big_note.as_str(), card.note.as_str()),
-            ("Nothing freed", "None could go: each one's line says why", "")
+            ("Nothing sent", "None could go: each one's line says why", "")
         );
         assert!(card.parts.iter().filter(|p| p.under).all(|p| p.problem));
         assert_eq!(line(Some(&found), false, &removing).unwrap().1.size, "");
@@ -1038,7 +1045,7 @@ mod tests {
     fn a_removal_that_all_went_says_so() {
         let found = Found { copies: vec![aax("Serum", 300)] };
         let done = Done { removed: vec![removed(&found.copies[0])], ..Done::default() };
-        assert_eq!(removed_words(&done), Ok(format!("Freed 300 MB: 1 copy is in the {BIN}.")));
+        assert_eq!(removed_words(&done), Ok(format!("Sent 300 MB: 1 copy is in the {BIN}.")));
         let mut removing = Removing::default();
         removing.start(found.copies.clone());
         removing.sent(5, done);

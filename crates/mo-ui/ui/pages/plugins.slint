@@ -97,9 +97,8 @@ export global PluginsData {
     in property <FilterView> format-filter;
     in property <FilterView> daw-filter;
     in property <bool> any-filter;
-    in property <[string]> sorts;
-    in property <string> sort;
-    in property <int> sort-index;
+    // The orders, each a chip with the picked one lit.
+    in property <FilterView> sort-filter;
     // The year strip beside the list: the years plugins were used in.
     in property <[YearBar]> years;
     // The picked years' places on the strip (-1 for none).
@@ -793,12 +792,13 @@ export component PluginsPage inherits Rectangle {
                     false
                 }
             }
+            // The list's order, each on show behind its name as on Sounds and MIDI (the whole-app review of 6 Nov, X3-5).
             VerticalLayout {
                 alignment: center;
-                Segmented {
-                    choices: PluginsData.sorts;
-                    current: PluginsData.sort-index;
-                    picked(i) => { PluginsData.sort-picked(PluginsData.sorts[i]); }
+                FilterPicks {
+                    name: "Order";
+                    filter: PluginsData.sort-filter;
+                    toggled(text) => { PluginsData.sort-picked(text); }
                 }
             }
         }

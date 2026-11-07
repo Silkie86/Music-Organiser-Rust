@@ -13,6 +13,7 @@ pub mod arrangement;
 pub mod backup;
 mod canvas;
 pub mod cards;
+pub mod daws;
 pub mod drag;
 pub mod files;
 pub mod filters;
@@ -203,8 +204,7 @@ fn connect_finder(app: &AppWindow, shortcuts: &Shortcuts, feed: &Feed) {
     finder::add_source(app, "settings", std::sync::Arc::new(mo_app::finder::settings()));
     finder::on_open(mo_app::finder::Kind::Setting, |app, hit, _| {
         let Some(tab) = mo_app::settings::Tab::ALL.into_iter().find(|t| t.name() == hit.id) else { return false };
-        go_to(app, Place::Settings.index() as i32);
-        settings::show_tab(app, tab);
+        settings::open_on(app, tab);
         true
     });
     // The page on show may have changed its own list since (the Presets page's Sounds or Curves).

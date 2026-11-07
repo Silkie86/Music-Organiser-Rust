@@ -38,8 +38,9 @@ pub const OLD_COPIES: &str = "old-copies";
 /// The card's big figure when none of the old copies can go yet.
 pub const NOTHING_YET: &str = "Nothing to free yet";
 
-/// The activity card's title while Remove is on.
-pub const REMOVING: &str = "Removing old copies";
+/// The activity card's title while they're sent to the bin.
+pub const REMOVING: &str =
+    if cfg!(windows) { "Sending old copies to the Recycle Bin" } else { "Sending old copies to the Trash" };
 
 /// Why every ticked one stays when Remove couldn't read the moves the app keeps, to check each one again.
 pub const CANT_CHECK: &str = "The moves the app keeps couldn't be read to check it again (the log says why), so it \
@@ -247,8 +248,8 @@ const LEAD: &str = "When a plugin's folder moved to another drive, its old copy 
 /// together, Windows asking once, and come back together the same way.
 fn remove_note(can_put_back: bool, guarded: bool) -> String {
     let checks = format!(
-        "Remove sends the ticked ones to the {BIN}, each compared file by file with its copy just before it goes: one \
-         with anything only in it, or that the plugin could need now, stays."
+        "The ticked ones go to the {BIN}, each compared file by file with its copy just before it goes: one with \
+         anything only in it, or that the plugin could need now, stays."
     );
     match (can_put_back, guarded) {
         (true, false) => format!("{checks} Put back returns them until you empty the {BIN}."),
@@ -542,9 +543,9 @@ mod tests {
         );
         // Remove frees what's ticked: Spitfire, then the kept files too once you tick them.
         let button = |r: &Removing| r.remove_button(Some(&found), false, &PutBacks::default());
-        assert_eq!(button(&removing), Some(("Remove 60 GB".to_owned(), true)));
+        assert_eq!(button(&removing), Some((format!("Send 60 GB to the {BIN}"), true)));
         removing.tick(&[PathBuf::from(KEPT)], true);
-        assert_eq!(button(&removing), Some(("Remove 61 GB".to_owned(), true)));
+        assert_eq!(button(&removing), Some((format!("Send 61 GB to the {BIN}"), true)));
         let picked: Vec<String> = removing.ticked_copies(Some(&found)).into_iter().map(|l| l.path).collect();
         assert_eq!(picked, [SPITFIRE, KEPT]);
         // Nothing can be ticked into going that can't go.
@@ -553,7 +554,7 @@ mod tests {
         // Waiting while a look is on or something else goes; nothing ticked, nothing to press.
         assert_eq!(
             removing.remove_button(Some(&found), true, &PutBacks::default()),
-            Some(("Remove 61 GB".to_owned(), false))
+            Some((format!("Send 61 GB to the {BIN}"), false))
         );
         removing.tick(&[PathBuf::from(SPITFIRE), PathBuf::from(KEPT)], false);
         assert_eq!(button(&removing), Some(("Nothing ticked".to_owned(), false)));
@@ -609,7 +610,7 @@ mod tests {
         assert!(sending.parts.iter().all(|p| p.tick.is_none()));
         assert_eq!(
             removing.remove_button(Some(&found), false, &PutBacks::default()),
-            Some(("Removing…".to_owned(), false))
+            Some((format!("Sending to the {BIN}…"), false))
         );
         // Spitfire went; the kept files changed since, so they stayed.
         let why = "Some of it isn't where its files went, is newer here, or isn't the same there: x. Look before deleting it.";
@@ -622,7 +623,7 @@ mod tests {
         let card = super::card(Some(&found), &removing, true, |_| false);
         assert_eq!(
             (card.big.as_str(), card.big_note.as_str()),
-            ("Freed 60 GB", format!("1 old copy is in the {BIN}, and 1 stayed").as_str())
+            ("Sent 60 GB", format!("1 old copy is in the {BIN}, and 1 stayed").as_str())
         );
         assert!(!card.ticks);
         let spitfire = &card.parts[0];
@@ -632,11 +633,11 @@ mod tests {
         );
         assert_eq!(spitfire.open, None);
         assert_eq!((card.parts[1].status.as_str(), card.parts[1].problem), (why, true));
-        assert!(card.note.starts_with(&format!("They're in the {BIN}. Put back returns each one to where it was")));
+        assert!(card.note.starts_with(&format!("They're in the {BIN}: their room comes back once you empty it.")));
         let (bytes, line) = super::line(Some(&found), &removing).unwrap();
         assert_eq!(
             (bytes, line.why.as_str(), line.size.as_str()),
-            (0, format!("1 old copy is in the {BIN}, and 1 stayed").as_str(), "Freed 60 GB")
+            (0, format!("1 old copy is in the {BIN}, and 1 stayed").as_str(), "Sent 60 GB")
         );
         assert_eq!(removing.put_back_button(true, &PutBacks::default()), Some(("Put back".to_owned(), true)));
         assert_eq!(removing.to_put_back().map(|s| s.coming_back().removed.len()), Some(1));
@@ -669,7 +670,7 @@ mod tests {
     #[test]
     fn the_activity_card_counts_old_copies() {
         let done = Done { removed: vec![removed(SPITFIRE, 60 * GB), removed(UHE, 2 * GB)], ..Done::default() };
-        assert_eq!(removed_words(&done), Ok(format!("Freed 62 GB: 2 old copies are in the {BIN}.")));
+        assert_eq!(removed_words(&done), Ok(format!("Sent 62 GB: 2 old copies are in the {BIN}.")));
         let none = stayed(&sample().reminder.leftovers, CANT_CHECK);
         assert_eq!(none.problems.len(), 2);
         assert_eq!(removed_words(&none), Err("None could go: the Space page says why.".to_owned()));

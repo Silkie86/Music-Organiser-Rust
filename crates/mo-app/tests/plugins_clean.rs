@@ -16,7 +16,8 @@ use mo_app::plugins::clean::{
 use mo_app::plugins::{Plugins, Read, SaveBrief, SongBrief};
 use mo_library::PluginKind;
 use mo_library::plugins::{PluginUse, SampleIndex, ScanCounts, StoredFolder, StoredSpace};
-use mo_space::clean::{Bin, NOT_IN_BIN, Problem, Removed, undo};
+use mo_space::admin::Admin;
+use mo_space::clean::{Bin, BinRoom, Check, NOT_IN_BIN, Problem, Removed, Room, undo};
 use mo_space::key;
 use mo_space::plugin_clean::{apply, lines};
 use mo_space::size::size_text;
@@ -191,7 +192,7 @@ fn clean_up_sends_what_may_go_to_the_bin_and_puts_it_back() {
     assert!(done.problems.is_empty(), "{:?}", done.problems);
     assert!(!docs.join("Arcade Library").exists() && !docs.join("Arcade Presets").exists());
     assert!(docs.join("Arcade Kits/kick.wav").exists());
-    assert!(done_text(&done).0.starts_with("Freed "));
+    assert!(done_text(&done).0.starts_with("Sent "), "{}", done_text(&done).0);
 
     // The page forgets them until the old app measures again: only the kits are left on its card.
     plugins.forget_removed(&done);
@@ -241,6 +242,11 @@ fn what_didnt_come_back_stays_to_try_again() {
     let mut gone = both.clone();
     gone.problems = vec![Problem { path: "D:/A".into(), why: NOT_IN_BIN.into() }];
     assert!(done_text(&gone).0.contains("1 folder is in the Recycle Bin"), "{}", done_text(&gone).0);
+    assert!(
+        done_text(&gone).0.ends_with(" 1 went but wasn't found there: the lines below say why."),
+        "{}",
+        done_text(&gone).0
+    );
     // Review E2-7: only what's in the bin is offered for Put back, without what went inside one that isn't; the rest is
     // still left out of the sizes.
     let mut gone_b = both.clone();
@@ -280,6 +286,112 @@ impl Bin for Counting {
     fn put_back(&self, _removed: &[Removed]) -> Vec<Problem> {
         Vec::new()
     }
+}
+
+/// Clean up and Uninstall send through [`Watched`], so it passes each of the bin's ways on to the bin inside (the 6 Nov
+/// review's second look: it left out the room in the bin, so they sent what the Recycle Bin hadn't room for).
+#[test]
+fn watched_passes_each_way_on_to_its_bin() {
+    struct Asks;
+    impl Admin for Asks {
+        fn can_ask(&self) -> bool {
+            true
+        }
+        fn ask(&self, _: &[String]) -> Result<(), String> {
+            Ok(())
+        }
+    }
+    /// Answers each way unlike its default, and notes each it's asked: never the computer's bin.
+    #[derive(Default)]
+    struct Noting(std::sync::Mutex<Vec<&'static str>>);
+    impl Noting {
+        fn note(&self, way: &'static str) {
+            self.0.lock().unwrap().push(way);
+        }
+    }
+    impl Bin for Noting {
+        fn send(&self, _: &Path) -> Result<(), String> {
+            self.note("send");
+            Ok(())
+        }
+        fn admin(&self) -> &dyn Admin {
+            self.note("admin");
+            &Asks
+        }
+        fn find(&self, removed: &mut [Removed]) -> Vec<Problem> {
+            self.note("find");
+            vec![Problem { path: removed[0].path.clone(), why: "find".to_owned() }]
+        }
+        fn put_back(&self, _: &[Removed]) -> Vec<Problem> {
+            self.note("put_back");
+            vec![Problem { path: "a".to_owned(), why: "put back".to_owned() }]
+        }
+        fn holds(&self, _: &[Removed]) -> Option<Vec<bool>> {
+            self.note("holds");
+            Some(vec![true])
+        }
+        fn put_back_checked(&self, _: &[Removed], _: &Check<'_>, each: &mut dyn FnMut(usize, Option<String>)) {
+            self.note("put_back_checked");
+            each(0, None);
+        }
+        fn can_look_for(&self, _: &Removed) -> bool {
+            self.note("can_look_for");
+            false
+        }
+        fn refuses_quietly(&self, _: &Path, _: u64) -> Option<String> {
+            self.note("refuses_quietly");
+            Some("quietly".to_owned())
+        }
+        fn room(&self, _: &Path) -> Option<Result<Room, String>> {
+            self.note("room");
+            Some(Ok(Room::new(BinRoom { held: 1, most: 2 })))
+        }
+        fn going(&self, _: &Removed) {
+            self.note("going");
+        }
+    }
+
+    let inner = Noting::default();
+    let bin = Watched::new(&inner);
+    let one = Removed {
+        path: "a".into(),
+        real: "a".into(),
+        bytes: 1,
+        what: mo_space::clean::What::Plugin(mo_space::plugin_space::SpaceKind::Sounds),
+        when: 0,
+        bin_id: None,
+        binned: None,
+        binned_zone: None,
+        stamp: None,
+    };
+    assert_eq!(bin.send(Path::new("a")), Ok(()));
+    assert!(bin.admin().can_ask());
+    assert_eq!(bin.find(&mut [one.clone()])[0].why, "find");
+    assert_eq!(bin.put_back(std::slice::from_ref(&one))[0].why, "put back");
+    assert_eq!(bin.holds(std::slice::from_ref(&one)), Some(vec![true]));
+    let mut back = Vec::new();
+    bin.put_back_checked(std::slice::from_ref(&one), &|_, _| Ok(()), &mut |n, why| back.push((n, why)));
+    assert_eq!(back, [(0, None)]);
+    assert!(!bin.can_look_for(&one));
+    assert_eq!(bin.refuses_quietly(Path::new("a"), 1).as_deref(), Some("quietly"));
+    assert_eq!(bin.room(Path::new("a")).map(|r| r.map(|r| r.now())), Some(Ok(BinRoom { held: 1, most: 2 })));
+    bin.going(&one);
+    // Each way reached the bin inside, none of them a default.
+    assert_eq!(
+        *inner.0.lock().unwrap(),
+        [
+            "send",
+            "admin",
+            "find",
+            "put_back",
+            "holds",
+            "put_back_checked",
+            "can_look_for",
+            "refuses_quietly",
+            "room",
+            "going"
+        ]
+    );
 }
 
 #[test]
