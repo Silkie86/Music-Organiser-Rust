@@ -869,7 +869,7 @@ mod tests {
         };
         assert_eq!(
             removed_words(&done),
-            Ok(format!("Freed 610 MB: 3 copies are in the {BIN}; 1 stayed (the Space page says why)."))
+            Ok(format!("Sent 610 MB: 3 copies are in the {BIN}; 1 stayed (the Space page says why)."))
         );
         removing.sent(42, done.clone());
         assert!(!removing.busy() && removing.shows_result());
@@ -880,9 +880,9 @@ mod tests {
         let card = super::card(Some(&found), false, &removing, true, |_| false);
         assert_eq!(
             (card.big.as_str(), card.big_note.as_str()),
-            ("Freed 610 MB", format!("3 spare copies are in the {BIN}, and 1 stayed").as_str())
+            ("Sent 610 MB", format!("3 spare copies are in the {BIN}, and 1 stayed").as_str())
         );
-        assert!(card.note.starts_with(&format!("They're in the {BIN}. Put back returns each one")));
+        assert!(card.note.starts_with(&format!("They're in the {BIN}: their room comes back once you empty it.")));
         assert!(!card.ticks && card.parts.iter().all(|p| p.tick.is_none()));
         let status = |card: &Card, name: &str, size: &str| {
             let p = card.parts.iter().find(|p| p.under && p.name == name && p.size == size).unwrap();
@@ -903,7 +903,7 @@ mod tests {
         let (bytes, l) = line(Some(&found), false, &removing).unwrap();
         assert_eq!(
             (bytes, l.why.as_str(), l.size.as_str()),
-            (0, format!("3 spare copies are in the {BIN}, and 1 stayed").as_str(), "Freed 610 MB")
+            (0, format!("3 spare copies are in the {BIN}, and 1 stayed").as_str(), "Sent 610 MB")
         );
 
         // Put back: one couldn't come back.
@@ -977,7 +977,7 @@ mod tests {
         let done = Done { removed: picked.iter().map(removed).collect(), problems: vec![lost], went_with: Vec::new() };
         assert_eq!(
             removed_words(&done),
-            Ok(format!("Freed 650 MB: 3 copies are in the {BIN}, and 1 went but wasn't found there."))
+            Ok(format!("Sent 650 MB: 3 copies are in the {BIN}, and 1 went but wasn't found there."))
         );
         removing.sent(9, done);
         let status = |card: &Card, size: &str| {
@@ -987,7 +987,7 @@ mod tests {
         let card = super::card(Some(&found), false, &removing, true, |_| false);
         assert_eq!(
             (card.big.as_str(), card.big_note.as_str()),
-            ("Freed 650 MB", format!("3 spare copies are in the {BIN}, and 1 went but wasn't found there").as_str())
+            ("Sent 650 MB", format!("3 spare copies are in the {BIN}, and 1 went but wasn't found there").as_str())
         );
         let gone = (mo_space::clean::NOT_IN_BIN.to_owned(), true, false, String::new());
         assert_eq!(status(&card, "300 MB"), gone);
@@ -1012,7 +1012,7 @@ mod tests {
             problems: picked.iter().map(lost).collect(),
             went_with: Vec::new(),
         };
-        assert_eq!(removed_words(&done), Ok(format!("Freed 650 MB: 4 copies went but weren't found in the {BIN}.")));
+        assert_eq!(removed_words(&done), Ok(format!("Sent 650 MB: 4 copies went but weren't found in the {BIN}.")));
         removing.sent(10, done);
         assert_eq!((removing.to_put_back(), removing.put_back_button(true, &PutBacks::default())), (None, None));
         let card = super::card(Some(&found), false, &removing, true, |_| false);
@@ -1034,7 +1034,7 @@ mod tests {
         let card = super::card(Some(&found), false, &removing, true, |_| false);
         assert_eq!(
             (card.big.as_str(), card.big_note.as_str(), card.note.as_str()),
-            ("Nothing freed", "None could go: each one's line says why", "")
+            ("Nothing sent", "None could go: each one's line says why", "")
         );
         assert!(card.parts.iter().filter(|p| p.under).all(|p| p.problem));
         assert_eq!(line(Some(&found), false, &removing).unwrap().1.size, "");
@@ -1045,7 +1045,7 @@ mod tests {
     fn a_removal_that_all_went_says_so() {
         let found = Found { copies: vec![aax("Serum", 300)] };
         let done = Done { removed: vec![removed(&found.copies[0])], ..Done::default() };
-        assert_eq!(removed_words(&done), Ok(format!("Freed 300 MB: 1 copy is in the {BIN}.")));
+        assert_eq!(removed_words(&done), Ok(format!("Sent 300 MB: 1 copy is in the {BIN}.")));
         let mut removing = Removing::default();
         removing.start(found.copies.clone());
         removing.sent(5, done);

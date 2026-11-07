@@ -602,6 +602,13 @@ pub fn show_tab(app: &AppWindow, tab: Tab) {
     }
 }
 
+/// Goes to Settings on `tab` (from Ctrl+K, or the rail's DAW lines): the tab first, so the page asks Bitwig once as
+/// it shows when that's the DAWs tab ([`show_tab`] after going there would ask again).
+pub fn open_on(app: &AppWindow, tab: Tab) {
+    change(TAB_KEY, tab.name());
+    crate::go_to(app, Place::Settings.index() as i32);
+}
+
 pub fn page_shown(place: Place) {
     // Leaving Settings stops Shortcuts listening, so the next key on another page works as a key again.
     if place != Place::Settings {

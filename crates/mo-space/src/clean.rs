@@ -573,6 +573,14 @@ pub trait Bin {
     fn refuses_quietly(&self, _path: &Path, _bytes: u64) -> Option<String> {
         None
     }
+    /// The room in the bin on the drive `real` is on, or why it can take nothing there (it's off, say): past its size
+    /// Windows asks about something too big (a yes removes it for good), and makes room for the rest by removing the
+    /// oldest things in it for good. A clean-up reads it once for each drive and counts it down as it sends things
+    /// there ([`Sending::send`]). `None` for a bin that does neither: a bin of the tests' own (a folder), and the Trash
+    /// on a Mac or Linux.
+    fn room(&self, _real: &Path) -> Option<Result<BinRoom, String>> {
+        None
+    }
     /// Told of each thing on its way to the bin, with what Put back needs, before the clean-up ends ([`Sending`] tells
     /// it): what went, as soon as it's in the bin; what Windows guards, just before the administrator step, which goes
     /// on even if the app closes and may still leave some of it where it is. So what went can be kept as it goes, and
@@ -633,6 +641,9 @@ impl Bin for Heard<'_> {
     }
     fn refuses_quietly(&self, path: &Path, bytes: u64) -> Option<String> {
         self.bin.refuses_quietly(path, bytes)
+    }
+    fn room(&self, real: &Path) -> Option<Result<BinRoom, String>> {
+        self.bin.room(real)
     }
     fn going(&self, removed: &Removed) {
         self.bin.going(removed);
@@ -751,6 +762,9 @@ pub(crate) struct Sending<'a> {
     by_admin: Vec<String>,
     /// Set once Windows has been asked (it asks at most once in a clean-up): why anything else Windows guards stays.
     not_asked: Option<String>,
+    /// The room in each drive's bin ([`Bin::room`]), by the drive ([`drive_key`]): read at the first thing sent there,
+    /// and counted down as things go.
+    rooms: HashMap<String, Option<Result<BinRoom, String>>>,
 }
 
 /// Checks something waiting for the administrator step again just before Windows asks: why it stays, if it does.
@@ -769,7 +783,15 @@ pub(crate) enum Sent {
 
 impl<'a> Sending<'a> {
     pub(crate) fn new(bin: &'a dyn Bin, stop: &'a AtomicBool) -> Self {
-        Sending { bin, stop, waiting: Vec::new(), sent: HashMap::new(), by_admin: Vec::new(), not_asked: None }
+        Sending {
+            bin,
+            stop,
+            waiting: Vec::new(),
+            sent: HashMap::new(),
+            by_admin: Vec::new(),
+            not_asked: None,
+            rooms: HashMap::new(),
+        }
     }
 
     /// Sends one checked thing to the bin and notes how it went in `done`. One Windows guards waits for the
@@ -805,6 +827,16 @@ impl<'a> Sending<'a> {
         if self.stop.load(Ordering::Relaxed) {
             return stays(done, STOPPED.to_owned());
         }
+        // Nor what the bin hasn't room for: Windows would ask about it, and a yes would remove it for good, or it would
+        // make room by removing the oldest things in the bin for good (the 6 Nov review of X3-11's "Send to the
+        // Recycle Bin"). Read once for each drive, and counted down as things go.
+        let drive = drive_key(&real);
+        let bin = self.bin;
+        match self.rooms.entry(drive.clone()).or_insert_with(|| bin.room(Path::new(&real))) {
+            Some(Err(why)) => return stays(done, why.clone()),
+            Some(Ok(room)) if !room.takes(bytes) => return stays(done, NO_ROOM.to_owned()),
+            _ => {}
+        }
         let removed = Removed {
             path: path.to_owned(),
             real,
@@ -820,6 +852,7 @@ impl<'a> Sending<'a> {
             Ok(()) => {
                 self.bin.going(&removed);
                 self.sent.insert(real_key, removed.path.clone());
+                self.fill(&drive, bytes);
                 done.removed.push(removed);
                 return Sent::Went;
             }
@@ -827,6 +860,8 @@ impl<'a> Sending<'a> {
                 Some(no) => no.clone(),
                 None => {
                     self.sent.insert(real_key, removed.path.clone());
+                    // Counted now: the room is kept for it, whether the administrator step sends it or not.
+                    self.fill(&drive, bytes);
                     self.waiting.push((removed, Box::new(again)));
                     return Sent::Waits;
                 }
@@ -834,6 +869,13 @@ impl<'a> Sending<'a> {
             Err(why) => why,
         };
         stays(done, why)
+    }
+
+    /// Counts `bytes` sent to the bin on `drive` ([`drive_key`]).
+    fn fill(&mut self, drive: &str, bytes: u64) {
+        if let Some(Some(Ok(room))) = self.rooms.get_mut(drive) {
+            room.held = room.held.saturating_add(bytes);
+        }
     }
 
     /// Sends what waits to the bin in one administrator step (Windows asks you once). Each is checked again first, and
@@ -1026,6 +1068,38 @@ impl Bin for SystemBin {
     fn refuses_quietly(&self, path: &Path, bytes: u64) -> Option<String> {
         refuses_quietly(path, bytes).map(str::to_owned)
     }
+
+    fn room(&self, real: &Path) -> Option<Result<BinRoom, String>> {
+        system_room(real)
+    }
+}
+
+/// The drive `real` is on, as a clean-up counts each bin's room ([`Bin::room`]): on Windows its id (the same drive
+/// whatever letter or folder it's reached by), or `real` itself when Windows can't say (its room then says why it
+/// stays); elsewhere one for everything, as only a bin of the tests' own has room to count there.
+fn drive_key(real: &str) -> String {
+    #[cfg(windows)]
+    {
+        volume_of_path(Path::new(real)).map_or_else(|| real.to_owned(), |(_, id)| id)
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = real;
+        String::new()
+    }
+}
+
+/// Windows: the room in the Recycle Bin on the drive `real` is on ([`Bin::room`]).
+#[cfg(windows)]
+fn system_room(real: &Path) -> Option<Result<BinRoom, String>> {
+    Some(room_of(real).map_err(str::to_owned))
+}
+
+/// A Mac's Trash and Linux's never remove anything by themselves (Finder asks first, and you're there to answer), so
+/// there's no room to count.
+#[cfg(not(windows))]
+fn system_room(_real: &Path) -> Option<Result<BinRoom, String>> {
+    None
 }
 
 /// Whether the drive `real` is on is plugged in, so its Recycle Bin can be looked in: on Windows, the drive's own top
@@ -1062,9 +1136,8 @@ fn refuses_quietly(path: &Path, bytes: u64) -> Option<&'static str> {
 #[cfg_attr(not(windows), allow(dead_code))]
 const BIN_OFF: &str = "The Recycle Bin is off for that drive, so it would be removed for good. It stays.";
 /// What's said of something the Recycle Bin hasn't room for.
-#[cfg_attr(not(windows), allow(dead_code))]
-const NO_ROOM: &str = "The Recycle Bin on that drive is nearly full (or smaller than it), so putting it there would \
-                       remove it, or the oldest things in the Recycle Bin, for good. It stays.";
+pub const NO_ROOM: &str = "The Recycle Bin on that drive is nearly full (or smaller than it), so putting it there \
+                           would remove it, or the oldest things in the Recycle Bin, for good. It stays.";
 /// What's said of something on a drive Windows doesn't name.
 #[cfg(windows)]
 const UNKNOWN_DRIVE: &str =
@@ -1088,6 +1161,23 @@ const DRIVE_FIXED: u32 = 3;
 /// What Windows says is read here; [`bin_decides`] works it out.
 #[cfg(windows)]
 fn bin_refuses(real: &Path, bytes: u64) -> Option<&'static str> {
+    match bin_facts(real) {
+        Ok((facts, drive)) => bin_decides(&facts, bytes, || drive.bin_holds()),
+        Err(why) => Some(why),
+    }
+}
+
+/// Windows: the room in the Recycle Bin on the drive `real` is on, or why it can take nothing there, as
+/// [`bin_refuses`] decides it.
+#[cfg(windows)]
+fn room_of(real: &Path) -> Result<BinRoom, &'static str> {
+    let (facts, drive) = bin_facts(real)?;
+    bin_room(&facts, || drive.bin_holds())
+}
+
+/// Windows: what it says of the drive `real` is on and its Recycle Bin, or why it can't be told.
+#[cfg(windows)]
+fn bin_facts(real: &Path) -> Result<(BinFacts, Drive), &'static str> {
     use windows_registry::{CURRENT_USER, LOCAL_MACHINE};
     // Where policies can say "Do not move deleted files to the Recycle Bin" and "Maximum allowed Recycle Bin size".
     const POLICY: &str = r"Software\Microsoft\Windows\CurrentVersion\Policies\Explorer";
@@ -1095,7 +1185,7 @@ fn bin_refuses(real: &Path, bytes: u64) -> Option<&'static str> {
     const DRIVES: &str = r"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume";
     // A path Windows can't put on a drive (a `\\?\Volume{…}\` one, once its `\\?\` is taken off) stays.
     if !real.is_absolute() {
-        return Some(UNKNOWN_DRIVE);
+        return Err(UNKNOWN_DRIVE);
     }
     let policies = |name: &str| -> Vec<u32> {
         [LOCAL_MACHINE, CURRENT_USER]
@@ -1103,7 +1193,7 @@ fn bin_refuses(real: &Path, bytes: u64) -> Option<&'static str> {
             .filter_map(|hive| hive.open(POLICY).ok()?.get_u32(name).ok())
             .collect()
     };
-    let Some(drive) = Drive::of(real) else { return Some(UNKNOWN_DRIVE) };
+    let Some(drive) = Drive::of(real) else { return Err(UNKNOWN_DRIVE) };
     // A drive whose Recycle Bin settings were never changed may have none of its own: then Windows' own hold.
     let settings = CURRENT_USER.open(format!(r"{DRIVES}\{}", drive.id)).ok();
     let setting = |name: &str| settings.as_ref().and_then(|s| s.get_u32(name).ok());
@@ -1115,7 +1205,7 @@ fn bin_refuses(real: &Path, bytes: u64) -> Option<&'static str> {
         policy_percent: policies("RecycleBinSize").into_iter().min(),
         max_mb: setting("MaxCapacity"),
     };
-    bin_decides(&facts, bytes, || drive.bin_holds())
+    Ok((facts, drive))
 }
 
 /// What Windows says of a drive and its Recycle Bin, as [`bin_refuses`] reads it.
@@ -1137,24 +1227,49 @@ struct BinFacts {
 }
 
 /// Whether the Recycle Bin can't take `bytes` more without asking, by what Windows says of it (`facts`); `held` reads
-/// what's in it now, only when that's needed. The bin may hold a policy's share of the drive, else that drive's own
-/// maximum size, else a twentieth of the drive (Windows' own first choice is more); past nine tenths of that, it stays.
+/// what's in it now, only when that's needed ([`bin_room`] works out the room).
 #[cfg_attr(not(windows), allow(dead_code))]
 fn bin_decides(facts: &BinFacts, bytes: u64, held: impl FnOnce() -> Option<u64>) -> Option<&'static str> {
+    match bin_room(facts, held) {
+        Ok(room) => (!room.takes(bytes)).then_some(NO_ROOM),
+        Err(why) => Some(why),
+    }
+}
+
+/// The room in the Recycle Bin, by what Windows says of it (`facts`), or why it can take nothing; `held` reads what's
+/// in it now, only when that's needed. The bin may hold a policy's share of the drive, else that drive's own maximum
+/// size, else a twentieth of the drive (Windows' own first choice is more); it's kept to nine tenths of that.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn bin_room(facts: &BinFacts, held: impl FnOnce() -> Option<u64>) -> Result<BinRoom, &'static str> {
     if facts.no_recycle_policy || facts.nuke_on_delete {
-        return Some(BIN_OFF);
+        return Err(BIN_OFF);
     }
     if facts.kind != DRIVE_FIXED {
-        return Some(NOT_OWN_DRIVE);
+        return Err(NOT_OWN_DRIVE);
     }
     let most = match (facts.policy_percent, facts.max_mb) {
         (Some(percent), _) => facts.size / 100 * u64::from(percent.min(100)),
         (None, Some(mb)) => u64::from(mb).saturating_mul(1024 * 1024),
         (None, None) => facts.size / 20,
     };
+    let held = held().ok_or(CANT_SEE_ROOM)?;
     // What's in it now, with a tenth to spare.
-    let Some(held) = held() else { return Some(CANT_SEE_ROOM) };
-    (held.saturating_add(bytes) > most / 10 * 9).then_some(NO_ROOM)
+    Ok(BinRoom { held, most: most / 10 * 9 })
+}
+
+/// What a drive's Recycle Bin holds and the most it should ([`Bin::room`]), in bytes: what a clean-up counts down as
+/// it sends things there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BinRoom {
+    pub held: u64,
+    pub most: u64,
+}
+
+impl BinRoom {
+    /// Whether `bytes` more fit.
+    pub fn takes(&self, bytes: u64) -> bool {
+        self.held.saturating_add(bytes) <= self.most
+    }
 }
 
 /// The drive holding a file, as Windows knows it.
@@ -1755,6 +1870,10 @@ mod tests {
                 self.note("refuses_quietly");
                 Some("quietly".to_owned())
             }
+            fn room(&self, _: &Path) -> Option<Result<super::BinRoom, String>> {
+                self.note("room");
+                Some(Err("room".to_owned()))
+            }
             fn going(&self, _: &Removed) {
                 self.note("going");
             }
@@ -1796,6 +1915,7 @@ mod tests {
         assert_eq!(back, [(0, None)]);
         assert!(!bin.can_look_for(&one));
         assert_eq!(bin.refuses_quietly(Path::new("a"), 1).as_deref(), Some("quietly"));
+        assert_eq!(bin.room(Path::new("a")), Some(Err("room".to_owned())));
         bin.going(&one);
         // What's told as it goes reaches the clean-up too.
         assert_eq!(*noted.lock().unwrap(), ["a"]);
@@ -1812,6 +1932,7 @@ mod tests {
                 "put_back_checked",
                 "can_look_for",
                 "refuses_quietly",
+                "room",
                 "going"
             ]
         );
@@ -1873,6 +1994,74 @@ mod tests {
         assert_eq!(bin_decides(&BinFacts { no_recycle_policy: true, ..fixed }, 1, unread), Some(BIN_OFF));
         assert_eq!(bin_decides(&BinFacts { nuke_on_delete: true, ..fixed }, 1, unread), Some(BIN_OFF));
         assert_eq!(bin_decides(&BinFacts { kind: 2, ..fixed }, 1, unread), Some(NOT_OWN_DRIVE));
+    }
+
+    #[test]
+    fn what_the_bin_hasnt_room_for_stays_and_its_room_is_read_once_and_counted_down() {
+        use super::{BinRoom, Done, NO_ROOM, Problem, Removed, Sending, Sent, What};
+        use crate::plugin_space::SpaceKind;
+        use std::fs;
+        use std::path::Path;
+        use std::sync::Mutex;
+        use std::sync::atomic::AtomicBool;
+
+        /// A bin with this much room, which notes each time it's asked and each thing sent (and moves nothing).
+        struct Sized {
+            room: Option<Result<BinRoom, String>>,
+            asked: Mutex<usize>,
+        }
+        impl Bin for Sized {
+            fn send(&self, _: &Path) -> Result<(), String> {
+                Ok(())
+            }
+            fn find(&self, _: &mut [Removed]) -> Vec<Problem> {
+                Vec::new()
+            }
+            fn put_back(&self, _: &[Removed]) -> Vec<Problem> {
+                Vec::new()
+            }
+            fn room(&self, _: &Path) -> Option<Result<BinRoom, String>> {
+                *self.asked.lock().unwrap() += 1;
+                self.room.clone()
+            }
+        }
+        let dir = std::env::temp_dir().join("mo-space-unit-bin-room");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let files: Vec<String> = ["a", "b", "c"]
+            .iter()
+            .map(|name| {
+                let file = dir.join(name);
+                fs::write(&file, b"0123456789").unwrap();
+                text(&file)
+            })
+            .collect();
+        let stop = AtomicBool::new(false);
+        let send_all = |bin: &Sized| {
+            let mut done = Done::default();
+            let mut sending = Sending::new(bin, &stop);
+            let sent: Vec<Sent> = files
+                .iter()
+                .map(|f| sending.send(f, f.clone(), 10, What::Plugin(SpaceKind::Sounds), &mut done, || Ok(())))
+                .collect();
+            (sent, done)
+        };
+        // Room for 20 more bytes: two go, and the third stays, as the bin would remove it, or the oldest things in it,
+        // for good. The bin is read once for the drive, not for each.
+        let bin = Sized { room: Some(Ok(BinRoom { held: 5, most: 25 })), asked: Mutex::new(0) };
+        let (sent, done) = send_all(&bin);
+        assert_eq!(sent, [Sent::Went, Sent::Went, Sent::Stays]);
+        assert_eq!(done.problems, [Problem { path: files[2].clone(), why: NO_ROOM.to_owned() }]);
+        assert_eq!(*bin.asked.lock().unwrap(), 1);
+        // A bin that's off there takes nothing, in its own words.
+        let off = Sized { room: Some(Err("It's off.".to_owned())), asked: Mutex::new(0) };
+        let (sent, done) = send_all(&off);
+        assert_eq!(sent, [Sent::Stays, Sent::Stays, Sent::Stays]);
+        assert!(done.problems.iter().all(|p| p.why == "It's off."));
+        // A bin with no room to count (a Mac's Trash, Linux's, a test's folder) takes everything.
+        let (sent, _) = send_all(&Sized { room: None, asked: Mutex::new(0) });
+        assert_eq!(sent, [Sent::Went, Sent::Went, Sent::Went]);
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The start-up sweep's notes stop going by themselves when Windows didn't move one and didn't say why, or was

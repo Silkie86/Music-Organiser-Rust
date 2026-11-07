@@ -586,8 +586,6 @@ pub fn show_only(app: &AppWindow, label: &str, saves: HashSet<i64>) {
     refresh(app);
 }
 
-/// Picks the song with this save and brings it into view (the Plugins page's song lines). Returns whether the list has
-/// it (not while the library is still being read).
 /// Shows the song a save belongs to, by the save's path (Presets and Curves know their saves by path). Whether it was
 /// found.
 pub fn show_save_path(app: &AppWindow, save: &str) -> bool {
@@ -603,6 +601,8 @@ pub fn show_save_path(app: &AppWindow, save: &str) -> bool {
     }
 }
 
+/// Picks the song with this save and brings it into view (the Plugins page's song lines). Returns whether the list has
+/// it (not while the library is still being read).
 pub fn show_save(app: &AppWindow, save: i64) -> bool {
     let row = PAGE.with(|p| {
         p.borrow().songs.rows.iter().position(|r| r.song.saves().chain(&r.song.copies).any(|s| s.id == save))
@@ -614,6 +614,23 @@ pub fn show_save(app: &AppWindow, save: i64) -> bool {
         }
         None => false,
     }
+}
+
+/// The newest of your Bitwig saves with the name Bitwig shows for the project open in it (the file's name without its
+/// ending, in any case, as the C# app matched them), for the rail's "In your DAWs" line. None while the list is still
+/// being read.
+pub fn bitwig_save_named(name: &str) -> Option<i64> {
+    let wanted = name.trim().to_lowercase();
+    PAGE.with(|p| {
+        p.borrow()
+            .songs
+            .rows
+            .iter()
+            .flat_map(|r| r.song.saves())
+            .filter(|s| s.daw == BITWIG_STUDIO && s.name.trim().to_lowercase() == wanted)
+            .max_by_key(|s| s.mtime)
+            .map(|s| s.id)
+    })
 }
 
 /// Picks the song at `row` and brings it into view in the list, clearing the filters first when they hide it (but

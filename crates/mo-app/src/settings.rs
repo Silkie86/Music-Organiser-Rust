@@ -593,44 +593,6 @@ pub fn bitwig_status(checked: &Result<mo_dawlink::bitwig::Hello, mo_dawlink::bit
     DawStatus { daw: "Bitwig Studio", state, ok, facts }
 }
 
-/// One line under the rail's "In your DAWs" (spec 3.1): the DAW, what it has open (or that it isn't linked), whether
-/// its link answers, and the tooltip. The rail said "Nothing open" whatever was open before (the whole-app review of 6
-/// Nov, X3-9).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct RailDaw {
-    pub daw: &'static str,
-    pub text: String,
-    pub linked: bool,
-    pub tip: String,
-}
-
-/// Bitwig's line in the rail, from what the link said last ([`mo_dawlink::bitwig::Link::refresh`]): the project open
-/// there, by the name Bitwig shows. Only reads, as [`bitwig_status`] does.
-pub fn bitwig_rail(checked: &Result<mo_dawlink::bitwig::Hello, mo_dawlink::bitwig::Error>) -> RailDaw {
-    use mo_dawlink::bitwig::Error;
-    const MORE: &str = "Settings \u{203a} DAWs says more about the link.";
-    let line = |text: &str, linked, tip: String| RailDaw { daw: "Bitwig", text: text.to_owned(), linked, tip };
-    match checked {
-        Ok(hello) if hello.error.is_none() => {
-            let project = if hello.project.is_empty() { "A new project" } else { hello.project.as_str() };
-            let unsaved = if hello.modified { ", with changes not saved yet" } else { "" };
-            line(project, true, format!("Open in Bitwig now{unsaved}. {MORE}"))
-        }
-        Ok(hello) => {
-            let why = Error::NotStarted(hello.error.clone().unwrap_or_default());
-            line("Linked, not working fully", false, format!("{why} {MORE}"))
-        }
-        Err(Error::NotRunning) => line(
-            "Not linked",
-            false,
-            "Bitwig isn't answering: it's closed, or the Music Organiser controller isn't on in it. Settings \u{203a} \
-             DAWs says how to link it."
-                .to_owned(),
-        ),
-        Err(e) => line("Not linked", false, format!("{e} {MORE}")),
-    }
-}
-
 /// FL Studio's row: whether the Music Organiser script is installed (none while it's being looked at), and where it
 /// goes. Talking to FL Studio through it comes later in phase 5.
 pub fn fl_status(state: Option<ScriptState>, folders: &[PathBuf]) -> DawStatus {
@@ -909,27 +871,6 @@ mod tests {
         assert_eq!(broken.state, "Linked, but not working fully");
         assert!(broken.facts.iter().all(|f| f.what != "Open project"));
         assert!(broken.facts.last().is_some_and(|f| f.value.ends_with("Bitwig said: no MIDI")));
-    }
-
-    #[test]
-    fn the_rail_says_what_bitwig_has_open() {
-        use mo_dawlink::bitwig::{Error, Hello};
-        let hello = Hello { link: 3, project: "Night drive".into(), changes: true, ..Hello::default() };
-        let open = bitwig_rail(&Ok(hello.clone()));
-        assert_eq!((open.daw, open.text.as_str(), open.linked), ("Bitwig", "Night drive", true));
-        assert!(open.tip.starts_with("Open in Bitwig now. "), "{}", open.tip);
-        let unsaved = bitwig_rail(&Ok(Hello { modified: true, project: String::new(), ..hello.clone() }));
-        assert_eq!(unsaved.text, "A new project");
-        assert!(unsaved.tip.starts_with("Open in Bitwig now, with changes not saved yet."));
-        // Linked but not sending is still what's open; part of the link not started isn't.
-        assert!(bitwig_rail(&Ok(Hello { changes: false, ..hello.clone() })).linked);
-        let broken = bitwig_rail(&Ok(Hello { error: Some("no MIDI".into()), ..hello }));
-        assert_eq!((broken.text.as_str(), broken.linked), ("Linked, not working fully", false));
-        assert!(broken.tip.contains("Bitwig said: no MIDI"));
-        let off = bitwig_rail(&Err(Error::NotRunning));
-        assert_eq!((off.text.as_str(), off.linked), ("Not linked", false));
-        assert!(off.tip.contains("closed, or the Music Organiser controller isn't on"));
-        assert_eq!(bitwig_rail(&Err(Error::Closed)).text, "Not linked");
     }
 
     #[test]

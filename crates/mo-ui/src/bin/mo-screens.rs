@@ -47,10 +47,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app = mo_ui::new_app(&graphite, Shortcuts::default(), Place::Songs, feed.clone())?;
     app.show()?;
     // The rail's "In your DAWs", as when Bitwig has a song open: the screenshots never reach a real DAW (rule 11).
-    let open = "Open in Bitwig now. Settings \u{203a} DAWs says more about the link.";
+    let open = "Open in Bitwig now. A click shows it on Songs, or Settings \u{203a} DAWs when it isn't one of your \
+                songs.";
     mo_ui::daws::show(
         &app,
-        &[mo_app::settings::RailDaw { daw: "Bitwig", text: "Night Drive".into(), linked: true, tip: open.into() }],
+        &[mo_app::rail_daws::RailDaw {
+            daw: "Bitwig",
+            text: "Night Drive".into(),
+            linked: true,
+            tip: open.into(),
+            project: "Night Drive".into(),
+        }],
     );
     mo_ui::songs::show_sample(&app, sample_songs());
     // The Sounds page, worked out in place too, from made-up sounds.

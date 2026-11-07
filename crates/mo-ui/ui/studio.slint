@@ -191,11 +191,16 @@ export component Tip {
     height: 0;
     property <bool> wanted: hovering && (text != "" || key != "");
     property <bool> mine;
+    // The words it put up: once its own words change, they're how it knows the tip on show is still its own.
+    property <string> put-text;
+    property <string> put-key;
     Timer {
         interval: 600ms;
         running: root.wanted && !root.mine;
         triggered => {
             root.mine = true;
+            root.put-text = root.text;
+            root.put-key = root.key;
             TipState.text = root.text;
             TipState.key = root.key;
             TipState.x = root.absolute-position.x + root.at-x;
@@ -220,7 +225,7 @@ export component Tip {
     function put-away() {
         if (root.mine) {
             root.mine = false;
-            if (TipState.text == root.text && TipState.key == root.key) {
+            if (TipState.text == root.put-text && TipState.key == root.put-key) {
                 TipState.shown = false;
             }
         }
@@ -2401,7 +2406,7 @@ export component FolderRow inherits Rectangle {
         padding-left: Space.md;
         padding-right: Space.sm;
         spacing: Space.md;
-        Text {
+        path-text := Text {
             text: root.path;
             color: Theme.text;
             font-size: Type.body;
@@ -2432,5 +2437,18 @@ export component FolderRow inherits Rectangle {
                 clicked => { root.remove(); }
             }
         }
+    }
+    // The whole path, for one cut short with "…" (two long ones that differ only at the end look the same).
+    path-touch := TouchArea {
+        x: path-text.x;
+        y: 0;
+        width: path-text.width;
+        height: root.height;
+    }
+    Tip {
+        text: root.path;
+        hovering: path-touch.has-hover;
+        at-x: path-text.x;
+        at-y: root.height;
     }
 }

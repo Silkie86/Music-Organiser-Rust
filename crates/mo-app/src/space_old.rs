@@ -623,7 +623,7 @@ mod tests {
         let card = super::card(Some(&found), &removing, true, |_| false);
         assert_eq!(
             (card.big.as_str(), card.big_note.as_str()),
-            ("Freed 60 GB", format!("1 old copy is in the {BIN}, and 1 stayed").as_str())
+            ("Sent 60 GB", format!("1 old copy is in the {BIN}, and 1 stayed").as_str())
         );
         assert!(!card.ticks);
         let spitfire = &card.parts[0];
@@ -633,11 +633,11 @@ mod tests {
         );
         assert_eq!(spitfire.open, None);
         assert_eq!((card.parts[1].status.as_str(), card.parts[1].problem), (why, true));
-        assert!(card.note.starts_with(&format!("They're in the {BIN}. Put back returns each one to where it was")));
+        assert!(card.note.starts_with(&format!("They're in the {BIN}: their room comes back once you empty it.")));
         let (bytes, line) = super::line(Some(&found), &removing).unwrap();
         assert_eq!(
             (bytes, line.why.as_str(), line.size.as_str()),
-            (0, format!("1 old copy is in the {BIN}, and 1 stayed").as_str(), "Freed 60 GB")
+            (0, format!("1 old copy is in the {BIN}, and 1 stayed").as_str(), "Sent 60 GB")
         );
         assert_eq!(removing.put_back_button(true, &PutBacks::default()), Some(("Put back".to_owned(), true)));
         assert_eq!(removing.to_put_back().map(|s| s.coming_back().removed.len()), Some(1));
@@ -670,7 +670,7 @@ mod tests {
     #[test]
     fn the_activity_card_counts_old_copies() {
         let done = Done { removed: vec![removed(SPITFIRE, 60 * GB), removed(UHE, 2 * GB)], ..Done::default() };
-        assert_eq!(removed_words(&done), Ok(format!("Freed 62 GB: 2 old copies are in the {BIN}.")));
+        assert_eq!(removed_words(&done), Ok(format!("Sent 62 GB: 2 old copies are in the {BIN}.")));
         let none = stayed(&sample().reminder.leftovers, CANT_CHECK);
         assert_eq!(none.problems.len(), 2);
         assert_eq!(removed_words(&none), Err("None could go: the Space page says why.".to_owned()));

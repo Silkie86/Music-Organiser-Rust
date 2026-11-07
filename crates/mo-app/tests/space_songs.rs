@@ -317,7 +317,7 @@ fn ticked_autosaves_and_caches_go_to_the_bin_each_checked_again_and_come_back() 
     );
     assert_eq!(status("Night Drive"), (format!("1 in the {}, and 2 stayed (the log says why).", space_bin::BIN), true));
     let [line, _] = lines(Some(&shown), false, &removing);
-    assert_eq!(line.unwrap().1.size, "Freed 560 bytes");
+    assert_eq!(line.unwrap().1.size, "Sent 560 bytes");
 
     // Put back: both are where they were, the cache with all it held, and nothing of the app's is left in the bin.
     let sent = removing.to_put_back().unwrap();

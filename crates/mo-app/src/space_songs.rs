@@ -466,8 +466,8 @@ pub fn removing_words() -> String {
     format!("Each one is checked again just before it goes to the {BIN}.")
 }
 
-/// The activity card's line once Remove is done: what was freed, what's in the bin, what went but wasn't found there,
-/// and what stayed. Err when nothing went (the card then fails).
+/// The activity card's line once Remove is done: how much was sent to the bin, what's in it, what went but wasn't found
+/// there, and what stayed. Err when nothing went (the card then fails).
 pub fn removed_words(done: &Done) -> Result<String, String> {
     let said: HashSet<&str> = done.problems.iter().map(|p| p.path.as_str()).collect();
     let in_bin = done.removed.iter().filter(|r| !said.contains(r.path.as_str()));
@@ -1503,7 +1503,7 @@ mod tests {
         removing.sent(WHEN, done);
         let card = compact_card(Some(&shown), &removing, true);
         let freed: u64 = picked.iter().filter(|i| i.item.path != changed).map(|i| i.item.bytes).sum();
-        assert_eq!(card.big, format!("Freed {}", size_text(freed)));
+        assert_eq!(card.big, format!("Sent {}", size_text(freed)));
         // What's in the bin is counted by kind; what stayed only by how many.
         let in_bin = picked.len() - 2;
         assert_eq!(card.big_note, format!("{in_bin} old autosaves and 1 cache are in the {BIN}, and 1 stayed"));
@@ -1650,7 +1650,7 @@ mod tests {
         let done = Done { removed, ..Done::default() };
         assert_eq!(
             removed_words(&done),
-            Ok(format!("Freed {}: 3 old autosaves and 1 cache are in the {BIN}.", size_text(done.bytes())))
+            Ok(format!("Sent {}: 3 old autosaves and 1 cache are in the {BIN}.", size_text(done.bytes())))
         );
         // One that went but wasn't found in the bin is counted on its own.
         let first = done.removed.first().map(|r| r.path.clone()).unwrap_or_default();
@@ -1658,7 +1658,7 @@ mod tests {
         assert_eq!(
             removed_words(&lost),
             Ok(format!(
-                "Freed {}: 2 old autosaves and 1 cache are in the {BIN}, and 1 went but wasn't found there.",
+                "Sent {}: 2 old autosaves and 1 cache are in the {BIN}, and 1 went but wasn't found there.",
                 size_text(done.bytes())
             ))
         );
@@ -1666,7 +1666,7 @@ mod tests {
             removed: done.removed.iter().filter(|r| r.what == What::Song(CompactKind::Cache)).cloned().collect(),
             ..Done::default()
         };
-        assert_eq!(removed_words(&caches), Ok(format!("Freed 30 MB: 1 cache is in the {BIN}.")));
+        assert_eq!(removed_words(&caches), Ok(format!("Sent 30 MB: 1 cache is in the {BIN}.")));
         assert_eq!(removed_words(&Done::default()), Err("Nothing was removed.".to_owned()));
     }
 

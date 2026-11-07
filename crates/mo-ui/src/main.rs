@@ -166,6 +166,8 @@ fn main() -> Result<(), slint::PlatformError> {
         // A line of how the run ends: it shows even once the log is full.
         log::last(log::Level::Error, "App", &format!("The window stopped with an error: {e}"));
     }
+    // The rail's DAW watch stops asking Bitwig.
+    mo_ui::daws::finish_up();
     // A plugin move still copying is told to stop, its copy cleared, rather than leave a half copy on the other drive.
     mo_ui::plugins::stop_moves();
     // A settings change still waiting to be written goes now.

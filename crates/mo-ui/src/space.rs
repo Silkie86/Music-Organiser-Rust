@@ -858,7 +858,8 @@ fn chosen(app: &AppWindow, id: &str) {
 
 /// A button: its id, words and whether it can be pressed now; the card's main one is in the accent colour (Send to the
 /// Recycle Bin, or Put back once it has run). None is in the colour for removing for good: nothing on Space goes for
-/// good, as everything it sends to the bin can come back (the whole-app review of 6 Nov, X3-11).
+/// good. What the bin can't keep stays where it is, and so does what it hasn't room for (the bin would remove it, or
+/// the oldest things in it, for good), so everything that goes can come back (the whole-app review of 6 Nov, X3-11).
 struct Button {
     id: &'static str,
     text: String,
