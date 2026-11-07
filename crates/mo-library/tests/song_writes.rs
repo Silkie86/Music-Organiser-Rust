@@ -89,16 +89,20 @@ fn read(id: i64, path: &str) -> SaveDetail {
     }
 }
 
-fn put(detail: SaveDetail, new: bool) -> Batch {
-    Batch { put: vec![Put { detail, new }], ..Batch::default() }
+/// The save in `detail`, known to the library by the path `known_as` (`None`: never kept).
+fn put(detail: SaveDetail, known_as: Option<&str>) -> Batch {
+    Batch { put: vec![Put { detail, known_as: known_as.map(str::to_owned) }], ..Batch::default() }
 }
+
+/// The path the library made for these tests has its save 1 at.
+const ONE: &str = "C:\\Music\\Night\\Night_11.flp";
 
 #[test]
 fn a_save_read_is_kept_and_reads_back_as_it_was_read() {
     let songs = library("new");
     let mut new = read(2, "C:\\Music\\Night\\Night_12.flp");
     new.save.status = "Mixing".into();
-    let written = song_writes::write(&songs, &put(new.clone(), true)).unwrap();
+    let written = song_writes::write(&songs, &put(new.clone(), None)).unwrap();
     assert_eq!((written.put, written.ids.clone()), (1, Vec::new()));
     let lib = Library::open_read_only(&songs).unwrap();
     let back = lib.detail(2).unwrap().unwrap();
@@ -136,7 +140,7 @@ fn a_save_read_again_is_the_same_row_with_what_you_gave_it_and_when_you_opened_i
     again.save.notes = "louder kick".into();
     again.save.tags = vec!["dark".into(), "digitakt".into()];
     again.plugins.truncate(1);
-    song_writes::write(&songs, &put(again, false)).unwrap();
+    song_writes::write(&songs, &put(again, Some(ONE))).unwrap();
     let lib = Library::open_read_only(&songs).unwrap();
     let saves = lib.saves().unwrap();
     assert_eq!(saves.len(), 1);
@@ -151,27 +155,36 @@ fn a_moved_save_keeps_its_row_and_a_file_the_library_has_keeps_its_id() {
     let songs = library("moved");
     // Moved to another folder: the same save, in its new place.
     let moved = read(1, "D:\\Music\\Night_11.flp");
-    let written = song_writes::write(&songs, &put(moved, false)).unwrap();
+    let written = song_writes::write(&songs, &put(moved, Some(ONE))).unwrap();
     assert!(written.ids.is_empty());
     let lib = Library::open_read_only(&songs).unwrap();
     assert_eq!(lib.saves().unwrap()[0].path, "D:\\Music\\Night_11.flp");
     drop(lib);
     // Given a new id, but the library has its file already (in other capitals): it's that save.
     let known = read(9, "d:\\music\\NIGHT_11.flp");
-    let written = song_writes::write(&songs, &put(known, true)).unwrap();
+    let written = song_writes::write(&songs, &put(known, None)).unwrap();
     assert_eq!(written.ids, vec![(9, 1)]);
     // Given an id another save has meanwhile (another copy of the app): the next free one.
     let other = read(1, "D:\\Music\\Day_1.flp");
-    let written = song_writes::write(&songs, &put(other, true)).unwrap();
+    let written = song_writes::write(&songs, &put(other, None)).unwrap();
     assert_eq!(written.ids, vec![(1, 2)]);
     let lib = Library::open_read_only(&songs).unwrap();
     assert_eq!(lib.saves().unwrap().len(), 2);
+    drop(lib);
+    // Moved, as another copy of the app knew it (by a path its row no longer has, as id 2 is another save's here):
+    // kept as a save of its own, and the other save is left as it was.
+    let stale = read(2, "E:\\Music\\Dusk_1.flp");
+    let written = song_writes::write(&songs, &put(stale, Some("C:\\Music\\Dusk_1.flp"))).unwrap();
+    assert_eq!(written.ids, vec![(2, 3)]);
+    let lib = Library::open_read_only(&songs).unwrap();
+    let paths: Vec<String> = lib.saves().unwrap().into_iter().map(|s| s.path).collect();
+    assert!(paths.contains(&"D:\\Music\\Day_1.flp".to_owned()) && paths.len() == 3, "{paths:?}");
 }
 
 #[test]
 fn a_gone_save_is_marked_missing_and_keeps_all_it_had() {
     let songs = library("gone");
-    song_writes::write(&songs, &put(read(2, "C:\\Music\\Night\\Night_12.flp"), true)).unwrap();
+    song_writes::write(&songs, &put(read(2, "C:\\Music\\Night\\Night_12.flp"), None)).unwrap();
     let missing = |id: i64, path: &str| Missing { id, path: path.to_owned() };
     // Only the row with both its id and its path: one that's another save's by now is left alone.
     let batch = Batch {
@@ -194,22 +207,22 @@ fn only_the_apps_own_songs_db_is_written_and_a_busy_one_is_left_as_it_was() {
     let songs = library("refused");
     let dir = songs.parent().unwrap();
     // library.db, and a songs.db not yet the app's own: never written.
-    let why = song_writes::write(&dir.join("library.db"), &put(read(2, "C:\\a.flp"), true)).unwrap_err();
+    let why = song_writes::write(&dir.join("library.db"), &put(read(2, "C:\\a.flp"), None)).unwrap_err();
     assert!(why.to_string().contains("isn't the app's own"), "{why}");
     let not_own = dir.join("other").join(songs_db::FILE_NAME);
     std::fs::create_dir_all(not_own.parent().unwrap()).unwrap();
     songs_db::make(&dir.join("library.db"), &not_own, &mut |_| {}).unwrap();
-    assert!(song_writes::write(&not_own, &put(read(2, "C:\\a.flp"), true)).is_err());
+    assert!(song_writes::write(&not_own, &put(read(2, "C:\\a.flp"), None)).is_err());
     assert_eq!(Library::open_read_only(&not_own).unwrap().saves().unwrap().len(), 1);
     // Another copy of the app writing meanwhile: busy, nothing changed, and it can be tried again.
     let holder = Connection::open(&songs).unwrap();
     holder.execute_batch("BEGIN IMMEDIATE;").unwrap();
-    let busy = song_writes::write(&songs, &put(read(2, "C:\\a.flp"), true)).unwrap_err();
+    let busy = song_writes::write(&songs, &put(read(2, "C:\\a.flp"), None)).unwrap_err();
     assert!(busy.is_busy(), "{busy}");
     holder.execute_batch("ROLLBACK;").unwrap();
     drop(holder);
     assert_eq!(Library::open_read_only(&songs).unwrap().saves().unwrap().len(), 1);
-    song_writes::write(&songs, &put(read(2, "C:\\a.flp"), true)).unwrap();
+    song_writes::write(&songs, &put(read(2, "C:\\a.flp"), None)).unwrap();
     assert_eq!(Library::open_read_only(&songs).unwrap().saves().unwrap().len(), 2);
 }
 
@@ -240,9 +253,9 @@ fn the_fl_studio_saves_the_app_kept_are_read_again_once_for_their_muted_samples(
     let mut gone = read(5, "C:\\Music\\Night\\Night_13.flp");
     gone.save.mtime = now - day;
     gone.save.file_missing = true;
-    let put = [(again, false), (lately, true), (long_ago, true), (bitwig, true), (gone, true)]
+    let put = [(again, Some(ONE)), (lately, None), (long_ago, None), (bitwig, None), (gone, None)]
         .into_iter()
-        .map(|(detail, new)| Put { detail, new })
+        .map(|(detail, known_as)| Put { detail, known_as: known_as.map(str::to_owned) })
         .collect();
     song_writes::write(&songs, &Batch { put, ..Batch::default() }).unwrap();
     // The FL Studio ones that aren't in library.db as they are, whenever they changed.

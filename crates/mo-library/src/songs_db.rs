@@ -33,7 +33,7 @@ use flate2::Compression;
 use flate2::read::DeflateDecoder;
 use flate2::write::DeflateEncoder;
 use rusqlite::types::{Value, ValueRef};
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params_from_iter};
+use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, params_from_iter};
 use sha2::{Digest, Sha256};
 
 use crate::list_copy::{stamp_of, with_ending};
@@ -145,6 +145,10 @@ pub enum State {
     Old { why: String },
     /// `library.db`, as before, and no `songs.db` is made: `why`.
     Kept { why: String },
+    /// `library.db` this time only: the `songs.db` there couldn't be read as the app started (`why`): another program
+    /// held it longer than [`START_WAIT`]. It may be the app's own library, so the settings writers don't write into
+    /// `library.db` while it may be ([`may_be_own`]): a change there would be lost at the next start.
+    Unread { why: String },
 }
 
 impl AtStart {
@@ -167,13 +171,27 @@ impl AtStart {
             }
             State::Old { why } => format!("Reading library.db: {why}, so songs.db will be made from it"),
             State::Kept { why } => format!("Reading library.db: {why}"),
+            State::Unread { why } => format!("Reading library.db this time: songs.db couldn't be read ({why})"),
         }
+    }
+
+    /// What a card should say this time, if anything: the app shows its old library, and changes to settings may be
+    /// refused ([`may_be_own`]).
+    pub fn notice(&self) -> Option<String> {
+        let State::Unread { why } = &self.state else { return None };
+        Some(format!(
+            "Your song library, songs.db, couldn't be read as the app started ({why}), so the Songs page shows the old \
+             library.db this time, and changes to folders and settings may not be taken. Close the app and open it \
+             again."
+        ))
     }
 }
 
-/// How long the start waits for another program (another copy of the app, a virus checker) to let go of `songs.db`
-/// before reading `library.db` this time: it holds up the window opening.
-const START_WAIT: Duration = Duration::from_millis(250);
+/// How long a look at `songs.db` or a note in it waits for another program (another copy of the app) to let go of it.
+const WAIT: Duration = Duration::from_millis(250);
+/// How long the start waits for another program (another copy of the app, the last run still closing) to let go of
+/// `songs.db` before reading `library.db` this time: it holds up the window opening, only while `songs.db` is held.
+const START_WAIT: Duration = Duration::from_secs(1);
 
 /// Which library the app opens at this start, in its data folder `dir`: `songs.db` once it's been made and checked
 /// and `library.db` hasn't changed since (it becomes the app's own library then), else `library.db` as before. Looks
@@ -207,7 +225,7 @@ pub fn at_start(dir: &Path, app: &str) -> AtStart {
             ),
         }),
     };
-    match look(&songs) {
+    match look_closely(&songs, START_WAIT) {
         Ok(Found::Songs { own: Some(_), .. }) => AtStart { library: songs, state: State::Own },
         Ok(Found::Songs { own: None, made_from }) => match stamp_of(&old) {
             Some(now) if made_from.as_deref() == Some(now.as_str()) => switch(Some(&now)),
@@ -221,7 +239,10 @@ pub fn at_start(dir: &Path, app: &str) -> AtStart {
         Ok(Found::Newer(version)) => old_one(State::Kept {
             why: format!("songs.db was made by a newer version of the app (layout {version}), so it's left as it is"),
         }),
-        Err(why) => old_one(State::Kept { why: format!("songs.db couldn't be read ({why}), so it's left as it is") }),
+        Err(Unread { why, passing: true }) => old_one(State::Unread { why }),
+        Err(Unread { why, .. }) => {
+            old_one(State::Kept { why: format!("songs.db couldn't be read ({why}), so it's left as it is") })
+        }
     }
 }
 
@@ -286,6 +307,16 @@ pub fn own_since(songs: &Path) -> Option<i64> {
     }
 }
 
+/// Whether the `songs.db` at `songs` is the app's own library, or may be: another program holds it just now, so it
+/// can't be told ([`State::Unread`]). The settings writers don't write into `library.db` then ([`crate::folders`]).
+pub fn may_be_own(songs: &Path) -> bool {
+    match look_closely(songs, WAIT) {
+        Ok(Found::Songs { own, .. }) => own.is_some(),
+        Ok(_) => false,
+        Err(Unread { passing, .. }) => passing,
+    }
+}
+
 /// What's at `songs.db`'s place.
 enum Found {
     Nothing,
@@ -299,12 +330,25 @@ enum Found {
     Newer(i32),
 }
 
+/// Why `songs.db` couldn't be looked at, and whether it may be another program holding it just then (it's busy or
+/// locked), rather than what it holds or the drive (those are the same at every start).
+struct Unread {
+    why: String,
+    passing: bool,
+}
+
 fn look(songs: &Path) -> Result<Found, String> {
+    look_closely(songs, WAIT).map_err(|u| u.why)
+}
+
+/// What's at `songs`, waiting at most `wait` for another program that holds it.
+fn look_closely(songs: &Path, wait: Duration) -> Result<Found, Unread> {
     if !songs.exists() {
         return Ok(Found::Nothing);
     }
     let found = (|| -> rusqlite::Result<Result<Found, String>> {
         let conn = open_read_only(songs)?;
+        conn.busy_timeout(wait)?;
         let id: i32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0))?;
         if id != APPLICATION_ID {
             return Ok(Err("it isn't the app's song library".to_owned()));
@@ -329,12 +373,18 @@ fn look(songs: &Path) -> Result<Found, String> {
         };
         Ok(Ok(Found::Songs { made_from, own }))
     })();
-    found.map_err(|e| e.to_string())?
+    let passing = |e: &rusqlite::Error| {
+        matches!(e.sqlite_error_code(), Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked))
+    };
+    match found {
+        Ok(found) => found.map_err(|why| Unread { why, passing: false }),
+        Err(e) => Err(Unread { passing: passing(&e), why: e.to_string() }),
+    }
 }
 
 fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-    conn.busy_timeout(START_WAIT)?;
+    conn.busy_timeout(WAIT)?;
     Ok(conn)
 }
 
@@ -345,7 +395,7 @@ fn adopt(songs: &Path, made_from: Option<&str>) -> Result<(), String> {
     let noted = (|| -> rusqlite::Result<Result<(), String>> {
         let conn =
             Connection::open_with_flags(songs, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-        conn.busy_timeout(START_WAIT)?;
+        conn.busy_timeout(WAIT)?;
         let tx = rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
         let now: Option<Value> =
             tx.query_row("SELECT value FROM songs_info WHERE key = 'made_from'", [], |r| r.get(0)).optional()?;

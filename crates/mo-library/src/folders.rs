@@ -219,6 +219,11 @@ fn read_list(conn: &Connection, list: FolderList) -> Result<Vec<String>, String>
     }
 }
 
+/// Why a change isn't written into the old `library.db` while `songs.db` is, or may be, the app's own library
+/// ([`open_for_settings`]).
+pub const NOT_INTO_THE_OLD_ONE: &str = "songs.db, your song library, couldn't be read as the app started, so a change \
+     written into the old library.db might be lost: close the app and open it again, then make it";
+
 /// Opens an existing library to change its settings or folder lists: never makes one. Only for writes to what the
 /// saves list doesn't hold (the `settings` and `roots` tables, as [`change`] and [`crate::setting_list`] do): once the
 /// connection is closed, the app's copy of the list is marked as still fitting ([`crate::list_copy`]), so the next
@@ -228,6 +233,14 @@ pub(crate) fn open_for_settings(library: &Path) -> Result<SettingsWriter, Librar
     let open_error = |why: String| LibraryError::Open { path: library.to_owned(), why };
     if !library.is_file() {
         return Err(open_error("it isn't there".to_owned()));
+    }
+    // The old library.db, read this time only as songs.db couldn't be read as the app started: when songs.db is the
+    // app's own, or may be (another program still holds it), a change written here would be lost at the next start
+    // (review finding A-2).
+    if library.file_name().is_some_and(|n| n.eq_ignore_ascii_case(crate::songs_db::OLD_FILE_NAME))
+        && crate::songs_db::may_be_own(&library.with_file_name(crate::songs_db::FILE_NAME))
+    {
+        return Err(open_error(NOT_INTO_THE_OLD_ONE.to_owned()));
     }
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = Connection::open_with_flags(library, flags).map_err(|e| open_error(e.to_string()))?;

@@ -278,9 +278,13 @@ fn bitwig_curves(clips: &[automation::AutomationClip], place: &Place<'_>) -> Vec
         .collect()
 }
 
-/// Whether a save is the converter's own copy (in the export folder), which the library leaves out.
+/// Whether a save is the converter's own copy (in the export folder), which the library leaves out. Big and small
+/// letters count the same, as Windows takes them (and the Songs list).
 pub fn is_export(path: &Path, export_root: Option<&Path>) -> bool {
-    export_root.is_some_and(|root| path.starts_with(root))
+    export_root.is_some_and(|root| {
+        let mut path = path.components();
+        root.components().all(|r| path.next().is_some_and(|p| p.as_os_str().eq_ignore_ascii_case(r.as_os_str())))
+    })
 }
 
 /// What went wrong with `curves.db`.
@@ -767,6 +771,16 @@ mod tests {
 
     fn p(x: f64, y: f64, bend: f64) -> curve::CurvePoint {
         curve::CurvePoint { x, y, bend }
+    }
+
+    #[test]
+    fn the_converters_copies_are_known_whatever_their_letters() {
+        let root = Path::new("/Music/Exports");
+        assert!(is_export(Path::new("/music/EXPORTS/Night/Bitwig/Night.bwproject"), Some(root)));
+        assert!(is_export(Path::new("/Music/Exports"), Some(root)));
+        assert!(!is_export(Path::new("/Music/Exports 2/Night.bwproject"), Some(root)));
+        assert!(!is_export(Path::new("/Music/Night.flp"), Some(root)));
+        assert!(!is_export(Path::new("/Music/Exports/Night.flp"), None));
     }
 
     #[test]

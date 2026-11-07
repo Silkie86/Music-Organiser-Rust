@@ -40,6 +40,18 @@ pub fn export_root(setting: Option<&str>, documents: Option<&Path>) -> Option<Pa
     }
 }
 
+/// The export folder ([`export_root`], with this computer's Documents) that the lists of saves leave out, so Open in
+/// Bitwig's copies never show as songs (the Songs list, Presets): `None` when a project folder in `library` is that
+/// folder or inside it, as the saves there are yours then. Reads `library`, so never on the window's thread.
+pub fn export_left_out(library: &mo_library::Library) -> Result<Option<PathBuf>, mo_library::LibraryError> {
+    let Some(export) = export_root(library.setting(EXPORT_FOLDER_KEY)?.as_deref(), documents().as_deref()) else {
+        return Ok(None);
+    };
+    let folder = export.display().to_string();
+    let roots = library.roots()?;
+    Ok((!roots.iter().any(|root| mo_library::scan::is_inside(root, &folder))).then_some(export))
+}
+
 /// Where an export writes ([`export_root`]), checked first. An export folder that's set but isn't there stops the
 /// export, saying so, rather than being made again or the export going somewhere else (Solomon, 2026-11-05: it's most
 /// likely on a drive that isn't plugged in, and C: is nearly full). The one in Documents is made when it's needed.

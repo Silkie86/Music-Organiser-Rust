@@ -1077,10 +1077,7 @@ fn read_all(at: &Where) -> Result<(), String> {
     let lib = Library::open_read_only(&at.library).map_err(|e| format!("Couldn't open your library: {e}"))?;
     let saves = lib.saves().map_err(|e| format!("Couldn't read your library: {e}"))?;
     let choices = lib.song_choices().unwrap_or_default();
-    let export_root = bitwig::export_root(
-        lib.setting(bitwig::EXPORT_FOLDER_KEY).ok().flatten().as_deref(),
-        bitwig::documents().as_deref(),
-    );
+    let export_root = bitwig::export_left_out(&lib).ok().flatten();
     drop(lib);
     let songs = mo_library::songs::group_songs(&saves, &choices);
     let newest = logic::newest_saves(&songs, export_root.as_deref());
@@ -2154,10 +2151,7 @@ fn scan_curves(at: &Where) -> Result<Vec<Curve>, String> {
     });
     let lib = Library::open_read_only(&at.library).map_err(|e| format!("Couldn't open your library: {e}"))?;
     let saves = lib.saves().map_err(|e| format!("Couldn't read your library: {e}"))?;
-    let export_root = bitwig::export_root(
-        lib.setting(bitwig::EXPORT_FOLDER_KEY).ok().flatten().as_deref(),
-        bitwig::documents().as_deref(),
-    );
+    let export_root = bitwig::export_left_out(&lib).ok().flatten();
     drop(lib);
     let mut paths = logic::curve_saves(&saves, export_root.as_deref());
     let bitwig_folders = logic::bitwig_folders(&plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
