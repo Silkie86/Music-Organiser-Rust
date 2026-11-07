@@ -42,7 +42,7 @@ param(
 )
 
 # Raised whenever this script changes, so an older branch's copy never replaces a newer installed one.
-$LauncherVersion = 8
+$LauncherVersion = 9
 
 $ErrorActionPreference = 'Continue'   # git and cargo write progress to stderr, which Windows PowerShell treats as failure
 $GitHubRepo = 'Silkie86/Music-Organiser-Rust'
@@ -262,7 +262,8 @@ if (-not $gotLock) {
 
 if (-not (Test-Path (Join-Path $Repo '.git'))) {
     Say "Downloading the code from GitHub into $Repo (only the first time)..." 'Cyan'
-    & $GitExe clone "https://github.com/$GitHubRepo.git" $Repo
+    # Only main comes down (and only main on later plain fetches): see Get-FromGitHub.
+    & $GitExe clone --single-branch --branch main "https://github.com/$GitHubRepo.git" $Repo
     if ($LASTEXITCODE -ne 0) { Stop-WithMessage 'Couldn''t download the code from GitHub. Is the internet on?' }
 }
 
@@ -312,10 +313,78 @@ if (-not $Branch) {
 Set-Content -Path $LastChoice -Value $Branch
 
 # --- Bring it down ----------------------------------------------------------------------------------------------
+# While git changes a ref (or the index) it puts "<name>.lock" beside it, and removes it when done. A git stopped
+# part-way (the window closed during a fetch, say) leaves its locks behind, and every later fetch then fails on them
+# ("cannot lock ref ... File exists"). Only one launcher runs per copy of the code (the mutex above), so when no git
+# is running at all, a lock in this copy's .git folder is stale and is removed. Only files named *.lock, only in .git
+# itself and under .git\refs, never through a link.
+function Get-LockFiles([string]$Dir, [switch]$Deep) {
+    foreach ($item in @(Get-ChildItem -LiteralPath $Dir -Force -ErrorAction SilentlyContinue)) {
+        if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { continue }
+        if ($item.PSIsContainer) { if ($Deep) { Get-LockFiles $item.FullName -Deep } }
+        elseif ($item.Name -like '*.lock') { $item }
+    }
+}
+function Clear-StaleGitLocks {
+    $gitDir = Join-Path $Repo '.git'
+    $refs = Join-Path $gitDir 'refs'
+    if (-not (Test-Path -LiteralPath $refs -PathType Container)) { return }
+    if ((Get-Item -LiteralPath $gitDir -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { return }
+    # Any git running (here or in another folder) might own a lock: then nothing is touched this time.
+    if (Get-Process -Name 'git', 'git-remote-https', 'git-remote-http' -ErrorAction SilentlyContinue) { return }
+    $locks = @(Get-LockFiles $gitDir) + @(Get-LockFiles $refs -Deep)
+    if ($locks.Count -eq 0) { return }
+    $removed = 0
+    foreach ($lock in $locks) {
+        try { Remove-Item -LiteralPath $lock.FullName -Force -ErrorAction Stop; $removed++ }
+        catch { Say "Couldn't remove the stale git lock $($lock.FullName) ($($_.Exception.Message))." 'Yellow' }
+    }
+    if ($removed -gt 0) { Say "Removed $removed lock file(s) an earlier git left behind when it was stopped." 'DarkGray' }
+}
+
+# Only the version being run comes down from GitHub, into origin/<branch>. Fetching every branch (one per pull
+# request) was slower and gave a stale lock many more places to stop the fetch.
+# What git said goes in $script:FetchSaid, so the message can say what really went wrong.
+function Get-FromGitHub {
+    $spec = "+refs/heads/${Branch}:refs/remotes/origin/$Branch"
+    $script:FetchSaid = @(& $GitExe -C $Repo fetch --quiet origin $spec 2>&1 | ForEach-Object { "$_" }) -join "`n"
+    return ($LASTEXITCODE -eq 0)
+}
+function Get-FetchProblem {
+    if ($FetchSaid -match '\.lock|cannot lock') {
+        return 'GitHub was reached, but a lock file left by an earlier git that was stopped part-way blocked the update'
+    }
+    if ($FetchSaid -match "couldn't find remote ref") { return "'$Branch' isn't on GitHub any more (merged, perhaps)" }
+    if ($FetchSaid -match 'Could not resolve host|unable to access|Failed to connect|timed out') {
+        return "Couldn't reach GitHub (is the internet on?)"
+    }
+    return "Git couldn't get the latest from GitHub"
+}
+
+# The other branches an older launcher brought down are only clutter here: their origin/... copies are dropped
+# (nothing on GitHub changes, and a branch picked later comes down again). A plain "git fetch" in this copy then
+# brings only main too.
+function Remove-OtherBranchCopies {
+    & $GitExe -C $Repo config remote.origin.fetch '+refs/heads/main:refs/remotes/origin/main'
+    # Full names: the short name of origin/HEAD is just "origin".
+    $keep = @('refs/remotes/origin/main', "refs/remotes/origin/$Branch", 'refs/remotes/origin/HEAD')
+    $drop = @(& $GitExe -C $Repo for-each-ref --format='%(refname)' refs/remotes/origin/ |
+        Where-Object { $_ -and $keep -notcontains $_ } | ForEach-Object { $_.Substring('refs/remotes/'.Length) })
+    # In groups, so the command line stays well inside Windows' limit.
+    for ($i = 0; $i -lt $drop.Count; $i += 100) {
+        $group = @($drop[$i..([Math]::Min($i + 99, $drop.Count - 1))])
+        & $GitExe -C $Repo branch --quiet --delete --remotes @group 2>$null | Out-Null
+    }
+}
+
 Say ''
 Say "Getting the latest '$Branch' from GitHub..." 'Cyan'
-& $GitExe -C $Repo fetch --quiet --prune origin
-if ($LASTEXITCODE -ne 0) { Say "Couldn't reach GitHub; running the version already here." 'Yellow' }
+Clear-StaleGitLocks
+if (-not (Get-FromGitHub)) {
+    if ($FetchSaid) { Say $FetchSaid 'DarkGray' }
+    Say "$(Get-FetchProblem); running the version already here." 'Yellow'
+}
+Remove-OtherBranchCopies
 
 function Save-LocalChanges {
     # This copy is only for running the app, so anything changed in it is put aside, not lost.
@@ -773,9 +842,10 @@ try {
         if ((Get-Date) -lt $next) { continue }
         $next = (Get-Date).AddSeconds($PullEvery)
 
-        & $GitExe -C $Repo fetch --quiet origin $Branch 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            # Offline for a moment (try again next time), or the branch is gone from GitHub (merged and deleted).
+        if (-not (Get-FromGitHub)) {
+            # Offline for a moment (try again next time), or the branch is gone from GitHub (merged and deleted), or a
+            # git stopped part-way left a lock (cleared here, so the next try gets through).
+            Clear-StaleGitLocks
             & $GitExe -C $Repo ls-remote --exit-code --heads origin $Branch 2>$null | Out-Null
             if ($LASTEXITCODE -eq 2 -and -not $saidGone) {
                 $saidGone = $true
