@@ -13,6 +13,7 @@ mod grid;
 mod kit;
 mod peaks;
 mod sky;
+mod yours;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -31,7 +32,7 @@ use mo_app::filters::{self, Filter, Shown};
 use mo_app::finder::{self, Kind};
 use mo_app::places::Place;
 use mo_app::shortcuts::{Shortcuts, what_of};
-use mo_app::sound_notes::{Held, Noter};
+use mo_app::sound_notes::{Held, Holds, Noter};
 use mo_app::sounds::{
     self as list, AUTOPLAY_KEY, Filters, Order, REDISCOVER_COUNT_KEY as COUNT_KEY, SoundCounts, SoundList, VIEW_KEY,
 };
@@ -102,7 +103,11 @@ struct Page {
     noted: Vec<did::Noted>,
     /// How much each sign of liking counts for Most liked, as the sounds were scored with.
     weights: LikedWeights,
-    /// Keeps what's done with sounds in the library ([`did`]); none for the screenshots.
+    /// Your say about sounds since they were read (a favourite, stars, your own type, tags), in the order said: shown
+    /// over the sounds at once ([`yours`]), and left out of the sounds read again once they hold it.
+    said: Vec<yours::Said>,
+    /// Keeps what's done with sounds, and your say about them, in the library ([`did`], [`yours`]); none for the
+    /// screenshots.
     noter: Option<Arc<Noter>>,
     /// How many tiles fit side by side.
     columns: usize,
@@ -189,6 +194,7 @@ impl Default for Page {
             history_behind: None,
             did: HashMap::new(),
             noted: Vec::new(),
+            said: Vec::new(),
             weights: LikedWeights::default(),
             noter: None,
             columns: 4,
@@ -436,13 +442,14 @@ impl Model for Lines {
 }
 
 fn tile(p: &Page, row: usize, at: usize) -> SoundTile {
-    let Some(s) = p.list.sound(at) else { return SoundTile::default() };
+    let Some(now) = p.list.now(at) else { return SoundTile::default() };
+    let s = now.sound;
     SoundTile {
         row: row as i32,
         name: s.name().into(),
-        facts: list::facts_line(s).into(),
-        colour: list::type_colour(&s.sound_type),
-        favourite: s.favourite,
+        facts: list::facts_line_now(&now).into(),
+        colour: list::type_colour(now.sound_type),
+        favourite: now.favourite,
         liked: liked_share(p, at).map_or(-1.0, |l| l as f32),
         liked_why: liked_why(p, at).into(),
         wave: wave(s).into(),
@@ -453,14 +460,15 @@ fn tile(p: &Page, row: usize, at: usize) -> SoundTile {
 }
 
 fn line(p: &Page, row: usize, at: usize) -> SoundLine {
-    let Some(s) = p.list.sound(at) else { return SoundLine::default() };
+    let Some(now) = p.list.now(at) else { return SoundLine::default() };
+    let s = now.sound;
     let a = s.analysis.as_ref();
     let used = p.list.used_in(at);
     SoundLine {
         row: row as i32,
         name: s.name().into(),
-        sound_type: s.sound_type.as_str().into(),
-        colour: list::type_colour(&s.sound_type),
+        sound_type: now.sound_type.into(),
+        colour: list::type_colour(now.sound_type),
         key: list::key_text(s).into(),
         bpm: a.and_then(|a| a.bpm).map(list::bpm_text).unwrap_or_default().into(),
         length: a.map(|a| list::length_text(a.seconds)).unwrap_or_default().into(),
@@ -469,19 +477,20 @@ fn line(p: &Page, row: usize, at: usize) -> SoundLine {
         folder: s.folder().into(),
         when: p.history.get(row).filter(|_| p.view == HISTORY).map(|h| when(h.1, p.now)).unwrap_or_default().into(),
         reason: p.rediscover.get(row).filter(|_| p.view == REDISCOVER).map(|r| r.1.clone()).unwrap_or_default().into(),
-        favourite: s.favourite,
+        favourite: now.favourite,
         picked: p.picked == Some(at),
         playing: p.playing.is_some_and(|(i, _)| i == at),
     }
 }
 
-/// Why a sound is as liked as it is (empty until the scores are known), with what was done with it since it was read.
+/// Why a sound is as liked as it is (empty until the scores are known), with what was done with it, and whether you
+/// made it a favourite, since it was read.
 fn liked_why(p: &Page, at: usize) -> String {
-    match (p.list.liked_share(at), p.list.sound(at)) {
-        (Some(_), Some(s)) => match did::since(p, s) {
-            Some(since) => liking::explain_with(s, since, p.list.usage(at)),
-            None => liking::explain(s, p.list.usage(at)),
-        },
+    match (p.list.liked_share(at), p.list.now(at)) {
+        (Some(_), Some(now)) => {
+            let since = did::since(p, now.sound).copied().unwrap_or_default();
+            liking::explain_with(now.sound, now.favourite, &since, p.list.usage(at))
+        }
         _ => String::new(),
     }
 }
@@ -761,9 +770,9 @@ pub struct Library {
     places: Arc<HashMap<i64, usize>>,
     /// How much each sign of liking counted for Most liked.
     weights: LikedWeights,
-    /// The number of the last thing done with sounds that these hold, when they were read with its writer held off
-    /// ([`did::read_again`]).
-    upto: Option<u64>,
+    /// Which things done with sounds, and which of your say, these hold, when they were read with their writer held
+    /// off ([`did::read_again`]).
+    holds: Option<Holds>,
 }
 
 impl Library {
@@ -785,14 +794,14 @@ impl Library {
             played,
             places: Arc::new(places),
             weights: *weights,
-            upto: None,
+            holds: None,
         }
     }
 
-    /// The same library, read holding every thing done with sounds up to the one numbered `upto` (when it was read
+    /// The same library, read holding the things done with sounds and your say that `holds` says (when it was read
     /// with their writer held off).
-    fn read_upto(mut self, upto: Option<u64>) -> Library {
-        self.upto = upto;
+    fn read_holding(mut self, holds: Option<Holds>) -> Library {
+        self.holds = holds;
         self
     }
 
@@ -889,7 +898,7 @@ fn read_all(
         return None;
     }
     let held = noter.map(Noter::hold);
-    let upto = held.as_ref().map(Held::upto);
+    let holds = held.as_ref().map(Held::holds);
     let lib = library_db.exists().then(|| mo_library::Library::open_read_only(library_db)).and_then(|lib| {
         lib.map_err(|e| log::warning("Sounds", &format!("Couldn't read the song library for how sounds are used: {e}")))
             .ok()
@@ -916,7 +925,7 @@ fn read_all(
                 Ok((db.some(&first, now)?, ids.len()))
             }) {
                 Ok((sounds, all)) => {
-                    let library = Library::new(sounds, Vec::new(), &settings.weights).read_upto(upto);
+                    let library = Library::new(sounds, Vec::new(), &settings.weights).read_holding(holds.clone());
                     log::info(
                         "Sounds",
                         &format!(
@@ -946,7 +955,8 @@ fn read_all(
     // Sounds the app's own scan added aren't counted for CLAP: it never hears them in this app.
     let new_since = compact::grow::new_since(&first.source);
     let analysed = mo_sounds::count_clap_could_hear(&sounds, new_since);
-    let library = Library::new(sounds, std::mem::take(&mut first.played), &settings.weights).read_upto(upto);
+    let library =
+        Library::new(sounds, std::mem::take(&mut first.played), &settings.weights).read_holding(holds.clone());
     log::info(
         "Sounds",
         &format!(
@@ -1100,7 +1110,7 @@ fn read_all(
         Some(s) if s.made => PrintsAgain::Again,
         Some(_) => PrintsAgain::IfCountChanged,
     };
-    take_again(sounds, db, prints, &mut on_show, upto, &send);
+    take_again(sounds, db, prints, &mut on_show, holds, &send);
     Some(on_show)
 }
 
@@ -1177,9 +1187,9 @@ fn scan_for_sounds(
     let prints = if k.added + k.updated > 0 { PrintsAgain::Again } else { PrintsAgain::IfCountChanged };
     let now = Local::now().naive_local();
     let held = noter.map(Noter::hold);
-    let upto = held.as_ref().map(Held::upto);
+    let holds = held.as_ref().map(Held::holds);
     match SoundsDb::open_read_only(&copy).and_then(|db| Ok((db.all(now)?, db))) {
-        Ok((sounds, db)) => take_again(sounds, Ok(db), prints, on_show, upto, send),
+        Ok((sounds, db)) => take_again(sounds, Ok(db), prints, on_show, holds, send),
         Err(e) => log::warning("Sounds", &format!("Couldn't read the sounds again once the scan kept them: {e}")),
     }
     true
@@ -1213,14 +1223,14 @@ enum PrintsAgain {
 }
 
 /// The sounds read again (`sounds`, from `db`) take the place of those on show: the page moves what it holds by place
-/// with each sound ([`Step::Refreshed`]). Their fingerprints are read again too as `prints` says. `upto`: the last
-/// thing done with sounds that they hold, when they're read with its writer held off ([`Noter::hold`]).
+/// with each sound ([`Step::Refreshed`]). Their fingerprints are read again too as `prints` says. `holds`: the things
+/// done with sounds and your say that they hold, when they're read with their writer held off ([`Noter::hold`]).
 fn take_again(
     sounds: Vec<Sound>,
     db: Result<SoundsDb, SoundsError>,
     prints: PrintsAgain,
     on_show: &mut OnShow,
-    upto: Option<u64>,
+    holds: Option<Holds>,
     send: &impl Fn(Step),
 ) {
     // What was played: the sounds are in hand, so a History that can't be read just now stays empty.
@@ -1233,7 +1243,7 @@ fn take_again(
         Vec::new()
     });
     let analysed_now = mo_sounds::count_clap_could_hear(&sounds, on_show.new_since);
-    let mut library = Library::new(sounds, played, &on_show.weights).read_upto(upto);
+    let mut library = Library::new(sounds, played, &on_show.weights).read_holding(holds);
     if let Some((uses, projects)) = &on_show.uses {
         library.list = Arc::new(with_usage(&library.list, usage_of(&library.list, uses), projects, &on_show.weights));
     }
@@ -1690,12 +1700,12 @@ fn alike_found(app: &AppWindow, at: usize, list: &SoundList, found: Vec<(usize, 
             found
                 .iter()
                 .filter_map(|&(i, likeness)| {
-                    let s = p.list.sound(i)?;
+                    let now = p.list.now(i)?;
                     Some(AlikeLine {
                         place: i as i32,
-                        name: s.name().into(),
-                        sound_type: s.sound_type.as_str().into(),
-                        colour: list::type_colour(&s.sound_type),
+                        name: now.sound.name().into(),
+                        sound_type: now.sound_type.into(),
+                        colour: list::type_colour(now.sound_type),
                         likeness: format!("{:.0}%", likeness.clamp(0.0, 1.0) * 100.0).into(),
                     })
                 })
@@ -1719,6 +1729,8 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
         let mut with_use = (*list).clone();
         with_use.keep_copies_of(&p.list);
         p.list = Arc::new(with_use);
+        // Your say since the sounds were read stays over them.
+        yours::keep_showing(&mut p);
         Some(p.picked)
     });
     let Some(picked) = picked else { return };
@@ -1840,7 +1852,8 @@ fn take_refreshed(p: &mut Page, library: Library, moved: Option<&[Option<usize>]
     p.played = Arc::new(library.played);
     // Read again, they hold what was done with them so far: what wasn't kept yet as they were read goes on showing.
     p.weights = library.weights;
-    did::read_again(p, library.upto);
+    did::read_again(p, library.holds.as_ref());
+    yours::read_again(p, library.holds.as_ref());
     let gone = moved.map(|moved| move_places(p, moved)).unwrap_or_default();
     let anew = moved.is_some() || retyped;
     if anew {
@@ -1990,7 +2003,8 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         p.places = library.places;
         p.types = library.types;
         p.tags = library.tags;
-        did::read_again(&mut p, library.upto);
+        did::read_again(&mut p, library.holds.as_ref());
+        yours::read_again(&mut p, library.holds.as_ref());
         // Counted afresh for these sounds: the choices show without numbers until then.
         p.counts = None;
         p.open_on(view, autoplay);
@@ -2052,7 +2066,14 @@ fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
         id: "play".into(),
         enabled: true,
     };
-    let mut menu = vec![play, MenuItem { enabled: true, ..MenuItem::default() }];
+    // Favourite has its heart on the card, and a line here (as in the C# app's menu).
+    let favourite = MenuItem {
+        what: "Favourite, or not".into(),
+        key: shortcuts.key_of(FAVOURITE).into(),
+        id: FAVOURITE.into(),
+        enabled: true,
+    };
+    let mut menu = vec![play, favourite, MenuItem { enabled: true, ..MenuItem::default() }];
     let mut actions = Vec::new();
     for &(text, id) in CARD_ACTIONS {
         let key = SharedString::from(shortcuts.key_of(id));
@@ -2071,7 +2092,13 @@ fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
     data.set_actions(ModelRc::new(VecModel::from(actions)));
     data.set_play_tip("Play or stop the picked sound".into());
     data.set_play_key(shortcuts.key_of("app.play").into());
+    data.set_favourite_key(shortcuts.key_of(FAVOURITE).into());
+    data.set_tag_key(shortcuts.key_of(TAG).into());
 }
+
+/// Favourite's and Add a tag's ids in the shortcut list (the C# app's).
+const FAVOURITE: &str = "sounds.favourite";
+const TAG: &str = "sounds.tag";
 
 fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     FEED.with(|f| *f.borrow_mut() = Some(feed));
@@ -2289,6 +2316,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         // The galaxy's ring leaves the star with it.
         galaxy::show_picked(&app);
     });
+    wire_yours(app, &data);
     let weak = app.as_weak();
     data.on_menu_chosen(move |id| {
         if let Some(app) = weak.upgrade() {
@@ -2300,6 +2328,42 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         }
     });
     data.on_panel_resized(|w| log::info("Sounds", &format!("Panel width {w:.0}")));
+}
+
+/// The card's heart, stars, Your type menu and tags ([`yours`]).
+fn wire_yours(app: &AppWindow, data: &SoundsData) {
+    let choices: Vec<SharedString> = yours::choices().into_iter().map(SharedString::from).collect();
+    data.set_type_choices(ModelRc::new(VecModel::from(choices)));
+    let weak = app.as_weak();
+    data.on_toggle_favourite(move || {
+        if let Some(app) = weak.upgrade() {
+            yours::favourite(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_set_stars(move |n| {
+        if let Some(app) = weak.upgrade() {
+            yours::stars(&app, n);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_set_type(move |t| {
+        if let Some(app) = weak.upgrade() {
+            yours::own_type(&app, &t);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_add_tag(move |t| {
+        if let Some(app) = weak.upgrade() {
+            yours::tag(&app, &t);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_remove_tag(move |t| {
+        if let Some(app) = weak.upgrade() {
+            yours::untag(&app, &t);
+        }
+    });
 }
 
 /// A Rediscover ask: everything its thread needs, so the page can go on changing meanwhile.
@@ -2955,7 +3019,7 @@ fn show_chips(app: &AppWindow) {
 
 /// The picked sound's tags on its panel, each lit while the Tag filter has it.
 fn show_picked_tags(data: &SoundsData, p: &Page) {
-    let tags = p.picked.and_then(|at| p.list.sound(at)).map(|s| s.tags.as_slice()).unwrap_or_default();
+    let tags = p.picked.and_then(|at| p.list.now(at)).map(|now| now.tags).unwrap_or_default();
     let shown: Vec<Shown> = tags
         .iter()
         .map(|t| Shown {
@@ -3009,7 +3073,8 @@ fn bring_picked_into_view(app: &AppWindow) {
 }
 
 fn picked_sound(p: &Page, at: usize) -> PickedSound {
-    let Some(s) = p.list.sound(at) else { return PickedSound::default() };
+    let Some(now) = p.list.now(at) else { return PickedSound::default() };
+    let s = now.sound;
     let a = s.analysis.as_ref();
     let mut facts = vec![
         ("Key", list::key_text(s)),
@@ -3037,7 +3102,7 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
             saved: l.saved.as_str().into(),
         })
         .collect();
-    let type_from = match s.type_source.as_str() {
+    let type_from = match now.type_source {
         "you" => "· you set this",
         "name" => "· from its name",
         "learned" => "· learned from your library",
@@ -3046,15 +3111,17 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
     };
     PickedSound {
         name: s.name().into(),
-        sound_type: s.sound_type.as_str().into(),
-        colour: list::type_colour(&s.sound_type),
+        sound_type: now.sound_type.into(),
+        colour: list::type_colour(now.sound_type),
         type_from: type_from.into(),
         path: mo_app::shell::wrappable_path(&s.path).into(),
         wave: wave(s).into(),
         points: points(s),
         seconds: a.map_or(0.0, |a| a.seconds.min(mo_audio::MAX_SECONDS)) as f32,
         facts: ModelRc::new(VecModel::from(facts)),
-        favourite: s.favourite,
+        favourite: now.favourite,
+        stars: now.stars,
+        own_type: now.own_type.unwrap_or_default().into(),
         character: a.map(|a| a.character.join(", ")).unwrap_or_default().into(),
         liked_why: liked_why(p, at).into(),
         projects: ModelRc::new(VecModel::from(projects)),
@@ -3447,6 +3514,12 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
     });
     let feed = FEED.with(|f| f.borrow().clone());
     match (id, picked, feed) {
+        (FAVOURITE, Some(_), _) => yours::favourite(app),
+        // The card's tag box takes the keys.
+        (TAG, Some(_), _) => {
+            let data = app.global::<SoundsData>();
+            data.set_tag_asked(data.get_tag_asked().wrapping_add(1));
+        }
         (TO_BITWIG, Some((id, path, name)), Some(feed)) => send_to_bitwig(app, &feed, id, path, name),
         ("sounds.reveal", Some((_, path, _)), Some(feed)) => {
             crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));
@@ -4315,7 +4388,8 @@ mod tests {
         assert!(!p.did.contains_key(&99));
         // Read again holding everything noted up to the drag: the send goes on showing, the rest is in what was read
         // (here, as the sounds were: nothing is counted twice).
-        let again = Library::new(sounds, vec![(1, day(1, 9))], &LikedWeights::default()).read_upto(Some(7));
+        let again = Library::new(sounds, vec![(1, day(1, 9))], &LikedWeights::default())
+            .read_holding(Some(Holds { upto: 7, ..Holds::default() }));
         take_refreshed(&mut p, again, None, false);
         assert_eq!(p.did.len(), 1);
         assert_eq!(liked_why(&p, 2), "Sent into a DAW once");
@@ -4342,11 +4416,103 @@ mod tests {
         // first, at their new places; the first is as the library has it.
         let mut moved = sounds;
         moved.reverse();
-        let again = Library::new(moved, vec![(1, day(10))], &LikedWeights::default()).read_upto(Some(1));
+        let again = Library::new(moved, vec![(1, day(10))], &LikedWeights::default())
+            .read_holding(Some(Holds { upto: 1, ..Holds::default() }));
         take_refreshed(&mut p, again, None, false);
         let ids: Vec<i64> = p.played.iter().filter_map(|&(at, _)| p.list.sound(at).map(|s| s.id)).collect();
         assert_eq!(ids, [3, 2, 1]);
         assert_eq!(p.did.keys().copied().collect::<std::collections::BTreeSet<_>>(), [2, 3].into());
+    }
+
+    #[test]
+    fn your_say_shows_at_once_and_stays_until_the_sounds_read_hold_it() {
+        use mo_sounds::compact::yours::Change;
+        let mut sounds = vec![sound(1, "Pack/a.wav"), sound(2, "Pack/b.wav"), sound(3, "Pack/c.wav")];
+        sounds[0].activity.plays = 10;
+        sounds[2].name_type = Some("Snare".into());
+        sounds[2].tags = vec!["dusty".into()];
+        let lib = Library::new(sounds.clone(), Vec::new(), &LikedWeights::default());
+        let mut p = Page {
+            list: lib.list.clone(),
+            places: lib.places.clone(),
+            types: lib.types.clone(),
+            tags: lib.tags.clone(),
+            weights: lib.weights,
+            ..Page::default()
+        };
+        let card = |p: &Page, at: usize| picked_sound(p, at);
+        assert_eq!((liked_share(&p, 0), liked_share(&p, 1)), (Some(1.0), Some(0.0)));
+        // Made a favourite: its heart on its card and tile, its liked bar and why, and the Favourites filter.
+        yours::take(&mut p, 2, Change::Favourite(true), 1);
+        assert!(card(&p, 1).favourite && tile(&p, 0, 1).favourite && line(&p, 0, 1).favourite);
+        assert_eq!(liked_why(&p, 1), "Favourite");
+        assert_eq!((liked_share(&p, 0), liked_share(&p, 1)), (Some(1.0), Some(1.0)));
+        let favourites = Filters { favourites: true, ..Filters::default() };
+        assert_eq!(p.list.view(&favourites, Order::Name, 0), [1]);
+        // Stars, your own type (a new one joins the type chips) and a tag (a new one joins the Tag filter).
+        yours::take(&mut p, 2, Change::Stars(4), 2);
+        yours::take(&mut p, 2, Change::Type(Some("Perc".into())), 3);
+        yours::take(&mut p, 3, Change::Tag("Warm".into()), 4);
+        yours::take(&mut p, 3, Change::Untag("DUSTY".into()), 5);
+        let b = card(&p, 1);
+        assert_eq!(
+            (b.stars, b.own_type.as_str(), b.sound_type.as_str(), b.type_from.as_str()),
+            (4, "Perc", "Perc", "· you set this")
+        );
+        assert!(p.types.iter().any(|(t, _)| t == "Perc"), "{:?}", p.types);
+        assert_eq!(p.tags, ["dusty", "Warm"]);
+        assert_eq!(p.list.now(2).map(|n| n.tags.to_vec()), Some(vec!["Warm".to_owned()]));
+        // Your type taken away: the name's type again.
+        yours::take(&mut p, 3, Change::Type(Some("Kick".into())), 6);
+        yours::take(&mut p, 3, Change::Type(None), 7);
+        let c = card(&p, 2);
+        assert_eq!(
+            (c.own_type.as_str(), c.sound_type.as_str(), c.type_from.as_str()),
+            ("", "Snare", "· from its name")
+        );
+        // A sound not in the list isn't taken.
+        yours::take(&mut p, 99, Change::Favourite(true), 8);
+        assert_eq!(p.said.len(), 7);
+        // Read again holding everything up to the stars, in another order: the rest goes on showing, at the sounds'
+        // new places; what was read is taken as it is (here, as the sounds were: the stars are gone with it). The
+        // favourite couldn't be kept yet, so it goes on showing too.
+        let mut moved = sounds.clone();
+        moved.reverse();
+        let holds = Holds { upto: 2, waiting: [1].into() };
+        let again = Library::new(moved, Vec::new(), &LikedWeights::default()).read_holding(Some(holds));
+        take_refreshed(&mut p, again, None, false);
+        assert_eq!(p.said.len(), 6);
+        let at = |p: &Page, id: i64| p.places[&id];
+        assert!(card(&p, at(&p, 2)).favourite);
+        assert_eq!(card(&p, at(&p, 2)).stars, 0);
+        assert_eq!(card(&p, at(&p, 2)).sound_type, "Perc");
+        assert_eq!(p.list.now(at(&p, 3)).map(|n| n.tags.to_vec()), Some(vec!["Warm".to_owned()]));
+        assert!(p.tags.iter().any(|t| t == "Warm") && p.types.iter().any(|(t, _)| t == "Perc"));
+        // The use counts arriving keep it over the sounds.
+        let used = with_usage(&lib.list, HashMap::new(), &Arc::default(), &p.weights);
+        p.list = Arc::new(used);
+        yours::keep_showing(&mut p);
+        assert_eq!(card(&p, at(&p, 2)).sound_type, "Perc");
+        // One read without holding them off: the library's word is taken.
+        let again = Library::new(sounds, Vec::new(), &LikedWeights::default());
+        take_refreshed(&mut p, again, None, false);
+        assert!(p.said.is_empty() && !p.list.has_say());
+    }
+
+    #[test]
+    fn the_best_liked_sound_made_no_favourite_no_longer_sets_the_liked_bars() {
+        use mo_sounds::compact::yours::Change;
+        let mut sounds = vec![sound(1, "Pack/a.wav"), sound(2, "Pack/b.wav")];
+        sounds[0].favourite = true;
+        sounds[0].activity.plays = 10;
+        sounds[1].activity.plays = 10;
+        let lib = Library::new(sounds, Vec::new(), &LikedWeights::default());
+        let mut p =
+            Page { list: lib.list.clone(), places: lib.places.clone(), weights: lib.weights, ..Page::default() };
+        assert!(liked_share(&p, 1).is_some_and(|share| share < 1.0));
+        // Played as often, and no favourite now: the two are the best liked.
+        yours::take(&mut p, 1, Change::Favourite(false), 1);
+        assert_eq!((liked_share(&p, 0), liked_share(&p, 1)), (Some(1.0), Some(1.0)));
     }
 
     #[test]

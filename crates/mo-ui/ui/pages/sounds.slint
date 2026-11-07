@@ -1,9 +1,9 @@
 // The Sounds page: every sound in your library as Tiles, a List, the History of what you played or Rediscover (unused
 // sounds that fit your taste), with the type chips
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
-// Read-only for now (favourites, tags and types are shown, not changed), like the C# app's sounds.db until it's trusted.
+// The picked sound's card takes your say: a favourite, stars, your own type and tags, kept in the app's own sound library.
 import { ListView } from "std-widgets.slint";
-import { Theme, AppKeys, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, DragHandle, Caps, Heart, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, DragHandle, Caps, Heart, HeartToggle, StarPicker, TagChip, WordBox, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -133,6 +133,9 @@ export struct PickedSound {
     seconds: float,
     facts: [SoundFact],
     favourite: bool,
+    // Its stars, 0 to 5, and your own type for it ("" when you haven't given it one).
+    stars: int,
+    own-type: string,
     // What the analysis says it sounds like ("punchy, bright").
     character: string,
     // Why it's as liked as it is, once that's known: "Favourite, in 4 projects, played 12 times".
@@ -400,6 +403,19 @@ export global SoundsData {
     in property <[CardAction]> actions;
     in property <string> play-tip;
     in property <string> play-key;
+    // Your say about the picked sound: a favourite or not, its stars, your own type for it ("" takes yours away), and
+    // a tag added or taken away. Each is kept in the app's own sound library, and shows at once.
+    callback toggle-favourite();
+    callback set-stars(int);
+    callback set-type(string);
+    callback add-tag(string);
+    callback remove-tag(string);
+    // The types you can give a sound, and the keys of Favourite and Add a tag from the shortcut list (rule 15).
+    in property <[string]> type-choices;
+    in property <string> favourite-key;
+    in property <string> tag-key;
+    // Changes each time Add a tag's key is pressed: the card's tag box takes the keys.
+    in property <int> tag-asked;
 }
 
 // A tile's width at least; as many as fit go in a row.
@@ -961,9 +977,14 @@ component SoundPanel inherits SidePanel {
             horizontal-stretch: 1;
             min-width: 0px;
         }
-        if SoundsData.picked.favourite: VerticalLayout {
-            alignment: center;
-            Heart { }
+        VerticalLayout {
+            alignment: start;
+            HeartToggle {
+                on: SoundsData.picked.favourite;
+                tip: SoundsData.picked.favourite ? "A favourite: click to make it not one" : "Make it a favourite";
+                key: SoundsData.favourite-key;
+                clicked => { SoundsData.toggle-favourite(); }
+            }
         }
     }
     // The path breaks after its slashes (the Rust side marks them), or anywhere in a folder name too long for a line.
@@ -1010,6 +1031,26 @@ component SoundPanel inherits SidePanel {
             clicked => { SoundsData.play(); }
         }
     }
+    // Its stars and your own type for it.
+    HorizontalLayout {
+        spacing: Space.sm;
+        alignment: start;
+        StarPicker {
+            rating: SoundsData.picked.stars;
+            tip: "How many stars it has: a click on the last one lit takes them away";
+            picked(n) => { SoundsData.set-stars(n); }
+        }
+        VerticalLayout {
+            alignment: center;
+            MenuChip {
+                name: "Your type";
+                value: SoundsData.picked.own-type;
+                any-text: "None of yours: its name's type";
+                choices: SoundsData.type-choices;
+                picked(t) => { SoundsData.set-type(t); }
+            }
+        }
+    }
     // In a narrow panel the facts wrap onto a second line, rather than run past its edge.
     FlexboxLayout {
         alignment: stretch;
@@ -1043,18 +1084,31 @@ component SoundPanel inherits SidePanel {
         font-size: Type.meta;
         wrap: word-wrap;
     }
-    if SoundsData.picked-tags.length > 0: VerticalLayout {
+    // Its tags (a click picks or unpicks one on the Tag filter, its × takes it away) and a box to add one.
+    VerticalLayout {
         spacing: Space.xs;
         Caps { text: "TAGS"; }
         FlexboxLayout {
             spacing: Space.xs;
-            for t in SoundsData.picked-tags: ToggleChip {
+            for t in SoundsData.picked-tags: TagChip {
                 text: t.text;
                 on: t.on;
+                remove-tip: "Take the tag " + t.text + " away from this sound";
                 clicked => { SoundsData.toggle-choice("tag", t.text); }
+                removed => { SoundsData.remove-tag(t.text); }
+            }
+            tag-box := WordBox {
+                width: 180px;
+                hint: SoundsData.tag-key == "" ? "Add a tag" : "Add a tag (" + SoundsData.tag-key + ")";
+                accepted(text) => {
+                    SoundsData.add-tag(text);
+                    self.text = "";
+                }
             }
         }
     }
+    property <int> tag-asked: SoundsData.tag-asked;
+    changed tag-asked => { tag-box.focus-all(); }
     VerticalLayout {
         spacing: Space.xs;
         // The sounds like it, or the projects that use it: one switch, as the card has room for one list (Solomon's

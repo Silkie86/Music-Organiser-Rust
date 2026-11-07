@@ -106,7 +106,7 @@ impl Sound {
     /// Whether the sound is one of `types`, matched in any case ("kick" is Kick); none picked is any type. The Type
     /// filter and Rediscover both pick by it, so the two always agree (the whole-app review of 6 Nov, X3-23).
     pub fn is_of_types(&self, types: &[String]) -> bool {
-        types.is_empty() || types.iter().any(|t| t.eq_ignore_ascii_case(&self.sound_type))
+        types::is_one_of(&self.sound_type, types)
     }
 
     /// The file's name without its extension: "Kick_01".

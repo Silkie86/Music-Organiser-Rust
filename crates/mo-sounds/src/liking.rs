@@ -54,15 +54,16 @@ impl LikedWeights {
 
 /// The liked bar's tooltip: "Favourite, in 4 projects, dragged out 6 times, played 12 times".
 pub fn explain(s: &Sound, usage: Option<&Usage>) -> String {
-    explain_with(s, &SoundActivity::default(), usage)
+    explain_with(s, s.favourite, &SoundActivity::default(), usage)
 }
 
-/// As [`explain`], with what's been done with the sound `since` it was read counted in.
-pub fn explain_with(s: &Sound, since: &SoundActivity, usage: Option<&Usage>) -> String {
+/// As [`explain`], with what's been done with the sound `since` it was read counted in, and whether it's a
+/// `favourite` now.
+pub fn explain_with(s: &Sound, favourite: bool, since: &SoundActivity, usage: Option<&Usage>) -> String {
     let (a, b) = (&s.activity, since);
     let times = |n: i32| if n == 1 { "once".to_owned() } else { format!("{n} times") };
     let mut parts = Vec::new();
-    if s.favourite {
+    if favourite {
         parts.push("Favourite".to_owned());
     }
     match usage.map_or(0, |u| u.projects) {

@@ -160,8 +160,9 @@ fn scene(at: &TileGridAt, look: &TileLook, p: &Page, types: &[Colour]) -> Scene 
     let grey = Colour::rgb(0x6E6E6E, 1.0);
     let tiles = shapes_of(at, columns, entries, |row| {
         let i = p.entry(row)?;
-        let s = p.list.sound(i)?;
-        let tint = usize::try_from(list::type_colour(&s.sound_type)).ok().and_then(|t| types.get(t)).copied();
+        let now = p.list.now(i)?;
+        let s = now.sound;
+        let tint = usize::try_from(list::type_colour(now.sound_type)).ok().and_then(|t| types.get(t)).copied();
         Some(Tile {
             picked: p.picked == Some(i),
             playing: p.playing.is_some_and(|(at, _)| at == i),

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use chrono::{Local, NaiveDateTime};
 use mo_app::log;
-use mo_app::sound_notes::Noter;
+use mo_app::sound_notes::{Holds, Noter};
 use mo_sounds::liking::LikedWeights;
 use mo_sounds::{Sound, SoundActivity, event};
 use slint::ComponentHandle;
@@ -28,7 +28,7 @@ use crate::{AppWindow, SoundsData};
 const CLOSE_WAIT: Duration = Duration::from_secs(2);
 
 /// The number of what's done when it isn't kept (for the screenshots, or with no writer): never in the library.
-const NOT_KEPT: u64 = u64::MAX;
+pub(super) const NOT_KEPT: u64 = u64::MAX;
 
 /// Something done with a sound on the page, as it was noted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -48,11 +48,15 @@ pub(super) fn connect(sounds_db: &Path) -> Arc<Noter> {
     noter
 }
 
-/// As the app closes: what's been done and not kept yet is kept now, waiting a moment at most.
+/// As the app closes: what's been done and said and not kept yet is kept now, waiting a moment at most.
 pub fn finish_up() {
     let Some(noter) = PAGE.with(|p| p.borrow_mut().noter.take()) else { return };
     if !noter.finish_within(Some(CLOSE_WAIT)) {
-        log::warning("Sounds", "The app closed before the last plays, drags or sends were kept");
+        log::warning(
+            "Sounds",
+            "The app closed before the last plays, drags or sends, or changes to favourites, stars, types or tags, were \
+             kept",
+        );
     }
 }
 
@@ -111,12 +115,12 @@ pub(super) fn take(p: &mut Page, ids: &[i64], kind: &'static str, number: u64, n
     }
 }
 
-/// The sounds were read again (`upto`: the number of the last note what was read holds, when it was read with the
-/// writer held off): what's been done since goes on showing, and what they hold already isn't counted twice. Without
-/// `upto` the library's word is taken.
-pub(super) fn read_again(p: &mut Page, upto: Option<u64>) {
-    match upto {
-        Some(upto) => p.noted.retain(|n| n.number > upto),
+/// The sounds were read again (`holds`: the notes what was read holds, when it was read with the writer held off):
+/// what's been done since goes on showing, and what they hold already isn't counted twice. Without `holds` the
+/// library's word is taken.
+pub(super) fn read_again(p: &mut Page, holds: Option<&Holds>) {
+    match holds {
+        Some(holds) => p.noted.retain(|n| !holds.has(n.number)),
         None => p.noted.clear(),
     }
     p.did.clear();
@@ -173,17 +177,21 @@ pub(super) fn since<'a>(p: &'a Page, s: &Sound) -> Option<&'a SoundActivity> {
     p.did.get(&s.id)
 }
 
-/// The sound at `at`'s Most liked score with what's been done with it since it was read, if scores are known yet.
+/// The sound at `at`'s Most liked score with what's been done with it since it was read (and whether you made it a
+/// favourite since: [`super::yours::liked_more`]), if scores are known yet.
 pub(super) fn score_now(p: &Page, at: usize) -> Option<f64> {
     let score = p.list.liked_score(at)?;
     let more = p.list.sound(at).and_then(|s| since(p, s)).map_or(0.0, |d| more(&p.weights, d));
-    Some(score + more)
+    Some(score + more + super::yours::liked_more(p, at))
 }
 
-/// The best liked sound's score now: one done with since may have overtaken it.
+/// The best liked sound's score now: one done with since, or made a favourite since, may have overtaken it, and the
+/// best may be no favourite now.
 pub(super) fn best_now(p: &Page) -> Option<f64> {
-    let best = p.list.liked_best()?;
-    Some(p.did.keys().filter_map(|id| score_now(p, *p.places.get(id)?)).fold(best, f64::max))
+    let changed = |id: &i64| p.did.contains_key(id) || super::yours::favourite_changed(p, *id);
+    let best = p.list.liked_best_but(|at| p.list.sound(at).is_some_and(|s| changed(&s.id)))?;
+    let since = p.did.keys().chain(super::yours::favourites_changed(p));
+    Some(since.filter_map(|id| score_now(p, *p.places.get(id)?)).fold(best, f64::max))
 }
 
 /// How much what's been done since (`d`, all of it this year) adds to a sound's Most liked score.
