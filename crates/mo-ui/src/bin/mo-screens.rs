@@ -1011,12 +1011,10 @@ fn sounds_shots(
     capture(window);
     shots.push(("sounds-paper.png".into(), capture(window)));
     mo_ui::apply_look(app, graphite);
+    found_turned_down(app, window)?;
     // Your say on the card, last of the Sounds shots as it stays on the page (the screenshots keep none of it): four
     // stars, your own type, a tag added and one taken away, and the heart taken off (the tile's goes too). The tiles
-    // turned back to their top first: the shots before may leave them turned down (with the shuffled order), and one
-    // tile turned down out of sight would leave the grid looking empty.
-    scroll(window, 590.0, 600.0, 10.0 * PAGE_DOWN);
-    hover(window, -1.0, -1.0);
+    // are still turned down to their end from the check before: the search leaves one, at the top.
     data.set_search("Boom Kick".into());
     data.invoke_search_edited("Boom Kick".into());
     data.invoke_select(0);
@@ -1043,6 +1041,72 @@ fn sounds_shots(
     data.invoke_search_edited("".into());
     app.set_place(Place::Songs.index() as i32);
     Ok(())
+}
+
+/// The List and the tiles turned down half a page more each time, then a search that leaves one sound and that sound
+/// picked, both before the list is drawn again: it shows, at the top. Turned down a screen or so, the list once lost
+/// every row here and showed nothing but its scrollbar (7 Nov): the pick turned it before it had laid out the rows the
+/// search had just given it. Ends on the tiles turned down to their end, the mouse away.
+fn found_turned_down(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    let data = app.global::<mo_ui::SoundsData>();
+    let search = |text: &str| {
+        data.set_search(text.into());
+        data.invoke_search_edited(text.into());
+    };
+    // Drawn with no wait: nothing here needs time to settle, and a list lays out its rows as it's drawn.
+    let draw = || capture_after(window, Duration::ZERO);
+    let (x, y) = (590.0, 600.0);
+    // From its top each time.
+    let turn_down = |by: f32| {
+        scroll(window, x, y, 10.0 * PAGE_DOWN);
+        if by > 0.0 {
+            scroll(window, x, y, -by);
+        }
+        hover(window, -1.0, -1.0);
+    };
+    for (view, name, first) in [(1, "List", FIRST_LINE), (0, "tiles", FIRST_TILE)] {
+        data.invoke_pick_view(view);
+        // At the top first: a list made afresh brings the picked sound into view a moment later.
+        turn_down(0.0);
+        let mut before = draw();
+        for halves in 1..=16 {
+            let by = halves as f32 * PAGE_DOWN / 2.0;
+            turn_down(by);
+            let down = draw();
+            if down == before {
+                if halves == 1 {
+                    return Err(format!(
+                        "sounds {name}: the wheel at {x}, {y} moved nothing; is it still on the list?"
+                    ));
+                }
+                // At its end: turned further, it moves no more.
+                break;
+            }
+            before = down;
+            search("Boom Kick");
+            data.invoke_select(0);
+            if plain(&draw(), first) {
+                return Err(format!(
+                    "sounds {name}: turned down {by} px (or to its end), a search that left one sound, picked before \
+                     the next draw, left it showing nothing"
+                ));
+            }
+            search("");
+        }
+    }
+    turn_down(100.0 * PAGE_DOWN);
+    draw();
+    Ok(())
+}
+
+/// Whether every pixel in a box (x, y, width, height, in pixels) of a picture of the window is the same colour.
+fn plain(pixels: &[u8], (x, y, width, height): (u32, u32, u32, u32)) -> bool {
+    let at = |x: u32, y: u32| {
+        let i = ((y * WIDTH + x) * 3) as usize;
+        pixels.get(i..i + 3)
+    };
+    let first = at(x, y);
+    (y..y + height).all(|y| (x..x + width).all(|x| at(x, y) == first))
 }
 
 /// Made-up drives for the Space page: C: nearly full with the app's files, a big drive of projects and samples, the
@@ -2132,6 +2196,10 @@ const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
 const LIKED_BAR: (f32, f32) = (350.0, 414.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
 const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
+/// Inside the first tile of the Sounds grid, and the first line of its List, at their top (x, y, width, height in
+/// pixels): all one colour there, the list shows nothing.
+const FIRST_TILE: (u32, u32, u32, u32) = (250, 320, 200, 70);
+const FIRST_LINE: (u32, u32, u32, u32) = (250, 335, 400, 30);
 
 /// Moves the mouse to a point in the window (a point outside it moves it away).
 fn hover(window: &MinimalSoftwareWindow, x: f32, y: f32) {
@@ -2282,7 +2350,6 @@ fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
     window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position, button });
 }
 
-/// Lets hover and slide-in animations finish, then draws the window.
 /// The box (x, y, width, height, in pixels) round every pixel that differs between two pictures of the window, or
 /// None when none does.
 fn changed_box(a: &[u8], b: &[u8]) -> Option<(i32, i32, i32, i32)> {
@@ -2402,6 +2469,7 @@ fn save_narrow_scrolled(
     Ok(())
 }
 
+/// Lets hover and slide-in animations finish, then draws the window.
 fn capture(window: &MinimalSoftwareWindow) -> Vec<u8> {
     capture_after(window, Duration::from_millis(400))
 }

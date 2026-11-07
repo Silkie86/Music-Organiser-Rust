@@ -1706,21 +1706,43 @@ export component SoundsPage inherits Rectangle {
                         tiles := ListView {
                             property <int> columns: max(1, floor((self.visible-width - Space.sm) / (TileSize.width + Space.sm)));
                             property <int> show-ask: SoundsData.show-ask;
+                            property <length> row-height: TileSize.height + Space.sm;
+                            // Slint's list loses every row if it's turned before it has laid out the rows it was just
+                            // given: turned down a screen or so, a search that left one row and a pick before the next
+                            // draw left the grid empty but for its scrollbar (7 Nov). Until it has laid them out its
+                            // height is still the old rows' height, so a turn asked for then waits for them.
+                            property <bool> laid-out: abs(self.content-height - SoundsData.tile-rows.length * self.row-height)
+                                < self.row-height / 2;
+                            property <bool> show-waits;
                             changed columns => { SoundsData.columns-changed(self.columns); }
                             init => {
                                 SoundsData.columns-changed(self.columns);
                                 SoundsData.list-made();
                             }
                             changed show-ask => {
-                                // Scrolls only when the picked tile's row is out of sight.
-                                if (SoundsData.show-row * (TileSize.height + Space.sm) < -self.content-y
-                                    || (SoundsData.show-row + 1) * (TileSize.height + Space.sm) > -self.content-y + self.visible-height) {
-                                    self.content-y = -clamp(SoundsData.show-row * (TileSize.height + Space.sm) - self.visible-height / 3,
+                                if (self.laid-out) {
+                                    self.show-picked();
+                                } else {
+                                    self.show-waits = true;
+                                }
+                            }
+                            changed laid-out => {
+                                if (self.laid-out && self.show-waits) {
+                                    self.show-waits = false;
+                                    self.show-picked();
+                                }
+                            }
+                            // Scrolls only when the picked tile's row is out of sight.
+                            function show-picked() {
+                                if (SoundsData.show-row * self.row-height < -self.content-y
+                                    || (SoundsData.show-row + 1) * self.row-height > -self.content-y + self.visible-height) {
+                                    self.content-y = -clamp(SoundsData.show-row * self.row-height - self.visible-height / 3,
                                         0px, max(0px, self.content-height - self.visible-height));
                                 }
                             }
                             for r in SoundsData.tile-rows: HorizontalLayout {
-                                height: TileSize.height + Space.sm;
+                                // Every row this height: `laid-out` counts on it.
+                                height: tiles.row-height;
                                 padding-left: Space.sm;
                                 padding-top: Space.sm;
                                 spacing: Space.sm;
@@ -1758,7 +1780,27 @@ export component SoundsPage inherits Rectangle {
                             init => { SoundsData.list-made(); }
                             // The top of the line to bring into view.
                             property <length> show-top: SoundsData.show-row * list-box.line-height;
+                            // A turn asked for before the list has laid out the lines it was just given waits for
+                            // them, as the tiles' does (History and Rediscover share this list with the List view).
+                            // Each list keeps its own copy: a `for` is only drawn a screenful at a time straight inside
+                            // a ListView, not inside a component made from one.
+                            property <bool> laid-out: abs(self.content-height - SoundsData.lines.length * list-box.line-height)
+                                < list-box.line-height / 2;
+                            property <bool> show-waits;
                             changed show-ask => {
+                                if (self.laid-out) {
+                                    self.show-picked();
+                                } else {
+                                    self.show-waits = true;
+                                }
+                            }
+                            changed laid-out => {
+                                if (self.laid-out && self.show-waits) {
+                                    self.show-waits = false;
+                                    self.show-picked();
+                                }
+                            }
+                            function show-picked() {
                                 if (self.show-top < -self.content-y
                                     || self.show-top + list-box.line-height > -self.content-y + self.visible-height) {
                                     self.content-y = -clamp(self.show-top - self.visible-height / 3, 0px,
@@ -1766,6 +1808,7 @@ export component SoundsPage inherits Rectangle {
                                 }
                             }
                             for l in SoundsData.lines: SoundLineView {
+                                // Every line this height: `laid-out` counts on it.
                                 height: list-box.line-height;
                                 narrow: list-box.narrow;
                                 line: l;
