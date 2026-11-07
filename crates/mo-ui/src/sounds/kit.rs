@@ -19,7 +19,7 @@ use mo_sounds::kits::{self, ExportOptions, KitSlot};
 use mo_sounds::music::NOTE_NAMES;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
-use super::{FEED, HERE, PAGE, Page, pick, play_picked, strings};
+use super::{FEED, HERE, PAGE, Page, did, pick, play_picked, strings};
 use crate::{AppWindow, MenuItem, PadLine, SoundsData};
 
 /// The kit builder's part of the page.
@@ -520,9 +520,11 @@ fn send_to_bitwig(app: &AppWindow) {
         if pads.is_empty() {
             return Err(Some("Roll a kit first."));
         }
-        Ok((pads, to_bitwig::kit_name(k.seed), k.drum_machine.clone(), k.asked))
+        // Each pad's sound, by id, to count towards how liked it is once the kit is in.
+        let ids: Vec<i64> = k.slots.iter().filter_map(|s| s.sound).filter(|id| p.places.contains_key(id)).collect();
+        Ok((pads, ids, to_bitwig::kit_name(k.seed), k.drum_machine.clone(), k.asked))
     });
-    let (pads, name, setting, asked) = match ready {
+    let (pads, ids, name, setting, asked) = match ready {
         Ok(ready) => ready,
         Err(why) => {
             if let Some(why) = why {
@@ -543,10 +545,10 @@ fn send_to_bitwig(app: &AppWindow) {
     let started = background::spawn("Kit to Bitwig", move || {
         let to = to_bitwig::Bitwig::default();
         // A panic in it is logged as a crash and fails the card as it goes; the button still comes back.
-        let line = mo_catch::catch_crash(AssertUnwindSafe(|| {
+        let (line, went_in) = mo_catch::catch_crash(AssertUnwindSafe(|| {
             to_bitwig::send_kit(job, &to, &KITS_TO_BITWIG, &name, &pads, setting.as_deref())
         }))
-        .unwrap_or_else(|_| "The kit couldn't be sent: see the log.".to_owned());
+        .unwrap_or_else(|_| ("The kit couldn't be sent: see the log.".to_owned(), false));
         let _ = slint::invoke_from_event_loop(move || {
             PAGE.with(|p| {
                 let mut p = p.borrow_mut();
@@ -558,6 +560,9 @@ fn send_to_bitwig(app: &AppWindow) {
             });
             if let Some(app) = weak.upgrade() {
                 show(&app);
+                if went_in {
+                    did::sent(&app, &ids);
+                }
             }
         });
     });

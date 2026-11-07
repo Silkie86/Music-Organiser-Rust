@@ -177,6 +177,8 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::note::finish_up();
     // The MIDI files this run's drags wrote, once the DAW has long read them (rule 28).
     mo_ui::drag::finish_up();
+    // The last plays, drags and sends go into the sound library.
+    mo_ui::sounds::finish_up();
     // A part playing in Bitwig or FL stops with the app.
     mo_ui::midi::finish_up();
     // So does a preset being auditioned there.

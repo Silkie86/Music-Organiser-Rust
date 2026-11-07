@@ -5,8 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::Sound;
 use crate::usage::Usage;
+use crate::{Sound, SoundActivity};
 
 /// Where the C# app keeps the weights, in `library.db`'s settings.
 pub const LIKED_WEIGHTS_KEY: &str = "liked_weights";
@@ -54,7 +54,12 @@ impl LikedWeights {
 
 /// The liked bar's tooltip: "Favourite, in 4 projects, dragged out 6 times, played 12 times".
 pub fn explain(s: &Sound, usage: Option<&Usage>) -> String {
-    let a = &s.activity;
+    explain_with(s, &SoundActivity::default(), usage)
+}
+
+/// As [`explain`], with what's been done with the sound `since` it was read counted in.
+pub fn explain_with(s: &Sound, since: &SoundActivity, usage: Option<&Usage>) -> String {
+    let (a, b) = (&s.activity, since);
     let times = |n: i32| if n == 1 { "once".to_owned() } else { format!("{n} times") };
     let mut parts = Vec::new();
     if s.favourite {
@@ -65,14 +70,17 @@ pub fn explain(s: &Sound, usage: Option<&Usage>) -> String {
         1 => parts.push("in 1 project".to_owned()),
         n => parts.push(format!("in {n} projects")),
     }
-    if a.drags + a.older_drags > 0 {
-        parts.push(format!("dragged out {}", times(a.drags + a.older_drags)));
+    let drags = a.drags + a.older_drags + b.drags + b.older_drags;
+    if drags > 0 {
+        parts.push(format!("dragged out {}", times(drags)));
     }
-    if a.sends + a.older_sends > 0 {
-        parts.push(format!("sent into a DAW {}", times(a.sends + a.older_sends)));
+    let sends = a.sends + a.older_sends + b.sends + b.older_sends;
+    if sends > 0 {
+        parts.push(format!("sent into a DAW {}", times(sends)));
     }
-    if a.plays + a.older_plays > 0 {
-        parts.push(format!("played {}", times(a.plays + a.older_plays)));
+    let plays = a.plays + a.older_plays + b.plays + b.older_plays;
+    if plays > 0 {
+        parts.push(format!("played {}", times(plays)));
     }
     if parts.is_empty() {
         return "Not used, played or dragged out yet".to_owned();
@@ -85,7 +93,6 @@ pub fn explain(s: &Sound, usage: Option<&Usage>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SoundActivity;
     use crate::test_support::sound;
 
     #[test]

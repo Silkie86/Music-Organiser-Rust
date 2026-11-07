@@ -129,9 +129,10 @@ pub fn kit_card(feed: &Feed, pads: usize) -> Job {
 }
 
 /// Puts a kit's `pads` ([`kit_pads`]) on a Drum Machine in the project open in Bitwig, where `kits` says, and ends
-/// `job`'s card ([`kit_card`]) with how it went. Returns the line for under the Kits buttons: which sound went on
-/// which pad, or what went wrong and what to do about it. Waits for Bitwig, so never call it on the window's thread.
-pub fn send_kit(job: Job, to: &Bitwig, kits: &Kits, name: &str, pads: &[Pad], setting: Option<&str>) -> String {
+/// `job`'s card ([`kit_card`]) with how it went. Returns the line for under the Kits buttons (which sound went on
+/// which pad, or what went wrong and what to do about it), and whether the kit went in as asked. Waits for Bitwig, so
+/// never call it on the window's thread.
+pub fn send_kit(job: Job, to: &Bitwig, kits: &Kits, name: &str, pads: &[Pad], setting: Option<&str>) -> (String, bool) {
     match to.send_kit(name, pads, kits.target(setting)) {
         Ok(sent) => {
             let (title, detail) = (sent.title(), sent.detail());
@@ -142,18 +143,19 @@ pub fn send_kit(job: Job, to: &Bitwig, kits: &Kits, name: &str, pads: &[Pad], se
                 kits.use_the_selected();
                 format!("{title}. {detail}")
             };
-            if sent.went_in() {
+            let went_in = sent.went_in();
+            if went_in {
                 job.done_as(&title, &detail);
             } else {
                 job.failed_as(&title, &detail);
             }
-            line
+            (line, went_in)
         }
         // Nothing changed in Bitwig.
         Err(e) => {
             let why = e.to_string();
             job.failed_as(bitwig::KIT_FAILED, &why);
-            why
+            (why, false)
         }
     }
 }

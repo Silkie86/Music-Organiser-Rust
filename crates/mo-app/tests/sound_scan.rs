@@ -165,3 +165,45 @@ fn a_scan_that_stops_part_way_keeps_what_it_kept() {
     assert_eq!(title, "Couldn't keep all your new sounds");
     assert!(detail.starts_with("64 were kept, then: "), "{detail}");
 }
+
+#[test]
+fn plays_noted_without_waiting_are_kept_by_one_writer() {
+    use mo_app::sound_notes::Noter;
+    use mo_sounds::event;
+    let dir = folder("notes");
+    let kick = dir.join("Samples").join("Kick 01.wav");
+    let snare = dir.join("Samples").join("Snare 01.wav");
+    tone(&kick, 0.3, 60.0);
+    tone(&snare, 0.4, 200.0);
+    let db = own_library(&dir, &[&kick, &snare]);
+    let copy = compact::copy_of(&db);
+    let noter = Noter::start(db.clone());
+    // Played twice, a drag of both (each once however often named), and a send of one that isn't there: numbered in
+    // the order noted.
+    let numbers = [
+        noter.note(&[1], event::PLAY),
+        noter.note(&[1], event::PLAY),
+        noter.note(&[1, 2, 2], event::DRAG),
+        noter.note(&[99], event::SEND),
+    ];
+    assert_eq!(numbers, [Some(1), Some(2), Some(3), Some(4)]);
+    noter.finish();
+    let c = Connection::open(&copy).unwrap();
+    let plays: i64 = c.query_row("SELECT plays FROM sounds WHERE id = 1", [], |r| r.get(0)).unwrap();
+    let events: i64 = c.query_row("SELECT COUNT(*) FROM sound_events", [], |r| r.get(0)).unwrap();
+    assert_eq!((plays, events), (2, 4));
+    let history = SoundsDb::open_read_only(&copy).unwrap().history(10).unwrap();
+    assert_eq!(history.iter().map(|h| h.0).collect::<Vec<_>>(), [1]);
+    // Held for a read: what's read holds every note up to the number it's told, and nothing noted meanwhile.
+    let held = noter.hold();
+    assert_eq!(held.upto(), 4);
+    assert_eq!(noter.note(&[2], event::PLAY), Some(5));
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    let plays = |id: i64| c.query_row("SELECT plays FROM sounds WHERE id = ?1", [id], |r| r.get::<_, i64>(0)).unwrap();
+    assert_eq!(plays(2), 0);
+    drop(held);
+    // Kept once it's let go, and when the noter goes.
+    noter.note(&[2], event::PLAY);
+    drop(noter);
+    assert_eq!(plays(2), 2);
+}

@@ -2,8 +2,8 @@
 //! list view, a pad of the kit builder, a "Sounds like this" line, a line of the Galaxy's swept list, or the picked
 //! sound by its card's handle. Each goes out as its own file, where it is on disk: never a copy, never moved (rule 2).
 //!
-//! The C# app counted a drag towards how liked a sound is. Here `sounds.db` is only read until the page is trusted, so
-//! drags aren't written down yet.
+//! A drag that lands counts towards how liked the sound is, as in the C# app ([`super::did`]; the C# app counted it as
+//! the drag began).
 
 use std::path::PathBuf;
 
@@ -12,7 +12,7 @@ use mo_app::sounds as list;
 use mo_sounds::Peaks;
 use slint::ComponentHandle;
 
-use super::{PAGE, kit};
+use super::{PAGE, did, kit};
 use crate::drag::{self, Drag, Outcome};
 use crate::{AppWindow, SoundsData, Theme};
 
@@ -101,6 +101,8 @@ pub fn card_at_row(app: &AppWindow, row: i32) -> Option<Payload> {
 /// Drags the sound at `at` in the library out of the app, picked up at `spot`.
 fn carry(app: &AppWindow, at: usize, spot: Spot) {
     let Some((mut item, unread)) = item(app, at) else { return };
+    // By its id: the sounds may be read again while it's carried, and another take its place.
+    let Some(id) = PAGE.with(|p| p.borrow().list.sound(at).map(|s| s.id)) else { return };
     let under_way = drag::start(
         app,
         Drag {
@@ -125,6 +127,7 @@ fn carry(app: &AppWindow, at: usize, spot: Spot) {
                 lift(app, spot, false);
                 if outcome == Outcome::Landed {
                     drag::glow(app, move |app, on| glow(app, spot, on));
+                    did::dragged(app, id);
                 }
             }),
         },
