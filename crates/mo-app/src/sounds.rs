@@ -11,7 +11,7 @@ use mo_library::ProjectFile;
 use mo_sounds::compact::Synced;
 use mo_sounds::copies::SameAudio;
 use mo_sounds::usage::Usage;
-use mo_sounds::{Sound, SoundsError, music, rediscover, types};
+use mo_sounds::{Sound, SoundsError, Word, learn, music, rediscover, types};
 use mo_space::size::size_text;
 use rayon::prelude::*;
 
@@ -254,9 +254,81 @@ pub struct SoundList {
     liked: Option<Arc<Vec<f64>>>,
     /// The best of `liked`, worked out once, as every tile asks for its share of it.
     liked_best: f64,
+    /// The places of the [`TOP_LIKED`] best liked sounds, best first ([`SoundList::liked_best_but`]).
+    liked_top: Vec<usize>,
     /// Which sounds are copies of each other (the same audio), once known: shared by a clone, and kept by
     /// [`SoundList::sharing`], as it's of the same sounds.
     copies: Option<Arc<Copies>>,
+    /// Your say about sounds since they were read (a favourite, stars, your own type, tags), by sound id
+    /// ([`SoundList::with_say`]): over what each sound says, for the filters, the chips' counts, the orders and
+    /// [`SoundList::now`]. Kept by [`SoundList::sharing`], as it's of the same sounds.
+    say: Option<Arc<HashMap<i64, YourSay>>>,
+}
+
+/// Your say about a sound since it was read: what you changed, over what the sound says.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct YourSay {
+    pub favourite: Option<bool>,
+    pub stars: Option<i32>,
+    /// Your own type: `Some(None)` when you took yours away.
+    pub own_type: Option<Option<Word>>,
+    /// Its tags as they are now, sorted as the library sorts them (byte by byte).
+    pub tags: Option<Vec<String>>,
+}
+
+/// A sound as it is now ([`SoundList::now`]): the sound as it was read, with your say since over it.
+#[derive(Clone, Copy, Debug)]
+pub struct Now<'a> {
+    pub sound: &'a Sound,
+    pub favourite: bool,
+    pub stars: i32,
+    /// The type shown, and where it came from ("you", "name", "learned", "model", or "").
+    pub sound_type: &'a str,
+    pub type_source: &'a str,
+    /// Your own type, when you've given it one.
+    pub own_type: Option<&'a str>,
+    pub tags: &'a [String],
+    /// Your say changed what the search looks for in it (its type or its tags) since its words were worked out.
+    words_changed: bool,
+}
+
+impl<'a> Now<'a> {
+    /// `s` with `say` over it. Your own type taken away shows the name's type again, or Unknown when the name gives
+    /// none, as the C# app's `SetUserType` did.
+    pub fn of(s: &'a Sound, say: Option<&'a YourSay>) -> Now<'a> {
+        let mut now = Now {
+            sound: s,
+            favourite: s.favourite,
+            stars: s.rating,
+            sound_type: s.sound_type.as_str(),
+            type_source: s.type_source.as_str(),
+            own_type: s.user_type.as_deref(),
+            tags: &s.tags,
+            words_changed: false,
+        };
+        let Some(say) = say else { return now };
+        now.words_changed = say.own_type.is_some() || say.tags.is_some();
+        if let Some(f) = say.favourite {
+            now.favourite = f;
+        }
+        if let Some(n) = say.stars {
+            now.stars = n;
+        }
+        match &say.own_type {
+            Some(Some(own)) => {
+                (now.sound_type, now.type_source, now.own_type) = (own.as_str(), "you", Some(own.as_str()))
+            }
+            Some(None) => {
+                let (named, source, _) = learn::named_or_unknown(s.name_type.as_deref());
+                (now.sound_type, now.type_source, now.own_type) = (named, source, None);
+            }
+            None => {}
+        }
+        if let Some(tags) = &say.tags {
+            now.tags = tags;
+        }
+        now
+    }
 }
 
 /// The sounds whose audio is exactly the same as another's, by their places in a list ([`SoundList::copies_in`]): the
@@ -272,6 +344,10 @@ pub struct Copies {
     /// Each grouped sound's file size in bytes, by place, when known.
     sizes: HashMap<usize, u64>,
 }
+
+/// How many of the best liked sounds a list knows the places of ([`SoundList::liked_best_but`]): more than you change
+/// in a while.
+const TOP_LIKED: usize = 16;
 
 /// What told a sound to keep from its copy ([`SoundList::why_kept`]): the first of these that does, in this order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -354,7 +430,7 @@ impl SoundList {
         let mut sounds: Vec<Sound> = sounds.into_iter().filter(|s| !s.hidden).collect();
         // Leaving out the hidden copies keeps the room they took: give it back.
         sounds.shrink_to_fit();
-        let hay = sounds.par_iter().map(hay_of).collect();
+        let hay = sounds.par_iter().map(|s| hay_of(&Now::of(s, None))).collect();
         let names = sounds.par_iter().map(|s| s.name().to_lowercase()).collect();
         SoundList {
             shared: Arc::new(Shared { sounds, hay, names }),
@@ -362,7 +438,9 @@ impl SoundList {
             projects: None,
             liked: None,
             liked_best: 0.0,
+            liked_top: Vec::new(),
             copies: None,
+            say: None,
         }
     }
 
@@ -375,7 +453,9 @@ impl SoundList {
             projects: None,
             liked: None,
             liked_best: 0.0,
+            liked_top: Vec::new(),
             copies: self.copies.clone(),
+            say: self.say.clone(),
         }
     }
 
@@ -497,6 +577,36 @@ impl SoundList {
         self.copies.as_ref().map(|c| c.copies)
     }
 
+    /// This list with your say about its sounds since they were read (`say`, by sound id), over what each says: for
+    /// the filters, the chips' counts, the orders and [`SoundList::now`]. What it holds is shared, not copied.
+    pub fn with_say(&self, say: Arc<HashMap<i64, YourSay>>) -> SoundList {
+        let mut list = self.clone();
+        list.say = (!say.is_empty()).then_some(say);
+        list
+    }
+
+    /// Whether this list shows your say over any of its sounds ([`SoundList::with_say`]).
+    pub fn has_say(&self) -> bool {
+        self.say.is_some()
+    }
+
+    /// The sound at `i` as it is now: with your say since it was read over it.
+    pub fn now(&self, i: usize) -> Option<Now<'_>> {
+        let s = self.shared.sounds.get(i)?;
+        Some(Now::of(s, self.say_of(s)))
+    }
+
+    /// The sound at `i` (in the list) as it is now.
+    fn now_at(&self, i: usize) -> Now<'_> {
+        let s = &self.shared.sounds[i];
+        Now::of(s, self.say_of(s))
+    }
+
+    /// Your say about `s` since it was read, if any.
+    fn say_of(&self, s: &Sound) -> Option<&YourSay> {
+        self.say.as_ref()?.get(&s.id)
+    }
+
     /// The copies, when `filters` hide them and they're known.
     fn hiding(&self, filters: &Filters) -> Option<&Copies> {
         self.copies.as_deref().filter(|c| filters.hide_copies && !c.group_of.is_empty())
@@ -511,14 +621,15 @@ impl SoundList {
     /// [`SoundList::keep_first`], and what told the two apart (the first rule that does): one list of rules for the
     /// order and for what the Space page says of it ([`SoundList::why_kept`]).
     fn keep_by(&self, a: usize, b: usize) -> (std::cmp::Ordering, KeptFor) {
-        let (sa, sb) = (&self.shared.sounds[a], &self.shared.sounds[b]);
+        let (na, nb) = (self.now_at(a), self.now_at(b));
+        let (sa, sb) = (na.sound, nb.sound);
         let used = |s: &Sound| self.used.as_ref().and_then(|u| u.get(&s.id)).map_or(0, |u| u.projects);
         let rules = [
             (KeptFor::Used, used(sb).cmp(&used(sa))),
-            (KeptFor::Favourite, sb.favourite.cmp(&sa.favourite)),
-            (KeptFor::Stars, sb.rating.cmp(&sa.rating)),
+            (KeptFor::Favourite, nb.favourite.cmp(&na.favourite)),
+            (KeptFor::Stars, nb.stars.cmp(&na.stars)),
             (KeptFor::Plays, sb.plays.cmp(&sa.plays)),
-            (KeptFor::Tags, sb.tags.len().cmp(&sa.tags.len())),
+            (KeptFor::Tags, nb.tags.len().cmp(&na.tags.len())),
             (KeptFor::Older, sa.added.cmp(&sb.added)),
         ];
         if let Some((rule, by)) = rules.into_iter().find(|(_, by)| by.is_ne()) {
@@ -553,6 +664,15 @@ impl SoundList {
     pub fn set_liked(&mut self, score: impl Fn(&Sound) -> f64 + Sync + Send) {
         let liked: Vec<f64> = self.shared.sounds.par_iter().map(&score).collect();
         self.liked_best = liked.iter().copied().fold(0.0, f64::max);
+        let mut top: Vec<usize> = Vec::with_capacity(TOP_LIKED + 1);
+        for (i, &score) in liked.iter().enumerate() {
+            if top.len() == TOP_LIKED && top.last().is_some_and(|&t| score <= liked[t]) {
+                continue;
+            }
+            top.insert(top.partition_point(|&t| liked[t] >= score), i);
+            top.truncate(TOP_LIKED);
+        }
+        self.liked_top = top;
         self.liked = Some(Arc::new(liked));
     }
 
@@ -611,6 +731,15 @@ impl SoundList {
         self.liked.as_ref().map(|_| self.liked_best)
     }
 
+    /// The best Most liked score of the sounds whose places `changed` doesn't pick, if scores are known yet: the page
+    /// works out those whose score changed since (one that's no favourite now may have been the best). When all the
+    /// [`TOP_LIKED`] best changed, the last of them is the nearest it knows, a little over at most.
+    pub fn liked_best_but(&self, changed: impl Fn(usize) -> bool) -> Option<f64> {
+        let liked = self.liked.as_ref()?;
+        let top = self.liked_top.iter().find(|&&at| !changed(at)).or(self.liked_top.last());
+        Some(top.map_or(0.0, |&at| liked[at]).max(0.0))
+    }
+
     /// Whether the use counts are in, so the Used chips can work.
     pub fn knows_use(&self) -> bool {
         self.used.is_some()
@@ -645,17 +774,17 @@ impl SoundList {
             .fold(
                 || (Vec::new(), Tally::default(), Vec::new()),
                 |(mut shown, mut tally, mut held), i| {
-                    let s = &self.shared.sounds[i];
-                    let ok = facets(s, &test);
+                    let now = self.now_at(i);
+                    let ok = facets(&now, &test);
                     let fails = ok.iter().filter(|&&o| !o).count();
                     // The chips first, as they're quick: a sound two of them leave out is neither shown nor counted,
                     // so the search (the slow part) isn't tried on it.
-                    if fails <= 1 && self.passes_others(i, s, &test) {
+                    if fails <= 1 && self.passes_others(i, &now, &test) {
                         if copies.is_some_and(|c| c.group_of.contains_key(&i)) {
                             // Counted with its copies, below.
                             held.push((i, ok, fails));
                         } else {
-                            tally.count(s, ok, fails);
+                            tally.count(&now, ok, fails);
                             if fails == 0 {
                                 shown.push(i);
                             }
@@ -678,7 +807,7 @@ impl SoundList {
             shown.extend(kept.values());
             let mut by_group: HashMap<u32, Tally> = HashMap::new();
             for (i, ok, fails) in held {
-                by_group.entry(copies.group_of[&i]).or_default().count(&self.shared.sounds[i], ok, fails);
+                by_group.entry(copies.group_of[&i]).or_default().count(&self.now_at(i), ok, fails);
             }
             for group in by_group.into_values() {
                 tally.add(group.once());
@@ -694,6 +823,12 @@ impl SoundList {
             let mut keyed: Vec<(u64, usize)> =
                 shown.par_iter().map(|&i| (shuffle_key(seed, self.shared.sounds[i].id), i)).collect();
             keyed.par_sort_unstable();
+            return keyed.into_iter().map(|(_, i)| i).collect();
+        }
+        if order == Order::Type {
+            // Each sound's type (with your say over it) found once, not on every comparison.
+            let mut keyed: Vec<(&str, usize)> = shown.par_iter().map(|&i| (self.now_at(i).sound_type, i)).collect();
+            keyed.par_sort_unstable_by(|&(ta, a), &(tb, b)| by_letters(ta, tb).then_with(|| self.by_name(a, b)));
             return keyed.into_iter().map(|(_, i)| i).collect();
         }
         shown.par_sort_unstable_by(|&a, &b| self.compare(a, b, order));
@@ -712,8 +847,8 @@ impl SoundList {
     /// that differ only in capitals are one, as the filter matches them, named as most of its sounds have it.
     pub fn type_counts(&self) -> Vec<(String, usize)> {
         let mut exact: HashMap<&str, usize> = HashMap::new();
-        for s in self.shared.sounds.iter() {
-            *exact.entry(s.sound_type.as_str()).or_default() += 1;
+        for i in 0..self.len() {
+            *exact.entry(self.now_at(i).sound_type).or_default() += 1;
         }
         // In lower case: the name most of its sounds have, how many have that name, and how many there are in all.
         let mut by: HashMap<String, (&str, usize, usize)> = HashMap::new();
@@ -733,21 +868,22 @@ impl SoundList {
 
     /// Every tag on a sound, sorted, for the Tag menu.
     pub fn tags(&self) -> Vec<String> {
-        let mut tags: Vec<String> = self.shared.sounds.iter().flat_map(|s| s.tags.iter().cloned()).collect();
+        let mut tags: Vec<String> = (0..self.len()).flat_map(|i| self.now_at(i).tags.iter().cloned()).collect();
         tags.sort_by_key(|t| t.to_lowercase());
         tags.dedup_by(|a, b| a.eq_ignore_ascii_case(b));
         tags
     }
 
     fn allows(&self, i: usize, t: &Test) -> bool {
-        let s = &self.shared.sounds[i];
-        facets(s, t) == [true; FACETS] && self.passes_others(i, s, t)
+        let now = self.now_at(i);
+        facets(&now, t) == [true; FACETS] && self.passes_others(i, &now, t)
     }
 
-    /// Everything but the chips' filters lets `s` (at `i`) through: favourites, Used and Unused, the folder, the years
-    /// and the search (last, as it's the slow one).
-    fn passes_others(&self, i: usize, s: &Sound, t: &Test) -> bool {
-        if t.favourites && !s.favourite {
+    /// Everything but the chips' filters lets the sound at `i` (`now`) through: favourites, Used and Unused, the
+    /// folder, the years and the search (last, as it's the slow one).
+    fn passes_others(&self, i: usize, now: &Now, t: &Test) -> bool {
+        let s = now.sound;
+        if t.favourites && !now.favourite {
             return false;
         }
         if let Some(used) = &self.used {
@@ -769,7 +905,13 @@ impl SoundList {
                 return false;
             }
         }
-        t.words.iter().all(|w| self.shared.hay[i].contains(w.as_str()))
+        if t.words.is_empty() {
+            return true;
+        }
+        // Your say changed its type or tags since its words were worked out: worked out again, for it alone.
+        let changed = now.words_changed.then(|| hay_of(now));
+        let hay = changed.as_deref().unwrap_or(&self.shared.hay[i]);
+        t.words.iter().all(|w| hay.contains(w.as_str()))
     }
 
     /// How many sounds there are in each year, newest first, as the year filter reads them: by the years of the songs
@@ -804,17 +946,23 @@ impl SoundList {
                 None => std::cmp::Ordering::Equal,
             },
             Order::Name => std::cmp::Ordering::Equal,
-            // Letter by letter, lower-cased as it goes: no new strings for each of a big list's comparisons.
-            Order::Type => sa
-                .sound_type
-                .chars()
-                .flat_map(char::to_lowercase)
-                .cmp(sb.sound_type.chars().flat_map(char::to_lowercase)),
+            // [`SoundList::ordered`] finds each type once.
+            Order::Type => by_letters(self.now_at(a).sound_type, self.now_at(b).sound_type),
             Order::Key => key_order(sa).cmp(&key_order(sb)),
             Order::Newest => sb.added.cmp(&sa.added),
         };
-        by.then_with(|| self.shared.names[a].cmp(&self.shared.names[b])).then(a.cmp(&b))
+        by.then_with(|| self.by_name(a, b))
     }
+
+    /// The sounds at `a` and `b` by name, then by place: the order of those any other order finds the same.
+    fn by_name(&self, a: usize, b: usize) -> std::cmp::Ordering {
+        self.shared.names[a].cmp(&self.shared.names[b]).then(a.cmp(&b))
+    }
+}
+
+/// `a` and `b` letter by letter, lower-cased as it goes: no new strings for each of a big list's comparisons.
+pub fn by_letters(a: &str, b: &str) -> std::cmp::Ordering {
+    a.chars().flat_map(char::to_lowercase).cmp(b.chars().flat_map(char::to_lowercase))
 }
 
 /// The filters made ready to test many sounds: lower-cased words, the set of keys allowed.
@@ -873,13 +1021,15 @@ const KEY_AT: usize = 2;
 const TEMPO_AT: usize = 3;
 const TAG_AT: usize = 4;
 
-/// Which of the chips' filters let `s` through: its type, its length (hit or loop), its key, its tempo and its tags.
-fn facets(s: &Sound, t: &Test) -> [bool; FACETS] {
+/// Which of the chips' filters let a sound (as it is `now`) through: its type, its length (hit or loop), its key, its
+/// tempo and its tags.
+fn facets(now: &Now, t: &Test) -> [bool; FACETS] {
+    let s = now.sound;
     let a = s.analysis.as_ref();
     let is_loop = a.is_some_and(|a| a.is_loop);
     let bpm = a.and_then(|a| a.bpm);
     [
-        s.is_of_types(t.sound_types),
+        types::is_one_of(now.sound_type, t.sound_types),
         match t.length {
             Length::All => true,
             Length::Hits => !is_loop,
@@ -887,7 +1037,7 @@ fn facets(s: &Sound, t: &Test) -> [bool; FACETS] {
         },
         t.keys.as_ref().is_none_or(|keys| key_of(s).is_some_and(|k| keys.contains(&k))),
         t.tempos.is_empty() || t.tempos.iter().any(|&range| tempo_in(bpm, range)),
-        t.tags.is_empty() || t.tags.iter().any(|w| s.tags.iter().any(|own| own.eq_ignore_ascii_case(w))),
+        t.tags.is_empty() || t.tags.iter().any(|w| now.tags.iter().any(|own| own.eq_ignore_ascii_case(w))),
     ]
 }
 
@@ -932,11 +1082,12 @@ impl<'a> Tally<'a> {
     /// Counts `s`, which the chips' filters `ok` let through, all but `fails` of them: beside every filter's choices
     /// when they all do, and beside only the one that doesn't when one doesn't (picking another of its choices would
     /// show it). A sound two of them leave out isn't counted.
-    fn count(&mut self, s: &'a Sound, ok: [bool; FACETS], fails: usize) {
+    fn count(&mut self, now: &Now<'a>, ok: [bool; FACETS], fails: usize) {
         let on = |facet: usize| fails == 0 || !ok[facet];
+        let s = now.sound;
         let a = s.analysis.as_ref();
         if on(TYPE_AT) {
-            *self.types.entry(s.sound_type.as_str()).or_default() += 1;
+            *self.types.entry(now.sound_type).or_default() += 1;
         }
         if on(LENGTH_AT) {
             self.lengths[usize::from(a.is_some_and(|a| a.is_loop))] += 1;
@@ -955,9 +1106,10 @@ impl<'a> Tally<'a> {
             }
         }
         if on(TAG_AT) {
-            for (k, t) in s.tags.iter().enumerate() {
+            let tags = now.tags;
+            for (k, t) in tags.iter().enumerate() {
                 // A tag the sound has twice (in other capitals) counts it once: picking it shows the sound once.
-                if !s.tags[..k].iter().any(|other| other.eq_ignore_ascii_case(t)) {
+                if !tags[..k].iter().any(|other| other.eq_ignore_ascii_case(t)) {
                     *self.tags.entry(t.as_str()).or_default() += 1;
                 }
             }
@@ -1078,9 +1230,10 @@ pub fn chips(f: &Filters, counts: Option<&SoundCounts>, types: &[(String, usize)
     }
 }
 
-fn hay_of(s: &Sound) -> String {
-    let mut hay = format!("{}\n{}", s.path, s.sound_type);
-    for t in &s.tags {
+fn hay_of(now: &Now) -> String {
+    let s = now.sound;
+    let mut hay = format!("{}\n{}", s.path, now.sound_type);
+    for t in now.tags {
         hay.push('\n');
         hay.push_str(t);
     }
@@ -1224,7 +1377,13 @@ pub fn wave_path_of(peaks: impl Iterator<Item = f32> + Clone) -> String {
 
 /// The line under a sound's name: its type, key, tempo and length, the ones it has.
 pub fn facts_line(s: &Sound) -> String {
-    let mut parts = vec![s.sound_type.to_string()];
+    facts_line_now(&Now::of(s, None))
+}
+
+/// [`facts_line`] for a sound as it is `now` (with your own type for it since it was read).
+pub fn facts_line_now(now: &Now) -> String {
+    let s = now.sound;
+    let mut parts = vec![now.sound_type.to_owned()];
     parts.push(key_text(s));
     if let Some(a) = &s.analysis {
         if let Some(b) = a.bpm {
@@ -1531,6 +1690,73 @@ mod tests {
 
     fn ids(list: &SoundList, shown: &[usize]) -> Vec<i64> {
         shown.iter().filter_map(|&i| list.sound(i)).map(|s| s.id).collect()
+    }
+
+    #[test]
+    fn your_say_since_the_sounds_were_read_shows_through_the_filters_counts_and_orders() {
+        let list = library();
+        let place = |id: i64| list.find(id).unwrap();
+        let (kick, bass, vocal) = (place(1), place(2), place(3));
+        let view = |list: &SoundList, f: Filters, order: Order| ids(list, &list.view(&f, order, 0));
+        let counted = |list: &SoundList, f: Filters| ids(list, &list.view_counted(&f, Order::Name, 0).0);
+        let favourites = Filters { favourites: true, ..Filters::default() };
+        assert_eq!(view(&list, favourites.clone(), Order::Name), [3]);
+        // The kick a favourite now, with stars and a tag; the vocal not, and its tag gone; the bass yours as a Pad.
+        let say = HashMap::from([
+            (
+                1,
+                YourSay {
+                    favourite: Some(true),
+                    stars: Some(4),
+                    tags: Some(vec!["dusty".into()]),
+                    ..YourSay::default()
+                },
+            ),
+            (3, YourSay { favourite: Some(false), tags: Some(Vec::new()), ..YourSay::default() }),
+            (2, YourSay { own_type: Some(Some("Pad".into())), ..YourSay::default() }),
+        ]);
+        let now = list.with_say(Arc::new(say));
+        assert!(list.shares_with(&now));
+        assert_eq!(view(&now, favourites.clone(), Order::Name), [1]);
+        assert_eq!(counted(&now, favourites), [1]);
+        let k = now.now(kick).unwrap();
+        assert_eq!((k.favourite, k.stars, k.tags, k.sound_type), (true, 4, &["dusty".to_owned()][..], "Kick"));
+        let b = now.now(bass).unwrap();
+        assert_eq!((b.sound_type, b.type_source, b.own_type), ("Pad", "you", Some("Pad")));
+        // The sound as it was read stays as it was.
+        assert_eq!(now.sound(bass).unwrap().sound_type, "Bass");
+        assert!(now.now(vocal).unwrap().tags.is_empty());
+        // The type and tag chips, their counts, the search and the type order all go by your say.
+        let pads = Filters { sound_types: vec!["pad".into()], ..Filters::default() };
+        assert_eq!(view(&now, pads.clone(), Order::Name), [4, 2]);
+        assert_eq!(now.type_counts(), [("Pad".to_owned(), 2), ("Kick".to_owned(), 1), ("Vocal".to_owned(), 1)]);
+        assert_eq!(now.tags(), ["dusty"]);
+        let dusty = Filters { tags: vec!["Dusty".into()], ..Filters::default() };
+        assert_eq!(view(&now, dusty.clone(), Order::Name), [1]);
+        assert_eq!(view(&now, Filters { search: "DUSTY".into(), ..Filters::default() }, Order::Name), [1]);
+        assert_eq!(view(&now, Filters { search: "dark".into(), ..Filters::default() }, Order::Name), Vec::<i64>::new());
+        assert_eq!(view(&now, Filters { search: "pad".into(), ..Filters::default() }, Order::Name), [4, 2]);
+        let (_, counts) = now.view_counted(&Filters::default(), Order::Name, 0);
+        let chips = chips(&Filters::default(), Some(&counts), &now.type_counts(), &now.tags());
+        let tags = chips.tag.chips.iter().chain(&chips.tag.more);
+        assert!(tags.clone().any(|c| c.text == "dusty" && c.count == "1"), "{:?}", tags.collect::<Vec<_>>());
+        assert_eq!(view(&now, Filters::default(), Order::Type), [1, 4, 2, 3]);
+        // Your own type taken away: the name's type again, or Unknown when the name gives none.
+        let mut named = sound(5, r"I:\S\Clap 1.wav", "Clap", None);
+        (named.user_type, named.name_type, named.type_source) =
+            (Some("Snare".into()), Some("Clap".into()), "you".into());
+        let mut unnamed = sound(6, r"I:\S\x.wav", "Snare", None);
+        (unnamed.user_type, unnamed.type_source) = (Some("Snare".into()), "you".into());
+        let two = SoundList::new(vec![named, unnamed]);
+        let taken = YourSay { own_type: Some(None), ..YourSay::default() };
+        let two = two.with_say(Arc::new(HashMap::from([(5, taken.clone()), (6, taken)])));
+        let shown = |i: usize| two.now(i).map(|n| (n.sound_type, n.type_source, n.own_type));
+        assert_eq!((shown(0), shown(1)), (Some(("Clap", "name", None)), Some(("Unknown", "", None))));
+        // Nothing to say: as it was read.
+        let none = list.with_say(Arc::new(HashMap::new()));
+        assert_eq!(view(&none, Filters { favourites: true, ..Filters::default() }, Order::Name), [3]);
+        // Of two copies, the favourite with more stars now is the one kept.
+        assert_eq!(now.why_kept(kick, vocal), KeptFor::Favourite);
     }
 
     #[test]

@@ -73,8 +73,9 @@ pub(super) fn wire(app: &AppWindow) {
 fn item(app: &AppWindow, at: usize) -> Option<(SoundItem, Option<Unread>)> {
     PAGE.with(|p| {
         let p = p.borrow();
-        let s = p.list.sound(at)?;
-        let tint = tint(app, list::type_colour(&s.sound_type));
+        let now = p.list.now(at)?;
+        let s = now.sound;
+        let tint = tint(app, list::type_colour(now.sound_type));
         let card = super::peaks::with(s, |wave| drag_out::sound_card(s, wave, tint));
         let unread = match (&card, &s.analysis, &p.galaxy.db) {
             (None, Some(_), Some(db)) => Some(Unread { db: db.clone(), id: s.id }),

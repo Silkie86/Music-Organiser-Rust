@@ -55,16 +55,25 @@ pub fn resolve_type(s: &Sound, vector: Option<&[f32]>, model: Option<&Classifier
     if let Some(u) = &s.user_type {
         return choice(u, "you", 1.0);
     }
-    if let Some(n) = &s.name_type {
-        return choice(n, "name", 1.0);
-    }
-    if let (Some(v), Some(m)) = (vector, model)
+    if s.name_type.is_none()
+        && let (Some(v), Some(m)) = (vector, model)
         && let Some((label, p)) = m.top(v)
         && p >= 0.45
     {
         return choice(label, "learned", round_to(p, 2));
     }
-    choice(UNKNOWN, "", 0.0)
+    let (sound_type, source, confidence) = named_or_unknown(s.name_type.as_deref());
+    choice(sound_type, source, confidence)
+}
+
+/// The type a sound has with neither your own nor a learned one, where it came from and how sure: its name's (sure),
+/// else Unknown (nothing said). The one rule for a new sound, for one whose type you take away (as the C# app's
+/// `SetUserType` did) and for the page showing that at once.
+pub fn named_or_unknown(name_type: Option<&str>) -> (&str, &'static str, f64) {
+    match name_type {
+        Some(named) => (named, "name", 1.0),
+        None => (UNKNOWN, "", 0.0),
+    }
 }
 
 /// What [`update_types`] works out.

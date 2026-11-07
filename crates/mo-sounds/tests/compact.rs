@@ -2161,3 +2161,102 @@ fn the_galaxys_maps_are_kept_for_the_next_start() {
         .unwrap();
     assert_eq!(index, 1);
 }
+
+#[test]
+fn your_favourites_stars_types_and_tags_are_kept() {
+    use mo_sounds::compact::yours::{self, Change, Yours};
+    let dir = folder("yours");
+    let old = library(&dir, 20);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    // Two sounds with a name's type, and one with none.
+    let pick = |sql: &str| -> Vec<(i64, String)> {
+        let c = Connection::open(&copy).unwrap();
+        let mut st = c.prepare(sql).unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
+    };
+    let named = pick("SELECT id, name_type FROM sounds WHERE name_type IS NOT NULL ORDER BY id LIMIT 2");
+    let [(a, a_named), (b, _)] = named.as_slice() else { panic!("two sounds with a name's type") };
+    let (a, b) = (*a, *b);
+    let unnamed = pick("SELECT id, path FROM sounds WHERE name_type IS NULL ORDER BY id LIMIT 1");
+    let [(c, c_path)] = unnamed.as_slice() else { panic!("a sound with no name's type") };
+    let c = *c;
+    let y = |id, change| Yours { id, change };
+    let read = |id: i64| SoundsDb::open_read_only(&copy).unwrap().some(&[id], now()).unwrap().remove(0);
+    // Still following sounds.db: not written.
+    let Err(e) = yours::keep(&old, &[y(a, Change::Favourite(true))]) else { panic!("not the app's own yet") };
+    assert!(e.to_string().contains("isn't the app's own"), "{e}");
+    compact::last_sync(&old, &copy).unwrap();
+    assert!(matches!(backup::back_up(&old), Some(BackedUp::Made { .. })));
+    // A sound learned "dusty" from the C# app's model: yours now, kept in its capitals; "Warm" added in any capitals
+    // once.
+    Connection::open(&copy)
+        .unwrap()
+        .execute_batch(&format!(
+            "DELETE FROM sound_tags WHERE sound_id IN ({a}, {b}, {c});
+             INSERT INTO sound_tags VALUES ({a}, 'dusty', 'learned');"
+        ))
+        .unwrap();
+    let kept = yours::keep(
+        &old,
+        &[
+            y(a, Change::Favourite(true)),
+            y(a, Change::Stars(9)),
+            y(a, Change::Type(Some("  Perc ".into()))),
+            y(a, Change::Tag("Dusty".into())),
+            y(a, Change::Tag(" Warm ".into())),
+            y(a, Change::Tag("warm".into())),
+            y(a, Change::Tag("  ".into())),
+            y(b, Change::Favourite(true)),
+            y(b, Change::Favourite(false)),
+            y(b, Change::Stars(3)),
+            y(b, Change::Tag("gone".into())),
+            y(b, Change::Untag("GONE".into())),
+            y(c, Change::Type(Some("Kick".into()))),
+            y(999_999, Change::Favourite(true)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(kept, 12);
+    assert_eq!(yours::keep(&old, &[]).unwrap(), 0);
+    let now_a = read(a);
+    assert!(now_a.favourite);
+    assert_eq!(now_a.rating, yours::MOST_STARS);
+    assert_eq!(now_a.user_type.as_deref(), Some("Perc"));
+    assert_eq!((now_a.sound_type.as_str(), now_a.type_source.as_str()), ("Perc", "you"));
+    assert_eq!(now_a.tags, ["Warm", "dusty"]);
+    let source: String = Connection::open(&copy)
+        .unwrap()
+        .query_row("SELECT source FROM sound_tags WHERE sound_id = ?1 AND tag = 'dusty'", [a], |r| r.get(0))
+        .unwrap();
+    assert_eq!(source, "you");
+    let now_b = read(b);
+    assert!(!now_b.favourite);
+    assert_eq!(now_b.rating, 3);
+    assert!(now_b.tags.is_empty(), "{:?}", now_b.tags);
+    assert_eq!((read(c).sound_type.as_str(), read(c).type_source.as_str()), ("Kick", "you"));
+    assert_eq!(pragma(&copy, "integrity_check"), "ok");
+    // Your own type taken away: the name's type shows again, or Unknown when the name gives none.
+    yours::keep(&old, &[y(a, Change::Type(None)), y(c, Change::Type(Some(" ".into())))]).unwrap();
+    let (now_a, now_c) = (read(a), read(c));
+    assert_eq!((now_a.user_type, now_a.sound_type.as_str(), now_a.type_source.as_str()), (None, &a_named[..], "name"));
+    assert_eq!((now_c.user_type, now_c.sound_type.as_str(), now_c.type_source.as_str()), (None, "Unknown", ""));
+    // As sure as a new sound's would be: the name's for certain, nothing said of Unknown.
+    assert_eq!((now_a.type_confidence, now_c.type_confidence), (1.0, 0.0));
+    // They change the library at nearly every start: the backup copy follows them once a day.
+    assert_eq!(backup::back_up_when(&old, When::Daily), None);
+    assert!(matches!(backup::back_up_when(&old, When::Now), Some(BackedUp::Made { .. })));
+    // A sound forgotten at a scan takes its tags with it.
+    yours::keep(&old, &[y(c, Change::Tag("lost".into()))]).unwrap();
+    assert_eq!(grow::follow(&old, &[], std::slice::from_ref(c_path)).unwrap().forgotten, 1);
+    assert_eq!(count(&copy, "SELECT COUNT(*) FROM sound_tags WHERE sound_id = ?1", c), 0);
+    // A library made from a sounds.db without the tags table gets the C# app's.
+    Connection::open(&copy).unwrap().execute_batch("DROP TABLE sound_tags;").unwrap();
+    assert_eq!(yours::keep(&old, &[y(a, Change::Tag("big".into()))]).unwrap(), 1);
+    assert_eq!(read(a).tags, ["big"]);
+    let index: i64 = Connection::open(&copy)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'ix_sound_tags_tag'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(index, 1);
+}

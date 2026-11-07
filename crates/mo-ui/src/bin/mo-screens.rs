@@ -1011,6 +1011,36 @@ fn sounds_shots(
     capture(window);
     shots.push(("sounds-paper.png".into(), capture(window)));
     mo_ui::apply_look(app, graphite);
+    // Your say on the card, last of the Sounds shots as it stays on the page (the screenshots keep none of it): four
+    // stars, your own type, a tag added and one taken away, and the heart taken off (the tile's goes too). The tiles
+    // turned back to their top first: the shots before may leave them turned down (with the shuffled order), and one
+    // tile turned down out of sight would leave the grid looking empty.
+    scroll(window, 590.0, 600.0, 10.0 * PAGE_DOWN);
+    hover(window, -1.0, -1.0);
+    data.set_search("Boom Kick".into());
+    data.invoke_search_edited("Boom Kick".into());
+    data.invoke_select(0);
+    // Drawn after each, as a click would be: the tiles' list isn't made again many times between two draws.
+    capture(window);
+    data.invoke_set_stars(4);
+    capture(window);
+    data.invoke_set_type("Perc".into());
+    capture(window);
+    data.invoke_add_tag("warm".into());
+    capture(window);
+    data.invoke_remove_tag("Dark".into());
+    capture(window);
+    data.invoke_toggle_favourite();
+    capture(window);
+    let top = capture(window);
+    shots.push(("sounds-panel-yours.png".into(), top.clone()));
+    // Turned down to its tags (the new one in among them) and the box to add one.
+    shots.push((
+        "sounds-panel-yours-tags.png".into(),
+        card_down(window, &top, "sounds-panel-yours-tags.png").map_err(|e| e.to_string())?,
+    ));
+    data.set_search("".into());
+    data.invoke_search_edited("".into());
     app.set_place(Place::Songs.index() as i32);
     Ok(())
 }

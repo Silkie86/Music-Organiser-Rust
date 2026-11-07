@@ -646,7 +646,7 @@ pub(super) fn redraw() {
 
 fn pad_line(p: &Page, slot: &KitSlot) -> PadLine {
     let at = slot.sound.and_then(|id| p.places.get(&id).copied());
-    let Some((at, s)) = at.and_then(|at| p.list.sound(at).map(|s| (at, s))) else {
+    let Some((at, now)) = at.and_then(|at| p.list.now(at).map(|n| (at, n))) else {
         return PadLine {
             name: slot.name.clone().into(),
             sound: "Empty pad".into(),
@@ -665,9 +665,9 @@ fn pad_line(p: &Page, slot: &KitSlot) -> PadLine {
     };
     PadLine {
         name: slot.name.clone().into(),
-        sound: s.name().into(),
-        detail: format!("{} · {}{used}", s.sound_type, s.folder()).into(),
-        colour: list::type_colour(&s.sound_type),
+        sound: now.sound.name().into(),
+        detail: format!("{} · {}{used}", now.sound_type, now.sound.folder()).into(),
+        colour: list::type_colour(now.sound_type),
         filled: true,
         locked: slot.locked,
         picked: p.picked == Some(at),

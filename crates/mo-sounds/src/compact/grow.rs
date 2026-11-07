@@ -40,9 +40,9 @@ pub const LAST_ID: &str = "last_id";
 pub const NEW_SINCE: &str = "new_since";
 
 /// The key in `copy_info` that counts the changes the app made to its library, but for what's done with sounds
-/// ([`super::did`]) and the galaxy's maps ([`super::maps`]). The backup copy holds the count it was made at, so one
-/// made in the last day that's behind only by those can wait ([`super::backup::When::Daily`]), and one behind by
-/// anything else can't.
+/// ([`super::did`]), the galaxy's maps ([`super::maps`]) and your own say about sounds ([`super::yours`]). The backup
+/// copy holds the count it was made at, so one made in the last day that's behind only by those can wait
+/// ([`super::backup::When::Daily`]), and one behind by anything else can't.
 pub const CHANGES: &str = "changes";
 
 /// The first number the app gave a sound of its own scan ([`NEW_SINCE`]) in the library at `copy`; `None` when it has
@@ -123,6 +123,7 @@ pub fn keep(sounds_db: &Path, listened: &[Listened]) -> Result<Kept, SoundsError
                 None => {
                     last += 1;
                     let text = |t: &str| Value::Text(t.to_owned());
+                    let named = crate::learn::named_or_unknown(name_type);
                     let mut values: Vec<Value> = vec![
                         Value::Integer(last),
                         text(&l.path),
@@ -132,9 +133,9 @@ pub fn keep(sounds_db: &Path, listened: &[Listened]) -> Result<Kept, SoundsError
                         name_type.map_or(Value::Null, text),
                         // Your type, none yet; the type, from the name or "Unknown", with where it came from.
                         Value::Null,
-                        text(name_type.unwrap_or("Unknown")),
-                        text(if name_type.is_some() { "name" } else { "" }),
-                        Value::Real(1.0),
+                        text(named.0),
+                        text(named.1),
+                        Value::Real(named.2),
                         // No heart, stars or plays yet, and never played.
                         Value::Integer(0),
                         Value::Integer(0),
@@ -260,8 +261,8 @@ pub(super) fn write<T>(
     write_as(sounds_db, true, change)
 }
 
-/// As [`write`], for what's done with sounds ([`super::did`]) and the galaxy's maps ([`super::maps`]): not counted, so
-/// the backup copy can wait for it.
+/// As [`write`], for what's done with sounds ([`super::did`]), the galaxy's maps ([`super::maps`]) and your own say
+/// about sounds ([`super::yours`]): not counted, so the backup copy can wait for it.
 pub(super) fn write_small<T>(
     sounds_db: &Path,
     change: impl FnOnce(&Transaction<'_>) -> rusqlite::Result<Result<T, String>>,

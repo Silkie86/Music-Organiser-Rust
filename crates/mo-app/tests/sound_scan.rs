@@ -20,6 +20,16 @@ fn folder(name: &str) -> PathBuf {
 
 /// A C# app's `sounds.db` at `dir` with the sounds at `paths`, one of them heard by CLAP, made the app's own library.
 fn own_library(dir: &Path, paths: &[&Path]) -> PathBuf {
+    let db = following_library(dir, paths);
+    let copy = compact::copy_of(&db);
+    compact::last_sync(&db, &copy).unwrap();
+    assert!(compact::own_since(&copy).is_some());
+    db
+}
+
+/// A `sounds.db` in `dir` with the sounds at `paths`, and the app's own library made from it, still following it (not
+/// the app's own yet).
+fn following_library(dir: &Path, paths: &[&Path]) -> PathBuf {
     let db = dir.join("sounds.db");
     let c = Connection::open(&db).unwrap();
     c.execute_batch(
@@ -47,10 +57,7 @@ fn own_library(dir: &Path, paths: &[&Path]) -> PathBuf {
         c.execute("INSERT INTO sound_tags (sound_id, tag) VALUES (?1, 'mine')", [i as i64 + 1]).unwrap();
     }
     drop(c);
-    let copy = compact::copy_of(&db);
-    compact::sync(&db, &copy).unwrap();
-    compact::last_sync(&db, &copy).unwrap();
-    assert!(compact::own_since(&copy).is_some());
+    compact::sync(&db, &compact::copy_of(&db)).unwrap();
     db
 }
 
@@ -206,4 +213,93 @@ fn plays_noted_without_waiting_are_kept_by_one_writer() {
     noter.note(&[2], event::PLAY);
     drop(noter);
     assert_eq!(plays(2), 2);
+}
+
+#[test]
+fn your_say_noted_without_waiting_is_kept_in_order_with_the_plays() {
+    use mo_app::sound_notes::Noter;
+    use mo_sounds::compact::yours::Change;
+    use mo_sounds::event;
+    let dir = folder("say");
+    let kick = dir.join("Samples").join("Kick 01.wav");
+    tone(&kick, 0.3, 60.0);
+    let db = own_library(&dir, &[&kick]);
+    let copy = compact::copy_of(&db);
+    let noter = Noter::start(db.clone());
+    // A favourite made and unmade and made again, stars, a type, a tag added and another added then taken away, and
+    // a play between them: numbered with the plays, in the order noted, the last change winning.
+    let numbers = [
+        noter.note_yours(1, Change::Favourite(true)),
+        noter.note(&[1], event::PLAY),
+        noter.note_yours(1, Change::Favourite(false)),
+        noter.note_yours(1, Change::Stars(3)),
+        noter.note_yours(1, Change::Type(Some("Perc".into()))),
+        noter.note_yours(1, Change::Tag("warm".into())),
+        noter.note_yours(1, Change::Tag("gone".into())),
+        noter.note_yours(1, Change::Untag("gone".into())),
+        noter.note_yours(1, Change::Favourite(true)),
+        noter.note_yours(99, Change::Favourite(true)),
+    ];
+    assert_eq!(numbers, std::array::from_fn(|i| Some(i as u64 + 1)));
+    noter.finish();
+    let read = SoundsDb::open_read_only(&copy).unwrap().some(&[1], chrono::Local::now().naive_local()).unwrap();
+    let s = &read[0];
+    assert_eq!((s.favourite, s.rating, s.user_type.as_deref(), s.plays), (true, 3, Some("Perc"), 1));
+    // Beside the tag it had.
+    assert_eq!(s.tags, ["mine", "warm"]);
+    assert_eq!(noter.hold().upto(), 10);
+}
+
+#[test]
+fn your_say_that_couldnt_be_kept_is_tried_again_and_shows_till_then() {
+    use mo_app::sound_notes::Noter;
+    use mo_sounds::compact::yours::Change;
+    use mo_sounds::event;
+    let dir = folder("say-again");
+    let kick = dir.join("Samples").join("Kick 01.wav");
+    tone(&kick, 0.3, 60.0);
+    let db = following_library(&dir, &[&kick]);
+    let copy = compact::copy_of(&db);
+    let favourite = || {
+        let c = Connection::open(&copy).unwrap();
+        c.query_row("SELECT favourite FROM sounds WHERE id = 1", [], |r| r.get::<_, bool>(0)).unwrap()
+    };
+    // Written once the writer has been through the notes up to `number`.
+    let written = |noter: &Noter, number: u64| {
+        for _ in 0..500 {
+            if noter.hold().upto() >= number {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("never written");
+    };
+    // The library isn't the app's own yet: a favourite can't be kept, so it waits, and a read holds the notes before
+    // and after it but not it.
+    let noter = Noter::start(db.clone());
+    assert_eq!(noter.note_yours(1, Change::Favourite(true)), Some(1));
+    written(&noter, 1);
+    let holds = noter.hold().holds();
+    assert_eq!((holds.upto, holds.waiting.iter().copied().collect::<Vec<_>>()), (1, vec![1]));
+    assert!(!holds.has(1) && !holds.has(2));
+    assert!(!favourite());
+    // Once it's the app's own, the next write keeps it (before what's noted after it).
+    compact::last_sync(&db, &copy).unwrap();
+    assert_eq!(noter.note(&[1], event::PLAY), Some(2));
+    written(&noter, 2);
+    let holds = noter.hold().holds();
+    assert!(holds.waiting.is_empty() && holds.has(1) && holds.has(2), "{holds:?}");
+    assert!(favourite());
+    noter.finish();
+
+    // Never kept: tried once more as the app closes, then given up (a read then takes the library's word).
+    let dir = folder("say-given-up");
+    let snare = dir.join("Samples").join("Snare 01.wav");
+    tone(&snare, 0.3, 200.0);
+    let db = following_library(&dir, &[&snare]);
+    let noter = Noter::start(db.clone());
+    noter.note_yours(1, Change::Stars(4));
+    noter.finish();
+    let holds = noter.hold().holds();
+    assert!(holds.waiting.is_empty() && holds.has(1), "{holds:?}");
 }

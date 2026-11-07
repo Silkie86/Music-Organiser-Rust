@@ -51,6 +51,7 @@ pub mod backup;
 pub mod did;
 pub mod grow;
 pub mod maps;
+pub mod yours;
 
 /// The copy's name, beside `sounds.db`.
 pub const FILE_NAME: &str = "sounds-rust.db";

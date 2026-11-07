@@ -892,9 +892,9 @@ fn sweep_play(app: &AppWindow, at: usize) {
     let _doing = crate::watchdog::doing("Galaxy: play a swept sound");
     let name = PAGE.with(|p| {
         let p = p.borrow();
-        let s = p.list.sound(at)?;
-        sweep_timing::asked(&s.path);
-        Some(format!("{}  ·  {}", s.name(), s.sound_type))
+        let now = p.list.now(at)?;
+        sweep_timing::asked(&now.sound.path);
+        Some(format!("{}  ·  {}", now.sound.name(), now.sound_type))
     });
     app.global::<SoundsData>().set_galaxy_hover_text(name.unwrap_or_default().into());
     on_trail(app, at, true);
@@ -1102,7 +1102,7 @@ fn hover(app: &AppWindow) {
         let (x, y) = g.view.mouse;
         let at = star_at_in(g, x, y)?;
         let star = (*g.stars.as_ref()?.get(at)?)?;
-        let name = p.list.sound(at).map(|s| format!("{}  ·  {}", s.name(), s.sound_type)).unwrap_or_default();
+        let name = p.list.now(at).map(|n| format!("{}  ·  {}", n.sound.name(), n.sound_type)).unwrap_or_default();
         Some((name, g.view.to_view(star.x, star.y, 1.0)))
     });
     data.set_galaxy_hover_shown(found.is_some());

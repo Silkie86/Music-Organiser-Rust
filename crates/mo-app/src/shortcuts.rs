@@ -82,9 +82,11 @@ pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.copyPath", "Copy where the picked song's file is", "Ctrl+Shift+C"),
 ];
 
-/// The Sounds page's own actions, with the C# Sound Lab's ids. Favourite and tag join once the page may write. Esc
-/// stops the sound playing as it does on every page (`app.escape`).
+/// The Sounds page's own actions, with the C# Sound Lab's ids and keys. Esc stops the sound playing as it does on every
+/// page (`app.escape`).
 pub const SOUNDS_ACTIONS: &[Action] = &[
+    action("sounds.favourite", "Make the picked sound a favourite, or not", "Ctrl+D"),
+    action("sounds.tag", "Type a tag for the picked sound", "Ctrl+T"),
     action("sounds.toBitwig", "Put the picked sound into Bitwig", "Ctrl+B"),
     action("sounds.reveal", "Show the sound's file in Explorer", "Ctrl+Shift+E"),
     action("sounds.copyPath", "Copy where the sound's file is", "Ctrl+Shift+C"),

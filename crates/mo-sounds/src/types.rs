@@ -91,6 +91,12 @@ pub fn all() -> impl Iterator<Item = &'static str> {
     RULES.iter().map(|(t, _, _)| *t)
 }
 
+/// Whether `sound_type` is one of `types`, matched in any case ("kick" is Kick); none picked is any type. What
+/// [`crate::Sound::is_of_types`] and the Sounds page's Type filter both test by.
+pub fn is_one_of(sound_type: &str, types: &[String]) -> bool {
+    types.is_empty() || types.iter().any(|t| t.eq_ignore_ascii_case(sound_type))
+}
+
 /// The text the CLAP model is given for a type ("the sound of a kick drum"), or `None` for a type that isn't one.
 pub fn prompt(sound_type: &str) -> Option<String> {
     RULES.iter().find(|(t, _, _)| *t == sound_type).map(|(_, _, p)| format!("the sound of {p}"))
