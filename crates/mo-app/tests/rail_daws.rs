@@ -9,11 +9,19 @@ use mo_app::rail_daws::{BitwigWatch, EVERY, SLOW};
 use mo_dawlink::bitwig::Bitwig;
 use mo_dawlink::bitwig::fake::{FakeBitwig, OnConnect};
 
-/// Short waits, so a Bitwig that doesn't answer is found out quickly.
-const WAIT: Duration = Duration::from_millis(300);
+/// A short wait, where nothing will answer: a Bitwig that doesn't is found out quickly. Where the stand-in answers, the
+/// watch waits as long as the stand-in's own link does (2 seconds), so a busy computer running the tests doesn't read
+/// as a busy Bitwig.
+const SHORT: Duration = Duration::from_millis(300);
 
 fn watch(bitwig: &FakeBitwig) -> BitwigWatch {
-    BitwigWatch::new(Bitwig { connect_timeout: WAIT, timeout: WAIT, ..bitwig.bitwig() })
+    BitwigWatch::new(bitwig.bitwig())
+}
+
+/// From now on the watch waits [`SHORT`] for a new link (one it keeps keeps its own wait).
+fn hurry(watch: &mut BitwigWatch) {
+    watch.bitwig.connect_timeout = SHORT;
+    watch.bitwig.timeout = SHORT;
 }
 
 /// The words an ask changed the rail's line to, or none when it left the line as it was.
@@ -49,7 +57,11 @@ fn a_busy_bitwig_keeps_its_line_for_a_few_asks() {
         world.silent = vec!["hello".into()];
         world.on_connect = OnConnect::HangUp;
     }
+    let (wait, asks_at) = (watch.bitwig, std::time::Instant::now());
+    hurry(&mut watch);
     let missed = watch.ask();
+    // The link it kept waited as long as it was made to (the stand-in's 2 seconds), not the shorter wait set since.
+    assert!(asks_at.elapsed() >= wait.timeout, "{:?}", asks_at.elapsed());
     assert_eq!((missed.line, missed.wait), (None, EVERY));
     // The next call isn't greeted either: still busy, still the same line.
     bitwig.world().on_connect = OnConnect::Nothing;
@@ -63,6 +75,7 @@ fn a_busy_bitwig_keeps_its_line_for_a_few_asks() {
         world.silent.clear();
         world.on_connect = OnConnect::Greet;
     }
+    watch.bitwig = wait;
     assert_eq!(asked(&mut watch).as_deref(), Some("Night Drive"));
 }
 
@@ -70,7 +83,9 @@ fn a_busy_bitwig_keeps_its_line_for_a_few_asks() {
 fn a_bitwig_busy_from_the_start_says_so_at_once() {
     let bitwig = FakeBitwig::start().unwrap();
     bitwig.world().on_connect = OnConnect::Nothing;
-    assert_eq!(asked(&mut watch(&bitwig)).as_deref(), Some("Not answering"));
+    let mut watch = watch(&bitwig);
+    hurry(&mut watch);
+    assert_eq!(asked(&mut watch).as_deref(), Some("Not answering"));
 }
 
 #[test]
@@ -89,6 +104,27 @@ fn a_link_that_says_no_is_kept_and_asked_once_a_minute() {
     let again = watch.ask();
     assert_eq!((again.line, again.wait), (None, SLOW));
     assert_eq!(bitwig.world().commands(), ["hello"]);
+}
+
+#[test]
+fn a_link_that_says_no_later_says_so_in_its_own_words_and_is_kept() {
+    let bitwig = FakeBitwig::start().unwrap();
+    let mut watch = watch(&bitwig);
+    assert_eq!(asked(&mut watch).as_deref(), Some("Night Drive"));
+    // The link greeted the app as one working fully, then says no to what's open (in words without a full stop).
+    bitwig.world().hello.insert("error".into(), "Something went wrong".into());
+    let refused = watch.ask();
+    let line = refused.line.unwrap();
+    assert_eq!((line.text.as_str(), line.linked, line.project.as_str()), ("Linked, not working fully", false, ""));
+    assert!(line.tip.contains("didn't say what's open there. Bitwig said: Something went wrong."), "{}", line.tip);
+    // Not what a link part of which didn't start is told: this one started.
+    assert!(!line.tip.contains("didn't start"), "{}", line.tip);
+    assert_eq!(refused.wait, SLOW);
+    // A new call would be hung up on: the link it has is kept, and the line stays.
+    bitwig.world().on_connect = OnConnect::HangUp;
+    let again = watch.ask();
+    assert_eq!((again.line, again.wait), (None, SLOW));
+    assert_eq!(bitwig.world().commands(), ["hello", "hello"]);
 }
 
 #[test]
@@ -111,7 +147,7 @@ fn nothing_listening_says_not_linked() {
     // meanwhile, so another is tried then.
     for _ in 0..10 {
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let mut watch = BitwigWatch::new(Bitwig { port, connect_timeout: WAIT, timeout: WAIT, ..Bitwig::default() });
+        let mut watch = BitwigWatch::new(Bitwig { port, connect_timeout: SHORT, timeout: SHORT, ..Bitwig::default() });
         let line = watch.ask().line.unwrap();
         if line.text == "Not linked" {
             assert!(!line.linked && line.project.is_empty());

@@ -80,7 +80,7 @@ pub const NOT_YET: &str = if cfg!(windows) {
 };
 
 /// Why one picked stays when the card can't send its kind to the bin yet.
-const NOT_YET_STAYS: &str = if cfg!(windows) {
+pub const NOT_YET_STAYS: &str = if cfg!(windows) {
     "This kind can't go to the Recycle Bin from here yet, so it stays."
 } else {
     "This kind can't go to the Trash from here yet, so it stays."

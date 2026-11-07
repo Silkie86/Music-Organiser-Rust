@@ -1,6 +1,6 @@
 // The window shell: the rail on the left and the page on show. Agreed map (2026-10-29): Songs, Sounds, Presets, MIDI,
 // Plugins and Space, with Settings at the bottom.
-import { Theme, Type, Space, Motion, Icons, RailItem, Groove, Caps, ActionKey, TipLayer, TipState, StudioButton, JumpField, AppKeys, Dot, Tip } from "studio.slint";
+import { Theme, Type, Space, Motion, Icons, RailItem, RailDawLine, DawLine, Groove, Caps, ActionKey, TipLayer, TipState, StudioButton, JumpField, AppKeys, Dot, Tip } from "studio.slint";
 import { ComingPage } from "pages/coming.slint";
 import { PartsGallery } from "pages/parts.slint";
 import { SoundsPage, SoundsData, GalaxyLabel, SweptLine, TrailDot, AlikeLine, FolderLine, PadLine, SoundTile, TileRow, SoundLine, SoundFact, PickedSound, TileGrid, TileGridAt, TileLook } from "pages/sounds.slint";
@@ -14,6 +14,7 @@ import { MidiPage, MidiData, MidiLine, RollLabel, RollRoom, MidiFact, PickedPart
 // The waveforms drawn on the graphics card (mo-ui's waves.rs).
 import { Waves, WavePicture } from "studio.slint";
 export { Waves, WavePicture }
+export { DawLine }
 export { AppKeys }
 import { SpacePage, SpaceData, DriveCard, RoomLine, CardPart } from "pages/space.slint";
 import { ActivityCards, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
@@ -50,59 +51,6 @@ export struct PlaceInfo {
     key: string,
     // Its icon, from Icons.
     icon: string,
-}
-
-// One line under the rail's "In your DAWs": the DAW, what it has open (or that it isn't linked), whether its link
-// answers, and the tooltip (mo_app::settings::RailDaw).
-export struct DawLine {
-    daw: string,
-    text: string,
-    linked: bool,
-    tip: string,
-}
-
-// A DAW's line on the rail: a light (lit while its link answers), its name, and what it has open under it. A click
-// opens Settings on the DAWs tab.
-component RailDawLine inherits Rectangle {
-    in property <DawLine> line;
-    callback clicked;
-    height: 36px;
-    border-radius: Theme.radius;
-    background: touch.has-hover ? Theme.hover : transparent;
-    HorizontalLayout {
-        padding-left: Space.md;
-        padding-right: Space.sm;
-        spacing: Space.sm;
-        VerticalLayout {
-            alignment: center;
-            Dot {
-                tint: root.line.linked ? Theme.ok : Theme.faint;
-            }
-        }
-        VerticalLayout {
-            alignment: center;
-            Text {
-                text: root.line.daw;
-                color: Theme.muted;
-                font-size: Type.meta;
-            }
-            Text {
-                text: root.line.text;
-                color: root.line.linked ? Theme.text : Theme.faint;
-                font-size: Type.meta;
-                overflow: elide;
-            }
-        }
-    }
-    touch := TouchArea {
-        clicked => { root.clicked(); }
-    }
-    Tip {
-        text: root.line.tip;
-        hovering: touch.has-hover && !touch.pressed;
-        at-x: root.width + Space.xs;
-        at-y: Space.xs;
-    }
 }
 
 export component AppWindow inherits Window {

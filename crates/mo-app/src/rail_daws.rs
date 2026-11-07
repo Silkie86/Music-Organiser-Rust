@@ -6,7 +6,8 @@
 //! As the C# app's watch did, a Bitwig that stops answering for a moment (opening a big project, say) keeps its line
 //! for a few asks before the rail says so, and a link that answers "no" stays open: only a link that closed, broke or
 //! ran out of time is let go. A link part of whose extension didn't start can't answer `hello` until Bitwig starts it
-//! again (which closes the connection), and each "no" goes in the link's report in Bitwig, so it's asked once a minute.
+//! again (which closes the connection), and each "no" goes in the link's report in Bitwig, so it's asked once a minute;
+//! so is a link that greeted the app as one working fully and then said no.
 
 use std::time::Duration;
 
@@ -19,6 +20,9 @@ pub const EVERY: Duration = Duration::from_secs(5);
 pub const SLOW: Duration = Duration::from_secs(60);
 /// A Bitwig that takes the call but doesn't answer keeps its line until it has missed this many asks in a row.
 pub const MISSES: u32 = 3;
+
+/// Where each tooltip points for more.
+const MORE: &str = "Settings \u{203a} DAWs says more about the link.";
 
 /// One line under the rail's "In your DAWs": the DAW, what it has open (or that it isn't linked), whether its link
 /// answers, and the tooltip.
@@ -36,15 +40,7 @@ pub struct RailDaw {
 /// Bitwig's line in the rail, from what the link said last ([`Link::refresh`]): the project open there, by the name
 /// Bitwig shows. Only reads, as `settings::bitwig_status` does.
 pub fn bitwig_rail(checked: &Result<Hello, Error>) -> RailDaw {
-    const MORE: &str = "Settings \u{203a} DAWs says more about the link.";
     const AGAIN: &str = "The app asks again by itself every few seconds.";
-    let line = |text: &str, linked, tip: String| RailDaw {
-        daw: "Bitwig",
-        text: text.to_owned(),
-        linked,
-        tip,
-        ..RailDaw::default()
-    };
     match checked {
         Ok(hello) if hello.error.is_none() && hello.project.is_empty() => {
             line("A new project", true, format!("A new project, not saved yet, is open in Bitwig now. {MORE}"))
@@ -68,8 +64,8 @@ pub fn bitwig_rail(checked: &Result<Hello, Error>) -> RailDaw {
             false,
             format!(
                 "Part of the Music Organiser extension didn't start in Bitwig, so the app can't see what's open there \
-                 or send anything to it. Restarting Bitwig may help. Bitwig said: {} {MORE}",
-                hello.error.as_deref().unwrap_or_default()
+                 or send anything to it. Restarting Bitwig may help. {} {MORE}",
+                said(hello.error.as_deref().unwrap_or_default())
             ),
         ),
         Err(Error::NotRunning) => line(
@@ -99,9 +95,38 @@ pub fn bitwig_rail(checked: &Result<Hello, Error>) -> RailDaw {
     }
 }
 
+/// Bitwig's line when its link, open and greeted as one working fully, then said no to what's open, or answered in a
+/// way the app doesn't know (`why`). It's asked again once a minute ([`SLOW`]).
+fn refused_rail(why: &Error) -> RailDaw {
+    let why = match why {
+        Error::Bitwig(words) => said(words),
+        other => other.to_string(),
+    };
+    line(
+        "Linked, not working fully",
+        false,
+        format!(
+            "Bitwig's link answered the app, but didn't say what's open there. {why} The app asks again in a minute. \
+             {MORE}"
+        ),
+    )
+}
+
+/// One line under the rail's "In your DAWs", for Bitwig.
+fn line(text: &str, linked: bool, tip: String) -> RailDaw {
+    RailDaw { daw: "Bitwig", text: text.to_owned(), linked, tip, ..RailDaw::default() }
+}
+
+/// "Bitwig said: …", ending in a full stop.
+fn said(words: &str) -> String {
+    let words = words.trim();
+    if words.ends_with(['.', '!', '?']) { format!("Bitwig said: {words}") } else { format!("Bitwig said: {words}.") }
+}
+
 /// Keeps up with what Bitwig has open, for the rail, one ask at a time ([`BitwigWatch::ask`]).
 pub struct BitwigWatch {
-    bitwig: Bitwig,
+    /// How to reach Bitwig (its port, and how long to wait): for a new link; one kept keeps its own.
+    pub bitwig: Bitwig,
     /// The link, kept open between asks: none before the first, and once it closed, broke or ran out of time.
     link: Option<Link>,
     /// Asks in a row that Bitwig took but didn't answer.
@@ -120,6 +145,8 @@ pub struct Asked {
 /// What the link said, or why it didn't.
 enum Answer {
     Said(Hello),
+    /// The link is still open, but said no to what's open, or answered in a way the app doesn't know: why.
+    Refused(Error),
     /// Bitwig took the call but didn't answer in time: busy, perhaps.
     Busy(Error),
     NotLinked(Error),
@@ -133,11 +160,16 @@ impl BitwigWatch {
     /// Asks Bitwig what it has open: on the kept link, or a new one when there's none. Waits as long as the link's own
     /// time limits at most (a few seconds), so never on the window's thread.
     pub fn ask(&mut self) -> Asked {
-        let (checked, wait) = match self.answer() {
+        let (line, wait) = match self.answer() {
             Answer::Said(hello) => {
                 self.missed = 0;
                 let wait = if hello.error.is_some() { SLOW } else { EVERY };
-                (Ok(hello), wait)
+                (bitwig_rail(&Ok(hello)), wait)
+            }
+            // Each "no" goes in the link's report in Bitwig, so it's asked once a minute.
+            Answer::Refused(why) => {
+                self.missed = 0;
+                (refused_rail(&why), SLOW)
             }
             Answer::Busy(why) => {
                 self.missed += 1;
@@ -145,14 +177,13 @@ impl BitwigWatch {
                 if self.missed < MISSES && self.shown.is_some() {
                     return Asked { line: None, wait: EVERY };
                 }
-                (Err(why), EVERY)
+                (bitwig_rail(&Err(why)), EVERY)
             }
             Answer::NotLinked(why) => {
                 self.missed = 0;
-                (Err(why), EVERY)
+                (bitwig_rail(&Err(why)), EVERY)
             }
         };
-        let line = bitwig_rail(&checked);
         let changed = self.shown.as_ref() != Some(&line);
         if changed {
             self.shown = Some(line.clone());
@@ -164,13 +195,12 @@ impl BitwigWatch {
         if let Some(link) = self.link.as_mut().filter(|l| l.is_open()) {
             match link.refresh().cloned() {
                 Ok(hello) => return Answer::Said(hello),
-                // A "no", or an answer not laid out as the link's: the link is still open, so it's kept, with what it
-                // said last and why.
-                Err(why @ (Error::Bitwig(_) | Error::Unexpected)) => {
-                    let mut hello = link.hello().clone();
-                    hello.error.get_or_insert_with(|| why.to_string());
-                    return Answer::Said(hello);
+                // A "no", or an answer not laid out as the link's: the link is still open, so it's kept. One part of
+                // which didn't start says no each time, as its greeting said: the line says what the greeting did.
+                Err(Error::Bitwig(_) | Error::Unexpected) if link.hello().error.is_some() => {
+                    return Answer::Said(link.hello().clone());
                 }
+                Err(why @ (Error::Bitwig(_) | Error::Unexpected)) => return Answer::Refused(why),
                 // Out of time, and the link closed the connection: Bitwig may be busy, so it connects afresh next
                 // time, not now (a new connection's greeting gets less time, so it would read as something else
                 // answering).
@@ -220,7 +250,7 @@ mod tests {
             (broken.text.as_str(), broken.linked, broken.project.as_str()),
             ("Linked, not working fully", false, "")
         );
-        assert!(broken.tip.contains("Bitwig said: no MIDI"), "{}", broken.tip);
+        assert!(broken.tip.contains("Bitwig said: no MIDI."), "{}", broken.tip);
         assert!(!broken.tip.contains("didn't send"), "{}", broken.tip);
         let off = bitwig_rail(&Err(Error::NotRunning));
         assert_eq!((off.text.as_str(), off.linked), ("Not linked", false));

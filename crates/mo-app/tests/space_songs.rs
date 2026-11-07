@@ -354,14 +354,14 @@ fn remove_takes_only_old_autosaves_and_caches_and_stop_leaves_them_all() {
     let items: Vec<SongItem> = mo_app::space_removing::Looked::items(&shown).to_vec();
     let kinds: Vec<CompactKind> = items.iter().map(|i| i.item.kind).collect();
     assert_eq!(kinds, [CompactKind::Backup, CompactKind::Backup, CompactKind::SameSave]);
-    // The copy of a save has no tick (Remove doesn't take saves yet), and if it's sent all the same, it stays.
+    // The copy of a save has no tick (saves can't go to the bin from here yet); sent all the same, it stays.
     let removing = Removing::default();
     assert_eq!(removing.ticked_copies(Some(&shown)), items[..2]);
     let bin = FolderBin::new(dir.join("Bin"));
     let done = remove(&items[2..], &from, CompactSettings::default(), &bin, &AtomicBool::new(false));
     assert!(done.removed.is_empty() && night.join("Night Drive_1.bwproject").exists());
     assert_eq!(done.problems.len(), 1);
-    assert_eq!(done.problems[0].why, "Remove doesn't take these from here yet, so it stays.");
+    assert_eq!(done.problems[0].why, mo_app::space_songs::NOT_YET_STAYS);
     // Stopped before it starts, everything picked stays where it is, saying so.
     let done = remove(&items[..2], &from, CompactSettings::default(), &bin, &AtomicBool::new(true));
     assert!(done.removed.is_empty() && backup(0).exists() && backup(1).exists());

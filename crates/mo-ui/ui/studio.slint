@@ -1735,6 +1735,59 @@ export component Dot inherits Rectangle {
     background: tint;
 }
 
+// One line under the rail's "In your DAWs": the DAW, what it has open (or that it isn't linked), whether its link
+// answers, and the tooltip (mo_app::rail_daws::RailDaw).
+export struct DawLine {
+    daw: string,
+    text: string,
+    linked: bool,
+    tip: string,
+}
+
+// A DAW's line on the rail: a light (lit while its link answers), its name, and what it has open under it. A click
+// shows the song open there on Songs when it's one of yours, or Settings on the DAWs tab.
+export component RailDawLine inherits Rectangle {
+    in property <DawLine> line;
+    callback clicked;
+    height: 36px;
+    border-radius: Theme.radius;
+    background: touch.has-hover ? Theme.hover : transparent;
+    HorizontalLayout {
+        padding-left: Space.md;
+        padding-right: Space.sm;
+        spacing: Space.sm;
+        VerticalLayout {
+            alignment: center;
+            Dot {
+                tint: root.line.linked ? Theme.ok : Theme.faint;
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: root.line.daw;
+                color: Theme.muted;
+                font-size: Type.meta;
+            }
+            Text {
+                text: root.line.text;
+                color: root.line.linked ? Theme.text : Theme.faint;
+                font-size: Type.meta;
+                overflow: elide;
+            }
+        }
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+    Tip {
+        text: root.line.tip;
+        hovering: touch.has-hover && !touch.pressed;
+        at-x: root.width + Space.xs;
+        at-y: Space.xs;
+    }
+}
+
 // How full or how far, as a level meter: lit segments like the LEDs on a mixer's channel, the same everywhere a
 // share is shown. Segments 4px wide (one gap of 2px between), as many as fit.
 export component Meter inherits Rectangle {
