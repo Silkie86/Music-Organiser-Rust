@@ -11,9 +11,10 @@
 //! - **Up to date** while the library looks just as it did when the backup was made: the backup notes the library's
 //!   [`SoundsDb::stamp`] then ([`BACKED_UP_FROM`]), which changes with every save to it (and never with a read), so
 //!   nothing that writes to the library has to say so. A backup that hasn't been looked at for a week is checked
-//!   again (`quick_check`), and made again if it's damaged. Plays, drags and sends change the library at nearly every
-//!   start, so for them alone it's made again once a day at most ([`When::Daily`]): the backup holds how many other
-//!   changes the library had had ([`super::grow::CHANGES`]), and one behind by any of those is made again at once.
+//!   again (`quick_check`), and made again if it's damaged. Plays, drags and sends (and the galaxy's maps) change the
+//!   library at nearly every start, so for them alone it's made again once a day at most ([`When::Daily`]): the
+//!   backup holds how many other changes the library had had ([`super::grow::CHANGES`]), and one behind by any of
+//!   those is made again at once.
 //! - **Mending** ([`restore`]): the backup is checked again (`quick_check`), copied beside the library, and given its
 //!   name. The damaged library is set aside as `sounds-rust.db.damaged` (only one: the one before goes), so nothing is
 //!   thrown away at once; it goes a week after it was set aside.
@@ -75,9 +76,9 @@ pub enum BackedUp {
 pub enum When {
     /// Now: new sounds came in, or the library was made afresh.
     Now,
-    /// Once the backup copy is a day old, when the library changed since only by plays, drags and sends (any other
-    /// change, now). They change the library at nearly every start, and making the copy writes about the library's
-    /// size: a day of them at most is lost if the library is damaged.
+    /// Once the backup copy is a day old, when the library changed since only by plays, drags and sends, or the
+    /// galaxy's maps (any other change, now). They change the library at nearly every start, and making the copy
+    /// writes about the library's size: a day of them at most is lost if the library is damaged.
     Daily,
 }
 
@@ -93,9 +94,9 @@ pub fn back_up(sounds_db: &Path) -> Option<BackedUp> {
     back_up_when(sounds_db, When::Now)
 }
 
-/// As [`back_up`], but with [`When::Daily`] a library that changed only by plays, drags and sends since a backup copy
-/// made in the last day waits (one that's missing, damaged, of another format, or behind by anything else is still
-/// made at once).
+/// As [`back_up`], but with [`When::Daily`] a library that changed only by plays, drags and sends, or the galaxy's
+/// maps, since a backup copy made in the last day waits (one that's missing, damaged, of another format, or behind by
+/// anything else is still made at once).
 pub fn back_up_when(sounds_db: &Path, when: When) -> Option<BackedUp> {
     let copy = super::copy_of(sounds_db);
     let backup = backup_of(&copy);
@@ -137,8 +138,8 @@ fn made_in_the_last_day(backup: &Path) -> bool {
     at.is_some_and(|at| (0..A_DAY).contains(&(unix_now() - at)))
 }
 
-/// Whether the library at `copy` changed since its backup copy at `backup` was made only by what's done with sounds:
-/// the same library (its [`OWN_SINCE`]) with no other change since ([`super::grow::CHANGES`]).
+/// Whether the library at `copy` changed since its backup copy at `backup` was made only by what's done with sounds
+/// and the galaxy's maps: the same library (its [`OWN_SINCE`]) with no other change since ([`super::grow::CHANGES`]).
 fn only_small_changes(copy: &Path, backup: &Path) -> bool {
     let notes = |path: &Path| {
         let conn = open_read_only(path).ok()?;

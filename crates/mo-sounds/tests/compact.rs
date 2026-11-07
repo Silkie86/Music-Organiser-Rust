@@ -3,6 +3,7 @@
 //! and a copy of the format before must come out of being laid out anew holding every fact it held.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -2102,4 +2103,61 @@ fn plays_drags_and_sends_are_kept_for_history_and_most_liked() {
     did::keep(&old, &[did(a, event::PLAY, at)]).unwrap();
     assert_eq!(grow::follow(&old, &[], &[]).unwrap(), grow::Kept::default());
     assert!(matches!(backup::back_up_when(&old, When::Daily), Some(BackedUp::Made { .. })));
+}
+
+#[test]
+fn the_galaxys_maps_are_kept_for_the_next_start() {
+    use mo_sounds::StarPoint;
+    use mo_sounds::compact::maps;
+    let dir = folder("maps");
+    let old = library(&dir, 20);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    let ids: Vec<i64> = {
+        let c = Connection::open(&copy).unwrap();
+        let mut st = c.prepare("SELECT id FROM sounds ORDER BY id LIMIT 3").unwrap();
+        st.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+    };
+    let [a, b, c] = ids[..] else { panic!("three sounds") };
+    let at = |x: f32, y: f32| StarPoint { x, y };
+    let map = |space: &str| SoundsDb::open_read_only(&copy).unwrap().map(space).unwrap();
+    // Still following sounds.db: not written.
+    let points = HashMap::from([(a, at(0.25, 0.5))]);
+    let Err(e) = maps::keep(&old, "features", &points, false) else { panic!("not the app's own yet") };
+    assert!(e.to_string().contains("isn't the app's own"), "{e}");
+    compact::last_sync(&old, &copy).unwrap();
+    assert!(matches!(backup::back_up(&old), Some(BackedUp::Made { .. })));
+    let clap_before = map("clap");
+    // New places go over the old ones; a sound that isn't there is skipped.
+    let was = map("features");
+    let points = HashMap::from([(a, at(0.25, 0.5)), (b, at(0.75, 0.125)), (999_999, at(0.5, 0.5))]);
+    assert_eq!(maps::keep(&old, "features", &points, false).unwrap(), 2);
+    let now = map("features");
+    assert_eq!((now.get(&a), now.get(&b)), (Some(&at(0.25, 0.5)), Some(&at(0.75, 0.125))));
+    assert_eq!(now.len(), was.len() + [a, b].iter().filter(|id| !was.contains_key(id)).count());
+    assert_eq!(maps::keep(&old, "features", &HashMap::new(), false).unwrap(), 0);
+    // Laid out afresh: the whole map in place of the old one, the other ways of placing as they were.
+    let fresh = HashMap::from([(b, at(0.5, 0.25)), (c, at(0.125, 0.875))]);
+    assert_eq!(maps::keep(&old, "features", &fresh, true).unwrap(), 2);
+    assert_eq!(map("features"), fresh);
+    assert_eq!(map("clap"), clap_before);
+    assert_eq!(pragma(&copy, "integrity_check"), "ok");
+    // A sound forgotten at a scan takes its places with it.
+    let c_path: String =
+        Connection::open(&copy).unwrap().query_row("SELECT path FROM sounds WHERE id = ?1", [c], |r| r.get(0)).unwrap();
+    assert_eq!(grow::follow(&old, &[], &[c_path]).unwrap().forgotten, 1);
+    assert_eq!(map("features").len(), 1);
+    assert!(matches!(backup::back_up(&old), Some(BackedUp::Made { .. })));
+    // Maps change the library at nearly every start: the backup copy follows them once a day.
+    assert_eq!(maps::keep(&old, "clap+features", &fresh, true).unwrap(), 1);
+    assert_eq!(backup::back_up_when(&old, When::Daily), None);
+    // A library made from a sounds.db without the maps table gets the C# app's.
+    Connection::open(&copy).unwrap().execute_batch("DROP TABLE sound_maps;").unwrap();
+    assert_eq!(maps::keep(&old, "features", &fresh, false).unwrap(), 1);
+    assert_eq!(map("features").get(&b), Some(&at(0.5, 0.25)));
+    let index: i64 = Connection::open(&copy)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM sqlite_master WHERE name = 'ix_sound_maps_sound'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(index, 1);
 }

@@ -1,15 +1,16 @@
 //! The Sounds page's galaxy: every sound as a star on a map, sound-alikes close together (`mo_sounds::galaxy`). The
-//! map is the C# app's saved one, brought up to date (or laid out afresh) on the low-priority pool; it's kept in
-//! memory only, as sounds.db stays read-only until it's trusted. The graphics card draws the stars (`sky`), every
+//! map is the one kept in the sound library, brought up to date (or laid out afresh) on the low-priority pool, and
+//! kept again for the next start (`mo_sounds::compact::maps`); each Placed by choice's map is kept in memory too, so
+//! switching back to one is quick (review finding X2-2). The graphics card draws the stars (`sky`), every
 //! frame; without one they're drawn into a picture off the window's thread instead, newest ask first. The filters dim
 //! the stars they leave out. Which part of the map is on show, the wheel and clicks versus drags are
 //! `mo_app::galaxy_view`'s; the star under the mouse is found on a grid over the whole map (`mo_app::galaxy_grid`).
 
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::path::PathBuf;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use mo_app::background::{self, Newest};
@@ -22,6 +23,7 @@ use mo_app::galaxy_view::{Hold, Moved, View, most_zoom_for};
 use mo_app::log;
 use mo_app::sounds as list;
 use mo_app::{frame_timing, sweep_timing};
+use mo_sounds::compact;
 use mo_sounds::galaxy::{self, Placing, Step};
 use mo_sounds::{SoundsDb, StarPoint};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel};
@@ -57,14 +59,38 @@ pub(super) struct Kinds {
     colours: Vec<i32>,
 }
 
-/// The map as it arrives: every star by its place in the list, each one's colour, and its type.
-type Arrived = Option<(Vec<Option<StarPoint>>, Vec<i32>, Kinds)>;
+/// A map brought up to date, as it arrives: every star by its place in the list, each one's colour and type, every
+/// star by its sound's id, and what's to be kept of it in the library.
+struct Brought {
+    stars: Vec<Option<StarPoint>>,
+    colours: Vec<i32>,
+    kinds: Kinds,
+    map: Arc<HashMap<i64, StarPoint>>,
+    keep: Keep,
+}
+
+/// What of a map brought up to date is to be kept in the library for the next start.
+#[derive(Debug, PartialEq)]
+enum Keep {
+    /// Nothing: nothing new in it.
+    Nothing,
+    /// The places new in it.
+    New(HashMap<i64, StarPoint>),
+    /// All of it, in place of the library's: laid out afresh, or not kept before ([`Galaxy::unkept`]).
+    Whole,
+}
 
 /// The galaxy's part of the page.
 pub(super) struct Galaxy {
     /// Where the sound library is, to read its saved map; `None` (the screenshots) lays out afresh.
     pub(super) db: Option<PathBuf>,
     placing: Placing,
+    /// Each map brought up to date this session, by how its stars are placed ([`galaxy::space`]), every star by its
+    /// sound's id: switching back to one doesn't read or lay it out again.
+    maps: HashMap<&'static str, Arc<HashMap<i64, StarPoint>>>,
+    /// The ways of placing whose map in memory couldn't be kept in the library: kept whole the next time they're
+    /// brought up to date.
+    unkept: HashSet<&'static str>,
     /// What makes a star bigger and brighter.
     light_by: LightBy,
     /// How lit each star is, worked out (off the window's thread) for one list and one Light by, and kept: a search
@@ -119,6 +145,8 @@ impl Default for Galaxy {
         Galaxy {
             db: None,
             placing: Placing::Both,
+            maps: HashMap::new(),
+            unkept: HashSet::new(),
             light_by: LightBy::default(),
             light: None,
             stars: None,
@@ -1207,104 +1235,225 @@ fn load(app: &AppWindow, fresh: bool) {
         let cancel = Arc::new(AtomicBool::new(false));
         g.loading = Some(cancel.clone());
         g.note = if fresh { "Laying out the galaxy afresh…" } else { "Reading the galaxy…" }.to_owned();
-        Some((index, list, places, g.db.clone(), g.placing, cancel))
+        let space = galaxy::space(g.placing, &index);
+        // This session's map for it, unless it's to be laid out afresh.
+        let had = g.maps.get(space).filter(|_| !fresh).cloned();
+        let whole = g.unkept.contains(space);
+        Some((index, list, places, g.db.clone(), space, had, whole, cancel))
     });
     show_note(app);
-    let Some((index, list, places, db, placing, cancel)) = ask else { return };
+    let Some((index, list, places, db, space, had, whole, cancel)) = ask else { return };
     let mine = cancel.clone();
     let weak = app.as_weak();
     let here = HERE.with(|h| *h.borrow());
     let feed = FEED.with(|f| f.borrow().clone()).filter(|_| !here);
+    // Kept for the next start in the app's own library beside it (not the screenshots' fixture).
+    let keep_in = db.clone().filter(|_| !here);
     let work = move || {
-        let space = galaxy::space(placing, &index);
-        let saved = match &db {
-            Some(path) => match SoundsDb::open_read_only(path).and_then(|db| db.map(space)) {
-                Ok(map) => map,
-                Err(e) => {
-                    log::warning("Sounds", &format!("Couldn't read the saved galaxy ({space}), so it's laid out: {e}"));
-                    HashMap::new()
+        let (map, keep) = match had {
+            // Nothing new since it was brought up to date this session: as it was.
+            Some(had) if !galaxy::out_of_date(&index, &had) => (had, if whole { Keep::Whole } else { Keep::Nothing }),
+            had => {
+                let saved = match (had, &db) {
+                    (Some(had), _) => Arc::unwrap_or_clone(had),
+                    // Laid out afresh: the kept one isn't wanted.
+                    (None, Some(path)) if !fresh => match SoundsDb::open_read_only(path).and_then(|db| db.map(space)) {
+                        Ok(map) => map,
+                        Err(e) => {
+                            log::warning(
+                                "Sounds",
+                                &format!("Couldn't read the saved galaxy ({space}), so it's laid out: {e}"),
+                            );
+                            HashMap::new()
+                        }
+                    },
+                    _ => HashMap::new(),
+                };
+                let job = feed.map(|f| Mutex::new(f.start("Galaxy", "Bringing the map up to date")));
+                let progress = |s: Step| {
+                    if let Some(job) = &job
+                        && let Ok(job) = job.lock()
+                    {
+                        job.progress(s.done as f32 / 4.0, Some(s.what));
+                    }
+                };
+                let updated = background::on_pool(|| galaxy::update(&index, space, saved, fresh, &progress, &cancel));
+                let job = job.and_then(|j| j.into_inner().ok());
+                let Some(u) = updated else {
+                    if let Some(job) = job {
+                        job.done("Stopped");
+                    }
+                    return None;
+                };
+                if let Some(job) = job {
+                    job.done(if u.replace { "Laid out afresh" } else { "Up to date" });
                 }
-            },
-            None => HashMap::new(),
-        };
-        let job = feed.map(|f| Mutex::new(f.start("Galaxy", "Bringing the map up to date")));
-        let progress = |s: Step| {
-            if let Some(job) = &job
-                && let Ok(job) = job.lock()
-            {
-                job.progress(s.done as f32 / 4.0, Some(s.what));
+                // Laid out afresh, all of it is kept: `u.save` is the whole map again, let go here.
+                let keep = if u.replace || whole { Keep::Whole } else { Keep::New(u.save) };
+                (Arc::new(u.map), keep)
             }
         };
-        let updated = background::on_pool(|| galaxy::update(&index, space, saved, fresh, &progress, &cancel));
-        let job = job.and_then(|j| j.into_inner().ok());
-        let stars = updated.map(|u| {
-            let mut stars = vec![None; list.len()];
-            for (id, point) in u.map {
-                if let Some(&at) = places.get(&id) {
-                    stars[at] = Some(point);
-                }
+        let mut stars = vec![None; list.len()];
+        for (id, point) in map.iter() {
+            if let Some(&at) = places.get(id) {
+                stars[at] = Some(*point);
             }
-            (stars, u.replace)
-        });
+        }
         // Each star's colour, worked out once rather than on every picture.
         let colours: Vec<i32> = list.sounds().iter().map(|s| list::type_colour(&s.sound_type)).collect();
         let kinds = kinds_of(&list);
-        match (&stars, job) {
-            (Some((_, true)), Some(job)) => job.done("Laid out afresh (kept in memory until sounds.db is trusted)"),
-            (Some(_), Some(job)) => job.done("Up to date"),
-            (None, Some(job)) => job.done("Stopped"),
-            _ => {}
-        }
-        stars.map(|s| (s.0, colours, kinds))
+        Some(Brought { stars, colours, kinds, map, keep })
     };
-    let arrive = move |app: &AppWindow, stars: Arrived, cancel: &Arc<AtomicBool>| {
+    let arrive = move |app: &AppWindow, brought: Option<Brought>, cancel: &Arc<AtomicBool>| {
         let _doing = crate::watchdog::doing("Galaxy: the map arrived");
         let current = PAGE.with(|p| {
             let mut p = p.borrow_mut();
             let g = &mut p.galaxy;
             if !g.loading.as_ref().is_some_and(|c| Arc::ptr_eq(c, cancel)) {
-                return false;
+                return None;
             }
             g.loading = None;
-            if let Some((stars, colours, kinds)) = stars {
-                let n = stars.iter().filter(|s| s.is_some()).count();
-                g.note = if n == 0 {
-                    "No sounds on the map yet: the analysis hasn't heard any.".to_owned()
-                } else {
-                    String::new()
-                };
-                g.stars = Some(Arc::new(stars));
-                g.colours = Some(Arc::new(colours));
-                g.kinds = Some(Arc::new(kinds));
-                g.regions_for = None;
-                g.count = n;
-                g.view.most = most_zoom_for(n);
-                g.view.zoom = g.view.zoom.min(g.view.most);
-            }
-            true
+            let Some(b) = brought else { return Some(None) };
+            let n = b.stars.iter().filter(|s| s.is_some()).count();
+            g.note = if n == 0 {
+                "No sounds on the map yet: the analysis hasn't heard any.".to_owned()
+            } else {
+                String::new()
+            };
+            g.stars = Some(Arc::new(b.stars));
+            g.colours = Some(Arc::new(b.colours));
+            g.kinds = Some(Arc::new(b.kinds));
+            g.regions_for = None;
+            g.count = n;
+            g.view.most = most_zoom_for(n);
+            g.view.zoom = g.view.zoom.min(g.view.most);
+            g.maps.insert(space, b.map.clone());
+            Some(Some((b.map, b.keep)))
         });
-        if current {
-            show_note(app);
-            draw(app);
+        let Some(kept) = current else { return };
+        show_note(app);
+        draw(app);
+        // Only the map on show is kept, after any kept before it.
+        if let (Some(db), Some((map, keep))) = (keep_in.clone(), kept) {
+            keep_later(Keeping { db, space, map, keep });
         }
     };
     if here {
-        let stars = work();
-        arrive(app, stars, &mine);
+        let brought = work();
+        arrive(app, brought, &mine);
         return;
     }
     let c = mine;
     let started = background::spawn("Galaxy", move || {
-        let stars = work();
+        let brought = work();
         let _ = slint::invoke_from_event_loop(move || {
             if let Some(app) = weak.upgrade() {
-                arrive(&app, stars, &c);
+                arrive(&app, brought, &c);
             }
         });
     });
     if let Err(e) = started {
         log::error("Sounds", &format!("Couldn't start the galaxy: {e}"));
     }
+}
+
+/// A map on show to keep in the app's own sound library beside `db`.
+struct Keeping {
+    db: PathBuf,
+    space: &'static str,
+    map: Arc<HashMap<i64, StarPoint>>,
+    keep: Keep,
+}
+
+/// The one thread that keeps the maps, each in turn, so a map laid out afresh never goes over places added after it.
+struct Keeper {
+    to: mpsc::Sender<Keeping>,
+    /// Closes as the thread ends.
+    ended: mpsc::Receiver<()>,
+}
+
+thread_local! {
+    static KEEPER: RefCell<Option<Keeper>> = const { RefCell::new(None) };
+}
+
+/// How long the app waits as it closes for a map still being kept (a whole one writes every star).
+const CLOSE_WAIT: Duration = Duration::from_secs(2);
+
+/// Keeps `k` once those before it are kept, on a low-priority thread: the window never waits for it. Each one says
+/// how it went back to the page, which keeps a map whole next time if it couldn't be kept ([`Galaxy::unkept`]).
+fn keep_later(k: Keeping) {
+    KEEPER.with(|keeper| {
+        let mut keeper = keeper.borrow_mut();
+        if keeper.is_none() {
+            let (to, from) = mpsc::channel::<Keeping>();
+            let (ending, ended) = mpsc::channel::<()>();
+            let started = background::spawn("Keep the galaxy", move || {
+                let _ending = ending;
+                for k in from {
+                    let (points, replace) = match &k.keep {
+                        Keep::Nothing => continue,
+                        Keep::New(points) => (points, false),
+                        Keep::Whole => (&*k.map, true),
+                    };
+                    let kept = keep_map(&k.db, k.space, points, replace);
+                    let space = k.space;
+                    let _ = slint::invoke_from_event_loop(move || {
+                        PAGE.with(|p| {
+                            let unkept = &mut p.borrow_mut().galaxy.unkept;
+                            if !kept {
+                                unkept.insert(space);
+                            } else if replace {
+                                unkept.remove(space);
+                            }
+                        });
+                    });
+                }
+            });
+            match started {
+                Ok(_) => *keeper = Some(Keeper { to, ended }),
+                Err(e) => log::warning("Sounds", &format!("Couldn't start keeping the galaxy's maps: {e}")),
+            }
+        }
+        if let Some(keeper) = keeper.as_ref() {
+            let _ = keeper.to.send(k);
+        }
+    });
+}
+
+/// As the app closes: a map still being kept is waited for, a moment at most.
+pub(super) fn finish_up() {
+    let Some(Keeper { to, ended }) = KEEPER.with(|k| k.borrow_mut().take()) else { return };
+    drop(to);
+    if ended.recv_timeout(CLOSE_WAIT) == Err(mpsc::RecvTimeoutError::Timeout) {
+        log::warning("Sounds", "The app closed before the galaxy's map was kept: it's brought up to date next time");
+    }
+}
+
+/// Keeps `points` on the map placed by `space` in the sound library beside `db` (`replace`: all of it, in place of
+/// the library's). Whether it was kept. A failure is logged once for each reason: the map is kept whole the next time
+/// it's brought up to date.
+fn keep_map(db: &Path, space: &str, points: &HashMap<i64, StarPoint>, replace: bool) -> bool {
+    static SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let began = Instant::now();
+    let why = match mo_catch::catch(|| compact::maps::keep(db, space, points, replace)) {
+        Ok(Ok(0)) => return true,
+        Ok(Ok(kept)) => {
+            let took = began.elapsed().as_secs_f32();
+            log::info(
+                "Sounds",
+                &format!("The galaxy's map ({space}) kept for next time: {kept} places in {took:.1} s"),
+            );
+            return true;
+        }
+        Ok(Err(e)) => e.to_string(),
+        Err(_) => "keeping it tripped up".to_owned(),
+    };
+    let mut said = SAID.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !said.contains(&why) {
+        log::warning("Sounds", &format!("Couldn't keep the galaxy's map ({space}) for next time: {why}"));
+        said.push(why);
+    }
+    false
 }
 
 /// Each sound's type as a number, and the types' names and colours, for the names over the map. A sound with no type,

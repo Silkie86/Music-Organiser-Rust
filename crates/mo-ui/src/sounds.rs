@@ -544,9 +544,11 @@ pub(crate) fn strings<S: AsRef<str>>(items: impl IntoIterator<Item = S>) -> Mode
     ModelRc::new(VecModel::from(items.into_iter().map(|s| SharedString::from(s.as_ref())).collect::<Vec<_>>()))
 }
 
-/// As the app closes: the plays, drags and sends not kept yet are kept now, waiting a moment at most.
+/// As the app closes: the plays, drags and sends not kept yet, and a galaxy map being kept, are kept now, waiting a
+/// moment at most.
 pub fn finish_up() {
     did::finish_up();
+    galaxy::finish_up();
 }
 
 /// For the screenshots: work lists out on the window's thread, as there's no event loop to send them back with.

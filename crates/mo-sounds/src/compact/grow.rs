@@ -40,8 +40,9 @@ pub const LAST_ID: &str = "last_id";
 pub const NEW_SINCE: &str = "new_since";
 
 /// The key in `copy_info` that counts the changes the app made to its library, but for what's done with sounds
-/// ([`super::did`]). The backup copy holds the count it was made at, so one made in the last day that's behind only by
-/// plays, drags and sends can wait ([`super::backup::When::Daily`]), and one behind by anything else can't.
+/// ([`super::did`]) and the galaxy's maps ([`super::maps`]). The backup copy holds the count it was made at, so one
+/// made in the last day that's behind only by those can wait ([`super::backup::When::Daily`]), and one behind by
+/// anything else can't.
 pub const CHANGES: &str = "changes";
 
 /// The first number the app gave a sound of its own scan ([`NEW_SINCE`]) in the library at `copy`; `None` when it has
@@ -259,7 +260,8 @@ pub(super) fn write<T>(
     write_as(sounds_db, true, change)
 }
 
-/// As [`write`], for what's done with sounds ([`super::did`]): not counted, so the backup copy can wait for it.
+/// As [`write`], for what's done with sounds ([`super::did`]) and the galaxy's maps ([`super::maps`]): not counted, so
+/// the backup copy can wait for it.
 pub(super) fn write_small<T>(
     sounds_db: &Path,
     change: impl FnOnce(&Transaction<'_>) -> rusqlite::Result<Result<T, String>>,
