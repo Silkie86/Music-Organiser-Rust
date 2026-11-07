@@ -137,8 +137,8 @@ pub struct Updated {
 /// Brings the galaxy for `space` up to date from its `saved` map. It's laid out afresh when there's no map yet,
 /// `fresh` asks for it, or more than a fifth of the sounds are new; otherwise the new sounds are placed beside their
 /// sound-alikes, so the stars you know stay where they were. `None` when `cancel` was set. As C#'s
-/// `SoundOrganiser.UpdateGalaxy`, less the saving: until sounds.db is trusted, the app keeps [`Updated::save`] to
-/// itself.
+/// `SoundOrganiser.UpdateGalaxy`, less the saving: the caller keeps [`Updated::save`] in the library
+/// ([`crate::compact::maps::keep`]).
 pub fn update(
     index: &SoundIndex,
     space: &str,
