@@ -3,7 +3,7 @@
 // disk and its installed copies. The same list and side card as every page (Solomon, 1 Nov 2026), the card always
 // there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
 // fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
-import { ListView } from "std-widgets.slint";
+import { ListView } from "../list.slint";
 import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TickBox, FilterPicks, FilterView, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
 
 // One line of the list.
@@ -203,6 +203,8 @@ export global PluginsData {
     callback step(int);
     in property <int> show-row;
     in property <int> show-ask;
+    // The last ask the list has turned to (list.slint's ListView keeps it).
+    in-out property <int> show-done;
     callback close-panel();
     callback menu-chosen(string);
     callback use-daw-picked(string);
@@ -989,17 +991,15 @@ export component PluginsPage inherits Rectangle {
                         title: "No plugins like that";
                         text: "Try fewer filters, or another search.";
                     }
-                    if PluginsData.message == "": ListView {
-                        property <int> show-ask: PluginsData.show-ask;
-                        changed show-ask => {
-                            if (PluginsData.show-row * 56px < -self.content-y
-                                || (PluginsData.show-row + 1) * 56px > -self.content-y + self.visible-height) {
-                                self.content-y = -clamp(PluginsData.show-row * 56px - self.visible-height / 3, 0px,
-                                    max(0px, self.content-height - self.visible-height));
-                            }
-                        }
+                    if PluginsData.message == "": plugin-list := ListView {
+                        row-height: 56px;
+                        rows: PluginsData.lines.length;
+                        show-top: PluginsData.show-row * self.row-height;
+                        show-ask: PluginsData.show-ask;
+                        show-done <=> PluginsData.show-done;
                         for line in PluginsData.lines: ListLine {
-                            height: 56px;
+                            // Every line this height: the list counts on it.
+                            height: plugin-list.row-height;
                             selected: line.row == PluginsData.selected;
                             clicked => {
                                 keys.focus();

@@ -610,7 +610,8 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>, in_bin: Vec<String>)
             // What another page asked for before the first read comes first; with every unused plugin asked for, the
             // plugin picked before stays picked only when it's among them.
             let kept = kept.and_then(|(k, o)| fresh.find(&k, &o));
-            let picked = match wanted.map(|w| show_in(&mut fresh, &w)) {
+            let asked = wanted.map(|w| show_in(&mut fresh, &w));
+            let picked = match asked {
                 Some(Some(row)) => Some(row),
                 Some(None) => kept.filter(|row| fresh.shown.contains(row)),
                 None => kept,
@@ -629,6 +630,9 @@ fn arrived(app: &AppWindow, built: Result<Plugins, String>, in_bin: Vec<String>)
             refresh(app);
             fill_cards(app);
             pick(app, picked);
+            if let Some(Some(row)) = asked {
+                bring_into_view(app, row);
+            }
         }
     }
 }
@@ -663,6 +667,7 @@ fn show_wanted(app: &AppWindow, wanted: Wanted) {
         Some(row) => {
             pick(app, Some(row));
             app.global::<PluginsData>().set_tab(0);
+            bring_into_view(app, row);
         }
         // The plugin picked before stays picked only when it's among those shown now.
         None => {
@@ -878,6 +883,20 @@ fn step(app: &AppWindow, by: i32) {
     });
     let Some((at, row)) = next else { return };
     pick(app, Some(row));
+    show_line(app, at);
+}
+
+/// Brings plugin `row` into sight, for another page (Ctrl+K, Space's Show on Plugins page): before 7 Nov it was picked
+/// but its line could stay out of sight.
+fn bring_into_view(app: &AppWindow, row: usize) {
+    let at = PAGE.with(|p| p.borrow().plugins.as_ref().and_then(|pl| pl.shown.iter().position(|&s| s == row)));
+    if let Some(at) = at {
+        show_line(app, at);
+    }
+}
+
+/// Asks the list to bring its line `at` (as the list shows them) into sight.
+fn show_line(app: &AppWindow, at: usize) {
     let data = app.global::<PluginsData>();
     data.set_show_row(i32::try_from(at).unwrap_or(i32::MAX));
     data.set_show_ask(data.get_show_ask().wrapping_add(1));

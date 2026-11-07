@@ -22,6 +22,8 @@ const WIDTH: u32 = 1440;
 const HEIGHT: u32 = 900;
 /// The app's narrowest window (app.slint's min-width).
 const NARROW: u32 = 900;
+/// A window short enough that the Songs, Presets, MIDI and Plugins samples' lists scroll (app.slint's min-height).
+const SHORT: u32 = 600;
 
 struct Headless(Rc<MinimalSoftwareWindow>);
 
@@ -567,6 +569,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", path.display());
     }
     app.set_note_open(false);
+    // After the shots: it leaves a line picked on each of those pages.
+    opened_in_sight(&app, &window)?;
     key_checks(&app)?;
     rail_checks(&app)?;
     Ok(())
@@ -800,6 +804,118 @@ fn finder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     typed("theme");
     shots.push(("finder-settings.png".into(), capture(window)));
     finder::close(app);
+}
+
+/// Ctrl+K to the last song, preset, MIDI part and plugin of their pages' lists, each found by its name and opened with
+/// Enter: first from another page (Sounds), then from its own page with a search hiding it. In a short window, so each
+/// list scrolls. Each list must be at its end just as the wheel leaves it there by hand, the whole last line in sight.
+/// Before 7 Nov a page made when it was shown (after the turn was asked) stayed at its top, a list given back the lines
+/// a search hid turned with the height of the fewer it had, Plugins didn't turn at all, and a long turn landed on the
+/// top of a line, up to a line short of the end: the last line was cut off.
+fn opened_in_sight(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    let finder = app.global::<mo_ui::FinderData>();
+    let open = |name: &str| {
+        mo_ui::finder::toggle(app);
+        finder.set_query(name.into());
+        finder.invoke_edited(name.into());
+        finder.invoke_key(char::from(slint::platform::Key::Return).to_string().into(), false, false);
+    };
+    let songs = app.global::<mo_ui::SongsData>();
+    let presets = app.global::<mo_ui::PresetsData>();
+    let midi = app.global::<mo_ui::MidiData>();
+    let plugins = app.global::<mo_ui::PluginsData>();
+    // Each page's search box, as typing in it would set it.
+    let search = |place: Place, text: &str| match place {
+        Place::Songs => {
+            songs.set_search(text.into());
+            songs.invoke_search_edited(text.into());
+        }
+        Place::Presets => {
+            presets.set_search(text.into());
+            presets.invoke_search_edited(text.into());
+        }
+        Place::Plugins => {
+            plugins.set_search(text.into());
+            plugins.invoke_search_edited(text.into());
+        }
+        _ => {
+            midi.set_search(text.into());
+            midi.invoke_search_edited(text.into());
+        }
+    };
+    // The name on each list's last line as the page has it now.
+    fn end<T>(lines: slint::ModelRc<T>) -> Option<T> {
+        lines.row_count().checked_sub(1).and_then(|i| lines.row_data(i))
+    }
+    let last = |place: Place| {
+        let name = match place {
+            Place::Songs => end(songs.get_lines()).map(|l| l.name),
+            Place::Presets => end(presets.get_lines()).map(|l| l.name),
+            Place::Plugins => end(plugins.get_lines()).map(|l| l.name),
+            _ => end(midi.get_lines()).map(|l| l.title),
+        };
+        name.unwrap_or_default().to_string()
+    };
+    mo_ui::presets::sample_in_finder(app);
+    // The Plugins page has the sample its shots left; Ctrl+K finds the same plugins.
+    let found = mo_app::finder::plugins(&sample_plugins().0);
+    mo_ui::finder::add_source(app, "plugins", std::sync::Arc::new(found));
+    window.set_size(PhysicalSize::new(WIDTH, SHORT));
+    let mut wrong = Vec::new();
+    for (place, name, hides) in [
+        (Place::Songs, "Old Tapes", "Night"),
+        (Place::Presets, "Warm Pad", "Sub"),
+        (Place::Midi, "Flute hook", "Keys"),
+        (Place::Plugins, "Arturia Pigments", "Serum"),
+    ] {
+        let at_end = last(place);
+        if !at_end.starts_with(name) {
+            wrong.push(format!("{name} isn't the last line of its list now, {at_end} is: open that"));
+            continue;
+        }
+        for own_page in [false, true] {
+            let how = if own_page {
+                format!("{name} from its page, a search hiding it")
+            } else {
+                format!("{name} from Sounds")
+            };
+            if own_page {
+                app.set_place(place.index() as i32);
+                search(place, hides);
+            } else {
+                app.set_place(Place::Sounds.index() as i32);
+            }
+            capture(window);
+            open(name);
+            let first = capture(window);
+            if app.get_place() != place.index() as i32 {
+                wrong.push(format!("{how}: Enter didn't open it on its page (is it still Ctrl+K's first hit?)"));
+                search(place, "");
+                continue;
+            }
+            // The list turned up a little by hand, then back down past its end, where the wheel stops.
+            scroll(window, SHORT_LIST_WHEEL.0, SHORT_LIST_WHEEL.1, SHORT_TURN);
+            hover(window, -1.0, -1.0);
+            let up = capture(window);
+            scroll(window, SHORT_LIST_WHEEL.0, SHORT_LIST_WHEEL.1, -2.0 * SHORT_TURN);
+            hover(window, -1.0, -1.0);
+            let end = capture(window);
+            if same_in(&up, &end, SHORT_LIST) {
+                wrong.push(format!("{how}: the wheel moved nothing (is it still over the list, and does it scroll?)"));
+            } else if !same_in(&first, &end, SHORT_LIST) {
+                wrong.push(format!("{how}: not at its end as the wheel leaves it (is its last line cut off?)"));
+            }
+            search(place, "");
+        }
+    }
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    songs.invoke_close_panel();
+    presets.invoke_close_panel();
+    midi.invoke_close_panel();
+    plugins.invoke_close_panel();
+    app.set_place(Place::Songs.index() as i32);
+    capture(window);
+    if wrong.is_empty() { Ok(()) } else { Err(format!("Ctrl+K, opened low down a list: {}", wrong.join("; "))) }
 }
 
 /// The Sounds page: a sound picked and playing in its panel, a filter on, the List and History views, and the tiles in
@@ -1107,6 +1223,15 @@ fn plain(pixels: &[u8], (x, y, width, height): (u32, u32, u32, u32)) -> bool {
     };
     let first = at(x, y);
     (y..y + height).all(|y| (x..x + width).all(|x| at(x, y) == first))
+}
+
+/// Whether two pictures of the window are the same inside `(x, y, width, height)`.
+fn same_in(a: &[u8], b: &[u8], (x, y, width, height): (u32, u32, u32, u32)) -> bool {
+    (y..y + height).all(|y| {
+        let at = ((y * WIDTH + x) * 3) as usize;
+        let row = at..at + (width * 3) as usize;
+        a.get(row.clone()) == b.get(row)
+    })
 }
 
 /// Made-up drives for the Space page: C: nearly full with the app's files, a big drive of projects and samples, the
@@ -2200,6 +2325,12 @@ const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 /// pixels): all one colour there, the list shows nothing.
 const FIRST_TILE: (u32, u32, u32, u32) = (250, 320, 200, 70);
 const FIRST_LINE: (u32, u32, u32, u32) = (250, 335, 400, 30);
+/// The Songs, Presets, MIDI and Plugins lists in the short window: left of the activity cards, which move on their own.
+const SHORT_LIST: (u32, u32, u32, u32) = (230, 200, 760, 400);
+/// The mouse over each of those lists (Songs' is narrow beside its panel; Plugins' starts low), for the wheel.
+const SHORT_LIST_WHEEL: (f32, f32) = (400.0, 540.0);
+/// A short wheel turn: less than those lists show, so turning back down goes through lines the list has made.
+const SHORT_TURN: f32 = 100.0;
 
 /// Moves the mouse to a point in the window (a point outside it moves it away).
 fn hover(window: &MinimalSoftwareWindow, x: f32, y: f32) {

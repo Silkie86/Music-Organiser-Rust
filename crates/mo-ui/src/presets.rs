@@ -269,14 +269,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
     });
     wire(app);
-    crate::finder::on_open(Kind::Preset, |app, hit, _| {
-        let Some(at) = hit.id.parse::<usize>().ok().filter(|&at| PAGE.with(|p| at < p.borrow().items.len())) else {
-            return false;
-        };
-        crate::go_to(app, Place::Presets.index() as i32);
-        show_preset(app, at);
-        true
-    });
+    finder_opens();
     // Ctrl+K finds your presets before this page is first shown: they're read once, in the background.
     crate::finder::when_opening(|app| {
         let start = PAGE.with(|p| !std::mem::replace(&mut p.borrow_mut().started, true));
@@ -288,6 +281,18 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     if app.get_place() == Place::Presets.index() as i32 {
         shown(app);
     }
+}
+
+/// Says how Ctrl+K opens one of the Sounds section's lines: on this page, picked.
+fn finder_opens() {
+    crate::finder::on_open(Kind::Preset, |app, hit, _| {
+        let Some(at) = hit.id.parse::<usize>().ok().filter(|&at| PAGE.with(|p| at < p.borrow().items.len())) else {
+            return false;
+        };
+        crate::go_to(app, Place::Presets.index() as i32);
+        show_preset(app, at);
+        true
+    });
 }
 
 /// Shows one line of the Sounds section, by its place in the lines (Ctrl+K): when the filters hide it, they go.
@@ -2365,9 +2370,10 @@ fn curve_db_change(
 // ---------------------------------------------------------------------------------------------------------------------
 // For the screenshots
 
-/// Shows made-up sounds and curves, for mo-screens (no library, nothing read).
+/// Shows made-up sounds and curves, with Ctrl+K opening them, for mo-screens (no library, nothing read).
 pub fn show_sample(app: &AppWindow) {
     wire(app);
+    finder_opens();
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.started = true;
@@ -2384,6 +2390,11 @@ pub fn show_sample(app: &AppWindow) {
         (p.curve_shown, p.curve_found_in) = logic::shown_curves(&p.curves, &p.curve_keys, &p.curve_filters);
     });
     show_all(app);
+}
+
+/// Hands the sample's lines to Ctrl+K, as the page does once its lines are read (screenshots).
+pub fn sample_in_finder(app: &AppWindow) {
+    give_finder(app);
 }
 
 /// Shows the picked line as auditioned in Bitwig, playing (screenshots: nothing reaches Bitwig); `false` puts it back.
