@@ -255,8 +255,14 @@ pub fn done_text(done: &Done) -> (String, Vec<String>) {
     } else if binned == 0 {
         format!("Freed {}. None of it is in the Recycle Bin: the lines below say why.", size_text(done.bytes()))
     } else {
+        // What went but Windows removed for good counts in what was sent, as on Space, and says so.
+        let lost = match lost {
+            0 => String::new(),
+            1 => " 1 went but wasn't found there: the lines below say why.".to_owned(),
+            n => format!(" {n} went but weren't found there: the lines below say why."),
+        };
         format!(
-            "Sent {}: {} in the Recycle Bin, so you can put {} back.",
+            "Sent {}: {} in the Recycle Bin, so you can put {} back.{lost}",
             size_text(done.bytes()),
             {
                 let (one, many) = things(done.removed.iter());

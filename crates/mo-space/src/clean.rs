@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::admin::{Admin, AsAdmin, NoAdmin, Outcome, Step, ask_for, real_spot, reason, stamp};
 use crate::plugin_space::SpaceKind;
-use crate::size::{OnlineOnly, Stopped, is_link, is_online_only, modified_of, online_only_in, total};
+use crate::size::{OnlineOnly, Stopped, is_link, is_online_only, measure, modified_of, online_only_in, total};
 use crate::song::{CompactItem, CompactKind, has_studio_one_song, parent};
 use crate::{key, not_there, real_path, text};
 
@@ -830,8 +830,8 @@ impl<'a> Sending<'a> {
         }
         // Nor what the bin hasn't room for: Windows would ask about it, and a yes would remove it for good, or it would
         // make room by removing the oldest things in the bin for good (the 6 Nov review of X3-11's "Send to the
-        // Recycle Bin"). Read once for each drive; room is kept for each thing just before it's sent, and given back
-        // when it stays after all.
+        // Recycle Bin"). Read once for each drive; room is kept for each thing just before it's sent, and what stays
+        // after all gives back the room of what's still where it was ([`left_behind`]).
         let bin = self.bin;
         let room = match self.rooms.entry(drive_key(&real)).or_insert_with(|| bin.room(Path::new(&real))) {
             Some(Err(why)) => return stays(done, why.clone()),
@@ -839,9 +839,10 @@ impl<'a> Sending<'a> {
             Some(Ok(room)) => Some(room.clone()),
             None => None,
         };
+        let stop = self.stop;
         let stays = |done: &mut Done, why: String| {
             if let Some(room) = &room {
-                room.give_back(bytes);
+                room.give_back(left_behind(path, bytes, stop));
             }
             stays(done, why)
         };
@@ -867,7 +868,7 @@ impl<'a> Sending<'a> {
                 Some(no) => no.clone(),
                 None => {
                     self.sent.insert(real_key, removed.path.clone());
-                    // Its room stays kept, whether the administrator step sends it or not.
+                    // Its room stays kept: what the administrator step doesn't send gives it back ([`Sending::flush`]).
                     self.waiting.push((removed, Box::new(again)));
                     return Sent::Waits;
                 }
@@ -914,6 +915,7 @@ impl<'a> Sending<'a> {
                 Err(why) => {
                     // It didn't go: the same thing reached another way may still try.
                     self.sent.remove(&key(&r.real));
+                    self.give_back(&r);
                     done.problems.push(Problem { path: r.path, why });
                 }
             }
@@ -944,8 +946,17 @@ impl<'a> Sending<'a> {
             } else {
                 let why = reason(&said, n, "It's still there: a program may be using some of it.");
                 self.sent.remove(&key(&r.real));
+                self.give_back(&r);
                 done.problems.push(Problem { path: r.path, why });
             }
+        }
+    }
+
+    /// Gives back the room kept in the bin for `r`, waiting for the administrator step, that it doesn't take after all:
+    /// what of it is still where it was ([`left_behind`]).
+    fn give_back(&self, r: &Removed) {
+        if let Some(Some(Ok(room))) = self.rooms.get(&drive_key(&r.real)) {
+            room.give_back(left_behind(&r.real, r.bytes, self.stop));
         }
     }
 
@@ -1070,6 +1081,19 @@ impl Bin for SystemBin {
 
     fn room(&self, real: &Path) -> Option<Result<Room, String>> {
         system_room(real)
+    }
+}
+
+/// How much of something that was to go to the bin (`bytes` big) is still where it was, so the room kept for it can be
+/// given back: all of a file that's still there (a file goes whole or not at all), and of a folder what's in it now, at
+/// most `bytes`: Windows can move part of a folder and leave what a program is using, and what it moved is in the bin.
+/// Nothing when it's gone or can't be measured (or Stop was pressed): its room stays kept, which only means less goes.
+fn left_behind(path: &str, bytes: u64, stop: &AtomicBool) -> u64 {
+    let path = Path::new(path);
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_dir() => measure(path, stop).map_or(0, |m| m.bytes.min(bytes)),
+        Ok(_) => bytes,
+        Err(_) => 0,
     }
 }
 
@@ -2131,6 +2155,83 @@ mod tests {
         // A bin with no room to count (a Mac's Trash, Linux's, a test's folder) takes everything.
         let (sent, _) = send_all(&sized(None));
         assert_eq!(sent, [Sent::Went, Sent::Went, Sent::Went]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// What stays after room was kept for it gives back the room of what's still where it was: all of a file, and of a
+    /// folder Windows moved part of, only the part left. What waited for the administrator step and stays gives its
+    /// room back too.
+    #[test]
+    fn what_stays_gives_back_the_room_of_what_is_still_there() {
+        use super::{Admin, BinRoom, Done, Problem, Removed, Room, STILL_THERE, Sending, Sent, What};
+        use crate::plugin_space::SpaceKind;
+        use std::fs;
+        use std::path::Path;
+        use std::sync::atomic::AtomicBool;
+
+        /// Says no to the administrator step.
+        struct SaysNo;
+        impl Admin for SaysNo {
+            fn can_ask(&self) -> bool {
+                true
+            }
+            fn ask(&self, _: &[String]) -> Result<(), String> {
+                Err("You said no.".to_owned())
+            }
+        }
+        /// A bin with one count of room, which the test reads too. It takes nothing: "in use" stays whole, Windows
+        /// moves the first file of the folder "part" and leaves the rest, and "guarded" needs the administrator step.
+        struct Partly(Room);
+        impl Bin for Partly {
+            fn send(&self, path: &Path) -> Result<(), String> {
+                if path.ends_with("part") {
+                    fs::remove_file(path.join("1")).unwrap();
+                    return Err(STILL_THERE.to_owned());
+                }
+                Err(if path.ends_with("guarded") { NEEDS_ADMIN } else { "It's in use." }.to_owned())
+            }
+            fn admin(&self) -> &dyn Admin {
+                &SaysNo
+            }
+            fn find(&self, _: &mut [Removed]) -> Vec<Problem> {
+                Vec::new()
+            }
+            fn put_back(&self, _: &[Removed]) -> Vec<Problem> {
+                Vec::new()
+            }
+            fn room(&self, _: &Path) -> Option<Result<Room, String>> {
+                Some(Ok(self.0.clone()))
+            }
+        }
+        let dir = std::env::temp_dir().join("mo-space-unit-bin-give-back");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("part")).unwrap();
+        // Where it really is, so the administrator step's checks find it there.
+        let dir = fs::canonicalize(&dir).unwrap();
+        for file in ["in use", "guarded", "part/1", "part/2"] {
+            fs::write(dir.join(file), b"0123456789").unwrap();
+        }
+        let room = Room::new(BinRoom { held: 0, most: 100 });
+        let bin = Partly(room.clone());
+        let stop = AtomicBool::new(false);
+        let mut done = Done::default();
+        let mut sending = Sending::new(&bin, &stop);
+        let mut send = |name: &str, bytes: u64| {
+            let path = text(&dir.join(name));
+            sending.send(&path, path.clone(), bytes, What::Plugin(SpaceKind::Sounds), &mut done, || Ok(()))
+        };
+        // A file that stays gives all its room back.
+        assert_eq!(send("in use", 10), Sent::Stays);
+        assert_eq!(room.now().held, 0);
+        // A folder Windows moved half of keeps the room of that half: it's in the bin.
+        assert_eq!(send("part", 20), Sent::Stays);
+        assert_eq!(room.now().held, 10);
+        // What waits for the administrator step keeps its room until then; told no, it gives it back.
+        assert_eq!(send("guarded", 10), Sent::Waits);
+        assert_eq!(room.now().held, 20);
+        sending.flush(&mut done);
+        assert_eq!(room.now().held, 10);
+        assert!(done.removed.is_empty() && done.problems.len() == 3, "{:?}", done.problems);
         fs::remove_dir_all(&dir).unwrap();
     }
 

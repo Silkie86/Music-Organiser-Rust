@@ -117,10 +117,12 @@ fn line(text: &str, linked: bool, tip: String) -> RailDaw {
     RailDaw { daw: "Bitwig", text: text.to_owned(), linked, tip, ..RailDaw::default() }
 }
 
-/// "Bitwig said: …", ending in a full stop.
+/// "Bitwig said: …", ending in a full stop; words that already start with Bitwig (the link's own "Bitwig said no." when
+/// Bitwig gave none) as they are.
 fn said(words: &str) -> String {
     let words = words.trim();
-    if words.ends_with(['.', '!', '?']) { format!("Bitwig said: {words}") } else { format!("Bitwig said: {words}.") }
+    let words = if words.ends_with(['.', '!', '?']) { words.to_owned() } else { format!("{words}.") };
+    if words.starts_with("Bitwig ") { words } else { format!("Bitwig said: {words}") }
 }
 
 /// Keeps up with what Bitwig has open, for the rail, one ask at a time ([`BitwigWatch::ask`]).
@@ -195,8 +197,9 @@ impl BitwigWatch {
         if let Some(link) = self.link.as_mut().filter(|l| l.is_open()) {
             match link.refresh().cloned() {
                 Ok(hello) => return Answer::Said(hello),
-                // A "no", or an answer not laid out as the link's: the link is still open, so it's kept. One part of
-                // which didn't start says no each time, as its greeting said: the line says what the greeting did.
+                // A "no", or an answer not laid out as the link's: the link is still open, so it's kept. One that
+                // greeted the app with what didn't start, and hasn't said what's open since (it says no each time),
+                // keeps the line its greeting gave.
                 Err(Error::Bitwig(_) | Error::Unexpected) if link.hello().error.is_some() => {
                     return Answer::Said(link.hello().clone());
                 }

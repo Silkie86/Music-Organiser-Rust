@@ -242,6 +242,11 @@ fn what_didnt_come_back_stays_to_try_again() {
     let mut gone = both.clone();
     gone.problems = vec![Problem { path: "D:/A".into(), why: NOT_IN_BIN.into() }];
     assert!(done_text(&gone).0.contains("1 folder is in the Recycle Bin"), "{}", done_text(&gone).0);
+    assert!(
+        done_text(&gone).0.ends_with(" 1 went but wasn't found there: the lines below say why."),
+        "{}",
+        done_text(&gone).0
+    );
     // Review E2-7: only what's in the bin is offered for Put back, without what went inside one that isn't; the rest is
     // still left out of the sizes.
     let mut gone_b = both.clone();

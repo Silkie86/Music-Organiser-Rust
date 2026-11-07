@@ -125,6 +125,10 @@ fn a_link_that_says_no_later_says_so_in_its_own_words_and_is_kept() {
     let again = watch.ask();
     assert_eq!((again.line, again.wait), (None, SLOW));
     assert_eq!(bitwig.world().commands(), ["hello", "hello"]);
+    // A "no" without words of Bitwig's own isn't said twice.
+    bitwig.world().hello.insert("error".into(), "".into());
+    let line = watch.ask().line.unwrap();
+    assert!(line.tip.contains("what's open there. Bitwig said no. The app"), "{}", line.tip);
 }
 
 #[test]
