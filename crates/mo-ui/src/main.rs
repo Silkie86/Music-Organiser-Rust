@@ -59,6 +59,10 @@ fn main() -> Result<(), slint::PlatformError> {
     // songs.db is made from it in the background, for the next start).
     let songs_db = mo_library::songs_db::at_start(&data, &mo_app::version::version());
     log::info("Song library", &songs_db.line());
+    if let Some(notice) = songs_db.notice() {
+        log::warning("Song library", &notice);
+        feed.notice("Your song library couldn't be read", &notice);
+    }
     let library = songs_db.library.clone();
     // Rule 28: what an earlier run or a stopped tool left behind is cleared, a little later, at low priority.
     mo_app::tidy::start(library.clone());

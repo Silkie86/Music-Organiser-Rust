@@ -8,8 +8,8 @@
 //! and checked, and only then kept. If anything goes wrong nothing is changed, and the caller tries again.
 //!
 //! A save keeps its id: a row with the save's path is the save (whatever id the app gave it), else the row with its
-//! id when it isn't new. A new one takes the id the app gave it while that's free, or the next free one, and
-//! [`Written::ids`] says so.
+//! id while it still has the path the library knew the save by ([`Put::known_as`]). A new one takes the id the app
+//! gave it while that's free, or the next free one, and [`Written::ids`] says so.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -27,8 +27,11 @@ use crate::{LibraryError, SaveDetail};
 #[derive(Clone, Debug)]
 pub struct Put {
     pub detail: SaveDetail,
-    /// The app has never kept it: its id is the one the app gave it, which may be taken meanwhile.
-    pub new: bool,
+    /// The path the library knows the save by, as it was last kept (the one it moved from, for a save in a new place);
+    /// `None` when the app has never kept it (its id is the one the app gave it, which may be taken meanwhile). The row
+    /// with its id is this save only while it still has that path: otherwise it's another save's by now (another copy
+    /// of the app kept one under that id), and this one is kept as new (review finding A-fp1).
+    pub known_as: Option<String>,
 }
 
 /// A save the library has, whose file has gone (moved somewhere the app doesn't look, or deleted): it stays, marked
@@ -218,12 +221,21 @@ fn put_one(tx: &Transaction<'_>, put: &Put) -> rusqlite::Result<i64> {
     let id_taken = || -> rusqlite::Result<bool> {
         tx.query_row("SELECT EXISTS (SELECT 1 FROM projects WHERE id = ?1)", [save.id], |r| r.get(0))
     };
+    // Moved: the row with its id, while that's still the save the library knew (by its path then).
+    let known_row = || -> rusqlite::Result<bool> {
+        let Some(known) = &put.known_as else { return Ok(false) };
+        tx.query_row(
+            "SELECT EXISTS (SELECT 1 FROM projects WHERE id = ?1 AND path = ?2)",
+            params![save.id, known],
+            |r| r.get(0),
+        )
+    };
     let id = match at_path {
         Some(id) => {
             update(tx, id, put)?;
             id
         }
-        None if !put.new && id_taken()? => {
+        None if known_row()? => {
             update(tx, save.id, put)?;
             save.id
         }

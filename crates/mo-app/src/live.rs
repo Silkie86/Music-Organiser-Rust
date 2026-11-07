@@ -11,7 +11,7 @@
 //! At the start, once the list is up, every project folder is walked once ([`Live::catch_up`]): saves made or changed
 //! while the app was closed are read, and ones gone are marked missing, as the C# app's scan at its start did.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -51,6 +51,9 @@ pub struct Live {
     asking: Option<bool>,
     daw_exes: HashMap<String, String>,
     roots: Vec<String>,
+    /// The export folder Open in Bitwig writes its copies into, as it was when the list was loaded: never listed, even
+    /// inside a project folder, as Presets leaves them out (review finding A-7).
+    export: Option<String>,
     installed: Installed,
     next_id: i64,
     details: LiveDetails,
@@ -64,10 +67,12 @@ pub struct Live {
     source: Option<String>,
     /// The app's own `songs.db`, where what's read is kept ([`Live::with_writes`]); none while it's held here only.
     writes: Option<PathBuf>,
-    /// What's still to be kept there: saves read (by id, with whether the library has never had them), and saves
-    /// gone missing.
-    to_put: BTreeMap<i64, bool>,
+    /// What's still to be kept there: saves read, and saves gone missing (by id).
+    to_put: BTreeSet<i64>,
     to_mark: BTreeSet<i64>,
+    /// The path the library keeps each listed save under, by id ([`Put::known_as`]): not the list's while a save that
+    /// moved isn't kept yet (the library refused it, say). One the library has never had isn't in it.
+    kept_as: HashMap<i64, String>,
     /// Reading again the saves whose "muted" sample marks were lost ([`song_writes::to_mend`]).
     mend: Mend,
 }
@@ -164,6 +169,12 @@ impl Updated {
     }
 }
 
+/// Whether `path` is in the export folder `export` (Open in Bitwig's copies): the Songs list leaves them out, even when
+/// the folder is inside a project folder. A folder changed in Settings counts from the next start.
+fn in_export(path: &str, export: Option<&str>) -> bool {
+    export.is_some_and(|e| scan::is_inside(path, e))
+}
+
 impl Live {
     /// Reads what the list is made from. Fix's copies still waiting for Keep or Delete are left out: until Keep, a
     /// song opens its original. Runs of saves split at the gap picked in Settings (`version_gap_months`, shared with
@@ -179,7 +190,8 @@ impl Live {
         // A DAW's autosave copies the C# app's scan let in ("sly_17 (autosaved at 4h10).flp") stay hidden, as do saves
         // in a folder the scan leaves out (a project folder inside one was taken off): the library keeps them.
         let roots = library.roots()?;
-        saves.retain(|s| !scan::is_ignored(&s.path, &roots));
+        let export = crate::bitwig_convert::export_left_out(library)?.map(|e| e.display().to_string());
+        saves.retain(|s| !scan::is_ignored(&s.path, &roots) && !in_export(&s.path, export.as_deref()));
         // As the C# app: asked unless Settings turned it off; across folders only when turned on.
         let asking = (library.setting(ASK_DOUBTS)?.as_deref() != Some("0"))
             .then(|| library.setting(DOUBTS_ACROSS_FOLDERS).map(|v| v.as_deref() == Some("1")))
@@ -192,6 +204,7 @@ impl Live {
                 daw_exes.insert(daw, exe);
             }
         }
+        let kept_as = saves.iter().map(|s| (s.id, s.path.clone())).collect();
         Ok(Live {
             saves,
             choices: library.song_choices()?,
@@ -200,6 +213,7 @@ impl Live {
             asking,
             daw_exes,
             roots,
+            export,
             installed: library.installed()?,
             next_id,
             details,
@@ -208,8 +222,9 @@ impl Live {
             retry: HashMap::new(),
             source,
             writes: None,
-            to_put: BTreeMap::new(),
+            to_put: BTreeSet::new(),
             to_mark: BTreeSet::new(),
+            kept_as,
             mend: Mend::NotLooked,
         })
     }
@@ -313,6 +328,8 @@ impl Live {
         let songs_db = self.writes.clone()?;
         let mut batch = self.batch();
         batch.mended = self.mend.to_note();
+        let put: Vec<(i64, String)> =
+            batch.put.iter().map(|p| (p.detail.save.id, p.detail.save.path.clone())).collect();
         if batch.is_empty() {
             self.to_put.clear();
             self.to_mark.clear();
@@ -329,12 +346,13 @@ impl Live {
         self.renumber(&kept.written.ids);
         // In the library now, where the song panel reads them; ones that couldn't be kept stay here.
         let held: HashSet<String> = kept.not_kept.iter().map(|(path, _)| case::key(path)).collect();
+        self.note_kept(&put, &kept.written.ids, &held);
         let done: Vec<i64> = self
             .saves
             .iter()
             .filter(|s| !held.contains(&case::key(&s.path)))
             .map(|s| s.id)
-            .filter(|id| self.to_put.contains_key(id) || kept.written.ids.iter().any(|&(_, k)| k == *id))
+            .filter(|id| self.to_put.contains(id) || kept.written.ids.iter().any(|&(_, k)| k == *id))
             .collect();
         let mut details = self.details.lock().unwrap_or_else(PoisonError::into_inner);
         for id in done {
@@ -354,22 +372,45 @@ impl Live {
         Some(Ok(kept))
     }
 
-    /// What's to be kept, each save as the list has it now. A save the library has never had that's gone again is
-    /// kept as it is now (missing), not marked.
+    /// What's to be kept, each save as the list has it now, by the path the library keeps it under
+    /// ([`Live::kept_as`]). A save the library has never had that's gone again is kept as it is now (missing), not
+    /// marked.
     fn batch(&self) -> Batch {
         let details = self.details.lock().unwrap_or_else(PoisonError::into_inner);
         let mut batch = Batch::default();
         for s in &self.saves {
-            if let Some(&new) = self.to_put.get(&s.id)
+            let known_as = self.kept_as.get(&s.id);
+            if self.to_put.contains(&s.id)
                 && let Some(detail) = details.get(&s.id)
             {
-                batch.put.push(Put { detail: SaveDetail { save: s.clone(), ..detail.clone() }, new });
+                batch.put.push(Put {
+                    detail: SaveDetail { save: s.clone(), ..detail.clone() },
+                    known_as: known_as.cloned(),
+                });
             }
-            if self.to_mark.contains(&s.id) && self.to_put.get(&s.id) != Some(&true) {
-                batch.missing.push(Missing { id: s.id, path: s.path.clone() });
+            if self.to_mark.contains(&s.id)
+                && let Some(path) = known_as
+            {
+                batch.missing.push(Missing { id: s.id, path: path.clone() });
             }
         }
         batch
+    }
+
+    /// Notes the paths the library keeps the saves just `put` under, as (id given, path), each by the id it kept it
+    /// under (`ids`, as (given, kept)): the ones it wouldn't take (`held`, by [`case::key`]) apart. All at once, as one
+    /// save's new id may be another's old one.
+    fn note_kept(&mut self, put: &[(i64, String)], ids: &[(i64, i64)], held: &HashSet<String>) {
+        let to: HashMap<i64, i64> = ids.iter().copied().collect();
+        let kept: Vec<(i64, String)> = put
+            .iter()
+            .filter(|(_, path)| !held.contains(&case::key(path)))
+            .map(|(given, path)| (to.get(given).copied().unwrap_or(*given), path.clone()))
+            .collect();
+        for given in put.iter().map(|(given, _)| given).filter(|given| to.contains_key(given)) {
+            self.kept_as.remove(given);
+        }
+        self.kept_as.extend(kept);
     }
 
     /// Saves the library kept under another id than the one given here, as (given, kept): they go by it from now on.
@@ -419,7 +460,12 @@ impl Live {
             self.walk(&changes.overflowed, &mut paths, &mut done);
         }
         let mut seen = HashSet::new();
-        paths.retain(|p| seen.insert(case::key(p)) && scan::is_project_file(p) && !scan::is_ignored(p, &self.roots));
+        paths.retain(|p| {
+            seen.insert(case::key(p))
+                && scan::is_project_file(p)
+                && !scan::is_ignored(p, &self.roots)
+                && !in_export(p, self.export.as_deref())
+        });
         let mut index: HashMap<String, usize> =
             self.saves.iter().enumerate().map(|(i, s)| (case::key(&s.path), i)).collect();
 
@@ -518,7 +564,7 @@ impl Live {
                         done.read.push(detail.save.name.clone());
                     }
                     self.mend.tried(old.id, true);
-                    self.to_put.entry(old.id).or_insert(false);
+                    self.to_put.insert(old.id);
                     self.to_mark.remove(&old.id);
                     self.saves[i] = detail.save.clone();
                 }
@@ -528,7 +574,7 @@ impl Live {
                     self.inherit(&mut detail.save);
                     add_hardware_tags(&mut detail.save);
                     index.insert(case::key(&detail.save.path), self.saves.len());
-                    self.to_put.insert(detail.save.id, true);
+                    self.to_put.insert(detail.save.id);
                     self.saves.push(detail.save.clone());
                     done.read.push(detail.save.name.clone());
                 }
@@ -731,6 +777,7 @@ mod tests {
             asking: None,
             daw_exes: HashMap::new(),
             roots: Vec::new(),
+            export: None,
             installed: Installed::default(),
             next_id: 100,
             details: LiveDetails::default(),
@@ -739,8 +786,9 @@ mod tests {
             retry: HashMap::new(),
             source: None,
             writes: None,
-            to_put: BTreeMap::new(),
+            to_put: BTreeSet::new(),
             to_mark: BTreeSet::new(),
+            kept_as: HashMap::new(),
             mend: Mend::NotLooked,
         }
     }
@@ -888,10 +936,41 @@ mod tests {
         let backup = projects.join("Backup").join("Night_0.flp").display().to_string();
         let save = Save { path: backup, name: "Night_0".into(), rating: 5, ..save(50, "x", "y") };
         let hidden = SaveDetail { save, ..SaveDetail::default() };
-        song_writes::write(&songs, &Batch { put: vec![Put { detail: hidden, new: true }], ..Batch::default() })
+        song_writes::write(&songs, &Batch { put: vec![Put { detail: hidden, known_as: None }], ..Batch::default() })
             .unwrap();
         assert_eq!(Library::open_read_only(&songs).unwrap().saves().unwrap().len(), 2);
         assert_eq!(open().saves.len(), 1);
+        // The export folder inside the project folder: Open in Bitwig's copies there are never read in as songs, and
+        // one the library got before is left off the list.
+        let exports = projects.join("Exports");
+        std::fs::create_dir_all(exports.join("Night_2")).unwrap();
+        std::fs::write(projects.join("Night_2.flp"), tiny_flp()).unwrap();
+        std::fs::write(exports.join("Night_2").join("Night_2.flp"), tiny_flp()).unwrap();
+        let copy = exports.join("Night_0.flp").display().to_string();
+        let exported = Save { path: copy, name: "Night_0".into(), ..self::save(51, "x", "y") };
+        let put = Put { detail: SaveDetail { save: exported, ..SaveDetail::default() }, known_as: None };
+        song_writes::write(&songs, &Batch { put: vec![put], ..Batch::default() }).unwrap();
+        rusqlite::Connection::open(&songs)
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                [crate::bitwig_convert::EXPORT_FOLDER_KEY, &exports.display().to_string()],
+            )
+            .unwrap();
+        let mut with_exports = open();
+        assert_eq!(with_exports.saves.len(), 1);
+        assert_eq!(with_exports.catch_up().read, vec!["Night_2".to_owned()]);
+        let changed = exports.join("Night_2").join("Night_2.flp").display().to_string();
+        assert!(with_exports.update(&Changes { files: vec![changed], ..Changes::default() }).is_empty());
+        // The export folder set to the project folder itself: the saves there are yours, so none is left out.
+        rusqlite::Connection::open(&songs)
+            .unwrap()
+            .execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES (?1, ?2)",
+                [crate::bitwig_convert::EXPORT_FOLDER_KEY, &projects.display().to_string()],
+            )
+            .unwrap();
+        assert_eq!(open().saves.len(), 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1005,7 +1084,7 @@ mod tests {
         let mut live = live(vec![save(1, "C:\\a", "Good_1"), save(2, "C:\\a", "Bad_1")]);
         live.writes = Some(songs.clone());
         for s in live.saves.clone() {
-            live.to_put.insert(s.id, true);
+            live.to_put.insert(s.id);
             live.details.lock().unwrap().insert(s.id, SaveDetail { save: s, ..SaveDetail::default() });
         }
         let kept = live.keep().unwrap().unwrap();
@@ -1018,6 +1097,54 @@ mod tests {
         assert_eq!(lib.saves().unwrap().iter().map(|s| s.name.as_str()).collect::<Vec<_>>(), ["Good_1"]);
         assert!(!live.details.lock().unwrap().contains_key(&1) && live.details.lock().unwrap().contains_key(&2));
         assert!(live.keep().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_save_that_moves_again_after_the_library_refused_its_move_stays_one_song() {
+        let dir = std::env::temp_dir().join(format!("mo-live-moved-twice-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        rusqlite::Connection::open(dir.join("library.db"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                     name TEXT NOT NULL, daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, info TEXT);",
+            )
+            .unwrap();
+        let songs = dir.join(mo_library::songs_db::FILE_NAME);
+        mo_library::songs_db::make(&dir.join("library.db"), &songs, &mut |_| {}).unwrap();
+        assert!(mo_library::songs_db::at_start(&dir, "test").is_songs_db());
+        let mut live = live(vec![save(1, "C:\\a", "Dusk_1")]);
+        live.writes = Some(songs.clone());
+        // Read, kept, then moved twice: the library won't take the first move.
+        let moved = |live: &mut Live, folder: &str| {
+            let s = &mut live.saves[0];
+            s.folder = folder.into();
+            s.path = format!("{folder}\\Dusk_1.flp");
+            live.to_put.insert(s.id);
+            live.details.lock().unwrap().insert(s.id, SaveDetail { save: s.clone(), ..SaveDetail::default() });
+            live.keep().unwrap().unwrap()
+        };
+        assert_eq!(moved(&mut live, "C:\\a").written.put, 1);
+        rusqlite::Connection::open(&songs)
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER refuse BEFORE UPDATE ON projects WHEN NEW.folder = 'C:\\b'
+                 BEGIN SELECT RAISE(ABORT, 'refused'); END;",
+            )
+            .unwrap();
+        assert_eq!(moved(&mut live, "C:\\b").not_kept.len(), 1);
+        // Still where it was in the library, which goes on being asked for it there: the same row moves, not a new one.
+        let kept = moved(&mut live, "C:\\c");
+        assert_eq!((kept.written.put, kept.not_kept.len()), (1, 0), "{kept:?}");
+        let rows: Vec<(i64, String)> =
+            Library::open_read_only(&songs).unwrap().saves().unwrap().into_iter().map(|s| (s.id, s.path)).collect();
+        assert_eq!(rows, [(1, "C:\\c\\Dusk_1.flp".to_owned())]);
+        // Gone from there: marked missing in the library, at the path it has there.
+        live.saves[0].file_missing = true;
+        live.to_mark.insert(1);
+        assert_eq!(live.keep().unwrap().unwrap().written.missing, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

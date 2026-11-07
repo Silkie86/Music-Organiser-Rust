@@ -438,3 +438,58 @@ fn songs_db_held_by_another_program_at_the_start_leaves_library_db_in_use_till_n
     drop(holder);
     assert_eq!(songs_db::at_start(dir, APP).state, State::Switched);
 }
+
+#[test]
+fn songs_db_held_as_the_app_starts_is_waited_for_and_settings_never_go_into_library_db() {
+    let old = library("held-own");
+    let dir = old.parent().unwrap().to_owned();
+    let new = songs_beside(&old);
+    make(&old);
+    assert_eq!(songs_db::at_start(&dir, APP).state, State::Switched);
+    // Another program holds it as the app starts, letting go a moment later: waited for, and read.
+    let hold = |for_how_long: Option<std::time::Duration>| {
+        let (held, wait) = std::sync::mpsc::channel();
+        let new = new.clone();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holder = std::thread::spawn(move || {
+            let c = Connection::open(&new).unwrap();
+            c.execute_batch(
+                "PRAGMA locking_mode = EXCLUSIVE; BEGIN EXCLUSIVE;
+                 UPDATE songs_info SET value = value WHERE key = 'made_from';",
+            )
+            .unwrap();
+            held.send(()).unwrap();
+            match for_how_long {
+                Some(d) => std::thread::sleep(d),
+                None => released.recv().unwrap(),
+            }
+            c.execute_batch("ROLLBACK;").unwrap();
+        });
+        wait.recv().unwrap();
+        (holder, release)
+    };
+    let (holder, _release) = hold(Some(std::time::Duration::from_millis(400)));
+    assert_eq!(songs_db::at_start(&dir, APP).state, State::Own);
+    holder.join().unwrap();
+    // Held all through the start: library.db this time, and a card says so.
+    let (holder, release) = hold(None);
+    let start = songs_db::at_start(&dir, APP);
+    assert_eq!(start.library, old);
+    assert!(matches!(&start.state, State::Unread { .. }), "{start:?}");
+    assert!(!start.make_wanted() && !start.is_songs_db());
+    assert!(start.notice().is_some_and(|n| n.contains("open it again")), "{start:?}");
+    // Still held: it may be the app's own, so a settings change isn't written into library.db.
+    let refused = folders::add_folder(&old, FolderList::Samples, "F:\\Lost samples", &[]).unwrap_err().to_string();
+    assert!(refused.contains("open it again"), "{refused}");
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    // Let go later: a settings change isn't written into library.db, where it would be lost at the next start.
+    let refused = folders::add_folder(&old, FolderList::Samples, "F:\\Lost samples", &[]).unwrap_err().to_string();
+    assert!(refused.contains("open it again"), "{refused}");
+    assert_eq!(Library::open_read_only(&old).unwrap().list_setting("sample_folders").unwrap().len(), 2);
+    // Before songs.db is the app's own, library.db is written as before (songs.db is made from it again).
+    let other = library("held-not-own");
+    make(&other);
+    let changed = folders::add_folder(&other, FolderList::Samples, "F:\\New samples", &[]).unwrap();
+    assert!(matches!(changed, folders::Changed::Done(_)), "{changed:?}");
+}
