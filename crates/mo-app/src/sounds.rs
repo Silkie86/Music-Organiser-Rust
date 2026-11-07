@@ -601,6 +601,16 @@ impl SoundList {
         Some(if best > 0.0 { liked.get(i).copied().unwrap_or(0.0) / best } else { 0.0 })
     }
 
+    /// The sound at `i`'s Most liked score, if scores are known yet.
+    pub fn liked_score(&self, i: usize) -> Option<f64> {
+        Some(self.liked.as_ref()?.get(i).copied().unwrap_or(0.0))
+    }
+
+    /// The best liked sound's Most liked score, if scores are known yet.
+    pub fn liked_best(&self) -> Option<f64> {
+        self.liked.as_ref().map(|_| self.liked_best)
+    }
+
     /// Whether the use counts are in, so the Used chips can work.
     pub fn knows_use(&self) -> bool {
         self.used.is_some()

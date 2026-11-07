@@ -166,7 +166,7 @@ fn scene(at: &TileGridAt, look: &TileLook, p: &Page, types: &[Colour]) -> Scene 
             picked: p.picked == Some(i),
             playing: p.playing.is_some_and(|(at, _)| at == i),
             tint: tint.unwrap_or(grey),
-            liked: p.list.liked_share(i).map_or(-1.0, |l| l as f32),
+            liked: super::liked_share(p, i).map_or(-1.0, |l| l as f32),
             wave: lines_of(p, i, s),
         })
     });

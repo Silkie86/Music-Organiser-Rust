@@ -140,7 +140,8 @@ fn the_kit_on_show_goes_on_a_new_drum_machine() {
     let feed = Feed::default();
     let job = to_bitwig::kit_card(&feed, pads.len());
     assert_eq!(card(&feed), ("Sending the kit to Bitwig".into(), "4 pads".into(), State::Running));
-    let line = to_bitwig::send_kit(job, &bitwig.bitwig(), &kits, &kit_name(12), &pads, None);
+    let (line, went_in) = to_bitwig::send_kit(job, &bitwig.bitwig(), &kits, &kit_name(12), &pads, None);
+    assert!(went_in);
     let said = "Kit #12 is on a Drum Machine on a new track in Bitwig: Kick on C1, FX on C#1, Snare on D1, Closed hat \
                 on F#1.";
     assert_eq!(line, said);
@@ -167,12 +168,13 @@ fn once_bitwig_adds_no_drum_machine_kits_go_on_the_selected_one() {
     let wrong = DeviceId::SAMPLER.to_string();
     assert_eq!(kits.target(Some(&wrong)), KitTarget::NewDrumMachine(DeviceId::SAMPLER));
     let feed = Feed::default();
-    let line =
+    let (line, went_in) =
         to_bitwig::send_kit(to_bitwig::kit_card(&feed, 2), &bitwig.bitwig(), &kits, "Kit #4", &pads, Some(&wrong));
     assert_eq!(
         line,
         "Bitwig didn't add a Drum Machine. Add one to a track yourself, select it, and send the kit again."
     );
+    assert!(!went_in);
     assert_eq!(
         card(&feed),
         (
@@ -191,8 +193,10 @@ fn once_bitwig_adds_no_drum_machine_kits_go_on_the_selected_one() {
         world.selected_device = Some((bass, 0));
     }
     let feed = Feed::default();
-    let line = to_bitwig::send_kit(to_bitwig::kit_card(&feed, 2), &bitwig.bitwig(), &kits, "Kit #4", &pads, None);
+    let (line, went_in) =
+        to_bitwig::send_kit(to_bitwig::kit_card(&feed, 2), &bitwig.bitwig(), &kits, "Kit #4", &pads, None);
     assert_eq!(line, "The selected device isn't a Drum Machine. Select one and send the kit again.");
+    assert!(!went_in);
     assert_eq!(card(&feed), ("Couldn't send the kit".into(), line.clone(), State::Failed));
 
     // Once one is selected, the kit goes on it.
@@ -205,8 +209,10 @@ fn once_bitwig_adds_no_drum_machine_kits_go_on_the_selected_one() {
         world.selected_device = Some((0, 0));
     }
     let feed = Feed::default();
-    let line = to_bitwig::send_kit(to_bitwig::kit_card(&feed, 2), &bitwig.bitwig(), &kits, "Kit #4", &pads, None);
+    let (line, went_in) =
+        to_bitwig::send_kit(to_bitwig::kit_card(&feed, 2), &bitwig.bitwig(), &kits, "Kit #4", &pads, None);
     assert_eq!(line, "Kit #4 is on the Drum Machine selected in Bitwig: Kick on C1, Snare on D1.");
+    assert!(went_in);
     assert_eq!(card(&feed).0, "Kit #4 is in Bitwig");
     assert_eq!(bitwig.world().pads(0).unwrap().keys().copied().collect::<Vec<_>>(), [36, 38]);
 }

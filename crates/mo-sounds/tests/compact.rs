@@ -7,11 +7,12 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 use chrono::{Local, NaiveDate, NaiveDateTime, TimeZone};
-use mo_sounds::compact::backup::{self, BackedUp};
+use mo_sounds::compact::backup::{self, BackedUp, When};
+use mo_sounds::compact::did::{self, Did};
 use mo_sounds::compact::grow::{self, Kept, Listened};
 use mo_sounds::compact::{self, LaidOut, PageRead, Synced};
 use mo_sounds::index::{Gathered, SoundIndex, held, unheld};
-use mo_sounds::{ChordSpan, Everything, SoundAnalysis, SoundsDb, SoundsError};
+use mo_sounds::{ChordSpan, Everything, SoundAnalysis, SoundsDb, SoundsError, event};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, params};
 
@@ -2007,4 +2008,98 @@ fn a_scan_is_kept_without_prints_and_never_gives_a_number_again() {
     assert_eq!(kept, Kept { added: 1, updated: 1, ..Kept::default() });
     assert!(id_of(&copy, &new).unwrap() > highest);
     assert!(!grow::Kept::default().any() && kept.any());
+}
+
+/// What you do with sounds is kept in the app's own library (stage 3, review finding X1-own1), as the C# app's
+/// `MarkPlayed` and `Record` kept it: a play counts on its sound and goes into History; drags and sends count for Most
+/// liked; a sound forgotten since is skipped, and its events go with it. A library without the events table gets the
+/// C# app's. The backup copy follows them once a day at most.
+#[test]
+fn plays_drags_and_sends_are_kept_for_history_and_most_liked() {
+    let dir = folder("did");
+    let old = library(&dir, 20);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    // After every play the fixture has, so History lists it first.
+    let latest: i64 =
+        Connection::open(&copy).unwrap().query_row("SELECT MAX(at) FROM sound_events", [], |r| r.get(0)).unwrap();
+    let at = latest.max(unix(2026, 5, 20)) + 1;
+    let did = |id, kind, at| Did { id, kind, at };
+    let ids: Vec<(i64, String)> = {
+        let c = Connection::open(&copy).unwrap();
+        let mut st = c.prepare("SELECT id, path FROM sounds ORDER BY id LIMIT 2").unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
+    };
+    let [(a, _), (b, b_path)] = ids.as_slice() else { panic!("two sounds") };
+    let (a, b) = (*a, *b);
+    // Still following sounds.db: not written.
+    let Err(e) = did::keep(&old, &[did(a, event::PLAY, at)]) else { panic!("not the app's own yet") };
+    assert!(e.to_string().contains("isn't the app's own"), "{e}");
+    compact::last_sync(&old, &copy).unwrap();
+    assert!(matches!(backup::back_up(&old), Some(BackedUp::Made { .. })));
+    let plays = |id| count(&copy, "SELECT COALESCE(plays, 0) FROM sounds WHERE id = ?1", id);
+    let events = |id| count(&copy, "SELECT COUNT(*) FROM sounds JOIN sound_events ON sound_id = id WHERE id = ?1", id);
+    let activity =
+        |id| SoundsDb::open_read_only(&copy).unwrap().activity(now()).unwrap().get(&id).copied().unwrap_or_default();
+    let (plays_a, events_b, was_a, was_b) = (plays(a), events(b), activity(a), activity(b));
+    // Two plays, a drag and a send; one of a sound that isn't there is skipped.
+    let kept = did::keep(
+        &old,
+        &[
+            did(a, event::PLAY, at),
+            did(a, event::PLAY, at + 60),
+            did(b, event::DRAG, at),
+            did(b, event::SEND, at),
+            did(999_999, event::PLAY, at),
+        ],
+    )
+    .unwrap();
+    assert_eq!(kept, 4);
+    assert_eq!(did::keep(&old, &[]).unwrap(), 0);
+    assert_eq!(plays(a), plays_a + 2);
+    assert_eq!(count(&copy, "SELECT last_played FROM sounds WHERE id = ?1", a), at + 60);
+    assert_eq!(events(b), events_b + 2);
+    let db = SoundsDb::open_read_only(&copy).unwrap();
+    let history = db.history(10).unwrap();
+    assert_eq!(history.first().map(|h| h.0), Some(a));
+    drop(db);
+    let (now_a, now_b) = (activity(a), activity(b));
+    assert_eq!(now_a.plays, was_a.plays + 2);
+    assert_eq!((now_b.drags, now_b.sends), (was_b.drags + 1, was_b.sends + 1));
+    assert_eq!(pragma(&copy, "integrity_check"), "ok");
+    // A sound forgotten at a scan takes its events with it.
+    assert_eq!(grow::follow(&old, &[], std::slice::from_ref(b_path)).unwrap().forgotten, 1);
+    assert_eq!(count(&copy, "SELECT COUNT(*) FROM sound_events WHERE sound_id = ?1", b), 0);
+    // A library made from a sounds.db without the events table gets the C# app's.
+    Connection::open(&copy).unwrap().execute_batch("DROP TABLE sound_events;").unwrap();
+    assert_eq!(did::keep(&old, &[did(a, event::SEND, at)]).unwrap(), 1);
+    assert_eq!(count(&copy, "SELECT COUNT(*) FROM sound_events WHERE sound_id = ?1", a), 1);
+    let indexes: Vec<String> = {
+        let c = Connection::open(&copy).unwrap();
+        let mut st = c
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sound_events' ORDER BY name")
+            .unwrap();
+        st.query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+    };
+    assert_eq!(indexes, ["ix_sound_events", "ix_sound_events_sound"]);
+    // The backup copy: behind by a sound forgotten at a scan, it's made again at once, even once a day.
+    assert!(matches!(backup::back_up_when(&old, When::Daily), Some(BackedUp::Made { .. })));
+    // Behind only by plays, drags and sends since it was made: followed at once when asked, else once it's a day old.
+    did::keep(&old, &[did(a, event::PLAY, at)]).unwrap();
+    assert_eq!(backup::back_up_when(&old, When::Daily), None);
+    assert!(matches!(backup::back_up_when(&old, When::Now), Some(BackedUp::Made { .. })));
+    did::keep(&old, &[did(a, event::PLAY, at)]).unwrap();
+    assert_eq!(backup::back_up_when(&old, When::Daily), None);
+    let day_old = backup::backup_of(&copy);
+    Connection::open(&day_old)
+        .unwrap()
+        .execute("UPDATE copy_info SET value = value - 90000 WHERE key = 'backed_up_at'", [])
+        .unwrap();
+    assert!(matches!(backup::back_up_when(&old, When::Daily), Some(BackedUp::Made { .. })));
+    assert_eq!(backup::back_up_when(&old, When::Daily), None);
+    assert_eq!(backup::back_up(&old), None);
+    // Any other change, in the day after: made again at once.
+    did::keep(&old, &[did(a, event::PLAY, at)]).unwrap();
+    assert_eq!(grow::follow(&old, &[], &[]).unwrap(), grow::Kept::default());
+    assert!(matches!(backup::back_up_when(&old, When::Daily), Some(BackedUp::Made { .. })));
 }

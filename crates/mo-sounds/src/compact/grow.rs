@@ -39,6 +39,11 @@ pub const LAST_ID: &str = "last_id";
 /// ([`crate::count_clap_could_hear`]).
 pub const NEW_SINCE: &str = "new_since";
 
+/// The key in `copy_info` that counts the changes the app made to its library, but for what's done with sounds
+/// ([`super::did`]). The backup copy holds the count it was made at, so one made in the last day that's behind only by
+/// plays, drags and sends can wait ([`super::backup::When::Daily`]), and one behind by anything else can't.
+pub const CHANGES: &str = "changes";
+
 /// The first number the app gave a sound of its own scan ([`NEW_SINCE`]) in the library at `copy`; `None` when it has
 /// added none (or the library can't be read just now).
 pub fn new_since(copy: &Path) -> Option<i64> {
@@ -245,9 +250,27 @@ fn features_blob(features: &[f32]) -> Vec<u8> {
 
 /// Runs `change` in one transaction on the app's own sound library beside `sounds_db`, and keeps it only when it says
 /// it's whole (`Ok(Ok(_))`); `Ok(Err(why))` drops it. Only the app's own library in this version's format is written,
-/// looked at again under the write lock, with room left on its disk.
-fn write<T>(
+/// looked at again under the write lock, with room left on its disk. Every change the app makes to its library goes
+/// through here or [`write_small`]; each one here is counted ([`CHANGES`]).
+pub(super) fn write<T>(
     sounds_db: &Path,
+    change: impl FnOnce(&Transaction<'_>) -> rusqlite::Result<Result<T, String>>,
+) -> Result<T, SoundsError> {
+    write_as(sounds_db, true, change)
+}
+
+/// As [`write`], for what's done with sounds ([`super::did`]): not counted, so the backup copy can wait for it.
+pub(super) fn write_small<T>(
+    sounds_db: &Path,
+    change: impl FnOnce(&Transaction<'_>) -> rusqlite::Result<Result<T, String>>,
+) -> Result<T, SoundsError> {
+    write_as(sounds_db, false, change)
+}
+
+/// [`write`], counted (`counted`) or not.
+fn write_as<T>(
+    sounds_db: &Path,
+    counted: bool,
     change: impl FnOnce(&Transaction<'_>) -> rusqlite::Result<Result<T, String>>,
 ) -> Result<T, SoundsError> {
     let copy = copy_of(sounds_db);
@@ -282,6 +305,10 @@ fn write<T>(
         return Err(failed("it isn't the app's own sound library, so it isn't written".into()));
     }
     let done = change(&tx).map_err(sql)?.map_err(|why| failed(format!("what was written didn't read back ({why})")))?;
+    if counted {
+        let changes = info_value(&tx, CHANGES).map_err(sql)?.unwrap_or(0);
+        set_info(&tx, CHANGES, changes + 1).map_err(sql)?;
+    }
     tx.commit().map_err(sql)?;
     Ok(done)
 }

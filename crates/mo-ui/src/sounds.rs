@@ -5,6 +5,7 @@
 //! Rediscover (unused sounds that fit your taste) is dug out on its own low-priority thread too.
 
 mod copies;
+mod did;
 mod drag_out;
 pub use drag_out::card_at_row;
 mod galaxy;
@@ -30,6 +31,7 @@ use mo_app::filters::{self, Filter, Shown};
 use mo_app::finder::{self, Kind};
 use mo_app::places::Place;
 use mo_app::shortcuts::{Shortcuts, what_of};
+use mo_app::sound_notes::{Held, Noter};
 use mo_app::sounds::{
     self as list, AUTOPLAY_KEY, Filters, Order, REDISCOVER_COUNT_KEY as COUNT_KEY, SoundCounts, SoundList, VIEW_KEY,
 };
@@ -42,7 +44,7 @@ use mo_sounds::index::{Gathered, SoundIndex};
 use mo_sounds::liking::{self, LIKED_WEIGHTS_KEY, LikedWeights};
 use mo_sounds::rediscover::{self, FolderUse};
 use mo_sounds::usage::{self, Usage};
-use mo_sounds::{Sound, SoundsDb, SoundsError};
+use mo_sounds::{Sound, SoundActivity, SoundsDb, SoundsError};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode, VecModel};
 
 use crate::filters::FilterModels;
@@ -89,6 +91,19 @@ struct Page {
     played: Arc<Vec<(usize, NaiveDateTime)>>,
     /// What History shows: the sounds played that the filters let through (the year strip's years aside).
     history: Vec<(usize, NaiveDateTime)>,
+    /// A sound was played while History was on show: what was played as History lists it until you come back to it
+    /// (the sound you played stays under your pointer; [`did::take`]).
+    history_behind: Option<Arc<Vec<(usize, NaiveDateTime)>>>,
+    /// What's been done with sounds since they were read (by id): plays, drags and sends, counted on their liked
+    /// bars at once ([`did`]).
+    did: HashMap<i64, SoundActivity>,
+    /// Each of them, in the order done, as it was noted: the sounds read again leave out those they hold already
+    /// ([`did::read_again`]).
+    noted: Vec<did::Noted>,
+    /// How much each sign of liking counts for Most liked, as the sounds were scored with.
+    weights: LikedWeights,
+    /// Keeps what's done with sounds in the library ([`did`]); none for the screenshots.
+    noter: Option<Arc<Noter>>,
     /// How many tiles fit side by side.
     columns: usize,
     /// The picked sound, as its place in `list`.
@@ -171,6 +186,11 @@ impl Default for Page {
             years: Vec::new(),
             played: Arc::default(),
             history: Vec::new(),
+            history_behind: None,
+            did: HashMap::new(),
+            noted: Vec::new(),
+            weights: LikedWeights::default(),
+            noter: None,
             columns: 4,
             picked: None,
             to_pick: None,
@@ -224,6 +244,10 @@ impl Page {
     fn pick_view(&mut self, v: i32) {
         self.view = v;
         self.chose_view = true;
+        // Plays from History while it showed: listed now.
+        if v == HISTORY && self.history_behind.take().is_some() {
+            self.history = self.list.played(&self.played, &self.filters);
+        }
     }
 
     /// You turned Autoplay on or off: on, it says so.
@@ -419,7 +443,7 @@ fn tile(p: &Page, row: usize, at: usize) -> SoundTile {
         facts: list::facts_line(s).into(),
         colour: list::type_colour(&s.sound_type),
         favourite: s.favourite,
-        liked: p.list.liked_share(at).map_or(-1.0, |l| l as f32),
+        liked: liked_share(p, at).map_or(-1.0, |l| l as f32),
         liked_why: liked_why(p, at).into(),
         wave: wave(s).into(),
         points: points(s),
@@ -451,12 +475,22 @@ fn line(p: &Page, row: usize, at: usize) -> SoundLine {
     }
 }
 
-/// Why a sound is as liked as it is (empty until the scores are known).
+/// Why a sound is as liked as it is (empty until the scores are known), with what was done with it since it was read.
 fn liked_why(p: &Page, at: usize) -> String {
     match (p.list.liked_share(at), p.list.sound(at)) {
-        (Some(_), Some(s)) => liking::explain(s, p.list.usage(at)),
+        (Some(_), Some(s)) => match did::since(p, s) {
+            Some(since) => liking::explain_with(s, since, p.list.usage(at)),
+            None => liking::explain(s, p.list.usage(at)),
+        },
         _ => String::new(),
     }
+}
+
+/// A sound's Most liked score against the best liked, from 0 to 1 (`None` until the scores are known), both with what
+/// was done with sounds since they were read.
+fn liked_share(p: &Page, at: usize) -> Option<f64> {
+    let (score, best) = (did::score_now(p, at)?, did::best_now(p)?);
+    Some(if best > 0.0 { score / best } else { 0.0 })
 }
 
 /// When a sound was played, short: "14:05" today, "Tue" this week, "3 Oct" before.
@@ -510,6 +544,11 @@ pub(crate) fn strings<S: AsRef<str>>(items: impl IntoIterator<Item = S>) -> Mode
     ModelRc::new(VecModel::from(items.into_iter().map(|s| SharedString::from(s.as_ref())).collect::<Vec<_>>()))
 }
 
+/// As the app closes: the plays, drags and sends not kept yet are kept now, waiting a moment at most.
+pub fn finish_up() {
+    did::finish_up();
+}
+
 /// For the screenshots: work lists out on the window's thread, as there's no event loop to send them back with.
 pub fn compute_here() {
     HERE.with(|h| *h.borrow_mut() = true);
@@ -548,6 +587,7 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
             How::Play => {
                 let Some(at) = PAGE.with(|p| p.borrow().places.get(&id).copied()) else { return false };
                 play_sound(app, at, 0.0, mo_audio::MAX_SECONDS);
+                did::played(app, at);
                 true
             }
             How::Open | How::InDaw => show_sound_by_id(app, id),
@@ -579,9 +619,11 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
     };
     if here {
         // The screenshots read their fixture as it is: nothing is written beside it.
-        read_all(&sounds_db, &library_db, None, None, send);
+        read_all(&sounds_db, &library_db, None, None, None, send);
         return;
     }
+    // Plays, drags and sends are kept from now on.
+    let noter = did::connect(&sounds_db);
     // Not at once: the first thing on show reads from the disk first. The sounds are read when this page, Space or
     // Ctrl+K wants them ([`wanted`]), or a few seconds after the window opens, whichever is first.
     let weak = app.as_weak();
@@ -604,12 +646,14 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
                 (p.order == Order::Shuffled && !hiding).then_some(Opening { seed: p.seed, view })
             });
             let read = move || {
-                let on_show = read_all(&sounds_db, &library_db, Some(cards.clone()), opening, &send);
+                let on_show = read_all(&sounds_db, &library_db, Some(cards.clone()), opening, Some(&noter), &send);
                 // Once the page has all it needs from the library: its backup copy, when there's none or the library
-                // has changed since. Made before the scan writes into it.
-                say_backed_up(compact::backup::back_up(&sounds_db));
+                // has changed since. Made before the scan writes into it. Not made again for the plays, drags and
+                // sends kept since the last one, unless it's a day old: a whole copy of the library each start for a
+                // few plays would be a lot of writing.
+                say_backed_up(compact::backup::back_up_when(&sounds_db, compact::backup::When::Daily));
                 if let Some(mut on_show) = on_show
-                    && scan_for_sounds(&sounds_db, &library_db, &cards, &mut on_show, &send)
+                    && scan_for_sounds(&sounds_db, &library_db, &cards, &mut on_show, Some(&noter), &send)
                 {
                     say_backed_up(compact::backup::back_up(&sounds_db));
                 }
@@ -713,6 +757,11 @@ pub struct Library {
     played: Vec<(usize, NaiveDateTime)>,
     /// Each sound's place in the list, by its id.
     places: Arc<HashMap<i64, usize>>,
+    /// How much each sign of liking counted for Most liked.
+    weights: LikedWeights,
+    /// The number of the last thing done with sounds that these hold, when they were read with its writer held off
+    /// ([`did::read_again`]).
+    upto: Option<u64>,
 }
 
 impl Library {
@@ -727,7 +776,22 @@ impl Library {
         });
         let places: HashMap<i64, usize> = (0..list.len()).filter_map(|i| list.sound(i).map(|s| (s.id, i))).collect();
         let played = played.into_iter().filter_map(|(id, at)| places.get(&id).map(|&i| (i, at))).collect();
-        Library { types: list.type_counts(), tags: list.tags(), list: Arc::new(list), played, places: Arc::new(places) }
+        Library {
+            types: list.type_counts(),
+            tags: list.tags(),
+            list: Arc::new(list),
+            played,
+            places: Arc::new(places),
+            weights: *weights,
+            upto: None,
+        }
+    }
+
+    /// The same library, read holding every thing done with sounds up to the one numbered `upto` (when it was read
+    /// with their writer held off).
+    fn read_upto(mut self, upto: Option<u64>) -> Library {
+        self.upto = upto;
+        self
     }
 
     /// The same library with how your songs use each sound (by sound id) counted in, and the files of the projects
@@ -806,11 +870,15 @@ impl Settings {
 /// With `opening` (how the page opens: shuffled), when it opens on Tiles or List, the first sounds its shuffle puts on
 /// top are read from the copy on their own and sent first ([`FIRST`]), so they show in a moment; all of them follow
 /// ([`Step::Rest`]). Reading half a million takes seconds.
+///
+/// With `noter`, what's done with sounds isn't written meanwhile ([`Noter::hold`]): the page knows which of what it
+/// shows the sounds read hold already ([`did::read_again`]).
 fn read_all(
     sounds_db: &Path,
     library_db: &Path,
     cards: Option<Feed>,
     opening: Option<Opening>,
+    noter: Option<&Noter>,
     send: impl Fn(Step),
 ) -> Option<OnShow> {
     // No library at all. Once the copy is the app's own, it's all there is: `sounds.db` may have been archived.
@@ -818,6 +886,8 @@ fn read_all(
         send(Step::Read(Err(String::new())));
         return None;
     }
+    let held = noter.map(Noter::hold);
+    let upto = held.as_ref().map(Held::upto);
     let lib = library_db.exists().then(|| mo_library::Library::open_read_only(library_db)).and_then(|lib| {
         lib.map_err(|e| log::warning("Sounds", &format!("Couldn't read the song library for how sounds are used: {e}")))
             .ok()
@@ -844,7 +914,7 @@ fn read_all(
                 Ok((db.some(&first, now)?, ids.len()))
             }) {
                 Ok((sounds, all)) => {
-                    let library = Library::new(sounds, Vec::new(), &settings.weights);
+                    let library = Library::new(sounds, Vec::new(), &settings.weights).read_upto(upto);
                     log::info(
                         "Sounds",
                         &format!(
@@ -874,7 +944,7 @@ fn read_all(
     // Sounds the app's own scan added aren't counted for CLAP: it never hears them in this app.
     let new_since = compact::grow::new_since(&first.source);
     let analysed = mo_sounds::count_clap_could_hear(&sounds, new_since);
-    let library = Library::new(sounds, std::mem::take(&mut first.played), &settings.weights);
+    let library = Library::new(sounds, std::mem::take(&mut first.played), &settings.weights).read_upto(upto);
     log::info(
         "Sounds",
         &format!(
@@ -1028,7 +1098,7 @@ fn read_all(
         Some(s) if s.made => PrintsAgain::Again,
         Some(_) => PrintsAgain::IfCountChanged,
     };
-    take_again(sounds, db, prints, &mut on_show, &send);
+    take_again(sounds, db, prints, &mut on_show, upto, &send);
     Some(on_show)
 }
 
@@ -1036,12 +1106,14 @@ fn read_all(
 /// (stage 2 of "the sound library grows again", review finding X1-own1), once the page has its sounds: the page takes
 /// them again when anything changed ([`take_again`]). A card shows while sounds are listened to. Nothing when the
 /// sounds on show aren't from the app's own library (it's made from `sounds.db` first), or there are no sample
-/// folders. Whether the library changed.
+/// folders. Whether the library changed. With `noter`, what's done with sounds isn't written while they're read again
+/// ([`Noter::hold`]).
 fn scan_for_sounds(
     sounds_db: &Path,
     library_db: &Path,
     cards: &Feed,
     on_show: &mut OnShow,
+    noter: Option<&Noter>,
     send: &impl Fn(Step),
 ) -> bool {
     let copy = compact::copy_of(sounds_db);
@@ -1102,8 +1174,10 @@ fn scan_for_sounds(
     let k = &scanned.kept;
     let prints = if k.added + k.updated > 0 { PrintsAgain::Again } else { PrintsAgain::IfCountChanged };
     let now = Local::now().naive_local();
+    let held = noter.map(Noter::hold);
+    let upto = held.as_ref().map(Held::upto);
     match SoundsDb::open_read_only(&copy).and_then(|db| Ok((db.all(now)?, db))) {
-        Ok((sounds, db)) => take_again(sounds, Ok(db), prints, on_show, send),
+        Ok((sounds, db)) => take_again(sounds, Ok(db), prints, on_show, upto, send),
         Err(e) => log::warning("Sounds", &format!("Couldn't read the sounds again once the scan kept them: {e}")),
     }
     true
@@ -1137,12 +1211,14 @@ enum PrintsAgain {
 }
 
 /// The sounds read again (`sounds`, from `db`) take the place of those on show: the page moves what it holds by place
-/// with each sound ([`Step::Refreshed`]). Their fingerprints are read again too as `prints` says.
+/// with each sound ([`Step::Refreshed`]). Their fingerprints are read again too as `prints` says. `upto`: the last
+/// thing done with sounds that they hold, when they're read with its writer held off ([`Noter::hold`]).
 fn take_again(
     sounds: Vec<Sound>,
     db: Result<SoundsDb, SoundsError>,
     prints: PrintsAgain,
     on_show: &mut OnShow,
+    upto: Option<u64>,
     send: &impl Fn(Step),
 ) {
     // What was played: the sounds are in hand, so a History that can't be read just now stays empty.
@@ -1155,7 +1231,7 @@ fn take_again(
         Vec::new()
     });
     let analysed_now = mo_sounds::count_clap_could_hear(&sounds, on_show.new_since);
-    let mut library = Library::new(sounds, played, &on_show.weights);
+    let mut library = Library::new(sounds, played, &on_show.weights).read_upto(upto);
     if let Some((uses, projects)) = &on_show.uses {
         library.list = Arc::new(with_usage(&library.list, usage_of(&library.list, uses), projects, &on_show.weights));
     }
@@ -1760,6 +1836,9 @@ fn take_refreshed(p: &mut Page, library: Library, moved: Option<&[Option<usize>]
     p.tags = library.tags;
     // History lists them once the filters have been through them again ([`listed`], asked for by the page next).
     p.played = Arc::new(library.played);
+    // Read again, they hold what was done with them so far: what wasn't kept yet as they were read goes on showing.
+    p.weights = library.weights;
+    did::read_again(p, library.upto);
     let gone = moved.map(|moved| move_places(p, moved)).unwrap_or_default();
     let anew = moved.is_some() || retyped;
     if anew {
@@ -1903,11 +1982,13 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         // History lists them once the filters have been through them ([`listed`]).
         p.played = Arc::new(library.played);
         p.history.clear();
+        p.weights = library.weights;
         p.list = library.list;
         p.to_pick = None;
         p.places = library.places;
         p.types = library.types;
         p.tags = library.tags;
+        did::read_again(&mut p, library.upto);
         // Counted afresh for these sounds: the choices show without numbers until then.
         p.counts = None;
         p.open_on(view, autoplay);
@@ -2135,10 +2216,15 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         }
     });
     let weak = app.as_weak();
+    // A double-click: a play you meant, kept for History and Most liked (a single click, autoplay, the arrow keys and
+    // the galaxy's sweep only try sounds out, as in the C# app).
     data.on_play_row(move |row| {
         let Some(app) = weak.upgrade() else { return };
+        // Not one the list has just lost (it changed between the clicks): nothing was played.
+        let Some(at) = PAGE.with(|p| usize::try_from(row).ok().and_then(|r| p.borrow().entry(r))) else { return };
         select_row(&app, row, false);
         play_picked(&app, 0.0);
+        did::played(&app, at);
     });
     // A sound like the picked one: picked in turn (and played with autoplay on), or played on a double-click.
     let weak = app.as_weak();
@@ -2156,6 +2242,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         let Ok(at) = usize::try_from(place) else { return };
         pick(&app, at);
         play_picked(&app, 0.0);
+        did::played(&app, at);
     });
     let weak = app.as_weak();
     data.on_step(move |d, held| {
@@ -2575,7 +2662,7 @@ fn refresh(app: &AppWindow) {
         let (shown, counts) = ask.list.view_counted(&ask.filters, ask.order, ask.seed);
         let years = ask.list.year_counts(ask.filters.used);
         let history = ask.list.played(&ask.played, &ask.filters);
-        listed(app, ask.id, Listed { shown, counts, years, history });
+        listed(app, ask.id, Listed { shown, counts, years, history, played: ask.played });
         return;
     }
     WORKER.with(|w| {
@@ -2599,7 +2686,7 @@ fn refresh(app: &AppWindow) {
                     let years = kept.unwrap_or_else(|| ask.list.year_counts(ask.filters.used));
                     let history = ask.list.played(&ask.played, &ask.filters);
                     let (shown, counts) = ask.list.view_counted(&ask.filters, ask.order, ask.seed);
-                    Listed { shown, counts, years, history }
+                    Listed { shown, counts, years, history, played: ask.played.clone() }
                 });
                 counted = Some((Arc::downgrade(&ask.list), ask.filters.used, new.years.clone()));
                 let weak = weak.clone();
@@ -2629,6 +2716,8 @@ struct Listed {
     years: YearCounts,
     /// For History: the sounds played, newest first, with when.
     history: Vec<(usize, NaiveDateTime)>,
+    /// What was played, as History was worked out from.
+    played: Arc<Vec<(usize, NaiveDateTime)>>,
 }
 
 /// A new list has been worked out: shows it, unless a newer one has been asked for since.
@@ -2643,7 +2732,16 @@ fn listed(app: &AppWindow, id: u64, new: Listed) {
         // Not while only the first few sounds are in: their counts would be a few of all.
         p.counts = p.partial.is_none().then_some(new.counts);
         p.years = new.years;
-        p.history = new.history;
+        // What History lists: what was played as it shows it while you play from it ([`did::take`]); a sound played
+        // while the list was worked out is listed too.
+        let from = match &p.history_behind {
+            Some(was) if p.view == HISTORY => was.clone(),
+            _ => {
+                p.history_behind = None;
+                p.played.clone()
+            }
+        };
+        p.history = if Arc::ptr_eq(&new.played, &from) { new.history } else { p.list.played(&from, &p.filters) };
         true
     });
     if current {
@@ -3013,7 +3111,8 @@ fn step(app: &AppWindow, d: i32, held: bool) {
     }
 }
 
-/// Space and the Play button: stops the picked sound if it's playing, else plays it.
+/// Space and the Play button: stops the picked sound if it's playing, else plays it (a play you meant, kept for
+/// History and Most liked).
 pub fn toggle_play(app: &AppWindow) -> bool {
     let (picked, playing) = PAGE.with(|p| {
         let p = p.borrow();
@@ -3021,7 +3120,10 @@ pub fn toggle_play(app: &AppWindow) -> bool {
     });
     match (picked, playing) {
         (Some(i), Some((j, _))) if i == j => stop(app),
-        (Some(_), _) => play_picked(app, 0.0),
+        (Some(i), _) => {
+            play_picked(app, 0.0);
+            did::played(app, i);
+        }
         (None, Some(_)) => stop(app),
         (None, None) => return false,
     }
@@ -3312,7 +3414,7 @@ fn playing_changed(app: &AppWindow) {
 pub fn run_action(app: &AppWindow, id: &str) -> bool {
     let picked = PAGE.with(|p| {
         let p = p.borrow();
-        p.picked.and_then(|at| p.list.sound(at)).map(|s| (s.path.clone(), s.name().to_owned()))
+        p.picked.and_then(|at| p.list.sound(at)).map(|s| (s.id, s.path.clone(), s.name().to_owned()))
     });
     let feed = FEED.with(|f| f.borrow().clone());
     match (id, picked, feed) {
@@ -3322,19 +3424,20 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             }
             stop(app);
         }
-        (TO_BITWIG, Some((path, name)), Some(feed)) => send_to_bitwig(app, &feed, path, name),
-        ("sounds.reveal", Some((path, _)), Some(feed)) => {
+        (TO_BITWIG, Some((id, path, name)), Some(feed)) => send_to_bitwig(app, &feed, id, path, name),
+        ("sounds.reveal", Some((_, path, _)), Some(feed)) => {
             crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));
         }
-        ("sounds.copyPath", Some((path, _)), Some(feed)) => crate::files::copy_path(&feed, &path),
+        ("sounds.copyPath", Some((_, path, _)), Some(feed)) => crate::files::copy_path(&feed, &path),
         _ => return false,
     }
     true
 }
 
-/// Puts a sound on a Sampler on a new track in the project open in Bitwig, on a thread of its own, as its file name
-/// (without the extension) names it. Its card shows at once and says how it went. While it goes, Send to Bitwig waits.
-fn send_to_bitwig(app: &AppWindow, feed: &Feed, path: String, name: String) {
+/// Puts a sound (its id, file and name) on a Sampler on a new track in the project open in Bitwig, on a thread of its
+/// own, as its file name (without the extension) names it. Its card shows at once and says how it went. While it goes,
+/// Send to Bitwig waits. Once it's in, it counts towards how liked the sound is ([`did::sent`]).
+fn send_to_bitwig(app: &AppWindow, feed: &Feed, id: i64, path: String, name: String) {
     if SENDING.swap(true, Ordering::AcqRel) {
         return;
     }
@@ -3344,9 +3447,15 @@ fn send_to_bitwig(app: &AppWindow, feed: &Feed, path: String, name: String) {
     let sent = background::spawn("Send to Bitwig", move || {
         // A panic in it is logged as a crash and fails the card as it goes; Send to Bitwig still comes back.
         let to = to_bitwig::Bitwig::default();
-        let _ = mo_catch::catch_crash(AssertUnwindSafe(|| to_bitwig::send_sound(job, &to, &path, &name)));
+        let went_in =
+            mo_catch::catch_crash(AssertUnwindSafe(|| to_bitwig::send_sound(job, &to, &path, &name))).unwrap_or(false);
         SENDING.store(false, Ordering::Release);
-        let _ = weak.upgrade_in_event_loop(|app| show_sending(&app, false));
+        let _ = weak.upgrade_in_event_loop(move |app| {
+            show_sending(&app, false);
+            if went_in {
+                did::sent(&app, &[id]);
+            }
+        });
     });
     // Its card was taken into the thread, so it fails by itself ("It stopped before it finished").
     if let Err(e) = sent {
@@ -3528,7 +3637,7 @@ mod tests {
     fn one_start_shuffled(sounds_db: &Path, library_db: &Path, cards: &Feed, seed: Option<u64>) -> Vec<String> {
         let got = std::sync::Mutex::new(Vec::new());
         let opening = seed.map(|seed| Opening { seed, view: TILES });
-        read_all(sounds_db, library_db, Some(cards.clone()), opening, |step| {
+        read_all(sounds_db, library_db, Some(cards.clone()), opening, None, |step| {
             if let Ok(mut got) = got.lock() {
                 got.push(said(step));
             }
@@ -3598,7 +3707,7 @@ mod tests {
         // The next: the new samples are listened to and kept, the page takes them with their fingerprints, a card
         // says what was found, and the C# app's sounds elsewhere are left as they are.
         let cards = Feed::default();
-        let Some(mut on_show) = read_all(&sounds_db, &library_db, Some(cards.clone()), None, |_| {}) else {
+        let Some(mut on_show) = read_all(&sounds_db, &library_db, Some(cards.clone()), None, None, |_| {}) else {
             panic!("no sounds read")
         };
         assert_eq!(on_show.list.len(), 5);
@@ -3608,7 +3717,7 @@ mod tests {
                 steps.push(said(step));
             }
         };
-        assert!(scan_for_sounds(&sounds_db, &library_db, &cards, &mut on_show, &send));
+        assert!(scan_for_sounds(&sounds_db, &library_db, &cards, &mut on_show, None, &send));
         let got = steps.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default();
         assert_eq!(got, ["again: other sounds, 7 sounds, 0 plays, used: true", "7 fingerprints"]);
         assert_eq!(on_show.list.len(), 7);
@@ -3616,7 +3725,7 @@ mod tests {
         assert_eq!((on_show.new_since, on_show.analysed), (Some(6), 0));
         assert_eq!(cards_said(&cards), ["Found 2 new sounds: They're in your sound library now."]);
         // Nothing new: nothing kept, nothing sent.
-        assert!(!scan_for_sounds(&sounds_db, &library_db, &cards, &mut on_show, &send));
+        assert!(!scan_for_sounds(&sounds_db, &library_db, &cards, &mut on_show, None, &send));
         assert!(steps.lock().map(|s| s.is_empty()).unwrap_or_default());
     }
 
@@ -3688,15 +3797,20 @@ mod tests {
         );
         // They're the start of the whole shuffled list, so nothing on show moves when the rest arrive.
         let (first, rest) = (std::sync::Mutex::new(None), std::sync::Mutex::new(None));
-        read_all(&sounds_db, &library_db, Some(Feed::default()), Some(Opening { seed: 7, view: TILES }), |step| {
-            match step {
+        read_all(
+            &sounds_db,
+            &library_db,
+            Some(Feed::default()),
+            Some(Opening { seed: 7, view: TILES }),
+            None,
+            |step| match step {
                 Step::Read(Ok(read)) => {
                     *first.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(read.library.list)
                 }
                 Step::Rest(r) => *rest.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(r.library.list),
                 _ => {}
-            }
-        });
+            },
+        );
         let (Some(first), Some(rest)) = (first.into_inner().ok().flatten(), rest.into_inner().ok().flatten()) else {
             panic!("the first sounds or the rest didn't come")
         };
@@ -3735,7 +3849,7 @@ mod tests {
         let first_of = |view: i32| -> Vec<String> {
             let said = std::sync::Mutex::new(Vec::new());
             let opening = Some(Opening { seed: 7, view });
-            read_all(&sounds_db, &library_db, Some(Feed::default()), opening, |step| {
+            read_all(&sounds_db, &library_db, Some(Feed::default()), opening, None, |step| {
                 let line = match step {
                     Step::Read(Ok(read)) => format!("{} sounds", read.library.list.len()),
                     Step::Rest(_) => "the rest".to_owned(),
@@ -4132,6 +4246,84 @@ mod tests {
         assert_eq!(a.folders.first().map(|f| (f.sounds, f.used)), Some((6, 1)));
         // The one a line says it sounds like is the sound your projects use.
         assert!(a.likes.values().all(|&like| like == 2), "{:?}", a.likes);
+    }
+
+    #[test]
+    fn plays_drags_and_sends_show_at_once_in_history_and_on_the_liked_bars() {
+        use mo_sounds::event::{DRAG, PLAY, SEND};
+        let mut sounds = vec![sound(1, "Pack/a.wav"), sound(2, "Pack/b.wav"), sound(3, "Pack/c.wav")];
+        sounds[0].activity.plays = 4;
+        let day = |d: u32, h: u32| {
+            chrono::NaiveDate::from_ymd_opt(2026, 11, d).and_then(|d| d.and_hms_opt(h, 0, 0)).unwrap_or_default()
+        };
+        let lib = Library::new(sounds.clone(), vec![(1, day(1, 9))], &LikedWeights::default());
+        let mut p = Page {
+            list: lib.list.clone(),
+            places: lib.places.clone(),
+            played: Arc::new(lib.played.clone()),
+            weights: lib.weights,
+            ..Page::default()
+        };
+        assert_eq!((liked_share(&p, 0), liked_share(&p, 1)), (Some(1.0), Some(0.0)));
+        // A play you meant: first in History, and counted on its liked bar and in why.
+        did::take(&mut p, &[2], PLAY, 1, day(6, 10));
+        assert_eq!(p.history, [(1, day(6, 10)), (0, day(1, 9))]);
+        assert_eq!(liked_share(&p, 1), Some(0.25));
+        assert_eq!(liked_why(&p, 1), "Played once");
+        // Played four times more, it's the best liked, and every bar is against it, as the C# app scored them again.
+        for n in 2..6 {
+            did::take(&mut p, &[2], PLAY, n, day(6, 11));
+        }
+        assert_eq!((liked_share(&p, 0), liked_share(&p, 1)), (Some(0.8), Some(1.0)));
+        assert_eq!(p.played.len(), 2);
+        // With History on show, the sound played stays where it is until you come back to it, whatever the list
+        // worked out meanwhile.
+        p.view = HISTORY;
+        did::take(&mut p, &[1], PLAY, 6, day(6, 12));
+        assert_eq!(p.history.first(), Some(&(1, day(6, 11))));
+        assert_eq!(p.history_behind.as_ref().and_then(|was| was.first()), Some(&(1, day(6, 11))));
+        p.pick_view(TILES);
+        p.pick_view(HISTORY);
+        assert_eq!(p.history.first(), Some(&(0, day(6, 12))));
+        // A drag and a send count once each for each sound; one not in the list isn't counted.
+        did::take(&mut p, &[3, 3, 99], DRAG, 7, day(6, 13));
+        did::take(&mut p, &[3], SEND, 8, day(6, 13));
+        assert_eq!(liked_why(&p, 2), "Dragged out once, sent into a DAW once");
+        assert!(!p.did.contains_key(&99));
+        // Read again holding everything noted up to the drag: the send goes on showing, the rest is in what was read
+        // (here, as the sounds were: nothing is counted twice).
+        let again = Library::new(sounds, vec![(1, day(1, 9))], &LikedWeights::default()).read_upto(Some(7));
+        take_refreshed(&mut p, again, None, false);
+        assert_eq!(p.did.len(), 1);
+        assert_eq!(liked_why(&p, 2), "Sent into a DAW once");
+        assert_eq!(p.played.first(), Some(&(0, day(1, 9))));
+        // One read without holding them off: the library's word is taken.
+        let again = Library::new(vec![sound(1, "Pack/a.wav")], Vec::new(), &LikedWeights::default());
+        take_refreshed(&mut p, again, None, false);
+        assert!(p.did.is_empty() && p.noted.is_empty());
+    }
+
+    #[test]
+    fn plays_not_yet_kept_as_the_sounds_were_read_again_stay_first_in_history() {
+        use mo_sounds::event::PLAY;
+        let day = |h: u32| {
+            chrono::NaiveDate::from_ymd_opt(2026, 11, 6).and_then(|d| d.and_hms_opt(h, 0, 0)).unwrap_or_default()
+        };
+        let sounds = vec![sound(1, "Pack/a.wav"), sound(2, "Pack/b.wav"), sound(3, "Pack/c.wav")];
+        let lib = Library::new(sounds.clone(), Vec::new(), &LikedWeights::default());
+        let mut p = Page { list: lib.list.clone(), places: lib.places.clone(), ..Page::default() };
+        did::take(&mut p, &[1], PLAY, 1, day(10));
+        did::take(&mut p, &[2], PLAY, 2, day(11));
+        did::take(&mut p, &[3], PLAY, 3, day(12));
+        // Read again holding the first play only, in another order: the two after it are first in History, newest
+        // first, at their new places; the first is as the library has it.
+        let mut moved = sounds;
+        moved.reverse();
+        let again = Library::new(moved, vec![(1, day(10))], &LikedWeights::default()).read_upto(Some(1));
+        take_refreshed(&mut p, again, None, false);
+        let ids: Vec<i64> = p.played.iter().filter_map(|&(at, _)| p.list.sound(at).map(|s| s.id)).collect();
+        assert_eq!(ids, [3, 2, 1]);
+        assert_eq!(p.did.keys().copied().collect::<std::collections::BTreeSet<_>>(), [2, 3].into());
     }
 
     #[test]

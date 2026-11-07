@@ -11,7 +11,9 @@
 //! - **Up to date** while the library looks just as it did when the backup was made: the backup notes the library's
 //!   [`SoundsDb::stamp`] then ([`BACKED_UP_FROM`]), which changes with every save to it (and never with a read), so
 //!   nothing that writes to the library has to say so. A backup that hasn't been looked at for a week is checked
-//!   again (`quick_check`), and made again if it's damaged.
+//!   again (`quick_check`), and made again if it's damaged. Plays, drags and sends change the library at nearly every
+//!   start, so for them alone it's made again once a day at most ([`When::Daily`]): the backup holds how many other
+//!   changes the library had had ([`super::grow::CHANGES`]), and one behind by any of those is made again at once.
 //! - **Mending** ([`restore`]): the backup is checked again (`quick_check`), copied beside the library, and given its
 //!   name. The damaged library is set aside as `sounds-rust.db.damaged` (only one: the one before goes), so nothing is
 //!   thrown away at once; it goes a week after it was set aside.
@@ -68,12 +70,33 @@ pub enum BackedUp {
     NotNow(String),
 }
 
+/// How soon a library that changed since its backup copy was made is backed up again ([`back_up_when`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum When {
+    /// Now: new sounds came in, or the library was made afresh.
+    Now,
+    /// Once the backup copy is a day old, when the library changed since only by plays, drags and sends (any other
+    /// change, now). They change the library at nearly every start, and making the copy writes about the library's
+    /// size: a day of them at most is lost if the library is damaged.
+    Daily,
+}
+
+/// How old a backup copy may be before a library that changed is backed up again, for [`When::Daily`].
+const A_DAY: i64 = 24 * 60 * 60;
+
 /// Makes the backup copy of the app's own sound library beside `sounds_db` when there's none, the library has changed
 /// since it was made, or it's found damaged. `None` when there's nothing to do: it's up to date, or there's no library
 /// that's the app's own in this version's format (one of the format before is laid out anew first). Reads the whole
 /// library and writes about its size, so it's for the background, never the window's thread; one at a time with every
 /// other change to the library.
 pub fn back_up(sounds_db: &Path) -> Option<BackedUp> {
+    back_up_when(sounds_db, When::Now)
+}
+
+/// As [`back_up`], but with [`When::Daily`] a library that changed only by plays, drags and sends since a backup copy
+/// made in the last day waits (one that's missing, damaged, of another format, or behind by anything else is still
+/// made at once).
+pub fn back_up_when(sounds_db: &Path, when: When) -> Option<BackedUp> {
     let copy = super::copy_of(sounds_db);
     let backup = backup_of(&copy);
     let _one_at_a_time = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
@@ -84,7 +107,8 @@ pub fn back_up(sounds_db: &Path) -> Option<BackedUp> {
     }
     remove_parts(&backup, true);
     let up_to_date = matches!(look_at(&backup, WAIT), Ok(Found::Copy { format: FORMAT, own: Some(_), .. }))
-        && text_note(&backup, BACKED_UP_FROM).is_some_and(|from| from == SoundsDb::stamp(&copy))
+        && (text_note(&backup, BACKED_UP_FROM).is_some_and(|from| from == SoundsDb::stamp(&copy))
+            || (when == When::Daily && made_in_the_last_day(&backup) && only_small_changes(&copy, &backup)))
         && still_whole(&backup);
     let made = if up_to_date {
         None
@@ -104,6 +128,23 @@ pub fn back_up(sounds_db: &Path) -> Option<BackedUp> {
         let _ = remove_database(&damaged);
     }
     made
+}
+
+/// Whether the backup copy at `backup` was made less than a day ago ([`BACKED_UP_AT`]). A time ahead of now (the
+/// clock was put back) doesn't count as recent.
+fn made_in_the_last_day(backup: &Path) -> bool {
+    let at = open_read_only(backup).ok().and_then(|conn| info_value(&conn, BACKED_UP_AT).ok().flatten());
+    at.is_some_and(|at| (0..A_DAY).contains(&(unix_now() - at)))
+}
+
+/// Whether the library at `copy` changed since its backup copy at `backup` was made only by what's done with sounds:
+/// the same library (its [`OWN_SINCE`]) with no other change since ([`super::grow::CHANGES`]).
+fn only_small_changes(copy: &Path, backup: &Path) -> bool {
+    let notes = |path: &Path| {
+        let conn = open_read_only(path).ok()?;
+        Some((info_value(&conn, OWN_SINCE).ok()?, info_value(&conn, super::grow::CHANGES).ok()?))
+    };
+    notes(copy).is_some_and(|copy| notes(backup) == Some(copy))
 }
 
 /// A note in `copy_info` of the database at `path` that's text; `None` when there's none, or it can't be read.
