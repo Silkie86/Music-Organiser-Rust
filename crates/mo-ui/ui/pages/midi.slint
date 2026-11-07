@@ -2,7 +2,7 @@
 // notes ("in 20 files"), with kind chips, From, Key, Order, Shuffle and the year strip; the picked part's card with
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
-import { ListView } from "std-widgets.slint";
+import { ListView } from "../list.slint";
 import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
 
 // One part in the list.
@@ -127,6 +127,8 @@ export global MidiData {
     // The line to bring into sight, each time `show-ask` goes up.
     in property <int> show-row;
     in property <int> show-ask;
+    // The last ask the list has turned to (list.slint's ListView keeps it).
+    in-out property <int> show-done;
     callback select(int);
     callback step(int);
 
@@ -810,15 +812,14 @@ export component MidiPage inherits Rectangle {
                     if MidiData.empty-title == "" && MidiData.shown > 0: VerticalLayout {
                         ListHeading { }
                         lines := ListView {
-                            property <int> show-ask: MidiData.show-ask;
-                            changed show-ask => {
-                                if (MidiData.show-row * 52px < -self.content-y
-                                    || (MidiData.show-row + 1) * 52px > -self.content-y + self.visible-height) {
-                                    self.content-y = -clamp(MidiData.show-row * 52px - self.visible-height / 3, 0px,
-                                        max(0px, self.content-height - self.visible-height));
-                                }
-                            }
+                            row-height: 52px;
+                            rows: MidiData.lines.length;
+                            show-top: MidiData.show-row * self.row-height;
+                            show-ask: MidiData.show-ask;
+                            show-done <=> MidiData.show-done;
                             for l in MidiData.lines: MidiLineView {
+                                // Every line this height: the list counts on it.
+                                height: lines.row-height;
                                 line: l;
                                 chosen => { keys.focus(); }
                                 right-clicked(x, y) => {

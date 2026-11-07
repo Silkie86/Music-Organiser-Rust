@@ -134,24 +134,7 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     });
     // The same, from the buttons on the save's line.
     data.on_save_chosen(|path, id| do_to_save(&path, &id));
-    crate::finder::on_open(Kind::Song, |app, hit, how| {
-        let Some(row) = PAGE.with(|p| p.borrow().songs.rows.iter().position(|r| r.song.key == hit.id)) else {
-            return false;
-        };
-        match how {
-            How::InDaw => PAGE.with(|p| {
-                let p = p.borrow();
-                if let Some(r) = p.songs.rows.get(row) {
-                    open_main(&p, &r.song.latest);
-                }
-            }),
-            How::Open | How::Play => {
-                crate::go_to(app, Place::Songs.index() as i32);
-                show_song(app, row);
-            }
-        }
-        true
-    });
+    finder_opens();
     data.on_reveal(|| with_picked(|_, r| reveal(&r.song.latest)));
     data.on_copy_path(|| with_picked(|_, r| copy_path(&r.song.latest.path)));
     let weak = app.as_weak();
@@ -537,10 +520,33 @@ fn wire_list(app: &AppWindow) {
     });
 }
 
-/// Shows made-up songs with the filters wired, for mo-screens (no library, nothing read).
+/// Says how Ctrl+K opens a song: on this page, picked; or its latest save in its DAW (Ctrl+Enter).
+fn finder_opens() {
+    crate::finder::on_open(Kind::Song, |app, hit, how| {
+        let Some(row) = PAGE.with(|p| p.borrow().songs.rows.iter().position(|r| r.song.key == hit.id)) else {
+            return false;
+        };
+        match how {
+            How::InDaw => PAGE.with(|p| {
+                let p = p.borrow();
+                if let Some(r) = p.songs.rows.get(row) {
+                    open_main(&p, &r.song.latest);
+                }
+            }),
+            How::Open | How::Play => {
+                crate::go_to(app, Place::Songs.index() as i32);
+                show_song(app, row);
+            }
+        }
+        true
+    });
+}
+
+/// Shows made-up songs with the filters wired, and Ctrl+K opening them, for mo-screens (no library, nothing read).
 pub fn show_sample(app: &AppWindow, songs: Songs) {
     wire_filters(app);
     wire_list(app);
+    finder_opens();
     // A handful of songs: counted here.
     let years = songs.year_counts();
     show(app, songs, years);

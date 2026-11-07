@@ -1,0 +1,70 @@
+// The app's long lists: Slint's ListView, which makes only the lines in sight, and turns to a line when asked. The
+// compiler makes only the lines in sight for a `for` straight inside an element whose type is called ListView
+// (i-slint-compiler object_tree.rs, "Custom ListView is OK"), so this one keeps the name.
+import { ListView as SlintListView } from "std-widgets.slint";
+
+// Each time `show-ask` goes up, the list brings the line whose top is at `show-top` into sight, a third of the way
+// down (or the list to its end), once it has laid out its lines. Every line must be `row-height` tall: the list counts
+// on it to know when they're laid out. A list that never turns leaves these alone.
+export component ListView inherits SlintListView {
+    in property <length> row-height;
+    // How many lines there are: the model's length.
+    in property <int> rows;
+    // The line to bring into sight: its top, and a count that goes up each time it's asked.
+    in property <length> show-top;
+    in property <int> show-ask;
+    // The last ask turned to. Two-way with the page's own, so that a list made after the ask (a page is made when it's
+    // shown, so Ctrl+K from another page asks first) still turns to it.
+    in-out property <int> show-done;
+
+    // Until the list has laid out the lines it was just given, its height is still the old lines' height: a turn then
+    // stopped short, or with fewer lines left none drawn (7 Nov). So a turn waits for them. A list just made has its
+    // own height until then, so one about a screen tall can look laid out early: a turn finds the end from `rows`.
+    property <bool> laid-out: abs(self.content-height - self.rows * self.row-height) < self.row-height / 2;
+    property <bool> turn-now: self.show-ask != self.show-done && self.laid-out;
+    init => {
+        if (self.turn-now) {
+            self.turn();
+        }
+    }
+    changed turn-now => {
+        if (self.turn-now) {
+            self.turn();
+        }
+    }
+
+    // A turn past the lines the list has made lands on the top of a line (Slint's repeater.rs jumps by whole lines),
+    // up to a line short of where it was asked: a turn to the end left the last line cut off. From there it's turned
+    // once more, a short turn that lands exactly. `turn-to` is where the turn was asked to (1px: none), `lands` where
+    // such a jump lands.
+    property <length> turn-to: 1px;
+    property <length> lands: 1px;
+    changed content-y => {
+        if (self.turn-to != 1px && self.content-y != self.turn-to) {
+            if (abs(self.content-y - self.lands) < 0.5px) {
+                self.content-y = self.turn-to;
+            }
+            self.turn-to = 1px;
+        }
+    }
+    // The second turn is only for that jump: your own scroll, or other lines, ends the wait for it.
+    scrolled => {
+        self.turn-to = 1px;
+    }
+    changed rows => {
+        self.turn-to = 1px;
+    }
+
+    // Turns only when the line is out of sight.
+    function turn() {
+        self.show-done = self.show-ask;
+        self.turn-to = 1px;
+        if (self.show-top < -self.content-y
+            || self.show-top + self.row-height > -self.content-y + self.visible-height) {
+            self.turn-to = -clamp(self.show-top - self.visible-height / 3, 0px,
+                max(0px, self.rows * self.row-height - self.visible-height));
+            self.lands = -floor(-self.turn-to / self.row-height) * self.row-height;
+            self.content-y = self.turn-to;
+        }
+    }
+}

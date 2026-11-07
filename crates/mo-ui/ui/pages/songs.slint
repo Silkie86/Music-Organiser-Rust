@@ -1,6 +1,6 @@
 // The Songs page: one line per song, newest save first, under time headings, with search, filter chips and a year
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
-import { ListView } from "std-widgets.slint";
+import { ListView } from "../list.slint";
 import { ArrangementPreview } from "arrangement.slint";
 import { Theme, AppKeys, Type, Space, PageHeader, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Stars, YearRange, YearBar, Caps, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState } from "../studio.slint";
 
@@ -124,6 +124,8 @@ export global SongsData {
     // Bring a song into view: its line's top in the list, and a count that goes up each time it's asked.
     in property <length> show-y;
     in property <int> show-ask;
+    // The last ask the list has turned to (list.slint's ListView keeps it).
+    in-out property <int> show-done;
     // The song panel, shown while a song is picked.
     in property <PanelSong> song;
     in property <[string]> tabs;
@@ -904,18 +906,15 @@ export component SongsPage inherits Rectangle {
                         text: SongsData.message-text;
                     }
                     if SongsData.message == "": HorizontalLayout {
-                        property <int> show-ask: SongsData.show-ask;
-                        // Scrolls only when the line is out of sight.
-                        changed show-ask => {
-                            if (SongsData.show-y < -list.content-y
-                                || SongsData.show-y + SongsData.line-height > -list.content-y + list.visible-height) {
-                                list.content-y = -clamp(SongsData.show-y - list.visible-height / 3, 0px,
-                                    max(0px, list.content-height - list.visible-height));
-                            }
-                        }
                         list := ListView {
                             horizontal-stretch: 1;
+                            row-height: SongsData.line-height;
+                            rows: SongsData.lines.length;
+                            show-top: SongsData.show-y;
+                            show-ask: SongsData.show-ask;
+                            show-done <=> SongsData.show-done;
                             for line in SongsData.lines: Rectangle {
+                                // Every line this height: the list counts on it.
                                 height: SongsData.line-height;
                                 if line.heading != "": Caps {
                                     x: Space.lg;
