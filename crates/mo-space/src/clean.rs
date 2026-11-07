@@ -2206,8 +2206,9 @@ mod tests {
         let dir = std::env::temp_dir().join("mo-space-unit-bin-give-back");
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("part")).unwrap();
-        // Where it really is, so the administrator step's checks find it there.
-        let dir = fs::canonicalize(&dir).unwrap();
+        // Where it really is, so the administrator step's checks find it there: as a plain path (Windows' own name for
+        // it starts with \\?\, which reads as a network path, and nothing on one goes to the bin).
+        let dir = std::path::PathBuf::from(crate::real_path(&text(&dir)).unwrap());
         for file in ["in use", "guarded", "part/1", "part/2"] {
             fs::write(dir.join(file), b"0123456789").unwrap();
         }
