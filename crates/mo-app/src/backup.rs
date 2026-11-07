@@ -25,11 +25,12 @@ use mo_backup::plan::{self, Folders, LeftOut, Level, Plan, Rules, SongInfo, Used
 use mo_formats::case;
 use mo_library::Library;
 use mo_library::songs::{Song, file_id, group_songs, marked};
+use mo_space::prints::Prints;
 use mo_space::size::{FileEntry, size_text};
-use mo_space::song::{CompactSettings, DEFAULT_KEEP_BACKUPS, SongSave, SongSpaceReport};
+use mo_space::song::{CompactSettings, Compare, DEFAULT_KEEP_BACKUPS, SongSave, SongSpaceReport};
 use rayon::prelude::*;
 
-use crate::song_room::{Others, song_saves};
+use crate::song_room::{Others, keep_prints, song_saves};
 
 /// The settings file's name, in the app's folder.
 pub const SETTINGS_FILE: &str = "backup.txt";
@@ -418,8 +419,15 @@ fn shapes(saves: &[&mo_library::Save]) -> Vec<plan::SaveShape> {
 }
 
 /// Walks the folders on the list, finds the songs saved in them and the samples they use (wherever those are), and
-/// makes the plan. Reads only. Slow: on the app's low-priority pool, never the window's thread.
-pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Result<Prepared, String> {
+/// makes the plan. `prints` are the fingerprints of saves the last plans read (see [`crate::song_room`]): a save
+/// unchanged since isn't read again to find its copies, but one they call a copy is read again before the plan leaves
+/// it out ([`Compare::Confirmed`]). Reads only. Slow: on the app's low-priority pool, never the window's thread.
+pub fn prepare(
+    library: &Library,
+    settings: &Settings,
+    prints: Option<&Prints>,
+    stop: &AtomicBool,
+) -> Result<Prepared, String> {
     let backup = settings.drive.clone().ok_or("Pick a backup drive first")?;
     let gathered = folders::gather(&settings.folders, &backup, stop).map_err(|_| "Stopped".to_owned())?;
     let saves = library.saves().map_err(|e| e.to_string())?;
@@ -449,6 +457,7 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
         keep_backups: if settings.level == Level::Essentials { 0 } else { DEFAULT_KEEP_BACKUPS },
         ..CompactSettings::default()
     };
+    let compare = compare_for(settings.level, prints);
     // Only songs with a save in the folders are this backup's (a song there only as a copy, too).
     let songs: Vec<_> = all_songs
         .into_iter()
@@ -462,7 +471,7 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
         used: Vec<PathBuf>,
         id: u64,
     }
-    let mut measured: Vec<Measured> = songs
+    let measured: Result<Vec<Measured>, ()> = songs
         .par_iter()
         .map(|song| {
             // The song's own saves, or (when only copies of them are in the folders) the copies.
@@ -481,7 +490,7 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
                     }
                 }
             }
-            let report = others.measure(&saves, opens, &roots, &used_text, compact, stop).map_err(|_| ())?;
+            let report = others.measure(&saves, opens, &roots, &used_text, compact, compare, stop).map_err(|_| ())?;
             // Saves you mark as milestones by their name always go, and so do saves where the song changed a lot, and
             // the save the song opens (its highest-numbered one: the newest by time, which always goes, can be another).
             let mut milestones: Vec<String> =
@@ -490,8 +499,9 @@ pub fn prepare(library: &Library, settings: &Settings, stop: &AtomicBool) -> Res
             milestones.extend(opens.map(str::to_owned));
             Ok(Measured { saves, report, milestones, used, id: song_id(song) })
         })
-        .collect::<Result<_, ()>>()
-        .map_err(|()| "Stopped".to_owned())?;
+        .collect::<Result<_, ()>>();
+    keep_prints(prints, measured.is_ok(), "Backup");
+    let mut measured: Vec<Measured> = measured.map_err(|()| "Stopped".to_owned())?;
 
     // The samples the songs use, wherever they are: one outside the folders is added, so a song's backup is whole.
     // Each is looked up once (a sample on a drive that isn't there is asked about once, not once per save that names
@@ -1179,9 +1189,30 @@ pub fn when_text(when: NaiveDateTime, now: NaiveDateTime) -> String {
     }
 }
 
+/// How the plan finds the saves that are copies of another: only Slim leaves a copy out of the backup, so only Slim
+/// reads again each save the kept prints call a copy before leaving it out. Full keeps every save, and Essentials leaves
+/// out every save that isn't a milestone whatever it copies, so they go by the kept prints and read nothing again (the
+/// prints are still kept up to date for Slim).
+fn compare_for(level: Level, prints: Option<&Prints>) -> Compare<'_> {
+    match prints {
+        Some(prints) if level == Level::Slim => Compare::Confirmed(prints),
+        Some(prints) => Compare::Remembered(prints),
+        None => Compare::Afresh,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_slim_reads_a_copy_again_before_leaving_it_out() {
+        let prints = Prints::default();
+        assert!(matches!(compare_for(Level::Slim, Some(&prints)), Compare::Confirmed(_)));
+        assert!(matches!(compare_for(Level::Full, Some(&prints)), Compare::Remembered(_)));
+        assert!(matches!(compare_for(Level::Essentials, Some(&prints)), Compare::Remembered(_)));
+        assert!(matches!(compare_for(Level::Slim, None), Compare::Afresh));
+    }
 
     #[test]
     fn only_the_temporary_names_write_whole_gives_are_its_parts() {

@@ -4,10 +4,11 @@
 //! Nothing here removes anything: [`measure`] only lists. What you pick from the list goes through
 //! [`crate::clean`], which checks every line again and only ever sends things to the Recycle Bin.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use chrono::{NaiveDateTime, TimeDelta};
 use mo_formats::case;
@@ -18,7 +19,8 @@ use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::key;
-use crate::size::{self, Stopped, add, total};
+use crate::prints::Prints;
+use crate::size::{self, FileEntry, Stopped, add, total};
 
 /// What a song's space can be freed from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -157,6 +159,71 @@ pub struct Elsewhere<'a> {
     /// Names of the song's FL Studio saves that another song elsewhere has too ("Beat", "Untitled"), as [`key`]s: FL
     /// Studio's shared Backup folder doesn't say which song an autosave is of, so those autosaves are left alone.
     pub shared_names: &'a HashSet<String>,
+    /// FL Studio's Backup folders as listed for the songs measured with this one: each is listed once for them all.
+    pub backup_folders: &'a BackupFolders,
+    /// How saves of the same size are compared to find the copies.
+    pub compare: Compare<'a>,
+}
+
+/// How [`measure`] compares a song's saves of the same size in a folder, to find the ones that are copies of another.
+#[derive(Clone, Copy, Default)]
+pub enum Compare<'a> {
+    /// Every one read whole, now: Remove's check just before anything goes.
+    #[default]
+    Afresh,
+    /// With the fingerprints of saves read before, used again while each save's size and time are as they were, so an
+    /// unchanged save isn't read again (the whole-app review of 6 Nov, E1-5): the Space page's look, where nothing goes
+    /// on their word (Remove reads every save afresh first).
+    Remembered(&'a Prints),
+    /// As `Remembered`, but a save the kept fingerprints call a copy of another is read again before it's called one,
+    /// unless it was read just now: the backup plan, which leaves a copy out of the backup on its word. A file can be
+    /// written again keeping its size and time (a tool that puts the time back), and then only its bytes say it
+    /// changed.
+    Confirmed(&'a Prints),
+}
+
+/// FL Studio's Backup folders as listed for a measure of every song (the whole-app review of 6 Nov, X2-1). FL Studio
+/// keeps every song's autosaves in one Backup folder, so it was listed again for each FL song: now the first song to
+/// ask lists it, and the songs measured with it use that list. Each autosave's size and time are read when a song asks,
+/// so they're as they are then (FL Studio writes its autosave again every few minutes), and one gone since isn't
+/// counted; one made since waits for the next measure. Make one for each measure of every song.
+#[derive(Default)]
+pub struct BackupFolders {
+    listed: Mutex<HashMap<String, Arc<OnceLock<Arc<FlAutosaves>>>>>,
+}
+
+/// One Backup folder's FL Studio autosaves (each one's path), by the name of the song each is of, as a [`case::key`].
+type FlAutosaves = HashMap<String, Vec<PathBuf>>;
+
+impl BackupFolders {
+    /// The FL Studio autosaves in the Backup folder `dir`, listed now unless a song measured with this one has listed
+    /// it already (one asking meanwhile waits for that list). The listing reads only the folder itself, never on
+    /// other threads, so waiting for it can't hold up the threads it would need.
+    fn autosaves(&self, dir: &Path) -> Arc<FlAutosaves> {
+        let cell = {
+            let mut listed = self.listed.lock().unwrap_or_else(PoisonError::into_inner);
+            Arc::clone(listed.entry(key(&dir.to_string_lossy())).or_default())
+        };
+        Arc::clone(cell.get_or_init(|| Arc::new(list_fl_autosaves(dir))))
+    }
+}
+
+/// The FL Studio autosaves in a Backup folder: "Song (autosave).flp" and "Song (overwritten at 2213h05).flp", by the
+/// name of the song ("Song"). Nothing for a folder that can't be read.
+fn list_fl_autosaves(dir: &Path) -> FlAutosaves {
+    let mut by_song = FlAutosaves::new();
+    let Ok(entries) = fs::read_dir(dir) else { return by_song };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !case::eq_ignore_case(extension(&name), ".flp") || !e.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        let song = case::key(stem(&name));
+        let cut = song.find(" (AUTOSAVE)").or_else(|| song.find(" (OVERWRITTEN AT "));
+        let Some(of) = cut.filter(|&c| c > 0).and_then(|c| song.get(..c)) else { continue };
+        by_song.entry(of.to_owned()).or_default().push(e.path());
+    }
+    by_song
 }
 
 /// Measures a song: its saves, the DAW's autosaves of it, and (when the song has a folder to itself) everything in that
@@ -178,7 +245,10 @@ pub fn measure(
     let Some(newest) = newest(saves) else { return Ok(SongSpaceReport::default()) };
     let folder = parent(&newest.path);
     let save_keys: HashSet<String> = saves.iter().map(|s| key(&s.path)).collect();
-    let own = owns_folder(&folder, &save_keys, roots, stop)?;
+    // One walk of the folder says both whether it's the song's own and what's in it (the whole-app review of 6 Nov,
+    // X2-1: it was walked twice).
+    let own_files = own_folder_files(&folder, &save_keys, roots, stop)?;
+    let own = own_files.is_some();
 
     let mut report = SongSpaceReport { own_folder: own, folder: folder.clone(), ..SongSpaceReport::default() };
     let mut backups: Vec<(String, u64, NaiveDateTime)> = Vec::new();
@@ -188,10 +258,10 @@ pub fn measure(
     let used_full: HashSet<String> = used_audio.iter().map(|u| key(u)).collect();
     let used_names: HashSet<String> = used_audio.iter().map(|u| case::key(file_name(u))).collect();
 
-    if own {
+    if let Some(files) = own_files {
         let dir = Path::new(&folder);
         let studio_one = has_studio_one_song(dir);
-        for f in size::files(dir, stop)? {
+        for f in files {
             let path = f.path.to_string_lossy().into_owned();
             let path_key = key(&path);
             seen.insert(path_key.clone());
@@ -244,7 +314,9 @@ pub fn measure(
     }
 
     // FL Studio keeps its autosaves in one Backup folder for all songs (Projects\Backup), named after the song.
-    for b in fl_backups(saves, roots, elsewhere.map(|e| e.shared_names)) {
+    let alone = BackupFolders::default();
+    let backup_folders = elsewhere.map_or(&alone, |e| e.backup_folders);
+    for b in fl_backups(saves, roots, elsewhere.map(|e| e.shared_names), backup_folders) {
         if seen.insert(key(&b.0)) {
             add(&mut report.backups, b.1);
             backups.push(b);
@@ -256,7 +328,7 @@ pub fn measure(
     }
     let thinned = thin(saves, settings.sitting_hours);
     let thinned_keys: HashSet<String> = thinned.iter().map(|s| key(&s.path)).collect();
-    let same = same_saves(saves, newest, &thinned_keys, stop)?;
+    let same = same_saves(saves, newest, &thinned_keys, elsewhere.map_or(Compare::Afresh, |e| e.compare), stop)?;
     // Neither a copy nor the save it's a copy of is thinned: removing both would lose what they held (the last save
     // of a sitting, kept as a later identical save).
     let copies: HashSet<String> =
@@ -366,39 +438,60 @@ pub fn thin(saves: &[SongSave], sitting_hours: u32) -> Vec<&SongSave> {
         .collect()
 }
 
-/// Whether the folder is the song's own: none of your project folders, and every project file in it, or in a folder in
-/// it, is one of the song's saves (autosave folders aside). Bitwig and Studio One give each song a folder; FL Studio
-/// songs often share one, and another song kept in a folder inside this one has its own autosaves there.
-pub fn owns_folder(
+/// What takes room in `folder` and the folders in it, when the folder is the song's own; `None` when it isn't. It's the
+/// song's own when it's none of your project folders and every project file in it, or in a folder in it, is one of the
+/// song's saves (`save_keys`) or an autosave its DAW made, OneDrive's online-only ones too (another song's save that's
+/// only online takes no room here, but it's still there). Bitwig and Studio One give each song a folder; FL Studio
+/// songs often share one, and another song kept in a folder inside this one has its own autosaves there. Only the
+/// DAW's own autosaves don't count: a project of yours in a "Backups" folder (an old version, or another song) may use
+/// audio here that this song's saves don't. A link to another place isn't walked (it can't be shown to hold only the
+/// song's saves), nor a folder that can't be read.
+///
+/// The walk stops at the first project file that isn't the song's, so a folder of many songs isn't walked to its end
+/// for each of them, and what the walk meets after that file isn't kept.
+fn own_folder_files(
     folder: &str,
     save_keys: &HashSet<String>,
     roots: &[String],
     stop: &AtomicBool,
-) -> Result<bool, Stopped> {
-    // A link to another place isn't walked, so it can't be shown to hold only the song's saves; nor can a folder that
-    // can't be read.
+) -> Result<Option<Vec<FileEntry>>, Stopped> {
     let real_folder = fs::symlink_metadata(folder).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
     if folder.is_empty() || !real_folder || fs::read_dir(folder).is_err() {
-        return Ok(false);
+        return Ok(None);
     }
     // A project folder, or one holding it.
     if roots.iter().any(|r| is_inside(r, folder)) {
-        return Ok(false);
+        return Ok(None);
     }
-    // Every file, OneDrive's online-only ones too: another song's save takes no room here, but it's still there.
     let dir = Path::new(folder);
-    let others = size::walk(dir, true, stop, |path, _| {
-        let p = path.to_string_lossy();
-        if !is_project_file(&p) || save_keys.contains(&key(&p)) {
+    // Ends the walk: set by the first project file that isn't the song's, or by `stop`.
+    let enough = AtomicBool::new(false);
+    let files = size::walk(dir, true, &enough, |path, meta| {
+        // The walk looks at its stop between batches of files: the rest of a batch is let go.
+        if stop.load(Ordering::Relaxed) || enough.load(Ordering::Relaxed) {
+            enough.store(true, Ordering::Relaxed);
             return None;
         }
-        // Only the DAW's own autosaves don't count: a project of yours in a "Backups" folder (an old version, or
-        // another song) may use audio here that this song's saves don't.
-        let rel = relative_parts(dir, path);
-        let autosave = rel.split_last().is_some_and(|(name, folders)| is_daws_autosave(folders, name));
-        (!autosave).then_some(())
-    })?;
-    Ok(others.is_empty())
+        let p = path.to_string_lossy();
+        if is_project_file(&p) && !save_keys.contains(&key(&p)) {
+            let rel = relative_parts(dir, path);
+            if !rel.split_last().is_some_and(|(name, folders)| is_daws_autosave(folders, name)) {
+                enough.store(true, Ordering::Relaxed);
+                return None;
+            }
+        }
+        // What takes room here: a OneDrive file that's only online takes none.
+        (!size::is_online_only(meta)).then(|| FileEntry {
+            path: path.to_path_buf(),
+            size: meta.len(),
+            modified: size::modified_of(meta),
+        })
+    });
+    if stop.load(Ordering::Relaxed) {
+        return Err(Stopped);
+    }
+    // Ended early (not by `stop`): another project file is in it.
+    Ok(files.ok().filter(|_| !enough.load(Ordering::Relaxed)))
 }
 
 /// Whether a project file in the song's folder (in `folders` below it, called `name`) is one its DAW made by itself,
@@ -415,13 +508,16 @@ pub(crate) fn is_daws_autosave(folders: &[String], name: &str) -> bool {
 
 /// FL Studio's autosaves of the song: "Song (autosave).flp" and "Song (overwritten at 2213h05).flp" in a Backup folder
 /// beside the song or in a folder above it, up to your project folder. Names another song has too (`shared`) are left
-/// out: the autosaves could be that song's.
+/// out: the autosaves could be that song's. Each Backup folder is listed once for the songs measured together
+/// (`folders`).
 fn fl_backups(
     saves: &[SongSave],
     roots: &[String],
     shared: Option<&HashSet<String>>,
+    folders: &BackupFolders,
 ) -> Vec<(String, u64, NaiveDateTime)> {
-    let stems: HashSet<String> = saves
+    // In name order, so the autosaves come in the same order every time.
+    let stems: std::collections::BTreeSet<String> = saves
         .iter()
         .filter(|s| case::eq_ignore_case(extension(file_name(&s.path)), ".flp"))
         .map(|s| case::key(stem(&s.path.replace('\\', "/"))))
@@ -457,19 +553,12 @@ fn fl_backups(
     }
     let mut found = Vec::new();
     for b in backup_dirs {
-        let Ok(entries) = fs::read_dir(&b) else { continue };
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if !case::eq_ignore_case(extension(&name), ".flp") || !e.file_type().is_ok_and(|t| t.is_file()) {
-                continue;
-            }
-            let Ok(meta) = e.metadata() else { continue };
-            let song = case::key(stem(&name));
-            let cut = song.find(" (AUTOSAVE)").or_else(|| song.find(" (OVERWRITTEN AT "));
-            if let Some(cut) = cut.filter(|&c| c > 0)
-                && song.get(..cut).is_some_and(|s| stems.contains(s))
-            {
-                found.push((e.path().to_string_lossy().into_owned(), meta.len(), size::modified_of(&meta)));
+        let listed = folders.autosaves(&b);
+        for path in stems.iter().flat_map(|s| listed.get(s).into_iter().flatten()) {
+            // As it is now: the folder may have been listed a while ago, for another song.
+            let Ok(meta) = fs::symlink_metadata(path) else { continue };
+            if meta.is_file() {
+                found.push((path.to_string_lossy().into_owned(), meta.len(), size::modified_of(&meta)));
             }
         }
     }
@@ -480,11 +569,13 @@ fn fl_backups(
 /// the song's newest save stays when it's one of them, so the save you'd open is never on the list; otherwise the one
 /// thinning would keep (`thinned` are the ones it wouldn't: the last save of a sitting, or the first), so a later
 /// Compact can't thin the copy that's left (the newest of those, or of the set when thinning keeps none). The C# app
-/// always kept the newest. Only files of the same size are read, to compare them, each once and at the same time.
+/// always kept the newest. Only files of the same size are read, to compare them, each once and at the same time, as
+/// `compare` says ([`Compare`]).
 fn same_saves(
     saves: &[SongSave],
     newest: &SongSave,
     thinned: &HashSet<String>,
+    compare: Compare<'_>,
     stop: &AtomicBool,
 ) -> Result<Vec<CompactItem>, Stopped> {
     // By folder and size, in the order the saves come. Links aren't compared (a link to the save beside it would be
@@ -507,7 +598,11 @@ fn same_saves(
         if stop.load(Ordering::Relaxed) {
             return Err(Stopped);
         }
-        let hashes: Vec<Option<[u8; 32]>> = set.par_iter().map(|s| size::file_hash(Path::new(&s.path), stop)).collect();
+        let hashes: Vec<Option<[u8; 32]>> = match compare {
+            Compare::Afresh => set.par_iter().map(|s| size::file_hash(Path::new(&s.path), stop)).collect(),
+            Compare::Remembered(prints) => fingerprints(&set, prints, stop).into_iter().map(|p| Some(p?.0)).collect(),
+            Compare::Confirmed(prints) => confirmed(&set, prints, fingerprints(&set, prints, stop), stop),
+        };
         if stop.load(Ordering::Relaxed) {
             return Err(Stopped);
         }
@@ -541,6 +636,59 @@ fn same_saves(
         }
     }
     Ok(items)
+}
+
+/// The whole fingerprint of each save of `set` (all the same size) whose first and last bytes are the same as another's
+/// there, and whether it was read just now rather than kept from before; `None` for the others, which can't be a copy
+/// of any (and for one that can't be read). Both prints come from `prints` while a save's size and time are as they
+/// were when it was read, so an unchanged save isn't read again: each look and each backup plan used to read every one
+/// of them whole (the whole-app review of 6 Nov, E1-5). The ends come first because saves of the same size mostly
+/// differ in them, and then neither is read whole; a copy's are read as well as its whole the first time it's
+/// measured (at most 128 KB more), and not again while it's unchanged.
+fn fingerprints(set: &[&SongSave], prints: &Prints, stop: &AtomicBool) -> Vec<Option<([u8; 32], bool)>> {
+    let ends: Vec<Option<[u8; 32]>> = set.par_iter().map(|s| prints.ends(Path::new(&s.path), stop)).collect();
+    let shared = more_than_one(ends.iter().flatten());
+    set.par_iter()
+        .zip(&ends)
+        .map(|(s, end)| {
+            let end = end.as_ref()?;
+            if shared.contains(end) { prints.whole_and_if_read(Path::new(&s.path), stop) } else { None }
+        })
+        .collect()
+}
+
+/// `found` (one print for each save of `set`, from [`fingerprints`]) once every print that says a save is the same as
+/// another was read just now ([`Compare::Confirmed`]): one kept from before is read again from the save, and `prints`
+/// keeps what it reads. Again until none is left, as a print read again can be the same as another one kept from
+/// before (that save changed too).
+fn confirmed(
+    set: &[&SongSave],
+    prints: &Prints,
+    mut found: Vec<Option<([u8; 32], bool)>>,
+    stop: &AtomicBool,
+) -> Vec<Option<[u8; 32]>> {
+    // Each round reads at least one print that wasn't read just now, so it ends.
+    while !stop.load(Ordering::Relaxed) {
+        let shared = more_than_one(found.iter().flatten().map(|(print, _)| print));
+        let again: Vec<usize> = (0..found.len())
+            .filter(|&i| found[i].is_some_and(|(print, read_now)| !read_now && shared.contains(&print)))
+            .collect();
+        if again.is_empty() {
+            break;
+        }
+        let read: Vec<Option<[u8; 32]>> =
+            again.par_iter().map(|&i| prints.whole_afresh(Path::new(&set[i].path), stop)).collect();
+        for (i, print) in again.into_iter().zip(read) {
+            found[i] = print.map(|print| (print, true));
+        }
+    }
+    found.into_iter().map(|p| Some(p?.0)).collect()
+}
+
+/// The prints that more than one of `prints` has.
+fn more_than_one<'a>(prints: impl Iterator<Item = &'a [u8; 32]>) -> HashSet<[u8; 32]> {
+    let mut seen: HashSet<[u8; 32]> = HashSet::new();
+    prints.filter(|p| !seen.insert(**p)).copied().collect()
 }
 
 fn newest_of<'a>(saves: &[&'a SongSave]) -> Option<&'a SongSave> {

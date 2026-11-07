@@ -21,10 +21,12 @@ use mo_app::backup::{
 use mo_app::backup_gone::{self, Warning};
 use mo_app::backup_older::{self, KeptState};
 use mo_app::log;
+use mo_app::song_room::{self, BACKUP_PRINTS};
 use mo_backup::folders::Mode;
 use mo_backup::gone::Holdings;
 use mo_backup::older::{self, Kept, Run};
 use mo_library::Library;
+use mo_space::prints::Prints;
 use slint::{ComponentHandle, ModelRc, SharedString, VecModel, Weak};
 
 use crate::{AppWindow, BackupData, BackupFolderLine, GoneLine, LeftOutLine, MenuItem};
@@ -170,21 +172,35 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
     let weak = app.as_weak();
     // What the backup holds as last read, so each look only reads again what changed on the drive.
     let mut holdings = Holdings::default();
+    // The fingerprints of the songs' saves the last plans read, so a plan doesn't read an unchanged save again to find
+    // its copies (the whole-app review of 6 Nov, E1-5): kept here between plans and in their store between starts,
+    // taken from it by the first plan. After a plan that broke they're forgotten, in case what was kept is why.
+    let mut prints: Option<Prints> = None;
     let planner = Newest::start("Backup plan", move |(asked, settings, library, stop): Job| {
         let room = settings.drive.as_ref().and_then(|d| {
             mo_space::app_files::drive_space(d).map(|r| (d.clone(), DriveRoom { free: r.free, total: r.total }))
         });
+        let store = mo_app::paths::data_dir().join(BACKUP_PRINTS);
+        let mut broke = false;
         // Nothing to walk yet: only the drive's room is wanted.
         let result = (!settings.folders.is_empty()).then(|| {
-            // A plan that breaks says so on the page, instead of "Working out what goes…" for good.
-            background::guarded(|| {
+            // A plan that breaks says so on the page, instead of "Working out what goes…" for good; so does one whose
+            // store of prints breaks as it's opened.
+            let planned = background::guarded(|| {
+                let prints: &Prints = prints.get_or_insert_with(|| song_room::prints_in(&store, "Backup"));
                 background::on_bulk_pool(|| {
                     let lib = Library::open_read_only(&library).map_err(|e| e.to_string())?;
-                    backup::prepare(&lib, &settings, &stop).map(Arc::new)
+                    backup::prepare(&lib, &settings, Some(prints), &stop).map(Arc::new)
                 })
-            })
-            .and_then(|plan| plan)
+            });
+            broke = planned.is_err();
+            planned.and_then(|plan| plan)
         });
+        if broke {
+            // Let go of the store first, so it can be removed.
+            prints = None;
+            mo_space::prints::forget(&store);
+        }
         let ready = match &result {
             Some(Ok(p)) => Some(Arc::clone(p)),
             _ => None,

@@ -1,6 +1,8 @@
 //! Fingerprints of the Bitwig multisamples Space has read, kept between runs in `bitwig-prints.db` (the app's own, in
 //! its data folder), so a look for Bitwig copies after a restart doesn't read every same-size multisample again (on
-//! Solomon's PC, the first look after each start read hundreds of gigabytes and froze the window for a second).
+//! Solomon's PC, the first look after each start read hundreds of gigabytes and froze the window for a second). The
+//! Space page's look at your songs and the backup plan keep the prints of song saves the same way, each in a store of
+//! its own, to find the saves that are copies of another ([`crate::song`]).
 //!
 //! Each file is kept with its size and last-written time (to the nanosecond), and used again only while both are as
 //! they were. Two prints are kept: one of the file's first and last 64 KB (its "ends"), read first, and one of the
@@ -72,6 +74,9 @@ struct State {
     asked: HashSet<PathBuf>,
     /// The files read since the last [`Prints::keep`], to write to the store.
     read: HashSet<PathBuf>,
+    /// The files whose whole print was read since the last [`Prints::keep`] (a read of the whole file, or of a small
+    /// file's ends, which are the whole of it), so it's of them as they are now.
+    whole_read: HashSet<PathBuf>,
 }
 
 impl Prints {
@@ -106,48 +111,78 @@ impl Prints {
     /// The print of a file's first and last [`END_BYTES`] (the whole file when it's no longer than both): kept, or
     /// read now. `None` when it can't be read (Bitwig may have it open: it's tried again next time), or when stopped.
     pub fn ends(&self, path: &Path, stop: &AtomicBool) -> Option<[u8; 32]> {
-        self.of(path, Kind::Ends, stop)
+        self.of(path, Kind::Ends, false, stop).map(|(print, _)| print)
     }
 
     /// The print of the whole file: kept, or read now. As [`Prints::ends`].
     pub fn whole(&self, path: &Path, stop: &AtomicBool) -> Option<[u8; 32]> {
-        self.of(path, Kind::Whole, stop)
+        self.of(path, Kind::Whole, false, stop).map(|(print, _)| print)
     }
 
-    fn of(&self, path: &Path, kind: Kind, stop: &AtomicBool) -> Option<[u8; 32]> {
+    /// As [`Prints::whole`], and whether the whole file was read since the last [`Prints::keep`], so the print is of
+    /// it as it is now, rather than known from before by its size and time alone. A read of its ends alone doesn't
+    /// count: the whole print kept with them can be older.
+    pub fn whole_and_if_read(&self, path: &Path, stop: &AtomicBool) -> Option<([u8; 32], bool)> {
+        self.of(path, Kind::Whole, false, stop)
+    }
+
+    /// The print of the whole file read now, whatever is kept, and kept in place of the one before: for a print that's
+    /// about to be acted on (the backup leaves a copy out on its word). One that isn't the print kept means the file
+    /// was written again keeping its size and time, so the ends kept with that print go too.
+    pub fn whole_afresh(&self, path: &Path, stop: &AtomicBool) -> Option<[u8; 32]> {
+        self.of(path, Kind::Whole, true, stop).map(|(print, _)| print)
+    }
+
+    /// The print of `kind`, and whether the whole file was read since the last [`Prints::keep`]: kept while the file's
+    /// size and time are as they were (unless `afresh`), or read now.
+    fn of(&self, path: &Path, kind: Kind, afresh: bool, stop: &AtomicBool) -> Option<([u8; 32], bool)> {
         let meta = fs::metadata(path).ok()?;
         let (len, modified) = (meta.len(), meta.modified().ok());
-        let kept = {
+        let (kept, whole_read) = {
             let mut s = self.state.lock().ok()?;
             s.asked.insert(path.to_path_buf());
-            s.known.get(path).copied()
+            (s.known.get(path).copied(), s.whole_read.contains(path))
         };
         let same = kept.filter(|k| Some(k.modified) == modified && k.len == len);
-        let print = match (same, kind) {
-            (Some(Known { ends: Some(p), .. }), Kind::Ends) | (Some(Known { whole: Some(p), .. }), Kind::Whole) => {
-                return Some(p);
+        match (same, kind) {
+            (Some(Known { ends: Some(p), .. }), Kind::Ends) | (Some(Known { whole: Some(p), .. }), Kind::Whole)
+                if !afresh =>
+            {
+                return Some((p, whole_read));
             }
-            _ => match kind {
-                Kind::Ends => ends_hash(path, stop)?,
-                Kind::Whole => file_hash(path, stop)?,
-            },
+            _ => {}
+        }
+        let print = match kind {
+            Kind::Ends => ends_hash(path, stop)?,
+            Kind::Whole => file_hash(path, stop)?,
         };
-        // A file without a time can't be checked next time: its print is used now and read again then.
-        let Some(modified) = modified else { return Some(print) };
-        // Changed between the look above and the read: it's kept with the older size and time, so it's read again.
-        let mut known = same.unwrap_or(Known { len, modified, ends: None, whole: None });
         // A file no longer than both ends is read whole either way: its two prints are the same.
         let small = len <= 2 * END_BYTES;
+        let whole_now = kind == Kind::Whole || small;
+        // A file without a time can't be checked next time: its print is used now and read again then.
+        let Some(modified) = modified else { return Some((print, whole_now)) };
+        // Changed between the look above and the read: it's kept with the older size and time, so it's read again.
+        let mut known = same.unwrap_or(Known { len, modified, ends: None, whole: None });
+        let unchanged = afresh && known.whole == Some(print);
+        if afresh && known.whole.is_some_and(|w| w != print) {
+            known.ends = None;
+        }
         if kind == Kind::Ends || small {
             known.ends = Some(print);
         }
-        if kind == Kind::Whole || small {
+        if whole_now {
             known.whole = Some(print);
         }
         let mut s = self.state.lock().ok()?;
         s.known.insert(path.to_path_buf(), known);
-        s.read.insert(path.to_path_buf());
-        Some(print)
+        // Read again and the same as kept: nothing new for the store.
+        if !unchanged {
+            s.read.insert(path.to_path_buf());
+        }
+        if whole_now {
+            s.whole_read.insert(path.to_path_buf());
+        }
+        Some((print, whole_now || whole_read))
     }
 
     /// Writes the prints read since the last time to the store. After a whole look (`whole_look`), the files it didn't
@@ -159,6 +194,7 @@ impl Prints {
             let s = &mut *s;
             let read: Vec<(PathBuf, Known)> =
                 s.read.drain().filter_map(|p| s.known.get(&p).copied().map(|k| (p, k))).collect();
+            s.whole_read.clear();
             // Only a whole look uses (and starts again) the files asked about: one kept part way through, or stopped,
             // leaves them for the whole look's end, so what it asked about before then isn't forgotten.
             let asked = if whole_look { std::mem::take(&mut s.asked) } else { HashSet::new() };
@@ -237,7 +273,7 @@ fn open(path: &Path) -> Result<Connection, String> {
     let conn = match Connection::open(path).and_then(|c| check_id(&c).map(|ours| (c, ours))) {
         Ok((conn, true)) => conn,
         Ok((_, false)) => {
-            return Err(format!("{} isn't the app's Bitwig prints store, so it's left as it is", path.display()));
+            return Err(format!("{} isn't one of the app's prints stores, so it's left as it is", path.display()));
         }
         // Not a database at all (damaged where SQLite keeps its header): only what was read before, made again.
         Err(e) if is_damage(&e) => {
@@ -448,6 +484,60 @@ mod tests {
         let first = prints.whole(&a, &stop);
         fs::write(&a, b"two!").expect("write");
         assert_ne!(prints.whole(&a, &stop), first);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_print_says_whether_the_whole_file_was_read_since_the_last_keep() {
+        let dir = folder("read-now");
+        let stop = AtomicBool::new(false);
+        let a = dir.join("a.flp");
+        fs::write(&a, b"one").expect("write");
+        let prints = Prints::default();
+        let (print, read) = prints.whole_and_if_read(&a, &stop).expect("read");
+        assert!(read, "read now");
+        assert_eq!(prints.whole_and_if_read(&a, &stop), Some((print, true)), "still the read of this look");
+        prints.keep(false).expect("kept");
+        assert_eq!(prints.whole_and_if_read(&a, &stop), Some((print, false)), "known from before by its size and time");
+        // A big file whose ends are read now, with a whole print kept from before: that print is still the old one.
+        let big = dir.join("big.flp");
+        fs::write(&big, vec![7u8; 3 * END_BYTES as usize]).expect("write");
+        let whole = prints.whole(&big, &stop).expect("read");
+        prints.keep(false).expect("kept");
+        assert!(prints.ends(&big, &stop).is_some());
+        assert_eq!(prints.whole_and_if_read(&big, &stop), Some((whole, false)), "only its ends were read");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_whole_print_read_afresh_takes_the_kept_ones_place() {
+        let dir = folder("afresh");
+        let stop = AtomicBool::new(false);
+        let a = dir.join("a.flp");
+        // In its first 64 KB and in its middle, so both prints change.
+        let body = |fill: u8| {
+            let mut b = vec![1u8; 3 * END_BYTES as usize];
+            b[0] = fill;
+            b[END_BYTES as usize + 10] = fill;
+            b
+        };
+        fs::write(&a, body(5)).expect("write");
+        let prints = Prints::default();
+        let first = prints.whole(&a, &stop).expect("read");
+        let ends = prints.ends(&a, &stop).expect("read");
+        prints.keep(false).expect("kept");
+        // Written again keeping its size and time: the kept print stands until it's read afresh.
+        let when = fs::metadata(&a).and_then(|m| m.modified()).expect("time");
+        fs::write(&a, body(6)).expect("write");
+        fs::File::options().write(true).open(&a).and_then(|f| f.set_modified(when)).expect("time");
+        assert_eq!(prints.whole(&a, &stop), Some(first));
+        let again = prints.whole_afresh(&a, &stop).expect("read");
+        assert_ne!(again, first);
+        assert_eq!(prints.whole_and_if_read(&a, &stop), Some((again, true)), "kept in its place, read now");
+        // The ends kept with the old print went with it: they're read again, not the ones from before.
+        assert_ne!(prints.ends(&a, &stop), Some(ends));
+        assert_eq!(prints.ends(&a, &stop), ends_hash(&a, &stop));
+        assert!(prints.state.lock().expect("state").read.contains(&a), "the new print goes to the store");
         let _ = fs::remove_dir_all(&dir);
     }
 

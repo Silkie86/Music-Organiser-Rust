@@ -9,8 +9,9 @@ use std::sync::atomic::AtomicBool;
 use mo_app::backup::{Format, Settings, prepare, run};
 use mo_backup::folders::{Folder, Mode};
 use mo_backup::pack::SONGS;
-use mo_backup::plan::Level;
+use mo_backup::plan::{LeftOut, Level};
 use mo_library::Library;
+use mo_space::prints::Prints;
 use rusqlite::Connection;
 
 fn fixtures(name: &str) -> PathBuf {
@@ -73,7 +74,7 @@ fn a_song_goes_with_the_sample_it_uses_from_outside_the_folders() {
         ],
         ..Settings::default()
     };
-    let prepared = prepare(&lib, &settings, &stop).unwrap();
+    let prepared = prepare(&lib, &settings, None, &stop).unwrap();
     let going: Vec<&Path> = prepared.plan.copy.iter().map(|f| f.path.as_path()).collect();
     assert!(going.contains(&kick.as_path()), "the sample the song uses goes, though its folder isn't on the list");
     assert!(going.contains(&save1.as_path()) && going.contains(&save2.as_path()));
@@ -110,6 +111,40 @@ fn a_song_goes_with_the_sample_it_uses_from_outside_the_folders() {
 }
 
 #[test]
+fn a_save_the_kept_prints_call_a_copy_is_read_again_before_the_plan_leaves_it_out() {
+    // The plan leaves a save that's the same as another out of the backup. Its kept print is only as good as the
+    // save's size and time, which a save written again can keep (a tool that puts the time back).
+    let root = fixtures("backup-screen-same-save");
+    let music = root.join("music");
+    let save1 = music.join("Song").join("Song.flp");
+    let save2 = music.join("Song").join("Song_2.flp");
+    let kick = root.join("elsewhere").join("Kick.wav");
+    write(&save1, b"same!");
+    write(&save2, b"same!");
+    write(&kick, b"kick");
+    let backup = root.join("backup");
+    fs::create_dir_all(&backup).unwrap();
+    let lib = library(&root, &save1, &save2, &kick);
+    let stop = AtomicBool::new(false);
+    let settings = Settings {
+        drive: Some(backup),
+        folders: vec![Folder { path: music.clone(), mode: Mode::Slimmed }],
+        ..Settings::default()
+    };
+    let prints = Prints::default();
+    let left_out = || -> Vec<(PathBuf, LeftOut)> {
+        let prepared = prepare(&lib, &settings, Some(&prints), &stop).unwrap();
+        prepared.plan.left_out.into_iter().map(|s| (s.file.path, s.why)).collect()
+    };
+    // The older of the two is the copy: the save the song opens stays.
+    assert_eq!(left_out(), [(save1.clone(), LeftOut::SameSave)]);
+    let when = fs::metadata(&save1).unwrap().modified().unwrap();
+    write(&save1, b"diff!");
+    fs::File::options().write(true).open(&save1).unwrap().set_modified(when).unwrap();
+    assert!(left_out().is_empty(), "read again, it isn't a copy any more: it goes");
+}
+
+#[test]
 fn a_song_whose_zip_cant_be_made_still_goes_as_plain_folders() {
     // Review 2026-11-03: when a song's zip failed (a save renamed after the plan was made), none of its files went.
     let root = fixtures("backup-screen-unzipped");
@@ -130,7 +165,7 @@ fn a_song_whose_zip_cant_be_made_still_goes_as_plain_folders() {
         format: Format::Zips,
         ..Settings::default()
     };
-    let prepared = prepare(&lib, &settings, &stop).unwrap();
+    let prepared = prepare(&lib, &settings, None, &stop).unwrap();
     fs::rename(&save1, music.join("Song").join("Song old.flp")).unwrap();
 
     let ran = run(&prepared, &settings, &stop, &|_| {});
@@ -177,7 +212,7 @@ fn a_sample_named_through_a_link_goes_once_from_where_it_really_is() {
         ],
         ..Settings::default()
     };
-    let prepared = prepare(&lib, &settings, &AtomicBool::new(false)).unwrap();
+    let prepared = prepare(&lib, &settings, None, &AtomicBool::new(false)).unwrap();
     let kicks: Vec<&Path> =
         prepared.plan.copy.iter().map(|f| f.path.as_path()).filter(|p| p.ends_with("Kick.wav")).collect();
     assert_eq!(kicks, vec![moved.join("Kick.wav").as_path()]);
@@ -230,7 +265,7 @@ fn a_sample_named_where_it_really_is_matches_a_listed_link() {
         ],
         ..Settings::default()
     };
-    let prepared = prepare(&lib, &settings, &AtomicBool::new(false)).unwrap();
+    let prepared = prepare(&lib, &settings, None, &AtomicBool::new(false)).unwrap();
     let kicks: Vec<&Path> =
         prepared.plan.copy.iter().map(|f| f.path.as_path()).filter(|p| p.ends_with("Kick.wav")).collect();
     assert_eq!(kicks.len(), 1, "{kicks:?}");
@@ -284,7 +319,7 @@ fn backed_up(lib: &Library, root: &Path, music: &Path, level: Level) -> Vec<Path
         folders: vec![Folder { path: music.to_owned(), mode: Mode::Slimmed }],
         ..Settings::default()
     };
-    prepare(lib, &settings, &AtomicBool::new(false)).unwrap().plan.copy.into_iter().map(|f| f.path).collect()
+    prepare(lib, &settings, None, &AtomicBool::new(false)).unwrap().plan.copy.into_iter().map(|f| f.path).collect()
 }
 
 #[test]
