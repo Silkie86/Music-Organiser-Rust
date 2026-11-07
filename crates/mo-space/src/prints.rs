@@ -514,9 +514,11 @@ mod tests {
         let dir = folder("afresh");
         let stop = AtomicBool::new(false);
         let a = dir.join("a.flp");
-        let body = |middle: u8| {
+        // In its first 64 KB and in its middle, so both prints change.
+        let body = |fill: u8| {
             let mut b = vec![1u8; 3 * END_BYTES as usize];
-            b[END_BYTES as usize + 10] = middle;
+            b[0] = fill;
+            b[END_BYTES as usize + 10] = fill;
             b
         };
         fs::write(&a, body(5)).expect("write");
@@ -532,8 +534,9 @@ mod tests {
         let again = prints.whole_afresh(&a, &stop).expect("read");
         assert_ne!(again, first);
         assert_eq!(prints.whole_and_if_read(&a, &stop), Some((again, true)), "kept in its place, read now");
-        // Its ends were the same, but they were dropped with the old print and read again.
-        assert_eq!(prints.ends(&a, &stop), Some(ends));
+        // The ends kept with the old print went with it: they're read again, not the ones from before.
+        assert_ne!(prints.ends(&a, &stop), Some(ends));
+        assert_eq!(prints.ends(&a, &stop), ends_hash(&a, &stop));
         assert!(prints.state.lock().expect("state").read.contains(&a), "the new print goes to the store");
         let _ = fs::remove_dir_all(&dir);
     }

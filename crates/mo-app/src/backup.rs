@@ -457,8 +457,7 @@ pub fn prepare(
         keep_backups: if settings.level == Level::Essentials { 0 } else { DEFAULT_KEEP_BACKUPS },
         ..CompactSettings::default()
     };
-    // A save the kept prints call a copy is read again before the plan leaves it out of the backup.
-    let compare = prints.map_or(Compare::Afresh, Compare::Confirmed);
+    let compare = compare_for(settings.level, prints);
     // Only songs with a save in the folders are this backup's (a song there only as a copy, too).
     let songs: Vec<_> = all_songs
         .into_iter()
@@ -1190,9 +1189,30 @@ pub fn when_text(when: NaiveDateTime, now: NaiveDateTime) -> String {
     }
 }
 
+/// How the plan finds the saves that are copies of another: only Slim leaves a copy out of the backup, so only Slim
+/// reads again each save the kept prints call a copy before leaving it out. Full keeps every save, and Essentials leaves
+/// out every save that isn't a milestone whatever it copies, so they go by the kept prints and read nothing again (the
+/// prints are still kept up to date for Slim).
+fn compare_for(level: Level, prints: Option<&Prints>) -> Compare<'_> {
+    match prints {
+        Some(prints) if level == Level::Slim => Compare::Confirmed(prints),
+        Some(prints) => Compare::Remembered(prints),
+        None => Compare::Afresh,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_slim_reads_a_copy_again_before_leaving_it_out() {
+        let prints = Prints::default();
+        assert!(matches!(compare_for(Level::Slim, Some(&prints)), Compare::Confirmed(_)));
+        assert!(matches!(compare_for(Level::Full, Some(&prints)), Compare::Remembered(_)));
+        assert!(matches!(compare_for(Level::Essentials, Some(&prints)), Compare::Remembered(_)));
+        assert!(matches!(compare_for(Level::Slim, None), Compare::Afresh));
+    }
 
     #[test]
     fn only_the_temporary_names_write_whole_gives_are_its_parts() {
