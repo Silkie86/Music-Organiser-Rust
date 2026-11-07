@@ -253,9 +253,11 @@ fn read_asked(asks: &mpsc::Receiver<Ask>) {
 }
 
 /// The waveforms of the sounds with these ids in the library at `db`, opened for them alone (read-only, and closed
-/// again at once: nothing holds it open while it's laid out anew or made again).
+/// again at once: nothing holds it open while it's laid out anew or made again). The read waits its turn with the
+/// app's other reads of the library, before it opens it: a long one (the page's fingerprints) lets it in between rows
+/// (review finding B-4).
 pub(super) fn read(db: &Path, ids: &[i64]) -> Result<Vec<(i64, Peaks)>, String> {
-    SoundsDb::open_read_only(db).and_then(|db| db.waves(ids)).map_err(|e| e.to_string())
+    SoundsDb::read_once(db, |db| db.waves(ids)).map_err(|e| e.to_string())
 }
 
 /// What was read for the sounds `asked` is back: the page shows their waveforms. When the read failed, it asks again

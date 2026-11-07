@@ -1379,10 +1379,7 @@ fn read_through_copy(
             // can't be read just now stays empty.
             let (source, played) = match made.as_ref().ok().and_then(|_| SoundsDb::open_read_only(&copy).ok()) {
                 Some(db) => (copy, db.history(HISTORY_LENGTH)),
-                None => (
-                    sounds_db.to_owned(),
-                    SoundsDb::open_read_only(sounds_db).and_then(|db| db.history(HISTORY_LENGTH)),
-                ),
+                None => (sounds_db.to_owned(), SoundsDb::read_once(sounds_db, |db| db.history(HISTORY_LENGTH))),
             };
             Ok(FirstRead {
                 sounds: everything.sounds,
