@@ -384,6 +384,20 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
     }
 }
 
+/// Runs one of the page's own actions, from its key or Ctrl+K (the whole-app review of 6 Nov, X3-21), as its buttons
+/// do: Back up now once what goes is worked out and nothing runs, Stop while something does. Whether it did anything,
+/// so an unused key goes on.
+pub fn run_action(app: &AppWindow, id: &str) -> bool {
+    let data = app.global::<BackupData>();
+    let idle = data.get_busy().is_empty();
+    match id {
+        "backup.now" if idle && !data.get_goes().is_empty() => data.invoke_run(),
+        "backup.stop" if !idle => data.invoke_stop(),
+        _ => return false,
+    }
+    true
+}
+
 /// The page is on show: the first time, its folders are walked to work out what goes, and the drive's older versions
 /// are read. They're read again each time it's shown after a read that failed (the drive may be plugged in now).
 pub fn shown() {

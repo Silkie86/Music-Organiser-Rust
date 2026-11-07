@@ -1955,6 +1955,39 @@ fn stop_audition_now(app: &AppWindow) {
     }
 }
 
+/// Esc on the page (`app.escape`, in the search box or anywhere else), the same order on every page, one step a press
+/// once nothing plays ([`stop_on_escape`]; the whole-app review of 6 Nov, X3-12): the search is cleared; else the
+/// picked line's card closes (a sound's, or a curve's on Curves). Says whether it did either (when not, the key goes
+/// on).
+pub fn escape(app: &AppWindow) -> bool {
+    let data = app.global::<PresetsData>();
+    if !data.get_search().is_empty() {
+        data.set_search(SharedString::new());
+        data.invoke_search_edited(SharedString::new());
+        return true;
+    }
+    let (section, sound, curve) = PAGE.with(|p| {
+        let p = p.borrow();
+        (p.section, p.picked.is_some(), p.curve_picked.is_some())
+    });
+    match section {
+        Section::Sounds if sound => pick(app, None),
+        Section::Curves if curve => pick_curve(app, None),
+        _ => return false,
+    }
+    true
+}
+
+/// Esc's first step (`app.escape`): the audition in Bitwig stops. Whether one was playing (only while its page is on
+/// show: it stops as the page goes, [`left`]).
+pub fn stop_on_escape(app: &AppWindow) -> bool {
+    let hearing = PAGE.with(|p| p.borrow().hearing.is_some());
+    if hearing {
+        stop_audition_now(app);
+    }
+    hearing
+}
+
 /// When another page comes to the front: the audition stops, so nothing plays in Bitwig that this page can't show (the
 /// 6 Nov review's X3-1).
 pub fn left(app: &AppWindow) {

@@ -40,8 +40,8 @@ use mo_app::activity::Feed;
 use mo_app::log;
 use mo_app::places::Place;
 use mo_app::shortcuts::{
-    APP_ACTIONS, Action, MIDI_ACTIONS, PLUGINS_ACTIONS, SONGS_ACTIONS, SOUNDS_ACTIONS, SPACE_ACTIONS, Shortcuts,
-    repeats, what_of,
+    APP_ACTIONS, Action, BACKUP_ACTIONS, MIDI_ACTIONS, PLUGINS_ACTIONS, SONGS_ACTIONS, SOUNDS_ACTIONS, SPACE_ACTIONS,
+    Shortcuts, list_keys, repeats, what_of,
 };
 use mo_app::themes::Look;
 use note::open_note;
@@ -102,78 +102,97 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     let weak = app.as_weak();
     let key_feed = feed.clone();
     app.on_key(move |text, ctrl, shift, alt, meta, repeat| {
-        let _doing = watchdog::doing("a key");
-        let key = key_name(&text, ctrl, shift, alt, meta);
-        // Settings › Shortcuts listening for a new key: this press is the key, not a shortcut.
-        if settings::listening()
-            && let Some(app) = weak.upgrade()
-        {
-            return repeat || settings::key_pressed(&app, &key);
-        }
-        // The keys as they are now: Settings may have changed one.
-        let Some(shortcuts) = KEYS.with(|k| k.borrow().clone()) else { return false };
-        if key == "F12" {
-            return weak.upgrade().is_some_and(|app| {
-                if !repeat {
-                    open_note(&app);
-                }
-                true
-            });
-        }
-        // A page's own key beats an app-wide one, when there's something for it to do; otherwise the key goes on.
-        if let Some(app) = weak.upgrade()
-            && app.get_place() == Place::Songs.index() as i32
-            && let Some(id) = shortcuts.page_action_for(&key, SONGS_ACTIONS)
-            && songs::has_pick()
-        {
-            return repeat || songs::run_action(&app, id);
-        }
-        if let Some(app) = weak.upgrade()
-            && app.get_place() == Place::Plugins.index() as i32
-            && let Some(id) = shortcuts.page_action_for(&key, PLUGINS_ACTIONS)
-            && plugins::has_pick()
-        {
-            return repeat || plugins::run_action(&app, id);
-        }
-        if let Some(app) = weak.upgrade()
-            && app.get_place() == Place::Presets.index() as i32
-            && let Some(id) = shortcuts.page_action_for(&key, presets::page_actions())
-            && (repeat || presets::run_action(&app, id))
-        {
-            return true;
-        }
-        if let Some(app) = weak.upgrade()
-            && app.get_place() == Place::Sounds.index() as i32
-            && let Some(id) = shortcuts.page_action_for(&key, SOUNDS_ACTIONS)
-            && (repeat || sounds::run_action(&app, id))
-        {
-            return true;
-        }
-        if let Some(app) = weak.upgrade()
-            && app.get_place() == Place::Midi.index() as i32
-            && let Some(id) = shortcuts.page_action_for(&key, MIDI_ACTIONS)
-            && (repeat || midi::run_action(&app, id))
-        {
-            return true;
-        }
-        if let Some(app) = weak.upgrade()
-            && app.get_place() == Place::Space.index() as i32
-            && let Some(id) = shortcuts.page_action_for(&key, SPACE_ACTIONS)
-            && (repeat || space::run_action(&app, id))
-        {
-            return true;
-        }
-        let Some(id) = shortcuts.action_for(&key) else { return false };
-        // A key held down did its job once (unless it's one that steps), and the page behind doesn't get it either.
-        if repeat && !repeats(id) {
-            return handles(id);
-        }
-        run(id, &weak, &key_feed)
+        key_pressed(&weak, &key_feed, &key_name(&text, ctrl, shift, alt, meta), repeat)
+    });
+    // The same keys from a search box, for the ones it would only use to move its cursor (Ctrl+Up and Ctrl+Down).
+    let weak = app.as_weak();
+    let key_feed = feed.clone();
+    app.global::<AppKeys>().on_key(move |text, ctrl, shift, alt, meta, repeat| {
+        key_pressed(&weak, &key_feed, &key_name(&text, ctrl, shift, alt, meta), repeat)
     });
 
     cards::connect(&app, &feed);
     note::connect(&app, &feed);
     Ok(app)
+}
+
+/// A key pressed on the window, or passed on by a search box (`AppKeys.key`), written as [`key_name`] writes it:
+/// Settings › Shortcuts listening for one, F12, then the page's own key, then an app-wide one. Whether it did anything,
+/// so an unused key goes on.
+fn key_pressed(weak: &Weak<AppWindow>, feed: &Feed, key: &str, repeat: bool) -> bool {
+    let _doing = watchdog::doing("a key");
+    // Settings › Shortcuts listening for a new key: this press is the key, not a shortcut.
+    if settings::listening()
+        && let Some(app) = weak.upgrade()
+    {
+        return repeat || settings::key_pressed(&app, key);
+    }
+    // The keys as they are now: Settings may have changed one.
+    let Some(shortcuts) = KEYS.with(|k| k.borrow().clone()) else { return false };
+    if key == "F12" {
+        return weak.upgrade().is_some_and(|app| {
+            if !repeat {
+                open_note(&app);
+            }
+            true
+        });
+    }
+    // A page's own key beats an app-wide one, when there's something for it to do; otherwise the key goes on.
+    if let Some(app) = weak.upgrade()
+        && app.get_place() == Place::Songs.index() as i32
+        && let Some(id) = shortcuts.page_action_for(key, SONGS_ACTIONS)
+        && songs::has_pick()
+    {
+        return repeat || songs::run_action(&app, id);
+    }
+    if let Some(app) = weak.upgrade()
+        && app.get_place() == Place::Plugins.index() as i32
+        && let Some(id) = shortcuts.page_action_for(key, PLUGINS_ACTIONS)
+        && plugins::has_pick()
+    {
+        return repeat || plugins::run_action(&app, id);
+    }
+    if let Some(app) = weak.upgrade()
+        && app.get_place() == Place::Presets.index() as i32
+        && let Some(id) = shortcuts.page_action_for(key, presets::page_actions())
+        && (repeat || presets::run_action(&app, id))
+    {
+        return true;
+    }
+    if let Some(app) = weak.upgrade()
+        && app.get_place() == Place::Sounds.index() as i32
+        && let Some(id) = shortcuts.page_action_for(key, SOUNDS_ACTIONS)
+        && (repeat || sounds::run_action(&app, id))
+    {
+        return true;
+    }
+    if let Some(app) = weak.upgrade()
+        && app.get_place() == Place::Midi.index() as i32
+        && let Some(id) = shortcuts.page_action_for(key, MIDI_ACTIONS)
+        && (repeat || midi::run_action(&app, id))
+    {
+        return true;
+    }
+    if let Some(app) = weak.upgrade()
+        && app.get_place() == Place::Space.index() as i32
+        && let Some(id) = shortcuts.page_action_for(key, SPACE_ACTIONS)
+        && (repeat || space::run_action(&app, id))
+    {
+        return true;
+    }
+    if let Some(app) = weak.upgrade()
+        && app.get_place() == Place::Backup.index() as i32
+        && let Some(id) = shortcuts.page_action_for(key, BACKUP_ACTIONS)
+        && (repeat || backup::run_action(&app, id))
+    {
+        return true;
+    }
+    let Some(id) = shortcuts.action_for(key) else { return false };
+    // A key held down did its job once (unless it's one that steps), and the page behind doesn't get it either.
+    if repeat && !repeats(id) {
+        return handles(id);
+    }
+    run(id, weak, feed, repeat)
 }
 
 /// Ctrl+K: the pages, Settings tabs and actions to jump to, and how to open them. Songs, sounds, presets, MIDI parts
@@ -218,10 +237,11 @@ fn connect_finder(app: &AppWindow, shortcuts: &Shortcuts, feed: &Feed) {
                 Place::Presets => presets::run_action(app, id),
                 Place::Midi => midi::run_action(app, id),
                 Place::Space => space::run_action(app, id),
-                Place::Backup | Place::Settings => false,
+                Place::Backup => backup::run_action(app, id),
+                Place::Settings => false,
             };
         }
-        run(id, &app.as_weak(), &feed)
+        run(id, &app.as_weak(), &feed, false)
     });
 }
 
@@ -232,10 +252,17 @@ fn finder_pages(app: &AppWindow, shortcuts: &Shortcuts) {
 }
 
 /// The actions Ctrl+K offers on a place: its page's own, then the app-wide ones that do something so far (not Ctrl+K
-/// itself, and the help key once).
+/// itself, the help key once, and not the keys for moving about the page: Ctrl+F, Esc, Ctrl+Up and Ctrl+Down, which
+/// act on where the keys were before Ctrl+K took them).
 fn finder_actions(app: &AppWindow, shortcuts: &Shortcuts, place: Place) {
     let page = page_actions(place);
-    let wide = APP_ACTIONS.iter().filter(|a| handles(a.id) && !matches!(a.id, "app.jump" | "app.helpF1"));
+    let wide = APP_ACTIONS.iter().filter(|a| {
+        handles(a.id)
+            && !matches!(
+                a.id,
+                "app.jump" | "app.helpF1" | "app.search" | "app.escape" | "app.prevItem" | "app.nextItem"
+            )
+    });
     let actions = mo_app::finder::actions(shortcuts, page.iter().chain(wide));
     finder::add_source(app, "actions", std::sync::Arc::new(actions));
 }
@@ -246,17 +273,19 @@ pub fn shortcuts() -> Shortcuts {
 }
 
 /// A key was changed in Settings: everything that shows or runs a key takes the new list at once (the rail's tooltips,
-/// the key sheet, the Songs buttons, the Sounds and Presets cards and menus, the Space buttons). Every page's keys run
-/// from this one list.
+/// the key sheet, the Songs buttons, the Sounds, Presets, MIDI and Plugins cards and menus, the Space buttons). Every
+/// page's keys run from this one list.
 pub fn keys_changed(app: &AppWindow, shortcuts: &Shortcuts) {
     KEYS.with(|k| *k.borrow_mut() = Some(std::rc::Rc::new(shortcuts.clone())));
     show_places(app, shortcuts);
     show_button_keys(app, shortcuts);
     sounds::show_keys(app, shortcuts);
     presets::show_keys(app, shortcuts);
+    midi::show_keys(app, shortcuts);
+    plugins::show_keys(app, shortcuts);
     space::show(app);
     if let Some(place) = place() {
-        app.set_key_rows(ModelRc::new(VecModel::from(key_rows(shortcuts, place))));
+        show_key_rows(app, shortcuts, place);
         finder_actions(app, shortcuts, place);
     }
     finder_pages(app, shortcuts);
@@ -279,7 +308,8 @@ fn show_places(app: &AppWindow, shortcuts: &Shortcuts) {
     app.global::<FinderData>().set_jump_key(shortcuts.key_of("app.jump").into());
 }
 
-/// The Songs page's buttons' tooltips: what each does and its key, from the one shortcut list (rule 15).
+/// The Songs and Backup pages' buttons' tooltips, and the MIDI page's Read MIDI again's key: what each does and its
+/// key, from the one shortcut list (rule 15).
 fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     let action = |id: &str| ActionKey { what: what_of(id).into(), key: shortcuts.key_of(id).into() };
     let data = app.global::<SongsData>();
@@ -287,6 +317,10 @@ fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     data.set_open_own_key(action("projects.openOwn"));
     data.set_reveal_key(action("projects.reveal"));
     data.set_copy_key(action("projects.copyPath"));
+    let backup = app.global::<BackupData>();
+    backup.set_run_key(action("backup.now"));
+    backup.set_stop_key(action("backup.stop"));
+    app.global::<MidiData>().set_read_again_key(shortcuts.key_of("midi.readAgain").into());
 }
 
 /// Shows a place, and notes it for the log and the watchdog.
@@ -332,14 +366,21 @@ pub(crate) fn go_to(app: &AppWindow, index: i32) {
 }
 
 /// Fills the key sheet for the place on show (and, on Presets, the section on show).
-pub(crate) fn refresh_keys(app: &AppWindow) {
+pub fn refresh_keys(app: &AppWindow) {
     let Some(place) = usize::try_from(app.get_place()).ok().and_then(Place::from_index) else { return };
     KEYS.with(|k| {
         if let Some(shortcuts) = k.borrow().as_ref() {
-            app.set_key_rows(ModelRc::new(VecModel::from(key_rows(shortcuts, place))));
+            show_key_rows(app, shortcuts, place);
             finder_actions(app, shortcuts, place);
         }
     });
+}
+
+/// The key sheet's two lists for `place`: its own keys, and the ones that work everywhere.
+fn show_key_rows(app: &AppWindow, shortcuts: &Shortcuts, place: Place) {
+    let (page, everywhere) = key_rows(shortcuts, place);
+    app.set_page_key_rows(ModelRc::new(VecModel::from(page)));
+    app.set_key_rows(ModelRc::new(VecModel::from(everywhere)));
 }
 
 /// A page's own actions: what its keys do, the key sheet lists and Ctrl+K offers on it.
@@ -351,23 +392,22 @@ fn page_actions(place: Place) -> &'static [Action] {
         Place::Presets => presets::page_actions(),
         Place::Midi => MIDI_ACTIONS,
         Place::Space => SPACE_ACTIONS,
-        Place::Backup | Place::Settings => &[],
+        Place::Backup => BACKUP_ACTIONS,
+        Place::Settings => &[],
     }
 }
 
-/// The key sheet's lines: the page's own actions, then every app-wide action, with the key each has now, and F12,
-/// which the app keeps for itself.
-fn key_rows(shortcuts: &Shortcuts, place: Place) -> Vec<KeyRow> {
-    let page = page_actions(place);
-    let mut rows: Vec<KeyRow> =
-        page.iter().map(|a| KeyRow { key: shortcuts.key_of(a.id).into(), what: a.what.into() }).collect();
-    // Keys whose action isn't built yet say so, rather than looking broken.
-    rows.extend(APP_ACTIONS.iter().map(|a| {
-        let what = if handles(a.id) { a.what.to_owned() } else { format!("{} (coming)", a.what) };
-        KeyRow { key: shortcuts.key_of(a.id).into(), what: what.into() }
-    }));
-    rows.push(KeyRow { key: "F12".into(), what: "Write a note for Claude about what's on screen".into() });
-    rows
+/// The key sheet's lines, with the key each has now, in two lists (the whole-app review of 6 Nov, X3-25): the page's
+/// own actions and the keys its list keeps for itself (the arrows), then the app-wide actions and F12, which the app
+/// keeps for itself. An app-wide action that isn't built yet isn't listed, so every key on the sheet works (X3-22).
+fn key_rows(shortcuts: &Shortcuts, place: Place) -> (Vec<KeyRow>, Vec<KeyRow>) {
+    let row = |key: &str, what: &str| KeyRow { key: key.into(), what: what.into() };
+    let mut page: Vec<KeyRow> = page_actions(place).iter().map(|a| row(shortcuts.key_of(a.id), a.what)).collect();
+    page.extend(list_keys(place).iter().map(|(key, what)| row(key, what)));
+    let mut everywhere: Vec<KeyRow> =
+        APP_ACTIONS.iter().filter(|a| handles(a.id)).map(|a| row(shortcuts.key_of(a.id), a.what)).collect();
+    everywhere.push(row("F12", "Write a note for Claude about what's on screen"));
+    (page, everywhere)
 }
 
 /// Puts a look's colours and fonts into the screens' `Theme` tokens.
@@ -447,7 +487,7 @@ fn coming(place: Place) -> &'static str {
 }
 
 /// The app-wide actions `run` does something for so far (besides going to a place).
-const HANDLED: [&str; 8] = [
+const HANDLED: [&str; 12] = [
     "app.jump",
     "app.prevPage",
     "app.nextPage",
@@ -456,14 +496,22 @@ const HANDLED: [&str; 8] = [
     "app.fullScreen",
     "app.play",
     "app.recycleBin",
+    "app.search",
+    "app.escape",
+    "app.prevItem",
+    "app.nextItem",
 ];
+
+/// The places with a search box, which Ctrl+F puts the keys in.
+const SEARCHED: [Place; 5] = [Place::Songs, Place::Sounds, Place::Presets, Place::Midi, Place::Plugins];
 
 fn handles(id: &str) -> bool {
     HANDLED.contains(&id) || Place::ALL.iter().any(|p| p.shortcut_id() == id)
 }
 
-/// Runs an app-wide action. Returns whether it did anything, so an unused key can go on to the page.
-fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed) -> bool {
+/// Runs an app-wide action (`held`: its key is repeating). Returns whether it did anything, so an unused key can go on
+/// to the page.
+fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
     let Some(app) = weak.upgrade() else { return false };
     if let Some(p) = Place::ALL.into_iter().find(|p| p.shortcut_id() == id) {
         go_to(&app, p.index() as i32);
@@ -489,12 +537,76 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed) -> bool {
                 || (place == Place::Midi.index() as i32 && midi::toggle_play(&app))
                 || (place == Place::Presets.index() as i32 && presets::toggle_play(&app));
         }
+        // Ctrl+F: the keys go to the page's search box, its words picked (review X3-22). The page on show sees the
+        // count change; a page without a search box lets the key go on. Not while Ctrl+K or the F12 note is open, as
+        // the keys would go to a box under it; the key sheet closes first, so the search is in sight.
+        "app.search" => {
+            if app.global::<FinderData>().get_open()
+                || app.get_note_open()
+                || !place().is_some_and(|p| SEARCHED.contains(&p))
+            {
+                return false;
+            }
+            app.set_sheet_open(false);
+            let keys = app.global::<AppKeys>();
+            keys.set_search(keys.get_search().wrapping_add(1));
+        }
+        // Esc: one step back, in the same order on every page (review X3-12), and first what plays stops, whichever
+        // page started it.
+        "app.escape" => {
+            if stop_what_plays(&app) {
+                return true;
+            }
+            return match place() {
+                Some(Place::Songs) => songs::escape(&app),
+                Some(Place::Sounds) => sounds::escape(&app),
+                Some(Place::Presets) => presets::escape(&app),
+                Some(Place::Midi) => midi::escape(&app),
+                Some(Place::Plugins) => plugins::escape(&app),
+                _ => false,
+            };
+        }
+        // Ctrl+Up and Ctrl+Down: the line above or below in the page's list, even while you type a search.
+        "app.prevItem" | "app.nextItem" => {
+            return step_list(&app, if id == "app.prevItem" { -1 } else { 1 }, held);
+        }
         _ => {
             debug_assert!(!HANDLED.contains(&id), "{id} is in HANDLED but run() doesn't do it");
             return false;
         }
     }
     debug_assert!(handles(id), "run() does {id}: add it to HANDLED so the key sheet doesn't say (coming)");
+    true
+}
+
+/// Esc's first step on every page: whatever plays stops, whichever page started it (a sound on Sounds, the MIDI page's
+/// loop or a part playing in a DAW go on after their page goes; an audition in Bitwig stops as its page goes). Each
+/// one, as two can play at once. Whether anything was playing.
+fn stop_what_plays(app: &AppWindow) -> bool {
+    let sound = sounds::stop_on_escape(app);
+    let midi = midi::stop_on_escape(app);
+    let audition = presets::stop_on_escape(app);
+    sound || midi || audition
+}
+
+/// Moves the pick of the list on show one line up (`by` -1) or down (1), as its Up and Down keys do (on Sounds' Tiles, a
+/// row up or down). False on a page without a list to step through.
+fn step_list(app: &AppWindow, by: i32, held: bool) -> bool {
+    match place() {
+        Some(Place::Songs) => app.global::<SongsData>().invoke_step(by),
+        Some(Place::Sounds) => app.global::<SoundsData>().invoke_step(by * 2, held),
+        Some(Place::Midi) => app.global::<MidiData>().invoke_step(by),
+        Some(Place::Plugins) => app.global::<PluginsData>().invoke_step(by),
+        Some(Place::Presets) => {
+            let data = app.global::<PresetsData>();
+            if data.get_section() == 0 {
+                data.invoke_step(by);
+            } else {
+                data.invoke_curve_step(by);
+            }
+        }
+        _ => return false,
+    }
     true
 }
 
@@ -556,6 +668,24 @@ mod tests {
         for id in HANDLED {
             assert!(APP_ACTIONS.iter().any(|a| a.id == id), "{id} isn't in the shortcut list");
         }
+    }
+
+    #[test]
+    fn the_key_sheet_puts_the_page_s_keys_first_and_lists_only_keys_that_work() {
+        let keys = Shortcuts::default();
+        let (page, everywhere) = key_rows(&keys, Place::Songs);
+        // The page's own actions, then what its list's arrows do (X3-25).
+        assert_eq!(page[0].what.as_str(), what_of("projects.open"));
+        assert!(page.iter().any(|r| r.key == "Up, Down"), "{page:?}");
+        // Every key that works everywhere, and none that isn't built yet (X3-22), then F12.
+        assert!(everywhere.iter().any(|r| r.key == "Ctrl+F" && r.what == what_of("app.search")));
+        assert!(everywhere.iter().any(|r| r.key == "Esc" && r.what == what_of("app.escape")));
+        assert!(!everywhere.iter().any(|r| r.key == "F5" || r.what.contains("(coming)")), "{everywhere:?}");
+        assert_eq!(everywhere.last().map(|r| r.key.as_str()), Some("F12"));
+        // Backup has keys of its own now (X3-21); Settings has none.
+        let (backup, _) = key_rows(&keys, Place::Backup);
+        assert_eq!(backup.first().map(|r| r.key.as_str()), Some("Ctrl+Enter"));
+        assert!(key_rows(&keys, Place::Settings).0.is_empty());
     }
 
     #[test]

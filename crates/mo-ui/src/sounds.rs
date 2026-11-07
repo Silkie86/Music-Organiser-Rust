@@ -3231,6 +3231,33 @@ fn stop(app: &AppWindow) {
     playing_changed(app);
 }
 
+/// Esc on the page (`app.escape`, in the search box or anywhere else), the same order on every page, once nothing plays
+/// ([`stop_on_escape`]): the search is cleared; else the picked sound's card closes (the whole-app review of 6 Nov,
+/// X3-12). Says whether it did either (when not, the key goes on).
+pub fn escape(app: &AppWindow) -> bool {
+    let data = app.global::<SoundsData>();
+    if !data.get_search().is_empty() {
+        data.set_search(SharedString::new());
+        data.invoke_search_edited(SharedString::new());
+        return true;
+    }
+    if PAGE.with(|p| p.borrow().picked.is_some()) {
+        data.invoke_close_panel();
+        return true;
+    }
+    false
+}
+
+/// Esc's first step, on any page (`app.escape`): the sound playing stops, as it plays on for a while after its page
+/// goes. Whether one was playing.
+pub fn stop_on_escape(app: &AppWindow) -> bool {
+    let playing = PAGE.with(|p| p.borrow().playing.is_some());
+    if playing {
+        stop(app);
+    }
+    playing
+}
+
 /// Another page is about to play (the MIDI page's loop): the sound shown playing here stops, so this page doesn't go
 /// on saying it plays.
 pub fn stop_for_another(app: &AppWindow) {
@@ -3316,12 +3343,6 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
     });
     let feed = FEED.with(|f| f.borrow().clone());
     match (id, picked, feed) {
-        ("sounds.stop", _, _) => {
-            if PAGE.with(|p| p.borrow().playing.is_none()) {
-                return false;
-            }
-            stop(app);
-        }
         (TO_BITWIG, Some((path, name)), Some(feed)) => send_to_bitwig(app, &feed, path, name),
         ("sounds.reveal", Some((path, _)), Some(feed)) => {
             crate::files::reveal(&feed, &path, mo_app::shell::folder_of(&path));

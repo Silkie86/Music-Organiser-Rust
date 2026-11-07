@@ -3,7 +3,7 @@
 //!
 //! `mo-screens [folder]` writes one picture per place in Graphite, then the Songs page in every theme. The folder
 //! defaults to `screenshots`. Then the shared parts on one page, and the parts over every page: activity cards, the key
-//! sheet and the F12 note.
+//! sheet and the F12 note. Last, keys pressed on the window as on a keyboard, checked for what they did.
 
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -122,7 +122,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.global::<mo_ui::MidiData>().set_roll_names(false);
     mo_ui::midi::run_action(&app, "midi.moreLike");
     shots.push(("midi-more-like.png".into(), capture(&window)));
-    mo_ui::midi::run_action(&app, "midi.back");
+    // Esc: back to the whole list (nothing plays now), as the page's one step back.
+    mo_ui::midi::escape(&app);
     // Two kinds and a place picked on the shared filter chips, each choice with its count.
     let midi = app.global::<mo_ui::MidiData>();
     midi.invoke_toggle("kind".into(), "Basslines".into());
@@ -534,6 +535,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     finder_shots(&app, &window, &mut shots);
 
+    // The sheet lists the keys of the page on show (Songs): the shots before set the place without the page change.
+    mo_ui::refresh_keys(&app);
     app.set_sheet_open(true);
     shots.push(("key-sheet.png".into(), capture(&window)));
     app.set_sheet_open(false);
@@ -550,7 +553,131 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         image::save_buffer(&path, &pixels, WIDTH, HEIGHT, image::ExtendedColorType::Rgb8)?;
         println!("{}", path.display());
     }
+    app.set_note_open(false);
+    key_checks(&app)?;
     Ok(())
+}
+
+/// Keys pressed on the window as on a keyboard, and what they did (the 6 Nov review's X3-12 and X3-22, and the code
+/// review on them): the keys still work after Ctrl+F and a page change, Esc closes the key sheet before the page under
+/// it sees the key (and Ctrl+K over the sheet first), Esc stops what plays on another page, a held Esc takes one step,
+/// and Ctrl+F leaves Ctrl+K open. Each check starts on Songs with the keys on the window, so one going wrong doesn't
+/// hide another.
+fn key_checks(app: &mo_ui::AppWindow) -> Result<(), String> {
+    use slint::platform::Key;
+    let songs = app.global::<mo_ui::SongsData>();
+    let midi = app.global::<mo_ui::MidiData>();
+    let finder = app.global::<mo_ui::FinderData>();
+    let searched = |want: &str| songs.get_search() == want;
+    app.set_note_open(false);
+    // Songs: Ctrl+F puts the keys in its search box, so typing searches.
+    start_on_songs(app);
+    press(app, "f", true);
+    press(app, "a", false);
+    if !searched("a") {
+        return Err(format!("keys: Ctrl+F then A on Songs searched {:?}", songs.get_search()));
+    }
+    // The search box goes with its page: the keys come back to the window, so Ctrl+1 still works.
+    press(app, "2", true);
+    press(app, "1", true);
+    if app.get_place() != Place::Songs.index() as i32 {
+        return Err("keys: after Ctrl+F and Ctrl+2, Ctrl+1 didn't go back to Songs".into());
+    }
+    // Esc closes the key sheet, and the search under it, which has the keys, stays.
+    start_on_songs(app);
+    press(app, "f", true);
+    press(app, "a", false);
+    press(app, Key::F1, false);
+    if !app.get_sheet_open() {
+        return Err("keys: F1 in the search box didn't open the key sheet".into());
+    }
+    press(app, Key::Escape, false);
+    if app.get_sheet_open() || !searched("a") {
+        return Err(format!("keys: Esc on the key sheet left it open or searched {:?}", songs.get_search()));
+    }
+    // Esc stops the MIDI page's loop from here (it plays on after its page goes), and does only that.
+    start_on_songs(app);
+    press(app, "f", true);
+    press(app, "a", false);
+    midi.set_playing(true);
+    press(app, Key::Escape, false);
+    if midi.get_playing() || !searched("a") {
+        return Err("keys: Esc on Songs didn't stop the MIDI loop first".into());
+    }
+    // A held Esc takes one step: the search clears, and the song's panel stays until Esc is pressed again.
+    midi.set_playing(false);
+    start_on_songs(app);
+    press(app, "f", true);
+    press(app, "a", false);
+    mo_ui::songs::show_picked(app, 1, sample_detail(), Tab::Overview);
+    press(app, Key::Escape, false);
+    for _ in 0..3 {
+        held(app, Key::Escape);
+    }
+    if !searched("") || !mo_ui::songs::has_pick() {
+        return Err("keys: a held Esc took more than one step".into());
+    }
+    press(app, Key::Escape, false);
+    if mo_ui::songs::has_pick() {
+        return Err("keys: Esc didn't put the song's panel away".into());
+    }
+    // Ctrl+F leaves Ctrl+K open, its box keeping the keys; Esc closes it.
+    start_on_songs(app);
+    press(app, "k", true);
+    let asked = app.global::<mo_ui::AppKeys>().get_search();
+    press(app, "f", true);
+    if !finder.get_open() || app.global::<mo_ui::AppKeys>().get_search() != asked {
+        return Err("keys: Ctrl+F with Ctrl+K open went to the page's search".into());
+    }
+    press(app, Key::Escape, false);
+    if finder.get_open() {
+        return Err("keys: Esc didn't close Ctrl+K".into());
+    }
+    // Ctrl+K over the key sheet closes first, then the sheet.
+    start_on_songs(app);
+    press(app, Key::F1, false);
+    press(app, "k", true);
+    press(app, Key::Escape, false);
+    if finder.get_open() || !app.get_sheet_open() {
+        return Err("keys: Esc with Ctrl+K over the key sheet didn't close Ctrl+K first".into());
+    }
+    press(app, Key::Escape, false);
+    if app.get_sheet_open() {
+        return Err("keys: the second Esc didn't close the key sheet".into());
+    }
+    Ok(())
+}
+
+/// Songs on show, with the keys on the window (as Ctrl+K gives them back when it closes) and nothing open over it.
+fn start_on_songs(app: &mo_ui::AppWindow) {
+    app.invoke_place_chosen(Place::Songs.index() as i32);
+    app.set_sheet_open(false);
+    mo_ui::finder::toggle(app);
+    slint::platform::update_timers_and_animations();
+    mo_ui::finder::close(app);
+    slint::platform::update_timers_and_animations();
+}
+
+/// Presses and lets go of `key` on the window, with Ctrl held when `ctrl`, then lets the window catch up.
+fn press(app: &mo_ui::AppWindow, key: impl Into<slint::SharedString>, ctrl: bool) {
+    use slint::platform::{Key, WindowEvent};
+    let window = app.window();
+    let text = key.into();
+    if ctrl {
+        window.dispatch_event(WindowEvent::KeyPressed { text: Key::Control.into() });
+    }
+    window.dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+    window.dispatch_event(WindowEvent::KeyReleased { text });
+    if ctrl {
+        window.dispatch_event(WindowEvent::KeyReleased { text: Key::Control.into() });
+    }
+    slint::platform::update_timers_and_animations();
+}
+
+/// One more press of `key` from holding it down (the keyboard's repeat).
+fn held(app: &mo_ui::AppWindow, key: impl Into<slint::SharedString>) {
+    app.window().dispatch_event(slint::platform::WindowEvent::KeyPressRepeated { text: key.into() });
+    slint::platform::update_timers_and_animations();
 }
 
 /// The Presets page: made-up sounds with one picked, then the Curves section with a curve picked.

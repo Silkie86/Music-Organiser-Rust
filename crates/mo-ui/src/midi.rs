@@ -29,7 +29,7 @@ use mo_library::songs::thousands;
 use mo_midi::indexer;
 use mo_midi::store::MidiStore;
 use mo_midi::{Catalogue, Hit, Role, StoredPhrase};
-use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, VecModel};
+use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
 use crate::filters::FilterModels;
 use crate::sounds::{new_seed, strings};
@@ -257,18 +257,34 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         let mut p = p.borrow_mut();
         p.library = library;
         p.feed = Some(feed);
-        p.shortcuts = shortcuts.clone();
     });
     wire(app);
     crate::piano_roll::connect(app);
+    show_keys(app, shortcuts);
     let data = app.global::<MidiData>();
-    data.set_play_key(shortcuts.key_of("app.play").into());
-    data.set_bitwig_key(shortcuts.key_of("midi.playBitwig").into());
-    data.set_fl_key(shortcuts.key_of("midi.playFl").into());
     data.set_empty_title("Reading your MIDI…".into());
     data.set_empty_text("".into());
     if app.get_place() == mo_app::places::Place::Midi.index() as i32 {
         shown(app);
+    }
+}
+
+/// The keys as they are now, from the one shortcut list (rule 15): the play row's, and the picked part's card and
+/// menu. Again after a key is changed in Settings, so none shows an old key.
+pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
+    let data = app.global::<MidiData>();
+    data.set_play_key(shortcuts.key_of("app.play").into());
+    data.set_bitwig_key(shortcuts.key_of("midi.playBitwig").into());
+    data.set_fl_key(shortcuts.key_of("midi.playFl").into());
+    let card = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.shortcuts = shortcuts.clone();
+        let e = p.cat.entry(p.picked?)?;
+        Some(actions(e, shortcuts))
+    });
+    if let Some((actions, menu)) = card {
+        data.set_actions(ModelRc::new(VecModel::from(actions)));
+        data.set_menu(ModelRc::new(VecModel::from(menu)));
     }
 }
 
@@ -1271,12 +1287,14 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
         (p.picked.and_then(|at| p.cat.entry(at).map(|e| (at, e.phrase.source.path.clone()))), p.feed.clone())
     });
     match (id, picked) {
-        ("midi.back", _) => {
-            let had = PAGE.with(|p| p.borrow_mut().target.take().is_some());
-            if had {
-                relist(app);
+        // F5 and the Read MIDI again button: reads again, or stops a reading under way (X3-21).
+        ("midi.readAgain", _) => {
+            if app.global::<MidiData>().get_reading() {
+                stop_reading();
+            } else {
+                read_midi(app, true);
             }
-            had
+            true
         }
         ("midi.moreLike", Some((at, _))) => {
             PAGE.with(|p| {
@@ -1317,6 +1335,43 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
         }
         _ => false,
     }
+}
+
+/// Esc's first step, on any page (`app.escape`): the loop playing stops, and a part playing in a DAW, as both play on
+/// after the page goes. Whether either was playing.
+pub fn stop_on_escape(app: &AppWindow) -> bool {
+    let data = app.global::<MidiData>();
+    let looping = data.get_playing() || PAGE.with(|p| p.borrow().looping.is_some());
+    let in_daw = data.get_daw_playing() != "" || data.get_daw_starting() != "";
+    if looping {
+        stop_playing(app);
+    }
+    if in_daw {
+        stop_daw(app);
+    }
+    looping || in_daw
+}
+
+/// Esc on the page (`app.escape`, in the search box or anywhere else), the same order on every page, one step a press
+/// once nothing plays ([`stop_on_escape`]; the whole-app review of 6 Nov, X3-12): the list goes back to the whole list
+/// from parts shaped like one (or the phrases one is in); else the search is cleared; else the picked part's card
+/// closes. Says whether it did any of them (when not, the key goes on).
+pub fn escape(app: &AppWindow) -> bool {
+    let data = app.global::<MidiData>();
+    if PAGE.with(|p| p.borrow_mut().target.take().is_some()) {
+        relist(app);
+        return true;
+    }
+    if !data.get_search().is_empty() {
+        data.set_search(SharedString::new());
+        data.invoke_search_edited(SharedString::new());
+        return true;
+    }
+    if PAGE.with(|p| p.borrow().picked.is_some()) {
+        pick(app, None);
+        return true;
+    }
+    false
 }
 
 /// What a send to Bitwig needs, taken from the page so it can go on a thread of its own.

@@ -3,7 +3,7 @@
 // what goes and what's left out, and why. Only shared parts from studio.slint; mo-app decides every word
 // (mo_app::backup), mo-ui/src/backup.rs fills it.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, StudioButton, MenuButton, MenuItem, Segmented, FolderRow, PageHeader, Caps, Well, Groove, ProgressLine, EmptyState, NoticeStrip, ListLine } from "../studio.slint";
+import { Theme, Type, Space, StudioButton, ActionKey, MenuButton, MenuItem, Segmented, FolderRow, PageHeader, Caps, Well, Groove, ProgressLine, EmptyState, NoticeStrip, ListLine } from "../studio.slint";
 
 export struct BackupFolderLine {
     path: string,
@@ -72,6 +72,9 @@ export global BackupData {
     callback pick-drive();
     callback run();
     callback stop();
+    // Back up now's and Stop's tooltips: what each does and its key, from the one shortcut list (rule 15).
+    in property <ActionKey> run-key;
+    in property <ActionKey> stop-key;
     callback level-picked(int);
     callback format-picked(int);
     callback add-folder();
@@ -151,12 +154,16 @@ export component BackupPage inherits Rectangle {
                             if BackupData.busy == "": StudioButton {
                                 text: "Back up now";
                                 main: true;
+                                tip: BackupData.run-key.what;
+                                key: BackupData.run-key.key;
                                 // Only once what goes is worked out.
                                 enabled: BackupData.goes != "";
                                 clicked => { BackupData.run(); }
                             }
                             if BackupData.busy != "": StudioButton {
                                 text: "Stop";
+                                tip: BackupData.stop-key.what;
+                                key: BackupData.stop-key.key;
                                 clicked => { BackupData.stop(); }
                             }
                         }

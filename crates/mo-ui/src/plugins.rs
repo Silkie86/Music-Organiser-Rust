@@ -531,6 +531,23 @@ pub fn has_pick() -> bool {
     PAGE.with(|p| p.borrow().picked.is_some())
 }
 
+/// Esc on the page (`app.escape`, in the search box or anywhere else), the same order on every page, one step a press
+/// (the whole-app review of 6 Nov, X3-12): the search is cleared, else the picked plugin's card closes (nothing plays
+/// here). Says whether it did either (when not, the key goes on).
+pub fn escape(app: &AppWindow) -> bool {
+    let data = app.global::<PluginsData>();
+    if !data.get_search().is_empty() {
+        data.set_search(SharedString::new());
+        data.invoke_search_edited(SharedString::new());
+        return true;
+    }
+    if has_pick() {
+        pick(app, None);
+        return true;
+    }
+    false
+}
+
 /// A read of the library has arrived (`built`), read while Space's clean-ups had what's at `in_bin` in the Recycle Bin.
 fn arrived(app: &AppWindow, built: Result<Plugins, String>, in_bin: Vec<String>) {
     let _doing = crate::watchdog::doing("Plugins: show the list");
@@ -897,6 +914,12 @@ fn action_words(id: &str) -> &'static str {
         "plugins.move" => "Move to another drive…",
         _ => "Search online",
     }
+}
+
+/// A key was changed in Settings: the card's buttons and the right-click menu show the new keys.
+pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
+    PAGE.with(|p| p.borrow_mut().shortcuts = shortcuts.clone());
+    fill_actions(app);
 }
 
 /// The card's buttons and the right-click menu: Clean up only for a plugin with folders it could look at.

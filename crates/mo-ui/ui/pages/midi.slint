@@ -3,7 +3,7 @@
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
 
 // One part in the list.
 export struct MidiLine {
@@ -90,6 +90,8 @@ export global MidiData {
     // Your MIDI being read into the Rust index.
     in property <bool> reading;
     callback read-again();
+    // The Read MIDI again button's key (it stops a reading too), from the one shortcut list (rule 15).
+    in property <string> read-again-key;
     callback stop-reading();
 
     in-out property <string> search;
@@ -639,6 +641,9 @@ component PartPanel inherits SidePanel {
 
 export component MidiPage inherits Rectangle {
     forward-focus: search-box;
+    // Ctrl+F (app.search): the keys go to the search box, its words picked so typing replaces them (review X3-22).
+    property <int> search-asked: AppKeys.search;
+    changed search-asked => { search-box.focus-all(); }
 
     VerticalLayout {
         padding: Space.xl;
@@ -654,6 +659,9 @@ export component MidiPage inherits Rectangle {
             spacing: Space.sm;
             vertical-stretch: 0;
             search-box := SearchBox {
+                // Esc goes on to the window's keys (the page's next step back, app.escape), and Ctrl+Up and
+                // Ctrl+Down step through the list from here.
+                page-search: true;
                 horizontal-stretch: 1;
                 min-width: 320px;
                 max-width: 480px;
@@ -661,11 +669,6 @@ export component MidiPage inherits Rectangle {
                 text <=> MidiData.search;
                 edited(t) => { MidiData.search-edited(t); }
                 key(k) => {
-                    if (k == Key.Escape && MidiData.search != "") {
-                        MidiData.search = "";
-                        MidiData.search-edited("");
-                        return true;
-                    }
                     if (k == Key.DownArrow) {
                         keys.focus();
                         MidiData.step(1);
@@ -682,6 +685,7 @@ export component MidiPage inherits Rectangle {
                     text: MidiData.reading ? "Stop" : "Read MIDI again";
                     tip: MidiData.reading ? "Stop reading: it carries on from there next time"
                         : "Look for new and changed projects and MIDI files, and try the ones that failed again. Only those are read.";
+                    key: MidiData.read-again-key;
                     clicked => {
                         if (MidiData.reading) {
                             MidiData.stop-reading();
