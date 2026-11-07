@@ -11,6 +11,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, params};
 
 use crate::duplicates::Finds;
 use crate::index::Gathered;
+use crate::turns;
 use crate::{Peaks, Sound, SoundActivity, SoundAnalysis, Word, compact, event, types};
 
 /// What went wrong reading the sound library.
@@ -230,8 +231,19 @@ enum Layout {
 }
 
 impl SoundsDb {
+    /// Opens the sound library at `path` for one short read (`read`: the waveforms of a few sounds, say) in its turn
+    /// with the app's other reads of the library, and closes it again. It's open only while it reads, never while it
+    /// waits for a long read to let it in: a copy being laid out anew is let go of only when nothing has it open.
+    pub fn read_once<T>(path: &Path, read: impl FnOnce(&SoundsDb) -> Result<T, SoundsError>) -> Result<T, SoundsError> {
+        let _turn = turns::turn();
+        read(&SoundsDb::open_read_only(path)?)
+    }
+
     /// Opens the sound library at `path` for reading. It must already exist: this never makes one.
     pub fn open_read_only(path: &Path) -> Result<SoundsDb, SoundsError> {
+        // Its first read, in its turn with the app's other reads of the library (before the swap's lock, as in
+        // `read_once`).
+        let _turn = turns::turn();
         let open_error = |why: String| SoundsError::Open { path: path.to_owned(), why };
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         // Not while the app's copy is swapped for a new one ([`compact::LAYING_OUT`]): opened then, it would read the
@@ -321,6 +333,7 @@ impl SoundsDb {
 
     /// A setting the C# app keeps in `sounds.db` (the classifier's weights, the galaxy's basis…), if set.
     pub fn setting(&self, key: &str) -> Result<Option<String>, SoundsError> {
+        let _turn = turns::turn();
         if !self.has("settings") {
             return Ok(None);
         }
@@ -332,11 +345,13 @@ impl SoundsDb {
     }
 
     pub fn count(&self) -> Result<i64, SoundsError> {
+        let _turn = turns::turn();
         Ok(self.conn.query_row("SELECT COUNT(*) FROM sounds", [], |r| r.get(0))?)
     }
 
     /// How many sounds the CLAP model has listened to.
     pub fn count_with_clap(&self) -> Result<i64, SoundsError> {
+        let _turn = turns::long_turn();
         // From each sound's note of how many numbers its CLAP has, which an index holds by itself: the fingerprints
         // themselves are half a gigabyte (in the format before, from the lengths kept beside the rows' hashes).
         let sql = match self.layout {
@@ -350,6 +365,7 @@ impl SoundsDb {
     /// Every file the library knows, as the last scan saw it. A size or time that isn't a whole number (a damaged
     /// row) reads as 0, so the file is listened to again; a path that isn't readable text, as near to it as it can be.
     pub fn known_files(&self) -> Result<Vec<KnownSound>, SoundsError> {
+        let _turn = turns::long_turn();
         let mut st = self.conn.prepare(match self.layout {
             Layout::Copy => {
                 "SELECT path, iif(typeof(size) = 'integer', size, 0), iif(typeof(mtime) = 'integer', mtime, 0),
@@ -372,6 +388,7 @@ impl SoundsDb {
                 rusqlite::types::ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
                 _ => String::new(),
             };
+            turns::give_way();
             Ok(KnownSound { path, size: r.get(1)?, mtime: r.get(2)?, has_clap: r.get(3)? })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -388,6 +405,7 @@ impl SoundsDb {
     /// are hundreds), so it's quick whatever the rows hold: for picking which sounds to show first
     /// ([`SoundsDb::some`]) while the rest are read.
     pub fn shown_ids(&self) -> Result<Vec<i64>, SoundsError> {
+        let _turn = turns::long_turn();
         let snapshot = self.conn.unchecked_transaction()?;
         let hidden = self.hidden()?;
         let mut st = self.conn.prepare("SELECT id FROM sounds")?;
@@ -398,6 +416,7 @@ impl SoundsDb {
             if !hidden.contains(&id) {
                 ids.push(id);
             }
+            turns::give_way();
         }
         drop(st);
         snapshot.finish()?;
@@ -409,6 +428,7 @@ impl SoundsDb {
     /// plays and hidden marks), so it's quick for a few hundred whatever the size of the library. With their
     /// waveforms, even where the whole list comes without them ([`SoundsDb::waves_apart`]): they show at once.
     pub fn some(&self, ids: &[i64], now: NaiveDateTime) -> Result<Vec<Sound>, SoundsError> {
+        let _turn = turns::turn();
         let snapshot = self.conn.unchecked_transaction()?;
         let mut sounds = Vec::with_capacity(ids.len());
         // A few hundred at a time: each id is a value handed to SQLite, which takes only so many in one statement.
@@ -453,6 +473,7 @@ impl SoundsDb {
     }
 
     fn read_sounds(&self, now: NaiveDateTime, vectors: bool) -> Result<Everything, SoundsError> {
+        let _turn = turns::long_turn();
         // One read transaction, so every query below sees the library as it was at one moment, even while the C# app
         // saves a scan or hides a batch of copies in between.
         let snapshot = self.conn.unchecked_transaction()?;
@@ -467,6 +488,7 @@ impl SoundsDb {
         let mut rows = st.query([])?;
         while let Some(r) = rows.next()? {
             reading.add_listed(self.is_copy(), r)?;
+            turns::give_way();
         }
         drop(rows);
         drop(st);
@@ -489,6 +511,7 @@ impl SoundsDb {
     /// CLAP is (and keeps CLAP's as the index holds them, which go into it as they are). From `sounds.db` it's a pass
     /// over the whole file: [`SoundsDb::everything`] takes them on the same pass as the list.
     pub fn fingerprints(&self, analysed: usize) -> Result<(Gathered, Gathered), SoundsError> {
+        let _turn = turns::long_turn();
         let snapshot = self.conn.unchecked_transaction()?;
         if !self.is_copy() {
             // As the page's read gathers them, in the order the rows are stored.
@@ -503,6 +526,7 @@ impl SoundsDb {
                 if let Ok(ValueRef::Blob(blob)) = r.get_ref(2) {
                     clap.push_blob(id, blob);
                 }
+                turns::give_way();
             }
             drop(rows);
             drop(st);
@@ -535,6 +559,7 @@ impl SoundsDb {
     /// What's been done with each sound in the year before `now` and before that: deliberate plays, drags out of the
     /// app and sends into a DAW. Plays counted before the app kept dates count as recent, as in the C# app.
     pub fn activity(&self, now: NaiveDateTime) -> Result<HashMap<i64, SoundActivity>, SoundsError> {
+        let _turn = turns::long_turn();
         let mut result = self.dated_activity(now, None)?;
         // Plays counted on the sound before each one was dated: those beyond the dated ones count as recent.
         let mut st = self.conn.prepare("SELECT id, plays FROM sounds WHERE plays > 0")?;
@@ -542,6 +567,7 @@ impl SoundsDb {
         for row in rows {
             let (id, plays) = row?;
             add_undated_plays(result.entry(id).or_default(), plays);
+            turns::give_way();
         }
         Ok(result)
     }
@@ -572,6 +598,7 @@ impl SoundsDb {
             })?;
             for row in rows {
                 let (id, kind, recent, older) = row?;
+                turns::give_way();
                 let (recent, older) = (int(recent), int(older));
                 let a = result.entry(id).or_default();
                 match kind.as_str() {
@@ -599,6 +626,7 @@ impl SoundsDb {
                 if let (Some(id), tag) = row? {
                     tags.entry(id).or_default().push(tag);
                 }
+                turns::give_way();
             }
         }
         for list in tags.values_mut() {
@@ -609,6 +637,7 @@ impl SoundsDb {
 
     /// The sounds you've played on purpose, most recent first, each once with when you last played it (local time).
     pub fn history(&self, limit: usize) -> Result<Vec<(i64, NaiveDateTime)>, SoundsError> {
+        let _turn = turns::turn();
         if !self.has("sound_events") {
             return Ok(Vec::new());
         }
@@ -623,11 +652,13 @@ impl SoundsDb {
 
     /// Where each sound sits on the galaxy map placed by `space` ("features" or "clap").
     pub fn map(&self, space: &str) -> Result<HashMap<i64, StarPoint>, SoundsError> {
+        let _turn = turns::long_turn();
         if !self.has("sound_maps") {
             return Ok(HashMap::new());
         }
         let mut st = self.conn.prepare("SELECT sound_id, x, y FROM sound_maps WHERE space = ?1")?;
         let rows = st.query_map([space], |r| {
+            turns::give_way();
             Ok((r.get::<_, i64>(0)?, StarPoint { x: r.get::<_, f64>(1)? as f32, y: r.get::<_, f64>(2)? as f32 }))
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
@@ -637,6 +668,7 @@ impl SoundsDb {
     /// analyser's own). Sounds without one, or with a damaged one, are left out. CLAP's from the copy are as CLAP's
     /// index holds them: unit length, to about 3 significant digits ([`crate::index::held`]).
     pub fn vectors(&self, space: &str) -> Result<HashMap<i64, Vec<f32>>, SoundsError> {
+        let _turn = turns::long_turn();
         let clap = space == "clap";
         let sql = match (self.is_copy(), clap) {
             (true, true) => "SELECT sound_id, v FROM sound_clap".to_owned(),
@@ -655,6 +687,7 @@ impl SoundsDb {
             if let Some(v) = v {
                 out.insert(r.get::<_, i64>(0)?, v);
             }
+            turns::give_way();
         }
         Ok(out)
     }
@@ -672,6 +705,7 @@ impl SoundsDb {
             if let Ok(ValueRef::Blob(blob)) = r.get_ref(1) {
                 out.push_held(r.get(0)?, blob);
             }
+            turns::give_way();
         }
         Ok(out)
     }
@@ -686,12 +720,14 @@ impl SoundsDb {
             if let Ok(ValueRef::Blob(blob)) = r.get_ref(1) {
                 out.push_blob(r.get(0)?, blob);
             }
+            turns::give_way();
         }
         Ok(out)
     }
 
     /// Every tag, with how many sounds you gave it and how many the app suggested; most of yours first.
     pub fn tag_counts(&self) -> Result<Vec<TagCount>, SoundsError> {
+        let _turn = turns::turn();
         if !self.has("sound_tags") {
             return Ok(Vec::new());
         }
@@ -712,6 +748,7 @@ impl SoundsDb {
     /// The sounds tagged `tag`, by `source` ("you" for your own tags, "learned" for the app's suggestions), in the
     /// order SQLite gives them (as the C# app reads them, so learning from them goes the same way).
     pub fn tagged(&self, tag: &str, source: &str) -> Result<Vec<i64>, SoundsError> {
+        let _turn = turns::turn();
         if !self.has("sound_tags") {
             return Ok(Vec::new());
         }
@@ -729,6 +766,7 @@ impl SoundsDb {
     /// The waveforms of the sounds with these ids, by id: any it doesn't have (no sound with that id, or one never
     /// analysed) is left out. Only theirs are read, a few hundred bytes each.
     pub fn waves(&self, ids: &[i64]) -> Result<Vec<(i64, Peaks)>, SoundsError> {
+        let _turn = turns::turn();
         let snapshot = self.conn.unchecked_transaction()?;
         let waves = self.waves_of(ids)?;
         snapshot.finish()?;
@@ -763,6 +801,7 @@ impl SoundsDb {
 
     /// The sounds you've hidden as duplicates.
     pub fn hidden(&self) -> Result<HashSet<i64>, SoundsError> {
+        let _turn = turns::turn();
         self.hidden_of(None)
     }
 
@@ -781,6 +820,7 @@ impl SoundsDb {
     /// in the order the rows are stored: what the Space page counts copies in with the Sounds page's list, which
     /// leaves them out (their files are still there). Only their own rows are read.
     pub fn hidden_sounds(&self) -> Result<Vec<Sound>, SoundsError> {
+        let _turn = turns::long_turn();
         if !self.has("sound_hidden") {
             return Ok(Vec::new());
         }
@@ -788,6 +828,7 @@ impl SoundsDb {
         let mut st = self.conn.prepare(&format!("{sql} WHERE id IN (SELECT sound_id FROM sound_hidden)"))?;
         let copy = self.is_copy();
         let rows = st.query_map([], |r| {
+            turns::give_way();
             let s = if copy { copy_sound_at(r) } else { sound_at(r) }?;
             Ok(Sound { hidden: true, ..s })
         })?;
@@ -797,6 +838,7 @@ impl SoundsDb {
     /// What the duplicate finder found and the sounds you've hidden, read at one moment, for grouping with a list of
     /// the sounds that leaves the hidden ones out (the Sounds page's): only the sizes of sounds with copies are kept.
     pub fn finds(&self) -> Result<Finds, SoundsError> {
+        let _turn = turns::long_turn();
         let snapshot = self.conn.unchecked_transaction()?;
         let (matches, exact) = (self.matches()?, self.exact_copies()?);
         let copied: HashSet<i64> = matches.iter().flat_map(|m| [m.a, m.b]).chain(exact.iter().map(|e| e.0)).collect();
@@ -810,6 +852,7 @@ impl SoundsDb {
 
     /// Every pair of copies the duplicate finder found.
     pub fn matches(&self) -> Result<Vec<SoundMatch>, SoundsError> {
+        let _turn = turns::long_turn();
         if !self.has("sound_matches") {
             return Ok(Vec::new());
         }
@@ -822,6 +865,7 @@ impl SoundsDb {
         let extra = if has_apart { "apart, typical" } else { "NULL, NULL" };
         let mut st = self.conn.prepare(&format!("SELECT a, b, kind, score, offset, {extra} FROM sound_matches"))?;
         let rows = st.query_map(params![], |r| {
+            turns::give_way();
             Ok(SoundMatch {
                 a: r.get(0)?,
                 b: r.get(1)?,
@@ -840,6 +884,7 @@ impl SoundsDb {
     /// Sounds whose audio is exactly the same as another's, by the hash the duplicate finder kept (in capitals, as
     /// SQLite's `hex` gives it). Only hashes that more than one sound has.
     pub fn exact_copies(&self) -> Result<Vec<(i64, String)>, SoundsError> {
+        let _turn = turns::long_turn();
         if !self.has("sound_prints") {
             return Ok(Vec::new());
         }
@@ -847,7 +892,10 @@ impl SoundsDb {
             "SELECT sound_id, hex(exact) FROM sound_prints
              WHERE exact IN (SELECT exact FROM sound_prints WHERE exact IS NOT NULL GROUP BY exact HAVING COUNT(*) > 1)",
         )?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        let rows = st.query_map([], |r| {
+            turns::give_way();
+            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+        })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
@@ -855,6 +903,7 @@ impl SoundsDb {
     /// C# app may be saving more while the page reads).
     #[allow(clippy::type_complexity)]
     pub fn duplicate_finds(&self) -> Result<(Vec<SoundMatch>, Vec<(i64, String)>, HashMap<i64, i64>), SoundsError> {
+        let _turn = turns::long_turn();
         let snapshot = self.conn.unchecked_transaction()?;
         let found = (self.matches()?, self.exact_copies()?, self.sizes()?);
         snapshot.finish()?;
@@ -863,8 +912,12 @@ impl SoundsDb {
 
     /// Each sound's file size in bytes (0 when not known).
     pub fn sizes(&self) -> Result<HashMap<i64, i64>, SoundsError> {
+        let _turn = turns::long_turn();
         let mut st = self.conn.prepare("SELECT id, size FROM sounds")?;
-        let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, int_at(r, 1).unwrap_or(0))))?;
+        let rows = st.query_map([], |r| {
+            turns::give_way();
+            Ok((r.get::<_, i64>(0)?, int_at(r, 1).unwrap_or(0)))
+        })?;
         Ok(rows.collect::<Result<_, _>>()?)
     }
 }

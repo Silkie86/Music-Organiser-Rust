@@ -1257,7 +1257,7 @@ fn load(app: &AppWindow, fresh: bool) {
                 let saved = match (had, &db) {
                     (Some(had), _) => Arc::unwrap_or_clone(had),
                     // Laid out afresh: the kept one isn't wanted.
-                    (None, Some(path)) if !fresh => match SoundsDb::open_read_only(path).and_then(|db| db.map(space)) {
+                    (None, Some(path)) if !fresh => match SoundsDb::read_once(path, |db| db.map(space)) {
                         Ok(map) => map,
                         Err(e) => {
                             log::warning(

@@ -1150,6 +1150,8 @@ fn open_for_writing(path: &Path, flags: OpenFlags) -> rusqlite::Result<Connectio
 /// after: the page has it once the pass ends (a new copy's last few seconds, its indexes and its trip to the disk,
 /// come first).
 fn fill(old: &SoundsDb, conn: &Connection, pass: Pass<'_>) -> Result<Synced, Failed> {
+    // The longest read of all: the app's short reads of the library go in between its rows.
+    let _turn = crate::turns::long_turn();
     let mut synced = Synced { made: true, ..Synced::default() };
     let snapshot = old.conn.unchecked_transaction()?;
     let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
@@ -1181,6 +1183,7 @@ fn fill(old: &SoundsDb, conn: &Connection, pass: Pass<'_>) -> Result<Synced, Fai
         if let (Some(reading), Some(sound)) = (reading.as_mut(), sound) {
             reading.add_read(r, sound);
         }
+        crate::turns::give_way();
     }
     drop(rows);
     drop(st);
@@ -1345,6 +1348,7 @@ fn copy_rows(from: &Connection, select: &str, to: &Transaction<'_>, insert: &str
     while let Some(r) = rows.next()? {
         let values = (0..n).map(|i| r.get_ref(i).map(ToSqlOutput::Borrowed)).collect::<Result<Vec<_>, _>>()?;
         ins.execute(params_from_iter(values))?;
+        crate::turns::give_way();
     }
     Ok(())
 }
