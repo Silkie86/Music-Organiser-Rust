@@ -4,7 +4,7 @@
 // there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
 // fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
 import { ListView } from "std-widgets.slint";
-import { Theme, Type, Space, Well, SearchBox, ToggleChip, TickBox, FilterPicks, FilterView, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TickBox, FilterPicks, FilterView, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
 
 // One line of the list.
 export struct PluginListLine {
@@ -755,6 +755,9 @@ component PluginPanel inherits SidePanel {
 
 export component PluginsPage inherits Rectangle {
     forward-focus: search-box;
+    // Ctrl+F (app.search): the keys go to the search box, its words picked so typing replaces them (review X3-22).
+    property <int> search-asked: AppKeys.search;
+    changed search-asked => { search-box.focus-all(); }
 
     VerticalLayout {
         padding: Space.xl;
@@ -773,16 +776,14 @@ export component PluginsPage inherits Rectangle {
             spacing: Space.sm;
             vertical-stretch: 0;
             search-box := SearchBox {
+                // Esc goes on to the window's keys (the page's next step back, app.escape), and Ctrl+Up and
+                // Ctrl+Down step through the list from here.
+                page-search: true;
                 horizontal-stretch: 1;
                 hint: "Search plugins or makers";
                 text <=> PluginsData.search;
                 edited(t) => { PluginsData.search-edited(t); }
                 key(k) => {
-                    if (k == Key.Escape && PluginsData.search != "") {
-                        PluginsData.search = "";
-                        PluginsData.search-edited("");
-                        return true;
-                    }
                     // Down goes into the list, as on Sounds, MIDI and Presets, when a line shows.
                     if (k == Key.DownArrow && PluginsData.message == "" && PluginsData.lines.length > 0) {
                         keys.focus();

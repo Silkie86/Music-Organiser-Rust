@@ -5,11 +5,14 @@
 
 use std::collections::HashMap;
 
+use crate::places::Place;
+
 /// The setting the changed keys are saved under.
 pub const SETTING_KEY: &str = "shortcuts";
 
-/// Keys the app keeps for itself: F12 writes a note for Claude, and Tab moves between boxes and buttons.
-pub const KEPT: [&str; 3] = ["F12", "Tab", "Shift+Tab"];
+/// Keys the app keeps for itself: F12 writes a note for Claude, Tab moves between boxes and buttons, and the arrow keys
+/// move through the lists ([`list_keys`]).
+pub const KEPT: [&str; 7] = ["F12", "Tab", "Shift+Tab", "Up", "Down", "Left", "Right"];
 
 /// One thing a key can do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -49,6 +52,12 @@ pub const APP_ACTIONS: &[Action] = &[
     action("app.prevTab", "The tab to the left on this page", "Ctrl+Left"),
     action("app.nextTab", "The tab to the right on this page", "Ctrl+Right"),
     action("app.play", "Play or stop the picked sound or MIDI part (on Presets, audition it in Bitwig)", "Space"),
+    // The same order on every page (the whole-app review of 6 Nov, X3-12): each press takes one step back.
+    action(
+        "app.escape",
+        "Step back, one step a press: stop what's playing, then clear the search, then close the picked line's card",
+        "Esc",
+    ),
     action("app.rescan", "Look for new and changed projects", "F5"),
     action("app.fullRescan", "Rescan everything: re-read every project, even unchanged ones", ""),
     action("app.fullScreen", "Full screen on or off", "F11"),
@@ -73,9 +82,9 @@ pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.copyPath", "Copy where the picked song's file is", "Ctrl+Shift+C"),
 ];
 
-/// The Sounds page's own actions, with the C# Sound Lab's ids. Favourite and tag join once the page may write.
+/// The Sounds page's own actions, with the C# Sound Lab's ids. Favourite and tag join once the page may write. Esc
+/// stops the sound playing as it does on every page (`app.escape`).
 pub const SOUNDS_ACTIONS: &[Action] = &[
-    action("sounds.stop", "Stop the sound playing", "Esc"),
     action("sounds.toBitwig", "Put the picked sound into Bitwig", "Ctrl+B"),
     action("sounds.reveal", "Show the sound's file in Explorer", "Ctrl+Shift+E"),
     action("sounds.copyPath", "Copy where the sound's file is", "Ctrl+Shift+C"),
@@ -134,7 +143,8 @@ pub const CURVES_ACTIONS: &[Action] = &[
 ];
 
 /// The MIDI page's own actions, with the C# MIDI page's ids where it had them. What goes with this (midi.fit),
-/// the playground, Save as and the octave keys join as those parts are built.
+/// the playground, Save as and the octave keys join as those parts are built. Esc goes back to the whole list as one
+/// of its steps back (`app.escape`). F5 reads the MIDI again on this page, as it measures again on Space.
 pub const MIDI_ACTIONS: &[Action] = &[
     action("midi.moreLike", "Parts shaped like the picked one", "Ctrl+L"),
     action("midi.toBitwig", "Put the picked part into Bitwig as a clip on a new track", "Ctrl+B"),
@@ -143,7 +153,11 @@ pub const MIDI_ACTIONS: &[Action] = &[
     action("midi.within", "The longer phrases the picked part is in", ""),
     action("midi.source", "Show the picked part's file in its folder", "Ctrl+Shift+E"),
     action("midi.copyPath", "Copy where the picked part's file is", "Ctrl+Shift+C"),
-    action("midi.back", "Back to the whole list", "Esc"),
+    action(
+        "midi.readAgain",
+        "Read MIDI again: new and changed projects and MIDI files, and the ones that failed; again to stop",
+        "F5",
+    ),
 ];
 
 /// The Space page's own actions (new: the C# app had no Space page). F5 measures again on this page; elsewhere it
@@ -162,9 +176,24 @@ pub const SPACE_ACTIONS: &[Action] = &[
     action("space.putBack", "Put back what the last clean-up sent to the Recycle Bin", ""),
 ];
 
+/// The Backup page's own actions (new: the C# app had no Backup page), so its buttons have keys and Ctrl+K finds them
+/// (review X3-21). Stop has no key until you give it one, as on Space.
+pub const BACKUP_ACTIONS: &[Action] = &[
+    action("backup.now", "Back up now: copy what's new or changed to the backup drive", "Ctrl+Enter"),
+    action("backup.stop", "Stop the backup: what's copied so far stays on the drive", ""),
+];
+
 /// Every page's own list. A page's keys only work on that page, so two pages may share a key.
-pub const PAGE_ACTIONS: &[&[Action]] =
-    &[SONGS_ACTIONS, SOUNDS_ACTIONS, PRESETS_ACTIONS, CURVES_ACTIONS, MIDI_ACTIONS, PLUGINS_ACTIONS, SPACE_ACTIONS];
+pub const PAGE_ACTIONS: &[&[Action]] = &[
+    SONGS_ACTIONS,
+    SOUNDS_ACTIONS,
+    PRESETS_ACTIONS,
+    CURVES_ACTIONS,
+    MIDI_ACTIONS,
+    PLUGINS_ACTIONS,
+    SPACE_ACTIONS,
+    BACKUP_ACTIONS,
+];
 
 /// Every page's own list with the page's name, in the order Settings › Shortcuts shows them (after the keys that work
 /// everywhere).
@@ -176,7 +205,28 @@ pub const PAGES: &[(&str, &[Action])] = &[
     ("MIDI", MIDI_ACTIONS),
     ("Plugins", PLUGINS_ACTIONS),
     ("Space", SPACE_ACTIONS),
+    ("Backup", BACKUP_ACTIONS),
 ];
+
+/// The keys a page's list keeps for itself ([`KEPT`]: no action can have them), as the key sheet lists them under the
+/// page's own: what each does there (the whole-app review of 6 Nov, X3-25). The pages without a list to step through
+/// have none.
+pub fn list_keys(place: Place) -> &'static [(&'static str, &'static str)] {
+    const DOWN: (&str, &str) = ("Down", "From the search box into the list");
+    match place {
+        Place::Songs => &[("Up, Down", "The song above or below in the list"), DOWN],
+        Place::Sounds => &[
+            ("Up, Down", "The sound above or below the picked one"),
+            ("Left, Right", "The sound beside it (on Tiles and Galaxy)"),
+            ("Enter", "Play or stop it"),
+            DOWN,
+        ],
+        Place::Presets => &[("Up, Down", "The sound or curve above or below in the list"), DOWN],
+        Place::Midi => &[("Up, Down", "The part above or below in the list"), DOWN],
+        Place::Plugins => &[("Up, Down", "The plugin above or below in the list"), DOWN],
+        Place::Space | Place::Backup | Place::Settings => &[],
+    }
+}
 
 /// The name Settings › Shortcuts gives the keys that work on every page.
 pub const EVERYWHERE: &str = "Everywhere";
@@ -270,10 +320,10 @@ impl Shortcuts {
         let Some((page, action)) = all_actions().find(|(_, a)| a.id == id) else { return String::new() };
         let key = written(key);
         if KEPT.iter().any(|k| normalise(k) == normalise(&key)) {
-            return if key == "F12" {
-                "F12 is kept for writing a note to Claude.".to_owned()
-            } else {
-                format!("{key} is kept for moving between boxes and buttons.")
+            return match key.as_str() {
+                "F12" => "F12 is kept for writing a note to Claude.".to_owned(),
+                "Tab" | "Shift+Tab" => format!("{key} is kept for moving between boxes and buttons."),
+                _ => format!("{key} is kept for moving through the lists."),
             };
         }
         let same = |k: &str| !key.is_empty() && normalise(k) == normalise(&key);
@@ -469,7 +519,6 @@ pub fn normalise(key: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::places::Place;
 
     #[test]
     fn ids_are_unique() {
@@ -638,6 +687,43 @@ mod tests {
         assert_eq!(keys.action_for("Ctrl+F"), Some("app.search"));
         let said = keys.set("app.fullScreen", "Ctrl+Shift+E");
         assert!(said.starts_with("Songs and Sounds and Presets and Curves and MIDI and Space keep"), "{said}");
+    }
+
+    #[test]
+    fn esc_steps_back_the_same_way_on_every_page() {
+        // One action for Esc, everywhere: no page's own list has it (the whole-app review of 6 Nov, X3-12).
+        let keys = Shortcuts::default();
+        assert_eq!(keys.action_for("Esc"), Some("app.escape"));
+        for page in PAGE_ACTIONS {
+            assert!(page.iter().all(|a| normalise(a.default_key) != "Esc"), "a page's own action has Esc");
+            assert_eq!(keys.page_action_for("Esc", page), None);
+        }
+    }
+
+    #[test]
+    fn the_arrow_keys_are_the_lists_and_every_list_says_so() {
+        let mut keys = Shortcuts::default();
+        for arrow in ["Up", "Down", "Left", "Right"] {
+            assert!(keys.set("app.search", arrow).contains("kept for moving through the lists"), "{arrow}");
+        }
+        // With a key held, an arrow is a key of its own (as Ctrl+Up, which steps even while you type a search).
+        assert_eq!(keys.set("app.search", "Alt+Up"), "");
+        assert_eq!(keys.key_of("app.search"), "Alt+Up");
+        // Each page with a list says what its arrows do on the key sheet; the pages without one say nothing.
+        for place in [Place::Songs, Place::Sounds, Place::Presets, Place::Midi, Place::Plugins] {
+            assert!(list_keys(place).iter().any(|(k, _)| k.contains("Up")), "{place:?}");
+        }
+        assert!(list_keys(Place::Space).is_empty() && list_keys(Place::Settings).is_empty());
+    }
+
+    #[test]
+    fn backup_and_read_midi_again_have_keys() {
+        // Their buttons have keys, and Ctrl+K finds them (X3-21).
+        let keys = Shortcuts::default();
+        assert_eq!(keys.page_action_for("Ctrl+Enter", BACKUP_ACTIONS), Some("backup.now"));
+        assert_eq!(keys.key_of("backup.stop"), "");
+        assert_eq!(keys.page_action_for("F5", MIDI_ACTIONS), Some("midi.readAgain"));
+        assert!(PAGES.iter().any(|(name, list)| *name == "Backup" && *list == BACKUP_ACTIONS));
     }
 
     #[test]

@@ -816,7 +816,8 @@ mod tests {
         let lines = key_lines(&keys);
         assert_eq!(lines[0].page, crate::shortcuts::EVERYWHERE);
         let heads: Vec<&str> = lines.iter().filter(|l| !l.page.is_empty()).map(|l| l.page).collect();
-        assert_eq!(heads, vec!["Everywhere", "Songs", "Sounds", "Presets", "Curves", "MIDI", "Plugins", "Space"]);
+        let pages = ["Everywhere", "Songs", "Sounds", "Presets", "Curves", "MIDI", "Plugins", "Space", "Backup"];
+        assert_eq!(heads, pages);
         let rescan = lines.iter().find(|l| l.id == "app.fullRescan").unwrap();
         assert_eq!((rescan.key.as_str(), rescan.changed), ("F6", true));
         assert_eq!(rescan.starts, "It starts with no key");

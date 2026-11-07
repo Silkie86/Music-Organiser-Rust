@@ -131,8 +131,39 @@ component Backdrop inherits Rectangle {
     }
 }
 
-// F1 or ?: every key in one list, read from the app-wide shortcut list.
+// One line of the key sheet: what a key does, and the key in a keycap.
+component KeyLine inherits HorizontalLayout {
+    in property <KeyRow> line;
+    padding-top: Space.xs;
+    padding-bottom: Space.xs;
+    spacing: Space.lg;
+    Text {
+        text: root.line.what;
+        color: Theme.text;
+        font-size: Type.body;
+        horizontal-stretch: 1;
+        wrap: word-wrap;
+    }
+    Rectangle {
+        width: max(keyText.preferred-width + 14px, 34px);
+        height: 22px;
+        border-radius: Theme.radius;
+        border-width: 1px;
+        border-color: Theme.stroke;
+        background: Theme.surface-raised;
+        keyText := Text {
+            text: root.line.key;
+            color: root.line.key == "" ? Theme.faint : Theme.muted;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+        }
+    }
+}
+
+// F1 or ?: every key, read from the app-wide shortcut list: the page's own first, under their own heading, then the
+// ones that work everywhere (the whole-app review of 6 Nov, X3-25).
 export component KeySheet inherits Rectangle {
+    in property <[KeyRow]> page-rows;
     in property <[KeyRow]> rows;
     callback close();
     Backdrop {
@@ -165,35 +196,19 @@ export component KeySheet inherits Rectangle {
                     clicked => { root.close(); }
                 }
             }
-            Caps { text: "EVERYWHERE"; }
             Groove { }
             Flickable {
                 VerticalLayout {
-                    for r in root.rows: HorizontalLayout {
-                        padding-top: Space.xs;
-                        padding-bottom: Space.xs;
-                        spacing: Space.lg;
-                        Text {
-                            text: r.what;
-                            color: Theme.text;
-                            font-size: Type.body;
-                            horizontal-stretch: 1;
-                            wrap: word-wrap;
+                    if root.page-rows.length > 0: VerticalLayout {
+                        padding-bottom: Space.md;
+                        Caps { text: "ON THIS PAGE"; }
+                        for r in root.page-rows: KeyLine {
+                            line: r;
                         }
-                        Rectangle {
-                            width: max(keyText.preferred-width + 14px, 34px);
-                            height: 22px;
-                            border-radius: Theme.radius;
-                            border-width: 1px;
-                            border-color: Theme.stroke;
-                            background: Theme.surface-raised;
-                            keyText := Text {
-                                text: r.key;
-                                color: r.key == "" ? Theme.faint : Theme.muted;
-                                font-family: Theme.number-font;
-                                font-size: Type.meta;
-                            }
-                        }
+                    }
+                    Caps { text: "EVERYWHERE"; }
+                    for r in root.rows: KeyLine {
+                        line: r;
                     }
                 }
             }
