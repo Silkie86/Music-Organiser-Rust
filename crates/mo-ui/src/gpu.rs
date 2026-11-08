@@ -36,6 +36,9 @@ thread_local! {
     static FRAMES: Cell<u64> = const { Cell::new(0) };
 }
 
+/// A hold on the first card handed over, kept until the process ends (see `connect`).
+static LAST_HOLD: std::sync::OnceLock<Gpu> = std::sync::OnceLock::new();
+
 /// How many frames the graphics card has drawn so far (none at all when the window isn't drawn with it).
 pub fn frames_drawn() -> u64 {
     FRAMES.with(Cell::get)
@@ -270,6 +273,10 @@ pub fn connect(app: &AppWindow) {
             let info = device.adapter_info();
             log::info("Graphics", &format!("Drawing with {} ({:?}, {:?})", info.name, info.backend, info.device_type));
             GPU.with(|g| *g.borrow_mut() = Some(Gpu { device: device.clone(), queue: queue.clone() }));
+            // The first card's device and queue are never let go: Slint lets go of its own in the window thread's
+            // last tidy-up when the app closes, and in a debug build wgpu then reaches for a thread-local of its own
+            // that's already gone, which ended every close with a crash log. Statics are never dropped.
+            let _ = LAST_HOLD.set(Gpu { device: device.clone(), queue: queue.clone() });
             GENERATION.with(|n| n.set(n.get() + 1));
             // Not from inside Slint's drawing: the views draw at their next turn.
             let weak = weak.clone();
