@@ -12,7 +12,7 @@
 
   Folders can be given instead of the library's: .\real-files-check.ps1 "D:\Music\FL Projects" "E:\Old saves"
 #>
-param([string[]]$Folders)
+param([Parameter(ValueFromRemainingArguments = $true)][string[]]$Folders)
 
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8

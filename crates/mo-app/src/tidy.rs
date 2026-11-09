@@ -25,8 +25,8 @@
 //!
 //! `logs\` is kept in bounds at every start instead ([`prune_logs`], from the session log), so an app that crashes soon
 //! after it opens still keeps it so: this app's session logs past the newest 30, crash logs (`crash-<time>.log`) past
-//! the newest 30, and each tool's reports (the twin test's, the MIDI twin test's, the galaxy check's) past the newest
-//! 10 of that kind. The app writes its logs there even when `logs` is a link (the folder moved to another drive), so
+//! the newest 30, and each tool's reports (the twin test's, the MIDI twin test's, the real files check's, the galaxy
+//! check's) past the newest 10 of that kind. The app writes its logs there even when `logs` is a link (the folder moved to another drive), so
 //! they're kept in bounds through it too; a file in it that is a link is never one of them.
 //!
 //! A file's age runs from the latest of when it was made, when it was last changed and, on a Mac or Linux, when its

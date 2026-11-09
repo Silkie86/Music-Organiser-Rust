@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Instant, UNIX_EPOCH};
 
 use mo_formats::midi::smf;
+use mo_library::folders::FolderList;
 use mo_library::songs::thousands;
 use rayon::prelude::*;
 use serde_json::Value;
@@ -138,7 +139,7 @@ fn read_one(path: &Path) -> (Reading, Option<String>) {
         .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
     let start = Instant::now();
-    let result = mo_catch::catch(AssertUnwindSafe(|| rust_side::dump(path)));
+    let result = mo_catch::catch(AssertUnwindSafe(|| rust_side::dump_with(path, false)));
     let ms = u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
     let path = path.to_string_lossy().into_owned();
     match result {
@@ -183,21 +184,25 @@ pub fn read_state(text: &str) -> HashMap<String, Reading> {
 }
 
 /// The parts that read differently from the last check, for a file that hasn't changed on disk (same size and
-/// date). A file that changed, or that the last check didn't read, gives none: its reading may well differ.
-pub fn changed_parts(old: &Reading, new: &Reading) -> BTreeSet<String> {
+/// date); `None` for a file that changed, whose reading may well differ. When a reader starts or stops panicking on a
+/// file, only that is said: a panic has no parts to compare.
+pub fn changed_parts(old: &Reading, new: &Reading) -> Option<BTreeSet<String>> {
     if old.size != new.size || old.modified != new.modified {
-        return BTreeSet::new();
+        return None;
     }
     let mut out = BTreeSet::new();
     if old.outcome != new.outcome {
         out.insert(format!("outcome {} to {}", old.outcome.word(), new.outcome.word()));
+        if old.outcome == Outcome::Panicked || new.outcome == Outcome::Panicked {
+            return Some(out);
+        }
     }
     for k in old.parts.keys().chain(new.parts.keys()) {
         if old.parts.get(k) != new.parts.get(k) {
             out.insert(k.clone());
         }
     }
-    out
+    Some(out)
 }
 
 /// A file's kind, for the summary.
@@ -216,24 +221,40 @@ fn kind(path: &str) -> &'static str {
     }
 }
 
-/// A panic's words with its numbers taken out, so the same bug in many files counts once and no number from a song
-/// (a length, an offset) reaches the summary.
+/// A panic's words with its numbers and anything it quotes taken out, so the same bug in many files counts once and
+/// nothing from a song (a length, an offset, a name it quotes) reaches the summary. Quoted text (in `'`, `"` or a
+/// backtick) becomes `...`, a number `#`, and any letter outside plain ASCII is left out.
 pub fn panic_kind(message: &str) -> String {
+    let first = message.lines().next().unwrap_or("");
     let mut out = String::new();
+    let mut quote: Option<char> = None;
     let mut in_number = false;
-    for c in message.chars() {
+    for c in first.chars() {
+        if let Some(q) = quote {
+            if c == q {
+                quote = None;
+            }
+            continue;
+        }
+        if matches!(c, '\'' | '"' | '`') {
+            quote = Some(c);
+            out.push_str("...");
+            in_number = false;
+            continue;
+        }
         if c.is_ascii_digit() {
             if !in_number {
                 out.push('#');
             }
             in_number = true;
-        } else {
-            in_number = false;
+            continue;
+        }
+        in_number = false;
+        if c.is_ascii() && !c.is_ascii_control() {
             out.push(c);
         }
     }
-    // Only the first line, and not too long: a panic's words are the reader's own, not the song's.
-    out.lines().next().unwrap_or("").chars().take(160).collect()
+    out.chars().take(160).collect()
 }
 
 /// The options of `twin check`.
@@ -274,7 +295,8 @@ pub fn run(args: &[String]) -> Result<bool, String> {
         let mut roots = lib.roots().map_err(|e| format!("Couldn't read the project folders: {e}"))?;
         // And the MIDI page's folders, so the MIDI packs are read too.
         roots.extend(
-            lib.strict_list_setting("midi_folders").map_err(|e| format!("Couldn't read the MIDI folders: {e}"))?,
+            lib.strict_list_setting(FolderList::Midi.setting_key().unwrap_or("midi_folders"))
+                .map_err(|e| format!("Couldn't read the MIDI folders: {e}"))?,
         );
         o.inputs.extend(roots.into_iter().map(PathBuf::from).filter(|p| p.exists()));
     }
@@ -294,14 +316,7 @@ pub fn run(args: &[String]) -> Result<bool, String> {
     // A panic is caught and counted: the default hook would print each one (with its file's path in what's around
     // it) over the summary.
     std::panic::set_hook(Box::new(|_| {}));
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1).max(1));
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .start_handler(|_| {
-            let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
-        })
-        .build()
-        .map_err(|e| format!("Couldn't start the threads that read: {e}"))?;
+    let pool = crate::low_priority_pool()?;
 
     let mut readings: Vec<Reading> = Vec::with_capacity(files.len());
     let mut panics: Vec<(String, String)> = Vec::new();
@@ -320,7 +335,8 @@ pub fn run(args: &[String]) -> Result<bool, String> {
     eprintln!("\r  {} of {} files read.   ", thousands(done), thousands(files.len()));
     let _ = std::panic::take_hook();
 
-    let summary = summarise(&readings, &old, &panics);
+    let roots: Vec<&Path> = o.inputs.iter().map(PathBuf::as_path).collect();
+    let summary = summarise(&readings, &old, &panics, &roots);
     print!("{}", summary.text);
 
     // The state is written by copy then rename, so a check stopped part way leaves the last one whole.
@@ -330,9 +346,23 @@ pub fn run(args: &[String]) -> Result<bool, String> {
         state += &state_line(r);
         state.push('\n');
     }
+    // Files this check didn't reach (one folder checked, a drive unplugged) keep their last reading, so the next
+    // full check still compares them with it. Gone files go when their folder is checked and they aren't found.
+    let reached: Vec<&Path> = o.inputs.iter().map(PathBuf::as_path).collect();
+    let read_now: std::collections::HashSet<&str> = readings.iter().map(|r| r.path.as_str()).collect();
+    for (path, r) in &old {
+        if !read_now.contains(path.as_str()) && !reached.iter().any(|root| Path::new(path).starts_with(root)) {
+            state += &state_line(r);
+            state.push('\n');
+        }
+    }
     let part = state_path.with_extension("part");
-    std::fs::write(&part, state).map_err(|e| format!("Couldn't write the state: {e}"))?;
-    std::fs::rename(&part, &state_path).map_err(|e| format!("Couldn't write the state: {e}"))?;
+    let written = std::fs::write(&part, state).and_then(|()| std::fs::rename(&part, &state_path));
+    if let Err(e) = written {
+        // Nothing of the check's own is left behind (rule 28).
+        let _ = std::fs::remove_file(&part);
+        return Err(format!("Couldn't write the state: {e}"));
+    }
 
     if let Some(path) = &o.report {
         let mut f = std::io::BufWriter::new(
@@ -352,7 +382,13 @@ pub struct Summary {
 }
 
 /// Counts the readings, and compares them with the last check's.
-pub fn summarise(readings: &[Reading], old: &HashMap<String, Reading>, panics: &[(String, String)]) -> Summary {
+/// `roots` are the folders and files this check read: a file the last check read elsewhere isn't counted as gone.
+pub fn summarise(
+    readings: &[Reading],
+    old: &HashMap<String, Reading>,
+    panics: &[(String, String)],
+    roots: &[&Path],
+) -> Summary {
     let mut text = String::new();
     let mut report = String::new();
     let mut by_kind: BTreeMap<&str, BTreeMap<&str, usize>> = BTreeMap::new();
@@ -417,12 +453,8 @@ pub fn summarise(readings: &[Reading], old: &HashMap<String, Reading>, panics: &
         let mut changed: BTreeMap<String, Vec<&str>> = BTreeMap::new();
         let mut files_changed = 0;
         for r in readings {
-            let Some(o) = old.get(&r.path) else { continue };
-            if o.size != r.size || o.modified != r.modified {
-                continue;
-            }
+            let Some(parts) = old.get(&r.path).and_then(|o| changed_parts(o, r)) else { continue };
             same_file += 1;
-            let parts = changed_parts(o, r);
             if !parts.is_empty() {
                 files_changed += 1;
             }
@@ -431,7 +463,13 @@ pub fn summarise(readings: &[Reading], old: &HashMap<String, Reading>, panics: &
             }
         }
         let new_files = readings.iter().filter(|r| !old.contains_key(&r.path)).count();
-        let gone = old.len() - readings.iter().filter(|r| old.contains_key(&r.path)).count();
+        let read_now: std::collections::HashSet<&str> = readings.iter().map(|r| r.path.as_str()).collect();
+        let gone = old
+            .keys()
+            .filter(|p| {
+                !read_now.contains(p.as_str()) && roots.iter().any(|root| Path::new(p.as_str()).starts_with(root))
+            })
+            .count();
         text += &format!(
             "  Since the last check: {} file(s) new, {} gone, {} changed on disk; of the {} unchanged, {} read \
              differently now.\n",
@@ -512,11 +550,34 @@ mod tests {
         let old = reading("a.flp", Outcome::Read, &[("info.notes", "1"), ("midi", "2")]);
         let new = reading("a.flp", Outcome::Warned, &[("info.notes", "1"), ("midi", "3"), ("song", "4")]);
         assert_eq!(
-            changed_parts(&old, &new).into_iter().collect::<Vec<_>>(),
+            changed_parts(&old, &new).unwrap().into_iter().collect::<Vec<_>>(),
             ["midi", "outcome read to warned", "song"]
         );
+        let panicked = reading("a.flp", Outcome::Panicked, &[]);
+        assert_eq!(
+            changed_parts(&old, &panicked).unwrap().into_iter().collect::<Vec<_>>(),
+            ["outcome read to panicked"]
+        );
         let saved_again = Reading { modified: 21, ..new };
-        assert!(changed_parts(&old, &saved_again).is_empty());
+        assert_eq!(changed_parts(&old, &saved_again), None);
+    }
+
+    #[test]
+    fn panic_kinds_drop_what_they_quote() {
+        assert_eq!(
+            panic_kind("byte index 5 is not a char boundary; it is inside 'é' (bytes 4..6) of `Café Demo`"),
+            "byte index # is not a char boundary; it is inside ... (bytes #..#) of ..."
+        );
+        assert_eq!(
+            panic_kind("called `Result::unwrap()` on an `Err` value: Zip(\"Drums/Kick é.wav\")"),
+            "called ... on an ... value: Zip(...)"
+        );
+        assert_eq!(panic_kind("Café"), "Caf");
+    }
+
+    #[test]
+    fn the_usage_is_in_the_twins_own() {
+        assert!(crate::USAGE.contains(USAGE));
     }
 
     #[test]
@@ -538,7 +599,7 @@ mod tests {
             reading("C:\\Other Secret.bwproject", Outcome::Panicked, &[]),
         ];
         let panics = [("C:\\Other Secret.bwproject".to_owned(), "slice index 99 out of range".to_owned())];
-        let s = summarise(&now, &old, &panics);
+        let s = summarise(&now, &old, &panics, &[Path::new("C:\\")]);
         assert!(!s.text.contains("Secret"), "{}", s.text);
         assert!(s.text.contains("FL Studio: info.notes"), "{}", s.text);
         assert!(s.text.contains("slice index # out of range"), "{}", s.text);

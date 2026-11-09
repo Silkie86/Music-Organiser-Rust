@@ -16,6 +16,12 @@ use sha2::{Digest, Sha256};
 
 /// Everything the Rust readers find in one file. A file that can't be read gives `{"error": ...}`.
 pub fn dump(path: &Path) -> Value {
+    dump_with(path, true)
+}
+
+/// [`dump`], with FL samples found on the disk (`resolve`) or left as the project names them. The real files check
+/// leaves them: a sample pack moved between two checks would otherwise make the project read differently.
+pub fn dump_with(path: &Path, resolve: bool) -> Value {
     let raw = match std::fs::read(path) {
         Ok(raw) => raw,
         Err(e) => return json!({ "file": path.to_string_lossy(), "error": e.to_string() }),
@@ -37,9 +43,13 @@ pub fn dump(path: &Path) -> Value {
         return out;
     };
     let mut channels = song::extract_channels(&flp);
-    song::resolve_channel_samples(&mut channels, path);
+    if resolve {
+        song::resolve_channel_samples(&mut channels, path);
+    }
     let mut read = song::read_song(&flp);
-    read.resolve_samples(path);
+    if resolve {
+        read.resolve_samples(path);
+    }
     out["midi"] = song::extract_midi(&flp).iter().map(clip_json).collect();
     out["channels"] = channels.iter().map(channel_json).collect();
     out["presets"] = presets::extract_presets(&flp).iter().map(preset_json).collect();
