@@ -207,6 +207,95 @@ fn a_bitwig_project_with_only_launcher_clips_shows_its_scenes_one_after_another(
     assert_eq!(empty.notes, ["Nothing is on the arrangement timeline or in the clip launcher yet."]);
 }
 
+/// A note clip as Bitwig wrote it before version 6: its name on the clip, its content straight in 0x288, and the play
+/// range inside the content. Same kick loop as [`note_clip`].
+fn old_note_clip(b: &mut BwWriter, start: f64, length: f64) {
+    b.begin(CLIP);
+    b.f64(START, start);
+    b.f64(DURATION, length);
+    b.obj(0x288);
+    b.begin(0x501);
+    b.obj(0x98f);
+    b.begin(0x503);
+    b.bool(0x991, true);
+    b.obj(0x992);
+    b.begin(0x504);
+    b.f64(START, 0.0);
+    b.f64(DURATION, 4.0);
+    b.end();
+    b.end();
+    b.obj(0x49c);
+    b.begin(0x502);
+    b.list(0x18cb);
+    b.begin(0x42);
+    b.f64(0xee, 36.0);
+    b.list(ITEMS);
+    for (at, long) in [(0.0, 0.5), (3.0, 2.0)] {
+        b.begin(0x66);
+        b.f64(START, at);
+        b.f64(DURATION, long);
+        b.end();
+    }
+    b.end_list();
+    b.end();
+    b.end_list();
+    b.end();
+    b.end();
+    b.str(0x286, "Old beat");
+    b.end();
+}
+
+/// A track as Bitwig wrote it before version 6: its timeline in 0x15d → 0x238, its launcher in 0x15e.
+fn old_track(b: &mut BwWriter, name: &str, timeline: &[(f64, f64)], launcher: &[f64]) {
+    b.begin(0x285);
+    b.str(TRACK_NAME, name);
+    b.obj(0x15d);
+    b.begin(0x510);
+    b.obj(0x238);
+    b.begin(0x511);
+    b.list(ITEMS);
+    for &(start, length) in timeline {
+        old_note_clip(b, start, length);
+    }
+    b.end_list();
+    b.end();
+    b.end();
+    b.obj(0x15e);
+    b.begin(0x512);
+    b.list(SLOTS);
+    for &length in launcher {
+        b.begin(0x513);
+        b.obj(0x240);
+        old_note_clip(b, 0.0, length);
+        b.end();
+    }
+    b.end_list();
+    b.end();
+    b.list(GROUP_TRACKS);
+    b.end_list();
+    b.end();
+}
+
+#[test]
+fn bitwig_projects_from_before_version_6_show_their_clips() {
+    // Solomon's saves from Bitwig 2 to 5.2 all hold their clips this way (they used to show as empty).
+    let a = read("Old.bwproject", &bitwig_project(|b| old_track(b, "Beat", &[(8.0, 8.0)], &[])));
+    assert!(a.notes.is_empty(), "{:?}", a.notes);
+    assert_eq!(
+        a.lanes[0].clips.iter().map(|c| (c.name.as_str(), c.start, c.length)).collect::<Vec<_>>(),
+        [("Old beat", 8.0, 8.0)]
+    );
+    // The loop plays twice in the 8-beat clip.
+    assert_eq!(notes(&a, 0, 0), [(0.0, 0.5, 36), (3.0, 2.0, 36), (4.0, 0.5, 36), (7.0, 1.0, 36)]);
+
+    let jam = read("Old jam.bwproject", &bitwig_project(|b| old_track(b, "Keys", &[], &[8.0, 4.0])));
+    assert_eq!(
+        jam.notes,
+        ["This project's clips are in the clip launcher, so its scenes are shown one after another."]
+    );
+    assert_eq!(jam.lanes[0].clips.iter().map(|c| (c.start, c.length)).collect::<Vec<_>>(), [(0.0, 8.0), (8.0, 4.0)]);
+}
+
 #[test]
 fn the_bitwig_template_shows_its_audio_and_note_clips_and_what_plays_each_track() {
     let a = read("template.bwproject", &bitwig_template(Template::default()));
