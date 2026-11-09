@@ -11,11 +11,17 @@ fn save(daw: &str, name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/recipe").join(daw).join(name)
 }
 
+/// A save that didn't decode comes back as an empty view with a "couldn't be read" note.
+fn decoded(path: &Path, a: &Arrangement) {
+    assert!(!a.notes.iter().any(|n| n.contains("couldn't be read")), "{} didn't decode: {:?}", path.display(), a.notes);
+}
+
 /// The first view of a save (the DAW's own arrangement).
 fn read(daw: &str, name: &str) -> Arrangement {
     let path = save(daw, name);
-    let raw = std::fs::read(&path).unwrap();
-    arrangement::read_bytes(&path, &raw).into_iter().next().unwrap()
+    let a = arrangement::read(&path).unwrap().into_iter().next().unwrap();
+    decoded(&path, &a);
+    a
 }
 
 fn fl(step: &str) -> Arrangement {
@@ -59,10 +65,34 @@ fn every_save_reads() {
             let path = entry.unwrap().path();
             let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase());
             if matches!(ext.as_deref(), Some("flp" | "bwproject" | "song")) {
-                let raw = std::fs::read(&path).unwrap();
-                assert!(!arrangement::read_bytes(&path, &raw).is_empty(), "{}", path.display());
+                let views = arrangement::read(&path).unwrap();
+                assert!(!views.is_empty(), "{}", path.display());
+                for a in &views {
+                    decoded(&path, a);
+                }
             }
         }
+    }
+}
+
+#[test]
+fn the_presets_read() {
+    let bw =
+        mo_formats::bitwig::decode(std::fs::read(save("bitwig", "MO Recipe Polysynth.bwpreset")).unwrap()).unwrap();
+    assert_eq!(bw.body_error, None);
+    let fst = std::fs::read(save("fl", "MO Recipe Keys.fst")).unwrap();
+    let fst = mo_formats::fl::events::load(&fst).unwrap();
+    assert_eq!(fst.major, 25);
+    assert_eq!(fst.warning, None);
+    // A multisample is a zip of multisample.xml and the sounds: the three tones on C3, E3 and G3.
+    let file = std::fs::File::open(save("bitwig", "MO Recipe Tones.multisample")).unwrap();
+    let mut zip = zip::ZipArchive::new(file).unwrap();
+    let mut xml = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("multisample.xml").unwrap(), &mut xml).unwrap();
+    for (tone, key) in [("A", 60), ("B", 64), ("C", 67)] {
+        assert!(xml.contains(&format!("file=\"MO Tone {tone}.wav\"")), "{tone}");
+        assert!(xml.contains(&format!("root=\"{key}\"")), "{key}");
+        assert!(zip.by_name(&format!("MO Tone {tone}.wav")).is_ok());
     }
 }
 
@@ -200,9 +230,10 @@ fn bitwig_reversed_clip() {
 #[ignore = "known gap: FL Stretch pro / e2 / e3 clips read a whole-file length millions of beats long"]
 fn fl_stretched_clips_have_a_sane_length() {
     for step in ["11b stretch pro", "11c e2 generic", "11d e3 mono"] {
-        let part = tone(&fl(step)).2;
-        let beats = part.whole_file_beats.or(part.seconds_per_beat.map(|s| 0.5 / s)).unwrap();
-        assert!(beats < 100.0, "{step}: {beats}");
+        // The whole tone plays over the clip: FL set the Time knob so it spans 4.27 beats.
+        let (_, len, part) = tone(&fl(step));
+        assert!(near(len, 4.2708), "{step}: {len}");
+        assert!(near(part.whole_file_beats.unwrap(), 4.2708), "{step}: {:?}", part.whole_file_beats);
     }
 }
 
@@ -219,18 +250,53 @@ fn bitwig_time_signature_and_marker() {
     let a = bitwig("16 time signature and marker");
     assert_eq!(a.beats_per_bar, 3);
     assert_eq!(a.markers.len(), 1);
+    assert_eq!(a.markers[0].name, "Verse");
+    // The save has the cue marker on beat 4, where the tone starts.
+    assert!(near(a.markers[0].beat, 4.0));
+}
+
+/// The volume, pan and tempo lanes from step 3: each a straight line between two points.
+fn step_3_automation(a: &Arrangement, what: &str) {
+    let points = |name: &str| -> Vec<(f64, f64)> {
+        let lane = a.lanes.iter().find(|l| l.kind == LaneKind::Automation && l.name.contains(name));
+        let lane = lane.unwrap_or_else(|| {
+            panic!("{what}: no {name} lane in {:?}", a.lanes.iter().map(|l| &l.name).collect::<Vec<_>>())
+        });
+        lane.clips.iter().flat_map(|c| c.points.iter().map(move |p| (c.start + p.beat, p.value))).collect()
+    };
+    let volume = points("Volume");
+    assert!(near(volume[0].0, 0.0) && near(volume[1].0, 4.0), "{what}: {volume:?}");
+    let pan = points("Pan");
+    assert!(near(pan[0].0, 4.0) && pan[0].1 < pan[1].1, "{what}: {pan:?}");
+    let tempo = points("Tempo");
+    assert!(near(tempo[0].0, 4.0) && near(tempo[0].1, 128.0) && near(tempo[1].1, 140.0), "{what}: {tempo:?}");
 }
 
 #[test]
-#[ignore = "known gap: Bitwig and Fender arranger automation is not shown"]
-fn bitwig_and_fender_automation() {
-    for a in [bitwig("03 automation"), fender("03 automation")] {
-        assert!(a.lanes.iter().any(|l| l.clips.iter().any(|c| !c.points.is_empty())));
-    }
+#[ignore = "known gap: Bitwig arranger automation is not shown"]
+fn bitwig_automation() {
+    step_3_automation(&bitwig("03 automation"), "Bitwig");
 }
 
 #[test]
-#[ignore = "known gap: deactivated (Bitwig) and disabled (Fender) tracks are not marked"]
-fn switched_off_tracks() {
+#[ignore = "known gap: Fender automation is not shown"]
+fn fender_automation() {
+    // Solomon's pan line ends a 16th after bar 3; the test only checks where it starts.
+    step_3_automation(&fender("03 automation"), "Fender");
+}
+
+#[test]
+#[ignore = "known gap: Bitwig deactivated tracks are not marked"]
+fn bitwig_deactivated_track() {
     assert!(lane(&bitwig("06 group and off"), LaneKind::Audio).muted);
+    assert!(!lane(&bitwig("05 drum machine"), LaneKind::Audio).muted);
+}
+
+#[test]
+#[ignore = "known gap: Fender disabled tracks are not told apart from muted ones"]
+fn fender_disabled_track() {
+    // 06 is muted only, 06b muted and disabled: something must tell them apart.
+    let muted = lane(&fender("06 mixer"), LaneKind::Audio).detail.clone();
+    let disabled = lane(&fender("06b disabled"), LaneKind::Audio).detail.clone();
+    assert_ne!(muted, disabled);
 }

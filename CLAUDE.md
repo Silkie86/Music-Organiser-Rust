@@ -25,6 +25,8 @@ This repo is the Rust rebuild of the C# app. The plan, the inventory of today's 
 2. Never move or delete samples. Duplicates only hide in the app.
 3. Never change an original project: Fix writes "(fixed)" beside it.
 4. Never commit Solomon's projects, samples, MIDI packs, Bitwig template, Bitwig binaries or model files.
+   One exception (Solomon, 2026-11-07): the recipe test saves in `crates/mo-formats/tests/fixtures/recipe/`, made
+   by hand from a recipe with built-in instruments and made-up tones only, names blanked; no other saves of his.
 5. Only counts and averages from Solomon's MIDI go in code. One exception (Solomon, 2026-11-01): the key finder's
    stream scales, minor weight and calibration (about 20 numbers) may be fitted on his packs (`theorybench keyfit
    --rescale`); nothing else is learned from them.

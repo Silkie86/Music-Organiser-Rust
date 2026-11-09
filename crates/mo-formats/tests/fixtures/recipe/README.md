@@ -37,8 +37,8 @@ multisample of the three tones.
 Fender Studio (`studio-one/`): 01 empty; 02 Mai Tai notes; 03 volume, pan and tempo automation (the pan's last point
 is a 16th after bar 3); 04 tone at bar 2; 05 Impact XT pads; 06 audio track muted, Pro EQ, bus; 06b audio track
 disabled; 08 Timestretch Sound at 100, 08b Drums, 08c Solo, 08d Tape, 08e Follow, 08f Speedup 2; 09 to 12 carry
-on from 08f (back at 128): transpose +3, gain with fades, trimmed, 3/4 with marker on beat 4. `Media/` and
-`Samples/` hold the tone the songs point at.
+on from 08f (back at 128): transpose +3, gain with fades, trimmed, 3/4 with marker on beat 4. `Media/` holds
+the tone the songs point at.
 
 ## Known gaps (what the readers miss)
 
@@ -46,5 +46,5 @@ on from 08f (back at 128): transpose +3, gain with fades, trimmed, 3/4 with mark
   cue markers; reversed clips read as forwards with a negative rate.
 - FL: stretch mode, pitch, clip fades, declicking, sampler IN/OUT, the second arrangement; Stretch pro, e2 and e3
   clips read a whole-file length millions of beats long.
-- Fender: automation, transpose, gain and fades, disabled tracks, bus routing; Timestretch events read as if they
-  played at the song's speed.
+- Fender: automation, transpose, gain and fades, disabled tracks (read as just muted), bus routing; Timestretch
+  events read as if they played at the song's speed.
