@@ -95,7 +95,8 @@ pub fn read(doc: &Document) -> Arrangement {
             continue;
         }
         let children = doc.field_list(track, F_GROUP_TRACKS);
-        let clips: Vec<PreviewClip> = arranger_lane(doc, track)
+        let clips: Vec<PreviewClip> = track_lanes(doc, track)
+            .0
             .map(|l| doc.field_list(l, F_ITEMS))
             .unwrap_or_default()
             .into_iter()
@@ -165,29 +166,35 @@ pub fn read(doc: &Document) -> Arrangement {
     Arrangement { view: VIEW, tempo, beats_per_bar: 4, lanes, markers: Vec::new(), notes }
 }
 
-/// What's on a track's timeline: track → 0x2bf8 → 0x2d8e, or before Bitwig 6, track → 0x15d → 0x238.
-fn arranger_lane(doc: &Document, track: ObjId) -> Option<ObjId> {
+/// A track's arranger lane (its timeline's clips) and its clip launcher: track → 0x2bf8 → 0x2d8e and 0x2d8f, or
+/// before Bitwig 6, track → 0x15d → 0x238 and track → 0x15e.
+fn track_lanes(doc: &Document, track: ObjId) -> (Option<ObjId>, Option<ObjId>) {
     match field_obj(doc, track, F_TRACK_LANES) {
-        Some(lanes) => field_obj(doc, lanes, F_ARRANGER_LANE),
-        None => field_obj(doc, track, F_OLD_TIMELINE).and_then(|t| field_obj(doc, t, F_OLD_ARRANGER_LANE)),
+        Some(lanes) => (field_obj(doc, lanes, F_ARRANGER_LANE), field_obj(doc, lanes, F_LAUNCHER_LANE)),
+        None => (
+            field_obj(doc, track, F_OLD_TIMELINE).and_then(|t| field_obj(doc, t, F_OLD_ARRANGER_LANE)),
+            field_obj(doc, track, F_OLD_LAUNCHER),
+        ),
     }
 }
 
-/// A track's clip launcher slots, one per scene: track → 0x2bf8 → 0x2d8f → 0x231, or before Bitwig 6,
-/// track → 0x15e → 0x231.
+/// A track's clip launcher slots, one per scene (the launcher's 0x231).
 fn launcher_slots(doc: &Document, track: ObjId) -> Vec<ObjId> {
-    let launcher = match field_obj(doc, track, F_TRACK_LANES) {
-        Some(lanes) => field_obj(doc, lanes, F_LAUNCHER_LANE),
-        None => field_obj(doc, track, F_OLD_LAUNCHER),
-    };
-    launcher.map(|l| doc.field_list(l, F_LAUNCHER_SLOTS)).unwrap_or_default()
+    track_lanes(doc, track).1.map(|l| doc.field_list(l, F_LAUNCHER_SLOTS)).unwrap_or_default()
+}
+
+/// A clip as Bitwig wrote it before version 6: no 0x2ae9 holder, its content straight in 0x288.
+fn is_old_clip(doc: &Document, clip: ObjId) -> bool {
+    let c = doc.obj(clip);
+    !c.has(F_CLIP_CONTENT) && c.has(F_OLD_CLIP_CONTENT)
 }
 
 /// A clip's content (its notes or audio): clip → 0x2ae9 → 0x10e9, or before Bitwig 6, clip → 0x288.
 fn clip_content(doc: &Document, clip: ObjId) -> Option<ObjId> {
-    match field_obj(doc, clip, F_CLIP_CONTENT) {
-        Some(holder) => field_obj(doc, holder, F_CONTENT_OBJECT),
-        None => field_obj(doc, clip, F_OLD_CLIP_CONTENT),
+    if is_old_clip(doc, clip) {
+        field_obj(doc, clip, F_OLD_CLIP_CONTENT)
+    } else {
+        field_obj(doc, clip, F_CLIP_CONTENT).and_then(|holder| field_obj(doc, holder, F_CONTENT_OBJECT))
     }
 }
 
@@ -196,7 +203,7 @@ fn is_clip(doc: &Document, o: ObjId) -> bool {
     matches!(c.class, CLS_CLIP | CLS_AUDIO_CLIP)
         && c.has(F_START)
         && c.has(F_DURATION)
-        && clip_content(doc, o).is_some()
+        && (c.has(F_CLIP_CONTENT) || c.has(F_OLD_CLIP_CONTENT))
 }
 
 /// Everything inside an object, depth first, in the order it's written: what's defined there, and with `refs` also
@@ -245,7 +252,7 @@ fn first_device(doc: &Document, track: ObjId) -> String {
     // References are followed, but never into another track (a sidechain or modulator can point at one).
     let other_track = |o: ObjId| {
         let o = doc.obj(o);
-        o.has(F_TRACK_LANES) || o.has(F_OLD_TIMELINE) || o.has(F_GROUP_TRACKS)
+        o.has(F_TRACK_LANES) || o.has(F_OLD_TIMELINE) || o.has(F_OLD_LAUNCHER) || o.has(F_GROUP_TRACKS)
     };
     let devices: Vec<ObjId> = descendants(doc, chain, true, other_track)
         .filter(|&o| {
@@ -287,8 +294,12 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
     }
     let muted = c.num(F_MUTED).is_some_and(|m| m > 0.0);
     let content = clip_content(doc, clip);
-    let range =
-        field_obj(doc, clip, F_PLAY_RANGE).or_else(|| content.and_then(|o| field_obj(doc, o, F_OLD_PLAY_RANGE)));
+    let old = is_old_clip(doc, clip);
+    let range = if old {
+        content.and_then(|o| field_obj(doc, o, F_OLD_PLAY_RANGE))
+    } else {
+        field_obj(doc, clip, F_PLAY_RANGE)
+    };
     let loop_range = range.and_then(|r| field_obj(doc, r, F_LOOP_RANGE));
     let num = |o: Option<ObjId>, field: u32| o.and_then(|o| doc.obj(o).num(field));
     let offset =
@@ -298,10 +309,8 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
     let looping = num(range, F_LOOP_ON).is_some_and(|v| v > 0.0) && loop_end > loop_start;
     let key_lanes = content.and_then(|o| field_obj(doc, o, F_NOTE_CONTENT)).map(|o| doc.field_list(o, F_KEY_LANES));
     let key_lanes = key_lanes.unwrap_or_default();
-    let name = match content.map(|o| doc.obj(o).str(F_CONTENT_NAME)).unwrap_or_default() {
-        "" => c.str(F_OLD_CLIP_NAME),
-        name => name,
-    };
+    let name =
+        if old { c.str(F_OLD_CLIP_NAME) } else { content.map(|o| doc.obj(o).str(F_CONTENT_NAME)).unwrap_or_default() };
 
     // Where a moment of the content falls in the clip: each pass of the loop after the first starts at the loop start.
     // Worked out one at a time (as the C# app's iterator did), so a note stops as soon as the budget runs out.
