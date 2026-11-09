@@ -1,6 +1,7 @@
 //! A Bitwig project's arrangement as Bitwig shows it: its tracks (groups indented) and the clips on their timelines;
 //! when nothing is on the timeline, the clip launcher's scenes one after another. Ported from the C# app's
-//! `Parsers/BitwigArrangement.cs`, as mapped from Solomon's projects (Bitwig 5.1 to 6.1).
+//! `Parsers/BitwigArrangement.cs`, as mapped from Solomon's projects (Bitwig 2 to 6.1; the
+//! way a track holds its clips changed in Bitwig 6).
 
 use std::collections::HashSet;
 
@@ -37,6 +38,15 @@ const F_PLAY_RANGE: u32 = 0x2adb;
 const F_LOOP_RANGE: u32 = 0x992;
 const F_LOOP_ON: u32 = 0x991;
 const F_PLAY_START: u32 = 0x98c;
+// Before Bitwig 6 a track held its timeline in 0x15d → 0x238 and its launcher in 0x15e (its slots in 0x231), and a
+// clip held its content in 0x288 (the same object as 6's 0x2ae9 → 0x10e9), its name in 0x286 and its play range in
+// the content's 0x98f. Seen in Solomon's saves from Bitwig 2 to 5.2.
+const F_OLD_TIMELINE: u32 = 0x15d;
+const F_OLD_ARRANGER_LANE: u32 = 0x238;
+const F_OLD_LAUNCHER: u32 = 0x15e;
+const F_OLD_CLIP_CONTENT: u32 = 0x288;
+const F_OLD_CLIP_NAME: u32 = 0x286;
+const F_OLD_PLAY_RANGE: u32 = 0x98f;
 const CLS_AUDIO_CLIP: u32 = 0xee;
 // An audio event: what it plays (0x288 → 0x20d → 0x4b4, a sample whose file is 0x129e → 0xd3b), the seconds of the
 // file it starts and ends at, and warp markers (0x192: points of a beat 0x2af and a second 0xa6 of the file).
@@ -85,8 +95,7 @@ pub fn read(doc: &Document) -> Arrangement {
             continue;
         }
         let children = doc.field_list(track, F_GROUP_TRACKS);
-        let clips: Vec<PreviewClip> = field_obj(doc, track, F_TRACK_LANES)
-            .and_then(|l| field_obj(doc, l, F_ARRANGER_LANE))
+        let clips: Vec<PreviewClip> = arranger_lane(doc, track)
             .map(|l| doc.field_list(l, F_ITEMS))
             .unwrap_or_default()
             .into_iter()
@@ -156,17 +165,38 @@ pub fn read(doc: &Document) -> Arrangement {
     Arrangement { view: VIEW, tempo, beats_per_bar: 4, lanes, markers: Vec::new(), notes }
 }
 
-/// A track's clip launcher slots, one per scene (track → 0x2bf8 → 0x2d8f → 0x231).
+/// What's on a track's timeline: track → 0x2bf8 → 0x2d8e, or before Bitwig 6, track → 0x15d → 0x238.
+fn arranger_lane(doc: &Document, track: ObjId) -> Option<ObjId> {
+    match field_obj(doc, track, F_TRACK_LANES) {
+        Some(lanes) => field_obj(doc, lanes, F_ARRANGER_LANE),
+        None => field_obj(doc, track, F_OLD_TIMELINE).and_then(|t| field_obj(doc, t, F_OLD_ARRANGER_LANE)),
+    }
+}
+
+/// A track's clip launcher slots, one per scene: track → 0x2bf8 → 0x2d8f → 0x231, or before Bitwig 6,
+/// track → 0x15e → 0x231.
 fn launcher_slots(doc: &Document, track: ObjId) -> Vec<ObjId> {
-    field_obj(doc, track, F_TRACK_LANES)
-        .and_then(|l| field_obj(doc, l, F_LAUNCHER_LANE))
-        .map(|l| doc.field_list(l, F_LAUNCHER_SLOTS))
-        .unwrap_or_default()
+    let launcher = match field_obj(doc, track, F_TRACK_LANES) {
+        Some(lanes) => field_obj(doc, lanes, F_LAUNCHER_LANE),
+        None => field_obj(doc, track, F_OLD_LAUNCHER),
+    };
+    launcher.map(|l| doc.field_list(l, F_LAUNCHER_SLOTS)).unwrap_or_default()
+}
+
+/// A clip's content (its notes or audio): clip → 0x2ae9 → 0x10e9, or before Bitwig 6, clip → 0x288.
+fn clip_content(doc: &Document, clip: ObjId) -> Option<ObjId> {
+    match field_obj(doc, clip, F_CLIP_CONTENT) {
+        Some(holder) => field_obj(doc, holder, F_CONTENT_OBJECT),
+        None => field_obj(doc, clip, F_OLD_CLIP_CONTENT),
+    }
 }
 
 fn is_clip(doc: &Document, o: ObjId) -> bool {
-    let o = doc.obj(o);
-    matches!(o.class, CLS_CLIP | CLS_AUDIO_CLIP) && o.has(F_START) && o.has(F_DURATION) && o.has(F_CLIP_CONTENT)
+    let c = doc.obj(o);
+    matches!(c.class, CLS_CLIP | CLS_AUDIO_CLIP)
+        && c.has(F_START)
+        && c.has(F_DURATION)
+        && clip_content(doc, o).is_some()
 }
 
 /// Everything inside an object, depth first, in the order it's written: what's defined there, and with `refs` also
@@ -213,7 +243,10 @@ fn first_device(doc: &Document, track: ObjId) -> String {
     // The device chain only; clips and sub-tracks hold no devices of this track's.
     let Some(chain) = field_obj(doc, track, F_DEVICE_CHAIN) else { return String::new() };
     // References are followed, but never into another track (a sidechain or modulator can point at one).
-    let other_track = |o: ObjId| doc.obj(o).has(F_TRACK_LANES) || doc.obj(o).has(F_GROUP_TRACKS);
+    let other_track = |o: ObjId| {
+        let o = doc.obj(o);
+        o.has(F_TRACK_LANES) || o.has(F_OLD_TIMELINE) || o.has(F_GROUP_TRACKS)
+    };
     let devices: Vec<ObjId> = descendants(doc, chain, true, other_track)
         .filter(|&o| {
             let d = doc.obj(o);
@@ -253,8 +286,9 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
         return None;
     }
     let muted = c.num(F_MUTED).is_some_and(|m| m > 0.0);
-    let content = field_obj(doc, clip, F_CLIP_CONTENT).and_then(|o| field_obj(doc, o, F_CONTENT_OBJECT));
-    let range = field_obj(doc, clip, F_PLAY_RANGE);
+    let content = clip_content(doc, clip);
+    let range =
+        field_obj(doc, clip, F_PLAY_RANGE).or_else(|| content.and_then(|o| field_obj(doc, o, F_OLD_PLAY_RANGE)));
     let loop_range = range.and_then(|r| field_obj(doc, r, F_LOOP_RANGE));
     let num = |o: Option<ObjId>, field: u32| o.and_then(|o| doc.obj(o).num(field));
     let offset =
@@ -264,7 +298,10 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
     let looping = num(range, F_LOOP_ON).is_some_and(|v| v > 0.0) && loop_end > loop_start;
     let key_lanes = content.and_then(|o| field_obj(doc, o, F_NOTE_CONTENT)).map(|o| doc.field_list(o, F_KEY_LANES));
     let key_lanes = key_lanes.unwrap_or_default();
-    let name = content.map(|o| doc.obj(o).str(F_CONTENT_NAME)).unwrap_or_default();
+    let name = match content.map(|o| doc.obj(o).str(F_CONTENT_NAME)).unwrap_or_default() {
+        "" => c.str(F_OLD_CLIP_NAME),
+        name => name,
+    };
 
     // Where a moment of the content falls in the clip: each pass of the loop after the first starts at the loop start.
     // Worked out one at a time (as the C# app's iterator did), so a note stops as soon as the budget runs out.
