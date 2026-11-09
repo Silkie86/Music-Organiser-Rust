@@ -16,6 +16,24 @@ It writes two files to `%LOCALAPPDATA%\MusicOrganiser\logs`:
 - `twin-report-<date>.txt`: every difference, file by file, with what each app found. It names songs and samples,
   so it stays on the PC.
 
+## The real files check (Rust only)
+
+`tools\dev\Real files check.cmd` reads every `.flp`, `.bwproject`, `.song` and MIDI file in the library's folders
+and the MIDI page's with the Rust readers only (the C# app isn't needed). It says which files a reader panics on (a
+bug to fix), which it can't read or reads with warnings, which are slow, and which read differently from the last
+check although the file itself hasn't changed: what a change to a reader does to the real library. Run it once to
+start, and again after a reader changes.
+
+- `logs\real-files-check-<date>.txt`: the summary, counts and parts of a reading only (as `song.channels`), safe to
+  share.
+- `logs\real-files-report-<date>.txt`: the files behind each count. It names songs, so it stays on the PC.
+- `twin\real-files-state.txt`: what each file read as last time (a short fingerprint of each part), for the next
+  check. One file, replaced each time.
+
+```
+cargo run -p mo-twin -- check <folder or file>... --state <file> [--report <file>] [--library <library.db>]
+```
+
 ## In CI
 
 The test files (`crates/mo-formats/tests/twin_fixtures.rs`) are read by both apps on every push. A difference not

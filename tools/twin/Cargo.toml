@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 chrono.workspace = true
 mo-audio = { path = "../../crates/mo-audio", default-features = false }
+mo-catch = { path = "../../crates/mo-catch" }
 mo-formats = { path = "../../crates/mo-formats" }
 mo-library = { path = "../../crates/mo-library" }
 mo-sounds = { path = "../../crates/mo-sounds" }

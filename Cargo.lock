@@ -3343,6 +3343,7 @@ version = "0.1.0"
 dependencies = [
  "chrono",
  "mo-audio",
+ "mo-catch",
  "mo-formats",
  "mo-library",
  "mo-sounds",

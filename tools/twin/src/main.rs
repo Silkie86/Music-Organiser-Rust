@@ -5,6 +5,7 @@
 //! ```text
 //! twin run --cs <helper> <folder or file>... [--report <file>] [--expect <file>] [--write-expect <file>]
 //! twin dump <file>
+//! twin check <folder or file>... --state <file> [--report <file>] [--library <library.db>]
 //! twin songs --cs <helper> <library.db> [--report <file>]
 //! twin sounds --cs <helper> <folder>
 //! ```
@@ -12,11 +13,13 @@
 //! `run` prints a summary that holds only counts and field names (no names, paths or notes from the songs), so it's safe
 //! to paste into a conversation; every difference, file by file, goes in the report. `--expect` checks the differences
 //! against a list of the ones already judged and fails on any new one (CI uses it on the test files); `--write-expect`
-//! writes that list. `dump` prints what the Rust readers find in one file. `songs` groups the library into songs both
-//! ways and sorts the differences by cause (see `songs.rs`); both sides read one copy of the library, made beside the
-//! helper and deleted afterwards. `sounds` makes test sounds in the folder and has both apps analyse them (see
+//! writes that list. `dump` prints what the Rust readers find in one file. `check` reads every file with the Rust
+//! readers only, and says which they trip over and which read differently since the last check (see `check.rs`).
+//! `songs` groups the library into songs both ways and sorts the differences by cause (see `songs.rs`); both sides
+//! read one copy of the library, made beside the helper and deleted afterwards. `sounds` makes test sounds in the folder and has both apps analyse them (see
 //! `sounds.rs`), then has both train the sound type classifier on made-up examples (`classify.rs`).
 
+mod check;
 mod classify;
 mod compare;
 mod galaxy;
@@ -45,6 +48,7 @@ fn main() -> ExitCode {
             Ok(true)
         }
         Some("run") => run(&args[1..]),
+        Some("check") => check::run(&args[1..]),
         Some("songs") => run_songs(&args[1..]),
         Some("sounds") => run_sounds(&args[1..]),
         _ => Err(USAGE.to_owned()),
@@ -62,6 +66,7 @@ fn main() -> ExitCode {
 const USAGE: &str =
     "twin run --cs <helper> <folder or file>... [--report <file>] [--expect <file>] [--write-expect <file>]
 twin dump <file>
+twin check <folder or file>... --state <file> [--report <file>] [--library <library.db>]
 twin songs --cs <helper> <library.db> [--report <file>]
 twin sounds --cs <helper> <folder> (makes and removes its own test-sound folder inside it)";
 
@@ -151,15 +156,7 @@ fn run(args: &[String]) -> Result<bool, String> {
     let mut kinds: BTreeMap<String, usize> = BTreeMap::new();
     let mut found: BTreeSet<String> = BTreeSet::new();
     let mut same = 0;
-    // All cores but one, at low priority (rule 21), so the computer (and a DAW open on it) stays quick.
-    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1).max(1));
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
-        .start_handler(|_| {
-            let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
-        })
-        .build()
-        .map_err(|e| format!("Couldn't start the threads that read: {e}"))?;
+    let pool = low_priority_pool()?;
     // A few hundred files at a time, so a big library's readings never all sit in memory at once.
     let mut done = 0;
     for chunk in files.chunks(CHUNK) {
@@ -250,6 +247,19 @@ fn run(args: &[String]) -> Result<bool, String> {
         print!("{report}");
     }
     Ok(new.is_empty() && gone.is_empty())
+}
+
+/// The threads that read: all cores but one, at low priority (rule 21), so the computer (and a DAW open on it) stays
+/// quick.
+fn low_priority_pool() -> Result<rayon::ThreadPool, String> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get().saturating_sub(1).max(1));
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .start_handler(|_| {
+            let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
+        })
+        .build()
+        .map_err(|e| format!("Couldn't start the threads that read: {e}"))
 }
 
 /// The FL Studio, Bitwig and Studio One projects and MIDI files in the folders given (and the folders in them), and
