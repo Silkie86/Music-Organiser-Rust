@@ -112,9 +112,18 @@ const STOP_RETRY: Duration = Duration::from_millis(200);
 
 /// The tools' reports in `logs\`, by how their names start. Each name is this, then the time it ran (digits, `-` and
 /// `_`), then `.txt`: `twin-test-2026-11-02-1430.txt`. Written by `tools/dev/twin-test.ps1`, `tools/dev/MIDI twin
-/// test.cmd` and the galaxy check (`tools/galaxycheck`); the C# app writes none of these.
-pub const REPORTS: [&str; 6] =
-    ["twin-test-", "twin-report-", "twin-songs-", "midi-twin-", "midi-twin-report-", "galaxy-check-"];
+/// test.cmd`, `tools/dev/real-files-check.ps1` and the galaxy check (`tools/galaxycheck`); the C# app writes none of
+/// these.
+pub const REPORTS: [&str; 8] = [
+    "twin-test-",
+    "twin-report-",
+    "twin-songs-",
+    "midi-twin-",
+    "midi-twin-report-",
+    "galaxy-check-",
+    "real-files-check-",
+    "real-files-report-",
+];
 
 /// The folder in the data folder that curve files are written to.
 const CURVES: &str = mo_presets::curves::FOLDER;
