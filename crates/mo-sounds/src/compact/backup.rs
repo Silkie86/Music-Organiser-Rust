@@ -273,6 +273,24 @@ fn check(path: &Path, sounds: Option<i64>, whole: bool) -> Result<(), NotRestore
     }
 }
 
+/// Whether the library at `copy` has a backup copy it could be put back from now ([`restore`] looks the same way):
+/// there, the app's own library in a format this version reads, and whole by SQLite's `quick_check`. Why not
+/// otherwise. Reads the whole backup copy, so for the background, and not at every start: the old `sounds.db` is
+/// only put away once this says yes (`mo_app::old_databases`), as a damaged library with no usable backup is made
+/// again from that.
+pub fn usable(copy: &Path) -> Result<(), String> {
+    let backup = backup_of(copy);
+    match look_at(&backup, WAIT) {
+        Ok(Found::Copy { format, own: Some(_), .. }) if readable(format) => {}
+        Ok(Found::Nothing) => return Err("the app's own sound library has no backup copy yet".into()),
+        Ok(_) => return Err("the sound library's backup copy isn't a whole copy of it".into()),
+        Err(why) => return Err(format!("the sound library's backup copy couldn't be read just now ({why})")),
+    }
+    check(&backup, None, false).map_err(|(NotRestored::NoBackup(why) | NotRestored::NotNow(why))| {
+        format!("the sound library's backup copy can't be used: {why}")
+    })
+}
+
 /// Why [`restore`] didn't put the library back from its backup copy. Either way, nothing has changed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum NotRestored {

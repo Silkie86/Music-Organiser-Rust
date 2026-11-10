@@ -1709,12 +1709,14 @@ fn the_apps_own_library_keeps_one_checked_backup_copy() {
     // Still following sounds.db: sounds.db is its backup.
     assert_eq!(backup::back_up(&old), None);
     assert!(!backup.exists());
+    assert_eq!(backup::usable(&copy), Err("the app's own sound library has no backup copy yet".into()));
     compact::last_sync(&old, &copy).unwrap();
     assert!(compact::own_since(&copy).is_some());
     let Some(BackedUp::Made { bytes, .. }) = backup::back_up(&old) else { panic!("made") };
     assert_eq!(bytes, std::fs::metadata(&backup).unwrap().len());
     assert_eq!(half_made(&dir), Vec::<String>::new());
     same_answers(&old, &backup);
+    assert_eq!(backup::usable(&copy), Ok(()), "sounds.db may be put away now");
     // A file of its own (no log beside it), the same size of page.
     assert_eq!(pragma(&backup, "journal_mode"), "delete");
     assert_eq!(rows(&backup, "PRAGMA page_size"), rows(&copy, "PRAGMA page_size"));
@@ -1740,6 +1742,8 @@ fn the_apps_own_library_keeps_one_checked_backup_copy() {
     // Damaged: made again then, though the library hasn't changed (only then: it isn't checked every time).
     damage(&backup, "sounds");
     assert_eq!(backup::back_up(&old), None);
+    // A backup copy that's there but damaged is no reason to put sounds.db away.
+    assert!(backup::usable(&copy).is_err_and(|why| why.contains("can't be used")));
     set_time(&backup, a_week_ago);
     assert!(matches!(backup::back_up(&old), Some(BackedUp::Made { .. })));
     assert_eq!(rating_of(&backup, id), stars);

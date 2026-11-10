@@ -29,15 +29,15 @@ use sha2::{Digest, Sha256};
 use crate::activity::{Feed, Job};
 use crate::log;
 
-/// The folder in the data folder the old databases are put away in. `mo_space::app_files::part_of` counts it as the
-/// old app's databases by this name.
-pub const FOLDER: &str = "old-databases";
+/// The folder in the data folder the old databases are put away in (the Space page counts it as the old app's
+/// databases by this name).
+pub const FOLDER: &str = mo_space::app_files::OLD_DATABASES_FOLDER;
 
 /// A few words in [`FOLDER`] on what's in it, with a line for each database put there.
 pub const READ_ME: &str = "READ ME.txt";
 
 /// The old app's databases, by name.
-pub const OLD: [&str; 3] = [mo_library::songs_db::OLD_FILE_NAME, "sounds.db", "midi.db"];
+pub const OLD: [&str; 3] = mo_space::app_files::OLD_DATABASE_FILES;
 
 /// How long the app's own database must have done without the old one before that's put away.
 pub const WORKED_FOR: Duration = Duration::from_secs(7 * 24 * 60 * 60);
@@ -50,7 +50,7 @@ const WAIT: Duration = Duration::from_secs(90);
 const SPARE_ROOM: u64 = 1 << 30;
 
 /// A database's own file, then the files SQLite keeps beside it.
-const SIDES: [&str; 4] = ["", "-wal", "-shm", "-journal"];
+const SIDES: [&str; 4] = mo_space::app_files::JOURNALS;
 
 /// What a copy is called while it's written and checked, after the file's own name and before the app's process
 /// number ([`is_part`]).
@@ -64,8 +64,9 @@ const BUFFER: usize = 1 << 20;
 ///
 /// - `library.db`: `songs.db` is the app's own song library, and the one thing still read from `library.db` after
 ///   that, the FL Studio saves whose muted marks were lost ([`mo_library::song_writes::to_mend`]), has been.
-/// - `sounds.db`: `sounds-rust.db` is the app's own sound library, and it has a checked backup copy: `sounds.db` was
-///   what a damaged library with no backup was made from again.
+/// - `sounds.db`: `sounds-rust.db` is the app's own sound library, and its backup copy is there and whole
+///   ([`mo_sounds::compact::backup::usable`], which reads all of it: asked only once the week is up): `sounds.db`
+///   was what a damaged library with no usable backup was made from again.
 /// - `midi.db`: the MIDI index is in this version's layout and has taken in the corrections you made in the old app.
 pub fn ready_at(data: &Path, old: &str, now: i64) -> Result<(), String> {
     if old == mo_library::songs_db::OLD_FILE_NAME {
@@ -82,10 +83,7 @@ pub fn ready_at(data: &Path, old: &str, now: i64) -> Result<(), String> {
         let since = mo_sounds::compact::own_since(&copy)
             .ok_or_else(|| "sounds-rust.db isn't the app's own sound library yet".to_owned())?;
         worked(since, now, "sounds-rust.db has been the app's own sound library")?;
-        if plain_file(&mo_sounds::compact::backup::backup_of(&copy)).is_none() {
-            return Err("the app's own sound library has no backup copy yet".into());
-        }
-        Ok(())
+        mo_sounds::compact::backup::usable(&copy)
     } else if old == "midi.db" {
         let since = mo_midi::store::took_in_old_at(&data.join(mo_midi::store::FILE_NAME)).ok_or_else(|| {
             "the MIDI index hasn't taken in the old app's corrections yet (it does when the MIDI page first shows)"
@@ -118,8 +116,8 @@ fn worked(since: i64, now: i64, what: &str) -> Result<(), String> {
 pub struct Archived {
     /// Old databases moved into [`FOLDER`] from the data folder, each with what it and its side files take.
     pub moved: Vec<(&'static str, u64)>,
-    /// Old databases copied into [`FOLDER`] from the folder the data was moved out of, the same.
-    pub copied: Vec<(&'static str, u64)>,
+    /// Old databases copied into [`FOLDER`] from a folder the data was moved out of.
+    pub copied: Vec<Copied>,
     /// Why an old database that's there stays where it is for now.
     pub waits: Vec<String>,
     /// What couldn't be done this time; it's tried again at the next start.
@@ -133,6 +131,15 @@ impl Archived {
     }
 }
 
+/// An old database copied from a folder the data was moved out of: its name, what it and its side files take, and
+/// the folder.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Copied {
+    pub name: &'static str,
+    pub bytes: u64,
+    pub from: PathBuf,
+}
+
 /// How far a copy from the old folder is: the database's name, and the bytes done of those to do.
 pub struct Copying<'a> {
     pub name: &'a str,
@@ -141,12 +148,12 @@ pub struct Copying<'a> {
 }
 
 /// Puts away each old database that `ready` says may go (as [`ready_at`] does): those in the data folder `data` are
-/// moved into its [`FOLDER`]; one only in `old_folder` (the folder the data was moved out of, if it was) is copied
-/// there and checked, and left where it is. `copying` hears how far a copy is. Reads and writes files, so never on
-/// the window's thread.
+/// moved into its [`FOLDER`]; one only in one of `old_folders` (the folders the data was moved out of, the last
+/// first: [`old_folders`]) is copied there and checked, and left where it is. `copying` hears how far a copy is.
+/// Reads and writes files, so never on the window's thread.
 pub fn archive(
     data: &Path,
-    old_folder: Option<&Path>,
+    old_folders: &[PathBuf],
     ready: &dyn Fn(&str) -> Result<(), String>,
     copying: &mut dyn FnMut(Copying<'_>),
 ) -> Archived {
@@ -168,14 +175,18 @@ pub fn archive(
         } else if kept && !here.is_empty() {
             // Its side files, left when a move was cut short: they follow it.
             move_in(&here, &archive, name, &mut done);
-        } else if !kept && let Some(old_folder) = old_folder {
-            // Only what the move left in the old folder: one the data folder has (or had) is the newer.
-            let there = family(old_folder, name);
-            if there.first().is_some_and(|f| f.side.is_empty()) {
+        } else if !kept {
+            // Only what a move left in an old folder: one the data folder has (or had) is the newer. The folder the
+            // data was in last comes first: it had the newest.
+            let found = old_folders.iter().find_map(|folder| {
+                let there = family(folder, name);
+                there.first().is_some_and(|f| f.side.is_empty()).then_some((folder, there))
+            });
+            if let Some((old_folder, there)) = found {
                 match ready(name).and_then(|()| folder_ready(&archive)) {
                     Ok(()) => match copy_in(&there, &archive, name, copying) {
                         Ok(bytes) => {
-                            done.copied.push((name, bytes));
+                            done.copied.push(Copied { name, bytes, from: old_folder.clone() });
                             note_in_read_me(&archive, name, "copied here", old_folder);
                         }
                         Err(why) => done.failed.push(format!(
@@ -205,6 +216,25 @@ fn put_away(data: &Path, file: &str) -> Option<Metadata> {
     let archive = data.join(FOLDER);
     fs::symlink_metadata(&archive).ok().filter(|m| m.file_type().is_dir())?;
     plain_file(&archive.join(file))
+}
+
+/// The folders the data in `data` was moved out of, the last first, as each folder's own record of its move says
+/// ([`crate::data_move::moved_in`]): a second move made before an old database was put away leaves it two folders
+/// back.
+pub fn old_folders(data: &Path) -> Vec<PathBuf> {
+    let mut folders: Vec<PathBuf> = Vec::new();
+    let mut at = data.to_path_buf();
+    while folders.len() < 8
+        && let Some(moved) = crate::data_move::moved_in(&at)
+    {
+        let from = PathBuf::from(moved.from);
+        if !from.is_absolute() || from == data || folders.contains(&from) {
+            break;
+        }
+        folders.push(from.clone());
+        at = from;
+    }
+    folders
 }
 
 /// Whether `name`, in [`FOLDER`], is a copy that was being written when the app stopped: one of the old files' own
@@ -425,11 +455,16 @@ fn note_in_read_me(archive: &Path, name: &str, how: &str, from: &Path) {
 }
 
 /// Starts the look on a low-priority thread of its own, [`WAIT`] after the app opens: the old databases in the data
-/// folder `data`, and those left in the folder the data was moved out of.
+/// folder `data`, and those left in the folders the data was moved out of. Not in a run that uses the old copy of
+/// its data (the folder a move went to is away: [`crate::paths::problem`]): that folder is the one the old databases
+/// are copied *from*, and nothing in it is changed. The caller leaves it out too in a run that reads `library.db`.
 pub fn archive_later(data: PathBuf, feed: Feed) {
+    if crate::paths::problem().is_some() {
+        return;
+    }
     let started = crate::background::spawn("Old databases", move || {
         std::thread::sleep(WAIT);
-        archive_now(&data, crate::paths::moved_from().as_deref(), &crate::paths::first_dir(), &feed);
+        archive_now(&data, &old_folders(&data), &crate::paths::first_dir(), &feed);
     });
     if let Err(e) = started {
         log::warning("Old databases", &format!("Couldn't start putting the old app's databases away: {e}"));
@@ -438,31 +473,28 @@ pub fn archive_later(data: PathBuf, feed: Feed) {
 
 /// Looks now ([`archive`], with [`ready_at`]), saying in the log what it did and why anything stays, with a card
 /// while it copies and one that stays, to say what was put away. `first` is the system's own data folder
-/// ([`crate::paths::first_dir`]), for the old folder's note.
-pub fn archive_now(data: &Path, old_folder: Option<&Path>, first: &Path, feed: &Feed) -> Archived {
+/// ([`crate::paths::first_dir`]), for the old folders' notes.
+pub fn archive_now(data: &Path, old_folders: &[PathBuf], first: &Path, feed: &Feed) -> Archived {
     // A copy reads gigabytes: they shouldn't push the pages' own out of memory.
     crate::background::lower_memory_priority();
     let now = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64);
     let mut job: Option<Job> = None;
-    let done = archive(data, old_folder, &|old| ready_at(data, old, now), &mut |at| {
+    let done = archive(data, old_folders, &|old| ready_at(data, old, now), &mut |at| {
         let job = job.get_or_insert_with(|| {
             feed.start(
                 "Putting the old app's databases away",
-                &format!(
-                    "Copying {} ({}) into {}",
-                    at.name,
-                    mo_space::size_text(at.total),
-                    data.join(FOLDER).display()
-                ),
+                &format!("Copying them into {} and checking each copy", data.join(FOLDER).display()),
             )
         });
-        job.progress(if at.total == 0 { 1.0 } else { (at.done as f64 / at.total as f64) as f32 }, None);
+        let detail = format!("Copying {} ({})", at.name, mo_space::size_text(at.total));
+        job.progress(if at.total == 0 { 1.0 } else { (at.done as f64 / at.total as f64) as f32 }, Some(&detail));
     });
     if let Some(job) = job {
-        if done.copied.is_empty() {
-            job.failed(&done.failed.join("; "));
-        } else {
+        // Any copy that failed shows, even beside one that didn't.
+        if done.failed.is_empty() {
             job.done("Copied and checked");
+        } else {
+            job.failed(&done.failed.join("; "));
         }
     }
     for line in &done.waits {
@@ -471,19 +503,23 @@ pub fn archive_now(data: &Path, old_folder: Option<&Path>, first: &Path, feed: &
     for line in &done.failed {
         log::warning("Old databases", line);
     }
-    // The old folder's note said to keep what was still to be put away.
-    if old_folder.is_some() && crate::data_move::renew_moved_out_note(data, first) {
-        log::info("Old databases", "Wrote the note in the old data folder again: nothing there is waited for now");
+    // An old folder's note says to keep what's still to be put away: written again when that's no longer so.
+    let mut moved_into = data;
+    for old in old_folders {
+        if crate::data_move::renew_moved_out_note(moved_into, data, first) {
+            log::info("Old databases", &format!("Wrote the note in {} again, as things are now", old.display()));
+        }
+        moved_into = old;
     }
-    if let Some(detail) = card_line(&done, data, old_folder) {
+    if let Some(detail) = card_line(&done, data, old_folders) {
         feed.told("Put the old app's databases away", &detail);
     }
     done
 }
 
-/// What the card says once something was put away: what was moved and copied, where to, and that the old folder
-/// isn't needed any more once nothing in it is still to be put away. `None` when nothing was.
-pub fn card_line(done: &Archived, data: &Path, old_folder: Option<&Path>) -> Option<String> {
+/// What the card says once something was put away: what was moved and copied, where to, and that the old folders
+/// aren't needed any more once nothing in them is still to be put away. `None` when nothing was.
+pub fn card_line(done: &Archived, data: &Path, old_folders: &[PathBuf]) -> Option<String> {
     if !done.any() {
         return None;
     }
@@ -497,21 +533,30 @@ pub fn card_line(done: &Archived, data: &Path, old_folder: Option<&Path>) -> Opt
     if !done.moved.is_empty() {
         line.push_str(&format!("{} moved into {}. ", list(&done.moved), archive.display()));
     }
-    if let (false, Some(old)) = (done.copied.is_empty(), old_folder) {
-        let to = if done.moved.is_empty() { format!("into {}", archive.display()) } else { "there".to_owned() };
-        line.push_str(&format!("{} copied {to} from {} and checked. ", list(&done.copied), old.display()));
+    let mut named = !done.moved.is_empty();
+    for folder in old_folders {
+        let from: Vec<(&'static str, u64)> =
+            done.copied.iter().filter(|c| &c.from == folder).map(|c| (c.name, c.bytes)).collect();
+        if !from.is_empty() {
+            let to = if named { "there".to_owned() } else { format!("into {}", archive.display()) };
+            line.push_str(&format!("{} copied {to} from {} and checked. ", list(&from), folder.display()));
+            named = true;
+        }
     }
     line.push_str("The app has its own now and doesn't open them any more. Nothing was deleted.");
-    if let Some(old) = old_folder
-        && old.is_dir()
-        // One the data folder has too is the newer: the old folder's isn't waited for.
-        && OLD.iter().all(|name| {
-            plain_file(&old.join(name)).is_none() || holds(data, name) || plain_file(&data.join(name)).is_some()
+    // One the data folder has too is the newer: the old folder's isn't waited for.
+    let waited = |old: &Path| {
+        OLD.iter().any(|name| {
+            plain_file(&old.join(name)).is_some() && !holds(data, name) && plain_file(&data.join(name)).is_none()
         })
-    {
+    };
+    let free: Vec<String> =
+        old_folders.iter().filter(|old| old.is_dir() && !waited(old)).map(|old| old.display().to_string()).collect();
+    if !free.is_empty() && free.len() == old_folders.iter().filter(|old| old.is_dir()).count() {
+        let free: Vec<&str> = free.iter().map(String::as_str).collect();
         line.push_str(&format!(
             " Nothing in {} is waited for any more: the note in it says what to keep, and the rest can go.",
-            old.display()
+            and(&free)
         ));
     }
     Some(line)
@@ -556,10 +601,10 @@ mod tests {
     fn nothing_there_is_nothing_to_do() {
         let data = test_folder("nothing");
         let old = test_folder("nothing-old");
-        assert_eq!(archive(&data, Some(&old), READY, &mut quiet), Archived::default());
-        assert_eq!(archive(&data, None, READY, &mut quiet), Archived::default());
+        assert_eq!(archive(&data, std::slice::from_ref(&old), READY, &mut quiet), Archived::default());
+        assert_eq!(archive(&data, &[], READY, &mut quiet), Archived::default());
         assert!(names(&data).is_empty(), "no folder is made for nothing");
-        assert_eq!(card_line(&Archived::default(), &data, Some(&old)), None);
+        assert_eq!(card_line(&Archived::default(), &data, std::slice::from_ref(&old)), None);
     }
 
     #[test]
@@ -572,7 +617,7 @@ mod tests {
         fs::write(data.join("songs.db"), b"the app's own").unwrap();
         // Only library.db is ready.
         let ready = |old: &str| if old == "library.db" { Ok(()) } else { Err("not yet".to_owned()) };
-        let done = archive(&data, None, &ready, &mut quiet);
+        let done = archive(&data, &[], &ready, &mut quiet);
         assert_eq!(done.moved, [("library.db", 18)]);
         assert_eq!(done.waits, ["midi.db stays where it is for now: not yet"]);
         assert!(done.copied.is_empty() && done.failed.is_empty(), "{done:?}");
@@ -586,14 +631,14 @@ mod tests {
         assert!(holds(&data, "library.db") && holds(&data, "library.db-wal") && !holds(&data, "midi.db"));
         assert!(!holds(&data, "library.db.bak") && !holds(&data, "songs.db"));
         // Nothing more to do for it; midi.db goes when its time comes, and the note gets a line, not a new start.
-        assert_eq!(archive(&data, None, &ready, &mut quiet).moved, []);
-        let done = archive(&data, None, READY, &mut quiet);
+        assert_eq!(archive(&data, &[], &ready, &mut quiet).moved, []);
+        let done = archive(&data, &[], READY, &mut quiet);
         assert_eq!(done.moved, [("midi.db", 4)]);
         let read_me = fs::read_to_string(archive_folder.join(READ_ME)).unwrap();
         assert_eq!(read_me.matches("Music Organiser put").count(), 1, "{read_me}");
         assert_eq!(read_me.matches("moved here").count(), 2, "{read_me}");
         assert_eq!(names(&data), [FOLDER, "songs.db"]);
-        let line = card_line(&done, &data, None).unwrap();
+        let line = card_line(&done, &data, &[]).unwrap();
         assert!(line.starts_with("midi.db (4 bytes) moved into "), "{line}");
         assert!(line.ends_with("Nothing was deleted."), "{line}");
     }
@@ -608,7 +653,7 @@ mod tests {
         // A side file with no database anywhere is nobody's to move.
         fs::write(data.join("midi.db-shm"), b"stray").unwrap();
         // They follow whatever `ready` says now: their database went when it was.
-        let done = archive(&data, None, &|_| Err("no".to_owned()), &mut quiet);
+        let done = archive(&data, &[], &|_| Err("no".to_owned()), &mut quiet);
         assert_eq!(done.moved, [("library.db", 6)]);
         assert!(done.waits.is_empty() && done.failed.is_empty(), "{done:?}");
         assert_eq!(fs::read(archive_folder.join("library.db-wal")).unwrap(), b"newest");
@@ -627,7 +672,7 @@ mod tests {
         fs::write(data.join("midi.db"), b"midi").unwrap();
         fs::write(data.join("midi.db-wal"), b"another").unwrap();
         fs::write(data.join("midi.db-shm"), b"index").unwrap();
-        let done = archive(&data, None, READY, &mut quiet);
+        let done = archive(&data, &[], READY, &mut quiet);
         assert_eq!(
             done.waits,
             [format!("library.db is in the data folder again, and {FOLDER} already holds one: both stay as they are")]
@@ -660,11 +705,13 @@ mod tests {
         let before = names(&old);
 
         let mut heard = Vec::new();
-        let done = archive(&data, Some(&old), READY, &mut |at| heard.push((at.name.to_owned(), at.done, at.total)));
+        let done = archive(&data, std::slice::from_ref(&old), READY, &mut |at| {
+            heard.push((at.name.to_owned(), at.done, at.total))
+        });
         assert!(done.waits.is_empty() && done.failed.is_empty(), "{done:?}");
         assert_eq!(done.moved, [("library.db", 13)]);
         let total = big.len() as u64 + 6;
-        assert_eq!(done.copied, [("sounds.db", total)]);
+        assert_eq!(done.copied, [Copied { name: "sounds.db", bytes: total, from: old.clone() }]);
         let archive_folder = data.join(FOLDER);
         assert_eq!(names(&archive_folder), [READ_ME, "library.db", "sounds.db", "sounds.db-wal"]);
         assert_eq!(fs::read(archive_folder.join("library.db")).unwrap(), b"changed since");
@@ -683,7 +730,7 @@ mod tests {
         let read_me = fs::read_to_string(archive_folder.join(READ_ME)).unwrap();
         assert!(read_me.contains(&format!("sounds.db: copied here from {}", old.display())), "{read_me}");
 
-        let line = card_line(&done, &data, Some(&old)).unwrap();
+        let line = card_line(&done, &data, std::slice::from_ref(&old)).unwrap();
         assert!(line.starts_with("library.db (13 bytes) moved into "), "{line}");
         assert!(line.contains(&format!(") copied there from {} and checked. ", old.display())), "{line}");
         assert!(line.contains("Nothing was deleted."), "{line}");
@@ -695,7 +742,10 @@ mod tests {
             "{line}"
         );
         // Once it's there, the old folder's isn't read again.
-        assert_eq!(archive(&data, Some(&old), READY, &mut |_| panic!("copied again")), Archived::default());
+        assert_eq!(
+            archive(&data, std::slice::from_ref(&old), READY, &mut |_| panic!("copied again")),
+            Archived::default()
+        );
     }
 
     #[test]
@@ -716,8 +766,8 @@ mod tests {
         // A half-written copy from another run isn't taken for anything.
         fs::write(archive_folder.join("sounds.db.part-1"), b"sou").unwrap();
 
-        let done = archive(&data, Some(&old), READY, &mut quiet);
-        assert_eq!(done.copied, [("sounds.db", 12)]);
+        let done = archive(&data, std::slice::from_ref(&old), READY, &mut quiet);
+        assert_eq!(done.copied, [Copied { name: "sounds.db", bytes: 12, from: old.clone() }]);
         assert_eq!(fs::read(archive_folder.join("sounds.db")).unwrap(), b"sounds");
         assert_eq!(done.failed.len(), 1, "{done:?}");
         assert!(done.failed[0].starts_with("midi.db couldn't be copied from "), "{done:?}");
@@ -726,7 +776,7 @@ mod tests {
         assert_eq!(fs::read(archive_folder.join("midi.db-wal")).unwrap(), b"something else");
         assert!(archive_folder.join("sounds.db.part-1").exists(), "the sweep's to clear, not a copy's");
         // The old folder still has one that isn't put away: it isn't called done with.
-        let line = card_line(&done, &data, Some(&old)).unwrap();
+        let line = card_line(&done, &data, std::slice::from_ref(&old)).unwrap();
         assert!(line.starts_with("sounds.db (12 bytes) copied into "), "{line}");
         assert!(line.ends_with("Nothing was deleted."), "{line}");
     }
@@ -736,11 +786,55 @@ mod tests {
         let data = test_folder("old-waits");
         let old = test_folder("old-waits-old");
         fs::write(old.join("sounds.db"), b"sounds").unwrap();
-        let done = archive(&data, Some(&old), &|_| Err("not yet".to_owned()), &mut |_| panic!("copied"));
+        let done =
+            archive(&data, std::slice::from_ref(&old), &|_| Err("not yet".to_owned()), &mut |_| panic!("copied"));
         assert_eq!(done.waits, [format!("sounds.db stays in {} for now: not yet", old.display())]);
         assert!(!data.join(FOLDER).exists());
         // An old folder that isn't there (its drive is away) is nothing to do.
-        assert_eq!(archive(&data, Some(&old.join("gone")), READY, &mut quiet), Archived::default());
+        assert_eq!(archive(&data, &[old.join("gone")], READY, &mut quiet), Archived::default());
+    }
+
+    #[test]
+    fn one_left_two_moves_back_is_found_through_each_folders_own_record() {
+        let root = test_folder("two-back");
+        let (a, b, c) = (root.join("A"), root.join("B"), root.join("C"));
+        for (folder, from) in [(&a, None), (&b, Some(&a)), (&c, Some(&b))] {
+            fs::create_dir(folder).unwrap();
+            if let Some(from) = from {
+                let record = crate::data_move::Record { from: from.display().to_string(), ..Default::default() };
+                fs::write(folder.join(crate::paths::MOVED_IN_FILE), serde_json::to_string(&record).unwrap()).unwrap();
+            }
+        }
+        assert_eq!(old_folders(&c), [b.clone(), a.clone()]);
+        assert_eq!(old_folders(&a), Vec::<PathBuf>::new());
+        // sounds.db stayed in A at the first move; B, the folder before this one, has an older midi.db than A's.
+        fs::write(a.join("sounds.db"), b"sounds").unwrap();
+        fs::write(a.join("midi.db"), b"older").unwrap();
+        fs::write(b.join("midi.db"), b"newer!").unwrap();
+        let done = archive(&c, &old_folders(&c), READY, &mut quiet);
+        assert!(done.failed.is_empty() && done.waits.is_empty(), "{done:?}");
+        assert_eq!(
+            done.copied,
+            [
+                Copied { name: "sounds.db", bytes: 6, from: a.clone() },
+                Copied { name: "midi.db", bytes: 6, from: b.clone() }
+            ]
+        );
+        assert_eq!(fs::read(c.join(FOLDER).join("midi.db")).unwrap(), b"newer!");
+        let line = card_line(&done, &c, &old_folders(&c)).unwrap();
+        assert!(
+            line.contains(&format!("midi.db (6 bytes) copied into {} from {}", c.join(FOLDER).display(), b.display())),
+            "{line}"
+        );
+        assert!(line.contains(&format!("sounds.db (6 bytes) copied there from {}", a.display())), "{line}");
+        assert!(
+            line.contains(&format!("Nothing in {} and {} is waited for any more", b.display(), a.display())),
+            "{line}"
+        );
+        // A record that points back at itself ends the walk.
+        let record = crate::data_move::Record { from: c.display().to_string(), ..Default::default() };
+        fs::write(a.join(crate::paths::MOVED_IN_FILE), serde_json::to_string(&record).unwrap()).unwrap();
+        assert_eq!(old_folders(&c), [b, a]);
     }
 
     #[cfg(unix)]
@@ -753,7 +847,7 @@ mod tests {
         // A database that is itself a link is never moved either.
         fs::write(elsewhere.join("real-midi.db"), b"midi").unwrap();
         std::os::unix::fs::symlink(elsewhere.join("real-midi.db"), data.join("midi.db")).unwrap();
-        let done = archive(&data, None, READY, &mut quiet);
+        let done = archive(&data, &[], READY, &mut quiet);
         assert!(!done.any(), "{done:?}");
         assert_eq!(done.waits.len(), 1, "{done:?}");
         assert!(done.waits[0].ends_with("isn't a plain folder"), "{done:?}");
@@ -821,6 +915,8 @@ mod tests {
             Err("songs.db isn't the app's own song library yet".into())
         );
         own_song_library(&data);
+        // Read the clock again: the library's own time may be a second after the first reading.
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as i64;
         let why = ready_at(&data, "library.db", now).unwrap_err();
         assert!(why.starts_with("songs.db has been the app's own song library for 0 days"), "{why}");
         let later = now + week + 60;
@@ -828,19 +924,19 @@ mod tests {
         assert!(why.contains("muted samples"), "{why}");
         // The whole step: nothing moves until the mend is noted.
         let feed = Feed::default();
-        let done = archive(&data, None, &|old| ready_at(&data, old, later), &mut quiet);
+        let done = archive(&data, &[], &|old| ready_at(&data, old, later), &mut quiet);
         assert!(!done.any() && done.waits.len() == 1, "{done:?}");
         let batch = mo_library::song_writes::Batch { mended: true, ..Default::default() };
         mo_library::song_writes::write(&data.join("songs.db"), &batch).unwrap();
         assert_eq!(ready_at(&data, "library.db", later), Ok(()));
-        let done = archive(&data, None, &|old| ready_at(&data, old, later), &mut quiet);
+        let done = archive(&data, &[], &|old| ready_at(&data, old, later), &mut quiet);
         assert_eq!(done.moved.len(), 1, "{done:?}");
         assert!(data.join(FOLDER).join("library.db").is_file() && !data.join("library.db").exists());
         // The app opens its own library as before, with library.db gone.
         assert!(mo_library::songs_db::at_start(&data, "test").is_songs_db());
         assert_eq!(mo_library::song_writes::to_mend(&data.join("songs.db")).unwrap(), None);
         // Run now, as the app does: nothing is left to do, and no card for nothing.
-        assert_eq!(archive_now(&data, None, &data, &feed), Archived::default());
+        assert_eq!(archive_now(&data, &[], &data, &feed), Archived::default());
         assert!(feed.visible(std::time::Instant::now()).is_empty());
     }
 
@@ -879,10 +975,10 @@ mod tests {
         let data = PathBuf::from("data");
         let done = Archived {
             moved: vec![("library.db", 3 << 20), ("midi.db", 1 << 20)],
-            copied: vec![("sounds.db", 5 << 20)],
+            copied: vec![Copied { name: "sounds.db", bytes: 5 << 20, from: "gone-old-folder".into() }],
             ..Archived::default()
         };
-        let line = card_line(&done, &data, Some(Path::new("gone-old-folder"))).unwrap();
+        let line = card_line(&done, &data, &["gone-old-folder".into()]).unwrap();
         let archive_folder = data.join(FOLDER);
         assert_eq!(
             line,
