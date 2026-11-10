@@ -1832,7 +1832,7 @@ fn say_soundfont(app: &AppWindow) {
         let usual = folder.join(page::SOUNDFONT_FOLDER).join(page::SOUNDFONT_FILE);
         data.set_soundfont_note(
             format!(
-                "To hear parts, choose a General MIDI SoundFont (.sf2). GeneralUser GS, the old app's, goes in {}",
+                "To hear parts, choose a General MIDI SoundFont (.sf2). GeneralUser GS, a free one, goes in {}",
                 usual.display()
             )
             .into(),

@@ -373,6 +373,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     scroll(&window, 700.0, 600.0, 10.0 * PAGE_DOWN);
     hover(&window, -1.0, -1.0);
     capture(&window);
+    space_keys_checks(&app, &window, &mut shots)?;
     mo_ui::space::show_sample(&app, sample_space(), "");
     presets_shots(&app, &window, &mut shots)?;
     app.set_place(Place::Songs.index() as i32);
@@ -806,6 +807,64 @@ fn key_checks(app: &mo_ui::AppWindow) -> Result<(), String> {
     press(app, Key::Escape, false);
     if app.get_sheet_open() {
         return Err("keys: the second Esc didn't close the key sheet".into());
+    }
+    Ok(())
+}
+
+/// Space's Esc and right click (the whole-app review of 10 Nov, X3-2): Esc closes the picked line's card, as on every
+/// page, and a right click on a line picks it and opens its menu, its card's buttons with their keys (space-menu.png).
+/// The menu is shut by a click outside it, so nothing on it runs: nothing is shown in a folder, measured or moved.
+/// Ends with no line picked.
+fn space_keys_checks(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    shots: &mut Vec<(String, Vec<u8>)>,
+) -> Result<(), String> {
+    use slint::platform::Key;
+    let data = app.global::<mo_ui::SpaceData>();
+    let picked = || data.get_picked().to_string();
+    // Space on show for the keys, as going there notes it (without its looks), until the checks end, and the keys on
+    // the window, as Ctrl+K gives them back when it closes. Esc's first step stops what plays (a sound from the Sounds
+    // shots): taken here, with no card open, so the next Esc is the one that closes it.
+    let noted = mo_ui::place();
+    mo_ui::note_place(Place::Space);
+    mo_ui::space::show_sample(app, sample_space(), "");
+    mo_ui::finder::toggle(app);
+    slint::platform::update_timers_and_animations();
+    mo_ui::finder::close(app);
+    press(app, Key::Escape, false);
+    // The App files card open: one Esc closes it.
+    mo_ui::space::show_sample(app, sample_space(), mo_app::space::APP_FILES);
+    capture(window);
+    press(app, Key::Escape, false);
+    capture(window);
+    if !picked().is_empty() {
+        return Err(format!("space keys: Esc left the {} card open", picked()));
+    }
+    // Old copies after moving folders, right-clicked: picked, its card opens, and its menu over the page.
+    let before = capture(window);
+    let (x, y) = SPACE_OLD_LINE;
+    right_click(window, x, y);
+    let after = capture(window);
+    if picked() != mo_app::space_old::OLD_COPIES || data.get_line_menu().row_count() == 0 || before == after {
+        return Err(format!("space-menu.png: the right click at {x}, {y} picked {:?}; has the line moved?", picked()));
+    }
+    shots.push(("space-menu.png".into(), after));
+    // A click outside shuts it (and does nothing else: the card stays open); the keys are back on the window, so Esc
+    // closes the card.
+    click(window, SPACE_EMPTY.0, SPACE_EMPTY.1);
+    capture(window);
+    if picked() != mo_app::space_old::OLD_COPIES {
+        return Err(format!("space keys: the click that shut the line's menu picked {:?} instead", picked()));
+    }
+    press(app, Key::Escape, false);
+    capture(window);
+    if !picked().is_empty() {
+        return Err("space keys: Esc after a line's menu left its card open".into());
+    }
+    // The shots after go on with the place noted as before (Ctrl+K lists the actions of the place noted).
+    if let Some(place) = noted {
+        mo_ui::note_place(place);
     }
     Ok(())
 }
@@ -1394,13 +1453,18 @@ fn sample_drives() -> Vec<mo_app::space::Drive> {
 
 /// The app's own files, made up, with the parts' words as the app gives them.
 fn sample_app_files() -> Vec<mo_space::app_files::AppFilesPart> {
-    use mo_space::app_files::{AppFilesPart, part_of};
+    use mo_space::app_files::{AppDatabase, AppFilesPart, caches, part_of, sound_lab_copies};
     const MB: u64 = 1 << 20;
     let part = |(name, what): (&'static str, &'static str), bytes: u64| AppFilesPart { name, what, bytes };
+    let named = |db: &AppDatabase| (db.name, db.what);
+    let backup = sound_lab_copies(PathBuf::new(), PathBuf::new());
+    let cache = caches([PathBuf::new()]);
     vec![
         AppFilesPart { name: "Your library", what: "Projects, plugins, samples, tags and ratings", bytes: 6250 * MB },
         AppFilesPart { name: "Sound Lab", what: "Every sound's details, likes and look-alikes", bytes: 2460 * MB },
+        part(named(&backup[0]), 2310 * MB),
         part(part_of("models", true), 310 * MB),
+        part(named(&cache[0]), 140 * MB),
         part(part_of("logs", true), 48 * MB),
         part(part_of("notes", true), 21 * MB),
         part(part_of("bitwig template", false), 4 * MB),
@@ -2449,6 +2513,10 @@ const PAGE_DOWN: f32 = 300.0;
 /// doesn't scroll on its own, as the lists and the arrangement in it do.
 const NARROW_PANEL_WHEEL: (f32, f32, f32) = (760.0, 404.0, -2.0 * PAGE_DOWN);
 const OLDER_BUTTON: (f32, f32) = (1005.0, 368.0);
+/// Space's Old copies after moving folders line, the page at its top, and a place on the page with nothing on it (right
+/// of its name, left of a card).
+const SPACE_OLD_LINE: (f32, f32) = (400.0, 516.0);
+const SPACE_EMPTY: (f32, f32) = (1000.0, 60.0);
 /// Where the wheel turns a page's card (Space's, or Sounds') down to its end, and by more than enough: on its parts.
 const SPACE_CARD_WHEEL: (f32, f32, f32) = (1240.0, 600.0, -10.0 * PAGE_DOWN);
 /// The second line on the galaxy's Swept card, after the sweep.

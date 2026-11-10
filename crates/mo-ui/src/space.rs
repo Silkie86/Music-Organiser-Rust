@@ -50,7 +50,7 @@ use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
 use crate::plugins as plugins_page;
 use crate::sounds::{self as sounds_page, Known};
-use crate::{AppWindow, CardAction, CardPart, DriveCard, RoomLine, SpaceData};
+use crate::{AppWindow, CardAction, CardPart, DriveCard, MenuItem, RoomLine, SpaceData};
 
 /// How long what the page shows stays fresh: shown again after this, it looks again (the C# app looked every five
 /// minutes).
@@ -398,8 +398,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed) {
     let weak = app.as_weak();
     data.on_close_card(move || {
         let Some(app) = weak.upgrade() else { return };
-        PAGE.with(|p| p.borrow_mut().picked.clear());
-        show_card(&app);
+        close_card(&app);
     });
     let weak = app.as_weak();
     data.on_chosen(move |id| {
@@ -630,6 +629,22 @@ pub fn plugins_measured(app: &AppWindow) {
     if now {
         look_for_plugins(app);
     }
+}
+
+/// Closes the picked line's card. Whether one was open.
+fn close_card(app: &AppWindow) -> bool {
+    let open = PAGE.with(|p| !std::mem::take(&mut p.borrow_mut().picked).is_empty());
+    if open {
+        show_card(app);
+    }
+    open
+}
+
+/// Esc on Space, after what plays has stopped (the one step back every page takes, review X3-12): the picked line's
+/// card closes; the page has no search to clear. Whether it did anything, so the key goes on when it didn't (the
+/// whole-app review of 10 Nov, X3-2: Esc did nothing here).
+pub fn escape(app: &AppWindow) -> bool {
+    close_card(app)
 }
 
 /// Runs one of the page's own shortcuts ([`mo_app::shortcuts::SPACE_ACTIONS`]). Returns whether it did anything,
@@ -1514,10 +1529,9 @@ fn look(ask: Ask, weak: &slint::Weak<AppWindow>) {
     arrive(weak, Step::Drives(ask.id, drives));
     let data = &ask.app_folder;
     // The song and sound libraries and the MIDI index the app reads (its own songs.db and sounds-rust.db once they're
-    // made), then the old app's databases it doesn't read any more, as one part of their own.
-    let midi = mo_midi::store::MidiStore::path_beside(&ask.library);
-    let mut databases = app_files::databases(ask.library.clone(), mo_app::sound_library::database_in(data), midi);
-    databases.extend(app_files::old_databases(data));
+    // made), songs.db while it isn't read yet, the old app's databases it doesn't read any more, the sound library's
+    // backup copy and the caches: each a part of its own.
+    let databases = space::app_databases(data, ask.library.clone());
     // On the pool for long work that waits on a disk, as Space's other walks are (rule 21): the app's folder can hold
     // thousands of files, and on the pages' quick pool the walk would hold up their asks (Ctrl+K, a filter) until it
     // ended. A look stopped for a newer one says nothing: the newer one's sizes follow.
@@ -2518,7 +2532,11 @@ fn show_card(app: &AppWindow) {
                 let card = space_bin::card(p.kept.as_ref(), &p.put_backs, CAN_PUT_BACK, removing(&p));
                 (card, vec![bin_button(), measure_button(&p)])
             }
-            _ => return,
+            // Nothing picked, or the line went: no card, and no menu of its buttons left to choose from.
+            _ => {
+                set_line_menu(&data, &[]);
+                return;
+            }
         };
         data.set_card_kind(card.kind.into());
         data.set_card_title(card.title.into());
@@ -2535,8 +2553,30 @@ fn show_card(app: &AppWindow) {
         data.set_card_note(card.note.into());
         data.set_card_room(card.room.into());
         data.set_card_warning(card.warning.into());
+        set_line_menu(&data, &buttons);
         data.set_card_actions(actions(buttons));
     });
+}
+
+/// The picked line's right-click menu: its card's buttons, each with its key from the shortcut list as it is now
+/// (rule 15), as Songs' line menu has its panel's (the whole-app review of 10 Nov, X3-2). Made again only when it
+/// changes: the card is shown again as often as a look moves on, and a menu made again while it's open could lose the
+/// click on it.
+fn set_line_menu(data: &SpaceData, buttons: &[Button]) {
+    let keys = crate::shortcuts();
+    let items: Vec<MenuItem> = buttons
+        .iter()
+        .map(|b| MenuItem {
+            what: b.text.as_str().into(),
+            key: keys.key_of(b.id).into(),
+            id: b.id.into(),
+            enabled: b.enabled,
+        })
+        .collect();
+    let now = data.get_line_menu();
+    if now.row_count() != items.len() || now.iter().zip(&items).any(|(was, item)| was != *item) {
+        data.set_line_menu(ModelRc::new(VecModel::from(items)));
+    }
 }
 
 fn card_part(part: &Part) -> CardPart {

@@ -1593,7 +1593,7 @@ fn bring_up_to_date(sounds_db: &Path, copy: &Path, cards: Option<&Feed>) -> Opti
     if compact::own_since(copy).is_some() {
         return None;
     }
-    let job = cards.map(|c| c.start("Bringing your sound library up to date", "With what the C# app changed in it"));
+    let job = cards.map(|c| c.start("Bringing your sound library up to date", "With what changed in sounds.db"));
     let began = Instant::now();
     match compact::last_sync(sounds_db, copy) {
         Ok(synced) => {

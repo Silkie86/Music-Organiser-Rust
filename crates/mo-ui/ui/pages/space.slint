@@ -4,7 +4,7 @@
 // you tick and the Recycle Bin's Put back. Agreed layout: the design canvas's Space board
 // (2026-11-03): the drives across the top, Biggest wins first, Also taking room, and the picked line's card beside
 // them. Only shared parts from studio.slint; mo-app decides every word (mo_app::space), mo-ui/src/space.rs fills it.
-import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, CardAction, CardActions, TickBox, LinkText, Meter } from "../studio.slint";
+import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, CardAction, CardActions, TickBox, LinkText, Meter, MenuItem, RightClickMenu } from "../studio.slint";
 
 // One drive across the top.
 export struct DriveCard {
@@ -77,6 +77,8 @@ export global SpaceData {
     in property <string> card-room;
     in property <string> card-warning;
     in property <[CardAction]> card-actions;
+    // The picked line's right-click menu: its card's buttons, each with its key (rule 15; the review of 10 Nov, X3-2).
+    in property <[MenuItem]> line-menu;
     in-out property <length> panel-width: 380px;
     callback pick(string);
     callback close-card();
@@ -144,12 +146,15 @@ component DriveView inherits Rectangle {
     }
 }
 
-// A line of Biggest wins first or Also taking room: picked, it opens its card.
+// A line of Biggest wins first or Also taking room: picked, it opens its card. Right-clicked, it's picked first (as
+// ListLine does), then `menu-at` asks for its menu where the mouse is.
 component RoomLineView inherits ListLine {
     in property <RoomLine> line;
+    callback menu-at(length, length);
     height: 56px;
     selected: SpaceData.picked == line.id;
     clicked => { SpaceData.pick(root.line.id); }
+    right-clicked(x, y) => { root.menu-at(x, y); }
     HorizontalLayout {
         width: 100%;
         height: 100%;
@@ -378,6 +383,7 @@ export component SpacePage inherits Rectangle {
                 }
                 for line in SpaceData.wins: RoomLineView {
                     line: line;
+                    menu-at(x, y) => { line-menu.open-at(x, y); }
                 }
                 // Why a kind has no line, smaller once there are lines above it; none when there's nothing to say.
                 if SpaceData.wins-note != "": Well {
@@ -400,6 +406,7 @@ export component SpacePage inherits Rectangle {
                 Caps { text: "ALSO TAKING ROOM"; }
                 for line in SpaceData.also: RoomLineView {
                     line: line;
+                    menu-at(x, y) => { line-menu.open-at(x, y); }
                 }
             }
         }
@@ -419,5 +426,10 @@ export component SpacePage inherits Rectangle {
         y: Space.xl;
         width: root.width - self.x - Space.xl;
         height: parent.height - 2 * Space.xl;
+    }
+    // A line's right-click menu: its card's buttons, each with its key (rule 15), as on Songs.
+    line-menu := RightClickMenu {
+        items: SpaceData.line-menu;
+        chosen(id) => { SpaceData.chosen(id); }
     }
 }

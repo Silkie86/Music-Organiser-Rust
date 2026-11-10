@@ -7,7 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mo_space::app_files::{self, AppFilesPart, DriveSpace, VERY_LOW_SPACE};
+use mo_space::app_files::{self, AppDatabase, AppFilesPart, DriveSpace, VERY_LOW_SPACE};
 use mo_space::size::size_text;
 
 /// What one of your folders holds, as its drive's card names it, in the order the card lists them.
@@ -327,6 +327,41 @@ pub fn wins_note<S: AsRef<str>>(nones: &[S], lines: usize) -> String {
 
 /// The App files line's id.
 pub const APP_FILES: &str = "app-files";
+
+/// The caches the app keeps in its data folder, by name: each made again if it goes, and each held to a limit (rule
+/// 28). Counted on the App files card as one part of their own ([`app_databases`]).
+const CACHE_FILES: [&str; 8] = [
+    mo_sounds::copies::FILE_NAME,
+    mo_space::prints::FILE_NAME,
+    crate::song_room::SPACE_PRINTS,
+    crate::song_room::BACKUP_PRINTS,
+    mo_library::list_copy::FILE_NAME,
+    crate::arrangement::peaks_store::FILE_NAME,
+    mo_presets::file_store::FILE_NAME,
+    mo_presets::sound_store::FILE_NAME,
+];
+
+/// What the App files card measures in the app's data folder `data`, as parts (each file counts once, in the first
+/// part that names it): the song library the app reads (`library`: its own `songs.db` once it's made, or `library.db`
+/// till then), the sound library and the MIDI index, then `songs.db` while it isn't read yet, the old app's databases
+/// it doesn't read any more, the sound library's backup copy and a damaged one set aside, and the caches. The rest
+/// goes by what's at the top of the folder ([`app_files::part_of`]): before, the backup copy and the caches were "Your
+/// Bitwig template and the rest" (the whole-app review of 10 Nov, T-4).
+pub fn app_databases(data: &Path, library: PathBuf) -> Vec<AppDatabase> {
+    let midi = mo_midi::store::MidiStore::path_beside(&library);
+    let own_sounds = mo_sounds::compact::copy_of(&data.join("sounds.db"));
+    let mut databases = app_files::databases(library, crate::sound_library::database_in(data), midi);
+    // Made from library.db while the app still reads that: from the run it's made in to the next start, or longer when
+    // it can't be taken yet (mo_library::songs_db::at_start).
+    databases.push(app_files::new_song_library(data.join(mo_library::songs_db::FILE_NAME)));
+    databases.extend(app_files::old_databases(data));
+    databases.extend(app_files::sound_lab_copies(
+        mo_sounds::compact::backup::backup_of(&own_sounds),
+        mo_sounds::compact::backup::damaged_of(&own_sounds),
+    ));
+    databases.extend(app_files::caches(CACHE_FILES.iter().map(|name| data.join(name))));
+    databases
+}
 
 /// The App files line: what the app's own folder holds and its size, "Measuring…" until it's measured (`parts`
 /// `None`), on the drive named `drive`.
