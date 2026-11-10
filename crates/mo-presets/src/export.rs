@@ -214,9 +214,21 @@ pub fn bitwig_preset_from_save(save: &str, key: &str, templates: &Templates, to:
     if p.data.is_empty() {
         return Err(io::Error::other("its settings were let go after it was listed"));
     }
+    // Only settings that read back as a preset go to Bitwig, as an export only makes a Bitwig preset beside a plugin
+    // preset that read back.
+    if files::FileFormat::of(&name).is_some()
+        && let Err(e) = files::read_bytes(&p.data, &name)
+    {
+        return Err(io::Error::other(format!("its settings don't read as a preset: {e}")));
+    }
     let Some(built) = bitwig_bytes(p, templates, &mut HashMap::new()) else { return Ok(None) };
     let bytes = built.map_err(io::Error::other)?;
-    if let Err(e) = std::fs::write(to, &bytes) {
+    // A new file of the caller's own, so nothing is written over: written, then read back and checked.
+    let written = std::fs::write(to, &bytes).and_then(|()| match std::fs::read(to)? == bytes {
+        true => Ok(()),
+        false => Err(io::Error::other("the file didn't read back as it was written")),
+    });
+    if let Err(e) = written {
         let _ = std::fs::remove_file(to);
         return Err(e);
     }

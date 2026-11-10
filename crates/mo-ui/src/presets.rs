@@ -1708,16 +1708,31 @@ fn toggle_audition(app: &AppWindow, item: Item) {
             return;
         }
         let wanted = move || audition_asked() == asked;
+        let held = std::cell::Cell::new(None);
         let made = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
-            audition(&item, templates, &bitwig_folders, &turn, &wanted)
-        }))
-        .unwrap_or_else(|_| Err(Some("It stopped before it started playing.".to_owned())));
+            audition(&item, templates, &bitwig_folders, &turn, &wanted, &held)
+        }));
+        // A track it made is let go of once it has answered (it took the track out again, or says it may be left),
+        // but kept for the app to take out as it closes when it stopped part way.
+        if let Ok(Err(_)) = made
+            && let Some(id) = held.take()
+        {
+            HELD.release(id);
+        }
+        let made = made.unwrap_or_else(|_| Err(Some("It stopped before it started playing.".to_owned())));
         let made = match made {
             // Something newer was asked for while it waited: it took back what it put in, and says nothing.
             Err(None) => return,
             Ok(auditioning) => {
                 // Checked and kept under the lock a Stop takes, so a Stop either finds it or is seen here.
                 let mut slot = audition_now();
+                // Let go of only now, under the slot's lock, which the app takes too as it closes (with all that's
+                // held), so it's always in one or the other. Gone when the app took it, and took it out, as it closed.
+                if let Some(id) = held.take()
+                    && HELD.release(id).is_none()
+                {
+                    return;
+                }
                 if audition_asked() != asked {
                     drop(slot);
                     // Stopped (or another line asked for) just as it went in: stopped inside its own turn.
@@ -1776,6 +1791,7 @@ fn audition(
     bitwig_folders: &[PathBuf],
     turn: &mo_dawlink::bitwig::Turn<'_>,
     wanted: &dyn Fn() -> bool,
+    held: &std::cell::Cell<Option<u64>>,
 ) -> Result<mo_dawlink::bitwig::Auditioning, Option<String>> {
     // Nothing is made for one that's no longer wanted (the review's D-5).
     if !wanted() {
@@ -1804,15 +1820,11 @@ fn audition(
     let part = std::env::temp_dir().join(mo_app::midi::play_file_name());
     std::fs::write(&part, &bytes).map_err(|e| format!("Its part's MIDI file couldn't be saved in Temp: {e}."))?;
     // Bitwig has read both files once this answers, so the part goes at once (rule 28).
-    // Its track is held from the moment it's made until this answers, so the app closing while Bitwig loads a heavy
-    // preset still takes it out (the 10 Nov review's D-2).
-    let held = std::cell::Cell::new(None);
+    // Its track is held (under `held`) from the moment it's made until the caller has it in the slot, so the app
+    // closing while Bitwig loads a heavy preset still takes it out (the 10 Nov review's D-2).
     let made = |a: &mo_dawlink::bitwig::Auditioning| held.set(Some(HELD.hold(a.clone())));
     let heard =
         mo_dawlink::bitwig::Bitwig::default().audition_preset_telling(&preset, &part, &name, turn, wanted, &made);
-    if let Some(id) = held.take() {
-        HELD.release(id);
-    }
     let _ = std::fs::remove_file(&part);
     heard.map_err(|e| (e != mo_dawlink::bitwig::Error::Cancelled).then(|| e.to_string()))
 }
@@ -2111,8 +2123,12 @@ pub fn after_crash() {
         Err(std::sync::TryLockError::Poisoned(slot)) => slot.into_inner(),
         Err(std::sync::TryLockError::WouldBlock) => return,
     };
-    if let Some(auditioning) = slot.take() {
-        let _ = crate::in_flight::closing_link(Duration::from_millis(500)).stop_audition_as_app_closes(&auditioning);
+    // With what a thread still on its way holds (the 10 Nov review's D-2).
+    let to = crate::in_flight::closing_link(Duration::from_millis(500));
+    for auditioning in slot.take().into_iter().chain(HELD.try_take_all()) {
+        if to.stop_audition_as_app_closes(&auditioning).is_err() {
+            break;
+        }
     }
 }
 
@@ -2122,14 +2138,22 @@ pub fn finish_up() {
     // moment (the review's D-fp4).
     let first = take_audition();
     crate::in_flight::wait_for_all(Duration::from_secs(3));
-    // With those a thread still on its way holds, behind a job longer than the wait (the 10 Nov review's D-2).
-    let all = first.or_else(take_audition).into_iter().chain(HELD.take_all());
+    // With those a thread still on its way holds, behind a job longer than the wait (the 10 Nov review's D-2): taken
+    // under the slot's lock, as a start lets go of its track only under it once it's in the slot.
+    let all: Vec<_> = {
+        let mut slot = audition_now();
+        first.or_else(|| slot.take()).into_iter().chain(HELD.take_all()).collect()
+    };
     let to = crate::in_flight::closing_link(Duration::from_secs(3));
     for auditioning in all {
         // Without waiting its turn: what would go first is closing too, and the extension still makes the stop once
         // the app has gone (3.21).
         if let Err(e) = to.stop_audition_as_app_closes(&auditioning) {
             log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped as the app closed: {e}"));
+            // Bitwig gone or not answering: the rest would only make the app slower to close.
+            if e.bitwig_gone() || e == mo_dawlink::bitwig::Error::TimedOut {
+                break;
+            }
         }
     }
 }

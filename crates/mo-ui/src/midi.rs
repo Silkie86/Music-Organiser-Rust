@@ -2195,7 +2195,13 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
         }))
         .unwrap_or_else(|_| Err(stopped()));
         // Its place in the line is given up when it won't start.
-        let turn = if read.is_ok() { ticket.map(mo_dawlink::bitwig::Ticket::wait) } else { None };
+        let turn = match read {
+            Ok(_) => ticket.map(mo_dawlink::bitwig::Ticket::wait),
+            Err(_) => {
+                drop(ticket);
+                None
+            }
+        };
         let made = read.and_then(|(notes, tempo)| {
             mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
                 start_in_daw(daw, &notes, bars, tempo, &name, turn.as_ref(), &wanted)
@@ -2338,6 +2344,10 @@ pub fn finish_up() {
         // the app has gone.
         if let Err(e) = to.stop_playing_as_app_closes(&bitwig) {
             log::warning("MIDI", &format!("The part playing in Bitwig couldn't be stopped as the app closed: {e}"));
+            // Bitwig gone or not answering: the rest would only make the app slower to close.
+            if e.bitwig_gone() || e == mo_dawlink::bitwig::Error::TimedOut {
+                break;
+            }
         }
     }
 }
@@ -2353,12 +2363,18 @@ pub fn after_crash() {
         Err(std::sync::TryLockError::Poisoned(slot)) => slot.into_inner(),
         Err(std::sync::TryLockError::WouldBlock) => return,
     };
+    let mut in_bitwig = HELD.try_take_all();
     match slot.take() {
         Some(InDaw::Fl(fl)) => fl.finish(),
-        Some(InDaw::Bitwig(bitwig)) => {
-            let _ = crate::in_flight::closing_link(Duration::from_millis(500)).stop_playing_as_app_closes(&bitwig);
-        }
+        Some(InDaw::Bitwig(bitwig)) => in_bitwig.insert(0, bitwig),
         None => {}
+    }
+    // With what a stop still on its way holds (the 10 Nov review's D-2).
+    let to = crate::in_flight::closing_link(Duration::from_millis(500));
+    for bitwig in in_bitwig {
+        if to.stop_playing_as_app_closes(&bitwig).is_err() {
+            break;
+        }
     }
 }
 

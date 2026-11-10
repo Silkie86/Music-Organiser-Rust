@@ -72,6 +72,17 @@ impl<T> Held<T> {
     pub(crate) fn take_all(&self) -> Vec<T> {
         self.items().drain(..).map(|(_, item)| item).collect()
     }
+
+    /// [`Held::take_all`] for the crash hook: never waits for the lock (the thread that crashed may hold it).
+    pub(crate) fn try_take_all(&self) -> Vec<T> {
+        match self.items.try_lock() {
+            Ok(mut items) => items.drain(..).map(|(_, item)| item).collect(),
+            Err(std::sync::TryLockError::Poisoned(items)) => {
+                items.into_inner().drain(..).map(|(_, item)| item).collect()
+            }
+            Err(std::sync::TryLockError::WouldBlock) => Vec::new(),
+        }
+    }
 }
 
 /// How many starts are on their way.
