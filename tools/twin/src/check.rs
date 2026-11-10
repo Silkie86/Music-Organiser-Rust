@@ -286,10 +286,18 @@ fn options(args: &[String]) -> Result<Options, String> {
     Ok(o)
 }
 
+/// The library whose folders the app uses: the app's own `songs.db` beside `given` once it is the app's own (Settings
+/// writes folder changes there, and the C# app's `library.db` is frozen), else `given` (review T-3).
+fn library_in_use(given: &std::path::Path) -> PathBuf {
+    let songs = given.with_file_name(mo_library::songs_db::FILE_NAME);
+    if songs != given && mo_library::songs_db::own_since(&songs).is_some() { songs } else { given.to_owned() }
+}
+
 /// Runs the check. `Ok(false)` when a reader panicked on a file: that's a bug to fix.
 pub fn run(args: &[String]) -> Result<bool, String> {
     let mut o = options(args)?;
-    if let Some(db) = &o.library {
+    if let Some(given) = &o.library {
+        let db = &library_in_use(given);
         let lib = mo_library::Library::open_read_only(db)
             .map_err(|e| format!("Couldn't open {} to find the project folders: {e}", db.display()))?;
         let mut roots = lib.roots().map_err(|e| format!("Couldn't read the project folders: {e}"))?;

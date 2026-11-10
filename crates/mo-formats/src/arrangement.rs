@@ -239,8 +239,9 @@ impl NoteBudget {
 }
 
 /// The project's arrangement views, read from its bytes by its ending: FL Studio has two (its playlist, and the tracks
-/// it becomes in Bitwig), Bitwig and Studio One one each. None for a file of another kind; a project too damaged to
-/// draw gives a view that says so.
+/// it becomes in Bitwig); Bitwig its arranger and, when the clip launcher holds clips, its scenes one after another
+/// (the scenes first when the arranger timeline is empty); Studio One one. None for a file of another kind; a project
+/// too damaged to draw gives a view that says so.
 pub fn read_bytes(path: &Path, raw: &[u8]) -> Vec<Arrangement> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_lowercase();
     match ext.as_str() {

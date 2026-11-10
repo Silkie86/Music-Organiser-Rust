@@ -76,6 +76,9 @@ pub struct Live {
     kept_as: HashMap<i64, String>,
     /// Reading again the saves whose "muted" sample marks were lost ([`song_writes::to_mend`]).
     mend: Mend,
+    /// How many plugin measures had been kept when the installed plugins were last read
+    /// ([`plugin_writes::measures_kept`]).
+    measures_seen: u64,
 }
 
 /// Where reading again the saves whose "muted" sample marks were lost is (review finding A-1): looked for once a start,
@@ -231,6 +234,7 @@ impl Live {
             to_mark: BTreeSet::new(),
             kept_as,
             mend: Mend::NotLooked,
+            measures_seen: plugin_writes::measures_kept(),
         })
     }
 
@@ -306,6 +310,7 @@ impl Live {
     /// changed. Saves read from now on use the installed plugins as they are now. One that can't be looked at is
     /// looked at again at the next start.
     fn recheck_installed(&mut self) -> usize {
+        self.measures_seen = plugin_writes::measures_kept();
         let Some(songs_db) = &self.writes else { return 0 };
         let r = match plugin_writes::recheck_installed(songs_db) {
             Ok(r) => r,
@@ -512,6 +517,10 @@ impl Live {
     /// thread; the walking and reading are spread over the app's low-priority threads.
     pub fn update(&mut self, changes: &Changes) -> Updated {
         let mut done = Updated::default();
+        // The Plugins page measured your plugins since: saves are judged against what it found from now on (review G-3).
+        if self.measures_seen != plugin_writes::measures_kept() {
+            done.rechecked += self.recheck_installed();
+        }
         let mut paths: Vec<String> = changes.files.clone();
         // A path that went and may have been a folder: the saves listed inside it are looked at (the ones that went
         // are marked missing below), with no walk.
@@ -857,6 +866,7 @@ mod tests {
             to_mark: BTreeSet::new(),
             kept_as: HashMap::new(),
             mend: Mend::NotLooked,
+            measures_seen: plugin_writes::measures_kept(),
         }
     }
 

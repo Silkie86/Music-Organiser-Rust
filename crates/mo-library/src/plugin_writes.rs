@@ -10,6 +10,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::NaiveDateTime;
@@ -91,6 +92,15 @@ fn rows(measure: &Measure) -> Rows {
     (installed, spaces)
 }
 
+/// How many measures [`write`] has kept since the app started, so the Songs watch knows to read the installed plugins
+/// again ([`measures_kept`]).
+static MEASURES_KEPT: AtomicU64 = AtomicU64::new(0);
+
+/// How many plugin measures have been kept since the app started.
+pub fn measures_kept() -> u64 {
+    MEASURES_KEPT.load(Ordering::Relaxed)
+}
+
 /// Keeps `measure` in the app's own `songs.db` at `songs_db` in place of the last one, all of it or none.
 pub fn write(songs_db: &Path, measure: &Measure) -> Result<(), LibraryError> {
     let (mut conn, sql) = open_own(songs_db)?;
@@ -102,7 +112,9 @@ pub fn write(songs_db: &Path, measure: &Measure) -> Result<(), LibraryError> {
     if let Some(why) = differs(&wanted, &back) {
         return Err(write_error(songs_db, format!("what was written didn't read back the same ({why})")));
     }
-    tx.commit().map_err(&sql)
+    tx.commit().map_err(&sql)?;
+    MEASURES_KEPT.fetch_add(1, Ordering::Relaxed);
+    Ok(())
 }
 
 fn write_error(songs_db: &Path, why: String) -> LibraryError {
@@ -242,19 +254,26 @@ pub fn recheck_installed(songs_db: &Path) -> Result<Rechecked, LibraryError> {
         rows.map_err(&sql)?.collect::<rusqlite::Result<_>>().map_err(&sql)?
     };
     let mut judged: HashMap<(&str, &str, &str, &str), bool> = HashMap::new();
-    let found: Vec<(i64, i64)> = rows
+    let found: Vec<&(i64, i64, PluginRef)> = rows
         .iter()
         .filter(|(_, _, p)| *judged.entry((&p.name, &p.vendor, &p.format, &p.path)).or_insert_with(|| installed.has(p)))
-        .map(|(row, project, _)| (*row, *project))
         .collect();
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(&sql)?;
     own_under_lock(songs_db, &tx)?;
     let mut changed: BTreeSet<i64> = BTreeSet::new();
     {
-        let mut set = tx.prepare("UPDATE plugins SET installed = 1 WHERE rowid = ?1").map_err(&sql)?;
-        for (row, project) in &found {
-            if set.execute([row]).map_err(&sql)? > 0 {
+        // By its row, but only while it's still the same plugin of the same save, still missing: another copy of the
+        // app may have kept that save again meanwhile, and its new rows can take the old row numbers (review G-4).
+        let mut set = tx
+            .prepare(
+                "UPDATE plugins SET installed = 1 WHERE rowid = ?1 AND project_id = ?2 AND COALESCE(name, '') = ?3 \
+                 AND COALESCE(vendor, '') = ?4 AND COALESCE(format, '') = ?5 AND COALESCE(path, '') = ?6 \
+                 AND COALESCE(installed, 0) = 0",
+            )
+            .map_err(&sql)?;
+        for (row, project, p) in found {
+            if set.execute(params![row, project, p.name, p.vendor, p.format, p.path]).map_err(&sql)? > 0 {
                 changed.insert(*project);
             }
         }
