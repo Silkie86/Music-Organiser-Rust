@@ -62,6 +62,22 @@ impl AudioData {
         if self.sample_rate == 0 { 0.0 } else { self.len() as f64 / f64::from(self.sample_rate) }
     }
 
+    /// Fades the last 5 ms out, for a sound that stops where its read was cut (a sweep reads only a sound's start), so
+    /// it doesn't click there.
+    pub fn fade_out_end(&mut self) {
+        const FADE_SECONDS: f64 = 0.005;
+        let frames = self.len();
+        if frames == 0 {
+            return;
+        }
+        let n = ((FADE_SECONDS * f64::from(self.sample_rate)).ceil() as usize).clamp(1, frames);
+        for channel in &mut self.channels {
+            for (i, s) in channel[frames - n..].iter_mut().enumerate() {
+                *s *= (n - 1 - i) as f32 / n as f32;
+            }
+        }
+    }
+
     /// The channels mixed to one, each at an equal share. Borrows the only channel of a mono file rather than copying it.
     pub fn mono(&self) -> std::borrow::Cow<'_, [f32]> {
         match self.channels.as_slice() {
@@ -108,5 +124,37 @@ impl std::error::Error for AudioError {}
 impl From<std::io::Error> for AudioError {
     fn from(e: std::io::Error) -> AudioError {
         AudioError::Io(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AudioData;
+
+    fn sound(frames: usize) -> AudioData {
+        AudioData {
+            sample_rate: 1000,
+            channels: vec![vec![1.0; frames], vec![0.5; frames]],
+            file_seconds: 4.0,
+            embedded_tempo: None,
+            embedded_root_note: None,
+            embedded_is_loop: None,
+        }
+    }
+
+    #[test]
+    fn the_end_fades_out_over_5_ms() {
+        // 1 s at 1000 frames a second: its last 5 frames go down to silence, the rest stays.
+        let mut cut = sound(1000);
+        cut.fade_out_end();
+        assert_eq!(cut.channels[0][..995], vec![1.0; 995][..]);
+        assert_eq!(cut.channels[0][995..], [0.8, 0.6, 0.4, 0.2, 0.0]);
+        assert_eq!(cut.channels[1][999], 0.0);
+        assert_eq!(cut.channels[1][995], 0.4);
+        // Shorter than the fade: all of it fades. Nothing to fade: nothing happens.
+        let mut tiny = sound(2);
+        tiny.fade_out_end();
+        assert_eq!(tiny.channels[0], [0.5, 0.0]);
+        sound(0).fade_out_end();
     }
 }

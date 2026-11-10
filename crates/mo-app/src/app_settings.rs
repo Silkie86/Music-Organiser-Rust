@@ -48,6 +48,10 @@ pub const BITWIG_FOLDER_KEY: &str = "bitwig_user_folder";
 /// they're heard: "1" for on. Off unless set (this app's own; the C# app had no such setting).
 pub const SWEEP_HOLD_KEY: &str = "galaxy_sweep_hold";
 
+/// How long each star a Galaxy sweep reaches plays, in milliseconds: "0" (or unset) until the next star's turn, as
+/// before there was a choice. This app's own; the C# app had no such setting.
+pub const SWEEP_PLAY_KEY: &str = "galaxy_sweep_play";
+
 /// The C# app's settings this app reads from `library.db`, for whatever hasn't been changed here.
 pub const FROM_CSHARP: &[&str] = &[
     themes::THEME_KEY,

@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
+use mo_app::app_settings::SWEEP_PLAY_KEY;
 use mo_app::background::{self, Newest};
 use mo_app::filters;
 use mo_app::galaxy_grid::{Crowd, Grid};
@@ -422,12 +423,16 @@ fn show_choices(app: &AppWindow) {
         (g.placing, g.light_by)
     });
     let placing = PLACINGS.iter().find(|p| p.1 == placing).map_or("", |p| p.0);
+    let play = sweep_play_ms();
+    let plays =
+        filters::one_of(&SWEEP_PLAYS.map(|p| p.0), SWEEP_PLAYS.iter().find(|p| p.1 == play).map_or("", |p| p.0));
     let placings = filters::one_of(&PLACINGS.map(|p| p.0), placing);
     let lights = filters::one_of(&LightBy::ALL.map(LightBy::name), light_by.name());
     let data = app.global::<SoundsData>();
     CHOICES.with(|c| {
         data.set_placing_filter(c.placing.view(&placings));
         data.set_light_filter(c.light.view(&lights));
+        data.set_sweep_play_filter(c.sweep_play.view(&plays));
     });
 }
 
@@ -454,6 +459,17 @@ pub(super) fn wire(app: &AppWindow) {
         if changed {
             show_choices(&app);
             draw(&app);
+        }
+    });
+    // Kept for the next start; the next star a sweep reaches plays for the new length.
+    let weak = app.as_weak();
+    data.on_galaxy_sweep_plays(move |v| {
+        let Some(app) = weak.upgrade() else { return };
+        let Some(&(_, ms)) = SWEEP_PLAYS.iter().find(|p| p.0 == v.as_str()) else { return };
+        if sweep_play_ms() != ms {
+            SWEEP_PLAY.with(|c| c.set(Some(ms)));
+            crate::settings::remember(SWEEP_PLAY_KEY, &ms.to_string());
+            show_choices(&app);
         }
     });
     let weak = app.as_weak();
@@ -644,9 +660,14 @@ const SWEEP_GAP: Duration = Duration::from_millis(40);
 /// How often a star waiting its turn looks whether its turn has come: a small part of [`SWEEP_GAP`], so it doesn't
 /// add much to the wait.
 const SWEEP_LOOK: Duration = Duration::from_millis(5);
-/// How much of a swept sound is read and played: its start is what a sweep hears, and a whole loop would take a
-/// moment to read.
+/// How much of a swept sound is read and played when it plays until the next star's turn: its start is what a sweep
+/// hears, and a whole loop would take a moment to read.
 const SWEEP_SECONDS: f64 = 4.0;
+/// How long each swept star plays, as the Galaxy's "Sweep plays" chips name them, in milliseconds (as the setting
+/// keeps it): until the next star's turn (0, as before there was a choice), or for a set length, which the next star
+/// waits for (Solomon, 2026-11-10: "you should be able to set how long a sound plays for when you sweep").
+const SWEEP_PLAYS: [(&str, u32); 6] =
+    [("Until the next", 0), ("0.1 s", 100), ("0.25 s", 250), ("0.5 s", 500), ("1 s", 1000), ("2 s", 2000)];
 /// How far apart (in points) the mouse's path is looked along for stars.
 const SWEEP_STEP: f32 = 3.0;
 
@@ -655,6 +676,8 @@ const SWEEP_STEP: f32 = 3.0;
 #[derive(Default)]
 pub(super) struct Sweep {
     played: Option<(usize, Instant)>,
+    /// The play number of the star last played, to know when its sound really started ([`super::started_at`]).
+    played_ask: u64,
     waiting: Option<usize>,
     /// When the mouse last moved in this sweep, to tell how fast it's going.
     moved: Option<Instant>,
@@ -673,6 +696,8 @@ thread_local! {
     static SWEEP_TIMER: Timer = Timer::default();
     /// Whether a sweep holds the pointer to the star waiting its turn (Settings › General), so none is passed unheard.
     static HOLD: Cell<bool> = const { Cell::new(false) };
+    /// How long each swept star plays, in milliseconds (one of [`SWEEP_PLAYS`]); `None` until the setting is read.
+    static SWEEP_PLAY: Cell<Option<u32>> = const { Cell::new(None) };
     /// Reads the start of the sounds a sweep is about to reach, newest ask first.
     static READ_AHEAD: RefCell<Option<Newest<Vec<String>>>> = const { RefCell::new(None) };
 }
@@ -741,6 +766,54 @@ fn read_ahead(from: (f32, f32), to: (f32, f32), dt: Duration, passed: &[usize]) 
             worker.ask(paths);
         }
     });
+}
+
+/// The play length a setting keeps (milliseconds as text): one of [`SWEEP_PLAYS`], else until the next star's turn.
+fn sweep_play_from(kept: Option<&str>) -> u32 {
+    kept.and_then(|k| k.trim().parse().ok()).filter(|ms| SWEEP_PLAYS.iter().any(|p| p.1 == *ms)).unwrap_or(0)
+}
+
+/// How long each swept star plays, in milliseconds (0: until the next star's turn), as last chosen.
+fn sweep_play_ms() -> u32 {
+    SWEEP_PLAY.with(|c| {
+        c.get().unwrap_or_else(|| {
+            let ms = sweep_play_from(crate::settings::value(SWEEP_PLAY_KEY).as_deref());
+            c.set(Some(ms));
+            ms
+        })
+    })
+}
+
+/// How long a swept star has before the next one may start: its play length, or [`SWEEP_GAP`] when it plays until
+/// the next star's turn (never less, so each sound still starts cleanly).
+fn turn(ms: u32) -> Duration {
+    Duration::from_millis(u64::from(ms)).max(SWEEP_GAP)
+}
+
+/// How long past its turn a set-length star that never started (its file couldn't be read, or it's still being read
+/// from a sleeping drive) keeps the next one waiting.
+const NEVER_STARTED: Duration = Duration::from_millis(250);
+
+/// Whether the star asked to play at `asked` has had its turn by `now`. Until the next: timed from the ask, as
+/// before. A set length is timed from when its sound really started (`started`), so the reading and the output's
+/// delay don't cut it short; one that hasn't started is let go [`NEVER_STARTED`] after its turn.
+fn turn_over(ms: u32, asked: Instant, started: Option<Instant>, now: Instant) -> bool {
+    let turn = turn(ms);
+    match started.filter(|_| ms > 0) {
+        Some(started) => now.saturating_duration_since(started) >= turn,
+        None if ms > 0 => now.saturating_duration_since(asked) >= turn + NEVER_STARTED,
+        None => now.saturating_duration_since(asked) >= turn,
+    }
+}
+
+/// Whether the star the sweep last played has had its turn.
+fn played_turn_over(sweep: &Sweep, now: Instant) -> bool {
+    sweep.played.is_none_or(|(_, asked)| turn_over(sweep_play_ms(), asked, super::started_at(sweep.played_ask), now))
+}
+
+/// How many seconds of a swept star are read and played.
+fn play_seconds(ms: u32) -> f64 {
+    if ms == 0 { SWEEP_SECONDS } else { f64::from(ms) / 1000.0 }
 }
 
 /// Whether a Galaxy sweep holds the pointer to the star waiting its turn.
@@ -842,7 +915,7 @@ fn reached(app: &AppWindow, at: usize) -> bool {
         if last.is_some_and(|(was, _)| was == at) && g.sweep.waiting.is_none() {
             return None;
         }
-        if last.is_none_or(|(_, when)| now.duration_since(when) >= SWEEP_GAP) {
+        if played_turn_over(&g.sweep, now) {
             g.sweep.waiting = None;
             g.sweep.played = Some((at, now));
             Some(true)
@@ -867,7 +940,7 @@ fn reached(app: &AppWindow, at: usize) -> bool {
                 let due = PAGE.with(|p| {
                     let g = &mut p.borrow_mut().galaxy;
                     let waiting = g.sweep.waiting?;
-                    let ready = g.sweep.played.is_none_or(|(_, when)| when.elapsed() >= SWEEP_GAP);
+                    let ready = played_turn_over(&g.sweep, Instant::now());
                     ready.then(|| {
                         g.sweep.waiting = None;
                         g.sweep.held = None;
@@ -898,7 +971,11 @@ fn sweep_play(app: &AppWindow, at: usize) {
     });
     app.global::<SoundsData>().set_galaxy_hover_text(name.unwrap_or_default().into());
     on_trail(app, at, true);
-    super::play_sound(app, at, 0.0, SWEEP_SECONDS);
+    super::play_sound(app, at, 0.0, play_seconds(sweep_play_ms()));
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.galaxy.sweep.played_ask = p.play;
+    });
 }
 
 /// Puts a sound on the trail, newest first (as the C# app: a swept one moves to the front; a clicked one already on
@@ -2001,6 +2078,34 @@ pub(super) fn show_picked(app: &AppWindow) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_sweep_plays_each_star_as_long_as_was_picked() {
+        // Kept as milliseconds; anything else (unset, an old or made-up number) plays until the next star's turn.
+        assert_eq!(sweep_play_from(Some("500")), 500);
+        assert_eq!(sweep_play_from(Some(" 2000 ")), 2000);
+        for kept in [None, Some(""), Some("0"), Some("300"), Some("fast")] {
+            assert_eq!(sweep_play_from(kept), 0, "{kept:?}");
+        }
+        // Until the next: today's 40 ms turn and the 4 s read. A set length is both how long it plays and its turn.
+        assert_eq!((turn(0), play_seconds(0)), (SWEEP_GAP, SWEEP_SECONDS));
+        assert_eq!((turn(250), play_seconds(250)), (Duration::from_millis(250), 0.25));
+        assert_eq!((turn(2000), play_seconds(2000)), (Duration::from_secs(2), 2.0));
+        // A set length counts from when the sound started, not from the ask; one that never starts is let go a bit
+        // after its turn. Until the next counts from the ask.
+        let asked = Instant::now();
+        let started = asked + Duration::from_millis(60);
+        assert!(!turn_over(100, asked, Some(started), asked + Duration::from_millis(100)));
+        assert!(turn_over(100, asked, Some(started), started + Duration::from_millis(100)));
+        assert!(!turn_over(100, asked, None, asked + Duration::from_millis(300)));
+        assert!(turn_over(100, asked, None, asked + Duration::from_millis(350)));
+        assert!(turn_over(0, asked, Some(started), asked + SWEEP_GAP));
+        // Every choice but the first is a length, and each is as its chip says.
+        assert_eq!(SWEEP_PLAYS[0], ("Until the next", 0));
+        for (name, ms) in &SWEEP_PLAYS[1..] {
+            assert_eq!(format!("{} s", f64::from(*ms) / 1000.0), *name);
+        }
+    }
 
     #[test]
     fn stars_packed_for_a_list_read_again_are_dropped() {

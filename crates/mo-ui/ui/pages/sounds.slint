@@ -216,6 +216,9 @@ export global SoundsData {
     // What makes a star bigger and brighter, each choice on show.
     in property <FilterView> light-filter;
     callback galaxy-light-by(string);
+    // How long each star a sweep reaches plays, each choice on show.
+    in property <FilterView> sweep-play-filter;
+    callback galaxy-sweep-plays(string);
     callback galaxy-lay-out();
     callback galaxy-reset();
     // The view's size, and the mouse on it: a left drag plays each star it passes, a right or middle drag moves the
@@ -1303,6 +1306,11 @@ export component SoundsPage inherits Rectangle {
                 name: "Light by";
                 filter: SoundsData.light-filter;
                 toggled(text) => { SoundsData.galaxy-light-by(text); }
+            }
+            FilterPicks {
+                name: "Sweep plays";
+                filter: SoundsData.sweep-play-filter;
+                toggled(text) => { SoundsData.galaxy-sweep-plays(text); }
             }
             StudioButton {
                 horizontal-stretch: 0;
