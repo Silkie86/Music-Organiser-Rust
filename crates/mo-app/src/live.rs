@@ -76,6 +76,9 @@ pub struct Live {
     kept_as: HashMap<i64, String>,
     /// Reading again the saves whose "muted" sample marks were lost ([`song_writes::to_mend`]).
     mend: Mend,
+    /// How many plugin measures had been kept when the installed plugins were last read
+    /// ([`plugin_writes::measures_kept`]).
+    measures_seen: u64,
 }
 
 /// Where reading again the saves whose "muted" sample marks were lost is (review finding A-1): looked for once a start,
@@ -231,6 +234,7 @@ impl Live {
             to_mark: BTreeSet::new(),
             kept_as,
             mend: Mend::NotLooked,
+            measures_seen: plugin_writes::measures_kept(),
         })
     }
 
@@ -269,9 +273,12 @@ impl Live {
     }
 
     /// The saves whose read failed last time, to read again a moment later; None when there are none.
+    /// Also Some (with nothing in it) when the Plugins page measured your plugins since the last look, so
+    /// [`Live::update`] looks again at which are installed while no project file changes (review G-3).
     pub fn retries(&mut self) -> Option<Changes> {
         let files: Vec<String> = self.retry.keys().cloned().collect();
-        (!files.is_empty()).then_some(Changes { files, ..Changes::default() })
+        (!files.is_empty() || self.measures_seen != plugin_writes::measures_kept())
+            .then_some(Changes { files, ..Changes::default() })
     }
 
     /// Walks every project folder once, as the C# app's scan did at its start: saves made or changed while the app was
@@ -306,14 +313,20 @@ impl Live {
     /// changed. Saves read from now on use the installed plugins as they are now. One that can't be looked at is
     /// looked at again at the next start.
     fn recheck_installed(&mut self) -> usize {
-        let Some(songs_db) = &self.writes else { return 0 };
+        // Taken before the look, so a measure kept meanwhile is looked at next time; only kept once the look worked,
+        // so one that failed is tried again at the next batch.
+        let measures = plugin_writes::measures_kept();
+        let Some(songs_db) = &self.writes else {
+            self.measures_seen = measures;
+            return 0;
+        };
         let r = match plugin_writes::recheck_installed(songs_db) {
-            Ok(r) => r,
+            Ok(r) => {
+                self.measures_seen = measures;
+                r
+            }
             Err(e) => {
-                crate::log::warning(
-                    "Songs",
-                    &format!("{e}; which plugins are installed is looked at again next start"),
-                );
+                crate::log::warning("Songs", &format!("{e}; which plugins are installed is looked at again later"));
                 return 0;
             }
         };
@@ -512,6 +525,10 @@ impl Live {
     /// thread; the walking and reading are spread over the app's low-priority threads.
     pub fn update(&mut self, changes: &Changes) -> Updated {
         let mut done = Updated::default();
+        // The Plugins page measured your plugins since: saves are judged against what it found from now on (review G-3).
+        if self.measures_seen != plugin_writes::measures_kept() {
+            done.rechecked += self.recheck_installed();
+        }
         let mut paths: Vec<String> = changes.files.clone();
         // A path that went and may have been a folder: the saves listed inside it are looked at (the ones that went
         // are marked missing below), with no walk.
@@ -857,6 +874,7 @@ mod tests {
             to_mark: BTreeSet::new(),
             kept_as: HashMap::new(),
             mend: Mend::NotLooked,
+            measures_seen: plugin_writes::measures_kept(),
         }
     }
 
@@ -871,6 +889,19 @@ mod tests {
             mtime: 1_700_000_000 + id,
             ..Save::default()
         }
+    }
+
+    #[test]
+    fn a_plugin_measure_wakes_the_watch_with_no_file_changed() {
+        // Review G-3 (and of #406): the Songs watch only calls update when it has something, so a measure kept while
+        // no project file changes is one too; looked at once, then not again.
+        let mut l = live(Vec::new());
+        assert!(l.retries().is_none());
+        l.measures_seen = plugin_writes::measures_kept().wrapping_add(1);
+        let woke = l.retries().expect("a measure to look at");
+        assert!(woke.files.is_empty());
+        l.update(&woke);
+        assert!(l.retries().is_none());
     }
 
     #[test]

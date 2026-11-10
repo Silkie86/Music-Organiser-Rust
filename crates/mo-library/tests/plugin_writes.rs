@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use chrono::{NaiveDate, NaiveDateTime};
 use mo_library::Library;
-use mo_library::plugin_writes::{Measure, recheck_installed, write};
+use mo_library::plugin_writes::{Measure, measures_kept, recheck_installed, write};
 use mo_library::plugins::{StoredFolder, StoredSpace};
 use mo_library::songs_db::{self, State};
 use rusqlite::Connection;
@@ -104,11 +104,15 @@ fn saves_plugins_are_looked_at_again_when_the_installed_plugins_or_rules_change(
          INSERT INTO plugins (project_id, name, vendor, format, path, installed) VALUES
              (7, 'Smack Attack Stereo', 'Waves', 'VST3', '', 0),
              (7, 'Gone Synth', 'Nobody', 'VST3', '', 0),
-             (7, 'Serum', 'Xfer Records', 'VST3', '', 0);",
+             (7, 'Serum', 'Xfer Records', 'VST3', '', 0),
+             (NULL, 'Serum', 'Xfer Records', 'AU', '', 0);",
     )
     .unwrap();
     let measured = Measure { installed: vec!["WaveShell1-VST3 15.5_x64".into(), "Serum".into()], spaces: Vec::new() };
+    let before = measures_kept();
     write(&path, &measured).unwrap();
+    // The Songs watch sees a measure was kept, and looks again (review G-3).
+    assert!(measures_kept() > before);
 
     let r = recheck_installed(&path).unwrap();
     assert!(r.looked);
@@ -121,7 +125,11 @@ fn saves_plugins_are_looked_at_again_when_the_installed_plugins_or_rules_change(
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(flags, [("Gone Synth".into(), 0), ("Serum".into(), 1), ("Smack Attack Stereo".into(), 1)]);
+    // A row with no save is flipped too, though no save's count changes (review of #406).
+    assert_eq!(
+        flags,
+        [("Gone Synth".into(), 0), ("Serum".into(), 1), ("Serum".into(), 1), ("Smack Attack Stereo".into(), 1)]
+    );
     assert_eq!(Library::open_read_only(&path).unwrap().detail(7).unwrap().unwrap().save.missing_plugins, 1);
 
     // Nothing changed since: not looked at again.

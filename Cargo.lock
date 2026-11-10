@@ -3348,6 +3348,7 @@ dependencies = [
  "mo-library",
  "mo-sounds",
  "rayon",
+ "rusqlite",
  "serde_json",
  "sha2",
  "thread-priority",
