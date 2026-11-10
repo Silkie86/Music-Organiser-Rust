@@ -2353,6 +2353,23 @@ export component SidePanel inherits Rectangle {
     public function to-top() {
         flick.content-y = 0;
     }
+    // Where a part of what it holds is in it (`y` as the window has it): the same however far it's scrolled, so a part
+    // can tell when it moved in the panel.
+    pure public function held-at(y: length) -> length {
+        y - flick.absolute-position.y - flick.content-y
+    }
+    // Scrolls as little as it must to bring a part of what it holds into sight (`top` and `bottom` as the window has
+    // them): for a box with the keys that something moved out of sight. Slint scrolls a part into sight as it gets the
+    // keys, not after, and takes the keys from one out of sight at the next key.
+    public function reveal(top: length, bottom: length) {
+        let shown-top = flick.absolute-position.y;
+        let shown-bottom = shown-top + flick.height;
+        if (bottom > shown-bottom) {
+            flick.content-y = max(flick.height - flick.content-height, flick.content-y - (bottom - shown-bottom));
+        } else if (top < shown-top) {
+            flick.content-y = min(0px, flick.content-y + (shown-top - top));
+        }
+    }
     background: Theme.surface;
     border-radius: Theme.radius;
     border-width: 1px;
