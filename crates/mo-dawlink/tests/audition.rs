@@ -271,3 +271,21 @@ fn the_preset_goes_on_the_new_track_by_its_id() {
     let insert = world.requests.iter().find(|r| r["cmd"] == "insert").unwrap();
     assert_eq!(insert["track"], 3);
 }
+
+#[test]
+fn an_audition_is_told_as_soon_as_its_track_is_made() {
+    // Before its preset loads, so an app closing while Bitwig loads a heavy one can still take the track out (the
+    // 10 Nov review's D-2).
+    let bitwig = FakeBitwig::start().unwrap();
+    let told = std::sync::Mutex::new(None);
+    let made = |a: &mo_dawlink::bitwig::Auditioning| {
+        let devices = bitwig.world().tracks.iter().find(|t| t.name == a.track).map(|t| t.devices.len());
+        *told.lock().unwrap() = Some((a.clone(), devices));
+    };
+    let auditioning = bitwig
+        .bitwig()
+        .audition_preset_telling(preset("Told"), part("MO Play 19"), "Told", &turn(), &|| true, &made)
+        .unwrap();
+    assert_eq!(told.into_inner().unwrap(), Some((auditioning.clone(), Some(0))), "told before the preset went in");
+    assert!(bitwig.bitwig().stop_audition(&auditioning, &turn()).unwrap());
+}

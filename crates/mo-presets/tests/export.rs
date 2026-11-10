@@ -155,3 +155,18 @@ fn a_leftover_with_the_same_name_is_passed_over_not_touched() {
         assert_eq!(std::fs::read(p).unwrap(), b"someone else's");
     }
 }
+
+#[test]
+fn an_auditions_bitwig_preset_writes_only_its_own_file() {
+    // The 10 Nov review's D-4: nothing but the file asked for is ever written, also when it can't be made.
+    let root = folder("audition");
+    let to = root.join("MO Play 1-1.bwpreset");
+    let templates = mo_presets::bitwig::Templates::default();
+    let damaged = root.join("Damaged.flp");
+    std::fs::write(&damaged, b"FLhd not really").unwrap();
+    assert!(export::bitwig_preset_from_save(damaged.to_str().unwrap(), "x", &templates, &to).is_err());
+    let save = concat!(env!("CARGO_MANIFEST_DIR"), "/../mo-formats/tests/fixtures/recipe/fl/MO Recipe 08 sampler.flp");
+    let gone = export::bitwig_preset_from_save(save, "no such sound", &templates, &to).unwrap_err();
+    assert!(gone.to_string().contains("isn't in the save"), "{gone}");
+    assert_eq!(names(&root), ["Damaged.flp"]);
+}

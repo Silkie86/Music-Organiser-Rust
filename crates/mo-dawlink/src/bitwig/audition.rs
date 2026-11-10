@@ -70,14 +70,16 @@ pub struct Auditioning {
     project: Option<String>,
 }
 
-/// Whether a failed `newtrack` may have made the track all the same: not when the link refused before changing
-/// anything (another project in front as it began, an old link, no connection).
+/// Whether a failed `newtrack` may have made the track all the same: not when the app never reached it (an old link,
+/// no connection). Bitwig's own words count, even "the link stopped before changing anything there": the link checks
+/// the project in front before each of its steps, and the first, making the track, comes before them; this audition
+/// keeps to the project that was in front a moment before it asked, so another in front almost always means one came
+/// to the front part way (the 10 Nov review's D-3).
 fn may_have_left_a_track(e: &Error) -> bool {
-    match e {
-        Error::Bitwig(words) => !words.contains("before changing anything"),
-        Error::ChangesOff | Error::TimedOut | Error::Closed | Error::Lost(_) | Error::Unexpected => true,
-        _ => false,
-    }
+    matches!(
+        e,
+        Error::Bitwig(_) | Error::ChangesOff | Error::TimedOut | Error::Closed | Error::Lost(_) | Error::Unexpected
+    )
 }
 
 /// Checks a file the link is to load is there, as each send does.
@@ -178,8 +180,23 @@ impl Bitwig {
         preset: impl AsRef<Path>,
         part: impl AsRef<Path>,
         name: &str,
+        turn: &Turn<'_>,
+        wanted: &dyn Fn() -> bool,
+    ) -> Result<Auditioning, Error> {
+        self.audition_preset_telling(preset, part, name, turn, wanted, &|_| {})
+    }
+
+    /// [`Bitwig::audition_preset`], telling `made` the audition as soon as its track is made, before the preset
+    /// loads (which can take Bitwig a while), so an app closing meanwhile can still take the track out (the 10 Nov
+    /// review's D-2).
+    pub fn audition_preset_telling(
+        &self,
+        preset: impl AsRef<Path>,
+        part: impl AsRef<Path>,
+        name: &str,
         _turn: &Turn<'_>,
         wanted: &dyn Fn() -> bool,
+        made: &dyn Fn(&Auditioning),
     ) -> Result<Auditioning, Error> {
         if !wanted() {
             return Err(Error::Cancelled);
@@ -212,6 +229,7 @@ impl Bitwig {
             started_bitwig: !was_playing,
             project: link.only_in().map(str::to_owned),
         };
+        made(&auditioning);
         // Whatever goes wrong from here, the track comes out again, so a failed audition leaves nothing behind (and
         // Bitwig stops if its clip launched after all and started it). When the link can't take it out (the
         // connection went, say), the words say there may be a track left; one no longer wanted comes back then, so
@@ -279,6 +297,17 @@ mod tests {
 
     fn hello(runtime: &str, extension: &str) -> Hello {
         Hello { runtime: runtime.into(), extension: extension.into(), ..Hello::default() }
+    }
+
+    #[test]
+    fn a_new_track_stopped_by_another_project_may_be_left() {
+        let elsewhere = Error::Bitwig(
+            "Bitwig has \"B\" open, not \"A\", so the link stopped before changing anything there.".into(),
+        );
+        assert!(may_have_left_a_track(&elsewhere), "the switch can come once the track is made");
+        assert!(may_have_left_a_track(&Error::TimedOut));
+        assert!(!may_have_left_a_track(&Error::NotRunning), "it never reached Bitwig");
+        assert!(!may_have_left_a_track(&Error::OldLink));
     }
 
     #[test]

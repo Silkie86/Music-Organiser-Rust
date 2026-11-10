@@ -144,30 +144,8 @@ fn write_all(
                 files.push(name);
                 // Send to Bitwig: only beside a plugin preset that was written.
                 let Some(templates) = templates else { continue };
-                // Its plugin's own template, else a stand-in of the same format that becomes its plugin.
-                let own = bitwig::template_for(p, templates);
-                let chosen = own.map(|t| (t, false)).or_else(|| bitwig::stand_in_for(p, templates).map(|t| (t, true)));
-                let made = match chosen {
-                    Some((template, other)) => {
-                        let raw = template_bytes
-                            .entry(template.path.clone())
-                            .or_insert_with(|| {
-                                std::fs::read(&template.path).map_err(|e| format!("its template couldn't be read: {e}"))
-                            })
-                            .as_deref()
-                            .map_err(|e| e.clone());
-                        // A template changed since it was found could trip the reader: that's this one's failure.
-                        let built = raw.and_then(|raw| {
-                            mo_catch::catch(|| match other {
-                                false => bitwig::build(raw, &template.path, p, &p.name),
-                                true => bitwig::build_for_other(raw, &template.path, p, &p.name),
-                            })
-                            .unwrap_or_else(|_| Err("its template stopped the reader".into()))
-                        });
-                        Some(built.map_err(io::Error::other).and_then(|b| write_checked(&folder.join(&bw), &b)))
-                    }
-                    None => None,
-                };
+                let made = bitwig_bytes(p, templates, &mut template_bytes)
+                    .map(|built| built.map_err(io::Error::other).and_then(|b| write_checked(&folder.join(&bw), &b)));
                 match made {
                     Some(Ok(())) => files.push(bw),
                     Some(Err(e)) => failed.push(stale(&folder, &bw, &e.to_string())),
@@ -192,6 +170,58 @@ fn write_all(
         return Err(io::Error::other(failed.join("; ")));
     }
     Ok(Exported { folder, files, failed, warning: None })
+}
+
+/// A sound's Bitwig preset, made from its plugin's own template, else a stand-in of the same format that becomes its
+/// plugin; `None` when `templates` has neither. Each template's file is read once into `read` (for a whole export).
+fn bitwig_bytes(
+    p: &PresetBlob,
+    templates: &Templates,
+    read: &mut HashMap<PathBuf, Result<Vec<u8>, String>>,
+) -> Option<Result<Vec<u8>, String>> {
+    let own = bitwig::template_for(p, templates);
+    let (template, other) =
+        own.map(|t| (t, false)).or_else(|| bitwig::stand_in_for(p, templates).map(|t| (t, true)))?;
+    let raw = read
+        .entry(template.path.clone())
+        .or_insert_with(|| std::fs::read(&template.path).map_err(|e| format!("its template couldn't be read: {e}")))
+        .as_deref()
+        .map_err(|e| e.clone());
+    // A template changed since it was found could trip the reader: that's this one's failure.
+    Some(raw.and_then(|raw| {
+        mo_catch::catch(|| match other {
+            false => bitwig::build(raw, &template.path, p, &p.name),
+            true => bitwig::build_for_other(raw, &template.path, p, &p.name),
+        })
+        .unwrap_or_else(|_| Err("its template stopped the reader".into()))
+    }))
+}
+
+/// Reads a save again and writes the sound with this key ([`crate::list::place_keys`]) as a Bitwig preset straight to
+/// `to`, a file of the caller's own (an audition's in Temp): no export folder and no plugin preset are written, so
+/// nothing is left behind but `to` if the app stops part way (the 10 Nov review's D-4). Gives the name the sound's
+/// `.bwpreset` would have in an export, without ".bwpreset", or `None` when `templates` has no template for its plugin.
+pub fn bitwig_preset_from_save(save: &str, key: &str, templates: &Templates, to: &Path) -> io::Result<Option<String>> {
+    let raw = std::fs::read(save)?;
+    let (sounds, _) = crate::library::sounds_in(save, raw, &Thresholds::default()).map_err(io::Error::other)?;
+    let keys = crate::list::place_keys(&sounds);
+    let blobs: Vec<PresetBlob> = sounds.into_iter().map(|s| s.blob).collect();
+    // Named among all the save's sounds, as an export names it.
+    let names = file_names(&blobs);
+    let Some(((p, name), _)) = blobs.iter().zip(names).zip(&keys).find(|(_, k)| k.as_str() == key) else {
+        return Err(io::Error::other("the sound isn't in the save any more (was it saved again since?)"));
+    };
+    if p.data.is_empty() {
+        return Err(io::Error::other("its settings were let go after it was listed"));
+    }
+    let Some(built) = bitwig_bytes(p, templates, &mut HashMap::new()) else { return Ok(None) };
+    let bytes = built.map_err(io::Error::other)?;
+    if let Err(e) = std::fs::write(to, &bytes) {
+        let _ = std::fs::remove_file(to);
+        return Err(e);
+    }
+    let bw = bitwig_name(&name, &safe_extension(&p.extension));
+    Ok(Some(bw.strip_suffix(".bwpreset").unwrap_or(&bw).to_owned()))
 }
 
 /// Why a Bitwig preset wasn't made, saying when one from an earlier export is still there with older settings.
