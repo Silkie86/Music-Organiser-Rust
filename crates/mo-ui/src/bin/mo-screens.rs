@@ -578,7 +578,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     card_keys_checks(&app, &window, &out)?;
     rail_checks(&app)?;
     wide_shots(&app, &window, &out)?;
+    tag_box_checks(&app, &window)?;
     Ok(())
+}
+
+/// The tag box on a sound's card keeps the keys as the tags typed into it push it down the card: the card scrolls
+/// after it. Slint takes the keys from a part out of sight at the next key (even Enter's own release), and then nothing
+/// had them, so no key worked until a click (it showed with the small words a step bigger, the UX review's D4). In a
+/// short window, so the card shows only its top and Ctrl+T finds the box at its foot. Last, as the tags it adds would
+/// show in the shots.
+fn tag_box_checks(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    let sounds = app.global::<mo_ui::SoundsData>();
+    window.set_size(PhysicalSize::new(WIDTH, SHORT));
+    start_on(app, Place::Sounds);
+    sounds.invoke_pick_view(0);
+    sounds.invoke_select(0);
+    capture(window);
+    press(app, "t", true);
+    capture(window);
+    let mut wrong = None;
+    for tag in [
+        "glassy", "wide", "crunchy", "soft", "metallic", "hollow", "bouncy", "gritty", "smooth", "tight", "roomy",
+        "noisy", "dry", "wet", "lofi", "vintage",
+    ] {
+        if picked_has_tag(app, tag) {
+            wrong = Some(format!("the picked sound has the tag {tag} already: type a new word"));
+            break;
+        }
+        type_in(app, window, tag);
+        if !picked_has_tag(app, tag) {
+            wrong = Some(format!("the box lost the keys as the tags before {tag} pushed it down the card"));
+            break;
+        }
+    }
+    // With the keys in the box as the card closes, they come back to the list: F1 works.
+    sounds.invoke_close_panel();
+    capture(window);
+    let opened = f1_works(app, window);
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    capture(window);
+    match wrong {
+        Some(wrong) => Err(format!("tag box: {wrong}")),
+        None if !opened => {
+            Err("tag box: once its card closed after the tags, F1 did nothing: no part had the keys".into())
+        }
+        None => Ok(()),
+    }
 }
 
 /// Every place once more in a window as wide as Solomon's screen (3440 x 1369, the size of his F12 notes' pictures),
@@ -615,23 +660,13 @@ fn card_keys_checks(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use slint::platform::Key;
     let sounds = app.global::<mo_ui::SoundsData>();
-    let tagged = |tag: &str| {
-        let tags = sounds.get_picked_tags();
-        (0..tags.row_count()).any(|i| tags.row_data(i).is_some_and(|t| t.text == tag))
-    };
-    let type_in = |words: &str| {
-        for c in words.chars() {
-            press(app, c.to_string(), false);
-        }
-        press(app, Key::Return, false);
-        capture(window);
-    };
+    let tagged = |tag: &str| picked_has_tag(app, tag);
     let keys_work = |after: &str| -> Result<(), String> {
-        press(app, Key::F1, false);
-        let opened = app.get_sheet_open();
-        app.set_sheet_open(false);
-        capture(window);
-        if opened { Ok(()) } else { Err(format!("card keys: {after}, F1 did nothing: no part had the keys")) }
+        if f1_works(app, window) {
+            Ok(())
+        } else {
+            Err(format!("card keys: {after}, F1 did nothing: no part had the keys"))
+        }
     };
     start_on(app, Place::Sounds);
     sounds.invoke_pick_view(0);
@@ -640,7 +675,7 @@ fn card_keys_checks(
     // Ctrl+T, a tag typed and Enter, then Esc in the empty box until the card closes (the first may stop the sound).
     press(app, "t", true);
     capture(window);
-    type_in("airy");
+    type_in(app, window, "airy");
     if !tagged("airy") {
         return Err("card keys: Ctrl+T then typing on Sounds added no tag: its box didn't get the keys".into());
     }
@@ -667,7 +702,7 @@ fn card_keys_checks(
     // Its third line, under Play and Favourite.
     click(window, x + 60.0, y + MENU_LINES_TOP + 2.5 * MENU_LINE);
     capture(window);
-    type_in("bright");
+    type_in(app, window, "bright");
     if !tagged("bright") {
         return Err("card keys: the menu's Add a tag… then typing added no tag: the box didn't get the keys".into());
     }
@@ -713,6 +748,30 @@ fn card_keys_checks(
     mo_ui::presets::show_section(app, mo_app::presets::Section::Sounds);
     mo_ui::presets::pick_row(app, usize::MAX);
     Ok(())
+}
+
+/// Whether the sound picked on Sounds has `tag` among the tags its card shows.
+fn picked_has_tag(app: &mo_ui::AppWindow, tag: &str) -> bool {
+    let tags = app.global::<mo_ui::SoundsData>().get_picked_tags();
+    (0..tags.row_count()).any(|i| tags.row_data(i).is_some_and(|t| t.text == tag))
+}
+
+/// `words` typed where the keys are, then Enter.
+fn type_in(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, words: &str) {
+    for c in words.chars() {
+        press(app, c.to_string(), false);
+    }
+    press(app, slint::platform::Key::Return, false);
+    capture(window);
+}
+
+/// Whether F1 opens the key sheet, as it does when some part has the keys. The sheet is closed again.
+fn f1_works(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> bool {
+    press(app, slint::platform::Key::F1, false);
+    let opened = app.get_sheet_open();
+    app.set_sheet_open(false);
+    capture(window);
+    opened
 }
 
 /// The rail's "In your DAWs" line (the 6 Nov review's X3-9, and the code review on it): a click shows the song Bitwig

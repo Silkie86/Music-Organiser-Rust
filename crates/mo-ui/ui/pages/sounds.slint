@@ -1076,6 +1076,18 @@ component SoundPanel inherits SidePanel {
     }
     property <int> tag-asked: SoundsData.tag-asked;
     changed tag-asked => { tag-box.focus-all(); }
+    // The tag box keeps the keys when the tags added push it down the card, out of sight (they wrap onto another line,
+    // or the filter rows over the card do and the card gets shorter): Slint takes the keys from a part out of sight at
+    // the next key, even Enter's own release, and then nothing had them. The card scrolls after the box as it moves in
+    // the card or the card's height changes, never as the card is scrolled. Asked only while the box has the keys.
+    property <length> tag-box-at: tag-box.has-keys ? root.held-at(tag-box.absolute-position.y) : 0px;
+    changed tag-box-at => { root.keep-tag-box(); }
+    changed height => { root.keep-tag-box(); }
+    function keep-tag-box() {
+        if (tag-box.has-keys) {
+            root.reveal(tag-box.absolute-position.y, tag-box.absolute-position.y + tag-box.height);
+        }
+    }
     VerticalLayout {
         spacing: Space.xs;
         // The sounds like it, or the projects that use it: one switch, as the card has room for one list (Solomon's
