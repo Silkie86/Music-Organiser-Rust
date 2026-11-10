@@ -365,10 +365,20 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
                 .into_iter()
                 .map(|w| (doc.obj(w).num(F_START).unwrap_or(0.0), doc.obj(w).num(F_WARP_SECOND).unwrap_or(0.0)))
                 .collect();
+            // Seconds of the file per beat of the event; negative when the event plays the file backwards.
             let rate = match (warps.first(), warps.last()) {
                 (Some(a), Some(b)) if warps.len() >= 2 && b.0 > a.0 => Some((b.1 - a.1) / (b.0 - a.0)),
-                _ if to > from => Some((to - from) / e_length),
+                _ if to != from => Some((to - from) / e_length),
                 _ => None,
+            }
+            .filter(|r| r.is_finite());
+            let settings = play.map(|p| doc.obj(p));
+            let flagged = settings.and_then(|p| p.num(F_REVERSED)).is_some_and(|v| v > 0.0);
+            // Where the file is at each beat of the event: `at` beats in plays second `from + at * rate`. A reversed
+            // flag on forward markers plays the same stretch of file from its end.
+            let (from, rate) = match rate {
+                Some(r) if flagged && r > 0.0 => (from + e_length * r, Some(-r)),
+                _ => (from, rate),
             };
             // The part of the event that shows: from where the clip's window starts to where it (or the clip) ends.
             let shown_from = e_start.max(offset);
@@ -376,16 +386,18 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
             if shown_to <= shown_from {
                 continue;
             }
-            let settings = play.map(|p| doc.obj(p));
-            let start_in_file = from + (shown_from - e_start) * rate.unwrap_or(0.0);
             let length = shown_to - shown_from;
-            // A reversed event's warp markers run backwards through the file: what plays starts at its end. Keep the
-            // rate positive and `from` the lowest second played, which is how a reversed part is drawn.
             let backwards = rate.is_some_and(|r| r < 0.0);
+            // Keep the rate positive and `from` the lowest second played, which is how a reversed part is drawn.
             let (start_in_file, rate) = match rate {
-                // Rounding can put the lowest second a hair before the file's start.
-                Some(r) if backwards => ((start_in_file + length * r).max(0.0), Some(-r)),
-                _ => (start_in_file, rate),
+                Some(r) => {
+                    let a = from + (shown_from - e_start) * r;
+                    let lowest = a.min(a + length * r);
+                    // Rounding can put the lowest second a hair before the file's start; more than that means the
+                    // markers don't fit the file, so the part is shown without a waveform.
+                    if lowest < -1e-3 { (0.0, None) } else { (lowest.max(0.0), Some(r.abs())) }
+                }
+                None => (from, None),
             };
             parts.push(AudioPart {
                 path: file.to_owned(),
@@ -394,13 +406,15 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
                 from: start_in_file,
                 seconds_per_beat: rate,
                 whole_file_beats: None,
-                reversed: backwards || settings.and_then(|p| p.num(F_REVERSED)).is_some_and(|v| v > 0.0),
-                stretch: settings.and_then(|p| p.num(F_STRETCH_MODE)).map(|m| Stretch::from_bitwig(m as i32)),
+                reversed: backwards || flagged,
+                stretch: settings
+                    .and_then(|p| p.num(F_STRETCH_MODE))
+                    .filter(|m| m.is_finite() && m.fract() == 0.0)
+                    .map(|m| Stretch::from_bitwig(m as i32)),
                 semitones: play.and_then(|p| expression(doc, p, F_TRANSPOSE)).unwrap_or(0.0),
                 gain_db: play
                     .and_then(|p| expression(doc, p, F_GAIN))
-                    .filter(|&v| v > 0.0)
-                    .map_or(0.0, |v| 60.0 * v.log10()),
+                    .map_or(0.0, |v| if v > 0.0 { 60.0 * v.log10() } else { f64::NEG_INFINITY }),
             });
         }
         let name = if name.is_empty() {
@@ -408,7 +422,7 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
         } else {
             name.to_owned()
         };
-        let fade = |field: u32| c.num(field).filter(|f| f.is_finite() && *f > 0.0).unwrap_or(0.0);
+        let fade = |field: u32| c.num(field).filter(|f| f.is_finite() && *f > 0.0).unwrap_or(0.0).min(length);
         return Some(PreviewClip {
             name,
             start,
@@ -458,11 +472,16 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
     Some(PreviewClip { name: name.to_owned(), start, length, muted, notes, ..PreviewClip::default() })
 }
 
-/// The value of an expression in an audio playback's `field` (its first point's 0x28f), when it has one.
+/// The value of an expression in an audio playback's `field` at the event's start (its earliest point's 0x28f), when
+/// it has one.
 fn expression(doc: &Document, play: ObjId, field: u32) -> Option<f64> {
     let e = field_obj(doc, play, field)?;
-    let first = doc.field_list(e, F_ITEMS).into_iter().next()?;
-    doc.obj(first).num(F_EXPRESSION_VALUE).filter(|v| v.is_finite())
+    doc.field_list(e, F_ITEMS)
+        .into_iter()
+        .map(|p| doc.obj(p))
+        .filter_map(|p| Some((p.num(F_START).unwrap_or(0.0), p.num(F_EXPRESSION_VALUE).filter(|v| v.is_finite())?)))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, v)| v)
 }
 
 #[cfg(test)]

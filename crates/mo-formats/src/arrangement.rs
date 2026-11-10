@@ -86,7 +86,7 @@ pub struct AudioPart {
     pub stretch: Option<Stretch>,
     /// Transposed this many semitones (0 when it isn't).
     pub semitones: f64,
-    /// Its own gain in dB (0 when it's left alone).
+    /// Its own gain in dB (0 when it's left alone, minus infinity when turned right down).
     pub gain_db: f64,
 }
 

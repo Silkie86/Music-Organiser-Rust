@@ -43,7 +43,8 @@ the tone the songs point at.
 ## Known gaps (what the readers miss)
 
 - Bitwig: an audio clip's loop (only its first pass shows), deactivated tracks, arranger automation, time
-  signature and cue markers.
+  signature and cue markers. Stretch mode, transpose, gain and clip fades are read but the app doesn't draw or
+  play them yet.
 - FL: stretch mode, pitch, clip fades, declicking, sampler IN/OUT, the second arrangement; Stretch pro, e2 and e3
   clips read a whole-file length millions of beats long.
 - Fender: automation, transpose, gain and fades, disabled tracks (read as just muted), bus routing; Timestretch
