@@ -62,15 +62,12 @@ impl AudioData {
         if self.sample_rate == 0 { 0.0 } else { self.len() as f64 / f64::from(self.sample_rate) }
     }
 
-    /// Fades the last few milliseconds out when less than the whole file was decoded (a sweep reads only a sound's
-    /// start), so its cut end doesn't click. A sound decoded to its own end is left as it is.
-    pub fn fade_cut_end(&mut self) {
+    /// Fades the last 5 ms out, for a sound that stops where its read was cut (a sweep reads only a sound's start), so
+    /// it doesn't click there.
+    pub fn fade_out_end(&mut self) {
         const FADE_SECONDS: f64 = 0.005;
         let frames = self.len();
-        if frames == 0
-            || self.sample_rate == 0
-            || self.seconds() + 1.0 / f64::from(self.sample_rate) >= self.file_seconds
-        {
+        if frames == 0 {
             return;
         }
         let n = ((FADE_SECONDS * f64::from(self.sample_rate)).ceil() as usize).clamp(1, frames);
@@ -134,11 +131,11 @@ impl From<std::io::Error> for AudioError {
 mod tests {
     use super::AudioData;
 
-    fn sound(frames: usize, file_seconds: f64) -> AudioData {
+    fn sound(frames: usize) -> AudioData {
         AudioData {
             sample_rate: 1000,
             channels: vec![vec![1.0; frames], vec![0.5; frames]],
-            file_seconds,
+            file_seconds: 4.0,
             embedded_tempo: None,
             embedded_root_note: None,
             embedded_is_loop: None,
@@ -146,21 +143,18 @@ mod tests {
     }
 
     #[test]
-    fn a_cut_sound_fades_out_at_its_end_and_a_whole_one_does_not() {
-        // 1 s of a 4 s file at 1000 frames a second: its last 5 frames go down to silence.
-        let mut cut = sound(1000, 4.0);
-        cut.fade_cut_end();
+    fn the_end_fades_out_over_5_ms() {
+        // 1 s at 1000 frames a second: its last 5 frames go down to silence, the rest stays.
+        let mut cut = sound(1000);
+        cut.fade_out_end();
         assert_eq!(cut.channels[0][..995], vec![1.0; 995][..]);
         assert_eq!(cut.channels[0][995..], [0.8, 0.6, 0.4, 0.2, 0.0]);
         assert_eq!(cut.channels[1][999], 0.0);
         assert_eq!(cut.channels[1][995], 0.4);
-        // Decoded to its own end: left as it is.
-        let mut whole = sound(1000, 1.0);
-        whole.fade_cut_end();
-        assert!(whole.channels[0].iter().all(|&s| s == 1.0));
-        // Shorter than the fade: all of it fades.
-        let mut tiny = sound(2, 4.0);
-        tiny.fade_cut_end();
+        // Shorter than the fade: all of it fades. Nothing to fade: nothing happens.
+        let mut tiny = sound(2);
+        tiny.fade_out_end();
         assert_eq!(tiny.channels[0], [0.5, 0.0]);
+        sound(0).fade_out_end();
     }
 }

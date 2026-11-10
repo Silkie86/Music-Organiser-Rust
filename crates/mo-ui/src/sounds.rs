@@ -391,6 +391,14 @@ pub fn choose_output(name: Option<String>) {
 static PLAYS: AtomicU64 = AtomicU64::new(0);
 /// The newest play's number (not a stop's), so a read cut short can tell a newer sound from a stop.
 static NEWEST_PLAY: AtomicU64 = AtomicU64::new(0);
+/// The newest play handed to the output, and when (a Galaxy sweep's set length counts from then).
+static STARTED: Mutex<Option<(u64, Instant)>> = Mutex::new(None);
+
+/// When play `ask` was handed to the output, if it was the last one to be.
+fn started_at(ask: u64) -> Option<Instant> {
+    let started = *STARTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    started.filter(|&(a, _)| a == ask && ask > 0).map(|(_, at)| at)
+}
 
 /// The tile rows, made from the page's list one row at a time as the list draws them.
 struct TileRows {
@@ -3553,8 +3561,11 @@ fn read_and_play(job: PlayJob) {
         // Looked at again as it starts, with no stop or other sound able to come in between: one asked for since
         // wins, rather than this sound starting after it and playing on while the page shows another or none.
         Ok(mut audio) => {
-            // A sweep's short read stops where it was cut: faded, so it doesn't click there.
-            audio.fade_cut_end();
+            // Read as far as it was asked to (a sweep reads only a sound's start; a long one is read so far): it
+            // stops there, so it fades out rather than clicking.
+            if audio.sample_rate > 0 && audio.seconds() + 1.0 / f64::from(audio.sample_rate) >= most {
+                audio.fade_out_end();
+            }
             player().play_if(Arc::new(audio), ask.to_string(), from * seconds, wanted)
         }
         Err(e) => match wanted() {
@@ -3567,6 +3578,7 @@ fn read_and_play(job: PlayJob) {
     };
     match went {
         Ok(()) => {
+            *STARTED.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some((ask, Instant::now()));
             let output = player().info();
             sweep_timing::output(output.mix_every_ms.map(|m| m / 2.0), output.delay_ms);
             sweep_timing::started(&path, ask);
