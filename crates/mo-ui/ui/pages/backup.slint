@@ -3,6 +3,7 @@
 // what goes and what's left out, and why. Only shared parts from studio.slint; mo-app decides every word
 // (mo_app::backup), mo-ui/src/backup.rs fills it.
 import { ListView } from "std-widgets.slint";
+import { Fit } from "../list.slint";
 import { Theme, Type, Space, StudioButton, ActionKey, MenuButton, MenuItem, Segmented, FolderRow, PageHeader, Caps, Well, Groove, ProgressLine, EmptyState, NoticeStrip, ListLine } from "../studio.slint";
 
 export struct BackupFolderLine {
@@ -94,6 +95,9 @@ export component BackupPage inherits Rectangle {
     Flickable {
         content-height: page.preferred-height;
         page := VerticalLayout {
+            // In a wide window the page stops at a list and a card's width (the UX review of 10 Nov, A1).
+            x: 0;
+            width: min(root.width, Fit.page-max + 2 * Space.xl);
             padding: Space.xl;
             spacing: Space.xl;
             alignment: start;

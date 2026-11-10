@@ -2,6 +2,7 @@
 // "Made with Slint" credit in General's About part (Slint's royalty-free licence, decided 2026-10-30). Only shared
 // parts from studio.slint; mo-app decides every word (mo_app::settings), mo-ui/src/settings.rs fills it.
 import { AboutSlint } from "std-widgets.slint";
+import { Fit } from "../list.slint";
 import { Theme, Type, Space, StudioButton, Segmented, MenuChip, PageHeader, Caps, Well, TabBar, EmptyState, Dot, ToggleChip, FolderRow } from "../studio.slint";
 
 // One theme to pick, drawn as a little picture of it in its own colours.
@@ -825,6 +826,10 @@ component DeveloperTab inherits VerticalLayout {
 
 export component SettingsPage inherits Rectangle {
     VerticalLayout {
+        // In a wide window the page stops at a list's width (the UX review of 10 Nov, A1): a setting's name and its
+        // button stay within one look of each other.
+        x: 0;
+        width: min(root.width, Fit.list-max + 2 * Space.xl);
         padding: Space.xl;
         spacing: Space.lg;
         PageHeader {
