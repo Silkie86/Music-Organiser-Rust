@@ -1,10 +1,11 @@
 //! Your say about sounds, on the picked sound's card (stage 5 of "the sound library grows again", review finding
-//! X1-own1): a favourite (its heart, or Ctrl+D), stars, your own type, and tags (added in the card's box, or Ctrl+T;
-//! taken away by their ×), as the C# app's Sound Lab kept them. Each goes into the app's own sound library through the
-//! one writer of what's done with sounds ([`mo_app::sound_notes`]), never waiting here. Meanwhile the page shows it at
-//! once, over the sounds as they were read ([`SoundList::with_say`]): on the tiles, lines and card, in the filters and
-//! their counts, in the type order and the search. What Most liked's order, Rediscover, Kits, the galaxy's colours
-//! and Ctrl+K make of it catches up the next time the sounds are read.
+//! X1-own1): a favourite (its heart, or Ctrl+D), your own type, and tags (added in the card's box, or Ctrl+T; taken
+//! away by their ×), as the C# app's Sound Lab kept them; not its stars, as the heart is the one way to like a sound
+//! (Solomon's pick, 10 Nov 2026). Each goes into the app's own sound library through the one writer of what's done
+//! with sounds ([`mo_app::sound_notes`]), never waiting here. Meanwhile the page shows it at once, over the sounds as
+//! they were read ([`SoundList::with_say`]): on the tiles, lines and card, in the filters and their counts, in the
+//! type order and the search. What Most liked's order, Rediscover, Kits, the galaxy's colours and Ctrl+K make of it
+//! catches up the next time the sounds are read.
 //!
 //! The sounds read again while the app is open hold every change up to a number (they're read with the writer held
 //! off, as for plays: [`super::did`]), and the page goes on showing those after it ([`read_again`]).
@@ -14,7 +15,7 @@ use std::sync::Arc;
 
 use mo_app::sound_notes::Holds;
 use mo_app::sounds::{Now, SoundList, YourSay, by_letters};
-use mo_sounds::compact::yours::{Change, MOST_STARS};
+use mo_sounds::compact::yours::Change;
 use mo_sounds::{Sound, Word, types};
 use slint::ComponentHandle;
 
@@ -39,12 +40,6 @@ pub(super) fn choices() -> Vec<&'static str> {
 /// The picked sound a favourite, or not.
 pub(super) fn favourite(app: &AppWindow) {
     change(app, |now| Some(Change::Favourite(!now.favourite)));
-}
-
-/// The picked sound's stars: `stars` (0 for none).
-pub(super) fn stars(app: &AppWindow, stars: i32) {
-    let stars = stars.clamp(0, MOST_STARS);
-    change(app, |now| (now.stars != stars).then_some(Change::Stars(stars)));
 }
 
 /// Your own type for the picked sound: `own` ("" takes yours away, so its name's type shows again).
@@ -155,7 +150,8 @@ fn say_of(list: &SoundList, places: &HashMap<i64, usize>, said: &[Said]) -> Hash
 fn add(say: &mut YourSay, sound: &Sound, change: &Change) {
     match change {
         Change::Favourite(on) => say.favourite = Some(*on),
-        Change::Stars(n) => say.stars = Some((*n).clamp(0, MOST_STARS)),
+        // The page gives no stars: the heart is the one way to like a sound.
+        Change::Stars(_) => {}
         Change::Type(own) => {
             say.own_type = Some(own.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(Word::new));
         }
@@ -194,25 +190,4 @@ fn known(p: &mut Page, change: &Change) {
         }
         _ => {}
     }
-}
-
-/// How much the favourites you made or unmade since the sounds were read add to the sound at `at`'s Most liked score
-/// (by the favourite weight).
-pub(super) fn liked_more(p: &Page, at: usize) -> f64 {
-    let Some(now) = p.list.now(at) else { return 0.0 };
-    match (now.favourite, now.sound.favourite) {
-        (true, false) => p.weights.favourite,
-        (false, true) => -p.weights.favourite,
-        _ => 0.0,
-    }
-}
-
-/// The sounds whose favourite you changed since they were read, by id: one of them may be the best liked now.
-pub(super) fn favourites_changed(p: &Page) -> impl Iterator<Item = &i64> {
-    p.said.iter().filter(|s| matches!(s.change, Change::Favourite(_))).map(|s| &s.id)
-}
-
-/// Whether you changed the favourite of the sound `id` since it was read.
-pub(super) fn favourite_changed(p: &Page, id: i64) -> bool {
-    favourites_changed(p).any(|&changed| changed == id)
 }

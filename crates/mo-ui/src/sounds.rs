@@ -42,10 +42,10 @@ use mo_library::UsageRules;
 use mo_library::songs::thousands;
 use mo_sounds::compact::{self, PageRead};
 use mo_sounds::index::{Gathered, SoundIndex};
-use mo_sounds::liking::{self, LIKED_WEIGHTS_KEY, LikedWeights};
+use mo_sounds::liking::{LIKED_WEIGHTS_KEY, LikedWeights};
 use mo_sounds::rediscover::{self, FolderUse};
 use mo_sounds::usage::{self, Usage};
-use mo_sounds::{Sound, SoundActivity, SoundsDb, SoundsError};
+use mo_sounds::{Sound, SoundsDb, SoundsError};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, Timer, TimerMode, VecModel};
 
 use crate::filters::FilterModels;
@@ -95,15 +95,10 @@ struct Page {
     /// A sound was played while History was on show: what was played as History lists it until you come back to it
     /// (the sound you played stays under your pointer; [`did::take`]).
     history_behind: Option<Arc<Vec<(usize, NaiveDateTime)>>>,
-    /// What's been done with sounds since they were read (by id): plays, drags and sends, counted on their liked
-    /// bars at once ([`did`]).
-    did: HashMap<i64, SoundActivity>,
-    /// Each of them, in the order done, as it was noted: the sounds read again leave out those they hold already
-    /// ([`did::read_again`]).
+    /// The plays since the sounds were read, in the order played, as they were noted: the sounds read again leave out
+    /// those they hold already ([`did::read_again`]).
     noted: Vec<did::Noted>,
-    /// How much each sign of liking counts for Most liked, as the sounds were scored with.
-    weights: LikedWeights,
-    /// Your say about sounds since they were read (a favourite, stars, your own type, tags), in the order said: shown
+    /// Your say about sounds since they were read (a favourite, your own type, tags), in the order said: shown
     /// over the sounds at once ([`yours`]), and left out of the sounds read again once they hold it.
     said: Vec<yours::Said>,
     /// Keeps what's done with sounds, and your say about them, in the library ([`did`], [`yours`]); none for the
@@ -192,10 +187,8 @@ impl Default for Page {
             played: Arc::default(),
             history: Vec::new(),
             history_behind: None,
-            did: HashMap::new(),
             noted: Vec::new(),
             said: Vec::new(),
-            weights: LikedWeights::default(),
             noter: None,
             columns: 4,
             picked: None,
@@ -463,8 +456,6 @@ fn tile(p: &Page, row: usize, at: usize) -> SoundTile {
         facts: list::facts_line_now(&now).into(),
         colour: list::type_colour(now.sound_type),
         favourite: now.favourite,
-        liked: liked_share(p, at).map_or(-1.0, |l| l as f32),
-        liked_why: liked_why(p, at).into(),
         wave: wave(s).into(),
         points: points(s),
         picked: p.picked == Some(at),
@@ -494,25 +485,6 @@ fn line(p: &Page, row: usize, at: usize) -> SoundLine {
         picked: p.picked == Some(at),
         playing: p.playing.is_some_and(|(i, _)| i == at),
     }
-}
-
-/// Why a sound is as liked as it is (empty until the scores are known), with what was done with it, and whether you
-/// made it a favourite, since it was read.
-fn liked_why(p: &Page, at: usize) -> String {
-    match (p.list.liked_share(at), p.list.now(at)) {
-        (Some(_), Some(now)) => {
-            let since = did::since(p, now.sound).copied().unwrap_or_default();
-            liking::explain_with(now.sound, now.favourite, &since, p.list.usage(at))
-        }
-        _ => String::new(),
-    }
-}
-
-/// A sound's Most liked score against the best liked, from 0 to 1 (`None` until the scores are known), both with what
-/// was done with sounds since they were read.
-fn liked_share(p: &Page, at: usize) -> Option<f64> {
-    let (score, best) = (did::score_now(p, at)?, did::best_now(p)?);
-    Some(if best > 0.0 { score / best } else { 0.0 })
 }
 
 /// When a sound was played, short: "14:05" today, "Tue" this week, "3 Oct" before.
@@ -785,8 +757,6 @@ pub struct Library {
     played: Vec<(usize, NaiveDateTime)>,
     /// Each sound's place in the list, by its id.
     places: Arc<HashMap<i64, usize>>,
-    /// How much each sign of liking counted for Most liked.
-    weights: LikedWeights,
     /// Which things done with sounds, and which of your say, these hold, when they were read with their writer held
     /// off ([`did::read_again`]).
     holds: Option<Holds>,
@@ -810,7 +780,6 @@ impl Library {
             list: Arc::new(list),
             played,
             places: Arc::new(places),
-            weights: *weights,
             holds: None,
         }
     }
@@ -1254,11 +1223,11 @@ fn prints_after(scanned: &mo_app::sound_scan::Scanned, sounds: &[Sound]) -> Prin
 /// app closes. Asks already in when a scan starts are for the folders it reads, so one scan does them all.
 ///
 /// The backup copy comes first, so a library found damaged is mended before the scan writes into it, and a start makes
-/// one at most (review finding S-5). It's made when the library changed by more than plays, your stars and tags and
-/// the galaxy's maps, or by those once it's a day old; a scan that kept sounds has one made straight after, unless one
-/// was made just before. While the app stays open it's looked at again every hour, so what a scan kept is in it within
-/// the hour, and a long session loses a day of the rest at most too (review finding S-6). A library found damaged that
-/// couldn't be mended isn't tried again until the next start.
+/// one at most (review finding S-5). It's made when the library changed by more than plays, your say (favourites,
+/// types, tags) and the galaxy's maps, or by those once it's a day old; a scan that kept sounds has one made straight
+/// after, unless one was made just before. While the app stays open it's looked at again every hour, so what a scan
+/// kept is in it within the hour, and a long session loses a day of the rest at most too (review finding S-6). A
+/// library found damaged that couldn't be mended isn't tried again until the next start.
 fn scans(
     sounds_db: &Path,
     library_db: &Path,
@@ -2117,7 +2086,6 @@ fn take_refreshed(p: &mut Page, library: Library, moved: Option<&[Option<usize>]
     // History lists them once the filters have been through them again ([`listed`], asked for by the page next).
     p.played = Arc::new(library.played);
     // Read again, they hold what was done with them so far: what wasn't kept yet as they were read goes on showing.
-    p.weights = library.weights;
     did::read_again(p, library.holds.as_ref());
     yours::read_again(p, library.holds.as_ref());
     let gone = moved.map(|moved| move_places(p, moved)).unwrap_or_default();
@@ -2263,7 +2231,6 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         // History lists them once the filters have been through them ([`listed`]).
         p.played = Arc::new(library.played);
         p.history.clear();
-        p.weights = library.weights;
         p.list = library.list;
         p.to_pick = None;
         p.places = library.places;
@@ -2600,7 +2567,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.on_panel_resized(|w| log::info("Sounds", &format!("Panel width {w:.0}")));
 }
 
-/// The card's heart, stars, Your type menu and tags ([`yours`]).
+/// The card's heart, Your type menu and tags ([`yours`]).
 fn wire_yours(app: &AppWindow, data: &SoundsData) {
     let choices: Vec<SharedString> = yours::choices().into_iter().map(SharedString::from).collect();
     data.set_type_choices(ModelRc::new(VecModel::from(choices)));
@@ -2608,12 +2575,6 @@ fn wire_yours(app: &AppWindow, data: &SoundsData) {
     data.on_toggle_favourite(move || {
         if let Some(app) = weak.upgrade() {
             yours::favourite(&app);
-        }
-    });
-    let weak = app.as_weak();
-    data.on_set_stars(move |n| {
-        if let Some(app) = weak.upgrade() {
-            yours::stars(&app, n);
         }
     });
     let weak = app.as_weak();
@@ -3390,10 +3351,8 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
         seconds: a.map_or(0.0, |a| a.seconds.min(mo_audio::MAX_SECONDS)) as f32,
         facts: ModelRc::new(VecModel::from(facts)),
         favourite: now.favourite,
-        stars: now.stars,
         own_type: now.own_type.unwrap_or_default().into(),
         character: a.map(|a| a.character.join(", ")).unwrap_or_default().into(),
-        liked_why: liked_why(p, at).into(),
         projects: ModelRc::new(VecModel::from(projects)),
         projects_title: used.title.into(),
         projects_note: used.note.into(),
@@ -4804,10 +4763,9 @@ mod tests {
     }
 
     #[test]
-    fn plays_drags_and_sends_show_at_once_in_history_and_on_the_liked_bars() {
+    fn plays_show_at_once_in_history_and_drags_and_sends_wait_for_the_next_read() {
         use mo_sounds::event::{DRAG, PLAY, SEND};
-        let mut sounds = vec![sound(1, "Pack/a.wav"), sound(2, "Pack/b.wav"), sound(3, "Pack/c.wav")];
-        sounds[0].activity.plays = 4;
+        let sounds = vec![sound(1, "Pack/a.wav"), sound(2, "Pack/b.wav"), sound(3, "Pack/c.wav")];
         let day = |d: u32, h: u32| {
             chrono::NaiveDate::from_ymd_opt(2026, 11, d).and_then(|d| d.and_hms_opt(h, 0, 0)).unwrap_or_default()
         };
@@ -4816,20 +4774,16 @@ mod tests {
             list: lib.list.clone(),
             places: lib.places.clone(),
             played: Arc::new(lib.played.clone()),
-            weights: lib.weights,
             ..Page::default()
         };
-        assert_eq!((liked_share(&p, 0), liked_share(&p, 1)), (Some(1.0), Some(0.0)));
-        // A play you meant: first in History, and counted on its liked bar and in why.
+        // A play you meant: first in History.
         did::take(&mut p, &[2], PLAY, 1, day(6, 10));
         assert_eq!(p.history, [(1, day(6, 10)), (0, day(1, 9))]);
-        assert_eq!(liked_share(&p, 1), Some(0.25));
-        assert_eq!(liked_why(&p, 1), "Played once");
-        // Played four times more, it's the best liked, and every bar is against it, as the C# app scored them again.
+        // Played four times more: History lists it once, at its last play.
         for n in 2..6 {
             did::take(&mut p, &[2], PLAY, n, day(6, 11));
         }
-        assert_eq!((liked_share(&p, 0), liked_share(&p, 1)), (Some(0.8), Some(1.0)));
+        assert_eq!(p.history, [(1, day(6, 11)), (0, day(1, 9))]);
         assert_eq!(p.played.len(), 2);
         // With History on show, the sound played stays where it is until you come back to it, whatever the list
         // worked out meanwhile.
@@ -4840,23 +4794,23 @@ mod tests {
         p.pick_view(TILES);
         p.pick_view(HISTORY);
         assert_eq!(p.history.first(), Some(&(0, day(6, 12))));
-        // A drag and a send count once each for each sound; one not in the list isn't counted.
+        // A drag and a send leave the page as it was: they count the next time the sounds are read.
+        let (history, played) = (p.history.clone(), p.played.clone());
         did::take(&mut p, &[3, 3, 99], DRAG, 7, day(6, 13));
         did::take(&mut p, &[3], SEND, 8, day(6, 13));
-        assert_eq!(liked_why(&p, 2), "Dragged out once, sent into a DAW once");
-        assert!(!p.did.contains_key(&99));
-        // Read again holding everything noted up to the drag: the send goes on showing, the rest is in what was read
-        // (here, as the sounds were: nothing is counted twice).
+        assert_eq!((&p.history, &p.played), (&history, &played));
+        assert_eq!(p.noted.len(), 6);
+        // Read again holding the first five plays: the sixth goes on showing first in History, the rest is in what
+        // was read (here, as the sounds were).
         let again = Library::new(sounds, vec![(1, day(1, 9))], &LikedWeights::default())
-            .read_holding(Some(Holds { upto: 7, ..Holds::default() }));
+            .read_holding(Some(Holds { upto: 5, ..Holds::default() }));
         take_refreshed(&mut p, again, None, false);
-        assert_eq!(p.did.len(), 1);
-        assert_eq!(liked_why(&p, 2), "Sent into a DAW once");
-        assert_eq!(p.played.first(), Some(&(0, day(1, 9))));
+        assert_eq!(p.noted.len(), 1);
+        assert_eq!(p.played.first(), Some(&(0, day(6, 12))));
         // One read without holding them off: the library's word is taken.
         let again = Library::new(vec![sound(1, "Pack/a.wav")], Vec::new(), &LikedWeights::default());
         take_refreshed(&mut p, again, None, false);
-        assert!(p.did.is_empty() && p.noted.is_empty());
+        assert!(p.noted.is_empty());
     }
 
     #[test]
@@ -4880,14 +4834,13 @@ mod tests {
         take_refreshed(&mut p, again, None, false);
         let ids: Vec<i64> = p.played.iter().filter_map(|&(at, _)| p.list.sound(at).map(|s| s.id)).collect();
         assert_eq!(ids, [3, 2, 1]);
-        assert_eq!(p.did.keys().copied().collect::<std::collections::BTreeSet<_>>(), [2, 3].into());
+        assert_eq!(p.noted.len(), 2);
     }
 
     #[test]
     fn your_say_shows_at_once_and_stays_until_the_sounds_read_hold_it() {
         use mo_sounds::compact::yours::Change;
         let mut sounds = vec![sound(1, "Pack/a.wav"), sound(2, "Pack/b.wav"), sound(3, "Pack/c.wav")];
-        sounds[0].activity.plays = 10;
         sounds[2].name_type = Some("Snare".into());
         sounds[2].tags = vec!["dusty".into()];
         let lib = Library::new(sounds.clone(), Vec::new(), &LikedWeights::default());
@@ -4896,30 +4849,26 @@ mod tests {
             places: lib.places.clone(),
             types: lib.types.clone(),
             tags: lib.tags.clone(),
-            weights: lib.weights,
             ..Page::default()
         };
         let card = |p: &Page, at: usize| picked_sound(p, at);
-        assert_eq!((liked_share(&p, 0), liked_share(&p, 1)), (Some(1.0), Some(0.0)));
-        // Made a favourite: its heart on its card and tile, its liked bar and why, and the Favourites filter.
+        // Made a favourite: its heart on its card, tile and line, and the Favourites filter.
         yours::take(&mut p, 2, Change::Favourite(true), 1);
         assert!(card(&p, 1).favourite && tile(&p, 0, 1).favourite && line(&p, 0, 1).favourite);
-        assert_eq!(liked_why(&p, 1), "Favourite");
-        assert_eq!((liked_share(&p, 0), liked_share(&p, 1)), (Some(1.0), Some(1.0)));
         let favourites = Filters { favourites: true, ..Filters::default() };
         assert_eq!(p.list.view(&favourites, Order::Name, 0), [1]);
-        // Stars, your own type (a new one joins the type chips) and a tag (a new one joins the Tag filter).
-        yours::take(&mut p, 2, Change::Stars(4), 2);
+        // Tags (a new one joins the Tag filter) and your own type (a new one joins the type chips).
+        yours::take(&mut p, 2, Change::Tag("Bright".into()), 2);
         yours::take(&mut p, 2, Change::Type(Some("Perc".into())), 3);
         yours::take(&mut p, 3, Change::Tag("Warm".into()), 4);
         yours::take(&mut p, 3, Change::Untag("DUSTY".into()), 5);
         let b = card(&p, 1);
         assert_eq!(
-            (b.stars, b.own_type.as_str(), b.sound_type.as_str(), b.type_from.as_str()),
-            (4, "Perc", "Perc", "· you set this")
+            (b.own_type.as_str(), b.sound_type.as_str(), b.type_from.as_str()),
+            ("Perc", "Perc", "· you set this")
         );
         assert!(p.types.iter().any(|(t, _)| t == "Perc"), "{:?}", p.types);
-        assert_eq!(p.tags, ["dusty", "Warm"]);
+        assert_eq!(p.tags, ["Bright", "dusty", "Warm"]);
         assert_eq!(p.list.now(2).map(|n| n.tags.to_vec()), Some(vec!["Warm".to_owned()]));
         // Your type taken away: the name's type again.
         yours::take(&mut p, 3, Change::Type(Some("Kick".into())), 6);
@@ -4932,9 +4881,9 @@ mod tests {
         // A sound not in the list isn't taken.
         yours::take(&mut p, 99, Change::Favourite(true), 8);
         assert_eq!(p.said.len(), 7);
-        // Read again holding everything up to the stars, in another order: the rest goes on showing, at the sounds'
-        // new places; what was read is taken as it is (here, as the sounds were: the stars are gone with it). The
-        // favourite couldn't be kept yet, so it goes on showing too.
+        // Read again holding everything up to the first tag, in another order: the rest goes on showing, at the
+        // sounds' new places; what was read is taken as it is (here, as the sounds were: the tag is gone with it).
+        // The favourite couldn't be kept yet, so it goes on showing too.
         let mut moved = sounds.clone();
         moved.reverse();
         let holds = Holds { upto: 2, waiting: [1].into() };
@@ -4943,12 +4892,12 @@ mod tests {
         assert_eq!(p.said.len(), 6);
         let at = |p: &Page, id: i64| p.places[&id];
         assert!(card(&p, at(&p, 2)).favourite);
-        assert_eq!(card(&p, at(&p, 2)).stars, 0);
+        assert_eq!(p.list.now(at(&p, 2)).map(|n| n.tags.to_vec()), Some(Vec::new()));
         assert_eq!(card(&p, at(&p, 2)).sound_type, "Perc");
         assert_eq!(p.list.now(at(&p, 3)).map(|n| n.tags.to_vec()), Some(vec!["Warm".to_owned()]));
         assert!(p.tags.iter().any(|t| t == "Warm") && p.types.iter().any(|(t, _)| t == "Perc"));
         // The use counts arriving keep it over the sounds.
-        let used = with_usage(&lib.list, HashMap::new(), &Arc::default(), &p.weights);
+        let used = with_usage(&lib.list, HashMap::new(), &Arc::default(), &LikedWeights::default());
         p.list = Arc::new(used);
         yours::keep_showing(&mut p);
         assert_eq!(card(&p, at(&p, 2)).sound_type, "Perc");
@@ -4956,22 +4905,6 @@ mod tests {
         let again = Library::new(sounds, Vec::new(), &LikedWeights::default());
         take_refreshed(&mut p, again, None, false);
         assert!(p.said.is_empty() && !p.list.has_say());
-    }
-
-    #[test]
-    fn the_best_liked_sound_made_no_favourite_no_longer_sets_the_liked_bars() {
-        use mo_sounds::compact::yours::Change;
-        let mut sounds = vec![sound(1, "Pack/a.wav"), sound(2, "Pack/b.wav")];
-        sounds[0].favourite = true;
-        sounds[0].activity.plays = 10;
-        sounds[1].activity.plays = 10;
-        let lib = Library::new(sounds, Vec::new(), &LikedWeights::default());
-        let mut p =
-            Page { list: lib.list.clone(), places: lib.places.clone(), weights: lib.weights, ..Page::default() };
-        assert!(liked_share(&p, 1).is_some_and(|share| share < 1.0));
-        // Played as often, and no favourite now: the two are the best liked.
-        yours::take(&mut p, 1, Change::Favourite(false), 1);
-        assert_eq!((liked_share(&p, 0), liked_share(&p, 1)), (Some(1.0), Some(1.0)));
     }
 
     #[test]

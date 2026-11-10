@@ -39,7 +39,7 @@ const WHAT_THEY_ARE: &str = "Sounds your sample folders hold more than once: the
 /// What the card says of how copies are found, which one is kept, and that nothing goes from here.
 pub const NOTE: &str = "Only sounds whose audio is exactly the same count, as the Sounds page's Hide duplicates finds \
     them: sounds that only sound alike never do. The one to keep is the one that page shows: the one your projects \
-    use most, then a favourite, more stars, more plays. Nothing goes from here: your samples stay where they are.";
+    use most, then a favourite, more plays. Nothing goes from here: your samples stay where they are.";
 
 /// What a copy's line says while Hide duplicates is on.
 pub const HIDDEN: &str = "Hidden by Hide duplicates";
@@ -131,7 +131,6 @@ fn keep_why(list: &SoundList, g: &CopyGroup) -> String {
     let reason = match list.why_kept(a, b) {
         KeptFor::Used => format!("used in {}", count_of(list.used_in(a).unwrap_or(0) as usize, "project", "projects")),
         KeptFor::Favourite => "a favourite".to_owned(),
-        KeptFor::Stars => "more stars".to_owned(),
         KeptFor::Plays => "played more".to_owned(),
         KeptFor::Tags => "more tags".to_owned(),
         KeptFor::Older => "the oldest file".to_owned(),
