@@ -76,6 +76,8 @@ light that means something. It should feel like a rack unit on a desk, not a web
   Sounds and Plugins so far. Buttons that change files stand apart under a thin line (Plugins' Clean up, Uninstall
   and Move). A choice between numbers is a chip strip (`FilterPicks`); the lit-underline switch (`Segmented`,
   `TabBar`) is only for views and tabs.
+  A line inside a card has no buttons of its own: a click picks it and the card's buttons act on it (a song's Saves
+  tab), with the same in its right-click menu.
 
 - Column headings order a list (the UX review of 10 Nov, B5): a click on a heading (`ColumnHead` in `studio.slint`)
   puts the list in that column's order, a second click turns it round; the heading the list goes by is lit in the
