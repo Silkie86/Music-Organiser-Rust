@@ -16,8 +16,9 @@ claude/project-thread-j68n0z, PR #344 MERGED 2026-11-05 22:12 (5738066).
 - Candidates only: analysis key (seconds ms, rate, channels, peak 0.1 dB) shared with another sound.
 - Cache `sound-copies.db` beside the library (app id MOSC, layout 1), path+size+mtime; pruned to candidates.
   Foreign/locked file left alone; own damaged/old layout remade.
-- mo-app SoundList copies (Arc, kept by sharing/keep_copies_of); keep-first = most used, fav, stars, plays, tags,
-  older. mo-ui sounds/copies.rs: look only while on, bulk pool, ONE_LOOK mutex. Setting `sounds_hide_duplicates`.
+- mo-app SoundList copies (Arc, kept by sharing/keep_copies_of); keep-first = most used, fav, plays, tags,
+  older (stars dropped 10 Nov, Heart only). mo-ui sounds/copies.rs: look only while on, bulk pool, ONE_LOOK mutex.
+  Setting `sounds_hide_duplicates`.
 - Space's copies line still reads the old C# finds; not switched to this finder (could be a follow-up).
 
 See [[space-sound-copies]], [[sounds-backend-status]].

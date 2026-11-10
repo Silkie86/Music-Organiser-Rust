@@ -1136,15 +1136,6 @@ fn sounds_shots(
 ) -> Result<(), String> {
     app.set_place(Place::Sounds.index() as i32);
     let data = app.global::<mo_ui::SoundsData>();
-    // The first tile's liked bar, saying why (its note comes up a moment after the mouse stops on it).
-    hover(window, LIKED_BAR.0, LIKED_BAR.1);
-    let hovered = capture_after(window, Duration::from_millis(80));
-    let tip = capture_after(window, Duration::from_millis(750));
-    if tip == hovered {
-        return Err(format!("sounds-liked-tip.png: no tip came up at {}, {}", LIKED_BAR.0, LIKED_BAR.1));
-    }
-    shots.push(("sounds-liked-tip.png".into(), tip));
-    hover(window, -1.0, -1.0);
     // Autoplay is on, so picking a sound plays it.
     data.invoke_select(6);
     data.set_played(0.35);
@@ -1336,15 +1327,13 @@ fn sounds_shots(
     shots.push(("sounds-paper.png".into(), capture(window)));
     mo_ui::apply_look(app, graphite);
     found_turned_down(app, window)?;
-    // Your say on the card, last of the Sounds shots as it stays on the page (the screenshots keep none of it): four
-    // stars, your own type, a tag added and one taken away, and the heart taken off (the tile's goes too). The tiles
+    // Your say on the card, last of the Sounds shots as it stays on the page (the screenshots keep none of it): your
+    // own type, a tag added and one taken away, and the heart taken off (the tile's goes too). The tiles
     // are still turned down to their end from the check before: the search leaves one, at the top.
     data.set_search("Boom Kick".into());
     data.invoke_search_edited("Boom Kick".into());
     data.invoke_select(0);
     // Drawn after each, as a click would be: the tiles' list isn't made again many times between two draws.
-    capture(window);
-    data.invoke_set_stars(4);
     capture(window);
     data.invoke_set_type("Perc".into());
     capture(window);
@@ -2548,8 +2537,6 @@ const SPACE_CARD_WHEEL: (f32, f32, f32) = (1240.0, 600.0, -10.0 * PAGE_DOWN);
 const SWEPT_LINE: (f32, f32) = (760.0, 410.0);
 /// The Lock chip on the kit's second pad (Snare).
 const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
-/// The first tile's liked bar on Sounds, under the Order line and the three lines of filters.
-const LIKED_BAR: (f32, f32) = (350.0, 414.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
 const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 /// Inside the first tile of the Sounds grid, and the first line of its List, at their top (x, y, width, height in

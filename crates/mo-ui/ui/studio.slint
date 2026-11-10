@@ -1136,8 +1136,8 @@ export component FilterPicks inherits FlexboxLayout {
 // A line of a list that can be picked: the shared look for every list's rows (rule 16).
 export component ListLine inherits Rectangle {
     in property <bool> selected;
-    // A tooltip for the part of the line right of `tip-from` and below `tip-below` (a date, say, or a tile's
-    // bottom strip), shown by the mouse.
+    // A tooltip for the part of the line right of `tip-from` and below `tip-below` (a date, say, or a line's second
+    // row), shown by the mouse.
     in property <string> tip;
     in property <length> tip-from;
     in property <length> tip-below;
@@ -1279,7 +1279,7 @@ export component DragHandle inherits ListLine {
 // A star rating out of five, drawn.
 export component Stars inherits HorizontalLayout {
     in property <int> rating;
-    // Each star's size: small in a list, bigger where they're picked (StarPicker).
+    // Each star's size.
     in property <length> size: 10px;
     spacing: 1px;
     for i in 5: Path {
@@ -1335,45 +1335,6 @@ export component HeartToggle inherits Rectangle {
         text: root.tip;
         key: root.key;
         hovering: touch.has-hover && !touch.pressed;
-        at-y: root.height + Space.xs;
-    }
-}
-
-// Stars out of five to click on a card (the list's Stars, bigger): a click on a star gives that many, and a click on
-// the last one lit takes them all away. Under the mouse, the stars a click would give light up.
-export component StarPicker inherits Rectangle {
-    in property <int> rating;
-    in property <string> tip;
-    callback picked(int);
-    // The star under the mouse (0 to 4), or -1.
-    property <int> over: -1;
-    property <length> cell: 22px;
-    width: 5 * self.cell;
-    height: 32px;
-    Stars {
-        x: (root.cell - self.size) / 2;
-        y: (root.height - self.size) / 2;
-        width: 5 * root.cell - self.spacing;
-        height: self.size;
-        size: 16px;
-        spacing: root.cell - self.size;
-        rating: root.over >= 0 ? root.over + 1 : root.rating;
-    }
-    for i in 5: TouchArea {
-        x: i * root.cell;
-        width: root.cell;
-        changed has-hover => {
-            if (self.has-hover) {
-                root.over = i;
-            } else if (root.over == i) {
-                root.over = -1;
-            }
-        }
-        clicked => { root.picked(i + 1 == root.rating ? 0 : i + 1); }
-    }
-    Tip {
-        text: root.tip;
-        hovering: root.over >= 0;
         at-y: root.height + Space.xs;
     }
 }
