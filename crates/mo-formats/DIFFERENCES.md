@@ -77,6 +77,11 @@ tests don't have.
 | A damaged zip that names two files the same | Reads the first of them, and lists (and counts) every copy's presets. | The zip reader keeps only the last one's bytes, and the song says so in a warning. | Same for real songs |
 | A note's velocity | Rounded to MIDI 1.0's 0 to 127 as it's read. | Kept at MIDI 2.0's 16 bits (a 0-to-127 velocity from an older song by MIDI 2.0's own scaling), rounded to 0 to 127 only when a MIDI 1.0 value is wanted. As with Bitwig, a few in 10,000 of the 0-to-1 velocities come out 1 apart. | Better (rule 22) |
 | The arrangement preview of a song that isn't a zip, or is cut short (checked against the C# reader on the test files and 007jah's 640 clips, 2026-10-31) | Stops with an error. | Shows an empty arrangement that says the song couldn't be read well enough to draw, as a Bitwig project or a song without its song.xml already does. Everything else matches. | Better |
+| An audio event stretched to the tempo (timed in beats; Studio One's default for a file whose tempo it knows) | Moved through the file at the song's seconds per beat. | At the file's own (the media pool clip's AudioTempoMap), times the event's speed: a 90 BPM loop in a 140 BPM song was drawn a third short. Checked on the recipe saves (10 Nov 2026). | Better |
+| An audio track set to Tempo: Don't Follow (track `timeFormat` 0; Solomon's radio mixes) | Its events' starts taken as beats. | As seconds, which is what they are (events that overlapped as beats sit end to end as seconds). | Better |
+| A track with layers (takes): no Events list of its own, each layer's under `Layers` | Shown empty ("Nothing is on this song's timeline yet" for a mix made on such tracks). | The active layer's events. | Better |
+| An audio part (AudioPartEvent; its events are the media pool's AudioPartClip) | Left out. | A clip with each of its events' audio, cut to what the part shows. | Better |
+| An audio event's stretch mode, transpose and tune, gain and fades; a disabled track; the bus a track is sent to; automation curves (`Envelopes/*.envelopex`, older `*.envelope`, the tempo's in song.xml) | Not read. | Read (10 Nov 2026). The gain is taken as a plain multiple (0.631 is -4 dB): Solomon's songs hold 3.2 and 6.5, too much for any other reading, but it hasn't been checked against the number Studio One shows. | Better |
 
 ## MIDI files
 

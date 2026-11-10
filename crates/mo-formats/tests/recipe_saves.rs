@@ -130,16 +130,19 @@ fn fl_volume_automation_goes_from_full_to_half_over_bar_1() {
 
 #[test]
 fn the_tone_lands_at_bar_2() {
-    // MO Tone A is half a second: 1.0667 beats at 128 (FL rounds the clip to 1.0625, Fender's was cut to 1 beat).
-    for (a, length) in
-        [(fl("04 audio clip"), 1.0625), (bitwig("04 audio clip"), 1.0667), (fender("04 audio clip"), 1.0)]
-    {
+    // MO Tone A is half a second: 1.0667 beats at 128 (FL rounds the clip to 1.0625). Fender Studio stretches it by
+    // default: it took the tone for one beat at 120, so it fills one beat and half a second of it plays to a beat.
+    for (a, length, seconds_per_beat) in [
+        (fl("04 audio clip"), 1.0625, 60.0 / 128.0),
+        (bitwig("04 audio clip"), 1.0667, 60.0 / 128.0),
+        (fender("04 audio clip"), 1.0, 0.5),
+    ] {
         let (start, len, part) = tone(&a);
         assert!(near(start, 4.0), "{start}");
         assert!(near(len, length), "{len}");
         assert!(part.path.ends_with("MO Tone A.wav"));
         assert!(near(part.from, 0.0));
-        assert!(near(part.seconds_per_beat.unwrap(), 60.0 / 128.0));
+        assert!(near(part.seconds_per_beat.unwrap(), seconds_per_beat));
         assert!(!part.reversed);
     }
 }
@@ -156,8 +159,10 @@ fn trimmed_by_a_16th() {
     // The recipe said a beat; the saves' left edges moved one grid step, a 16th (a quarter of a beat).
     let (start, len, part) = tone(&fl("15 trimmed"));
     assert!(near(start, 4.25) && near(len, 0.8125) && near(part.from, 0.25 * 60.0 / 128.0));
-    let (start, _, part) = tone(&fender("11 trimmed"));
-    assert!(near(start, 4.25) && near(part.from, 0.2344));
+    // Fender's tone plays at twice its speed there (step 8f), so the whole of it takes half a beat: a 16th off the
+    // left is half of it, a quarter of a second.
+    let (start, len, part) = tone(&fender("11 trimmed"));
+    assert!(near(start, 4.25) && near(len, 0.25) && near(part.from, 0.25), "{part:?}");
 }
 
 #[test]
@@ -276,10 +281,51 @@ fn fl_stretched_clips_have_a_sane_length() {
 }
 
 #[test]
-#[ignore = "known gap: Fender Timestretch events read as if they play at the song's speed"]
-fn fender_timestretch_keeps_the_file_tempo() {
-    let part = tone(&fender("08 stretch sound")).2;
-    assert!(near(part.seconds_per_beat.unwrap(), 60.0 / 128.0));
+fn fender_timestretch_plays_the_file_at_its_own_tempo() {
+    // Fender Studio took the half-second tone for one beat at 120. Stretched, that beat is spread over one of the
+    // song's beats whatever the song's tempo: half a second of the file to a beat, and the event one beat long.
+    for (step, mode) in [
+        ("04 audio clip", Stretch::Elastique),
+        ("08 stretch sound", Stretch::Elastique),
+        ("08b stretch drums", Stretch::Elastique),
+        ("08c stretch solo", Stretch::ElastiqueSolo),
+        ("08d stretch tape", Stretch::Repitch),
+    ] {
+        let (_, len, part) = tone(&fender(step));
+        assert!(near(len, 1.0) && near(part.seconds_per_beat.unwrap(), 0.5), "{step}: {len} {part:?}");
+        assert_eq!(part.stretch, Some(mode), "{step}");
+    }
+    // Speedup 2 plays it twice as fast: the whole tone in half a beat.
+    let (_, len, part) = tone(&fender("08f speedup"));
+    assert!(near(len, 0.5) && near(part.seconds_per_beat.unwrap(), 1.0));
+    // Follow moves the event with the tempo but plays it at its own speed.
+    assert_eq!(tone(&fender("08e follow")).2.stretch, Some(Stretch::Raw));
+}
+
+#[test]
+fn fender_transpose_gain_and_fades() {
+    let (_, _, part) = tone(&fender("08f speedup"));
+    assert!(near(part.semitones, 0.0) && near(part.gain_db, 0.0));
+    assert!(near(tone(&fender("09 transpose")).2.semitones, 3.0));
+    // Step 10 was made from 9, so it keeps the +3. The save's gain is 0.8 of the sound, which is -1.9 dB.
+    let a = fender("10 gain and fades");
+    let (_, _, part) = tone(&a);
+    assert!(near(part.semitones, 3.0) && near(part.gain_db, -1.932), "{part:?}");
+    // The fades are saved in seconds (0.091 and 0.071); at 128 a beat is 0.469 s.
+    let clip = &lane(&a, LaneKind::Audio).clips[0];
+    assert!(near(clip.fade_in, 0.1944) && near(clip.fade_out, 0.1523), "{} {}", clip.fade_in, clip.fade_out);
+    let plain = fender("09 transpose");
+    let clip = &lane(&plain, LaneKind::Audio).clips[0];
+    assert!(near(clip.fade_in, 0.0) && near(clip.fade_out, 0.0));
+}
+
+#[test]
+fn fender_bus() {
+    // Step 6 sends the Mai Tai track to a new bus; before that it goes to the main output. The track is named after
+    // its instrument, so the instrument isn't said again.
+    assert_eq!(lane(&fender("05 drum pads"), LaneKind::Instrument).detail, "");
+    assert_eq!(lane(&fender("06 mixer"), LaneKind::Instrument).detail, "To Bus 1");
+    assert_eq!(lane(&fender("06 mixer"), LaneKind::Audio).detail, "");
 }
 
 #[test]
@@ -317,10 +363,38 @@ fn bitwig_automation() {
 }
 
 #[test]
-#[ignore = "known gap: Fender automation is not shown"]
 fn fender_automation() {
-    // Solomon's pan line ends a 16th after bar 3; the test only checks where it starts.
-    step_3_automation(&fender("03 automation"), "Fender");
+    let a = fender("03 automation");
+    let points = |name: &str| -> Vec<(f64, f64)> {
+        let lane = a.lanes.iter().find(|l| l.kind == LaneKind::Automation && l.name == name).unwrap();
+        lane.clips.iter().flat_map(|c| c.points.iter().map(move |p| (c.start + p.beat, p.value))).collect()
+    };
+    // The volume goes from 0 dB to -6 dB over bar 1. Fender's 1 is +10 dB, so 0 dB is 0.316 and -6 dB half of that.
+    let db = |v: f64| 20.0 * v.log10() + 10.0;
+    let volume = points("Volume");
+    assert!(near(volume[0].0, 0.0) && near(volume[1].0, 4.0), "{volume:?}");
+    assert!(db(volume[0].1).abs() < 0.01 && (db(volume[1].1) + 6.0).abs() < 0.1, "{volume:?}");
+    // The pan goes from one side to the other from bar 2 (Solomon's hand left the end a 16th after bar 3).
+    let pan = points("Pan L/R");
+    assert_eq!(pan, [(4.0, 1.0), (8.25, 0.0)]);
+    // The tempo holds 128 to bar 2, then climbs to 140 at bar 3: 0 to 1 is 10 to 400 BPM.
+    let tempo: Vec<_> = points("Tempo").iter().map(|(beat, v)| (*beat, 10.0 + 390.0 * v)).collect();
+    assert_eq!(tempo.len(), 3);
+    assert!(near(tempo[0].0, 0.0) && near(tempo[1].0, 4.0) && near(tempo[2].0, 8.0), "{tempo:?}");
+    assert!(near(tempo[0].1, 128.0) && near(tempo[1].1, 128.0) && near(tempo[2].1, 140.0), "{tempo:?}");
+    // The curves sit under their track and say what they move.
+    let names: Vec<_> = a.lanes.iter().map(|l| (l.name.as_str(), l.detail.as_str(), l.depth)).collect();
+    assert_eq!(
+        names,
+        [
+            ("Tempo", "Song tempo", 0),
+            ("Mai Tai", "", 0),
+            ("Volume", "Moves Mai Tai", 1),
+            ("Pan L/R", "Moves Mai Tai", 1)
+        ]
+    );
+    // A song whose settings never move has no curves.
+    assert!(fender("02 notes").lanes.iter().all(|l| l.kind != LaneKind::Automation));
 }
 
 #[test]
@@ -331,12 +405,13 @@ fn bitwig_deactivated_track() {
 }
 
 #[test]
-#[ignore = "known gap: Fender disabled tracks are not told apart from muted ones"]
 fn fender_disabled_track() {
-    // 06 is muted only, 06b muted and disabled: something must tell them apart.
-    let muted = lane(&fender("06 mixer"), LaneKind::Audio).detail.clone();
-    let disabled = lane(&fender("06b disabled"), LaneKind::Audio).detail.clone();
-    assert_ne!(muted, disabled);
+    // 06 is muted only; 06b is disabled too.
+    let muted = fender("06 mixer");
+    let disabled = fender("06b disabled");
+    assert!(lane(&muted, LaneKind::Audio).muted && !lane(&muted, LaneKind::Audio).disabled);
+    assert!(lane(&disabled, LaneKind::Audio).muted && lane(&disabled, LaneKind::Audio).disabled);
+    assert!(!lane(&disabled, LaneKind::Instrument).disabled);
 }
 
 #[test]

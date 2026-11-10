@@ -10,7 +10,7 @@ use std::path::Path;
 
 use common::bitwig::*;
 use common::studio_one::*;
-use mo_formats::arrangement::{self, Arrangement, LaneKind, PreviewMarker};
+use mo_formats::arrangement::{self, Arrangement, LaneKind, PreviewMarker, Stretch};
 use mo_formats::velocity;
 
 /// The one view a project has.
@@ -585,6 +585,331 @@ fn studio_one_tracks_folders_parts_patterns_audio_and_markers() {
         (92.0, ["Nothing is on this song's timeline yet.".to_owned()].as_slice())
     );
     assert_eq!(read("x.song", b"not a zip").notes, ["This song couldn't be read in enough detail to draw."]);
+}
+
+/// UBJSON as Studio One writes an automation curve: {"stepcount": 2, "events": [{start, value}...]} (a point at the
+/// song's start has no start; only a curve that jumps has a stepcount).
+fn envelopex(steps: bool, points: &[(f64, f64)]) -> Vec<u8> {
+    let key = |b: &mut Vec<u8>, k: &str| {
+        b.extend([b'i', k.len() as u8]);
+        b.extend(k.as_bytes());
+    };
+    let mut b = vec![b'{'];
+    if steps {
+        key(&mut b, "stepcount");
+        b.extend([b'i', 2]);
+    }
+    key(&mut b, "events");
+    b.push(b'[');
+    for (start, value) in points {
+        b.push(b'{');
+        for (k, v) in [("start", start), ("value", value)] {
+            if k == "start" && *v == 0.0 {
+                continue;
+            }
+            key(&mut b, k);
+            b.push(b'D');
+            b.extend(v.to_be_bytes());
+        }
+        b.push(b'}');
+    }
+    b.extend(b"]}");
+    b
+}
+
+#[test]
+fn studio_one_stretch_layers_audio_parts_automation_and_channels() {
+    // The shapes Solomon's own songs showed (10 Nov 2026), at 120 BPM: half a second to a beat.
+    let song = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Song>
+  <TempoMap x:id="tempoMap">
+    <Attributes x:id="envelope"><EnvelopePoint value="0.25"/><EnvelopePoint start="8" value="0.5"/></Attributes>
+    <TempoMapSegment tempo="0.5"/>
+  </TempoMap>
+  <List x:id="Tracks">
+    <MediaTrack name="Loop" mediaType="Audio" tempoFollow="2" materialMode="1" timeFormat="2">
+      <UID x:id="channelID" uid="{CH-LOOP}"/>
+      <Attributes x:id="AutomationRegionList">
+        <AutomationRegion title="Volume" color="FF112233"><Url x:id="points" url="media:///Envelopes/Loop/Volume.envelopex"/></AutomationRegion>
+        <AutomationRegion title="Mute" mute="1"><Url x:id="points" url="media:///Envelopes/Loop/Mute.envelopex"/></AutomationRegion>
+        <AutomationRegion title="Pan"><Url x:id="points" url="media:///Envelopes/Loop/Pan.envelopex"/></AutomationRegion>
+        <AutomationRegion title="Gone"><Url x:id="points" url="media:///Envelopes/Loop/Gone.envelopex"/></AutomationRegion>
+      </Attributes>
+      <List x:id="Events">
+        <AudioEvent name="Stretched" start="4" length="8" offset="2" timeFormat="2" speed="1" transpose="-2" tune="50" clipID="{LOOP}">
+          <Attributes x:id="volumeCurve" fadeIn.length="0.25" fadeOut.length="100" level="0.5"/>
+        </AudioEvent>
+        <AudioEvent name="No tempo" start="16" length="4" timeFormat="2" clipID="{HIT}">
+          <Attributes x:id="volumeCurve" level="0"/>
+        </AudioEvent>
+      </List>
+    </MediaTrack>
+    <MediaTrack name="Tape" mediaType="Audio" tempoFollow="2" timeFormat="2">
+      <UID x:id="stretchMethod" uid="{b442aefc-7b3c-497b-a22e-630e00b1b908}"/>
+      <UID x:id="channelID" uid="{ch-tape}"/>
+      <List x:id="Events"><AudioEvent start="0" length="1" timeFormat="2" clipID="{LOOP}"/></List>
+    </MediaTrack>
+    <MediaTrack name="Mix" mediaType="Audio" tempoFollow="0" timeFormat="0" activeLayer="1">
+      <List x:id="Layers">
+        <Attributes id="0"><List x:id="Events"><AudioEvent name="Old take" start="0" length="1" timeFormat="0" clipID="{HIT}"/></List></Attributes>
+        <Attributes id="1">
+          <List x:id="Events">
+            <AudioEvent name="Set" start="10" length="30" offset="5" timeFormat="0" clipID="{HIT}"/>
+            <AudioPartEvent name="Edits" start="60" length="4" offset="1" timeFormat="0" clipID="{PART}"/>
+            <AudioPartEvent name="Lost" start="90" length="4" timeFormat="0" clipID="{NOWHERE}"/>
+          </List>
+        </Attributes>
+      </List>
+    </MediaTrack>
+    <MediaTrack name="Keys" mediaType="Music" timeFormat="2"><UID x:id="channelID" uid="{CH-KEYS}"/></MediaTrack>
+    <MediaTrack name="Kontakt 5" mediaType="Music" timeFormat="2"><UID x:id="channelID" uid="{CH-KONTAKT}"/></MediaTrack>
+    <AutomationTrack name="Drum bus" timeFormat="2">
+      <Attributes x:id="AutomationRegionList">
+        <AutomationRegion title="Volume"><Url x:id="points" url="media:///Envelopes/Drum%20bus/Volume.envelope"/></AutomationRegion>
+      </Attributes>
+    </AutomationTrack>
+    <MediaTrack name="Bass" mediaType="Music" timeFormat="2"><UID x:id="channelID" uid="{CH-BASS}"/></MediaTrack>
+  </List>
+</Song>"#;
+    let pool = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MediaPool>
+  <AudioClip mediaID="{loop}"><Url url="file:///C:/Samples/Loop%2090.wav"/>
+    <AudioTempoMap x:id="tempoMap"><AudioTempoMapSegment offset="0" tempo="0.75"/></AudioTempoMap>
+    <Attributes x:id="format" frameCount="264600" sampleRate="44100"/></AudioClip>
+  <AudioClip mediaID="{HIT}"><Url url="file:///C:/Samples/Hit.wav"/></AudioClip>
+  <AudioPartClip mediaID="{PART}" eventFormat="2">
+    <Attributes x:id="Events" timeFormat="0" length="100">
+      <AudioEvent start="0" length="1.5" offset="7" timeFormat="0" clipID="{HIT}"/>
+      <AudioEvent start="2" length="8" offset="3" timeFormat="2" clipID="{LOOP}"/>
+      <AudioEvent start="1.5" length="0.25" timeFormat="0" mute="1" clipID="{HIT}"/>
+      <AudioEvent start="40" length="1" timeFormat="0" clipID="{HIT}"/>
+    </Attributes>
+  </AudioPartClip>
+</MediaPool>"#;
+    let mixer = r#"<?xml version="1.0" encoding="UTF-8"?>
+<AudioMixer>
+  <AudioOutputChannel label="Main"><UID x:id="uniqueID" uid="{MAIN}"/></AudioOutputChannel>
+  <AudioTrackChannel label="Loop" disabled="1"><UID x:id="uniqueID" uid="{ch-loop}"/>
+    <Connection x:id="destination" objectID="{BUS}/Input" friendlyName="Drum bus"/>
+    <Attributes x:id="Inserts"><Attributes name="FX01" disabled="1"/></Attributes></AudioTrackChannel>
+  <AudioTrackChannel label="Tape"><UID x:id="uniqueID" uid="{CH-TAPE}"/>
+    <Connection x:id="destination" objectID="{main}/Input" friendlyName="Main"/></AudioTrackChannel>
+  <AudioSynthChannel label="Kt. st. 1"><UID x:id="uniqueID" uid="{SYNTH-OUT}"/>
+    <Connection x:id="destination" objectID="{BUS}/Input" friendlyName="Drum bus"/></AudioSynthChannel>
+  <AudioGroupChannel label="Drum bus"><UID x:id="uniqueID" uid="{BUS}"/>
+    <Connection x:id="destination" objectID="{MAIN}/Input" friendlyName="Main"/></AudioGroupChannel>
+</AudioMixer>"#;
+    let tracks = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MusicTrackDevice>
+  <MusicTrackChannel label="Keys"><UID x:id="uniqueID" uid="{CH-KEYS}"/>
+    <Connection x:id="instrumentOut" objectID="{synth-out}/Input" friendlyName="Kt. st. 1"/>
+    <Connection x:id="destination" objectID="{K}/MusicInput00" friendlyName="2 - Kontakt 5/CH 1"/></MusicTrackChannel>
+  <MusicTrackChannel label="Kontakt 5"><UID x:id="uniqueID" uid="{CH-KONTAKT}"/>
+    <Connection x:id="destination" objectID="{K}/MusicInput00" friendlyName="Kontakt 5/Synth Input"/></MusicTrackChannel>
+  <MusicTrackChannel label="Bass"><UID x:id="uniqueID" uid="{CH-BASS}"/>
+    <Connection x:id="destination" objectID="{GONE}/MusicInput00" friendlyName="3 - 808 - Sub/CH 1"/></MusicTrackChannel>
+</MusicTrackDevice>"#;
+    let synths = r#"<?xml version="1.0" encoding="UTF-8"?>
+<AudioSynthFolder>
+  <Attributes><UID x:id="uniqueID" uid="{OUTER}"/>
+    <Attributes x:id="deviceData" name="Kontakt 5"><UID x:id="uniqueID" uid="{k}"/></Attributes></Attributes>
+</AudioSynthFolder>"#;
+    let old_envelope = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Envelope><EnvelopePoint start="16" value="0.25"/><EnvelopePoint start="8" value="2"/><EnvelopePoint start="9" value="NaN"/>
+<EnvelopeAnchor start="2400000" value="0"/></Envelope>"#;
+    let bytes = stored_zip(&[
+        ("Song/song.xml", song.as_bytes()),
+        ("Song/mediapool.xml", pool.as_bytes()),
+        ("Devices/audiomixer.xml", mixer.as_bytes()),
+        ("Devices/musictrackdevice.xml", tracks.as_bytes()),
+        ("Devices/audiosynthfolder.xml", synths.as_bytes()),
+        ("Envelopes/Loop/Volume.envelopex", &envelopex(false, &[(0.0, 0.3), (4.0, 0.6)])),
+        ("Envelopes/Loop/Mute.envelopex", &envelopex(true, &[(2.0, 0.0), (6.0, 1.0), (7.0, 0.0)])),
+        ("Envelopes/Loop/Pan.envelopex", &envelopex(false, &[(0.0, 0.5)])),
+        ("Envelopes/Drum bus/Volume.envelope", old_envelope.as_bytes()),
+    ]);
+    let a = read("Song.song", &bytes);
+    assert!(a.notes.is_empty(), "{:?}", a.notes);
+    let shown: Vec<_> = a.lanes.iter().map(|l| (l.name.as_str(), l.kind, l.detail.as_str(), l.depth)).collect();
+    assert_eq!(
+        shown,
+        [
+            ("Tempo", LaneKind::Automation, "Song tempo", 0),
+            ("Loop", LaneKind::Audio, "To Drum bus", 0),
+            ("Volume", LaneKind::Automation, "Moves Loop", 1),
+            ("Mute", LaneKind::Automation, "Moves Loop", 1),
+            // A pan that never moves, and a curve whose file is gone, have no lane.
+            ("Tape", LaneKind::Audio, "", 0),
+            ("Mix", LaneKind::Audio, "", 0),
+            // The instrument's own name, found by its id (its input is called "2 - Kontakt 5/CH 1").
+            ("Keys", LaneKind::Instrument, "Kontakt 5, to Drum bus", 0),
+            // Named after its instrument, so that isn't said twice.
+            ("Kontakt 5", LaneKind::Instrument, "", 0),
+            ("Volume", LaneKind::Automation, "Moves Drum bus", 1),
+            // An instrument whose name isn't with its id goes by its input's name, without Studio One's number.
+            ("Bass", LaneKind::Instrument, "808 - Sub", 0),
+        ]
+    );
+    let points = |lane: usize| -> Vec<(f64, f64)> {
+        let clip = &a.lanes[lane].clips[0];
+        clip.points.iter().map(|p| (clip.start + p.beat, p.value)).collect()
+    };
+    assert_eq!(points(0), [(0.0, 0.25), (8.0, 0.5)]);
+    assert_eq!(points(2), [(0.0, 0.3), (4.0, 0.6)]);
+    assert_eq!(a.lanes[2].colour, Some(0x11_2233));
+    // A curve that jumps holds each value until the next; a muted curve is a muted lane.
+    assert_eq!(points(3), [(2.0, 0.0), (6.0, 0.0), (6.0, 1.0), (7.0, 1.0), (7.0, 0.0)]);
+    assert!(a.lanes[3].muted);
+    // The old XML curve: in time order, values kept to 0..1, a point that isn't a number and the anchor left out.
+    assert_eq!(points(8), [(8.0, 1.0), (16.0, 0.25)]);
+
+    // The disabled track is muted too (its disabled insert is not the track's own switch).
+    assert!(a.lanes[1].disabled && a.lanes[1].muted);
+    assert!(a.lanes.iter().skip(2).all(|l| !l.disabled));
+    // And so are its curves: they move nothing.
+    assert!(a.lanes[2].muted);
+
+    // Stretched: the file's own beat is 0.75 s, so each of the song's beats plays 0.75 s of it. Two beats in is 1.5 s.
+    let loops = &a.lanes[1].clips;
+    let part = &loops[0].audio[0];
+    assert_eq!((loops[0].start, loops[0].length, part.from, part.seconds_per_beat), (4.0, 8.0, 1.5, Some(0.75)));
+    assert_eq!(part.stretch, Some(Stretch::ElastiqueSolo));
+    // Down two semitones and up 50 cents; half as loud is -6 dB.
+    assert!((part.semitones + 1.5).abs() < 1e-9 && (part.gain_db + 6.0206).abs() < 1e-3);
+    // The fades are in seconds: a quarter second is half a beat, and the fade out can't be longer than what's left.
+    assert_eq!((loops[0].fade_in, loops[0].fade_out), (0.5, 7.5));
+    // A file whose tempo Studio One doesn't know plays at the song's; a gain of nothing is silence.
+    let part = &loops[1].audio[0];
+    assert_eq!((part.seconds_per_beat, part.gain_db), (Some(0.5), f64::NEG_INFINITY));
+    assert_eq!(a.lanes[4].clips[0].audio[0].stretch, Some(Stretch::Repitch));
+
+    // A track that doesn't follow the tempo counts in seconds: 10 s is beat 20. Its active layer is the second.
+    let mix = &a.lanes[5].clips;
+    assert_eq!(mix.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Set", "Edits"]);
+    assert_eq!((mix[0].start, mix[0].length, mix[0].audio[0].from), (20.0, 60.0, 5.0));
+    assert_eq!(mix[0].audio[0].stretch, Some(Stretch::Raw));
+    // The audio part shows its events from a second (2 beats) in, for 4 seconds (8 beats).
+    assert_eq!((mix[1].start, mix[1].length), (120.0, 8.0));
+    let parts: Vec<_> = mix[1].audio.iter().map(|p| (p.path.as_str(), p.start, p.length, p.from)).collect();
+    assert_eq!(
+        parts,
+        [
+            // Starts before what's shown: its first second is cut off, so it plays from 8 s into the file.
+            (r"C:\Samples\Hit.wav", 0.0, 1.0, 8.0),
+            // Starts at 2 s (a second into what's shown) and is cut at the part's end: 3 beats in at 0.75 s a beat.
+            (r"C:\Samples\Loop 90.wav", 2.0, 6.0, 2.25),
+        ]
+    );
+}
+
+#[test]
+fn studio_one_seconds_follow_the_tempo_changes() {
+    // 120 BPM for 8 beats (4 seconds), then 60 BPM: what's counted in seconds lands by the tempo at that place.
+    let song = r#"<?xml version="1.0" encoding="UTF-8"?>
+<Song>
+  <TempoMap x:id="tempoMap"><TempoMapSegment start="8" tempo="1"/><TempoMapSegment start="0" tempo="0.5"/></TempoMap>
+  <List x:id="Tracks">
+    <MediaTrack name="Mix" mediaType="Audio" tempoFollow="0" timeFormat="0" activeLayer="1" mute="1">
+      <Attributes x:id="AutomationRegionList">
+        <AutomationRegion title="Mute"><Url x:id="points" url="media:///Envelopes/Mix/Mute.envelopex"/></AutomationRegion>
+      </Attributes>
+      <List x:id="Events"/>
+      <List x:id="Layers">
+        <Attributes id="1">
+          <List x:id="Events">
+            <AudioEvent name="Across" start="3" length="2" offset="1.5" timeFormat="0" clipID="{HIT}">
+              <Attributes x:id="volumeCurve" fadeIn.length="0.5" fadeOut.length="0.5"/>
+            </AudioEvent>
+            <AudioEvent name="After" start="6" length="3" timeFormat="0" clipID="{HIT}"/>
+            <AudioPartEvent name="Edits" start="10" timeFormat="0" clipID="{PART}"/>
+          </List>
+        </Attributes>
+      </List>
+    </MediaTrack>
+    <AutomationTrack timeFormat="2">
+      <Attributes x:id="AutomationRegionList">
+        <AutomationRegion title="Mute"><Url x:id="points" url="media:///Envelopes/Mix/Mute.envelopex"/></AutomationRegion>
+      </Attributes>
+    </AutomationTrack>
+  </List>
+  <MarkerEvent name="Drop" start="5" timeFormat="0"/>
+</Song>"#;
+    let pool = r#"<?xml version="1.0" encoding="UTF-8"?>
+<MediaPool>
+  <AudioClip mediaID="{HIT}"><Url url="file:///C:/Samples/Hit.wav"/></AudioClip>
+  <AudioPartClip mediaID="{PART}">
+    <Attributes x:id="Events" timeFormat="0">
+      <AudioEvent start="0" length="1" timeFormat="0" clipID="{HIT}"/>
+      <AudioEvent start="1" length="2" timeFormat="0" clipID="{HIT}"/>
+    </Attributes>
+  </AudioPartClip>
+</MediaPool>"#;
+    let bytes = stored_zip(&[
+        ("Song/song.xml", song.as_bytes()),
+        ("Song/mediapool.xml", pool.as_bytes()),
+        // Written out of order: a curve that jumps still holds each value until the next in time.
+        ("Envelopes/Mix/Mute.envelopex", &envelopex(true, &[(6.0, 1.0), (2.0, 0.0)])),
+    ]);
+    let a = read("Song.song", &bytes);
+    assert!(a.notes.is_empty(), "{:?}", a.notes);
+    assert_eq!(a.tempo, 120.0, "the tempo at the song's start, wherever it's written");
+    let shown: Vec<_> = a.lanes.iter().map(|l| (l.name.as_str(), l.detail.as_str(), l.muted)).collect();
+    // A muted track's curve is muted with it; an automation track with no name still has one to show.
+    assert_eq!(shown, [("Mix", "", true), ("Mute", "Moves Mix", true), ("Mute", "Moves Automation", false)]);
+
+    // The takes are found though the track has an (empty) list of its own.
+    let mix = &a.lanes[0].clips;
+    assert_eq!(mix.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["Across", "After", "Edits"]);
+    // 3 s is beat 6; its 2 s are two beats at 120 and one at 60. It plays the file at the tempo it starts in.
+    assert_eq!((mix[0].start, mix[0].length), (6.0, 3.0));
+    assert_eq!((mix[0].audio[0].from, mix[0].audio[0].seconds_per_beat), (1.5, Some(0.5)));
+    // Half a second fades in over a beat at 120, and out over half a beat at 60.
+    assert_eq!((mix[0].fade_in, mix[0].fade_out), (1.0, 0.5));
+    // 6 s is two seconds past the change: beat 10, and 3 s there are 3 beats.
+    assert_eq!((mix[1].start, mix[1].length, mix[1].audio[0].seconds_per_beat), (10.0, 3.0, Some(1.0)));
+    // An audio part with no length runs to the end of its last event: 3 s after 10 s.
+    assert_eq!((mix[2].start, mix[2].length), (14.0, 3.0));
+    let inside: Vec<_> = mix[2].audio.iter().map(|p| (p.start, p.length)).collect();
+    assert_eq!(inside, [(0.0, 1.0), (1.0, 2.0)]);
+    assert_eq!((a.markers[0].name.as_str(), a.markers[0].beat), ("Drop", 9.0));
+
+    // The curve on the seconds track is in seconds (2 s is beat 4, 6 s beat 10); the other is in beats. Both came
+    // from one file.
+    let points = |lane: usize| -> Vec<(f64, f64)> {
+        let clip = &a.lanes[lane].clips[0];
+        clip.points.iter().map(|p| (clip.start + p.beat, p.value)).collect()
+    };
+    assert_eq!(points(1), [(4.0, 0.0), (10.0, 0.0), (10.0, 1.0)]);
+    assert_eq!(points(2), [(2.0, 0.0), (6.0, 0.0), (6.0, 1.0)]);
+}
+
+#[test]
+fn a_damaged_song_cant_make_its_audio_parts_look_at_one_clip_for_ever() {
+    // 1,500 audio parts, each on the same clip of 1,500 events: 2.25 million looks, past the 2 million the preview makes.
+    let events: String =
+        (0..1500).map(|i| format!(r#"<AudioEvent start="{i}" length="1" clipID="{{HIT}}"/>"#)).collect();
+    let parts: String = (0..1500)
+        .map(|i| format!(r#"<AudioPartEvent start="{i}" length="1" offset="{i}" clipID="{{PART}}"/>"#))
+        .collect();
+    let song = format!(
+        r#"<Song><List x:id="Tracks"><MediaTrack name="Mix" mediaType="Audio"><List x:id="Events">{parts}</List></MediaTrack></List></Song>"#
+    );
+    let pool = format!(
+        r#"<MediaPool><AudioClip mediaID="{{HIT}}"><Url url="file:///C:/Hit.wav"/></AudioClip>
+<AudioPartClip mediaID="{{PART}}"><Attributes x:id="Events" timeFormat="2">{events}</Attributes></AudioPartClip></MediaPool>"#
+    );
+    let a =
+        read("Parts.song", &stored_zip(&[("Song/song.xml", song.as_bytes()), ("Song/mediapool.xml", pool.as_bytes())]));
+    assert_eq!(
+        a.notes,
+        [
+            "This song's audio parts hold more events than the preview looks at (2 million), so the last parts are left out."
+        ]
+    );
+    // 1,333 parts fit; each shows the one event that plays in its beat.
+    let clips = &a.lanes[0].clips;
+    assert_eq!(clips.len(), 1333);
+    assert!(clips.iter().all(|c| c.audio.len() == 1 && c.audio[0].start == 0.0 && c.audio[0].length == 1.0));
 }
 
 #[test]

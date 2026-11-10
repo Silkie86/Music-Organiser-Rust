@@ -204,6 +204,7 @@ fn scenes(
             colour: l.colour,
             depth: l.depth,
             muted: l.muted,
+            disabled: l.disabled,
             clips: Vec::new(),
         })
         .collect();

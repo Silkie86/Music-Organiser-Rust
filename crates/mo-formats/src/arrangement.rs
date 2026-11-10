@@ -48,7 +48,11 @@ pub enum Stretch {
     /// Bitwig's old Stretch.
     Stretch,
     StretchHd,
+    /// zplane's Elastique (Studio One's Drums and Sound).
+    Elastique,
     ElastiquePro,
+    /// Elastique for one voice at a time (Studio One's Solo).
+    ElastiqueSolo,
     /// A mode the reader doesn't know yet, by the number the file gives it.
     Other(i32),
 }
@@ -137,6 +141,8 @@ pub struct PreviewLane {
     pub colour: Option<u32>,
     pub depth: u32,
     pub muted: bool,
+    /// Switched off altogether, so it takes no computer power (Studio One's Disable Track): it's `muted` too.
+    pub disabled: bool,
     pub clips: Vec<PreviewClip>,
 }
 
@@ -149,6 +155,7 @@ impl PreviewLane {
             colour: None,
             depth: 0,
             muted: false,
+            disabled: false,
             clips: Vec::new(),
         }
     }

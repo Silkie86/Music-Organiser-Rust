@@ -46,5 +46,6 @@ the tone the songs point at.
   and clip fades are read but the app doesn't draw or play them yet.
 - FL: stretch mode, pitch, clip fades, declicking, sampler IN/OUT, the second arrangement; Stretch pro, e2 and e3
   clips read a whole-file length millions of beats long.
-- Fender: automation, transpose, gain and fades, disabled tracks (read as just muted), bus routing; Timestretch
-  events read as if they played at the song's speed.
+- Fender: nothing known from these saves now (10 Nov 2026). Not in them, so not checked: an event's Speedup on a
+  track that doesn't stretch, a file whose tempo changes part way, and what the event's gain number means in dB (the
+  save has 0.8, read as -1.9 dB; the recipe asked for -6).
