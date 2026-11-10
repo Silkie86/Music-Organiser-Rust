@@ -24,6 +24,8 @@ const HEIGHT: u32 = 900;
 const NARROW: u32 = 900;
 /// A window short enough that the Songs, Presets, MIDI and Plugins samples' lists scroll (app.slint's min-height).
 const SHORT: u32 = 600;
+/// Solomon's own window: an ultrawide screen at 100% (across, down).
+const WIDE: (u32, u32) = (3440, 1369);
 
 struct Headless(Rc<MinimalSoftwareWindow>);
 
@@ -575,6 +577,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     key_checks(&app)?;
     card_keys_checks(&app, &window, &out)?;
     rail_checks(&app)?;
+    wide_shots(&app, &window, &out)?;
+    Ok(())
+}
+
+/// Every place once more in a window as wide as Solomon's screen (3440 x 1369, the size of his F12 notes' pictures),
+/// saved as wide-<place>.png: a page that only looks right at 1440 across stretches its lines' columns a screen
+/// apart there (the UX review of 10 Nov, A1). After the checks, so each page has the line they left picked.
+fn wide_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    out: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    window.set_size(PhysicalSize::new(WIDE.0, WIDE.1));
+    for place in Place::ALL {
+        app.set_place(place.index() as i32);
+        // Once to lay the page out at this width (the tiles' width tells Sounds how many fit in a row), then for real.
+        capture_sized(window, WIDE, Duration::from_millis(400));
+        let pixels = capture_sized(window, WIDE, Duration::from_millis(400));
+        let path = out.join(format!("wide-{}.png", slug(place.name())));
+        image::save_buffer(&path, &pixels, WIDE.0, WIDE.1, image::ExtendedColorType::Rgb8)?;
+        println!("{}", path.display());
+    }
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
     Ok(())
 }
 
@@ -2827,6 +2852,11 @@ fn capture(window: &MinimalSoftwareWindow) -> Vec<u8> {
 
 /// Draws the window once its timers and animations have run for `wait`.
 fn capture_after(window: &MinimalSoftwareWindow, wait: Duration) -> Vec<u8> {
+    capture_sized(window, (WIDTH, HEIGHT), wait)
+}
+
+/// [`capture_after`] for a window of another size (`size` is the size it was set to: across, down).
+fn capture_sized(window: &MinimalSoftwareWindow, size: (u32, u32), wait: Duration) -> Vec<u8> {
     let start = std::time::Instant::now();
     while start.elapsed() < wait {
         slint::platform::update_timers_and_animations();
@@ -2834,9 +2864,9 @@ fn capture_after(window: &MinimalSoftwareWindow, wait: Duration) -> Vec<u8> {
     }
     slint::platform::update_timers_and_animations();
     window.request_redraw();
-    let mut buffer = vec![Rgb8Pixel::default(); (WIDTH * HEIGHT) as usize];
+    let mut buffer = vec![Rgb8Pixel::default(); (size.0 * size.1) as usize];
     window.draw_if_needed(|renderer| {
-        renderer.render(&mut buffer, WIDTH as usize);
+        renderer.render(&mut buffer, size.0 as usize);
     });
     buffer.iter().flat_map(|p| [p.r, p.g, p.b]).collect()
 }
