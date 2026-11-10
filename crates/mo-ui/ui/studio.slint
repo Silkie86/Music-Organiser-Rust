@@ -2325,9 +2325,21 @@ export component CardActions inherits FlexboxLayout {
     out property <length> cell: (self.room - (self.columns - 1) * self.spacing) / self.columns - 0.5px;
     callback chosen(string);
     spacing: Space.sm;
+    // Two lists, one of them empty: a button with a `width` of its own gets no place from this layout unless that
+    // width is a real one, so the buttons without a room mustn't have the binding at all.
+    property <[CardAction]> none: [];
     @children
-    for a in root.actions: StudioButton {
-        width: root.room > 0 ? max(self.min-width, root.cell) : self.preferred-width;
+    for a in root.room > 0 ? root.none : root.actions: StudioButton {
+        text: a.text;
+        tip: a.tip;
+        key: a.key;
+        enabled: a.enabled;
+        main: a.main;
+        danger: a.danger;
+        clicked => { root.chosen(a.id); }
+    }
+    for a in root.room > 0 ? root.actions : root.none: StudioButton {
+        width: max(self.min-width, root.cell);
         text: a.text;
         tip: a.tip;
         key: a.key;
