@@ -6,6 +6,7 @@
 //! read leaves out what isn't there now (nothing is written to library.db).
 //! Uninstall's card ([`super::uninstall`]) is shown the same way, in the same place.
 
+use mo_app::space_bin::BIN;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -128,7 +129,9 @@ pub(super) fn record(kind: &str, row_key: &(String, String), outcome: &Outcome) 
             if !kept.noted {
                 log::warning(
                     "Plugins",
-                    "What went to the Recycle Bin couldn't be kept in its list: Put back works until the app closes",
+                    &format!(
+                        "What went to the {BIN} couldn't be kept in its list: Put back works until the app closes"
+                    ),
                 );
             }
             Some(((kind.to_owned(), at), kept))
@@ -387,7 +390,7 @@ pub(super) fn confirm(app: &AppWindow) {
             return None;
         };
         c.stage = Stage::Removing;
-        let card = feed.start(&format!("Cleaning up {}", c.name), "Sending to the Recycle Bin");
+        let card = feed.start(&format!("Cleaning up {}", c.name), &format!("Sending to the {BIN}"));
         Some((ask, library, picked, c.id, c.stop.clone(), c.row_key.clone(), c.name.clone(), card))
     });
     fill(app);
@@ -433,7 +436,7 @@ pub(super) fn report(card: mo_app::activity::Job, outcome: &Outcome) {
         Outcome::Done(d) if !d.removed.is_empty() => card.done(&clean::done_text(d).0),
         Outcome::Done(d) => card.failed(d.problems.first().map_or("Nothing was removed.", |p| p.why.as_str())),
         Outcome::NotChecked(why) => card.failed(why),
-        Outcome::Stopped(_) => card.failed(clean::STOPPED_PART_WAY),
+        Outcome::Stopped(_) => card.failed(&clean::stopped_part_way()),
     }
 }
 
@@ -478,7 +481,7 @@ pub(super) fn removed(
             Outcome::NotChecked(why) => (why, Vec::new(), Done::default()),
             Outcome::Stopped(d) => {
                 let problems = d.problems.iter().map(|p| format!("{}: {}", p.path, p.why)).collect();
-                (clean::STOPPED_PART_WAY.to_owned(), problems, d)
+                (clean::stopped_part_way(), problems, d)
             }
         };
         log::info("Plugins", &format!("Clean up: {head}"));
@@ -488,7 +491,7 @@ pub(super) fn removed(
         if !done.removed.is_empty() {
             log::info(
                 "Plugins",
-                &format!("Clean up: {} folders in the Recycle Bin, {}", done.removed.len(), size_text(done.bytes())),
+                &format!("Clean up: {} folders in the {BIN}, {}", done.removed.len(), size_text(done.bytes())),
             );
             if let Some(pl) = p.plugins.as_mut() {
                 pl.forget_removed(&done);
@@ -534,7 +537,7 @@ pub(super) fn put_back(app: &AppWindow) {
             stop: Arc::new(AtomicBool::new(false)),
             stage: Stage::PuttingBack,
         });
-        let card = p.feed.start(&format!("Putting back what went from {name}"), "From the Recycle Bin");
+        let card = p.feed.start(&format!("Putting back what went from {name}"), &format!("From the {BIN}"));
         Some((done, row_key, p.clean_asked, card))
     });
     let Some((done, row_key, id, card)) = job else { return };
@@ -553,7 +556,7 @@ pub(super) fn put_back(app: &AppWindow) {
             }
             // What came back before it stopped isn't known: all of it stays listed, and a later Put back says which
             // aren't in the bin any more.
-            Err(_) => (clean::PUT_BACK_STOPPED.to_owned(), Vec::new(), Some(done)),
+            Err(_) => (clean::put_back_stopped(), Vec::new(), Some(done)),
         };
         if still.is_none() {
             card.done(&head)
@@ -682,7 +685,9 @@ pub(super) fn fill(app: &AppWindow) {
         let (busy, can_stop) = match c.stage {
             Stage::Checking => ("Checking the folders for samples your songs use…", true),
             Stage::Finding => ("Looking for its uninstaller…", true),
-            Stage::Removing => ("Sending to the Recycle Bin…", true),
+            Stage::Removing => {
+                (if cfg!(windows) { "Sending to the Recycle Bin…" } else { "Sending to the Trash…" }, true)
+            }
             Stage::Waiting => ("Its uninstaller is open in its own window. Waiting for its files to go…", true),
             Stage::PuttingBack => ("Putting back…", false),
             Stage::MoveChecking => ("Checking it can move there…", true),
@@ -712,7 +717,7 @@ pub(super) fn fill(app: &AppWindow) {
                     })
                     .collect();
                 data.set_clean_rows(model(rows));
-                data.set_clean_go_text("Send to the Recycle Bin".into());
+                data.set_clean_go_text(format!("Send to the {BIN}").into());
                 data.set_clean_keep_text("Keep everything".into());
             }
             Stage::Files { intro, lines, ticks, .. } => {
@@ -730,7 +735,7 @@ pub(super) fn fill(app: &AppWindow) {
                     })
                     .collect();
                 data.set_clean_rows(model(rows));
-                data.set_clean_go_text("Send to the Recycle Bin".into());
+                data.set_clean_go_text(format!("Send to the {BIN}").into());
                 data.set_clean_keep_text("Keep it".into());
             }
             Stage::Pick { intro, found, others, picked, .. } => {

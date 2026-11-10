@@ -120,6 +120,8 @@ export global PluginsData {
     // When the plugins were last measured (or that a measure is running), and Measure again (review X1-2).
     in property <string> measure-text;
     in property <bool> can-measure: true;
+    in property <string> measure-key;
+    in property <string> measure-tip;
     callback measure-plugins();
 
     // The page's options, shown on the page beside what they change. has-missing: some song's newest save misses a
@@ -947,9 +949,10 @@ export component PluginsPage inherits Rectangle {
             }
             if PluginsData.can-measure: VerticalLayout {
                 alignment: center;
-                LinkText {
+                StudioButton {
                     text: "Measure again";
-                    font-size: Type.meta;
+                    tip: PluginsData.measure-tip;
+                    key: PluginsData.measure-key;
                     clicked => { PluginsData.measure-plugins(); }
                 }
             }
@@ -988,8 +991,10 @@ export component PluginsPage inherits Rectangle {
                     if PluginsData.message == "" && PluginsData.lines.length == 0: EmptyState {
                         x: Space.xl;
                         width: parent.width - 2 * Space.xl;
-                        title: "No plugins like that";
-                        text: "Try fewer filters, or another search.";
+                        title: "No plugins match";
+                        text: "Try fewer filters or other words.";
+                        action: PluginsData.any-filter ? "Clear the filters" : "";
+                        act => { PluginsData.clear(); }
                     }
                     if PluginsData.message == "": plugin-list := ListView {
                         row-height: 56px;
