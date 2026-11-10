@@ -3,7 +3,7 @@
 // to drop onto a Bitwig lane (Solomon, 2 Nov 2026). Only shared parts from studio.slint; mo-app decides every word
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
 import { ListView, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
 
 // One line of the sounds list.
 export struct PresetLine {
@@ -194,6 +194,8 @@ export global PresetsData {
 // A line of the sounds list.
 component PresetLineView inherits ListLine {
     in property <PresetLine> line;
+    // As the heading's.
+    in property <bool> tight;
     callback chosen();
     height: 48px;
     selected: line.picked;
@@ -251,14 +253,14 @@ component PresetLineView inherits ListLine {
             vertical-alignment: center;
             overflow: elide;
         }
-        Text {
+        if !root.tight: Text {
             width: 56px;
             text: root.line.kind;
             color: Theme.muted;
             font-size: Type.meta;
             vertical-alignment: center;
         }
-        Text {
+        if !root.tight: Text {
             width: 72px;
             text: root.line.format;
             color: Theme.faint;
@@ -273,6 +275,9 @@ component PresetLineView inherits ListLine {
 // The sounds list's headings: a click puts the list in that column's order (A to Z), a second click turns it round,
 // a third puts it back as it was found.
 component PresetHeading inherits HorizontalLayout {
+    // A narrow list (beside the filter column and the card at 1440 wide) leaves out Kind and File, which the card
+    // says too, so the preset's name and its song keep their room.
+    in property <bool> tight;
     height: 28px;
     padding-left: Space.md + Space.sm + Space.md;
     padding-right: Space.md + Space.md;
@@ -298,14 +303,14 @@ component PresetHeading inherits HorizontalLayout {
         up: !PresetsData.order-reversed;
         clicked => { PresetsData.order-picked("Song or folder"); }
     }
-    ColumnHead {
+    if !root.tight: ColumnHead {
         width: 56px;
         text: "KIND";
         on: PresetsData.order-column == "Kind";
         up: !PresetsData.order-reversed;
         clicked => { PresetsData.order-picked("Kind"); }
     }
-    ColumnHead {
+    if !root.tight: ColumnHead {
         width: 72px;
         text: "FILE";
         right: true;
@@ -702,77 +707,6 @@ export component PresetsPage inherits Rectangle {
                 }
             }
         }
-        // The filters: each as chips of its own behind its name when it has only a few choices, or in a menu that
-        // scrolls when it has more (the plugins); more than one part or plugin can be picked, one or none of the rest.
-        // They wrap when the window is narrow.
-        if PresetsData.section == 0: FlexboxLayout {
-            spacing: Space.md;
-            vertical-stretch: 0;
-            // The plugins first: a menu, so its chip stays in one place whatever the parts' chips say.
-            FilterPicks {
-                name: "Plugin";
-                filter: PresetsData.plugin-filter;
-                toggled(text) => { PresetsData.toggle("plugin", text); }
-                cleared => { PresetsData.clear-chip("plugin"); }
-            }
-            FilterPicks {
-                name: "Part";
-                filter: PresetsData.part-filter;
-                toggled(text) => { PresetsData.toggle("part", text); }
-                cleared => { PresetsData.clear-chip("part"); }
-            }
-            FilterPicks {
-                // The plugin's format (VST2, VST3, CLAP, AU, or Native: the DAW's own).
-                name: "Format";
-                filter: PresetsData.format-filter;
-                toggled(text) => { PresetsData.toggle("format", text); }
-                cleared => { PresetsData.clear-chip("format"); }
-            }
-            FilterPicks {
-                name: "Type";
-                filter: PresetsData.type-filter;
-                toggled(text) => { PresetsData.toggle("type", text); }
-                cleared => { PresetsData.clear-chip("type"); }
-            }
-            FilterPicks {
-                // Where the sound was found: in a song, or as a preset file on disk.
-                name: "Found in";
-                filter: PresetsData.from-filter;
-                toggled(text) => { PresetsData.toggle("from", text); }
-                cleared => { PresetsData.clear-chip("from"); }
-            }
-            // On the page, not in an options menu (Solomon, 4 Nov 2026: nothing useful hidden away). Clear leaves it.
-            ToggleChip {
-                text: "Show synths that play nothing";
-                on: PresetsData.unused;
-                clicked => { PresetsData.unused-toggled(!PresetsData.unused); }
-            }
-            if PresetsData.song != "": ToggleChip {
-                text: "Song: " + PresetsData.song + "  ×";
-                on: true;
-                clicked => { PresetsData.clear-song(); }
-            }
-            if PresetsData.any-filter: ToggleChip {
-                text: "Clear";
-                clicked => { PresetsData.clear(); }
-            }
-        }
-        if PresetsData.section == 1: HorizontalLayout {
-            spacing: Space.md;
-            alignment: start;
-            vertical-stretch: 0;
-            FilterPicks {
-                name: "Found in";
-                filter: PresetsData.curve-found-in;
-                toggled(text) => { PresetsData.toggle("found-in", text); }
-                cleared => { PresetsData.clear-chip("found-in"); }
-            }
-            ToggleChip {
-                text: "Show the curves I hid";
-                on: PresetsData.curve-hidden;
-                clicked => { PresetsData.curve-hidden-toggled(!PresetsData.curve-hidden); }
-            }
-        }
         // The audition playing in Bitwig, whatever line is picked and whichever section is on show, with its
         // Stop and Keep (the 6 Nov review's D-4 and X3-1).
         if PresetsData.hearing != "": Rectangle {
@@ -813,141 +747,219 @@ export component PresetsPage inherits Rectangle {
                 }
             }
         }
-        // The list, the year strip beside it, and the picked line's card.
-        area := Rectangle {
+        split := Rectangle {
             vertical-stretch: 1;
-            property <bool> panel: PresetsData.section == 0 ? PresetsData.panel-shown : PresetsData.curve-panel-shown;
-            // The card's place is always there (empty until something is picked), so nothing moves when it is.
-            property <length> list-width: min(Fit.list-max, max(380px, self.width - PresetsData.panel-width - divider.width, self.width - Fit.card-max - divider.width));
-            property <length> card-width: min(Fit.card-max, self.width - self.list-width - divider.width);
-            property <length> years-width: PresetsData.section == 0 && PresetsData.years.length > 1 && PresetsData.empty-title == "" ? 56px : 0px;
-            if area.years-width > 0: YearRange {
-                x: area.list-width - area.years-width;
+            // The list, the year strip beside it, and the picked line's card.
+            area := Rectangle {
+                x: column.room;
                 y: 0;
-                height: area.height;
-                years: PresetsData.years;
-                picked-from: PresetsData.years-from;
-                picked-to: PresetsData.years-to;
-                picked(a, b) => { PresetsData.years-picked(a, b); }
-                cleared => { PresetsData.years-cleared(); }
-            }
-            keys := FocusScope {
-                x: 0;
-                width: area.list-width - area.years-width;
-                key-pressed(event) => {
-                    if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
-                        return reject;
-                    }
-                    if (event.text == Key.UpArrow) {
-                        if (PresetsData.section == 0) {
-                            PresetsData.step(-1);
-                        } else {
-                            PresetsData.curve-step(-1);
-                        }
-                        return accept;
-                    }
-                    if (event.text == Key.DownArrow) {
-                        if (PresetsData.section == 0) {
-                            PresetsData.step(1);
-                        } else {
-                            PresetsData.curve-step(1);
-                        }
-                        return accept;
-                    }
-                    reject
+                width: split.width - self.x;
+                height: split.height;
+                property <bool> panel: PresetsData.section == 0 ? PresetsData.panel-shown : PresetsData.curve-panel-shown;
+                // The card's place is always there (empty until something is picked), so nothing moves when it is.
+                property <length> list-width: min(Fit.list-max, max(380px, self.width - PresetsData.panel-width - divider.width, self.width - Fit.card-max - divider.width));
+                property <length> card-width: min(Fit.card-max, self.width - self.list-width - divider.width);
+                property <length> years-width: PresetsData.section == 0 && PresetsData.years.length > 1 && PresetsData.empty-title == "" ? 56px : 0px;
+                if area.years-width > 0: YearRange {
+                    x: area.list-width - area.years-width;
+                    y: 0;
+                    height: area.height;
+                    years: PresetsData.years;
+                    picked-from: PresetsData.years-from;
+                    picked-to: PresetsData.years-to;
+                    picked(a, b) => { PresetsData.years-picked(a, b); }
+                    cleared => { PresetsData.years-cleared(); }
                 }
-                Well {
-                    if PresetsData.section == 0 && PresetsData.empty-title != "": EmptyState {
-                        title: PresetsData.empty-title;
-                        text: PresetsData.empty-text;
-                        action: PresetsData.any-filter && PresetsData.shown == 0 ? "Clear the filters" : "";
-                        act => { PresetsData.clear(); }
+                keys := FocusScope {
+                    x: 0;
+                    width: area.list-width - area.years-width;
+                    key-pressed(event) => {
+                        if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                            return reject;
+                        }
+                        if (event.text == Key.UpArrow) {
+                            if (PresetsData.section == 0) {
+                                PresetsData.step(-1);
+                            } else {
+                                PresetsData.curve-step(-1);
+                            }
+                            return accept;
+                        }
+                        if (event.text == Key.DownArrow) {
+                            if (PresetsData.section == 0) {
+                                PresetsData.step(1);
+                            } else {
+                                PresetsData.curve-step(1);
+                            }
+                            return accept;
+                        }
+                        reject
                     }
-                    if PresetsData.section == 0 && PresetsData.empty-title == "": VerticalLayout {
-                        PresetHeading { }
-                        list := ListView {
+                    Well {
+                        if PresetsData.section == 0 && PresetsData.empty-title != "": EmptyState {
+                            title: PresetsData.empty-title;
+                            text: PresetsData.empty-text;
+                            action: PresetsData.any-filter && PresetsData.shown == 0 ? "Clear the filters" : "";
+                            act => { PresetsData.clear(); }
+                        }
+                        if PresetsData.section == 0 && PresetsData.empty-title == "": VerticalLayout {
+                            PresetHeading {
+                                tight: area.list-width < 620px;
+                            }
+                            list := ListView {
+                                row-height: 48px;
+                                rows: PresetsData.lines.length;
+                                show-top: PresetsData.show-row * self.row-height;
+                                show-ask: PresetsData.show-ask;
+                                show-done <=> PresetsData.show-done;
+                                for l in PresetsData.lines: PresetLineView {
+                                    tight: area.list-width < 620px;
+                                    // Every line this height: the list counts on it.
+                                    height: list.row-height;
+                                    line: l;
+                                    chosen => { keys.focus(); }
+                                    right-clicked(x, y) => {
+                                        keys.focus();
+                                        menu.open-at(x, y);
+                                    }
+                                }
+                            }
+                        }
+                        if PresetsData.section == 1 && PresetsData.curve-empty-title != "": EmptyState {
+                            title: PresetsData.curve-empty-title;
+                            text: PresetsData.curve-empty-text;
+                        }
+                        if PresetsData.section == 1 && PresetsData.curve-empty-title == "": curve-list := ListView {
                             row-height: 48px;
-                            rows: PresetsData.lines.length;
-                            show-top: PresetsData.show-row * self.row-height;
-                            show-ask: PresetsData.show-ask;
-                            show-done <=> PresetsData.show-done;
-                            for l in PresetsData.lines: PresetLineView {
+                            rows: PresetsData.curve-lines.length;
+                            show-top: PresetsData.curve-show-row * self.row-height;
+                            show-ask: PresetsData.curve-show-ask;
+                            show-done <=> PresetsData.curve-show-done;
+                            for l in PresetsData.curve-lines: CurveLineView {
                                 // Every line this height: the list counts on it.
-                                height: list.row-height;
+                                height: curve-list.row-height;
                                 line: l;
                                 chosen => { keys.focus(); }
                                 right-clicked(x, y) => {
                                     keys.focus();
-                                    menu.open-at(x, y);
+                                    curve-menu.open-at(x, y);
                                 }
                             }
                         }
                     }
-                    if PresetsData.section == 1 && PresetsData.curve-empty-title != "": EmptyState {
-                        title: PresetsData.curve-empty-title;
-                        text: PresetsData.curve-empty-text;
-                    }
-                    if PresetsData.section == 1 && PresetsData.curve-empty-title == "": curve-list := ListView {
-                        row-height: 48px;
-                        rows: PresetsData.curve-lines.length;
-                        show-top: PresetsData.curve-show-row * self.row-height;
-                        show-ask: PresetsData.curve-show-ask;
-                        show-done <=> PresetsData.curve-show-done;
-                        for l in PresetsData.curve-lines: CurveLineView {
-                            // Every line this height: the list counts on it.
-                            height: curve-list.row-height;
-                            line: l;
-                            chosen => { keys.focus(); }
-                            right-clicked(x, y) => {
-                                keys.focus();
-                                curve-menu.open-at(x, y);
-                            }
-                        }
+                }
+                divider := PanelDivider {
+                    x: area.list-width;
+                    height: parent.height;
+                    // The card's width as it's shown, so a drag starts from what you see; no seam to drag once the
+                    // window has room for the list and the card at their widest.
+                    visible: area.card-width < Fit.card-max;
+                    panel-width: area.card-width;
+                    room: area.width;
+                    resizing(w) => { PresetsData.panel-width = w; }
+                    resized(w) => { PresetsData.panel-resized(w); }
+                }
+                if PresetsData.section == 0 && PresetsData.panel-shown: PresetPanel {
+                    x: area.list-width + divider.width;
+                    width: area.card-width;
+                    height: parent.height;
+                }
+                if PresetsData.section == 1 && PresetsData.curve-panel-shown: CurvePanel {
+                    x: area.list-width + divider.width;
+                    width: area.card-width;
+                    height: parent.height;
+                    rename-keys <=> root.rename-keys;
+                }
+                if !area.panel: SidePanel {
+                    x: area.list-width + divider.width;
+                    width: area.card-width;
+                    height: parent.height;
+                    closable: false;
+                    EmptyState {
+                        vertical-stretch: 1;
+                        title: PresetsData.section == 0 ? "Pick a sound" : "Pick a curve";
+                        text: PresetsData.section == 0
+                            ? "Where it's from, its part and what it can do show here."
+                            : "Its shape, where it was found and what it can do show here.";
                     }
                 }
-            }
-            divider := PanelDivider {
-                x: area.list-width;
-                height: parent.height;
-                // The card's width as it's shown, so a drag starts from what you see; no seam to drag once the
-                // window has room for the list and the card at their widest.
-                visible: area.card-width < Fit.card-max;
-                panel-width: area.card-width;
-                room: area.width;
-                resizing(w) => { PresetsData.panel-width = w; }
-                resized(w) => { PresetsData.panel-resized(w); }
-            }
-            if PresetsData.section == 0 && PresetsData.panel-shown: PresetPanel {
-                x: area.list-width + divider.width;
-                width: area.card-width;
-                height: parent.height;
-            }
-            if PresetsData.section == 1 && PresetsData.curve-panel-shown: CurvePanel {
-                x: area.list-width + divider.width;
-                width: area.card-width;
-                height: parent.height;
-                rename-keys <=> root.rename-keys;
-            }
-            if !area.panel: SidePanel {
-                x: area.list-width + divider.width;
-                width: area.card-width;
-                height: parent.height;
-                closable: false;
-                EmptyState {
-                    vertical-stretch: 1;
-                    title: PresetsData.section == 0 ? "Pick a sound" : "Pick a curve";
-                    text: PresetsData.section == 0
-                        ? "Where it's from, its part and what it can do show here."
-                        : "Its shape, where it was found and what it can do show here.";
+                menu := RightClickMenu {
+                    items: PresetsData.menu;
+                    chosen(id) => { PresetsData.menu-chosen(id); }
+                }
+                curve-menu := RightClickMenu {
+                    items: PresetsData.curve-menu;
+                    chosen(id) => { PresetsData.curve-chosen(id); }
                 }
             }
-            menu := RightClickMenu {
-                items: PresetsData.menu;
-                chosen(id) => { PresetsData.menu-chosen(id); }
-            }
-            curve-menu := RightClickMenu {
-                items: PresetsData.curve-menu;
-                chosen(id) => { PresetsData.curve-chosen(id); }
+            // The filters, in a column at the side as on every page (Solomon, 10 Nov 2026): a short list's choices
+            // as a tick list, the plugins in a menu that scrolls; more than one part or plugin can be picked, one or
+            // none of the rest. After the list, so the opened column of a narrow window lies over it.
+            column := FilterColumn {
+                page-width: split.width;
+                height: split.height;
+                active: PresetsData.section == 0 && PresetsData.any-filter;
+                if PresetsData.section == 0: FilterList {
+                    name: "PLUGIN";
+                    filter: PresetsData.plugin-filter;
+                    toggled(text) => { PresetsData.toggle("plugin", text); }
+                    cleared => { PresetsData.clear-chip("plugin"); }
+                }
+                if PresetsData.section == 0: FilterList {
+                    name: "PART";
+                    filter: PresetsData.part-filter;
+                    toggled(text) => { PresetsData.toggle("part", text); }
+                    cleared => { PresetsData.clear-chip("part"); }
+                }
+                // The plugin's format (VST2, VST3, CLAP, AU, or Native: the DAW's own).
+                if PresetsData.section == 0: FilterList {
+                    name: "FORMAT";
+                    filter: PresetsData.format-filter;
+                    toggled(text) => { PresetsData.toggle("format", text); }
+                    cleared => { PresetsData.clear-chip("format"); }
+                }
+                if PresetsData.section == 0: FilterList {
+                    name: "TYPE";
+                    filter: PresetsData.type-filter;
+                    toggled(text) => { PresetsData.toggle("type", text); }
+                    cleared => { PresetsData.clear-chip("type"); }
+                }
+                // Where the sound was found: in a song, or as a preset file on disk.
+                if PresetsData.section == 0: FilterList {
+                    name: "FOUND IN";
+                    filter: PresetsData.from-filter;
+                    toggled(text) => { PresetsData.toggle("from", text); }
+                    cleared => { PresetsData.clear-chip("from"); }
+                }
+                // On the page, not in an options menu (Solomon, 4 Nov 2026: nothing useful hidden away). Clear leaves it.
+                if PresetsData.section == 0: TickLine {
+                    text: "Synths that play nothing";
+                    on: PresetsData.unused;
+                    clicked => { PresetsData.unused-toggled(!PresetsData.unused); }
+                }
+                if PresetsData.section == 0 && PresetsData.song != "": TickLine {
+                    text: "Song: " + PresetsData.song;
+                    on: true;
+                    clicked => { PresetsData.clear-song(); }
+                }
+                if PresetsData.section == 0 && PresetsData.any-filter: HorizontalLayout {
+                    alignment: start;
+                    StudioButton {
+                        text: "Clear filters";
+                        clicked => { PresetsData.clear(); }
+                    }
+                }
+                if PresetsData.section == 1: FilterList {
+                    name: "FOUND IN";
+                    filter: PresetsData.curve-found-in;
+                    toggled(text) => { PresetsData.toggle("found-in", text); }
+                    cleared => { PresetsData.clear-chip("found-in"); }
+                }
+                if PresetsData.section == 1: TickLine {
+                    text: "The curves I hid";
+                    on: PresetsData.curve-hidden;
+                    clicked => { PresetsData.curve-hidden-toggled(!PresetsData.curve-hidden); }
+                }
             }
         }
     }

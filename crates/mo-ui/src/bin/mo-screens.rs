@@ -181,6 +181,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     shots.push(("backup-gone-open.png".into(), capture(&window)));
     app.global::<mo_ui::BackupData>().set_gone_open(false);
     mo_ui::backup::show_gone(&app, &mo_app::backup_gone::Warning::default());
+    // The mouse moved away: left where Backup's clicks put it, the tip of what's under it stays up over the next page.
+    hover(&window, -1.0, -1.0);
     // The Plugins page, from made-up songs: a plugin picked, on each of its card's tabs.
     mo_ui::plugins::connect(&app, out.join("no library.db"), feed.clone(), &Shortcuts::default());
     app.set_place(Place::Plugins.index() as i32);
@@ -2587,8 +2589,8 @@ fn sample_plugins() -> (mo_app::plugins::Plugins, Vec<mo_library::plugins::Scann
 
 /// The Backup page's Remove older versions button, and how far the page is turned down to show the question it asks.
 const REMOVE_OLDER_BUTTON: (f32, f32) = (1150.0, 845.0);
-/// The Presets page's Plugin chip: the first in its filter row, so the other chips' words don't move it.
-const PLUGIN_CHIP: (f32, f32) = (262.0, 156.0);
+/// The Presets page's Plugin menu: the first thing in its filter column.
+const PLUGIN_CHIP: (f32, f32) = (288.0, 175.0);
 const PAGE_DOWN: f32 = 300.0;
 
 /// Where the wheel turns the song panel down in the narrowest window, and by how much: on its status line, which

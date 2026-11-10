@@ -4,7 +4,7 @@
 // there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
 // fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
 import { ListView, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TickBox, FilterPicks, FilterView, ListLine, Caps, ColumnHead, StudioButton, LinkText, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TickBox, FilterPicks, FilterList, FilterColumn, FilterView, ListLine, Caps, ColumnHead, StudioButton, LinkText, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
 
 // One line of the list.
 export struct PluginListLine {
@@ -817,40 +817,6 @@ export component PluginsPage inherits Rectangle {
                 }
             }
         }
-        // The filters, each behind its name; more than one can be picked in each. They wrap when the window is narrow.
-        FlexboxLayout {
-            spacing: Space.md;
-            vertical-stretch: 0;
-            FilterPicks {
-                name: "Show";
-                filter: PluginsData.show-filter;
-                toggled(text) => { PluginsData.toggle("show", text); }
-                cleared => { PluginsData.clear-filter("show"); }
-            }
-            FilterPicks {
-                name: "Kind";
-                filter: PluginsData.kind-filter;
-                toggled(text) => { PluginsData.toggle("kind", text); }
-                cleared => { PluginsData.clear-filter("kind"); }
-            }
-            FilterPicks {
-                name: "Format";
-                filter: PluginsData.format-filter;
-                toggled(text) => { PluginsData.toggle("format", text); }
-                cleared => { PluginsData.clear-filter("format"); }
-            }
-            FilterPicks {
-                name: "DAW";
-                filter: PluginsData.daw-filter;
-                toggled(text) => { PluginsData.toggle("daw", text); }
-                cleared => { PluginsData.clear-filter("daw"); }
-            }
-            if PluginsData.any-filter: ToggleChip {
-                text: "Clear";
-                on: false;
-                clicked => { PluginsData.clear(); }
-            }
-        }
         // What to install to open more of your songs.
         if PluginsData.has-missing: VerticalLayout {
             spacing: Space.sm;
@@ -963,200 +929,245 @@ export component PluginsPage inherits Rectangle {
             }
             Rectangle { horizontal-stretch: 1; }
         }
-        // The list, the year strip and the picked plugin's card.
-        area := Rectangle {
+        split := Rectangle {
             vertical-stretch: 1;
-            property <length> list-width: min(Fit.list-max, max(380px, self.width - PluginsData.panel-width - divider.width, self.width - Fit.card-max - divider.width));
-            property <length> card-width: min(Fit.card-max, self.width - self.list-width - divider.width);
-            property <length> years-width: PluginsData.years.length > 1 && PluginsData.message == "" ? 56px : 0px;
-            property <bool> wide: self.list-width > 640px;
-            keys := FocusScope {
-                x: 0;
-                width: area.list-width - area.years-width;
-                height: parent.height;
-                key-pressed(event) => {
-                    if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
-                        return reject;
-                    }
-                    if (event.text == Key.UpArrow) {
-                        PluginsData.step(-1);
-                        return accept;
-                    }
-                    if (event.text == Key.DownArrow) {
-                        PluginsData.step(1);
-                        return accept;
-                    }
-                    reject
-                }
-                Well {
-                    if PluginsData.message != "": EmptyState {
-                        x: Space.xl;
-                        width: parent.width - 2 * Space.xl;
-                        title: PluginsData.message;
-                    }
-                    if PluginsData.message == "" && PluginsData.lines.length == 0: EmptyState {
-                        x: Space.xl;
-                        width: parent.width - 2 * Space.xl;
-                        title: "No plugins match";
-                        text: "Try fewer filters or other words.";
-                        action: PluginsData.any-filter ? "Clear the filters" : "";
-                        act => { PluginsData.clear(); }
-                    }
-                    if PluginsData.message == "" && PluginsData.lines.length > 0: VerticalLayout {
-                        // The headings order the list: a click goes by that column, a second turns it round.
-                        HorizontalLayout {
-                            padding-left: Space.md + Space.xs;
-                            padding-right: Space.md + Space.xs;
-                            spacing: Space.md;
-                            Rectangle { width: 8px; }
-                            ColumnHead {
-                                horizontal-stretch: 1;
-                                text: "PLUGIN";
-                                on: PluginsData.sort-column == "Plugin";
-                                // A to Z first.
-                                up: !PluginsData.sort-reversed;
-                                clicked => { PluginsData.sort-picked("Plugin"); }
-                            }
-                            ColumnHead {
-                                width: 80px;
-                                right: true;
-                                text: "SONGS";
-                                on: PluginsData.sort-column == "Songs";
-                                up: PluginsData.sort-reversed;
-                                clicked => { PluginsData.sort-picked("Songs"); }
-                            }
-                            if area.wide: ColumnHead {
-                                width: 76px;
-                                right: true;
-                                text: "LAST USED";
-                                on: PluginsData.sort-column == "Last used";
-                                up: PluginsData.sort-reversed;
-                                clicked => { PluginsData.sort-picked("Last used"); }
-                            }
-                            ColumnHead {
-                                width: 72px;
-                                right: true;
-                                text: "SIZE";
-                                on: PluginsData.sort-column == "Size";
-                                up: PluginsData.sort-reversed;
-                                clicked => { PluginsData.sort-picked("Size"); }
-                            }
+            // The list, the year strip and the picked plugin's card.
+            area := Rectangle {
+                x: column.room;
+                y: 0;
+                width: split.width - self.x;
+                height: split.height;
+                property <length> list-width: min(Fit.list-max, max(380px, self.width - PluginsData.panel-width - divider.width, self.width - Fit.card-max - divider.width));
+                property <length> card-width: min(Fit.card-max, self.width - self.list-width - divider.width);
+                property <length> years-width: PluginsData.years.length > 1 && PluginsData.message == "" ? 56px : 0px;
+                property <bool> wide: self.list-width > 640px;
+                keys := FocusScope {
+                    x: 0;
+                    width: area.list-width - area.years-width;
+                    height: parent.height;
+                    key-pressed(event) => {
+                        if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                            return reject;
                         }
-                        plugin-list := ListView {
-                            row-height: 56px;
-                            rows: PluginsData.lines.length;
-                            show-top: PluginsData.show-row * self.row-height;
-                            show-ask: PluginsData.show-ask;
-                            show-done <=> PluginsData.show-done;
-                            for line in PluginsData.lines: ListLine {
-                                // Every line this height: the list counts on it.
-                                height: plugin-list.row-height;
-                                selected: line.row == PluginsData.selected;
-                                clicked => {
-                                    keys.focus();
-                                    PluginsData.select(line.row);
+                        if (event.text == Key.UpArrow) {
+                            PluginsData.step(-1);
+                            return accept;
+                        }
+                        if (event.text == Key.DownArrow) {
+                            PluginsData.step(1);
+                            return accept;
+                        }
+                        reject
+                    }
+                    Well {
+                        if PluginsData.message != "": EmptyState {
+                            x: Space.xl;
+                            width: parent.width - 2 * Space.xl;
+                            title: PluginsData.message;
+                        }
+                        if PluginsData.message == "" && PluginsData.lines.length == 0: EmptyState {
+                            x: Space.xl;
+                            width: parent.width - 2 * Space.xl;
+                            title: "No plugins match";
+                            text: "Try fewer filters or other words.";
+                            action: PluginsData.any-filter ? "Clear the filters" : "";
+                            act => { PluginsData.clear(); }
+                        }
+                        if PluginsData.message == "" && PluginsData.lines.length > 0: VerticalLayout {
+                            // The headings order the list: a click goes by that column, a second turns it round.
+                            HorizontalLayout {
+                                padding-left: Space.md + Space.xs;
+                                padding-right: Space.md + Space.xs;
+                                spacing: Space.md;
+                                Rectangle { width: 8px; }
+                                ColumnHead {
+                                    horizontal-stretch: 1;
+                                    text: "PLUGIN";
+                                    on: PluginsData.sort-column == "Plugin";
+                                    // A to Z first.
+                                    up: !PluginsData.sort-reversed;
+                                    clicked => { PluginsData.sort-picked("Plugin"); }
                                 }
-                                right-clicked(x, y) => { menu.open-at(x, y); }
-                                HorizontalLayout {
-                                    padding-left: Space.md;
-                                    padding-right: Space.md;
-                                    spacing: Space.md;
-                                    VerticalLayout {
-                                        alignment: center;
-                                        Dot { tint: line.state == 1 ? Theme.missing : line.state == 2 ? Theme.warning : Theme.ok; }
+                                ColumnHead {
+                                    width: 80px;
+                                    right: true;
+                                    text: "SONGS";
+                                    on: PluginsData.sort-column == "Songs";
+                                    up: PluginsData.sort-reversed;
+                                    clicked => { PluginsData.sort-picked("Songs"); }
+                                }
+                                if area.wide: ColumnHead {
+                                    width: 76px;
+                                    right: true;
+                                    text: "LAST USED";
+                                    on: PluginsData.sort-column == "Last used";
+                                    up: PluginsData.sort-reversed;
+                                    clicked => { PluginsData.sort-picked("Last used"); }
+                                }
+                                ColumnHead {
+                                    width: 72px;
+                                    right: true;
+                                    text: "SIZE";
+                                    on: PluginsData.sort-column == "Size";
+                                    up: PluginsData.sort-reversed;
+                                    clicked => { PluginsData.sort-picked("Size"); }
+                                }
+                            }
+                            plugin-list := ListView {
+                                row-height: 56px;
+                                rows: PluginsData.lines.length;
+                                show-top: PluginsData.show-row * self.row-height;
+                                show-ask: PluginsData.show-ask;
+                                show-done <=> PluginsData.show-done;
+                                for line in PluginsData.lines: ListLine {
+                                    // Every line this height: the list counts on it.
+                                    height: plugin-list.row-height;
+                                    selected: line.row == PluginsData.selected;
+                                    clicked => {
+                                        keys.focus();
+                                        PluginsData.select(line.row);
                                     }
-                                    VerticalLayout {
-                                        alignment: center;
-                                        spacing: Space.xs;
-                                        horizontal-stretch: 1;
-                                        // The state in a word beside the name, as a red dot alone is easy to miss
-                                        // (the UX review of 10 Nov, B11).
-                                        HorizontalLayout {
-                                            spacing: Space.sm;
-                                            Text {
-                                                text: line.name;
-                                                color: Theme.text;
-                                                font-size: Type.row-title;
-                                                font-weight: 500;
-                                                overflow: elide;
-                                                horizontal-stretch: line.state == 0 ? 1 : 0;
+                                    right-clicked(x, y) => { menu.open-at(x, y); }
+                                    HorizontalLayout {
+                                        padding-left: Space.md;
+                                        padding-right: Space.md;
+                                        spacing: Space.md;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Dot { tint: line.state == 1 ? Theme.missing : line.state == 2 ? Theme.warning : Theme.ok; }
+                                        }
+                                        VerticalLayout {
+                                            alignment: center;
+                                            spacing: Space.xs;
+                                            horizontal-stretch: 1;
+                                            // The state in a word beside the name, as a red dot alone is easy to miss
+                                            // (the UX review of 10 Nov, B11).
+                                            HorizontalLayout {
+                                                spacing: Space.sm;
+                                                Text {
+                                                    text: line.name;
+                                                    color: Theme.text;
+                                                    font-size: Type.row-title;
+                                                    font-weight: 500;
+                                                    overflow: elide;
+                                                    horizontal-stretch: line.state == 0 ? 1 : 0;
+                                                }
+                                                if line.state != 0: Text {
+                                                    text: line.state == 1 ? "Missing" : "Unused";
+                                                    color: line.state == 1 ? Theme.missing : Theme.warning;
+                                                    font-size: Type.meta;
+                                                    vertical-alignment: center;
+                                                    horizontal-stretch: 1;
+                                                }
                                             }
-                                            if line.state != 0: Text {
-                                                text: line.state == 1 ? "Missing" : "Unused";
-                                                color: line.state == 1 ? Theme.missing : Theme.warning;
+                                            Text {
+                                                text: line.details;
+                                                color: Theme.muted;
                                                 font-size: Type.meta;
-                                                vertical-alignment: center;
-                                                horizontal-stretch: 1;
+                                                overflow: elide;
                                             }
                                         }
                                         Text {
-                                            text: line.details;
-                                            color: Theme.muted;
+                                            width: 80px;
+                                            text: line.songs;
+                                            color: Theme.text;
                                             font-size: Type.meta;
-                                            overflow: elide;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: right;
                                         }
-                                    }
-                                    Text {
-                                        width: 80px;
-                                        text: line.songs;
-                                        color: Theme.text;
-                                        font-size: Type.meta;
-                                        vertical-alignment: center;
-                                        horizontal-alignment: right;
-                                    }
-                                    if area.wide: Text {
-                                        width: 76px;
-                                        text: line.last;
-                                        color: Theme.muted;
-                                        font-family: Theme.number-font;
-                                        font-size: Type.meta;
-                                        vertical-alignment: center;
-                                        horizontal-alignment: right;
-                                    }
-                                    Text {
-                                        width: 72px;
-                                        text: line.size;
-                                        color: line.state == 2 ? Theme.warning : Theme.muted;
-                                        font-family: Theme.number-font;
-                                        font-size: Type.meta;
-                                        vertical-alignment: center;
-                                        horizontal-alignment: right;
+                                        if area.wide: Text {
+                                            width: 76px;
+                                            text: line.last;
+                                            color: Theme.muted;
+                                            font-family: Theme.number-font;
+                                            font-size: Type.meta;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: right;
+                                        }
+                                        Text {
+                                            width: 72px;
+                                            text: line.size;
+                                            color: line.state == 2 ? Theme.warning : Theme.muted;
+                                            font-family: Theme.number-font;
+                                            font-size: Type.meta;
+                                            vertical-alignment: center;
+                                            horizontal-alignment: right;
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
+                if area.years-width > 0: YearRange {
+                    x: area.list-width - area.years-width;
+                    width: area.years-width;
+                    height: parent.height;
+                    years: PluginsData.years;
+                    picked-from: PluginsData.years-from;
+                    picked-to: PluginsData.years-to;
+                    picked(a, b) => { PluginsData.years-picked(a, b); }
+                    cleared => { PluginsData.years-cleared(); }
+                }
+                divider := PanelDivider {
+                    x: area.list-width;
+                    height: parent.height;
+                    // The card's width as it's shown, so a drag starts from what you see; no seam to drag once the
+                    // window has room for the list and the card at their widest.
+                    visible: area.card-width < Fit.card-max;
+                    panel-width: area.card-width;
+                    room: area.width;
+                    resizing(w) => { PluginsData.panel-width = w; }
+                    resized(w) => { PluginsData.panel-resized(w); }
+                }
+                PluginPanel {
+                    x: area.list-width + divider.width;
+                    width: area.card-width;
+                    height: parent.height;
+                }
+                menu := RightClickMenu {
+                    items: PluginsData.menu;
+                    chosen(id) => { PluginsData.menu-chosen(id); }
+                }
             }
-            if area.years-width > 0: YearRange {
-                x: area.list-width - area.years-width;
-                width: area.years-width;
-                height: parent.height;
-                years: PluginsData.years;
-                picked-from: PluginsData.years-from;
-                picked-to: PluginsData.years-to;
-                picked(a, b) => { PluginsData.years-picked(a, b); }
-                cleared => { PluginsData.years-cleared(); }
-            }
-            divider := PanelDivider {
-                x: area.list-width;
-                height: parent.height;
-                // The card's width as it's shown, so a drag starts from what you see; no seam to drag once the
-                // window has room for the list and the card at their widest.
-                visible: area.card-width < Fit.card-max;
-                panel-width: area.card-width;
-                room: area.width;
-                resizing(w) => { PluginsData.panel-width = w; }
-                resized(w) => { PluginsData.panel-resized(w); }
-            }
-            PluginPanel {
-                x: area.list-width + divider.width;
-                width: area.card-width;
-                height: parent.height;
-            }
-            menu := RightClickMenu {
-                items: PluginsData.menu;
-                chosen(id) => { PluginsData.menu-chosen(id); }
+            // The filters, in a column at the side as on every page (Solomon, 10 Nov 2026): each one's choices as a
+            // tick list; more than one can be picked in each. After the list, so the opened column of a narrow window
+            // lies over it.
+            column := FilterColumn {
+                page-width: split.width;
+                height: split.height;
+                active: PluginsData.any-filter;
+                FilterList {
+                    name: "SHOW";
+                    filter: PluginsData.show-filter;
+                    toggled(text) => { PluginsData.toggle("show", text); }
+                    cleared => { PluginsData.clear-filter("show"); }
+                }
+                FilterList {
+                    name: "KIND";
+                    filter: PluginsData.kind-filter;
+                    toggled(text) => { PluginsData.toggle("kind", text); }
+                    cleared => { PluginsData.clear-filter("kind"); }
+                }
+                FilterList {
+                    name: "FORMAT";
+                    filter: PluginsData.format-filter;
+                    toggled(text) => { PluginsData.toggle("format", text); }
+                    cleared => { PluginsData.clear-filter("format"); }
+                }
+                FilterList {
+                    name: "DAW";
+                    filter: PluginsData.daw-filter;
+                    toggled(text) => { PluginsData.toggle("daw", text); }
+                    cleared => { PluginsData.clear-filter("daw"); }
+                }
+                if PluginsData.any-filter: HorizontalLayout {
+                    alignment: start;
+                    StudioButton {
+                        text: "Clear filters";
+                        clicked => { PluginsData.clear(); }
+                    }
+                }
             }
         }
     }
