@@ -55,7 +55,9 @@ light that means something. It should feel like a rack unit on a desk, not a web
   at 1280 px and its side card at 760 px (`Fit` in `ui/list.slint`), side by side from the left with the page's rows
   of controls stopping at the same width, so a line's name and its numbers stay within one look of each other. The
   card's place is always there, empty ("Pick a part") until something is picked, so nothing moves when it is. On
-  MIDI, Presets and Plugins so far; `mo-screens` draws every place at 3440 x 1369 too (`wide-<place>.png`).
+  MIDI, Presets, Plugins and Songs so far; `mo-screens` draws every place at 3440 x 1369 too (`wide-<place>.png`).
+  Songs turns it round, since a song's card holds its arrangement: the list takes a third of the room up to 760 px
+  and the card the rest, up to twice 1280 px.
 
 - Column headings order a list (the UX review of 10 Nov, B5): a click on a heading (`ColumnHead` in `studio.slint`)
   puts the list in that column's order, a second click turns it round; the heading the list goes by is lit in the
