@@ -725,13 +725,27 @@ pub fn moves_this_session() -> u64 {
     PAGE.with(|p| p.borrow().moves)
 }
 
-/// Space put back one of this page's clean-ups or uninstalls (`kind`, kept at `when`): its Put back here goes when all
-/// of it came back, and the list is read again, so the plugin's folders show again (review X1-3).
-pub fn put_back_elsewhere(kind: &str, when: i64, all: bool) {
-    if all {
-        let kept = Some((kind.to_owned(), when));
-        PAGE.with(|p| p.borrow_mut().binned.retain(|b| b.kept != kept));
-    }
+/// This page's clean-ups and uninstalls in the app's list of what's in the bin, when it can be gone by
+/// ([`clean::trusted`]).
+pub fn trusted_binned(kept: &mo_app::binned::Kept) -> Option<Vec<mo_app::binned::Binned>> {
+    clean::trusted(kept)
+}
+
+/// Space put back one of this page's clean-ups or uninstalls (`kind`, kept at `when`): the page's list of what's in the
+/// bin follows the app's (`list`, looked at after it), so what came back shows again however much did (review P-5),
+/// and the list is read again (review X1-3). Without that list, its Put back here goes only when all of it came back.
+pub fn put_back_elsewhere(kind: &str, when: i64, all: bool, list: Option<&[mo_app::binned::Binned]>) {
+    PAGE.with(|p| {
+        let binned = &mut p.borrow_mut().binned;
+        match list {
+            Some(list) => clean::sync_binned(binned, list),
+            None if all => {
+                let kept = Some((kind.to_owned(), when));
+                binned.retain(|b| b.kept != kept);
+            }
+            None => {}
+        }
+    });
     read_again();
 }
 
@@ -739,6 +753,7 @@ pub fn put_back_elsewhere(kind: &str, when: i64, all: bool) {
 pub fn stop_moves() {
     moving::stop_moves();
     measuring::stop();
+    clean::stop_sending();
 }
 
 /// Space looked at your plugins: they're measured again when the last measure is a day old (once a run).
@@ -746,9 +761,11 @@ pub fn measure_when_due(app: &AppWindow) {
     measuring::when_due(app);
 }
 
-/// When the window has closed, after the quick jobs: waits for a move told to stop ([`moving::finish_up`]).
+/// When the window has closed, after the quick jobs: waits for a move told to stop ([`moving::finish_up`]), then for
+/// a clean-up or uninstall sending to the bin ([`clean::finish_sending`]).
 pub fn finish_up() {
     moving::finish_up();
+    clean::finish_sending();
 }
 
 /// Where this session's Clean ups, uninstalls and moves took things from: Space leaves them out of the plugins it

@@ -7,8 +7,9 @@
 //! Uninstall's card ([`super::uninstall`]) is shown the same way, in the same place.
 
 use mo_app::space_bin::BIN;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 use mo_app::binned::Kept;
 use mo_app::log;
@@ -109,24 +110,134 @@ pub(super) struct Binned {
     pub(super) kept: Option<(String, i64)>,
 }
 
+/// The Plugins page's clean-ups and uninstalls sending things to the Recycle Bin now, each by what stops it: as the app
+/// closes, each is stopped and given a little time to keep what went ([`finish_sending`], review P-1).
+static SENDING: Mutex<Vec<Arc<AtomicBool>>> = Mutex::new(Vec::new());
+static SENDING_ENDED: Condvar = Condvar::new();
+
+/// The longest the app waits, as it closes, for a clean-up it stopped to keep what went (as Space's Removes).
+const CLOSE_WAIT: Duration = Duration::from_secs(15);
+
+/// What a clean-up's things in the bin are kept under (kind and when), and the app's list of them now.
+type KeptAs = ((String, i64), Kept);
+
+/// One clean-up or uninstall sending to the bin, in [`SENDING`] until it's done with, however it ends.
+struct OnItsWay(Arc<AtomicBool>);
+
+impl OnItsWay {
+    fn new(stop: Arc<AtomicBool>) -> Self {
+        SENDING.lock().unwrap_or_else(PoisonError::into_inner).push(stop.clone());
+        OnItsWay(stop)
+    }
+}
+
+impl Drop for OnItsWay {
+    fn drop(&mut self) {
+        let mut sending = SENDING.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(at) = sending.iter().position(|stop| Arc::ptr_eq(stop, &self.0)) {
+            sending.swap_remove(at);
+        }
+        SENDING_ENDED.notify_all();
+    }
+}
+
+/// As the window closes, first: a clean-up or uninstall still sending to the bin stops after what's going now.
+pub(super) fn stop_sending() {
+    for stop in SENDING.lock().unwrap_or_else(PoisonError::into_inner).iter() {
+        stop.store(true, Ordering::Relaxed);
+    }
+}
+
+/// As the app closes: waits a little for a clean-up told to stop ([`stop_sending`]) to keep what went, for Put back.
+/// One that doesn't end in time (Windows' administrator step may still be waiting for you) noted what went as it went
+/// ([`Sent::note`]): the next look keeps it.
+pub(super) fn finish_sending() {
+    // Again: one may have started since the window closed.
+    stop_sending();
+    let mut sending = SENDING.lock().unwrap_or_else(PoisonError::into_inner);
+    if sending.is_empty() {
+        return;
+    }
+    log::warning(
+        "Plugins",
+        &format!("The app closed while a clean-up was sending to the {BIN}: it stops (what went stays there)"),
+    );
+    let deadline = Instant::now() + CLOSE_WAIT;
+    while !sending.is_empty() {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            log::warning(
+                "Plugins",
+                &format!("A clean-up didn't stop in time: what went to the {BIN} was noted as it went, for Put back"),
+            );
+            return;
+        }
+        sending = SENDING_ENDED.wait_timeout(sending, left).unwrap_or_else(PoisonError::into_inner).0;
+    }
+}
+
+/// A clean-up or uninstall of the plugin at `row_key` on its way to the bin: when it started, and its note of each thing
+/// the moment it goes (`mo_app::binned::Going`), so a close or a crash part way still leaves what went on the disk, to
+/// be kept by the next look with its Put back (review P-1).
+pub(super) struct Sent {
+    kind: &'static str,
+    row_key: (String, String),
+    when: i64,
+    note: mo_app::binned::Going,
+    _on_its_way: OnItsWay,
+}
+
+impl Sent {
+    /// Starts one, stopped by `stop` (as the app closes too).
+    pub(super) fn start(kind: &'static str, row_key: &(String, String), stop: &Arc<AtomicBool>) -> Sent {
+        let when = mo_app::binned::now();
+        let note = mo_app::binned::Going::start_for(&mo_app::paths::data_dir(), kind, when, Some(row_key.clone()));
+        Sent { kind, row_key: row_key.clone(), when, note, _on_its_way: OnItsWay::new(stop.clone()) }
+    }
+
+    /// Runs `work` with the bin to send through: the system's, each thing noted as it goes.
+    pub(super) fn send<T>(&self, work: impl FnOnce(&Watched<'_>) -> T) -> T {
+        let goes = |removed: &mo_space::clean::Removed| self.note.went(removed);
+        let hear = |_: &std::path::Path, _: &Result<(), String>| {};
+        let heard = mo_space::clean::Heard::new(&SystemBin, &hear).noting(&goes);
+        work(&Watched::new(&heard))
+    }
+
+    /// What it noted going so far, as the bin has each: what went when it stopped on a bug, the same as its note (so
+    /// the next look doesn't take the note in as another clean-up).
+    pub(super) fn went_so_far(&self) -> Done {
+        Done { removed: self.note.went_so_far(), ..Done::default() }
+    }
+
+    /// It ended (`outcome`): what's in the bin is kept in the app's list ([`record`]), and its note goes once that's
+    /// kept. After a crash the note stays for the next look, as Windows' administrator step goes on by itself.
+    pub(super) fn keep(self, outcome: &Outcome) -> Option<KeptAs> {
+        let (kept, keeps) = record(self.kind, &self.row_key, outcome, self.when);
+        let crashed = matches!(outcome, Outcome::Stopped(_));
+        self.note.finish(!crashed && keeps);
+        kept
+    }
+}
+
 /// Keeps what a clean-up or an uninstall of the plugin at `row_key` sent to the Recycle Bin in the app's list, as Space's
-/// clean-ups are (`mo_app::binned`): Space's Recycle Bin line counts it, and its Put back is here after a restart too
-/// (review X1-3). What it's kept under and the list now, or `None` when nothing went to the bin or it couldn't be kept
-/// (said in the log). Looks in the bin and writes a file: call it off the window's thread.
-pub(super) fn record(kind: &str, row_key: &(String, String), outcome: &Outcome) -> Option<((String, i64), Kept)> {
-    let (Outcome::Done(done) | Outcome::Stopped(done)) = outcome else { return None };
+/// clean-ups are (`mo_app::binned`), under `when` (as its note: [`Sent`]): Space's Recycle Bin line counts it, and its
+/// Put back is here after a restart too (review X1-3). What it's kept under and the list now, or `None` when nothing
+/// went to the bin or it couldn't be kept (said in the log); and whether it's all kept, so its note may go. Looks in
+/// the bin and writes a file: call it off the window's thread.
+fn record(kind: &str, row_key: &(String, String), outcome: &Outcome, when: i64) -> (Option<KeptAs>, bool) {
+    let (Outcome::Done(done) | Outcome::Stopped(done)) = outcome else { return (None, true) };
     let in_bin = clean::in_the_bin(done);
     if in_bin.removed.is_empty() {
-        return None;
+        return (None, true);
     }
-    let when = mo_app::binned::now();
     let folder = mo_app::paths::data_dir();
     let kept = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
         mo_app::binned::record_for(&folder, &SystemBin, kind, when, &in_bin, Some(row_key.clone()))
     }));
     match kept {
         Ok((kept, at)) => {
-            if !kept.noted {
+            let noted = kept.noted;
+            if !noted {
                 log::warning(
                     "Plugins",
                     &format!(
@@ -134,9 +245,9 @@ pub(super) fn record(kind: &str, row_key: &(String, String), outcome: &Outcome) 
                     ),
                 );
             }
-            Some(((kind.to_owned(), at), kept))
+            (Some(((kind.to_owned(), at), kept)), noted)
         }
-        Err(_) => None,
+        Err(_) => (None, false),
     }
 }
 
@@ -153,16 +264,7 @@ pub(super) fn load_binned(app: &AppWindow) {
     let weak = app.as_weak();
     let spawned = mo_app::background::spawn("Plugins binned", move || {
         let Some(kept) = kept_now() else { return };
-        let mine: Vec<Binned> = kept
-            .list
-            .clone()
-            .into_iter()
-            .filter(|b| b.kind == PLUGIN_CLEAN || b.kind == PLUGIN_UNINSTALL)
-            .filter_map(|b| {
-                let row_key = b.plugin?;
-                Some(Binned { row_key, done: b.done, kept: Some((b.kind, b.when)) })
-            })
-            .collect();
+        let mine = mine(&kept.list);
         back(&weak, move |app| {
             crate::space::bin_changed(app, kept);
             if mine.is_empty() {
@@ -186,6 +288,62 @@ pub(super) fn load_binned(app: &AppWindow) {
     if let Err(e) = spawned {
         log::warning("Plugins", &format!("Couldn't read what earlier clean-ups put in the Recycle Bin: {e}"));
     }
+}
+
+/// This page's clean-ups and uninstalls in the app's list of what's in the bin (`list`), each under its plugin.
+fn mine(list: &[mo_app::binned::Binned]) -> Vec<Binned> {
+    list.iter()
+        .filter(|b| b.kind == PLUGIN_CLEAN || b.kind == PLUGIN_UNINSTALL)
+        .filter_map(|b| {
+            let row_key = b.plugin.clone()?;
+            Some(Binned { row_key, done: b.done.clone(), kept: Some((b.kind.clone(), b.when)) })
+        })
+        .collect()
+}
+
+/// This page's clean-ups and uninstalls in the app's list of what's in the bin (`kept`), when that list can be gone by
+/// for what's still there: it was read from its file and the bin could be looked in. Otherwise `None` (the list may
+/// hold only some of them, or all of them whatever came back), and the page keeps what it knows.
+pub(crate) fn trusted(kept: &Kept) -> Option<Vec<mo_app::binned::Binned>> {
+    (kept.noted && kept.in_bin.looked)
+        .then(|| kept.list.iter().filter(|b| b.kind == PLUGIN_CLEAN || b.kind == PLUGIN_UNINSTALL).cloned().collect())
+}
+
+/// Brings the page's list of what its clean-ups sent to the bin in step with the app's list of what's there (`list`,
+/// just looked at, after a Put back here or on Space): each one kept there now holds only what's still in the bin, and
+/// goes once nothing of it is, so what came back shows on the page again (review P-5). One that couldn't be kept in
+/// that list stays as it is.
+pub(super) fn sync_binned(binned: &mut Vec<Binned>, list: &[mo_app::binned::Binned]) {
+    binned.retain_mut(|b| {
+        let Some((kind, when)) = &b.kept else { return true };
+        match list.iter().find(|l| &l.kind == kind && l.when == *when && !l.done.removed.is_empty()) {
+            Some(l) => {
+                b.done = l.done.clone();
+                true
+            }
+            None => false,
+        }
+    });
+}
+
+/// What's left of the plugin at `row_key` in the bin after its Put back: what the app's list (`list`) still keeps of
+/// it, under the same keys (so a later Put back on Space finds them, review P-5), and anything else of `still` (what
+/// didn't come back) that list doesn't hold. Without the list, all of `still`.
+fn left_after(row_key: &(String, String), still: Option<Done>, list: Option<&[mo_app::binned::Binned]>) -> Vec<Binned> {
+    let Some(list) = list else {
+        return still.into_iter().map(|done| Binned { row_key: row_key.clone(), done, kept: None }).collect();
+    };
+    let mut left: Vec<Binned> =
+        mine(list).into_iter().filter(|b| &b.row_key == row_key && !b.done.removed.is_empty()).collect();
+    if let Some(mut rest) = still {
+        let held: std::collections::HashSet<&str> =
+            left.iter().flat_map(|b| b.done.removed.iter().map(|r| r.path.as_str())).collect();
+        rest.removed.retain(|r| !held.contains(r.path.as_str()));
+        if !rest.removed.is_empty() {
+            left.push(Binned { row_key: row_key.clone(), done: rest, kept: None });
+        }
+    }
+    left
 }
 
 impl Cleaning {
@@ -398,6 +556,8 @@ pub(super) fn confirm(app: &AppWindow) {
     log::info("Plugins", &format!("Clean up {name}: sending {} folders to the Recycle Bin", picked.len()));
     let weak = app.as_weak();
     let kept = kept();
+    // Started before its worker, so the window closing straight after still finds it, to stop and wait for.
+    let sent = Sent::start(PLUGIN_CLEAN, &row_key, &stop);
     let spawned = mo_app::background::spawn("Plugins clean-up", move || {
         let inputs = mo_app::background::guarded(|| {
             Library::open_read_only(&library).and_then(|lib| ask.read(&lib, kept)).map_err(|e| e.to_string())
@@ -405,22 +565,21 @@ pub(super) fn confirm(app: &AppWindow) {
         .and_then(|r| r);
         let outcome = match inputs {
             Err(why) => Outcome::NotChecked(clean::recheck_failed_text(&name, &why)),
-            Ok(inputs) => {
-                let bin = Watched::new(&SystemBin);
+            Ok(inputs) => sent.send(|bin| {
                 // Not `guarded`: this changes things, so a stop part way says what went, not "nothing happened".
                 let done = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
                     mo_app::background::on_bulk_pool(|| {
-                        inputs.with(|l| apply(&picked, &inputs.ask.space, &inputs.ask.all, l, &bin, &stop))
+                        inputs.with(|l| apply(&picked, &inputs.ask.space, &inputs.ask.all, l, bin, &stop))
                     })
                 }));
                 match done {
                     Ok(d) => Outcome::Done(d),
-                    Err(_) => Outcome::Stopped(bin.went(&picked)),
+                    Err(_) => Outcome::Stopped(sent.went_so_far()),
                 }
-            }
+            }),
         };
         report(card, &outcome);
-        let kept = record(PLUGIN_CLEAN, &row_key, &outcome);
+        let kept = sent.keep(&outcome);
         back(&weak, move |app| removed(app, id, row_key, outcome, kept));
     });
     if let Err(e) = spawned {
@@ -526,7 +685,7 @@ pub(super) fn put_back(app: &AppWindow) {
         if theirs.is_empty() {
             return None;
         }
-        let done = clean::joined(theirs.into_iter().map(|b| b.done).collect());
+        let done = clean::joined(theirs.iter().map(|b| b.done.clone()).collect());
         p.clean_asked += 1;
         p.clean = Some(Cleaning {
             row_key: row_key.clone(),
@@ -538,17 +697,17 @@ pub(super) fn put_back(app: &AppWindow) {
             stage: Stage::PuttingBack,
         });
         let card = p.feed.start(&format!("Putting back what went from {name}"), &format!("From the {BIN}"));
-        Some((done, row_key, p.clean_asked, card))
+        Some((done, theirs, row_key, p.clean_asked, card))
     });
-    let Some((done, row_key, id, card)) = job else { return };
+    let Some((done, theirs, row_key, id, card)) = job else { return };
     app.global::<PluginsData>().set_tab(1);
     fill(app);
     let weak = app.as_weak();
-    let (kept_done, kept_key) = (done.clone(), row_key.clone());
     let spawned = mo_app::background::spawn("Plugins put back", move || {
         let problems = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| undo(&done, &SystemBin)));
         // What came back isn't in the bin any more: the app's list of what's there drops it (Space's line too).
         let kept = kept_now();
+        let list = kept.as_ref().and_then(trusted);
         let (head, lines, still) = match &problems {
             Ok(problems) => {
                 let (head, lines) = clean::undone_text(&done, problems);
@@ -567,36 +726,34 @@ pub(super) fn put_back(app: &AppWindow) {
             if let Some(kept) = kept {
                 crate::space::bin_changed(app, kept);
             }
-            put_back_done(app, id, row_key, head, lines, still);
+            let left = left_after(&row_key, still, list.as_deref());
+            put_back_done(app, id, head, lines, left);
         });
     });
     if let Err(e) = spawned {
         log::error("Plugins", &format!("Couldn't start putting back: {e}"));
         PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            p.binned.push(Binned { row_key: kept_key, done: kept_done, kept: None });
+            // Nothing was tried: they stay listed as they were, under their keys.
+            p.binned.extend(theirs);
             p.clean = None;
         });
         fill(app);
     }
 }
 
-fn put_back_done(
-    app: &AppWindow,
-    id: u64,
-    row_key: (String, String),
-    head: String,
-    problems: Vec<String>,
-    still: Option<Done>,
-) {
+fn put_back_done(app: &AppWindow, id: u64, head: String, problems: Vec<String>, left: Vec<Binned>) {
     log::info("Plugins", &format!("Put back: {head}"));
     for line in &problems {
         log::warning("Plugins", &format!("Put back: {line}"));
     }
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        if let Some(done) = still {
-            p.binned.push(Binned { row_key, done, kept: None });
+        // A look that came back meanwhile ([`load_binned`]) may have listed some again already.
+        for b in left {
+            if b.kept.is_none() || !p.binned.iter().any(|o| o.kept == b.kept) {
+                p.binned.push(b);
+            }
         }
         if let Some(c) = p.clean.as_mut().filter(|c| c.id == id) {
             c.stage = Stage::Done { head, problems, offer_clean: false };
@@ -805,4 +962,70 @@ pub(super) fn fill(app: &AppWindow) {
             data.set_clean_can_go(can_go);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mo_space::clean::{Removed, What};
+    use mo_space::plugin_space::SpaceKind;
+
+    fn gone(path: &str) -> Removed {
+        Removed {
+            path: path.to_owned(),
+            real: path.to_owned(),
+            bytes: 1,
+            what: What::Plugin(SpaceKind::Presets),
+            when: 5,
+            bin_id: Some(String::new()),
+            binned: None,
+            binned_zone: None,
+            stamp: None,
+        }
+    }
+
+    fn done(paths: &[&str]) -> Done {
+        Done { removed: paths.iter().map(|p| gone(p)).collect(), ..Done::default() }
+    }
+
+    fn row() -> (String, String) {
+        ("omnisphere".to_owned(), String::new())
+    }
+
+    fn listed(when: i64, paths: &[&str]) -> mo_app::binned::Binned {
+        mo_app::binned::Binned { kind: PLUGIN_CLEAN.to_owned(), when, done: done(paths), plugin: Some(row()) }
+    }
+
+    fn paths(b: &Binned) -> Vec<&str> {
+        b.done.removed.iter().map(|r| r.path.as_str()).collect()
+    }
+
+    #[test]
+    fn a_put_back_on_space_that_brought_some_back_shows_those_again() {
+        let mut binned = vec![
+            Binned { row_key: row(), done: done(&["a", "b", "c"]), kept: Some((PLUGIN_CLEAN.to_owned(), 5)) },
+            Binned { row_key: row(), done: done(&["d"]), kept: Some((PLUGIN_CLEAN.to_owned(), 6)) },
+            Binned { row_key: row(), done: done(&["e"]), kept: None },
+        ];
+        // a and b came back from the first; all of the second came back.
+        sync_binned(&mut binned, &[listed(5, &["c"])]);
+        assert_eq!(binned.len(), 2);
+        assert_eq!(paths(&binned[0]), ["c"]);
+        assert_eq!(binned[0].kept, Some((PLUGIN_CLEAN.to_owned(), 5)));
+        assert_eq!(paths(&binned[1]), ["e"], "one the app's list never held stays as it was");
+    }
+
+    #[test]
+    fn what_stays_after_a_put_back_here_keeps_its_keys() {
+        let list = [listed(5, &["c"]), listed(7, &[])];
+        let left = left_after(&row(), Some(done(&["c", "x"])), Some(&list));
+        assert_eq!(left.len(), 2, "an emptied one goes");
+        assert_eq!(left[0].kept, Some((PLUGIN_CLEAN.to_owned(), 5)));
+        assert_eq!(paths(&left[0]), ["c"]);
+        assert_eq!(paths(&left[1]), ["x"], "what didn't come back and the list doesn't hold stays, without a key");
+        assert_eq!(left[1].kept, None);
+        let left = left_after(&row(), Some(done(&["c"])), None);
+        assert_eq!((left.len(), left[0].kept.clone()), (1, None), "without the list, all of what's left, as before");
+        assert!(left_after(&row(), None, Some(&[])).is_empty());
+    }
 }
