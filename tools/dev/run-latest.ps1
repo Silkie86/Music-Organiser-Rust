@@ -42,7 +42,7 @@ param(
 )
 
 # Raised whenever this script changes, so an older branch's copy never replaces a newer installed one.
-$LauncherVersion = 9
+$LauncherVersion = 10
 
 $ErrorActionPreference = 'Continue'   # git and cargo write progress to stderr, which Windows PowerShell treats as failure
 $GitHubRepo = 'Silkie86/Music-Organiser-Rust'
@@ -401,7 +401,9 @@ else {
     if ($LASTEXITCODE -ne 0) {
         Stop-WithMessage "'$Branch' isn't in this copy yet and GitHub can't be reached. Try again when the internet is back, or pick main."
     }
-    Git switch --quiet --track -c $Branch "origin/$Branch"
+    # No --track: this copy fetches only main by default (see Remove-OtherBranchCopies), so git refuses to set up
+    # tracking for any other branch ("starting point is not a branch"). Update-ToRemote merges origin/<branch> by name.
+    Git switch --quiet --no-track -c $Branch "origin/$Branch"
 }
 
 function Update-ToRemote {
