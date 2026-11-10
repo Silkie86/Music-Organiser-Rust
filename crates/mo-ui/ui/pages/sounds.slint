@@ -943,9 +943,6 @@ component SoundPanel inherits SidePanel {
     close => { SoundsData.close-panel(); }
     // Whether the tag box has the keys: when the card closes with them, the page gives them back to its list.
     in-out property <bool> tag-keys;
-    // How wide its parts are, inside the panel's padding: given to the words that wrap inside an `if`, which Slint
-    // would measure as one line otherwise.
-    property <length> inside: root.width - 2 * Space.xl;
     HorizontalLayout {
         spacing: Space.sm;
         alignment: start;

@@ -67,6 +67,13 @@ light that means something. It should feel like a rack unit on a desk, not a web
   On Sounds the card stops at 760 px and the views made of lines (List, History, Rediscover) at 1280 px; Tiles and
   the Galaxy take all the room, since more of them is the point.
 
+- One top row and one side card on every page (the UX review of 10 Nov, A5, A6, B2 to B4). The top row reads: views
+  (where a page has them), search, how the list is ordered (only what no column heading can do, such as Shuffle), and
+  the page's own action at the far right; filters start on the next row. A side card reads from the top: its name
+  plate, its name, its picture (waveform, piano roll, curve), the drag strip straight under the picture, then its
+  buttons in even columns (`CardActions` given the card's `room`: two on a narrow card, four on a wide one) with the
+  lit play button first, then into the DAW, then show and copy, then its facts. On MIDI so far.
+
 - Column headings order a list (the UX review of 10 Nov, B5): a click on a heading (`ColumnHead` in `studio.slint`)
   puts the list in that column's order, a second click turns it round; the heading the list goes by is lit in the
   accent with a small arrow. A page whose headings do this has no "Order" row of chips. On Plugins, MIDI,

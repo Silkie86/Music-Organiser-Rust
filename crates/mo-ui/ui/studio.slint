@@ -2313,12 +2313,33 @@ export struct CardAction {
 // (Solomon's F12 note, 2026-11-02 03:28: "theres enough space just put them there"). The card's main button goes
 // first, as a child; the rest follow and wrap onto another line when the card is narrow. The right-click menu on a
 // line offers the same.
+//
+// Given the card's `room` (a SidePanel's `inside`), they stand in even columns (the UX review of 10 Nov, B2), two on
+// a narrow card and four on a wide one, so they don't wrap raggedly; a button given as a child takes `cell` as its
+// width. A button whose words need more than a column is as wide as its words. The room comes from the card, not
+// from this layout's own width: a part's width can't hang on the width of the layout that places it.
 export component CardActions inherits FlexboxLayout {
     in property <[CardAction]> actions;
+    in property <length> room;
+    property <int> columns: self.room >= 600px ? 4 : 2;
+    out property <length> cell: (self.room - (self.columns - 1) * self.spacing) / self.columns - 0.5px;
     callback chosen(string);
     spacing: Space.sm;
+    // Two lists, one of them empty: a button with a `width` of its own gets no place from this layout unless that
+    // width is a real one, so the buttons without a room mustn't have the binding at all.
+    property <[CardAction]> none: [];
     @children
-    for a in root.actions: StudioButton {
+    for a in root.room > 0 ? root.none : root.actions: StudioButton {
+        text: a.text;
+        tip: a.tip;
+        key: a.key;
+        enabled: a.enabled;
+        main: a.main;
+        danger: a.danger;
+        clicked => { root.chosen(a.id); }
+    }
+    for a in root.room > 0 ? root.actions : root.none: StudioButton {
+        width: max(self.min-width, root.cell);
         text: a.text;
         tip: a.tip;
         key: a.key;
@@ -2396,6 +2417,8 @@ export component SidePanel inherits Rectangle {
     callback close;
     // Whether it has something to close: an empty card ("Pick a part") shows no ×.
     in property <bool> closable: true;
+    // The width its parts get: for a part that sets widths inside itself (`CardActions`' columns).
+    out property <length> inside: self.width - 2 * Space.xl;
     // Back to its top: for a page whose one panel shows another card (it would open scrolled as far as the last one).
     public function to-top() {
         flick.content-y = 0;
