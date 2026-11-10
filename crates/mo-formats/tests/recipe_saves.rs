@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use mo_formats::arrangement::{self, Arrangement, AudioPart, LaneKind, PreviewLane};
+use mo_formats::arrangement::{self, Arrangement, AudioPart, LaneKind, PreviewLane, Stretch};
 
 fn save(daw: &str, name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/recipe").join(daw).join(name)
@@ -219,11 +219,49 @@ fn fender_follow_moves_but_does_not_stretch() {
 // What the readers get wrong or don't read yet. Each is a fix to make; take off the `#[ignore]` with it.
 
 #[test]
-#[ignore = "known gap: Bitwig reversed clips read as forwards with a negative rate"]
 fn bitwig_reversed_clip() {
     let part = tone(&bitwig("13 reversed")).2;
     assert!(part.reversed);
-    assert!(part.seconds_per_beat.unwrap() > 0.0);
+    assert!(near(part.seconds_per_beat.unwrap(), 60.0 / 128.0));
+    // It plays the whole tone, from its end back to its start.
+    assert!(near(part.from, 0.0) && near(part.length, 1.0667));
+    // Trimmed by a 16th on the left: what's cut is the tone's end, so it still reaches back to the start.
+    let (start, _, part) = tone(&bitwig("14 trimmed"));
+    assert!(near(start, 4.25) && part.reversed && near(part.from, 0.0) && near(part.length, 0.8167));
+    assert!(!tone(&bitwig("12 gain and fades")).2.reversed);
+}
+
+#[test]
+fn bitwig_stretch_modes() {
+    // Each piece of audio has its own stretch mode; the recipe's tone starts in Raw.
+    for (step, mode) in [
+        ("04 audio clip", Stretch::Raw),
+        ("09 stretch hd", Stretch::StretchHd),
+        ("09b stretch old", Stretch::Stretch),
+        ("09c elastique pro", Stretch::ElastiquePro),
+        ("10 repitch", Stretch::Repitch),
+        ("11 transpose", Stretch::StretchHd),
+    ] {
+        assert_eq!(tone(&bitwig(step)).2.stretch, Some(mode), "{step}");
+    }
+}
+
+#[test]
+fn bitwig_transpose_gain_and_fades() {
+    let plain = bitwig("04 audio clip");
+    let (_, _, part) = tone(&plain);
+    assert!(near(part.semitones, 0.0) && near(part.gain_db, 0.0));
+    let clip = &lane(&plain, LaneKind::Audio).clips[0];
+    assert!(near(clip.fade_in, 0.0) && near(clip.fade_out, 0.0));
+
+    assert!(near(tone(&bitwig("11 transpose")).2.semitones, 3.0));
+    // Step 12 was made from 11, so it keeps the +3.
+    let a = bitwig("12 gain and fades");
+    let (_, _, part) = tone(&a);
+    assert!(near(part.gain_db, -6.0) && near(part.semitones, 3.0));
+    // The fades sit on the clip, not on the audio in it: a 16th each (Bitwig's unit looks like beats).
+    let clip = &lane(&a, LaneKind::Audio).clips[0];
+    assert!(near(clip.fade_in, 0.25) && near(clip.fade_out, 0.25));
 }
 
 #[test]
@@ -299,4 +337,14 @@ fn fender_disabled_track() {
     let muted = lane(&fender("06 mixer"), LaneKind::Audio).detail.clone();
     let disabled = lane(&fender("06b disabled"), LaneKind::Audio).detail.clone();
     assert_ne!(muted, disabled);
+}
+
+#[test]
+#[ignore = "known gap: a looped Bitwig audio clip shows only its first pass"]
+fn bitwig_looped_audio_clip() {
+    // Step 15 loops the trimmed tone over 3 beats: each pass is 0.82 beats, so four parts (the last one cut short).
+    let a = bitwig("15 looped");
+    let clip = &lane(&a, LaneKind::Audio).clips[0];
+    assert!(near(clip.length, 3.0));
+    assert_eq!(clip.audio.len(), 4);
 }

@@ -1248,6 +1248,7 @@ mod tests {
                 seconds_per_beat: Some(0.5),
                 whole_file_beats: None,
                 reversed: false,
+                ..Default::default()
             }],
             ..PreviewClip::default()
         }];

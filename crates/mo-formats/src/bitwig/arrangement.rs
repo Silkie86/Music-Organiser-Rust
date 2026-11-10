@@ -13,7 +13,8 @@ use super::reader::{
 };
 use crate::PluginKind;
 use crate::arrangement::{
-    Arrangement, AudioPart, LaneKind, MOST_NOTES, NoteBudget, PreviewClip, PreviewLane, PreviewNote, TOO_MANY_NOTES,
+    Arrangement, AudioPart, LaneKind, MOST_NOTES, NoteBudget, PreviewClip, PreviewLane, PreviewNote, Stretch,
+    TOO_MANY_NOTES,
 };
 use crate::velocity;
 
@@ -59,6 +60,17 @@ const F_SAMPLE_START: u32 = 0xc04;
 const F_SAMPLE_END: u32 = 0xc05;
 const F_WARP: u32 = 0x192;
 const F_WARP_SECOND: u32 = 0xa6;
+// What each audio event's playback (0x288) says about how it plays, as Solomon's recipe saves showed (6.1.7): 0x4b0 its
+// stretch mode, 0x10ad set when it's reversed, and its transpose (0xc33) and gain (0xc34) as expressions whose first
+// point (0x21f) has the value in 0x28f: semitones, and the gain as the cube root of its level (-6 dB is 0.794).
+const F_STRETCH_MODE: u32 = 0x4b0;
+const F_REVERSED: u32 = 0x10ad;
+const F_TRANSPOSE: u32 = 0xc33;
+const F_GAIN: u32 = 0xc34;
+const F_EXPRESSION_VALUE: u32 = 0x28f;
+// An audio clip's fade in and out (0x1947, 0x1948), in beats as far as the saves show.
+const F_FADE_IN: u32 = 0x1947;
+const F_FADE_OUT: u32 = 0x1948;
 
 /// The project's arrangement as Bitwig shows it. A project that didn't decode cleanly says so instead.
 pub fn read(doc: &Document) -> Arrangement {
@@ -364,14 +376,31 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
             if shown_to <= shown_from {
                 continue;
             }
+            let settings = play.map(|p| doc.obj(p));
+            let start_in_file = from + (shown_from - e_start) * rate.unwrap_or(0.0);
+            let length = shown_to - shown_from;
+            // A reversed event's warp markers run backwards through the file: what plays starts at its end. Keep the
+            // rate positive and `from` the lowest second played, which is how a reversed part is drawn.
+            let backwards = rate.is_some_and(|r| r < 0.0);
+            let (start_in_file, rate) = match rate {
+                // Rounding can put the lowest second a hair before the file's start.
+                Some(r) if backwards => ((start_in_file + length * r).max(0.0), Some(-r)),
+                _ => (start_in_file, rate),
+            };
             parts.push(AudioPart {
                 path: file.to_owned(),
                 start: shown_from - offset,
-                length: shown_to - shown_from,
-                from: from + (shown_from - e_start) * rate.unwrap_or(0.0),
+                length,
+                from: start_in_file,
                 seconds_per_beat: rate,
                 whole_file_beats: None,
-                reversed: false,
+                reversed: backwards || settings.and_then(|p| p.num(F_REVERSED)).is_some_and(|v| v > 0.0),
+                stretch: settings.and_then(|p| p.num(F_STRETCH_MODE)).map(|m| Stretch::from_bitwig(m as i32)),
+                semitones: play.and_then(|p| expression(doc, p, F_TRANSPOSE)).unwrap_or(0.0),
+                gain_db: play
+                    .and_then(|p| expression(doc, p, F_GAIN))
+                    .filter(|&v| v > 0.0)
+                    .map_or(0.0, |v| 60.0 * v.log10()),
             });
         }
         let name = if name.is_empty() {
@@ -379,7 +408,17 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
         } else {
             name.to_owned()
         };
-        return Some(PreviewClip { name, start, length, muted, audio: parts, ..PreviewClip::default() });
+        let fade = |field: u32| c.num(field).filter(|f| f.is_finite() && *f > 0.0).unwrap_or(0.0);
+        return Some(PreviewClip {
+            name,
+            start,
+            length,
+            muted,
+            audio: parts,
+            fade_in: fade(F_FADE_IN),
+            fade_out: fade(F_FADE_OUT),
+            ..PreviewClip::default()
+        });
     }
 
     let mut notes = Vec::new();
@@ -417,6 +456,13 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
     }
     notes.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.key.cmp(&b.key)));
     Some(PreviewClip { name: name.to_owned(), start, length, muted, notes, ..PreviewClip::default() })
+}
+
+/// The value of an expression in an audio playback's `field` (its first point's 0x28f), when it has one.
+fn expression(doc: &Document, play: ObjId, field: u32) -> Option<f64> {
+    let e = field_obj(doc, play, field)?;
+    let first = doc.field_list(e, F_ITEMS).into_iter().next()?;
+    doc.obj(first).num(F_EXPRESSION_VALUE).filter(|v| v.is_finite())
 }
 
 #[cfg(test)]
