@@ -51,6 +51,10 @@ light that means something. It should feel like a rack unit on a desk, not a web
   strip behind its name (`FilterPicks`): the name in a sunken cap, the chips touching, its More menu at the end. A
   strip that breaks onto a new line rounds again where the line starts. A chip or menu on its own stays a pill.
 
+- Easier small words (Solomon, 10 Nov, UX review D4: the small grey text wasn't comfortable on his 3440 px screen
+  at 100%): second lines, chips, counts and dates 13 to 14 px, capitals, small and tiny words a step up too, and every
+  theme's faint words brighter (darker on Paper) so they reach about 4.5:1 on the page.
+
 ## Next steps
 
 - Left out on purpose: a focus ring on every button (the app is driven by its shortcut list, and focusable buttons
