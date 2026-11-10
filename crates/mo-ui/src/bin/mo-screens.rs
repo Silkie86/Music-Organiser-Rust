@@ -572,7 +572,120 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // After the shots: it leaves a line picked on each of those pages.
     opened_in_sight(&app, &window)?;
     key_checks(&app)?;
+    card_keys_checks(&app, &window, &out)?;
     rail_checks(&app)?;
+    Ok(())
+}
+
+/// The keys come back to a page's list when a box on its card goes with them (the whole-app review of 10 Nov, U-1):
+/// Sounds' tag box, given the keys by Ctrl+T or by the right-click menu's Add a tag…, as its card closes (Esc, its ×,
+/// or a read while another app's window is in front), and a curve's rename box on Presets as it closes. Nothing had
+/// the keys after, so no key worked until a click: F1 must open the key sheet each time. The menu, with its Add a tag…
+/// line, is saved as sounds-menu.png. After the shots: it adds tags and leaves a curve picked.
+fn card_keys_checks(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    out: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use slint::platform::Key;
+    let sounds = app.global::<mo_ui::SoundsData>();
+    let tagged = |tag: &str| {
+        let tags = sounds.get_picked_tags();
+        (0..tags.row_count()).any(|i| tags.row_data(i).is_some_and(|t| t.text == tag))
+    };
+    let type_in = |words: &str| {
+        for c in words.chars() {
+            press(app, c.to_string(), false);
+        }
+        press(app, Key::Return, false);
+        capture(window);
+    };
+    let keys_work = |after: &str| -> Result<(), String> {
+        press(app, Key::F1, false);
+        let opened = app.get_sheet_open();
+        app.set_sheet_open(false);
+        capture(window);
+        if opened { Ok(()) } else { Err(format!("card keys: {after}, F1 did nothing: no part had the keys")) }
+    };
+    start_on(app, Place::Sounds);
+    sounds.invoke_pick_view(0);
+    sounds.invoke_select(0);
+    capture(window);
+    // Ctrl+T, a tag typed and Enter, then Esc in the empty box until the card closes (the first may stop the sound).
+    press(app, "t", true);
+    capture(window);
+    type_in("airy");
+    if !tagged("airy") {
+        return Err("card keys: Ctrl+T then typing on Sounds added no tag: its box didn't get the keys".into());
+    }
+    for _ in 0..3 {
+        if sounds.get_panel_shown() {
+            press(app, Key::Escape, false);
+            capture(window);
+        }
+    }
+    if sounds.get_panel_shown() {
+        return Err("card keys: Esc in the sound card's empty tag box didn't close the card".into());
+    }
+    keys_work("once Esc closed the sound's card from its tag box")?;
+    // The right-click menu's Add a tag… on a tile (picked by the click): the menu goes, and the box has the keys.
+    let (x, y) = MENU_TILE;
+    right_click(window, x, y);
+    let menu = capture(window);
+    if !sounds.get_panel_shown() {
+        return Err(format!("sounds-menu.png: the right click at {x}, {y} picked no tile; has the grid moved?").into());
+    }
+    let path = out.join("sounds-menu.png");
+    image::save_buffer(&path, &menu, WIDTH, HEIGHT, image::ExtendedColorType::Rgb8)?;
+    println!("{}", path.display());
+    // Its third line, under Play and Favourite.
+    click(window, x + 60.0, y + MENU_LINES_TOP + 2.5 * MENU_LINE);
+    capture(window);
+    type_in("bright");
+    if !tagged("bright") {
+        return Err("card keys: the menu's Add a tag… then typing added no tag: the box didn't get the keys".into());
+    }
+    sounds.invoke_close_panel();
+    capture(window);
+    keys_work("once the sound's card closed by its × with the keys in its tag box")?;
+    // The card closing while another app's window is in front (a read of the library dropped its sound), with the
+    // keys in its tag box: the box lost them to that window, not to this one, so they come back to the list with the
+    // window (the code review of the fix). The system's word comes first, as the window's watcher has it.
+    sounds.invoke_select(0);
+    capture(window);
+    press(app, "t", true);
+    capture(window);
+    let front = |active: bool| {
+        app.global::<mo_ui::AppKeys>().set_window_active(active);
+        window.dispatch_event(slint::platform::WindowEvent::WindowActiveChanged(active));
+        capture(window);
+    };
+    front(false);
+    sounds.invoke_close_panel();
+    capture(window);
+    front(true);
+    keys_work("once the sound's card closed while another app's window was in front, with the keys in its tag box")?;
+    // Presets: a curve's Rename, a letter typed, then Esc in the box.
+    start_on(app, Place::Presets);
+    mo_ui::presets::show_section(app, mo_app::presets::Section::Curves);
+    mo_ui::presets::pick_row(app, 0);
+    capture(window);
+    let presets = app.global::<mo_ui::PresetsData>();
+    presets.invoke_curve_chosen(mo_app::presets::curve_act::RENAME.into());
+    capture(window);
+    let named = presets.get_rename_text();
+    press(app, "x", false);
+    if !presets.get_renaming() || presets.get_rename_text() == named {
+        return Err("card keys: Rename on a curve didn't give its box the keys".into());
+    }
+    press(app, Key::Escape, false);
+    capture(window);
+    if presets.get_renaming() {
+        return Err("card keys: Esc in a curve's rename box didn't close it".into());
+    }
+    keys_work("once Esc closed a curve's rename box")?;
+    mo_ui::presets::show_section(app, mo_app::presets::Section::Sounds);
+    mo_ui::presets::pick_row(app, usize::MAX);
     Ok(())
 }
 
@@ -699,7 +812,12 @@ fn key_checks(app: &mo_ui::AppWindow) -> Result<(), String> {
 
 /// Songs on show, with the keys on the window (as Ctrl+K gives them back when it closes) and nothing open over it.
 fn start_on_songs(app: &mo_ui::AppWindow) {
-    app.invoke_place_chosen(Place::Songs.index() as i32);
+    start_on(app, Place::Songs);
+}
+
+/// `place` on show, with the keys on the window and nothing open over it, as [`start_on_songs`].
+fn start_on(app: &mo_ui::AppWindow, place: Place) {
+    app.invoke_place_chosen(place.index() as i32);
     app.set_sheet_open(false);
     mo_ui::finder::toggle(app);
     slint::platform::update_timers_and_animations();
@@ -1159,6 +1277,20 @@ fn sounds_shots(
         "sounds-panel-yours-tags.png".into(),
         card_down(window, &top, "sounds-panel-yours-tags.png").map_err(|e| e.to_string())?,
     ));
+    // The mouse resting on that box: its tip says what it's for and its key, as the menu's line does.
+    let (x, y, turn) = SPACE_CARD_WHEEL;
+    scroll(window, x, y, turn);
+    hover(window, TAG_BOX.0, TAG_BOX.1);
+    let before = capture_after(window, Duration::from_millis(150));
+    let after = capture_after(window, Duration::from_millis(750));
+    hover(window, -1.0, -1.0);
+    scroll(window, x, y, -turn);
+    hover(window, -1.0, -1.0);
+    if before == after {
+        let (x, y) = TAG_BOX;
+        return Err(format!("sounds-tag-tip.png: no tooltip came up at {x}, {y}; has the card moved?"));
+    }
+    shots.push(("sounds-tag-tip.png".into(), after));
     data.set_search("".into());
     data.invoke_search_edited("".into());
     app.set_place(Place::Songs.index() as i32);
@@ -2331,6 +2463,13 @@ const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 /// pixels): all one colour there, the list shows nothing.
 const FIRST_TILE: (u32, u32, u32, u32) = (250, 320, 200, 70);
 const FIRST_LINE: (u32, u32, u32, u32) = (250, 335, 400, 30);
+/// A point on a Sounds tile to right-click, and where a right-click menu's lines start under the mouse (its card's
+/// padding) and how tall each is (studio.slint's MenuItems and MenuLine).
+const MENU_TILE: (f32, f32) = (330.0, 345.0);
+const MENU_LINES_TOP: f32 = 4.0;
+const MENU_LINE: f32 = 32.0;
+/// The Sounds card's Add a tag box, the card turned down to its end (with a sound's six tags over it).
+const TAG_BOX: (f32, f32) = (1130.0, 534.0);
 /// The Songs, Presets, MIDI and Plugins lists in the short window: left of the activity cards, which move on their own.
 const SHORT_LIST: (u32, u32, u32, u32) = (230, 200, 760, 400);
 /// The mouse over each of those lists (Songs' is narrow beside its panel; Plugins' starts low), for the wheel.
