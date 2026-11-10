@@ -44,7 +44,7 @@ pub(super) fn line(measured: Option<NaiveDateTime>) -> String {
         return "Measuring your plugins…".to_owned();
     }
     if NOT_OWN.load(Ordering::Relaxed) {
-        return "Plugins are measured once the app's own song library is in use (it's made at a start).".to_owned();
+        return "Plugins can't be measured yet. Close the app and open it again, and they will be.".to_owned();
     }
     match measured {
         Some(t) => format!("Plugins measured {}.", t.format("%-d %b %Y, %H:%M")),
