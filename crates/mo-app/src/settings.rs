@@ -666,9 +666,9 @@ pub fn bitwig_extension_facts(
         },
     )];
     if folders.is_empty() {
-        // Not "or chosen in the old app": that app is retired, and it shares the libraries (the whole-app review of
-        // 10 Nov, X3-5).
-        facts.push(fact("Goes into", "No Bitwig Studio folder found in Documents".to_owned()));
+        // Not "or chosen in the old app": that app is retired, and it shares the libraries. The card's Choose folder…
+        // is how (the whole-app review of 10 Nov, X3-5).
+        facts.push(fact("Goes into", "No Bitwig Studio folder found in Documents: choose it".to_owned()));
         return (facts, "");
     }
     facts.extend(folders.iter().map(|f| fact("Goes into", f.display().to_string())));
@@ -678,6 +678,49 @@ pub fn bitwig_extension_facts(
         ScriptState::Installed => "Install again",
     };
     (facts, button)
+}
+
+/// The title of the picker Bitwig's card opens for your Bitwig Studio folder.
+pub const BITWIG_PICK_TITLE: &str = "Choose your Bitwig Studio folder";
+
+/// The folders a Bitwig Studio folder has in it, that tell it from another folder.
+const BITWIG_INSIDE: [&str; 3] = ["Extensions", "Library", "Projects"];
+
+/// The Bitwig Studio folder kept for the folder picked in the picker, and whether it looks like one (with an
+/// Extensions, Library or Projects folder in it). The extension goes into the Extensions folder of the folder kept, so
+/// a wrong pick would put it where Bitwig never looks: the Extensions folder itself picked keeps the folder above it,
+/// and a folder with a `Bitwig Studio` folder in it (Documents, or a drive, picked) keeps that one. `is_dir` looks at
+/// the disk: call this away from the window (a drive may be asleep).
+pub fn bitwig_folder_from_pick(picked: &Path, is_dir: impl Fn(&Path) -> bool) -> (PathBuf, bool) {
+    let named = |name: &str| picked.file_name().is_some_and(|n| n.to_string_lossy().eq_ignore_ascii_case(name));
+    let inside = picked.join("Bitwig Studio");
+    let folder = match picked.parent() {
+        Some(up) if named("Extensions") && up.file_name().is_some() => up.to_owned(),
+        _ if !named("Bitwig Studio") && is_dir(&inside) => inside,
+        _ => picked.to_owned(),
+    };
+    let looks = BITWIG_INSIDE.iter().any(|d| is_dir(&folder.join(d)));
+    (folder, looks)
+}
+
+/// What choosing your Bitwig Studio folder did, in words: the folder kept (`None` for the one in Documents), whether it
+/// looks like one ([`bitwig_folder_from_pick`]), and whether it's kept past this run (not when the settings file
+/// couldn't be read at the start).
+pub fn bitwig_folder_note(folder: Option<&Path>, looks: bool, kept: bool) -> String {
+    let mut note = match folder {
+        Some(folder) => format!("Your Bitwig Studio folder is {} now.", folder.display()),
+        None => "Your Bitwig Studio folder is the one in Documents again.".to_owned(),
+    };
+    if folder.is_some() && !looks {
+        note.push_str(
+            " It has no Extensions, Library or Projects folder in it, so check it's the one Bitwig uses before you press \
+             Install.",
+        );
+    }
+    if !kept {
+        note.push_str(" It's only kept until the app closes: your settings file couldn't be read.");
+    }
+    note
 }
 
 /// What installing the Bitwig extension did, in words.
@@ -1022,5 +1065,43 @@ mod tests {
             removed: vec![],
         };
         assert!(bitwig_installed_note(&done).ends_with("If Bitwig is open, close it, then press Install again."));
+        // None found: the card's Choose folder… is the way, never the retired app.
+        let (facts, button) = bitwig_extension_facts(Some(ScriptState::NotInstalled), Some(None), &[]);
+        assert_eq!(button, "");
+        assert_eq!(facts[1].value, "No Bitwig Studio folder found in Documents: choose it");
+    }
+
+    #[test]
+    fn the_bitwig_folder_picked_is_kept_as_bitwig_keeps_it() {
+        let studio = PathBuf::from("K:").join("Bitwig Studio");
+        let documents = PathBuf::from("C:").join("Users").join("S").join("Documents");
+        let there = [
+            studio.clone(),
+            studio.join("Extensions"),
+            studio.join("Library"),
+            documents.clone(),
+            documents.join("Bitwig Studio"),
+            documents.join("Bitwig Studio").join("Projects"),
+        ];
+        let is_dir = |p: &Path| there.iter().any(|t| t == p);
+        assert_eq!(bitwig_folder_from_pick(&studio, is_dir), (studio.clone(), true));
+        // Its Extensions folder, picked by mistake: the folder above it, in any case.
+        assert_eq!(bitwig_folder_from_pick(&studio.join("Extensions"), is_dir), (studio.clone(), true));
+        assert_eq!(bitwig_folder_from_pick(&studio.join("extensions"), is_dir), (studio.clone(), true));
+        // Documents picked, with its Bitwig Studio folder in it: that one.
+        assert_eq!(bitwig_folder_from_pick(&documents, is_dir), (documents.join("Bitwig Studio"), true));
+        // Its Library: kept as picked, but it doesn't look like one.
+        assert_eq!(bitwig_folder_from_pick(&studio.join("Library"), is_dir), (studio.join("Library"), false));
+        // A drive's own Extensions folder has no folder above it to keep: as picked.
+        let root = PathBuf::from("/Extensions");
+        assert_eq!(bitwig_folder_from_pick(&root, is_dir), (root.clone(), false));
+
+        let note = bitwig_folder_note(Some(&studio), true, true);
+        assert_eq!(note, format!("Your Bitwig Studio folder is {} now.", studio.display()));
+        let note = bitwig_folder_note(Some(&root), false, true);
+        assert!(note.ends_with("so check it's the one Bitwig uses before you press Install."), "{note}");
+        assert_eq!(bitwig_folder_note(None, false, true), "Your Bitwig Studio folder is the one in Documents again.");
+        let note = bitwig_folder_note(None, false, false);
+        assert!(note.ends_with("only kept until the app closes: your settings file couldn't be read."), "{note}");
     }
 }

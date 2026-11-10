@@ -1,5 +1,5 @@
 //! The app's own settings: what you change on the Settings page (the look, the start page, the pace, the sound output,
-//! your keys) and what the app remembers between runs (the last page, the Settings tab).
+//! your keys, your Bitwig Studio folder) and what the app remembers between runs (the last page, the Settings tab).
 //!
 //! `library.db` is shared with the C# app and stays read-only until the Rust pages are trusted (CLAUDE.md), so this
 //! app keeps its changes in a small file of its own, `rust-settings.json` in the app's folder. On the first run, and
@@ -39,6 +39,11 @@ pub const SOUND_OUTPUT_KEY: &str = "sound_output";
 /// The Settings tab last shown, by its name. The C# app's name (its tabs had other names; an unknown one opens General).
 pub const TAB_KEY: &str = "settings_tab";
 
+/// Your Bitwig Studio folder, the one Bitwig keeps your Library, Projects and Extensions in (the app's extension goes
+/// into its Extensions folder), when it isn't the one in Documents: chosen on Settings › DAWs, else the C# app's
+/// choice. "" for the one in Documents. The C# app's name.
+pub const BITWIG_FOLDER_KEY: &str = "bitwig_user_folder";
+
 /// Whether a Galaxy sweep holds the pointer back to the star that's playing, so a quick sweep can't pass stars before
 /// they're heard: "1" for on. Off unless set (this app's own; the C# app had no such setting).
 pub const SWEEP_HOLD_KEY: &str = "galaxy_sweep_hold";
@@ -54,6 +59,7 @@ pub const FROM_CSHARP: &[&str] = &[
     PACE_KEY,
     SOUND_OUTPUT_KEY,
     TAB_KEY,
+    BITWIG_FOLDER_KEY,
     shortcuts::SETTING_KEY,
     crate::midi::SOUNDFONT_KEY,
     crate::sounds::VIEW_KEY,

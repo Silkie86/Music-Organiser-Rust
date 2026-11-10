@@ -190,9 +190,10 @@ pub fn bitwig_extension_source(app: &Path) -> Option<PathBuf> {
         .find(|f| f.is_file())
 }
 
-/// Bitwig's user folders: the one chosen in the C# app (`bitwig_user_folder`, like `K:\Bitwig Studio`), and every
-/// `Bitwig Studio` folder in a Documents folder that's there. Bitwig may load extensions from one while it keeps the
-/// projects in another, and every copy is the same, so the extension goes in each (as the C# app does).
+/// Bitwig's user folders: the one chosen (`bitwig_user_folder`, like `K:\Bitwig Studio`, on Settings › DAWs or before
+/// in the C# app), and every `Bitwig Studio` folder in a Documents folder that's there. Bitwig may load extensions from
+/// one while it keeps the projects in another, and every copy is the same, so the extension goes in each (as the C#
+/// app does).
 pub fn bitwig_user_folders(chosen: Option<&str>, documents: &[PathBuf]) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();
     let mut add = |f: PathBuf| {
