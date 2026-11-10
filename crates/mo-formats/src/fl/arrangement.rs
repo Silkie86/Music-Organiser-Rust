@@ -555,27 +555,30 @@ fn part(c: &FlChannel, beats: f64, from: f64, tempo: f64) -> AudioPart {
         whole_file_beats,
         reversed: s.reversed,
         stretch: Some(stretch_of(s)),
-        // Resampling, the pitch is already in how fast the sample plays; the other modes shift it on its own.
-        semitones: if s.mode == 0 { 0.0 } else { s.pitch_cents as f64 / 100.0 },
+        // The converter's own rule. Resampled to a set length, the pitch isn't known until the file's length is.
+        semitones: if s.mode == 0 && s.time > 0.0 { 0.0 } else { s.semitones(1.0, s.played_seconds(1.0, tempo)) },
         ..Default::default()
     }
 }
 
-/// FL's stretch mode by Bitwig's names. The numbers are FL's own (the sampler settings' mode): Solomon's FL 25 recipe
-/// saves showed Resample 0, e3 generic 1, Stretch pro -2, e2 generic 6, e3 mono 8 and Auto 5; the rest are PyFLP's
-/// list, not checked against a save.
+/// FL's stretch mode by the shared names. The numbers are FL's own (the sampler settings' mode): Solomon's FL 25
+/// recipe saves showed Resample 0, e3 generic 1, Stretch pro -2, Auto 5, e2 generic 6, and 8 in the save made as "e3
+/// mono" (PyFLP's list has 8 as e2 mono and 2 as e3 mono; both are one-voice modes, so they read the same here).
+/// The rest (-1, 2, 3, 4, 7, 9) are PyFLP's list, not checked against a save.
 fn stretch_of(s: &FlStretch) -> Stretch {
     match s.mode {
         // Resample plays like a record. Fitted to a length in beats (the Time knob) it follows the tempo; without,
-        // it plays at its own speed whatever the tempo.
+        // it plays at its own speed whatever the tempo, faster or slower as Pitch and Mul say.
         0 if s.time > 0.0 => Stretch::Repitch,
         0 => Stretch::Raw,
         -1 => Stretch::Stretch,
+        -2 => Stretch::StretchPro,
         // FL's e3 is zplane's Elastique Pro, e2 the Elastique before it; the mono modes are for one voice.
         1 => Stretch::ElastiquePro,
         2 | 8 => Stretch::ElastiqueSolo,
+        3 | 4 => Stretch::Slice,
+        5 => Stretch::Auto,
         6 | 7 | 9 => Stretch::Elastique,
-        // Stretch pro, Auto, and the slicing modes have no Bitwig name.
         other => Stretch::Other(other),
     }
 }

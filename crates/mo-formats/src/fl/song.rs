@@ -104,6 +104,16 @@ impl FlStretch {
         let length = length * self.multiplier;
         if self.mode == 0 { length / 2f64.powf(self.pitch_cents as f64 / 1200.0) } else { length }
     }
+
+    /// How many semitones higher than recorded a sample `seconds` long sounds when it plays for `played` seconds:
+    /// resampling, whatever its speed makes of it; in the other modes the Pitch knob alone.
+    pub fn semitones(&self, seconds: f64, played: f64) -> f64 {
+        if self.mode == 0 && seconds > 0.0 && played > 0.0 {
+            -12.0 * (played / seconds).log2()
+        } else {
+            self.pitch_cents as f64 / 100.0
+        }
+    }
 }
 
 impl Default for FlStretch {
@@ -645,7 +655,10 @@ fn levels(d: &[u8], major: u32) -> Option<(f64, f64, i32)> {
 /// A channel's time stretching, from its sampler settings (event 215, 168 bytes in FL 25): Time at 96, the pitch in
 /// cents at 100, the multiplier at 104 (2 to the power raw / 10000, so 10000 is twice as long) and the mode at 108.
 /// The multiplier, pitch and mode are checked against an FL 25 save. Time is a whole number in Solomon's FL 12 to 21
-/// projects (384, 1536) and a float in his FL 25 recipe saves (410.0, the tone fitted to 2.135 beats), 192 to a beat.
+/// projects and a float in his FL 25 recipe saves, 192 to a beat whatever the project's PPQ, and Mul stretches it
+/// further: his old projects hold 81508 and 81982 with Mul at 100% under whole clips of 40754 and 40991 ticks at 96
+/// PPQ, one at 192 PPQ plays from 336 seconds into a Time of 187855 (367 seconds at its 160 BPM), and the recipe's
+/// 410.0 with Mul at 200% sits under a clip of 410 ticks at 96 PPQ.
 fn stretch(d: &[u8]) -> Option<FlStretch> {
     if d.len() < 112 {
         return None;
@@ -661,11 +674,15 @@ fn stretch(d: &[u8]) -> Option<FlStretch> {
 
 /// The Time knob from its four bytes: a whole number up to FL 21, a float from FL 25 (which version changed it isn't
 /// known). The two can't be mixed up: the smallest float a knob could show is past any whole number a song could
-/// hold (0x2000_0000 units would be 2.8 million beats). 0 when it's off or damaged.
+/// hold (0x2000_0000 units would be 2.8 million beats). 0 when it's off, or damaged: less than one unit, or more
+/// than [`MOST_TIME`].
 fn time_knob(raw: i32) -> f64 {
     let time = if raw >= 0x2000_0000 { f32::from_bits(raw as u32) as f64 } else { raw as f64 };
-    if time.is_finite() { time.clamp(0.0, i32::MAX as f64) } else { 0.0 }
+    if (1.0..=MOST_TIME).contains(&time) { time } else { 0.0 }
 }
+
+/// The longest the Time knob is taken at its word: a million beats, days of sound.
+const MOST_TIME: f64 = 192.0e6;
 
 /// An envelope (event 218, 68 bytes), or `None` when it's switched off: i32 flags, i32 on, then i32 delay, attack,
 /// hold, decay, sustain (0..128) and release. The layout is PyFLP's; no real file with an envelope on is checked yet.
@@ -1234,21 +1251,24 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn the_time_knob_is_a_whole_number_or_a_float() {
-        use super::time_knob;
+        let float = |f: f32| time_knob(f.to_bits() as i32);
         // FL 12 to 21: whole numbers, 192 to a beat.
         assert_eq!((time_knob(0), time_knob(384), time_knob(81_508)), (0.0, 384.0, 81_508.0));
         // FL 25: a float.
-        assert_eq!(time_knob(410.0f32.to_bits() as i32), 410.0);
-        assert_eq!(time_knob(0.5f32.to_bits() as i32), 0.5);
-        // Damaged: below nothing, not a number, or past any song.
-        assert_eq!((time_knob(-5), time_knob((-410.0f32).to_bits() as i32)), (0.0, 0.0));
-        assert_eq!((time_knob(f32::NAN.to_bits() as i32), time_knob(f32::INFINITY.to_bits() as i32)), (0.0, 0.0));
-        assert_eq!(time_knob(f32::MAX.to_bits() as i32), i32::MAX as f64);
+        assert_eq!((float(410.0), float(1.5)), (410.0, 1.5));
+        // Damaged: below nothing, next to nothing, not a number, or longer than any song.
+        assert_eq!((time_knob(-5), float(-410.0), float(0.5), time_knob(0x2000_0001)), (0.0, 0.0, 0.0, 0.0));
+        assert_eq!((float(f32::NAN), float(f32::INFINITY), float(f32::MAX), float(193.0e6)), (0.0, 0.0, 0.0, 0.0));
+        assert_eq!(float(192.0e6), 192.0e6);
+        // Resampled, the pitch follows the speed; stretched, it's the Pitch knob's.
+        let s = FlStretch { pitch_cents: 300, ..FlStretch::default() };
+        assert!((s.semitones(1.0, 0.5) - 12.0).abs() < 1e-9);
+        assert_eq!(FlStretch { mode: 1, ..s }.semitones(1.0, 0.5), 3.0);
     }
-
-    use super::*;
 
     #[test]
     fn a_mixed_fl_9_playlist_puts_pattern_n_on_track_n_beside_the_clips() {

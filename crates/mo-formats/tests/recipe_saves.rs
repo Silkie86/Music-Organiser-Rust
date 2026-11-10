@@ -285,20 +285,21 @@ fn fl_stretch_modes_and_pitch() {
     for (step, mode) in [
         // Resample with no length set plays at the sample's own speed whatever the tempo.
         ("04 audio clip", Stretch::Raw),
-        ("10 stretch resample", Stretch::Raw),
         ("11 stretch keep pitch", Stretch::ElastiquePro),
-        // Stretch pro is FL's own: no Bitwig name, so it goes by FL's number.
-        ("11b stretch pro", Stretch::Other(-2)),
+        ("11b stretch pro", Stretch::StretchPro),
         ("11c e2 generic", Stretch::Elastique),
         ("11d e3 mono", Stretch::ElastiqueSolo),
     ] {
         let part = tone(&fl(step)).2;
         assert_eq!((part.stretch, part.semitones), (Some(mode), 0.0), "{step}");
     }
+    // Resampled to twice as long, it sounds an octave down.
+    let part = tone(&fl("10 stretch resample")).2;
+    assert!(part.stretch == Some(Stretch::Raw) && near(part.semitones, -12.0), "{part:?}");
     // Up 300 cents in Auto mode (FL's 5): three semitones, at the sample's own speed.
     let part = tone(&fl("12 pitch")).2;
     assert!(near(part.seconds_per_beat.unwrap(), 60.0 / 128.0) && near(part.semitones, 3.0), "{part:?}");
-    assert_eq!(part.stretch, Some(Stretch::Other(5)));
+    assert_eq!(part.stretch, Some(Stretch::Auto));
 }
 
 #[test]

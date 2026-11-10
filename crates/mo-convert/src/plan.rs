@@ -390,11 +390,7 @@ pub fn played_seconds(stretch: &FlStretch, seconds: f64, tempo: f64) -> f64 {
 
 /// How many semitones higher than recorded a sample `seconds` long sounds when it plays for `played` seconds.
 pub fn stretched_semitones(stretch: &FlStretch, seconds: f64, played: f64) -> f64 {
-    if stretch.mode == 0 && seconds > 0.0 && played > 0.0 {
-        -12.0 * (played / seconds).log2()
-    } else {
-        stretch.pitch_cents as f64 / 100.0
-    }
+    stretch.semitones(seconds, played)
 }
 
 /// How another DAW names a plugin's setting: a VST2 setting by its number, which FL uses too; a VST3 one by the
