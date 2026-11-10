@@ -112,11 +112,13 @@ impl Model for Lines {
 }
 
 /// The library's read, started before the window is made ([`read_ahead`]) and handed to [`connect`].
+#[must_use = "the read goes on the page only once `connect` has it"]
 pub struct Ahead {
     path: PathBuf,
     details: LiveDetails,
-    /// None when its thread couldn't be started: [`connect`] reads the library itself then.
-    reading: Option<std::thread::JoinHandle<Result<Loaded, String>>>,
+    /// Tells the reading thread which window the list goes on. None when that thread couldn't be started:
+    /// [`connect`] starts it then.
+    window: Option<mpsc::Sender<slint::Weak<AppWindow>>>,
 }
 
 /// A library read and made into the page's list.
@@ -130,19 +132,49 @@ struct Loaded {
 }
 
 /// Starts reading the library at `path` and making the page's list from it, in the background. Called as soon as the
-/// app knows which library it reads, before the graphics card is found and the window made, so the list is ready
-/// when the window first draws (or soon after) rather than only begun then.
+/// app knows which library it reads and how many background threads it may use, before the graphics card is found
+/// and the window made, so the list is ready when the window first draws (or soon after) rather than only begun then.
 pub fn read_ahead(path: PathBuf) -> Ahead {
     let details = LiveDetails::default();
-    let (db, for_load) = (path.clone(), details.clone());
-    let reading = match background::spawn("Songs read", move || load(&db, for_load)) {
-        Ok(reading) => Some(reading),
+    let window = match start(path.clone(), details.clone()) {
+        Ok(window) => Some(window),
         Err(e) => {
             log::warning("Songs", &format!("Couldn't start reading the library ahead of the window: {e}"));
             None
         }
     };
-    Ahead { path, details, reading }
+    Ahead { path, details, window }
+}
+
+/// Starts the page's thread: it reads the library at `path` at once ([`load`]), waits to be told its window, puts
+/// the list there and then keeps it up to date ([`watch`]). A read that fails is logged as it fails, and shown once
+/// there's a window. If it's never told a window (the window couldn't be made), it ends.
+fn start(path: PathBuf, details: LiveDetails) -> std::io::Result<mpsc::Sender<slint::Weak<AppWindow>>> {
+    let (window, told) = mpsc::channel::<slint::Weak<AppWindow>>();
+    background::spawn("Songs", move || {
+        let loaded = load(&path, details);
+        if let Err(e) = &loaded {
+            log::warning("Songs", e);
+        }
+        let Ok(weak) = told.recv() else { return };
+        let Loaded { mut live, songs, found, years } = match loaded {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    let data = app.global::<SongsData>();
+                    data.set_message(CANT_READ.into());
+                    data.set_message_text(e.into());
+                });
+                return;
+            }
+        };
+        let _ = weak.upgrade_in_event_loop(move |app| {
+            show(&app, songs, years);
+            crate::finder::add_source(&app, "songs", found);
+        });
+        watch(&mut live, &weak);
+    })?;
+    Ok(window)
 }
 
 /// Reads the library at `path` and makes the page's list from it. Why not, when it can't be read.
@@ -180,7 +212,7 @@ fn load(path: &Path, details: LiveDetails) -> Result<Loaded, String> {
 /// Wires the page's search box and chips, and puts the library `ahead` has been reading on the page once it's read.
 /// Open, Show in folder and Copy path report on `feed`'s cards.
 pub fn connect(app: &AppWindow, ahead: Ahead, feed: Feed) {
-    let Ahead { path, details, reading } = ahead;
+    let Ahead { path, details, window } = ahead;
     let data = app.global::<SongsData>();
     FEED.with(|f| *f.borrow_mut() = Some(feed));
     PAGE.with(|p| p.borrow_mut().db = path.clone());
@@ -274,33 +306,13 @@ pub fn connect(app: &AppWindow, ahead: Ahead, feed: Feed) {
         Err(e) => log::error("Songs", &format!("Couldn't start the song panel's reader: {e}")),
     }
 
-    let weak = app.as_weak();
-    let started = background::spawn("Songs", move || {
-        let loaded = match reading {
-            // Its own crash is logged where it happened; here the page says the list couldn't be made.
-            Some(reading) => reading.join().unwrap_or_else(|_| Err("reading them crashed (see the log)".to_owned())),
-            None => load(&path, details),
-        };
-        let Loaded { mut live, songs, found, years } = match loaded {
-            Ok(loaded) => loaded,
-            Err(e) => {
-                log::warning("Songs", &e);
-                let _ = weak.upgrade_in_event_loop(move |app| {
-                    let data = app.global::<SongsData>();
-                    data.set_message(CANT_READ.into());
-                    data.set_message_text(e.into());
-                });
-                return;
-            }
-        };
-        let _ = weak.upgrade_in_event_loop(move |app| {
-            show(&app, songs, years);
-            crate::finder::add_source(&app, "songs", found);
-        });
-        watch(&mut live, &weak);
-    });
-    if let Err(e) = started {
-        log::error("Songs", &format!("Couldn't start reading the library: {e}"));
+    // The thread that has been reading since the app started is told its window; started only now if it couldn't
+    // be then.
+    match window.map_or_else(|| start(path, details), Ok) {
+        Ok(window) => {
+            let _ = window.send(app.as_weak());
+        }
+        Err(e) => log::error("Songs", &format!("Couldn't start reading the library: {e}")),
     }
 }
 
@@ -1298,17 +1310,20 @@ mod tests {
             )
             .expect("filled");
         // No window, no event loop: the read needs neither, so it can start before them.
-        let ahead = read_ahead(library.clone());
-        assert_eq!(ahead.path, library);
-        let loaded = ahead.reading.expect("started").join().expect("no crash").expect("read");
+        let loaded = load(&library, LiveDetails::default()).expect("read");
         assert_eq!(loaded.songs.saves, 3);
         let names: Vec<&str> = loaded.songs.rows.iter().map(|r| r.song.name.as_str()).collect();
         assert_eq!(names.len(), 2, "the two Night saves are one song: {names:?}");
         assert_eq!(loaded.years.iter().map(|y| y.1).sum::<usize>(), 2, "each song counted in its year");
         assert!(!loaded.live.writes(), "the C# app's library.db is never written");
         // A library that can't be read says why, for the page to show; nothing crashes.
-        let none = read_ahead(dir.join("gone").join("library.db"));
-        assert!(none.reading.expect("started").join().expect("no crash").is_err());
+        assert!(load(&dir.join("gone").join("library.db"), LiveDetails::default()).is_err());
+        // Started with no window and no event loop: the read needs neither. Never told a window (it couldn't be
+        // made), its thread ends once the read is done.
+        let ahead = read_ahead(library.clone());
+        assert_eq!(ahead.path, library);
+        assert!(ahead.window.is_some(), "started");
+        drop(ahead);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

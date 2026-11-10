@@ -71,13 +71,14 @@ fn main() -> Result<(), slint::PlatformError> {
         // read out of library.db itself; songs.db needs no copy).
         mo_library::list_copy::keep(&library, &data.join(mo_library::list_copy::FILE_NAME));
     }
-    // The Songs list is read from here on, while the settings load, the graphics card is found and the window is made.
-    let songs_ahead = mo_ui::songs::read_ahead(library.clone());
     let (settings, writable) = mo_ui::settings::load(&data, &library);
     let shortcuts = Shortcuts::from_setting(settings.get(mo_app::shortcuts::SETTING_KEY));
     // Settings' pace: how many low-priority threads background work gets, from now until the app closes.
     let pace = Pace::from_setting(settings.get(mo_app::app_settings::PACE_KEY));
     mo_app::background::set_pace(pace);
+    // The Songs list is read from here on, while the graphics card is found and the window is made. (After the pace
+    // is set: background work started before it would fix the pool's size without it.)
+    let songs_ahead = mo_ui::songs::read_ahead(library.clone());
     mo_ui::startup::step("settings");
     log::info(
         "Settings",
