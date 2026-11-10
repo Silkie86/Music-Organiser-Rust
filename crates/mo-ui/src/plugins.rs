@@ -161,7 +161,8 @@ struct FilterChips {
     sort: FilterModels,
 }
 
-/// Wires the page. The library at `library` is read when the page is first shown.
+/// Wires the page. The library at `library` is read when the page is first shown, when Ctrl+K first opens, or a
+/// little after the start ([`READ_AFTER`]), whichever comes first.
 pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortcuts) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -189,15 +190,7 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         true
     });
     // Ctrl+K finds your plugins before this page is first shown: the library is read once, in the background.
-    crate::finder::when_opening(|_| {
-        let first = PAGE.with(|p| {
-            let mut p = p.borrow_mut();
-            p.plugins.is_none() && !std::mem::replace(&mut p.finder_asked, true)
-        });
-        if first {
-            shown();
-        }
-    });
+    crate::finder::when_opening(|_| read_before_shown());
 
     let weak = app.as_weak();
     data.on_search_edited(move |t| change(&weak, |f| f.search = t.to_string()));
@@ -460,6 +453,26 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     }
     // The app may start on this page, before its reader was there to ask.
     if app.get_place() == mo_app::places::Place::Plugins.index() as i32 {
+        shown();
+    } else {
+        // Otherwise the library is read a little after the start, so the first visit finds the list there rather
+        // than an empty page for a second or two.
+        slint::Timer::single_shot(READ_AFTER, read_before_shown);
+    }
+}
+
+/// How long after the app starts the plugins are read when nothing has asked for them yet: the page on show and the
+/// sounds (3 s after the start) read from the disk first.
+const READ_AFTER: std::time::Duration = std::time::Duration::from_secs(6);
+
+/// Reads the library once, in the background, for a page that hasn't been shown yet: for Ctrl+K, which finds your
+/// plugins before then, and a little after the start. Nothing more once it's been asked, or the page has its list.
+fn read_before_shown() {
+    let first = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.plugins.is_none() && !std::mem::replace(&mut p.finder_asked, true)
+    });
+    if first {
         shown();
     }
 }

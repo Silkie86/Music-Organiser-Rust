@@ -87,9 +87,27 @@ impl Drop for Paused {
     }
 }
 
-/// Whether a knock sent when `pauses` pauses had begun waited across one (or still is).
-fn paused_since(pauses: u64) -> bool {
-    PAUSED.load(Ordering::SeqCst) > 0 || PAUSES.load(Ordering::SeqCst) != pauses
+/// How the [`pause`]s stood when a knock was sent.
+#[derive(Clone, Copy, Debug)]
+struct PausesAt {
+    /// How many had begun.
+    begun: u64,
+    /// Whether one was going on.
+    going: bool,
+}
+
+/// How the pauses stand now, for a knock about to be sent.
+fn pauses_now() -> PausesAt {
+    // In the order `pause` counts them, so one beginning between the two looks is seen by `paused_since` later.
+    let begun = PAUSES.load(Ordering::SeqCst);
+    PausesAt { begun, going: PAUSED.load(Ordering::SeqCst) > 0 }
+}
+
+/// Whether a knock sent when the pauses stood at `sent` waited through any of one: sent while one was going on (a
+/// knock can be sent in the middle of a drag, and answered only once the drag has ended), one begun since, or one
+/// going on now.
+fn paused_since(sent: PausesAt) -> bool {
+    sent.going || PAUSED.load(Ordering::SeqCst) > 0 || PAUSES.load(Ordering::SeqCst) != sent.begun
 }
 
 /// Slint is drawing the window (`true`, from its "before rendering" call) or has finished (`false`). Marks it like a
@@ -280,7 +298,7 @@ fn watch(feed: &Feed) {
         let a = answered.clone();
         let sent = Instant::now();
         let memory_before = crate::stuck::memory_now();
-        let pauses = PAUSES.load(Ordering::SeqCst);
+        let pauses = pauses_now();
         let answer = move || {
             let waited = u64::try_from(sent.elapsed().as_micros()).unwrap_or(u64::MAX).max(1);
             a.store(waited, Ordering::Release);
@@ -413,6 +431,27 @@ mod tests {
         assert!(own("outer") >= Duration::from_millis(40), "{:?}", own("outer"));
         assert!(own("outer") + own("inner") <= whole, "{:?} + {:?} > {whole:?}", own("outer"), own("inner"));
         assert!(whole.saturating_sub(own("outer") + own("inner")) < Duration::from_millis(5), "{whole:?}");
+    }
+
+    #[test]
+    fn a_knock_that_waited_through_any_of_a_pause_is_not_a_freeze() {
+        let _turn = TURN.lock();
+        // No pause: a late answer counts.
+        let quiet = pauses_now();
+        assert!(!paused_since(quiet));
+        // Sent before a drag began and answered after it ended.
+        let before = pauses_now();
+        let drag = pause();
+        assert!(paused_since(before), "still going on");
+        // Sent in the middle of the drag (the window answers some knocks while Windows runs the drag)...
+        let during = pauses_now();
+        drop(drag);
+        assert!(paused_since(before), "one began since");
+        // ...and answered only once it had ended: no pause is going on and none has begun since, but it waited
+        // through the drag's end all the same. This one was logged as a freeze of a second or more after each drag.
+        assert!(paused_since(during), "sent while one was going on");
+        // The next knock, sent after the drag, counts again.
+        assert!(!paused_since(pauses_now()));
     }
 
     #[test]
