@@ -39,10 +39,13 @@ impl FolderFix {
 /// Your say on each stored plugin's folders, as the library keeps it (`plugin_space_not:<key>` and
 /// `plugin_space_added:<key>`), as fixes to apply over the stored measure ([`Plugins::apply_folder_fixes`]): a folder
 /// ruled out, one the measure has as added that's no longer on your list (taken off), and one on your list the measure
-/// hasn't got (added since), measured here. A list that can't be read is an error, never no say: a ruled-out folder
-/// read as the plugin's could be ticked in Clean up. Reads the disk for an added folder: call it away from the window.
+/// hasn't got (added since), measured here. One the measure left out as it is, holds or is inside a project, sample or
+/// MIDI folder of yours stays out, as the measure has it (rule 2, review P-4). A list that can't be read is an error,
+/// never no say: a ruled-out folder read as the plugin's could be ticked in Clean up. Reads the disk for an added
+/// folder: call it away from the window.
 pub fn saved(lib: &mo_library::Library, spaces: &[StoredSpace]) -> Result<Vec<FolderFix>, mo_library::LibraryError> {
     let mut fixes = Vec::new();
+    let mut protected: Option<Vec<String>> = None;
     for s in spaces {
         let not = lib.strict_list_setting(&ruled_out_key(&s.key))?;
         let added = lib.strict_list_setting(&added_folders_key(&s.key))?;
@@ -53,7 +56,21 @@ pub fn saved(lib: &mo_library::Library, spaces: &[StoredSpace]) -> Result<Vec<Fo
         for f in s.folders.iter().filter(|f| f.added && !on_list(&f.path)) {
             fixes.push(FolderFix::Removed { key: s.key.clone(), path: f.path.clone(), measured: s.measured });
         }
-        for path in added.iter().filter(|a| !a.trim().is_empty() && !s.folders.iter().any(|f| same(&f.path, a))) {
+        let missing: Vec<&String> =
+            added.iter().filter(|a| !a.trim().is_empty() && !s.folders.iter().any(|f| same(&f.path, a))).collect();
+        if missing.is_empty() {
+            continue;
+        }
+        if protected.is_none() {
+            let mut roots = lib.protected_roots()?;
+            roots.extend(lib.strict_list_setting(crate::midi::FOLDERS_KEY)?);
+            protected = Some(roots);
+        }
+        let yours = mo_space::plugin_space::Yours::new(protected.as_deref().unwrap_or_default());
+        for path in missing {
+            if yours.has(path) {
+                continue;
+            }
             let Some(measured) = measured_once(path) else { continue };
             let inside: Vec<(String, u64)> = spaces
                 .iter()
@@ -116,7 +133,7 @@ fn is_gone(path: &str, moved: &std::collections::HashSet<String>) -> bool {
 
 /// Whether the drive a path is on is there: its drive letter or network place on Windows; elsewhere a drive mounted
 /// in /Volumes, /media, /run/media or /mnt, or the system's own.
-fn drive_there(path: &std::path::Path) -> bool {
+pub(crate) fn drive_there(path: &std::path::Path) -> bool {
     use std::path::Component;
     let root = if cfg!(windows) {
         path.ancestors().last().map(std::path::Path::to_path_buf)
@@ -481,6 +498,23 @@ mod tests {
         assert!(folder.bytes < 100);
         // Only stored plugins are looked at: no say, no fixes.
         assert!(saved(&lib, &[stored("other", Vec::new())]).unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Review P-4: a folder you added that is inside one of your MIDI (or project, sample) folders stays out, as the
+    /// measure leaves it out, and isn't walked.
+    #[test]
+    fn an_added_folder_inside_one_of_yours_stays_out() {
+        let d = std::env::temp_dir().join(format!("mo-app-folder-fixes-yours-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        let new = d.join("Midi").join("Pack");
+        std::fs::create_dir_all(&new).unwrap();
+        let new_s = new.to_string_lossy().into_owned();
+        let midi = serde_json::to_string(&[d.join("Midi").to_string_lossy()]).unwrap();
+        let added = serde_json::to_string(&[&new_s]).unwrap();
+        let lib = library_with(&d, &[(added_folders_key("arcade"), added.as_str()), ("midi_folders".into(), &midi)]);
+        let fixes = saved(&lib, &[stored("arcade", Vec::new())]).unwrap();
+        assert!(fixes.is_empty(), "{fixes:?}");
         let _ = std::fs::remove_dir_all(&d);
     }
 
