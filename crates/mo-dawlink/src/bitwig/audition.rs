@@ -70,13 +70,26 @@ pub struct Auditioning {
     project: Option<String>,
 }
 
-/// Whether a failed `newtrack` may have made the track all the same: not when the link refused before changing
-/// anything (another project in front as it began, an old link, no connection).
+/// Whether a failed `newtrack` may have made the track all the same: not when the app never reached it (an old link,
+/// no connection), nor when Bitwig refused it in its own words, except that another project came to the front
+/// ([`Error::is_elsewhere`], see [`new_track_failed`]).
 fn may_have_left_a_track(e: &Error) -> bool {
-    match e {
-        Error::Bitwig(words) => !words.contains("before changing anything"),
-        Error::ChangesOff | Error::TimedOut | Error::Closed | Error::Lost(_) | Error::Unexpected => true,
-        _ => false,
+    matches!(e, Error::ChangesOff | Error::TimedOut | Error::Closed | Error::Lost(_) | Error::Unexpected)
+}
+
+/// What a failed `newtrack` says. Another project in front may have come there part way, after the track was made:
+/// this audition keeps to the project that was in front a moment before it asked, so the link's own "stopped before
+/// changing anything" can't be taken at its word (the 10 Nov review's D-3).
+fn new_track_failed(e: Error, name: &str) -> Error {
+    if e.is_elsewhere() {
+        Error::Bitwig(format!(
+            "Another project came to the front in Bitwig while the app was adding the track, so it stopped. There may \
+             be an empty track named {name} in the project you had in front before."
+        ))
+    } else if may_have_left_a_track(&e) {
+        Error::Bitwig(format!("{}. There may be an empty track named {name} in Bitwig.", sentence(&e)))
+    } else {
+        e
     }
 }
 
@@ -178,8 +191,23 @@ impl Bitwig {
         preset: impl AsRef<Path>,
         part: impl AsRef<Path>,
         name: &str,
+        turn: &Turn<'_>,
+        wanted: &dyn Fn() -> bool,
+    ) -> Result<Auditioning, Error> {
+        self.audition_preset_telling(preset, part, name, turn, wanted, &|_| {})
+    }
+
+    /// [`Bitwig::audition_preset`], telling `made` the audition as soon as its track is made, before the preset
+    /// loads (which can take Bitwig a while), so an app closing meanwhile can still take the track out (the 10 Nov
+    /// review's D-2).
+    pub fn audition_preset_telling(
+        &self,
+        preset: impl AsRef<Path>,
+        part: impl AsRef<Path>,
+        name: &str,
         _turn: &Turn<'_>,
         wanted: &dyn Fn() -> bool,
+        made: &dyn Fn(&Auditioning),
     ) -> Result<Auditioning, Error> {
         if !wanted() {
             return Err(Error::Cancelled);
@@ -191,15 +219,9 @@ impl Bitwig {
         link.stay_in_open_project();
         // If Bitwig can't say, take it as playing: stopping then leaves Bitwig as it is.
         let was_playing = link.is_playing().unwrap_or(true);
-        let track = link.new_audition_track(name).map_err(|e| {
-            // Bitwig may have made the track before the link stopped (changes turned off part way, say); a refusal
-            // before anything changed keeps its own words.
-            if may_have_left_a_track(&e) {
-                Error::Bitwig(format!("{}. There may be an empty track named {name} in Bitwig.", sentence(&e)))
-            } else {
-                e
-            }
-        })?;
+        // Bitwig may have made the track before the link stopped (changes turned off part way, say); a refusal
+        // before anything changed keeps its own words.
+        let track = link.new_audition_track(name).map_err(|e| new_track_failed(e, name))?;
         let Some(track_id) = track.id.clone() else {
             return Err(Error::Bitwig(format!(
                 "Bitwig didn't say the new track's ID, so the app couldn't take it out again: there's an empty track \
@@ -212,6 +234,7 @@ impl Bitwig {
             started_bitwig: !was_playing,
             project: link.only_in().map(str::to_owned),
         };
+        made(&auditioning);
         // Whatever goes wrong from here, the track comes out again, so a failed audition leaves nothing behind (and
         // Bitwig stops if its clip launched after all and started it). When the link can't take it out (the
         // connection went, say), the words say there may be a track left; one no longer wanted comes back then, so
@@ -279,6 +302,21 @@ mod tests {
 
     fn hello(runtime: &str, extension: &str) -> Hello {
         Hello { runtime: runtime.into(), extension: extension.into(), ..Hello::default() }
+    }
+
+    #[test]
+    fn a_new_track_stopped_by_another_project_may_be_left() {
+        let elsewhere = Error::Bitwig(
+            "Bitwig has \"B\" open, not \"A\", so the link stopped before changing anything there.".into(),
+        );
+        let said = new_track_failed(elsewhere, "Pad").to_string();
+        assert!(said.contains("may be an empty track named Pad"), "the switch can come once the track is made: {said}");
+        assert!(!said.contains("before changing anything"), "never says both: {said}");
+        let refused = Error::Bitwig("Bitwig has no project open.".into());
+        assert_eq!(new_track_failed(refused.clone(), "Pad"), refused, "its own words, no track to look for");
+        assert!(may_have_left_a_track(&Error::TimedOut));
+        assert!(!may_have_left_a_track(&Error::NotRunning), "it never reached Bitwig");
+        assert!(!may_have_left_a_track(&Error::OldLink));
     }
 
     #[test]
