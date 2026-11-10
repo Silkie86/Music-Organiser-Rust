@@ -139,6 +139,10 @@ export global SettingsData {
     in property <bool> daws-installing;
     // Install on a row: Bitwig's extension (true) or FL Studio's script.
     callback install-daw(bool);
+    // Your Bitwig Studio folder: pick one, or go back to the one in Documents; whether one is chosen (not Documents').
+    callback choose-bitwig-folder();
+    callback documents-bitwig();
+    in property <bool> bitwig-chosen;
 
     // Developer.
     in property <[SettingsFact]> facts;
@@ -770,6 +774,23 @@ component DawsTab inherits VerticalLayout {
         for f in d.facts: FactLine {
             fact: f;
             words: true;
+        }
+        // Where Bitwig's extension goes: your Bitwig Studio folder, chosen here when it isn't the one in Documents.
+        if d.bitwig: HorizontalLayout {
+            alignment: start;
+            spacing: Space.sm;
+            StudioButton {
+                text: "Choose folder\u{2026}";
+                tip: "Pick your Bitwig Studio folder, the one with Extensions, Library and Projects in it. The app's extension goes into its Extensions folder.";
+                enabled: !SettingsData.daws-installing;
+                clicked => { SettingsData.choose-bitwig-folder(); }
+            }
+            if SettingsData.bitwig-chosen: StudioButton {
+                text: "Use Documents";
+                tip: "Bitwig's folder is the Bitwig Studio folder in your Documents again. The extension already installed stays where it is.";
+                enabled: !SettingsData.daws-installing;
+                clicked => { SettingsData.documents-bitwig(); }
+            }
         }
     }
 }

@@ -2635,6 +2635,8 @@ fn settings_shots(
             ..Default::default()
         })),
     );
+    // A Bitwig Studio folder chosen on another drive (its Use Documents shows): only the made-up settings change.
+    mo_ui::settings::remember(mo_app::app_settings::BITWIG_FOLDER_KEY, r"K:\Bitwig Studio");
     mo_ui::settings::show_bitwig_extension(
         app,
         mo_dawlink::scripts::ScriptState::Outdated,
@@ -2648,6 +2650,11 @@ fn settings_shots(
     );
     capture(window);
     shots.push(("settings-daws.png".into(), capture(window)));
+    // No Bitwig Studio folder in Documents and none chosen: the card says to choose it (the 10 Nov review's X3-5).
+    mo_ui::settings::remember(mo_app::app_settings::BITWIG_FOLDER_KEY, "");
+    mo_ui::settings::show_bitwig_extension(app, mo_dawlink::scripts::ScriptState::NotInstalled, "3.19", Vec::new());
+    capture(window);
+    shots.push(("settings-daws-no-folder.png".into(), capture(window)));
     data.invoke_tab_picked(3);
     capture(window);
     shots.push(("settings-shortcuts.png".into(), capture(window)));

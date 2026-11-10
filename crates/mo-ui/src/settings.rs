@@ -70,6 +70,8 @@ struct Page {
     bw_folders: Vec<PathBuf>,
     bw_users: Vec<PathBuf>,
     bw_loaded_from: Option<String>,
+    /// Counts the looks for the DAWs' folders, so an older one finishing late is dropped (newest wins).
+    scripts_asked: u64,
     daws_installing: bool,
     daws_message: String,
     /// Moving the data folder: set while the copy runs (its Stop), and what the last copy did.
@@ -213,6 +215,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             bw_folders: Vec::new(),
             bw_users: Vec::new(),
             bw_loaded_from: None,
+            scripts_asked: 0,
             daws_installing: false,
             daws_message: String::new(),
             data_moving: None,
@@ -301,6 +304,36 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         }
     });
     data.on_open_export_folder(open_export_folder);
+    let weak = app.as_weak();
+    data.on_choose_bitwig_folder(move || {
+        // Not for the screenshots: nothing would be kept, and they never look at real folders.
+        if !PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live)) {
+            return;
+        }
+        let weak = weak.clone();
+        crate::backup::pick_folder(page::BITWIG_PICK_TITLE, move |picked| {
+            // What's in the folder picked is looked at away from the window (its drive may be asleep).
+            let started = background::spawn("Settings Bitwig folder", move || {
+                let (folder, looks) = page::bitwig_folder_from_pick(&picked, Path::is_dir);
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = weak.upgrade() {
+                        choose_bitwig_folder(&app, Some((folder, looks)));
+                    }
+                });
+            });
+            if let Err(e) = started {
+                log::error("Settings", &format!("Couldn't start looking at the Bitwig folder picked: {e}"));
+            }
+        });
+    });
+    let weak = app.as_weak();
+    data.on_documents_bitwig(move || {
+        if let Some(app) = weak.upgrade()
+            && PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live))
+        {
+            choose_bitwig_folder(&app, None);
+        }
+    });
     let weak = app.as_weak();
     data.on_check_daws(move || {
         if let Some(app) = weak.upgrade() {
@@ -877,18 +910,22 @@ fn check_daws(app: &AppWindow) {
 /// Finds the DAWs' folders and whether the scripts in them are the app's own, away from the window (a project folder
 /// on a drive that's asleep may take a moment).
 fn look_at_scripts(app: &AppWindow) {
-    let Some((library, loaded_from)) =
-        PAGE.with(|p| p.borrow().as_ref().filter(|p| p.live).map(|p| (p.library.clone(), p.bw_loaded_from.clone())))
-    else {
-        return;
-    };
+    let asked = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let p = p.as_mut().filter(|p| p.live)?;
+        p.scripts_asked += 1;
+        // Your Bitwig Studio folder as the card chose it, else as the C# app had it.
+        let chosen = p.settings.get(app_settings::BITWIG_FOLDER_KEY).map(str::to_owned);
+        Some((p.library.clone(), p.bw_loaded_from.clone(), chosen, p.scripts_asked))
+    });
+    let Some((library, loaded_from, chosen, asked)) = asked else { return };
     let weak = app.as_weak();
     let started = background::spawn("Settings DAW scripts", move || {
-        let (roots, chosen) = match Library::open_read_only(&library) {
-            Ok(l) => (l.roots().unwrap_or_default(), l.setting("bitwig_user_folder").ok().flatten()),
+        let roots = match Library::open_read_only(&library) {
+            Ok(l) => l.roots().unwrap_or_default(),
             Err(e) => {
                 log::warning("Settings", &format!("Couldn't read the library, to find the DAWs' folders: {e}"));
-                (Vec::new(), None)
+                Vec::new()
             }
         };
         let documents = crate::files::documents();
@@ -900,25 +937,69 @@ fn look_at_scripts(app: &AppWindow) {
         let bw_version = source.as_deref().and_then(scripts::extension_version);
         let bw_state = source.as_deref().map_or(ScriptState::NotInstalled, |s| scripts::bitwig_state(s, &bw_folders));
         let _ = slint::invoke_from_event_loop(move || {
-            PAGE.with(|p| {
-                if let Some(p) = p.borrow_mut().as_mut() {
-                    p.fl_state = Some(state);
-                    p.fl_folders = folders;
-                    p.bw_source = source;
-                    p.bw_version = bw_version;
-                    p.bw_state = Some(bw_state);
-                    p.bw_folders = bw_folders;
-                    p.bw_users = users;
-                }
+            let newest = PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                let Some(p) = p.as_mut().filter(|p| p.scripts_asked == asked) else { return false };
+                p.fl_state = Some(state);
+                p.fl_folders = folders;
+                p.bw_source = source;
+                p.bw_version = bw_version;
+                p.bw_state = Some(bw_state);
+                p.bw_folders = bw_folders;
+                p.bw_users = users;
+                true
             });
-            if let Some(app) = weak.upgrade() {
+            if newest && let Some(app) = weak.upgrade() {
                 show(&app);
             }
         });
     });
     if let Err(e) = started {
         log::error("Settings", &format!("Couldn't start looking for FL Studio's folders: {e}"));
+        // After what Install or a choice said, if anything.
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                let couldnt = "Couldn't look for the DAWs' folders just now. Press Check again.";
+                p.daws_message = format!("{} {couldnt}", p.daws_message).trim_start().to_owned();
+            }
+        });
+        show(app);
     }
+}
+
+/// Keeps your Bitwig Studio folder (`None`: the one in Documents), with whether it looks like one, in the app's own
+/// settings file, never in library.db (the C# app's choice stays as it was there), and looks for Bitwig's folders
+/// again. Not while the extension is being installed, which goes into the folders found before: the picker doesn't
+/// hold up the window, so Install may have been pressed meanwhile.
+fn choose_bitwig_folder(app: &AppWindow, chosen: Option<(PathBuf, bool)>) {
+    if PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.daws_installing)) {
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                p.daws_message =
+                    "Your Bitwig Studio folder wasn't changed: the extension was being installed. Choose it again."
+                        .to_owned();
+            }
+        });
+        show(app);
+        return;
+    }
+    let (folder, looks) = chosen.map_or((None, true), |(f, looks)| (Some(f), looks));
+    let value = folder.as_ref().map(|f| f.display().to_string()).unwrap_or_default();
+    let kept = remember(app_settings::BITWIG_FOLDER_KEY, &value);
+    match &folder {
+        Some(f) => log::info("Settings", &format!("Bitwig Studio folder chosen: {}", f.display())),
+        None => log::info("Settings", "Bitwig Studio folder: the one in Documents again"),
+    }
+    PAGE.with(|p| {
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.daws_message = page::bitwig_folder_note(folder.as_deref(), looks, kept);
+            // Looked for again: no Install into the folders found before meanwhile.
+            p.bw_state = None;
+            p.bw_folders.clear();
+        }
+    });
+    look_at_scripts(app);
+    show(app);
 }
 
 /// Puts the app's FL Studio script in FL's folders (Solomon's OK, 2026-11-03), away from the window, then looks again.
@@ -1376,6 +1457,7 @@ fn show(app: &AppWindow) {
         data.set_daws_checking(p.daws_checking);
         data.set_daws_installing(p.daws_installing);
         data.set_daws_message(p.daws_message.clone().into());
+        data.set_bitwig_chosen(p.settings.get(app_settings::BITWIG_FOLDER_KEY).is_some_and(|f| !f.trim().is_empty()));
         data.set_folders_busy(p.folders_busy);
         data.set_folders_message(p.folders_message.clone().into());
 
