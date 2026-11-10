@@ -17,7 +17,7 @@ export { Waves, WavePicture }
 export { DawLine }
 export { AppKeys }
 import { SpacePage, SpaceData, DriveCard, RoomLine, CardPart } from "pages/space.slint";
-import { ActivityCards, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
+import { ActivityCards, RailJobLine, CardInfo, KeySheet, KeyRow, NoteDialog } from "shell.slint";
 import { Finder, FinderData, FinderLine } from "finder.slint";
 import { SettingsPage, SettingsData, ThemeCardInfo, AccentInfo, SettingsFact, FolderGroupInfo, KeyLineInfo, DawRowInfo } from "pages/settings.slint";
 // std-widgets' colours follow the theme (light or dark), for its scroll bars and the About part's Slint logo.
@@ -92,11 +92,12 @@ export component AppWindow inherits Window {
     // Returns whether it was used.
     callback key(string, bool, bool, bool, bool, bool) -> bool;
 
-    // Activity cards, bottom right.
+    // What the app is doing: running and just-finished jobs as lines in the rail (and how many more than fit there),
+    // and the ones that failed as cards, bottom right.
+    in property <[CardInfo]> jobs;
+    in property <int> more-jobs;
     in property <[CardInfo]> cards;
-    in property <int> put-away;
     callback dismiss-card(int);
-    callback bring-back-cards();
     // Settings' "Try an activity card", until real jobs exist.
     callback try-job();
 
@@ -254,6 +255,29 @@ export component AppWindow inherits Window {
                             clicked => { root.daw-line-clicked(i); }
                         }
                     }
+                    // What the app is working on, in the rail's spare room (the UX review of 10 Nov, A3).
+                    if root.jobs.length > 0: VerticalLayout {
+                        // Only as tall as its lines: the room under it is the rail's spare room.
+                        vertical-stretch: 0;
+                        alignment: start;
+                        spacing: Space.xs;
+                        padding-top: Space.md;
+                        HorizontalLayout {
+                            padding-left: Space.md;
+                            Caps { text: "WORKING ON"; }
+                        }
+                        for j in root.jobs: RailJobLine {
+                            job: j;
+                        }
+                        if root.more-jobs > 0: HorizontalLayout {
+                            padding-left: Space.md;
+                            Text {
+                                text: "and " + root.more-jobs + " more";
+                                color: Theme.faint;
+                                font-size: Type.small;
+                            }
+                        }
+                    }
                     Rectangle { }
                     RailItem {
                         tint: Theme.place(root.settings-place);
@@ -344,9 +368,7 @@ export component AppWindow inherits Window {
             y: parent.height - self.height - 20px;
             height: self.preferred-height;
             cards: root.cards;
-            put-away: root.put-away;
             dismiss(id) => { root.dismiss-card(id); }
-            bring-back => { root.bring-back-cards(); }
         }
 
         if root.sheet-open: KeySheet {

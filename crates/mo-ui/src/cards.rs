@@ -10,8 +10,8 @@ use slint::{ComponentHandle, Model, ModelRc, Timer, TimerMode, VecModel};
 
 use crate::{AppWindow, CardInfo};
 
-/// Ties the window's cards to `feed`: redraws when it changes, passes the ×s and "N running" back, and lets finished
-/// cards go when their time is up.
+/// Ties the window's jobs and cards to `feed`: redraws when it changes, passes the ×s back, and lets finished ones go
+/// when their time is up.
 pub fn connect(app: &AppWindow, feed: &Feed) {
     let waiting = Arc::new(AtomicBool::new(false));
     let weak = app.as_weak();
@@ -36,8 +36,6 @@ pub fn connect(app: &AppWindow, feed: &Feed) {
     let f = feed.clone();
     app.on_dismiss_card(move |id| f.dismiss(id as u64));
     let f = feed.clone();
-    app.on_bring_back_cards(move || f.bring_back());
-    let f = feed.clone();
     app.on_try_job(move || try_job(&f));
 
     // Finished cards stay a few seconds, then go by themselves; and progress held back by the 250 ms limit is shown.
@@ -58,25 +56,38 @@ pub fn connect(app: &AppWindow, feed: &Feed) {
     refresh(app, feed);
 }
 
-/// Puts the feed's cards on screen now. Call on the window's thread. When the same cards are on screen, only their
-/// rows change, so the cards aren't rebuilt and their progress bars glide.
+/// How many jobs the rail lists; the rest are counted under them ("and 2 more").
+const RAIL_JOBS: usize = 4;
+
+/// Puts the feed's jobs on screen now: the running and just-finished ones as lines in the rail, the ones that failed
+/// as cards (the UX review of 10 Nov, A3). Call on the window's thread. When the same jobs are on screen, only their
+/// rows change, so the lines aren't rebuilt and their meters glide.
 pub fn refresh(app: &AppWindow, feed: &Feed) {
-    let cards: Vec<CardInfo> = feed.visible(Instant::now()).iter().map(card_info).collect();
-    let shown = app.get_cards();
-    let same_cards = shown.row_count() == cards.len()
-        && cards.iter().enumerate().all(|(i, c)| shown.row_data(i).is_some_and(|s| s.id == c.id));
+    let (cards, mut jobs): (Vec<CardInfo>, Vec<CardInfo>) =
+        feed.visible(Instant::now()).iter().map(card_info).partition(|c| c.state == 2);
+    // The newest are at the end: they are the ones kept when there are too many for the rail.
+    let more = jobs.len().saturating_sub(RAIL_JOBS);
+    jobs.drain(..more);
+    show(&app.get_cards(), cards, |m| app.set_cards(m));
+    show(&app.get_jobs(), jobs, |m| app.set_jobs(m));
+    app.set_more_jobs(more as i32);
+}
+
+/// Makes `shown` say `now`, changing only the rows that differ when the same jobs are there.
+fn show(shown: &ModelRc<CardInfo>, now: Vec<CardInfo>, set: impl FnOnce(ModelRc<CardInfo>)) {
+    let same = shown.row_count() == now.len()
+        && now.iter().enumerate().all(|(i, c)| shown.row_data(i).is_some_and(|s| s.id == c.id));
     match shown.as_any().downcast_ref::<VecModel<CardInfo>>() {
-        Some(model) if same_cards => {
-            for (i, c) in cards.into_iter().enumerate() {
+        Some(model) if same => {
+            for (i, c) in now.into_iter().enumerate() {
                 if model.row_data(i).as_ref() != Some(&c) {
                     model.set_row_data(i, c);
                 }
             }
         }
-        Some(model) => model.set_vec(cards),
-        None => app.set_cards(ModelRc::new(VecModel::from(cards))),
+        Some(model) => model.set_vec(now),
+        None => set(ModelRc::new(VecModel::from(now))),
     }
-    app.set_put_away(feed.put_away() as i32);
 }
 
 fn card_info(c: &Card) -> CardInfo {

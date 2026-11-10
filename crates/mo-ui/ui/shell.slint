@@ -1,5 +1,5 @@
 // The parts of the window shell that sit over every page: activity cards, the key sheet and the F12 note.
-import { Theme, Type, Space, Meter, StudioButton, Well, Caps, Groove, CloseButton, Chip, TickBox } from "studio.slint";
+import { Theme, Type, Space, Meter, StudioButton, Well, Caps, Groove, CloseButton, TickBox, Dot, Tip } from "studio.slint";
 
 export struct CardInfo {
     id: int,
@@ -98,12 +98,72 @@ component ActivityCard inherits Rectangle {
     }
 }
 
-// The cards, bottom right, newest at the bottom, with "N running" when some are put away.
+// A job in the left rail: a slim line with its name, how far it is in words, and its meter while it runs (the UX
+// review of 10 Nov, A3). Jobs used to be cards at the bottom right, on top of the side card; the rail has the room.
+// A finished job stays a few seconds with a green dot; one that failed is a card (`ActivityCards`), as it needs
+// reading. The whole name and words show in its tip.
+export component RailJobLine inherits Rectangle {
+    in property <CardInfo> job;
+    property <bool> running: job.state == 0;
+    height: 48px;
+    border-radius: Theme.radius;
+    background: touch.has-hover ? Theme.hover : transparent;
+    VerticalLayout {
+        padding-left: Space.md;
+        padding-right: Space.sm;
+        alignment: center;
+        spacing: 3px;
+        HorizontalLayout {
+            spacing: Space.sm;
+            VerticalLayout {
+                alignment: center;
+                Dot { tint: root.running ? Theme.accent : Theme.ok; }
+            }
+            Text {
+                text: root.job.title;
+                color: Theme.text;
+                font-size: Type.meta;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+        }
+        Text {
+            text: root.job.detail != "" ? root.job.detail : root.running ? "Working…" : "Done";
+            color: Theme.muted;
+            font-size: Type.small;
+            overflow: elide;
+        }
+        // A known amount lights the meter; an unknown one sweeps back and forth.
+        if root.running && root.job.progress >= 0: Meter {
+            height: 4px;
+            level: root.job.progress;
+        }
+        if root.running && root.job.progress < 0: Rectangle {
+            height: 4px;
+            border-radius: 1px;
+            background: Theme.well;
+            clip: true;
+            Rectangle {
+                x: (parent.width - self.width) * (0.5 + 0.5 * sin(animation-tick() / 900ms * 180deg));
+                width: parent.width * 0.3;
+                border-radius: 1px;
+                background: Theme.accent;
+            }
+        }
+    }
+    touch := TouchArea { }
+    Tip {
+        text: root.job.detail != "" ? root.job.title + ": " + root.job.detail : root.job.title;
+        hovering: touch.has-hover;
+        at-x: root.width + Space.xs;
+        at-y: Space.xs;
+    }
+}
+
+// The cards, bottom right, newest at the bottom: only the jobs that failed (the rest are lines in the rail).
 export component ActivityCards inherits VerticalLayout {
     in property <[CardInfo]> cards;
-    in property <int> put-away;
     callback dismiss(int);
-    callback bring-back();
     width: 320px;
     spacing: Space.sm;
     alignment: end;
@@ -112,13 +172,6 @@ export component ActivityCards inherits VerticalLayout {
         width: root.width;
         card: c;
         dismiss => { root.dismiss(c.id); }
-    }
-    if root.put-away > 0: HorizontalLayout {
-        alignment: end;
-        Chip {
-            text: root.put-away + " running";
-            clicked => { root.bring-back(); }
-        }
     }
 }
 
