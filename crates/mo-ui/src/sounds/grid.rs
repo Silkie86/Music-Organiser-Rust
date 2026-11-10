@@ -1,5 +1,5 @@
-//! The Sounds tiles' shapes on the graphics card: every tile's background, edge, dot, waveform and liked bar on show,
-//! drawn as one picture under the list (`TileGrid` in sounds.slint), which then shows only the tiles' words, hearts and
+//! The Sounds tiles' shapes on the graphics card: every tile's background, edge, dot and waveform on show, drawn as
+//! one picture under the list (`TileGrid` in sounds.slint), which then shows only the tiles' words, hearts and
 //! the playing tile's waveform. The window draws one picture much faster than the hundreds of shapes of a screen of
 //! tiles. The shapes are where the window would draw them (each tile's parts at the places sounds.slint gives every
 //! tile) and drawn as the window draws them: the waveform's lines as `waves` draws a Waveform's, softened as the
@@ -48,7 +48,7 @@ pub(super) fn connect(app: &AppWindow) {
     });
 }
 
-/// The tiles changed (the list, a pick, what's playing, the scores): the picture is drawn again.
+/// The tiles changed (the list, a pick, what's playing): the picture is drawn again.
 pub(super) fn changed() {
     let app = APP.with(|a| a.borrow().as_ref().and_then(slint::Weak::upgrade));
     if let Some(app) = app {
@@ -147,8 +147,6 @@ struct Tile {
     picked: bool,
     playing: bool,
     tint: Colour,
-    /// How liked, from 0 to 1, or below 0 when it isn't known yet.
-    liked: f32,
     /// Its waveform's lines and how many points across, if it has one.
     wave: Option<(Rc<[WaveLine]>, u32)>,
 }
@@ -167,7 +165,6 @@ fn scene(at: &TileGridAt, look: &TileLook, p: &Page, types: &[Colour]) -> Scene 
             picked: p.picked == Some(i),
             playing: p.playing.is_some_and(|(at, _)| at == i),
             tint: tint.unwrap_or(grey),
-            liked: super::liked_share(p, i).map_or(-1.0, |l| l as f32),
             wave: lines_of(p, i, s),
         })
     });
@@ -245,9 +242,9 @@ fn inner_radius(radius: f32) -> f64 {
     (f64::from(radius).max(0.51) - 0.5).max(0.0)
 }
 
-/// One tile's shapes, as the window draws them (sounds.slint's `SoundTileView`): its background and edge, the dot, the
-/// waveform (not while it plays: the tile shows that itself) and the liked bar. Under the mouse the tile draws them
-/// itself too, over its shade, which covers these.
+/// One tile's shapes, as the window draws them (sounds.slint's `SoundTileView`): its background and edge, the dot and
+/// the waveform (not while it plays: the tile shows that itself). Under the mouse the tile draws them itself too, over
+/// its shade, which covers these.
 fn draw_tile(scene: &mut Scene, at: &TileGridAt, look: &TileLook, (x, y): (f64, f64), tile: &Tile) {
     let (w, h) = (f64::from(at.tile_width), f64::from(at.tile_height));
     let inside = f64::from(at.inside);
@@ -276,11 +273,6 @@ fn draw_tile(scene: &mut Scene, at: &TileGridAt, look: &TileLook, (x, y): (f64, 
             }
         }
     }
-    if tile.liked >= 0.0 {
-        let bar_y = y + h - inside - 3.0;
-        scene.rounded((x + inside, bar_y, across, 3.0), 1.5, colour(look.hover), None);
-        scene.rounded((x + inside, bar_y, across * f64::from(tile.liked.max(0.0)), 3.0), 1.5, colour(look.muted), None);
-    }
 }
 
 #[cfg(test)]
@@ -299,7 +291,7 @@ mod tests {
             inside: 12.0,
             name_height: 19.0,
             wave_top: 58.0,
-            wave_height: 35.0,
+            wave_height: 42.0,
             over_x: 0.0,
             over_y: 0.0,
             scale: 1.0,
@@ -347,12 +339,10 @@ mod tests {
             raised: slint::Color::from_rgb_u8(0x25, 0x25, 0x25),
             edge: slint::Color::from_rgb_u8(0x0B, 0x0B, 0x0B),
             accent: slint::Color::from_rgb_u8(0x3D, 0xDC, 0x97),
-            hover: slint::Color::from_rgb_u8(0x2A, 0x2A, 0x2A),
-            muted: slint::Color::from_rgb_u8(0xA3, 0xA3, 0xA3),
         };
         let tint = Colour::rgb(0x4FB3FF, 1.0);
         let lines: Rc<[WaveLine]> = Rc::from(vec![WaveLine { x: 0.5, top: 0.0, bottom: 100.0 }]);
-        let tile = Tile { picked: true, playing: false, tint, liked: 0.5, wave: Some((lines, 4)) };
+        let tile = Tile { picked: true, playing: false, tint, wave: Some((lines, 4)) };
         let mut scene = Scene::new(300.0, 200.0, 0);
         draw_tile(&mut scene, &at(0.0, 200.0), &look, (8.0, 8.0), &tile);
         let accent = Some(colour(look.accent));
@@ -364,38 +354,16 @@ mod tests {
             scene.shapes[1],
             Shape::Rounded { x: 20.0, y: 25.5, w: 8.0, h: 8.0, radius: 4.0, fill: tint, edge: None }
         );
-        // The waveform is 176 across and 35 down, at 12 in and 58 down; its line is 176 / 4 * 0.6 = 26.4 wide.
+        // The waveform is 176 across and 42 down, at 12 in and 58 down; its line is 176 / 4 * 0.6 = 26.4 wide.
         let Shape::Line { from, to, width, .. } = scene.shapes[2] else { panic!("{:?}", scene.shapes[2]) };
         assert!((width - 26.4).abs() < 1e-4, "{width}");
         let across = (176.0 - 26.4) / 4.0;
         assert!((from.0 - (20.0 + 13.2 + 0.5 * across)).abs() < 1e-3, "{from:?}");
-        assert!((from.1 - (66.0 + 13.2)).abs() < 1e-3 && (to.1 - (66.0 + 13.2 + (35.0 - 26.4))).abs() < 1e-3, "{to:?}");
-        // The liked bar, half full, at the bottom.
-        assert_eq!(
-            &scene.shapes[3..],
-            [
-                Shape::Rounded {
-                    x: 20.0,
-                    y: 105.0,
-                    w: 176.0,
-                    h: 3.0,
-                    radius: 1.5,
-                    fill: colour(look.hover),
-                    edge: None
-                },
-                Shape::Rounded {
-                    x: 20.0,
-                    y: 105.0,
-                    w: 88.0,
-                    h: 3.0,
-                    radius: 1.5,
-                    fill: colour(look.muted),
-                    edge: None
-                },
-            ]
-        );
+        assert!((from.1 - (66.0 + 13.2)).abs() < 1e-3 && (to.1 - (66.0 + 13.2 + (42.0 - 26.4))).abs() < 1e-3, "{to:?}");
+        // Nothing under the waveform: a sound is liked by its heart alone.
+        assert_eq!(scene.shapes.len(), 3);
         // Playing, the tile shows its waveform itself.
-        let tile = Tile { playing: true, liked: -1.0, ..tile };
+        let tile = Tile { playing: true, ..tile };
         let mut scene = Scene::new(300.0, 200.0, 0);
         draw_tile(&mut scene, &at(0.0, 200.0), &look, (8.0, 8.0), &tile);
         assert_eq!(scene.shapes.len(), 2);

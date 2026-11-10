@@ -1,9 +1,9 @@
 // The Sounds page: every sound in your library as Tiles, a List, the History of what you played or Rediscover (unused
 // sounds that fit your taste), with the type chips
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
-// The picked sound's card takes your say: a favourite, stars, your own type and tags, kept in the app's own sound library.
+// The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, DragHandle, Caps, Heart, HeartToggle, StarPicker, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, DragHandle, Caps, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -12,10 +12,6 @@ export struct SoundTile {
     facts: string,
     colour: int,
     favourite: bool,
-    // How liked, from 0 to 1, or below 0 when it isn't known yet.
-    liked: float,
-    // Why: "Favourite, in 4 projects, played 12 times".
-    liked-why: string,
     wave: string,
     points: int,
     picked: bool,
@@ -133,13 +129,10 @@ export struct PickedSound {
     seconds: float,
     facts: [SoundFact],
     favourite: bool,
-    // Its stars, 0 to 5, and your own type for it ("" when you haven't given it one).
-    stars: int,
+    // Your own type for it ("" when you haven't given it one).
     own-type: string,
     // What the analysis says it sounds like ("punchy, bright").
     character: string,
-    // Why it's as liked as it is, once that's known: "Favourite, in 4 projects, played 12 times".
-    liked-why: string,
     // The projects that use it, newest first (or, for a sound Rediscover dug out that none use, those of the sound it
     // sounds like), with the words on the card's switch ("Used in 4") and above the list.
     projects: [UsedInLine],
@@ -405,10 +398,9 @@ export global SoundsData {
     in property <[CardAction]> actions;
     in property <string> play-tip;
     in property <string> play-key;
-    // Your say about the picked sound: a favourite or not, its stars, your own type for it ("" takes yours away), and
-    // a tag added or taken away. Each is kept in the app's own sound library, and shows at once.
+    // Your say about the picked sound: a favourite or not, your own type for it ("" takes yours away), and a tag added
+    // or taken away. Each is kept in the app's own sound library, and shows at once.
     callback toggle-favourite();
-    callback set-stars(int);
     callback set-type(string);
     callback add-tag(string);
     callback remove-tag(string);
@@ -459,13 +451,11 @@ export struct TileLook {
     raised: color,
     edge: color,
     accent: color,
-    hover: color,
-    muted: color,
 }
 
 // The tiles' shapes on the graphics card (mo-ui's sounds/grid.rs): the well they're in, and every tile's background,
-// edge, dot, waveform and liked bar, drawn as one picture of the tiles on show, under the window's own words (one
-// picture draws much faster than the window's hundreds of shapes). An empty picture where there's no card (the
+// edge, dot and waveform, drawn as one picture of the tiles on show, under the window's own words (one picture draws
+// much faster than the window's hundreds of shapes). An empty picture where there's no card (the
 // screenshots, an old driver, MO_DRAW_CPU): each tile then draws its shapes itself. `asked` changes when the tiles or
 // the card do, so the picture is drawn again.
 export global TileGrid {
@@ -506,9 +496,6 @@ component SoundTileView inherits Rectangle {
         landed: root.tile.row == SoundsData.landed-row;
         drag-out => { SoundsData.drag-row(root.tile.row); }
         drag-let-go => { SoundsData.drag-let-go(); }
-        // Why it's as liked as it is, when the mouse rests on the liked bar at the bottom.
-        tip: root.tile.liked-why;
-        tip-below: self.height - Space.md - Space.xs;
         clicked => {
             root.chosen();
             SoundsData.select(root.tile.row);
@@ -555,21 +542,6 @@ component SoundTileView inherits Rectangle {
             tint: Theme.sound-type(root.tile.colour);
             playing: root.tile.playing;
             played: root.tile.playing ? SoundsData.played : 1;
-        }
-        // How liked, as a thin bar (only once the scores are known); the tile's bottom strip says why.
-        if root.itself: Rectangle {
-            x: Space.md;
-            y: root.wave-top + root.wave-height + Space.xs;
-            width: root.width - 2 * Space.md;
-            height: 3px;
-            border-radius: 1.5px;
-            background: root.tile.liked >= 0 ? Theme.hover : transparent;
-            Rectangle {
-                x: 0;
-                width: parent.width * max(0, root.tile.liked);
-                border-radius: 1.5px;
-                background: Theme.muted;
-            }
         }
     }
 }
@@ -1037,25 +1009,15 @@ component SoundPanel inherits SidePanel {
             clicked => { SoundsData.play(); }
         }
     }
-    // Its stars and your own type for it.
+    // Your own type for it: a button, not a filter's chip, as giving it a type filters nothing.
     HorizontalLayout {
-        spacing: Space.sm;
         alignment: start;
-        StarPicker {
-            rating: SoundsData.picked.stars;
-            tip: "How many stars it has: a click on the last one lit takes them away";
-            picked(n) => { SoundsData.set-stars(n); }
-        }
-        // A button, not a filter's chip: giving it a type filters nothing.
-        VerticalLayout {
-            alignment: center;
-            PickButton {
-                name: "Your type";
-                value: SoundsData.picked.own-type;
-                none-text: "None of yours: its name's type";
-                choices: SoundsData.type-choices;
-                picked(t) => { SoundsData.set-type(t); }
-            }
+        PickButton {
+            name: "Your type";
+            value: SoundsData.picked.own-type;
+            none-text: "None of yours: its name's type";
+            choices: SoundsData.type-choices;
+            picked(t) => { SoundsData.set-type(t); }
         }
     }
     // In a narrow panel the facts wrap onto a second line, rather than run past its edge.
@@ -1073,16 +1035,6 @@ component SoundPanel inherits SidePanel {
                 font-family: Theme.number-font;
                 font-size: Type.meta;
             }
-        }
-    }
-    if SoundsData.picked.liked-why != "": VerticalLayout {
-        spacing: Space.xs;
-        Caps { text: "LIKED"; }
-        Text {
-            text: SoundsData.picked.liked-why;
-            color: Theme.muted;
-            font-size: Type.meta;
-            wrap: word-wrap;
         }
     }
     if SoundsData.picked.character != "": Text {
@@ -1124,6 +1076,18 @@ component SoundPanel inherits SidePanel {
     }
     property <int> tag-asked: SoundsData.tag-asked;
     changed tag-asked => { tag-box.focus-all(); }
+    // The tag box keeps the keys when the tags added push it down the card, out of sight (they wrap onto another line,
+    // or the filter rows over the card do and the card gets shorter): Slint takes the keys from a part out of sight at
+    // the next key, even Enter's own release, and then nothing had them. The card scrolls after the box as it moves in
+    // the card or the card's height changes, never as the card is scrolled. Asked only while the box has the keys.
+    property <length> tag-box-at: tag-box.has-keys ? root.held-at(tag-box.absolute-position.y) : 0px;
+    changed tag-box-at => { root.keep-tag-box(); }
+    changed height => { root.keep-tag-box(); }
+    function keep-tag-box() {
+        if (tag-box.has-keys) {
+            root.reveal(tag-box.absolute-position.y, tag-box.absolute-position.y + tag-box.height);
+        }
+    }
     VerticalLayout {
         spacing: Space.xs;
         // The sounds like it, or the projects that use it: one switch, as the card has room for one list (Solomon's
@@ -1688,7 +1652,7 @@ export component SoundsPage inherits Rectangle {
                         property <length> name-height: name-probe.preferred-height;
                         property <length> facts-height: facts-probe.preferred-height;
                         property <length> wave-top: Space.md + max(self.name-height, 10px) + Space.xs + self.facts-height + Space.xs;
-                        property <length> wave-height: TileSize.height - self.wave-top - Space.xs - 3px - Space.md;
+                        property <length> wave-height: TileSize.height - self.wave-top - Space.md;
                         // Where the picture's corner sits in the window, in pixels: it goes on a whole pixel, so the
                         // card draws the tiles as far past one as the list sits, and the picture goes that far back.
                         property <float> left: self.absolute-position.x / 1phx;
@@ -1718,8 +1682,6 @@ export component SoundsPage inherits Rectangle {
                             raised: Theme.surface-raised,
                             edge: Theme.edge,
                             accent: Theme.accent,
-                            hover: Theme.hover,
-                            muted: Theme.muted,
                         }, TileGrid.asked);
                         property <bool> on-card: self.grid.width > 0;
                         if grid-area.on-card: Image {

@@ -24,6 +24,8 @@ const HEIGHT: u32 = 900;
 const NARROW: u32 = 900;
 /// A window short enough that the Songs, Presets, MIDI and Plugins samples' lists scroll (app.slint's min-height).
 const SHORT: u32 = 600;
+/// Solomon's own window: an ultrawide screen at 100% (across, down).
+const WIDE: (u32, u32) = (3440, 1369);
 
 struct Headless(Rc<MinimalSoftwareWindow>);
 
@@ -575,6 +577,74 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     key_checks(&app)?;
     card_keys_checks(&app, &window, &out)?;
     rail_checks(&app)?;
+    wide_shots(&app, &window, &out)?;
+    tag_box_checks(&app, &window)?;
+    Ok(())
+}
+
+/// The tag box on a sound's card keeps the keys as the tags typed into it push it down the card: the card scrolls
+/// after it. Slint takes the keys from a part out of sight at the next key (even Enter's own release), and then nothing
+/// had them, so no key worked until a click (it showed with the small words a step bigger, the UX review's D4). In a
+/// short window, so the card shows only its top and Ctrl+T finds the box at its foot. Last, as the tags it adds would
+/// show in the shots.
+fn tag_box_checks(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    let sounds = app.global::<mo_ui::SoundsData>();
+    window.set_size(PhysicalSize::new(WIDTH, SHORT));
+    start_on(app, Place::Sounds);
+    sounds.invoke_pick_view(0);
+    sounds.invoke_select(0);
+    capture(window);
+    press(app, "t", true);
+    capture(window);
+    let mut wrong = None;
+    for tag in [
+        "glassy", "wide", "crunchy", "soft", "metallic", "hollow", "bouncy", "gritty", "smooth", "tight", "roomy",
+        "noisy", "dry", "wet", "lofi", "vintage",
+    ] {
+        if picked_has_tag(app, tag) {
+            wrong = Some(format!("the picked sound has the tag {tag} already: type a new word"));
+            break;
+        }
+        type_in(app, window, tag);
+        if !picked_has_tag(app, tag) {
+            wrong = Some(format!("the box lost the keys as the tags before {tag} pushed it down the card"));
+            break;
+        }
+    }
+    // With the keys in the box as the card closes, they come back to the list: F1 works.
+    sounds.invoke_close_panel();
+    capture(window);
+    let opened = f1_works(app, window);
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    capture(window);
+    match wrong {
+        Some(wrong) => Err(format!("tag box: {wrong}")),
+        None if !opened => {
+            Err("tag box: once its card closed after the tags, F1 did nothing: no part had the keys".into())
+        }
+        None => Ok(()),
+    }
+}
+
+/// Every place once more in a window as wide as Solomon's screen (3440 x 1369, the size of his F12 notes' pictures),
+/// saved as wide-<place>.png: a page that only looks right at 1440 across stretches its lines' columns a screen
+/// apart there (the UX review of 10 Nov, A1). After the checks, so each page has the line they left picked.
+fn wide_shots(
+    app: &mo_ui::AppWindow,
+    window: &MinimalSoftwareWindow,
+    out: &std::path::Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    window.set_size(PhysicalSize::new(WIDE.0, WIDE.1));
+    for place in Place::ALL {
+        app.set_place(place.index() as i32);
+        // Once to lay the page out at this width (the tiles' width tells Sounds how many fit in a row), then for real.
+        capture_sized(window, WIDE, Duration::from_millis(400));
+        let pixels = capture_sized(window, WIDE, Duration::from_millis(400));
+        let path = out.join(format!("wide-{}.png", slug(place.name())));
+        image::save_buffer(&path, &pixels, WIDE.0, WIDE.1, image::ExtendedColorType::Rgb8)?;
+        println!("{}", path.display());
+    }
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
     Ok(())
 }
 
@@ -590,23 +660,13 @@ fn card_keys_checks(
 ) -> Result<(), Box<dyn std::error::Error>> {
     use slint::platform::Key;
     let sounds = app.global::<mo_ui::SoundsData>();
-    let tagged = |tag: &str| {
-        let tags = sounds.get_picked_tags();
-        (0..tags.row_count()).any(|i| tags.row_data(i).is_some_and(|t| t.text == tag))
-    };
-    let type_in = |words: &str| {
-        for c in words.chars() {
-            press(app, c.to_string(), false);
-        }
-        press(app, Key::Return, false);
-        capture(window);
-    };
+    let tagged = |tag: &str| picked_has_tag(app, tag);
     let keys_work = |after: &str| -> Result<(), String> {
-        press(app, Key::F1, false);
-        let opened = app.get_sheet_open();
-        app.set_sheet_open(false);
-        capture(window);
-        if opened { Ok(()) } else { Err(format!("card keys: {after}, F1 did nothing: no part had the keys")) }
+        if f1_works(app, window) {
+            Ok(())
+        } else {
+            Err(format!("card keys: {after}, F1 did nothing: no part had the keys"))
+        }
     };
     start_on(app, Place::Sounds);
     sounds.invoke_pick_view(0);
@@ -615,7 +675,7 @@ fn card_keys_checks(
     // Ctrl+T, a tag typed and Enter, then Esc in the empty box until the card closes (the first may stop the sound).
     press(app, "t", true);
     capture(window);
-    type_in("airy");
+    type_in(app, window, "airy");
     if !tagged("airy") {
         return Err("card keys: Ctrl+T then typing on Sounds added no tag: its box didn't get the keys".into());
     }
@@ -642,7 +702,7 @@ fn card_keys_checks(
     // Its third line, under Play and Favourite.
     click(window, x + 60.0, y + MENU_LINES_TOP + 2.5 * MENU_LINE);
     capture(window);
-    type_in("bright");
+    type_in(app, window, "bright");
     if !tagged("bright") {
         return Err("card keys: the menu's Add a tag… then typing added no tag: the box didn't get the keys".into());
     }
@@ -688,6 +748,30 @@ fn card_keys_checks(
     mo_ui::presets::show_section(app, mo_app::presets::Section::Sounds);
     mo_ui::presets::pick_row(app, usize::MAX);
     Ok(())
+}
+
+/// Whether the sound picked on Sounds has `tag` among the tags its card shows.
+fn picked_has_tag(app: &mo_ui::AppWindow, tag: &str) -> bool {
+    let tags = app.global::<mo_ui::SoundsData>().get_picked_tags();
+    (0..tags.row_count()).any(|i| tags.row_data(i).is_some_and(|t| t.text == tag))
+}
+
+/// `words` typed where the keys are, then Enter.
+fn type_in(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, words: &str) {
+    for c in words.chars() {
+        press(app, c.to_string(), false);
+    }
+    press(app, slint::platform::Key::Return, false);
+    capture(window);
+}
+
+/// Whether F1 opens the key sheet, as it does when some part has the keys. The sheet is closed again.
+fn f1_works(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> bool {
+    press(app, slint::platform::Key::F1, false);
+    let opened = app.get_sheet_open();
+    app.set_sheet_open(false);
+    capture(window);
+    opened
 }
 
 /// The rail's "In your DAWs" line (the 6 Nov review's X3-9, and the code review on it): a click shows the song Bitwig
@@ -1111,15 +1195,6 @@ fn sounds_shots(
 ) -> Result<(), String> {
     app.set_place(Place::Sounds.index() as i32);
     let data = app.global::<mo_ui::SoundsData>();
-    // The first tile's liked bar, saying why (its note comes up a moment after the mouse stops on it).
-    hover(window, LIKED_BAR.0, LIKED_BAR.1);
-    let hovered = capture_after(window, Duration::from_millis(80));
-    let tip = capture_after(window, Duration::from_millis(750));
-    if tip == hovered {
-        return Err(format!("sounds-liked-tip.png: no tip came up at {}, {}", LIKED_BAR.0, LIKED_BAR.1));
-    }
-    shots.push(("sounds-liked-tip.png".into(), tip));
-    hover(window, -1.0, -1.0);
     // Autoplay is on, so picking a sound plays it.
     data.invoke_select(6);
     data.set_played(0.35);
@@ -1311,15 +1386,13 @@ fn sounds_shots(
     shots.push(("sounds-paper.png".into(), capture(window)));
     mo_ui::apply_look(app, graphite);
     found_turned_down(app, window)?;
-    // Your say on the card, last of the Sounds shots as it stays on the page (the screenshots keep none of it): four
-    // stars, your own type, a tag added and one taken away, and the heart taken off (the tile's goes too). The tiles
+    // Your say on the card, last of the Sounds shots as it stays on the page (the screenshots keep none of it): your
+    // own type, a tag added and one taken away, and the heart taken off (the tile's goes too). The tiles
     // are still turned down to their end from the check before: the search leaves one, at the top.
     data.set_search("Boom Kick".into());
     data.invoke_search_edited("Boom Kick".into());
     data.invoke_select(0);
     // Drawn after each, as a click would be: the tiles' list isn't made again many times between two draws.
-    capture(window);
-    data.invoke_set_stars(4);
     capture(window);
     data.invoke_set_type("Perc".into());
     capture(window);
@@ -2523,8 +2596,6 @@ const SPACE_CARD_WHEEL: (f32, f32, f32) = (1240.0, 600.0, -10.0 * PAGE_DOWN);
 const SWEPT_LINE: (f32, f32) = (760.0, 410.0);
 /// The Lock chip on the kit's second pad (Snare).
 const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
-/// The first tile's liked bar on Sounds, under the Order line and the three lines of filters.
-const LIKED_BAR: (f32, f32) = (350.0, 414.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
 const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 /// Inside the first tile of the Sounds grid, and the first line of its List, at their top (x, y, width, height in
@@ -2827,6 +2898,11 @@ fn capture(window: &MinimalSoftwareWindow) -> Vec<u8> {
 
 /// Draws the window once its timers and animations have run for `wait`.
 fn capture_after(window: &MinimalSoftwareWindow, wait: Duration) -> Vec<u8> {
+    capture_sized(window, (WIDTH, HEIGHT), wait)
+}
+
+/// [`capture_after`] for a window of another size (`size` is the size it was set to: across, down).
+fn capture_sized(window: &MinimalSoftwareWindow, size: (u32, u32), wait: Duration) -> Vec<u8> {
     let start = std::time::Instant::now();
     while start.elapsed() < wait {
         slint::platform::update_timers_and_animations();
@@ -2834,9 +2910,9 @@ fn capture_after(window: &MinimalSoftwareWindow, wait: Duration) -> Vec<u8> {
     }
     slint::platform::update_timers_and_animations();
     window.request_redraw();
-    let mut buffer = vec![Rgb8Pixel::default(); (WIDTH * HEIGHT) as usize];
+    let mut buffer = vec![Rgb8Pixel::default(); (size.0 * size.1) as usize];
     window.draw_if_needed(|renderer| {
-        renderer.render(&mut buffer, WIDTH as usize);
+        renderer.render(&mut buffer, size.0 as usize);
     });
     buffer.iter().flat_map(|p| [p.r, p.g, p.b]).collect()
 }

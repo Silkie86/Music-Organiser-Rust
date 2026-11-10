@@ -5,8 +5,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::Sound;
 use crate::usage::Usage;
-use crate::{Sound, SoundActivity};
 
 /// Where the C# app keeps the weights, in `library.db`'s settings.
 pub const LIKED_WEIGHTS_KEY: &str = "liked_weights";
@@ -52,48 +52,10 @@ impl LikedWeights {
     }
 }
 
-/// The liked bar's tooltip: "Favourite, in 4 projects, dragged out 6 times, played 12 times".
-pub fn explain(s: &Sound, usage: Option<&Usage>) -> String {
-    explain_with(s, s.favourite, &SoundActivity::default(), usage)
-}
-
-/// As [`explain`], with what's been done with the sound `since` it was read counted in, and whether it's a
-/// `favourite` now.
-pub fn explain_with(s: &Sound, favourite: bool, since: &SoundActivity, usage: Option<&Usage>) -> String {
-    let (a, b) = (&s.activity, since);
-    let times = |n: i32| if n == 1 { "once".to_owned() } else { format!("{n} times") };
-    let mut parts = Vec::new();
-    if favourite {
-        parts.push("Favourite".to_owned());
-    }
-    match usage.map_or(0, |u| u.projects) {
-        0 => {}
-        1 => parts.push("in 1 project".to_owned()),
-        n => parts.push(format!("in {n} projects")),
-    }
-    let drags = a.drags + a.older_drags + b.drags + b.older_drags;
-    if drags > 0 {
-        parts.push(format!("dragged out {}", times(drags)));
-    }
-    let sends = a.sends + a.older_sends + b.sends + b.older_sends;
-    if sends > 0 {
-        parts.push(format!("sent into a DAW {}", times(sends)));
-    }
-    let plays = a.plays + a.older_plays + b.plays + b.older_plays;
-    if plays > 0 {
-        parts.push(format!("played {}", times(plays)));
-    }
-    if parts.is_empty() {
-        return "Not used, played or dragged out yet".to_owned();
-    }
-    let text = parts.join(", ");
-    let mut chars = text.chars();
-    chars.next().map_or_else(String::new, |c| c.to_uppercase().chain(chars).collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SoundActivity;
     use crate::test_support::sound;
 
     #[test]
@@ -115,13 +77,7 @@ mod tests {
         let u = Usage { projects: 3, recent: 1, ..Usage::default() };
         // Projects 5 * (1 + 2 * 0.5) + drags 3 * 1 + sends 3 * (2 * 0.5) + plays 1 * (2 + 4 * 0.5) + favourite 10.
         assert_eq!(LikedWeights::default().score(&s, Some(&u)), 10.0 + 3.0 + 3.0 + 4.0 + 10.0);
-        assert_eq!(
-            explain(&s, Some(&u)),
-            "Favourite, in 3 projects, dragged out once, sent into a DAW 2 times, played 6 times"
-        );
         let plain = sound(2, "y.wav");
         assert_eq!(LikedWeights::default().score(&plain, None), 0.0);
-        assert_eq!(explain(&plain, None), "Not used, played or dragged out yet");
-        assert_eq!(explain(&plain, Some(&Usage { projects: 1, ..Usage::default() })), "In 1 project");
     }
 }

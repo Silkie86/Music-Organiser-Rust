@@ -414,9 +414,46 @@ pub fn type_from(l: &str) -> Type {
     [Type::Synths, Type::Effects].into_iter().find(|t| type_label(*t) == l).unwrap_or_default()
 }
 
-/// What the list is filtered by.
+/// What the list goes by: as it was found (songs newest first, each song's sounds as its save has them, then the
+/// preset files by folder and name), or one of its columns, picked by a click on the column's heading (the UX review
+/// of 10 Nov, B5).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Order {
+    #[default]
+    Found,
+    Name,
+    Part,
+    From,
+    Kind,
+    Format,
+}
+
+impl Order {
+    pub const COLUMNS: [Order; 5] = [Order::Name, Order::Part, Order::From, Order::Kind, Order::Format];
+
+    /// The column's heading; "" for the order no column stands for.
+    pub fn column(self) -> &'static str {
+        match self {
+            Order::Found => "",
+            Order::Name => "Sound",
+            Order::Part => "Part",
+            Order::From => "Song or folder",
+            Order::Kind => "What",
+            Order::Format => "File",
+        }
+    }
+
+    pub fn from_column(column: &str) -> Option<Order> {
+        Order::COLUMNS.into_iter().find(|o| o.column() == column)
+    }
+}
+
+/// What the list is filtered by, and the order it's in.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Filters {
+    /// The column the list goes by, and whether that order is turned round (Z to A).
+    pub order: Order,
+    pub reversed: bool,
     pub search: String,
     pub choice: Choice,
     /// Only these parts' sounds (any of them); every part when none is picked. Never holds [`PartPick::Any`].
@@ -474,9 +511,24 @@ impl Filters {
         }
     }
 
-    /// Every chip off, the search and the option kept.
+    /// Every chip off, the search, the option and the order kept.
     pub fn cleared(&self) -> Filters {
-        Filters { search: self.search.clone(), unused: self.unused, ..Filters::default() }
+        Filters { search: self.search.clone(), unused: self.unused, ..self.only_order() }
+    }
+
+    /// No filter at all, in this one's order: the order isn't a filter, so it outlives them.
+    pub fn only_order(&self) -> Filters {
+        Filters { order: self.order, reversed: self.reversed, ..Filters::default() }
+    }
+
+    /// A click on a column's heading: A to Z by that column, a second click Z to A, a third back to the list as it
+    /// was found.
+    pub fn order_by(&mut self, order: Order) {
+        (self.order, self.reversed) = match (self.order == order, self.reversed) {
+            (true, false) => (order, true),
+            (true, true) => (Order::Found, false),
+            (false, _) => (order, false),
+        };
     }
 
     /// The search's words, in lower case, once for a whole pass over the list.
@@ -603,7 +655,35 @@ pub fn filtered_with(items: &[Item], f: &Filters, fixes: &Fixes) -> Filtered {
     if !shown.is_sorted_by(|a, b| order(a, b).is_le()) {
         shown.sort_by(order);
     }
+    put_in_order(items, &mut shown, f, fixes);
     Filtered { shown, years: crate::year_strip::strip(by_year), counts: tally.done() }
+}
+
+/// Puts the lines shown in the picked column's order, as the column shows it, lines the same there staying as they
+/// were found. A line with nothing in that column (no part guessed, a kind not known) comes last either way round.
+fn put_in_order(items: &[Item], shown: &mut Vec<usize>, f: &Filters, fixes: &Fixes) {
+    if f.order == Order::Found {
+        return;
+    }
+    let key = |n: usize| {
+        let i = &items[n];
+        match f.order {
+            Order::Found => String::new(),
+            Order::Name => i.row.name.to_lowercase(),
+            Order::Part => i.role_with(fixes).map(|r| r.label().to_lowercase()).unwrap_or_default(),
+            Order::From => if i.is_file() { &i.row.place } else { &i.song }.to_lowercase(),
+            Order::Kind => kind_word(i.row.kind).to_owned(),
+            Order::Format => i.row.extension.trim_start_matches('.').to_lowercase(),
+        }
+    };
+    let mut keyed: Vec<(String, usize)> = shown.iter().map(|&n| (key(n), n)).collect();
+    // Stable sorts: equal lines keep the order they were found in (turned round with the rest).
+    keyed.sort_by(|a, b| a.0.cmp(&b.0));
+    if f.reversed {
+        keyed.reverse();
+    }
+    keyed.sort_by_key(|(k, _)| k.is_empty());
+    *shown = keyed.into_iter().map(|(_, n)| n).collect();
 }
 
 /// Puts preset files in the list's order (by folder, then name), so the filtering finds them in order and doesn't have
@@ -1697,6 +1777,26 @@ mod tests {
         // The part is searched too.
         assert_eq!(shown(&all, &Filters { search: "bass".into(), ..f.clone() }), [0]);
         assert!(!f.any() && Filters { from: From::Songs, ..f.clone() }.any());
+
+        // A click on a heading: A to Z by its column, lines the same there as they were found; a second click turns
+        // it round; a third puts the list back. The order isn't a filter, and Clear keeps it.
+        let names = |f: &Filters| shown(&all, f).iter().map(|&n| all[n].row.name.to_lowercase()).collect::<Vec<_>>();
+        let mut by = f.clone();
+        by.order_by(Order::Name);
+        assert!(!by.any() && names(&by).is_sorted());
+        assert_eq!(by.cleared().order, Order::Name);
+        by.order_by(Order::Name);
+        assert!(by.reversed && names(&by).iter().rev().is_sorted());
+        by.order_by(Order::Name);
+        assert_eq!((by.order, by.reversed), (Order::Found, false));
+        assert_eq!(shown(&all, &by), shown(&all, &f));
+        // By part, the sounds with no part guessed come last either way round.
+        let last_two = |f: &Filters| shown(&all, f)[2..].to_vec();
+        by.order_by(Order::Part);
+        assert_eq!(last_two(&by), [2, 3]);
+        by.order_by(Order::Part);
+        assert_eq!(last_two(&by), [3, 2]);
+        assert!(Order::COLUMNS.into_iter().all(|o| Order::from_column(o.column()) == Some(o)));
     }
 
     #[test]

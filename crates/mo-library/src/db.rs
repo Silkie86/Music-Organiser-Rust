@@ -331,8 +331,10 @@ impl Library {
         };
         read_info(&info, &mut d);
         d.save = save;
+        // Both in the order they were written (asked for: an index may hold them in another), which the sorts below
+        // keep for two of the same name.
         if self.has("plugins") {
-            let mut st = self.conn.prepare("SELECT * FROM plugins WHERE project_id = ?1")?;
+            let mut st = self.conn.prepare("SELECT * FROM plugins WHERE project_id = ?1 ORDER BY rowid")?;
             d.plugins = st
                 .query_map([id], |r| {
                     Ok(ProjectPlugin {
@@ -347,7 +349,7 @@ impl Library {
                 .collect::<Result<_, _>>()?;
         }
         if self.has("samples") {
-            let mut st = self.conn.prepare("SELECT * FROM samples WHERE project_id = ?1")?;
+            let mut st = self.conn.prepare("SELECT * FROM samples WHERE project_id = ?1 ORDER BY rowid")?;
             d.samples = st
                 .query_map([id], |r| {
                     Ok(ProjectSample {
@@ -677,7 +679,13 @@ fn summaries_query(columns: &[String], tables: &HashSet<String>) -> String {
     sub("samples", "SELECT COUNT(*) FROM samples WHERE project_id = p.id", "sample_count");
     sub("samples", "SELECT COUNT(*) FROM samples WHERE project_id = p.id AND found = 0", "missing_samples");
     sub("tags", "SELECT group_concat(tag, char(31)) FROM tags WHERE project_id = p.id", "tag_list");
-    sub("plugins", "SELECT group_concat(name, char(31)) FROM plugins WHERE project_id = p.id", "plugin_list");
+    // In the order the save's plugins were written, whichever index SQLite reads them from (songs.db's holds them by
+    // name): the order is asked for, a sort of one save's few names, still without a look at the table.
+    sub(
+        "plugins",
+        "SELECT group_concat(name, char(31) ORDER BY rowid) FROM plugins WHERE project_id = p.id",
+        "plugin_list",
+    );
     format!("SELECT {} FROM projects p", list.join(", "))
 }
 

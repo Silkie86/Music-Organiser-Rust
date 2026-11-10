@@ -310,7 +310,7 @@ fn show_preset(app: &AppWindow, at: usize) {
         let mut p = p.borrow_mut();
         // A synth that plays nothing is hidden unless that's shown: keep it shown, or the line stays hidden (H-1).
         let plays_nothing = p.items.get(at).is_some_and(|i| i.row.plays_nothing);
-        p.filters = Filters { unused: p.filters.unused || plays_nothing, ..Filters::default() };
+        p.filters = Filters { unused: p.filters.unused || plays_nothing, ..p.filters.only_order() };
         p.to_pick = Some(at);
         refilter(&mut p);
     });
@@ -367,6 +367,12 @@ fn wire(app: &AppWindow) {
             change_curves(&app, |f| f.kinds.clear());
         } else {
             change(&app, |f| f.clear_chip(&chip));
+        }
+    });
+    let weak = app.as_weak();
+    data.on_order_picked(move |column| {
+        if let (Some(app), Some(order)) = (weak.upgrade(), logic::Order::from_column(&column)) {
+            change(&app, |f| f.order_by(order));
         }
     });
     let weak = app.as_weak();
@@ -526,7 +532,7 @@ pub fn show_song(app: &AppWindow, save: &str, name: &str, modified: i64) {
     if again {
         read_again(app);
     }
-    change(app, |f| *f = Filters { song: Some(save.to_owned()), unused: f.unused, ..Filters::default() });
+    change(app, |f| *f = Filters { song: Some(save.to_owned()), unused: f.unused, ..f.only_order() });
     // The page may have been left on Curves: the key sheet lists the Sounds keys now (H-12).
     crate::refresh_keys(app);
 }
@@ -702,6 +708,9 @@ fn show_everything(app: &AppWindow) {
     PAGE.with(|p| {
         let p = p.borrow();
         data.set_section(p.section.index() as i32);
+        // The heading of the column the list goes by is lit, with which way (the UX review of 10 Nov, B5).
+        data.set_order_column(p.filters.order.column().into());
+        data.set_order_reversed(p.filters.reversed);
         let (hearing, playing) = match &p.hearing {
             Some((_, logic::Hearing::Starting)) => {
                 (format!("Putting {} into Bitwig to hear it\u{2026}", p.hearing_name), false)

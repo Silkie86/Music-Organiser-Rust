@@ -55,6 +55,17 @@ light that means something. It should feel like a rack unit on a desk, not a web
   at 100%): second lines, chips, counts and dates 13 to 14 px, capitals, small and tiny words a step up too, and every
   theme's faint words brighter (darker on Paper) so they reach about 4.5:1 on the page.
 
+- Wide windows (the UX review of 10 Nov, A1 and B1; Solomon's window is 3440 across): a page's list of lines stops
+  at 1280 px and its side card at 760 px (`Fit` in `ui/list.slint`), side by side from the left with the page's rows
+  of controls stopping at the same width, so a line's name and its numbers stay within one look of each other. The
+  card's place is always there, empty ("Pick a part") until something is picked, so nothing moves when it is. On
+  MIDI, Presets and Plugins so far; `mo-screens` draws every place at 3440 x 1369 too (`wide-<place>.png`).
+
+- Column headings order a list (the UX review of 10 Nov, B5): a click on a heading (`ColumnHead` in `studio.slint`)
+  puts the list in that column's order, a second click turns it round; the heading the list goes by is lit in the
+  accent with a small arrow. A page whose headings do this has no "Order" row of chips. On Plugins, MIDI and
+  Presets so far (Presets: a third click puts the list back as it was found).
+
 ## Next steps
 
 - Left out on purpose: a focus ring on every button (the app is driven by its shortcut list, and focusable buttons

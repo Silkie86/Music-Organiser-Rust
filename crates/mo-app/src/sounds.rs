@@ -252,14 +252,12 @@ pub struct SoundList {
     projects: Option<Arc<HashMap<i64, ProjectFile>>>,
     /// Each sound's Most liked score, in `sounds` order, once known.
     liked: Option<Arc<Vec<f64>>>,
-    /// The best of `liked`, worked out once, as every tile asks for its share of it.
+    /// The best of `liked`, worked out once, as the galaxy asks every sound for its share of it.
     liked_best: f64,
-    /// The places of the [`TOP_LIKED`] best liked sounds, best first ([`SoundList::liked_best_but`]).
-    liked_top: Vec<usize>,
     /// Which sounds are copies of each other (the same audio), once known: shared by a clone, and kept by
     /// [`SoundList::sharing`], as it's of the same sounds.
     copies: Option<Arc<Copies>>,
-    /// Your say about sounds since they were read (a favourite, stars, your own type, tags), by sound id
+    /// Your say about sounds since they were read (a favourite, your own type, tags), by sound id
     /// ([`SoundList::with_say`]): over what each sound says, for the filters, the chips' counts, the orders and
     /// [`SoundList::now`]. Kept by [`SoundList::sharing`], as it's of the same sounds.
     say: Option<Arc<HashMap<i64, YourSay>>>,
@@ -269,7 +267,6 @@ pub struct SoundList {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct YourSay {
     pub favourite: Option<bool>,
-    pub stars: Option<i32>,
     /// Your own type: `Some(None)` when you took yours away.
     pub own_type: Option<Option<Word>>,
     /// Its tags as they are now, sorted as the library sorts them (byte by byte).
@@ -281,7 +278,6 @@ pub struct YourSay {
 pub struct Now<'a> {
     pub sound: &'a Sound,
     pub favourite: bool,
-    pub stars: i32,
     /// The type shown, and where it came from ("you", "name", "learned", "model", or "").
     pub sound_type: &'a str,
     pub type_source: &'a str,
@@ -299,7 +295,6 @@ impl<'a> Now<'a> {
         let mut now = Now {
             sound: s,
             favourite: s.favourite,
-            stars: s.rating,
             sound_type: s.sound_type.as_str(),
             type_source: s.type_source.as_str(),
             own_type: s.user_type.as_deref(),
@@ -310,9 +305,6 @@ impl<'a> Now<'a> {
         now.words_changed = say.own_type.is_some() || say.tags.is_some();
         if let Some(f) = say.favourite {
             now.favourite = f;
-        }
-        if let Some(n) = say.stars {
-            now.stars = n;
         }
         match &say.own_type {
             Some(Some(own)) => {
@@ -345,17 +337,12 @@ pub struct Copies {
     sizes: HashMap<usize, u64>,
 }
 
-/// How many of the best liked sounds a list knows the places of ([`SoundList::liked_best_but`]): more than you change
-/// in a while.
-const TOP_LIKED: usize = 16;
-
 /// What told a sound to keep from its copy ([`SoundList::why_kept`]): the first of these that does, in this order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KeptFor {
     /// Your projects use it more.
     Used,
     Favourite,
-    Stars,
     Plays,
     Tags,
     /// The older file (most likely the first).
@@ -438,7 +425,6 @@ impl SoundList {
             projects: None,
             liked: None,
             liked_best: 0.0,
-            liked_top: Vec::new(),
             copies: None,
             say: None,
         }
@@ -453,7 +439,6 @@ impl SoundList {
             projects: None,
             liked: None,
             liked_best: 0.0,
-            liked_top: Vec::new(),
             copies: self.copies.clone(),
             say: self.say.clone(),
         }
@@ -618,7 +603,8 @@ impl SoundList {
     }
 
     /// Of two copies of the same sound, the one to keep showing first: the one your projects use most, then a
-    /// favourite, more stars, more plays, more tags, the older file (the first, most likely), and then by path.
+    /// favourite, more plays, more tags, the older file (the first, most likely), and then by path. Not stars: the
+    /// heart is the one way to like a sound (Solomon's pick, 10 Nov 2026), so stars given in the old app don't pick it.
     fn keep_first(&self, a: usize, b: usize) -> std::cmp::Ordering {
         self.keep_by(a, b).0
     }
@@ -632,7 +618,6 @@ impl SoundList {
         let rules = [
             (KeptFor::Used, used(sb).cmp(&used(sa))),
             (KeptFor::Favourite, nb.favourite.cmp(&na.favourite)),
-            (KeptFor::Stars, nb.stars.cmp(&na.stars)),
             (KeptFor::Plays, sb.plays.cmp(&sa.plays)),
             (KeptFor::Tags, nb.tags.len().cmp(&na.tags.len())),
             (KeptFor::Older, sa.added.cmp(&sb.added)),
@@ -669,15 +654,6 @@ impl SoundList {
     pub fn set_liked(&mut self, score: impl Fn(&Sound) -> f64 + Sync + Send) {
         let liked: Vec<f64> = self.shared.sounds.par_iter().map(&score).collect();
         self.liked_best = liked.iter().copied().fold(0.0, f64::max);
-        let mut top: Vec<usize> = Vec::with_capacity(TOP_LIKED + 1);
-        for (i, &score) in liked.iter().enumerate() {
-            if top.len() == TOP_LIKED && top.last().is_some_and(|&t| score <= liked[t]) {
-                continue;
-            }
-            top.insert(top.partition_point(|&t| liked[t] >= score), i);
-            top.truncate(TOP_LIKED);
-        }
-        self.liked_top = top;
         self.liked = Some(Arc::new(liked));
     }
 
@@ -724,25 +700,6 @@ impl SoundList {
         let liked = self.liked.as_ref()?;
         let best = self.liked_best;
         Some(if best > 0.0 { liked.get(i).copied().unwrap_or(0.0) / best } else { 0.0 })
-    }
-
-    /// The sound at `i`'s Most liked score, if scores are known yet.
-    pub fn liked_score(&self, i: usize) -> Option<f64> {
-        Some(self.liked.as_ref()?.get(i).copied().unwrap_or(0.0))
-    }
-
-    /// The best liked sound's Most liked score, if scores are known yet.
-    pub fn liked_best(&self) -> Option<f64> {
-        self.liked.as_ref().map(|_| self.liked_best)
-    }
-
-    /// The best Most liked score of the sounds whose places `changed` doesn't pick, if scores are known yet: the page
-    /// works out those whose score changed since (one that's no favourite now may have been the best). When all the
-    /// [`TOP_LIKED`] best changed, the last of them is the nearest it knows, a little over at most.
-    pub fn liked_best_but(&self, changed: impl Fn(usize) -> bool) -> Option<f64> {
-        let liked = self.liked.as_ref()?;
-        let top = self.liked_top.iter().find(|&&at| !changed(at)).or(self.liked_top.last());
-        Some(top.map_or(0.0, |&at| liked[at]).max(0.0))
     }
 
     /// Whether the use counts are in, so the Used chips can work.
@@ -1583,7 +1540,7 @@ pub fn salvaged_line(salvaged: &mo_sounds::compact::Salvaged, unused: Option<&st
     let kept = match (salvaged.kept, salvaged.unread) {
         (0, 0) => "nothing in it differed from sounds.db",
         (0, _) => "none of it could still be read, so it's as sounds.db has it",
-        (_, 0) => "with all of it: your stars, tags, plays and the sounds the scan added",
+        (_, 0) => "with all of it: your favourites, tags, plays and the sounds the scan added",
         _ => "with all of it that could still be read (the rest is as sounds.db has it)",
     };
     let unused = unused.unwrap_or("there's no backup copy");
@@ -1732,17 +1689,9 @@ mod tests {
         let counted = |list: &SoundList, f: Filters| ids(list, &list.view_counted(&f, Order::Name, 0).0);
         let favourites = Filters { favourites: true, ..Filters::default() };
         assert_eq!(view(&list, favourites.clone(), Order::Name), [3]);
-        // The kick a favourite now, with stars and a tag; the vocal not, and its tag gone; the bass yours as a Pad.
+        // The kick a favourite now, with a tag; the vocal not, and its tag gone; the bass yours as a Pad.
         let say = HashMap::from([
-            (
-                1,
-                YourSay {
-                    favourite: Some(true),
-                    stars: Some(4),
-                    tags: Some(vec!["dusty".into()]),
-                    ..YourSay::default()
-                },
-            ),
+            (1, YourSay { favourite: Some(true), tags: Some(vec!["dusty".into()]), ..YourSay::default() }),
             (3, YourSay { favourite: Some(false), tags: Some(Vec::new()), ..YourSay::default() }),
             (2, YourSay { own_type: Some(Some("Pad".into())), ..YourSay::default() }),
         ]);
@@ -1751,7 +1700,7 @@ mod tests {
         assert_eq!(view(&now, favourites.clone(), Order::Name), [1]);
         assert_eq!(counted(&now, favourites), [1]);
         let k = now.now(kick).unwrap();
-        assert_eq!((k.favourite, k.stars, k.tags, k.sound_type), (true, 4, &["dusty".to_owned()][..], "Kick"));
+        assert_eq!((k.favourite, k.tags, k.sound_type), (true, &["dusty".to_owned()][..], "Kick"));
         let b = now.now(bass).unwrap();
         assert_eq!((b.sound_type, b.type_source, b.own_type), ("Pad", "you", Some("Pad")));
         // The sound as it was read stays as it was.
@@ -1786,7 +1735,7 @@ mod tests {
         // Nothing to say: as it was read.
         let none = list.with_say(Arc::new(HashMap::new()));
         assert_eq!(view(&none, Filters { favourites: true, ..Filters::default() }, Order::Name), [3]);
-        // Of two copies, the favourite with more stars now is the one kept.
+        // Of two copies, the favourite now is the one kept.
         assert_eq!(now.why_kept(kick, vocal), KeptFor::Favourite);
     }
 
@@ -2303,7 +2252,7 @@ mod tests {
         assert_eq!(
             salvaged(12, 0),
             "It was damaged, and there's no backup copy, so it was made again from sounds.db, with all of it: your \
-             stars, tags, plays and the sounds the scan added. The damaged one is kept beside it for a week, as \
+             favourites, tags, plays and the sounds the scan added. The damaged one is kept beside it for a week, as \
              sounds-rust.db.damaged."
         );
         let unusable = mo_sounds::compact::Salvaged { kept: 3, unread: 0 };

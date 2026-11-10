@@ -1,6 +1,6 @@
 //! The one writer of what you do with sounds and your own say about them (stages 3 and 5 of "the sound library grows
-//! again", review finding X1-own1): deliberate plays, drags out of the app and sends into a DAW, and favourites,
-//! stars, your own types and tags, are noted on the window's thread, which never waits. A thread of their own, at low
+//! again", review finding X1-own1): deliberate plays, drags out of the app and sends into a DAW, and favourites, your
+//! own types and tags, are noted on the window's thread, which never waits. A thread of their own, at low
 //! priority (rule 21), keeps them in the app's own sound library ([`mo_sounds::compact::did`],
 //! [`mo_sounds::compact::yours`]), all those noted meanwhile in one short write of each.
 //!
@@ -234,9 +234,9 @@ impl Noter {
                 }
                 if let Some(why) = yours_failed {
                     let what = if given_up > 0 {
-                        format!("{given_up} changes to favourites, stars, types or tags (gave up)")
+                        format!("{given_up} changes to favourites, types or tags (gave up)")
                     } else {
-                        format!("{tried} changes to favourites, stars, types or tags yet (tried again later)")
+                        format!("{tried} changes to favourites, types or tags yet (tried again later)")
                     };
                     say(what, why, given_up > 0);
                 }
