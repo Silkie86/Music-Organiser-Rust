@@ -3,6 +3,18 @@
 // (i-slint-compiler object_tree.rs, "Custom ListView is OK"), so this one keeps the name.
 import { ListView as SlintListView } from "std-widgets.slint";
 
+// How wide a page's list of lines and its side card get at most. In a window wider than both (Solomon's is 3440
+// across) they stop here, side by side from the left, and the rest of the window stays empty: a line's name and its
+// numbers stay within one look of each other, where they used to end up a screen apart (the UX review of 10 Nov, A1).
+// The seam between them can only be dragged while the window is too narrow for both at their widest.
+export global Fit {
+    out property <length> list-max: 1280px;
+    out property <length> card-max: 760px;
+    // Both with the seam between them (a PanelDivider, 16px): how wide a page's own rows of controls get, so its
+    // buttons at the right end stay over the card and don't sit alone at the far side of the window.
+    out property <length> page-max: self.list-max + 16px + self.card-max;
+}
+
 // Each time `show-ask` goes up, the list brings the line whose top is at `show-top` into sight, a third of the way
 // down (or the list to its end), once it has laid out its lines. Every line must be `row-height` tall: the list counts
 // on it to know when they're laid out. A list that never turns leaves these alone.

@@ -51,6 +51,12 @@ light that means something. It should feel like a rack unit on a desk, not a web
   strip behind its name (`FilterPicks`): the name in a sunken cap, the chips touching, its More menu at the end. A
   strip that breaks onto a new line rounds again where the line starts. A chip or menu on its own stays a pill.
 
+- Wide windows (the UX review of 10 Nov, A1 and B1; Solomon's window is 3440 across): a page's list of lines stops
+  at 1280 px and its side card at 760 px (`Fit` in `ui/list.slint`), side by side from the left with the page's rows
+  of controls stopping at the same width, so a line's name and its numbers stay within one look of each other. The
+  card's place is always there, empty ("Pick a part") until something is picked, so nothing moves when it is. On
+  MIDI, Presets and Plugins so far; `mo-screens` draws every place at 3440 x 1369 too (`wide-<place>.png`).
+
 ## Next steps
 
 - Left out on purpose: a focus ring on every button (the app is driven by its shortcut list, and focusable buttons

@@ -2386,6 +2386,8 @@ export component OptionsButton inherits StudioButton {
 // The picked thing's panel beside a page's list: a raised card with a × to put it away (Esc does too).
 export component SidePanel inherits Rectangle {
     callback close;
+    // Whether it has something to close: an empty card ("Pick a part") shows no ×.
+    in property <bool> closable: true;
     // Back to its top: for a page whose one panel shows another card (it would open scrolled as far as the last one).
     public function to-top() {
         flick.content-y = 0;
@@ -2424,7 +2426,7 @@ export component SidePanel inherits Rectangle {
             }
         }
     }
-    CloseButton {
+    if root.closable: CloseButton {
         x: parent.width - self.width - Space.md;
         y: Space.md;
         clicked => { root.close(); }
