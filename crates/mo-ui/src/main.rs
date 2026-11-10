@@ -64,6 +64,20 @@ fn main() -> Result<(), slint::PlatformError> {
         feed.notice("Your song library couldn't be read", &notice);
     }
     let library = songs_db.library.clone();
+    if songs_db.is_songs_db() {
+        // Once, for a songs.db made before them: the indexes the Songs list is read from. Before any page reads.
+        match mo_library::songs_db::tune(&library) {
+            Ok(Some(took)) => log::info(
+                "Song library",
+                &format!("Gave songs.db the Songs list's indexes in {} ms (once)", took.as_millis()),
+            ),
+            Ok(None) => {}
+            Err(why) => log::warning(
+                "Song library",
+                &format!("songs.db couldn't be given the Songs list's indexes ({why}); tried again next start"),
+            ),
+        }
+    }
     // Rule 28: what an earlier run or a stopped tool left behind is cleared, a little later, at low priority.
     mo_app::tidy::start(library.clone());
     if !songs_db.is_songs_db() {

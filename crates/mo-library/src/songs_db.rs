@@ -96,17 +96,76 @@ const TABLES: &str = "
     CREATE TABLE songs_info (key TEXT PRIMARY KEY, value);
 ";
 
-/// The C# app's indexes, made once the tables are filled (quicker than keeping them up to date row by row).
+/// The indexes, made once the tables are filled (quicker than keeping them up to date row by row): the C# app's, but
+/// for the two the Songs list counts from ([`LIST_INDEXES`]).
 const INDEXES: &str = "
-    CREATE INDEX ix_plugins_project ON plugins(project_id);
+    CREATE INDEX ix_plugins_list ON plugins(project_id, installed, name);
     CREATE INDEX ix_plugins_key ON plugins(name_key);
-    CREATE INDEX ix_samples_project ON samples(project_id);
+    CREATE INDEX ix_samples_list ON samples(project_id, found);
     CREATE INDEX ix_samples_path ON samples(path COLLATE NOCASE);
     CREATE INDEX ix_tags_tag ON tags(tag);
     CREATE INDEX ix_projects_folder ON projects(folder);
     CREATE INDEX ix_scanned_plugins_path ON scanned_plugins(path);
     CREATE INDEX ix_scanned_plugins_key ON scanned_plugins(name_key);
 ";
+
+/// The two indexes the Songs list's counts and plugin names are read from, each with the C# app's index it takes the
+/// place of. They hold everything the list asks of `plugins` and `samples`, so the list is read from the indexes
+/// alone, a save's rows side by side, and never from the tables, where a save's rows lie scattered among the others'.
+/// (Each starts with `project_id`, so it does all the older one did.)
+const LIST_INDEXES: [(&str, &str, &str); 2] = [
+    ("ix_plugins_list", "plugins(project_id, installed, name)", "ix_plugins_project"),
+    ("ix_samples_list", "samples(project_id, found)", "ix_samples_project"),
+];
+
+/// Gives a `songs.db` that's the app's own library the indexes the Songs list is read from ([`LIST_INDEXES`]), where
+/// it was made before them, and removes the two they take the place of: all in one step, or none of it. How long it
+/// took, or `None` when there was nothing to do (which is only a look, and writes nothing).
+///
+/// Indexes only change how quickly SQLite finds rows, never what a question answers, so the layout number stays as it
+/// is and an older build of the app reads the file as before. Call it at the start, before the pages read: it takes
+/// about a second for a large library, once. A library that isn't the app's own (yet) is left alone: it may be made
+/// again.
+pub fn tune(songs: &Path) -> Result<Option<Duration>, String> {
+    let done = (|| -> rusqlite::Result<Result<Option<Duration>, String>> {
+        if !matches!(look(songs), Ok(Found::Songs { own: Some(_), .. })) {
+            return Ok(Err("it isn't the app's own song library (yet)".to_owned()));
+        }
+        let has = |conn: &Connection, index: &str| -> rusqlite::Result<bool> {
+            conn.query_row("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1", [index], |_| Ok(()))
+                .optional()
+                .map(|found| found.is_some())
+        };
+        let to_do = |conn: &Connection| -> rusqlite::Result<bool> {
+            for (new, _, old) in LIST_INDEXES {
+                if !has(conn, new)? || has(conn, old)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        };
+        if !to_do(&open_read_only(songs)?)? {
+            return Ok(Ok(None));
+        }
+        let started = std::time::Instant::now();
+        let conn =
+            Connection::open_with_flags(songs, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        conn.busy_timeout(WAIT)?;
+        let tx = rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
+        // Looked at again under the write lock: only the app's own library is written.
+        let own: Option<Value> =
+            tx.query_row("SELECT value FROM songs_info WHERE key = 'own_since'", [], |r| r.get(0)).optional()?;
+        if !matches!(own, Some(Value::Integer(_))) {
+            return Ok(Err("it isn't the app's own song library (yet)".to_owned()));
+        }
+        for (new, on, old) in LIST_INDEXES {
+            tx.execute_batch(&format!("CREATE INDEX IF NOT EXISTS {new} ON {on}; DROP INDEX IF EXISTS {old};"))?;
+        }
+        tx.commit()?;
+        Ok(Ok(Some(started.elapsed())))
+    })();
+    done.map_err(|e| e.to_string())?
+}
 
 /// The tables copied as they are, row for row (`projects` is copied too, its `info` apart).
 const WHOLE: [&str; 11] = [

@@ -677,7 +677,13 @@ fn summaries_query(columns: &[String], tables: &HashSet<String>) -> String {
     sub("samples", "SELECT COUNT(*) FROM samples WHERE project_id = p.id", "sample_count");
     sub("samples", "SELECT COUNT(*) FROM samples WHERE project_id = p.id AND found = 0", "missing_samples");
     sub("tags", "SELECT group_concat(tag, char(31)) FROM tags WHERE project_id = p.id", "tag_list");
-    sub("plugins", "SELECT group_concat(name, char(31)) FROM plugins WHERE project_id = p.id", "plugin_list");
+    // In the order the save's plugins were written, whichever index SQLite reads them from (songs.db's holds them by
+    // name): the order is asked for, and comes from the index too.
+    sub(
+        "plugins",
+        "SELECT group_concat(name, char(31) ORDER BY rowid) FROM plugins WHERE project_id = p.id",
+        "plugin_list",
+    );
     format!("SELECT {} FROM projects p", list.join(", "))
 }
 

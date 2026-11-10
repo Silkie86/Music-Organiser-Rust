@@ -503,3 +503,74 @@ fn songs_db_held_as_the_app_starts_is_waited_for_and_settings_never_go_into_libr
     let changed = folders::add_folder(&other, FolderList::Samples, "F:\\New samples", &[]).unwrap();
     assert!(matches!(changed, folders::Changed::Done(_)), "{changed:?}");
 }
+
+/// The names of the indexes on `table`, in order.
+fn indexes(songs: &Path, table: &str) -> Vec<String> {
+    let c = Connection::open(songs).unwrap();
+    let mut st = c
+        .prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = ?1 AND sql NOT NULL ORDER BY 1")
+        .unwrap();
+    st.query_map([table], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+}
+
+#[test]
+fn a_songs_db_made_before_them_gets_the_songs_lists_indexes_once() {
+    let old = library("tune");
+    let dir = old.parent().unwrap().to_owned();
+    let new = songs_beside(&old);
+    make(&old);
+    // One made now has them from the start.
+    assert_eq!(indexes(&new, "plugins"), ["ix_plugins_key", "ix_plugins_list"]);
+    assert_eq!(indexes(&new, "samples"), ["ix_samples_list", "ix_samples_path"]);
+    // As an earlier build made it: the C# app's two indexes.
+    Connection::open(&new)
+        .unwrap()
+        .execute_batch(
+            "DROP INDEX ix_plugins_list; DROP INDEX ix_samples_list;
+             CREATE INDEX ix_plugins_project ON plugins(project_id);
+             CREATE INDEX ix_samples_project ON samples(project_id);",
+        )
+        .unwrap();
+    // Not the app's own yet (it may be made again): left alone.
+    let refused = songs_db::tune(&new).unwrap_err();
+    assert!(refused.contains("isn't the app's own"), "{refused}");
+    assert_eq!(indexes(&new, "samples"), ["ix_samples_path", "ix_samples_project"]);
+    // Its own (library.db is put away, as the archive does): the new two in, the old two out, in one go.
+    std::fs::remove_file(&old).unwrap();
+    assert_eq!(songs_db::at_start(&dir, APP).state, State::Switched);
+    let before = everything(&new);
+    assert!(songs_db::tune(&new).unwrap().is_some());
+    assert_eq!(indexes(&new, "plugins"), ["ix_plugins_key", "ix_plugins_list"]);
+    assert_eq!(indexes(&new, "samples"), ["ix_samples_list", "ix_samples_path"]);
+    // Everything reads as before, the layout number is the same, and the file is sound.
+    assert_eq!(everything(&new), before);
+    assert_eq!(songs_db::at_start(&dir, APP).state, State::Own);
+    let c = Connection::open(&new).unwrap();
+    assert_eq!(c.query_row("PRAGMA integrity_check", [], |r| r.get::<_, String>(0)).unwrap(), "ok");
+    // The list's counts and names are read from the indexes alone, never the tables.
+    for ask in [
+        "SELECT COUNT(*) FROM plugins WHERE project_id = 1",
+        "SELECT COUNT(*) FROM plugins WHERE project_id = 1 AND installed = 0",
+        "SELECT group_concat(name, char(31) ORDER BY rowid) FROM plugins WHERE project_id = 1",
+        "SELECT COUNT(*) FROM samples WHERE project_id = 1",
+        "SELECT COUNT(*) FROM samples WHERE project_id = 1 AND found = 0",
+    ] {
+        let mut st = c.prepare(&format!("EXPLAIN QUERY PLAN {ask}")).unwrap();
+        let plan: Vec<String> = st.query_map([], |r| r.get(3)).unwrap().collect::<Result<_, _>>().unwrap();
+        assert!(plan.iter().any(|step| step.contains("USING COVERING INDEX ix_")), "{ask}: {plan:?}");
+        assert!(!plan.iter().any(|step| step.contains("SCAN")), "{ask}: {plan:?}");
+    }
+    drop(c);
+    // Done: the next start only looks, and writes nothing.
+    let stamp = |p: &Path| std::fs::metadata(p).unwrap().modified().unwrap();
+    let at = stamp(&new);
+    assert_eq!(songs_db::tune(&new), Ok(None));
+    assert_eq!(stamp(&new), at);
+    // Half done (the new ones made, an old one still there) is finished too.
+    Connection::open(&new).unwrap().execute_batch("CREATE INDEX ix_samples_project ON samples(project_id);").unwrap();
+    assert!(songs_db::tune(&new).unwrap().is_some());
+    assert_eq!(indexes(&new, "samples"), ["ix_samples_list", "ix_samples_path"]);
+    // Nothing there, or not the app's library: an error, and nothing made.
+    assert!(songs_db::tune(&dir.join("none.db")).is_err());
+    assert!(!dir.join("none.db").exists());
+}
