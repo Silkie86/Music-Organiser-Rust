@@ -473,7 +473,86 @@ pub struct View {
     pub counts: SongCounts,
 }
 
+/// The column the list goes by, picked by a click on the column's heading (the UX review of 10 Nov, B5): when each
+/// song was last saved (newest first, under the time headings), its name, or its status.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Order {
+    #[default]
+    Saved,
+    Name,
+    Status,
+}
+
+impl Order {
+    pub const ALL: [Order; 3] = [Order::Saved, Order::Name, Order::Status];
+
+    /// The column's heading.
+    pub fn column(self) -> &'static str {
+        match self {
+            Order::Saved => "Last saved",
+            Order::Name => "Song",
+            Order::Status => "Status",
+        }
+    }
+
+    pub fn from_column(column: &str) -> Option<Order> {
+        Order::ALL.into_iter().find(|o| o.column() == column)
+    }
+}
+
+/// The list's order: a column, and whether it's turned round (oldest first, Z to A).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Listed {
+    pub by: Order,
+    pub reversed: bool,
+}
+
+impl Listed {
+    /// A click on a column's heading: the list goes by it, and a second click turns it round.
+    pub fn order_by(&mut self, by: Order) {
+        self.reversed = self.by == by && !self.reversed;
+        self.by = by;
+    }
+}
+
 impl View {
+    /// Puts the songs shown in `listed`'s order. By the date they keep their time headings (turned round, the oldest
+    /// year's comes first); by name or status there are none, songs the same there stay newest first, and a song with
+    /// no status comes last either way round.
+    pub fn put_in_order(&mut self, songs: &Songs, listed: Listed, now: NaiveDateTime) {
+        if listed == Listed::default() {
+            return;
+        }
+        let mut rows: Vec<usize> =
+            self.entries.iter().filter_map(|e| if let Entry::Song(row) = e { Some(*row) } else { None }).collect();
+        let status = |&i: &usize| {
+            let s = &songs.rows[i].status;
+            STATUSES.iter().position(|known| known.eq_ignore_ascii_case(s)).unwrap_or(STATUSES.len())
+        };
+        // Stable sorts, so songs the same in the column keep the order they came in.
+        match listed.by {
+            Order::Saved => {}
+            Order::Name => rows.sort_by_cached_key(|&i| songs.rows[i].song.name.to_lowercase()),
+            Order::Status => rows.sort_by_key(status),
+        }
+        if listed.reversed {
+            rows.reverse();
+            if listed.by == Order::Status {
+                rows.sort_by_key(|i| status(i) == STATUSES.len());
+            }
+        }
+        self.entries.clear();
+        let mut heading = None;
+        for i in rows {
+            let h = When::of(songs.rows[i].saved, now);
+            if listed.by == Order::Saved && heading != Some(h) {
+                self.entries.push(Entry::Heading(h));
+                heading = Some(h);
+            }
+            self.entries.push(Entry::Song(i));
+        }
+    }
+
     /// The song `by` lines on from `from` (Up is -1, Down 1), stepping over the headings and stopping at the first and
     /// the last; the first song shown when none is picked or the picked one isn't shown. Its place in
     /// [`Songs::rows`]; none when nothing is shown (review X3-8).
@@ -761,6 +840,30 @@ mod tests {
             .collect();
         assert_eq!(names, ["# Earlier in 2026", "Alpha", "Didums", "Charlie"]);
         assert_eq!(s.rows[1].short_date(now), "1 May");
+
+        // A click on a heading: by name there are no time headings; a second click turns the order round; back by
+        // the date, turned round, the headings are back with the oldest first.
+        let names = |listed: Listed| {
+            let mut v = s.view(&Filters::default(), now);
+            v.put_in_order(&s, listed, now);
+            v.entries
+                .iter()
+                .map(|e| match e {
+                    Entry::Heading(h) => format!("# {h}"),
+                    Entry::Song(i) => s.rows[*i].song.name.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut listed = Listed::default();
+        listed.order_by(Order::Name);
+        assert_eq!(names(listed), ["Alpha", "Charlie", "Didums"]);
+        listed.order_by(Order::Name);
+        assert_eq!(names(listed), ["Didums", "Charlie", "Alpha"]);
+        listed.order_by(Order::Saved);
+        assert_eq!(names(listed), ["# Earlier in 2026", "Alpha", "Didums", "Charlie"]);
+        listed.order_by(Order::Saved);
+        assert_eq!(names(listed), ["# Earlier in 2026", "Charlie", "Didums", "Alpha"]);
+        assert!(Order::ALL.into_iter().all(|o| Order::from_column(o.column()) == Some(o)));
     }
 
     #[test]
