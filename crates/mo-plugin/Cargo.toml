@@ -1,0 +1,55 @@
+[package]
+name = "mo-plugin"
+description = "The test CLAP plugin: a small Music Organiser panel inside a DAW (Bitwig first). It opens a Slint panel in the window the DAW lends it, lists sounds from the app's sound library, plays one through the track, and lists every CLAP extension the DAW offers. It reads the app's files and never writes them."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+# cdylib: the .clap file a DAW loads (a renamed .dll/.so). rlib: so the tests can use it.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+chrono.workspace = true
+# CLAP itself, through safe Rust wrappers (MIT/Apache). clack-extensions holds every standard extension.
+clack-plugin = "0.2"
+clack-extensions = { version = "0.2", features = [
+    "audio-ports",
+    "clack-plugin",
+    "gui",
+    "log",
+    "note-ports",
+    "raw-window-handle_06",
+    "track-info",
+] }
+# The plugin's own window inside the one the DAW lends it (MIT/Apache).
+baseview = "0.4"
+# Puts the pixels Slint drew in that window, without the graphics card (Slint's software renderer).
+softbuffer = { version = "0.4", default-features = false, features = ["x11", "x11-dlopen"] }
+bytemuck = { version = "1", features = ["derive"] }
+raw-window-handle = "0.6"
+# The keys baseview hands the window, as it names them.
+keyboard-types = "0.8"
+# The screens: Slint without its own windows (the DAW's window stands in), drawn on the CPU.
+slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "renderer-software"] }
+# Only to switch on Slint's reading of the pictures in its own widgets (the list's scroll bar): Slint's window libraries
+# switch it on themselves, and the plugin uses none of them. The same version as `slint` in Cargo.lock: update both.
+i-slint-core = { version = "=1.18.1", default-features = false, features = ["image-decoders", "svg"] }
+# Hands sounds to the audio thread and back without waiting or making memory there.
+rtrb = "0.3"
+thread-priority.workspace = true
+mo-app = { workspace = true }
+# Decoding sounds only: the DAW plays them, not the system's sound output.
+mo-audio = { path = "../mo-audio", default-features = false }
+mo-sounds = { path = "../mo-sounds" }
+
+[dev-dependencies]
+# A stand-in DAW for the tests: clack's host side.
+clack-host = { version = "0.2", features = ["clack-plugin"] }
+clack-extensions = { version = "0.2", features = ["audio-ports", "clack-host", "gui", "note-ports"] }
+
+[build-dependencies]
+slint-build.workspace = true

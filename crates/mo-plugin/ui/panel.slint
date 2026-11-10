@@ -1,0 +1,181 @@
+// The test plugin's panel: what shows inside the DAW's plugin window. Built from the app's own style (studio.slint),
+// so it looks like the app. Two views: Sounds (a list from the app's sound library, click to play through the track)
+// and DAW check (every CLAP extension the DAW was asked for, and whether it has it).
+
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented } from "../../mo-ui/ui/studio.slint";
+import { ListView } from "../../mo-ui/ui/list.slint";
+
+import "../../mo-ui/fonts/IBMPlexSans-400.ttf";
+import "../../mo-ui/fonts/IBMPlexSans-600.ttf";
+import "../../mo-ui/fonts/IBMPlexMono-400.ttf";
+
+export struct SoundLine {
+    name: string,
+    // The folder it's in, shorter: the second line.
+    folder: string,
+}
+
+export struct ExtensionLine {
+    // What the extension is for, in plain words.
+    name: string,
+    // The id the DAW was asked for, exactly.
+    id: string,
+    offered: bool,
+}
+
+export component Panel inherits Window {
+    // The DAW and its version, and the track the plugin is on, when the DAW says.
+    in property <string> host;
+    in property <string> track;
+    in property <[SoundLine]> sounds;
+    // How the read went: "Reading the sound library", "1,234 sounds", or what's wrong.
+    in property <string> status;
+    // What's playing, or what went wrong playing it.
+    in property <string> playing;
+    in property <[ExtensionLine]> extensions;
+    in property <string> extensions-summary;
+    in-out property <int> picked: -1;
+    in-out property <int> view: 0;
+    callback search(string);
+    callback play(int);
+    callback stop();
+
+    title: "Music Organiser";
+    preferred-width: 560px;
+    preferred-height: 520px;
+    background: Theme.background;
+    default-font-family: Theme.text-font;
+    default-font-size: Type.body;
+
+    VerticalLayout {
+        padding: Space.lg;
+        spacing: Space.md;
+
+        HorizontalLayout {
+            spacing: Space.md;
+            VerticalLayout {
+                spacing: Space.xs;
+                Text {
+                    text: "Music Organiser";
+                    color: Theme.text;
+                    font-size: Type.heading;
+                    font-weight: 600;
+                }
+                Text {
+                    text: root.track == "" ? root.host : root.host + "  ·  track " + root.track;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                }
+            }
+            Rectangle { }
+            Segmented {
+                choices: ["Sounds", "DAW check"];
+                current: root.view;
+                picked(i) => { root.view = i; }
+            }
+        }
+
+        if root.view == 0: VerticalLayout {
+            spacing: Space.md;
+            HorizontalLayout {
+                spacing: Space.sm;
+                SearchBox {
+                    horizontal-stretch: 1;
+                    hint: "Search sounds";
+                    edited(text) => { root.search(text); }
+                }
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "Stop";
+                    clicked => { root.stop(); }
+                }
+            }
+            Text {
+                text: root.status;
+                color: Theme.muted;
+                font-size: Type.meta;
+            }
+            ListView {
+                row-height: 48px;
+                rows: root.sounds.length;
+                for sound[i] in root.sounds: ListLine {
+                    height: 48px;
+                    selected: i == root.picked;
+                    clicked => {
+                        root.picked = i;
+                        root.play(i);
+                    }
+                    VerticalLayout {
+                        padding-left: Space.md;
+                        padding-right: Space.md;
+                        alignment: center;
+                        Text {
+                            text: sound.name;
+                            color: Theme.text;
+                            font-size: Type.row-title;
+                            overflow: elide;
+                        }
+                        Text {
+                            text: sound.folder;
+                            color: Theme.faint;
+                            font-size: Type.meta;
+                            overflow: elide;
+                        }
+                    }
+                }
+            }
+            Text {
+                text: root.playing;
+                color: Theme.accent;
+                font-size: Type.meta;
+                overflow: elide;
+            }
+        }
+
+        if root.view == 1: VerticalLayout {
+            spacing: Space.md;
+            Text {
+                text: root.extensions-summary;
+                color: Theme.muted;
+                font-size: Type.meta;
+                wrap: word-wrap;
+            }
+            ListView {
+                row-height: 40px;
+                rows: root.extensions.length;
+                for ext in root.extensions: Rectangle {
+                    height: 40px;
+                    HorizontalLayout {
+                        padding-left: Space.md;
+                        padding-right: Space.md;
+                        spacing: Space.md;
+                        Text {
+                            width: 28px;
+                            vertical-alignment: center;
+                            text: ext.offered ? "Yes" : "No";
+                            color: ext.offered ? Theme.accent : Theme.faint;
+                            font-size: Type.meta;
+                            font-weight: 600;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: ext.name;
+                                color: ext.offered ? Theme.text : Theme.muted;
+                                font-size: Type.body;
+                                overflow: elide;
+                            }
+                            Text {
+                                text: ext.id;
+                                color: Theme.faint;
+                                font-size: Type.small;
+                                font-family: Theme.number-font;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
