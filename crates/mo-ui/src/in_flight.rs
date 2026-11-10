@@ -15,6 +15,27 @@ pub(crate) fn closing_link(longest: Duration) -> mo_dawlink::bitwig::Bitwig {
     }
 }
 
+/// What a stop in Bitwig failed for once already, and was put back after (an audition, a part): a second failure lets
+/// it go, so a stop that never works can't block what comes next or keep swallowing Esc (the 10 Nov review's D-1).
+/// Tied to the item itself, so a later one always gets its own second chance.
+pub(crate) struct PutBack<T>(std::sync::Mutex<Option<T>>);
+
+impl<T: PartialEq> PutBack<T> {
+    pub(crate) const fn new() -> PutBack<T> {
+        PutBack(std::sync::Mutex::new(None))
+    }
+
+    /// Whether `item` was put back after a failed stop before. Forgets it either way: it's put back at most once.
+    pub(crate) fn failed_before(&self, item: &T) -> bool {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take().is_some_and(|was| was == *item)
+    }
+
+    /// Notes `item` as put back after a failed stop.
+    pub(crate) fn note(&self, item: T) {
+        *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(item);
+    }
+}
+
 /// How many starts are on their way.
 static ON_THEIR_WAY: AtomicUsize = AtomicUsize::new(0);
 
@@ -49,6 +70,17 @@ pub(crate) fn wait_for_all(longest: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_item_is_put_back_once() {
+        let tries = PutBack::new();
+        assert!(!tries.failed_before(&"A"), "the first failure puts it back");
+        tries.note("A");
+        assert!(!tries.failed_before(&"B"), "another gets its own chance");
+        tries.note("A");
+        assert!(tries.failed_before(&"A"), "the second failure lets it go");
+        assert!(!tries.failed_before(&"A"), "forgotten after");
+    }
 
     #[test]
     fn waits_for_the_starts_on_their_way() {
