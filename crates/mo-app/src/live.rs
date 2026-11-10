@@ -273,9 +273,12 @@ impl Live {
     }
 
     /// The saves whose read failed last time, to read again a moment later; None when there are none.
+    /// Also Some (with nothing in it) when the Plugins page measured your plugins since the last look, so
+    /// [`Live::update`] looks again at which are installed while no project file changes (review G-3).
     pub fn retries(&mut self) -> Option<Changes> {
         let files: Vec<String> = self.retry.keys().cloned().collect();
-        (!files.is_empty()).then_some(Changes { files, ..Changes::default() })
+        (!files.is_empty() || self.measures_seen != plugin_writes::measures_kept())
+            .then_some(Changes { files, ..Changes::default() })
     }
 
     /// Walks every project folder once, as the C# app's scan did at its start: saves made or changed while the app was
@@ -310,15 +313,20 @@ impl Live {
     /// changed. Saves read from now on use the installed plugins as they are now. One that can't be looked at is
     /// looked at again at the next start.
     fn recheck_installed(&mut self) -> usize {
-        self.measures_seen = plugin_writes::measures_kept();
-        let Some(songs_db) = &self.writes else { return 0 };
+        // Taken before the look, so a measure kept meanwhile is looked at next time; only kept once the look worked,
+        // so one that failed is tried again at the next batch.
+        let measures = plugin_writes::measures_kept();
+        let Some(songs_db) = &self.writes else {
+            self.measures_seen = measures;
+            return 0;
+        };
         let r = match plugin_writes::recheck_installed(songs_db) {
-            Ok(r) => r,
+            Ok(r) => {
+                self.measures_seen = measures;
+                r
+            }
             Err(e) => {
-                crate::log::warning(
-                    "Songs",
-                    &format!("{e}; which plugins are installed is looked at again next start"),
-                );
+                crate::log::warning("Songs", &format!("{e}; which plugins are installed is looked at again later"));
                 return 0;
             }
         };
@@ -881,6 +889,19 @@ mod tests {
             mtime: 1_700_000_000 + id,
             ..Save::default()
         }
+    }
+
+    #[test]
+    fn a_plugin_measure_wakes_the_watch_with_no_file_changed() {
+        // Review G-3 (and of #406): the Songs watch only calls update when it has something, so a measure kept while
+        // no project file changes is one too; looked at once, then not again.
+        let mut l = live(Vec::new());
+        assert!(l.retries().is_none());
+        l.measures_seen = plugin_writes::measures_kept().wrapping_add(1);
+        let woke = l.retries().expect("a measure to look at");
+        assert!(woke.files.is_empty());
+        l.update(&woke);
+        assert!(l.retries().is_none());
     }
 
     #[test]

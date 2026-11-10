@@ -522,6 +522,34 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::unwrap_used)]
+    fn the_folders_come_from_songs_db_once_it_is_the_apps_own() {
+        // Review T-3: Settings writes folder changes to songs.db once it's the app's own; library.db is frozen.
+        let dir = std::env::temp_dir().join("mo-twin-library-in-use");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let library = dir.join("library.db");
+        rusqlite::Connection::open(&library)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE roots (path TEXT PRIMARY KEY);
+                 CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                     name TEXT NOT NULL, daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, info TEXT);",
+            )
+            .unwrap();
+        let songs = dir.join(mo_library::songs_db::FILE_NAME);
+        assert_eq!(library_in_use(&library), library);
+        mo_library::songs_db::make(&library, &songs, &mut |_| {}).unwrap();
+        // Made but not switched to yet: still library.db.
+        assert_eq!(library_in_use(&library), library);
+        mo_library::songs_db::at_start(&dir, "test");
+        assert_eq!(library_in_use(&library), songs);
+        // Given songs.db itself, it stays.
+        assert_eq!(library_in_use(&songs), songs);
+    }
+
+    #[test]
     fn parts_go_one_level_in_and_leave_the_path_out() {
         let r = json!({"file": "C:\\a.flp", "info": {"notes": 3, "bpm": 120}, "midi": [1, 2], "song": {}});
         let p = parts(&r);

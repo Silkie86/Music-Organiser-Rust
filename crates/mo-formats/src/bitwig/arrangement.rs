@@ -186,21 +186,25 @@ fn scenes(
     lanes: &[PreviewLane],
     launcher: &[Vec<Option<ObjId>>],
 ) -> Option<Arrangement> {
-    let mut budget = NoteBudget::new();
-    let names = scene_names(doc, root);
-    let count = launcher.iter().map(Vec::len).max().unwrap_or(0);
+    // Nothing in the launcher: no scenes view, and no scene names walked for it.
     if launcher.iter().flatten().all(Option::is_none) {
         return None;
     }
+    let mut budget = NoteBudget::new();
+    let names = scene_names(doc, root);
+    let count = launcher.iter().map(Vec::len).max().unwrap_or(0);
     // The arranger's tracks without their clips (copying them only to drop them would cost a big project dear).
     let mut placed: Vec<PreviewLane> = lanes
         .iter()
+        // Every field named, so one added to PreviewLane later must be thought about here too.
         .map(|l| PreviewLane {
+            name: l.name.clone(),
+            kind: l.kind,
             detail: l.detail.clone(),
             colour: l.colour,
             depth: l.depth,
             muted: l.muted,
-            ..PreviewLane::new(l.name.clone(), l.kind)
+            clips: Vec::new(),
         })
         .collect();
     let mut markers = Vec::new();
@@ -290,9 +294,12 @@ fn timing(doc: &Document, clip: ObjId) -> Timing {
     };
     let offset =
         num(range.and_then(|r| field_obj(doc, r, F_PLAY_START)), F_START).or(num(loop_range, F_START)).unwrap_or(0.0);
-    let loop_start = num(loop_range, F_START).unwrap_or(0.0);
+    // A loop whose start was left out isn't moved to 0: it doesn't loop (a loop the file doesn't hold would repeat).
+    let start = num(loop_range, F_START);
+    let loop_start = start.unwrap_or(0.0);
     let loop_end = loop_start + num(loop_range, F_DURATION).unwrap_or(0.0);
-    let looping = num(range, F_LOOP_ON).is_some_and(|v| v > 0.0) && loop_end > loop_start;
+    let dropped = start.is_none() && loop_range.is_some_and(|o| doc.obj(o).num(F_START).is_some());
+    let looping = num(range, F_LOOP_ON).is_some_and(|v| v > 0.0) && !dropped && loop_end > loop_start;
     Timing { offset, loop_start, loop_end, looping }
 }
 
@@ -483,7 +490,7 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget, play_for: Option<f
             if file.is_empty() || e_length.is_nan() || e_length <= 0.0 {
                 continue;
             }
-            let from = ev.num(F_SAMPLE_START).unwrap_or(0.0);
+            let from = ev.num(F_SAMPLE_START).filter(|f| f.is_finite()).unwrap_or(0.0);
             // An end only counts when the event has one: a missing one doesn't make the event play backwards.
             let to = ev.num(F_SAMPLE_END).filter(|t| t.is_finite());
             let warps: Vec<(f64, f64)> = play

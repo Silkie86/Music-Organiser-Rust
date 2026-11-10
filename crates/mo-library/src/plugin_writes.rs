@@ -267,13 +267,16 @@ pub fn recheck_installed(songs_db: &Path) -> Result<Rechecked, LibraryError> {
         // app may have kept that save again meanwhile, and its new rows can take the old row numbers (review G-4).
         let mut set = tx
             .prepare(
-                "UPDATE plugins SET installed = 1 WHERE rowid = ?1 AND project_id = ?2 AND COALESCE(name, '') = ?3 \
+                "UPDATE plugins SET installed = 1 WHERE rowid = ?1 AND COALESCE(project_id, 0) = ?2 AND COALESCE(name, '') = ?3 \
                  AND COALESCE(vendor, '') = ?4 AND COALESCE(format, '') = ?5 AND COALESCE(path, '') = ?6 \
                  AND COALESCE(installed, 0) = 0",
             )
             .map_err(&sql)?;
         for (row, project, p) in found {
-            if set.execute(params![row, project, p.name, p.vendor, p.format, p.path]).map_err(&sql)? > 0 {
+            // A row with no save (0) has no save's count to change.
+            if set.execute(params![row, project, p.name, p.vendor, p.format, p.path]).map_err(&sql)? > 0
+                && *project != 0
+            {
                 changed.insert(*project);
             }
         }
