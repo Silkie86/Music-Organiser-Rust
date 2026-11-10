@@ -246,23 +246,7 @@ impl Library {
     /// The plugins on this computer as the C# app last found them: their names, and the ids its plugin scanner found
     /// inside plugin files. Empty when it hasn't looked yet.
     pub fn installed(&self) -> Result<Installed, LibraryError> {
-        let mut installed = Installed::default();
-        if self.has("installed_plugins") {
-            let mut st = self.conn.prepare("SELECT name, name_key FROM installed_plugins")?;
-            let rows: Vec<(String, String)> =
-                st.query_map([], |r| Ok((text(r, "name"), text(r, "name_key"))))?.collect::<Result<_, _>>()?;
-            for (name, key) in rows {
-                installed.names.insert(case::to_lower(&name));
-                installed.keys.insert(key);
-            }
-        }
-        if self.has("scanned_plugins") {
-            let mut st = self.conn.prepare("SELECT id, path FROM scanned_plugins")?;
-            let rows: Vec<(String, String)> =
-                st.query_map([], |r| Ok((text(r, "id"), text(r, "path"))))?.collect::<Result<_, _>>()?;
-            installed = installed.with_scans(rows);
-        }
-        Ok(installed)
+        Ok(installed_in(&self.conn, self.has("installed_plugins"), self.has("scanned_plugins"))?)
     }
 
     /// Every save, the most recently written first.
@@ -699,6 +683,27 @@ fn summaries_query(columns: &[String], tables: &HashSet<String>) -> String {
 
 // A column that's missing (a library made before it was added) or holds something else reads as empty, as in the C#
 // app, rather than failing the whole list.
+
+/// [`Library::installed`] from an open library, given which of its two tables it has.
+pub(crate) fn installed_in(conn: &Connection, names: bool, scans: bool) -> rusqlite::Result<Installed> {
+    let mut installed = Installed::default();
+    if names {
+        let mut st = conn.prepare("SELECT name, name_key FROM installed_plugins")?;
+        let rows: Vec<(String, String)> =
+            st.query_map([], |r| Ok((text(r, "name"), text(r, "name_key"))))?.collect::<Result<_, _>>()?;
+        for (name, key) in rows {
+            installed.names.insert(case::to_lower(&name));
+            installed.keys.insert(key);
+        }
+    }
+    if scans {
+        let mut st = conn.prepare("SELECT id, path FROM scanned_plugins")?;
+        let rows: Vec<(String, String)> =
+            st.query_map([], |r| Ok((text(r, "id"), text(r, "path"))))?.collect::<Result<_, _>>()?;
+        installed = installed.with_scans(rows);
+    }
+    Ok(installed)
+}
 
 pub(crate) fn text(r: &Row<'_>, col: &str) -> String {
     match r.get_ref(col) {
