@@ -70,6 +70,21 @@ impl Order {
     pub fn from_name(name: &str) -> Order {
         Order::ALL.into_iter().find(|o| o.name() == name).unwrap_or_default()
     }
+
+    /// The List view's column this order goes by, as its heading says it; "" for an order no column stands for. A
+    /// click on the heading picks the order, a second click turns it round (the UX review of 10 Nov, B5).
+    pub fn column(self) -> &'static str {
+        match self {
+            Order::Name => "Sound",
+            Order::Type => "Type",
+            Order::Key => "Key",
+            Order::Shuffled | Order::MostLiked | Order::Newest => "",
+        }
+    }
+
+    pub fn from_column(column: &str) -> Option<Order> {
+        Order::ALL.into_iter().find(|o| !column.is_empty() && o.column() == column)
+    }
 }
 
 /// The filters' names, as the page calls them when a choice is picked.
@@ -897,6 +912,18 @@ impl SoundList {
             }
         }
         crate::year_strip::strip(counts)
+    }
+
+    /// Turns a list in `order` round (a second click on its heading; a shuffle has no other way round). By key, the
+    /// sounds with no key still come last.
+    pub fn turn_round(&self, shown: &mut [usize], order: Order) {
+        if order == Order::Shuffled {
+            return;
+        }
+        shown.reverse();
+        if order == Order::Key {
+            shown.sort_by_key(|&i| key_order(&self.shared.sounds[i]) == i32::MAX);
+        }
     }
 
     fn compare(&self, a: usize, b: usize, order: Order) -> std::cmp::Ordering {
@@ -2071,6 +2098,15 @@ mod tests {
         let mut list = library();
         let all = Filters::default();
         assert_eq!(ids(&list, &list.view(&all, Order::Newest, 0)), vec![4, 3, 2, 1]);
+        // Turned round (a second click on a heading); a shuffle stays as it is.
+        let mut turned = list.view(&all, Order::Newest, 0);
+        list.turn_round(&mut turned, Order::Newest);
+        assert_eq!(ids(&list, &turned), vec![1, 2, 3, 4]);
+        let mut shuffled = list.view(&all, Order::Shuffled, 7);
+        list.turn_round(&mut shuffled, Order::Shuffled);
+        assert_eq!(shuffled, list.view(&all, Order::Shuffled, 7));
+        assert_eq!(Order::from_column("Type"), Some(Order::Type));
+        assert_eq!(Order::from_column(""), None);
         assert_eq!(ids(&list, &list.view(&all, Order::Type, 0)), vec![2, 1, 4, 3]);
         // C major, F minor, A minor, then no key.
         assert_eq!(ids(&list, &list.view(&all, Order::Key, 0)), vec![4, 3, 2, 1]);
