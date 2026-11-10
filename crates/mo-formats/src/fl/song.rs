@@ -161,6 +161,9 @@ pub struct FlAudioClip {
     pub on_muted_track: bool,
     /// Automation switches its channel off part of the way through it.
     pub partly_off: bool,
+    /// The clip's own fades (FL 21 onwards), in seconds; 0 when it has none.
+    pub fade_in: f64,
+    pub fade_out: f64,
 }
 
 /// A playlist track, numbered from 1 at the top, with its name when it was given one.
@@ -370,6 +373,21 @@ pub(super) struct PlaylistItem {
     pub muted: bool,
     /// Can go below 0 in an old save with more than 500 patterns placed; no track is there.
     pub slot: i64,
+    /// An audio clip's own fades, in milliseconds (FL 21 onwards); 0 when it has none.
+    pub fade_in: f64,
+    pub fade_out: f64,
+}
+
+/// A clip's fade at `at`, in milliseconds: a float from FL 21's 60-byte items on. Solomon's recipe save 14b (FL 25)
+/// holds 112.3 and 126.95 on a clip 102 ticks long (half a second at 128 BPM): milliseconds is the reading that fits
+/// inside the clip, and the start offset beside it is in milliseconds too. 0 when there's none, or it's damaged.
+fn item_fade(d: &[u8], at: usize) -> f64 {
+    if d.len() < 60 {
+        return 0.0;
+    }
+    let ms = f32_at(d, at) as f64;
+    // Up to ten minutes: no clip fades for longer.
+    if (0.0..=600_000.0).contains(&ms) { ms } else { 0.0 }
 }
 
 /// A clip's start offset at `at`, written as a float or an integer depending on FL's version; none is 0.
@@ -384,7 +402,8 @@ fn item_offset(d: &[u8], at: usize) -> f64 {
 
 /// The clips in a playlist event. FL 9 onwards writes 32-byte items (60 from FL 21, 80 from FL 25, 88 from FL 26):
 /// u32 position, u16 pattern base (20480), u16 item index, u32 length, u16 slot at 12, u16 flags at 18 (0x2000 is
-/// muted), start offset at 24. FL 9 and FL 6 to 8 lay theirs out differently (below). Older layouts aren't read.
+/// muted), start offset at 24; from FL 21, an audio clip's fade in at 36 and fade out at 44 ([`item_fade`]). FL 9 and
+/// FL 6 to 8 lay theirs out differently (below). Older layouts aren't read.
 pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
     let mut items = Vec::new();
     for size in [88, 80, 60, 32] {
@@ -401,6 +420,8 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
             offset: item_offset(r, 24),
             muted: u16_at(r, 18) & 0x2000 != 0,
             slot: u16_at(r, 12) as i64,
+            fade_in: item_fade(r, 36),
+            fade_out: item_fade(r, 44),
         }));
         break;
     }
@@ -430,6 +451,8 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
                 muted: u16_at(r, 18) & 0x2000 != 0,
                 // A row's is set below.
                 slot: if is_row { -1 } else { row as i64 },
+                fade_in: 0.0,
+                fade_out: 0.0,
             });
         }
         if !items.is_empty() && rows == items.len() {
@@ -474,6 +497,8 @@ pub(super) fn playlist_items(d: &[u8]) -> Vec<PlaylistItem> {
                 offset: item_offset(r, 20),
                 muted: false,
                 slot: 0,
+                fade_in: 0.0,
+                fade_out: 0.0,
             });
             rows.push(row);
         }
@@ -620,6 +645,8 @@ fn place_audio_clips(
             track: tracks.number(i.slot),
             on_muted_track: tracks.muted(i.slot),
             partly_off: false,
+            fade_in: i.fade_in / 1000.0,
+            fade_out: i.fade_out / 1000.0,
         });
     }
     clips
@@ -1314,7 +1341,16 @@ mod tests {
         assert_eq!(tracks.number(1), 0, "track 499 wasn't kept");
         // An older save counts down from where its clips' slots say the first track is, however many it kept.
         tracks.tracks_by_version = None;
-        let item = |slot| PlaylistItem { index: 1, at: 0, length: 96, offset: 0.0, muted: false, slot };
+        let item = |slot| PlaylistItem {
+            index: 1,
+            at: 0,
+            length: 96,
+            offset: 0.0,
+            muted: false,
+            slot,
+            fade_in: 0.0,
+            fade_out: 0.0,
+        };
         tracks.count_from(&[item(198), item(197)], "11.0.3");
         assert_eq!(tracks.number(198), 1);
         assert_eq!(tracks.number(197), 2);

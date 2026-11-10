@@ -313,6 +313,22 @@ fn fl_stretch_modes_and_pitch() {
 }
 
 #[test]
+fn fl_clip_fades() {
+    // Step 14b: the clip's own fades, dragged by hand to about a 16th each (112 and 127 milliseconds at 128 BPM), in
+    // both views.
+    let views = arrangement::read(&save("fl", "MO Recipe 14b clip fades.flp")).unwrap();
+    assert_eq!(views.len(), 2);
+    for view in &views {
+        let clip = &lane(view, LaneKind::Audio).clips[0];
+        assert!(near(clip.fade_in, 0.2396) && near(clip.fade_out, 0.2708), "{}: {clip:?}", view.view);
+    }
+    // A clip with none has none.
+    let plain = fl("04 audio clip");
+    let clip = &lane(&plain, LaneKind::Audio).clips[0];
+    assert_eq!((clip.fade_in, clip.fade_out), (0.0, 0.0));
+}
+
+#[test]
 fn fender_timestretch_plays_the_file_at_its_own_tempo() {
     // Fender Studio took the half-second tone for one beat at 120. Stretched, that beat is spread over one of the
     // song's beats whatever the song's tempo: half a second of the file to a beat, and the event one beat long.

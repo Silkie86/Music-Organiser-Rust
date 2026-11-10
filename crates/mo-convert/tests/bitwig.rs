@@ -558,6 +558,8 @@ fn audio_clips_come_across_stretched_and_pitched_on_a_copy_of_the_audio_track() 
         track: 2,
         on_muted_track: false,
         partly_off: false,
+        fade_in: 0.0,
+        fade_out: 0.0,
     }];
     let mut s = song();
     s.tempo = 120.0;
@@ -738,6 +740,8 @@ fn audio_clips_are_listed_when_the_template_has_no_audio_track_and_the_rest_conv
         track: 2,
         on_muted_track: false,
         partly_off: false,
+        fade_in: 0.0,
+        fade_out: 0.0,
     }];
     s.channels.push(vox);
     s.automation.push(automation("Vox volume", 2, FlControl::Volume, 0, &[(0.0, 0.5)]));

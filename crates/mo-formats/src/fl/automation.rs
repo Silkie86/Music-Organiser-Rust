@@ -629,8 +629,26 @@ mod tests {
         let pattern = super::super::song::PATTERN_BASE + 1;
         // Placed at beat 0 for 8 beats, and again at beat 2 (over the first) for 4 beats starting 2 beats in.
         let items = [
-            PlaylistItem { index: pattern, at: 0, length: 768, offset: 0.0, muted: false, slot: 0 },
-            PlaylistItem { index: pattern, at: 192, length: 384, offset: 192.0, muted: false, slot: 0 },
+            PlaylistItem {
+                index: pattern,
+                at: 0,
+                length: 768,
+                offset: 0.0,
+                muted: false,
+                slot: 0,
+                fade_in: 0.0,
+                fade_out: 0.0,
+            },
+            PlaylistItem {
+                index: pattern,
+                at: 192,
+                length: 384,
+                offset: 192.0,
+                muted: false,
+                slot: 0,
+                fade_in: 0.0,
+                fade_out: 0.0,
+            },
         ];
         let (moved, left, cut) = place_edit_events(
             &raw,
@@ -668,7 +686,16 @@ mod tests {
                 let at = (i * 37 % 23) * 48;
                 let length = (1 + i * 13 % 7) * 48;
                 let offset = (i * 5 % 4) as f64 * 48.0;
-                items.push(PlaylistItem { index: 0, at, length, offset, muted: false, slot: 0 });
+                items.push(PlaylistItem {
+                    index: 0,
+                    at,
+                    length,
+                    offset,
+                    muted: false,
+                    slot: 0,
+                    fade_in: 0.0,
+                    fade_out: 0.0,
+                });
             }
             let mut sorted = items.clone();
             sorted.sort_by_key(|i| i.at);

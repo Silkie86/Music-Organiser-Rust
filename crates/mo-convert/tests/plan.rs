@@ -520,6 +520,8 @@ fn overlapping_audio_clips_go_on_tracks_of_their_own_that_the_channels_volume_mo
         track: 2,
         on_muted_track: false,
         partly_off: false,
+        fade_in: 0.0,
+        fade_out: 0.0,
     };
     vox.audio_clips = vec![audio(0, 384), audio(192, 96), audio(384, 96)];
     let fade = automation("Vox volume", Some(0), FlControl::Volume, &[(0.0, 0.5)]);
@@ -551,6 +553,8 @@ fn p_channel_with_audio() -> FlChannel {
         track: 1,
         on_muted_track: false,
         partly_off: false,
+        fade_in: 0.0,
+        fade_out: 0.0,
     }];
     vox
 }

@@ -89,6 +89,14 @@ struct Placement {
     muted: bool,
     pattern: Option<u32>,
     channel: Option<u32>,
+    /// An audio clip's own fades, in seconds.
+    fades: (f64, f64),
+}
+
+/// A clip's fades in beats, from seconds: together they can't be longer than the clip.
+fn fades((fade_in, fade_out): (f64, f64), length: f64, tempo: f64) -> (f64, f64) {
+    let fade_in = (fade_in * tempo / 60.0).clamp(0.0, length.max(0.0));
+    (fade_in, (fade_out * tempo / 60.0).clamp(0.0, (length - fade_in).max(0.0)))
 }
 
 /// The playlist as FL Studio shows it (its first arrangement).
@@ -219,6 +227,7 @@ fn read_playlist(flp: &Flp<'_>) -> Playlist {
                     muted: i.muted,
                     pattern: Some(i.index - PATTERN_BASE),
                     channel: None,
+                    fades: (0.0, 0.0),
                 }
             } else {
                 Placement {
@@ -229,6 +238,7 @@ fn read_playlist(flp: &Flp<'_>) -> Playlist {
                     muted: i.muted,
                     pattern: None,
                     channel: Some(i.index),
+                    fades: (i.fade_in / 1000.0, i.fade_out / 1000.0),
                 }
             }
         })
@@ -374,11 +384,14 @@ fn playlist_view(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
                 kinds.insert(LaneKind::Audio as u8);
                 let audio =
                     if c.sample.is_empty() { Vec::new() } else { vec![part(c, length, item.offset / 1000.0, tempo)] };
+                let (fade_in, fade_out) = fades(item.fades, length, tempo);
                 clips.push(PreviewClip {
                     name: c.name.clone(),
                     start,
                     length,
                     muted: item.muted,
+                    fade_in,
+                    fade_out,
                     audio,
                     colour: channel_colour(&pl.channel_colours, c.index),
                     ..PreviewClip::default()
@@ -499,13 +512,22 @@ fn by_channel(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
             lane.clips = c
                 .audio_clips
                 .iter()
-                .map(|k| PreviewClip {
-                    name: c.name.clone(),
-                    start: beats(k.start),
-                    length: beats(k.length),
-                    muted: k.muted || k.on_muted_track,
-                    audio: if c.sample.is_empty() { Vec::new() } else { vec![part(c, beats(k.length), k.from, tempo)] },
-                    ..PreviewClip::default()
+                .map(|k| {
+                    let (fade_in, fade_out) = fades((k.fade_in, k.fade_out), beats(k.length), tempo);
+                    PreviewClip {
+                        name: c.name.clone(),
+                        start: beats(k.start),
+                        length: beats(k.length),
+                        muted: k.muted || k.on_muted_track,
+                        fade_in,
+                        fade_out,
+                        audio: if c.sample.is_empty() {
+                            Vec::new()
+                        } else {
+                            vec![part(c, beats(k.length), k.from, tempo)]
+                        },
+                        ..PreviewClip::default()
+                    }
                 })
                 .collect();
             lanes.push(lane);
