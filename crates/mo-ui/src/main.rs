@@ -64,6 +64,10 @@ fn main() -> Result<(), slint::PlatformError> {
         feed.notice("Your song library couldn't be read", &notice);
     }
     let library = songs_db.library.clone();
+    if matches!(songs_db.state, mo_library::songs_db::State::Own | mo_library::songs_db::State::Switched) {
+        // Once, for a songs.db made before them: the indexes the Songs list is read from, made in the background.
+        mo_app::song_library::tune_soon(library.clone());
+    }
     // Rule 28: what an earlier run or a stopped tool left behind is cleared, a little later, at low priority.
     mo_app::tidy::start(library.clone());
     if !songs_db.is_songs_db() {

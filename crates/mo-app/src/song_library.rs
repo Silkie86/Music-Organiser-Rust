@@ -31,6 +31,26 @@ pub fn make_later(dir: PathBuf, feed: Feed) {
     }
 }
 
+/// Gives the app's own `songs.db` the indexes the Songs list is read from, if it was made before them
+/// ([`songs_db::tune`]): once, straight away, on a low-priority thread of its own, with a line in the log. The pages
+/// read as before meanwhile; the list is quicker from the next read on.
+pub fn tune_soon(songs: PathBuf) {
+    let started = crate::background::spawn("Song library indexes", move || match songs_db::tune(&songs) {
+        Ok(Some(took)) => log::info(
+            "Song library",
+            &format!("Gave songs.db the Songs list's indexes in {} ms (once)", took.as_millis()),
+        ),
+        Ok(None) => {}
+        Err(why) => log::warning(
+            "Song library",
+            &format!("songs.db couldn't be given the Songs list's indexes ({why}); tried again next start"),
+        ),
+    });
+    if let Err(e) = started {
+        log::warning("Song library", &format!("Couldn't start giving songs.db its indexes: {e}"));
+    }
+}
+
 /// Makes `songs.db` in `dir` now, saying how on `feed` and in the log: what it made, or why it couldn't.
 pub fn make_now(dir: &Path, feed: &Feed) -> Result<Made, String> {
     let library = dir.join(songs_db::OLD_FILE_NAME);
