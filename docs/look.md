@@ -62,6 +62,8 @@ light that means something. It should feel like a rack unit on a desk, not a web
   MIDI, Presets, Plugins and Songs so far; `mo-screens` draws every place at 3440 x 1369 too (`wide-<place>.png`).
   Songs turns it round, since a song's card holds its arrangement: the list takes a third of the room up to 760 px
   and the card the rest, up to twice 1280 px.
+  Space's lines and its card stop at the same widths (the card still shows only when a line is picked: the drives
+  need the room at 1440), Settings stops at a list's width, and Backup at a list and a card's.
 
 - Column headings order a list (the UX review of 10 Nov, B5): a click on a heading (`ColumnHead` in `studio.slint`)
   puts the list in that column's order, a second click turns it round; the heading the list goes by is lit in the
