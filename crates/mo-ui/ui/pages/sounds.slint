@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, OneOfChip, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -1313,38 +1313,6 @@ export component SoundsPage inherits Rectangle {
                 clicked => { SoundsData.shuffle(); }
             }
         }
-        if SoundsData.view == 2: FlexboxLayout {
-            spacing: Space.md;
-            cross-axis-alignment: center;
-            vertical-stretch: 0;
-            FilterPicks {
-                name: "Placed by";
-                filter: SoundsData.placing-filter;
-                toggled(text) => { SoundsData.galaxy-place-by(text); }
-            }
-            FilterPicks {
-                name: "Light by";
-                filter: SoundsData.light-filter;
-                toggled(text) => { SoundsData.galaxy-light-by(text); }
-            }
-            FilterPicks {
-                name: "Sweep plays";
-                filter: SoundsData.sweep-play-filter;
-                toggled(text) => { SoundsData.galaxy-sweep-plays(text); }
-            }
-            StudioButton {
-                horizontal-stretch: 0;
-                text: "Lay out again";
-                tip: "Work the map out afresh from every sound's fingerprint";
-                clicked => { SoundsData.galaxy-lay-out(); }
-            }
-            StudioButton {
-                horizontal-stretch: 0;
-                text: "Whole map";
-                tip: "Zoom out to see every star";
-                clicked => { SoundsData.galaxy-reset(); }
-            }
-        }
         // Rediscover's own choices, in place of the filters: the types as the Type filter shows them (the most used as
         // chips, the rest in a menu), the years, and how many, each on show.
         if SoundsData.view == 4: FlexboxLayout {
@@ -1482,277 +1450,310 @@ export component SoundsPage inherits Rectangle {
             font-size: Type.meta;
             wrap: word-wrap;
         }
-        // The filters, the same as on every page: the types first (the most used as chips, every one with how many
-        // sounds it would show), then the rest. A row moves a whole filter to the next line before it breaks one.
-        if SoundsData.view < 4: FlexboxLayout {
-            spacing: Space.md;
-            vertical-stretch: 0;
-            FilterPicks {
-                name: "Type";
-                more-name: "More types";
-                filter: SoundsData.type-filter;
-                toggled(text) => { SoundsData.toggle-choice("type", text); }
-                cleared => { SoundsData.clear-chip("more-types"); }
-            }
-            if SoundsData.any-type: ToggleChip {
-                text: "Clear types";
-                on: false;
-                clicked => { SoundsData.clear-chip("type"); }
-            }
-        }
-        if SoundsData.view < 4: FlexboxLayout {
-            spacing: Space.md;
-            vertical-stretch: 0;
-            FilterPicks {
-                name: "Length";
-                filter: SoundsData.length-filter;
-                toggled(text) => { SoundsData.toggle-choice("length", text); }
-                cleared => { SoundsData.clear-chip("length"); }
-            }
-            FilterPicks {
-                name: "Key";
-                filter: SoundsData.key-filter;
-                toggled(text) => { SoundsData.toggle-choice("key", text); }
-                cleared => { SoundsData.clear-chip("key"); }
-            }
-            if SoundsData.key-filter.more-picked != "": ToggleChip {
-                text: "Keys that mix well";
-                on: SoundsData.mix-well;
-                clicked => { SoundsData.toggle("mix-well"); }
-            }
-            FilterPicks {
-                name: "Tempo";
-                filter: SoundsData.tempo-filter;
-                toggled(text) => { SoundsData.toggle-choice("tempo", text); }
-                cleared => { SoundsData.clear-chip("tempo"); }
-            }
-            // Not in an `if`: a filter in one is measured as if it wrapped, and leaves a gap under the row. With no
-            // tags it shows nothing.
-            FilterPicks {
-                name: "Tag";
-                filter: SoundsData.tag-filter;
-                toggled(text) => { SoundsData.toggle-choice("tag", text); }
-                cleared => { SoundsData.clear-chip("tag"); }
-            }
-            if SoundsData.knows-use: ToggleChip {
-                text: "In my projects";
-                on: SoundsData.used;
-                clicked => { SoundsData.toggle("used"); }
-            }
-            if SoundsData.knows-use: ToggleChip {
-                text: "Unused";
-                on: SoundsData.unused;
-                clicked => { SoundsData.toggle("unused"); }
-            }
-            ToggleChip {
-                text: "Favourites";
-                on: SoundsData.favourites;
-                clicked => { SoundsData.toggle("favourites"); }
-            }
-            // Only sounds whose audio is exactly the same are copies: one of each shows while it's on.
-            ToggleChip {
-                text: SoundsData.hide-copies-text;
-                on: SoundsData.hide-copies;
-                clicked => { SoundsData.toggle("hide-copies"); }
-            }
-            // Only while a forgotten folder narrows the list: a click shows every folder's sounds again.
-            if SoundsData.folder != "": ToggleChip {
-                text: "In " + SoundsData.folder;
-                on: true;
-                clicked => { SoundsData.toggle("folder"); }
-            }
-            if SoundsData.any-filter: ToggleChip {
-                text: "Clear";
-                on: false;
-                clicked => { SoundsData.clear(); }
-            }
-        }
-        // The sounds, and the picked one's panel beside them.
-        area := Rectangle {
+        HorizontalLayout {
             vertical-stretch: 1;
-            // In a wide window (the UX review of 10 Nov, A1) the card stops at `Fit.card-max`, and so do the views
-            // made of lines (List, History, Rediscover) at `Fit.list-max`, so a line's name and its numbers stay
-            // within one look of each other. Tiles and the Galaxy take all the room: more of them is the point.
-            property <length> lines-max: SoundsData.view == 1 || SoundsData.view == 3 ? Fit.list-max
-                : SoundsData.view == 4 ? Fit.list-max + 300px
-                : self.width;
-            property <length> list-width: min(self.lines-max, SoundsData.panel-shown
-                ? max(380px, self.width - SoundsData.panel-width - divider.width, self.width - Fit.card-max - divider.width)
-                : self.width);
-            property <length> card-width: min(Fit.card-max, self.width - self.list-width - divider.width);
-            // Rediscover's forgotten folders take the list's right side when there's room.
-            property <length> folders-width: SoundsData.view == 4 && SoundsData.folders.length > 0 && self.list-width >= 900px
-                ? 300px
-                : 0px;
-            // The year strip, on Tiles, List and Galaxy: the views the filters pick for. Not on History, which lists
-            // what was played whatever the filters say, nor Kits, which picks its own. Rediscover has one too, the
-            // same strip, for the years it digs in (apart from the filters').
-            property <bool> re-strip: SoundsData.view == 4;
-            property <length> years-width: (SoundsData.view <= 2 ? SoundsData.years.length > 1 : self.re-strip && SoundsData.re-years.length > 1)
-                && SoundsData.empty-title == ""
-                ? 56px
-                : 0px;
-            if area.years-width > 0: YearRange {
-                x: area.list-width - area.folders-width - area.years-width;
-                y: 0;
-                height: area.height;
-                years: area.re-strip ? SoundsData.re-years : SoundsData.years;
-                picked-from: area.re-strip ? SoundsData.re-years-from : SoundsData.years-from;
-                picked-to: area.re-strip ? SoundsData.re-years-to : SoundsData.years-to;
-                picked(a, b) => {
-                    if (area.re-strip) {
-                        SoundsData.re-years-picked(a, b);
-                    } else {
-                        SoundsData.years-picked(a, b);
+            spacing: Space.lg;
+            // The filters, in a column at the side (Solomon, 10 Nov 2026), every choice in sight as a tick list with
+            // how many sounds it would show: the types first, then the rest.
+            if SoundsData.view < 4: FilterColumn {
+                FilterList {
+                    name: "TYPE";
+                    more-name: "More types";
+                    filter: SoundsData.type-filter;
+                    toggled(text) => { SoundsData.toggle-choice("type", text); }
+                    cleared => { SoundsData.clear-chip("more-types"); }
+                }
+                FilterList {
+                    name: "LENGTH";
+                    filter: SoundsData.length-filter;
+                    toggled(text) => { SoundsData.toggle-choice("length", text); }
+                    cleared => { SoundsData.clear-chip("length"); }
+                }
+                FilterList {
+                    name: "KEY";
+                    filter: SoundsData.key-filter;
+                    toggled(text) => { SoundsData.toggle-choice("key", text); }
+                    cleared => { SoundsData.clear-chip("key"); }
+                }
+                if SoundsData.key-filter.more-picked != "": TickLine {
+                    text: "Keys that mix well";
+                    on: SoundsData.mix-well;
+                    clicked => { SoundsData.toggle("mix-well"); }
+                }
+                FilterList {
+                    name: "TEMPO";
+                    filter: SoundsData.tempo-filter;
+                    toggled(text) => { SoundsData.toggle-choice("tempo", text); }
+                    cleared => { SoundsData.clear-chip("tempo"); }
+                }
+                if SoundsData.tag-filter.chips.length + SoundsData.tag-filter.more.length > 0: FilterList {
+                    name: "TAG";
+                    more-name: "More tags";
+                    filter: SoundsData.tag-filter;
+                    toggled(text) => { SoundsData.toggle-choice("tag", text); }
+                    cleared => { SoundsData.clear-chip("tag"); }
+                }
+                VerticalLayout {
+                    Caps {
+                        text: "SHOW ONLY";
+                        height: 22px;
+                    }
+                    TickLine {
+                        text: "Favourites";
+                        on: SoundsData.favourites;
+                        clicked => { SoundsData.toggle("favourites"); }
+                    }
+                    if SoundsData.knows-use: TickLine {
+                        text: "In my projects";
+                        on: SoundsData.used;
+                        clicked => { SoundsData.toggle("used"); }
+                    }
+                    if SoundsData.knows-use: TickLine {
+                        text: "Unused";
+                        on: SoundsData.unused;
+                        clicked => { SoundsData.toggle("unused"); }
+                    }
+                    // Only while a forgotten folder narrows the list: a click shows every folder's sounds again.
+                    if SoundsData.folder != "": TickLine {
+                        text: "In " + SoundsData.folder;
+                        on: true;
+                        clicked => { SoundsData.toggle("folder"); }
                     }
                 }
-                cleared => {
-                    if (area.re-strip) {
-                        SoundsData.re-years-cleared();
-                    } else {
-                        SoundsData.years-cleared();
+                // Only sounds whose audio is exactly the same are copies: one of each shows while it's on.
+                TickLine {
+                    text: SoundsData.hide-copies-text;
+                    on: SoundsData.hide-copies;
+                    clicked => { SoundsData.toggle("hide-copies"); }
+                }
+                if SoundsData.any-filter: HorizontalLayout {
+                    alignment: start;
+                    StudioButton {
+                        text: "Clear filters";
+                        clicked => { SoundsData.clear(); }
                     }
                 }
             }
-            keys := FocusScope {
-                x: 0;
-                width: area.list-width - area.folders-width - area.years-width;
-                // Typing elsewhere (the search) takes the arrow keys from the Swept card too, as its look says.
-                changed has-focus => {
-                    if (!self.has-focus) {
-                        SoundsData.galaxy-swept-keys = false;
+            // The sounds, and the picked one's panel beside them.
+            area := Rectangle {
+                vertical-stretch: 1;
+                // In a wide window (the UX review of 10 Nov, A1) the card stops at `Fit.card-max`, and so do the views
+                // made of lines (List, History, Rediscover) at `Fit.list-max`, so a line's name and its numbers stay
+                // within one look of each other. Tiles and the Galaxy take all the room: more of them is the point.
+                property <length> lines-max: SoundsData.view == 1 || SoundsData.view == 3 ? Fit.list-max
+                    : SoundsData.view == 4 ? Fit.list-max + 300px
+                    : self.width;
+                property <length> list-width: min(self.lines-max, SoundsData.panel-shown
+                    ? max(380px, self.width - SoundsData.panel-width - divider.width, self.width - Fit.card-max - divider.width)
+                    : self.width);
+                property <length> card-width: min(Fit.card-max, self.width - self.list-width - divider.width);
+                // Rediscover's forgotten folders take the list's right side when there's room.
+                property <length> folders-width: SoundsData.view == 4 && SoundsData.folders.length > 0 && self.list-width >= 900px
+                    ? 300px
+                    : 0px;
+                // The year strip, on Tiles, List and Galaxy: the views the filters pick for. Not on History, which lists
+                // what was played whatever the filters say, nor Kits, which picks its own. Rediscover has one too, the
+                // same strip, for the years it digs in (apart from the filters').
+                property <bool> re-strip: SoundsData.view == 4;
+                property <length> years-width: (SoundsData.view <= 2 ? SoundsData.years.length > 1 : self.re-strip && SoundsData.re-years.length > 1)
+                    && SoundsData.empty-title == ""
+                    ? 56px
+                    : 0px;
+                if area.years-width > 0: YearRange {
+                    x: area.list-width - area.folders-width - area.years-width;
+                    y: 0;
+                    height: area.height;
+                    years: area.re-strip ? SoundsData.re-years : SoundsData.years;
+                    picked-from: area.re-strip ? SoundsData.re-years-from : SoundsData.years-from;
+                    picked-to: area.re-strip ? SoundsData.re-years-to : SoundsData.years-to;
+                    picked(a, b) => {
+                        if (area.re-strip) {
+                            SoundsData.re-years-picked(a, b);
+                        } else {
+                            SoundsData.years-picked(a, b);
+                        }
+                    }
+                    cleared => {
+                        if (area.re-strip) {
+                            SoundsData.re-years-cleared();
+                        } else {
+                            SoundsData.years-cleared();
+                        }
                     }
                 }
-                key-pressed(event) => {
-                    if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
-                        return reject;
+                keys := FocusScope {
+                    x: 0;
+                    width: area.list-width - area.folders-width - area.years-width;
+                    // Typing elsewhere (the search) takes the arrow keys from the Swept card too, as its look says.
+                    changed has-focus => {
+                        if (!self.has-focus) {
+                            SoundsData.galaxy-swept-keys = false;
+                        }
                     }
-                    if (event.text == Key.LeftArrow) {
-                        SoundsData.step(-1, event.repeat);
-                        return accept;
+                    key-pressed(event) => {
+                        if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
+                            return reject;
+                        }
+                        if (event.text == Key.LeftArrow) {
+                            SoundsData.step(-1, event.repeat);
+                            return accept;
+                        }
+                        if (event.text == Key.RightArrow) {
+                            SoundsData.step(1, event.repeat);
+                            return accept;
+                        }
+                        if (event.text == Key.UpArrow) {
+                            SoundsData.step(-2, event.repeat);
+                            return accept;
+                        }
+                        if (event.text == Key.DownArrow) {
+                            SoundsData.step(2, event.repeat);
+                            return accept;
+                        }
+                        if (event.text == Key.Return) {
+                            SoundsData.play();
+                            return accept;
+                        }
+                        reject
                     }
-                    if (event.text == Key.RightArrow) {
-                        SoundsData.step(1, event.repeat);
-                        return accept;
-                    }
-                    if (event.text == Key.UpArrow) {
-                        SoundsData.step(-2, event.repeat);
-                        return accept;
-                    }
-                    if (event.text == Key.DownArrow) {
-                        SoundsData.step(2, event.repeat);
-                        return accept;
-                    }
-                    if (event.text == Key.Return) {
-                        SoundsData.play();
-                        return accept;
-                    }
-                    reject
-                }
-                Well {
-                    if SoundsData.empty-title != "" || (SoundsData.shown == 0 && SoundsData.view != 5): EmptyState {
-                        // On top of the galaxy, whose picture from the graphics card covers whatever is under it.
-                        z: 1;
-                        title: SoundsData.empty-title != "" ? SoundsData.empty-title
-                            : SoundsData.view == 4 ? SoundsData.re-empty-title : "No sounds match";
-                        text: SoundsData.empty-title != "" ? SoundsData.empty-text
-                            : SoundsData.view == 4 ? SoundsData.re-empty-text : "Try fewer filters or other words.";
-                        action: SoundsData.empty-title != "" ? ""
-                            : SoundsData.view == 4 ? (SoundsData.re-busy ? "" : "Shuffle")
-                            : SoundsData.any-filter ? "Clear the filters" : "";
-                        act => {
-                            if (SoundsData.view == 4) {
-                                SoundsData.re-shuffle();
-                            } else {
-                                SoundsData.clear();
+                    Well {
+                        if SoundsData.empty-title != "" || (SoundsData.shown == 0 && SoundsData.view != 5): EmptyState {
+                            // On top of the galaxy, whose picture from the graphics card covers whatever is under it.
+                            z: 1;
+                            title: SoundsData.empty-title != "" ? SoundsData.empty-title
+                                : SoundsData.view == 4 ? SoundsData.re-empty-title : "No sounds match";
+                            text: SoundsData.empty-title != "" ? SoundsData.empty-text
+                                : SoundsData.view == 4 ? SoundsData.re-empty-text : "Try fewer filters or other words.";
+                            action: SoundsData.empty-title != "" ? ""
+                                : SoundsData.view == 4 ? (SoundsData.re-busy ? "" : "Shuffle")
+                                : SoundsData.any-filter ? "Clear the filters" : "";
+                            act => {
+                                if (SoundsData.view == 4) {
+                                    SoundsData.re-shuffle();
+                                } else {
+                                    SoundsData.clear();
+                                }
                             }
                         }
-                    }
-                    // The tiles' shapes come in one picture from the graphics card when there's one (`TileGrid`),
-                    // under the list, which then shows only their words; without a card each tile draws its own.
-                    if SoundsData.empty-title == "" && SoundsData.shown > 0 && SoundsData.view == 0: grid-area := Rectangle {
-                        clip: true;
-                        // The height of a tile's lines of words, the same for every tile.
-                        name-probe := Text {
-                            visible: false;
-                            text: "Ag";
-                            font-size: Type.body;
-                            font-weight: 600;
-                        }
-                        facts-probe := Text {
-                            visible: false;
-                            text: "Ag";
-                            font-size: Type.meta;
-                        }
-                        property <length> name-height: name-probe.preferred-height;
-                        property <length> facts-height: facts-probe.preferred-height;
-                        property <length> wave-top: Space.md + max(self.name-height, 10px) + Space.xs + self.facts-height + Space.xs;
-                        property <length> wave-height: TileSize.height - self.wave-top - Space.md;
-                        // Where the picture's corner sits in the window, in pixels: it goes on a whole pixel, so the
-                        // card draws the tiles as far past one as the list sits, and the picture goes that far back.
-                        property <float> left: self.absolute-position.x / 1phx;
-                        property <float> top: self.absolute-position.y / 1phx;
-                        property <float> over-x: self.left - floor(self.left);
-                        property <float> over-y: self.top - floor(self.top);
-                        property <image> grid: TileGrid.picture({
-                            top: tiles.content-y / 1px,
-                            width: self.width / 1px,
-                            height: self.height / 1px,
-                            columns: tiles.columns,
-                            tile-width: ((tiles.visible-width - Space.sm) / tiles.columns - Space.sm) / 1px,
-                            tile-height: TileSize.height / 1px,
-                            gap: Space.sm / 1px,
-                            inside: Space.md / 1px,
-                            name-height: self.name-height / 1px,
-                            wave-top: self.wave-top / 1px,
-                            wave-height: self.wave-height / 1px,
-                            over-x: self.over-x,
-                            over-y: self.over-y,
-                            scale: 1px / 1phx,
-                        }, {
-                            radius: Theme.radius / 1px,
-                            background: Theme.background,
-                            well: Theme.well,
-                            surface: Theme.surface,
-                            raised: Theme.surface-raised,
-                            edge: Theme.edge,
-                            accent: Theme.accent,
-                        }, TileGrid.asked);
-                        property <bool> on-card: self.grid.width > 0;
-                        if grid-area.on-card: Image {
-                            x: -grid-area.over-x * 1phx;
-                            y: -grid-area.over-y * 1phx;
-                            width: grid-area.grid.width * 1phx;
-                            height: grid-area.grid.height * 1phx;
-                            source: grid-area.grid;
-                        }
-                        tiles := ListView {
-                            property <int> columns: max(1, floor((self.visible-width - Space.sm) / (TileSize.width + Space.sm)));
-                            row-height: TileSize.height + Space.sm;
-                            rows: SoundsData.tile-rows.length;
-                            show-top: SoundsData.show-row * self.row-height;
-                            show-ask: SoundsData.show-ask;
-                            show-done <=> SoundsData.show-done;
-                            changed columns => { SoundsData.columns-changed(self.columns); }
-                            init => {
-                                SoundsData.columns-changed(self.columns);
-                                SoundsData.list-made();
+                        // The tiles' shapes come in one picture from the graphics card when there's one (`TileGrid`),
+                        // under the list, which then shows only their words; without a card each tile draws its own.
+                        if SoundsData.empty-title == "" && SoundsData.shown > 0 && SoundsData.view == 0: grid-area := Rectangle {
+                            clip: true;
+                            // The height of a tile's lines of words, the same for every tile.
+                            name-probe := Text {
+                                visible: false;
+                                text: "Ag";
+                                font-size: Type.body;
+                                font-weight: 600;
                             }
-                            for r in SoundsData.tile-rows: HorizontalLayout {
-                                // Every row this height: the list counts on it.
-                                height: tiles.row-height;
-                                padding-left: Space.sm;
-                                padding-top: Space.sm;
-                                spacing: Space.sm;
-                                alignment: start;
-                                for t in r.tiles: SoundTileView {
-                                    width: (tiles.visible-width - Space.sm) / tiles.columns - Space.sm;
-                                    tile: t;
-                                    name-height: grid-area.name-height;
-                                    facts-height: grid-area.facts-height;
-                                    wave-top: grid-area.wave-top;
-                                    wave-height: grid-area.wave-height;
-                                    on-card: grid-area.on-card;
+                            facts-probe := Text {
+                                visible: false;
+                                text: "Ag";
+                                font-size: Type.meta;
+                            }
+                            property <length> name-height: name-probe.preferred-height;
+                            property <length> facts-height: facts-probe.preferred-height;
+                            property <length> wave-top: Space.md + max(self.name-height, 10px) + Space.xs + self.facts-height + Space.xs;
+                            property <length> wave-height: TileSize.height - self.wave-top - Space.md;
+                            // Where the picture's corner sits in the window, in pixels: it goes on a whole pixel, so the
+                            // card draws the tiles as far past one as the list sits, and the picture goes that far back.
+                            property <float> left: self.absolute-position.x / 1phx;
+                            property <float> top: self.absolute-position.y / 1phx;
+                            property <float> over-x: self.left - floor(self.left);
+                            property <float> over-y: self.top - floor(self.top);
+                            property <image> grid: TileGrid.picture({
+                                top: tiles.content-y / 1px,
+                                width: self.width / 1px,
+                                height: self.height / 1px,
+                                columns: tiles.columns,
+                                tile-width: ((tiles.visible-width - Space.sm) / tiles.columns - Space.sm) / 1px,
+                                tile-height: TileSize.height / 1px,
+                                gap: Space.sm / 1px,
+                                inside: Space.md / 1px,
+                                name-height: self.name-height / 1px,
+                                wave-top: self.wave-top / 1px,
+                                wave-height: self.wave-height / 1px,
+                                over-x: self.over-x,
+                                over-y: self.over-y,
+                                scale: 1px / 1phx,
+                            }, {
+                                radius: Theme.radius / 1px,
+                                background: Theme.background,
+                                well: Theme.well,
+                                surface: Theme.surface,
+                                raised: Theme.surface-raised,
+                                edge: Theme.edge,
+                                accent: Theme.accent,
+                            }, TileGrid.asked);
+                            property <bool> on-card: self.grid.width > 0;
+                            if grid-area.on-card: Image {
+                                x: -grid-area.over-x * 1phx;
+                                y: -grid-area.over-y * 1phx;
+                                width: grid-area.grid.width * 1phx;
+                                height: grid-area.grid.height * 1phx;
+                                source: grid-area.grid;
+                            }
+                            tiles := ListView {
+                                property <int> columns: max(1, floor((self.visible-width - Space.sm) / (TileSize.width + Space.sm)));
+                                row-height: TileSize.height + Space.sm;
+                                rows: SoundsData.tile-rows.length;
+                                show-top: SoundsData.show-row * self.row-height;
+                                show-ask: SoundsData.show-ask;
+                                show-done <=> SoundsData.show-done;
+                                changed columns => { SoundsData.columns-changed(self.columns); }
+                                init => {
+                                    SoundsData.columns-changed(self.columns);
+                                    SoundsData.list-made();
+                                }
+                                for r in SoundsData.tile-rows: HorizontalLayout {
+                                    // Every row this height: the list counts on it.
+                                    height: tiles.row-height;
+                                    padding-left: Space.sm;
+                                    padding-top: Space.sm;
+                                    spacing: Space.sm;
+                                    alignment: start;
+                                    for t in r.tiles: SoundTileView {
+                                        width: (tiles.visible-width - Space.sm) / tiles.columns - Space.sm;
+                                        tile: t;
+                                        name-height: grid-area.name-height;
+                                        facts-height: grid-area.facts-height;
+                                        wave-top: grid-area.wave-top;
+                                        wave-height: grid-area.wave-height;
+                                        on-card: grid-area.on-card;
+                                        chosen => { keys.focus(); }
+                                        right-clicked(x, y) => {
+                                            keys.focus();
+                                            menu.open-at(x, y);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if SoundsData.empty-title == "" && SoundsData.shown > 0 && (SoundsData.view == 1 || SoundsData.view == 3 || SoundsData.view == 4): list-box := VerticalLayout {
+                            // Two lines a sound where the columns would leave its name under about 100 px (in a
+                            // 900 px window); a big window with the panel and the year strip open keeps one line. The
+                            // columns take about 510 px (SoundLineView): make one wider, and raise this with it.
+                            property <bool> narrow: self.width < 660px;
+                            property <length> line-height: self.narrow ? 52px : 40px;
+                            ListHeading {
+                                history: SoundsData.view == 3;
+                                rediscover: SoundsData.view == 4;
+                                narrow: list-box.narrow;
+                            }
+                            lines := ListView {
+                                row-height: list-box.line-height;
+                                rows: SoundsData.lines.length;
+                                show-top: SoundsData.show-row * self.row-height;
+                                show-ask: SoundsData.show-ask;
+                                show-done <=> SoundsData.show-done;
+                                init => { SoundsData.list-made(); }
+                                for l in SoundsData.lines: SoundLineView {
+                                    // Every line this height: the list counts on it.
+                                    height: lines.row-height;
+                                    narrow: list-box.narrow;
+                                    line: l;
+                                    history: SoundsData.view == 3;
+                                    rediscover: SoundsData.view == 4;
                                     chosen => { keys.focus(); }
                                     right-clicked(x, y) => {
                                         keys.focus();
@@ -1761,294 +1762,297 @@ export component SoundsPage inherits Rectangle {
                                 }
                             }
                         }
-                    }
-                    if SoundsData.empty-title == "" && SoundsData.shown > 0 && (SoundsData.view == 1 || SoundsData.view == 3 || SoundsData.view == 4): list-box := VerticalLayout {
-                        // Two lines a sound where the columns would leave its name under about 100 px (in a
-                        // 900 px window); a big window with the panel and the year strip open keeps one line. The
-                        // columns take about 510 px (SoundLineView): make one wider, and raise this with it.
-                        property <bool> narrow: self.width < 660px;
-                        property <length> line-height: self.narrow ? 52px : 40px;
-                        ListHeading {
-                            history: SoundsData.view == 3;
-                            rediscover: SoundsData.view == 4;
-                            narrow: list-box.narrow;
-                        }
-                        lines := ListView {
-                            row-height: list-box.line-height;
-                            rows: SoundsData.lines.length;
-                            show-top: SoundsData.show-row * self.row-height;
-                            show-ask: SoundsData.show-ask;
-                            show-done <=> SoundsData.show-done;
-                            init => { SoundsData.list-made(); }
-                            for l in SoundsData.lines: SoundLineView {
-                                // Every line this height: the list counts on it.
-                                height: lines.row-height;
-                                narrow: list-box.narrow;
-                                line: l;
-                                history: SoundsData.view == 3;
-                                rediscover: SoundsData.view == 4;
+                        if SoundsData.empty-title == "" && SoundsData.view == 5: ListView {
+                            for pad[i] in SoundsData.pads: PadLineView {
+                                pad: pad;
+                                place: i;
                                 chosen => { keys.focus(); }
-                                right-clicked(x, y) => {
-                                    keys.focus();
-                                    menu.open-at(x, y);
-                                }
                             }
                         }
-                    }
-                    if SoundsData.empty-title == "" && SoundsData.view == 5: ListView {
-                        for pad[i] in SoundsData.pads: PadLineView {
-                            pad: pad;
-                            place: i;
-                            chosen => { keys.focus(); }
-                        }
-                    }
-                    if SoundsData.empty-title == "" && SoundsData.view == 2: sky := Rectangle {
-                        clip: true;
-                        init => { SoundsData.galaxy-resized(self.width, self.height); }
-                        changed width => { SoundsData.galaxy-resized(self.width, self.height); }
-                        changed height => { SoundsData.galaxy-resized(self.width, self.height); }
-                        Image {
-                            x: SoundsData.galaxy-image-x;
-                            y: SoundsData.galaxy-image-y;
-                            width: SoundsData.galaxy-image-width;
-                            height: SoundsData.galaxy-image-height;
-                            source: SoundsData.galaxy-image;
-                            image-fit: fill;
-                        }
-                        if SoundsData.galaxy-trail != "": Path {
-                            x: 0;
-                            y: 0;
-                            width: sky.width;
-                            height: sky.height;
-                            viewbox-x: 0;
-                            viewbox-y: 0;
-                            viewbox-width: sky.width / 1px;
-                            viewbox-height: sky.height / 1px;
-                            commands: SoundsData.galaxy-trail;
-                            stroke: Theme.text;
-                            stroke-width: 1.2px;
-                            opacity: 0.45;
-                        }
-                        for d in SoundsData.galaxy-trail-dots: Rectangle {
-                            x: d.x - 4px;
-                            y: d.y - 4px;
-                            width: 8px;
-                            height: 8px;
-                            border-radius: 4px;
-                            border-width: 1px;
-                            border-color: Theme.text;
-                            opacity: 0.2 + 0.6 * d.fade;
-                        }
-                        if SoundsData.galaxy-hover-shown: Rectangle {
-                            x: SoundsData.galaxy-hover-x - 7px;
-                            y: SoundsData.galaxy-hover-y - 7px;
-                            width: 14px;
-                            height: 14px;
-                            border-radius: 7px;
-                            border-width: 1.5px;
-                            border-color: Theme.text;
-                            opacity: 0.7;
-                        }
-                        if SoundsData.galaxy-picked-shown: Rectangle {
-                            x: SoundsData.galaxy-picked-x - 9px;
-                            y: SoundsData.galaxy-picked-y - 9px;
-                            width: 18px;
-                            height: 18px;
-                            border-radius: 9px;
-                            border-width: 2px;
-                            border-color: Theme.accent;
-                        }
-                        PointerPad {
-                            grabbing: SoundsData.galaxy-grabbing;
-                            down(x, y) => {
-                                keys.focus();
-                                SoundsData.galaxy-swept-keys = false;
-                                SoundsData.galaxy-sky-x = sky.absolute-position.x;
-                                SoundsData.galaxy-sky-y = sky.absolute-position.y;
-                                SoundsData.galaxy-down(x, y, false);
-                            }
-                            side-down(x, y) => {
-                                keys.focus();
-                                SoundsData.galaxy-down(x, y, true);
-                            }
-                            side-up => { SoundsData.galaxy-up(true); }
-                            move(x, y) => { SoundsData.galaxy-move(x, y); }
-                            cancelled => { SoundsData.galaxy-cancelled(); }
-                            up => { SoundsData.galaxy-up(false); }
-                            double => { SoundsData.galaxy-double(); }
-                            wheel(x, dx, dy, ctrl, shift) => { SoundsData.galaxy-wheel(dy); }
-                            gone => { SoundsData.galaxy-gone(); }
-                        }
-                        for l in SoundsData.galaxy-labels: MapName {
-                            x: l.x - self.width / 2;
-                            y: l.y - self.height;
-                            text: l.name;
-                            tint: Theme.sound-type(l.colour);
-                            opacity: l.fade;
-                            clicked => { SoundsData.galaxy-label(l.region); }
-                        }
-                        if SoundsData.galaxy-mini-shown: MapInset {
-                            x: sky.width - self.width - Space.md;
-                            y: sky.height - self.height - Space.md;
-                            picture: SoundsData.galaxy-mini-image;
-                            title: SoundsData.galaxy-mini-title;
-                            box-x: SoundsData.galaxy-mini-x;
-                            box-y: SoundsData.galaxy-mini-y;
-                            box-width: SoundsData.galaxy-mini-width;
-                            box-height: SoundsData.galaxy-mini-height;
-                            go(x, y) => { SoundsData.galaxy-mini(x, y); }
-                        }
-                        if SoundsData.galaxy-swept.length > 0: Rectangle {
-                            x: sky.width - self.width - Space.md;
-                            y: Space.md;
-                            width: 250px;
-                            height: min(swept-card.preferred-height, sky.height - 2 * Space.md);
-                            background: Theme.surface;
-                            border-radius: Theme.radius;
-                            border-width: 1px;
-                            // Accent while the arrow keys go through it.
-                            border-color: SoundsData.galaxy-swept-keys && keys.has-focus ? Theme.accent : Theme.edge;
+                        if SoundsData.empty-title == "" && SoundsData.view == 2: sky := Rectangle {
                             clip: true;
-                            // The card takes its own clicks and the wheel, so they don't reach the map under it; a
-                            // click on it hands it the arrow keys.
-                            TouchArea {
-                                clicked => {
-                                    keys.focus();
-                                    SoundsData.galaxy-swept-keys = true;
-                                }
+                            init => { SoundsData.galaxy-resized(self.width, self.height); }
+                            changed width => { SoundsData.galaxy-resized(self.width, self.height); }
+                            changed height => { SoundsData.galaxy-resized(self.width, self.height); }
+                            Image {
+                                x: SoundsData.galaxy-image-x;
+                                y: SoundsData.galaxy-image-y;
+                                width: SoundsData.galaxy-image-width;
+                                height: SoundsData.galaxy-image-height;
+                                source: SoundsData.galaxy-image;
+                                image-fit: fill;
                             }
-                            swept-card := VerticalLayout {
-                                padding: Space.md;
-                                spacing: Space.xs;
-                                HorizontalLayout {
-                                    spacing: Space.sm;
-                                    Caps {
-                                        text: "SWEPT";
-                                        vertical-alignment: center;
-                                        horizontal-stretch: 1;
-                                    }
-                                    StudioButton {
-                                        text: "Back";
-                                        tip: "The sound swept before this one";
-                                        clicked => {
-                                            keys.focus();
-                                            SoundsData.galaxy-swept-keys = true;
-                                            SoundsData.galaxy-swept-step(1);
-                                        }
-                                    }
-                                    StudioButton {
-                                        text: "Next";
-                                        tip: "The sound swept after this one";
-                                        clicked => {
-                                            keys.focus();
-                                            SoundsData.galaxy-swept-keys = true;
-                                            SoundsData.galaxy-swept-step(-1);
-                                        }
-                                    }
+                            if SoundsData.galaxy-trail != "": Path {
+                                x: 0;
+                                y: 0;
+                                width: sky.width;
+                                height: sky.height;
+                                viewbox-x: 0;
+                                viewbox-y: 0;
+                                viewbox-width: sky.width / 1px;
+                                viewbox-height: sky.height / 1px;
+                                commands: SoundsData.galaxy-trail;
+                                stroke: Theme.text;
+                                stroke-width: 1.2px;
+                                opacity: 0.45;
+                            }
+                            for d in SoundsData.galaxy-trail-dots: Rectangle {
+                                x: d.x - 4px;
+                                y: d.y - 4px;
+                                width: 8px;
+                                height: 8px;
+                                border-radius: 4px;
+                                border-width: 1px;
+                                border-color: Theme.text;
+                                opacity: 0.2 + 0.6 * d.fade;
+                            }
+                            if SoundsData.galaxy-hover-shown: Rectangle {
+                                x: SoundsData.galaxy-hover-x - 7px;
+                                y: SoundsData.galaxy-hover-y - 7px;
+                                width: 14px;
+                                height: 14px;
+                                border-radius: 7px;
+                                border-width: 1.5px;
+                                border-color: Theme.text;
+                                opacity: 0.7;
+                            }
+                            if SoundsData.galaxy-picked-shown: Rectangle {
+                                x: SoundsData.galaxy-picked-x - 9px;
+                                y: SoundsData.galaxy-picked-y - 9px;
+                                width: 18px;
+                                height: 18px;
+                                border-radius: 9px;
+                                border-width: 2px;
+                                border-color: Theme.accent;
+                            }
+                            PointerPad {
+                                grabbing: SoundsData.galaxy-grabbing;
+                                down(x, y) => {
+                                    keys.focus();
+                                    SoundsData.galaxy-swept-keys = false;
+                                    SoundsData.galaxy-sky-x = sky.absolute-position.x;
+                                    SoundsData.galaxy-sky-y = sky.absolute-position.y;
+                                    SoundsData.galaxy-down(x, y, false);
                                 }
-                                for line[i] in SoundsData.galaxy-swept: ListLine {
-                                    height: 30px;
-                                    selected: line.current;
-                                    tip: line.kind;
-                                    draggable: true;
-                                    lifted: line.place == SoundsData.lifted-alike;
-                                    landed: line.place == SoundsData.landed-alike;
-                                    drag-out => { SoundsData.drag-alike(line.place); }
-                                    drag-let-go => { SoundsData.drag-let-go(); }
+                                side-down(x, y) => {
+                                    keys.focus();
+                                    SoundsData.galaxy-down(x, y, true);
+                                }
+                                side-up => { SoundsData.galaxy-up(true); }
+                                move(x, y) => { SoundsData.galaxy-move(x, y); }
+                                cancelled => { SoundsData.galaxy-cancelled(); }
+                                up => { SoundsData.galaxy-up(false); }
+                                double => { SoundsData.galaxy-double(); }
+                                wheel(x, dx, dy, ctrl, shift) => { SoundsData.galaxy-wheel(dy); }
+                                gone => { SoundsData.galaxy-gone(); }
+                            }
+                            for l in SoundsData.galaxy-labels: MapName {
+                                x: l.x - self.width / 2;
+                                y: l.y - self.height;
+                                text: l.name;
+                                tint: Theme.sound-type(l.colour);
+                                opacity: l.fade;
+                                clicked => { SoundsData.galaxy-label(l.region); }
+                            }
+                            if SoundsData.galaxy-mini-shown: MapInset {
+                                x: sky.width - self.width - Space.md;
+                                y: sky.height - self.height - Space.md;
+                                picture: SoundsData.galaxy-mini-image;
+                                title: SoundsData.galaxy-mini-title;
+                                box-x: SoundsData.galaxy-mini-x;
+                                box-y: SoundsData.galaxy-mini-y;
+                                box-width: SoundsData.galaxy-mini-width;
+                                box-height: SoundsData.galaxy-mini-height;
+                                go(x, y) => { SoundsData.galaxy-mini(x, y); }
+                            }
+                            if SoundsData.galaxy-swept.length > 0: Rectangle {
+                                x: sky.width - self.width - Space.md;
+                                y: Space.md;
+                                width: 250px;
+                                height: min(swept-card.preferred-height, sky.height - 2 * Space.md);
+                                background: Theme.surface;
+                                border-radius: Theme.radius;
+                                border-width: 1px;
+                                // Accent while the arrow keys go through it.
+                                border-color: SoundsData.galaxy-swept-keys && keys.has-focus ? Theme.accent : Theme.edge;
+                                clip: true;
+                                // The card takes its own clicks and the wheel, so they don't reach the map under it; a
+                                // click on it hands it the arrow keys.
+                                TouchArea {
                                     clicked => {
                                         keys.focus();
                                         SoundsData.galaxy-swept-keys = true;
-                                        SoundsData.galaxy-swept-go(i);
+                                    }
+                                }
+                                swept-card := VerticalLayout {
+                                    padding: Space.md;
+                                    spacing: Space.xs;
+                                    HorizontalLayout {
+                                        spacing: Space.sm;
+                                        Caps {
+                                            text: "SWEPT";
+                                            vertical-alignment: center;
+                                            horizontal-stretch: 1;
+                                        }
+                                        StudioButton {
+                                            text: "Back";
+                                            tip: "The sound swept before this one";
+                                            clicked => {
+                                                keys.focus();
+                                                SoundsData.galaxy-swept-keys = true;
+                                                SoundsData.galaxy-swept-step(1);
+                                            }
+                                        }
+                                        StudioButton {
+                                            text: "Next";
+                                            tip: "The sound swept after this one";
+                                            clicked => {
+                                                keys.focus();
+                                                SoundsData.galaxy-swept-keys = true;
+                                                SoundsData.galaxy-swept-step(-1);
+                                            }
+                                        }
+                                    }
+                                    for line[i] in SoundsData.galaxy-swept: ListLine {
+                                        height: 30px;
+                                        selected: line.current;
+                                        tip: line.kind;
+                                        draggable: true;
+                                        lifted: line.place == SoundsData.lifted-alike;
+                                        landed: line.place == SoundsData.landed-alike;
+                                        drag-out => { SoundsData.drag-alike(line.place); }
+                                        drag-let-go => { SoundsData.drag-let-go(); }
+                                        clicked => {
+                                            keys.focus();
+                                            SoundsData.galaxy-swept-keys = true;
+                                            SoundsData.galaxy-swept-go(i);
+                                        }
+                                        HorizontalLayout {
+                                            padding-left: Space.sm;
+                                            padding-right: Space.sm;
+                                            spacing: Space.sm;
+                                            alignment: start;
+                                            VerticalLayout {
+                                                alignment: center;
+                                                Dot { tint: Theme.sound-type(line.colour); }
+                                            }
+                                            Text {
+                                                text: line.name;
+                                                color: line.current ? Theme.text : Theme.muted;
+                                                font-size: Type.meta;
+                                                vertical-alignment: center;
+                                                overflow: elide;
+                                                horizontal-stretch: 1;
+                                            }
+                                        }
                                     }
                                     HorizontalLayout {
-                                        padding-left: Space.sm;
-                                        padding-right: Space.sm;
                                         spacing: Space.sm;
-                                        alignment: start;
-                                        VerticalLayout {
-                                            alignment: center;
-                                            Dot { tint: Theme.sound-type(line.colour); }
-                                        }
+                                        // What the arrow keys do here, so it's seen, not guessed.
                                         Text {
-                                            text: line.name;
-                                            color: line.current ? Theme.text : Theme.muted;
+                                            text: SoundsData.galaxy-swept-keys && keys.has-focus
+                                                ? "Up and Down go through these"
+                                                : "Click here, then Up and Down";
+                                            color: SoundsData.galaxy-swept-keys && keys.has-focus ? Theme.accent : Theme.muted;
                                             font-size: Type.meta;
                                             vertical-alignment: center;
                                             overflow: elide;
                                             horizontal-stretch: 1;
                                         }
-                                    }
-                                }
-                                HorizontalLayout {
-                                    spacing: Space.sm;
-                                    // What the arrow keys do here, so it's seen, not guessed.
-                                    Text {
-                                        text: SoundsData.galaxy-swept-keys && keys.has-focus
-                                            ? "Up and Down go through these"
-                                            : "Click here, then Up and Down";
-                                        color: SoundsData.galaxy-swept-keys && keys.has-focus ? Theme.accent : Theme.muted;
-                                        font-size: Type.meta;
-                                        vertical-alignment: center;
-                                        overflow: elide;
-                                        horizontal-stretch: 1;
-                                    }
-                                    LinkText {
-                                        text: "Clear";
-                                        tint: Theme.muted;
-                                        font-size: Type.meta;
-                                        clicked => { SoundsData.galaxy-swept-clear(); }
+                                        LinkText {
+                                            text: "Clear";
+                                            tint: Theme.muted;
+                                            font-size: Type.meta;
+                                            clicked => { SoundsData.galaxy-swept-clear(); }
+                                        }
                                     }
                                 }
                             }
-                        }
-                        // What the arrow keys do on the map, in its bottom left corner (the mini-map has the right).
-                        if SoundsData.shown > 0 && SoundsData.galaxy-note == "": Text {
-                            x: Space.md;
-                            y: sky.height - self.height - Space.md;
-                            text: "Arrow keys: the nearest sound that way";
-                            color: Theme.muted;
-                            font-size: Type.meta;
-                        }
-                        if SoundsData.galaxy-hover-text != "": HoverNote {
-                            text: SoundsData.galaxy-hover-text;
-                            at-x: SoundsData.galaxy-mouse-x;
-                            at-y: SoundsData.galaxy-mouse-y;
-                            room-width: sky.width;
-                            room-height: sky.height;
-                        }
-                        // Only with stars to show: when the filters leave none, the list's own word says so in the
-                        // same place, and the two would sit on top of each other.
-                        if SoundsData.galaxy-note != "" && SoundsData.shown > 0: EmptyState {
-                            title: SoundsData.galaxy-busy ? "Making the galaxy" : "";
-                            text: SoundsData.galaxy-note;
+                            // The map's own settings, on the map (they were a row of chips above it, among the
+                            // filters): how it places and lights its stars and what a sweep plays, as small
+                            // drop-downs in its top left corner, and the two buttons after them.
+                            FlexboxLayout {
+                                x: Space.md;
+                                y: Space.md;
+                                width: sky.width - 2 * Space.md;
+                                height: self.preferred-height;
+                                spacing: Space.sm;
+                                cross-axis-alignment: center;
+                                OneOfChip {
+                                    name: "Placed by";
+                                    filter: SoundsData.placing-filter;
+                                    picked(text) => { SoundsData.galaxy-place-by(text); }
+                                }
+                                OneOfChip {
+                                    name: "Light by";
+                                    filter: SoundsData.light-filter;
+                                    picked(text) => { SoundsData.galaxy-light-by(text); }
+                                }
+                                OneOfChip {
+                                    name: "Sweep plays";
+                                    filter: SoundsData.sweep-play-filter;
+                                    picked(text) => { SoundsData.galaxy-sweep-plays(text); }
+                                }
+                                StudioButton {
+                                    text: "Lay out again";
+                                    tip: "Work the map out afresh from every sound's fingerprint";
+                                    clicked => { SoundsData.galaxy-lay-out(); }
+                                }
+                                StudioButton {
+                                    text: "Whole map";
+                                    tip: "Zoom out to see every star";
+                                    clicked => { SoundsData.galaxy-reset(); }
+                                }
+                            }
+                            // What the arrow keys do on the map, in its bottom left corner (the mini-map has the right).
+                            if SoundsData.shown > 0 && SoundsData.galaxy-note == "": Text {
+                                x: Space.md;
+                                y: sky.height - self.height - Space.md;
+                                text: "Arrow keys: the nearest sound that way";
+                                color: Theme.muted;
+                                font-size: Type.meta;
+                            }
+                            if SoundsData.galaxy-hover-text != "": HoverNote {
+                                text: SoundsData.galaxy-hover-text;
+                                at-x: SoundsData.galaxy-mouse-x;
+                                at-y: SoundsData.galaxy-mouse-y;
+                                room-width: sky.width;
+                                room-height: sky.height;
+                            }
+                            // Only with stars to show: when the filters leave none, the list's own word says so in the
+                            // same place, and the two would sit on top of each other.
+                            if SoundsData.galaxy-note != "" && SoundsData.shown > 0: EmptyState {
+                                title: SoundsData.galaxy-busy ? "Making the galaxy" : "";
+                                text: SoundsData.galaxy-note;
+                            }
                         }
                     }
                 }
-            }
-            if area.folders-width > 0: FoldersCard {
-                x: area.list-width - area.folders-width + Space.md;
-                width: area.folders-width - Space.md;
-                height: parent.height;
-            }
-            divider := PanelDivider {
-                // No seam to drag once the window has room for the sounds and the card at their widest.
-                visible: SoundsData.panel-shown && area.card-width < Fit.card-max;
-                x: area.list-width;
-                height: parent.height;
-                panel-width: area.card-width;
-                room: area.width;
-                resizing(w) => { SoundsData.panel-width = w; }
-                resized(w) => { SoundsData.panel-resized(w); }
-            }
-            if SoundsData.panel-shown: SoundPanel {
-                x: area.list-width + divider.width;
-                width: area.card-width;
-                height: parent.height;
-                tag-keys <=> root.card-keys;
-            }
-            menu := RightClickMenu {
-                items: SoundsData.menu;
-                chosen(id) => { SoundsData.menu-chosen(id); }
+                if area.folders-width > 0: FoldersCard {
+                    x: area.list-width - area.folders-width + Space.md;
+                    width: area.folders-width - Space.md;
+                    height: parent.height;
+                }
+                divider := PanelDivider {
+                    // No seam to drag once the window has room for the sounds and the card at their widest.
+                    visible: SoundsData.panel-shown && area.card-width < Fit.card-max;
+                    x: area.list-width;
+                    height: parent.height;
+                    panel-width: area.card-width;
+                    room: area.width;
+                    resizing(w) => { SoundsData.panel-width = w; }
+                    resized(w) => { SoundsData.panel-resized(w); }
+                }
+                if SoundsData.panel-shown: SoundPanel {
+                    x: area.list-width + divider.width;
+                    width: area.card-width;
+                    height: parent.height;
+                    tag-keys <=> root.card-keys;
+                }
+                menu := RightClickMenu {
+                    items: SoundsData.menu;
+                    chosen(id) => { SoundsData.menu-chosen(id); }
+                }
             }
         }
     }

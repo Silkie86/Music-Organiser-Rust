@@ -79,7 +79,9 @@ pub fn one_of<S: AsRef<str>>(choices: &[S], picked: &str) -> Filter {
         .iter()
         .map(|c| Shown { text: c.as_ref().to_owned(), count: String::new(), on: c.as_ref() == picked })
         .collect();
-    Filter { chips, ..Filter::default() }
+    // What's picked, in words, for a small drop-down that shows the choice as "Placed by: Both" (OneOfChip).
+    let more_picked = choices.iter().map(AsRef::as_ref).find(|c| *c == picked).unwrap_or_default().to_owned();
+    Filter { chips, more_picked, ..Filter::default() }
 }
 
 /// What a menu's chip says is picked: the one, "Bass + 2" for more, or "" for none.
@@ -175,7 +177,8 @@ mod tests {
             order.chips.iter().map(|c| (c.text.as_str(), c.count.as_str(), c.on)).collect::<Vec<_>>(),
             [("Shuffled", "", false), ("Name", "", true), ("Newest", "", false)]
         );
-        assert!(order.more.is_empty() && order.more_picked.is_empty());
+        assert!(order.more.is_empty());
+        assert_eq!(order.more_picked, "Name");
         // Words of any kind, such as numbers made as text.
         let counts = one_of(&[30, 60].map(|n: i32| n.to_string()), "60");
         assert_eq!(counts.chips.iter().filter(|c| c.on).count(), 1);

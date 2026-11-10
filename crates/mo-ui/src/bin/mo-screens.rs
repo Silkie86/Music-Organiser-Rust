@@ -2613,7 +2613,7 @@ const FIRST_TILE: (u32, u32, u32, u32) = (250, 320, 200, 70);
 const FIRST_LINE: (u32, u32, u32, u32) = (250, 335, 400, 30);
 /// A point on a Sounds tile to right-click, and where a right-click menu's lines start under the mouse (its card's
 /// padding) and how tall each is (studio.slint's MenuItems and MenuLine).
-const MENU_TILE: (f32, f32) = (330.0, 345.0);
+const MENU_TILE: (f32, f32) = (560.0, 345.0);
 const MENU_LINES_TOP: f32 = 4.0;
 const MENU_LINE: f32 = 32.0;
 /// The Sounds card's Add a tag box, the card turned down to its end (with a sound's six tags over it).
