@@ -5,7 +5,7 @@
 //! are in its clip's file (`Performances/*.musicx`, binary JSON, or `*.pattern` for a pattern part), found through
 //! `Song/mediapool.xml` by clipID. Positions are in beats; an event whose timeFormat is 0 gives its length and offset
 //! in seconds, and a track whose timeFormat is 0 (Tempo: Don't Follow) gives its events' starts in seconds too. The tempo
-//! map holds seconds per beat.
+//! map holds seconds per beat, change by change, and turns those seconds into beats.
 //!
 //! Audio, as Solomon's recipe saves and his own songs showed (10 Nov 2026):
 //!
@@ -98,7 +98,7 @@ struct AudioEvent {
 impl AudioEvent {
     fn read(ev: Node<'_, '_>) -> AudioEvent {
         let n = |name: &str| num(attr(ev, name)).filter(|v| v.is_finite()).unwrap_or(0.0);
-        let curve = ev.children().find(|c| c.is_element() && id(*c) == "volumeCurve");
+        let curve = child(ev, "volumeCurve");
         let fade =
             |name: &str| curve.and_then(|c| num(attr(c, name))).filter(|v| v.is_finite()).map_or(0.0, |v| v.max(0.0));
         // The gain is a plain multiple of the sound: none saved is 1, and 0 is silence.
@@ -124,36 +124,134 @@ impl AudioEvent {
         }
     }
 
-    /// How long the event is in beats, and the stretch of its file it plays. `spb` is the song's seconds per beat and
-    /// `stretch` its track's Timestretch mode (none when the track doesn't stretch).
-    fn play(&self, pool: &Pool, spb: f64, stretch: Option<Stretch>) -> (f64, AudioPart) {
-        let file = pool.audio.get(&self.clip_id).cloned().unwrap_or_default();
+    /// How the event plays its file when it starts at the beat `at`. `stretch` is its track's Timestretch mode (none
+    /// when the track doesn't stretch).
+    fn played(&self, file: Option<&PoolAudio>, at: f64, map: &TempoMap, stretch: Option<Stretch>) -> Played {
+        let spb = map.spb_at(at);
         // Timed in beats, the file is stretched so its own beats fall on the song's; timed in seconds it plays at its
         // own speed. Either way `speed` (the event's Speedup) plays it that many times faster.
-        let (rate, mode) = if self.seconds {
+        let (rate, stretch) = if self.seconds {
             (spb * self.speed, Some(Stretch::Raw))
         } else {
-            (file.tempo.unwrap_or(spb) * self.speed, stretch)
+            (file.and_then(|f| f.tempo).unwrap_or(spb) * self.speed, stretch)
         };
-        let to_beats = |v: f64| if self.seconds { v / spb } else { v };
-        let mut length = to_beats(self.length);
-        if length <= 0.0 && file.seconds > 0.0 {
-            length = file.seconds / rate;
+        let mut length = map.span(at, self.length, self.seconds);
+        // No length saved: the whole file.
+        let whole = file.map_or(0.0, |f| f.seconds);
+        if length <= 0.0 && whole > 0.0 {
+            length = if self.seconds { map.span(at, whole / self.speed, true) } else { whole / rate };
         }
-        let part = AudioPart {
-            path: file.path,
+        let from = if self.seconds { self.offset * self.speed } else { self.offset * rate };
+        Played { length, rate, from, stretch }
+    }
+
+    /// The stretch of its file the event plays, from the start of its clip.
+    fn part(&self, file: Option<&PoolAudio>, played: &Played) -> AudioPart {
+        AudioPart {
+            path: file.map_or_else(String::new, |f| f.path.clone()),
             start: 0.0,
-            length,
-            from: to_beats(self.offset) * rate,
-            seconds_per_beat: Some(rate),
+            length: played.length,
+            from: played.from,
+            seconds_per_beat: Some(played.rate),
             whole_file_beats: None,
             reversed: false,
-            stretch: mode,
+            stretch: played.stretch,
             semitones: self.semitones,
             gain_db: self.gain_db,
-        };
-        (length, part)
+        }
     }
+}
+
+/// How an audio event plays its file: for how many beats, how many seconds of the file a beat plays (`rate`), where
+/// in the file it starts (seconds) and how it's stretched.
+struct Played {
+    length: f64,
+    rate: f64,
+    from: f64,
+    stretch: Option<Stretch>,
+}
+
+/// The song's tempo changes, first to last: the beat and the second each starts at, and its seconds per beat. What a
+/// song counts in seconds (a track that doesn't follow the tempo, an unstretched event's length, a fade) becomes
+/// beats through it.
+struct TempoMap {
+    changes: Vec<(f64, f64, f64)>,
+}
+
+impl TempoMap {
+    /// The song's TempoMapSegments; `fallback` is the seconds per beat of a song that has none.
+    fn new(song: Node<'_, '_>, fallback: f64) -> TempoMap {
+        let mut starts: Vec<(f64, f64)> = elements(song)
+            .filter(|e| e.tag_name().name() == "TempoMapSegment")
+            .filter_map(|t| {
+                let spb = num(attr(t, "tempo")).filter(|t| *t > 0.05 && *t < 6.0)?;
+                Some((num(attr(t, "start")).filter(|s| s.is_finite()).map_or(0.0, |s| s.max(0.0)), spb))
+            })
+            .collect();
+        starts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // The first tempo holds from the song's start, wherever it's written.
+        let first = starts.first().map_or(fallback, |s| s.1);
+        let (mut beat, mut second, mut spb) = (0.0, 0.0, first);
+        let mut changes = vec![(beat, second, spb)];
+        for (start, tempo) in starts {
+            second += (start - beat) * spb;
+            (beat, spb) = (start, tempo);
+            changes.push((beat, second, spb));
+        }
+        TempoMap { changes }
+    }
+
+    fn change(&self, after: usize) -> (f64, f64, f64) {
+        // There's always a first change, at the song's start.
+        self.changes.get(after.saturating_sub(1)).copied().unwrap_or((0.0, 0.0, 0.5))
+    }
+
+    /// The seconds per beat at a beat.
+    fn spb_at(&self, beat: f64) -> f64 {
+        self.change(self.changes.partition_point(|c| c.0 <= beat)).2
+    }
+
+    /// The second a beat falls on.
+    fn seconds(&self, beat: f64) -> f64 {
+        let (from, second, spb) = self.change(self.changes.partition_point(|c| c.0 <= beat));
+        second + (beat - from) * spb
+    }
+
+    /// The beat a second falls on.
+    fn beats(&self, second: f64) -> f64 {
+        let (beat, from, spb) = self.change(self.changes.partition_point(|c| c.1 <= second));
+        beat + (second - from) / spb
+    }
+
+    /// How many beats an amount takes from the beat `from` on: itself, or counted in seconds, what the tempo makes of
+    /// it there.
+    fn span(&self, from: f64, amount: f64, seconds: bool) -> f64 {
+        if seconds { self.beats(self.seconds(from) + amount) - from } else { amount }
+    }
+
+    /// How many beats the seconds before the beat `to` take.
+    fn span_before(&self, to: f64, seconds: f64) -> f64 {
+        to - self.beats(self.seconds(to) - seconds)
+    }
+}
+
+/// The child of an element with this `x:id`.
+fn child<'a, 'i>(e: Node<'a, 'i>, name: &str) -> Option<Node<'a, 'i>> {
+    e.children().find(|c| c.is_element() && id(*c) == name)
+}
+
+/// The file in the song a `media:///` address points at.
+fn media_entry(url: &str) -> Option<String> {
+    url.get(..9).filter(|s| s.eq_ignore_ascii_case("media:///")).and(url.get(9..)).map(unescape)
+}
+
+/// A number in a binary JSON object.
+fn number(o: &[(String, Ubjson)], key: &str) -> Option<f64> {
+    o.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
+        Ubjson::Float(f) => Some(*f),
+        Ubjson::Int(i) => Some(*i as f64),
+        _ => None,
+    })
 }
 
 /// What a track plays through: the instrument an instrument track plays (empty for an audio track), whether its
@@ -214,20 +312,25 @@ impl Song<'_> {
 
         let pool = self.pool();
         let channels = self.channels();
-        let beats = |e: Node<'_, '_>, name: &str, seconds: bool| {
-            num(attr(e, name)).map_or(0.0, |v| if seconds { v / spb } else { v })
-        };
+        let map = TempoMap::new(song, spb);
+        // The tempo shown is the one the song starts in, wherever its segment is written.
+        let tempo = if seconds_per_beat.is_some() { 60.0 / map.spb_at(0.0) } else { tempo };
+        let n = |e: Node<'_, '_>, name: &str| num(attr(e, name)).filter(|v| v.is_finite()).unwrap_or(0.0);
+        // Where something starts, in beats.
+        let place = |e: Node<'_, '_>, seconds: bool| if seconds { map.beats(n(e, "start")) } else { n(e, "start") };
         let in_seconds = |e: Node<'_, '_>| attr(e, "timeFormat") == "0";
 
         let mut lanes = Vec::new();
         let mut budget = NoteBudget::new();
         let (mut points_held, mut too_many_points) = (0usize, false);
         let mut part_events_left = MOST_PART_EVENTS;
+        // Each curve file's points, read once however many regions name it.
+        let mut curves: HashMap<String, Vec<PreviewPoint>> = HashMap::new();
         let mut too_many_part_events = false;
         // The tempo's own curve, when it changes: first, as Studio One's tempo track is.
         let tempo_points: Vec<PreviewPoint> = elements(song)
             .find(|e| e.tag_name().name() == "TempoMap")
-            .and_then(|map| map.children().find(|c| c.is_element() && id(*c) == "envelope"))
+            .and_then(|map| child(map, "envelope"))
             .map(|envelope| xml_points(envelope).take(MOST_POINTS).collect())
             .unwrap_or_default();
         points_held += tempo_points.len();
@@ -262,43 +365,49 @@ impl Song<'_> {
             // A track that doesn't follow the tempo (timeFormat 0) counts its events' starts in seconds.
             let track_seconds = attr(track, "timeFormat") == "0";
             let stretch = stretch_of(track);
-            // A track with layers (takes) keeps every layer's events under Layers, and plays the active one.
+            // A track with layers (takes) keeps every layer's events under Layers, and plays the active one. Its own
+            // Events list is missing, or there and empty.
             let mut event_lists: Vec<Node<'_, '_>> = lists("Events").collect();
-            if event_lists.is_empty() {
+            if !event_lists.iter().any(|l| l.children().any(|c| c.is_element())) {
                 let active = match attr(track, "activeLayer") {
                     "" => "0",
                     layer => layer,
                 };
                 event_lists = lists("Layers")
-                    .flat_map(|l| l.children().filter(|a| a.is_element() && attr(*a, "id") == active))
+                    .flat_map(|l| l.children().filter(|a| a.is_element() && id(*a) == active))
                     .flat_map(|a| a.children().filter(|l| l.is_element() && id(*l) == "Events"))
                     .collect();
             }
             for ev in event_lists.into_iter().flat_map(|l| l.children().filter(Node::is_element)) {
                 let name = attr(ev, "name");
-                let start = beats(ev, "start", track_seconds);
+                let start = place(ev, track_seconds);
                 let seconds = in_seconds(ev);
-                let mut length = beats(ev, "length", seconds);
-                let offset = beats(ev, "offset", seconds);
+                let mut length = map.span(start, n(ev, "length"), seconds);
+                let offset = map.span(start, n(ev, "offset"), seconds);
                 let muted = attr(ev, "mute") == "1";
                 let clip_id = attr(ev, "clipID");
                 match ev.tag_name().name() {
                     "AudioEvent" => {
                         let event = AudioEvent::read(ev);
-                        let (length, part) = event.play(&pool, spb, stretch);
+                        let file = pool.audio.get(&event.clip_id);
+                        let played = event.played(file, start, &map, stretch);
+                        let part = event.part(file, &played);
+                        let length = played.length;
                         let name = if name.is_empty() {
                             paths::stem(paths::file_name(&part.path)).to_owned()
                         } else {
                             name.to_owned()
                         };
+                        // The fades are in seconds; together they can't be longer than the clip.
+                        let fade_in = map.span(start, event.fade_in, true).min(length.max(0.0));
+                        let fade_out = map.span_before(start + length, event.fade_out).min((length - fade_in).max(0.0));
                         clips.push(PreviewClip {
                             name,
                             start,
                             length,
                             muted,
-                            // The fades are in seconds; together they can't be longer than the clip.
-                            fade_in: (event.fade_in / spb).min(length.max(0.0)),
-                            fade_out: (event.fade_out / spb).min((length - event.fade_in / spb).max(0.0)),
+                            fade_in,
+                            fade_out,
                             audio: vec![part],
                             ..PreviewClip::default()
                         });
@@ -312,19 +421,34 @@ impl Song<'_> {
                             continue;
                         };
                         part_events_left = left;
+                        // Where the part's own time starts: `offset` before the part does.
+                        let origin = start - offset;
+                        let inner: Vec<_> = inside
+                            .events
+                            .iter()
+                            .map(|event| {
+                                let begins = origin + map.span(origin, event.start, inside.seconds);
+                                let file = pool.audio.get(&event.clip_id);
+                                (begins - start, event, file, event.played(file, begins, &map, stretch))
+                            })
+                            .collect();
+                        // No length saved: the part runs to the end of its last event.
+                        if length <= 0.0 {
+                            let ends = inner.iter().map(|(at, _, _, played)| at + played.length);
+                            length = ends.filter(|e| e.is_finite()).reduce(f64::max).unwrap_or(0.0).max(0.0);
+                        }
                         let mut audio = Vec::new();
-                        for event in &inside.events {
-                            let at = if inside.seconds { event.start / spb } else { event.start } - offset;
-                            let (event_length, mut part) = event.play(&pool, spb, stretch);
+                        for (at, event, file, played) in inner {
                             // Cut to what the part shows of it.
                             let cut = (-at).max(0.0);
-                            let shown = (at + event_length).min(length) - at.max(0.0);
+                            let shown = (at + played.length).min(length) - at.max(0.0);
                             if event.muted || shown.is_nan() || shown <= 0.0 {
                                 continue;
                             }
+                            let mut part = event.part(file, &played);
                             part.start = at.max(0.0);
                             part.length = shown;
-                            part.from += cut * part.seconds_per_beat.unwrap_or(0.0);
+                            part.from += cut * played.rate;
                             audio.push(part);
                         }
                         audio.sort_by(|a, b| a.start.total_cmp(&b.start));
@@ -420,13 +544,14 @@ impl Song<'_> {
             clips.sort_by(|a, b| a.start.total_cmp(&b.start));
             let name = match attr(track, "name") {
                 "" if kind == LaneKind::Audio => "Audio",
+                "" if kind == LaneKind::Automation => "Automation",
                 "" => "Instrument",
                 n => n,
             };
             let mut lane = PreviewLane::new(name, kind);
             lane.colour = colour(attr(track, "color"));
             lane.muted = attr(track, "mute") == "1";
-            let channel_id = track.children().find(|c| c.is_element() && id(*c) == "channelID").map(|c| attr(c, "uid"));
+            let channel_id = child(track, "channelID").map(|c| attr(c, "uid"));
             if let Some(channel) = channel_id.and_then(|uid| channels.get(&uid.to_lowercase())) {
                 // A disabled track doesn't play, so it's muted too.
                 lane.disabled = channel.disabled;
@@ -443,6 +568,7 @@ impl Song<'_> {
             lane.clips = clips;
             // Its automation curves, each a lane under it. An automation track is nothing but its curves.
             let moves = format!("Moves {}", lane.name);
+            let silent = lane.muted;
             if kind != LaneKind::Automation {
                 lanes.push(lane);
             }
@@ -454,14 +580,16 @@ impl Song<'_> {
                 if too_many_points {
                     break;
                 }
-                let url = region.children().find(|u| u.is_element() && id(*u) == "points").map(|u| attr(u, "url"));
-                let Some(entry) =
-                    url.and_then(|u| u.get(..9).filter(|s| s.eq_ignore_ascii_case("media:///")).and(u.get(9..)))
-                else {
-                    continue;
-                };
+                let Some(entry) = child(region, "points").and_then(|u| media_entry(attr(u, "url"))) else { continue };
                 let room = MOST_POINTS - points_held;
-                let mut points = self.envelope(&unescape(entry));
+                let mut points = match curves.get(&entry) {
+                    Some(read) => read.clone(),
+                    None => {
+                        let read = self.envelope(&entry);
+                        curves.insert(entry, read.clone());
+                        read
+                    }
+                };
                 if points.len() > room {
                     too_many_points = true;
                     continue;
@@ -469,7 +597,7 @@ impl Song<'_> {
                 points_held += points.len();
                 // Counted in seconds like the track's events (no save has shown such a curve yet).
                 if track_seconds {
-                    points.iter_mut().for_each(|p| p.beat /= spb);
+                    points.iter_mut().for_each(|p| p.beat = map.beats(p.beat));
                 }
                 let title = match attr(region, "title") {
                     "" => "Automation",
@@ -477,7 +605,8 @@ impl Song<'_> {
                 };
                 if let Some(mut curve) = curve_lane(title, &moves, depth + 1, points) {
                     curve.colour = colour(attr(region, "color"));
-                    curve.muted = attr(region, "mute") == "1";
+                    // A muted or disabled track's curves move nothing.
+                    curve.muted = silent || attr(region, "mute") == "1";
                     lanes.push(curve);
                 }
             }
@@ -495,7 +624,7 @@ impl Song<'_> {
         let mut markers: Vec<PreviewMarker> = elements(song)
             .filter(|m| m.tag_name().name() == "MarkerEvent")
             .filter(|m| !matches!(attr(*m, "markerType"), "2" | "3") && !attr(*m, "name").is_empty())
-            .map(|m| PreviewMarker { beat: beats(m, "start", in_seconds(m)), name: attr(m, "name").to_owned() })
+            .map(|m| PreviewMarker { beat: place(m, in_seconds(m)), name: attr(m, "name").to_owned() })
             .collect();
         markers.sort_by(|a, b| a.beat.total_cmp(&b.beat));
 
@@ -558,8 +687,8 @@ impl Song<'_> {
                     pool.parts.insert(clip_id.to_lowercase(), part);
                 }
                 _ => {
-                    if let Some(rest) = url.get(..9).filter(|s| s.eq_ignore_ascii_case("media:///")).and(url.get(9..)) {
-                        pool.music.insert(clip_id.to_lowercase(), unescape(rest));
+                    if let Some(entry) = media_entry(url) {
+                        pool.music.insert(clip_id.to_lowercase(), entry);
                     }
                 }
             }
@@ -573,9 +702,6 @@ impl Song<'_> {
         let mut channels = HashMap::new();
         let Some(text) = self.xml("Devices/audiomixer.xml") else { return channels };
         let Ok(doc) = parse(&text) else { return channels };
-        fn child<'a, 'i>(e: Node<'a, 'i>, name: &str) -> Option<Node<'a, 'i>> {
-            e.children().find(|c| c.is_element() && id(*c) == name)
-        }
         let uid = |e: Node<'_, '_>| child(e, "uniqueID").map(|u| attr(u, "uid").to_lowercase());
         let is_channel = |e: &Node<'_, '_>| e.tag_name().name().ends_with("Channel");
         // The main output takes what isn't sent to a bus.
@@ -596,6 +722,17 @@ impl Song<'_> {
             };
             channels.insert(uid, channel);
         }
+        // Each instrument's name, by the id its note input goes by.
+        let mut instruments: HashMap<String, String> = HashMap::new();
+        if let Some(text) = self.xml("Devices/audiosynthfolder.xml")
+            && let Ok(doc) = parse(&text)
+        {
+            for data in elements(doc.root_element()).filter(|e| id(*e) == "deviceData") {
+                if let Some(uid) = uid(data) {
+                    instruments.insert(uid, attr(data, "name").trim().to_owned());
+                }
+            }
+        }
         // An instrument track's channel is in the track device, and points at its instrument's mixer channel.
         if let Some(text) = self.xml("Devices/musictrackdevice.xml")
             && let Ok(doc) = parse(&text)
@@ -604,11 +741,20 @@ impl Song<'_> {
                 let out = child(e, "instrumentOut").map(|c| attr(c, "objectID").split('/').next().unwrap_or_default());
                 let Some(uid) = uid(e) else { continue };
                 let mut channel = out.and_then(|o| channels.get(&o.to_lowercase()).cloned()).unwrap_or_default();
-                // Its notes go to "Mai Tai/Synth Input", or "2 - Kontakt 5/CH 1" in older songs.
-                let input = child(e, "destination").map_or("", |d| attr(d, "friendlyName"));
-                let instrument = input.rsplit_once('/').map_or(input, |(instrument, _)| instrument);
-                let numbered = instrument.split_once(" - ").filter(|(n, _)| n.bytes().all(|b| b.is_ascii_digit()));
-                channel.instrument = numbered.map_or(instrument, |(_, rest)| rest).trim().to_owned();
+                // Its notes go to the instrument's input. The instrument's own name is with its id; an outside
+                // instrument (a hardware synth) has none there, so it goes by its input's name, "Mai Tai/Synth Input",
+                // without the number Studio One puts before it in older songs ("7 - Analog Rytm MKII/CH 14").
+                let to = child(e, "destination");
+                let target = to.map_or("", |d| attr(d, "objectID")).split('/').next().unwrap_or_default();
+                channel.instrument = match instruments.get(&target.to_lowercase()).filter(|name| !name.is_empty()) {
+                    Some(name) => name.clone(),
+                    None => {
+                        let input = to.map_or("", |d| attr(d, "friendlyName"));
+                        let device = input.rsplit_once('/').map_or(input, |(device, _)| device);
+                        let numbered = device.split_once(" - ").filter(|(n, _)| n.bytes().all(|b| b.is_ascii_digit()));
+                        numbered.map_or(device, |(_, name)| name).trim().to_owned()
+                    }
+                };
                 channel.disabled |= attr(e, "disabled") == "1";
                 channels.entry(uid).or_insert(channel);
             }
@@ -616,36 +762,34 @@ impl Song<'_> {
         channels
     }
 
-    /// An automation curve's points from its file in the song, in the order written: `.envelopex` is binary JSON
+    /// An automation curve's points from its file in the song: `.envelopex` is binary JSON
     /// ({stepcount, events: [{start, value}]}; a point with no start is at 0), the older `.envelope` the same as XML. A
     /// curve with a stepcount jumps, so each point is held until the next. None when the file is missing or damaged.
     fn envelope(&mut self, entry: &str) -> Vec<PreviewPoint> {
-        let (points, steps): (Vec<PreviewPoint>, bool) = if crate::plugins::ends_with_ignore_case(entry, ".envelopex") {
-            let Some(bytes) = self.entry(entry) else { return Vec::new() };
-            let Some(Ubjson::Object(root)) = Ubjson::read(&bytes) else { return Vec::new() };
-            let field = |o: &[(String, Ubjson)], key: &str| {
-                o.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
-                    Ubjson::Float(f) => Some(*f),
-                    Ubjson::Int(i) => Some(*i as f64),
+        let (mut points, steps): (Vec<PreviewPoint>, bool) =
+            if crate::plugins::ends_with_ignore_case(entry, ".envelopex") {
+                let Some(bytes) = self.entry(entry) else { return Vec::new() };
+                let Some(Ubjson::Object(root)) = Ubjson::read(&bytes) else { return Vec::new() };
+                let steps = number(&root, "stepcount").is_some();
+                let Some((_, Ubjson::List(events))) = root.iter().find(|(k, _)| k == "events") else {
+                    return Vec::new();
+                };
+                let points = events.iter().take(MOST_POINTS).filter_map(|e| match e {
+                    Ubjson::Object(o) => point(number(o, "start").unwrap_or(0.0), number(o, "value")),
                     _ => None,
-                })
+                });
+                (points.collect(), steps)
+            } else {
+                let Some(text) = self.xml(entry) else { return Vec::new() };
+                let Ok(doc) = parse(&text) else { return Vec::new() };
+                let root = doc.root_element();
+                (xml_points(root).take(MOST_POINTS).collect(), root.has_attribute("stepcount"))
             };
-            let steps = field(&root, "stepcount").is_some();
-            let Some((_, Ubjson::List(events))) = root.iter().find(|(k, _)| k == "events") else { return Vec::new() };
-            let points = events.iter().take(MOST_POINTS).filter_map(|e| match e {
-                Ubjson::Object(o) => point(field(o, "start").unwrap_or(0.0), field(o, "value")),
-                _ => None,
-            });
-            (points.collect(), steps)
-        } else {
-            let Some(text) = self.xml(entry) else { return Vec::new() };
-            let Ok(doc) = parse(&text) else { return Vec::new() };
-            let root = doc.root_element();
-            (xml_points(root).take(MOST_POINTS).collect(), root.has_attribute("stepcount"))
-        };
         if !steps {
             return points;
         }
+        // Held in time order, whatever order the file has them in.
+        points.sort_by(|a, b| a.beat.total_cmp(&b.beat));
         let mut held = Vec::with_capacity(points.len() * 2);
         for p in points {
             if let Some(&PreviewPoint { value, .. }) = held.last() {
@@ -680,11 +824,7 @@ impl Song<'_> {
                 _ => None,
             })
             .map(|o| {
-                let n = |key: &str, fallback: f64| match field(o, key) {
-                    Some(Ubjson::Float(f)) => f,
-                    Some(Ubjson::Int(i)) => i as f64,
-                    _ => fallback,
-                };
+                let n = |key: &str, fallback: f64| number(o, key).unwrap_or(fallback);
                 PreviewNote {
                     start: n("start", 0.0),
                     length: n("length", 0.25),
