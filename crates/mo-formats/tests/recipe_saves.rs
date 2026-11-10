@@ -340,11 +340,16 @@ fn fender_disabled_track() {
 }
 
 #[test]
-#[ignore = "known gap: a looped Bitwig audio clip shows only its first pass"]
 fn bitwig_looped_audio_clip() {
-    // Step 15 loops the trimmed tone over 3 beats: each pass is 0.82 beats, so four parts (the last one cut short).
+    // Step 15 loops the trimmed tone over 3 beats. The loop is 1.07 beats (0 to 1.07) and the tone starts 0.25 into
+    // it; the clip plays from its start marker at 0.25. So the first pass is 0.82 beats, and each pass after starts
+    // 0.25 beats of silence later: three parts in 3 beats.
     let a = bitwig("15 looped");
     let clip = &lane(&a, LaneKind::Audio).clips[0];
     assert!(near(clip.length, 3.0));
-    assert_eq!(clip.audio.len(), 4);
+    let parts: Vec<(f64, f64, f64)> = clip.audio.iter().map(|p| (p.start, p.length, p.from)).collect();
+    assert_eq!(parts.len(), 3, "{parts:?}");
+    for (part, start) in parts.iter().zip([0.0, 1.0667, 2.1333]) {
+        assert!(near(part.0, start) && near(part.1, 0.8167) && near(part.2, 0.0), "{parts:?}");
+    }
 }
