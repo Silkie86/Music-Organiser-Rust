@@ -21,7 +21,7 @@ use mo_app::places::Place;
 use mo_app::shell;
 use mo_app::shortcuts::Shortcuts;
 use mo_app::song_panel::{self as panel, Go, SaveLine as PanelSaveLine, Tab};
-use mo_app::songs::{Entry, Filters, SongRow, Songs, View};
+use mo_app::songs::{Entry, Filters, Listed, Order, SongRow, Songs, View};
 use mo_app::{paths, sound_library, year_strip};
 use mo_library::scan::is_project_file;
 use mo_library::songs::DEFAULT_RUN_GAP_MONTHS;
@@ -40,6 +40,8 @@ use crate::{
 struct Page {
     songs: Songs,
     filters: Filters,
+    /// The column the list goes by: a click on its heading.
+    listed: Listed,
     view: View,
     /// Every year a song was last saved in, newest first, with how many: the year strip.
     years: Vec<(i32, usize)>,
@@ -62,6 +64,7 @@ impl Default for Page {
         Page {
             songs: Songs::default(),
             filters: Filters::default(),
+            listed: Listed::default(),
             view: View::default(),
             years: Vec::new(),
             now: Local::now().naive_local(),
@@ -533,6 +536,13 @@ fn wire_filters(app: &AppWindow) {
         });
     });
     let weak = app.as_weak();
+    data.on_order_picked(move |column| {
+        let (Some(app), Some(by)) = (weak.upgrade(), Order::from_column(&column)) else { return };
+        let _doing = crate::watchdog::doing("Songs: order");
+        PAGE.with(|p| p.borrow_mut().listed.order_by(by));
+        refresh(&app);
+    });
+    let weak = app.as_weak();
     data.on_clear(move || {
         change(&weak, |f| *f = Filters { hide_archived: f.hide_archived, ..Filters::default() });
     });
@@ -745,6 +755,9 @@ fn refresh(app: &AppWindow) {
             let mut p = p.borrow_mut();
             p.now = Local::now().naive_local();
             p.view = p.songs.view(&p.filters, p.now);
+            let (listed, now) = (p.listed, p.now);
+            let p = &mut *p;
+            p.view.put_in_order(&p.songs, listed, now);
         }
         LINES.with(|l| l.notify.reset());
         let p = p.borrow();
@@ -761,6 +774,9 @@ fn refresh(app: &AppWindow) {
         data.set_years_from(from);
         data.set_years_to(to);
         data.set_count(view.count.as_str().into());
+        // The heading of the column the list goes by is lit, with which way (the UX review of 10 Nov, B5).
+        data.set_order_column(p.listed.by.column().into());
+        data.set_order_reversed(p.listed.reversed);
         data.set_shown(i32::try_from(view.shown).unwrap_or(i32::MAX));
         let chips = p.songs.chips(f, &view.counts);
         FILTER_MODELS.with(|m| {
