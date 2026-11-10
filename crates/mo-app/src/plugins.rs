@@ -758,12 +758,13 @@ impl Plugins {
     /// What the plugin scanner has read so far, for the installed copies.
     pub fn scanner_note(&self) -> String {
         let ScanCounts { files, plugins, failed } = self.scans;
+        // Only the retired C# app read plugin files for their IDs and versions; the app's own measure doesn't yet
+        // (review X3-4), so this is that last scan, never one still to come.
         if files == 0 {
-            return "The old app's plugin scanner hasn't read your plugin files yet, so IDs and versions aren't known."
-                .to_owned();
+            return "IDs and versions aren't known: the app doesn't read plugin files for them yet.".to_owned();
         }
         let mut s = format!(
-            "The plugin scanner has read {} holding {}",
+            "IDs and versions are from the old app's last scan, of {} holding {}",
             plural(files as usize, "plugin file", "plugin files"),
             plural(plugins as usize, "plugin", "plugins")
         );
@@ -1142,10 +1143,9 @@ pub fn copy_lines(copies: &[ScannedPlugin]) -> Vec<CopyLine> {
 /// What the card says when the scanner read no copies of the plugin.
 pub fn no_copies_note(p: &Plugins, row: usize) -> String {
     let installed = p.rows.get(row).is_some_and(|r| r.installed);
-    if p.scans.files == 0 {
-        "The plugin scanner hasn't read your plugins yet.".to_owned()
-    } else if installed {
-        "Installed, but the plugin scanner couldn't read it, or it's in a format it doesn't read yet (AU, AAX)."
+    if installed {
+        "Installed, but its ID and version aren't known: the old app's last scan didn't have it, and the app \
+         doesn't read plugin files for them yet."
             .to_owned()
     } else {
         "Not found in your plugin folders.".to_owned()

@@ -149,7 +149,7 @@ fn key_pressed(weak: &Weak<AppWindow>, feed: &Feed, key: &str, repeat: bool) -> 
     if let Some(app) = weak.upgrade()
         && app.get_place() == Place::Plugins.index() as i32
         && let Some(id) = shortcuts.page_action_for(key, PLUGINS_ACTIONS)
-        && plugins::has_pick()
+        && (plugins::has_pick() || id == plugins::MEASURE)
     {
         return repeat || plugins::run_action(&app, id);
     }

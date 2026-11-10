@@ -3,6 +3,7 @@
 //! and Clean up offered for what it left behind. Without one, its plugin files to the Recycle Bin instead, with Put
 //! back. The rules are `mo_app::plugins::uninstall`'s; the looking, the running and the waiting are on workers.
 
+use mo_app::space_bin::BIN;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -164,7 +165,7 @@ fn remove_files(app: &AppWindow) {
             return None;
         };
         c.stage = Stage::Removing;
-        let card = feed.start(&format!("Removing {}'s plugin files", c.name), "Sending to the Recycle Bin");
+        let card = feed.start(&format!("Removing {}'s plugin files", c.name), &format!("Sending to the {BIN}"));
         Some((ask, picked, c.id, c.stop.clone(), c.row_key.clone(), card))
     });
     fill(app);
