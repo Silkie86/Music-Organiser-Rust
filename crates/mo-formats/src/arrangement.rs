@@ -249,7 +249,7 @@ pub fn read_bytes(path: &Path, raw: &[u8]) -> Vec<Arrangement> {
             Err(_) => vec![unreadable(crate::fl::arrangement::PLAYLIST_VIEW, "This project")],
         },
         "bwproject" => match crate::bitwig::decode(raw) {
-            Ok(doc) => vec![crate::bitwig::arrangement::read(&doc)],
+            Ok(doc) => crate::bitwig::arrangement::read(&doc),
             Err(_) => vec![unreadable(crate::bitwig::arrangement::VIEW, "This project")],
         },
         "song" => match crate::studio_one::Song::open(raw) {

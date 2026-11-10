@@ -79,7 +79,10 @@ impl Installed {
         if self.keys.contains(&key) {
             return true;
         }
-        if is_waves(&p.name, &p.path) && self.keys.iter().any(|k| k.starts_with("waveshell")) {
+        // A Waves plugin lives inside a WaveShell file, so its own name is never a file's. Bitwig names it plainly
+        // ("Smack Attack Stereo") with Waves as its vendor.
+        let waves = is_waves(&p.name, &p.path) || case::to_lower(p.vendor.trim()) == "waves";
+        if waves && self.keys.iter().any(|k| k.starts_with("waveshell")) {
             return true;
         }
         self.keys
@@ -216,6 +219,12 @@ mod tests {
         assert!(some.has(&PluginRef { id: "ABCD".into(), ..plugin("Something Else") }));
         assert!(some.has(&PluginRef { format: "Native".into(), ..plugin("Fruity Reverb 2") }));
         assert!(!some.has(&plugin("Gone Synth")));
+        // A Waves plugin saved by its own name counts as installed when a WaveShell is.
+        let smack = PluginRef { vendor: "Waves".into(), ..plugin("Smack Attack Stereo") };
+        assert!(!some.has(&smack));
+        let shell = Installed { keys: ["waveshell1vst31412x64".into()].into(), ..Installed::default() };
+        assert!(shell.has(&smack));
+        assert!(!shell.has(&plugin("Smack Attack Stereo")), "no vendor, no Waves in the name");
     }
 
     #[test]

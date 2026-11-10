@@ -13,10 +13,16 @@ use common::studio_one::*;
 use mo_formats::arrangement::{self, Arrangement, LaneKind, PreviewMarker};
 use mo_formats::velocity;
 
+/// The one view a project has.
 fn read(name: &str, bytes: &[u8]) -> Arrangement {
     let mut views = arrangement::read_bytes(Path::new(name), bytes);
     assert_eq!(views.len(), 1);
     views.pop().unwrap()
+}
+
+/// Every view a project has, in the order they're offered.
+fn views(name: &str, bytes: &[u8]) -> Vec<Arrangement> {
+    arrangement::read_bytes(Path::new(name), bytes)
 }
 
 /// Each lane as (name, kind, depth).
@@ -48,9 +54,45 @@ fn note_clip(b: &mut BwWriter, start: f64, length: f64, looping: bool) {
     note_clip_looping(b, start, length, looping, 4.0);
 }
 
-/// [`note_clip`] with a loop `loop_beats` long.
-fn note_clip_looping(b: &mut BwWriter, start: f64, length: f64, looping: bool, loop_beats: f64) {
-    b.begin(CLIP);
+#[test]
+fn a_bitwig_clip_plays_from_its_start_marker() {
+    // A 6-beat clip whose start marker is on beat 3 of its 4-beat loop: the long note on beat 4 first, then the loop
+    // from its start (kick at 1, long note at 4 cut by the clip's end).
+    let bytes = bitwig_project(|b| {
+        track(
+            b,
+            "Beat",
+            None,
+            |b| {
+                b.obj(ARRANGER);
+                b.begin(0x511);
+                b.list(ITEMS);
+                note_clip_from(b, 0.0, 6.0, true, 4.0, Some(2.0));
+                b.end_list();
+                b.end();
+            },
+            |_| {},
+        );
+    });
+    let a = read("Marker.bwproject", &bytes);
+    assert_eq!(notes(&a, 0, 0), [(1.0, 2.0, 36), (2.0, 0.5, 36), (5.0, 1.0, 36)]);
+}
+
+/// [`note_clip`] with a loop `loop_beats` long; returns the clip's number, for references.
+fn note_clip_looping(b: &mut BwWriter, start: f64, length: f64, looping: bool, loop_beats: f64) -> u32 {
+    note_clip_from(b, start, length, looping, loop_beats, None)
+}
+
+/// [`note_clip_looping`] that starts playing from `play_start` (its start marker).
+fn note_clip_from(
+    b: &mut BwWriter,
+    start: f64,
+    length: f64,
+    looping: bool,
+    loop_beats: f64,
+    play_start: Option<f64>,
+) -> u32 {
+    let clip = b.begin(CLIP);
     b.f64(START, start);
     b.f64(DURATION, length);
     b.obj(0x2ae9);
@@ -85,8 +127,15 @@ fn note_clip_looping(b: &mut BwWriter, start: f64, length: f64, looping: bool, l
     b.f64(START, 0.0);
     b.f64(DURATION, loop_beats);
     b.end();
+    if let Some(at) = play_start {
+        b.obj(0x98c);
+        b.begin(0x505);
+        b.f64(START, at);
+        b.end();
+    }
     b.end();
     b.end();
+    clip
 }
 
 /// A track named `name`; `lane` writes what's on its timeline or in its launcher; `inner` writes the tracks in it.
@@ -174,17 +223,18 @@ fn bitwig_tracks_in_groups_with_looping_clips() {
 }
 
 #[test]
-fn a_bitwig_project_with_only_launcher_clips_shows_its_scenes_one_after_another() {
-    let launcher = |lengths: &'static [Option<f64>]| {
+fn a_bitwig_project_with_only_launcher_clips_shows_its_scenes_first() {
+    // Each slot as (length, looping); a looping clip's loop is as long as the clip.
+    let launcher = |slots: &'static [Option<(f64, bool)>]| {
         move |b: &mut BwWriter| {
             b.obj(LAUNCHER);
             b.begin(0x512);
             b.list(SLOTS);
-            for length in lengths {
+            for slot in slots {
                 b.begin(0x513);
-                if let Some(l) = length {
-                    b.obj(0x514);
-                    note_clip(b, 0.0, *l, true);
+                if let Some((length, looping)) = slot {
+                    b.obj(0x240);
+                    note_clip_looping(b, 0.0, *length, *looping, *length);
                 }
                 b.end();
             }
@@ -193,15 +243,45 @@ fn a_bitwig_project_with_only_launcher_clips_shows_its_scenes_one_after_another(
         }
     };
     let bytes = bitwig_project(|b| {
-        track(b, "Keys", None, launcher(&[Some(8.0), None, Some(4.0)]), |_| {});
-        track(b, "Bass", None, launcher(&[Some(4.0), Some(2.0)]), |_| {});
+        track(b, "Keys", None, launcher(&[Some((8.0, true)), None, Some((4.0, false))]), |_| {});
+        track(b, "Bass", None, launcher(&[Some((4.0, true)), Some((2.0, true))]), |_| {});
+        // Bitwig 6 can define a clip at its first use outside the launcher (the track's 0x15f) and only refer to it
+        // from the slot.
+        track(
+            b,
+            "Pad",
+            None,
+            |b| {
+                b.obj(0x15f);
+                let clip = note_clip_looping(b, 0.0, 2.0, false, 2.0);
+                b.obj(LAUNCHER);
+                b.begin(0x512);
+                b.list(SLOTS);
+                b.begin(0x513);
+                b.bare_ref(0x240, clip);
+                b.end();
+                b.end_list();
+                b.end();
+            },
+            |_| {},
+        );
     });
-    let a = read("Jam.bwproject", &bytes);
-    assert_eq!(a.notes, ["This project's clips are in the clip launcher, so its scenes are shown one after another."]);
+    let all = views("Jam.bwproject", &bytes);
+    assert_eq!(all.iter().map(|v| v.view).collect::<Vec<_>>(), ["Bitwig scenes", "Bitwig arranger"]);
+    let (a, arranger) = (&all[0], &all[1]);
+    assert!(arranger.lanes.iter().all(|l| l.clips.is_empty()));
+    assert_eq!(arranger.notes, ["Nothing is on the arrangement timeline; the clips are in the clip launcher."]);
     let starts = |lane: usize| a.lanes[lane].clips.iter().map(|c| (c.start, c.length)).collect::<Vec<_>>();
-    // Scene 1 is as long as its longest clip (8 beats), scene 2 takes 2, scene 3 takes 4.
+    // Scene 1 is as long as its longest clip (8 beats), and the looping bass fills it; scene 2 takes 2 beats and
+    // scene 3 4. The pad doesn't loop, so it stops at its own end.
     assert_eq!(starts(0), [(0.0, 8.0), (10.0, 4.0)]);
-    assert_eq!(starts(1), [(0.0, 4.0), (8.0, 2.0)]);
+    assert_eq!(starts(1), [(0.0, 8.0), (8.0, 2.0)]);
+    assert_eq!(starts(2), [(0.0, 2.0)]);
+    assert_eq!(notes(a, 1, 0), [(0.0, 0.5, 36), (3.0, 2.0, 36), (4.0, 0.5, 36), (7.0, 1.0, 36)]);
+    assert_eq!(
+        a.markers.iter().map(|m| (m.beat, m.name.as_str())).collect::<Vec<_>>(),
+        [(0.0, "Scene 1"), (8.0, "Scene 2"), (10.0, "Scene 3")]
+    );
 
     let empty = read("Empty.bwproject", &bitwig_project(|b| track(b, "Keys", None, |_| {}, |_| {})));
     assert_eq!(empty.notes, ["Nothing is on the arrangement timeline or in the clip launcher yet."]);
@@ -288,12 +368,10 @@ fn bitwig_projects_from_before_version_6_show_their_clips() {
     // The loop plays twice in the 8-beat clip.
     assert_eq!(notes(&a, 0, 0), [(0.0, 0.5, 36), (3.0, 2.0, 36), (4.0, 0.5, 36), (7.0, 1.0, 36)]);
 
-    let jam = read("Old jam.bwproject", &bitwig_project(|b| old_track(b, "Keys", &[], &[8.0, 4.0])));
-    assert_eq!(
-        jam.notes,
-        ["This project's clips are in the clip launcher, so its scenes are shown one after another."]
-    );
-    assert_eq!(jam.lanes[0].clips.iter().map(|c| (c.start, c.length)).collect::<Vec<_>>(), [(0.0, 8.0), (8.0, 4.0)]);
+    // Each launcher clip loops 4 beats, so each scene is 4 beats long.
+    let jam = &views("Old jam.bwproject", &bitwig_project(|b| old_track(b, "Keys", &[], &[8.0, 4.0])))[0];
+    assert_eq!(jam.view, "Bitwig scenes");
+    assert_eq!(jam.lanes[0].clips.iter().map(|c| (c.start, c.length)).collect::<Vec<_>>(), [(0.0, 4.0), (4.0, 4.0)]);
 }
 
 #[test]

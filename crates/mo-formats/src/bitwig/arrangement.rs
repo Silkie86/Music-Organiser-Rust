@@ -1,5 +1,5 @@
-//! A Bitwig project's arrangement as Bitwig shows it: its tracks (groups indented) and the clips on their timelines;
-//! when nothing is on the timeline, the clip launcher's scenes one after another. Ported from the C# app's
+//! A Bitwig project's arrangement as Bitwig shows it: its tracks (groups indented) and the clips on their timelines,
+//! and the clip launcher's scenes one after another (shown first when nothing is on the timeline). Ported from the C# app's
 //! `Parsers/BitwigArrangement.cs`, as mapped from Solomon's projects (Bitwig 2 to 6.1; the
 //! way a track holds its clips changed in Bitwig 6).
 
@@ -13,12 +13,16 @@ use super::reader::{
 };
 use crate::PluginKind;
 use crate::arrangement::{
-    Arrangement, AudioPart, LaneKind, MOST_NOTES, NoteBudget, PreviewClip, PreviewLane, PreviewNote, Stretch,
-    TOO_MANY_NOTES,
+    Arrangement, AudioPart, LaneKind, MOST_BEATS, MOST_NOTES, NoteBudget, PreviewClip, PreviewLane, PreviewMarker,
+    PreviewNote, Stretch, TOO_MANY_NOTES,
 };
 use crate::velocity;
 
 pub const VIEW: &str = "Bitwig arranger";
+pub const SCENES_VIEW: &str = "Bitwig scenes";
+
+/// The most times a looping audio clip's loop is drawn (a tiny loop in a long clip would otherwise be drawn for ever).
+const MOST_PASSES: usize = 4096;
 
 /// A track's colour: four floats, red, green, blue and alpha from 0 to 1.
 const F_TRACK_COLOUR: u32 = 0x54c;
@@ -26,6 +30,14 @@ const F_TRACK_LANES: u32 = 0x2bf8;
 const F_ARRANGER_LANE: u32 = 0x2d8e;
 const F_LAUNCHER_LANE: u32 = 0x2d8f;
 const F_LAUNCHER_SLOTS: u32 = 0x231;
+/// A launcher slot's clip (defined there, or referred to when it's defined at its first use elsewhere).
+const F_SLOT_CLIP: u32 = 0x240;
+// The scenes (Bitwig 6.1): root → 0x190 → 0x352f → 0x2ddb → 0x293, a list of scenes (class 0x6d) named in 0x109.
+const F_SCENES_HOLDER: u32 = 0x190;
+const F_SCENES_LANES: u32 = 0x352f;
+const F_SCENES_LIST: u32 = 0x2ddb;
+const F_SCENES: u32 = 0x293;
+const F_SCENE_NAME: u32 = 0x109;
 /// The list of things on a lane: clips on a track's lane, notes on a key lane, events on an audio lane.
 const F_ITEMS: u32 = F_NOTES;
 const F_MUTED: u32 = 0x10f8;
@@ -72,10 +84,11 @@ const F_EXPRESSION_VALUE: u32 = 0x28f;
 const F_FADE_IN: u32 = 0x1947;
 const F_FADE_OUT: u32 = 0x1948;
 
-/// The project's arrangement as Bitwig shows it. A project that didn't decode cleanly says so instead.
-pub fn read(doc: &Document) -> Arrangement {
+/// The project's arrangement as Bitwig shows it: its arranger timeline, and its clip launcher's scenes one after
+/// another. The scenes come first when nothing is on the timeline. A project that didn't decode cleanly says so instead.
+pub fn read(doc: &Document) -> Vec<Arrangement> {
     let Some(root) = doc.root.filter(|_| doc.body_error.is_none()) else {
-        return crate::arrangement::unreadable(VIEW, "This project");
+        return vec![crate::arrangement::unreadable(VIEW, "This project")];
     };
     let names = track_names(doc);
     let tempo = doc
@@ -112,7 +125,7 @@ pub fn read(doc: &Document) -> Arrangement {
             .map(|l| doc.field_list(l, F_ITEMS))
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|c| clip(doc, c, &mut budget))
+            .filter_map(|c| clip(doc, c, &mut budget, None))
             .collect();
         let kind = if !children.is_empty() {
             LaneKind::Group
@@ -127,55 +140,139 @@ pub fn read(doc: &Document) -> Arrangement {
         lane.depth = depth;
         lane.clips = clips;
         lanes.push(lane);
-        launcher.push(
-            launcher_slots(doc, track)
-                .into_iter()
-                .map(|slot| descendants(doc, slot, false, |_| false).find(|&o| is_clip(doc, o)))
-                .collect(),
-        );
+        launcher.push(launcher_slots(doc, track).into_iter().map(|slot| slot_clip(doc, slot)).collect());
         if !children.is_empty() {
             stack.push((children.into_iter().rev().collect(), depth + 1));
         }
     }
 
+    let scenes = scenes(doc, root, &lanes, &launcher, &mut budget);
     let mut notes = Vec::new();
-    if !lanes.is_empty() && lanes.iter().all(|l| l.clips.is_empty()) {
-        // Nothing on the timeline: lay the clip launcher's scenes end to end instead, each as long as its longest clip.
-        let slots: Vec<Vec<Option<PreviewClip>>> = launcher
-            .iter()
-            .map(|row| row.iter().map(|c| c.and_then(|c| clip(doc, c, &mut budget))).collect())
-            .collect();
-        let scenes = slots.iter().map(Vec::len).max().unwrap_or(0);
-        let mut at = 0.0;
-        let mut placed: Vec<Vec<PreviewClip>> = vec![Vec::new(); lanes.len()];
-        for scene in 0..scenes {
-            let in_scene: Vec<(usize, &PreviewClip)> =
-                slots.iter().enumerate().filter_map(|(i, row)| row.get(scene)?.as_ref().map(|c| (i, c))).collect();
-            if in_scene.is_empty() {
-                continue;
-            }
-            for (lane, c) in &in_scene {
-                if let Some(p) = placed.get_mut(*lane) {
-                    p.push(PreviewClip { start: at, ..(*c).clone() });
-                }
-            }
-            at += in_scene.iter().map(|(_, c)| c.length).fold(f64::MIN, f64::max);
-        }
-        if at > 0.0 {
-            for (lane, clips) in lanes.iter_mut().zip(placed) {
-                lane.clips = clips;
-            }
-            notes.push(
-                "This project's clips are in the clip launcher, so its scenes are shown one after another.".into(),
-            );
-        } else {
-            notes.push("Nothing is on the arrangement timeline or in the clip launcher yet.".into());
-        }
-    }
     if budget.ran_out {
         notes.push(TOO_MANY_NOTES.to_owned());
     }
-    Arrangement { view: VIEW, tempo, beats_per_bar: 4, lanes, markers: Vec::new(), notes }
+    let timeline_empty = lanes.iter().all(|l| l.clips.is_empty());
+    let mut arranger = Arrangement { view: VIEW, tempo, beats_per_bar: 4, lanes, markers: Vec::new(), notes };
+    match scenes {
+        None => {
+            if timeline_empty && !arranger.lanes.is_empty() {
+                arranger.notes.push("Nothing is on the arrangement timeline or in the clip launcher yet.".into());
+            }
+            vec![arranger]
+        }
+        Some(mut scenes) => {
+            scenes.tempo = tempo;
+            scenes.notes.extend(arranger.notes.iter().filter(|n| *n == TOO_MANY_NOTES).cloned());
+            if timeline_empty {
+                arranger
+                    .notes
+                    .push("Nothing is on the arrangement timeline; the clips are in the clip launcher.".into());
+                vec![scenes, arranger]
+            } else {
+                vec![arranger, scenes]
+            }
+        }
+    }
+}
+
+/// The clip launcher's scenes one after another, on the same tracks as the arranger: each scene as long as its
+/// longest clip (a looping clip's loop), looping clips repeating to fill it, and a marker naming each. None when the
+/// launcher is empty.
+fn scenes(
+    doc: &Document,
+    root: ObjId,
+    lanes: &[PreviewLane],
+    launcher: &[Vec<Option<ObjId>>],
+    budget: &mut NoteBudget,
+) -> Option<Arrangement> {
+    let names = scene_names(doc, root);
+    let count = launcher.iter().map(Vec::len).max().unwrap_or(0);
+    let mut placed: Vec<PreviewLane> = lanes.iter().map(|l| PreviewLane { clips: Vec::new(), ..l.clone() }).collect();
+    let mut markers = Vec::new();
+    let mut at = 0.0;
+    for scene in 0..count {
+        let in_scene: Vec<(usize, ObjId, f64)> = launcher
+            .iter()
+            .enumerate()
+            .filter_map(|(i, row)| {
+                let c = (*row.get(scene)?)?;
+                Some((i, c, launcher_length(doc, c)?))
+            })
+            .collect();
+        let Some(length) = in_scene.iter().map(|&(_, _, l)| l).reduce(f64::max) else { continue };
+        for &(lane, c, _) in &in_scene {
+            let Some(mut clip) = clip(doc, c, budget, Some(length)) else { continue };
+            clip.start = at;
+            clip.length = clip.length.min(length);
+            if let Some(l) = placed.get_mut(lane) {
+                l.clips.push(clip);
+            }
+        }
+        let name =
+            names.get(scene).filter(|n| !n.is_empty()).cloned().unwrap_or_else(|| format!("Scene {}", scene + 1));
+        markers.push(PreviewMarker { beat: at, name });
+        at += length;
+    }
+    if markers.is_empty() {
+        return None;
+    }
+    for lane in &mut placed {
+        if lane.kind != LaneKind::Group {
+            let audio = lane.clips.iter().any(|c| !c.audio.is_empty());
+            lane.kind = if audio { LaneKind::Audio } else { LaneKind::Instrument };
+        }
+    }
+    Some(Arrangement {
+        view: SCENES_VIEW,
+        tempo: 120.0,
+        beats_per_bar: 4,
+        lanes: placed,
+        markers,
+        notes: vec![
+            "The clip launcher's scenes one after another: each plays as long as its longest clip, and looping clips \
+             repeat to fill it."
+                .into(),
+        ],
+    })
+}
+
+/// The clip in a launcher slot (the slot's 0x240). Bitwig 6 defines a clip at its first use, which can be the track's
+/// 0x15f, so the slot may only refer to it.
+fn slot_clip(doc: &Document, slot: ObjId) -> Option<ObjId> {
+    field_obj(doc, slot, F_SLOT_CLIP)
+        .filter(|&c| is_clip(doc, c))
+        .or_else(|| descendants(doc, slot, false, |_| false).find(|&o| is_clip(doc, o)))
+}
+
+/// How long a launcher clip plays once round: its loop when it loops, else its own length.
+fn launcher_length(doc: &Document, clip: ObjId) -> Option<f64> {
+    let length = doc.obj(clip).num(F_DURATION).filter(|l| l.is_finite() && *l > 0.0)?;
+    let range = if is_old_clip(doc, clip) {
+        clip_content(doc, clip).and_then(|o| field_obj(doc, o, F_OLD_PLAY_RANGE))
+    } else {
+        field_obj(doc, clip, F_PLAY_RANGE)
+    };
+    let looping = range.and_then(|r| doc.obj(r).num(F_LOOP_ON)).is_some_and(|v| v > 0.0);
+    let pass = range
+        .and_then(|r| field_obj(doc, r, F_LOOP_RANGE))
+        .and_then(|l| doc.obj(l).num(F_DURATION))
+        .filter(|l| l.is_finite() && *l > 0.0);
+    Some(match pass {
+        Some(pass) if looping => pass.min(MOST_BEATS),
+        _ => length.min(MOST_BEATS),
+    })
+}
+
+/// The scenes' names, in order (Bitwig 6: root → 0x190 → 0x352f → 0x2ddb → 0x293, each name in 0x109; empty when the
+/// scene has none). Empty when the project keeps them elsewhere.
+fn scene_names(doc: &Document, root: ObjId) -> Vec<String> {
+    [F_SCENES_HOLDER, F_SCENES_LANES, F_SCENES_LIST]
+        .into_iter()
+        .try_fold(root, |o, f| field_obj(doc, o, f))
+        .map(|list| {
+            doc.field_list(list, F_SCENES).into_iter().map(|s| doc.obj(s).str(F_SCENE_NAME).to_owned()).collect()
+        })
+        .unwrap_or_default()
 }
 
 /// A track's arranger lane (its timeline's clips) and its clip launcher: track → 0x2bf8 → 0x2d8e and 0x2d8f, or
@@ -296,8 +393,10 @@ fn colour(value: Option<&Value>) -> Option<u32> {
 }
 
 /// An arrangement clip: where it is, and what of its content plays. The content has its own timeline; the clip plays
-/// it from its play start, and when looping is on, goes back to the loop range's start each time it reaches its end.
-fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewClip> {
+/// it from its play start (the start marker), and when looping is on, goes back to the loop range's start each time it
+/// reaches its end. `play_for` is how long a looping launcher clip plays for (a scene's length); a clip that doesn't
+/// loop stops at its own end.
+fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget, play_for: Option<f64>) -> Option<PreviewClip> {
     let c = doc.obj(clip);
     let (start, length) = (c.num(F_START)?, c.num(F_DURATION)?);
     // A damaged file can say anything: a clip with no length, or one that goes on for ever, isn't drawn.
@@ -319,6 +418,10 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
     let loop_start = num(loop_range, F_START).unwrap_or(0.0);
     let loop_end = loop_start + num(loop_range, F_DURATION).unwrap_or(0.0);
     let looping = num(range, F_LOOP_ON).is_some_and(|v| v > 0.0) && loop_end > loop_start;
+    let length = match play_for {
+        Some(play_for) if looping && play_for.is_finite() && play_for > 0.0 => play_for,
+        _ => length,
+    };
     let key_lanes = content.and_then(|o| field_obj(doc, o, F_NOTE_CONTENT)).map(|o| doc.field_list(o, F_KEY_LANES));
     let key_lanes = key_lanes.unwrap_or_default();
     let name =
@@ -342,6 +445,20 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
     };
 
     if c.class == CLS_AUDIO_CLIP {
+        // The stretches of the content that play, each with where it starts in the clip: the first pass from the play
+        // start, then the loop range again and again while looping.
+        let mut windows = Vec::new();
+        let first_end = if looping { loop_end.min(offset + length) } else { offset + length };
+        if first_end > offset {
+            windows.push((offset, first_end, 0.0));
+        }
+        if looping {
+            let mut at = (loop_end - offset).max(0.0);
+            while at < length && windows.len() < MOST_PASSES {
+                windows.push((loop_start, loop_start + (length - at).min(pass_length), at));
+                at += pass_length;
+            }
+        }
         let mut parts = Vec::new();
         for e in key_lanes.iter().flat_map(|&l| doc.field_list(l, F_ITEMS)) {
             let play = field_obj(doc, e, F_AUDIO_PLAY);
@@ -380,43 +497,49 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget) -> Option<PreviewC
                 Some(r) if flagged && r > 0.0 => (from + e_length * r, Some(-r)),
                 _ => (from, rate),
             };
-            // The part of the event that shows: from where the clip's window starts to where it (or the clip) ends.
-            let shown_from = e_start.max(offset);
-            let shown_to = (e_start + e_length).min(offset + length);
-            if shown_to <= shown_from {
-                continue;
-            }
-            let length = shown_to - shown_from;
-            let backwards = rate.is_some_and(|r| r < 0.0);
-            // Keep the rate positive and `from` the lowest second played, which is how a reversed part is drawn.
-            let (start_in_file, rate) = match rate {
-                Some(r) => {
-                    let a = from + (shown_from - e_start) * r;
-                    let lowest = a.min(a + length * r);
-                    // Rounding can put the lowest second a hair before the file's start; more than that means the
-                    // markers don't fit the file, so the part is shown without a waveform.
-                    if lowest < -1e-3 { (0.0, None) } else { (lowest.max(0.0), Some(r.abs())) }
+            let stretch = settings
+                .and_then(|p| p.num(F_STRETCH_MODE))
+                .filter(|m| m.is_finite() && m.fract() == 0.0)
+                .map(|m| Stretch::from_bitwig(m as i32));
+            let semitones = play.and_then(|p| expression(doc, p, F_TRANSPOSE)).unwrap_or(0.0);
+            let gain_db = play
+                .and_then(|p| expression(doc, p, F_GAIN))
+                .map_or(0.0, |v| if v > 0.0 { 60.0 * v.log10() } else { f64::NEG_INFINITY });
+            for &(w_from, w_to, at) in &windows {
+                // The part of the event this pass plays.
+                let shown_from = e_start.max(w_from);
+                let shown_to = (e_start + e_length).min(w_to);
+                if shown_to <= shown_from || parts.len() >= MOST_NOTES {
+                    continue;
                 }
-                None => (from, None),
-            };
-            parts.push(AudioPart {
-                path: file.to_owned(),
-                start: shown_from - offset,
-                length,
-                from: start_in_file,
-                seconds_per_beat: rate,
-                whole_file_beats: None,
-                reversed: backwards || flagged,
-                stretch: settings
-                    .and_then(|p| p.num(F_STRETCH_MODE))
-                    .filter(|m| m.is_finite() && m.fract() == 0.0)
-                    .map(|m| Stretch::from_bitwig(m as i32)),
-                semitones: play.and_then(|p| expression(doc, p, F_TRANSPOSE)).unwrap_or(0.0),
-                gain_db: play
-                    .and_then(|p| expression(doc, p, F_GAIN))
-                    .map_or(0.0, |v| if v > 0.0 { 60.0 * v.log10() } else { f64::NEG_INFINITY }),
-            });
+                let length = shown_to - shown_from;
+                let backwards = rate.is_some_and(|r| r < 0.0);
+                // Keep the rate positive and `from` the lowest second played, which is how a reversed part is drawn.
+                let (start_in_file, rate) = match rate {
+                    Some(r) => {
+                        let a = from + (shown_from - e_start) * r;
+                        let lowest = a.min(a + length * r);
+                        // Rounding can put the lowest second a hair before the file's start; more than that means the
+                        // markers don't fit the file, so the part is shown without a waveform.
+                        if lowest < -1e-3 { (0.0, None) } else { (lowest.max(0.0), Some(r.abs())) }
+                    }
+                    None => (from, None),
+                };
+                parts.push(AudioPart {
+                    path: file.to_owned(),
+                    start: at + (shown_from - w_from),
+                    length,
+                    from: start_in_file,
+                    seconds_per_beat: rate,
+                    whole_file_beats: None,
+                    reversed: backwards || flagged,
+                    stretch,
+                    semitones,
+                    gain_db,
+                });
+            }
         }
+        parts.sort_by(|a, b| a.start.total_cmp(&b.start));
         let name = if name.is_empty() {
             parts.first().map(|p| crate::paths::file_name(&p.path).to_owned()).unwrap_or_default()
         } else {
