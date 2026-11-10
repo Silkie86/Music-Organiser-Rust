@@ -81,6 +81,8 @@ struct Page {
     list: Arc<SoundList>,
     filters: Filters,
     order: Order,
+    /// The order turned round: a second click on its column's heading in the List view.
+    reversed: bool,
     /// Picks the shuffled order; a new one on each open and each Shuffle.
     seed: u64,
     view: i32,
@@ -180,6 +182,7 @@ impl Default for Page {
             list: Arc::default(),
             filters: Filters::default(),
             order: Order::default(),
+            reversed: false,
             seed: new_seed(),
             view: TILES,
             shown: Arc::default(),
@@ -292,6 +295,7 @@ struct Ask {
     list: Arc<SoundList>,
     filters: Filters,
     order: Order,
+    reversed: bool,
     seed: u64,
     played: Arc<Vec<(usize, NaiveDateTime)>>,
 }
@@ -2414,12 +2418,29 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     let weak = app.as_weak();
     data.on_pick_order(move |name| {
         let Some(app) = weak.upgrade() else { return };
-        // The order already picked stays picked, and the list stays as it is.
+        // The order already picked stays picked, and the list stays as it is (unless it was turned round: a chip
+        // puts it the usual way round).
         let order = Order::from_name(&name);
-        let changed = PAGE.with(|p| std::mem::replace(&mut p.borrow_mut().order, order) != order);
+        let changed = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            let was = (p.order, p.reversed);
+            (p.order, p.reversed) = (order, false);
+            was != (order, false)
+        });
         if changed {
             refresh(&app);
         }
+    });
+    let weak = app.as_weak();
+    data.on_order_by_column(move |column| {
+        // A click on a List heading: the list goes by its column, or turns round when it does already.
+        let (Some(app), Some(order)) = (weak.upgrade(), Order::from_column(&column)) else { return };
+        PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.reversed = p.order == order && !p.reversed;
+            p.order = order;
+        });
+        refresh(&app);
     });
     let weak = app.as_weak();
     data.on_shuffle(move || {
@@ -2428,6 +2449,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
             let mut p = p.borrow_mut();
             p.seed = new_seed();
             p.order = Order::Shuffled;
+            p.reversed = false;
         });
         refresh(&app);
     });
@@ -2960,12 +2982,16 @@ fn refresh(app: &AppWindow) {
             list: p.list.clone(),
             filters: p.filters.clone(),
             order: p.order,
+            reversed: p.reversed,
             seed: p.seed,
             played: p.played.clone(),
         }
     });
     if HERE.with(|h| *h.borrow()) {
-        let (shown, counts) = ask.list.view_counted(&ask.filters, ask.order, ask.seed);
+        let (mut shown, counts) = ask.list.view_counted(&ask.filters, ask.order, ask.seed);
+        if ask.reversed {
+            ask.list.turn_round(&mut shown, ask.order);
+        }
         let years = ask.list.year_counts(ask.filters.used);
         let history = ask.list.played(&ask.played, &ask.filters);
         listed(app, ask.id, Listed { shown, counts, years, history, played: ask.played });
@@ -2991,7 +3017,10 @@ fn refresh(app: &AppWindow) {
                 let new = background::on_pool(|| {
                     let years = kept.unwrap_or_else(|| ask.list.year_counts(ask.filters.used));
                     let history = ask.list.played(&ask.played, &ask.filters);
-                    let (shown, counts) = ask.list.view_counted(&ask.filters, ask.order, ask.seed);
+                    let (mut shown, counts) = ask.list.view_counted(&ask.filters, ask.order, ask.seed);
+                    if ask.reversed {
+                        ask.list.turn_round(&mut shown, ask.order);
+                    }
                     Listed { shown, counts, years, history, played: ask.played.clone() }
                 });
                 counted = Some((Arc::downgrade(&ask.list), ask.filters.used, new.years.clone()));
@@ -3252,6 +3281,9 @@ fn show_chips(app: &AppWindow) {
         data.set_any_filter(f.any());
         let order = filters::one_of(&Order::ALL.map(Order::name), p.order.name());
         data.set_order_filter(CHOICES.with(|c| c.order.view(&order)));
+        // In the List view the heading of the column the list goes by is lit too, with which way (review B5).
+        data.set_order_column(p.order.column().into());
+        data.set_order_reversed(p.reversed);
         data.set_autoplay(p.autoplay);
         show_picked_tags(&data, &p);
     });

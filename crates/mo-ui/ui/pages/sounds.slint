@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, DragHandle, Caps, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -342,6 +342,11 @@ export global SoundsData {
     // The order Tiles and List are in, each on show (one is always picked).
     in property <FilterView> order-filter;
     callback pick-order(string);
+    // The List view's column the list goes by, as its heading says it ("" for an order no column stands for), whether
+    // that order is turned round, and a click on a heading (its words).
+    in property <string> order-column;
+    in property <bool> order-reversed;
+    callback order-by-column(string);
     callback shuffle();
     in property <bool> autoplay;
     callback toggle-autoplay();
@@ -724,27 +729,42 @@ component ListHeading inherits HorizontalLayout {
     in property <bool> history;
     in property <bool> rediscover;
     in property <bool> narrow;
+    // The plain List: a click on Sound, Type or Key orders it, a second click turns it round. History and Rediscover
+    // have their own order.
+    property <bool> orders: !root.history && !root.rediscover;
     padding-left: Space.md + Space.xs;
     padding-right: Space.md + Space.xs;
     spacing: Space.md;
     height: 28px;
     Rectangle { width: 8px; }
-    Caps {
+    ColumnHead {
         horizontal-stretch: 2;
         preferred-width: 0px;
         min-width: 0px;
         text: "SOUND";
-        vertical-alignment: center;
+        can-order: root.orders;
+        on: root.orders && SoundsData.order-column == "Sound";
+        // A to Z, or round the keys from C, first.
+        up: !SoundsData.order-reversed;
+        clicked => { SoundsData.order-by-column("Sound"); }
     }
-    if !root.narrow: Caps {
+    if !root.narrow: ColumnHead {
         width: 110px;
         text: "TYPE";
-        vertical-alignment: center;
+        can-order: root.orders;
+        on: root.orders && SoundsData.order-column == "Type";
+        // A to Z, or round the keys from C, first.
+        up: !SoundsData.order-reversed;
+        clicked => { SoundsData.order-by-column("Type"); }
     }
-    if !root.narrow: Caps {
+    if !root.narrow: ColumnHead {
         width: 52px;
         text: "KEY";
-        vertical-alignment: center;
+        can-order: root.orders;
+        on: root.orders && SoundsData.order-column == "Key";
+        // A to Z, or round the keys from C, first.
+        up: !SoundsData.order-reversed;
+        clicked => { SoundsData.order-by-column("Key"); }
     }
     if !root.narrow: Caps {
         width: 80px;
