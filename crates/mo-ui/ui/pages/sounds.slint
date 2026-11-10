@@ -1450,93 +1450,16 @@ export component SoundsPage inherits Rectangle {
             font-size: Type.meta;
             wrap: word-wrap;
         }
-        HorizontalLayout {
+        split := Rectangle {
             vertical-stretch: 1;
-            spacing: Space.lg;
             // The filters, in a column at the side (Solomon, 10 Nov 2026), every choice in sight as a tick list with
             // how many sounds it would show: the types first, then the rest.
-            if SoundsData.view < 4: FilterColumn {
-                FilterList {
-                    name: "TYPE";
-                    more-name: "More types";
-                    filter: SoundsData.type-filter;
-                    toggled(text) => { SoundsData.toggle-choice("type", text); }
-                    cleared => { SoundsData.clear-chip("more-types"); }
-                }
-                FilterList {
-                    name: "LENGTH";
-                    filter: SoundsData.length-filter;
-                    toggled(text) => { SoundsData.toggle-choice("length", text); }
-                    cleared => { SoundsData.clear-chip("length"); }
-                }
-                FilterList {
-                    name: "KEY";
-                    filter: SoundsData.key-filter;
-                    toggled(text) => { SoundsData.toggle-choice("key", text); }
-                    cleared => { SoundsData.clear-chip("key"); }
-                }
-                if SoundsData.key-filter.more-picked != "": TickLine {
-                    text: "Keys that mix well";
-                    on: SoundsData.mix-well;
-                    clicked => { SoundsData.toggle("mix-well"); }
-                }
-                FilterList {
-                    name: "TEMPO";
-                    filter: SoundsData.tempo-filter;
-                    toggled(text) => { SoundsData.toggle-choice("tempo", text); }
-                    cleared => { SoundsData.clear-chip("tempo"); }
-                }
-                if SoundsData.tag-filter.chips.length + SoundsData.tag-filter.more.length > 0: FilterList {
-                    name: "TAG";
-                    more-name: "More tags";
-                    filter: SoundsData.tag-filter;
-                    toggled(text) => { SoundsData.toggle-choice("tag", text); }
-                    cleared => { SoundsData.clear-chip("tag"); }
-                }
-                VerticalLayout {
-                    Caps {
-                        text: "SHOW ONLY";
-                        height: 22px;
-                    }
-                    TickLine {
-                        text: "Favourites";
-                        on: SoundsData.favourites;
-                        clicked => { SoundsData.toggle("favourites"); }
-                    }
-                    if SoundsData.knows-use: TickLine {
-                        text: "In my projects";
-                        on: SoundsData.used;
-                        clicked => { SoundsData.toggle("used"); }
-                    }
-                    if SoundsData.knows-use: TickLine {
-                        text: "Unused";
-                        on: SoundsData.unused;
-                        clicked => { SoundsData.toggle("unused"); }
-                    }
-                    // Only while a forgotten folder narrows the list: a click shows every folder's sounds again.
-                    if SoundsData.folder != "": TickLine {
-                        text: "In " + SoundsData.folder;
-                        on: true;
-                        clicked => { SoundsData.toggle("folder"); }
-                    }
-                }
-                // Only sounds whose audio is exactly the same are copies: one of each shows while it's on.
-                TickLine {
-                    text: SoundsData.hide-copies-text;
-                    on: SoundsData.hide-copies;
-                    clicked => { SoundsData.toggle("hide-copies"); }
-                }
-                if SoundsData.any-filter: HorizontalLayout {
-                    alignment: start;
-                    StudioButton {
-                        text: "Clear filters";
-                        clicked => { SoundsData.clear(); }
-                    }
-                }
-            }
             // The sounds, and the picked one's panel beside them.
             area := Rectangle {
-                vertical-stretch: 1;
+                x: column.room;
+                y: 0;
+                width: split.width - self.x;
+                height: split.height;
                 // In a wide window (the UX review of 10 Nov, A1) the card stops at `Fit.card-max`, and so do the views
                 // made of lines (List, History, Rediscover) at `Fit.list-max`, so a line's name and its numbers stay
                 // within one look of each other. Tiles and the Galaxy take all the room: more of them is the point.
@@ -2052,6 +1975,90 @@ export component SoundsPage inherits Rectangle {
                 menu := RightClickMenu {
                     items: SoundsData.menu;
                     chosen(id) => { SoundsData.menu-chosen(id); }
+                }
+            }
+            // After the list, so the opened column of a narrow window lies over it.
+            column := FilterColumn {
+                page-width: split.width;
+                height: split.height;
+                shown: SoundsData.view < 4;
+                active: SoundsData.any-filter;
+                FilterList {
+                    name: "TYPE";
+                    more-name: "More types";
+                    filter: SoundsData.type-filter;
+                    toggled(text) => { SoundsData.toggle-choice("type", text); }
+                    cleared => { SoundsData.clear-chip("more-types"); }
+                }
+                FilterList {
+                    name: "LENGTH";
+                    filter: SoundsData.length-filter;
+                    toggled(text) => { SoundsData.toggle-choice("length", text); }
+                    cleared => { SoundsData.clear-chip("length"); }
+                }
+                FilterList {
+                    name: "KEY";
+                    filter: SoundsData.key-filter;
+                    toggled(text) => { SoundsData.toggle-choice("key", text); }
+                    cleared => { SoundsData.clear-chip("key"); }
+                }
+                if SoundsData.key-filter.more-picked != "": TickLine {
+                    text: "Keys that mix well";
+                    on: SoundsData.mix-well;
+                    clicked => { SoundsData.toggle("mix-well"); }
+                }
+                FilterList {
+                    name: "TEMPO";
+                    filter: SoundsData.tempo-filter;
+                    toggled(text) => { SoundsData.toggle-choice("tempo", text); }
+                    cleared => { SoundsData.clear-chip("tempo"); }
+                }
+                if SoundsData.tag-filter.chips.length + SoundsData.tag-filter.more.length > 0: FilterList {
+                    name: "TAG";
+                    more-name: "More tags";
+                    filter: SoundsData.tag-filter;
+                    toggled(text) => { SoundsData.toggle-choice("tag", text); }
+                    cleared => { SoundsData.clear-chip("tag"); }
+                }
+                VerticalLayout {
+                    Caps {
+                        text: "SHOW ONLY";
+                        height: 22px;
+                    }
+                    TickLine {
+                        text: "Favourites";
+                        on: SoundsData.favourites;
+                        clicked => { SoundsData.toggle("favourites"); }
+                    }
+                    if SoundsData.knows-use: TickLine {
+                        text: "In my projects";
+                        on: SoundsData.used;
+                        clicked => { SoundsData.toggle("used"); }
+                    }
+                    if SoundsData.knows-use: TickLine {
+                        text: "Unused";
+                        on: SoundsData.unused;
+                        clicked => { SoundsData.toggle("unused"); }
+                    }
+                    // Only while a forgotten folder narrows the list: a click shows every folder's sounds again.
+                    if SoundsData.folder != "": TickLine {
+                        text: "In " + SoundsData.folder;
+                        on: true;
+                        clicked => { SoundsData.toggle("folder"); }
+                    }
+                }
+                // Only sounds whose audio is exactly the same are copies: one of each shows while it's on.
+                TickLine {
+                    text: SoundsData.hide-copies-text;
+                    on: SoundsData.hide-copies;
+                    clicked => { SoundsData.toggle("hide-copies"); }
+                }
+                if SoundsData.any-filter: HorizontalLayout {
+                    alignment: start;
+                    StudioButton {
+                        text: "Clear filters";
+                        clicked => { SoundsData.clear(); }
+                    }
                 }
             }
         }

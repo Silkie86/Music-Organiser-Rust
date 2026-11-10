@@ -1284,11 +1284,30 @@ export component FilterList inherits VerticalLayout {
 }
 
 // The filter column: a page's filters as FilterLists and TickLines, one under the other at the page's left side. It
-// scrolls with the wheel when the window is too short for them all.
+// scrolls with the wheel when the window is too short for them all. The page places it by hand over the left of the
+// room it shares with its list (`page-width` wide), and starts its list `room` in from the left. In a narrow window
+// the column folds to a slim tab that says "Filters" (lit while any filter is picked, `active`), so the list keeps
+// its room; a click opens the column over the list, and another puts it away.
 export component FilterColumn inherits Rectangle {
-    width: 208px;
+    in property <length> page-width;
+    // Off where a view has no filters (Sounds' Rediscover and Kits): it takes no room.
+    in property <bool> shown: true;
+    in property <bool> active;
+    property <bool> narrow: root.page-width < 860px;
+    property <bool> open;
+    property <bool> folded: root.narrow && !root.open;
+    // How far in the page's list starts.
+    out property <length> room: !root.shown ? 0px : root.narrow ? 28px + Space.sm : 208px + Space.lg;
+    x: 0;
+    y: 0;
+    visible: root.shown;
+    width: root.folded ? 28px : 208px;
+    background: root.narrow && root.open ? Theme.background : transparent;
     clip: true;
     flick := Flickable {
+        visible: !root.folded;
+        y: root.narrow ? 30px : 0px;
+        height: parent.height - self.y;
         width: parent.width - Space.md;
         content-width: self.width;
         content-height: max(self.height, lists.preferred-height);
@@ -1306,6 +1325,34 @@ export component FilterColumn inherits Rectangle {
         x: parent.width - 1px;
         width: 1px;
         background: Theme.edge;
+    }
+    // The tab: all of the folded column, or a line across the top of the opened one.
+    if root.narrow: Rectangle {
+        x: 0;
+        y: 0;
+        width: root.folded ? 27px : parent.width - 1px;
+        height: root.folded ? parent.height : 26px;
+        border-radius: Theme.radius;
+        background: tab.has-hover ? Theme.hover : root.folded ? Theme.surface : transparent;
+        // Folded, the word reads down the tab, a letter a line (a turned Text isn't drawn turned by every renderer).
+        if root.folded: VerticalLayout {
+            y: Space.md;
+            height: self.preferred-height;
+            for letter in ["F", "I", "L", "T", "E", "R", "S"]: Caps {
+                text: letter;
+                horizontal-alignment: center;
+                color: root.active ? Theme.accent : Theme.muted;
+            }
+        }
+        if !root.folded: Caps {
+            x: Space.xs;
+            text: "CLOSE FILTERS";
+            vertical-alignment: center;
+            color: Theme.muted;
+        }
+        tab := TouchArea {
+            clicked => { root.open = !root.open; }
+        }
     }
 }
 
