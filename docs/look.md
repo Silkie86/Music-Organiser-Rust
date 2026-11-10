@@ -76,6 +76,8 @@ light that means something. It should feel like a rack unit on a desk, not a web
   Sounds and Plugins so far. Buttons that change files stand apart under a thin line (Plugins' Clean up, Uninstall
   and Move). A choice between numbers is a chip strip (`FilterPicks`); the lit-underline switch (`Segmented`,
   `TabBar`) is only for views and tabs.
+  A chip for a choice that would show nothing ("Arranging 0") has faint words (`ToggleChip.dim`). A dot that shows
+  a state is green, amber, red or grey, never a DAW's colour. Shuffle is a plain button everywhere.
   A line inside a card has no buttons of its own: a click picks it and the card's buttons act on it (a song's Saves
   tab), with the same in its right-click menu.
 

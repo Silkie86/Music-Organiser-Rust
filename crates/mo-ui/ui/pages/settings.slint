@@ -188,9 +188,11 @@ component SettingsCard inherits Rectangle {
     VerticalLayout {
         padding: Space.lg;
         spacing: Space.md;
+        // Every card's title in the title face and sentence case (the UX review of 10 Nov, B12).
         Text {
             text: root.title;
             color: Theme.text;
+            font-family: Theme.title-font;
             font-size: Type.row-title;
             font-weight: 600;
         }
@@ -747,7 +749,8 @@ component DawsTab inherits VerticalLayout {
             spacing: Space.sm;
             Dot {
                 y: (parent.height - self.height) / 2;
-                tint: !d.ok ? Theme.faint : d.bitwig ? Theme.bitwig : Theme.fl-studio;
+                // A state's dot is green, amber, red or grey, never a DAW's colour (the UX review of 10 Nov, D2).
+                tint: d.ok ? Theme.ok : Theme.faint;
             }
             Text {
                 horizontal-stretch: 1;

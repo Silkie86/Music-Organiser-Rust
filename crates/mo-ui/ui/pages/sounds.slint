@@ -1351,7 +1351,6 @@ export component SoundsPage inherits Rectangle {
             StudioButton {
                 horizontal-stretch: 0;
                 text: SoundsData.re-busy ? "Shuffling…" : "Shuffle";
-                main: true;
                 tip: "Dig out a new set";
                 clicked => { SoundsData.re-shuffle(); }
             }

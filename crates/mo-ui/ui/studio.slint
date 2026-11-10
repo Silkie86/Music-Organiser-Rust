@@ -834,6 +834,9 @@ export component ToggleChip inherits Rectangle {
     in property <bool> joined-right;
     // The mouse rests on it (for a tip beside it).
     out property <bool> hovered: touch.has-hover && !touch.pressed;
+    // A choice that would show nothing ("Arranging 0"): its words are faint, so the useful choices stand out (the UX
+    // review of 10 Nov, B8). It can still be clicked.
+    in property <bool> dim;
     callback clicked;
     width: label.preferred-width + 24px;
     height: 28px;
@@ -847,7 +850,7 @@ export component ToggleChip inherits Rectangle {
     animate background, border-color { duration: Motion.tap; }
     label := Text {
         text: root.text;
-        color: root.on ? Theme.text : Theme.muted;
+        color: root.on ? Theme.text : root.dim ? Theme.faint : Theme.muted;
         font-size: Type.meta;
         font-weight: 500;
     }
@@ -1171,6 +1174,7 @@ export component FilterPicks inherits FlexboxLayout {
     for c[i] in root.filter.chips: ToggleChip {
         text: c.count == "" ? c.text : c.text + "  " + c.count;
         on: c.on;
+        dim: c.count == "0";
         // A chip that starts a new line (the strip broke in a narrow window) rounds its left side again.
         joined-left: self.x > 0;
         joined-right: root.has-more || i < root.filter.chips.length - 1;

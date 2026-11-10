@@ -273,7 +273,7 @@ pub fn folder_groups(
     let plugins_are_defaults = plugins.is_empty();
     vec![
         FolderGroup {
-            title: "PROJECTS",
+            title: "Projects",
             list: Some(FolderList::Projects),
             note: "Searched for Bitwig, FL Studio and Studio One projects, subfolders too. Autosaves, backups and the \
                    demo songs that came with your DAWs are skipped.",
@@ -281,7 +281,7 @@ pub fn folder_groups(
             empty: "No project folders yet.",
         },
         FolderGroup {
-            title: "SAMPLES",
+            title: "Samples",
             list: Some(FolderList::Samples),
             note: "Your sample libraries: what Sounds shows, and where missing samples are looked for.",
             folders: samples,
@@ -362,7 +362,7 @@ pub fn folder_change_note(
 }
 
 /// The Folders tab's card on where exports go: its title and what it's for.
-pub const EXPORTS_TITLE: &str = "EXPORTS";
+pub const EXPORTS_TITLE: &str = "Exports";
 pub const EXPORTS_NOTE: &str = "Where the app puts what it makes for you: kits from Sounds (in Kits), songs converted \
     for Bitwig and presets exported on Presets (in a folder named after each song), and MIDI parts sent to Bitwig (in \
     MIDI browser). If the folder you choose isn't there when you export (its drive unplugged, say), the export stops \
@@ -627,8 +627,8 @@ pub fn fl_status(state: Option<ScriptState>, folders: &[PathBuf]) -> DawStatus {
     }
     facts.push(fact(
         "Then",
-        "FL Studio loads the script when it starts. Its MIDI port is set in FL Studio's MIDI settings, as before; the \
-         app talking to FL Studio through it comes later in phase 5."
+        "FL Studio loads the script when it starts. Its MIDI port is set in FL Studio's MIDI settings, as before. \
+         The app can't talk to FL Studio through it yet."
             .to_owned(),
     ));
     DawStatus { daw: "FL Studio", state: state.to_owned(), ok, facts }

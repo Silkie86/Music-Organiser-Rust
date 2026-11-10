@@ -256,9 +256,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     data.set_exports_note(page::EXPORTS_NOTE.into());
     data.set_keys_note(page::KEYS_NOTE.into());
     data.set_daws_note(page::DAWS_NOTE.into());
-    data.set_kept_note(
-        format!("Your changes are kept in {}, and your folders in the song library", app_settings::FILE).into(),
-    );
+    data.set_kept_note("Your changes are saved as you make them".into());
     show(app);
 
     let weak = app.as_weak();
