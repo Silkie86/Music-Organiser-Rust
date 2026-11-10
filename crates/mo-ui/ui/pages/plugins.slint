@@ -965,7 +965,7 @@ export component PluginsPage inherits Rectangle {
         // The list, the year strip and the picked plugin's card.
         area := Rectangle {
             vertical-stretch: 1;
-            property <length> list-width: min(Fit.list-max, max(380px, self.width - PluginsData.panel-width - divider.width));
+            property <length> list-width: min(Fit.list-max, max(380px, self.width - PluginsData.panel-width - divider.width, self.width - Fit.card-max - divider.width));
             property <length> card-width: min(Fit.card-max, self.width - self.list-width - divider.width);
             property <length> years-width: PluginsData.years.length > 1 && PluginsData.message == "" ? 56px : 0px;
             property <bool> wide: self.list-width > 640px;

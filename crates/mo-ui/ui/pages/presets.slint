@@ -770,7 +770,7 @@ export component PresetsPage inherits Rectangle {
             vertical-stretch: 1;
             property <bool> panel: PresetsData.section == 0 ? PresetsData.panel-shown : PresetsData.curve-panel-shown;
             // The card's place is always there (empty until something is picked), so nothing moves when it is.
-            property <length> list-width: min(Fit.list-max, max(380px, self.width - PresetsData.panel-width - divider.width));
+            property <length> list-width: min(Fit.list-max, max(380px, self.width - PresetsData.panel-width - divider.width, self.width - Fit.card-max - divider.width));
             property <length> card-width: min(Fit.card-max, self.width - self.list-width - divider.width);
             property <length> years-width: PresetsData.section == 0 && PresetsData.years.length > 1 && PresetsData.empty-title == "" ? 56px : 0px;
             if area.years-width > 0: YearRange {

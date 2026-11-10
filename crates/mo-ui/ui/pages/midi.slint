@@ -775,7 +775,7 @@ export component MidiPage inherits Rectangle {
         area := Rectangle {
             vertical-stretch: 1;
             // The card's place is always there (empty until a part is picked), so nothing moves when one is.
-            property <length> list-width: min(Fit.list-max, max(380px, self.width - MidiData.panel-width - divider.width));
+            property <length> list-width: min(Fit.list-max, max(380px, self.width - MidiData.panel-width - divider.width, self.width - Fit.card-max - divider.width));
             property <length> card-width: min(Fit.card-max, self.width - self.list-width - divider.width);
             property <length> years-width: MidiData.years.length > 1 && MidiData.empty-title == "" ? 56px : 0px;
             if area.years-width > 0: YearRange {
