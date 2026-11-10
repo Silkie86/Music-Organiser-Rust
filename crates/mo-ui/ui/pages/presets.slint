@@ -118,7 +118,6 @@ export global PresetsData {
     in property <int> shown;
     in property <string> empty-title;
     in property <string> empty-text;
-    in property <string> format-note;
     in property <[YearBar]> years;
     // The years picked, as places on the strip (-1 for none).
     in property <int> years-from: -1;
@@ -280,7 +279,7 @@ component PresetHeading inherits HorizontalLayout {
     spacing: Space.md;
     ColumnHead {
         horizontal-stretch: 3; preferred-width: 0px; min-width: 0px;
-        text: "SOUND";
+        text: "PRESET";
         on: PresetsData.order-column == "Sound";
         up: !PresetsData.order-reversed;
         clicked => { PresetsData.order-picked("Sound"); }
@@ -301,10 +300,10 @@ component PresetHeading inherits HorizontalLayout {
     }
     ColumnHead {
         width: 56px;
-        text: "WHAT";
-        on: PresetsData.order-column == "What";
+        text: "KIND";
+        on: PresetsData.order-column == "Kind";
         up: !PresetsData.order-reversed;
-        clicked => { PresetsData.order-picked("What"); }
+        clicked => { PresetsData.order-picked("Kind"); }
     }
     ColumnHead {
         width: 72px;
@@ -420,7 +419,9 @@ component PresetPanel inherits SidePanel {
         wrap: word-wrap;
         min-width: 0px;
     }
+    // Every card's buttons: the lit one first, in even columns (the UX review of 10 Nov, B2).
     CardActions {
+        room: root.inside;
         actions: PresetsData.actions;
         chosen(id) => { PresetsData.menu-chosen(id); }
     }
@@ -468,15 +469,23 @@ component PresetPanel inherits SidePanel {
             }
         }
     }
-    for f in PresetsData.facts: VerticalLayout {
-        spacing: Space.xs;
-        Caps { text: f.name; }
-        Text {
-            text: f.value;
-            color: Theme.text;
-            font-size: Type.meta;
-            wrap: word-wrap;
-            min-width: 0px;
+    // Its facts side by side, as on every card (the UX review of 10 Nov, B4); a long song name wraps in its column.
+    // Each column's width comes from the card: words inside a `for` are measured as one line otherwise.
+    HorizontalLayout {
+        spacing: Space.md;
+        for f in PresetsData.facts: VerticalLayout {
+            property <length> wide: (root.inside - (PresetsData.facts.length - 1) * Space.md) / max(1, PresetsData.facts.length);
+            width: self.wide;
+            spacing: Space.xs;
+            alignment: start;
+            Caps { text: f.name; }
+            Text {
+                width: parent.wide;
+                text: f.value;
+                color: Theme.text;
+                font-size: Type.meta;
+                wrap: word-wrap;
+            }
         }
     }
     if PresetsData.card.hint != "": Text {
@@ -560,6 +569,7 @@ component CurvePanel inherits SidePanel {
         drag-let-go => { PresetsData.curve-drag-let-go(); }
     }
     CardActions {
+        room: root.inside;
         actions: PresetsData.curve-actions;
         chosen(id) => { PresetsData.curve-chosen(id); }
     }
@@ -649,7 +659,7 @@ export component PresetsPage inherits Rectangle {
             VerticalLayout {
                 alignment: center;
                 Segmented {
-                    choices: ["Sounds", "Curves"];
+                    choices: ["Presets", "Curves"];
                     current: PresetsData.section;
                     picked(i) => { PresetsData.section-picked(i); }
                 }
@@ -662,7 +672,7 @@ export component PresetsPage inherits Rectangle {
                 horizontal-stretch: 1;
                 min-width: 320px;
                 max-width: 480px;
-                hint: PresetsData.section == 0 ? "Search sounds, plugins, songs and parts" : "Search curves, songs and settings";
+                hint: PresetsData.section == 0 ? "Search presets, plugins, songs and parts" : "Search curves, songs and settings";
                 text <=> PresetsData.search;
                 edited(t) => { PresetsData.search-edited(t); }
                 key(k) => {
@@ -871,15 +881,6 @@ export component PresetsPage inherits Rectangle {
                                     menu.open-at(x, y);
                                 }
                             }
-                        }
-                        if PresetsData.format-note != "": Text {
-                            height: 28px;
-                            x: Space.md;
-                            text: PresetsData.format-note;
-                            color: Theme.faint;
-                            font-size: Type.small;
-                            vertical-alignment: center;
-                            overflow: elide;
                         }
                     }
                     if PresetsData.section == 1 && PresetsData.curve-empty-title != "": EmptyState {

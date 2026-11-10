@@ -2316,7 +2316,7 @@ export struct CardAction {
 //
 // Given the card's `room` (a SidePanel's `inside`), they stand in even columns (the UX review of 10 Nov, B2), two on
 // a narrow card and four on a wide one, so they don't wrap raggedly; a button given as a child takes `cell` as its
-// width. A button whose words need more than a column is as wide as its words. The room comes from the card, not
+// width. A button whose words need more than a column takes the whole line. The room comes from the card, not
 // from this layout's own width: a part's width can't hang on the width of the layout that places it.
 export component CardActions inherits FlexboxLayout {
     in property <[CardAction]> actions;
@@ -2339,7 +2339,7 @@ export component CardActions inherits FlexboxLayout {
         clicked => { root.chosen(a.id); }
     }
     for a in root.room > 0 ? root.actions : root.none: StudioButton {
-        width: max(self.min-width, root.cell);
+        width: self.min-width > root.cell ? root.room : root.cell;
         text: a.text;
         tip: a.tip;
         key: a.key;

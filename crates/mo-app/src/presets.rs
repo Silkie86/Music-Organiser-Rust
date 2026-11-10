@@ -438,7 +438,7 @@ impl Order {
             Order::Name => "Sound",
             Order::Part => "Part",
             Order::From => "Song or folder",
-            Order::Kind => "What",
+            Order::Kind => "Kind",
             Order::Format => "File",
         }
     }
@@ -1061,25 +1061,6 @@ pub fn load_hint(extension: &str) -> String {
     c.next().map(|f| f.to_uppercase().chain(c).collect::<String>() + ".").unwrap_or_default()
 }
 
-/// A line of the page's lines, for the list under the page: where each type in it loads (the C# window's FormatNote).
-pub fn format_note(items: &[Item], shown: &[usize]) -> String {
-    let mut seen: Vec<String> = Vec::new();
-    for &i in shown {
-        let ext = items[i].row.extension.to_lowercase();
-        if !seen.contains(&ext) {
-            seen.push(ext);
-        }
-    }
-    seen.sort();
-    seen.into_iter()
-        .filter_map(|e| {
-            let hint = filter::load_hint(&e);
-            (!hint.is_empty()).then(|| format!("{}: {hint}", e.trim_start_matches('.')))
-        })
-        .collect::<Vec<_>>()
-        .join("  ·  ")
-}
-
 // ---------------------------------------------------------------------------------------------------------------------
 // What can be done with a line
 
@@ -1129,12 +1110,9 @@ pub fn offers(i: &Item, busy: bool, hearing: Hearing) -> Vec<Offer> {
     let file = i.is_file();
     // A Bitwig preset file, or a sound a Bitwig preset can be made from (which waits for an export to finish).
     let bitwig = if file { ext == ".bwpreset" } else { can_be_bitwig(&ext) };
-    let mut out = if file {
-        // A preset file is already a file: show it, copy where it is, or send a Bitwig one into Bitwig.
-        vec![offer("Send to Bitwig", act::TO_BITWIG, bitwig && !busy)]
-    } else {
-        vec![offer("Export", act::EXPORT, !busy), offer("Send to Bitwig", act::TO_BITWIG, !busy && bitwig)]
-    };
+    // Every card's order (the UX review of 10 Nov, B2): hearing it first (the lit button), then into the DAW, then
+    // showing and copying.
+    let mut out = Vec::new();
     match hearing {
         // Stop always works, so a part never plays on with no way to stop it from here.
         Hearing::Starting => out.push(offer("Stop in Bitwig", act::AUDITION, true)),
@@ -1143,6 +1121,12 @@ pub fn offers(i: &Item, busy: bool, hearing: Hearing) -> Vec<Offer> {
             out.push(offer("Keep in Bitwig", act::KEEP, true));
         }
         Hearing::Off => out.push(offer("Audition in Bitwig", act::AUDITION, bitwig && (file || !busy))),
+    }
+    // A preset file is already a file: send a Bitwig one into Bitwig, show it, copy where it is. A song's sound can
+    // be exported as one too.
+    out.push(offer("Send to Bitwig", act::TO_BITWIG, bitwig && !busy));
+    if !file {
+        out.push(offer("Export", act::EXPORT, !busy));
     }
     if file {
         out.push(offer("Show in folder", act::REVEAL, true));
@@ -1914,13 +1898,13 @@ mod tests {
         };
         assert_eq!(
             ids(&all[0]),
-            [act::EXPORT, act::TO_BITWIG, act::AUDITION, act::SHOW_IN_SONGS, act::REVEAL, act::COPY_PATH]
+            [act::AUDITION, act::TO_BITWIG, act::EXPORT, act::SHOW_IN_SONGS, act::REVEAL, act::COPY_PATH]
         );
         let mut fl_own = all[2].clone();
         fl_own.row.extension = ".flstate".into();
         assert!(!ids(&fl_own).contains(&act::TO_BITWIG), "an FL plugin's own state can't go into Bitwig");
         assert!(!ids(&fl_own).contains(&act::AUDITION), "nor be auditioned there");
-        assert_eq!(ids(&all[3]), [act::TO_BITWIG, act::AUDITION, act::REVEAL, act::COPY_PATH]);
+        assert_eq!(ids(&all[3]), [act::AUDITION, act::TO_BITWIG, act::REVEAL, act::COPY_PATH]);
         // While a preset file is auditioned: Stop in Bitwig, then Keep in Bitwig once it plays, even mid-export.
         let texts = |h| offers(&all[3], true, h).into_iter().filter(|o| o.enabled).map(|o| o.text).collect::<Vec<_>>();
         assert_eq!(texts(Hearing::Starting), ["Stop in Bitwig", "Show in folder", "Copy path"]);

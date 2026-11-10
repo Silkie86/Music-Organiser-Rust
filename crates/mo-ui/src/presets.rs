@@ -70,8 +70,6 @@ struct Page {
     asked: u64,
     /// The last filtering taken: while it's behind `asked`, what's shown is still being worked out.
     answered: u64,
-    /// The file types' notes for the lines shown, worked out with them.
-    format_note: String,
     /// Filter here, not on the worker (the screenshots, which show the page at once).
     filter_here: bool,
     filters: Filters,
@@ -159,7 +157,6 @@ struct FilterAnswer {
     shown: Vec<usize>,
     years: Vec<(i32, usize)>,
     chips: logic::FilterChips,
-    format_note: String,
     plugins: Vec<(String, usize)>,
 }
 
@@ -168,8 +165,7 @@ impl FilterAsk {
         let plugins = self.plugins.unwrap_or_else(|| logic::plugins(&self.items));
         let found = logic::filtered_with(&self.items, &self.filters, &self.fixes);
         let chips = logic::filter_chips(&found.counts, &plugins, &self.filters);
-        let format_note = logic::format_note(&self.items, &found.shown);
-        FilterAnswer { id: self.id, shown: found.shown, years: found.years, chips, format_note, plugins }
+        FilterAnswer { id: self.id, shown: found.shown, years: found.years, chips, plugins }
     }
 }
 
@@ -684,7 +680,6 @@ fn take_filtered(p: &mut Page, a: FilterAnswer) -> bool {
     p.shown = a.shown;
     p.years = a.years;
     p.chips = a.chips;
-    p.format_note = a.format_note;
     p.plugins = a.plugins;
     if let Some(at) = p.to_pick.take()
         && p.shown.contains(&at)
@@ -768,7 +763,6 @@ fn show_everything(app: &AppWindow) {
         }
         data.set_empty_title(title.into());
         data.set_empty_text(text.into());
-        data.set_format_note(p.format_note.as_str().into());
         let most = p.years.iter().map(|y| y.1).max().unwrap_or(1).max(1) as f32;
         let bars: Vec<YearBar> = p
             .years
