@@ -2,7 +2,7 @@
 // sounds that fit your taste), with the type chips
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
-import { ListView } from "../list.slint";
+import { ListView, Fit } from "../list.slint";
 import { Theme, AppKeys, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
@@ -1570,9 +1570,16 @@ export component SoundsPage inherits Rectangle {
         // The sounds, and the picked one's panel beside them.
         area := Rectangle {
             vertical-stretch: 1;
-            property <length> list-width: SoundsData.panel-shown
-                ? max(380px, self.width - SoundsData.panel-width - divider.width)
+            // In a wide window (the UX review of 10 Nov, A1) the card stops at `Fit.card-max`, and so do the views
+            // made of lines (List, History, Rediscover) at `Fit.list-max`, so a line's name and its numbers stay
+            // within one look of each other. Tiles and the Galaxy take all the room: more of them is the point.
+            property <length> lines-max: SoundsData.view == 1 || SoundsData.view == 3 ? Fit.list-max
+                : SoundsData.view == 4 ? Fit.list-max + 300px
                 : self.width;
+            property <length> list-width: min(self.lines-max, SoundsData.panel-shown
+                ? max(380px, self.width - SoundsData.panel-width - divider.width, self.width - Fit.card-max - divider.width)
+                : self.width);
+            property <length> card-width: min(Fit.card-max, self.width - self.list-width - divider.width);
             // Rediscover's forgotten folders take the list's right side when there's room.
             property <length> folders-width: SoundsData.view == 4 && SoundsData.folders.length > 0 && self.list-width >= 900px
                 ? 300px
@@ -2024,17 +2031,18 @@ export component SoundsPage inherits Rectangle {
                 height: parent.height;
             }
             divider := PanelDivider {
-                visible: SoundsData.panel-shown;
+                // No seam to drag once the window has room for the sounds and the card at their widest.
+                visible: SoundsData.panel-shown && area.card-width < Fit.card-max;
                 x: area.list-width;
                 height: parent.height;
-                panel-width: SoundsData.panel-width;
+                panel-width: area.card-width;
                 room: area.width;
                 resizing(w) => { SoundsData.panel-width = w; }
                 resized(w) => { SoundsData.panel-resized(w); }
             }
             if SoundsData.panel-shown: SoundPanel {
                 x: area.list-width + divider.width;
-                width: area.width - self.x;
+                width: area.card-width;
                 height: parent.height;
                 tag-keys <=> root.card-keys;
             }
