@@ -86,6 +86,9 @@ thread_local! {
     static FEED: RefCell<Option<Feed>> = const { RefCell::new(None) };
     /// The save last right-clicked on the Saves tab, by its path, for its menu's lines.
     static MENU_SAVE: RefCell<String> = const { RefCell::new(String::new()) };
+    /// The save picked on the Saves tab, by its path ("" for none): the song's buttons and keys act on it rather than
+    /// on the newest save. Only ever used when it's one of the picked song's saves ([`aimed`]).
+    static PICKED_SAVE: RefCell<String> = const { RefCell::new(String::new()) };
     /// The DAW, status and tag filters' chips and menus, kept from one showing to the next.
     static FILTER_MODELS: [FilterModels; 3] = Default::default();
 }
@@ -219,8 +222,8 @@ pub fn connect(app: &AppWindow, ahead: Ahead, feed: Feed) {
     let data = app.global::<SongsData>();
     FEED.with(|f| *f.borrow_mut() = Some(feed));
     PAGE.with(|p| p.borrow_mut().db = path.clone());
-    data.on_open(|| with_picked(|p, r| open_main(p, &r.song.latest)));
-    data.on_open_own(|| with_picked(|p, r| open_save(p, &r.song.latest)));
+    data.on_open(|| with_picked(|p, r| open_main(p, aimed(r))));
+    data.on_open_own(|| with_picked(|p, r| open_save(p, aimed(r))));
     data.on_open_save(|path| with_save(&path, open_save));
     let weak = app.as_weak();
     data.on_save_menu_for(move |path| {
@@ -237,8 +240,8 @@ pub fn connect(app: &AppWindow, ahead: Ahead, feed: Feed) {
     // The same, from the buttons on the save's line.
     data.on_save_chosen(|path, id| do_to_save(&path, &id));
     finder_opens();
-    data.on_reveal(|| with_picked(|_, r| reveal(&r.song.latest)));
-    data.on_copy_path(|| with_picked(|_, r| copy_path(&r.song.latest.path)));
+    data.on_reveal(|| with_picked(|_, r| reveal(aimed(r))));
+    data.on_copy_path(|| with_picked(|_, r| copy_path(&aimed(r).path)));
     let weak = app.as_weak();
     data.on_show_presets(move || {
         let Some(app) = weak.upgrade() else { return };
@@ -562,6 +565,16 @@ fn wire_filters(app: &AppWindow) {
 fn wire_list(app: &AppWindow) {
     let data = app.global::<SongsData>();
     let weak = app.as_weak();
+    data.on_pick_save(move |path, name| {
+        let Some(app) = weak.upgrade() else { return };
+        // The newest save is what the buttons act on anyway: picking it is picking none.
+        let mut older = false;
+        with_picked(|_, r| {
+            older = path.as_str() != r.song.latest.path && r.song.saves().any(|s| s.path == path.as_str());
+        });
+        show_picked_save(&app, if older { Some((path.as_str(), name.as_str())) } else { None });
+    });
+    let weak = app.as_weak();
     data.on_step(move |by| {
         if let Some(app) = weak.upgrade() {
             step(&app, by);
@@ -842,6 +855,10 @@ fn pick(app: &AppWindow, row: Option<usize>) {
     if row.is_none() {
         crate::arrangement::show_song(app, None, false);
     }
+    if row.is_none() || id.is_some() {
+        // Another song, or none: the save picked on the last one's Saves tab is no longer what the buttons act on.
+        show_picked_save(app, None);
+    }
     let Some((asked, id)) = id else { return };
     data.set_tab(Tab::Overview.index() as i32);
     data.set_health_open(false);
@@ -1001,7 +1018,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
         "projects.openInBitwig" => {
             let mut done = false;
             with_picked(|p, r| {
-                let save = &r.song.latest;
+                let save = aimed(r);
                 if save.daw == FL {
                     open_in_bitwig(p, save);
                     done = true;
@@ -1096,6 +1113,27 @@ pub fn escape(app: &AppWindow) -> bool {
         return true;
     }
     false
+}
+
+/// Says which save of the picked song the song's buttons act on: one picked on the Saves tab (its path and name), or
+/// none, the newest.
+fn show_picked_save(app: &AppWindow, save: Option<(&str, &str)>) {
+    let (path, name) = save.unwrap_or_default();
+    PICKED_SAVE.with(|s| *s.borrow_mut() = path.to_owned());
+    let data = app.global::<SongsData>();
+    data.set_picked_save(path.into());
+    data.set_picked_save_name(name.into());
+}
+
+/// The save the song's buttons and keys act on: the one picked on the Saves tab while it's still one of this song's
+/// saves, else the newest.
+fn aimed(r: &SongRow) -> &mo_library::Save {
+    PICKED_SAVE
+        .with(|s| {
+            let path = s.borrow();
+            if path.is_empty() { None } else { r.song.saves().find(|s| s.path == *path) }
+        })
+        .unwrap_or(&r.song.latest)
 }
 
 fn with_picked(f: impl FnOnce(&Page, &SongRow)) {

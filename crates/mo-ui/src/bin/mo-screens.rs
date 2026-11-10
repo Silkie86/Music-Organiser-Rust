@@ -445,8 +445,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         show_song_panel(&app, 0, tab);
         shots.push((format!("song-panel-{}.png", slug(tab.name())), capture(&window)));
     }
+    // A click on an older save picks it for the song's own buttons (the UX review of 10 Nov, B10); another song
+    // lets go of it.
+    click(&window, SECOND_SAVE.0, SECOND_SAVE.1);
+    if app.global::<mo_ui::SongsData>().get_picked_save().is_empty() {
+        return Err("song-panel-save-picked.png: no save was picked; has the Saves tab's second line moved?".into());
+    }
+    shots.push(("song-panel-save-picked.png".into(), capture(&window)));
+    show_song_panel(&app, 1, Tab::Saves);
+    if !app.global::<mo_ui::SongsData>().get_picked_save().is_empty() {
+        return Err("another song was picked, and the last one's save is still what the buttons act on".into());
+    }
     // Each tab in the narrowest window, where the panel is at its narrowest: its rows wrap, so nothing runs past its
-    // edge. On Saves, each line's buttons only show with room for them and the save's name.
+    // edge.
     for tab in Tab::ALL {
         show_song_panel(&app, 0, tab);
         save_narrow(&window, &out, &format!("song-panel-{}-narrow.png", slug(tab.name())))?;
@@ -2612,6 +2623,8 @@ const TAG_BOX: (f32, f32) = (1130.0, 534.0);
 /// The Songs, Presets, MIDI and Plugins lists in the short window: left of the activity cards, which move on their own.
 const SHORT_LIST: (u32, u32, u32, u32) = (230, 200, 760, 400);
 /// The mouse over each of those lists (Songs' is narrow beside its panel; Plugins' starts low), for the wheel.
+/// The second line of a song's Saves tab (an older save), at 1440 x 900.
+const SECOND_SAVE: (f32, f32) = (900.0, 527.0);
 const SHORT_LIST_WHEEL: (f32, f32) = (400.0, 540.0);
 /// A short wheel turn: less than those lists show, so turning back down goes through lines the list has made.
 const SHORT_TURN: f32 = 100.0;

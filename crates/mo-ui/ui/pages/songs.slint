@@ -190,6 +190,10 @@ export global SongsData {
     // A button on a save's line on the Saves tab: the save's path, and "open", "bitwig", "reveal" or "copy", as the
     // lines of its right-click menu.
     callback save-chosen(string, string);
+    // The save picked on the Saves tab ("" for none: the newest), which the song's buttons act on, and its name.
+    in property <string> picked-save;
+    in property <string> picked-save-name;
+    callback pick-save(string, string);
     callback reveal();
     callback copy-path();
     // Opens the Presets page on the picked song's sounds (its newest save's).
@@ -296,6 +300,23 @@ component SongPanel inherits Rectangle {
                 color: Theme.muted;
                 font-size: Type.meta;
                 overflow: elide;
+            }
+            // Which save the buttons act on, when one is picked on the Saves tab; a click goes back to the newest.
+            if SongsData.picked-save != "": HorizontalLayout {
+                spacing: Space.sm;
+                alignment: start;
+                Text {
+                    text: "The buttons act on the picked save: " + SongsData.picked-save-name;
+                    color: Theme.accent;
+                    font-size: Type.meta;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+                LinkText {
+                    text: "Back to the newest";
+                    font-size: Type.meta;
+                    clicked => { SongsData.pick-save("", ""); }
+                }
             }
             // Its status, stars, key and tags, and its buttons below: each row wraps in a narrow panel, so nothing runs past
             // its edge.
@@ -556,13 +577,14 @@ component SongPanel inherits Rectangle {
                                     overflow: elide;
                                 }
                             }
-                            // Double-click a save to open it, or use the buttons on its line (Solomon, 4 Nov 2026: "makes
-                            // sure things that are useful arent hidden away"); right-click for the same in a menu.
+                            // Click a save to pick it for the song's buttons, double-click to open it, right-click for
+                            // the same in a menu. Nothing is hidden (Solomon, 4 Nov 2026): the buttons are the card's.
                             if line.run == "": ListLine {
-                              // The buttons show when there's room for them and the save's name; in a narrow panel the
-                              // right-click menu and a double-click do the same.
-                              property <bool> roomy: !root.narrow && !line.missing
-                                  && self.width - 96px - 160px - 4 * Space.md >= buttons.preferred-width;
+                              // A click picks the save: the song's own buttons above (Open, Show in folder, Copy path)
+                              // then act on it, and so do their keys. No buttons on the line itself, as everywhere else
+                              // (the UX review of 10 Nov, B10).
+                              selected: line.path == SongsData.picked-save;
+                              clicked => { SongsData.pick-save(line.path, line.name); }
                               double-clicked => { SongsData.open-save(line.path); }
                               right-clicked(x, y) => {
                                   SongsData.save-menu-for(line.path);
@@ -595,8 +617,6 @@ component SongPanel inherits Rectangle {
                                     font-size: Type.meta;
                                     vertical-alignment: center;
                                 }
-                                // The buttons' place, so the name stops short of them.
-                                if roomy: Rectangle { width: buttons.preferred-width; }
                               }
                               // In a narrow panel: the save's name, then its date and whether it has moved below it.
                               if root.narrow: VerticalLayout {
@@ -627,40 +647,6 @@ component SongPanel inherits Rectangle {
                                         font-size: Type.meta;
                                         overflow: elide;
                                     }
-                                }
-                              }
-                              // Always made, so it can be measured; on the right of the line, the same as its menu's lines.
-                              buttons := HorizontalLayout {
-                                visible: roomy;
-                                x: parent.width - self.width - Space.sm;
-                                width: self.preferred-width;
-                                height: parent.height;
-                                spacing: Space.md;
-                                // Only as tall as their words: in the middle of the line, as the words are.
-                                cross-axis-alignment: center;
-                                LinkText {
-                                    text: "Open in " + line.daw;
-                                    tint: Theme.muted;
-                                    font-size: Type.meta;
-                                    clicked => { SongsData.save-chosen(line.path, "open"); }
-                                }
-                                if line.daw == "FL Studio": LinkText {
-                                    text: "Open in Bitwig";
-                                    tint: Theme.muted;
-                                    font-size: Type.meta;
-                                    clicked => { SongsData.save-chosen(line.path, "bitwig"); }
-                                }
-                                LinkText {
-                                    text: "Show in folder";
-                                    tint: Theme.muted;
-                                    font-size: Type.meta;
-                                    clicked => { SongsData.save-chosen(line.path, "reveal"); }
-                                }
-                                LinkText {
-                                    text: "Copy path";
-                                    tint: Theme.muted;
-                                    font-size: Type.meta;
-                                    clicked => { SongsData.save-chosen(line.path, "copy"); }
                                 }
                               }
                             }
@@ -1014,6 +1000,22 @@ export component SongsPage inherits Rectangle {
                                                         overflow: elide;
                                                     }
                                                     if line.favourite: Heart { y: (parent.height - self.height) / 2; }
+                                                    // Its status as a small tag beside the name (the UX review of 10 Nov,
+                                                    // C5): one of the main things the list is filtered by. A wide list
+                                                    // has it in a column of its own.
+                                                    if line.status != "" && !list-well.wide: Rectangle {
+                                                        y: (parent.height - self.height) / 2;
+                                                        width: status-tag.preferred-width + 2 * Space.sm;
+                                                        height: 18px;
+                                                        border-radius: 9px;
+                                                        border-width: 1px;
+                                                        border-color: Theme.edge;
+                                                        status-tag := Text {
+                                                            text: line.status;
+                                                            color: Theme.muted;
+                                                            font-size: Type.tiny;
+                                                        }
+                                                    }
                                                 }
                                                 Text {
                                                     text: line.details;
