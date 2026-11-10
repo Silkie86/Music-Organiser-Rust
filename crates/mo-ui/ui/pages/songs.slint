@@ -1,8 +1,8 @@
 // The Songs page: one line per song, newest save first, under time headings, with search, filter chips and a year
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
-import { ListView } from "../list.slint";
+import { ListView, Fit } from "../list.slint";
 import { ArrangementPreview } from "arrangement.slint";
-import { Theme, AppKeys, Type, Space, PageHeader, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Stars, YearRange, YearBar, Caps, ColumnHead, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, PageHeader, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, Stars, YearRange, YearBar, Caps, ColumnHead, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState, SidePanel } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
 export struct SongLine {
@@ -800,6 +800,11 @@ export component SongsPage inherits Rectangle {
     changed search-asked => { search-box.focus-all(); }
 
     VerticalLayout {
+        // In a window wider than the list and the song's panel at their widest, the page stops there (the UX review
+        // of 10 Nov, A1): the list a third of the room up to `Fit.card-max`, the panel up to twice `Fit.list-max`
+        // (its arrangement likes the width), side by side from the left.
+        x: 0;
+        width: min(root.width, Fit.card-max + 16px + 2 * Fit.list-max + 2 * Space.xl);
         padding: Space.xl;
         padding-bottom: Space.lg;
         spacing: Space.md;
@@ -884,7 +889,9 @@ export component SongsPage inherits Rectangle {
                 x: 0;
                 y: 0;
                 height: parent.height;
-                width: SongsData.selected >= 0 ? max(380px, (parent.width - 16px) / 3) : parent.width;
+                // The same width whether a song is picked or not: the panel's place is always there (review B1), so
+                // nothing moves when one is picked.
+                width: clamp((parent.width - 16px) / 3, 380px, Fit.card-max);
                 key-pressed(event) => {
                     if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
                         return reject;
@@ -905,7 +912,7 @@ export component SongsPage inherits Rectangle {
                     height: parent.height;
                     width: parent.width;
                     // Narrow beside the panel: what's missing and the status make room for the name.
-                    property <bool> wide: SongsData.selected < 0 || self.width > 640px;
+                    property <bool> wide: self.width > 640px;
                     if SongsData.message != "": EmptyState {
                         title: SongsData.message;
                         text: SongsData.message-text;
@@ -1082,6 +1089,18 @@ export component SongsPage inherits Rectangle {
                 y: 0;
                 height: parent.height;
                 width: parent.width - self.x;
+            }
+            if SongsData.selected < 0: SidePanel {
+                x: keys.width + 16px;
+                y: 0;
+                height: parent.height;
+                width: parent.width - self.x;
+                closable: false;
+                EmptyState {
+                    vertical-stretch: 1;
+                    title: "Pick a song";
+                    text: "Its saves, plugins, samples and arrangement show here.";
+                }
             }
             // A song line's right-click menu: the panel's buttons, each with its key (rule 15; review X3-24).
             song-menu := RightClickMenu {
