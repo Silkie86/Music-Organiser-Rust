@@ -253,6 +253,24 @@ fn chips_search_and_years_filter_the_list() {
     p.refilter();
     assert_eq!(shown(&p), ["Delay", "Delay", "Ozone 9", "Pro-Q 3"]);
     assert!(p.filters.any());
+
+    // A click on the heading the list goes by turns the order round; a click on another heading starts it the usual
+    // way round again; a space chip puts the biggest first the usual way round.
+    p.filters.order_by(Sort::Name);
+    assert!(p.filters.reversed);
+    p.refilter();
+    assert_eq!(shown(&p), ["Pro-Q 3", "Ozone 9", "Delay", "Delay"]);
+    p.filters.order_by(Sort::Name);
+    assert!(!p.filters.reversed);
+    p.filters.order_by(Sort::Name);
+    p.filters.order_by(Sort::LastUsed);
+    assert_eq!((p.filters.sort, p.filters.reversed), (Sort::LastUsed, false));
+    p.filters.order_by(Sort::LastUsed);
+    p.filters.pick(Chip::NeverUsed);
+    assert_eq!((p.filters.sort, p.filters.reversed), (Sort::Biggest, false));
+    for sort in Sort::ALL {
+        assert_eq!(Sort::from_column(sort.column()), Some(sort));
+    }
 }
 
 #[test]

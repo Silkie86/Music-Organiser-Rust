@@ -344,17 +344,18 @@ pub enum Sort {
 impl Sort {
     pub const ALL: [Sort; 4] = [Sort::MostUsed, Sort::Name, Sort::Biggest, Sort::LastUsed];
 
-    pub fn name(self) -> &'static str {
+    /// The list column this order goes by, as its heading says it: a click on the heading picks the order.
+    pub fn column(self) -> &'static str {
         match self {
-            Sort::MostUsed => "Most used",
-            Sort::Name => "Name",
-            Sort::Biggest => "Biggest",
+            Sort::MostUsed => "Songs",
+            Sort::Name => "Plugin",
+            Sort::Biggest => "Size",
             Sort::LastUsed => "Last used",
         }
     }
 
-    pub fn from_name(name: &str) -> Option<Sort> {
-        Sort::ALL.into_iter().find(|s| s.name() == name)
+    pub fn from_column(column: &str) -> Option<Sort> {
+        Sort::ALL.into_iter().find(|s| s.column() == column)
     }
 }
 
@@ -367,6 +368,8 @@ pub struct Filters {
     /// Only plugins used in songs from these DAWs.
     pub daws: Vec<String>,
     pub sort: Sort,
+    /// The order turned round: the fewest songs, Z to A, the smallest, the longest ago first.
+    pub reversed: bool,
     /// Only plugins used in these years, first to last (the year strip).
     pub years: Option<(i32, i32)>,
 }
@@ -378,6 +381,7 @@ impl Filters {
         filters::toggle_as(&mut self.chips, chip.name(), true, Chip::name, Chip::from_name);
         if self.chips.contains(&chip) && matches!(chip, Chip::BigUnused | Chip::NeverUsed) {
             self.sort = Sort::Biggest;
+            self.reversed = false;
         }
     }
 
@@ -388,7 +392,14 @@ impl Filters {
         self.chips.push(chip);
         if matches!(chip, Chip::BigUnused | Chip::NeverUsed) {
             self.sort = Sort::Biggest;
+            self.reversed = false;
         }
+    }
+
+    /// A click on a column's heading: the list goes by that column, and a second click on it turns the order round.
+    pub fn order_by(&mut self, sort: Sort) {
+        self.reversed = self.sort == sort && !self.reversed;
+        self.sort = sort;
     }
 
     /// Picks or unpicks a DAW.
@@ -577,6 +588,9 @@ impl Plugins {
             Sort::Name => shown.sort_by_cached_key(|&i| case::to_lower(&rows[i].name)),
             Sort::Biggest => shown.sort_by(|&a, &b| rows[b].bytes().cmp(&rows[a].bytes())),
             Sort::LastUsed => shown.sort_by(|&a, &b| rows[b].last_used.cmp(&rows[a].last_used)),
+        }
+        if self.filters.reversed {
+            shown.reverse();
         }
         self.shown = shown;
     }
@@ -813,7 +827,8 @@ impl Plugins {
         let row = self.find(key, own);
         if row.is_none_or(|r| !self.shown.contains(&r)) {
             let search = if row.is_some() { String::new() } else { name.to_owned() };
-            self.filters = Filters { search, sort: self.filters.sort, ..Filters::default() };
+            self.filters =
+                Filters { search, sort: self.filters.sort, reversed: self.filters.reversed, ..Filters::default() };
             self.refilter();
         }
         row
