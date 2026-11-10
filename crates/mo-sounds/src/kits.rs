@@ -105,7 +105,7 @@ pub fn roll(
 ) -> i32 {
     let seed = if o.seed != 0 { o.seed } else { crate::rediscover::fresh_seed() };
     let mut rng = DotnetRandom::new(seed);
-    let clap = index.clap.as_ref().filter(|_| index.deep);
+    let clap = index.clap.as_deref().filter(|_| index.deep);
     let vibe = o.vibe.as_deref().filter(|_| clap.is_some());
     // A locked pad keeps its sound whatever has happened to it since (hidden, or gone in a rescan), as in C#.
     let locked_ids: Vec<i64> = slots.iter().filter(|s| s.kept()).filter_map(|s| s.sound).collect();

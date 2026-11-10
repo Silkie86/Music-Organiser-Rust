@@ -411,6 +411,67 @@ pub fn lay_out(sounds_db: &Path, starting: impl FnOnce()) -> Option<LaidOut> {
     }
 }
 
+/// Makes the app's own sound library at `copy`, empty, the app's own from the start, when there's nothing to make it
+/// from: a fresh install, with neither `sounds.db` nor a library at `copy`. A scan of the sample folders then fills it
+/// (the fresh-install gap: before, nothing was ever made, so nothing was ever scanned). Whether it made one.
+///
+/// Never where there's anything the library could be mended from: its backup copy, or a damaged one set aside. One
+/// made empty in its place would be backed up over the only copy left. Only in a folder that's there (the app's data
+/// folder, which it makes as it starts): one that isn't is on a drive that's away, not a fresh install. A part of a
+/// library left without it (its write-ahead log or journal) is an error: it may be the last of yours, and SQLite
+/// would take it as part of the new one.
+pub fn make_empty(sounds_db: &Path, copy: &Path) -> Result<bool, SoundsError> {
+    let failed = |why: String| SoundsError::Copy { path: copy.to_owned(), why };
+    let _one_at_a_time = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
+    let gone = |path: &Path| matches!(path.try_exists(), Ok(false));
+    let anything = [sounds_db, copy, &backup::backup_of(copy), &backup::damaged_of(copy)].into_iter().any(|p| !gone(p));
+    if anything || !matches!(dir_of(copy).try_exists(), Ok(true)) {
+        return Ok(false);
+    }
+    for end in ["-wal", "-journal"] {
+        let left = side(copy, end);
+        if !gone(&left) {
+            return Err(failed(format!(
+                "{} is there without the library it's part of: it's left as it is, and no library is made beside it",
+                left.display()
+            )));
+        }
+    }
+    let part = part_of(copy);
+    remove_database(&part).map_err(|e| failed(format!("a half-made copy couldn't be removed ({e})")))?;
+    let _part = Part(part.clone());
+    let made = (|| -> Result<(), Failed> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = open_for_writing(&part, flags)?;
+        conn.pragma_update(None, "page_size", PAGE_SIZE)?;
+        let tx = Transaction::new_unchecked(&conn, TransactionBehavior::Immediate)?;
+        tx.execute_batch(SCHEMA)?;
+        tx.execute_batch(INDEXES)?;
+        set_info(&tx, "format", FORMAT)?;
+        set_info(&tx, OWN_SINCE, unix_now())?;
+        tx.commit()?;
+        // Read and written as every library of the app's own is: in WAL mode, so readers never wait for a writer.
+        conn.pragma_update(None, "journal_mode", "WAL")?;
+        conn.close().map_err(|(_, e)| e)?;
+        fs::OpenOptions::new().write(true).open(&part)?.sync_all()?;
+        Ok(())
+    })();
+    made.map_err(|Failed { why, .. }| failed(why))?;
+    let _readers_wait = LAYING_OUT.lock().unwrap_or_else(PoisonError::into_inner);
+    // Given its name only if nothing has it (another copy of the app may have made one meanwhile: it stays). A second
+    // name for the file is never put over one that's there; where the disk can't give a file two (a FAT drive), it's
+    // renamed once it's looked at again, which a library made in the moment between would lose to.
+    let named = match fs::hard_link(&part, copy) {
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(false),
+        Err(_) if !gone(copy) => return Ok(false),
+        Err(_) => fs::rename(&part, copy),
+        // The half-made name goes as it's let go of.
+        Ok(()) => Ok(()),
+    };
+    named.map_err(|e| failed(format!("it couldn't be given its name ({e})")))?;
+    Ok(true)
+}
+
 /// Notes that the copy at `copy`, up to date with `sounds_db` (or the only library left, with `sounds_db` gone), is
 /// the app's own sound library from now on. Whether this made it so: not when it was already, or when it isn't a
 /// whole copy this version reads, up to date with `sounds_db` as it is now (it's looked at again here, under the same

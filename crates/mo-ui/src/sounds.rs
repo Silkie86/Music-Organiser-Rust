@@ -16,7 +16,7 @@ mod sky;
 mod yours;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
@@ -673,16 +673,17 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
             });
             let read = move || {
                 let on_show = read_all(&sounds_db, &library_db, Some(cards.clone()), opening, Some(&noter), &send);
-                // Once the page has all it needs from the library: its backup copy, when there's none or the library
-                // has changed since. Made before the scan writes into it. Not made again for the plays, drags and
-                // sends kept since the last one, unless it's a day old: a whole copy of the library each start for a
-                // few plays would be a lot of writing.
-                let mut on_show = on_show;
-                let daily = compact::backup::When::Daily;
-                let mended = back_up(&sounds_db, daily, true, &cards, on_show.as_mut(), Some(&noter), &send);
-                if let Some(mut on_show) = on_show {
-                    let asked = &asked_again;
-                    scans(&sounds_db, &library_db, &cards, &mut on_show, Some(&noter), &send, asked, mended);
+                // Once the page has all it needs from the library: it's backed up as it's due, and the sample
+                // folders are scanned ([`scans`]).
+                match on_show {
+                    Some(mut on_show) => {
+                        let asked = &asked_again;
+                        scans(&sounds_db, &library_db, &cards, &mut on_show, Some(&noter), &send, asked);
+                    }
+                    // Nothing could be read: its backup copy is made all the same, when it's due.
+                    None => {
+                        back_up(&sounds_db, compact::backup::When::Daily, true, &cards, None, Some(&noter), &send);
+                    }
                 }
             };
             if let Err(e) = background::spawn("Sounds library", read)
@@ -908,8 +909,18 @@ fn read_all(
     noter: Option<&Noter>,
     send: impl Fn(Step),
 ) -> Option<OnShow> {
+    // A fresh install, with no library at all: the app's own is made empty, for the scan to fill (it scans only the
+    // app's own). Not for the screenshots (no cards), which never write beside their fixture.
+    let copy = compact::copy_of(sounds_db);
+    if cards.is_some() {
+        match compact::make_empty(sounds_db, &copy) {
+            Ok(true) => log::info("Sounds", "Made the app's own sound library, empty, for the scan to fill"),
+            Ok(false) => {}
+            Err(e) => log::warning("Sounds", &format!("Couldn't make the app's own sound library: {e}")),
+        }
+    }
     // No library at all. Once the copy is the app's own, it's all there is: `sounds.db` may have been archived.
-    if !sounds_db.exists() && (cards.is_none() || !compact::copy_of(sounds_db).exists()) {
+    if !sounds_db.exists() && (cards.is_none() || !copy.exists()) {
         send(Step::Read(Err(String::new())));
         return None;
     }
@@ -1030,7 +1041,7 @@ fn read_all(
             Err(e) => Err(e),
         },
     };
-    send_index(prints, &send);
+    let mut index = send_index(prints, &send);
     // How your songs use samples, with the file of each project counted (for the card's Used in list), read once:
     // counted again for the sounds read again after an update.
     let uses = lib.and_then(|lib| uses_in(&lib, now, settings.rules));
@@ -1060,7 +1071,7 @@ fn read_all(
                 let job = card_for(job);
                 match made {
                     Ok(prints) => {
-                        send_index(Ok(prints), &send);
+                        index = send_index(Ok(prints), &send);
                         if let Some(job) = job {
                             job.done_as(
                                 "Made your sound library smaller",
@@ -1092,6 +1103,8 @@ fn read_all(
         analysed,
         rules: settings.rules,
         recount: false,
+        index,
+        added: 0,
     };
     if !first.behind && remade.is_none() {
         return Some(on_show);
@@ -1199,10 +1212,6 @@ fn scan_for_sounds(
     }
     // The first new sound the scan numbered, now there may be one: CLAP's count leaves it out.
     on_show.new_since = compact::grow::new_since(&copy);
-    // Sounds listened to bring fingerprints of their own: read again. Moved and gone ones don't, unless the count
-    // that says whether CLAP has heard enough changed.
-    let k = &scanned.kept;
-    let prints = if k.added + k.updated > 0 { PrintsAgain::Again } else { PrintsAgain::IfCountChanged };
     let now = Local::now().naive_local();
     // How your songs use samples, let go while the page waited for this scan ([`scans`]): counted again, as they are.
     if on_show.recount && on_show.uses.is_none() {
@@ -1217,18 +1226,39 @@ fn scan_for_sounds(
     let held = noter.map(Noter::hold);
     let holds = held.as_ref().map(Held::holds);
     match SoundsDb::open_read_only(&copy).and_then(|db| Ok((db.all(now)?, db))) {
-        Ok((sounds, db)) => take_again(sounds, Ok(db), prints, on_show, holds, send),
+        Ok((sounds, db)) => {
+            let prints = prints_after(&scanned, &sounds);
+            take_again(sounds, Ok(db), prints, on_show, holds, send);
+        }
         Err(e) => log::warning("Sounds", &format!("Couldn't read the sounds again once the scan kept them: {e}")),
     }
     true
 }
 
-/// Scans the sample folders and the page takes what changed ([`scan_for_sounds`]), with a backup copy of the library
-/// after a scan that kept sounds: once at start, then each time Settings asks ([`sample_folders_changed`]), until the
-/// app closes. Asks already in when a scan starts are for the folders it reads, so one scan does them all. A library
-/// the backup finds damaged is mended ([`back_up`]) while `mend` says so: one that couldn't be mended isn't tried
-/// again until the next start.
-#[allow(clippy::too_many_arguments)]
+/// Which fingerprints are read again once a scan kept sounds (`sounds`, read again): only those of the sounds it
+/// listened to, new and changed, not every one (review finding S-5). Moved ones bring none, so none are read unless
+/// the count that says whether CLAP has heard enough changed; gone ones are taken out of the index. By path, letter
+/// case aside, as SQLite finds them.
+fn prints_after(scanned: &mo_app::sound_scan::Scanned, sounds: &[Sound]) -> PrintsAgain {
+    if scanned.listened.is_empty() && scanned.kept.forgotten == 0 {
+        return PrintsAgain::IfCountChanged;
+    }
+    let listened: HashSet<String> = scanned.listened.iter().map(|p| p.to_ascii_lowercase()).collect();
+    PrintsAgain::These(
+        sounds.iter().filter(|s| listened.contains(&s.path.to_ascii_lowercase())).map(|s| s.id).collect(),
+    )
+}
+
+/// Makes the library's backup copy as it's due ([`back_up`]), then scans the sample folders and the page takes what
+/// changed ([`scan_for_sounds`]): once at start, then each time Settings asks ([`sample_folders_changed`]), until the
+/// app closes. Asks already in when a scan starts are for the folders it reads, so one scan does them all.
+///
+/// The backup copy comes first, so a library found damaged is mended before the scan writes into it, and a start makes
+/// one at most (review finding S-5). It's made when the library changed by more than plays, your stars and tags and
+/// the galaxy's maps, or by those once it's a day old; a scan that kept sounds has one made straight after, unless one
+/// was made just before. While the app stays open it's looked at again every hour, so what a scan kept is in it within
+/// the hour, and a long session loses a day of the rest at most too (review finding S-6). A library found damaged that
+/// couldn't be mended isn't tried again until the next start.
 fn scans(
     sounds_db: &Path,
     library_db: &Path,
@@ -1237,25 +1267,40 @@ fn scans(
     noter: Option<&Noter>,
     send: &impl Fn(Step),
     asked: &mpsc::Receiver<()>,
-    mut mend: bool,
 ) {
+    use compact::backup::When;
     // Only the app's own library takes new sounds ([`scan_for_sounds`]): on the old app's, nothing waits for Settings'
     // asks, so its note says nothing of a scan.
     let own = on_show.source == compact::copy_of(sounds_db);
+    let start = back_up(sounds_db, When::Daily, true, cards, Some(&mut *on_show), noter, send);
+    let (mut mend, mut made) = (start.mend, start.made);
     loop {
         while asked.try_recv().is_ok() {}
-        if scan_for_sounds(sounds_db, library_db, cards, on_show, noter, send) {
-            let now = compact::backup::When::Now;
-            mend &= back_up(sounds_db, now, mend, cards, Some(&mut *on_show), noter, send);
+        if scan_for_sounds(sounds_db, library_db, cards, on_show, noter, send) && !made {
+            mend &= back_up(sounds_db, When::Now, mend, cards, Some(&mut *on_show), noter, send).mend;
         }
+        made = false;
         // Not kept while it waits, which may be all the time the app is open: how your songs use samples is read again
         // by the next scan that keeps sounds (your songs may have changed by then too).
         on_show.recount |= on_show.uses.take().is_some();
-        if !own || asked.recv().is_err() {
+        if !own {
             return;
+        }
+        loop {
+            match asked.recv_timeout(BACKUP_LOOK_EVERY) {
+                Ok(()) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    mend &= back_up(sounds_db, When::Daily, mend, cards, Some(&mut *on_show), noter, send).mend;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => return,
+            }
         }
     }
 }
+
+/// How often, while the app stays open, the sound library's backup copy is looked at to see whether it's due
+/// ([`scans`]): it's made only once it's a day old, so this costs a look at two small notes.
+const BACKUP_LOOK_EVERY: Duration = Duration::from_secs(60 * 60);
 
 /// What the page shows once its first read is done, for sounds read again to take its place ([`take_again`]): the
 /// list sent last, how your songs use samples (counted again for the sounds read again), the Most liked weights, where
@@ -1271,7 +1316,17 @@ struct OnShow {
     analysed: usize,
     rules: UsageRules,
     recount: bool,
+    /// The fingerprints' index sent last, for a scan's few new sounds to be put in it ([`SoundIndex::with_features`]).
+    index: Option<Arc<SoundIndex>>,
+    /// How many sounds' fingerprints have been put in it since it was built afresh ([`FEW`]).
+    added: usize,
 }
+
+/// How many sounds' fingerprints may be put in the index on show, for each one in it, before it's built afresh
+/// ([`take_again`]): what makes the fingerprints ready (the averages and spreads each number's taken from and divided
+/// by) stays that of most of them, and a scan that brings a lot (a new sample folder) reads them all once, not one at
+/// a time.
+const FEW: usize = 10;
 
 /// How your songs use samples, and the file of each project counted.
 type Uses = (Vec<mo_library::SampleUse>, Arc<HashMap<i64, ProjectFile>>);
@@ -1286,14 +1341,17 @@ fn uses_in(lib: &mo_library::Library, now: NaiveDateTime, rules: UsageRules) -> 
 }
 
 /// When [`take_again`] reads the sounds' fingerprints again too.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum PrintsAgain {
     /// Never: they came with the sounds (made again from `sounds.db`).
     CameWith,
     /// Only when the count that says whether CLAP has heard enough changed.
     IfCountChanged,
-    /// Always: the library was made afresh, or sounds were listened to.
+    /// Always: the library was made afresh.
     Again,
+    /// Only those of these sounds, a scan listened to, put in the index on show ([`SoundIndex::with_features`]); all
+    /// of them when the count that says whether CLAP has heard enough changed, or there's no index on show.
+    These(Vec<i64>),
 }
 
 /// The sounds read again (`sounds`, from `db`) take the place of those on show: the page moves what it holds by place
@@ -1317,6 +1375,15 @@ fn take_again(
         Vec::new()
     });
     let analysed_now = mo_sounds::count_clap_could_hear(&sounds, on_show.new_since);
+    // The sounds there now, in id order, for the index on show to lose those gone (hidden ones too: it has them).
+    let there: Vec<i64> = match (&prints, &on_show.index) {
+        (PrintsAgain::These(_), Some(_)) => {
+            let mut ids: Vec<i64> = sounds.iter().map(|s| s.id).collect();
+            ids.sort_unstable();
+            ids
+        }
+        _ => Vec::new(),
+    };
     let mut library = Library::new(sounds, played, &on_show.weights).read_holding(holds);
     // How your songs use each sound, as counted for this list; or when they couldn't be counted again, as the list on
     // show has them (a sound new since then has none yet), so the Used chips and Most liked don't lose them.
@@ -1337,16 +1404,59 @@ fn take_again(
         moved.is_none() && list.sounds().iter().zip(library.list.sounds()).any(|(a, b)| a.sound_type != b.sound_type);
     let now_shown = library.list.clone();
     send(Step::Refreshed(Refreshed { library, was: list.clone(), moved, retyped }));
-    let again = match prints {
-        PrintsAgain::CameWith => false,
-        PrintsAgain::IfCountChanged => analysed_now != on_show.analysed,
-        PrintsAgain::Again => true,
-    };
-    if again && let Ok(db) = db {
-        send_index(db.fingerprints(analysed_now).map(|(f, c)| (f, c, analysed_now)), send);
+    let count_changed = analysed_now != on_show.analysed;
+    let mut afresh = None;
+    match (prints, db, on_show.index.clone()) {
+        (PrintsAgain::CameWith, ..) | (_, Err(_), _) => {}
+        (PrintsAgain::IfCountChanged, ..) if !count_changed => {}
+        (PrintsAgain::These(ids), Ok(db), Some(index))
+            if !count_changed && (on_show.added + ids.len()) * FEW <= index.features.len() =>
+        {
+            match with_these(&db, &ids, &there, index.clone()) {
+                Ok(Some(now)) => {
+                    if !Arc::ptr_eq(&now, &index) {
+                        send(Step::Index(now.clone()));
+                        on_show.index = Some(now);
+                    }
+                    on_show.added += ids.len();
+                }
+                // CLAP's index has a sound that's gone.
+                Ok(None) => afresh = Some(db),
+                Err(e) => {
+                    log::warning("Sounds", &format!("Couldn't read the new sounds' fingerprints, so all of them: {e}"));
+                    afresh = Some(db);
+                }
+            }
+        }
+        (_, Ok(db), _) => afresh = Some(db),
+    }
+    if let Some(db) = afresh {
+        on_show.index = send_index(db.fingerprints(analysed_now).map(|(f, c)| (f, c, analysed_now)), send);
+        on_show.added = 0;
     }
     on_show.list = now_shown;
     on_show.analysed = analysed_now;
+}
+
+/// The index on show (`index`) after a scan ([`SoundIndex::with_features`]): with the fingerprints of the sounds it
+/// listened to (`ids`) read again, and without the sounds no longer `there` (in id order): the same one when none of
+/// that changes it. `None` when it has to be built afresh.
+fn with_these(
+    db: &SoundsDb,
+    ids: &[i64],
+    there: &[i64],
+    index: Arc<SoundIndex>,
+) -> Result<Option<Arc<SoundIndex>>, SoundsError> {
+    let more = db.features_of(ids)?;
+    let again: HashSet<i64> = ids.iter().copied().collect();
+    Ok(background::on_pool(move || {
+        let gone: HashSet<i64> =
+            index.features.ids().iter().copied().filter(|id| there.binary_search(id).is_err()).collect();
+        if gone.is_empty() && more.is_empty() && !again.iter().any(|id| index.features.contains(*id)) {
+            return Some(index);
+        }
+        index.with_features(&gone, &again, more).map(Arc::new)
+    }))
 }
 
 /// How many plays History lists.
@@ -1376,15 +1486,21 @@ fn places_in(list: &SoundList, places: &HashMap<i64, usize>) -> Vec<Option<usize
 }
 
 /// Makes the index of the fingerprints read (with how many sounds had been analysed when they were), and sends it.
-fn send_index(prints: Result<(Gathered, Gathered, usize), SoundsError>, send: &impl Fn(Step)) {
+/// The index sent, if one was.
+fn send_index(
+    prints: Result<(Gathered, Gathered, usize), SoundsError>,
+    send: &impl Fn(Step),
+) -> Option<Arc<SoundIndex>> {
     match prints {
         Ok((features, clap, analysed)) => {
-            let index = background::on_pool(move || SoundIndex::from_gathered(features, clap, analysed));
-            send(Step::Index(Arc::new(index)));
+            let index = Arc::new(background::on_pool(move || SoundIndex::from_gathered(features, clap, analysed)));
+            send(Step::Index(index.clone()));
+            Some(index)
         }
         Err(e) => {
             log::warning("Sounds", &format!("Couldn't read the sounds' fingerprints: {e}"));
             send(Step::NoIndex(e.to_string()));
+            None
         }
     }
 }
@@ -1514,8 +1630,7 @@ fn say_laid_out(laid_out: &compact::LaidOut, job: Option<Job>, began: Instant) {
 /// not made because the library itself is damaged, where the page's read never looks (review finding S-3), has the
 /// library mended now when `mend` says so: put back from its backup copy, or made again from sounds.db, either way
 /// with everything that can still be read of it. The page then takes the mended library's sounds (`on_show`, with
-/// what's done with sounds held off meanwhile: `noter`), and the mended library is backed up. False when it was found
-/// damaged and couldn't be mended (it's tried again at the next start), so it isn't tried again meanwhile.
+/// what's done with sounds held off meanwhile: `noter`), and the mended library is backed up.
 fn back_up(
     sounds_db: &Path,
     when: compact::backup::When,
@@ -1524,14 +1639,12 @@ fn back_up(
     on_show: Option<&mut OnShow>,
     noter: Option<&Noter>,
     send: &impl Fn(Step),
-) -> bool {
+) -> Backup {
     let why = match compact::backup::back_up_when(sounds_db, when) {
         Some(compact::backup::BackedUp::Damaged(why)) if mend => why,
-        backed_up => {
-            say_backed_up(backed_up);
-            return true;
-        }
+        backed_up => return Backup { made: say_backed_up(backed_up), mend },
     };
+    let not_mended = Backup { made: false, mend: false };
     log::warning("Sounds", &format!("The sound library's backup copy couldn't be made, so it's mended: {why}"));
     let copy = compact::copy_of(sounds_db);
     let held = noter.map(Noter::hold);
@@ -1540,7 +1653,7 @@ fn back_up(
         Ok((mut everything, made)) => {
             say_made(&made, &copy, sounds_db, Some(cards), true);
             if made.is_err() {
-                return false;
+                return not_mended;
             }
             if let Some(on_show) = on_show {
                 // As the mended library has them: what it was mended from may say otherwise.
@@ -1548,23 +1661,33 @@ fn back_up(
                 let (features, clap) = (std::mem::take(&mut everything.features), std::mem::take(&mut everything.clap));
                 let db = SoundsDb::open_read_only(&copy);
                 take_again(everything.sounds, db, PrintsAgain::CameWith, on_show, holds, send);
-                send_index(Ok((features, clap, on_show.analysed)), send);
+                on_show.index = send_index(Ok((features, clap, on_show.analysed)), send);
+                on_show.added = 0;
             }
             drop(held);
-            say_backed_up(compact::backup::back_up(sounds_db));
-            true
+            Backup { made: say_backed_up(compact::backup::back_up(sounds_db)), mend: true }
         }
         Err(e) => {
             log::warning("Sounds", &format!("Couldn't mend the sound library: {e}"));
             cards.start("Couldn't mend your sound library", "").failed(&list::not_remade_line(&e));
-            false
+            not_mended
         }
     }
 }
 
+/// How making the sound library's backup copy went, for what comes after it ([`back_up`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Backup {
+    /// One was made.
+    made: bool,
+    /// A library found damaged may still be mended: not once one couldn't be (it's tried again at the next start).
+    mend: bool,
+}
+
 /// Says in the log how making the sound library's backup copy went ([`compact::backup::back_up`]): nothing when there
-/// was nothing to do.
-fn say_backed_up(backed_up: Option<compact::backup::BackedUp>) {
+/// was nothing to do. Whether one was made.
+fn say_backed_up(backed_up: Option<compact::backup::BackedUp>) -> bool {
+    let made = matches!(backed_up, Some(compact::backup::BackedUp::Made { .. }));
     match backed_up {
         None => {}
         Some(compact::backup::BackedUp::Made { bytes, took }) => log::info(
@@ -1583,6 +1706,7 @@ fn say_backed_up(backed_up: Option<compact::backup::BackedUp>) {
             log::warning("Sounds", &format!("Couldn't make the sound library's backup copy: {why}"));
         }
     }
+    made
 }
 
 /// Says in the log, once, that the app's copy of the sound library is its own library from now on (the C# app is
@@ -3977,6 +4101,64 @@ mod tests {
         assert!(steps.lock().map(|s| s.is_empty()).unwrap_or_default());
     }
 
+    /// A fresh install, with no sound library at all: the page makes the app's own, empty, and the scan fills it (the
+    /// fresh-install gap: before, none was made, so nothing was ever scanned). Its one backup copy of the start comes
+    /// after the scan (review finding S-5), and only the new sound's fingerprint is read.
+    #[test]
+    fn a_fresh_install_makes_its_own_sound_library_for_the_scan_to_fill() {
+        let dir = std::env::temp_dir().join("mo-ui-sounds-test").join("fresh");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(std::fs::create_dir_all(&dir).is_ok());
+        let sounds_db = dir.join("sounds.db");
+        let copy = compact::copy_of(&sounds_db);
+        // The build's own fixtures folder, under a fixed name, as above.
+        let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp/mo-ui-sound-scan-fresh/Samples");
+        let _ = std::fs::remove_dir_all(&samples);
+        let folders = format!("[\"{}\"]", samples.to_string_lossy().replace('\\', "\\\\"));
+        let library_db = song_library("fresh-songs.db", &[("sample_folders", &folders)]);
+        let wave: Vec<f32> = (0..13_230).map(|i| (i as f32 * 60.0 * std::f32::consts::TAU / 44_100.0).sin()).collect();
+        assert!(std::fs::create_dir_all(samples.join("Pack")).is_ok());
+        assert!(mo_audio::write_wav(&samples.join("Pack").join("Kick 02.wav"), &[wave], 44_100, 16).is_ok());
+        // The screenshots read what's there and write nothing: no library.
+        assert!(read_all(&sounds_db, &library_db, None, None, None, |_| {}).is_none());
+        assert!(!copy.exists());
+        let cards = Feed::default();
+        let steps = std::sync::Mutex::new(Vec::new());
+        let send = |step: Step| {
+            if let Ok(mut steps) = steps.lock() {
+                steps.push(said(step));
+            }
+        };
+        let Some(mut on_show) = read_all(&sounds_db, &library_db, Some(cards.clone()), None, None, send) else {
+            panic!("no sounds read")
+        };
+        let got = steps.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default();
+        assert_eq!(got.first().map(String::as_str), Some("0 sounds from sounds-rust.db, 0 plays"), "{got:?}");
+        assert!(compact::own_since(&copy).is_some());
+        assert!(!sounds_db.exists());
+        // The page's thread at start: the backup copy (of the library as it is: empty), then the scan; then it waits
+        // for Settings (the app closes).
+        let (asks, asked) = mpsc::channel();
+        drop(asks);
+        scans(&sounds_db, &library_db, &cards, &mut on_show, None, &send, &asked);
+        let got = steps.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default();
+        assert_eq!(got.get(1).map(String::as_str), Some("1 fingerprints"), "{got:?}");
+        assert_eq!(on_show.list.len(), 1);
+        let backup = compact::backup::backup_of(&copy);
+        let sounds_in = |db: &Path| {
+            let c = rusqlite::Connection::open(db).ok()?;
+            c.query_row("SELECT COUNT(*) FROM sounds", [], |r| r.get::<_, i64>(0)).ok()
+        };
+        // A start makes one at most (review finding S-5): what the scan kept goes in the next, as the hourly look
+        // finds the library changed by more than plays and your say (S-6).
+        assert_eq!(sounds_in(&backup), Some(0));
+        let looked = back_up(&sounds_db, compact::backup::When::Daily, true, &cards, Some(&mut on_show), None, &send);
+        assert_eq!(looked, Backup { made: true, mend: true });
+        assert_eq!(sounds_in(&backup), Some(1));
+        let looked = back_up(&sounds_db, compact::backup::When::Daily, true, &cards, Some(&mut on_show), None, &send);
+        assert_eq!(looked, Backup { made: false, mend: true });
+    }
+
     #[test]
     fn a_sample_folder_added_while_the_app_is_open_is_scanned_and_its_sounds_taken() {
         let sounds_db = sound_library("scan-again");
@@ -4009,7 +4191,7 @@ mod tests {
                 let send = |step: Step| {
                     let _ = steps.send(said(step));
                 };
-                scans(&sounds_db, &library_db, &cards, &mut on_show, None, &send, &asked, true);
+                scans(&sounds_db, &library_db, &cards, &mut on_show, None, &send, &asked);
                 on_show
             }
         });
@@ -4032,6 +4214,74 @@ mod tests {
                 "Found a new sound: They're in your sound library now."
             ]
         );
+    }
+
+    /// A scan's few sounds go in the index on show, made ready as the ones there were, rather than every fingerprint
+    /// being read again (review finding S-5): a new one put in, one listened to again taking its own place, one gone
+    /// taken out.
+    #[test]
+    fn a_scans_few_sounds_go_in_the_index_on_show() {
+        let sounds_db = sound_library("few");
+        for id in 10..40 {
+            add_sound(&sounds_db, id, &format!("hit {id}"));
+        }
+        // The build's own fixtures folder, under a fixed name, as above.
+        let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp/mo-ui-sound-scan-few/Samples");
+        let _ = std::fs::remove_dir_all(&samples);
+        let folders = format!("[\"{}\"]", samples.to_string_lossy().replace('\\', "\\\\"));
+        let library_db = song_library("few-songs.db", &[("sample_folders", &folders)]);
+        let kick = samples.join("Pack").join("Kick 02.wav");
+        let write = |seconds: f32| {
+            let wave: Vec<f32> = (0..(44_100.0 * seconds) as usize)
+                .map(|i| (i as f32 * 60.0 * std::f32::consts::TAU / 44_100.0).sin() * (-(i as f32) / 9_000.0).exp())
+                .collect();
+            assert!(std::fs::create_dir_all(samples.join("Pack")).is_ok());
+            assert!(mo_audio::write_wav(&kick, &[wave], 44_100, 16).is_ok());
+        };
+        one_start(&sounds_db, &library_db, &Feed::default());
+        let cards = Feed::default();
+        let Some(mut on_show) = read_all(&sounds_db, &library_db, Some(cards.clone()), None, None, |_| {}) else {
+            panic!("no sounds read")
+        };
+        let index = |on_show: &OnShow| on_show.index.clone().unwrap_or_default();
+        let first = index(&on_show);
+        assert_eq!(first.features.len(), 35);
+        let steps = std::sync::Mutex::new(Vec::new());
+        let send = |step: Step| {
+            if let (Step::Index(_), Ok(mut steps)) = (&step, steps.lock()) {
+                steps.push(said(step));
+            }
+        };
+        let scan = |on_show: &mut OnShow| {
+            let (asks, asked) = mpsc::channel();
+            drop(asks);
+            scans(&sounds_db, &library_db, &cards, on_show, None, &send, &asked);
+            steps.lock().map(|mut s| std::mem::take(&mut *s)).unwrap_or_default()
+        };
+        write(0.3);
+        assert_eq!(scan(&mut on_show), ["36 fingerprints"]);
+        let Some(id) = on_show.list.sounds().iter().find(|s| s.path.ends_with("Kick 02.wav")).map(|s| s.id) else {
+            panic!("no kick")
+        };
+        let before = index(&on_show);
+        assert_eq!((on_show.added, before.features.get(id).is_some()), (1, true));
+        // The others as they were, to the last bit: put in, not built afresh.
+        let bits =
+            |i: &SoundIndex, id: i64| i.features.get(id).map(|v| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>());
+        assert!(first.features.ids().iter().all(|i| bits(&before, *i) == bits(&first, *i)));
+        // Listened to again: its own fingerprint takes its place.
+        write(0.6);
+        assert_eq!(scan(&mut on_show), ["36 fingerprints"]);
+        let again = index(&on_show);
+        assert_eq!(on_show.added, 2);
+        assert!(bits(&again, id).is_some() && bits(&again, id) != bits(&before, id));
+        assert!(before.features.ids().iter().filter(|i| **i != id).all(|i| bits(&again, *i) == bits(&before, *i)));
+        // Gone: taken out, and nothing else read again.
+        assert!(std::fs::remove_file(&kick).is_ok());
+        assert_eq!(scan(&mut on_show), ["35 fingerprints"]);
+        let gone = index(&on_show);
+        assert!(!gone.features.contains(id) && on_show.added == 2);
+        assert!(gone.features.ids().iter().all(|i| bits(&gone, *i) == bits(&before, *i)));
     }
 
     #[test]

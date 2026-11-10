@@ -8,8 +8,8 @@
 //! Building reads every vector once; build it off the window's thread and keep it until the library changes.
 
 use std::borrow::Cow;
-use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::{Arc, LazyLock};
 
 use rayon::prelude::*;
 
@@ -24,6 +24,44 @@ pub struct VectorIndex {
     /// The ids, in order; row `i` of `rows` is `ids[i]`'s vector.
     ids: Vec<i64>,
     rows: Rows,
+    /// How each vector was made ready as it went in, so more can go in the same way ([`VectorIndex::with`]).
+    ready: Ready,
+}
+
+/// How [`VectorIndex::make`] makes each vector ready before making it unit length: each number's average taken off and
+/// divided by its spread (none of either when it isn't standardised), then multiplied by its weight (none: all 1).
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Ready {
+    mean: Vec<f64>,
+    sd: Vec<f64>,
+    weights: Option<Vec<f32>>,
+}
+
+impl Ready {
+    /// Ready with the averages `mean` and spreads `sd` when it's `standardise`d (else neither), and `weights`.
+    fn new(standardise: bool, mean: Vec<f64>, sd: Vec<f64>, weights: Option<Vec<f32>>) -> Ready {
+        if standardise { Ready { mean, sd, weights } } else { Ready { weights, ..Ready::default() } }
+    }
+
+    /// `row` made ready, then unit length. Neither standardised nor weighted, each number stays as it is: only made
+    /// unit length, as [`held`] does.
+    fn finish(&self, row: &mut [f32]) {
+        let standardise = !self.mean.is_empty();
+        if standardise || self.weights.is_some() {
+            for (d, out) in row.iter_mut().enumerate() {
+                let x = f64::from(*out);
+                let x = if !standardise {
+                    x
+                } else if self.sd[d] > 1e-9 {
+                    (x - self.mean[d]) / self.sd[d]
+                } else {
+                    0.0
+                };
+                *out = (x * self.weights.as_ref().map_or(1.0, |w| f64::from(w[d]))) as f32;
+            }
+        }
+        unit(row);
+    }
 }
 
 /// An index's numbers: full precision, or half (16 bits, about 3 significant digits). Held in parts of [`CHUNK`] rows
@@ -368,24 +406,8 @@ impl VectorIndex {
                 *s = (*s / count).sqrt();
             }
         }
-        let w = weights.map(|f| f(dim));
-        let finish = |row: &mut [f32]| {
-            // Neither standardised nor weighted, each number stays as it is: only made unit length, as [`held`] does.
-            if standardise || w.is_some() {
-                for (d, out) in row.iter_mut().enumerate() {
-                    let x = f64::from(*out);
-                    let x = if !standardise {
-                        x
-                    } else if sd[d] > 1e-9 {
-                        (x - mean[d]) / sd[d]
-                    } else {
-                        0.0
-                    };
-                    *out = (x * w.as_ref().map_or(1.0, |w| f64::from(w[d]))) as f32;
-                }
-            }
-            self::unit(row);
-        };
+        let ready = Ready::new(standardise, mean, sd, weights.map(|f| f(dim)));
+        let finish = |row: &mut [f32]| ready.finish(row);
         let ids: Vec<i64> = order.iter().map(|&i| g.ids[i]).collect();
         let parts = order.len().div_ceil(CHUNK);
         let mut full: Vec<Box<[f32]>> = Vec::with_capacity(if half { 0 } else { parts });
@@ -426,7 +448,48 @@ impl VectorIndex {
         }
         drop(g);
         let rows = if half { Rows::Half(halves) } else { Rows::Full(full) };
-        VectorIndex { dim, ids, rows }
+        VectorIndex { dim, ids, rows, ready }
+    }
+
+    /// The index without the sounds numbered `without`, and with the vectors `more` in it: one for a sound it has
+    /// takes its place, even one of `without`. Each is made ready as the ones in it were, with the same averages,
+    /// spreads and weights (worked out again only when the index is built afresh), so a scan's few new sounds don't
+    /// need every fingerprint read again (review finding S-5). Ones of another length are left out, as building leaves
+    /// them out. An empty index is built from `more` alone, `standardise`d and weighted as asked (as
+    /// [`VectorIndex::from_gathered`]).
+    pub fn with(
+        &self,
+        without: &HashSet<i64>,
+        more: Gathered,
+        standardise: bool,
+        weights: Option<fn(usize) -> Vec<f32>>,
+    ) -> VectorIndex {
+        if self.ids.is_empty() {
+            return VectorIndex::from_gathered(more, standardise, weights);
+        }
+        let dim = self.dim;
+        // In id order, a later one for the same id winning, as building takes them.
+        let mut rows: BTreeMap<i64, Vec<f32>> = BTreeMap::new();
+        for (id, v) in more.iter().filter(|(_, v)| v.len() == dim) {
+            let mut row = v.into_owned();
+            self.ready.finish(&mut row);
+            rows.insert(id, row);
+        }
+        if rows.is_empty() && !without.iter().any(|id| self.contains(*id)) {
+            return self.clone();
+        }
+        let (ids, rows) = match &self.rows {
+            Rows::Full(parts) => {
+                let (ids, parts) = merged(&self.ids, parts, dim, without, &rows);
+                (ids, Rows::Full(parts))
+            }
+            Rows::Half(parts) => {
+                let rows = rows.into_iter().map(|(id, row)| (id, row.iter().map(|x| to_half(*x)).collect())).collect();
+                let (ids, parts) = merged(&self.ids, parts, dim, without, &rows);
+                (ids, Rows::Half(parts))
+            }
+        };
+        VectorIndex { dim, ids, rows, ready: self.ready.clone() }
     }
 
     /// The same index with its numbers at half precision (the app makes it with [`VectorIndex::from_gathered_halved`]
@@ -541,6 +604,58 @@ impl VectorIndex {
     }
 }
 
+/// The rows of an index (`ids`, and their numbers in `parts` of [`CHUNK`] rows of `dim`) without those numbered
+/// `without` and with `more` in them, in id order: one of `more` takes the place of the row of the same id. In parts of
+/// [`CHUNK`] rows again, the last shorter.
+fn merged<T: Copy>(
+    ids: &[i64],
+    parts: &[Box<[T]>],
+    dim: usize,
+    without: &HashSet<i64>,
+    more: &BTreeMap<i64, Vec<T>>,
+) -> (Vec<i64>, Vec<Box<[T]>>) {
+    let old = ids.iter().enumerate().filter(|(_, id)| !without.contains(id)).filter_map(|(i, id)| {
+        let at = (i % CHUNK) * dim;
+        let row = parts.get(i / CHUNK).and_then(|p| p.get(at..at + dim));
+        // Every id has its row: an index is only ever made so.
+        debug_assert!(row.is_some(), "row {i} of {}", ids.len());
+        Some((*id, row?))
+    });
+    let (mut old, mut new) = (old.peekable(), more.iter().map(|(id, row)| (*id, row.as_slice())).peekable());
+    let mut out_ids = Vec::with_capacity(ids.len() + more.len());
+    let mut out_parts = Vec::with_capacity((ids.len() + more.len()).div_ceil(CHUNK));
+    let mut part: Vec<T> = Vec::with_capacity(CHUNK * dim);
+    loop {
+        let from_new = match (old.peek(), new.peek()) {
+            (None, None) => break,
+            (Some(_), None) => false,
+            (None, Some(_)) => true,
+            (Some((a, _)), Some((b, _))) => b <= a,
+        };
+        let next = if from_new {
+            // It takes the place of the one in the index.
+            if let (Some((a, _)), Some((b, _))) = (old.peek(), new.peek())
+                && a == b
+            {
+                old.next();
+            }
+            new.next()
+        } else {
+            old.next()
+        };
+        let Some((id, row)) = next else { break };
+        out_ids.push(id);
+        part.extend_from_slice(row);
+        if part.len() == CHUNK * dim {
+            out_parts.push(std::mem::replace(&mut part, Vec::with_capacity(CHUNK * dim)).into_boxed_slice());
+        }
+    }
+    if !part.is_empty() {
+        out_parts.push(part.into_boxed_slice());
+    }
+    (out_ids, out_parts)
+}
+
 /// Closest first, then by id. A score that isn't a number counts as the least alike (as .NET sorts them), and -0
 /// counts the same as 0, so equal scores always fall back to the id.
 fn closest_first(a: &(i64, f32), b: &(i64, f32)) -> std::cmp::Ordering {
@@ -560,8 +675,9 @@ fn keep_best(scored: &mut Vec<(i64, f32)>, max: usize) {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct SoundIndex {
     pub features: VectorIndex,
-    /// `None` until deep listening has heard enough of the sounds for it to be used (see `deep`).
-    pub clap: Option<VectorIndex>,
+    /// `None` until deep listening has heard enough of the sounds for it to be used (see `deep`). Shared, so an index
+    /// with more of the analyser's fingerprints ([`SoundIndex::with_features`]) holds CLAP's only once.
+    pub clap: Option<Arc<VectorIndex>>,
     /// Deep listening has heard at least 9 in 10 analysed sounds, so CLAP is the one to use.
     pub deep: bool,
 }
@@ -581,13 +697,33 @@ impl SoundIndex {
         // Until deep listening has heard enough, nothing searches CLAP's vectors (searches, kits and the galaxy all use
         // the features), so they aren't kept: with a big library half heard, that's hundreds of megabytes. Once they
         // are, they're held at half precision: CLAP's is the biggest block the app holds (Solomon, 2026-11-03).
-        let clap = (deep && !clap.is_empty()).then(|| VectorIndex::from_gathered_halved(clap, false, None));
+        let clap = (deep && !clap.is_empty()).then(|| Arc::new(VectorIndex::from_gathered_halved(clap, false, None)));
         SoundIndex { features, clap, deep }
+    }
+
+    /// The same index after a scan (review finding S-5): without the sounds `gone` from the library, the analyser's
+    /// fingerprints of those listened to `again` taken out, and its fingerprints `more` (of the scan's new sounds, and
+    /// those listened to again that it could hear) put in, made ready as the ones in it were ([`VectorIndex::with`]):
+    /// for the few a scan brings, rather than reading every fingerprint again. CLAP's stay as they are: it never hears
+    /// a sound in this app, and one listened to again keeps CLAP's fingerprint. `None` when CLAP's has one of the sounds
+    /// gone: the index is built afresh then, as it is when the count that says whether CLAP has heard enough changes.
+    pub fn with_features(&self, gone: &HashSet<i64>, again: &HashSet<i64>, more: Gathered) -> Option<SoundIndex> {
+        if let Some(clap) = &self.clap
+            && gone.iter().any(|id| clap.contains(*id))
+        {
+            return None;
+        }
+        let without: HashSet<i64> = gone.union(again).copied().collect();
+        Some(SoundIndex {
+            features: self.features.with(&without, more, true, Some(chroma_downweight)),
+            clap: self.clap.clone(),
+            deep: self.deep,
+        })
     }
 
     /// The index searches use: CLAP when deep listening is on, else the features.
     pub fn active(&self) -> &VectorIndex {
-        match &self.clap {
+        match self.clap.as_deref() {
             Some(c) if self.deep => c,
             _ => &self.features,
         }
@@ -789,7 +925,8 @@ mod tests {
             unit(row);
         }
         let parts = rows.chunks(CHUNK * dim.max(1)).map(Box::from).collect();
-        VectorIndex { dim, ids: same.iter().map(|(id, _)| *id).collect(), rows: Rows::Full(parts) }
+        let ready = Ready::new(standardise, mean, sd, w);
+        VectorIndex { dim, ids: same.iter().map(|(id, _)| *id).collect(), rows: Rows::Full(parts), ready }
     }
 
     /// A library's worth of made-up vectors: mostly 16 long, some of an older length, a few ids missing.
@@ -801,6 +938,82 @@ mod tests {
                 (id, (0..len).map(|d| ((id * 31 + d * 17) % 101) as f32 / 7.0 - 5.0).collect())
             })
             .collect()
+    }
+
+    /// A scan's new and changed sounds put in an index (review finding S-5): in id order across its parts, each made
+    /// ready with the index's own averages, spreads and weights, one for a sound it has taking its place, the rest as
+    /// they were to the last bit; ones of another length left out; those taken out gone, unless one came back; CLAP's
+    /// index shared, not copied, unless it has a sound that's gone.
+    #[test]
+    fn more_fingerprints_go_in_as_the_ones_there_went_in() {
+        let weights = Some(chroma_downweight as fn(usize) -> Vec<f32>);
+        // More than a part's worth: every fifth sound and the last few hundred come later, from a scan.
+        let (there, later): (Vec<_>, Vec<_>) =
+            made(12_000).into_iter().partition(|(id, _)| id % 5 != 0 && *id < 11_600);
+        let vectors: Vectors = there.iter().cloned().collect();
+        let index = VectorIndex::features(&vectors);
+        assert!(index.len() > CHUNK);
+        let mut more = Gathered::default();
+        for (id, v) in &later {
+            more.push(*id, v);
+        }
+        // One there already, listened to again; and one of another length.
+        let again: Vec<f32> = (0..16).map(|d| d as f32 / 3.0).collect();
+        more.push(1, &again);
+        more.push(7_000, &[1.0, 2.0]);
+        // Taken out: two gone from the library or listened to again without a fingerprint, and the one with a new one.
+        let without: HashSet<i64> = [1, 2, 3].into();
+        let got = index.with(&without, more.clone(), true, weights);
+        let mut want_ids: Vec<i64> = there
+            .iter()
+            .chain(&later)
+            .filter(|(id, v)| v.len() == 16 && ![2, 3].contains(id))
+            .map(|(id, _)| *id)
+            .collect();
+        want_ids.sort_unstable();
+        assert_eq!(got.ids(), want_ids);
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        let ready = |v: &[f32]| {
+            let mut v = v.to_vec();
+            index.ready.finish(&mut v);
+            v
+        };
+        for (id, v) in later.iter().filter(|(_, v)| v.len() == 16).chain([&(1, again.clone())]) {
+            assert_eq!(got.get(*id).map(|g| bits(&g)), Some(bits(&ready(v))), "{id}");
+        }
+        for id in index.ids().iter().filter(|id| !without.contains(id)) {
+            assert_eq!(got.get(*id).map(|g| bits(&g)), index.get(*id).map(|g| bits(&g)), "{id}");
+        }
+        // In whole parts, the last shorter: as searching and looking up by place take them.
+        let Rows::Full(parts) = &got.rows else { panic!("at full precision") };
+        assert!(parts.iter().rev().skip(1).all(|p| p.len() == CHUNK * 16));
+        assert_eq!(parts.iter().map(|p| p.len()).sum::<usize>(), got.len() * 16);
+        assert_eq!(got.nearest(&ready(&again), 1).first().map(|f| f.0), Some(1));
+        // Nothing of the index's length: as it was. An empty index: built from them alone, as building builds it.
+        let mut odd = Gathered::default();
+        odd.push(5, &[1.0]);
+        let none = HashSet::new();
+        assert_eq!(index.with(&none, odd.clone(), true, weights), index);
+        assert_eq!(index.with(&[11, 7].into(), odd, true, weights), index, "neither is in it");
+        assert_eq!(
+            VectorIndex::default().with(&none, more.clone(), true, weights),
+            VectorIndex::from_gathered(more.clone(), true, weights)
+        );
+        // CLAP's index heard enough to be kept: shared by the index with more of the analyser's in it, and the one
+        // listened to again without a fingerprint of the analyser's taken out.
+        let clap: Vectors = vectors.iter().map(|(id, v)| (*id, v[..4].to_vec())).collect();
+        let sounds = SoundIndex::build(&vectors, &clap, vectors.len());
+        let with = sounds.with_features(&none, &[2].into(), more.clone()).unwrap();
+        assert!(matches!((&sounds.clap, &with.clap), (Some(a), Some(b)) if Arc::ptr_eq(a, b)));
+        assert!(with.deep);
+        assert_eq!(with.features, index.with(&[2].into(), more.clone(), true, weights));
+        assert!(!with.features.contains(2) && with.clap.as_ref().is_some_and(|c| c.contains(2)));
+        // A sound gone from the library that CLAP's index has: built afresh. Without CLAP's: taken out.
+        assert!(sounds.with_features(&[3].into(), &none, more.clone()).is_none());
+        let shallow = SoundIndex::build(&vectors, &clap, vectors.len() * 2);
+        assert!(shallow.clap.is_none());
+        let with = shallow.with_features(&[3].into(), &[2].into(), more.clone()).unwrap();
+        assert_eq!((with.features, with.deep), (got, false));
     }
 
     #[test]
@@ -945,7 +1158,7 @@ mod tests {
         assert!(shallow.clap.is_none());
         let i = SoundIndex::build(&f, &c, 1);
         assert!(i.deep);
-        assert!(i.clap.as_ref().is_some_and(VectorIndex::is_halved));
+        assert!(i.clap.as_deref().is_some_and(VectorIndex::is_halved));
         assert_eq!(i.active().len(), 1);
         assert!(!SoundIndex::build(&f, &Vectors::new(), 0).deep);
     }
