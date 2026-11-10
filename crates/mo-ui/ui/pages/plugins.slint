@@ -4,7 +4,7 @@
 // there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
 // fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
 import { ListView, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TickBox, FilterPicks, FilterView, ListLine, Caps, ColumnHead, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TickBox, FilterPicks, FilterView, ListLine, Caps, ColumnHead, StudioButton, LinkText, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
 
 // One line of the list.
 export struct PluginListLine {
@@ -129,12 +129,12 @@ export global PluginsData {
     // plugin (so the cards' count shows even when they're off); has-sizes: some plugin's room is measured.
     in property <bool> has-missing;
     in property <bool> has-sizes;
-    in property <[string]> card-counts;
-    in property <int> card-count;
-    in property <[string]> unused-choices;
-    in property <int> unused-index;
-    callback card-count-picked(int);
-    callback unused-picked(int);
+    // How many Install cards show and how long unused counts as unused: numbers, so chip strips as on Rediscover's
+    // "How many", not the lit-underline switch that means a view (the UX review of 10 Nov, B6).
+    in property <FilterView> card-filter;
+    in property <FilterView> unused-filter;
+    callback card-count-picked(string);
+    callback unused-picked(string);
 
     // The side card.
     in-out property <length> panel-width: 420px;
@@ -145,6 +145,8 @@ export global PluginsData {
     in property <int> state;
     in property <string> other;
     in property <[CardAction]> actions;
+    // The ones that change files (Clean up, Uninstall, Move), kept apart from the ones that only show things.
+    in property <[CardAction]> file-actions;
     in property <[MenuItem]> menu;
     in property <[string]> tabs;
     in-out property <int> tab;
@@ -337,8 +339,20 @@ component PluginPanel inherits SidePanel {
         wrap: word-wrap;
         min-width: 0px;
     }
+    // Every card's buttons in even columns (the UX review of 10 Nov, B2); the three that change files stand on
+    // their own under a thin line, away from the ones that only show things (E6).
     if PluginsData.has-pick: CardActions {
+        room: root.inside;
         actions: PluginsData.actions;
+        chosen(id) => { PluginsData.menu-chosen(id); }
+    }
+    if PluginsData.has-pick: Rectangle {
+        height: 1px;
+        background: Theme.edge;
+    }
+    if PluginsData.has-pick: CardActions {
+        room: root.inside;
+        actions: PluginsData.file-actions;
         chosen(id) => { PluginsData.menu-chosen(id); }
     }
     if PluginsData.has-pick: TabBar {
@@ -855,16 +869,13 @@ export component PluginsPage inherits Rectangle {
                     horizontal-stretch: 1;
                     overflow: elide;
                 }
-                Text {
-                    text: "Cards";
-                    color: Theme.muted;
-                    font-size: Type.meta;
-                    vertical-alignment: center;
-                }
-                Segmented {
-                    choices: PluginsData.card-counts;
-                    current: PluginsData.card-count;
-                    picked(i) => { PluginsData.card-count-picked(i); }
+                VerticalLayout {
+                    alignment: center;
+                    FilterPicks {
+                        name: "Cards";
+                        filter: PluginsData.card-filter;
+                        toggled(text) => { PluginsData.card-count-picked(text); }
+                    }
                 }
             }
             if PluginsData.cards.length > 0: HorizontalLayout {
@@ -902,16 +913,13 @@ export component PluginsPage inherits Rectangle {
                 }
             }
             Rectangle { horizontal-stretch: 1; }
-            Text {
-                text: "Unused after";
-                color: Theme.muted;
-                font-size: Type.meta;
-                vertical-alignment: center;
-            }
-            Segmented {
-                choices: PluginsData.unused-choices;
-                current: PluginsData.unused-index;
-                picked(i) => { PluginsData.unused-picked(i); }
+            VerticalLayout {
+                alignment: center;
+                FilterPicks {
+                    name: "Unused after";
+                    filter: PluginsData.unused-filter;
+                    toggled(text) => { PluginsData.unused-picked(text); }
+                }
             }
         }
         if PluginsData.half-copy-text != "": HorizontalLayout {
@@ -1061,12 +1069,25 @@ export component PluginsPage inherits Rectangle {
                                         alignment: center;
                                         spacing: Space.xs;
                                         horizontal-stretch: 1;
-                                        Text {
-                                            text: line.name;
-                                            color: Theme.text;
-                                            font-size: Type.row-title;
-                                            font-weight: 500;
-                                            overflow: elide;
+                                        // The state in a word beside the name, as a red dot alone is easy to miss
+                                        // (the UX review of 10 Nov, B11).
+                                        HorizontalLayout {
+                                            spacing: Space.sm;
+                                            Text {
+                                                text: line.name;
+                                                color: Theme.text;
+                                                font-size: Type.row-title;
+                                                font-weight: 500;
+                                                overflow: elide;
+                                                horizontal-stretch: line.state == 0 ? 1 : 0;
+                                            }
+                                            if line.state != 0: Text {
+                                                text: line.state == 1 ? "Missing" : "Unused";
+                                                color: line.state == 1 ? Theme.missing : Theme.warning;
+                                                font-size: Type.meta;
+                                                vertical-alignment: center;
+                                                horizontal-stretch: 1;
+                                            }
                                         }
                                         Text {
                                             text: line.details;

@@ -157,6 +157,19 @@ struct FilterChips {
     daw: FilterModels,
     /// The card's songs tab: one DAW or every one.
     use_daw: FilterModels,
+    /// How many Install cards, and how long unused counts as unused.
+    cards: FilterModels,
+    unused: FilterModels,
+}
+
+/// A count of Install cards as its chip says it.
+fn card_count_words(n: usize) -> String {
+    if n == 0 { "Off".to_owned() } else { n.to_string() }
+}
+
+/// A number of years as its "Unused after" chip says it.
+fn unused_words(y: u32) -> String {
+    if y == 1 { "1 year".to_owned() } else { format!("{y} years") }
 }
 
 /// Wires the page. The library at `library` is read when the page is first shown, when Ctrl+K first opens, or a
@@ -173,12 +186,6 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     // The order's heading is lit before the list is read.
     data.set_sort_column(Sort::default().column().into());
     data.set_tabs(strings(TABS));
-    data.set_card_counts(strings(
-        NEEDED_COUNT_CHOICES.iter().map(|&n| if n == 0 { "Off".to_owned() } else { n.to_string() }),
-    ));
-    data.set_unused_choices(strings(
-        UNUSED_YEARS_CHOICES.iter().map(|&y| if y == 1 { "1 year".to_owned() } else { format!("{y} years") }),
-    ));
     fill_actions(app);
     crate::finder::on_open(Kind::Plugin, |app, hit, _| {
         let (key, own) = mo_app::finder::plugin_of(&hit.id);
@@ -283,9 +290,9 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         }
     });
     let weak = app.as_weak();
-    data.on_card_count_picked(move |i| {
+    data.on_card_count_picked(move |words| {
         let Some(app) = weak.upgrade() else { return };
-        let Some(&n) = usize::try_from(i).ok().and_then(|i| NEEDED_COUNT_CHOICES.get(i)) else { return };
+        let Some(&n) = NEEDED_COUNT_CHOICES.iter().find(|&&n| card_count_words(n) == words.as_str()) else { return };
         PAGE.with(|p| {
             if let Some(pl) = p.borrow_mut().plugins.as_mut() {
                 pl.needed_count = n;
@@ -296,9 +303,9 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
         fill_cards(&app);
     });
     let weak = app.as_weak();
-    data.on_unused_picked(move |i| {
+    data.on_unused_picked(move |words| {
         let Some(app) = weak.upgrade() else { return };
-        let Some(&y) = usize::try_from(i).ok().and_then(|i| UNUSED_YEARS_CHOICES.get(i)) else { return };
+        let Some(&y) = UNUSED_YEARS_CHOICES.iter().find(|&&y| unused_words(y) == words.as_str()) else { return };
         PAGE.with(|p| {
             if let Some(pl) = p.borrow_mut().plugins.as_mut() {
                 pl.set_unused_years(y);
@@ -827,7 +834,10 @@ fn refresh(app: &AppWindow) {
             data.set_search(pl.filters.search.as_str().into());
         }
         data.set_freeable(pl.freeable().into());
-        data.set_unused_index(UNUSED_YEARS_CHOICES.iter().position(|&y| y == pl.unused_years).map_or(-1, |i| i as i32));
+        let years = UNUSED_YEARS_CHOICES.map(unused_words);
+        FILTER_MODELS.with(|m| {
+            data.set_unused_filter(m.unused.view(&mo_app::filters::one_of(&years, &unused_words(pl.unused_years))));
+        });
         let most = p.years.iter().map(|y| y.1).max().unwrap_or(1).max(1) as f32;
         let bars: Vec<YearBar> = p
             .years
@@ -887,7 +897,10 @@ fn fill_cards(app: &AppWindow) {
         data.set_cards_summary(pl.needed_summary(&cards).into());
         data.set_all_installed(pl.needed_count > 0 && pl.all_installed());
         data.set_has_missing(pl.any_missing());
-        data.set_card_count(NEEDED_COUNT_CHOICES.iter().position(|&n| n == pl.needed_count).map_or(-1, |i| i as i32));
+        let counts = NEEDED_COUNT_CHOICES.map(card_count_words);
+        FILTER_MODELS.with(|m| {
+            data.set_card_filter(m.cards.view(&mo_app::filters::one_of(&counts, &card_count_words(pl.needed_count))));
+        });
         let tiles: Vec<NeededCard> = cards
             .iter()
             .map(|c| NeededCard {
@@ -1011,20 +1024,26 @@ fn fill_actions(app: &AppWindow) {
         })
         .collect();
     data.set_menu(ModelRc::new(VecModel::from(menu)));
-    let actions: Vec<CardAction> = PLUGINS_ACTIONS
-        .iter()
-        .filter(|a| a.id != MEASURE)
-        .map(|a| CardAction {
-            text: action_words(a.id).into(),
-            tip: a.what.into(),
-            key: shortcuts.key_of(a.id).into(),
-            id: a.id.into(),
-            enabled: enabled(a.id),
-            main: false,
-            danger: a.id == "plugins.uninstall",
-        })
-        .collect();
-    data.set_actions(ModelRc::new(VecModel::from(actions)));
+    // The card's buttons in two groups: the ones that only show things, then the ones that change files (the UX
+    // review of 10 Nov, E6).
+    let changes_files = |id: &str| matches!(id, "plugins.cleanUp" | "plugins.uninstall" | "plugins.move");
+    let buttons = |files: bool| -> Vec<CardAction> {
+        PLUGINS_ACTIONS
+            .iter()
+            .filter(|a| a.id != MEASURE && changes_files(a.id) == files)
+            .map(|a| CardAction {
+                text: action_words(a.id).into(),
+                tip: a.what.into(),
+                key: shortcuts.key_of(a.id).into(),
+                id: a.id.into(),
+                enabled: enabled(a.id),
+                main: false,
+                danger: a.id == "plugins.uninstall",
+            })
+            .collect()
+    };
+    data.set_actions(ModelRc::new(VecModel::from(buttons(false))));
+    data.set_file_actions(ModelRc::new(VecModel::from(buttons(true))));
 }
 
 fn fill_panel(app: &AppWindow) {
