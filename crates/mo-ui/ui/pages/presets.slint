@@ -3,7 +3,7 @@
 // to drop onto a Bitwig lane (Solomon, 2 Nov 2026). Only shared parts from studio.slint; mo-app decides every word
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
 import { ListView, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
 
 // One line of the sounds list.
 export struct PresetLine {
@@ -107,6 +107,11 @@ export global PresetsData {
     callback toggle(string, string);
     callback clear-chip(string);
     callback clear();
+    // The column the sounds list goes by, as its heading says it ("" for the list as it was found), and whether
+    // that order is turned round; a click on a heading (its words) picks, turns round, then lets go.
+    in property <string> order-column;
+    in property <bool> order-reversed;
+    callback order-picked(string);
     callback clear-song();
     callback unused-toggled(bool);
     in property <[PresetLine]> lines;
@@ -266,16 +271,49 @@ component PresetLineView inherits ListLine {
     }
 }
 
+// The sounds list's headings: a click puts the list in that column's order (A to Z), a second click turns it round,
+// a third puts it back as it was found.
 component PresetHeading inherits HorizontalLayout {
     height: 28px;
     padding-left: Space.md + Space.sm + Space.md;
     padding-right: Space.md + Space.md;
     spacing: Space.md;
-    Caps { horizontal-stretch: 3; preferred-width: 0px; min-width: 0px; text: "SOUND"; vertical-alignment: center; }
-    Caps { width: 96px; text: "PART"; vertical-alignment: center; }
-    Caps { horizontal-stretch: 2; preferred-width: 0px; min-width: 0px; text: "SONG OR FOLDER"; vertical-alignment: center; }
-    Caps { width: 56px; text: "WHAT"; vertical-alignment: center; }
-    Caps { width: 72px; text: "FILE"; vertical-alignment: center; horizontal-alignment: right; }
+    ColumnHead {
+        horizontal-stretch: 3; preferred-width: 0px; min-width: 0px;
+        text: "SOUND";
+        on: PresetsData.order-column == "Sound";
+        up: !PresetsData.order-reversed;
+        clicked => { PresetsData.order-picked("Sound"); }
+    }
+    ColumnHead {
+        width: 96px;
+        text: "PART";
+        on: PresetsData.order-column == "Part";
+        up: !PresetsData.order-reversed;
+        clicked => { PresetsData.order-picked("Part"); }
+    }
+    ColumnHead {
+        horizontal-stretch: 2; preferred-width: 0px; min-width: 0px;
+        text: "SONG OR FOLDER";
+        on: PresetsData.order-column == "Song or folder";
+        up: !PresetsData.order-reversed;
+        clicked => { PresetsData.order-picked("Song or folder"); }
+    }
+    ColumnHead {
+        width: 56px;
+        text: "WHAT";
+        on: PresetsData.order-column == "What";
+        up: !PresetsData.order-reversed;
+        clicked => { PresetsData.order-picked("What"); }
+    }
+    ColumnHead {
+        width: 72px;
+        text: "FILE";
+        right: true;
+        on: PresetsData.order-column == "File";
+        up: !PresetsData.order-reversed;
+        clicked => { PresetsData.order-picked("File"); }
+    }
 }
 
 // A curve's shape, drawn in its box (the renderer draws it on the graphics card when there is one).

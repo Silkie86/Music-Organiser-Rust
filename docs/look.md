@@ -59,7 +59,8 @@ light that means something. It should feel like a rack unit on a desk, not a web
 
 - Column headings order a list (the UX review of 10 Nov, B5): a click on a heading (`ColumnHead` in `studio.slint`)
   puts the list in that column's order, a second click turns it round; the heading the list goes by is lit in the
-  accent with a small arrow. A page whose headings do this has no "Order" row of chips. On Plugins and MIDI so far.
+  accent with a small arrow. A page whose headings do this has no "Order" row of chips. On Plugins, MIDI and
+  Presets so far (Presets: a third click puts the list back as it was found).
 
 ## Next steps
 
