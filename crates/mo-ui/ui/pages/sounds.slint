@@ -1018,10 +1018,13 @@ component SoundPanel inherits SidePanel {
         drag-out => { SoundsData.drag-picked(); }
         drag-let-go => { SoundsData.drag-let-go(); }
     }
-    CardActions {
+    // Every card's buttons: the lit one first, in even columns (the UX review of 10 Nov, B2).
+    buttons := CardActions {
+        room: root.inside;
         actions: SoundsData.actions;
         chosen(id) => { SoundsData.menu-chosen(id); }
         StudioButton {
+            width: max(self.min-width, buttons.cell);
             text: SoundsData.playing ? "Stop" : "Play";
             main: true;
             tip: SoundsData.play-tip;
@@ -1250,11 +1253,19 @@ export component SoundsPage inherits Rectangle {
             busy: SoundsData.busy;
             done: SoundsData.done;
         }
-        // The search, the views and Autoplay. They wrap onto another line when there isn't room (a narrow window), so
+        // The views, the search and Autoplay, in every page's order (the UX review of 10 Nov, A5). They wrap onto another line when there isn't room (a narrow window), so
         // nothing runs off the page and the rows under them wrap too.
         FlexboxLayout {
             spacing: Space.sm;
             vertical-stretch: 0;
+            VerticalLayout {
+                alignment: center;
+                Segmented {
+                    choices: SoundsData.views;
+                    current: SoundsData.view;
+                    picked(i) => { SoundsData.pick-view(i); }
+                }
+            }
             search-box := SearchBox {
                 // Esc goes on to the window's keys (the page's next step back, app.escape), and Ctrl+Up and
                 // Ctrl+Down step through the list from here.
@@ -1272,14 +1283,6 @@ export component SoundsPage inherits Rectangle {
                         return true;
                     }
                     false
-                }
-            }
-            VerticalLayout {
-                alignment: center;
-                Segmented {
-                    choices: SoundsData.views;
-                    current: SoundsData.view;
-                    picked(i) => { SoundsData.pick-view(i); }
                 }
             }
             VerticalLayout {

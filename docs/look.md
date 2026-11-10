@@ -72,8 +72,8 @@ light that means something. It should feel like a rack unit on a desk, not a web
   the page's own action at the far right; filters start on the next row. A side card reads from the top: its name
   plate, its name, its picture (waveform, piano roll, curve), the drag strip straight under the picture, then its
   buttons in even columns (`CardActions` given the card's `room`: two on a narrow card, four on a wide one) with the
-  lit play button first, then into the DAW, then show and copy, then its facts side by side. On MIDI and Presets
-  so far.
+  lit play button first, then into the DAW, then show and copy, then its facts side by side. On MIDI, Presets
+  and Sounds so far.
 
 - Column headings order a list (the UX review of 10 Nov, B5): a click on a heading (`ColumnHead` in `studio.slint`)
   puts the list in that column's order, a second click turns it round; the heading the list goes by is lit in the
