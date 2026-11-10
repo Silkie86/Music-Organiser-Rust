@@ -186,10 +186,27 @@ fn scenes(
     lanes: &[PreviewLane],
     launcher: &[Vec<Option<ObjId>>],
 ) -> Option<Arrangement> {
+    // Nothing in the launcher: no scenes view, and no scene names walked for it.
+    if launcher.iter().flatten().all(Option::is_none) {
+        return None;
+    }
     let mut budget = NoteBudget::new();
     let names = scene_names(doc, root);
     let count = launcher.iter().map(Vec::len).max().unwrap_or(0);
-    let mut placed: Vec<PreviewLane> = lanes.iter().map(|l| PreviewLane { clips: Vec::new(), ..l.clone() }).collect();
+    // The arranger's tracks without their clips (copying them only to drop them would cost a big project dear).
+    let mut placed: Vec<PreviewLane> = lanes
+        .iter()
+        // Every field named, so one added to PreviewLane later must be thought about here too.
+        .map(|l| PreviewLane {
+            name: l.name.clone(),
+            kind: l.kind,
+            detail: l.detail.clone(),
+            colour: l.colour,
+            depth: l.depth,
+            muted: l.muted,
+            clips: Vec::new(),
+        })
+        .collect();
     let mut markers = Vec::new();
     let mut at = 0.0;
     for scene in 0..count {
@@ -253,6 +270,7 @@ fn launcher_length(doc: &Document, clip: ObjId) -> Option<f64> {
 }
 
 /// Where a clip starts playing its content and the loop it goes round.
+#[derive(Clone, Copy)]
 struct Timing {
     /// Where play starts (the start marker), in beats of the content.
     offset: f64,
@@ -270,12 +288,18 @@ fn timing(doc: &Document, clip: ObjId) -> Timing {
         field_obj(doc, clip, F_PLAY_RANGE)
     };
     let loop_range = range.and_then(|r| field_obj(doc, r, F_LOOP_RANGE));
-    let num = |o: Option<ObjId>, field: u32| o.and_then(|o| doc.obj(o).num(field)).filter(|v| v.is_finite());
+    // A damaged file can put the play start or the loop anywhere: beyond what an arrangement can hold, it's left out.
+    let num = |o: Option<ObjId>, field: u32| {
+        o.and_then(|o| doc.obj(o).num(field)).filter(|v| v.is_finite() && v.abs() <= MOST_BEATS)
+    };
     let offset =
         num(range.and_then(|r| field_obj(doc, r, F_PLAY_START)), F_START).or(num(loop_range, F_START)).unwrap_or(0.0);
-    let loop_start = num(loop_range, F_START).unwrap_or(0.0);
+    // A loop whose start was left out isn't moved to 0: it doesn't loop (a loop the file doesn't hold would repeat).
+    let start = num(loop_range, F_START);
+    let loop_start = start.unwrap_or(0.0);
     let loop_end = loop_start + num(loop_range, F_DURATION).unwrap_or(0.0);
-    let looping = num(range, F_LOOP_ON).is_some_and(|v| v > 0.0) && loop_end > loop_start;
+    let dropped = start.is_none() && loop_range.is_some_and(|o| doc.obj(o).num(F_START).is_some());
+    let looping = num(range, F_LOOP_ON).is_some_and(|v| v > 0.0) && !dropped && loop_end > loop_start;
     Timing { offset, loop_start, loop_end, looping }
 }
 
@@ -438,41 +462,20 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget, play_for: Option<f
     let placements = |at: f64| {
         let in_first = at >= offset && at - offset < length && (!looping || at < loop_end);
         let first = in_first.then_some(at - offset);
-        let passes = (looping && at >= loop_start && at < loop_end).then_some(loop_end - offset + (at - loop_start));
-        // A loop too short to move a huge start on ends there; passes before the clip's start (a play start after
-        // the loop's end) aren't heard. However short the loop, no more places than the notes an arrangement holds
-        // (and one more, so the budget sees it ran out).
+        // Passes before the clip's start (a play start after the loop's end) aren't heard: the first one heard is
+        // found straight away. A loop too short to move a huge start on ends there. However short the loop, no more
+        // places than the notes an arrangement holds (and one more, so the budget sees it ran out).
+        let passes = (looping && at >= loop_start && at < loop_end)
+            .then_some(loop_end - offset + (at - loop_start))
+            .map(|p| if p < 0.0 { p.rem_euclid(pass_length) } else { p });
         let later = std::iter::successors(passes, move |&p| Some(p + pass_length).filter(|&next| next > p))
             .take(MOST_NOTES + 1)
-            .skip_while(|&p| p < 0.0)
             .take_while(move |&p| p < length);
         first.into_iter().chain(later).take(MOST_NOTES + 1)
     };
 
     if c.class == CLS_AUDIO_CLIP {
-        // The stretches of the content that play, each with where it starts in the clip: the first pass from the play
-        // start, then the loop range again and again while looping.
-        let mut windows = Vec::new();
-        let first_end = if looping { loop_end.min(offset + length) } else { offset + length };
-        if first_end > offset {
-            windows.push((offset, first_end, 0.0));
-        }
-        if looping {
-            // Where each pass starts in the clip, as for notes: a play start after the loop's end puts the first
-            // passes before the clip's start, and only what's after it is heard.
-            let mut at = loop_end - offset;
-            if at < 0.0 {
-                at += ((-at) / pass_length).floor() * pass_length;
-            }
-            while at < length && windows.len() < MOST_PASSES {
-                let (w_from, pos) = (loop_start + (-at).max(0.0), at.max(0.0));
-                let w_to = loop_start + (length - at).min(pass_length);
-                if w_to > w_from {
-                    windows.push((w_from, w_to, pos));
-                }
-                at += pass_length;
-            }
-        }
+        let windows = audio_windows(&Timing { offset, loop_start, loop_end, looping }, length);
         let mut parts = Vec::new();
         for e in key_lanes.iter().flat_map(|&l| doc.field_list(l, F_ITEMS)) {
             let play = field_obj(doc, e, F_AUDIO_PLAY);
@@ -487,8 +490,9 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget, play_for: Option<f
             if file.is_empty() || e_length.is_nan() || e_length <= 0.0 {
                 continue;
             }
-            let from = ev.num(F_SAMPLE_START).unwrap_or(0.0);
-            let to = ev.num(F_SAMPLE_END).unwrap_or(0.0);
+            let from = ev.num(F_SAMPLE_START).filter(|f| f.is_finite()).unwrap_or(0.0);
+            // An end only counts when the event has one: a missing one doesn't make the event play backwards.
+            let to = ev.num(F_SAMPLE_END).filter(|t| t.is_finite());
             let warps: Vec<(f64, f64)> = play
                 .and_then(|p| field_obj(doc, p, F_WARP))
                 .map(|w| doc.field_list(w, F_ITEMS))
@@ -499,8 +503,7 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget, play_for: Option<f
             // Seconds of the file per beat of the event; negative when the event plays the file backwards.
             let rate = match (warps.first(), warps.last()) {
                 (Some(a), Some(b)) if warps.len() >= 2 && b.0 > a.0 => Some((b.1 - a.1) / (b.0 - a.0)),
-                _ if to != from => Some((to - from) / e_length),
-                _ => None,
+                _ => to.filter(|&t| t != from).map(|t| (t - from) / e_length),
             }
             .filter(|r| r.is_finite());
             let settings = play.map(|p| doc.obj(p));
@@ -612,6 +615,42 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget, play_for: Option<f
     Some(PreviewClip { name: name.to_owned(), start, length, muted, notes, ..PreviewClip::default() })
 }
 
+/// The stretches of an audio clip's content that play, each as (from, to, where it starts in the clip), for a clip
+/// `length` beats long: the first pass from the play start, then the loop range again and again while looping.
+/// However short the loop, no more than [`MOST_PASSES`] steps.
+fn audio_windows(t: &Timing, length: f64) -> Vec<(f64, f64, f64)> {
+    let Timing { offset, loop_start, loop_end, looping } = *t;
+    let mut windows = Vec::new();
+    let first_end = if looping { loop_end.min(offset + length) } else { offset + length };
+    if first_end > offset {
+        windows.push((offset, first_end, 0.0));
+    }
+    if !looping {
+        return windows;
+    }
+    let pass_length = loop_end - loop_start;
+    // Where each pass starts in the clip, as for notes: a play start after the loop's end puts the first passes
+    // before the clip's start, and only what's after it is heard. The pass the clip's start falls in is found straight
+    // away: `at` is in (-pass_length, 0] then.
+    let mut at = loop_end - offset;
+    if at < 0.0 {
+        let into = at.rem_euclid(pass_length);
+        at = if into == 0.0 { 0.0 } else { into - pass_length };
+    }
+    for _ in 0..MOST_PASSES {
+        if at >= length {
+            break;
+        }
+        let (w_from, pos) = (loop_start + (-at).max(0.0), at.max(0.0));
+        let w_to = loop_start + (length - at).min(pass_length);
+        if w_to > w_from {
+            windows.push((w_from, w_to, pos));
+        }
+        at += pass_length;
+    }
+    windows
+}
+
 /// The value of an expression in an audio playback's `field` at the event's start (its earliest point's 0x28f), when
 /// it has one.
 fn expression(doc: &Document, play: ObjId, field: u32) -> Option<f64> {
@@ -627,6 +666,18 @@ fn expression(doc: &Document, play: ObjId, field: u32) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_huge_play_start_on_a_looping_audio_clip_is_found_at_once() {
+        // Review B-1: walking pass by pass from a play start far after the loop never ended.
+        let t = |offset: f64| Timing { offset, loop_start: 0.0, loop_end: 3.0, looping: true };
+        let w = audio_windows(&t(1.0e7 + 1.5), 6.0);
+        assert!(!w.is_empty() && w.len() <= 4, "{w:?}");
+        assert!(w.iter().all(|&(from, to, at)| (0.0..=3.0).contains(&from) && to <= 3.0 && (0.0..6.0).contains(&at)));
+        // Every step counts, even ones that place nothing.
+        let tiny = Timing { offset: 0.0, loop_start: 0.0, loop_end: 1.0e-9, looping: true };
+        assert!(audio_windows(&tiny, 1.0e6).len() <= MOST_PASSES + 1);
+    }
 
     #[test]
     fn colours_from_floats() {

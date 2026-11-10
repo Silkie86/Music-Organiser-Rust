@@ -12,6 +12,7 @@
 //!
 //! Nothing is written to library.db: every read of the page leaves out the plugin's files once they've gone.
 
+use crate::space_bin::BIN;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -177,7 +178,7 @@ impl Ask {
             }
             Plan::Files(_) if cfg!(windows) => {
                 "Windows has no uninstaller for it that's still there. Its plugin files \
-                                                can go to the Recycle Bin instead (Windows may ask for administrator \
+                                                can go to the {BIN} instead (Windows may ask for administrator \
                                                 rights):"
                     .to_owned()
             }
@@ -209,7 +210,7 @@ pub fn files_freed_text(lines: &[FileLine], ticks: &[bool]) -> String {
     if n > 0 {
         format!("Frees {}", size_text(bytes))
     } else if lines.iter().any(|l| l.stays.is_none()) {
-        "Tick what to send to the Recycle Bin.".to_owned()
+        format!("Tick what to send to the {BIN}.")
     } else {
         "Nothing here can go: each line says why.".to_owned()
     }
@@ -296,8 +297,8 @@ fn sleep_unless_stopped(d: Duration, stop: &AtomicBool) {
 pub fn ran_text(name: &str, ran: &Ran, waited: Waited) -> String {
     match waited {
         Waited::Gone => format!(
-            "{name} is uninstalled, and its files are off the page. It leaves the list of installed plugins at the \
-             next measure (Measure again)."
+            "{name} is uninstalled, and its files are off the page. It leaves the list of installed plugins, and \
+             songs that use it show it missing, at the next measure (Measure again)."
         ),
         Waited::Stopped => format!(
             "Stopped waiting for {name}'s uninstaller. It may still be open in its own window; once it's done, \

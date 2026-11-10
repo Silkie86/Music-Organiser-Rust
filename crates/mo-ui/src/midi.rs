@@ -108,7 +108,13 @@ struct Page {
     finder_loaded: Option<Result<Loaded, String>>,
     /// The page first showed while that read was still going: it's handed to the page when it ends.
     finder_for_page: bool,
+    /// That read was let go unused (the page wasn't shown soon after): the page reads the index itself (M-3).
+    finder_let_go: bool,
 }
+
+/// How long the Ctrl+K read of the index is kept for the page: long enough to go from Ctrl+K to the MIDI page, short
+/// enough that a session that never opens it doesn't hold the whole index (M-3). Ctrl+K keeps its own lines.
+const KEEP_FINDER_READ: Duration = Duration::from_secs(120);
 
 struct Ask {
     id: u64,
@@ -248,6 +254,19 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
                     crate::finder::add_source(&app, "midi", l.found.clone());
                 }
                 PAGE.with(|p| p.borrow_mut().finder_loaded = Some(loaded));
+                slint::Timer::single_shot(KEEP_FINDER_READ, || {
+                    let unused = PAGE.with(|p| {
+                        let mut p = p.borrow_mut();
+                        let unused = p.finder_loaded.take();
+                        if unused.is_some() {
+                            p.finder_let_go = true;
+                        }
+                        unused
+                    });
+                    if let Some(unused) = unused {
+                        background::free_later(unused);
+                    }
+                });
             });
         });
         if let Err(e) = started {
@@ -503,7 +522,7 @@ pub fn shown(app: &AppWindow) {
         let mut p = p.borrow_mut();
         match p.finder_loaded.take() {
             Some(read) => Kept::Read(read),
-            None if p.finder_read => {
+            None if p.finder_read && !p.finder_let_go => {
                 p.finder_for_page = true;
                 Kept::Coming
             }
@@ -2002,11 +2021,16 @@ fn stop_in_daw(playing: InDaw, part: Option<i64>, weak: Option<slint::Weak<AppWi
             let ticket = mo_dawlink::bitwig::ticket();
             // Counted, so the app waits a moment for it as it closes (the review's D-fp4).
             let on_its_way = crate::in_flight::Start::begin();
+            // Held while it waits its turn, so the app closing behind a long job still stops it (the 10 Nov
+            // review's D-2).
+            let held = HELD.hold(bitwig);
             let started = background::spawn("Stop in Bitwig", move || {
                 let _on_its_way = on_its_way;
                 // In its turn, behind what was asked for before it, so it never stops Bitwig in the middle of a newer
                 // start (the 6 Nov review's D-fp3).
                 let turn = ticket.wait();
+                // Not there when the app took it as it closed, and stopped it.
+                let Some(bitwig) = HELD.release(held) else { return };
                 stop_bitwig_in(bitwig, part, &turn, weak);
             });
             if let Err(e) = started {
@@ -2028,9 +2052,14 @@ fn stop_bitwig_in(
 ) {
     let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_playing(&bitwig, turn) else { return };
     log::warning("MIDI", &format!("The part playing in Bitwig couldn't be stopped: {e}"));
+    // Put back once, so Stop can be pressed again once its project is in front; let go when the stop can never work
+    // (Bitwig is gone) or it failed again after being put back, so a new Play isn't called off and Esc goes on (the 10
+    // Nov review's D-1).
+    let again = PUT_BACK.failed_before(&bitwig);
     let put_back = {
         let mut slot = in_daw();
-        if slot.is_none() {
+        if slot.is_none() && !e.bitwig_gone() && !again {
+            PUT_BACK.note(bitwig.clone());
             *slot = Some(InDaw::Bitwig(bitwig));
             DAW_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Some((DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst), crate::presets::call_off_start()))
@@ -2038,11 +2067,21 @@ fn stop_bitwig_in(
             None
         }
     };
+    if put_back.is_none() {
+        log::info("MIDI", "The app let go of the part playing in Bitwig, which couldn't be stopped");
+    }
     let Some(weak) = weak else { return };
-    let words = format!(
-        "It couldn't be stopped in Bitwig: {e} Bring its project to the front in Bitwig (with changes on), then press \
-         Stop again."
-    );
+    let words = if put_back.is_none() {
+        format!(
+            "It couldn't be stopped in Bitwig: {e} The app has let it go: if its clip still plays there, stop it in \
+             Bitwig."
+        )
+    } else {
+        format!(
+            "It couldn't be stopped in Bitwig: {e} Bring its project to the front in Bitwig (with changes on), then \
+             press Stop again. If it fails again, the app lets it go."
+        )
+    };
     let _ = slint::invoke_from_event_loop(move || {
         let Some(app) = weak.upgrade() else { return };
         let data = app.global::<MidiData>();
@@ -2060,6 +2099,13 @@ fn stop_bitwig_in(
         data.set_daw_note(words.into());
     });
 }
+
+/// The part put back after a failed stop, if one is: a second failure lets it go.
+static PUT_BACK: crate::in_flight::PutBack<mo_dawlink::bitwig::Playing> = crate::in_flight::PutBack::new();
+
+/// Parts a stop took out of the slot and is waiting its turn to stop, for [`finish_up`] to stop as the app closes
+/// (the 10 Nov review's D-2).
+static HELD: crate::in_flight::Held<mo_dawlink::bitwig::Playing> = crate::in_flight::Held::new();
 
 /// Calls off a start still on its way from this page, for a part from Presets that couldn't be stopped in Bitwig (so
 /// one thing plays there at a time). Run inside that stop's turn; gives back the ask to hand to [`called_off`] on the
@@ -2135,15 +2181,33 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
     let on_its_way = crate::in_flight::Start::begin();
     let work = move || {
         let _on_its_way = on_its_way;
-        let turn = ticket.map(mo_dawlink::bitwig::Ticket::wait);
         let wanted = move || DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst) == asked;
-        let made = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
+        let stopped = || Some("It stopped before it started playing.".to_owned());
+        // The part's notes and tempo are read before its turn, and not at all once it's no longer wanted, so a part
+        // passed over while stepping down the list holds up nothing behind it (the 10 Nov review's D-5).
+        let read = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
+            if !wanted() {
+                return Err(None);
+            }
             let notes = notes_of(&from, phrase_id, &hash, &mut None)
                 .map_err(|e| Some(format!("Its notes couldn't be read: {e}.")))?;
-            let tempo = tempo_of(&from, &source, &library).bpm();
-            start_in_daw(daw, &notes, bars, tempo, &name, turn.as_ref(), &wanted)
+            Ok((notes, tempo_of(&from, &source, &library).bpm()))
         }))
-        .unwrap_or_else(|_| Err(Some("It stopped before it started playing.".to_owned())));
+        .unwrap_or_else(|_| Err(stopped()));
+        // Its place in the line is given up when it won't start.
+        let turn = match read {
+            Ok(_) => ticket.map(mo_dawlink::bitwig::Ticket::wait),
+            Err(_) => {
+                drop(ticket);
+                None
+            }
+        };
+        let made = read.and_then(|(notes, tempo)| {
+            mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
+                start_in_daw(daw, &notes, bars, tempo, &name, turn.as_ref(), &wanted)
+            }))
+            .unwrap_or_else(|_| Err(stopped()))
+        });
         let note = match made {
             // Something newer was asked for while it waited: it took back what it put in, and says nothing.
             Err(None) => return,
@@ -2267,17 +2331,24 @@ pub fn finish_up() {
     // none on their way).
     crate::presets::call_off_for_closing();
     crate::in_flight::wait_for_all(Duration::from_secs(3));
+    let mut in_bitwig = HELD.take_all();
     match first.or_else(take_in_daw) {
         Some(InDaw::Fl(fl)) => fl.finish(),
-        Some(InDaw::Bitwig(bitwig)) => {
-            let to = crate::in_flight::closing_link(Duration::from_secs(3));
-            // Without waiting its turn: what would go first is closing too, and the extension still makes the stop
-            // once the app has gone.
-            if let Err(e) = to.stop_playing_as_app_closes(&bitwig) {
-                log::warning("MIDI", &format!("The part playing in Bitwig couldn't be stopped as the app closed: {e}"));
+        Some(InDaw::Bitwig(bitwig)) => in_bitwig.insert(0, bitwig),
+        None => {}
+    }
+    // With those a stop still on its way holds, behind a job longer than the wait (the 10 Nov review's D-2).
+    let to = crate::in_flight::closing_link(Duration::from_secs(3));
+    for bitwig in in_bitwig {
+        // Without waiting its turn: what would go first is closing too, and the extension still makes the stop once
+        // the app has gone.
+        if let Err(e) = to.stop_playing_as_app_closes(&bitwig) {
+            log::warning("MIDI", &format!("The part playing in Bitwig couldn't be stopped as the app closed: {e}"));
+            // Bitwig gone or not answering: the rest would only make the app slower to close.
+            if e.bitwig_gone() || e == mo_dawlink::bitwig::Error::TimedOut {
+                break;
             }
         }
-        None => {}
     }
 }
 
@@ -2292,12 +2363,18 @@ pub fn after_crash() {
         Err(std::sync::TryLockError::Poisoned(slot)) => slot.into_inner(),
         Err(std::sync::TryLockError::WouldBlock) => return,
     };
+    let mut in_bitwig = HELD.try_take_all();
     match slot.take() {
         Some(InDaw::Fl(fl)) => fl.finish(),
-        Some(InDaw::Bitwig(bitwig)) => {
-            let _ = crate::in_flight::closing_link(Duration::from_millis(500)).stop_playing_as_app_closes(&bitwig);
-        }
+        Some(InDaw::Bitwig(bitwig)) => in_bitwig.insert(0, bitwig),
         None => {}
+    }
+    // With what a stop still on its way holds (the 10 Nov review's D-2).
+    let to = crate::in_flight::closing_link(Duration::from_millis(500));
+    for bitwig in in_bitwig {
+        if to.stop_playing_as_app_closes(&bitwig).is_err() {
+            break;
+        }
     }
 }
 

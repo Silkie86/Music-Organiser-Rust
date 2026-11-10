@@ -286,10 +286,18 @@ fn options(args: &[String]) -> Result<Options, String> {
     Ok(o)
 }
 
+/// The library whose folders the app uses: the app's own `songs.db` beside `given` once it is the app's own (Settings
+/// writes folder changes there, and the C# app's `library.db` is frozen), else `given` (review T-3).
+fn library_in_use(given: &std::path::Path) -> PathBuf {
+    let songs = given.with_file_name(mo_library::songs_db::FILE_NAME);
+    if songs != given && mo_library::songs_db::own_since(&songs).is_some() { songs } else { given.to_owned() }
+}
+
 /// Runs the check. `Ok(false)` when a reader panicked on a file: that's a bug to fix.
 pub fn run(args: &[String]) -> Result<bool, String> {
     let mut o = options(args)?;
-    if let Some(db) = &o.library {
+    if let Some(given) = &o.library {
+        let db = &library_in_use(given);
         let lib = mo_library::Library::open_read_only(db)
             .map_err(|e| format!("Couldn't open {} to find the project folders: {e}", db.display()))?;
         let mut roots = lib.roots().map_err(|e| format!("Couldn't read the project folders: {e}"))?;
@@ -511,6 +519,34 @@ mod tests {
             outcome,
             parts: parts.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect(),
         }
+    }
+
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn the_folders_come_from_songs_db_once_it_is_the_apps_own() {
+        // Review T-3: Settings writes folder changes to songs.db once it's the app's own; library.db is frozen.
+        let dir = std::env::temp_dir().join("mo-twin-library-in-use");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let library = dir.join("library.db");
+        rusqlite::Connection::open(&library)
+            .unwrap()
+            .execute_batch(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE roots (path TEXT PRIMARY KEY);
+                 CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                     name TEXT NOT NULL, daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, info TEXT);",
+            )
+            .unwrap();
+        let songs = dir.join(mo_library::songs_db::FILE_NAME);
+        assert_eq!(library_in_use(&library), library);
+        mo_library::songs_db::make(&library, &songs, &mut |_| {}).unwrap();
+        // Made but not switched to yet: still library.db.
+        assert_eq!(library_in_use(&library), library);
+        mo_library::songs_db::at_start(&dir, "test");
+        assert_eq!(library_in_use(&library), songs);
+        // Given songs.db itself, it stays.
+        assert_eq!(library_in_use(&songs), songs);
     }
 
     #[test]

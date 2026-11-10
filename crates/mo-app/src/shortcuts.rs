@@ -61,7 +61,15 @@ pub const APP_ACTIONS: &[Action] = &[
     action("app.rescan", "Look for new and changed projects", "F5"),
     action("app.fullRescan", "Rescan everything: re-read every project, even unchanged ones", ""),
     action("app.fullScreen", "Full screen on or off", "F11"),
-    action("app.recycleBin", "Open the Recycle Bin, where everything the app removes goes", "Ctrl+Shift+Delete"),
+    action(
+        "app.recycleBin",
+        if cfg!(windows) {
+            "Open the Recycle Bin, where everything the app removes goes"
+        } else {
+            "Open the Trash, where everything the app removes goes"
+        },
+        "Ctrl+Shift+Delete",
+    ),
     action("app.sizeUp", "Make this page bigger", "Ctrl+="),
     action("app.sizeDown", "Make this page smaller, to fit more on screen", "Ctrl+-"),
     action("app.sizeReset", "This page back to the size of the rest", "Ctrl+0"),
@@ -95,11 +103,17 @@ pub const SOUNDS_ACTIONS: &[Action] = &[
 /// The Plugins page's own actions, with the C# ids. Clean up and Uninstall join with the page's second part.
 pub const PLUGINS_ACTIONS: &[Action] = &[
     action("plugins.projects", "Show the songs that use the picked plugin", "Ctrl+O"),
+    // F5, as Space's Measure again and MIDI's Read again (review X3-7). Not one of the picked plugin's actions.
+    action("plugins.measure", "Measure your plugins again: which are installed and how much room each takes", "F5"),
     action("plugins.searchOnline", "Search the web for the picked plugin", "Ctrl+Shift+O"),
     action("plugins.cleanUp", "Clean up the picked plugin's presets and sounds (asks first)", "Ctrl+Shift+L"),
     action(
         "plugins.uninstall",
-        "Uninstall the picked plugin: its own uninstaller, or its plugin files to the Recycle Bin (asks first)",
+        if cfg!(windows) {
+            "Uninstall the picked plugin: its own uninstaller, or its plugin files to the Recycle Bin (asks first)"
+        } else {
+            "Uninstall the picked plugin: its own uninstaller, or its plugin files to the Trash (asks first)"
+        },
         "Ctrl+Shift+U",
     ),
     action(

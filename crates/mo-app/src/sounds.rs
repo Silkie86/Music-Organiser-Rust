@@ -489,6 +489,11 @@ impl SoundList {
         self.projects = Some(projects);
     }
 
+    /// The file of each project that uses a sound, as [`SoundList::set_project_files`] gave them, if it has.
+    pub fn project_files(&self) -> Option<&Arc<HashMap<i64, ProjectFile>>> {
+        self.projects.as_ref()
+    }
+
     /// The projects that use the sound at `i`, newest first (each one's file and when it was saved). None while
     /// that isn't known; empty when none do.
     pub fn projects_of(&self, i: usize) -> Option<Vec<&ProjectFile>> {

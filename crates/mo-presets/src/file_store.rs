@@ -22,7 +22,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::bitwig::{self as bw, Template, Templates};
 use crate::files::{self, FileFormat, NotAPreset, PresetFile};
-use crate::library::{FoundPreset, list_preset_files};
+use crate::library::{FoundPreset, list_preset_files_and_unread};
 
 /// The store's name, in the app's data folder.
 pub const FILE_NAME: &str = "preset-files.db";
@@ -280,9 +280,12 @@ impl FileStore {
     /// Every preset file under `roots` (walked as `library::find_preset_files` walks) with what each says, and the
     /// Send to Bitwig templates among them: a file unchanged since it was last read is taken from the store, the rest
     /// are read over every core of the current rayon pool and kept for next time. Files no longer found are forgotten.
-    /// Call it off the window's thread.
-    pub fn find(&mut self, roots: &[PathBuf]) -> Found {
-        let paths = list_preset_files(roots);
+    /// Call it off the window's thread. A file under a folder that couldn't be looked in now (a drive that's away, a
+    /// link to it, a folder that can't be read) is kept as it was. With `every_root` these are all the page's folders,
+    /// so a file under none of them (a folder no longer looked in) is forgotten too (rule 28); without it, only some
+    /// of them may be, and those files are left.
+    pub fn find(&mut self, roots: &[PathBuf], every_root: bool) -> Found {
+        let (paths, unread) = list_preset_files_and_unread(roots);
         let kept = match self.loaded.take() {
             Some(kept) => kept,
             None => self.load().unwrap_or_default(),
@@ -319,11 +322,17 @@ impl FileStore {
         let read = done.iter().filter(|d| d.3).count();
         // A kept file is gone only when its folder was looked through: one on a drive that's away now (unplugged or
         // asleep) is kept as it was, as curves.db keeps what it can't reach, and not read again when it's back (H-13).
+        // The same goes for a folder under it that couldn't be looked in, a link to a moved folder among them (M-4).
         let walked: Vec<&PathBuf> = roots.iter().filter(|r| r.is_dir()).collect();
         let listed: std::collections::HashSet<&str> = done.iter().map(|d| d.0.path.as_str()).collect();
         let gone: Vec<&String> = kept
             .keys()
-            .filter(|p| !listed.contains(p.as_str()) && walked.iter().any(|r| Path::new(p.as_str()).starts_with(r)))
+            .filter(|p| !listed.contains(p.as_str()))
+            .filter(|p| {
+                let p = Path::new(p.as_str());
+                // Under a folder looked through and not one that couldn't be; or under no folder at all now (X1-2).
+                (under_any(p, walked.iter().copied()) && !under_any(p, &unread)) || (every_root && !under_any(p, roots))
+            })
             .collect();
         drop(listed);
         // Nothing read and nothing gone: the store is as it should be, so it isn't written.
@@ -406,11 +415,24 @@ enum Damage {
     Busy(String),
 }
 
+fn under_any<'a>(p: &Path, folders: impl IntoIterator<Item = &'a PathBuf>) -> bool {
+    folders.into_iter().any(|f| p.starts_with(f))
+}
+
 /// The preset files under `roots` and their templates, through the store at `store` when it can be opened (`Err`
-/// says why not: every file is then read, as before).
+/// says why not: every file is then read, as before). Files kept from folders not in `roots` are left as they are.
 pub fn find(roots: &[PathBuf], store: &Path) -> (Found, Option<String>) {
+    find_in(roots, store, false)
+}
+
+/// [`find`] when `roots` are every folder the page looks in: files kept from any other folder are forgotten.
+pub fn find_every(roots: &[PathBuf], store: &Path) -> (Found, Option<String>) {
+    find_in(roots, store, true)
+}
+
+fn find_in(roots: &[PathBuf], store: &Path, every_root: bool) -> (Found, Option<String>) {
     match FileStore::open(store) {
-        Ok(mut s) => (s.find(roots), None),
+        Ok(mut s) => (s.find(roots, every_root), None),
         Err(e) => {
             let files = crate::library::find_preset_files(roots);
             let templates = bw::templates(&files);
@@ -502,6 +524,55 @@ mod tests {
         std::fs::rename(&hidden, &away).expect("rename back");
         let (third, _) = find(&roots, &store);
         assert_eq!((third.files.len(), third.read), (2, 0), "back, and not read again");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_folder_no_longer_looked_in_is_forgotten_only_when_every_folder_is_given() {
+        let dir = folder("dropped");
+        let (one, two) = (dir.join("one"), dir.join("two"));
+        std::fs::create_dir_all(&one).expect("folders");
+        std::fs::create_dir_all(&two).expect("folders");
+        std::fs::write(one.join("Lead.fxp"), fxp(b"Abcd", "Lead")).expect("write");
+        std::fs::write(two.join("Pad.fxp"), fxp(b"Abcd", "Pad")).expect("write");
+        let store = dir.join("data").join(FILE_NAME);
+        let rows = || -> i64 {
+            Connection::open(&store)
+                .and_then(|c| c.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)))
+                .expect("rows")
+        };
+        find_every(&[one.clone(), two.clone()], &store);
+        assert_eq!(rows(), 2);
+        // Some of the folders only (Send to Bitwig's look): the other's files stay.
+        find(std::slice::from_ref(&one), &store);
+        assert_eq!(rows(), 2);
+        // Every folder the page looks in, and two isn't one now: its file goes (X1-2).
+        find_every(std::slice::from_ref(&one), &store);
+        assert_eq!(rows(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn files_behind_a_link_to_a_folder_thats_away_are_kept() {
+        let dir = folder("link");
+        let (root, moved) = (dir.join("root"), dir.join("moved"));
+        std::fs::create_dir_all(&root).expect("folders");
+        std::fs::create_dir_all(&moved).expect("folders");
+        std::fs::write(moved.join("Pad.fxp"), fxp(b"Abcd", "Pad")).expect("write");
+        std::os::unix::fs::symlink(&moved, root.join("Synth")).expect("link");
+        let store = dir.join("data").join(FILE_NAME);
+        let roots = [root.clone()];
+        let (first, _) = find_every(&roots, &store);
+        assert_eq!(first.files.len(), 1);
+        // The drive the folder moved to is away: the link leads nowhere, and its file is kept (M-4).
+        let away = dir.join("moved-away");
+        std::fs::rename(&moved, &away).expect("rename");
+        let (second, _) = find_every(&roots, &store);
+        assert_eq!(second.files.len(), 0);
+        std::fs::rename(&away, &moved).expect("rename back");
+        let (third, _) = find_every(&roots, &store);
+        assert_eq!((third.files.len(), third.read), (1, 0), "back, and not read again");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

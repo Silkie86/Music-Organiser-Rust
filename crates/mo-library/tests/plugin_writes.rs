@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use chrono::{NaiveDate, NaiveDateTime};
 use mo_library::Library;
-use mo_library::plugin_writes::{Measure, recheck_installed, write};
+use mo_library::plugin_writes::{Measure, measures_kept, read_again_kept, recheck_installed, write};
 use mo_library::plugins::{StoredFolder, StoredSpace};
 use mo_library::songs_db::{self, State};
 use rusqlite::Connection;
@@ -104,14 +104,19 @@ fn saves_plugins_are_looked_at_again_when_the_installed_plugins_or_rules_change(
          INSERT INTO plugins (project_id, name, vendor, format, path, installed) VALUES
              (7, 'Smack Attack Stereo', 'Waves', 'VST3', '', 0),
              (7, 'Gone Synth', 'Nobody', 'VST3', '', 0),
-             (7, 'Serum', 'Xfer Records', 'VST3', '', 0);",
+             (7, 'Serum', 'Xfer Records', 'VST3', '', 0),
+             (NULL, 'Serum', 'Xfer Records', 'AU', '', 0);",
     )
     .unwrap();
     let measured = Measure { installed: vec!["WaveShell1-VST3 15.5_x64".into(), "Serum".into()], spaces: Vec::new() };
+    let before = measures_kept();
     write(&path, &measured).unwrap();
+    // The Songs watch sees a measure was kept, and looks again (review G-3).
+    assert!(measures_kept() > before);
 
     let r = recheck_installed(&path).unwrap();
     assert!(r.looked);
+    assert!(r.to_read.is_empty(), "nothing marked installed was missed: {:?}", r.to_read);
     // Smack Attack is in the WaveShell and Serum is installed now: only Gone Synth is missing.
     assert_eq!(r.missing, [(7, 1)]);
     let flags: Vec<(String, i64)> = conn
@@ -121,7 +126,11 @@ fn saves_plugins_are_looked_at_again_when_the_installed_plugins_or_rules_change(
         .unwrap()
         .collect::<Result<_, _>>()
         .unwrap();
-    assert_eq!(flags, [("Gone Synth".into(), 0), ("Serum".into(), 1), ("Smack Attack Stereo".into(), 1)]);
+    // A row with no save is flipped too, though no save's count changes (review of #406).
+    assert_eq!(
+        flags,
+        [("Gone Synth".into(), 0), ("Serum".into(), 1), ("Serum".into(), 1), ("Smack Attack Stereo".into(), 1)]
+    );
     assert_eq!(Library::open_read_only(&path).unwrap().detail(7).unwrap().unwrap().save.missing_plugins, 1);
 
     // Nothing changed since: not looked at again.
@@ -129,10 +138,15 @@ fn saves_plugins_are_looked_at_again_when_the_installed_plugins_or_rules_change(
     assert!(!again.looked && again.missing.is_empty());
 
     // Serum removed: looked at again, but a plugin marked installed is never marked missing here (the library doesn't
-    // keep the id a save may have found it by); its save shows it when it's read again.
+    // keep the id a save may have found it by); its save is named to be read again, and shows it then (review P-2).
     write(&path, &Measure { installed: vec!["WaveShell1-VST3 15.5_x64".into()], spaces: Vec::new() }).unwrap();
     let removed = recheck_installed(&path).unwrap();
     assert!(removed.looked && removed.missing.is_empty());
+    assert_eq!(removed.to_read, [7]);
+    // Kept with the look: the app closing before it's read names it again at the next start, until it's kept.
+    assert_eq!(recheck_installed(&path).unwrap().to_read, [7]);
+    read_again_kept(&path, &[7]).unwrap();
+    assert!(recheck_installed(&path).unwrap().to_read.is_empty());
 }
 
 #[test]

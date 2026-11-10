@@ -78,6 +78,58 @@ fn a_bitwig_clip_plays_from_its_start_marker() {
     assert_eq!(notes(&a, 0, 0), [(1.0, 2.0, 36), (2.0, 0.5, 36), (5.0, 1.0, 36)]);
 }
 
+#[test]
+fn a_bitwig_clip_with_a_far_start_marker_is_read_at_once() {
+    // Review B-1: a play start far after a short loop walked pass by pass. One far beyond what an arrangement holds
+    // (a damaged file) is left out, so the clip plays from its loop's start.
+    let clip = |play_start: f64, loop_beats: f64| {
+        let bytes = bitwig_project(|b| {
+            track(
+                b,
+                "Beat",
+                None,
+                |b| {
+                    b.obj(ARRANGER);
+                    b.begin(0x511);
+                    b.list(ITEMS);
+                    note_clip_from(b, 0.0, 4.0, true, loop_beats, Some(play_start));
+                    b.end_list();
+                    b.end();
+                },
+                |_| {},
+            );
+        });
+        read("Far.bwproject", &bytes)
+    };
+    let started = std::time::Instant::now();
+    assert_eq!(notes(&clip(1.7e100, 4.0), 0, 0), [(0.0, 0.5, 36), (3.0, 1.0, 36)]);
+    // A quarter-beat loop a million beats before: the kick on every pass, found without walking there.
+    assert_eq!(notes(&clip(1.0e6, 0.25), 0, 0).len(), 16);
+    assert!(started.elapsed().as_secs() < 5);
+}
+
+#[test]
+fn a_bitwig_loop_far_beyond_the_arrangement_is_not_moved_to_the_start() {
+    // Review of #406: a loop start left out as damaged doesn't become a loop at 0 the file doesn't hold.
+    let bytes = bitwig_project(|b| {
+        track(
+            b,
+            "Beat",
+            None,
+            |b| {
+                b.obj(ARRANGER);
+                b.begin(0x511);
+                b.list(ITEMS);
+                note_clip_loop_at(b, 0.0, 8.0, true, 5.0e7, 4.0, None);
+                b.end_list();
+                b.end();
+            },
+            |_| {},
+        );
+    });
+    assert_eq!(notes(&read("FarLoop.bwproject", &bytes), 0, 0), [(0.0, 0.5, 36), (3.0, 2.0, 36)]);
+}
+
 /// [`note_clip`] with a loop `loop_beats` long; returns the clip's number, for references.
 fn note_clip_looping(b: &mut BwWriter, start: f64, length: f64, looping: bool, loop_beats: f64) -> u32 {
     note_clip_from(b, start, length, looping, loop_beats, None)
@@ -89,6 +141,19 @@ fn note_clip_from(
     start: f64,
     length: f64,
     looping: bool,
+    loop_beats: f64,
+    play_start: Option<f64>,
+) -> u32 {
+    note_clip_loop_at(b, start, length, looping, 0.0, loop_beats, play_start)
+}
+
+/// [`note_clip_from`] whose loop starts at `loop_at`.
+fn note_clip_loop_at(
+    b: &mut BwWriter,
+    start: f64,
+    length: f64,
+    looping: bool,
+    loop_at: f64,
     loop_beats: f64,
     play_start: Option<f64>,
 ) -> u32 {
@@ -124,7 +189,7 @@ fn note_clip_from(
     b.bool(0x991, looping);
     b.obj(0x992);
     b.begin(0x504);
-    b.f64(START, 0.0);
+    b.f64(START, loop_at);
     b.f64(DURATION, loop_beats);
     b.end();
     if let Some(at) = play_start {

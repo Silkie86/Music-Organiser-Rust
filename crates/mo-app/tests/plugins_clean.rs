@@ -2,6 +2,7 @@
 //! own fixtures folder under fixed names. The bin is a folder there too, never the computer's Recycle Bin.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+use mo_app::space_bin::BIN;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs;
@@ -201,7 +202,7 @@ fn clean_up_sends_what_may_go_to_the_bin_and_puts_it_back() {
     assert!(left[0].path.ends_with("Arcade Kits"));
 
     // Put back.
-    assert_eq!(binned_text(&[&done]), format!("Clean up sent 2 folders to the Recycle Bin ({}).", size_text(6000)));
+    assert_eq!(binned_text(&[&done]), format!("Clean up sent 2 folders to the {BIN} ({}).", size_text(6000)));
     let problems = undo(&done, &bin);
     assert!(problems.is_empty());
     assert!(docs.join("Arcade Library/loop.wav").exists() && docs.join("Arcade Presets/a.fxp").exists());
@@ -241,7 +242,7 @@ fn what_didnt_come_back_stays_to_try_again() {
     // One removed for good isn't said to be in the Recycle Bin.
     let mut gone = both.clone();
     gone.problems = vec![Problem { path: "D:/A".into(), why: NOT_IN_BIN.into() }];
-    assert!(done_text(&gone).0.contains("1 folder is in the Recycle Bin"), "{}", done_text(&gone).0);
+    assert!(done_text(&gone).0.contains(&format!("1 folder is in the {BIN}")), "{}", done_text(&gone).0);
     assert!(
         done_text(&gone).0.ends_with(" 1 went but wasn't found there: the lines below say why."),
         "{}",

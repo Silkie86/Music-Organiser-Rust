@@ -4,6 +4,7 @@
 //! nothing under Program Files, nothing of yours, no sample a project uses). This only gathers what they need to know
 //! of your library and says what they found.
 
+use crate::space_bin::BIN;
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
@@ -213,7 +214,7 @@ pub fn freed_text(lines: &[CleanLine], ticks: &[bool]) -> String {
     let picked = picked(lines, ticks);
     if picked.is_empty() {
         if lines.iter().any(|l| l.stays.is_none()) {
-            "Tick what to send to the Recycle Bin.".to_owned()
+            format!("Tick what to send to the {BIN}.")
         } else {
             "Nothing here can go: each line says why.".to_owned()
         }
@@ -230,7 +231,7 @@ pub fn intro(inputs: &Inputs, lines: &[CleanLine]) -> String {
             inputs.ask.name
         );
     }
-    let mut s = "Tick what to remove. Everything goes to the Recycle Bin, so you can still put it back.".to_owned();
+    let mut s = format!("Tick what to remove. Everything goes to the {BIN}, so you can still put it back.");
     let presets_can_go = lines.iter().any(|l| l.stays.is_none() && l.folder.kind == SpaceKind::Presets);
     if inputs.ask.songs > 0 && presets_can_go {
         s.push_str(&format!(
@@ -253,7 +254,7 @@ pub fn done_text(done: &Done) -> (String, Vec<String>) {
     let head = if went == 0 {
         "Nothing was removed.".to_owned()
     } else if binned == 0 {
-        format!("Freed {}. None of it is in the Recycle Bin: the lines below say why.", size_text(done.bytes()))
+        format!("Freed {}. None of it is in the {BIN}: the lines below say why.", size_text(done.bytes()))
     } else {
         // What went but Windows removed for good counts in what was sent, as on Space, and says so.
         let lost = match lost {
@@ -262,7 +263,7 @@ pub fn done_text(done: &Done) -> (String, Vec<String>) {
             n => format!(" {n} went but weren't found there: the lines below say why."),
         };
         format!(
-            "Sent {}: {} in the Recycle Bin, so you can put {} back.{lost}",
+            "Sent {}: {} in the {BIN}, so you can put {} back.{lost}",
             size_text(done.bytes()),
             {
                 let (one, many) = things(done.removed.iter());
@@ -323,7 +324,7 @@ pub fn binned_text(dones: &[&Done]) -> String {
     let bytes = dones.iter().fold(0u64, |a, d| a.saturating_add(d.bytes()));
     let (one, many) = things(dones.iter().flat_map(|d| d.removed.iter()));
     let who = if one == "plugin file" { "Uninstall" } else { "Clean up" };
-    format!("{who} sent {} to the Recycle Bin ({}).", plural(n, one, many), size_text(bytes))
+    format!("{who} sent {} to the {BIN} ({}).", plural(n, one, many), size_text(bytes))
 }
 
 /// What the things removed are called: plugin files when all of them are (Uninstall's), folders otherwise.
@@ -346,12 +347,17 @@ pub fn recheck_failed_text(name: &str, why: &str) -> String {
 }
 
 /// What the card says when Clean up stopped part way on a bug.
-pub const STOPPED_PART_WAY: &str =
-    "Clean up stopped part way on something it didn't expect (the log says what). What went is in the Recycle Bin.";
+pub fn stopped_part_way() -> String {
+    format!("Clean up stopped part way on something it didn't expect (the log says what). What went is in the {BIN}.")
+}
 
 /// What the card says when Put back stopped on a bug.
-pub const PUT_BACK_STOPPED: &str = "Put back stopped on something it didn't expect (the log says what). What didn't come back is still in the \
-     Recycle Bin.";
+pub fn put_back_stopped() -> String {
+    format!(
+        "Put back stopped on something it didn't expect (the log says what). What didn't come back is still in the \
+         {BIN}."
+    )
+}
 
 /// `why` ending in a full stop.
 fn sentence(why: &str) -> String {

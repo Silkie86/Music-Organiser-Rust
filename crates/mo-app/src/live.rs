@@ -76,6 +76,14 @@ pub struct Live {
     kept_as: HashMap<i64, String>,
     /// Reading again the saves whose "muted" sample marks were lost ([`song_writes::to_mend`]).
     mend: Mend,
+    /// How many plugin measures had been kept when the installed plugins were last read
+    /// ([`plugin_writes::measures_kept`]).
+    measures_seen: u64,
+    /// Unchanged saves to read again because a plugin marked installed in them isn't found now
+    /// ([`plugin_writes::Rechecked::to_read`], review P-2): their own read says whether it's missing.
+    reread: HashSet<i64>,
+    /// Those read again, to take off the library's note once they're kept ([`plugin_writes::read_again_kept`]).
+    reread_put: HashSet<i64>,
 }
 
 /// Where reading again the saves whose "muted" sample marks were lost is (review finding A-1): looked for once a start,
@@ -231,6 +239,9 @@ impl Live {
             to_mark: BTreeSet::new(),
             kept_as,
             mend: Mend::NotLooked,
+            measures_seen: plugin_writes::measures_kept(),
+            reread: HashSet::new(),
+            reread_put: HashSet::new(),
         })
     }
 
@@ -269,9 +280,12 @@ impl Live {
     }
 
     /// The saves whose read failed last time, to read again a moment later; None when there are none.
+    /// Also Some (with nothing in it) when the Plugins page measured your plugins since the last look, so
+    /// [`Live::update`] looks again at which are installed while no project file changes (review G-3).
     pub fn retries(&mut self) -> Option<Changes> {
         let files: Vec<String> = self.retry.keys().cloned().collect();
-        (!files.is_empty()).then_some(Changes { files, ..Changes::default() })
+        (!files.is_empty() || self.measures_seen != plugin_writes::measures_kept())
+            .then_some(Changes { files, ..Changes::default() })
     }
 
     /// Walks every project folder once, as the C# app's scan did at its start: saves made or changed while the app was
@@ -306,14 +320,20 @@ impl Live {
     /// changed. Saves read from now on use the installed plugins as they are now. One that can't be looked at is
     /// looked at again at the next start.
     fn recheck_installed(&mut self) -> usize {
-        let Some(songs_db) = &self.writes else { return 0 };
+        // Taken before the look, so a measure kept meanwhile is looked at next time; only kept once the look worked,
+        // so one that failed is tried again at the next batch.
+        let measures = plugin_writes::measures_kept();
+        let Some(songs_db) = &self.writes else {
+            self.measures_seen = measures;
+            return 0;
+        };
         let r = match plugin_writes::recheck_installed(songs_db) {
-            Ok(r) => r,
+            Ok(r) => {
+                self.measures_seen = measures;
+                r
+            }
             Err(e) => {
-                crate::log::warning(
-                    "Songs",
-                    &format!("{e}; which plugins are installed is looked at again next start"),
-                );
+                crate::log::warning("Songs", &format!("{e}; which plugins are installed is looked at again later"));
                 return 0;
             }
         };
@@ -327,13 +347,26 @@ impl Live {
             );
         }
         self.installed = r.installed;
+        if !r.to_read.is_empty() {
+            let listed: HashSet<i64> = self.saves.iter().map(|s| s.id).collect();
+            let before = self.reread.len();
+            self.reread.extend(r.to_read.into_iter().filter(|id| listed.contains(id)));
+            crate::log::info(
+                "Songs",
+                &format!(
+                    "{} saves name a plugin that isn't found by its name or file now: read again to see if it's missing",
+                    self.reread.len() - before
+                ),
+            );
+        }
         let mut missing: HashMap<i64, u32> = r.missing.into_iter().collect();
         if r.looked {
             // Saves read but not kept yet were read against the installed plugins as they were: judged again too, so
             // keeping them doesn't put the old marks back.
             let mut held = self.details.lock().unwrap_or_else(PoisonError::into_inner);
             for d in held.values_mut() {
-                for p in d.plugins.iter_mut().filter(|p| !p.installed) {
+                let mut read_again = false;
+                for p in d.plugins.iter_mut() {
                     let named = PluginRef {
                         name: p.name.clone(),
                         vendor: p.vendor.clone(),
@@ -342,7 +375,16 @@ impl Live {
                         path: p.path.clone(),
                         ..PluginRef::default()
                     };
-                    p.installed = self.installed.has(&named);
+                    let has = self.installed.has(&named);
+                    if !p.installed {
+                        p.installed = has;
+                    } else if !has {
+                        // Found by an id it no longer has, perhaps: its own read judges it again (review P-2).
+                        read_again = true;
+                    }
+                }
+                if read_again {
+                    self.reread.insert(d.save.id);
                 }
                 let now = u32::try_from(d.plugins.iter().filter(|p| !p.installed).count()).unwrap_or(u32::MAX);
                 if now != d.save.missing_plugins {
@@ -428,6 +470,25 @@ impl Live {
         drop(details);
         self.to_put.clear();
         self.to_mark.clear();
+        // Saves read again for a plugin that isn't found now, kept: off the library's note of them (review P-2). One
+        // not taken off is only read again at the next start.
+        let read_again: Vec<i64> = self
+            .saves
+            .iter()
+            .filter(|s| self.reread_put.contains(&s.id) && !held.contains(&case::key(&s.path)))
+            .map(|s| s.id)
+            .collect();
+        if !read_again.is_empty() {
+            for id in &read_again {
+                self.reread_put.remove(id);
+            }
+            if let Err(e) = plugin_writes::read_again_kept(&songs_db, &read_again) {
+                crate::log::warning(
+                    "Songs",
+                    &format!("{e}; the saves read again for their plugins are read again next start"),
+                );
+            }
+        }
         if kept.written.mended {
             self.mend = Mend::Done;
         } else if let Mend::Reading { missed, .. } = &mut self.mend
@@ -512,7 +573,17 @@ impl Live {
     /// thread; the walking and reading are spread over the app's low-priority threads.
     pub fn update(&mut self, changes: &Changes) -> Updated {
         let mut done = Updated::default();
+        // The Plugins page measured your plugins since: saves are judged against what it found from now on (review G-3).
+        if self.measures_seen != plugin_writes::measures_kept() {
+            done.rechecked += self.recheck_installed();
+        }
         let mut paths: Vec<String> = changes.files.clone();
+        // Saves naming a plugin that isn't found now are read again, changed or not (review P-2).
+        if !self.reread.is_empty() {
+            paths.extend(
+                self.saves.iter().filter(|s| !s.file_missing && self.reread.contains(&s.id)).map(|s| s.path.clone()),
+            );
+        }
         // A path that went and may have been a folder: the saves listed inside it are looked at (the ones that went
         // are marked missing below), with no walk.
         if !changes.went.is_empty() {
@@ -567,7 +638,7 @@ impl Live {
                     && s.mtime == scan::mtime(meta)
                     && s.size == i64::try_from(meta.len()).unwrap_or(i64::MAX)
             });
-            if unchanged && listed.is_some_and(|s| self.mend.has(s.id)) {
+            if unchanged && listed.is_some_and(|s| self.mend.has(s.id) || self.reread.contains(&s.id)) {
                 mends.insert(path.clone());
                 return true;
             }
@@ -602,6 +673,7 @@ impl Live {
                     // Can't be read: it keeps what the library has.
                     if let Some(s) = at.and_then(|i| self.saves.get(i)) {
                         self.mend.tried(s.id, false);
+                        self.reread.remove(&s.id);
                     }
                 }
                 if at.and_then(|i| self.saves.get(i)).is_some_and(|s| s.error.is_none() && !s.file_missing) {
@@ -631,6 +703,9 @@ impl Live {
                         done.read.push(detail.save.name.clone());
                     }
                     self.mend.tried(old.id, true);
+                    if self.reread.remove(&old.id) {
+                        self.reread_put.insert(old.id);
+                    }
                     self.to_put.insert(old.id);
                     self.to_mark.remove(&old.id);
                     self.saves[i] = detail.save.clone();
@@ -675,7 +750,7 @@ impl Live {
                 mtime: s.mtime,
                 missing: s.file_missing,
                 // A missing save whose file is back is read again, even unchanged, as is one to mend.
-                reread: s.file_missing || self.mend.has(s.id),
+                reread: s.file_missing || self.mend.has(s.id) || self.reread.contains(&s.id),
             })
             .collect();
         let plan = scan::plan(&found, &known, &self.roots, &|_| false, false);
@@ -857,6 +932,9 @@ mod tests {
             to_mark: BTreeSet::new(),
             kept_as: HashMap::new(),
             mend: Mend::NotLooked,
+            measures_seen: plugin_writes::measures_kept(),
+            reread: HashSet::new(),
+            reread_put: HashSet::new(),
         }
     }
 
@@ -871,6 +949,19 @@ mod tests {
             mtime: 1_700_000_000 + id,
             ..Save::default()
         }
+    }
+
+    #[test]
+    fn a_plugin_measure_wakes_the_watch_with_no_file_changed() {
+        // Review G-3 (and of #406): the Songs watch only calls update when it has something, so a measure kept while
+        // no project file changes is one too; looked at once, then not again.
+        let mut l = live(Vec::new());
+        assert!(l.retries().is_none());
+        l.measures_seen = plugin_writes::measures_kept().wrapping_add(1);
+        let woke = l.retries().expect("a measure to look at");
+        assert!(woke.files.is_empty());
+        l.update(&woke);
+        assert!(l.retries().is_none());
     }
 
     #[test]
@@ -994,6 +1085,13 @@ mod tests {
         let mut next = open();
         assert_eq!(next.saves.len(), 1);
         assert!(next.catch_up().is_empty());
+        // Named to read again (a plugin marked installed in it isn't found now, review P-2): read unchanged, not on
+        // the card, then not again.
+        next.reread.insert(next.saves[0].id);
+        assert_eq!(next.update(&Changes::default()).mended, 1);
+        assert!(next.reread.is_empty());
+        assert!(next.update(&Changes::default()).is_empty());
+        next.keep();
         // Gone while the app was closed: missing, and kept so.
         std::fs::remove_file(projects.join("Night_1.flp")).unwrap();
         assert_eq!(next.catch_up().gone, 1);

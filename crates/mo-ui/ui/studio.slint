@@ -169,6 +169,10 @@ export global AppKeys {
     // Bumped by Ctrl+F (app.search): the page on show puts the keys in its search box. Only the page on show is there
     // to see it change.
     in-out property <int> search;
+    // Whether this window is the one in front, with the keys (set as the system says so, before Slint hears of it). A
+    // text box loses the keys while another app's window is in front and gets them back after: a page doesn't count
+    // that as the keys going to another part of the window.
+    in-out property <bool> window-active: true;
     // A key a page's search box would only use to move its cursor (Up or Down with Ctrl, Alt or Meta, in one line of
     // text), passed on to the app's shortcuts, so Ctrl+Up and Ctrl+Down step through the list even while you type:
     // whether it ran. The text and Ctrl, Shift, Alt, Meta and repeat, as the window's own `key`.
@@ -636,6 +640,8 @@ export component SearchBox inherits Rectangle {
     // The page's own search, not a box for a name: Ctrl+Up and Ctrl+Down step through the page's list from it, and Esc
     // goes on to the app's keys (the page's next step back), as anywhere on the page.
     in property <bool> page-search;
+    // Whether the keys are in it: a page gives them back to its list when a box for a name goes (on a card).
+    out property <bool> has-keys: input.has-focus;
     callback edited(string);
     // Down and Enter go to the page first (and Esc, in a box that isn't the page's search); it returns true when it
     // used the key.
@@ -920,6 +926,33 @@ component MenuChipFace inherits Rectangle {
     }
 }
 
+// The lines of a menu that picks one of a list: the first line (`none-text`, unless `has-none` is off) picks "", the
+// one picked (`value`) is ticked, and a list longer than 16 lines scrolls (with the wheel over it, or its bar). Only the
+// lines in sight are made, so a list of thousands (every plugin maker, say) opens at once instead of the window laying
+// out every line first. MenuChip's menu, and PickButton's.
+component PickLines inherits MenuCard {
+    in property <[string]> choices;
+    in property <string> value;
+    in property <bool> has-none: true;
+    in property <string> none-text: "Any";
+    callback picked(string);
+    if root.has-none: MenuLine {
+        text: root.none-text;
+        on: root.value == "";
+        tickable: true;
+        clicked => { root.picked(""); }
+    }
+    if root.choices.length > 0: ListView {
+        height: min(root.choices.length, 16) * 32px;
+        for c in root.choices: MenuLine {
+            text: c;
+            on: root.value == c;
+            tickable: true;
+            clicked => { root.picked(c); }
+        }
+    }
+}
+
 // A chip that picks one of a list, like "DAW: FL Studio". "Any" clears it. In its menu the one that's picked is
 // ticked, and a list longer than 16 lines scrolls (with the wheel over it, or its bar).
 export component MenuChip inherits MenuChipFace {
@@ -936,29 +969,14 @@ export component MenuChip inherits MenuChipFace {
         width: max(root.width, 220px);
         // Scrolling (or dragging its bar) keeps it open; picking a line closes it.
         close-policy: close-on-click-outside;
-        MenuCard {
-            if root.has-any: MenuLine {
-                text: root.any-text;
-                on: root.value == "";
-                tickable: true;
-                clicked => {
-                    menu.close();
-                    root.picked("");
-                }
-            }
-            // At most 16 lines show and the rest scroll: only the lines in sight are made, so a list of thousands
-            // (every plugin maker, say) opens at once instead of the window laying out every line first.
-            if root.choices.length > 0: ListView {
-                height: min(root.choices.length, 16) * 32px;
-                for c in root.choices: MenuLine {
-                    text: c;
-                    on: root.value == c;
-                    tickable: true;
-                    clicked => {
-                        menu.close();
-                        root.picked(c);
-                    }
-                }
+        PickLines {
+            choices: root.choices;
+            value: root.value;
+            has-none: root.has-any;
+            none-text: root.any-text;
+            picked(c) => {
+                menu.close();
+                root.picked(c);
             }
         }
     }
@@ -1393,10 +1411,16 @@ export component TagChip inherits HorizontalLayout {
 }
 
 // A small box to type a word or two into on a card, like a new tag: its hint shows while it's empty, Enter says it's
-// done, and Esc clears what's typed (then goes on to the app's keys).
+// done, and Esc clears what's typed (then goes on to the app's keys). Its key (Ctrl+T for a tag) shows in its tooltip,
+// as keys never show on the page.
 export component WordBox inherits Rectangle {
     in property <string> hint;
+    // The tooltip and the key from the shortcut list, if it has one.
+    in property <string> tip;
+    in property <string> key;
     in-out property <string> text <=> input.text;
+    // Whether the keys are in it: a page gives them back to its list when it goes (it's on a card that can close).
+    out property <bool> has-keys: input.has-focus;
     callback accepted(string);
     forward-focus: input;
     height: 28px;
@@ -1405,34 +1429,46 @@ export component WordBox inherits Rectangle {
     border-color: input.has-focus ? Theme.accent : Theme.edge;
     background: Theme.well;
     animate border-color { duration: Motion.tap; }
-    Text {
-        x: Space.md;
-        width: parent.width - 2 * Space.md;
-        height: parent.height;
-        text: root.hint;
-        visible: input.text == "";
-        color: Theme.faint;
-        font-size: Type.meta;
-        vertical-alignment: center;
-        overflow: elide;
-    }
-    input := TextInput {
-        x: Space.md;
-        width: parent.width - 2 * Space.md;
-        height: parent.height;
-        color: Theme.text;
-        font-size: Type.meta;
-        vertical-alignment: center;
-        single-line: true;
-        selection-background-color: Theme.accent.transparentize(60%);
-        accepted => { root.accepted(self.text); }
-        key-pressed(event) => {
-            if (event.text == Key.Escape && self.text != "") {
-                self.text = "";
-                return accept;
-            }
-            reject
+    // Only to know the mouse is over it, for the tooltip: the box under it gets the clicks first. A click at its rim
+    // (around the words) puts the keys in the box too.
+    hover := TouchArea {
+        clicked => { input.focus(); }
+        Text {
+            x: Space.md;
+            width: parent.width - 2 * Space.md;
+            height: parent.height;
+            text: root.hint;
+            visible: input.text == "";
+            color: Theme.faint;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            overflow: elide;
         }
+        input := TextInput {
+            x: Space.md;
+            width: parent.width - 2 * Space.md;
+            height: parent.height;
+            color: Theme.text;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            single-line: true;
+            selection-background-color: Theme.accent.transparentize(60%);
+            accepted => { root.accepted(self.text); }
+            key-pressed(event) => {
+                if (event.text == Key.Escape && self.text != "") {
+                    self.text = "";
+                    return accept;
+                }
+                reject
+            }
+        }
+    }
+    // Not while you type in it: it would cover what's under the box.
+    Tip {
+        text: root.tip;
+        key: root.key;
+        hovering: hover.has-hover && !input.has-focus;
+        at-y: root.height + Space.xs;
     }
 
     // A key asked for it (Ctrl+T for a tag): the keys come here, with anything typed picked.
@@ -2215,6 +2251,37 @@ export component MenuButton inherits StudioButton {
             chosen(id) => {
                 button-menu.close();
                 root.chosen(id);
+            }
+        }
+    }
+}
+
+// A button that picks one of a list for what's on a card, like "Your type: Snare": its name and what's picked, as a
+// MenuChip says them, with the same menu, but in a button's look. A chip lit with a value is a filter that's on (or one
+// of a list's options), and what a card's thing is filters nothing (the whole-app review of 10 Nov, X3-10).
+export component PickButton inherits StudioButton {
+    in property <string> name;
+    // What's picked; "" for none.
+    in property <string> value;
+    in property <[string]> choices;
+    // What the menu's first line says: it picks "".
+    in property <string> none-text: "Any";
+    callback picked(string);
+    text: root.value == "" ? root.name : root.name + ": " + root.value;
+    menu: true;
+    clicked => { pick-menu.show(); }
+    pick-menu := PopupWindow {
+        x: 0;
+        y: root.height + Space.xs;
+        width: max(root.width, 220px);
+        close-policy: close-on-click-outside;
+        PickLines {
+            choices: root.choices;
+            value: root.value;
+            none-text: root.none-text;
+            picked(c) => {
+                pick-menu.close();
+                root.picked(c);
             }
         }
     }

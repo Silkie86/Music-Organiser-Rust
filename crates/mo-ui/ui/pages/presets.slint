@@ -461,6 +461,8 @@ component PresetPanel inherits SidePanel {
 // The picked curve: its shape large, its name (rename in place), what can be done with it and where it was found.
 component CurvePanel inherits SidePanel {
     close => { PresetsData.curve-select(-1); }
+    // Whether the rename box has the keys: when it goes with them, the page gives them back to its list.
+    in-out property <bool> rename-keys;
     Caps { text: PresetsData.curve-card.hidden ? "CURVE · HIDDEN" : "CURVE"; }
     if !PresetsData.renaming: Text {
         text: PresetsData.curve-card.name;
@@ -474,7 +476,18 @@ component CurvePanel inherits SidePanel {
     if PresetsData.renaming: rename := SearchBox {
         hint: "A name for this curve";
         text <=> PresetsData.rename-text;
-        init => { self.focus(); }
+        // It takes the keys as it's made, and a change handler starts from what `init` leaves, so the one below would
+        // never see them come: it's said here, and the handler sees them go (or come back).
+        init => {
+            self.focus();
+            root.rename-keys = true;
+        }
+        // Not while another app's window is in front: the box gets them back with the window.
+        changed has-keys => {
+            if (self.has-keys || AppKeys.window-active) {
+                root.rename-keys = self.has-keys;
+            }
+        }
         key(k) => {
             if (k == Key.Return) {
                 PresetsData.rename-done(PresetsData.rename-text);
@@ -567,6 +580,17 @@ export component PresetsPage inherits Rectangle {
     // Ctrl+F (app.search): the keys go to the search box, its words picked so typing replaces them (review X3-22).
     property <int> search-asked: AppKeys.search;
     changed search-asked => { search-box.focus-all(); }
+    // A curve's rename box had the keys as it went (Enter or Esc in it, or its card closed): nothing had them then, so
+    // no key worked until a click (the whole-app review of 10 Nov, U-1). They come back to the list. Only then: a box
+    // that goes while the keys are elsewhere (in the search, say) leaves them there.
+    property <bool> rename-keys;
+    property <bool> renaming: PresetsData.section == 1 && PresetsData.curve-panel-shown && PresetsData.renaming;
+    changed renaming => {
+        if (!self.renaming && self.rename-keys) {
+            self.rename-keys = false;
+            keys.focus();
+        }
+    }
 
     VerticalLayout {
         padding: Space.xl;
@@ -858,6 +882,7 @@ export component PresetsPage inherits Rectangle {
                 x: area.list-width + divider.width;
                 width: area.width - self.x;
                 height: parent.height;
+                rename-keys <=> root.rename-keys;
             }
             menu := RightClickMenu {
                 items: PresetsData.menu;

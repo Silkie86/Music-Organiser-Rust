@@ -22,7 +22,7 @@ use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak, mpsc};
 use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDateTime};
@@ -342,6 +342,19 @@ thread_local! {
 /// its own things from the disk first.
 const READ_AFTER: Duration = Duration::from_secs(3);
 
+/// Asks for the sample folders to be scanned again ([`sample_folders_changed`]), for the thread that reads the sounds:
+/// it takes them once its first read and scan are done ([`scans`]).
+static SCAN_AGAIN: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
+
+/// The sample folders changed in Settings (one was added): the page scans them again and takes the sounds it finds,
+/// as at start (the whole-app review of 10 Nov, X2-4: they waited for the next start, and nothing said so). Asked
+/// while the page's first read or a scan is still going, the folders are scanned once more after it, as they are
+/// then. Whether they will be, for Settings' note: not when the sounds were never read (there's no sound library, or
+/// these are the screenshots), nor when the page reads the old app's library rather than its own ([`scans`]).
+pub fn sample_folders_changed() -> bool {
+    SCAN_AGAIN.lock().unwrap_or_else(PoisonError::into_inner).as_ref().is_some_and(|again| again.send(()).is_ok())
+}
+
 /// The one player, made the first time something plays or Settings lists the outputs (nothing opens before a sound
 /// plays).
 static PLAYER: OnceLock<Player> = OnceLock::new();
@@ -635,6 +648,8 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
     }
     // Plays, drags and sends are kept from now on.
     let noter = did::connect(&sounds_db);
+    let (again, asked_again) = mpsc::channel();
+    *SCAN_AGAIN.lock().unwrap_or_else(PoisonError::into_inner) = Some(again);
     // Not at once: the first thing on show reads from the disk first. The sounds are read when this page, Space or
     // Ctrl+K wants them ([`wanted`]), or a few seconds after the window opens, whichever is first.
     let weak = app.as_weak();
@@ -665,12 +680,9 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
                 let mut on_show = on_show;
                 let daily = compact::backup::When::Daily;
                 let mended = back_up(&sounds_db, daily, true, &cards, on_show.as_mut(), Some(&noter), &send);
-                if let Some(mut on_show) = on_show
-                    && scan_for_sounds(&sounds_db, &library_db, &cards, &mut on_show, Some(&noter), &send)
-                {
-                    // A library that couldn't be mended just now isn't tried again until the next start.
-                    let now = compact::backup::When::Now;
-                    back_up(&sounds_db, now, mended, &cards, Some(&mut on_show), Some(&noter), &send);
+                if let Some(mut on_show) = on_show {
+                    let asked = &asked_again;
+                    scans(&sounds_db, &library_db, &cards, &mut on_show, Some(&noter), &send, asked, mended);
                 }
             };
             if let Err(e) = background::spawn("Sounds library", read)
@@ -699,7 +711,7 @@ pub fn wanted() {
 
 /// What every view says in the list's place when the sound library has no sounds in it (made, but nothing scanned
 /// into it yet): the words Rediscover has for it (`rediscover::why_nothing`). The page scans the sample folders at
-/// each start ([`scan_for_sounds`]).
+/// each start, and again when one is added in Settings ([`scans`]).
 const NO_SOUNDS: (&str, &str) = ("No sounds yet", "Add your sample folders in Settings and let the scan finish.");
 
 /// While the sounds are read, every view shows one word in the list's place: not "No sounds match" (nothing is
@@ -1019,15 +1031,9 @@ fn read_all(
         },
     };
     send_index(prints, &send);
-    let year_ago = now.checked_sub_months(chrono::Months::new(12)).unwrap_or(now);
     // How your songs use samples, with the file of each project counted (for the card's Used in list), read once:
     // counted again for the sounds read again after an update.
-    let uses = lib.and_then(|lib| {
-        lib.sample_usage_with_projects(year_ago, settings.rules)
-            .map_err(|e| log::warning("Sounds", &format!("Couldn't count how your songs use sounds: {e}")))
-            .ok()
-    });
-    let uses = uses.map(|u| (u.uses, Arc::new(u.projects)));
+    let uses = lib.and_then(|lib| uses_in(&lib, now, settings.rules));
     if let Some((uses, projects)) = &uses {
         send(Step::Used(Arc::new(with_usage(&list, usage_of(&list, uses), projects, &settings.weights))));
     }
@@ -1077,8 +1083,16 @@ fn read_all(
             Some(laid_out) => say_laid_out(&laid_out, card_for(job), began),
         }
     }
-    let mut on_show =
-        OnShow { list, uses, weights: settings.weights, source: first.source.clone(), new_since, analysed };
+    let mut on_show = OnShow {
+        list,
+        uses,
+        weights: settings.weights,
+        source: first.source.clone(),
+        new_since,
+        analysed,
+        rules: settings.rules,
+        recount: false,
+    };
     if !first.behind && remade.is_none() {
         return Some(on_show);
     }
@@ -1190,6 +1204,16 @@ fn scan_for_sounds(
     let k = &scanned.kept;
     let prints = if k.added + k.updated > 0 { PrintsAgain::Again } else { PrintsAgain::IfCountChanged };
     let now = Local::now().naive_local();
+    // How your songs use samples, let go while the page waited for this scan ([`scans`]): counted again, as they are.
+    if on_show.recount && on_show.uses.is_none() {
+        on_show.uses = match mo_library::Library::open_read_only(library_db) {
+            Ok(lib) => uses_in(&lib, now, on_show.rules),
+            Err(e) => {
+                log::warning("Sounds", &format!("Couldn't read the song library for how sounds are used: {e}"));
+                None
+            }
+        };
+    }
     let held = noter.map(Noter::hold);
     let holds = held.as_ref().map(Held::holds);
     match SoundsDb::open_read_only(&copy).and_then(|db| Ok((db.all(now)?, db))) {
@@ -1199,10 +1223,45 @@ fn scan_for_sounds(
     true
 }
 
+/// Scans the sample folders and the page takes what changed ([`scan_for_sounds`]), with a backup copy of the library
+/// after a scan that kept sounds: once at start, then each time Settings asks ([`sample_folders_changed`]), until the
+/// app closes. Asks already in when a scan starts are for the folders it reads, so one scan does them all. A library
+/// the backup finds damaged is mended ([`back_up`]) while `mend` says so: one that couldn't be mended isn't tried
+/// again until the next start.
+#[allow(clippy::too_many_arguments)]
+fn scans(
+    sounds_db: &Path,
+    library_db: &Path,
+    cards: &Feed,
+    on_show: &mut OnShow,
+    noter: Option<&Noter>,
+    send: &impl Fn(Step),
+    asked: &mpsc::Receiver<()>,
+    mut mend: bool,
+) {
+    // Only the app's own library takes new sounds ([`scan_for_sounds`]): on the old app's, nothing waits for Settings'
+    // asks, so its note says nothing of a scan.
+    let own = on_show.source == compact::copy_of(sounds_db);
+    loop {
+        while asked.try_recv().is_ok() {}
+        if scan_for_sounds(sounds_db, library_db, cards, on_show, noter, send) {
+            let now = compact::backup::When::Now;
+            mend &= back_up(sounds_db, now, mend, cards, Some(&mut *on_show), noter, send);
+        }
+        // Not kept while it waits, which may be all the time the app is open: how your songs use samples is read again
+        // by the next scan that keeps sounds (your songs may have changed by then too).
+        on_show.recount |= on_show.uses.take().is_some();
+        if !own || asked.recv().is_err() {
+            return;
+        }
+    }
+}
+
 /// What the page shows once its first read is done, for sounds read again to take its place ([`take_again`]): the
 /// list sent last, how your songs use samples (counted again for the sounds read again), the Most liked weights, where
 /// the sounds come from, the first number the app's own scan gave a sound ([`compact::grow::new_since`]), and how many
-/// analysed sounds CLAP could have heard.
+/// analysed sounds CLAP could have heard. `rules` count how your songs use samples, read again for a later scan when
+/// `recount` (the count was let go while the page waited for it: [`scans`]).
 struct OnShow {
     list: Arc<SoundList>,
     uses: Option<Uses>,
@@ -1210,10 +1269,21 @@ struct OnShow {
     source: PathBuf,
     new_since: Option<i64>,
     analysed: usize,
+    rules: UsageRules,
+    recount: bool,
 }
 
 /// How your songs use samples, and the file of each project counted.
 type Uses = (Vec<mo_library::SampleUse>, Arc<HashMap<i64, ProjectFile>>);
+
+/// How your songs in `lib` use samples, by `rules`, with what was saved in the year to `now` counted as recent.
+fn uses_in(lib: &mo_library::Library, now: NaiveDateTime, rules: UsageRules) -> Option<Uses> {
+    let year_ago = now.checked_sub_months(chrono::Months::new(12)).unwrap_or(now);
+    lib.sample_usage_with_projects(year_ago, rules)
+        .map(|u| (u.uses, Arc::new(u.projects)))
+        .map_err(|e| log::warning("Sounds", &format!("Couldn't count how your songs use sounds: {e}")))
+        .ok()
+}
 
 /// When [`take_again`] reads the sounds' fingerprints again too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1248,8 +1318,14 @@ fn take_again(
     });
     let analysed_now = mo_sounds::count_clap_could_hear(&sounds, on_show.new_since);
     let mut library = Library::new(sounds, played, &on_show.weights).read_holding(holds);
-    if let Some((uses, projects)) = &on_show.uses {
-        library.list = Arc::new(with_usage(&library.list, usage_of(&library.list, uses), projects, &on_show.weights));
+    // How your songs use each sound, as counted for this list; or when they couldn't be counted again, as the list on
+    // show has them (a sound new since then has none yet), so the Used chips and Most liked don't lose them.
+    let usage = match &on_show.uses {
+        Some((uses, projects)) => Some((usage_of(&library.list, uses), projects.clone())),
+        None => on_show.list.usage_map().cloned().zip(on_show.list.project_files().cloned()),
+    };
+    if let Some((usage, projects)) = usage {
+        library.list = Arc::new(with_usage(&library.list, usage, &projects, &on_show.weights));
     }
     let list = &on_show.list;
     // Where each sound on show is in the new list, when they aren't the same sounds in the same order: worked out
@@ -2132,14 +2208,17 @@ fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
         id: "play".into(),
         enabled: true,
     };
-    // Favourite has its heart on the card, and a line here (as in the C# app's menu).
+    // Favourite has its heart on the card, and a line here (as in the C# app's menu); Add a tag, its box on the card,
+    // which takes the keys (the review of 10 Nov, X3-6: its key shows here and in the box's tooltip, not on the card).
     let favourite = MenuItem {
         what: "Favourite, or not".into(),
         key: shortcuts.key_of(FAVOURITE).into(),
         id: FAVOURITE.into(),
         enabled: true,
     };
-    let mut menu = vec![play, favourite, MenuItem { enabled: true, ..MenuItem::default() }];
+    let tag =
+        MenuItem { what: "Add a tag…".into(), key: shortcuts.key_of(TAG).into(), id: TAG.into(), enabled: true };
+    let mut menu = vec![play, favourite, tag, MenuItem { enabled: true, ..MenuItem::default() }];
     let mut actions = Vec::new();
     for &(text, id) in CARD_ACTIONS {
         let key = SharedString::from(shortcuts.key_of(id));
@@ -2160,6 +2239,7 @@ fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
     data.set_play_key(shortcuts.key_of("app.play").into());
     data.set_favourite_key(shortcuts.key_of(FAVOURITE).into());
     data.set_tag_key(shortcuts.key_of(TAG).into());
+    data.set_tag_tip(what_of(TAG).into());
 }
 
 /// Favourite's and Add a tag's ids in the shortcut list (the C# app's).
@@ -3843,7 +3923,13 @@ mod tests {
 
     /// The cards' titles and lines, as the feed shows them now.
     fn cards_said(cards: &Feed) -> Vec<String> {
-        cards.visible(Instant::now()).iter().map(|c| format!("{}: {}", c.title, c.detail)).collect()
+        cards_said_at(cards, Instant::now())
+    }
+
+    /// The cards that showed at `at` or after: a done card goes by itself after a few seconds
+    /// ([`mo_app::activity::DONE_STAYS`]).
+    fn cards_said_at(cards: &Feed, at: Instant) -> Vec<String> {
+        cards.visible(at).iter().map(|c| format!("{}: {}", c.title, c.detail)).collect()
     }
 
     #[test]
@@ -3889,6 +3975,63 @@ mod tests {
         // Nothing new: nothing kept, nothing sent.
         assert!(!scan_for_sounds(&sounds_db, &library_db, &cards, &mut on_show, None, &send));
         assert!(steps.lock().map(|s| s.is_empty()).unwrap_or_default());
+    }
+
+    #[test]
+    fn a_sample_folder_added_while_the_app_is_open_is_scanned_and_its_sounds_taken() {
+        let sounds_db = sound_library("scan-again");
+        // The build's own fixtures folder, under a fixed name, as above.
+        let samples = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/tmp/mo-ui-sound-scan-again/Samples");
+        let _ = std::fs::remove_dir_all(&samples);
+        let folders = format!("[\"{}\"]", samples.to_string_lossy().replace('\\', "\\\\"));
+        let library_db = song_library("scan-again-songs.db", &[("sample_folders", &folders)]);
+        let write = |name: &str, seconds: f32, hz: f32| {
+            let wave: Vec<f32> = (0..(44_100.0 * seconds) as usize)
+                .map(|i| (i as f32 * hz * std::f32::consts::TAU / 44_100.0).sin())
+                .collect();
+            assert!(std::fs::create_dir_all(samples.join("Pack")).is_ok());
+            assert!(mo_audio::write_wav(&samples.join("Pack").join(name), &[wave], 44_100, 16).is_ok());
+        };
+        write("Kick 02.wav", 0.3, 60.0);
+        one_start(&sounds_db, &library_db, &Feed::default());
+        let cards = Feed::default();
+        let Some(mut on_show) = read_all(&sounds_db, &library_db, Some(cards.clone()), None, None, |_| {}) else {
+            panic!("no sounds read")
+        };
+        // The page's thread: its scan at start, then one for each ask from Settings, until the app closes. Its cards
+        // are read as they stood from now: two scans and two backups can take longer than a done card stays.
+        let began = Instant::now();
+        let (asks, asked) = mpsc::channel();
+        let (steps, got) = mpsc::channel();
+        let scanning = std::thread::spawn({
+            let (sounds_db, library_db, cards) = (sounds_db.clone(), library_db.clone(), cards.clone());
+            move || {
+                let send = |step: Step| {
+                    let _ = steps.send(said(step));
+                };
+                scans(&sounds_db, &library_db, &cards, &mut on_show, None, &send, &asked, true);
+                on_show
+            }
+        });
+        let next = || got.recv_timeout(Duration::from_secs(120)).unwrap_or_else(|e| format!("nothing: {e}"));
+        assert_eq!([next(), next()], ["again: other sounds, 6 sounds, 0 plays, used: true", "6 fingerprints"]);
+        // A pad in the folder (as if it were a new folder), then Settings asks: it's scanned, and the page takes it,
+        // with how your songs use samples counted again (it isn't kept between scans).
+        write("Pad Long.wav", 1.5, 220.0);
+        assert!(asks.send(()).is_ok());
+        assert_eq!([next(), next()], ["again: other sounds, 7 sounds, 0 plays, used: true", "7 fingerprints"]);
+        // The app closes: the thread ends.
+        drop(asks);
+        let Ok(on_show) = scanning.join() else { panic!("the scans stopped part way") };
+        assert_eq!(on_show.list.len(), 7);
+        assert!(on_show.uses.is_none() && on_show.recount);
+        assert_eq!(
+            cards_said_at(&cards, began),
+            [
+                "Found a new sound: They're in your sound library now.",
+                "Found a new sound: They're in your sound library now."
+            ]
+        );
     }
 
     #[test]
