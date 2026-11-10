@@ -37,31 +37,36 @@ pub enum Order {
 impl Order {
     pub const ALL: [Order; 5] = [Order::Newest, Order::Name, Order::Key, Order::Bars, Order::Copies];
 
-    /// The order's chip, in the words Sounds and Plugins use for theirs ("Newest", not "Newest first": the whole-app
-    /// review of 6 Nov, X3-5).
-    pub fn name(self) -> &'static str {
+    /// The list column this order goes by, as its heading says it: a click on the heading picks the order, a second
+    /// click turns it round (the UX review of 10 Nov, B5).
+    pub fn column(self) -> &'static str {
         match self {
-            Order::Newest => "Newest",
-            Order::Name => "Name",
+            Order::Newest => "Saved",
+            Order::Name => "Part",
             Order::Key => "Key",
-            Order::Bars => "Longest",
-            Order::Copies => "In most files",
+            Order::Bars => "Bars",
+            Order::Copies => "Files",
         }
     }
 
-    /// The order as the line over the list says it: "newest first".
-    pub fn words(self) -> &'static str {
-        match self {
-            Order::Newest => "newest first",
-            Order::Name => "by name",
-            Order::Key => "by key",
-            Order::Bars => "longest first",
-            Order::Copies => "in most files first",
+    /// The order as the line over the list says it: "newest first", or turned round, "oldest first".
+    pub fn words(self, reversed: bool) -> &'static str {
+        match (self, reversed) {
+            (Order::Newest, false) => "newest first",
+            (Order::Newest, true) => "oldest first",
+            (Order::Name, false) => "by name",
+            (Order::Name, true) => "by name, Z to A",
+            (Order::Key, false) => "by key",
+            (Order::Key, true) => "by key, backwards",
+            (Order::Bars, false) => "longest first",
+            (Order::Bars, true) => "shortest first",
+            (Order::Copies, false) => "in most files first",
+            (Order::Copies, true) => "in fewest files first",
         }
     }
 
-    pub fn from_name(name: &str) -> Order {
-        Order::ALL.into_iter().find(|o| o.name() == name).unwrap_or_default()
+    pub fn from_column(column: &str) -> Order {
+        Order::ALL.into_iter().find(|o| o.column() == column).unwrap_or_default()
     }
 }
 
@@ -194,6 +199,7 @@ pub fn view(
     cat: &Catalogue,
     f: &Filters,
     order: Order,
+    reversed: bool,
     target: Option<Target>,
     seed: Option<u64>,
 ) -> (Vec<Hit>, ChoiceCounts) {
@@ -219,6 +225,9 @@ pub fn view(
     // Ranked by likeness, or the longest phrase first: that order is the point.
     if target.is_none() {
         sort(cat, &mut hits, order);
+        if reversed {
+            turn_round(cat, &mut hits, order);
+        }
     }
     // A shuffle is of the plain list: likeness and length are the order a ranked list is for.
     if let Some(seed) = seed.filter(|_| target.is_none()) {
@@ -382,6 +391,14 @@ fn sort(cat: &Catalogue, hits: &mut [Hit], order: Order) {
         Order::Key => hits.par_sort_by_cached_key(|h| e(h).and_then(sort_key).unwrap_or(u8::MAX)),
         Order::Bars => hits.par_sort_by_key(|h| std::cmp::Reverse(e(h).map_or(0, |e| e.phrase.bars))),
         Order::Copies => hits.par_sort_by_key(|h| std::cmp::Reverse(e(h).map_or(0, Entry::copies))),
+    }
+}
+
+/// Turns a sorted list round (a second click on its heading). By key, the parts with no clear key still come last.
+fn turn_round(cat: &Catalogue, hits: &mut [Hit], order: Order) {
+    hits.reverse();
+    if order == Order::Key {
+        hits.sort_by_key(|h| cat.entry(h.entry).and_then(sort_key).is_none());
     }
 }
 
@@ -817,7 +834,14 @@ pub fn summary(cat: &Catalogue) -> String {
 }
 
 /// Under the toolbar: what the list holds, in what order, of how many.
-pub fn result_text(shown: usize, all: usize, order: Order, target: Option<Target>, shuffled: bool) -> String {
+pub fn result_text(
+    shown: usize,
+    all: usize,
+    order: Order,
+    reversed: bool,
+    target: Option<Target>,
+    shuffled: bool,
+) -> String {
     if shown == 0 {
         return String::new();
     }
@@ -829,8 +853,8 @@ pub fn result_text(shown: usize, all: usize, order: Order, target: Option<Target
             format!("{n} longer {}, longest first", if shown == 1 { "phrase" } else { "phrases" })
         }
         None if shuffled => format!("Shuffled · {n} of {}", thousands(all)),
-        None if shown == all => format!("{n} parts, {}", order.words()),
-        None => format!("{n} of {} parts, {}", thousands(all), order.words()),
+        None if shown == all => format!("{n} parts, {}", order.words(reversed)),
+        None => format!("{n} of {} parts, {}", thousands(all), order.words(reversed)),
     }
 }
 
@@ -1244,7 +1268,7 @@ mod tests {
     }
 
     fn list(cat: &Catalogue, f: &Filters, o: Order, t: Option<Target>, seed: Option<u64>) -> Vec<Hit> {
-        view(cat, f, o, t, seed).0
+        view(cat, f, o, false, t, seed).0
     }
 
     fn titles(cat: &Catalogue, hits: &[Hit]) -> Vec<String> {
@@ -1314,7 +1338,7 @@ mod tests {
         let other = phrase("L:/New Midi/Pack/other.mid", "Pad", Role::Chords, "P", 1_700_000_000);
         let cat = Catalogue::new(vec![loop_in(9, "Am", 0), loop_in(2, "Dm", 1), loop_in(4, "Em", 2), other]);
         let f = Filters::default();
-        let (hits, counts) = view(&cat, &f, Order::Newest, None, None);
+        let (hits, counts) = view(&cat, &f, Order::Newest, false, None, None);
         let keys = |hits: &[Hit]| hits.iter().map(|h| key_text(cat.entry(h.entry).unwrap())).collect::<Vec<_>>();
         assert_eq!(titles(&cat, &hits), ["Lead", "Pad"]);
         assert_eq!(keys(&hits), ["Am", ""], "the newest stands for them");
@@ -1384,6 +1408,9 @@ mod tests {
         // C major, then A minor (its relative, the same place round the circle); no key last.
         assert_eq!(titles(&cat, &list(&cat, &f, Order::Key, None, None)), ["Piano", "Bass", "Kick"]);
         assert_eq!(titles(&cat, &list(&cat, &f, Order::Name, None, None)), ["Bass", "Kick", "Piano"]);
+        // Turned round (a second click on the heading); by key, the part with no clear key still comes last.
+        assert_eq!(titles(&cat, &view(&cat, &f, Order::Name, true, None, None).0), ["Piano", "Kick", "Bass"]);
+        assert_eq!(titles(&cat, &view(&cat, &f, Order::Key, true, None, None).0), ["Bass", "Piano", "Kick"]);
         // A shuffle keeps every part and is the same for the same seed.
         let one = list(&cat, &f, Order::Newest, None, Some(7));
         assert_eq!(one, list(&cat, &f, Order::Newest, None, Some(7)));
@@ -1393,7 +1420,7 @@ mod tests {
         let ranked = list(&cat, &f, Order::Newest, Some(Target::Like(at)), None);
         assert_eq!(list(&cat, &f, Order::Newest, Some(Target::Like(at)), Some(7)), ranked);
         for o in Order::ALL {
-            assert_eq!(Order::from_name(o.name()), o);
+            assert_eq!(Order::from_column(o.column()), o);
         }
     }
 
@@ -1410,11 +1437,13 @@ mod tests {
         assert_eq!(note_name(61), "Db4");
         assert_eq!(bars_text(1), "1 bar");
         assert_eq!(summary(&cat), "3 MIDI parts from 4 files · 1 copy kept as one");
-        assert_eq!(result_text(2, 3, Order::Newest, None, false), "2 of 3 parts, newest first");
+        assert_eq!(result_text(2, 3, Order::Newest, false, None, false), "2 of 3 parts, newest first");
         // The chips say the orders as Sounds and Plugins do; the line over the list says them in a sentence.
-        assert_eq!(Order::ALL.map(Order::name), ["Newest", "Name", "Key", "Longest", "In most files"]);
-        assert_eq!(result_text(3, 3, Order::Bars, None, false), "3 parts, longest first");
-        assert_eq!(result_text(1_200, 1_500, Order::Name, None, false), "1,200 of 1,500 parts, by name");
+        assert_eq!(Order::ALL.map(Order::column), ["Saved", "Part", "Key", "Bars", "Files"]);
+        assert!(Order::ALL.into_iter().all(|o| Order::from_column(o.column()) == o));
+        assert_eq!(result_text(3, 3, Order::Bars, true, None, false), "3 parts, shortest first");
+        assert_eq!(result_text(3, 3, Order::Bars, false, None, false), "3 parts, longest first");
+        assert_eq!(result_text(1_200, 1_500, Order::Name, false, None, false), "1,200 of 1,500 parts, by name");
     }
 
     #[test]
@@ -1653,7 +1682,7 @@ mod tests {
         // A chip's counts leave out its own pick, so its other choices say what picking them would add.
         f.keys.clear();
         f.toggle(FROM, "MIDI folders");
-        let (hits, counts) = view(&cat, &f, Order::Newest, None, None);
+        let (hits, counts) = view(&cat, &f, Order::Newest, false, None, None);
         assert_eq!(titles(&cat, &hits), ["Piano", "Kick"]);
         assert_eq!(counts.froms, [1, 2]);
         let drums = Role::ALL.iter().position(|r| *r == Role::Drums).unwrap();

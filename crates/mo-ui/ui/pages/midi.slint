@@ -3,7 +3,7 @@
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
 import { ListView, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
 
 // One part in the list.
 export struct MidiLine {
@@ -18,6 +18,9 @@ export struct MidiLine {
     phrase: string,
     key: string,
     date: string,
+    // How many bars long ("" when unknown) and how many files have these notes, for their columns.
+    bars: string,
+    files: string,
     // Its kind's colour, as a place in Theme.sound-types (-1 grey).
     colour: int,
     // Why the app thinks it's that kind, for the tooltip.
@@ -105,9 +108,11 @@ export global MidiData {
     callback toggle(string, string);
     // The filter's menu's Any.
     callback clear-chip(string);
-    // The orders, each a chip with the picked one lit.
-    in property <FilterView> order-filter;
-    // "order" and the order's words.
+    // The column the list goes by, as its heading says it ("Saved"; "" while shuffled or ranked), and whether that
+    // order is turned round.
+    in property <string> order-column;
+    in property <bool> order-reversed;
+    // "order" and the words of the column's heading that was clicked.
     callback pick(string, string);
     callback shuffle();
     // "Shaped most like Bass · Pattern 3 first · 500", or "" when the list isn't ranked against a part.
@@ -189,28 +194,53 @@ export global MidiData {
     callback menu-chosen(string);
 }
 
+// The list's headings: a click orders the list by that column, a second click turns it round.
 component ListHeading inherits HorizontalLayout {
     padding-left: Space.md + Space.xs;
     padding-right: Space.md + Space.xs;
     spacing: Space.md;
     height: 28px;
     Rectangle { width: 8px; }
-    Caps {
+    ColumnHead {
         horizontal-stretch: 1;
-        preferred-width: 0px;
-        min-width: 0px;
         text: "PART";
-        vertical-alignment: center;
+        on: MidiData.order-column == "Part";
+        // A to Z first.
+        up: !MidiData.order-reversed;
+        clicked => { MidiData.pick("order", "Part"); }
     }
-    Caps {
+    ColumnHead {
+        width: 44px;
+        right: true;
+        text: "BARS";
+        tip: "How many bars long";
+        on: MidiData.order-column == "Bars";
+        up: MidiData.order-reversed;
+        clicked => { MidiData.pick("order", "Bars"); }
+    }
+    ColumnHead {
+        width: 44px;
+        right: true;
+        text: "FILES";
+        tip: "How many of your files have these notes";
+        on: MidiData.order-column == "Files";
+        up: MidiData.order-reversed;
+        clicked => { MidiData.pick("order", "Files"); }
+    }
+    ColumnHead {
         width: 96px;
         text: "KEY";
-        vertical-alignment: center;
+        on: MidiData.order-column == "Key";
+        // Round the circle from C first.
+        up: !MidiData.order-reversed;
+        clicked => { MidiData.pick("order", "Key"); }
     }
-    Caps {
+    ColumnHead {
         width: 96px;
         text: "SAVED";
-        vertical-alignment: center;
+        on: MidiData.order-column == "Saved";
+        up: MidiData.order-reversed;
+        clicked => { MidiData.pick("order", "Saved"); }
     }
 }
 
@@ -287,6 +317,24 @@ component MidiLineView inherits ListLine {
                     font-size: Type.meta;
                 }
             }
+        }
+        Text {
+            width: 44px;
+            text: root.line.bars;
+            color: Theme.muted;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+        }
+        Text {
+            width: 44px;
+            text: root.line.files;
+            color: Theme.muted;
+            font-family: Theme.number-font;
+            font-size: Type.meta;
+            vertical-alignment: center;
+            horizontal-alignment: right;
         }
         Text {
             width: 96px;
@@ -752,16 +800,7 @@ export component MidiPage inherits Rectangle {
                 horizontal-stretch: 1;
                 min-width: 0px;
             }
-            // The list's order, each on show behind its name as on Sounds and Plugins (the whole-app review of 6 Nov, X3-5),
-            // and Shuffle beside them.
-            VerticalLayout {
-                alignment: center;
-                FilterPicks {
-                    name: "Order";
-                    filter: MidiData.order-filter;
-                    toggled(text) => { MidiData.pick("order", text); }
-                }
-            }
+            // The list's headings order it (the UX review of 10 Nov, B5); Shuffle is the one order no column has.
             VerticalLayout {
                 alignment: center;
                 StudioButton {
