@@ -1841,12 +1841,12 @@ fn say_soundfont(app: &AppWindow) {
     if missing {
         let folder = PAGE.with(|p| p.borrow().library.parent().map(Path::to_path_buf)).unwrap_or_default();
         let usual = folder.join(page::SOUNDFONT_FOLDER).join(page::SOUNDFONT_FILE);
+        // One line on the card; the file's place is in the button's tip (the UX review of 10 Nov, C6).
         data.set_soundfont_note(
-            format!(
-                "To hear parts, choose a General MIDI SoundFont (.sf2). GeneralUser GS, a free one, goes in {}",
-                usual.display()
-            )
-            .into(),
+            "To hear parts, choose a General MIDI SoundFont (.sf2), such as the free GeneralUser GS.".into(),
+        );
+        data.set_soundfont_where(
+            format!("Pick a .sf2 file. One saved as {} is found without asking.", usual.display()).into(),
         );
     }
 }

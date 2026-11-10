@@ -168,6 +168,7 @@ export global MidiData {
     // No SoundFont to play with yet: what to do, and a button to choose one.
     in property <bool> soundfont-missing;
     in property <string> soundfont-note;
+    in property <string> soundfont-where;
     callback play-toggled();
     callback choose-soundfont();
     // Playing the picked part in a DAW, through whatever is on the track selected in Bitwig or the channel selected
@@ -505,12 +506,26 @@ component PartPanel inherits SidePanel {
         color: Theme.muted;
         font-size: Type.meta;
     }
-    // Play: the part round and round with a General MIDI sound matched to it. The buttons wrap on a narrow card.
-    FlexboxLayout {
-        spacing: Space.sm;
+    // Where to take the part from to drag it into a DAW, straight under its picture as on every card (the UX
+    // review of 10 Nov, B3): it goes as a MIDI clip of its own (a new .mid file; the part's
+    // own file is never touched).
+    DragHandle {
+        text: "Drag into your DAW as a MIDI clip";
+        tip: "Drag the part out as a new MIDI file of its notes";
+        lifted: MidiData.lifted-picked;
+        landed: MidiData.landed-picked;
+        drag-out => { MidiData.drag-picked(); }
+        drag-let-go => { MidiData.drag-let-go(); }
+    }
+    // The card's buttons, in the order every card keeps (review B2): play first (the lit one), then into the DAW, then
+    // show and copy, in two even columns. Play is the part round and round with a General MIDI sound matched to it.
+    buttons := CardActions {
+        room: root.inside;
+        actions: MidiData.actions;
+        chosen(id) => { MidiData.menu-chosen(id); }
         StudioButton {
             main: true;
-            horizontal-stretch: 0;
+            width: max(self.min-width, buttons.cell);
             enabled: !MidiData.soundfont-missing || MidiData.playing;
             text: MidiData.playing ? "Stop" : "Play loop";
             tip: MidiData.playing ? "Stop the loop" : "Play the part round and round with a General MIDI sound matched to it";
@@ -518,14 +533,14 @@ component PartPanel inherits SidePanel {
             clicked => { MidiData.play-toggled(); }
         }
         StudioButton {
-            horizontal-stretch: 0;
+            width: max(self.min-width, buttons.cell);
             text: MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig" ? "Stop in Bitwig" : "Play in Bitwig";
             tip: MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig" ? "Stop the part and take its clip out of Bitwig" : "Play the part round and round through what's on the track selected in Bitwig";
             key: MidiData.bitwig-key;
             clicked => { MidiData.daw-play("bitwig"); }
         }
         StudioButton {
-            horizontal-stretch: 0;
+            width: max(self.min-width, buttons.cell);
             text: MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl" ? "Stop in FL Studio" : "Play in FL Studio";
             tip: MidiData.daw-playing == "fl" || MidiData.daw-starting == "fl" ? "Stop the part in FL Studio" : "Play the part round and round through the channel selected in FL Studio";
             key: MidiData.fl-key;
@@ -568,23 +583,10 @@ component PartPanel inherits SidePanel {
             StudioButton {
                 horizontal-stretch: 0;
                 text: "Choose a SoundFont…";
+                tip: MidiData.soundfont-where;
                 clicked => { MidiData.choose-soundfont(); }
             }
         }
-    }
-    // Where to take the part from to drag it into a DAW: it goes as a MIDI clip of its own (a new .mid file; the part's
-    // own file is never touched).
-    DragHandle {
-        text: "Drag into your DAW as a MIDI clip";
-        tip: "Drag the part out as a new MIDI file of its notes";
-        lifted: MidiData.lifted-picked;
-        landed: MidiData.landed-picked;
-        drag-out => { MidiData.drag-picked(); }
-        drag-let-go => { MidiData.drag-let-go(); }
-    }
-    CardActions {
-        actions: MidiData.actions;
-        chosen(id) => { MidiData.menu-chosen(id); }
     }
     VerticalLayout {
         spacing: Space.xs;
@@ -731,6 +733,18 @@ export component MidiPage inherits Rectangle {
                     false
                 }
             }
+            // The top row's order on every page (the UX review of 10 Nov, A5): search, how the list is ordered, and
+            // the page's own action at the far right. The list's headings order it (B5); Shuffle is the one order no
+            // column has.
+            VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "Shuffle";
+                    tip: "A random order: press again for another";
+                    clicked => { MidiData.shuffle(); }
+                }
+            }
             Rectangle { horizontal-stretch: 1; }
             VerticalLayout {
                 alignment: center;
@@ -799,16 +813,6 @@ export component MidiPage inherits Rectangle {
                 overflow: elide;
                 horizontal-stretch: 1;
                 min-width: 0px;
-            }
-            // The list's headings order it (the UX review of 10 Nov, B5); Shuffle is the one order no column has.
-            VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: "Shuffle";
-                    tip: "A random order: press again for another";
-                    clicked => { MidiData.shuffle(); }
-                }
             }
         }
         area := Rectangle {
