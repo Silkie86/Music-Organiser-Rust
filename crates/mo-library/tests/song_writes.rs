@@ -226,6 +226,56 @@ fn only_the_apps_own_songs_db_is_written_and_a_busy_one_is_left_as_it_was() {
     assert_eq!(Library::open_read_only(&songs).unwrap().saves().unwrap().len(), 2);
 }
 
+/// A save the app read again though its file hadn't changed (one marked missing that came back, say) is read again
+/// too when its samples aren't as the C# app kept them: fewer muted, or some where the C# app couldn't read it (review
+/// findings G-1, X1-4). Not one the app couldn't read itself: it would be tried at every start.
+#[test]
+fn saves_read_again_unchanged_are_mended_by_their_samples() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mo-song-writes").join("mend-samples");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let library_db = dir.join("library.db");
+    // The C# app's layout: the details, then what it found wrong (only what comes before the details is read).
+    Connection::open(&library_db)
+        .unwrap()
+        .execute_batch(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE roots (path TEXT PRIMARY KEY);
+             CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                 name TEXT NOT NULL, daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, info TEXT,
+                 error TEXT, file_missing INTEGER DEFAULT 0);
+             CREATE TABLE samples (project_id INTEGER, path TEXT, found INTEGER, unplayed INTEGER);
+             INSERT INTO projects (id, path, name, daw, folder, size, mtime, error) VALUES
+                 (1, 'C:\\M\\Lost.flp', 'Lost', 'FL Studio', 'C:\\M', 10, 100, NULL),
+                 (2, 'C:\\M\\Kept.flp', 'Kept', 'FL Studio', 'C:\\M', 10, 100, NULL),
+                 (3, 'C:\\M\\Unread.flp', 'Unread', 'FL Studio', 'C:\\M', 10, 100, 'an FL 25 event'),
+                 (4, 'C:\\M\\Broken.flp', 'Broken', 'FL Studio', 'C:\\M', 10, 100, NULL);
+             INSERT INTO samples VALUES (1, 'C:\\s\\a.wav', 1, 2), (1, 'C:\\s\\b.wav', 1, 0),
+                 (2, 'C:\\s\\a.wav', 1, 2), (4, 'C:\\s\\a.wav', 1, 2);",
+        )
+        .unwrap();
+    let songs = dir.join(songs_db::FILE_NAME);
+    songs_db::make(&library_db, &songs, &mut |_| {}).unwrap();
+    assert_eq!(songs_db::at_start(&dir, "test").state, State::Switched);
+    assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(Vec::new()));
+    // Read again unchanged: Lost by an earlier build (its muted mark lost), Kept by this one, Unread for the first
+    // time (the C# app couldn't), and Broken couldn't be read (kept with what it had).
+    Connection::open(&songs)
+        .unwrap()
+        .execute_batch(
+            "UPDATE samples SET unplayed = 0 WHERE project_id = 1;
+             UPDATE projects SET error = NULL WHERE id = 3;
+             INSERT INTO samples (project_id, path, found, unplayed) VALUES (3, 'C:\\s\\c.wav', 1, 0);
+             UPDATE projects SET error = 'damaged' WHERE id = 4;
+             DELETE FROM samples WHERE project_id = 4;",
+        )
+        .unwrap();
+    assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![1, 3]));
+    // An older C# app that kept no muted marks: only how many samples each has.
+    Connection::open(&library_db).unwrap().execute_batch("ALTER TABLE samples DROP COLUMN unplayed;").unwrap();
+    assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![3]));
+}
+
 #[test]
 fn the_fl_studio_saves_the_app_kept_are_read_again_once_for_their_muted_samples() {
     let songs = library("mend");
@@ -264,6 +314,11 @@ fn the_fl_studio_saves_the_app_kept_are_read_again_once_for_their_muted_samples(
     assert_eq!(ids, [1, 2, 3]);
     // With library.db gone: a guess, those changed since a month before the library became the app's own.
     std::fs::rename(dir.join("library.db"), dir.join("library.db.away")).unwrap();
+    assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![2]));
+    // Read again but for two that couldn't be: noted with them, and only those still FL Studio saves there are
+    // given after that (one since gone missing, one no longer in the library).
+    let noted = song_writes::write(&songs, &Batch { mended: true, owed: vec![2, 5, 99], ..Batch::default() }).unwrap();
+    assert!(noted.mended);
     assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![2]));
     // Once they're read again, a batch notes it (on its own too): none after that.
     let noted = song_writes::write(&songs, &Batch { mended: true, ..Batch::default() }).unwrap();
