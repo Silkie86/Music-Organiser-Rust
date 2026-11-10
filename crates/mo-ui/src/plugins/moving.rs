@@ -275,7 +275,7 @@ fn go(app: &AppWindow, ask: Arc<Ask>, at: usize, bytes: u64, destination: String
         // Done: its copy is in use now. A move that stopped or failed cleared its copy, or left a half copy for the next
         // look to find; that look drops the note when there's nothing.
         if gone.is_some()
-            && let Err(e) = moves_under_way::finished(&moves_under_way::file(), &folder.path)
+            && let Err(e) = moves_under_way::finished(&moves_under_way::file(), &folder.path, &destination)
         {
             log::warning("Plugins", &format!("Move: the move under way's note couldn't be taken out: {e}"));
         }

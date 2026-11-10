@@ -2,8 +2,10 @@
 //! closing, a crash or the computer stopping cuts off part way leaves a half copy on the other drive (marked with
 //! `mo_space::half_copy::MARKER`), and the move never reaches the library's moved folders, so nothing else knows where
 //! to look for it. The next look ([`cut_off`]) finds each half copy in the folders these moves went to, for the page to
-//! offer clearing; a note whose move left nothing goes then. A move that finishes takes its own note out, and the file
-//! goes with the last one (rule 28).
+//! offer clearing; a note whose move left nothing there goes then (one whose folder can't be read now, its drive not
+//! plugged in, stays for when it's back: review P-3). A move that finishes takes its own note out, and the file goes
+//! with the last one (rule 28). Notes are by the folder moved and where it went, so a move again of the same folder to
+//! another place keeps where the first went.
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -22,6 +24,17 @@ pub const FILE_NAME: &str = "plugin-moves-under-way.json";
 pub struct UnderWay {
     pub from: String,
     pub destination: String,
+    /// When it was noted (Unix seconds), or first found it couldn't be looked in, for a note written before that (0):
+    /// one whose folder can't be looked in for [`UNREADABLE_FOR`] goes (rule 28).
+    #[serde(default)]
+    pub since: i64,
+}
+
+/// How long a note whose folder can't be looked in (its drive not plugged in) is kept, for when it's back.
+pub const UNREADABLE_FOR: i64 = 90 * 24 * 60 * 60;
+
+fn now() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
 }
 
 /// The file in the app's data folder.
@@ -33,7 +46,7 @@ pub fn file() -> PathBuf {
 static CHANGING: Mutex<()> = Mutex::new(());
 
 /// The moves noted in `file`. None when it isn't there; one that can't be read is said in the log and counts as none:
-/// all that's lost is finding a half copy (Space's old copies and a move again to the same place still find it).
+/// all that's lost is finding a half copy (a move again of the same folder to the same place still finds its own).
 pub fn under_way(file: &Path) -> Vec<UnderWay> {
     match std::fs::read_to_string(file) {
         Ok(text) => serde_json::from_str(&text).unwrap_or_else(|e| {
@@ -64,21 +77,22 @@ fn same(a: &str, b: &str) -> bool {
     mo_space::key(a) == mo_space::key(b)
 }
 
-/// Notes a move about to copy `from` into `destination` (once for each folder).
+/// Notes a move about to copy `from` into `destination` (once for each folder and place).
 pub fn start(file: &Path, from: &str, destination: &str) -> std::io::Result<()> {
     let _one = CHANGING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut moves = under_way(file);
-    moves.retain(|m| !same(&m.from, from));
-    moves.push(UnderWay { from: from.to_owned(), destination: destination.to_owned() });
+    moves.retain(|m| !(same(&m.from, from) && same(&m.destination, destination)));
+    moves.push(UnderWay { from: from.to_owned(), destination: destination.to_owned(), since: now() });
     write(file, &moves)
 }
 
-/// Takes out the note of the move of `from`: it finished, so its copy is in use (or it left nothing).
-pub fn finished(file: &Path, from: &str) -> std::io::Result<()> {
+/// Takes out the note of the move of `from` into `destination`: it finished, so its copy is in use (or it left
+/// nothing). A note of an earlier move of it to another place stays.
+pub fn finished(file: &Path, from: &str, destination: &str) -> std::io::Result<()> {
     let _one = CHANGING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut moves = under_way(file);
     let before = moves.len();
-    moves.retain(|m| !same(&m.from, from));
+    moves.retain(|m| !(same(&m.from, from) && same(&m.destination, destination)));
     if moves.len() == before {
         return Ok(());
     }
@@ -86,9 +100,10 @@ pub fn finished(file: &Path, from: &str) -> std::io::Result<()> {
 }
 
 /// The half copies the moves noted in `file` left, in the folders they went to (and where each moved folder's copy is,
-/// `moved`, as `half_copy::half_copies` looks), each the copy of a noted move. A note whose move left nothing goes,
-/// unless that move is `running` now (the folders being moved, in this run) or was noted while this looked. Reads and
-/// measures them: call it away from the window's thread.
+/// `moved`, as `half_copy::half_copies` looks), each the copy of a noted move. A note whose move left nothing in the
+/// folder it went to goes, unless that move is `running` now (the folders being moved, in this run), was noted while
+/// this looked, or that folder couldn't be read (its drive not plugged in, no rights: review P-3). Reads and measures
+/// them: call it away from the window's thread.
 pub fn cut_off(
     file: &Path,
     moved: &[MovedFolder],
@@ -103,18 +118,48 @@ pub fn cut_off(
     let places: Vec<String> = noted.iter().map(|m| m.destination.clone()).collect();
     let mut found = half_copy::half_copies(moved, &places, drives, stop)?;
     found.retain(|h| noted.iter().any(|m| same(&h.from, &m.from)));
+    // Looked at before the lock: a place that can't be reached may take a while to say so.
+    let unreadable: Vec<String> =
+        noted.iter().filter(|m| !looked_in(&m.destination)).map(|m| mo_space::key(&m.destination)).collect();
+    let now = now();
     let _one = CHANGING.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut moves = under_way(file);
-    let before = moves.len();
+    let before = moves.clone();
     moves.retain(|m| {
-        running.iter().any(|r| same(r, &m.from)) || !noted.contains(m) || found.iter().any(|h| same(&h.from, &m.from))
+        let kept_while_away = || {
+            let away = unreadable.contains(&mo_space::key(&m.destination));
+            if away && m.since != 0 && now.saturating_sub(m.since) > UNREADABLE_FOR {
+                crate::log::info(
+                    "Plugins",
+                    &format!("A cut-off move's note to {} goes: it couldn't be looked in for 3 months", m.destination),
+                );
+                return false;
+            }
+            away
+        };
+        running.iter().any(|r| same(r, &m.from))
+            || !noted.contains(m)
+            || found.iter().any(|h| same(&h.from, &m.from) && mo_library::scan::is_inside(&h.path, &m.destination))
+            || kept_while_away()
     });
-    if moves.len() != before
+    for m in moves.iter_mut().filter(|m| m.since == 0) {
+        m.since = now;
+    }
+    if moves != before
         && let Err(e) = write(file, &moves)
     {
         crate::log::warning("Plugins", &format!("The moves under way couldn't be written: {e}"));
     }
     Ok(found)
+}
+
+/// Whether the folder a move went to could be looked in now: it's there and can be read, or it isn't there and its
+/// drive is (so nothing was left in it).
+fn looked_in(destination: &str) -> bool {
+    match std::fs::read_dir(destination) {
+        Ok(_) => true,
+        Err(e) => e.kind() == std::io::ErrorKind::NotFound && super::folder_fixes::drive_there(Path::new(destination)),
+    }
 }
 
 /// What the page says of the half copies found: the copies cut off part way, how big, where; a finished move's
@@ -170,15 +215,17 @@ mod tests {
         std::fs::create_dir_all(&d).unwrap();
         let file = d.join(FILE_NAME);
         start(&file, "C:/Kits", "E:/").unwrap();
-        start(&file, "c:\\kits\\", "F:/").unwrap();
+        start(&file, "c:\\kits\\", "e:/").unwrap();
+        start(&file, "C:/Kits", "F:/").unwrap();
         start(&file, "C:/Other", "E:/").unwrap();
         let noted = under_way(&file);
-        assert_eq!(noted.len(), 2);
-        assert_eq!(noted[0].destination, "F:/");
-        finished(&file, "C:/Kits").unwrap();
-        finished(&file, "C:/Nothing").unwrap();
-        assert_eq!(under_way(&file).len(), 1);
-        finished(&file, "C:/Other").unwrap();
+        assert_eq!(noted.len(), 3, "the same folder to another place is noted too: {noted:?}");
+        assert_eq!(noted[0].destination, "e:/");
+        finished(&file, "C:/Kits", "F:/").unwrap();
+        finished(&file, "C:/Nothing", "E:/").unwrap();
+        assert_eq!(under_way(&file).len(), 2, "the move to E: is still noted");
+        finished(&file, "C:/Kits", "E:/").unwrap();
+        finished(&file, "C:/Other", "E:/").unwrap();
         assert!(!file.exists());
         // A damaged file counts as no moves.
         std::fs::write(&file, "not json").unwrap();
@@ -212,7 +259,8 @@ mod tests {
         let found = cut_off(&file, &[], &[], &mo_space::folder_move::SystemDrives, &stop).unwrap();
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].state, mo_space::half_copy::State::CutOff, "{found:?}");
-        assert_eq!(under_way(&file), [UnderWay { from: s(&from), destination: s(&to_dir) }]);
+        let left = under_way(&file);
+        assert_eq!((left.len(), &left[0].from, &left[0].destination), (1, &s(&from), &s(&to_dir)));
         assert!(can_clear(&found));
         assert!(found_text(&found).starts_with("A move was cut off part way"), "{}", found_text(&found));
         let _ = std::fs::remove_dir_all(&d);
@@ -232,8 +280,30 @@ mod tests {
         let stop = AtomicBool::new(false);
         let found = cut_off(&file, &[], &["C:/Running".to_owned()], &mo_space::folder_move::SystemDrives, &stop);
         assert!(found.unwrap().is_empty());
-        assert_eq!(under_way(&file), [UnderWay { from: "C:/Running".into(), destination: to_s }]);
+        let left = under_way(&file);
+        assert_eq!((left.len(), left[0].from.as_str(), &left[0].destination), (1, "C:/Running", &to_s));
         assert_eq!(found_text(&[]), "");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Review P-3: a note whose folder can't be read now (its drive isn't plugged in) stays for when it's back.
+    #[test]
+    fn a_note_on_a_drive_not_plugged_in_stays() {
+        let d = std::env::temp_dir().join(format!("mo-app-moves-unplugged-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let file = d.join(FILE_NAME);
+        let away = if cfg!(windows) { "W:\\mo-no-such-drive\\Dest" } else { "/mnt/mo-no-such-drive/Dest" };
+        start(&file, "C:/Kits", away).unwrap();
+        let stop = AtomicBool::new(false);
+        let found = cut_off(&file, &[], &[], &mo_space::folder_move::SystemDrives, &stop);
+        assert!(found.unwrap().is_empty());
+        assert_eq!(under_way(&file).len(), 1);
+        // Not for ever (rule 28): once it couldn't be looked in for 3 months, it goes.
+        let old = UnderWay { from: "C:/Kits".into(), destination: away.into(), since: now() - UNREADABLE_FOR - 1 };
+        write(&file, &[old]).unwrap();
+        cut_off(&file, &[], &[], &mo_space::folder_move::SystemDrives, &stop).unwrap();
+        assert!(under_way(&file).is_empty());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

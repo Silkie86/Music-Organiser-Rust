@@ -204,6 +204,49 @@ fn differs(wanted: &Rows, back: &Rows) -> Option<String> {
 /// ([`INSTALLED_RULES`]) and the installed plugins then.
 const RECHECKED_KEY: &str = "installed_rechecked";
 
+/// The note in `songs_info` of the saves still to be read again for a plugin marked installed that isn't found now
+/// ([`Rechecked::to_read`]), by id, a comma between: kept with the look, so one the app closed before reading is read
+/// at the next start, and taken off once it's read and kept ([`read_again_kept`]).
+const TO_READ_KEY: &str = "installed_to_read";
+
+/// The saves noted to be read again ([`TO_READ_KEY`]).
+fn to_read_in(conn: &Connection) -> rusqlite::Result<BTreeSet<i64>> {
+    let text: Option<String> =
+        conn.query_row("SELECT value FROM songs_info WHERE key = ?1", [TO_READ_KEY], |r| r.get(0)).optional()?;
+    Ok(text.unwrap_or_default().split(',').filter_map(|id| id.trim().parse().ok()).collect())
+}
+
+/// Notes the saves to read again ([`TO_READ_KEY`]), or takes the note out when there are none.
+fn note_to_read(conn: &Connection, ids: &BTreeSet<i64>) -> rusqlite::Result<()> {
+    if ids.is_empty() {
+        conn.execute("DELETE FROM songs_info WHERE key = ?1", [TO_READ_KEY])?;
+    } else {
+        let text = ids.iter().map(i64::to_string).collect::<Vec<_>>().join(",");
+        conn.execute("INSERT OR REPLACE INTO songs_info (key, value) VALUES (?1, ?2)", params![TO_READ_KEY, text])?;
+    }
+    Ok(())
+}
+
+/// The saves `ids` named in [`Rechecked::to_read`] were read again and kept: they're taken off the note. One short
+/// transaction in the app's own `songs.db`.
+pub fn read_again_kept(songs_db: &Path, ids: &[i64]) -> Result<(), LibraryError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let (mut conn, sql) = open_own(songs_db)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(&sql)?;
+    own_under_lock(songs_db, &tx)?;
+    let mut noted = to_read_in(&tx).map_err(&sql)?;
+    let before = noted.len();
+    for id in ids {
+        noted.remove(id);
+    }
+    if noted.len() != before {
+        note_to_read(&tx, &noted).map_err(&sql)?;
+    }
+    tx.commit().map_err(&sql)
+}
+
 /// What [`recheck_installed`] found.
 #[derive(Debug, Default)]
 pub struct Rechecked {
@@ -213,13 +256,17 @@ pub struct Rechecked {
     pub missing: Vec<(i64, u32)>,
     /// Whether the saves' plugins were looked at (not when nothing changed since the last time).
     pub looked: bool,
+    /// The saves (by id) with a plugin marked installed that isn't found by its name or file now: to be read again by
+    /// their own reader, which knows the ids too, so a plugin uninstalled since shows as missing (review P-2).
+    pub to_read: Vec<i64>,
 }
 
 /// Looks again at the saves' plugins marked missing, as a save's own read decides ([`Installed::has`]), and marks the
 /// ones found installed now in the app's own `songs.db`: a save is only read when its file changes, so a plugin
 /// installed since, or a better rule ([`INSTALLED_RULES`]), would otherwise never reach it. Only ever from missing to
 /// installed: the library doesn't keep the id a save found a plugin by, so a plugin marked installed can't be judged
-/// again here (one removed shows as missing when its save is read again). Only when the installed plugins or the rules
+/// again here. A save with one that isn't found by its name or file now is named in [`Rechecked::to_read`], for its own
+/// reader to judge (review P-2): one removed since shows as missing then. Only when the installed plugins or the rules
 /// changed since the last look. Asks the disk (each plugin's file), so never on the window's thread; the looking is
 /// done before the write, which is one short transaction.
 pub fn recheck_installed(songs_db: &Path) -> Result<Rechecked, LibraryError> {
@@ -231,14 +278,14 @@ pub fn recheck_installed(songs_db: &Path) -> Result<Rechecked, LibraryError> {
         .optional()
         .map_err(&sql)?;
     if noted.as_deref() == Some(stamp.as_str()) {
-        return Ok(Rechecked { installed, ..Rechecked::default() });
+        // Still to read from an earlier look, if the app closed first.
+        let to_read = to_read_in(&conn).map_err(&sql)?.into_iter().collect();
+        return Ok(Rechecked { installed, to_read, ..Rechecked::default() });
     }
-    // The rows marked missing, read once; each plugin they name judged once.
-    let rows: Vec<(i64, i64, PluginRef)> = {
+    // Every row, read once (with its mark); each plugin they name judged once.
+    let rows: Vec<(i64, i64, PluginRef, bool)> = {
         let mut st = conn
-            .prepare(
-                "SELECT rowid, project_id, name, vendor, format, path FROM plugins WHERE COALESCE(installed, 0) = 0",
-            )
+            .prepare("SELECT rowid, project_id, name, vendor, format, path, COALESCE(installed, 0) FROM plugins")
             .map_err(&sql)?;
         let rows = st.query_map([], |r| {
             let text = |i: usize| r.get::<_, Option<String>>(i).map(Option::unwrap_or_default);
@@ -249,15 +296,24 @@ pub fn recheck_installed(songs_db: &Path) -> Result<Rechecked, LibraryError> {
                 path: text(5)?,
                 ..PluginRef::default()
             };
-            Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0), p))
+            Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0), p, r.get::<_, i64>(6)? != 0))
         });
         rows.map_err(&sql)?.collect::<rusqlite::Result<_>>().map_err(&sql)?
     };
     let mut judged: HashMap<(&str, &str, &str, &str), bool> = HashMap::new();
-    let found: Vec<&(i64, i64, PluginRef)> = rows
-        .iter()
-        .filter(|(_, _, p)| *judged.entry((&p.name, &p.vendor, &p.format, &p.path)).or_insert_with(|| installed.has(p)))
-        .collect();
+    let mut found: Vec<(i64, i64, &PluginRef)> = Vec::new();
+    let mut to_read: BTreeSet<i64> = BTreeSet::new();
+    for (row, project, p, marked) in &rows {
+        let has = *judged.entry((&p.name, &p.vendor, &p.format, &p.path)).or_insert_with(|| installed.has(p));
+        match (marked, has) {
+            (false, true) => found.push((*row, *project, p)),
+            // A row with no save (0) has no save to read.
+            (true, false) if *project != 0 => {
+                to_read.insert(*project);
+            }
+            _ => {}
+        }
+    }
 
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(&sql)?;
     own_under_lock(songs_db, &tx)?;
@@ -274,10 +330,9 @@ pub fn recheck_installed(songs_db: &Path) -> Result<Rechecked, LibraryError> {
             .map_err(&sql)?;
         for (row, project, p) in found {
             // A row with no save (0) has no save's count to change.
-            if set.execute(params![row, project, p.name, p.vendor, p.format, p.path]).map_err(&sql)? > 0
-                && *project != 0
+            if set.execute(params![row, project, p.name, p.vendor, p.format, p.path]).map_err(&sql)? > 0 && project != 0
             {
-                changed.insert(*project);
+                changed.insert(project);
             }
         }
     }
@@ -290,10 +345,26 @@ pub fn recheck_installed(songs_db: &Path) -> Result<Rechecked, LibraryError> {
             missing.push((id, u32::try_from(n).unwrap_or(u32::MAX)));
         }
     }
+    // Kept with the look, so what's still to read survives a close; a save no longer in the library goes from it.
+    let mut noted = to_read_in(&tx).map_err(&sql)?;
+    noted.extend(to_read);
+    {
+        let mut listed = tx.prepare("SELECT 1 FROM projects WHERE id = ?1").map_err(&sql)?;
+        let mut gone = Vec::new();
+        for id in &noted {
+            if !listed.exists([id]).map_err(&sql)? {
+                gone.push(*id);
+            }
+        }
+        for id in gone {
+            noted.remove(&id);
+        }
+    }
+    note_to_read(&tx, &noted).map_err(&sql)?;
     tx.execute("INSERT OR REPLACE INTO songs_info (key, value) VALUES (?1, ?2)", params![RECHECKED_KEY, stamp])
         .map_err(&sql)?;
     tx.commit().map_err(&sql)?;
-    Ok(Rechecked { installed, missing, looked: true })
+    Ok(Rechecked { installed, missing, looked: true, to_read: noted.into_iter().collect() })
 }
 
 /// What the saves' plugins are looked at against, in short: the rules' version and a fingerprint of everything

@@ -405,17 +405,8 @@ pub fn measure(
     // while the other is used; rule it out for the other to make it this one's alone. The ones you ruled out are left
     // out of every guess for it. One that is, holds or is inside a project or sample folder of yours is left out too,
     // as the guesses leave them out: it would be offered for a move, and its old copy for the Recycle Bin (rule 2).
-    let protected: Vec<(&str, String)> = protected_roots
-        .iter()
-        .filter(|r| !r.trim().is_empty())
-        .map(|r| (r.as_str(), real_path(r).unwrap_or_else(|| r.clone())))
-        .collect();
-    let yours = |a: &str| {
-        let real_a = real_path(a).unwrap_or_else(|| a.to_owned());
-        protected.iter().any(|(r, real_r)| {
-            is_inside(r, a) || is_inside(a, r) || is_inside(real_r, &real_a) || is_inside(&real_a, real_r)
-        })
-    };
+    let protected = Yours::new(protected_roots);
+    let yours = |a: &str| protected.has(a);
     let added: HashMap<&str, Vec<String>> = plugins
         .iter()
         .map(|p| {
@@ -587,6 +578,30 @@ fn folder_maker(path: &str, plugin_roots: &[String]) -> String {
     }
 }
 
+/// Your project, sample and MIDI folders (`protected_roots`), as a measure leaves them out of every plugin's (rule 2):
+/// [`Yours::has`] says whether a folder is, holds or is inside one, by its path or where its links lead.
+pub struct Yours<'a> {
+    roots: Vec<(&'a str, String)>,
+}
+
+impl<'a> Yours<'a> {
+    pub fn new(protected_roots: &'a [String]) -> Yours<'a> {
+        let roots = protected_roots
+            .iter()
+            .filter(|r| !r.trim().is_empty())
+            .map(|r| (r.as_str(), real_path(r).unwrap_or_else(|| r.clone())))
+            .collect();
+        Yours { roots }
+    }
+
+    /// Whether `folder` is, holds or is inside one of your folders. Looks at the disk for links.
+    pub fn has(&self, folder: &str) -> bool {
+        let real = real_path(folder).unwrap_or_else(|| folder.to_owned());
+        self.roots.iter().any(|(r, real_r)| {
+            is_inside(r, folder) || is_inside(folder, r) || is_inside(real_r, &real) || is_inside(&real, real_r)
+        })
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

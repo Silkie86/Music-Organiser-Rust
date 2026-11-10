@@ -52,8 +52,9 @@ pub struct Installed {
 
 /// Bump when what [`Installed::has`] decides changes (here, or in the mo-formats helpers it uses), so the saves' plugins
 /// marked missing are looked at again at the next start ([`crate::plugin_writes::recheck_installed`]). 2: a Waves
-/// plugin named plainly with Waves as its vendor (Bitwig's "Smack Attack Stereo").
-pub const INSTALLED_RULES: u32 = 2;
+/// plugin named plainly with Waves as its vendor (Bitwig's "Smack Attack Stereo"). 3: a plugin marked installed that
+/// isn't found now names its save to read again (review P-2), so ones uninstalled before that are looked at once.
+pub const INSTALLED_RULES: u32 = 3;
 
 impl Installed {
     /// The ids found by the plugin scanner, from rows of (id, plugin file).

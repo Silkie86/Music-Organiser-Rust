@@ -297,8 +297,8 @@ fn sleep_unless_stopped(d: Duration, stop: &AtomicBool) {
 pub fn ran_text(name: &str, ran: &Ran, waited: Waited) -> String {
     match waited {
         Waited::Gone => format!(
-            "{name} is uninstalled, and its files are off the page. It leaves the list of installed plugins at the \
-             next measure (Measure again)."
+            "{name} is uninstalled, and its files are off the page. It leaves the list of installed plugins, and \
+             songs that use it show it missing, at the next measure (Measure again)."
         ),
         Waited::Stopped => format!(
             "Stopped waiting for {name}'s uninstaller. It may still be open in its own window; once it's done, \
