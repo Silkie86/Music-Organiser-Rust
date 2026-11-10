@@ -12,8 +12,9 @@
 
 use crate::audition::Played;
 use crate::library::{self, Library, Read};
+use crate::threads::{background, lock};
 use crate::{ExtensionLine, Instance, Panel, SoundLine};
-use baseview::dpi::{LogicalSize, PhysicalPosition};
+use baseview::dpi::{PhysicalPosition, Size};
 use baseview::{
     Event, EventStatus, HandlerError, MouseButton, MouseEvent, ScrollDelta, TimerHandle, WindowContext, WindowEvent,
     WindowHandler, WindowSettings, WindowSize,
@@ -28,7 +29,8 @@ use slint::{ComponentHandle, LogicalPosition, Model, ModelNotify, ModelRc, Model
 use std::cell::{Cell, RefCell};
 use std::num::NonZeroU32;
 use std::rc::Rc;
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The panel's size, in logical pixels (before the screen's scaling).
@@ -38,16 +40,16 @@ pub const HEIGHT: f64 = 520.0;
 /// How often the window's timer runs: Slint's timers and animations, and what background threads found.
 const TICK: Duration = Duration::from_millis(30);
 
-/// Opens the panel inside `parent` (the window the DAW lends). The window goes when the returned one is dropped.
+/// Opens the panel inside `parent` (the window the DAW lends), at `size`: the size the plugin told the DAW, so the two
+/// match. The window goes when the returned one is dropped.
 pub fn open(
     parent: &impl raw_window_handle::HasWindowHandle,
+    size: Size,
     instance: Arc<Instance>,
 ) -> Result<baseview::Window, String> {
-    let settings = WindowSettings::new()
-        .with_title("Music Organiser")
-        .with_size(LogicalSize::new(WIDTH, HEIGHT))
-        .with_parent(parent)
-        .with_resizable(false);
+    crate::threads::note_crashes();
+    let settings =
+        WindowSettings::new().with_title("Music Organiser").with_size(size).with_parent(parent).with_resizable(false);
     let window = baseview::Window::create(settings, move |context| {
         Shown::new(context, instance).map_err(|why| HandlerError::from(std::io::Error::other(why)))
     })
@@ -104,15 +106,13 @@ struct Slots {
     library: Mutex<Option<Read>>,
     /// A search's matches, and the words searched.
     found: Mutex<Option<(String, Vec<u32>)>>,
+    /// Counts searches: a search stops when a newer one starts.
+    searches: AtomicU64,
     played: Mutex<Option<Played>>,
 }
 
 fn take<T>(slot: &Mutex<Option<T>>) -> Option<T> {
     lock(slot).take()
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// The list's lines, made only for the rows shown (the list can hold half a million sounds).
@@ -171,6 +171,8 @@ struct Shown {
     instance: Arc<Instance>,
     /// The words last searched, so a search that comes back after newer words were typed is dropped.
     words: Rc<RefCell<String>>,
+    /// The sound the "Playing" line names, as the player numbers it: the line goes when that sound ends.
+    playing: Cell<Option<u64>>,
     _timer: TimerHandle,
 }
 
@@ -180,8 +182,10 @@ impl Shown {
         let _ = slint::platform::set_platform(Box::new(Platform { started: Instant::now() }));
         let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
         NEXT.with(|next| *next.borrow_mut() = Some(Rc::clone(&window)));
-        let panel = Panel::new().map_err(|e| format!("Couldn't make the panel: {e}"))?;
+        let panel = Panel::new();
+        // Taken back whether or not the panel was made, so no later window gets this one.
         NEXT.with(|next| next.borrow_mut().take());
+        let panel = panel.map_err(|e| format!("Couldn't make the panel: {e}"))?;
 
         let handle = context.platform_handle();
         let soft = softbuffer::Context::new(handle.clone()).map_err(|e| format!("Couldn't draw in the window: {e}"))?;
@@ -208,6 +212,7 @@ impl Shown {
             slots,
             instance,
             words: Rc::new(RefCell::new(String::new())),
+            playing: Cell::new(None),
             _timer: timer,
         };
         shown.fill_in();
@@ -287,13 +292,23 @@ impl Shown {
             self.lines.show(library, found);
         }
         if let Some(played) = take(&self.slots.played) {
-            self.panel.set_playing(
-                match played {
-                    Played::Playing(name) => format!("Playing {name}"),
-                    Played::Not(why) => why,
+            let line = match played {
+                Played::Playing(name, n) => {
+                    self.playing.set(Some(n));
+                    format!("Playing {name}")
                 }
-                .into(),
-            );
+                Played::Not(why) => {
+                    self.playing.set(None);
+                    why
+                }
+            };
+            self.panel.set_playing(line.into());
+        }
+        if let Some(n) = self.playing.get()
+            && !self.instance.player.still_playing(n)
+        {
+            self.playing.set(None);
+            self.panel.set_playing(SharedString::new());
         }
         self.instance.player.tidy();
         self.render();
@@ -421,19 +436,15 @@ fn count_line(total: usize, found: Option<usize>) -> String {
     }
 }
 
-/// Searches `library` for `words` on a background thread; the matches land in `slots.found`.
+/// Searches `library` for `words` on a background thread; the matches land in `slots.found`. A search still going
+/// when a newer one starts stops there.
 fn search(library: Arc<Library>, words: String, slots: Arc<Slots>) {
+    let number = slots.searches.fetch_add(1, Ordering::AcqRel) + 1;
     background("mo-plugin-search", move || {
-        let found = library.search(&words);
-        *lock(&slots.found) = Some((words, found));
-    });
-}
-
-/// Runs `work` on a thread of its own at low priority (never the window's thread).
-fn background(name: &str, work: impl FnOnce() + Send + 'static) {
-    let _ = std::thread::Builder::new().name(name.into()).spawn(move || {
-        let _ = thread_priority::set_current_thread_priority(thread_priority::ThreadPriority::Min);
-        work();
+        let wanted = || slots.searches.load(Ordering::Acquire) == number;
+        if let Some(found) = library.search(&words, wanted) {
+            *lock(&slots.found) = Some((words, found));
+        }
     });
 }
 

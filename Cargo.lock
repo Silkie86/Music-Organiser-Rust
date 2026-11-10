@@ -3373,6 +3373,7 @@ dependencies = [
  "keyboard-types 0.8.3",
  "mo-app",
  "mo-audio",
+ "mo-catch",
  "mo-sounds",
  "raw-window-handle",
  "rtrb",

@@ -14,11 +14,13 @@
 //! and the audio thread ([`Processor`]). What they share lives in [`Instance`].
 
 // The CLAP plugin wrapper (clack) catches a panic in any call from the DAW and tells the DAW the call failed, so a bug
-// here never takes the DAW down with it.
+// here never takes the DAW down with it; background threads catch theirs too. Each is written to the plugin's crash
+// note ([`threads`]).
 
 pub mod audition;
 pub mod check;
 pub mod library;
+mod threads;
 mod window;
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]
@@ -134,7 +136,13 @@ impl MainThread<'_> {
             .get(&mut host, &mut buffer)
             .and_then(|info| info.name().map(|n| String::from_utf8_lossy(n).trim_end_matches('\0').to_owned()))
             .unwrap_or_default();
-        *self.shared.instance.track.lock().unwrap_or_else(|p| p.into_inner()) = name;
+        *threads::lock(&self.shared.instance.track) = name;
+    }
+
+    /// The panel's size as the DAW counts it: in pixels at the scaling it gave (Windows, Linux), or in points (Mac).
+    fn panel_size(&self) -> (u32, u32) {
+        let scale = if logical_sizes() { 1.0 } else { self.scale.get() };
+        ((window::WIDTH * scale).round() as u32, (window::HEIGHT * scale).round() as u32)
     }
 
     /// A line in the DAW's log (Bitwig: Help, Show log), when the DAW keeps one.
@@ -184,6 +192,8 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
         } else if let Some(only) = channels.channel_mut(0) {
             let len = only.len().min(self.spare.len());
             self.playing.fill(&mut only[..len], &mut self.spare[..len]);
+            // More frames than the DAW said it would ever ask for: the rest stays quiet.
+            only[len..].fill(0.0);
         }
         // Always on: a pick can start playing at any moment.
         Ok(ProcessStatus::Continue)
@@ -230,6 +240,11 @@ impl PluginNotePortsImpl for MainThread<'_> {
     }
 }
 
+/// Whether the DAW gives and takes window sizes in points before the screen's scaling (Mac) rather than in pixels.
+fn logical_sizes() -> bool {
+    GuiApiType::default_for_current_platform().is_some_and(|api| api.uses_logical_size())
+}
+
 /// The window kinds the plugin can draw in: the system's own (Windows, Mac, Linux X11), inside the DAW's window.
 fn embedded(configuration: &GuiConfiguration) -> bool {
     !configuration.is_floating
@@ -262,9 +277,8 @@ impl PluginGuiImpl for MainThread<'_> {
     }
 
     fn get_size(&self) -> Option<GuiSize> {
-        let logical = GuiApiType::default_for_current_platform().is_some_and(|api| api.uses_logical_size());
-        let scale = if logical { 1.0 } else { self.scale.get() };
-        Some(GuiSize { width: (window::WIDTH * scale).round() as u32, height: (window::HEIGHT * scale).round() as u32 })
+        let (width, height) = self.panel_size();
+        Some(GuiSize { width, height })
     }
 
     fn set_size(&self, _size: GuiSize) -> Result<(), PluginError> {
@@ -274,7 +288,13 @@ impl PluginGuiImpl for MainThread<'_> {
 
     fn set_parent(&self, parent: Window) -> Result<(), PluginError> {
         self.read_track();
-        match window::open(&parent, Arc::clone(&self.shared.instance)) {
+        let (width, height) = self.panel_size();
+        let size = if logical_sizes() {
+            baseview::dpi::LogicalSize::new(f64::from(width), f64::from(height)).into()
+        } else {
+            baseview::dpi::PhysicalSize::new(width, height).into()
+        };
+        match window::open(&parent, size, Arc::clone(&self.shared.instance)) {
             Ok(window) => {
                 *self.window.borrow_mut() = Some(window);
                 Ok(())
