@@ -4,7 +4,7 @@
 // there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
 // fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
 import { ListView, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TickBox, FilterPicks, FilterView, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TickBox, FilterPicks, FilterView, ListLine, Caps, ColumnHead, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
 
 // One line of the list.
 export struct PluginListLine {
@@ -97,8 +97,9 @@ export global PluginsData {
     in property <FilterView> format-filter;
     in property <FilterView> daw-filter;
     in property <bool> any-filter;
-    // The orders, each a chip with the picked one lit.
-    in property <FilterView> sort-filter;
+    // The column the list goes by, as its heading says it ("Songs"), and whether that order is turned round.
+    in property <string> sort-column;
+    in property <bool> sort-reversed;
     // The year strip beside the list: the years plugins were used in.
     in property <[YearBar]> years;
     // The picked years' places on the strip (-1 for none).
@@ -198,6 +199,7 @@ export global PluginsData {
     callback clear-filter(string);
     /// "Show them": turns Big and unused on (never off).
     callback show-unused();
+    // A click on a column's heading (its words): the list goes by it, or turns round when it does already.
     callback sort-picked(string);
     callback clear();
     callback select(int);
@@ -800,15 +802,6 @@ export component PluginsPage inherits Rectangle {
                     false
                 }
             }
-            // The list's order, each on show behind its name as on Sounds and MIDI (the whole-app review of 6 Nov, X3-5).
-            VerticalLayout {
-                alignment: center;
-                FilterPicks {
-                    name: "Order";
-                    filter: PluginsData.sort-filter;
-                    toggled(text) => { PluginsData.sort-picked(text); }
-                }
-            }
         }
         // The filters, each behind its name; more than one can be picked in each. They wrap when the window is narrow.
         FlexboxLayout {
@@ -1001,72 +994,113 @@ export component PluginsPage inherits Rectangle {
                         action: PluginsData.any-filter ? "Clear the filters" : "";
                         act => { PluginsData.clear(); }
                     }
-                    if PluginsData.message == "": plugin-list := ListView {
-                        row-height: 56px;
-                        rows: PluginsData.lines.length;
-                        show-top: PluginsData.show-row * self.row-height;
-                        show-ask: PluginsData.show-ask;
-                        show-done <=> PluginsData.show-done;
-                        for line in PluginsData.lines: ListLine {
-                            // Every line this height: the list counts on it.
-                            height: plugin-list.row-height;
-                            selected: line.row == PluginsData.selected;
-                            clicked => {
-                                keys.focus();
-                                PluginsData.select(line.row);
+                    if PluginsData.message == "" && PluginsData.lines.length > 0: VerticalLayout {
+                        // The headings order the list: a click goes by that column, a second turns it round.
+                        HorizontalLayout {
+                            padding-left: Space.md + Space.xs;
+                            padding-right: Space.md + Space.xs;
+                            spacing: Space.md;
+                            Rectangle { width: 8px; }
+                            ColumnHead {
+                                horizontal-stretch: 1;
+                                text: "PLUGIN";
+                                on: PluginsData.sort-column == "Plugin";
+                                // A to Z first.
+                                up: !PluginsData.sort-reversed;
+                                clicked => { PluginsData.sort-picked("Plugin"); }
                             }
-                            right-clicked(x, y) => { menu.open-at(x, y); }
-                            HorizontalLayout {
-                                padding-left: Space.md;
-                                padding-right: Space.md;
-                                spacing: Space.md;
-                                VerticalLayout {
-                                    alignment: center;
-                                    Dot { tint: line.state == 1 ? Theme.missing : line.state == 2 ? Theme.warning : Theme.ok; }
+                            ColumnHead {
+                                width: 80px;
+                                right: true;
+                                text: "SONGS";
+                                on: PluginsData.sort-column == "Songs";
+                                up: PluginsData.sort-reversed;
+                                clicked => { PluginsData.sort-picked("Songs"); }
+                            }
+                            if area.wide: ColumnHead {
+                                width: 76px;
+                                right: true;
+                                text: "LAST USED";
+                                on: PluginsData.sort-column == "Last used";
+                                up: PluginsData.sort-reversed;
+                                clicked => { PluginsData.sort-picked("Last used"); }
+                            }
+                            ColumnHead {
+                                width: 72px;
+                                right: true;
+                                text: "SIZE";
+                                on: PluginsData.sort-column == "Size";
+                                up: PluginsData.sort-reversed;
+                                clicked => { PluginsData.sort-picked("Size"); }
+                            }
+                        }
+                        plugin-list := ListView {
+                            row-height: 56px;
+                            rows: PluginsData.lines.length;
+                            show-top: PluginsData.show-row * self.row-height;
+                            show-ask: PluginsData.show-ask;
+                            show-done <=> PluginsData.show-done;
+                            for line in PluginsData.lines: ListLine {
+                                // Every line this height: the list counts on it.
+                                height: plugin-list.row-height;
+                                selected: line.row == PluginsData.selected;
+                                clicked => {
+                                    keys.focus();
+                                    PluginsData.select(line.row);
                                 }
-                                VerticalLayout {
-                                    alignment: center;
-                                    spacing: Space.xs;
-                                    horizontal-stretch: 1;
+                                right-clicked(x, y) => { menu.open-at(x, y); }
+                                HorizontalLayout {
+                                    padding-left: Space.md;
+                                    padding-right: Space.md;
+                                    spacing: Space.md;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Dot { tint: line.state == 1 ? Theme.missing : line.state == 2 ? Theme.warning : Theme.ok; }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        spacing: Space.xs;
+                                        horizontal-stretch: 1;
+                                        Text {
+                                            text: line.name;
+                                            color: Theme.text;
+                                            font-size: Type.row-title;
+                                            font-weight: 500;
+                                            overflow: elide;
+                                        }
+                                        Text {
+                                            text: line.details;
+                                            color: Theme.muted;
+                                            font-size: Type.meta;
+                                            overflow: elide;
+                                        }
+                                    }
                                     Text {
-                                        text: line.name;
+                                        width: 80px;
+                                        text: line.songs;
                                         color: Theme.text;
-                                        font-size: Type.row-title;
-                                        font-weight: 500;
-                                        overflow: elide;
+                                        font-size: Type.meta;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: right;
+                                    }
+                                    if area.wide: Text {
+                                        width: 76px;
+                                        text: line.last;
+                                        color: Theme.muted;
+                                        font-family: Theme.number-font;
+                                        font-size: Type.meta;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: right;
                                     }
                                     Text {
-                                        text: line.details;
-                                        color: Theme.muted;
+                                        width: 72px;
+                                        text: line.size;
+                                        color: line.state == 2 ? Theme.warning : Theme.muted;
+                                        font-family: Theme.number-font;
                                         font-size: Type.meta;
-                                        overflow: elide;
+                                        vertical-alignment: center;
+                                        horizontal-alignment: right;
                                     }
-                                }
-                                Text {
-                                    width: 80px;
-                                    text: line.songs;
-                                    color: Theme.text;
-                                    font-size: Type.meta;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: right;
-                                }
-                                if area.wide: Text {
-                                    width: 76px;
-                                    text: line.last;
-                                    color: Theme.muted;
-                                    font-family: Theme.number-font;
-                                    font-size: Type.meta;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: right;
-                                }
-                                Text {
-                                    width: 72px;
-                                    text: line.size;
-                                    color: line.state == 2 ? Theme.warning : Theme.muted;
-                                    font-family: Theme.number-font;
-                                    font-size: Type.meta;
-                                    vertical-alignment: center;
-                                    horizontal-alignment: right;
                                 }
                             }
                         }

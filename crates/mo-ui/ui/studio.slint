@@ -302,6 +302,47 @@ export component Caps inherits Text {
     letter-spacing: 0.8px;
 }
 
+// A list's column heading that orders the list (the UX review of 10 Nov, B5): a click on it puts the list in that
+// column's order, a second click turns the order round. The heading the list goes by is lit in the accent colour
+// (the accent means "on") with a small arrow for which way. Every page's list headings are made of these, so the
+// "Order" row of chips above a list isn't needed. A column the list can't go by sets `can-order` off: plain capitals.
+export component ColumnHead inherits Rectangle {
+    in property <string> text;
+    // The list goes by this column.
+    in property <bool> on;
+    // Which way, when it's on: up for the smallest, the earliest or A first.
+    in property <bool> up;
+    in property <bool> can-order: true;
+    // Numbers sit at the right of their column, and so does their heading.
+    in property <bool> right;
+    in property <string> tip;
+    callback clicked;
+    height: 28px;
+    HorizontalLayout {
+        alignment: root.right ? end : start;
+        spacing: Space.xs;
+        label := Caps {
+            text: root.text;
+            vertical-alignment: center;
+            color: root.on ? Theme.accent : touch.has-hover && root.can-order ? Theme.text : Theme.muted;
+        }
+        if root.on: VerticalLayout {
+            alignment: center;
+            Path {
+                width: 7px;
+                height: 5px;
+                fill: Theme.accent;
+                commands: root.up ? "M 0 5 L 3.5 0 L 7 5 Z" : "M 0 0 L 7 0 L 3.5 5 Z";
+            }
+        }
+    }
+    touch := TouchArea {
+        enabled: root.can-order;
+        mouse-cursor: root.can-order ? MouseCursor.pointer : MouseCursor.default;
+        clicked => { root.clicked(); }
+    }
+}
+
 // The shaded, top-lit button. `main` is the page's main action, in the accent colour; `danger` says in red that it
 // removes something for good (only ever the yes of a question that said what goes).
 export component StudioButton inherits Rectangle {
