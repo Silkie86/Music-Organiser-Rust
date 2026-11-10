@@ -13,7 +13,7 @@ use super::format::{Document, ObjId};
 /// Bitwig project again.
 pub const VERSION: u32 = 1;
 
-pub(super) const CLIP: u32 = 0xd90;
+const CLIP: u32 = 0xd90;
 const LANE: u32 = 0x23d;
 
 /// A point of an automation clip.
@@ -51,7 +51,7 @@ pub fn clips(doc: &Document) -> Vec<AutomationClip> {
         .collect()
 }
 
-pub(super) fn clip(doc: &Document, o: ObjId) -> Option<AutomationClip> {
+fn clip(doc: &Document, o: ObjId) -> Option<AutomationClip> {
     let c = doc.obj(o);
     let content = doc.field_obj(o, 0x2ae9).and_then(|h| doc.field_obj(h, 0x10e9))?;
     let list = doc.field_obj(content, 0x48e)?;

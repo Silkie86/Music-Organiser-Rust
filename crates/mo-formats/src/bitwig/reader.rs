@@ -59,8 +59,8 @@ const F_HARDWARE_NAME: u32 = 0x11a7;
 // and the master in a third field. The "structure" metadata mirrors it with the names Bitwig shows.
 pub(super) const F_PROJECT_GROUP: u32 = 0x4dd;
 pub(super) const F_GROUP_TRACKS: u32 = 0x4de;
-const F_GROUP_EFFECT_TRACKS: u32 = 0x4df;
-const F_MASTER_TRACK: u32 = 0x4e0;
+pub(super) const F_GROUP_EFFECT_TRACKS: u32 = 0x4df;
+pub(super) const F_MASTER_TRACK: u32 = 0x4e0;
 const F_STRUCT_ROOT: u32 = 0xad2;
 const F_STRUCT_TRACKS: u32 = 0xace;
 const F_STRUCT_EFFECT_TRACKS: u32 = 0xacf;

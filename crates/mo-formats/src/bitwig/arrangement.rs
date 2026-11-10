@@ -5,12 +5,12 @@
 
 use std::collections::HashSet;
 
-use super::automation;
 use super::format::{Document, ObjId, Slot, Value};
 use super::reader::{
     CLS_BITWIG_DEVICE, CLS_CLIP, CLS_NOTE, CLS_TEMPO, CLS_VST2_PLUGIN, CLS_VST3_PLUGIN, F_DEVICE_CATEGORY,
-    F_DEVICE_NAME, F_DEVICE_PRESET, F_DURATION, F_FILE_PATH, F_GROUP_TRACKS, F_NOTES, F_PITCH, F_PROJECT_GROUP,
-    F_START, F_TEMPO, F_VELOCITY, bitwig_kind, field_obj, is_instrument_category, track_names,
+    F_DEVICE_NAME, F_DEVICE_PRESET, F_DURATION, F_FILE_PATH, F_GROUP_EFFECT_TRACKS, F_GROUP_TRACKS, F_MASTER_TRACK,
+    F_NOTES, F_PITCH, F_PROJECT_GROUP, F_START, F_TEMPO, F_VELOCITY, bitwig_kind, field_obj, is_instrument_category,
+    track_names,
 };
 use crate::PluginKind;
 use crate::arrangement::{
@@ -101,9 +101,10 @@ const F_SIGNATURE: u32 = 0x1cbe;
 const F_CUE_MARKERS: u32 = 0x2adc;
 const F_CUE_NAME: u32 = 0x98b;
 // A track's (and the transport's) automation: 0x2dc9 → 0x4ba, a list of lanes. A lane's 0x2a3 says what it moves
-// (0x133b the device, "Mixer" or "Transport" or a plugin; 0x133a the setting), and its timeline (0x2d8c) holds the
-// points drawn straight on the lane (0x35ac → 0x21f: each a beat and a value in 0x28f, or for an on/off setting a
-// yes or no in 0x12e) and any automation clips (0x21f, [`automation`]).
+// (0x133b the device, "Mixer" or "Transport" or a plugin; 0x133a the setting; 0x41 the setting itself, whose 0x2bd is
+// its ID: "TEMPO", "VOLUME", "PANORAMA"), and its timeline (0x2d8c) holds the points drawn straight on the lane
+// (0x35ac → 0x21f: each a beat and a value in 0x28f, or for an on/off setting a yes or no in 0x12e) and any
+// automation clips (0x21f, class 0xd90: like a note clip, with its points in its content's 0x48e).
 const F_AUTOMATION: u32 = 0x2dc9;
 const F_AUTOMATION_LANES: u32 = 0x4ba;
 const F_LANE_TARGET: u32 = 0x2a3;
@@ -111,6 +112,10 @@ const F_LANE_TIMELINE: u32 = 0x2d8c;
 const F_LANE_POINTS: u32 = 0x35ac;
 const F_TARGET_DEVICE: u32 = 0x133b;
 const F_TARGET_SETTING: u32 = 0x133a;
+const F_TARGET_OBJECT: u32 = 0x41;
+const F_SETTING_ID: u32 = 0x2bd;
+const CLS_AUTOMATION_CLIP: u32 = 0xd90;
+const F_CURVE: u32 = 0x48e;
 const F_POINT_ON: u32 = 0x12e;
 
 /// The most automation points a project's preview holds: far past any real project's, and a damaged file can't fill
@@ -161,20 +166,22 @@ pub fn read(doc: &Document) -> Vec<Arrangement> {
     let mut lanes = Vec::new();
     // Each track's automation curves (the arranger shows them under it; the scenes view doesn't).
     let mut curves: Vec<Vec<PreviewLane>> = Vec::new();
-    let mut points_left = MOST_POINTS;
+    let mut points = PointBudget { left: MOST_POINTS, ran_out: false };
     // The transport's own curves (the tempo's) come first.
-    let song_curves = transport.map(|t| automation_lanes(doc, t, "", 0, false, &mut points_left)).unwrap_or_default();
+    let song_curves = transport.map(|t| automation_lanes(doc, t, "", 0, false, &mut points)).unwrap_or_default();
     let mut budget = NoteBudget::new();
     // Each track's launcher slots, the clip in each (for the scenes view).
     let mut launcher: Vec<Vec<Option<ObjId>>> = Vec::new();
     let mut seen = HashSet::new();
-    // The tracks left to walk in each group, last first, with how deep the group is.
-    let mut stack: Vec<(Vec<ObjId>, u32)> = Vec::new();
-    if let Some(project) = field_obj(doc, root, F_PROJECT_GROUP) {
-        stack.push((doc.field_list(project, F_GROUP_TRACKS).into_iter().rev().collect(), 0));
+    // The tracks left to walk in each group, last first, with how deep the group is and whether it's silent (muted
+    // or deactivated, which silences everything in it).
+    let mut stack: Vec<(Vec<ObjId>, u32, bool)> = Vec::new();
+    let project = field_obj(doc, root, F_PROJECT_GROUP);
+    if let Some(project) = project {
+        stack.push((doc.field_list(project, F_GROUP_TRACKS).into_iter().rev().collect(), 0, false));
     }
-    while let Some((left, depth)) = stack.last_mut() {
-        let depth = *depth;
+    while let Some((left, depth, silent)) = stack.last_mut() {
+        let (depth, silent) = (*depth, *silent);
         let Some(track) = left.pop() else {
             stack.pop();
             continue;
@@ -203,15 +210,27 @@ pub fn read(doc: &Document) -> Vec<Arrangement> {
         lane.colour = colour(doc.obj(track).get(F_TRACK_COLOUR));
         lane.depth = depth;
         lane.clips = clips;
-        // A deactivated track doesn't play, so it's muted too.
-        lane.disabled = doc.obj(track).num(F_ACTIVE) == Some(0.0);
-        let mute = field_obj(doc, track, F_MIXER).and_then(|m| field_obj(doc, m, F_MIXER_MUTE));
-        lane.muted = lane.disabled || mute.and_then(|m| doc.obj(m).num(F_ON)).is_some_and(|on| on != 0.0);
-        curves.push(automation_lanes(doc, track, &lane.name, depth + 1, lane.muted, &mut points_left));
+        // A deactivated track doesn't play, so it's muted too; so is a track in a group that's either.
+        let (disabled, muted) = switched_off(doc, track);
+        lane.disabled = disabled;
+        lane.muted = muted || silent;
+        curves.push(automation_lanes(doc, track, &lane.name, depth + 1, lane.muted, &mut points));
+        let silent = lane.muted;
         lanes.push(lane);
         launcher.push(launcher_slots(doc, track).into_iter().map(|slot| slot_clip(doc, slot)).collect());
         if !children.is_empty() {
-            stack.push((children.into_iter().rev().collect(), depth + 1));
+            stack.push((children.into_iter().rev().collect(), depth + 1, silent));
+        }
+    }
+    // The effect tracks and the master aren't drawn as tracks, but what's automated on them is: last, as Bitwig has
+    // them.
+    let mut mix_curves = Vec::new();
+    let effects = project.map(|p| doc.field_list(p, F_GROUP_EFFECT_TRACKS)).unwrap_or_default();
+    let master = project.and_then(|p| field_obj(doc, p, F_MASTER_TRACK));
+    for (track, fallback) in effects.into_iter().map(|t| (t, "FX")).chain(master.map(|t| (t, "Master"))) {
+        if seen.insert(track) {
+            let name = names.get(track).filter(|n| !n.is_empty()).unwrap_or(fallback);
+            mix_curves.extend(automation_lanes(doc, track, name, 0, switched_off(doc, track).1, &mut points));
         }
     }
 
@@ -221,7 +240,7 @@ pub fn read(doc: &Document) -> Vec<Arrangement> {
     if budget.ran_out {
         notes.push(TOO_MANY_NOTES.to_owned());
     }
-    if points_left == 0 {
+    if points.ran_out {
         notes.push(TOO_MANY_POINTS.to_owned());
     }
     let timeline_empty = lanes.iter().all(|l| l.clips.is_empty());
@@ -231,6 +250,7 @@ pub fn read(doc: &Document) -> Vec<Arrangement> {
         shown.push(lane);
         shown.extend(its_curves);
     }
+    shown.extend(mix_curves);
     let lanes = shown;
     let mut arranger = Arrangement { view: VIEW, tempo, beats_per_bar, lanes, markers, notes };
     match scenes {
@@ -331,16 +351,145 @@ fn scenes(
     Some(Arrangement { view: SCENES_VIEW, tempo, beats_per_bar, lanes: placed, markers, notes })
 }
 
-/// The automation curves of a track (or of the transport, whose name is ""), each a lane: the points drawn on the
-/// lane as one clip from the first to the last, and each automation clip as its own. A setting that never moves has
-/// no lane. `points_left` is how many more points the preview holds; at 0 the rest are left out.
+/// How many more automation points the preview holds.
+struct PointBudget {
+    left: usize,
+    ran_out: bool,
+}
+
+impl PointBudget {
+    /// Cuts a curve to what the preview still holds.
+    fn fit<T>(&mut self, points: &mut Vec<T>) {
+        if points.len() > self.left {
+            points.truncate(self.left);
+            self.ran_out = true;
+        }
+        self.left -= points.len();
+    }
+}
+
+/// What a lane moves, for turning what Bitwig saves into 0 to 1.
+#[derive(Clone, Copy, PartialEq)]
+enum Moved {
+    /// Real BPM, over Bitwig's own range of 20 to 666.
+    Tempo,
+    /// The cube root of the level, up to +6 dB (twice the level).
+    Volume,
+    /// -1 (left) to 1 (right).
+    Pan,
+    /// A plugin's setting is 0 to 1 already; anything else is spread over what the lane holds.
+    Other,
+}
+
+/// The points in a list (a lane's 0x35ac, or an automation clip's 0x48e) as (beat, value) in time order, and whether
+/// they're an on/off setting's (a yes or no in 0x12e, which jumps from one to the next).
+fn curve_points(doc: &Document, list: Option<ObjId>, most: usize) -> (Vec<(f64, f64)>, bool) {
+    let mut steps = false;
+    let mut points: Vec<(f64, f64)> = list
+        .map(|l| doc.field_list(l, F_ITEMS))
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|p| {
+            let p = doc.obj(p);
+            let on = p.num(F_POINT_ON);
+            steps |= on.is_some();
+            Some((p.num(F_START)?, p.num(F_EXPRESSION_VALUE).or(on)?))
+        })
+        .filter(|(beat, value)| beat.is_finite() && beat.abs() <= MOST_BEATS && value.is_finite())
+        .collect();
+    points.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // The earliest, when a damaged file holds more than the preview ever would.
+    points.truncate(most);
+    (points, steps)
+}
+
+/// An on/off setting's points with each answer held until the next.
+fn held(points: Vec<(f64, f64)>) -> Vec<(f64, f64)> {
+    let mut held = Vec::with_capacity(points.len() * 2);
+    for (beat, value) in points {
+        // Held up to the jump, unless a point is there already.
+        if let Some(&(_, before)) = held.last().filter(|&&(at, before)| before != value && at != beat) {
+            held.push((beat, before));
+        }
+        held.push((beat, value));
+    }
+    held
+}
+
+/// A curve's value at a beat: on the line between the points either side (or the answer before it, for an on/off
+/// setting), and the nearest point's past either end. `points` are in time order and not empty.
+fn value_at(points: &[(f64, f64)], steps: bool, beat: f64) -> f64 {
+    let after = points.partition_point(|p| p.0 <= beat);
+    match (after.checked_sub(1).and_then(|i| points.get(i)), points.get(after)) {
+        (Some(&(b0, v0)), Some(&(b1, v1))) if !steps && b1 > b0 => v0 + (v1 - v0) * (beat - b0) / (b1 - b0),
+        (Some(&(_, v)), _) | (None, Some(&(_, v))) => v,
+        (None, None) => 0.0,
+    }
+}
+
+/// An automation clip's points as they play over its `length`, in beats from its start: from its play start, and
+/// round its loop again and again when it loops (a note or audio clip's own rule, [`timing`]).
+fn played_points(points: &[(f64, f64)], steps: bool, t: Timing, length: f64) -> Vec<(f64, f64)> {
+    let mut out = Vec::new();
+    // Each pass plays the curve from `from` to `to`, and lands at `at` in the clip.
+    let (mut at, mut from) = (0.0, t.offset);
+    let looping = t.looping && t.offset < t.loop_end;
+    for _ in 0..MOST_PASSES {
+        let to = if looping { t.loop_end } else { from + length }.min(from + (length - at));
+        if to <= from || out.len() > MOST_POINTS {
+            break;
+        }
+        out.push((at, value_at(points, steps, from)));
+        let inside = points.iter().filter(|p| p.0 > from && p.0 < to);
+        out.extend(inside.map(|&(beat, value)| (at + beat - from, value)));
+        // An on/off setting's last answer holds to the pass's end; a curve reaches the value it has there.
+        out.push((at + to - from, value_at(points, steps, if steps { to.next_down() } else { to })));
+        at += to - from;
+        if !looping || at >= length {
+            break;
+        }
+        from = t.loop_start;
+    }
+    if steps { held(out) } else { out }
+}
+
+/// An automation clip on a lane's timeline (class 0xd90): where it is, and its points as they play.
+struct CurveClip {
+    name: String,
+    start: f64,
+    length: f64,
+    muted: bool,
+    points: Vec<(f64, f64)>,
+}
+
+fn curve_clip(doc: &Document, clip: ObjId, most: usize) -> Option<CurveClip> {
+    let c = doc.obj(clip);
+    let sane = |v: f64| v.is_finite() && v.abs() <= MOST_BEATS;
+    let (start, length) = (c.num(F_START).filter(|v| sane(*v))?, c.num(F_DURATION).filter(|v| sane(*v) && *v > 0.0)?);
+    let content = field_obj(doc, clip, F_CLIP_CONTENT).and_then(|holder| field_obj(doc, holder, F_CONTENT_OBJECT))?;
+    let (points, steps) = curve_points(doc, field_obj(doc, content, F_CURVE), most);
+    if points.is_empty() {
+        return None;
+    }
+    Some(CurveClip {
+        name: c.str(F_CONTENT_NAME).to_owned(),
+        start,
+        length,
+        muted: c.num(F_MUTED).is_some_and(|m| m > 0.0),
+        points: played_points(&points, steps, timing(doc, clip), length),
+    })
+}
+
+/// The automation curves of a track (or of the transport, whose name is ""), each a lane: its automation clips, and
+/// the points drawn on the lane itself wherever no clip is, as clips of their own. A setting that never moves has no
+/// lane.
 fn automation_lanes(
     doc: &Document,
     owner: ObjId,
     owner_name: &str,
     depth: u32,
     muted: bool,
-    points_left: &mut usize,
+    budget: &mut PointBudget,
 ) -> Vec<PreviewLane> {
     let list = field_obj(doc, owner, F_AUTOMATION).map(|a| doc.field_list(a, F_AUTOMATION_LANES)).unwrap_or_default();
     let mut lanes = Vec::new();
@@ -350,91 +499,98 @@ fn automation_lanes(
         let target = field_obj(doc, lane, F_LANE_TARGET);
         let text = |field: u32| target.map_or("", |t| doc.obj(t).str(field));
         let (device, setting) = (text(F_TARGET_DEVICE), text(F_TARGET_SETTING));
-        // The points on the lane itself, as (beat, value); an on/off setting's jump from one to the next.
-        let mut steps = false;
-        let mut drawn: Vec<(f64, f64)> = field_obj(doc, timeline, F_LANE_POINTS)
-            .map(|p| doc.field_list(p, F_ITEMS))
-            .unwrap_or_default()
-            .into_iter()
-            .take(*points_left)
-            .filter_map(|p| {
-                let p = doc.obj(p);
-                let on = p.num(F_POINT_ON);
-                steps |= on.is_some();
-                Some((p.num(F_START)?, p.num(F_EXPRESSION_VALUE).or(on)?))
+        // The setting's own ID says what it is whatever name it's shown by; one without is told by its names.
+        let id = target.and_then(|t| field_obj(doc, t, F_TARGET_OBJECT)).map_or("", |s| doc.obj(s).str(F_SETTING_ID));
+        let moved = match (id, device, setting) {
+            ("TEMPO", ..) | ("", "Transport", "Tempo") => Moved::Tempo,
+            ("VOLUME", ..) | ("", "Mixer", "Volume") => Moved::Volume,
+            ("PANORAMA", ..) | ("", "Mixer", "Pan") => Moved::Pan,
+            _ => Moved::Other,
+        };
+
+        // The automation clips on the lane, in time order.
+        let mut placed: Vec<CurveClip> = Vec::new();
+        for c in doc.field_list(timeline, F_ITEMS).into_iter().filter(|&c| doc.obj(c).class == CLS_AUTOMATION_CLIP) {
+            if budget.left == 0 {
+                budget.ran_out = true;
+                break;
+            }
+            let Some(mut clip) = curve_clip(doc, c, budget.left) else { continue };
+            budget.fit(&mut clip.points);
+            placed.push(clip);
+        }
+        placed.sort_by(|a, b| a.start.total_cmp(&b.start));
+        // The points on the lane itself. Bitwig leaves one after each clip (the value the setting stays at), so two
+        // points with a clip between them aren't joined: each run of points clear of the clips is a curve.
+        let (drawn, steps) = curve_points(doc, field_obj(doc, timeline, F_LANE_POINTS), budget.left);
+        let mut reach = f64::NEG_INFINITY;
+        // How far the clips starting up to each one reach.
+        let reaches: Vec<f64> = placed
+            .iter()
+            .map(|c| {
+                reach = reach.max(c.start + c.length);
+                reach
             })
-            .filter(|(beat, value)| beat.is_finite() && beat.abs() <= MOST_BEATS && value.is_finite())
             .collect();
-        *points_left -= drawn.len();
-        drawn.sort_by(|a, b| a.0.total_cmp(&b.0));
-        if steps {
-            // Each value is held until the next.
-            let mut held = Vec::with_capacity(drawn.len() * 2);
-            for (beat, value) in drawn {
-                if let Some(&(_, before)) = held.last() {
-                    held.push((beat, before));
-                }
-                held.push((beat, value));
-            }
-            drawn = held;
-        }
-        // The automation clips on the lane, their points counted from each clip's start.
-        let mut placed = Vec::new();
-        for c in doc.field_list(timeline, F_ITEMS).into_iter().filter(|&c| doc.obj(c).class == automation::CLIP) {
-            let Some(mut clip) = automation::clip(doc, c) else { continue };
-            clip.points.truncate(*points_left);
-            *points_left -= clip.points.len();
-            let sane = |v: f64| v.is_finite() && v.abs() <= MOST_BEATS;
-            if sane(clip.start) && sane(clip.length) && !clip.points.is_empty() {
-                placed.push(clip);
+        let clip_between = |a: f64, b: f64| {
+            let before = placed.partition_point(|c| c.start < b);
+            before.checked_sub(1).and_then(|i| reaches.get(i)).is_some_and(|&reach| reach > a)
+        };
+        let mut runs: Vec<Vec<(f64, f64)>> = Vec::new();
+        for point in drawn {
+            match runs.last_mut() {
+                Some(run) if run.last().is_some_and(|last| !clip_between(last.0, point.0)) => run.push(point),
+                _ => runs.push(vec![point]),
             }
         }
+        let mut runs: Vec<Vec<(f64, f64)>> =
+            runs.into_iter().filter(|run| run.len() > 1).map(|run| if steps { held(run) } else { run }).collect();
+        runs.iter_mut().for_each(|run| budget.fit(run));
+
         // Every value on the lane, to turn what Bitwig saves into 0 to 1.
-        let values = drawn.iter().map(|p| p.1).chain(placed.iter().flat_map(|c| c.points.iter().map(|p| p.value)));
+        let values = runs.iter().flatten().chain(placed.iter().flat_map(|c| c.points.iter())).map(|p| p.1);
         let (low, high) = values.fold((f64::INFINITY, f64::NEG_INFINITY), |(l, h), v| (l.min(v), h.max(v)));
         let unit = |value: f64| -> f64 {
-            let unit = match (device, setting) {
-                // Real BPM, over Bitwig's own range of 20 to 666.
-                ("Transport", "Tempo") => (value - 20.0) / 646.0,
-                // The cube root of the level, up to +6 dB (twice the level).
-                ("Mixer", "Volume") => value / 2f64.cbrt(),
-                ("Mixer", "Pan") => (value + 1.0) / 2.0,
-                // A plugin's setting is 0 to 1 already; anything else is spread over what the lane holds.
-                _ if low >= 0.0 && high <= 1.0 => value,
-                _ if high > low => (value - low) / (high - low),
-                _ => 0.5,
+            let unit = match moved {
+                Moved::Tempo => (value - 20.0) / 646.0,
+                Moved::Volume => value / 2f64.cbrt(),
+                Moved::Pan => (value + 1.0) / 2.0,
+                Moved::Other if low >= 0.0 && high <= 1.0 => value,
+                Moved::Other if high > low => (value - low) / (high - low),
+                Moved::Other => 0.5,
             };
             unit.clamp(0.0, 1.0)
         };
-        let mut clips = Vec::new();
-        if let (Some(&(start, _)), Some(&(end, _)), true) = (drawn.first(), drawn.last(), drawn.len() > 1) {
+        let name = match setting {
+            "" => "Automation",
+            setting => setting,
+        };
+        let mut clips: Vec<PreviewClip> = Vec::new();
+        for run in runs.iter().filter(|run| run.len() > 1) {
+            let (Some(&(start, _)), Some(&(end, _))) = (run.first(), run.last()) else { continue };
             clips.push(PreviewClip {
-                name: setting.to_owned(),
+                name: name.to_owned(),
                 start,
                 length: (end - start).max(1.0),
-                points: drawn.iter().map(|&(beat, v)| PreviewPoint { beat: beat - start, value: unit(v) }).collect(),
+                points: run.iter().map(|&(beat, v)| PreviewPoint { beat: beat - start, value: unit(v) }).collect(),
                 ..PreviewClip::default()
             });
         }
-        clips.extend(placed.into_iter().map(|c| PreviewClip {
-            name: if c.name.is_empty() { setting.to_owned() } else { c.name },
+        clips.extend(placed.iter().filter(|c| c.points.len() > 1).map(|c| PreviewClip {
+            name: if c.name.is_empty() { name.to_owned() } else { c.name.clone() },
             start: c.start,
             length: c.length,
             muted: c.muted,
-            points: c.points.iter().map(|p| PreviewPoint { beat: p.beat, value: unit(p.value) }).collect(),
+            points: c.points.iter().map(|&(beat, v)| PreviewPoint { beat, value: unit(v) }).collect(),
             ..PreviewClip::default()
         }));
         if clips.is_empty() {
             continue;
         }
         clips.sort_by(|a, b| a.start.total_cmp(&b.start));
-        let name = match setting {
-            "" => "Automation",
-            setting => setting,
-        };
         let mut shown = PreviewLane::new(name, LaneKind::Automation);
         shown.detail = match (device, owner_name) {
-            ("Transport", "") if setting == "Tempo" => "Song tempo".to_owned(),
+            (_, "") if moved == Moved::Tempo => "Song tempo".to_owned(),
             ("" | "Mixer" | "Transport", "") => "Moves the song".to_owned(),
             ("" | "Mixer" | "Transport", track) => format!("Moves {track}"),
             (device, "") => format!("Moves {device}"),
@@ -449,6 +605,13 @@ fn automation_lanes(
         lanes.push(shown);
     }
     lanes
+}
+
+/// Whether a track is deactivated, and whether it's silent: deactivated, or muted in its mixer.
+fn switched_off(doc: &Document, track: ObjId) -> (bool, bool) {
+    let disabled = doc.obj(track).num(F_ACTIVE) == Some(0.0);
+    let mute = field_obj(doc, track, F_MIXER).and_then(|m| field_obj(doc, m, F_MIXER_MUTE));
+    (disabled, disabled || mute.and_then(|m| doc.obj(m).num(F_ON)).is_some_and(|on| on != 0.0))
 }
 
 /// The clip in a launcher slot (the slot's 0x240). Bitwig 6 defines a clip at its first use, which can be the track's
