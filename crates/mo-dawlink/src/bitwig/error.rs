@@ -147,4 +147,39 @@ impl Error {
         matches!(self, Error::Bitwig(words) if words.starts_with("Bitwig has \"")
             && words.ends_with("\", so the link stopped before changing anything there."))
     }
+
+    /// Whether Bitwig (or the link in it) is gone, so nothing the app started there plays any more: Bitwig isn't
+    /// running, something else answers, or the connection closed or broke. A stop that fails this way can never work,
+    /// so the app lets go of what it was stopping (the 10 Nov review's D-1).
+    pub fn bitwig_gone(&self) -> bool {
+        matches!(
+            self,
+            Error::NotRunning | Error::NotTheLink { .. } | Error::Closed | Error::NotConnected | Error::Lost(_)
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_stop_that_can_never_work_is_told_apart() {
+        for gone in [
+            Error::NotRunning,
+            Error::NotTheLink { port: 1 },
+            Error::Closed,
+            Error::NotConnected,
+            Error::Lost(String::new()),
+        ] {
+            assert!(gone.bitwig_gone(), "{gone:?}");
+        }
+        // Bitwig is there: the stop may work once its project is in front, or changes are on.
+        let elsewhere = Error::Bitwig(
+            "Bitwig has \"B\" open, not \"A\", so the link stopped before changing anything there.".into(),
+        );
+        for there in [elsewhere, Error::ChangesOff, Error::TimedOut] {
+            assert!(!there.bitwig_gone(), "{there:?}");
+        }
+    }
 }

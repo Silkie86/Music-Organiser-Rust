@@ -2026,11 +2026,19 @@ fn stop_bitwig_in(
     turn: &mo_dawlink::bitwig::Turn<'_>,
     weak: Option<slint::Weak<AppWindow>>,
 ) {
-    let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_playing(&bitwig, turn) else { return };
+    let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_playing(&bitwig, turn) else {
+        PUT_BACK.store(false, std::sync::atomic::Ordering::SeqCst);
+        return;
+    };
     log::warning("MIDI", &format!("The part playing in Bitwig couldn't be stopped: {e}"));
+    // Put back once, so Stop can be pressed again once its project is in front; let go when the stop can never work
+    // (Bitwig is gone) or it failed again after being put back, so a new Play isn't called off and Esc goes on (the 10
+    // Nov review's D-1).
+    let let_go = e.bitwig_gone() || PUT_BACK.swap(false, std::sync::atomic::Ordering::SeqCst);
     let put_back = {
         let mut slot = in_daw();
-        if slot.is_none() {
+        if slot.is_none() && !let_go {
+            PUT_BACK.store(true, std::sync::atomic::Ordering::SeqCst);
             *slot = Some(InDaw::Bitwig(bitwig));
             DAW_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Some((DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst), crate::presets::call_off_start()))
@@ -2039,10 +2047,18 @@ fn stop_bitwig_in(
         }
     };
     let Some(weak) = weak else { return };
-    let words = format!(
-        "It couldn't be stopped in Bitwig: {e} Bring its project to the front in Bitwig (with changes on), then press \
-         Stop again."
-    );
+    let words = if let_go {
+        log::info("MIDI", "The app let go of the part playing in Bitwig, which couldn't be stopped");
+        format!(
+            "It couldn't be stopped in Bitwig: {e} The app has let it go: if its clip still plays there, stop it in \
+             Bitwig."
+        )
+    } else {
+        format!(
+            "It couldn't be stopped in Bitwig: {e} Bring its project to the front in Bitwig (with changes on), then \
+             press Stop again. If it fails again, the app lets it go."
+        )
+    };
     let _ = slint::invoke_from_event_loop(move || {
         let Some(app) = weak.upgrade() else { return };
         let data = app.global::<MidiData>();
@@ -2060,6 +2076,9 @@ fn stop_bitwig_in(
         data.set_daw_note(words.into());
     });
 }
+
+/// The part in the slot was put back after a stop that failed: if stopping it fails again, it's let go.
+static PUT_BACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// Calls off a start still on its way from this page, for a part from Presets that couldn't be stopped in Bitwig (so
 /// one thing plays there at a time). Run inside that stop's turn; gives back the ask to hand to [`called_off`] on the
@@ -2152,6 +2171,7 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
                 let mut slot = in_daw();
                 if DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst) == asked {
                     *slot = Some(playing);
+                    PUT_BACK.store(false, std::sync::atomic::Ordering::SeqCst);
                     Ok(note)
                 } else {
                     drop(slot);

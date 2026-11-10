@@ -1716,6 +1716,7 @@ fn toggle_audition(app: &AppWindow, item: Item) {
                     return;
                 }
                 *slot = Some(auditioning);
+                PUT_BACK.store(false, Ordering::SeqCst);
                 Ok(())
             }
             Err(Some(why)) => {
@@ -1869,13 +1870,36 @@ fn stop_audition_in(
     line: Option<String>,
     turn: &mo_dawlink::bitwig::Turn<'_>,
 ) -> bool {
-    let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_audition(&auditioning, turn) else { return true };
+    let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_audition(&auditioning, turn) else {
+        PUT_BACK.store(false, Ordering::SeqCst);
+        return true;
+    };
     log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped: {e}"));
+    // Put back once, so Stop can be pressed again once its project is in front; let go when the stop can never work
+    // (Bitwig is gone) or it failed again after being put back, so nothing stays blocked behind it and Esc goes on to
+    // its next step (the 10 Nov review's D-1).
+    if e.bitwig_gone() || PUT_BACK.swap(false, Ordering::SeqCst) || line.is_none() {
+        let_go(&auditioning.track, &e);
+        return true;
+    }
     if let Some(line) = line {
         put_back(auditioning, line, e);
     }
     false
 }
+
+/// An audition that was put back once already, or that can never be stopped: it's let go (the slot stays empty, and
+/// what comes next goes ahead), and the card says to take its track out in Bitwig if it's still there.
+fn let_go(track: &str, why: &mo_dawlink::bitwig::Error) {
+    log::info("Presets", &format!("The app let go of the audition of {track}, which couldn't be stopped"));
+    message_later(format!(
+        "{track} couldn't be stopped in Bitwig: {why} The app has let it go: if its track is still in your song, take \
+         it out in Bitwig."
+    ));
+}
+
+/// The audition in the slot was put back after a stop that failed: if stopping it fails again, it's let go.
+static PUT_BACK: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// An audition that couldn't be stopped: back in its place, unless another plays by now, and a start in Bitwig still
 /// on its way behind it (from this page or the MIDI page) is called off, so one thing plays there at a time (the
@@ -1883,7 +1907,7 @@ fn stop_audition_in(
 fn put_back(auditioning: mo_dawlink::bitwig::Auditioning, line: String, why: mo_dawlink::bitwig::Error) {
     let words = format!(
         "{} couldn't be stopped in Bitwig: {why} Bring its project to the front in Bitwig (with changes on), then \
-         press Stop in Bitwig again.",
+         press Stop in Bitwig again. If it fails again, the app lets it go.",
         auditioning.track
     );
     let track = auditioning.track.clone();
@@ -1891,6 +1915,7 @@ fn put_back(auditioning: mo_dawlink::bitwig::Auditioning, line: String, why: mo_
         let mut slot = audition_now();
         if slot.is_none() {
             *slot = Some(auditioning);
+            PUT_BACK.store(true, Ordering::SeqCst);
             AUDITION_ASKED.fetch_add(1, Ordering::SeqCst);
             Some((audition_asked(), crate::midi::call_off_start()))
         } else {
