@@ -17,7 +17,6 @@ use std::time::{Duration, Instant};
 
 use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
-use mo_app::filters;
 use mo_app::finder::Kind;
 use mo_app::midi::{self as page, Filters, Order, Roll, Target};
 use mo_app::places::Place;
@@ -71,6 +70,8 @@ struct Page {
     notes: Option<NotesFrom>,
     filters: Filters,
     order: Order,
+    /// The order turned round: a second click on its heading.
+    reversed: bool,
     seed: Option<u64>,
     target: Option<Target>,
     shown: Arc<Vec<Hit>>,
@@ -121,6 +122,7 @@ struct Ask {
     cat: Arc<Catalogue>,
     filters: Filters,
     order: Order,
+    reversed: bool,
     target: Option<Target>,
     seed: Option<u64>,
 }
@@ -164,8 +166,6 @@ thread_local! {
     static HERE: RefCell<bool> = const { RefCell::new(false) };
     /// The filter chips' lines, kept between showings: kinds, From and Key.
     static CHIPS: [FilterModels; 3] = Default::default();
-    /// The Order picks, changed in place as the filters' are.
-    static ORDER_CHIPS: FilterModels = FilterModels::default();
 }
 
 struct Lines {
@@ -196,6 +196,8 @@ impl Model for Lines {
             phrase: page::phrase_text(e).into(),
             key: page::key_text(e).into(),
             date: page::date_text(e.phrase.source.mtime).into(),
+            bars: if e.phrase.bars > 0 { e.phrase.bars.to_string() } else { String::new() }.into(),
+            files: thousands(e.copies()).into(),
             colour: colour(e.role()),
             why: why_text(&e.phrase).into(),
             picked: p.picked == Some(hit.entry),
@@ -310,17 +312,21 @@ pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     }
 }
 
-/// The Order picks: every order on show behind its name, with the one picked lit, as on Sounds and Plugins (the
-/// whole-app review of 6 Nov, X3-5).
-fn show_order(data: &MidiData, order: Order) {
-    let picks = filters::one_of(&Order::ALL.map(Order::name), order.name());
-    data.set_order_filter(ORDER_CHIPS.with(|m| m.view(&picks)));
+/// Lights the heading of the column the list goes by, with which way (the UX review of 10 Nov, B5); none while the
+/// list is shuffled or ranked (most alike, longest phrase), which no column stands for.
+fn show_order(data: &MidiData) {
+    let (column, reversed) = PAGE.with(|p| {
+        let p = p.borrow();
+        if p.seed.is_some() || p.target.is_some() { ("", false) } else { (p.order.column(), p.reversed) }
+    });
+    data.set_order_column(column.into());
+    data.set_order_reversed(reversed);
 }
 
 fn wire(app: &AppWindow) {
     let data = app.global::<MidiData>();
     data.set_lines(ModelRc::from(LINES.with(Rc::clone) as Rc<dyn Model<Data = MidiLine>>));
-    show_order(&data, Order::default());
+    show_order(&data);
     show_chips(app);
 
     let weak = app.as_weak();
@@ -354,14 +360,16 @@ fn wire(app: &AppWindow) {
     data.on_pick(move |what, value| {
         let Some(app) = weak.upgrade() else { return };
         if what == "order" {
-            // The order already picked stays picked (one is always on), and a shuffle ends.
-            let order = Order::from_name(&value);
+            // A click on a heading: the list goes by its column, or turns round when it does already; a shuffle
+            // ends.
+            let order = Order::from_column(&value);
             PAGE.with(|p| {
                 let mut p = p.borrow_mut();
+                let lit = p.seed.is_none() && p.target.is_none() && p.order == order;
+                p.reversed = lit && !p.reversed;
                 p.order = order;
                 p.seed = None;
             });
-            show_order(&app.global::<MidiData>(), order);
         }
         relist(&app);
     });
@@ -838,13 +846,14 @@ fn relist(app: &AppWindow) {
             cat: p.cat.clone(),
             filters: p.filters.clone(),
             order: p.order,
+            reversed: p.reversed,
             target: p.target,
             seed: p.seed,
         }
     });
     app.global::<MidiData>().set_any_filter(PAGE.with(|p| p.borrow().filters.any()));
     if HERE.with(|h| *h.borrow()) {
-        let (hits, counts) = page::view(&ask.cat, &ask.filters, ask.order, ask.target, ask.seed);
+        let (hits, counts) = page::view(&ask.cat, &ask.filters, ask.order, ask.reversed, ask.target, ask.seed);
         listed(app, ask.id, hits, counts);
         return;
     }
@@ -853,8 +862,9 @@ fn relist(app: &AppWindow) {
         if w.is_none() {
             let weak = app.as_weak();
             match Newest::start("MIDI list", move |ask: Ask| {
-                let (hits, counts) =
-                    background::on_pool(|| page::view(&ask.cat, &ask.filters, ask.order, ask.target, ask.seed));
+                let (hits, counts) = background::on_pool(|| {
+                    page::view(&ask.cat, &ask.filters, ask.order, ask.reversed, ask.target, ask.seed)
+                });
                 let weak = weak.clone();
                 let id = ask.id;
                 let _ = slint::invoke_from_event_loop(move || {
@@ -897,7 +907,7 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
         };
         let shown = p.shown.len();
         let all = p.cat.line_count;
-        (Some(shown), page::result_text(shown, all, p.order, p.target, p.seed.is_some()), target_text)
+        (Some(shown), page::result_text(shown, all, p.order, p.reversed, p.target, p.seed.is_some()), target_text)
     });
     let Some(shown) = shown else { return };
     show_chips(app);
@@ -906,6 +916,7 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
     data.set_shown(shown as i32);
     data.set_result(result.into());
     data.set_target(target.into());
+    show_order(&data);
     let scroll = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let row = p.picked_row.filter(|_| p.scroll_to_pick);

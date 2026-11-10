@@ -341,6 +341,11 @@ export component ColumnHead inherits Rectangle {
         mouse-cursor: root.can-order ? MouseCursor.pointer : MouseCursor.default;
         clicked => { root.clicked(); }
     }
+    Tip {
+        text: root.tip;
+        hovering: touch.has-hover && !touch.pressed;
+        at-y: root.height + Space.xs;
+    }
 }
 
 // The shaded, top-lit button. `main` is the page's main action, in the accent colour; `danger` says in red that it
