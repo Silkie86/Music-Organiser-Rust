@@ -3,7 +3,7 @@
 // disk and its installed copies. The same list and side card as every page (Solomon, 1 Nov 2026), the card always
 // there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
 // fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
-import { ListView } from "../list.slint";
+import { ListView, Fit } from "../list.slint";
 import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TickBox, FilterPicks, FilterView, ListLine, Caps, StudioButton, LinkText, Segmented, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
 
 // One line of the list.
@@ -297,6 +297,7 @@ component NeededTile inherits Rectangle {
 
 // The picked plugin. Nothing in it may be wider than the card: long names and paths wrap.
 component PluginPanel inherits SidePanel {
+    closable: PluginsData.has-pick;
     close => { PluginsData.close-panel(); }
     if !PluginsData.has-pick: EmptyState {
         vertical-stretch: 1;
@@ -763,6 +764,9 @@ export component PluginsPage inherits Rectangle {
     changed search-asked => { search-box.focus-all(); }
 
     VerticalLayout {
+        // In a window wider than the list and card at their widest, the page stops there (see `Fit`).
+        x: 0;
+        width: min(root.width, Fit.page-max + 2 * Space.xl);
         padding: Space.xl;
         padding-bottom: Space.lg;
         spacing: Space.md;
@@ -961,7 +965,8 @@ export component PluginsPage inherits Rectangle {
         // The list, the year strip and the picked plugin's card.
         area := Rectangle {
             vertical-stretch: 1;
-            property <length> list-width: max(380px, self.width - PluginsData.panel-width - divider.width);
+            property <length> list-width: min(Fit.list-max, max(380px, self.width - PluginsData.panel-width - divider.width));
+            property <length> card-width: min(Fit.card-max, self.width - self.list-width - divider.width);
             property <length> years-width: PluginsData.years.length > 1 && PluginsData.message == "" ? 56px : 0px;
             property <bool> wide: self.list-width > 640px;
             keys := FocusScope {
@@ -1081,14 +1086,17 @@ export component PluginsPage inherits Rectangle {
             divider := PanelDivider {
                 x: area.list-width;
                 height: parent.height;
-                panel-width: PluginsData.panel-width;
+                // The card's width as it's shown, so a drag starts from what you see; no seam to drag once the
+                // window has room for the list and the card at their widest.
+                visible: area.card-width < Fit.card-max;
+                panel-width: area.card-width;
                 room: area.width;
                 resizing(w) => { PluginsData.panel-width = w; }
                 resized(w) => { PluginsData.panel-resized(w); }
             }
             PluginPanel {
                 x: area.list-width + divider.width;
-                width: area.width - self.x;
+                width: area.card-width;
                 height: parent.height;
             }
             menu := RightClickMenu {

@@ -2,7 +2,7 @@
 // plays, in one list with the picked one's card beside it; and the Curves section, the shapes your settings moved in,
 // to drop onto a Bitwig lane (Solomon, 2 Nov 2026). Only shared parts from studio.slint; mo-app decides every word
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
-import { ListView } from "../list.slint";
+import { ListView, Fit } from "../list.slint";
 import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterPicks, FilterView, ListLine, DragHandle, Caps, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
 
 // One line of the sounds list.
@@ -593,6 +593,9 @@ export component PresetsPage inherits Rectangle {
     }
 
     VerticalLayout {
+        // In a window wider than the list and card at their widest, the page stops there (see `Fit`).
+        x: 0;
+        width: min(root.width, Fit.page-max + 2 * Space.xl);
         padding: Space.xl;
         padding-bottom: Space.lg;
         spacing: Space.md;
@@ -766,9 +769,9 @@ export component PresetsPage inherits Rectangle {
         area := Rectangle {
             vertical-stretch: 1;
             property <bool> panel: PresetsData.section == 0 ? PresetsData.panel-shown : PresetsData.curve-panel-shown;
-            property <length> list-width: self.panel
-                ? max(380px, self.width - PresetsData.panel-width - divider.width)
-                : self.width;
+            // The card's place is always there (empty until something is picked), so nothing moves when it is.
+            property <length> list-width: min(Fit.list-max, max(380px, self.width - PresetsData.panel-width - divider.width));
+            property <length> card-width: min(Fit.card-max, self.width - self.list-width - divider.width);
             property <length> years-width: PresetsData.section == 0 && PresetsData.years.length > 1 && PresetsData.empty-title == "" ? 56px : 0px;
             if area.years-width > 0: YearRange {
                 x: area.list-width - area.years-width;
@@ -865,24 +868,39 @@ export component PresetsPage inherits Rectangle {
                 }
             }
             divider := PanelDivider {
-                visible: area.panel;
                 x: area.list-width;
                 height: parent.height;
-                panel-width: PresetsData.panel-width;
+                // The card's width as it's shown, so a drag starts from what you see; no seam to drag once the
+                // window has room for the list and the card at their widest.
+                visible: area.card-width < Fit.card-max;
+                panel-width: area.card-width;
                 room: area.width;
                 resizing(w) => { PresetsData.panel-width = w; }
                 resized(w) => { PresetsData.panel-resized(w); }
             }
             if PresetsData.section == 0 && PresetsData.panel-shown: PresetPanel {
                 x: area.list-width + divider.width;
-                width: area.width - self.x;
+                width: area.card-width;
                 height: parent.height;
             }
             if PresetsData.section == 1 && PresetsData.curve-panel-shown: CurvePanel {
                 x: area.list-width + divider.width;
-                width: area.width - self.x;
+                width: area.card-width;
                 height: parent.height;
                 rename-keys <=> root.rename-keys;
+            }
+            if !area.panel: SidePanel {
+                x: area.list-width + divider.width;
+                width: area.card-width;
+                height: parent.height;
+                closable: false;
+                EmptyState {
+                    vertical-stretch: 1;
+                    title: PresetsData.section == 0 ? "Pick a sound" : "Pick a curve";
+                    text: PresetsData.section == 0
+                        ? "Where it's from, its part and what it can do show here."
+                        : "Its shape, where it was found and what it can do show here.";
+                }
             }
             menu := RightClickMenu {
                 items: PresetsData.menu;
