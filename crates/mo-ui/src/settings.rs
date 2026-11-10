@@ -737,15 +737,24 @@ fn edit_folder(app: &AppWindow, list: FolderList, folder: String, add: bool) {
         } else {
             folders::remove_folder(&library, list, &folder, &defaults)
         };
+        let mut scanning = false;
         match &done {
             Ok(folders::Changed::Done(_)) => {
-                log::info("Settings", &format!("{} {folder} ({list:?} folders)", if add { "Added" } else { "Removed" }))
+                log::info(
+                    "Settings",
+                    &format!("{} {folder} ({list:?} folders)", if add { "Added" } else { "Removed" }),
+                );
+                // Sounds scans a new sample folder now, not at the next start (review X2-4), and the note says so when
+                // it will. One taken off needs no scan: its sounds are kept as they are.
+                if add && list == FolderList::Samples {
+                    scanning = crate::sounds::sample_folders_changed();
+                }
             }
             Ok(folders::Changed::AsItWas) => {}
             Err(e) => log::warning("Settings", &format!("Couldn't change the {list:?} folders: {e}")),
         }
         let done = done.map(|d| matches!(d, folders::Changed::Done(_))).map_err(|e| e.to_string());
-        changed_folders(weak, page::folder_change_note(list, add, &folder, done));
+        changed_folders(weak, page::folder_change_note(list, add, &folder, done, scanning));
     });
     if let Err(e) = started {
         log::error("Settings", &format!("Couldn't start changing the folders: {e}"));

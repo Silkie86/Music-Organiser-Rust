@@ -319,7 +319,7 @@ pub fn folder_groups(
 pub const FOLDERS_NOTE: &str = "The folders the app looks in, and at the bottom the one it puts exports in. Adding \
     or removing one never moves or deletes anything on disk, and a project folder taken off keeps its songs listed. \
     The Songs page takes up a changed project folder (one added, or one taken off) at the next start, and reads the \
-    saves in a new one then.";
+    saves in a new one then. Sounds looks through a new sample folder for sounds straight away.";
 
 /// The folder picker's title for a list.
 pub fn pick_title(list: FolderList) -> &'static str {
@@ -332,11 +332,21 @@ pub fn pick_title(list: FolderList) -> &'static str {
 }
 
 /// What a folder change to `list` did, in words: none when it changed nothing worth saying. A project folder says
-/// when Songs takes it up, as the tab's line does (review X1-1).
-pub fn folder_change_note(list: FolderList, added: bool, folder: &str, done: Result<bool, String>) -> Option<String> {
+/// when Songs takes it up, as the tab's line does (review X1-1), and a sample folder that Sounds looks through it now,
+/// when it does (`scanning`, review X2-4).
+pub fn folder_change_note(
+    list: FolderList,
+    added: bool,
+    folder: &str,
+    done: Result<bool, String>,
+    scanning: bool,
+) -> Option<String> {
     let songs = list == FolderList::Projects;
     match done {
         Ok(true) => Some(match (added, songs) {
+            (true, false) if list == FolderList::Samples && scanning => {
+                format!("Added {folder}. Sounds is looking through it for new sounds.")
+            }
             (true, false) => format!("Added {folder}."),
             (true, true) => format!("Added {folder}. Songs lists the saves in it from the next start."),
             (false, false) => format!("Took {folder} off the list. Nothing on disk was changed."),
@@ -918,24 +928,36 @@ mod tests {
     #[test]
     fn folder_changes_are_said_plainly() {
         let samples = FolderList::Samples;
-        assert_eq!(folder_change_note(samples, true, r"E:\Songs", Ok(true)).as_deref(), Some(r"Added E:\Songs."));
+        // A sample folder says Sounds looks through it now, when it does (review X2-4); a MIDI folder says no more.
         assert_eq!(
-            folder_change_note(samples, true, r"E:\Songs", Ok(false)).as_deref(),
+            folder_change_note(samples, true, r"E:\Songs", Ok(true), true).as_deref(),
+            Some(r"Added E:\Songs. Sounds is looking through it for new sounds.")
+        );
+        assert_eq!(
+            folder_change_note(samples, true, r"E:\Songs", Ok(true), false).as_deref(),
+            Some(r"Added E:\Songs.")
+        );
+        let midi = FolderList::Midi;
+        assert_eq!(folder_change_note(midi, true, r"E:\Packs", Ok(true), false).as_deref(), Some(r"Added E:\Packs."));
+        assert_eq!(
+            folder_change_note(samples, true, r"E:\Songs", Ok(false), false).as_deref(),
             Some(r"E:\Songs is already on the list.")
         );
-        assert_eq!(folder_change_note(samples, false, r"E:\Songs", Ok(false)), None);
-        assert!(folder_change_note(samples, false, "x", Ok(true)).is_some_and(|n| n.contains("Nothing on disk")));
+        assert_eq!(folder_change_note(samples, false, r"E:\Songs", Ok(false), false), None);
+        let off = folder_change_note(samples, false, "x", Ok(true), false);
+        assert!(off.is_some_and(|n| n.contains("Nothing on disk")));
         assert_eq!(
-            folder_change_note(samples, true, "x", Err("locked".into())).as_deref(),
+            folder_change_note(samples, true, "x", Err("locked".into()), false).as_deref(),
             Some("Nothing was changed: locked")
         );
         // A project folder says when Songs takes it up.
         let projects = FolderList::Projects;
         assert_eq!(
-            folder_change_note(projects, true, r"K:\New", Ok(true)).as_deref(),
+            folder_change_note(projects, true, r"K:\New", Ok(true), false).as_deref(),
             Some(r"Added K:\New. Songs lists the saves in it from the next start.")
         );
-        assert!(folder_change_note(projects, false, "x", Ok(true)).is_some_and(|n| n.contains("from the next start")));
+        let off = folder_change_note(projects, false, "x", Ok(true), false);
+        assert!(off.is_some_and(|n| n.contains("from the next start")));
         let groups = folder_groups(vec![], vec![], vec![], vec![], vec![], &[]);
         let lists: Vec<_> = groups.iter().map(|g| g.list).collect();
         assert_eq!(
