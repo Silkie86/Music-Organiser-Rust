@@ -93,9 +93,11 @@ enum Mend {
     /// Not looked for yet this time.
     #[default]
     NotLooked,
-    /// The saves still to be read again (by id, unchanged or not), and whether one couldn't be read or kept: then
-    /// nothing is noted, and they're all read again at the next start.
-    Reading { ids: HashSet<i64>, missed: bool },
+    /// The saves still to be read again (by id, unchanged or not); those that couldn't be read this time (in a folder
+    /// that couldn't be read, a drive that's away): noted as owed, and only they are read again at the next start
+    /// (review finding G-1); and whether one couldn't be kept: then nothing is noted, and they're all read again at
+    /// the next start.
+    Reading { ids: HashSet<i64>, owed: HashSet<i64>, missed: bool },
     /// Nothing (more) to do this time.
     Done,
 }
@@ -107,16 +109,26 @@ impl Mend {
 
     /// `id` was read again (`read`), or couldn't be.
     fn tried(&mut self, id: i64, read: bool) {
-        if let Mend::Reading { ids, missed } = self
+        if let Mend::Reading { ids, owed, .. } = self
             && ids.remove(&id)
+            && !read
         {
-            *missed |= !read;
+            owed.insert(id);
         }
     }
 
-    /// Every save has been read again and kept: to be noted with the next batch.
+    /// Every save has been read again and kept, or couldn't be read: to be noted with the next batch, with those owed
+    /// ([`Mend::owed`]).
     fn to_note(&self) -> bool {
-        matches!(self, Mend::Reading { ids, missed: false } if ids.is_empty())
+        matches!(self, Mend::Reading { ids, missed: false, .. } if ids.is_empty())
+    }
+
+    /// The saves that couldn't be read this time, by id, in order.
+    fn owed(&self) -> Vec<i64> {
+        let Mend::Reading { owed, .. } = self else { return Vec::new() };
+        let mut owed: Vec<i64> = owed.iter().copied().collect();
+        owed.sort_unstable();
+        owed
     }
 }
 
@@ -305,7 +317,8 @@ impl Live {
         let mut done = self.update(&Changes { overflowed: roots, ..Changes::default() });
         done.rechecked += rechecked;
         // One the walk didn't find (gone, so marked missing, or outside the project folders now) has nothing to read
-        // again: only those waiting to be tried again are still to come.
+        // again: only those waiting to be tried again are still to come. One in a folder that couldn't be read is
+        // owed already ([`Live::walk`]).
         if let Mend::Reading { ids, .. } = &mut self.mend {
             let waiting: HashSet<String> = self.retry.keys().map(|p| case::key(p)).collect();
             let waiting: HashSet<i64> =
@@ -415,7 +428,7 @@ impl Live {
             Ok(Some(ids)) => {
                 let listed: HashSet<i64> = self.saves.iter().map(|s| s.id).collect();
                 let ids = ids.into_iter().filter(|id| listed.contains(id)).collect();
-                self.mend = Mend::Reading { ids, missed: false };
+                self.mend = Mend::Reading { ids, owed: HashSet::new(), missed: false };
             }
             Ok(None) => {}
             Err(e) => crate::log::warning("Songs", &format!("{e}; the muted samples are mended at the next start")),
@@ -437,6 +450,7 @@ impl Live {
         let songs_db = self.writes.clone()?;
         let mut batch = self.batch();
         batch.mended = self.mend.to_note();
+        batch.owed = if batch.mended { self.mend.owed() } else { Vec::new() };
         let put: Vec<(i64, String)> =
             batch.put.iter().map(|p| (p.detail.save.id, p.detail.save.path.clone())).collect();
         if batch.is_empty() {
@@ -754,6 +768,11 @@ impl Live {
             })
             .collect();
         let plan = scan::plan(&found, &known, &self.roots, &|_| false, false);
+        // A save to mend in a folder that couldn't be read (a drive that's away, a folder busy or denied) isn't read
+        // this time, nor marked missing: it's owed, and mended at a later start (review finding G-1).
+        for id in &plan.held {
+            self.mend.tried(*id, false);
+        }
         paths.extend(plan.read.into_iter().map(|f| f.path));
         let gone: HashSet<i64> = plan.gone.into_iter().collect();
         paths.extend(self.saves.iter().filter(|s| gone.contains(&s.id)).map(|s| s.path.clone()));
@@ -847,7 +866,7 @@ pub struct Kept {
 /// stops it: everything is tried again the next time (what's written already is the same written again).
 fn one_by_one(songs_db: &std::path::Path, batch: Batch) -> Result<Kept, LibraryError> {
     let mut kept = Kept::default();
-    let Batch { put, missing, mended } = batch;
+    let Batch { put, missing, mended, owed } = batch;
     let alone = put
         .into_iter()
         .map(|p| (p.detail.save.path.clone(), Batch { put: vec![p], ..Batch::default() }))
@@ -866,7 +885,7 @@ fn one_by_one(songs_db: &std::path::Path, batch: Batch) -> Result<Kept, LibraryE
     // The note that the muted samples were mended goes last, on its own, and only if the library took every save (a
     // save it refused may be one of them): if it isn't kept, they're mended again at the next start.
     if mended && kept.not_kept.is_empty() {
-        match song_writes::write(songs_db, &Batch { mended: true, ..Batch::default() }) {
+        match song_writes::write(songs_db, &Batch { mended: true, owed, ..Batch::default() }) {
             Ok(w) => kept.written.mended = w.mended,
             Err(e) if e.is_busy() => return Err(e),
             Err(_) => {}
@@ -1204,6 +1223,82 @@ mod tests {
         let mut next = open();
         assert!(next.catch_up().is_empty());
         assert!(next.keep().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A save to mend on a drive that's away isn't read: it's noted as owed, and only it is read again at a later
+    /// start, once the drive is back (review finding G-1). The one read stays read: a drive away for good doesn't
+    /// have every save read again at every start.
+    #[test]
+    fn a_save_to_mend_on_a_drive_thats_away_waits_for_it() {
+        let dir = std::env::temp_dir().join(format!("mo-live-mend-away-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let projects = dir.join("Projects");
+        let away = dir.join("Away");
+        std::fs::create_dir_all(&projects).unwrap();
+        // Two FL Studio saves the app kept since the C# app read them (they changed since): one here, one on a
+        // drive that's away now.
+        let here = projects.join("Night_1.flp");
+        std::fs::write(&here, tiny_flp()).unwrap();
+        let meta = std::fs::metadata(&here).unwrap();
+        let (size, mtime) = (meta.len(), scan::mtime(&meta));
+        rusqlite::Connection::open(dir.join("library.db"))
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE roots (path TEXT PRIMARY KEY);
+                 CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                     name TEXT NOT NULL, daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, info TEXT);
+                 INSERT INTO roots VALUES ('{projects}'), ('{away}');
+                 INSERT INTO projects (id, path, name, daw, folder, size, mtime) VALUES
+                     (1, '{here}', 'Night_1', 'FL Studio', '{projects}', {size}, {mtime}),
+                     (2, '{gone}', 'Away_1', 'FL Studio', '{away}', {size}, {mtime});",
+                projects = projects.display(),
+                away = away.display(),
+                here = here.display(),
+                gone = away.join("Away_1.flp").display(),
+            ))
+            .unwrap();
+        let songs = dir.join(mo_library::songs_db::FILE_NAME);
+        mo_library::songs_db::make(&dir.join("library.db"), &songs, &mut |_| {}).unwrap();
+        assert!(mo_library::songs_db::at_start(&dir, "test").is_songs_db());
+        rusqlite::Connection::open(dir.join("library.db"))
+            .unwrap()
+            .execute_batch("UPDATE projects SET mtime = mtime - 1000")
+            .unwrap();
+        let open = || {
+            let lib = Library::open_read_only(&songs).unwrap();
+            Live::load(&lib, 6, LiveDetails::default()).unwrap().with_writes(songs.clone())
+        };
+        let mut ids = mo_library::song_writes::to_mend(&songs).unwrap().unwrap();
+        ids.sort_unstable();
+        assert_eq!(ids, [1, 2]);
+        // The one here is read again; the one away is neither read nor marked missing, and it's owed.
+        let mut live = open();
+        let caught = live.catch_up();
+        assert_eq!((caught.read.len(), caught.gone, caught.mended), (0, 0, 1));
+        assert!(live.note_to_keep());
+        let kept = live.keep().unwrap().unwrap();
+        assert_eq!((kept.written.put, kept.written.mended), (1, true));
+        assert_eq!(mo_library::song_writes::to_mend(&songs).unwrap(), Some(vec![2]));
+        // Still away at the next start: still owed, and nothing else read again.
+        let mut live = open();
+        assert_eq!(live.catch_up().mended, 0);
+        assert!(live.note_to_keep());
+        assert!(live.keep().unwrap().unwrap().written.mended);
+        assert_eq!(mo_library::song_writes::to_mend(&songs).unwrap(), Some(vec![2]));
+        // The drive is back, the save as it was: it's read again, and nothing is owed.
+        std::fs::create_dir_all(&away).unwrap();
+        std::fs::write(away.join("Away_1.flp"), tiny_flp()).unwrap();
+        let back = std::fs::File::options().write(true).open(away.join("Away_1.flp")).unwrap();
+        back.set_modified(meta.modified().unwrap()).unwrap();
+        drop(back);
+        let mut live = open();
+        let caught = live.catch_up();
+        assert_eq!(caught.mended, 1);
+        let kept = live.keep().unwrap().unwrap();
+        assert_eq!((kept.written.put, kept.written.mended), (1, true));
+        assert_eq!(mo_library::song_writes::to_mend(&songs).unwrap(), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

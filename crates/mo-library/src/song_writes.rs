@@ -50,6 +50,9 @@ pub struct Batch {
     /// The saves [`to_mend`] gave have been read again (they're in this batch or one kept before it): noted, so
     /// they aren't read again at the next start.
     pub mended: bool,
+    /// With `mended`: those of them that couldn't be read this time (in a folder that couldn't be read, a drive
+    /// that's away), noted with it so [`to_mend`] gives them, and only them, at the next start.
+    pub owed: Vec<i64>,
 }
 
 impl Batch {
@@ -61,6 +64,10 @@ impl Batch {
 /// The note in `songs_info` that the saves [`to_mend`] gives were read again, with when.
 const MENDED_KEY: &str = "muted_marks_mended";
 
+/// The note in `songs_info` of the saves still to be read again when the rest were ([`Batch::owed`]), by id, with a
+/// comma between each.
+const OWED_KEY: &str = "muted_marks_owed";
+
 /// When `library.db` has gone: how long before the library became the app's own a save the app kept since may have
 /// last changed (the C# app kept the library up to date until about then).
 const MEND_SINCE: i64 = 30 * 24 * 60 * 60;
@@ -68,10 +75,16 @@ const MEND_SINCE: i64 = 30 * 24 * 60 * 60;
 /// The FL Studio saves to read again once so their "muted" sample marks come back, by id: until this version the app
 /// kept a sample whose notes are all muted as one that plays (review finding A-1). Only the rows the app wrote itself
 /// were kept so: those that differ from the C# app's `library.db` beside it (as it was when the C# app stopped), or
-/// aren't in it. When that's gone (or can't be read), those of the saves changed since a month before the library
-/// became the app's own. Saves whose file is missing are left: one that comes back is read again anyway. `None` when
-/// there's nothing to do: they've been read again already ([`Batch::mended`]), or the library at `songs_db` isn't the
-/// app's own.
+/// aren't in it. A row differs by its file (path, size and time), or, for one read whole, by its samples (how many,
+/// and how many muted): the app may have read a save again whose file hadn't changed, one marked missing that came
+/// back, say (review findings G-1 and X1-4). When `library.db` has gone (or can't be read), those of the saves changed
+/// since a month before the library became the app's own. Saves whose file is missing are left: one that comes back
+/// is read again anyway. Once they've been read again ([`Batch::mended`]), only those that couldn't be then
+/// ([`Batch::owed`]). `None` when there's nothing to do: they've all been read again already, or the library at
+/// `songs_db` isn't the app's own.
+///
+/// Of `library.db`, only what comes before each save's details is read, and the samples: the details are tens of KB a
+/// save, most of the file (review finding G-2).
 pub fn to_mend(songs_db: &Path) -> Result<Option<Vec<i64>>, LibraryError> {
     let Some(own_since) = crate::songs_db::own_since(songs_db) else {
         return Ok(None);
@@ -80,14 +93,40 @@ pub fn to_mend(songs_db: &Path) -> Result<Option<Vec<i64>>, LibraryError> {
     let noted: Option<rusqlite::types::Value> =
         conn.query_row("SELECT value FROM songs_info WHERE key = ?1", [MENDED_KEY], |r| r.get(0)).optional()?;
     if noted.is_some() {
-        return Ok(None);
+        let owed: Option<String> =
+            conn.query_row("SELECT value FROM songs_info WHERE key = ?1", [OWED_KEY], |r| r.get(0)).optional()?;
+        let owed: Vec<i64> = owed.iter().flat_map(|o| o.split(',')).filter_map(|id| id.trim().parse().ok()).collect();
+        if owed.is_empty() {
+            return Ok(None);
+        }
+        // Those still FL Studio saves whose file isn't missing, as the first time.
+        let mut st = conn
+            .prepare("SELECT 1 FROM projects WHERE id = ?1 AND daw = 'FL Studio' AND COALESCE(file_missing, 0) = 0")?;
+        let mut still = Vec::with_capacity(owed.len());
+        for id in owed {
+            if st.exists([id])? {
+                still.push(id);
+            }
+        }
+        return Ok(Some(still));
     }
     let library_db = songs_db.with_file_name(crate::songs_db::OLD_FILE_NAME);
-    let before = library_db.is_file().then(|| fl_rows(&library_db).ok()).flatten();
+    let before = library_db.is_file().then(|| before(&library_db).ok()).flatten();
+    // Muted marks are compared only where the C# app kept them.
+    let samples_now = match &before {
+        Some(b) => samples_of(&conn, b.muted)?,
+        None => HashMap::new(),
+    };
+    let mut st = conn.prepare(
+        "SELECT id, path, size, mtime, error IS NULL FROM projects
+         WHERE daw = 'FL Studio' AND COALESCE(file_missing, 0) = 0",
+    )?;
+    let rows = st.query_map([], |r| Ok((r.get::<_, i64>(0)?, fl_row(r)?, r.get::<_, bool>(4)?)))?;
     let mut ids = Vec::new();
-    for (id, row) in fl_rows_of(&conn, "file_missing", "error", "AND COALESCE(file_missing, 0) = 0")? {
+    for row in rows {
+        let (id, row, whole) = row?;
         let wanted = match &before {
-            Some(before) => before.get(&id) != Some(&row),
+            Some(b) => b.rows.get(&id) != Some(&row) || (whole && b.samples.get(&id) != samples_now.get(&id)),
             None => row.mtime.is_some_and(|t| t >= own_since - MEND_SINCE),
         };
         if wanted {
@@ -97,36 +136,50 @@ pub fn to_mend(songs_db: &Path) -> Result<Option<Vec<i64>>, LibraryError> {
     Ok(Some(ids))
 }
 
-/// What [`to_mend`] compares of a save's row: what a read sets that says the app read it again.
+/// What [`to_mend`] compares of a save's row: its file, as a read sets it.
 #[derive(Debug, PartialEq, Eq)]
 struct FlRow {
     path: String,
     size: Option<i64>,
     mtime: Option<i64>,
-    missing: i64,
-    error: Option<String>,
 }
 
-/// The FL Studio saves' rows in the library at `library_db` (an older C# app's has no `file_missing` or `error`).
-fn fl_rows(library_db: &Path) -> Result<HashMap<i64, FlRow>, LibraryError> {
+/// An [`FlRow`] from the id, path, size and time columns of a query.
+fn fl_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<FlRow> {
+    Ok(FlRow { path: r.get(1)?, size: r.get(2)?, mtime: r.get(3)? })
+}
+
+/// What [`to_mend`] compares of the C# app's `library.db`.
+struct Before {
+    /// The FL Studio saves' rows, by id.
+    rows: HashMap<i64, FlRow>,
+    /// Each save's samples, by id ([`samples_of`]).
+    samples: HashMap<i64, (i64, i64)>,
+    /// Whether it kept which samples are muted (an older C# app's didn't).
+    muted: bool,
+}
+
+/// The C# app's `library.db` at `library_db`, as [`to_mend`] compares it: only columns before each save's details,
+/// which hold most of the file (an older C# app's has no `samples` table, or no muted marks in it).
+fn before(library_db: &Path) -> Result<Before, LibraryError> {
     let conn = open_read_only(library_db)?;
-    let mut st = conn.prepare("SELECT name FROM pragma_table_info('projects')")?;
+    let mut st = conn.prepare("SELECT id, path, size, mtime FROM projects WHERE daw = 'FL Studio'")?;
+    let rows = st.query_map([], |r| Ok((r.get(0)?, fl_row(r)?)))?.collect::<rusqlite::Result<_>>()?;
+    let mut st = conn.prepare("SELECT name FROM pragma_table_info('samples')")?;
     let columns: Vec<String> = st.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-    let has = |c: &str| columns.iter().any(|n| n == c);
-    let missing = if has("file_missing") { "file_missing" } else { "0" };
-    let error = if has("error") { "error" } else { "NULL" };
-    Ok(fl_rows_of(&conn, missing, error, "")?.into_iter().collect())
+    let muted = columns.iter().any(|c| c == "unplayed");
+    let samples = if columns.is_empty() { HashMap::new() } else { samples_of(&conn, muted)? };
+    Ok(Before { rows, samples, muted })
 }
 
-fn fl_rows_of(conn: &Connection, missing: &str, error: &str, and: &str) -> rusqlite::Result<Vec<(i64, FlRow)>> {
+/// How many samples each save in the library on `conn` has, by id, and how many of them are muted (counted only with
+/// `muted`: 0 otherwise). A save with none isn't there, nor a sample of no save.
+fn samples_of(conn: &Connection, muted: bool) -> rusqlite::Result<HashMap<i64, (i64, i64)>> {
+    let muted = if muted { "COALESCE(SUM(unplayed = 2), 0)" } else { "0" };
     let mut st = conn.prepare(&format!(
-        "SELECT id, path, size, mtime, COALESCE({missing}, 0), {error} FROM projects WHERE daw = 'FL Studio' {and}"
+        "SELECT project_id, COUNT(*), {muted} FROM samples WHERE project_id IS NOT NULL GROUP BY project_id"
     ))?;
-    st.query_map([], |r| {
-        let row = FlRow { path: r.get(1)?, size: r.get(2)?, mtime: r.get(3)?, missing: r.get(4)?, error: r.get(5)? };
-        Ok((r.get(0)?, row))
-    })?
-    .collect()
+    st.query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?.collect()
 }
 
 fn open_read_only(path: &Path) -> Result<Connection, LibraryError> {
@@ -203,6 +256,16 @@ pub fn write(songs_db: &Path, batch: &Batch) -> Result<Written, LibraryError> {
             params![MENDED_KEY, Local::now().timestamp()],
         )
         .map_err(sql)?;
+        if batch.owed.is_empty() {
+            tx.execute("DELETE FROM songs_info WHERE key = ?1", [OWED_KEY]).map_err(sql)?;
+        } else {
+            let owed: Vec<String> = batch.owed.iter().map(i64::to_string).collect();
+            tx.execute(
+                "INSERT OR REPLACE INTO songs_info (key, value) VALUES (?1, ?2)",
+                params![OWED_KEY, owed.join(",")],
+            )
+            .map_err(sql)?;
+        }
         written.mended = true;
     }
     check(&tx, &kept, batch).map_err(|e| match e {

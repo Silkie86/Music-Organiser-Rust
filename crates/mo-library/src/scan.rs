@@ -373,6 +373,9 @@ pub struct Plan {
     pub gone: Vec<i64>,
     /// Saves the scan leaves out now (an autosave, or in a folder it skips): dropped rather than marked missing.
     pub dropped: Vec<i64>,
+    /// Saves in a folder that couldn't be read this time (by `id`): neither read nor marked missing, they stay as
+    /// they were.
+    pub held: Vec<i64>,
 }
 
 /// Compares what was found with what the library knows. `reread` says whether a DAW's reader has got better since the
@@ -404,7 +407,11 @@ pub fn plan(found: &Found, known: &[KnownFile], roots: &[String], reread: &dyn F
             continue;
         }
         let at = path_key(&k.path);
-        if !roots_keys.iter().any(|r| key_inside(&at, r)) || unreadable.iter().any(|d| key_inside(&at, d)) {
+        if !roots_keys.iter().any(|r| key_inside(&at, r)) {
+            continue;
+        }
+        if unreadable.iter().any(|d| key_inside(&at, d)) {
+            out.held.push(k.id);
             continue;
         }
         if is_ignored(&k.path, roots) {
@@ -415,6 +422,7 @@ pub fn plan(found: &Found, known: &[KnownFile], roots: &[String], reread: &dyn F
     }
     out.gone.sort_unstable();
     out.dropped.sort_unstable();
+    out.held.sort_unstable();
     out
 }
 
@@ -543,6 +551,8 @@ mod tests {
         assert_eq!(p.new, 1);
         assert_eq!(p.gone, [6]);
         assert_eq!(p.dropped, [8]);
+        // In a folder that couldn't be read: held as it was, neither read nor gone.
+        assert_eq!(p.held, [7]);
         assert_eq!(plan(&found, &library, &roots, &|_| false, true).read.len(), 5);
     }
 }
