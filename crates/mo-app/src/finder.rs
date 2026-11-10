@@ -704,7 +704,8 @@ pub fn plugin_of(id: &str) -> (&str, &str) {
 }
 
 /// Every sound and preset file the Presets page lists, shared with it rather than copied: found by its name, then its
-/// plugin. Its id is its place in the page's lines, which only ever grow while the app runs.
+/// plugin. Its id is the line's song save and sound key, or the preset file ([`crate::presets::audition_id`]), so a pick
+/// kept in Recent still opens the same sound after the page reads its lines again in another order.
 pub struct Presets(pub Arc<Vec<crate::presets::Item>>);
 
 impl Source for Presets {
@@ -730,7 +731,7 @@ impl Source for Presets {
             .join(" · ")
     }
     fn id(&self, at: usize) -> String {
-        at.to_string()
+        self.0.get(at).map(crate::presets::audition_id).unwrap_or_default()
     }
 }
 

@@ -108,7 +108,13 @@ struct Page {
     finder_loaded: Option<Result<Loaded, String>>,
     /// The page first showed while that read was still going: it's handed to the page when it ends.
     finder_for_page: bool,
+    /// That read was let go unused (the page wasn't shown soon after): the page reads the index itself (M-3).
+    finder_let_go: bool,
 }
+
+/// How long the Ctrl+K read of the index is kept for the page: long enough to go from Ctrl+K to the MIDI page, short
+/// enough that a session that never opens it doesn't hold the whole index (M-3). Ctrl+K keeps its own lines.
+const KEEP_FINDER_READ: Duration = Duration::from_secs(120);
 
 struct Ask {
     id: u64,
@@ -248,6 +254,19 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
                     crate::finder::add_source(&app, "midi", l.found.clone());
                 }
                 PAGE.with(|p| p.borrow_mut().finder_loaded = Some(loaded));
+                slint::Timer::single_shot(KEEP_FINDER_READ, || {
+                    let unused = PAGE.with(|p| {
+                        let mut p = p.borrow_mut();
+                        let unused = p.finder_loaded.take();
+                        if unused.is_some() {
+                            p.finder_let_go = true;
+                        }
+                        unused
+                    });
+                    if let Some(unused) = unused {
+                        background::free_later(unused);
+                    }
+                });
             });
         });
         if let Err(e) = started {
@@ -503,7 +522,7 @@ pub fn shown(app: &AppWindow) {
         let mut p = p.borrow_mut();
         match p.finder_loaded.take() {
             Some(read) => Kept::Read(read),
-            None if p.finder_read => {
+            None if p.finder_read && !p.finder_let_go => {
                 p.finder_for_page = true;
                 Kept::Coming
             }
