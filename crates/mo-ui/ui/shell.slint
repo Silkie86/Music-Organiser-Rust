@@ -1,5 +1,5 @@
 // The parts of the window shell that sit over every page: activity cards, the key sheet and the F12 note.
-import { Theme, Type, Space, Meter, StudioButton, Well, Caps, Groove, CloseButton, Chip, TickBox } from "studio.slint";
+import { Theme, Type, Space, Meter, StudioButton, Well, Caps, Groove, CloseButton, TickBox } from "studio.slint";
 
 export struct CardInfo {
     id: int,
@@ -98,12 +98,10 @@ component ActivityCard inherits Rectangle {
     }
 }
 
-// The cards, bottom right, newest at the bottom, with "N running" when some are put away.
+// The cards, bottom right, newest at the bottom: only the jobs that failed (the rest are lines in the rail).
 export component ActivityCards inherits VerticalLayout {
     in property <[CardInfo]> cards;
-    in property <int> put-away;
     callback dismiss(int);
-    callback bring-back();
     width: 320px;
     spacing: Space.sm;
     alignment: end;
@@ -112,13 +110,6 @@ export component ActivityCards inherits VerticalLayout {
         width: root.width;
         card: c;
         dismiss => { root.dismiss(c.id); }
-    }
-    if root.put-away > 0: HorizontalLayout {
-        alignment: end;
-        Chip {
-            text: root.put-away + " running";
-            clicked => { root.bring-back(); }
-        }
     }
 }
 

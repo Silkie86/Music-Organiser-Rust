@@ -520,19 +520,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::apply_look(&app, &graphite);
     app.set_parts_gallery(false);
 
-    // Activity cards: one going, one that can't say how far it is yet, one done and one failed, plus one put away.
-    // The one going has a title too long for a line, so its card must wrap it.
+    // What the app is working on, in the rail: one going (its title too long for a line there, so it's cut and its
+    // tip has it all), one that can't say how far it is yet and one done; and the one that failed, as a card.
     let going = feed.start(mo_app::space_bitwig::LOOKING, "");
     going.progress(0.4, Some("148 of 371 projects"));
     let _starting = feed.start("Analysing sounds", "Getting ready");
     feed.start("Finding missing samples", "").done("All 31 found");
     feed.start("Copying Bitwig template", "").failed("The template folder isn't there any more");
-    let hidden = feed.start("Measuring plugin folders", "");
-    feed.dismiss(hidden.id());
     mo_ui::cards::refresh(&app, &feed);
     shots.push(("cards.png".into(), capture(&window)));
     app.set_cards(Default::default());
-    app.set_put_away(0);
+    app.set_jobs(Default::default());
 
     // Tooltips: the mouse resting on a rail line, the song panel's Show in folder button and a song's date.
     show_song_panel(&app, 0, Tab::Overview);

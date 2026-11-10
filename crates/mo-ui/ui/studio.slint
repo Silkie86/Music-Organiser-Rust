@@ -2013,6 +2013,71 @@ export component Meter inherits Rectangle {
     }
 }
 
+// A job in the left rail: a slim line with its name, how far it is in words, and its meter while it runs (the UX
+// review of 10 Nov, A3). Jobs used to be cards at the bottom right, on top of the side card; the rail has the room.
+// A finished job stays a few seconds with a green dot; one that failed is a card (`ActivityCards`), as it needs
+// reading. The whole name and words show in its tip.
+export component RailJobLine inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+    // 0 to 1, or below 0 while the job can't say how far it is.
+    in property <float> progress;
+    in property <bool> running;
+    height: 48px;
+    border-radius: Theme.radius;
+    background: touch.has-hover ? Theme.hover : transparent;
+    VerticalLayout {
+        padding-left: Space.md;
+        padding-right: Space.sm;
+        alignment: center;
+        spacing: Space.xs;
+        HorizontalLayout {
+            spacing: Space.sm;
+            VerticalLayout {
+                alignment: center;
+                Dot { tint: root.running ? Theme.accent : Theme.ok; }
+            }
+            Text {
+                text: root.title;
+                color: Theme.text;
+                font-size: Type.meta;
+                overflow: elide;
+                horizontal-stretch: 1;
+            }
+        }
+        Text {
+            text: root.detail != "" ? root.detail : root.running ? "Working…" : "Done";
+            color: Theme.muted;
+            font-size: Type.small;
+            overflow: elide;
+        }
+        // A known amount lights the meter; an unknown one sweeps back and forth.
+        if root.running && root.progress >= 0: Meter {
+            height: 4px;
+            level: root.progress;
+        }
+        if root.running && root.progress < 0: Rectangle {
+            height: 4px;
+            border-radius: 1px;
+            background: Theme.well;
+            clip: true;
+            Rectangle {
+                x: (parent.width - self.width) * (0.5 + 0.5 * sin(animation-tick() / 900ms * 180deg));
+                width: parent.width * 0.3;
+                border-radius: 1px;
+                background: Theme.accent;
+            }
+        }
+    }
+    touch := TouchArea { }
+    Tip {
+        text: root.detail != "" ? root.title + ": " + root.detail : root.title;
+        hovering: touch.has-hover;
+        at-x: root.width + Space.xs;
+        at-y: Space.xs;
+    }
+}
+
 // How far a job on this page has got: a small level meter and a few words, under the page's name. The job's activity
 // card says the same; this keeps it in sight while you work on the page.
 export component ProgressLine inherits HorizontalLayout {

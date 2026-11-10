@@ -79,6 +79,11 @@ light that means something. It should feel like a rack unit on a desk, not a web
   A line inside a card has no buttons of its own: a click picks it and the card's buttons act on it (a song's Saves
   tab), with the same in its right-click menu.
 
+- Jobs live in the rail (the UX review of 10 Nov, A3): what the app is working on shows as slim lines under "In your
+  DAWS" (`RailJobLine`: name, how far in words, its `Meter`), at most four with the rest counted, and a finished one
+  stays a few seconds. Only a job that failed is a card at the bottom right, as it needs reading. Nothing covers the
+  side card any more.
+
 - Column headings order a list (the UX review of 10 Nov, B5): a click on a heading (`ColumnHead` in `studio.slint`)
   puts the list in that column's order, a second click turns it round; the heading the list goes by is lit in the
   accent with a small arrow. A page whose headings do this has no "Order" row of chips. On Plugins, MIDI,
