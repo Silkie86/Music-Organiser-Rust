@@ -710,7 +710,7 @@ fn audio_clip(c: &FlChannel, fl: &FlAudioClip, info: Option<&SampleFile>, tempo:
     // speed over that length; otherwise a guess that the clip plays to its end.
     let seconds = match info {
         Some(i) if i.seconds > 0.0 => i.seconds,
-        _ if c.stretch.time > 0 && tempo > 0.0 => played_seconds(&c.stretch, 0.0, tempo),
+        _ if c.stretch.time > 0.0 && tempo > 0.0 => played_seconds(&c.stretch, 0.0, tempo),
         _ => fl.from + length / beats_per_second / played_seconds(&c.stretch, 1.0, 0.0).max(1e-6),
     };
     let played = played_seconds(&c.stretch, seconds, tempo) * beats_per_second;

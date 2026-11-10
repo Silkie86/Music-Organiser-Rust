@@ -270,14 +270,35 @@ fn bitwig_transpose_gain_and_fades() {
 }
 
 #[test]
-#[ignore = "known gap: FL Stretch pro / e2 / e3 clips read a whole-file length millions of beats long"]
 fn fl_stretched_clips_have_a_sane_length() {
     for step in ["11b stretch pro", "11c e2 generic", "11d e3 mono"] {
-        // The whole tone plays over the clip: FL set the Time knob so it spans 4.27 beats.
+        // The whole tone plays over the clip: FL set the Time knob (a float in FL 25: 410 of 192 to a beat) and Mul
+        // doubles it, so it spans 4.27 beats.
         let (_, len, part) = tone(&fl(step));
         assert!(near(len, 4.2708), "{step}: {len}");
         assert!(near(part.whole_file_beats.unwrap(), 4.2708), "{step}: {:?}", part.whole_file_beats);
     }
+}
+
+#[test]
+fn fl_stretch_modes_and_pitch() {
+    for (step, mode) in [
+        // Resample with no length set plays at the sample's own speed whatever the tempo.
+        ("04 audio clip", Stretch::Raw),
+        ("10 stretch resample", Stretch::Raw),
+        ("11 stretch keep pitch", Stretch::ElastiquePro),
+        // Stretch pro is FL's own: no Bitwig name, so it goes by FL's number.
+        ("11b stretch pro", Stretch::Other(-2)),
+        ("11c e2 generic", Stretch::Elastique),
+        ("11d e3 mono", Stretch::ElastiqueSolo),
+    ] {
+        let part = tone(&fl(step)).2;
+        assert_eq!((part.stretch, part.semitones), (Some(mode), 0.0), "{step}");
+    }
+    // Up 300 cents in Auto mode (FL's 5): three semitones, at the sample's own speed.
+    let part = tone(&fl("12 pitch")).2;
+    assert!(near(part.seconds_per_beat.unwrap(), 60.0 / 128.0) && near(part.semitones, 3.0), "{part:?}");
+    assert_eq!(part.stretch, Some(Stretch::Other(5)));
 }
 
 #[test]

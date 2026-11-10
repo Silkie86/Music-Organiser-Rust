@@ -91,8 +91,8 @@ pub struct FlStretch {
     pub pitch_cents: i32,
     /// 0 resamples (pitch and length change together, like speeding up a record); the others keep them apart.
     pub mode: i32,
-    /// Stretches it to a length first, in FL's units of 768 a bar; 0 when off.
-    pub time: i32,
+    /// Stretches it to a length first, in FL's units of 192 a beat; 0 when off.
+    pub time: f64,
     pub reversed: bool,
 }
 
@@ -100,7 +100,7 @@ impl FlStretch {
     /// How long the sample plays, in seconds, given its own length and the song's tempo: stretched to a length first
     /// when Time is set (FL counts 192 to a beat), then by Mul, then (when resampling) shortened as the pitch goes up.
     pub fn played_seconds(&self, seconds: f64, tempo: f64) -> f64 {
-        let length = if self.time > 0 && tempo > 0.0 { self.time as f64 / 192.0 * 60.0 / tempo } else { seconds };
+        let length = if self.time > 0.0 && tempo > 0.0 { self.time / 192.0 * 60.0 / tempo } else { seconds };
         let length = length * self.multiplier;
         if self.mode == 0 { length / 2f64.powf(self.pitch_cents as f64 / 1200.0) } else { length }
     }
@@ -108,7 +108,7 @@ impl FlStretch {
 
 impl Default for FlStretch {
     fn default() -> FlStretch {
-        FlStretch { multiplier: 1.0, pitch_cents: 0, mode: 0, time: 0, reversed: false }
+        FlStretch { multiplier: 1.0, pitch_cents: 0, mode: 0, time: 0.0, reversed: false }
     }
 }
 
@@ -642,9 +642,10 @@ fn levels(d: &[u8], major: u32) -> Option<(f64, f64, i32)> {
     ))
 }
 
-/// A channel's time stretching, from its sampler settings (event 215, 168 bytes in FL 25): i32 Time at 96, the pitch
-/// in cents at 100, the multiplier at 104 (2 to the power raw / 10000, so 10000 is twice as long) and the mode at 108.
-/// The multiplier, pitch and mode are checked against an FL 25 save; Time is PyFLP's reading.
+/// A channel's time stretching, from its sampler settings (event 215, 168 bytes in FL 25): Time at 96, the pitch in
+/// cents at 100, the multiplier at 104 (2 to the power raw / 10000, so 10000 is twice as long) and the mode at 108.
+/// The multiplier, pitch and mode are checked against an FL 25 save. Time is a whole number in Solomon's FL 12 to 21
+/// projects (384, 1536) and a float in his FL 25 recipe saves (410.0, the tone fitted to 2.135 beats), 192 to a beat.
 fn stretch(d: &[u8]) -> Option<FlStretch> {
     if d.len() < 112 {
         return None;
@@ -653,9 +654,17 @@ fn stretch(d: &[u8]) -> Option<FlStretch> {
         multiplier: 2f64.powf(i32_at(d, 104).clamp(-100_000, 100_000) as f64 / 10_000.0),
         pitch_cents: i32_at(d, 100).clamp(-4800, 4800),
         mode: i32_at(d, 108),
-        time: i32_at(d, 96).max(0),
+        time: time_knob(i32_at(d, 96)),
         reversed: false,
     })
+}
+
+/// The Time knob from its four bytes: a whole number up to FL 21, a float from FL 25 (which version changed it isn't
+/// known). The two can't be mixed up: the smallest float a knob could show is past any whole number a song could
+/// hold (0x2000_0000 units would be 2.8 million beats). 0 when it's off or damaged.
+fn time_knob(raw: i32) -> f64 {
+    let time = if raw >= 0x2000_0000 { f32::from_bits(raw as u32) as f64 } else { raw as f64 };
+    if time.is_finite() { time.clamp(0.0, i32::MAX as f64) } else { 0.0 }
 }
 
 /// An envelope (event 218, 68 bytes), or `None` when it's switched off: i32 flags, i32 on, then i32 delay, attack,
@@ -1225,6 +1234,20 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn the_time_knob_is_a_whole_number_or_a_float() {
+        use super::time_knob;
+        // FL 12 to 21: whole numbers, 192 to a beat.
+        assert_eq!((time_knob(0), time_knob(384), time_knob(81_508)), (0.0, 384.0, 81_508.0));
+        // FL 25: a float.
+        assert_eq!(time_knob(410.0f32.to_bits() as i32), 410.0);
+        assert_eq!(time_knob(0.5f32.to_bits() as i32), 0.5);
+        // Damaged: below nothing, not a number, or past any song.
+        assert_eq!((time_knob(-5), time_knob((-410.0f32).to_bits() as i32)), (0.0, 0.0));
+        assert_eq!((time_knob(f32::NAN.to_bits() as i32), time_knob(f32::INFINITY.to_bits() as i32)), (0.0, 0.0));
+        assert_eq!(time_knob(f32::MAX.to_bits() as i32), i32::MAX as f64);
+    }
+
     use super::*;
 
     #[test]

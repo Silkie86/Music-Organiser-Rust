@@ -567,7 +567,7 @@ fn audio_clips_are_stretched_pitched_and_trimmed_as_in_fl() {
     assert_eq!((clip.seconds, clip.played, clip.offset, clip.length), (0.5, 0.5, 0.25, 1.0));
     assert!((clip.semitones - 12.0).abs() < 1e-9);
     // Stretched to a length instead (not resampled): 384 of FL's Time units are two beats, a second at 120 BPM.
-    vox.stretch = FlStretch { mode: 1, time: 384, pitch_cents: 300, ..FlStretch::default() };
+    vox.stretch = FlStretch { mode: 1, time: 384.0, pitch_cents: 300, ..FlStretch::default() };
     assert_eq!(played_seconds(&vox.stretch, 0.5, 120.0), 1.0);
     let p = plan(&song(vec![vox.clone()], vec![], vec![]));
     assert_eq!((p.tracks[0].audio_clips[0].played, p.tracks[0].audio_clips[0].semitones), (2.0, 3.0));
