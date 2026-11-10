@@ -16,7 +16,7 @@ use super::song::{
 use super::{Rack, channels as known_channels};
 use crate::arrangement::{
     Arrangement, AudioPart, LaneKind, NoteBudget, PreviewClip, PreviewLane, PreviewMarker, PreviewNote, PreviewPoint,
-    TOO_MANY_NOTES,
+    Stretch, TOO_MANY_NOTES,
 };
 use crate::fl::automation::{FlPoint, cut_curve};
 use crate::paths::file_name;
@@ -541,7 +541,7 @@ fn part(c: &FlChannel, beats: f64, from: f64, tempo: f64) -> AudioPart {
     let s: &FlStretch = &c.stretch;
     // Without the Time knob, how far the sample is stretched doesn't depend on its length; with it, the whole sample
     // is fitted to a length, so how fast it moves is only known once the file's length is.
-    let (seconds_per_beat, whole_file_beats) = if s.time > 0 {
+    let (seconds_per_beat, whole_file_beats) = if s.time > 0.0 {
         (None, Some(s.played_seconds(0.0, tempo) * tempo / 60.0))
     } else {
         (Some(60.0 / tempo / s.played_seconds(1.0, tempo).max(1e-6)), None)
@@ -554,7 +554,32 @@ fn part(c: &FlChannel, beats: f64, from: f64, tempo: f64) -> AudioPart {
         seconds_per_beat,
         whole_file_beats,
         reversed: s.reversed,
+        stretch: Some(stretch_of(s)),
+        // The converter's own rule. Resampled to a set length, the pitch isn't known until the file's length is.
+        semitones: if s.mode == 0 && s.time > 0.0 { 0.0 } else { s.semitones(1.0, s.played_seconds(1.0, tempo)) },
         ..Default::default()
+    }
+}
+
+/// FL's stretch mode by the shared names. The numbers are FL's own (the sampler settings' mode): Solomon's FL 25
+/// recipe saves showed Resample 0, e3 generic 1, Stretch pro -2, Auto 5, e2 generic 6, and 8 in the save made as "e3
+/// mono" (PyFLP's list has 8 as e2 mono and 2 as e3 mono; both are one-voice modes, so they read the same here).
+/// The rest (-1, 2, 3, 4, 7, 9) are PyFLP's list, not checked against a save.
+fn stretch_of(s: &FlStretch) -> Stretch {
+    match s.mode {
+        // Resample plays like a record. Fitted to a length in beats (the Time knob) it follows the tempo; without,
+        // it plays at its own speed whatever the tempo, faster or slower as Pitch and Mul say.
+        0 if s.time > 0.0 => Stretch::Repitch,
+        0 => Stretch::Raw,
+        -1 => Stretch::Stretch,
+        -2 => Stretch::StretchPro,
+        // FL's e3 is zplane's Elastique Pro, e2 the Elastique before it; the mono modes are for one voice.
+        1 => Stretch::ElastiquePro,
+        2 | 8 => Stretch::ElastiqueSolo,
+        3 | 4 => Stretch::Slice,
+        5 => Stretch::Auto,
+        6 | 7 | 9 => Stretch::Elastique,
+        other => Stretch::Other(other),
     }
 }
 

@@ -41,7 +41,7 @@ pub struct PreviewPoint {
 /// How a DAW stretches a piece of audio to the song's tempo, by Bitwig's names (the other DAWs' modes map onto these).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stretch {
-    /// Plays at its own speed and pitch, whatever the tempo.
+    /// Plays at its own speed and pitch, whatever the tempo (transposed, it plays faster or slower with the pitch).
     Raw,
     /// Speeds up or slows down with the tempo, and its pitch with it, like a record.
     Repitch,
@@ -53,7 +53,13 @@ pub enum Stretch {
     ElastiquePro,
     /// Elastique for one voice at a time (Studio One's Solo).
     ElastiqueSolo,
-    /// A mode the reader doesn't know yet, by the number the file gives it.
+    /// FL Studio's own Stretch pro.
+    StretchPro,
+    /// FL Studio picks the mode itself (Auto).
+    Auto,
+    /// Cut into slices that are moved, not stretched (FL Studio's Slice stretch and Slice map).
+    Slice,
+    /// A mode the reader doesn't know yet, by the number the file gives it (each DAW has its own numbers).
     Other(i32),
 }
 

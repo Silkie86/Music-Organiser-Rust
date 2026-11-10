@@ -91,8 +91,8 @@ pub struct FlStretch {
     pub pitch_cents: i32,
     /// 0 resamples (pitch and length change together, like speeding up a record); the others keep them apart.
     pub mode: i32,
-    /// Stretches it to a length first, in FL's units of 768 a bar; 0 when off.
-    pub time: i32,
+    /// Stretches it to a length first, in FL's units of 192 a beat; 0 when off.
+    pub time: f64,
     pub reversed: bool,
 }
 
@@ -100,15 +100,25 @@ impl FlStretch {
     /// How long the sample plays, in seconds, given its own length and the song's tempo: stretched to a length first
     /// when Time is set (FL counts 192 to a beat), then by Mul, then (when resampling) shortened as the pitch goes up.
     pub fn played_seconds(&self, seconds: f64, tempo: f64) -> f64 {
-        let length = if self.time > 0 && tempo > 0.0 { self.time as f64 / 192.0 * 60.0 / tempo } else { seconds };
+        let length = if self.time > 0.0 && tempo > 0.0 { self.time / 192.0 * 60.0 / tempo } else { seconds };
         let length = length * self.multiplier;
         if self.mode == 0 { length / 2f64.powf(self.pitch_cents as f64 / 1200.0) } else { length }
+    }
+
+    /// How many semitones higher than recorded a sample `seconds` long sounds when it plays for `played` seconds:
+    /// resampling, whatever its speed makes of it; in the other modes the Pitch knob alone.
+    pub fn semitones(&self, seconds: f64, played: f64) -> f64 {
+        if self.mode == 0 && seconds > 0.0 && played > 0.0 {
+            -12.0 * (played / seconds).log2()
+        } else {
+            self.pitch_cents as f64 / 100.0
+        }
     }
 }
 
 impl Default for FlStretch {
     fn default() -> FlStretch {
-        FlStretch { multiplier: 1.0, pitch_cents: 0, mode: 0, time: 0, reversed: false }
+        FlStretch { multiplier: 1.0, pitch_cents: 0, mode: 0, time: 0.0, reversed: false }
     }
 }
 
@@ -642,9 +652,13 @@ fn levels(d: &[u8], major: u32) -> Option<(f64, f64, i32)> {
     ))
 }
 
-/// A channel's time stretching, from its sampler settings (event 215, 168 bytes in FL 25): i32 Time at 96, the pitch
-/// in cents at 100, the multiplier at 104 (2 to the power raw / 10000, so 10000 is twice as long) and the mode at 108.
-/// The multiplier, pitch and mode are checked against an FL 25 save; Time is PyFLP's reading.
+/// A channel's time stretching, from its sampler settings (event 215, 168 bytes in FL 25): Time at 96, the pitch in
+/// cents at 100, the multiplier at 104 (2 to the power raw / 10000, so 10000 is twice as long) and the mode at 108.
+/// The multiplier, pitch and mode are checked against an FL 25 save. Time is a whole number in Solomon's FL 12 to 21
+/// projects and a float in his FL 25 recipe saves, 192 to a beat whatever the project's PPQ, and Mul stretches it
+/// further: his old projects hold 81508 and 81982 with Mul at 100% under whole clips of 40754 and 40991 ticks at 96
+/// PPQ, one at 192 PPQ plays from 336 seconds into a Time of 187855 (367 seconds at its 160 BPM), and the recipe's
+/// 410.0 with Mul at 200% sits under a clip of 410 ticks at 96 PPQ.
 fn stretch(d: &[u8]) -> Option<FlStretch> {
     if d.len() < 112 {
         return None;
@@ -653,10 +667,22 @@ fn stretch(d: &[u8]) -> Option<FlStretch> {
         multiplier: 2f64.powf(i32_at(d, 104).clamp(-100_000, 100_000) as f64 / 10_000.0),
         pitch_cents: i32_at(d, 100).clamp(-4800, 4800),
         mode: i32_at(d, 108),
-        time: i32_at(d, 96).max(0),
+        time: time_knob(i32_at(d, 96)),
         reversed: false,
     })
 }
+
+/// The Time knob from its four bytes: a whole number up to FL 21, a float from FL 25 (which version changed it isn't
+/// known). The two can't be mixed up: the smallest float a knob could show is past any whole number a song could
+/// hold (0x2000_0000 units would be 2.8 million beats). 0 when it's off, or damaged: less than one unit, or more
+/// than [`MOST_TIME`].
+fn time_knob(raw: i32) -> f64 {
+    let time = if raw >= 0x2000_0000 { f32::from_bits(raw as u32) as f64 } else { raw as f64 };
+    if (1.0..=MOST_TIME).contains(&time) { time } else { 0.0 }
+}
+
+/// The longest the Time knob is taken at its word: a million beats, days of sound.
+const MOST_TIME: f64 = 192.0e6;
 
 /// An envelope (event 218, 68 bytes), or `None` when it's switched off: i32 flags, i32 on, then i32 delay, attack,
 /// hold, decay, sustain (0..128) and release. The layout is PyFLP's; no real file with an envelope on is checked yet.
@@ -1226,6 +1252,23 @@ pub fn extract_channels(flp: &Flp<'_>) -> Vec<MidiChannel> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_time_knob_is_a_whole_number_or_a_float() {
+        let float = |f: f32| time_knob(f.to_bits() as i32);
+        // FL 12 to 21: whole numbers, 192 to a beat.
+        assert_eq!((time_knob(0), time_knob(384), time_knob(81_508)), (0.0, 384.0, 81_508.0));
+        // FL 25: a float.
+        assert_eq!((float(410.0), float(1.5)), (410.0, 1.5));
+        // Damaged: below nothing, next to nothing, not a number, or longer than any song.
+        assert_eq!((time_knob(-5), float(-410.0), float(0.5), time_knob(0x2000_0001)), (0.0, 0.0, 0.0, 0.0));
+        assert_eq!((float(f32::NAN), float(f32::INFINITY), float(f32::MAX), float(193.0e6)), (0.0, 0.0, 0.0, 0.0));
+        assert_eq!(float(192.0e6), 192.0e6);
+        // Resampled, the pitch follows the speed; stretched, it's the Pitch knob's.
+        let s = FlStretch { pitch_cents: 300, ..FlStretch::default() };
+        assert!((s.semitones(1.0, 0.5) - 12.0).abs() < 1e-9);
+        assert_eq!(FlStretch { mode: 1, ..s }.semitones(1.0, 0.5), 3.0);
+    }
 
     #[test]
     fn a_mixed_fl_9_playlist_puts_pattern_n_on_track_n_beside_the_clips() {

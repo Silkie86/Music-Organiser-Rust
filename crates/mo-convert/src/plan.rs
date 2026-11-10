@@ -390,11 +390,7 @@ pub fn played_seconds(stretch: &FlStretch, seconds: f64, tempo: f64) -> f64 {
 
 /// How many semitones higher than recorded a sample `seconds` long sounds when it plays for `played` seconds.
 pub fn stretched_semitones(stretch: &FlStretch, seconds: f64, played: f64) -> f64 {
-    if stretch.mode == 0 && seconds > 0.0 && played > 0.0 {
-        -12.0 * (played / seconds).log2()
-    } else {
-        stretch.pitch_cents as f64 / 100.0
-    }
+    stretch.semitones(seconds, played)
 }
 
 /// How another DAW names a plugin's setting: a VST2 setting by its number, which FL uses too; a VST3 one by the
@@ -710,7 +706,7 @@ fn audio_clip(c: &FlChannel, fl: &FlAudioClip, info: Option<&SampleFile>, tempo:
     // speed over that length; otherwise a guess that the clip plays to its end.
     let seconds = match info {
         Some(i) if i.seconds > 0.0 => i.seconds,
-        _ if c.stretch.time > 0 && tempo > 0.0 => played_seconds(&c.stretch, 0.0, tempo),
+        _ if c.stretch.time > 0.0 && tempo > 0.0 => played_seconds(&c.stretch, 0.0, tempo),
         _ => fl.from + length / beats_per_second / played_seconds(&c.stretch, 1.0, 0.0).max(1e-6),
     };
     let played = played_seconds(&c.stretch, seconds, tempo) * beats_per_second;
