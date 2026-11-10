@@ -286,9 +286,9 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
 /// Says how Ctrl+K opens one of the Sounds section's lines: on this page, picked.
 fn finder_opens() {
     crate::finder::on_open(Kind::Preset, |app, hit, _| {
-        let Some(at) = hit.id.parse::<usize>().ok().filter(|&at| PAGE.with(|p| at < p.borrow().items.len())) else {
-            return false;
-        };
+        // Found by what it is, not where it was: a read again puts the lines in another order (M-1).
+        let at = PAGE.with(|p| p.borrow().items.iter().position(|i| logic::audition_id(i) == hit.id));
+        let Some(at) = at else { return false };
         crate::go_to(app, Place::Presets.index() as i32);
         show_preset(app, at);
         true
@@ -1058,7 +1058,8 @@ fn read_sounds(_app: &AppWindow) {
 }
 
 /// Reads every song and preset file again, from the start: what's unchanged comes from the stores, so it's quick.
-/// Ctrl+K forgets the old lines until the new ones are all in (its picks are places in them).
+/// Ctrl+K forgets the old lines until the new ones are all in (it finds a pick by what it is, so one in Recent still
+/// opens the same sound).
 fn read_again(app: &AppWindow) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
