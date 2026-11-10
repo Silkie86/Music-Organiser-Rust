@@ -114,6 +114,13 @@ pub fn find_preset_files(roots: &[PathBuf]) -> Vec<FoundPreset> {
 
 /// Every preset file under `roots`, in order, walked as [`find_preset_files`] walks; none is read.
 pub fn list_preset_files(roots: &[PathBuf]) -> Vec<PathBuf> {
+    list_preset_files_and_unread(roots).0
+}
+
+/// [`list_preset_files`], and the folders under `roots` that couldn't be looked in: one that couldn't be read, and a
+/// link to a folder that isn't there now (a folder moved to a drive that's away). What was kept from them is still
+/// good: they aren't gone.
+pub fn list_preset_files_and_unread(roots: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut seen: HashSet<PathBuf> = HashSet::new();
     let mut level: Vec<PathBuf> = Vec::new();
     for r in roots {
@@ -122,14 +129,16 @@ pub fn list_preset_files(roots: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
     let mut files: Vec<PathBuf> = Vec::new();
+    let mut unread: Vec<PathBuf> = Vec::new();
     for _ in 0..DEEPEST {
         if level.is_empty() {
             break;
         }
         let listed: Vec<_> = level.par_iter().map(|d| list_dir(d)).collect();
         level = Vec::new();
-        for (dirs, found) in listed {
+        for (dirs, found, away) in listed {
             files.extend(found);
+            unread.extend(away);
             for (d, real) in dirs {
                 if seen.insert(real) {
                     level.push(d);
@@ -138,7 +147,7 @@ pub fn list_preset_files(roots: &[PathBuf]) -> Vec<PathBuf> {
         }
     }
     files.sort();
-    files
+    (files, unread)
 }
 
 /// One preset file's header read, as [`find_preset_files`] reads each.
@@ -163,9 +172,10 @@ fn real_path(dir: &Path) -> PathBuf {
 /// A folder's folders (each with where it really is, worked out here on the pool rather than one at a time after)
 /// and preset files. Names that aren't Unicode are left out, as the library's scanner does, so a listed path always
 /// opens again.
-fn list_dir(dir: &Path) -> (Vec<(PathBuf, PathBuf)>, Vec<PathBuf>) {
-    let (mut dirs, mut found) = (Vec::new(), Vec::new());
-    let Ok(entries) = std::fs::read_dir(dir) else { return (dirs, found) };
+/// Last, the folders that couldn't be looked in: this one when it can't be read, and links in it to nothing now.
+fn list_dir(dir: &Path) -> (Vec<(PathBuf, PathBuf)>, Vec<PathBuf>, Vec<PathBuf>) {
+    let (mut dirs, mut found, mut unread) = (Vec::new(), Vec::new(), Vec::new());
+    let Ok(entries) = std::fs::read_dir(dir) else { return (dirs, found, vec![dir.to_path_buf()]) };
     for entry in entries.flatten() {
         let path = entry.path();
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else { continue };
@@ -179,11 +189,13 @@ fn list_dir(dir: &Path) -> (Vec<(PathBuf, PathBuf)>, Vec<PathBuf>) {
                     dirs.push((path, real));
                 }
             }
+            // A link to a folder (or a file) that isn't there now: a folder moved to a drive that's away, say.
+            Ok(t) if t.is_symlink() && !path.exists() => unread.push(path),
             Ok(_) if FileFormat::of(name).is_some() => found.push(path),
             _ => {}
         }
     }
-    (dirs, found)
+    (dirs, found, unread)
 }
 
 /// Where plugins and DAWs keep presets you saved, on this computer, that are there: the VST3 preset folders, and

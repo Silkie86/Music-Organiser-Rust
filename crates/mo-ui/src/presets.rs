@@ -88,6 +88,8 @@ struct Page {
     failed: Option<String>,
     /// The name of the song the Song filter picks, as Songs gave it.
     song_name: String,
+    /// Every song's newest save the last reading looked at, with its time then.
+    looked_at: HashMap<String, i64>,
     exporting: bool,
     message: String,
     /// The line being auditioned in Bitwig ([`logic::audition_id`]) and how far it's got.
@@ -512,15 +514,14 @@ pub fn shown(app: &AppWindow) {
 
 /// Opens the page on one song's sounds (a song's Presets tab), by its save's path; `name` is the song's, for its chip.
 /// A save the page hasn't read (saved since the page read your songs) has the songs read again (H-4).
-pub fn show_song(app: &AppWindow, save: &str, name: &str) {
+/// `modified` is the save's time as Songs has it: a save looked at with that time (even one that gave no sounds, or a
+/// copy in the export folder) isn't read again (U-2).
+pub fn show_song(app: &AppWindow, save: &str, name: &str, modified: i64) {
     let again = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.section = Section::Sounds;
         p.song_name = name.to_owned();
-        p.started
-            && p.reading.is_none()
-            && logic::keeps_settings(save)
-            && !p.items.iter().chain(&p.pending).any(|i| i.path() == save)
+        p.started && p.reading.is_none() && logic::keeps_settings(save) && p.looked_at.get(save) != Some(&modified)
     });
     if again {
         read_again(app);
@@ -1088,6 +1089,8 @@ fn read_all(at: &Where) -> Result<(), String> {
     let songs = mo_library::songs::group_songs(&saves, &choices);
     let newest = logic::newest_saves(&songs, export_root.as_deref());
     let bitwig_folders = logic::bitwig_folders(&plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
+    // Every song's newest save as it is now, read below or left out: Songs' link reads again only for another (U-2).
+    let looked_at: HashMap<String, i64> = songs.iter().map(|s| (s.latest.path.clone(), s.latest.mtime)).collect();
     drop(songs);
     drop(saves);
     let total = newest.len();
@@ -1097,6 +1100,7 @@ fn read_all(at: &Where) -> Result<(), String> {
             PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 p.bitwig = folders;
+                background::free_later(std::mem::replace(&mut p.looked_at, looked_at));
                 p.reading = Some((0, total));
             });
             show_all(app);
@@ -1175,7 +1179,7 @@ fn read_all(at: &Where) -> Result<(), String> {
     let roots = logic::preset_folders(&plib::default_folders(), &bitwig_folders);
     // Read only the preset files that are new or changed since the last run; the rest are as they were kept.
     let started = std::time::Instant::now();
-    let (kept, why) = background::on_pool(|| file_store::find(&roots, &at.data_dir.join(file_store::FILE_NAME)));
+    let (kept, why) = background::on_pool(|| file_store::find_every(&roots, &at.data_dir.join(file_store::FILE_NAME)));
     if let Some(why) = why {
         log::warning("Presets", &format!("Every preset file is read, none kept for next time: {why}"));
     }
