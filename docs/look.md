@@ -84,6 +84,13 @@ light that means something. It should feel like a rack unit on a desk, not a web
   stays a few seconds. Only a job that failed is a card at the bottom right, as it needs reading. Nothing covers the
   side card any more.
 
+- Filters sit in a column at the page's side (Solomon, 10 Nov 2026: the chips "are taking up alot of space and look
+  messy"; he picked the column from three drawings). `FilterColumn` in `studio.slint` holds a `FilterList` for each
+  filter (its name in capitals, each choice a `TickLine` with how many lines it would show, a long list's rest in a
+  menu under them) and a `TickLine` for each on/off choice. Every choice stays in sight; a choice with nothing to
+  show is greyed. A view's own settings are not filters and go on the view: the Galaxy's are small drop-downs
+  (`OneOfChip`) on the map. On Sounds first; the other pages follow.
+
 - Column headings order a list (the UX review of 10 Nov, B5): a click on a heading (`ColumnHead` in `studio.slint`)
   puts the list in that column's order, a second click turns it round; the heading the list goes by is lit in the
   accent with a small arrow. A page whose headings do this has no "Order" row of chips. On Plugins, MIDI,

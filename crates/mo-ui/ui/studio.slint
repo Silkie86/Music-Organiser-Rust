@@ -937,6 +937,12 @@ component MenuChipFace inherits Rectangle {
     in property <string> value;
     // Joined to the chip before it in a filter's strip (FilterPicks): its left side is square.
     in property <bool> joined-left;
+    // Lit in the accent while something is picked. Off for a choice that always has one picked (OneOfChip): lit all
+    // the time, it would say nothing.
+    in property <bool> lights: true;
+    property <bool> lit: root.lights && root.value != "";
+    // Says only what's picked, without the name before it, where the name is already written above it (FilterList).
+    in property <bool> bare;
     callback clicked;
     width: label.preferred-width + 34px;
     height: 28px;
@@ -945,12 +951,12 @@ component MenuChipFace inherits Rectangle {
     border-top-right-radius: 14px;
     border-bottom-right-radius: 14px;
     border-width: 2px;
-    border-color: value != "" ? Theme.accent : Theme.edge;
-    background: value != "" ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
+    border-color: root.lit ? Theme.accent : Theme.edge;
+    background: root.lit ? Theme.accent.transparentize(80%) : touch.has-hover ? Theme.hover : Theme.surface-raised;
     animate background, border-color { duration: Motion.tap; }
     label := Text {
         x: 12px;
-        text: root.value == "" ? root.name : root.name + ": " + root.value;
+        text: root.value == "" ? root.name : root.bare ? root.value : root.name + ": " + root.value;
         color: root.value != "" ? Theme.text : Theme.muted;
         font-size: Type.meta;
         font-weight: 500;
@@ -1177,6 +1183,152 @@ export component FilterPicks inherits FlexboxLayout {
         joined-left: self.x > 0;
         toggled(text) => { root.toggled(text); }
         cleared => { root.cleared(); }
+    }
+}
+
+// A tick box with its words: one choice of a filter in the filter column (FilterList), or an on/off choice there
+// ("Favourites"). Picked, its box is filled with a tick; `count` is how many lines it would show, at the right; `dim`
+// (nothing to show) greys it, and it can still be clicked.
+export component TickLine inherits Rectangle {
+    in property <string> text;
+    in property <string> count;
+    in property <bool> on;
+    in property <bool> dim;
+    callback clicked;
+    height: 26px;
+    border-radius: Theme.radius;
+    background: touch.has-hover ? Theme.hover : transparent;
+    animate background { duration: Motion.tap; }
+    HorizontalLayout {
+        padding-left: Space.xs;
+        padding-right: Space.sm;
+        spacing: Space.sm;
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 14px;
+                height: 14px;
+                border-radius: 3px;
+                border-width: 1.5px;
+                border-color: root.on ? Theme.accent : Theme.muted.transparentize(root.dim ? 70% : 40%);
+                background: root.on ? Theme.accent : transparent;
+                if root.on: Path {
+                    x: 2px;
+                    y: 3px;
+                    width: 10px;
+                    height: 8px;
+                    viewbox-width: 12;
+                    viewbox-height: 10;
+                    commands: "M 1 5 L 4.5 8.5 L 11 1.5";
+                    stroke: Theme.accent-text;
+                    stroke-width: 2px;
+                }
+            }
+        }
+        Text {
+            text: root.text;
+            color: root.on ? Theme.text : root.dim ? Theme.faint.transparentize(40%) : Theme.muted;
+            font-size: Type.meta;
+            font-weight: root.on ? 600 : 400;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+            overflow: elide;
+        }
+        if root.count != "": Text {
+            text: root.count;
+            color: Theme.faint.transparentize(root.dim ? 50% : 0%);
+            font-size: Type.meta;
+            vertical-alignment: center;
+            horizontal-alignment: right;
+        }
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+// A filter in the filter column (Solomon, 10 Nov 2026: the chips "are taking up alot of space and look messy"; he
+// picked a column of tick lists at the page's side): its name in capitals, each choice a TickLine under it, every one
+// in sight, and a longer list's rest in a menu under them (`more-name`). It shows the same FilterView as FilterPicks.
+export component FilterList inherits VerticalLayout {
+    in property <string> name;
+    in property <FilterView> filter;
+    in property <string> more-name: "More";
+    callback toggled(string);
+    callback cleared();
+    alignment: start;
+    spacing: 0;
+    Caps {
+        text: root.name;
+        height: 22px;
+    }
+    for c in root.filter.chips: TickLine {
+        text: c.text;
+        count: c.count;
+        on: c.on;
+        dim: c.count == "0" && !c.on;
+        clicked => { root.toggled(c.text); }
+    }
+    if root.filter.more.length > 0: HorizontalLayout {
+        alignment: start;
+        padding-top: root.filter.chips.length > 0 ? Space.xs : 0;
+        PicksChip {
+            name: root.filter.chips.length > 0 ? root.more-name : "Any";
+            bare: root.filter.chips.length == 0;
+            value: root.filter.more-picked;
+            choices: root.filter.more;
+            toggled(text) => { root.toggled(text); }
+            cleared => { root.cleared(); }
+        }
+    }
+}
+
+// The filter column: a page's filters as FilterLists and TickLines, one under the other at the page's left side. It
+// scrolls with the wheel when the window is too short for them all.
+export component FilterColumn inherits Rectangle {
+    width: 208px;
+    clip: true;
+    flick := Flickable {
+        width: parent.width - Space.md;
+        content-width: self.width;
+        content-height: max(self.height, lists.preferred-height);
+        mouse-drag-pan-enabled: false;
+        lists := VerticalLayout {
+            x: 0;
+            y: 0;
+            width: flick.width;
+            alignment: start;
+            spacing: Space.md;
+            @children
+        }
+    }
+    Rectangle {
+        x: parent.width - 1px;
+        width: 1px;
+        background: Theme.edge;
+    }
+}
+
+// A small drop-down for a choice where one is always picked (how the Galaxy places its stars): its name and what's
+// picked, and a menu of the choices with the picked one ticked. It shows a `one_of` FilterView.
+export component OneOfChip inherits MenuChipFace {
+    in property <FilterView> filter;
+    callback picked(string);
+    value: root.filter.more-picked;
+    lights: false;
+    clicked => { menu.show(); }
+    menu := PopupWindow {
+        x: 0;
+        y: root.height + 4px;
+        width: max(root.width, 200px);
+        MenuCard {
+            for c in root.filter.chips: MenuLine {
+                text: c.text;
+                on: c.on;
+                tickable: true;
+                clicked => { root.picked(c.text); }
+            }
+        }
     }
 }
 
