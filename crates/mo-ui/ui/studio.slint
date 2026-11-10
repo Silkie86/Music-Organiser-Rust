@@ -2060,9 +2060,9 @@ export component Segmented inherits Rectangle {
     // The room either side of each label: less where many choices share a narrow row (Ctrl+K's kinds).
     in property <length> pad: Space.lg;
     callback picked(int);
-    // Where the picked button is, which each button reports.
-    property <length> lit-x;
-    property <length> lit-width;
+    // Where the picked button is, which each button reports (read by a row that scrolls, to keep it in view).
+    out property <length> lit-x;
+    out property <length> lit-width;
     // Off until the first frame is drawn, so a page opening on its third view doesn't slide there from the left.
     property <bool> ready;
     Timer {

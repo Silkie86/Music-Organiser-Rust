@@ -803,6 +803,12 @@ fn finder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     shots.push(("finder-midi.png".into(), capture(window)));
     typed("theme");
     shots.push(("finder-settings.png".into(), capture(window)));
+    // A narrow window: the kinds' row scrolls, and the last kind picked is still in view.
+    typed("");
+    window.set_size(PhysicalSize::new(560, HEIGHT));
+    data.invoke_kind_picked(data.get_kinds().row_count() as i32 - 1);
+    shots.push(("finder-narrow.png".into(), capture(window)));
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
     finder::close(app);
 }
 
