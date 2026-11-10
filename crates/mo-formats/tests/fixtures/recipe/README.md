@@ -47,7 +47,8 @@ the tone the songs point at.
   packed number fits two readings that only differ there), a muted track or group, automation clips (read as the
   live-test saves and the converter's own projects have them), how a curve bends between two points (drawn
   straight), and stretch modes 5, 6 and 12.
-- FL: declicking, sampler IN/OUT, the second arrangement. Stretch mode, pitch and clip fades are read (10 Nov 2026);
+- FL: the second arrangement. Declicking and the sampler's IN/OUT are found and named in the format registry (events
+  215, 75 and 76) but nothing shows them yet, and how long a fade an IN/OUT number makes isn't known. Stretch mode, pitch and clip fades are read (10 Nov 2026);
   the app doesn't draw or play the first two yet, and the converter doesn't carry the fades to Bitwig yet.
 - Fender: nothing known from these saves now (10 Nov 2026). Not in them, so not checked: an event's Speedup on a
   track that doesn't stretch, a file whose tempo changes part way, and what the event's gain number means in dB (the
