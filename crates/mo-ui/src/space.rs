@@ -2190,9 +2190,12 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     Changed::Bin { spare, old, songs }
                 }
                 Step::PutBack(kind, when, problems, kept) => {
-                    keep(&mut p, kept);
-                    if kind == space_bin::PLUGIN_CLEAN || kind == space_bin::PLUGIN_UNINSTALL {
-                        plugins_put_back = Some((kind.clone(), when, problems.is_empty()));
+                    let plugins = kind == space_bin::PLUGIN_CLEAN || kind == space_bin::PLUGIN_UNINSTALL;
+                    let list = kept.as_ref().filter(|_| plugins).and_then(plugins_page::trusted_binned);
+                    // A list older than the one the page has may not hold what the Plugins page kept since.
+                    let newer = keep(&mut p, kept);
+                    if plugins {
+                        plugins_put_back = Some((kind.clone(), when, problems.is_empty(), list.filter(|_| newer)));
                     }
                     match kind.as_str() {
                         SPARE_COPIES => p.removing.put_back(when, problems.clone()),
@@ -2213,8 +2216,8 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                 _ => Changed::Nothing,
             }
         });
-        if let Some((kind, when, all)) = plugins_put_back {
-            plugins_page::put_back_elsewhere(&kind, when, all);
+        if let Some((kind, when, all, list)) = plugins_put_back {
+            plugins_page::put_back_elsewhere(&kind, when, all, list.as_deref());
         }
         // Off show the page draws nothing, as what arrives can take tens of milliseconds to draw and some comes
         // several times a second (rule 12): it's drawn once when it comes back ([`shown`]). The looks a step asks

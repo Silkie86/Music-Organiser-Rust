@@ -8,12 +8,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use mo_app::log;
-use mo_app::plugins::clean::Watched;
 use mo_app::plugins::uninstall::{self, Plan, Waited};
 use mo_space::Stopped;
-use mo_space::clean::SystemBin;
 use mo_space::plugin_files;
-use mo_space::plugin_space::SpaceKind;
 use mo_space::uninstallers;
 use slint::ComponentHandle;
 
@@ -172,22 +169,21 @@ fn remove_files(app: &AppWindow) {
     let Some((ask, picked, id, stop, row_key, card)) = job else { return };
     log::info("Plugins", &format!("Uninstall {}: sending {} plugin files to the Recycle Bin", ask.name, picked.len()));
     let weak = app.as_weak();
+    // Started before its worker, so the window closing straight after still finds it, to stop and wait for.
+    let sent = clean::Sent::start(mo_app::space_bin::PLUGIN_UNINSTALL, &row_key, &stop);
     let spawned = mo_app::background::spawn("Plugins uninstall files", move || {
-        let bin = Watched::new(&SystemBin);
-        // Not `guarded`: this changes things, so a stop part way says what went.
-        let done = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
-            plugin_files::remove(&picked, &ask.space, &|k| ask.name_of(k), &bin, &stop)
-        }));
-        let outcome = match done {
-            Ok(d) => Outcome::Done(d),
-            Err(_) => {
-                let lines: Vec<(&str, u64, SpaceKind)> =
-                    picked.iter().map(|l| (l.path.as_str(), l.bytes, SpaceKind::Program)).collect();
-                Outcome::Stopped(bin.went_of(&lines))
+        let outcome = sent.send(|bin| {
+            // Not `guarded`: this changes things, so a stop part way says what went.
+            let done = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
+                plugin_files::remove(&picked, &ask.space, &|k| ask.name_of(k), bin, &stop)
+            }));
+            match done {
+                Ok(d) => Outcome::Done(d),
+                Err(_) => Outcome::Stopped(sent.went_so_far()),
             }
-        };
+        });
         clean::report(card, &outcome);
-        let kept = clean::record(mo_app::space_bin::PLUGIN_UNINSTALL, &row_key, &outcome);
+        let kept = sent.keep(&outcome);
         back(&weak, move |app| clean::removed(app, id, row_key, outcome, kept));
     });
     if let Err(e) = spawned {

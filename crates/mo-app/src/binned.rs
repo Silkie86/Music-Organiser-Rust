@@ -128,6 +128,10 @@ struct NoteLine {
     kind: String,
     when: i64,
     removed: Removed,
+    /// For the Plugins page's clean-ups, its plugin's line ([`Binned::plugin`]), so one a close cut short is kept with
+    /// its Put back on that plugin's card (review P-1). Not written for Space's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    plugin: Option<(String, String)>,
 }
 
 /// Where the notes of the clean-ups running in this run of the app are: they aren't taken into the list while they run
@@ -144,6 +148,7 @@ static RUNNING: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 pub struct Going {
     kind: String,
     when: i64,
+    plugin: Option<(String, String)>,
     path: PathBuf,
     note: Mutex<Note>,
 }
@@ -161,9 +166,14 @@ struct Note {
 impl Going {
     /// The note of a clean-up of `kind` that runs at `when` ([`now`]), in `folder`.
     pub fn start(folder: &Path, kind: &str, when: i64) -> Going {
+        Going::start_for(folder, kind, when, None)
+    }
+
+    /// [`Going::start`], for a clean-up of the plugin line `plugin` (the Plugins page's Clean up and Uninstall).
+    pub fn start_for(folder: &Path, kind: &str, when: i64, plugin: Option<(String, String)>) -> Going {
         let path = note_path(folder, kind, when);
         RUNNING.lock().unwrap_or_else(PoisonError::into_inner).push(path.clone());
-        Going { kind: kind.to_owned(), when, path, note: Mutex::default() }
+        Going { kind: kind.to_owned(), when, plugin, path, note: Mutex::default() }
     }
 
     /// Notes one more thing on its way to the bin, a line written at once. What can't be written (said in the log) is
@@ -174,7 +184,12 @@ impl Going {
         if note.failed {
             return;
         }
-        let line = NoteLine { kind: self.kind.clone(), when: self.when, removed: removed.clone() };
+        let line = NoteLine {
+            kind: self.kind.clone(),
+            when: self.when,
+            removed: removed.clone(),
+            plugin: self.plugin.clone(),
+        };
         let written = serde_json::to_string(&line).map_err(io::Error::other).and_then(|mut text| {
             text.push('\n');
             let file = match note.file.take() {
@@ -340,7 +355,7 @@ fn take_in(list: &mut Vec<Binned>, notes: &[(PathBuf, Vec<NoteLine>)]) {
     }
     let mut own = Vec::new();
     for (_, lines) in notes {
-        let Some(NoteLine { kind, when, .. }) = lines.first() else { continue };
+        let Some(NoteLine { kind, when, plugin, .. }) = lines.first() else { continue };
         let with = lines.iter().find_map(|line| match have.get(&pair(&line.removed)) {
             Some(Some(at)) if list.get(*at).is_some_and(|b| b.kind == *kind) => Some(*at),
             _ => None,
@@ -355,12 +370,12 @@ fn take_in(list: &mut Vec<Binned>, notes: &[(PathBuf, Vec<NoteLine>)]) {
         match with.and_then(|at| list.get_mut(at)) {
             _ if new.is_empty() => {}
             Some(binned) => binned.done.removed.extend(new),
-            // A note's own clean-up is Space's: the Plugins page's don't write notes yet.
+            // A Plugins page clean-up's note names its plugin's line (review P-1); Space's name none.
             None => own.push(Binned {
                 kind: kind.clone(),
                 when: *when,
                 done: Done { removed: new, ..Done::default() },
-                plugin: None,
+                plugin: plugin.clone(),
             }),
         }
     }
@@ -951,6 +966,22 @@ mod tests {
         assert_eq!(refresh(&dir, &bin).list, kept.list);
     }
 
+    /// Review P-1: a Plugins page clean-up a close cut short is kept with its plugin's line, so its Put back is on that
+    /// plugin's card after the restart.
+    #[test]
+    fn a_plugin_clean_up_cut_short_keeps_its_plugin() {
+        let dir = folder("mo-app-binned-plugin-cut-short");
+        let bin = holding(Some(vec!["C:/Omnisphere/Sounds"]));
+        let plugin = Some(("omnisphere".to_owned(), String::new()));
+        let note = Going::start_for(&dir, crate::space_bin::PLUGIN_CLEAN, 21, plugin.clone());
+        note.went(&going("C:/Omnisphere/Sounds", 21));
+        drop(note);
+        let kept = refresh(&dir, &bin);
+        assert_eq!(kept.list.len(), 1);
+        assert_eq!((kept.list[0].kind.as_str(), kept.list[0].plugin.clone()), (crate::space_bin::PLUGIN_CLEAN, plugin));
+        assert!(notes(&dir).is_empty());
+    }
+
     #[test]
     fn a_clean_up_kept_whole_takes_its_note_away() {
         let dir = folder("mo-app-binned-note-kept");
@@ -1025,7 +1056,7 @@ mod tests {
         let dir = folder("mo-app-binned-note-early");
         let bin = holding(Some(vec!["C:/a.dll", "C:/b.dll"]));
         // Another copy of the app took in the first line of its note just as it started (before it was locked).
-        let line = NoteLine { kind: "spare-copies".to_owned(), when: 40, removed: going("C:/a.dll", 40) };
+        let line = NoteLine { kind: "spare-copies".to_owned(), when: 40, removed: going("C:/a.dll", 40), plugin: None };
         let other = dir.join(format!("{NOTE_START}spare-copies-40-1{NOTE_END}"));
         fs::write(&other, format!("{}\n", serde_json::to_string(&line).unwrap())).unwrap();
         assert_eq!(whens(&refresh(&dir, &bin).list), [40]);
@@ -1066,7 +1097,7 @@ mod tests {
     #[test]
     fn a_line_a_crash_cut_short_is_left_out() {
         let dir = folder("mo-app-binned-note-cut");
-        let line = NoteLine { kind: "spare-copies".to_owned(), when: 12, removed: going("C:/a.dll", 12) };
+        let line = NoteLine { kind: "spare-copies".to_owned(), when: 12, removed: going("C:/a.dll", 12), plugin: None };
         let text = format!("{}\n{{\"kind\": \"spare-co", serde_json::to_string(&line).unwrap());
         fs::write(dir.join(format!("{NOTE_START}spare-copies-12-1{NOTE_END}")), text).unwrap();
         // Something else of a name like it, but not a file, isn't one.
