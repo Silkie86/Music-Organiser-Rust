@@ -60,6 +60,7 @@ tests don't have.
 | A reference to object 0, or to an object not read yet (a damaged file: Bitwig defines each object where it's first used) | Kept, and looked up once the whole body is read, or skipped. | The body isn't trusted past it: the project is read by the text scan, with a warning, so it has no MIDI. | Safer: a body that's wrong there is likely wrong after it too |
 | A project whose header says it stores plugin settings, but they're missing or cut short (a save interrupted at the end) | Read as whole, with no plugin states and no warning. | The same, with a warning that the plugin settings can't be read (VERSION 4). | Better |
 | A note's velocity as a MIDI 1.0 value (0 to 127) | Bitwig's 0-to-1 velocity rounded straight to 0 to 127. | Kept at MIDI 2.0's 16 bits, then rounded to 0 to 127 when a MIDI 1.0 value is wanted. About 3 in 10,000 velocities come out 1 apart (rounding twice); Bitwig's own whole-step velocities are the same. | Better (rule 22) |
+| The arrangement preview of a project (worked out from the recipe saves, 10 Nov 2026) | Every track drawn as playing, always 4 beats to the bar, no cue markers, no automation. | A deactivated or muted track is marked, the time signature and the cue markers are read, and each automation curve is a lane under its track (the tempo's first; the effect tracks' and the master's last). A track in a muted or deactivated group is muted with it. | Better |
 
 ## Studio One
 
