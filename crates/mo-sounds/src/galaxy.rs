@@ -113,7 +113,7 @@ impl<'a> Fingerprints<'a> {
 
 /// The fingerprints for `space` (see [`space`]).
 pub fn fingerprints<'a>(index: &'a SoundIndex, space: &str) -> Fingerprints<'a> {
-    let clap = if space == "features" { None } else { index.clap.as_ref() };
+    let clap = if space == "features" { None } else { index.clap.as_deref() };
     let clap = clap.map(|c| c.dim()).filter(|d| *d > 0);
     Fingerprints { ids: index.features.ids(), index, clap: clap.map(|d| (d, space == "clap")) }
 }

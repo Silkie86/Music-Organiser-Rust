@@ -556,6 +556,32 @@ impl SoundsDb {
         Ok((features, clap))
     }
 
+    /// The analyser's fingerprints of the sounds `ids` alone (one with none is left out), for an index that has the
+    /// rest already ([`crate::index::SoundIndex::with_features`]): a scan's few new sounds (review finding S-5).
+    pub fn features_of(&self, ids: &[i64]) -> Result<Gathered, SoundsError> {
+        let _turn = turns::long_turn();
+        let snapshot = self.conn.unchecked_transaction()?;
+        let sql = if self.is_copy() {
+            "SELECT v FROM sound_features WHERE sound_id = ?1"
+        } else {
+            "SELECT features FROM sounds WHERE id = ?1"
+        };
+        let mut st = self.conn.prepare(sql)?;
+        let mut out = Gathered::default();
+        for &id in ids {
+            let mut rows = st.query([id])?;
+            if let Some(r) = rows.next()?
+                && let Ok(ValueRef::Blob(blob)) = r.get_ref(0)
+            {
+                out.push_blob(id, blob);
+            }
+            turns::give_way();
+        }
+        drop(st);
+        snapshot.finish()?;
+        Ok(out)
+    }
+
     /// What's been done with each sound in the year before `now` and before that: deliberate plays, drags out of the
     /// app and sends into a DAW. Plays counted before the app kept dates count as recent, as in the C# app.
     pub fn activity(&self, now: NaiveDateTime) -> Result<HashMap<i64, SoundActivity>, SoundsError> {

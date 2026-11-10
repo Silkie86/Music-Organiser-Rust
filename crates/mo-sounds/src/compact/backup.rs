@@ -83,7 +83,7 @@ pub enum When {
     /// Once the backup copy is a day old, when the library changed since only by plays, drags and sends, the
     /// galaxy's maps, or your favourites, stars, own types and tags (any other change, now). They change the library
     /// at nearly every start, and making the copy writes about the library's size: a day of them at most is lost if
-    /// the library is damaged.
+    /// the library is damaged (the Sounds page looks again every hour while the app stays open: review finding S-6).
     Daily,
 }
 
@@ -210,6 +210,11 @@ fn make(copy: &Path, backup: &Path) -> Result<u64, BackedUp> {
     remove_database(&part).map_err(|e| not_now(format!("a half-made backup copy couldn't be removed ({e})")))?;
     let _part = Part(part.clone());
     let name = part.to_str().ok_or_else(|| not_now("its folder's name can't be given to SQLite".into()))?;
+    // It waits its turn behind the long reads of the library under way or waiting (every sound, every fingerprint),
+    // so it never starts in the middle of one on a slow disk (review finding S-4). It doesn't keep the turn: `VACUUM
+    // INTO` can't give way between rows, so the waveforms of the tiles on show would wait for the whole copy (tens of
+    // seconds for a big library), which is worse than sharing the disk with them for that while.
+    drop(crate::turns::long_turn());
     // How the library looks before it's read: the same after, so nothing was written to it in between.
     let from = SoundsDb::stamp(copy);
     let sounds = (|| -> rusqlite::Result<i64> {

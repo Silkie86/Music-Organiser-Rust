@@ -49,6 +49,9 @@ pub struct Scanned {
     /// Why it stopped part way, when it did: what was kept before stays kept, and the rest is tried again at the next
     /// scan.
     pub stopped: Option<String>,
+    /// The files listened to and kept (new and changed sounds), for the page to read only their fingerprints, not
+    /// every one again (review finding S-5).
+    pub listened: Vec<String>,
 }
 
 /// Scans `folders` and keeps what's new, changed, moved or gone in the app's own sound library beside `sounds_db`.
@@ -110,6 +113,7 @@ fn keep_all(
         let kept = grow::keep(sounds_db, &listened).map_err(|e| e.to_string())?;
         scanned.kept.added += kept.added;
         scanned.kept.updated += kept.updated;
+        scanned.listened.extend(listened.iter().map(|l| l.path.clone()));
         for l in listened.iter().filter(|l| l.analysed.is_err()) {
             scanned.unreadable += 1;
             let known = known_paths.get_or_insert_with(|| {
@@ -238,6 +242,7 @@ mod tests {
             not_forgotten: 0,
             took: Duration::from_millis(61_250),
             stopped: None,
+            listened: Vec::new(),
         };
         assert_eq!(
             scanned_line(&s),

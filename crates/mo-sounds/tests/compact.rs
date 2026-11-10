@@ -2368,6 +2368,65 @@ fn a_moved_sound_takes_the_type_its_new_name_says_unless_you_gave_it_one() {
     assert_eq!(shown(yours), ("Vocal".to_owned(), "you".to_owned(), 0.75));
 }
 
+/// A fresh install, with neither sounds.db nor a library of the app's own: one is made empty, the app's own from the
+/// start, for the scan to fill (it scans only the app's own). Never over anything it could be mended from, nor in a
+/// folder that isn't there.
+#[test]
+fn a_fresh_install_gets_an_empty_library_of_its_own_for_the_scan_to_fill() {
+    let dir = folder("fresh");
+    let old = dir.join("sounds.db");
+    let copy = compact::copy_of(&old);
+    assert!(compact::make_empty(&old, &copy).unwrap());
+    assert!(compact::own_since(&copy).is_some());
+    {
+        let db = SoundsDb::open_read_only(&copy).unwrap();
+        assert!(db.is_copy() && !db.is_formerly());
+        assert!(db.all(now()).unwrap().is_empty());
+        assert!(db.history(10).unwrap().is_empty());
+        assert_eq!(db.fingerprints(0).unwrap(), (Gathered::default(), Gathered::default()));
+    }
+    assert_eq!(pragma(&copy, "journal_mode"), "wal");
+    // Made once: the next start reads it.
+    assert!(!compact::make_empty(&old, &copy).unwrap());
+    // The scan fills it, numbering from 1, none of them counted for CLAP; and it's backed up.
+    let kick = "D:\\Samples\\Kick 01.wav".to_owned();
+    let listened = Listened { path: kick.clone(), size: 5, mtime: 6, analysed: Ok(heard(0.5)) };
+    assert_eq!(grow::keep(&old, &[listened]).unwrap(), Kept { added: 1, ..Kept::default() });
+    assert_eq!(id_of(&copy, &kick), Some(1));
+    assert_eq!(grow::new_since(&copy), Some(1));
+    let fingerprints = SoundsDb::open_read_only(&copy).unwrap().features_of(&[1, 2]).unwrap();
+    assert_eq!(fingerprints.iter().map(|(id, _)| id).collect::<Vec<_>>(), [1]);
+    assert!(matches!(backup::back_up(&old), Some(BackedUp::Made { .. })));
+    // Gone, with its backup copy left: never made empty in its place (it would be backed up over that).
+    for end in ["", "-wal", "-shm"] {
+        let _ = std::fs::remove_file(format!("{}{end}", copy.display()));
+    }
+    assert!(!compact::make_empty(&old, &copy).unwrap());
+    assert!(!copy.exists());
+    // Nor beside a sounds.db (made from it instead), nor in a folder that isn't there (a drive that's away).
+    let _ = std::fs::remove_file(backup::backup_of(&copy));
+    std::fs::write(&old, b"").unwrap();
+    assert!(!compact::make_empty(&old, &copy).unwrap());
+    std::fs::remove_file(&old).unwrap();
+    let away = dir.join("away").join("sounds.db");
+    assert!(!compact::make_empty(&away, &compact::copy_of(&away)).unwrap());
+    // Nor beside a write-ahead log or journal left without its library: it may be the last of yours, so it's said.
+    for end in ["-wal", "-journal"] {
+        let left = format!("{}{end}", copy.display());
+        std::fs::write(&left, b"what's left").unwrap();
+        let why = compact::make_empty(&old, &copy).unwrap_err().to_string();
+        assert!(why.contains(&left) && !copy.exists(), "{why}");
+        assert_eq!(std::fs::read(&left).unwrap(), b"what's left");
+        std::fs::remove_file(&left).unwrap();
+    }
+    assert!(compact::make_empty(&old, &copy).unwrap());
+    // Its name given without putting it over another: the half-made file is gone, the library is whole.
+    let part = format!("{}.part-{}", copy.display(), std::process::id());
+    assert!(!Path::new(&part).exists(), "{part}");
+    assert!(SoundsDb::open_read_only(&copy).unwrap().all(now()).unwrap().is_empty());
+    assert!(!compact::make_empty(&old, &copy).unwrap());
+}
+
 /// A library without the duplicate finder's prints is written all the same, and the highest sound forgotten before
 /// anything was ever added keeps its number from being given again.
 #[test]
