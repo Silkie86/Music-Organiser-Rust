@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use mo_formats::{case, paths};
+use mo_formats::{PluginRef, case, paths};
 use mo_library::plugin_writes;
 use mo_library::read::{Installed, read_save};
 use mo_library::samples::SampleLocator;
@@ -327,7 +327,30 @@ impl Live {
             );
         }
         self.installed = r.installed;
-        let missing: HashMap<i64, u32> = r.missing.into_iter().collect();
+        let mut missing: HashMap<i64, u32> = r.missing.into_iter().collect();
+        if r.looked {
+            // Saves read but not kept yet were read against the installed plugins as they were: judged again too, so
+            // keeping them doesn't put the old marks back.
+            let mut held = self.details.lock().unwrap_or_else(PoisonError::into_inner);
+            for d in held.values_mut() {
+                for p in d.plugins.iter_mut().filter(|p| !p.installed) {
+                    let named = PluginRef {
+                        name: p.name.clone(),
+                        vendor: p.vendor.clone(),
+                        kind: p.kind,
+                        format: p.format.clone(),
+                        path: p.path.clone(),
+                        ..PluginRef::default()
+                    };
+                    p.installed = self.installed.has(&named);
+                }
+                let now = u32::try_from(d.plugins.iter().filter(|p| !p.installed).count()).unwrap_or(u32::MAX);
+                if now != d.save.missing_plugins {
+                    d.save.missing_plugins = now;
+                    missing.insert(d.save.id, now);
+                }
+            }
+        }
         let mut changed = 0;
         for s in &mut self.saves {
             if let Some(&n) = missing.get(&s.id) {

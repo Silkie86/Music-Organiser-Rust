@@ -8,7 +8,7 @@
 //! and the old measure stays. The measuring itself is done before, away from the transaction, so the write is short
 //! (the Songs watch writes `songs.db` in the background too).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 use std::time::Duration;
 
@@ -20,7 +20,7 @@ use serde::Serialize;
 
 use crate::LibraryError;
 use crate::plugins::{StoredFolder, StoredSpace};
-use crate::read::Installed;
+use crate::read::{INSTALLED_RULES, Installed};
 
 /// What a measure found: the installed plugins' names, and each one's room on disk.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -93,39 +93,58 @@ fn rows(measure: &Measure) -> Rows {
 
 /// Keeps `measure` in the app's own `songs.db` at `songs_db` in place of the last one, all of it or none.
 pub fn write(songs_db: &Path, measure: &Measure) -> Result<(), LibraryError> {
-    let write_error = |why: String| LibraryError::Write { path: songs_db.to_owned(), why };
-    let sql = |e: rusqlite::Error| match e.sqlite_error_code() {
+    let (mut conn, sql) = open_own(songs_db)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(&sql)?;
+    own_under_lock(songs_db, &tx)?;
+    let wanted = rows(measure);
+    put(&tx, &wanted).map_err(&sql)?;
+    let back = read_back(&tx).map_err(&sql)?;
+    if let Some(why) = differs(&wanted, &back) {
+        return Err(write_error(songs_db, format!("what was written didn't read back the same ({why})")));
+    }
+    tx.commit().map_err(&sql)
+}
+
+fn write_error(songs_db: &Path, why: String) -> LibraryError {
+    LibraryError::Write { path: songs_db.to_owned(), why }
+}
+
+/// An SQLite error writing `songs_db`: busy when another copy of the app holds it.
+fn sql_error(songs_db: &Path, e: rusqlite::Error) -> LibraryError {
+    match e.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => LibraryError::Busy { path: songs_db.to_owned() },
-        _ => write_error(e.to_string()),
-    };
-    let not_own = || write_error("it isn't the app's own song library (yet), so it isn't written".to_owned());
+        _ => write_error(songs_db, e.to_string()),
+    }
+}
+
+fn not_own(songs_db: &Path) -> LibraryError {
+    write_error(songs_db, "it isn't the app's own song library (yet), so it isn't written".to_owned())
+}
+
+/// Opens `songs_db` to write, when it's there and made by the app; with how its SQLite errors are told.
+fn open_own(songs_db: &Path) -> Result<(Connection, impl Fn(rusqlite::Error) -> LibraryError + '_), LibraryError> {
+    let sql = move |e| sql_error(songs_db, e);
     if !songs_db.is_file() {
-        return Err(write_error("it isn't there".to_owned()));
+        return Err(write_error(songs_db, "it isn't there".to_owned()));
     }
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let mut conn = Connection::open_with_flags(songs_db, flags).map_err(sql)?;
+    let conn = Connection::open_with_flags(songs_db, flags).map_err(sql)?;
     conn.busy_timeout(WAIT).map_err(sql)?;
     let id: i32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0)).map_err(sql)?;
     let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(sql)?;
     if id != crate::songs_db::APPLICATION_ID || version != crate::songs_db::VERSION {
-        return Err(not_own());
+        return Err(not_own(songs_db));
     }
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql)?;
-    // Looked at under the write lock: only the app's own library is written.
+    Ok((conn, sql))
+}
+
+/// Looked at under the write lock: only the app's own library is written.
+fn own_under_lock(songs_db: &Path, tx: &Transaction<'_>) -> Result<(), LibraryError> {
     let own: Option<rusqlite::types::Value> = tx
         .query_row("SELECT value FROM songs_info WHERE key = 'own_since'", [], |r| r.get(0))
         .optional()
-        .map_err(sql)?;
-    if own.is_none() {
-        return Err(not_own());
-    }
-    let wanted = rows(measure);
-    put(&tx, &wanted).map_err(sql)?;
-    let back = read_back(&tx).map_err(sql)?;
-    if let Some(why) = differs(&wanted, &back) {
-        return Err(write_error(format!("what was written didn't read back the same ({why})")));
-    }
-    tx.commit().map_err(sql)
+        .map_err(|e| sql_error(songs_db, e))?;
+    if own.is_none() { Err(not_own(songs_db)) } else { Ok(()) }
 }
 
 fn put(tx: &Transaction<'_>, (installed, spaces): &Rows) -> rusqlite::Result<()> {
@@ -169,12 +188,8 @@ fn differs(wanted: &Rows, back: &Rows) -> Option<String> {
     None
 }
 
-/// Bump when what counts as installed changes ([`crate::read::Installed::has`]), so every save's plugins are looked at
-/// again at the next start. 2: a Waves plugin named plainly with Waves as its vendor (Bitwig's "Smack Attack Stereo").
-pub const INSTALLED_RULES: u32 = 2;
-
-/// The note in `songs_info` of what the saves' plugins were last looked at against: [`INSTALLED_RULES`] and the
-/// installed plugins then.
+/// The note in `songs_info` of what the saves' plugins were last looked at against: the rules' version
+/// ([`INSTALLED_RULES`]) and the installed plugins then.
 const RECHECKED_KEY: &str = "installed_rechecked";
 
 /// What [`recheck_installed`] found.
@@ -182,98 +197,96 @@ const RECHECKED_KEY: &str = "installed_rechecked";
 pub struct Rechecked {
     /// The installed plugins as the library has them now.
     pub installed: Installed,
-    /// The saves whose count of missing plugins changed, with the new count, by id.
+    /// The saves that now miss fewer plugins, with how many they miss, by id.
     pub missing: Vec<(i64, u32)>,
     /// Whether the saves' plugins were looked at (not when nothing changed since the last time).
     pub looked: bool,
 }
 
-/// Looks again at whether each save's plugins are installed, as a save's own read decides, and keeps any that changed
-/// in the app's own `songs.db`: a save is only read when its file changes, so a plugin installed (or removed) since, or
-/// a better rule ([`INSTALLED_RULES`]), would otherwise never reach it. Only when the installed plugins or the rules
+/// Looks again at the saves' plugins marked missing, as a save's own read decides ([`Installed::has`]), and marks the
+/// ones found installed now in the app's own `songs.db`: a save is only read when its file changes, so a plugin
+/// installed since, or a better rule ([`INSTALLED_RULES`]), would otherwise never reach it. Only ever from missing to
+/// installed: the library doesn't keep the id a save found a plugin by, so a plugin marked installed can't be judged
+/// again here (one removed shows as missing when its save is read again). Only when the installed plugins or the rules
 /// changed since the last look. Asks the disk (each plugin's file), so never on the window's thread; the looking is
 /// done before the write, which is one short transaction.
 pub fn recheck_installed(songs_db: &Path) -> Result<Rechecked, LibraryError> {
-    let write_error = |why: String| LibraryError::Write { path: songs_db.to_owned(), why };
-    let sql = |e: rusqlite::Error| match e.sqlite_error_code() {
-        Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => LibraryError::Busy { path: songs_db.to_owned() },
-        _ => write_error(e.to_string()),
-    };
-    if crate::songs_db::own_since(songs_db).is_none() {
-        return Err(write_error("it isn't the app's own song library (yet), so it isn't written".to_owned()));
-    }
-    let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let mut conn = Connection::open_with_flags(songs_db, flags).map_err(sql)?;
-    conn.busy_timeout(WAIT).map_err(sql)?;
-    let installed = crate::db::installed_in(&conn, true, true).map_err(sql)?;
+    let (mut conn, sql) = open_own(songs_db)?;
+    let installed = crate::db::installed_in(&conn, true, true).map_err(&sql)?;
     let stamp = stamp(&installed);
     let noted: Option<String> = conn
         .query_row("SELECT value FROM songs_info WHERE key = ?1", [RECHECKED_KEY], |r| r.get(0))
         .optional()
-        .map_err(sql)?;
+        .map_err(&sql)?;
     if noted.as_deref() == Some(stamp.as_str()) {
         return Ok(Rechecked { installed, ..Rechecked::default() });
     }
-    // Each plugin as the saves name it, once: far fewer than the saves' rows.
-    let plugins: Vec<PluginRef> = {
-        let mut st = conn.prepare("SELECT DISTINCT name, vendor, format, path FROM plugins").map_err(sql)?;
+    // The rows marked missing, read once; each plugin they name judged once.
+    let rows: Vec<(i64, i64, PluginRef)> = {
+        let mut st = conn
+            .prepare(
+                "SELECT rowid, project_id, name, vendor, format, path FROM plugins WHERE COALESCE(installed, 0) = 0",
+            )
+            .map_err(&sql)?;
         let rows = st.query_map([], |r| {
             let text = |i: usize| r.get::<_, Option<String>>(i).map(Option::unwrap_or_default);
-            Ok(PluginRef { name: text(0)?, vendor: text(1)?, format: text(2)?, path: text(3)?, ..PluginRef::default() })
+            let p = PluginRef {
+                name: text(2)?,
+                vendor: text(3)?,
+                format: text(4)?,
+                path: text(5)?,
+                ..PluginRef::default()
+            };
+            Ok((r.get(0)?, r.get::<_, Option<i64>>(1)?.unwrap_or(0), p))
         });
-        rows.map_err(sql)?.collect::<rusqlite::Result<_>>().map_err(sql)?
+        rows.map_err(&sql)?.collect::<rusqlite::Result<_>>().map_err(&sql)?
     };
-    let flags: Vec<(PluginRef, bool)> = plugins
-        .into_iter()
-        .map(|p| {
-            let has = installed.has(&p);
-            (p, has)
-        })
+    let mut judged: HashMap<(&str, &str, &str, &str), bool> = HashMap::new();
+    let found: Vec<(i64, i64)> = rows
+        .iter()
+        .filter(|(_, _, p)| *judged.entry((&p.name, &p.vendor, &p.format, &p.path)).or_insert_with(|| installed.has(p)))
+        .map(|(row, project, _)| (*row, *project))
         .collect();
 
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql)?;
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(&sql)?;
+    own_under_lock(songs_db, &tx)?;
     let mut changed: BTreeSet<i64> = BTreeSet::new();
     {
-        let same = "COALESCE(name, '') = ?1 AND COALESCE(vendor, '') = ?2 AND COALESCE(format, '') = ?3 \
-                    AND COALESCE(path, '') = ?4 AND COALESCE(installed, -1) != ?5";
-        let mut which = tx.prepare(&format!("SELECT DISTINCT project_id FROM plugins WHERE {same}")).map_err(sql)?;
-        let mut set = tx.prepare(&format!("UPDATE plugins SET installed = ?5 WHERE {same}")).map_err(sql)?;
-        for (p, has) in &flags {
-            let args = params![p.name, p.vendor, p.format, p.path, i64::from(*has)];
-            let ids = which.query_map(args, |r| r.get::<_, i64>(0)).map_err(sql)?;
-            let ids: Vec<i64> = ids.collect::<rusqlite::Result<_>>().map_err(sql)?;
-            if ids.is_empty() {
-                continue;
+        let mut set = tx.prepare("UPDATE plugins SET installed = 1 WHERE rowid = ?1").map_err(&sql)?;
+        for (row, project) in &found {
+            if set.execute([row]).map_err(&sql)? > 0 {
+                changed.insert(*project);
             }
-            set.execute(args).map_err(sql)?;
-            changed.extend(ids);
         }
     }
     let mut missing = Vec::with_capacity(changed.len());
     {
         let mut count =
-            tx.prepare("SELECT COUNT(*) FROM plugins WHERE project_id = ?1 AND installed = 0").map_err(sql)?;
+            tx.prepare("SELECT COUNT(*) FROM plugins WHERE project_id = ?1 AND installed = 0").map_err(&sql)?;
         for id in changed {
-            let n: i64 = count.query_row([id], |r| r.get(0)).map_err(sql)?;
+            let n: i64 = count.query_row([id], |r| r.get(0)).map_err(&sql)?;
             missing.push((id, u32::try_from(n).unwrap_or(u32::MAX)));
         }
     }
     tx.execute("INSERT OR REPLACE INTO songs_info (key, value) VALUES (?1, ?2)", params![RECHECKED_KEY, stamp])
-        .map_err(sql)?;
-    tx.commit().map_err(sql)?;
+        .map_err(&sql)?;
+    tx.commit().map_err(&sql)?;
     Ok(Rechecked { installed, missing, looked: true })
 }
 
-/// What the saves' plugins are looked at against, in short: the rules' version and a fingerprint of the installed
-/// plugins (FNV-1a over their sorted keys and ids, stable from one build to the next).
+/// What the saves' plugins are looked at against, in short: the rules' version and a fingerprint of everything
+/// [`Installed::has`] looks at (FNV-1a over each set sorted, stable from one build to the next).
 fn stamp(installed: &Installed) -> String {
-    let mut all: Vec<&str> = installed.keys.iter().chain(&installed.ids).map(String::as_str).collect();
-    all.sort_unstable();
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for s in all {
-        for b in s.bytes().chain([0]) {
-            hash = (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+    let mut add = |b: u8| hash = (hash ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+    for (n, set) in [&installed.keys, &installed.names, &installed.ids, &installed.waves].into_iter().enumerate() {
+        let mut all: Vec<&String> = set.iter().collect();
+        all.sort_unstable();
+        for s in all {
+            s.bytes().chain([0]).for_each(&mut add);
         }
+        add(0xff);
+        add(n as u8);
     }
-    format!("{INSTALLED_RULES}:{}:{hash:016x}", installed.keys.len() + installed.ids.len())
+    format!("{INSTALLED_RULES}:{hash:016x}")
 }

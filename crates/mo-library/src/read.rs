@@ -50,6 +50,11 @@ pub struct Installed {
     pub waves: HashSet<String>,
 }
 
+/// Bump when what [`Installed::has`] decides changes (here, or in the mo-formats helpers it uses), so the saves' plugins
+/// marked missing are looked at again at the next start ([`crate::plugin_writes::recheck_installed`]). 2: a Waves
+/// plugin named plainly with Waves as its vendor (Bitwig's "Smack Attack Stereo").
+pub const INSTALLED_RULES: u32 = 2;
+
 impl Installed {
     /// The ids found by the plugin scanner, from rows of (id, plugin file).
     pub fn with_scans(mut self, scans: impl IntoIterator<Item = (String, String)>) -> Installed {
