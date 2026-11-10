@@ -44,6 +44,9 @@ use crate::{
     YearBar,
 };
 
+/// The page's Measure again key's action (F5).
+pub const MEASURE: &str = "plugins.measure";
+
 /// The side card's tabs.
 const TABS: [&str; 3] = ["Songs", "On disk", "Installed copies"];
 
@@ -490,6 +493,11 @@ fn ask_read(whatever: bool) {
 /// Runs one of the page's actions on the picked plugin (a button, the right-click menu or its key). Returns whether
 /// there was a plugin to do it for.
 pub fn run_action(app: &AppWindow, id: &str) -> bool {
+    // Not the picked plugin's: it measures them all (review X3-7).
+    if id == MEASURE {
+        measuring::now(app);
+        return true;
+    }
     let picked = PAGE.with(|p| {
         let p = p.borrow();
         let pl = p.plugins.as_ref()?;
@@ -962,8 +970,12 @@ fn fill_actions(app: &AppWindow) {
         _ => true,
     };
     // The menu says what the card's buttons say (review X3-4); the shortcut list's longer words are the buttons' tips.
+    data.set_measure_key(shortcuts.key_of(MEASURE).into());
+    data.set_measure_tip(PLUGINS_ACTIONS.iter().find(|a| a.id == MEASURE).map_or("", |a| a.what).into());
+    // The picked plugin's actions: Measure again is the page's, beside its line.
     let menu: Vec<MenuItem> = PLUGINS_ACTIONS
         .iter()
+        .filter(|a| a.id != MEASURE)
         .map(|a| MenuItem {
             what: action_words(a.id).into(),
             key: shortcuts.key_of(a.id).into(),
@@ -974,6 +986,7 @@ fn fill_actions(app: &AppWindow) {
     data.set_menu(ModelRc::new(VecModel::from(menu)));
     let actions: Vec<CardAction> = PLUGINS_ACTIONS
         .iter()
+        .filter(|a| a.id != MEASURE)
         .map(|a| CardAction {
             text: action_words(a.id).into(),
             tip: a.what.into(),

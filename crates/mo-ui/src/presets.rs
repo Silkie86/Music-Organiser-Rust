@@ -88,6 +88,8 @@ struct Page {
     failed: Option<String>,
     /// The name of the song the Song filter picks, as Songs gave it.
     song_name: String,
+    /// Every song's newest save the last reading looked at, with its time then.
+    looked_at: HashMap<String, i64>,
     exporting: bool,
     message: String,
     /// The line being auditioned in Bitwig ([`logic::audition_id`]) and how far it's got.
@@ -286,9 +288,9 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
 /// Says how Ctrl+K opens one of the Sounds section's lines: on this page, picked.
 fn finder_opens() {
     crate::finder::on_open(Kind::Preset, |app, hit, _| {
-        let Some(at) = hit.id.parse::<usize>().ok().filter(|&at| PAGE.with(|p| at < p.borrow().items.len())) else {
-            return false;
-        };
+        // Found by what it is, not where it was: a read again puts the lines in another order (M-1).
+        let at = PAGE.with(|p| p.borrow().items.iter().position(|i| logic::audition_id(i) == hit.id));
+        let Some(at) = at else { return false };
         crate::go_to(app, Place::Presets.index() as i32);
         show_preset(app, at);
         true
@@ -512,15 +514,14 @@ pub fn shown(app: &AppWindow) {
 
 /// Opens the page on one song's sounds (a song's Presets tab), by its save's path; `name` is the song's, for its chip.
 /// A save the page hasn't read (saved since the page read your songs) has the songs read again (H-4).
-pub fn show_song(app: &AppWindow, save: &str, name: &str) {
+/// `modified` is the save's time as Songs has it: a save looked at with that time (even one that gave no sounds, or a
+/// copy in the export folder) isn't read again (U-2).
+pub fn show_song(app: &AppWindow, save: &str, name: &str, modified: i64) {
     let again = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.section = Section::Sounds;
         p.song_name = name.to_owned();
-        p.started
-            && p.reading.is_none()
-            && logic::keeps_settings(save)
-            && !p.items.iter().chain(&p.pending).any(|i| i.path() == save)
+        p.started && p.reading.is_none() && logic::keeps_settings(save) && p.looked_at.get(save) != Some(&modified)
     });
     if again {
         read_again(app);
@@ -1058,7 +1059,8 @@ fn read_sounds(_app: &AppWindow) {
 }
 
 /// Reads every song and preset file again, from the start: what's unchanged comes from the stores, so it's quick.
-/// Ctrl+K forgets the old lines until the new ones are all in (its picks are places in them).
+/// Ctrl+K forgets the old lines until the new ones are all in (it finds a pick by what it is, so one in Recent still
+/// opens the same sound).
 fn read_again(app: &AppWindow) {
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -1087,6 +1089,8 @@ fn read_all(at: &Where) -> Result<(), String> {
     let songs = mo_library::songs::group_songs(&saves, &choices);
     let newest = logic::newest_saves(&songs, export_root.as_deref());
     let bitwig_folders = logic::bitwig_folders(&plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
+    // Every song's newest save as it is now, read below or left out: Songs' link reads again only for another (U-2).
+    let looked_at: HashMap<String, i64> = songs.iter().map(|s| (s.latest.path.clone(), s.latest.mtime)).collect();
     drop(songs);
     drop(saves);
     let total = newest.len();
@@ -1096,6 +1100,7 @@ fn read_all(at: &Where) -> Result<(), String> {
             PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 p.bitwig = folders;
+                background::free_later(std::mem::replace(&mut p.looked_at, looked_at));
                 p.reading = Some((0, total));
             });
             show_all(app);
@@ -1174,7 +1179,7 @@ fn read_all(at: &Where) -> Result<(), String> {
     let roots = logic::preset_folders(&plib::default_folders(), &bitwig_folders);
     // Read only the preset files that are new or changed since the last run; the rest are as they were kept.
     let started = std::time::Instant::now();
-    let (kept, why) = background::on_pool(|| file_store::find(&roots, &at.data_dir.join(file_store::FILE_NAME)));
+    let (kept, why) = background::on_pool(|| file_store::find_every(&roots, &at.data_dir.join(file_store::FILE_NAME)));
     if let Some(why) = why {
         log::warning("Presets", &format!("Every preset file is read, none kept for next time: {why}"));
     }
@@ -1871,25 +1876,41 @@ fn stop_audition_in(
 ) -> bool {
     let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_audition(&auditioning, turn) else { return true };
     log::warning("Presets", &format!("The audition in Bitwig couldn't be stopped: {e}"));
-    if let Some(line) = line {
-        put_back(auditioning, line, e);
+    // Put back once, so Stop can be pressed again once its project is in front; let go when the stop can never work
+    // (Bitwig is gone) or it failed again after being put back, so nothing stays blocked behind it and Esc goes on to
+    // its next step (the 10 Nov review's D-1).
+    let again = PUT_BACK.failed_before(&auditioning);
+    let Some(line) = line else { return true };
+    if e.bitwig_gone() || again {
+        let_go(&auditioning.track, &e);
+        return true;
     }
-    false
+    !put_back(auditioning, line, e)
 }
 
-/// An audition that couldn't be stopped: back in its place, unless another plays by now, and a start in Bitwig still
-/// on its way behind it (from this page or the MIDI page) is called off, so one thing plays there at a time (the
-/// review's D-8). Run inside the stop's turn, so the start behind sees it. The card says why and what to do.
-fn put_back(auditioning: mo_dawlink::bitwig::Auditioning, line: String, why: mo_dawlink::bitwig::Error) {
-    let words = format!(
-        "{} couldn't be stopped in Bitwig: {why} Bring its project to the front in Bitwig (with changes on), then \
-         press Stop in Bitwig again.",
-        auditioning.track
-    );
+/// An audition put back once already, or that can never be stopped, or with another in its place: it's let go (what
+/// comes next goes ahead), and the card says to take its track out in Bitwig if it's still there.
+fn let_go(track: &str, why: &mo_dawlink::bitwig::Error) {
+    log::info("Presets", &format!("The app let go of the audition of {track}, which couldn't be stopped"));
+    message_later(format!(
+        "{track} couldn't be stopped in Bitwig: {why} The app has let it go: if its track is still in your song, take \
+         it out in Bitwig."
+    ));
+}
+
+/// The audition put back after a failed stop, if one is: a second failure lets it go.
+static PUT_BACK: crate::in_flight::PutBack<mo_dawlink::bitwig::Auditioning> = crate::in_flight::PutBack::new();
+
+/// An audition that couldn't be stopped: back in its place, unless another plays by now (then it's let go), and a start
+/// in Bitwig still on its way behind it (from this page or the MIDI page) is called off, so one thing plays there at a
+/// time (the review's D-8). Run inside the stop's turn, so the start behind sees it. The card says why and what to do.
+/// Whether it was put back.
+fn put_back(auditioning: mo_dawlink::bitwig::Auditioning, line: String, why: mo_dawlink::bitwig::Error) -> bool {
     let track = auditioning.track.clone();
     let put = {
         let mut slot = audition_now();
         if slot.is_none() {
+            PUT_BACK.note(auditioning.clone());
             *slot = Some(auditioning);
             AUDITION_ASKED.fetch_add(1, Ordering::SeqCst);
             Some((audition_asked(), crate::midi::call_off_start()))
@@ -1897,22 +1918,29 @@ fn put_back(auditioning: mo_dawlink::bitwig::Auditioning, line: String, why: mo_
             None
         }
     };
+    let Some((at, midi)) = put else {
+        let_go(&track, &why);
+        return false;
+    };
+    let words = format!(
+        "{track} couldn't be stopped in Bitwig: {why} Bring its project to the front in Bitwig (with changes on), then \
+         press Stop in Bitwig again. If it fails again, the app lets it go."
+    );
     on_window(move |app| {
-        if let Some((at, midi)) = put {
-            if audition_asked() == at {
-                PAGE.with(|p| {
-                    let mut p = p.borrow_mut();
-                    p.hearing = Some((line, logic::Hearing::Playing));
-                    p.hearing_name = track;
-                });
-            }
-            if let Some(midi) = midi {
-                crate::midi::called_off(app, midi);
-            }
+        if audition_asked() == at {
+            PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.hearing = Some((line, logic::Hearing::Playing));
+                p.hearing_name = track;
+            });
+        }
+        if let Some(midi) = midi {
+            crate::midi::called_off(app, midi);
         }
         PAGE.with(|p| p.borrow_mut().message = words);
         show_all(app);
     });
+    true
 }
 
 /// Calls off an audition still on its way, for a part from the MIDI page that couldn't be stopped in Bitwig. Run

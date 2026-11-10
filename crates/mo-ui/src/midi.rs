@@ -108,7 +108,13 @@ struct Page {
     finder_loaded: Option<Result<Loaded, String>>,
     /// The page first showed while that read was still going: it's handed to the page when it ends.
     finder_for_page: bool,
+    /// That read was let go unused (the page wasn't shown soon after): the page reads the index itself (M-3).
+    finder_let_go: bool,
 }
+
+/// How long the Ctrl+K read of the index is kept for the page: long enough to go from Ctrl+K to the MIDI page, short
+/// enough that a session that never opens it doesn't hold the whole index (M-3). Ctrl+K keeps its own lines.
+const KEEP_FINDER_READ: Duration = Duration::from_secs(120);
 
 struct Ask {
     id: u64,
@@ -248,6 +254,19 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
                     crate::finder::add_source(&app, "midi", l.found.clone());
                 }
                 PAGE.with(|p| p.borrow_mut().finder_loaded = Some(loaded));
+                slint::Timer::single_shot(KEEP_FINDER_READ, || {
+                    let unused = PAGE.with(|p| {
+                        let mut p = p.borrow_mut();
+                        let unused = p.finder_loaded.take();
+                        if unused.is_some() {
+                            p.finder_let_go = true;
+                        }
+                        unused
+                    });
+                    if let Some(unused) = unused {
+                        background::free_later(unused);
+                    }
+                });
             });
         });
         if let Err(e) = started {
@@ -503,7 +522,7 @@ pub fn shown(app: &AppWindow) {
         let mut p = p.borrow_mut();
         match p.finder_loaded.take() {
             Some(read) => Kept::Read(read),
-            None if p.finder_read => {
+            None if p.finder_read && !p.finder_let_go => {
                 p.finder_for_page = true;
                 Kept::Coming
             }
@@ -2028,9 +2047,14 @@ fn stop_bitwig_in(
 ) {
     let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_playing(&bitwig, turn) else { return };
     log::warning("MIDI", &format!("The part playing in Bitwig couldn't be stopped: {e}"));
+    // Put back once, so Stop can be pressed again once its project is in front; let go when the stop can never work
+    // (Bitwig is gone) or it failed again after being put back, so a new Play isn't called off and Esc goes on (the 10
+    // Nov review's D-1).
+    let again = PUT_BACK.failed_before(&bitwig);
     let put_back = {
         let mut slot = in_daw();
-        if slot.is_none() {
+        if slot.is_none() && !e.bitwig_gone() && !again {
+            PUT_BACK.note(bitwig.clone());
             *slot = Some(InDaw::Bitwig(bitwig));
             DAW_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Some((DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst), crate::presets::call_off_start()))
@@ -2038,11 +2062,21 @@ fn stop_bitwig_in(
             None
         }
     };
+    if put_back.is_none() {
+        log::info("MIDI", "The app let go of the part playing in Bitwig, which couldn't be stopped");
+    }
     let Some(weak) = weak else { return };
-    let words = format!(
-        "It couldn't be stopped in Bitwig: {e} Bring its project to the front in Bitwig (with changes on), then press \
-         Stop again."
-    );
+    let words = if put_back.is_none() {
+        format!(
+            "It couldn't be stopped in Bitwig: {e} The app has let it go: if its clip still plays there, stop it in \
+             Bitwig."
+        )
+    } else {
+        format!(
+            "It couldn't be stopped in Bitwig: {e} Bring its project to the front in Bitwig (with changes on), then \
+             press Stop again. If it fails again, the app lets it go."
+        )
+    };
     let _ = slint::invoke_from_event_loop(move || {
         let Some(app) = weak.upgrade() else { return };
         let data = app.global::<MidiData>();
@@ -2060,6 +2094,9 @@ fn stop_bitwig_in(
         data.set_daw_note(words.into());
     });
 }
+
+/// The part put back after a failed stop, if one is: a second failure lets it go.
+static PUT_BACK: crate::in_flight::PutBack<mo_dawlink::bitwig::Playing> = crate::in_flight::PutBack::new();
 
 /// Calls off a start still on its way from this page, for a part from Presets that couldn't be stopped in Bitwig (so
 /// one thing plays there at a time). Run inside that stop's turn; gives back the ask to hand to [`called_off`] on the

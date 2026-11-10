@@ -133,12 +133,14 @@ pub fn unread(e: &io::Error) -> Unread {
 pub fn unread_file(e: &io::Error) -> Unread {
     use io::ErrorKind as K;
     // Windows: sharing and lock violations (32, 33); path not found (3), device not ready (21), network path or
-    // name gone (53, 64, 67), network unreachable (1231).
+    // name gone (53, 64, 67), network unreachable (1231); and what a read in flight gets when its USB drive is pulled
+    // or its share drops (review M-7, 10 Nov): device gone (55, 433, 1167), network error (59), the file's volume
+    // gone (1006), a device error (1117). A bad sector (23) is still noted as failed.
     let code = if cfg!(windows) { e.raw_os_error() } else { None };
     if matches!(code, Some(32 | 33)) || e.kind() == K::WouldBlock || e.kind() == K::ResourceBusy {
         return Unread::InUse(format!("It couldn't be opened, maybe because another program had it open ({e})"));
     }
-    let away = matches!(code, Some(3 | 21 | 53 | 64 | 67 | 1231))
+    let away = matches!(code, Some(3 | 21 | 53 | 55 | 59 | 64 | 67 | 433 | 1006 | 1117 | 1167 | 1231))
         || matches!(
             e.kind(),
             K::NotFound
@@ -321,6 +323,14 @@ mod tests {
         assert!(matches!(unread_file(&e(io::ErrorKind::PermissionDenied)), Unread::Failed(_)));
         assert!(matches!(unread_file(&e(io::ErrorKind::InvalidData)), Unread::Failed(_)));
         assert!(matches!(unread_file(&e(io::ErrorKind::Other)), Unread::Failed(_)), "a bad sector is noted once");
+        // Windows: a read cut off by its drive or share going away keeps what was read before (review M-7).
+        if cfg!(windows) {
+            for code in [55, 59, 433, 1006, 1117, 1167] {
+                let away = io::Error::from_raw_os_error(code);
+                assert!(matches!(unread_file(&away), Unread::InUse(_)), "{code}");
+            }
+            assert!(matches!(unread_file(&io::Error::from_raw_os_error(23)), Unread::Failed(_)), "a bad sector");
+        }
         // A file's contents that don't read stay failed.
         assert!(matches!(unread(&e(io::ErrorKind::InvalidData)), Unread::Failed(_)));
     }
