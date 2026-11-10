@@ -111,9 +111,108 @@ impl Model for Lines {
     }
 }
 
-/// Wires the page's search box and chips, and starts reading the library at `path` in the background. Open, Show in
-/// folder and Copy path report on `feed`'s cards.
-pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
+/// The library's read, started before the window is made ([`read_ahead`]) and handed to [`connect`].
+#[must_use = "the read goes on the page only once `connect` has it"]
+pub struct Ahead {
+    path: PathBuf,
+    details: LiveDetails,
+    /// Tells the reading thread which window the list goes on. None when that thread couldn't be started:
+    /// [`connect`] starts it then.
+    window: Option<mpsc::Sender<slint::Weak<AppWindow>>>,
+}
+
+/// A library read and made into the page's list.
+struct Loaded {
+    live: Live,
+    songs: Songs,
+    /// What Ctrl+K finds.
+    found: Arc<finder::Lines>,
+    /// The year strip's counts ([`Songs::year_counts`]).
+    years: Vec<(i32, usize)>,
+}
+
+/// Starts reading the library at `path` and making the page's list from it, in the background. Called as soon as the
+/// app knows which library it reads and how many background threads it may use, before the graphics card is found
+/// and the window made, so the list is ready when the window first draws (or soon after) rather than only begun then.
+pub fn read_ahead(path: PathBuf) -> Ahead {
+    let details = LiveDetails::default();
+    let window = match start(path.clone(), details.clone()) {
+        Ok(window) => Some(window),
+        Err(e) => {
+            log::warning("Songs", &format!("Couldn't start reading the library ahead of the window: {e}"));
+            None
+        }
+    };
+    Ahead { path, details, window }
+}
+
+/// Starts the page's thread: it reads the library at `path` at once ([`load`]), waits to be told its window, puts
+/// the list there and then keeps it up to date ([`watch`]). A read that fails is logged as it fails, and shown once
+/// there's a window. If it's never told a window (the window couldn't be made), it ends.
+fn start(path: PathBuf, details: LiveDetails) -> std::io::Result<mpsc::Sender<slint::Weak<AppWindow>>> {
+    let (window, told) = mpsc::channel::<slint::Weak<AppWindow>>();
+    background::spawn("Songs", move || {
+        let loaded = load(&path, details);
+        if let Err(e) = &loaded {
+            log::warning("Songs", e);
+        }
+        let Ok(weak) = told.recv() else { return };
+        let Loaded { mut live, songs, found, years } = match loaded {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                let _ = weak.upgrade_in_event_loop(move |app| {
+                    let data = app.global::<SongsData>();
+                    data.set_message(CANT_READ.into());
+                    data.set_message_text(e.into());
+                });
+                return;
+            }
+        };
+        let _ = weak.upgrade_in_event_loop(move |app| {
+            show(&app, songs, years);
+            crate::finder::add_source(&app, "songs", found);
+        });
+        watch(&mut live, &weak);
+    })?;
+    Ok(window)
+}
+
+/// Reads the library at `path` and makes the page's list from it. Why not, when it can't be read.
+fn load(path: &Path, details: LiveDetails) -> Result<Loaded, String> {
+    let began = Instant::now();
+    let read = Library::open_read_only(path)
+        .and_then(|lib| Live::load(&lib, DEFAULT_RUN_GAP_MONTHS, details))
+        // Missing samples are looked for in the Sounds library beside it last (rule 13).
+        .map(|live| live.with_sounds(sound_library::database_beside(path)))
+        // What's read is kept in the app's own songs.db; library.db is never written.
+        .map(|live| match mo_library::songs_db::own_since(path) {
+            Some(_) => live.with_writes(path.to_owned()),
+            None => live,
+        });
+    let live = read.map_err(|e| e.to_string())?;
+    let read_in = began.elapsed();
+    let songs = live.songs();
+    let found = Arc::new(finder::songs(&songs, Local::now().naive_local()));
+    log::info(
+        "Songs",
+        &format!(
+            "{} songs from {} saves (library read in {:.1} s{}, grouped in {:.1} s)",
+            songs.rows.len(),
+            songs.saves,
+            read_in.as_secs_f32(),
+            live.source().map(|from| format!(", {from}")).unwrap_or_default(),
+            (began.elapsed() - read_in).as_secs_f32()
+        ),
+    );
+    // The year strip is counted here too, not on the window's thread (review A-4).
+    let years = songs.year_counts();
+    Ok(Loaded { live, songs, found, years })
+}
+
+/// Wires the page's search box and chips, and puts the library `ahead` has been reading on the page once it's read.
+/// Open, Show in folder and Copy path report on `feed`'s cards.
+pub fn connect(app: &AppWindow, ahead: Ahead, feed: Feed) {
+    let Ahead { path, details, window } = ahead;
     let data = app.global::<SongsData>();
     FEED.with(|f| *f.borrow_mut() = Some(feed));
     PAGE.with(|p| p.borrow_mut().db = path.clone());
@@ -175,7 +274,6 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
     let weak = app.as_weak();
     let db = path.clone();
     let mut library: Option<Library> = None;
-    let details = LiveDetails::default();
     let live_details = details.clone();
     let reader = Newest::start("Song panel", move |(asked, id): (u64, i64)| {
         // A save read while the app was open has its details here, newer than the library's.
@@ -208,54 +306,13 @@ pub fn connect(app: &AppWindow, path: PathBuf, feed: Feed) {
         Err(e) => log::error("Songs", &format!("Couldn't start the song panel's reader: {e}")),
     }
 
-    let weak = app.as_weak();
-    let started = background::spawn("Songs", move || {
-        let began = Instant::now();
-        let read = Library::open_read_only(&path)
-            .and_then(|lib| Live::load(&lib, DEFAULT_RUN_GAP_MONTHS, details))
-            // Missing samples are looked for in the Sounds library beside it last (rule 13).
-            .map(|live| live.with_sounds(sound_library::database_beside(&path)))
-            // What's read is kept in the app's own songs.db; library.db is never written.
-            .map(|live| match mo_library::songs_db::own_since(&path) {
-                Some(_) => live.with_writes(path.clone()),
-                None => live,
-            });
-        let mut live = match read {
-            Ok(live) => live,
-            Err(e) => {
-                log::warning("Songs", &e.to_string());
-                let _ = weak.upgrade_in_event_loop(move |app| {
-                    let data = app.global::<SongsData>();
-                    data.set_message(CANT_READ.into());
-                    data.set_message_text(e.to_string().into());
-                });
-                return;
-            }
-        };
-        let read_in = began.elapsed();
-        let songs = live.songs();
-        let found = Arc::new(finder::songs(&songs, Local::now().naive_local()));
-        log::info(
-            "Songs",
-            &format!(
-                "{} songs from {} saves (library read in {:.1} s{}, grouped in {:.1} s)",
-                songs.rows.len(),
-                songs.saves,
-                read_in.as_secs_f32(),
-                live.source().map(|from| format!(", {from}")).unwrap_or_default(),
-                (began.elapsed() - read_in).as_secs_f32()
-            ),
-        );
-        // The year strip is counted here too, not on the window's thread (review A-4).
-        let years = songs.year_counts();
-        let _ = weak.upgrade_in_event_loop(move |app| {
-            show(&app, songs, years);
-            crate::finder::add_source(&app, "songs", found);
-        });
-        watch(&mut live, &weak);
-    });
-    if let Err(e) = started {
-        log::error("Songs", &format!("Couldn't start reading the library: {e}"));
+    // The thread that has been reading since the app started is told its window; started only now if it couldn't
+    // be then.
+    match window.map_or_else(|| start(path, details), Ok) {
+        Ok(window) => {
+            let _ = window.send(app.as_weak());
+        }
+        Err(e) => log::error("Songs", &format!("Couldn't start reading the library: {e}")),
     }
 }
 
@@ -1231,6 +1288,43 @@ mod tests {
         // A key changed in Settings shows on its line.
         let changed = Shortcuts::from_setting(Some(r#"{"projects.reveal":"Ctrl+R"}"#));
         assert_eq!(lines(BITWIG_STUDIO, &changed)[2], line("Show in folder", "Ctrl+R", "projects.reveal"));
+    }
+
+    #[test]
+    fn the_library_is_read_ahead_of_the_window_into_the_page_s_list() {
+        let dir = std::env::temp_dir().join(format!("mo-ui-songs-ahead-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("made");
+        let library = dir.join("library.db");
+        rusqlite::Connection::open(&library)
+            .expect("opened")
+            .execute_batch(
+                "CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                     name TEXT NOT NULL, daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, info TEXT);
+                 INSERT INTO projects VALUES (1, 'C:\\Music\\Night\\Night_1.flp', 'Night_1', 'FL Studio',
+                     'C:\\Music\\Night', 10, 1700000000, '');
+                 INSERT INTO projects VALUES (2, 'C:\\Music\\Night\\Night_2.flp', 'Night_2', 'FL Studio',
+                     'C:\\Music\\Night', 10, 1700003600, '');
+                 INSERT INTO projects VALUES (3, 'C:\\Music\\Day\\Day.flp', 'Day', 'FL Studio',
+                     'C:\\Music\\Day', 10, 1600000000, '');",
+            )
+            .expect("filled");
+        // No window, no event loop: the read needs neither, so it can start before them.
+        let loaded = load(&library, LiveDetails::default()).expect("read");
+        assert_eq!(loaded.songs.saves, 3);
+        let names: Vec<&str> = loaded.songs.rows.iter().map(|r| r.song.name.as_str()).collect();
+        assert_eq!(names.len(), 2, "the two Night saves are one song: {names:?}");
+        assert_eq!(loaded.years.iter().map(|y| y.1).sum::<usize>(), 2, "each song counted in its year");
+        assert!(!loaded.live.writes(), "the C# app's library.db is never written");
+        // A library that can't be read says why, for the page to show; nothing crashes.
+        assert!(load(&dir.join("gone").join("library.db"), LiveDetails::default()).is_err());
+        // Started with no window and no event loop: the read needs neither. Never told a window (it couldn't be
+        // made), its thread ends once the read is done.
+        let ahead = read_ahead(library.clone());
+        assert_eq!(ahead.path, library);
+        assert!(ahead.window.is_some(), "started");
+        drop(ahead);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

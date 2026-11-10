@@ -76,6 +76,9 @@ fn main() -> Result<(), slint::PlatformError> {
     // Settings' pace: how many low-priority threads background work gets, from now until the app closes.
     let pace = Pace::from_setting(settings.get(mo_app::app_settings::PACE_KEY));
     mo_app::background::set_pace(pace);
+    // The Songs list is read from here on, while the graphics card is found and the window is made. (After the pace
+    // is set: background work started before it would fix the pool's size without it.)
+    let songs_ahead = mo_ui::songs::read_ahead(library.clone());
     mo_ui::startup::step("settings");
     log::info(
         "Settings",
@@ -103,7 +106,7 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::drag::connect(feed.clone());
     // The Songs page reads the song library (the C# app's library.db, read-only, until songs.db is the app's own), and
     // keeps what it reads of your saves, and the Bitwig copies it converts, only ever in songs.db.
-    mo_ui::songs::connect(&app, library.clone(), feed.clone());
+    mo_ui::songs::connect(&app, songs_ahead, feed.clone());
     mo_ui::startup::step("Songs page");
     mo_ui::sounds::connect(
         &app,
