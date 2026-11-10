@@ -155,6 +155,25 @@ impl Model for Lines {
     }
 }
 
+thread_local! {
+    /// The clipboard, kept open on the window's thread: on Linux what's copied only stays while it is.
+    static CLIPBOARD: RefCell<Option<arboard::Clipboard>> = const { RefCell::new(None) };
+}
+
+/// Puts `text` on the clipboard.
+fn copy_text(text: String) -> Result<(), arboard::Error> {
+    CLIPBOARD.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.is_none() {
+            *c = Some(arboard::Clipboard::new()?);
+        }
+        match c.as_mut() {
+            Some(clip) => clip.set_text(text),
+            None => Ok(()),
+        }
+    })
+}
+
 /// The open panel, on the window's thread.
 struct Shown {
     context: WindowContext,
@@ -259,6 +278,18 @@ impl Shown {
             *words.borrow_mut() = typed.to_string();
             let Some(library) = lines.library.borrow().clone() else { return };
             search(library, typed.to_string(), Arc::clone(&slots));
+        });
+
+        let instance = Arc::clone(&self.instance);
+        let weak = panel.as_weak();
+        panel.on_copy(move || {
+            let said = match copy_text(crate::check::as_text(&instance.host, &instance.offered)) {
+                Ok(()) => "Copied".to_owned(),
+                Err(e) => format!("Couldn't copy: {e}"),
+            };
+            if let Some(panel) = weak.upgrade() {
+                panel.set_copied(said.into());
+            }
         });
 
         let slots = Arc::clone(&self.slots);

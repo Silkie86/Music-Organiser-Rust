@@ -114,9 +114,33 @@ pub fn summary(offered: &[Offered]) -> String {
     )
 }
 
+/// The whole DAW check as plain text, for Copy list: the DAW's name, the count, then one line per extension.
+pub fn as_text(host: &str, offered: &[Offered]) -> String {
+    let yes = offered.iter().filter(|o| o.offered).count();
+    let mut text = format!("{host}: {yes} of {} CLAP extensions\n", offered.len());
+    for o in offered {
+        text.push_str(&format!("{}  {}  {}\n", if o.offered { "Yes" } else { "No " }, o.id, o.name));
+    }
+    text
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn copied_text_has_the_daw_and_every_line() {
+        let offered = [
+            Offered { name: "Log lines in the DAW's log", id: "clap.log".into(), offered: true },
+            Offered { name: "Note tuning", id: "clap.tuning/2".into(), offered: false },
+        ];
+        assert_eq!(
+            as_text("Bitwig Studio 6.1.7", &offered),
+            "Bitwig Studio 6.1.7: 1 of 2 CLAP extensions\n\
+             Yes  clap.log  Log lines in the DAW's log\n\
+             No   clap.tuning/2  Note tuning\n"
+        );
+    }
 
     #[test]
     fn every_extension_is_asked_by_a_clap_id() {

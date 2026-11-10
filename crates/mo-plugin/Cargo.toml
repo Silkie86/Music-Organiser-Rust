@@ -13,6 +13,8 @@ workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+# The clipboard, for the DAW check's Copy list (the app's Copy path uses it too).
+arboard = { version = "3.7", default-features = false }
 chrono.workspace = true
 # CLAP itself, through safe Rust wrappers (MIT/Apache). clack-extensions holds every standard extension.
 clack-plugin = "0.2"

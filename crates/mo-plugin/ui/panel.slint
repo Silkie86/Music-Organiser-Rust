@@ -34,11 +34,14 @@ export component Panel inherits Window {
     in property <string> playing;
     in property <[ExtensionLine]> extensions;
     in property <string> extensions-summary;
+    // "Copied" after Copy list, or what went wrong.
+    in property <string> copied;
     in-out property <int> picked: -1;
     in-out property <int> view: 0;
     callback search(string);
     callback play(int);
     callback stop();
+    callback copy();
 
     title: "Music Organiser";
     preferred-width: 560px;
@@ -134,11 +137,29 @@ export component Panel inherits Window {
 
         if root.view == 1: VerticalLayout {
             spacing: Space.md;
-            Text {
-                text: root.extensions-summary;
-                color: Theme.muted;
-                font-size: Type.meta;
-                wrap: word-wrap;
+            HorizontalLayout {
+                spacing: Space.md;
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.extensions-summary;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                    wrap: word-wrap;
+                }
+                VerticalLayout {
+                    horizontal-stretch: 0;
+                    spacing: Space.xs;
+                    StudioButton {
+                        text: "Copy list";
+                        clicked => { root.copy(); }
+                    }
+                    Text {
+                        text: root.copied;
+                        color: Theme.accent;
+                        font-size: Type.small;
+                        horizontal-alignment: center;
+                    }
+                }
             }
             ListView {
                 row-height: 40px;
