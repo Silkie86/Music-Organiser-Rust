@@ -23,6 +23,8 @@ pub const SCENES_VIEW: &str = "Bitwig scenes";
 
 /// The most times a looping audio clip's loop is drawn (a tiny loop in a long clip would otherwise be drawn for ever).
 const MOST_PASSES: usize = 4096;
+/// The most audio parts one clip draws (each pass of each piece of audio is one).
+const MOST_AUDIO_PARTS: usize = 20_000;
 
 /// A track's colour: four floats, red, green, blue and alpha from 0 to 1.
 const F_TRACK_COLOUR: u32 = 0x54c;
@@ -101,7 +103,7 @@ pub fn read(doc: &Document) -> Vec<Arrangement> {
 
     let mut lanes = Vec::new();
     let mut budget = NoteBudget::new();
-    // Each track's launcher slots, the first clip in each (read only when nothing is on the timeline).
+    // Each track's launcher slots, the clip in each (for the scenes view).
     let mut launcher: Vec<Vec<Option<ObjId>>> = Vec::new();
     let mut seen = HashSet::new();
     // The tracks left to walk in each group, last first, with how deep the group is.
@@ -146,7 +148,8 @@ pub fn read(doc: &Document) -> Vec<Arrangement> {
         }
     }
 
-    let scenes = scenes(doc, root, &lanes, &launcher, &mut budget);
+    // The scenes view has a note budget of its own, so a busy arranger can't leave it empty.
+    let scenes = scenes(doc, root, tempo, &lanes, &launcher);
     let mut notes = Vec::new();
     if budget.ran_out {
         notes.push(TOO_MANY_NOTES.to_owned());
@@ -160,9 +163,7 @@ pub fn read(doc: &Document) -> Vec<Arrangement> {
             }
             vec![arranger]
         }
-        Some(mut scenes) => {
-            scenes.tempo = tempo;
-            scenes.notes.extend(arranger.notes.iter().filter(|n| *n == TOO_MANY_NOTES).cloned());
+        Some(scenes) => {
             if timeline_empty {
                 arranger
                     .notes
@@ -181,10 +182,11 @@ pub fn read(doc: &Document) -> Vec<Arrangement> {
 fn scenes(
     doc: &Document,
     root: ObjId,
+    tempo: f64,
     lanes: &[PreviewLane],
     launcher: &[Vec<Option<ObjId>>],
-    budget: &mut NoteBudget,
 ) -> Option<Arrangement> {
+    let mut budget = NoteBudget::new();
     let names = scene_names(doc, root);
     let count = launcher.iter().map(Vec::len).max().unwrap_or(0);
     let mut placed: Vec<PreviewLane> = lanes.iter().map(|l| PreviewLane { clips: Vec::new(), ..l.clone() }).collect();
@@ -201,7 +203,7 @@ fn scenes(
             .collect();
         let Some(length) = in_scene.iter().map(|&(_, _, l)| l).reduce(f64::max) else { continue };
         for &(lane, c, _) in &in_scene {
-            let Some(mut clip) = clip(doc, c, budget, Some(length)) else { continue };
+            let Some(mut clip) = clip(doc, c, &mut budget, Some(length)) else { continue };
             clip.start = at;
             clip.length = clip.length.min(length);
             if let Some(l) = placed.get_mut(lane) {
@@ -222,18 +224,15 @@ fn scenes(
             lane.kind = if audio { LaneKind::Audio } else { LaneKind::Instrument };
         }
     }
-    Some(Arrangement {
-        view: SCENES_VIEW,
-        tempo: 120.0,
-        beats_per_bar: 4,
-        lanes: placed,
-        markers,
-        notes: vec![
-            "The clip launcher's scenes one after another: each plays as long as its longest clip, and looping clips \
-             repeat to fill it."
-                .into(),
-        ],
-    })
+    let mut notes = vec![
+        "The clip launcher's scenes one after another: each plays as long as its longest clip, and looping clips \
+         repeat to fill it."
+            .to_owned(),
+    ];
+    if budget.ran_out {
+        notes.push(TOO_MANY_NOTES.to_owned());
+    }
+    Some(Arrangement { view: SCENES_VIEW, tempo, beats_per_bar: 4, lanes: placed, markers, notes })
 }
 
 /// The clip in a launcher slot (the slot's 0x240). Bitwig 6 defines a clip at its first use, which can be the track's
@@ -244,23 +243,40 @@ fn slot_clip(doc: &Document, slot: ObjId) -> Option<ObjId> {
         .or_else(|| descendants(doc, slot, false, |_| false).find(|&o| is_clip(doc, o)))
 }
 
-/// How long a launcher clip plays once round: its loop when it loops, else its own length.
+/// How long a launcher clip plays once round: when it loops, from its start marker to its loop's end (at least one
+/// whole loop), else its own length.
 fn launcher_length(doc: &Document, clip: ObjId) -> Option<f64> {
     let length = doc.obj(clip).num(F_DURATION).filter(|l| l.is_finite() && *l > 0.0)?;
+    let t = timing(doc, clip);
+    let once = if t.looping { (t.loop_end - t.offset).max(t.loop_end - t.loop_start) } else { length };
+    Some(once.min(MOST_BEATS)).filter(|l| l.is_finite() && *l > 0.0)
+}
+
+/// Where a clip starts playing its content and the loop it goes round.
+struct Timing {
+    /// Where play starts (the start marker), in beats of the content.
+    offset: f64,
+    loop_start: f64,
+    loop_end: f64,
+    /// Whether it loops (and the loop has a length).
+    looping: bool,
+}
+
+/// A clip's [`Timing`]: its play range is in the clip's 0x2adb, or before Bitwig 6, its content's 0x98f.
+fn timing(doc: &Document, clip: ObjId) -> Timing {
     let range = if is_old_clip(doc, clip) {
         clip_content(doc, clip).and_then(|o| field_obj(doc, o, F_OLD_PLAY_RANGE))
     } else {
         field_obj(doc, clip, F_PLAY_RANGE)
     };
-    let looping = range.and_then(|r| doc.obj(r).num(F_LOOP_ON)).is_some_and(|v| v > 0.0);
-    let pass = range
-        .and_then(|r| field_obj(doc, r, F_LOOP_RANGE))
-        .and_then(|l| doc.obj(l).num(F_DURATION))
-        .filter(|l| l.is_finite() && *l > 0.0);
-    Some(match pass {
-        Some(pass) if looping => pass.min(MOST_BEATS),
-        _ => length.min(MOST_BEATS),
-    })
+    let loop_range = range.and_then(|r| field_obj(doc, r, F_LOOP_RANGE));
+    let num = |o: Option<ObjId>, field: u32| o.and_then(|o| doc.obj(o).num(field)).filter(|v| v.is_finite());
+    let offset =
+        num(range.and_then(|r| field_obj(doc, r, F_PLAY_START)), F_START).or(num(loop_range, F_START)).unwrap_or(0.0);
+    let loop_start = num(loop_range, F_START).unwrap_or(0.0);
+    let loop_end = loop_start + num(loop_range, F_DURATION).unwrap_or(0.0);
+    let looping = num(range, F_LOOP_ON).is_some_and(|v| v > 0.0) && loop_end > loop_start;
+    Timing { offset, loop_start, loop_end, looping }
 }
 
 /// The scenes' names, in order (Bitwig 6: root → 0x190 → 0x352f → 0x2ddb → 0x293, each name in 0x109; empty when the
@@ -406,18 +422,7 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget, play_for: Option<f
     let muted = c.num(F_MUTED).is_some_and(|m| m > 0.0);
     let content = clip_content(doc, clip);
     let old = is_old_clip(doc, clip);
-    let range = if old {
-        content.and_then(|o| field_obj(doc, o, F_OLD_PLAY_RANGE))
-    } else {
-        field_obj(doc, clip, F_PLAY_RANGE)
-    };
-    let loop_range = range.and_then(|r| field_obj(doc, r, F_LOOP_RANGE));
-    let num = |o: Option<ObjId>, field: u32| o.and_then(|o| doc.obj(o).num(field));
-    let offset =
-        num(range.and_then(|r| field_obj(doc, r, F_PLAY_START)), F_START).or(num(loop_range, F_START)).unwrap_or(0.0);
-    let loop_start = num(loop_range, F_START).unwrap_or(0.0);
-    let loop_end = loop_start + num(loop_range, F_DURATION).unwrap_or(0.0);
-    let looping = num(range, F_LOOP_ON).is_some_and(|v| v > 0.0) && loop_end > loop_start;
+    let Timing { offset, loop_start, loop_end, looping } = timing(doc, clip);
     let length = match play_for {
         Some(play_for) if looping && play_for.is_finite() && play_for > 0.0 => play_for,
         _ => length,
@@ -453,9 +458,18 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget, play_for: Option<f
             windows.push((offset, first_end, 0.0));
         }
         if looping {
-            let mut at = (loop_end - offset).max(0.0);
+            // Where each pass starts in the clip, as for notes: a play start after the loop's end puts the first
+            // passes before the clip's start, and only what's after it is heard.
+            let mut at = loop_end - offset;
+            if at < 0.0 {
+                at += ((-at) / pass_length).floor() * pass_length;
+            }
             while at < length && windows.len() < MOST_PASSES {
-                windows.push((loop_start, loop_start + (length - at).min(pass_length), at));
+                let (w_from, pos) = (loop_start + (-at).max(0.0), at.max(0.0));
+                let w_to = loop_start + (length - at).min(pass_length);
+                if w_to > w_from {
+                    windows.push((w_from, w_to, pos));
+                }
                 at += pass_length;
             }
         }
@@ -509,8 +523,11 @@ fn clip(doc: &Document, clip: ObjId, budget: &mut NoteBudget, play_for: Option<f
                 // The part of the event this pass plays.
                 let shown_from = e_start.max(w_from);
                 let shown_to = (e_start + e_length).min(w_to);
-                if shown_to <= shown_from || parts.len() >= MOST_NOTES {
+                if shown_to <= shown_from {
                     continue;
+                }
+                if parts.len() >= MOST_AUDIO_PARTS || !budget.take() {
+                    break;
                 }
                 let length = shown_to - shown_from;
                 let backwards = rate.is_some_and(|r| r < 0.0);

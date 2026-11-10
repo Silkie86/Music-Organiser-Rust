@@ -19,9 +19,16 @@ use crate::{ProjectPlugin, ProjectSample, Save, SaveDetail};
 // Moved to mo-formats so the preset export can use it without the library; kept here under its old name.
 pub use mo_formats::plugins::name_key;
 
-fn is_waves(name: &str, path: &str) -> bool {
+/// A Waves plugin: by its name, its WaveShell file, or its vendor ("Waves", "Waves Audio Ltd."), as Bitwig names
+/// Waves plugins plainly ("Smack Attack Stereo").
+fn is_waves(name: &str, vendor: &str, path: &str) -> bool {
     let lower = case::to_lower(name);
-    lower.starts_with("waves ") || lower.starts_with("waveshell") || case::to_lower(path).contains("waveshell")
+    let vendor = case::to_lower(vendor.trim());
+    lower.starts_with("waves ")
+        || lower.starts_with("waveshell")
+        || case::to_lower(path).contains("waveshell")
+        || vendor == "waves"
+        || vendor.starts_with("waves ")
 }
 
 /// The VST2 id a plugin id stands for: the four letters inside a 32-character VST3 id, or the id itself.
@@ -47,7 +54,7 @@ impl Installed {
     /// The ids found by the plugin scanner, from rows of (id, plugin file).
     pub fn with_scans(mut self, scans: impl IntoIterator<Item = (String, String)>) -> Installed {
         for (id, path) in scans.into_iter().filter(|(id, _)| !id.is_empty()) {
-            if is_waves("", &path) {
+            if is_waves("", "", &path) {
                 self.waves.extend(vst2_of(&id));
             }
             self.ids.insert(id);
@@ -79,10 +86,8 @@ impl Installed {
         if self.keys.contains(&key) {
             return true;
         }
-        // A Waves plugin lives inside a WaveShell file, so its own name is never a file's. Bitwig names it plainly
-        // ("Smack Attack Stereo") with Waves as its vendor.
-        let waves = is_waves(&p.name, &p.path) || case::to_lower(p.vendor.trim()) == "waves";
-        if waves && self.keys.iter().any(|k| k.starts_with("waveshell")) {
+        // A Waves plugin lives inside a WaveShell file, so its own name is never a file's.
+        if is_waves(&p.name, &p.vendor, &p.path) && self.keys.iter().any(|k| k.starts_with("waveshell")) {
             return true;
         }
         self.keys
@@ -224,7 +229,9 @@ mod tests {
         assert!(!some.has(&smack));
         let shell = Installed { keys: ["waveshell1vst31412x64".into()].into(), ..Installed::default() };
         assert!(shell.has(&smack));
+        assert!(shell.has(&PluginRef { vendor: "Waves Audio Ltd.".into(), ..plugin("Smack Attack Stereo") }));
         assert!(!shell.has(&plugin("Smack Attack Stereo")), "no vendor, no Waves in the name");
+        assert!(!shell.has(&PluginRef { vendor: "Wavesfactory".into(), ..plugin("Trackspacer") }));
     }
 
     #[test]
