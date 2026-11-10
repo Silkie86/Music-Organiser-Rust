@@ -337,9 +337,11 @@ impl Shortcuts {
         serde_json::to_string(&sorted).unwrap_or_else(|_| "{}".to_owned())
     }
 
-    /// Whether any of this app's actions has a key other than the one it started with.
+    /// Whether any of this app's listed actions ([`is_listed`]) has a key other than the one it started with: what
+    /// Settings shows Reset all for, so it never shows with no line marked changed. One not built yet may have lost its
+    /// key ([`Shortcuts::set`]), or kept one from the old app; [`Shortcuts::reset_all`] puts those back too.
     pub fn any_changed(&self) -> bool {
-        all_actions().any(|(_, a)| self.is_changed(a.id))
+        all_actions().any(|(page, a)| is_listed(page, a.id) && self.is_changed(a.id))
     }
 
     /// Whether an action's key isn't the one it started with.
@@ -365,11 +367,17 @@ impl Shortcuts {
         }
         let same = |k: &str| !key.is_empty() && normalise(k) == normalise(&key);
         let mut message = String::new();
-        if let Some((_, taken)) = all_actions().find(|(p, a)| a.id != id && *p == page && same(self.key_of(a.id))) {
+        let taken = all_actions().find(|(p, a)| a.id != id && *p == page && same(self.key_of(a.id))).map(|(_, a)| a);
+        if let Some(taken) = taken {
             self.changed.insert(taken.id.to_owned(), String::new());
+        }
+        // One that isn't built yet isn't on the list to give its key back, so it's let go without a word, and what
+        // else the key does is said instead (F5 is Rescan's, not built, and three pages' own).
+        if let Some(taken) = taken.filter(|a| is_listed(page, a.id)) {
             message = format!("{key} was \"{}\", which has no key now. Default puts it back.", taken.what);
         } else if page != EVERYWHERE
-            && let Some((_, wide)) = all_actions().find(|(p, a)| *p == EVERYWHERE && same(self.key_of(a.id)))
+            && let Some((_, wide)) =
+                all_actions().find(|(p, a)| *p == EVERYWHERE && is_built(a.id) && same(self.key_of(a.id)))
         {
             message = format!("{key} is also \"{}\" everywhere else; on {page} it does this instead.", wide.what);
         } else if page == EVERYWHERE {
@@ -445,6 +453,36 @@ impl Shortcuts {
         };
         [key.as_str(), other].into_iter().find_map(|k| self.by_key.get(k).copied())
     }
+}
+
+/// The app-wide actions the window does something for so far, besides going to a place ([`is_built`]). The rest
+/// (Back and Forward, the tabs, Rescan, the page sizes) aren't built yet.
+pub const BUILT: [&str; 12] = [
+    "app.jump",
+    "app.prevPage",
+    "app.nextPage",
+    "app.help",
+    "app.helpF1",
+    "app.fullScreen",
+    "app.play",
+    "app.recycleBin",
+    "app.search",
+    "app.escape",
+    "app.prevItem",
+    "app.nextItem",
+];
+
+/// Whether the app-wide action `id` does something yet: one of [`BUILT`], or going to a place. One that doesn't is on
+/// no list (the key sheet, Ctrl+K, Settings › Shortcuts), so every key the app shows works (the whole-app reviews of
+/// 6 Nov, X3-22, and 10 Nov, X3-1).
+pub fn is_built(id: &str) -> bool {
+    BUILT.contains(&id) || Place::ALL.iter().any(|p| p.shortcut_id() == id)
+}
+
+/// Whether an action of `page` (one of [`all_actions`]) is listed: each page's own, and the app-wide ones that are
+/// built ([`is_built`]).
+pub fn is_listed(page: &str, id: &str) -> bool {
+    page != EVERYWHERE || is_built(id)
 }
 
 /// Every action with its page's name ([`EVERYWHERE`] for the app-wide ones), in the order Settings shows them.
@@ -724,6 +762,37 @@ mod tests {
         assert_eq!(keys.action_for("Ctrl+F"), Some("app.search"));
         let said = keys.set("app.fullScreen", "Ctrl+Shift+E");
         assert!(said.starts_with("Songs and Sounds and Presets and Curves and MIDI and Space keep"), "{said}");
+    }
+
+    #[test]
+    fn keys_not_built_yet_are_let_go_without_a_word() {
+        // Every built one is on the list.
+        for id in BUILT {
+            assert!(APP_ACTIONS.iter().any(|a| a.id == id), "{id} isn't in the shortcut list");
+        }
+        assert!(is_built("app.goSpace") && !is_built("app.back") && !is_built("app.rescan"));
+        assert!(is_listed("Songs", "projects.open") && !is_listed(EVERYWHERE, "app.sizeUp"));
+        // Alt+Left is Back's, which isn't built: a page's key given it doesn't say it's also Back everywhere else, and
+        // an app-wide one given it takes it from Back without naming it (the whole-app review of 10 Nov, X3-1).
+        let mut keys = Shortcuts::default();
+        assert_eq!(keys.set("projects.open", "Alt+Left"), "");
+        assert_eq!(keys.set("app.search", "Alt+Right"), "");
+        assert_eq!(keys.key_of("app.forward"), "");
+        assert_eq!(keys.action_for("Alt+Right"), Some("app.search"));
+        // A built one still says so.
+        assert!(keys.set("projects.reveal", "F11").contains("everywhere else"));
+        // F5 is Rescan's, which isn't built, and three pages' own: taken from Rescan without a word, what the pages do
+        // with it is still said.
+        assert_eq!(keys.set("app.search", "F5"), "MIDI and Plugins and Space keep F5 for a job of their own.");
+        assert_eq!((keys.key_of("app.rescan"), keys.action_for("F5")), ("", Some("app.search")));
+        // Search given its own key back: Rescan has lost F5, but it isn't on the list, so Reset all isn't shown for it
+        // (it would have no line marked changed). Reset all still gives Rescan F5 back.
+        keys.set("app.search", "Ctrl+F");
+        keys.set("projects.open", "Ctrl+O");
+        keys.set("projects.reveal", "Ctrl+Shift+E");
+        assert!(keys.is_changed("app.rescan") && keys.is_changed("app.forward") && !keys.any_changed());
+        keys.reset_all();
+        assert_eq!((keys.key_of("app.rescan"), keys.key_of("app.forward")), ("F5", "Alt+Right"));
     }
 
     #[test]

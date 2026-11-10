@@ -23,7 +23,7 @@ pub fn is_low(free: u64, app_bytes: u64) -> bool {
     free < LOW_SPACE.max(app_bytes)
 }
 
-/// One of the app's databases: what it's called on Settings, what it holds, and its file.
+/// One of the app's databases, or a copy or cache it keeps beside them: its part's name, what it holds, and its file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AppDatabase {
     pub name: &'static str,
@@ -40,6 +40,22 @@ pub fn databases(library: PathBuf, sounds: PathBuf, midi: PathBuf) -> Vec<AppDat
     ]
 }
 
+/// What the part with the app's own song library is called while the app still reads `library.db`
+/// ([`new_song_library`]).
+pub const NEW_SONG_LIBRARY: &str = "Your new song library";
+
+/// The app's own song library at `songs` (`songs.db`), as a part of its own while the app still reads `library.db`:
+/// it's made from it in the background, and opened from a later start. Listed after [`databases`], so once it's the
+/// library the app reads it counts there: each file counts once ([`measure`]). Before, it was in "Everything else:
+/// Your Bitwig template and the rest" until then.
+pub fn new_song_library(songs: PathBuf) -> AppDatabase {
+    AppDatabase {
+        name: NEW_SONG_LIBRARY,
+        what: "Made from library.db, for the app to open instead once it's ready",
+        path: songs,
+    }
+}
+
 /// What the part with the old app's databases is called ([`old_databases`]).
 pub const OLD_DATABASES: &str = "Old app's databases";
 
@@ -53,6 +69,40 @@ pub fn old_databases(folder: &Path) -> Vec<AppDatabase> {
         .into_iter()
         .map(|file| AppDatabase { name: OLD_DATABASES, what, path: folder.join(file) })
         .collect()
+}
+
+/// What the part with the sound library's backup copy is called ([`sound_lab_copies`]).
+pub const SOUND_LAB_BACKUP: &str = "Sound Lab backup";
+
+/// What the part with the damaged sound library set aside is called ([`sound_lab_copies`]).
+pub const DAMAGED_SOUND_LAB: &str = "Damaged Sound Lab";
+
+/// What the part with the app's caches is called ([`caches`]).
+pub const CACHES: &str = "Caches";
+
+/// The sound library's checked backup copy (`backup`) and the damaged library set aside when it was mended from it
+/// (`damaged`), each a part of its own. The backup is about the library's size, and counted in "Everything else" it
+/// read as your Bitwig template (the whole-app review of 10 Nov, T-4).
+pub fn sound_lab_copies(backup: PathBuf, damaged: PathBuf) -> Vec<AppDatabase> {
+    vec![
+        AppDatabase {
+            name: SOUND_LAB_BACKUP,
+            what: "A checked copy of Sound Lab, to mend it from if it's ever damaged",
+            path: backup,
+        },
+        AppDatabase {
+            name: DAMAGED_SOUND_LAB,
+            what: "Set aside when Sound Lab was mended from its backup; it goes after a week",
+            path: damaged,
+        },
+    ]
+}
+
+/// The app's caches at `paths`, as one part: the fingerprints and lists it keeps so pages open quickly, which it makes
+/// again if they go.
+pub fn caches(paths: impl IntoIterator<Item = PathBuf>) -> Vec<AppDatabase> {
+    let what = "Fingerprints and lists kept so pages open quickly: the app makes them again if they go";
+    paths.into_iter().map(|path| AppDatabase { name: CACHES, what, path }).collect()
 }
 
 /// One part of the app's own files: a database, the search models, the logs.
@@ -99,7 +149,8 @@ pub fn measure(folder: &Path, databases: &[AppDatabase], stop: &AtomicBool) -> R
         if kind.is_symlink() || counted.contains(&key(&path.to_string_lossy())) {
             continue;
         }
-        let (name, what) = part_of(&entry.file_name().to_string_lossy(), kind.is_dir());
+        let half_made = if kind.is_dir() { None } else { half_made_part(&path, databases) };
+        let (name, what) = half_made.unwrap_or_else(|| part_of(&entry.file_name().to_string_lossy(), kind.is_dir()));
         let bytes = if kind.is_dir() {
             size::measure(&path, stop)?.bytes
         } else {
@@ -114,6 +165,28 @@ pub fn measure(folder: &Path, databases: &[AppDatabase], stop: &AtomicBool) -> R
         .collect();
     out.sort_by(|a, b| b.bytes.cmp(&a.bytes).then(a.name.cmp(b.name)));
     Ok(out)
+}
+
+/// What a new copy of a database is called while it's being made, after the database's own name and before the app's
+/// process number: the sound library's copy and its backup copy ("sounds-rust.db.part-1234",
+/// "sounds-rust.db.backup.part-1234"), and the song library, the MIDI index and the saves list ("songs.db.new-1234").
+const BEING_MADE: [&str; 2] = [".part-", ".new-"];
+
+/// The part of the `databases` a file at `path` counts in when it's a new copy of one being made ([`BEING_MADE`]), or
+/// one of the files SQLite keeps beside it ("songs.db.new-1234-journal"): the database's own, as it will be once it's
+/// made. A backup copy being made again is about the library's size, and in "Everything else" it read as your Bitwig
+/// template for as long as it took.
+fn half_made_part(path: &Path, databases: &[AppDatabase]) -> Option<(&'static str, &'static str)> {
+    // Paths compared as Space compares them, in capitals: so are the endings.
+    let ending = |end: &str| mo_formats::case::key(end);
+    let file = key(&path.to_string_lossy());
+    databases.iter().find_map(|db| {
+        let rest = file.strip_prefix(&key(&db.path.to_string_lossy()))?;
+        let number = BEING_MADE.iter().find_map(|end| rest.strip_prefix(ending(end).as_str()))?;
+        let journal = number.trim_start_matches(|c: char| c.is_ascii_digit());
+        let beside = JOURNALS.iter().any(|j| ending(j) == journal);
+        (journal.len() < number.len() && beside).then_some((db.name, db.what))
+    })
 }
 
 /// Which part a file or folder at the top of the app's folder is, and what it holds.

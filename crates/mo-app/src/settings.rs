@@ -482,11 +482,13 @@ pub struct KeyLine {
     pub starts: String,
 }
 
-/// The Shortcuts tab's lines: the keys that work everywhere, then each page's own, each under its page's name.
+/// The Shortcuts tab's lines: the keys that work everywhere, then each page's own, each under its page's name. An
+/// app-wide action that isn't built yet isn't listed, as on the key sheet, so every key here works (the whole-app
+/// review of 10 Nov, X3-1).
 pub fn key_lines(keys: &crate::shortcuts::Shortcuts) -> Vec<KeyLine> {
     let mut out = Vec::new();
     let mut last = "";
-    for (page, a) in crate::shortcuts::all_actions() {
+    for (page, a) in crate::shortcuts::all_actions().filter(|(page, a)| crate::shortcuts::is_listed(page, a.id)) {
         if page != last {
             out.push(KeyLine { page, id: "", what: "", key: String::new(), changed: false, starts: String::new() });
             last = page;
@@ -664,8 +666,9 @@ pub fn bitwig_extension_facts(
         },
     )];
     if folders.is_empty() {
-        facts
-            .push(fact("Goes into", "No Bitwig Studio folder found in Documents, or chosen in the old app".to_owned()));
+        // Not "or chosen in the old app": that app is retired, and it shares the libraries (the whole-app review of
+        // 10 Nov, X3-5).
+        facts.push(fact("Goes into", "No Bitwig Studio folder found in Documents".to_owned()));
         return (facts, "");
     }
     facts.extend(folders.iter().map(|f| fact("Goes into", f.display().to_string())));
@@ -822,17 +825,28 @@ mod tests {
     #[test]
     fn key_lines_come_under_their_pages() {
         let mut keys = crate::shortcuts::Shortcuts::default();
-        keys.set("app.fullRescan", "F6");
+        keys.set("app.fullScreen", "F6");
+        keys.set("sounds.toBitwig", "");
         let lines = key_lines(&keys);
         assert_eq!(lines[0].page, crate::shortcuts::EVERYWHERE);
         let heads: Vec<&str> = lines.iter().filter(|l| !l.page.is_empty()).map(|l| l.page).collect();
         let pages = ["Everywhere", "Songs", "Sounds", "Presets", "Curves", "MIDI", "Plugins", "Space", "Backup"];
         assert_eq!(heads, pages);
-        let rescan = lines.iter().find(|l| l.id == "app.fullRescan").unwrap();
-        assert_eq!((rescan.key.as_str(), rescan.changed), ("F6", true));
-        assert_eq!(rescan.starts, "It starts with no key");
+        let full = lines.iter().find(|l| l.id == "app.fullScreen").unwrap();
+        assert_eq!((full.key.as_str(), full.changed), ("F6", true));
+        assert_eq!(full.starts, "It starts as F11");
+        let bitwig = lines.iter().find(|l| l.id == "sounds.toBitwig").unwrap();
+        assert_eq!((bitwig.key.as_str(), bitwig.changed), ("None", true));
         let search = lines.iter().find(|l| l.id == "app.search").unwrap();
         assert_eq!((search.key.as_str(), search.changed), ("Ctrl+F", false));
+        // Only keys that work: no Back, Forward or tabs yet, no Rescan (F5) and no page sizes (the whole-app review of
+        // 10 Nov, X3-1), as on the key sheet.
+        for id in
+            ["app.back", "app.forward", "app.prevTab", "app.nextTab", "app.rescan", "app.fullRescan", "app.sizeUp"]
+        {
+            assert!(!lines.iter().any(|l| l.id == id), "{id} is listed, but does nothing yet");
+        }
+        assert!(lines.iter().any(|l| l.id == "app.goSpace") && lines.iter().any(|l| l.id == "space.measure"));
     }
 
     #[test]

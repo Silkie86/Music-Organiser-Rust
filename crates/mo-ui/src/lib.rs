@@ -41,8 +41,8 @@ use mo_app::activity::Feed;
 use mo_app::log;
 use mo_app::places::Place;
 use mo_app::shortcuts::{
-    APP_ACTIONS, Action, BACKUP_ACTIONS, MIDI_ACTIONS, PLUGINS_ACTIONS, SONGS_ACTIONS, SOUNDS_ACTIONS, SPACE_ACTIONS,
-    Shortcuts, list_keys, repeats, what_of,
+    APP_ACTIONS, Action, BACKUP_ACTIONS, BUILT, MIDI_ACTIONS, PLUGINS_ACTIONS, SONGS_ACTIONS, SOUNDS_ACTIONS,
+    SPACE_ACTIONS, Shortcuts, is_built, list_keys, repeats, what_of,
 };
 use mo_app::themes::Look;
 use note::open_note;
@@ -67,6 +67,13 @@ pub fn look() -> Look {
 /// The place on show, safe to read from any thread.
 pub fn place() -> Option<Place> {
     Place::from_index(PAGE.load(Ordering::Relaxed))
+}
+
+/// Notes `place` as the one on show, as the window's keys go by it (Esc, Ctrl+Up and Ctrl+Down), without showing it or
+/// starting what showing it starts ([`go_to`]): for mo-screens, which shows Space with made-up drives and must never
+/// have it look at the real ones.
+pub fn note_place(place: Place) {
+    PAGE.store(place.index(), Ordering::Relaxed);
 }
 
 /// The name of the place on show, safe to read from any thread.
@@ -191,7 +198,7 @@ fn key_pressed(weak: &Weak<AppWindow>, feed: &Feed, key: &str, repeat: bool) -> 
     let Some(id) = shortcuts.action_for(key) else { return false };
     // A key held down did its job once (unless it's one that steps), and the page behind doesn't get it either.
     if repeat && !repeats(id) {
-        return handles(id);
+        return is_built(id);
     }
     run(id, weak, feed, repeat)
 }
@@ -257,7 +264,7 @@ fn finder_pages(app: &AppWindow, shortcuts: &Shortcuts) {
 fn finder_actions(app: &AppWindow, shortcuts: &Shortcuts, place: Place) {
     let page = page_actions(place);
     let wide = APP_ACTIONS.iter().filter(|a| {
-        handles(a.id)
+        is_built(a.id)
             && !matches!(
                 a.id,
                 "app.jump" | "app.helpF1" | "app.search" | "app.escape" | "app.prevItem" | "app.nextItem"
@@ -405,7 +412,7 @@ fn key_rows(shortcuts: &Shortcuts, place: Place) -> (Vec<KeyRow>, Vec<KeyRow>) {
     let mut page: Vec<KeyRow> = page_actions(place).iter().map(|a| row(shortcuts.key_of(a.id), a.what)).collect();
     page.extend(list_keys(place).iter().map(|(key, what)| row(key, what)));
     let mut everywhere: Vec<KeyRow> =
-        APP_ACTIONS.iter().filter(|a| handles(a.id)).map(|a| row(shortcuts.key_of(a.id), a.what)).collect();
+        APP_ACTIONS.iter().filter(|a| is_built(a.id)).map(|a| row(shortcuts.key_of(a.id), a.what)).collect();
     everywhere.push(row("F12", "Write a note for Claude about what's on screen"));
     (page, everywhere)
 }
@@ -486,28 +493,8 @@ fn coming(place: Place) -> &'static str {
     }
 }
 
-/// The app-wide actions `run` does something for so far (besides going to a place).
-const HANDLED: [&str; 12] = [
-    "app.jump",
-    "app.prevPage",
-    "app.nextPage",
-    "app.help",
-    "app.helpF1",
-    "app.fullScreen",
-    "app.play",
-    "app.recycleBin",
-    "app.search",
-    "app.escape",
-    "app.prevItem",
-    "app.nextItem",
-];
-
 /// The places with a search box, which Ctrl+F puts the keys in.
 const SEARCHED: [Place; 5] = [Place::Songs, Place::Sounds, Place::Presets, Place::Midi, Place::Plugins];
-
-fn handles(id: &str) -> bool {
-    HANDLED.contains(&id) || Place::ALL.iter().any(|p| p.shortcut_id() == id)
-}
 
 /// Runs an app-wide action (`held`: its key is repeating). Returns whether it did anything, so an unused key can go on
 /// to the page.
@@ -563,6 +550,7 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
                 Some(Place::Presets) => presets::escape(&app),
                 Some(Place::Midi) => midi::escape(&app),
                 Some(Place::Plugins) => plugins::escape(&app),
+                Some(Place::Space) => space::escape(&app),
                 _ => false,
             };
         }
@@ -571,11 +559,11 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
             return step_list(&app, if id == "app.prevItem" { -1 } else { 1 }, held);
         }
         _ => {
-            debug_assert!(!HANDLED.contains(&id), "{id} is in HANDLED but run() doesn't do it");
+            debug_assert!(!BUILT.contains(&id), "{id} is in BUILT but run() doesn't do it");
             return false;
         }
     }
-    debug_assert!(handles(id), "run() does {id}: add it to HANDLED so the key sheet doesn't say (coming)");
+    debug_assert!(is_built(id), "run() does {id}: add it to BUILT so the key sheet and Settings list it");
     true
 }
 
@@ -662,13 +650,6 @@ pub fn key_name(text: &str, ctrl: bool, shift: bool, alt: bool, meta: bool) -> S
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_handled_action_is_on_the_list() {
-        for id in HANDLED {
-            assert!(APP_ACTIONS.iter().any(|a| a.id == id), "{id} isn't in the shortcut list");
-        }
-    }
 
     #[test]
     fn the_key_sheet_puts_the_page_s_keys_first_and_lists_only_keys_that_work() {
