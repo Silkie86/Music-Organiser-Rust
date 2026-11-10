@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use chrono::{NaiveDate, NaiveDateTime};
 use mo_library::Library;
-use mo_library::plugin_writes::{Measure, write};
+use mo_library::plugin_writes::{Measure, recheck_installed, write};
 use mo_library::plugins::{StoredFolder, StoredSpace};
 use mo_library::songs_db::{self, State};
 use rusqlite::Connection;
@@ -93,4 +93,50 @@ fn a_song_library_that_isnt_the_apps_own_is_never_written() {
     assert_eq!(Library::open_read_only(&path).unwrap().installed_names().unwrap(), ["Old One"]);
     let none = path.with_file_name("none.db");
     assert!(write(&none, &measure()).is_err() && !none.exists());
+}
+
+#[test]
+fn saves_plugins_are_looked_at_again_when_the_installed_plugins_or_rules_change() {
+    let path = library("recheck", true);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "INSERT INTO projects (id, path, name, daw) VALUES (7, 'K:\\Syrial Lover.bwproject', 'Syrial Lover', 'Bitwig Studio');
+         INSERT INTO plugins (project_id, name, vendor, format, path, installed) VALUES
+             (7, 'Smack Attack Stereo', 'Waves', 'VST3', '', 0),
+             (7, 'Gone Synth', 'Nobody', 'VST3', '', 0),
+             (7, 'Serum', 'Xfer Records', 'VST3', '', 0);",
+    )
+    .unwrap();
+    let measured = Measure { installed: vec!["WaveShell1-VST3 15.5_x64".into(), "Serum".into()], spaces: Vec::new() };
+    write(&path, &measured).unwrap();
+
+    let r = recheck_installed(&path).unwrap();
+    assert!(r.looked);
+    // Smack Attack is in the WaveShell and Serum is installed now: only Gone Synth is missing.
+    assert_eq!(r.missing, [(7, 1)]);
+    let flags: Vec<(String, i64)> = conn
+        .prepare("SELECT name, installed FROM plugins ORDER BY name")
+        .unwrap()
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(flags, [("Gone Synth".into(), 0), ("Serum".into(), 1), ("Smack Attack Stereo".into(), 1)]);
+    assert_eq!(Library::open_read_only(&path).unwrap().detail(7).unwrap().unwrap().save.missing_plugins, 1);
+
+    // Nothing changed since: not looked at again.
+    let again = recheck_installed(&path).unwrap();
+    assert!(!again.looked && again.missing.is_empty());
+
+    // Serum removed: looked at again, but a plugin marked installed is never marked missing here (the library doesn't
+    // keep the id a save may have found it by); its save shows it when it's read again.
+    write(&path, &Measure { installed: vec!["WaveShell1-VST3 15.5_x64".into()], spaces: Vec::new() }).unwrap();
+    let removed = recheck_installed(&path).unwrap();
+    assert!(removed.looked && removed.missing.is_empty());
+}
+
+#[test]
+fn saves_plugins_are_not_looked_at_in_a_library_not_the_apps_own() {
+    let path = library("recheck-not-own", false);
+    assert!(recheck_installed(&path).is_err());
 }

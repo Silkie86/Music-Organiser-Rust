@@ -16,7 +16,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use mo_formats::{case, paths};
+use mo_formats::{PluginRef, case, paths};
+use mo_library::plugin_writes;
 use mo_library::read::{Installed, read_save};
 use mo_library::samples::SampleLocator;
 use mo_library::scan::{self, KnownFile};
@@ -123,6 +124,9 @@ pub struct Updated {
     /// How many unchanged saves were read again for their "muted" sample marks ([`song_writes::to_mend`]): kept, but
     /// not on the card.
     pub mended: usize,
+    /// How many saves' count of missing plugins changed when their plugins were looked at again
+    /// ([`plugin_writes::recheck_installed`]): kept already, not on the card.
+    pub rechecked: usize,
 }
 
 impl Updated {
@@ -132,11 +136,12 @@ impl Updated {
         self.moved.extend(more.moved);
         self.gone += more.gone;
         self.mended += more.mended;
+        self.rechecked += more.rechecked;
         self
     }
 
     pub fn is_empty(&self) -> bool {
-        !self.for_card() && self.mended == 0
+        !self.for_card() && self.mended == 0 && self.rechecked == 0
     }
 
     /// Whether there's anything to say on the card: a save read, moved or gone.
@@ -277,12 +282,14 @@ impl Live {
     /// ([`song_writes::to_mend`]); once they're kept, the library notes it ([`Live::keep`]) and they aren't read again.
     pub fn catch_up(&mut self) -> Updated {
         self.look_for_mends();
+        let rechecked = self.recheck_installed();
         let roots = self.roots.clone();
         if roots.is_empty() {
             self.mend = Mend::Done;
-            return Updated::default();
+            return Updated { rechecked, ..Updated::default() };
         }
-        let done = self.update(&Changes { overflowed: roots, ..Changes::default() });
+        let mut done = self.update(&Changes { overflowed: roots, ..Changes::default() });
+        done.rechecked += rechecked;
         // One the walk didn't find (gone, so marked missing, or outside the project folders now) has nothing to read
         // again: only those waiting to be tried again are still to come.
         if let Mend::Reading { ids, .. } = &mut self.mend {
@@ -292,6 +299,66 @@ impl Live {
             ids.retain(|id| waiting.contains(id));
         }
         done
+    }
+
+    /// Looks again at whether every save's plugins are installed, when the installed plugins or the rules changed
+    /// since the last look ([`plugin_writes::recheck_installed`]), and shows the new counts; says how many saves
+    /// changed. Saves read from now on use the installed plugins as they are now. One that can't be looked at is
+    /// looked at again at the next start.
+    fn recheck_installed(&mut self) -> usize {
+        let Some(songs_db) = &self.writes else { return 0 };
+        let r = match plugin_writes::recheck_installed(songs_db) {
+            Ok(r) => r,
+            Err(e) => {
+                crate::log::warning(
+                    "Songs",
+                    &format!("{e}; which plugins are installed is looked at again next start"),
+                );
+                return 0;
+            }
+        };
+        if r.looked {
+            crate::log::info(
+                "Songs",
+                &format!(
+                    "Looked again at which plugins are installed: {} saves' missing plugins changed",
+                    r.missing.len()
+                ),
+            );
+        }
+        self.installed = r.installed;
+        let mut missing: HashMap<i64, u32> = r.missing.into_iter().collect();
+        if r.looked {
+            // Saves read but not kept yet were read against the installed plugins as they were: judged again too, so
+            // keeping them doesn't put the old marks back.
+            let mut held = self.details.lock().unwrap_or_else(PoisonError::into_inner);
+            for d in held.values_mut() {
+                for p in d.plugins.iter_mut().filter(|p| !p.installed) {
+                    let named = PluginRef {
+                        name: p.name.clone(),
+                        vendor: p.vendor.clone(),
+                        kind: p.kind,
+                        format: p.format.clone(),
+                        path: p.path.clone(),
+                        ..PluginRef::default()
+                    };
+                    p.installed = self.installed.has(&named);
+                }
+                let now = u32::try_from(d.plugins.iter().filter(|p| !p.installed).count()).unwrap_or(u32::MAX);
+                if now != d.save.missing_plugins {
+                    d.save.missing_plugins = now;
+                    missing.insert(d.save.id, now);
+                }
+            }
+        }
+        let mut changed = 0;
+        for s in &mut self.saves {
+            if let Some(&n) = missing.get(&s.id) {
+                s.missing_plugins = n;
+                changed += 1;
+            }
+        }
+        changed
     }
 
     /// Asks the library once a start which saves to read again for their "muted" sample marks. One it can't tell is
@@ -813,7 +880,8 @@ mod tests {
             one.card(),
             ("Updated Night Drive_15".into(), "Saved in its folder, so the app read it again".into())
         );
-        let some = Updated { read: vec!["a".into(), "b".into()], moved: vec!["c".into()], gone: 1, mended: 7 };
+        let some =
+            Updated { read: vec!["a".into(), "b".into()], moved: vec!["c".into()], gone: 1, mended: 7, rechecked: 0 };
         assert_eq!(some.card(), ("Updated 4 projects".into(), "2 saved, 1 moved, 1 missing".into()));
         let gone = Updated { gone: 1, ..Updated::default() };
         assert_eq!(gone.card(), ("Updated 1 project".into(), "Missing: moved or deleted".into()));
