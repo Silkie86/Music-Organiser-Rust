@@ -662,11 +662,15 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
                 // has changed since. Made before the scan writes into it. Not made again for the plays, drags and
                 // sends kept since the last one, unless it's a day old: a whole copy of the library each start for a
                 // few plays would be a lot of writing.
-                say_backed_up(compact::backup::back_up_when(&sounds_db, compact::backup::When::Daily));
+                let mut on_show = on_show;
+                let daily = compact::backup::When::Daily;
+                let mended = back_up(&sounds_db, daily, true, &cards, on_show.as_mut(), Some(&noter), &send);
                 if let Some(mut on_show) = on_show
                     && scan_for_sounds(&sounds_db, &library_db, &cards, &mut on_show, Some(&noter), &send)
                 {
-                    say_backed_up(compact::backup::back_up(&sounds_db));
+                    // A library that couldn't be mended just now isn't tried again until the next start.
+                    let now = compact::backup::When::Now;
+                    back_up(&sounds_db, now, mended, &cards, Some(&mut on_show), Some(&noter), &send);
                 }
             };
             if let Err(e) = background::spawn("Sounds library", read)
@@ -1430,6 +1434,58 @@ fn say_laid_out(laid_out: &compact::LaidOut, job: Option<Job>, began: Instant) {
     }
 }
 
+/// Makes the sound library's backup copy as `when` says ([`compact::backup::back_up_when`]), and says how it went. One
+/// not made because the library itself is damaged, where the page's read never looks (review finding S-3), has the
+/// library mended now when `mend` says so: put back from its backup copy, or made again from sounds.db, either way
+/// with everything that can still be read of it. The page then takes the mended library's sounds (`on_show`, with
+/// what's done with sounds held off meanwhile: `noter`), and the mended library is backed up. False when it was found
+/// damaged and couldn't be mended (it's tried again at the next start), so it isn't tried again meanwhile.
+fn back_up(
+    sounds_db: &Path,
+    when: compact::backup::When,
+    mend: bool,
+    cards: &Feed,
+    on_show: Option<&mut OnShow>,
+    noter: Option<&Noter>,
+    send: &impl Fn(Step),
+) -> bool {
+    let why = match compact::backup::back_up_when(sounds_db, when) {
+        Some(compact::backup::BackedUp::Damaged(why)) if mend => why,
+        backed_up => {
+            say_backed_up(backed_up);
+            return true;
+        }
+    };
+    log::warning("Sounds", &format!("The sound library's backup copy couldn't be made, so it's mended: {why}"));
+    let copy = compact::copy_of(sounds_db);
+    let held = noter.map(Noter::hold);
+    let holds = held.as_ref().map(Held::holds);
+    match compact::mend_reading(sounds_db, &copy, Local::now().naive_local()) {
+        Ok((mut everything, made)) => {
+            say_made(&made, &copy, sounds_db, Some(cards), true);
+            if made.is_err() {
+                return false;
+            }
+            if let Some(on_show) = on_show {
+                // As the mended library has them: what it was mended from may say otherwise.
+                on_show.new_since = compact::grow::new_since(&copy);
+                let (features, clap) = (std::mem::take(&mut everything.features), std::mem::take(&mut everything.clap));
+                let db = SoundsDb::open_read_only(&copy);
+                take_again(everything.sounds, db, PrintsAgain::CameWith, on_show, holds, send);
+                send_index(Ok((features, clap, on_show.analysed)), send);
+            }
+            drop(held);
+            say_backed_up(compact::backup::back_up(sounds_db));
+            true
+        }
+        Err(e) => {
+            log::warning("Sounds", &format!("Couldn't mend the sound library: {e}"));
+            cards.start("Couldn't mend your sound library", "").failed(&list::not_remade_line(&e));
+            false
+        }
+    }
+}
+
 /// Says in the log how making the sound library's backup copy went ([`compact::backup::back_up`]): nothing when there
 /// was nothing to do.
 fn say_backed_up(backed_up: Option<compact::backup::BackedUp>) {
@@ -1445,6 +1501,10 @@ fn say_backed_up(backed_up: Option<compact::backup::BackedUp>) {
         ),
         Some(compact::backup::BackedUp::NotNow(why)) => {
             log::warning("Sounds", &format!("Couldn't make the sound library's backup copy this time: {why}"));
+        }
+        // Mended once at a time ([`back_up`]): found damaged again straight after it was mended.
+        Some(compact::backup::BackedUp::Damaged(why)) => {
+            log::warning("Sounds", &format!("Couldn't make the sound library's backup copy: {why}"));
         }
     }
 }
@@ -1477,10 +1537,19 @@ fn say_made(
     match made {
         Ok(synced) if synced.made && synced.from_backup.is_some() => {
             let made = synced.from_backup.map(chrono::DateTime::<Local>::from).unwrap_or_else(Local::now);
-            let line = list::put_back_line(made);
+            let line = list::put_back_line(made, synced.salvaged.as_ref());
             log::warning("Sounds", &format!("The app's own sound library was damaged: {line}"));
             if let Some(cards) = cards {
                 cards.start("Mended your sound library from its backup copy", "").done(&line);
+            }
+        }
+        // Made again from sounds.db with what could still be read of it (review finding S-1).
+        Ok(synced) if synced.made && synced.salvaged.is_some() => {
+            let unused = synced.backup_unused.as_deref();
+            let line = synced.salvaged.as_ref().map(|s| list::salvaged_line(s, unused)).unwrap_or_default();
+            log::warning("Sounds", &format!("The app's own sound library was damaged: {line} ({synced:?})"));
+            if let Some(cards) = cards {
+                cards.start("Mended your sound library", "").done(&line);
             }
         }
         Ok(synced) if synced.made => {
@@ -3985,27 +4054,27 @@ mod tests {
         assert_eq!(one_start(&sounds_db, &library_db, &cards), first);
         assert_eq!(cards_said(&cards), Vec::<String>::new());
         // Its fingerprints damaged (a bad sector): it's made again from sounds.db while that's still there (all it can
-        // be made from), and stays the app's own. The page takes the sounds it was made with in place of those shown.
+        // be made from), with all of it that can still be read (review finding S-1), and stays the app's own. So the
+        // retired app's play and sound stay out of it, as before. The page takes the sounds it was made with.
         damage_first_page(&copy, "sound_features");
         let cards = Feed::default();
         assert_eq!(
             one_start(&sounds_db, &library_db, &cards),
             [
                 "5 sounds from sounds-rust.db, 0 plays",
-                "6 fingerprints",
+                "5 fingerprints",
                 "used: true",
-                "again: other sounds, 6 sounds, 2 plays, used: true",
+                "again: the same sounds, 5 sounds, 0 plays, used: true",
             ]
         );
         let said = cards_said(&cards);
-        assert!(said.iter().any(|c| c.starts_with("Made the app's own copy of your sound library again")), "{said:?}");
+        assert!(said.iter().any(|c| c.starts_with("Mended your sound library: It was damaged")), "{said:?}");
         assert!(compact::own_since(&copy).is_some());
-        assert_eq!(
-            one_start(&sounds_db, &library_db, &Feed::default()),
-            ["6 sounds from sounds-rust.db, 2 plays", "6 fingerprints", "used: true"]
-        );
+        assert!(compact::backup::damaged_of(&copy).exists(), "the damaged one is kept beside it");
+        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default()), first);
         // Damaged, and it can't be made again (a folder in the way of the new copy): the rest comes from sounds.db,
-        // as it does without a copy, and the sounds as sounds.db has them.
+        // as it does without a copy, and the sounds as sounds.db has them, for this start. The damaged one is put back
+        // as it was, so nothing of it is lost: the next start mends it, still keeping its own word.
         let part = PathBuf::from(format!("{}.part-{}", copy.display(), std::process::id()));
         assert!(std::fs::create_dir_all(&part).is_ok());
         damage_first_page(&copy, "sound_features");
@@ -4013,11 +4082,11 @@ mod tests {
         assert_eq!(
             one_start(&sounds_db, &library_db, &cards),
             [
-                "6 sounds from sounds-rust.db, 2 plays".to_owned(),
+                "5 sounds from sounds-rust.db, 0 plays".to_owned(),
                 format!("the rest from {}", sounds_db.display()),
                 "6 fingerprints".to_owned(),
                 "used: true".to_owned(),
-                "again: the same sounds, 6 sounds, 2 plays, used: true".to_owned(),
+                "again: other sounds, 6 sounds, 2 plays, used: true".to_owned(),
             ]
         );
         let said = cards_said(&cards);
@@ -4026,15 +4095,15 @@ mod tests {
             "{said:?}"
         );
         assert!(std::fs::remove_dir(&part).is_ok());
-        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default())[1], "6 fingerprints", "made whole again");
+        let cards = Feed::default();
+        assert_eq!(one_start(&sounds_db, &library_db, &cards)[1], "5 fingerprints", "made whole again");
+        let said = cards_said(&cards);
+        assert!(said.iter().any(|c| c.starts_with("Mended your sound library: It was damaged")), "{said:?}");
         // sounds.db archived: the app's own library is all the page needs.
         for end in ["", "-wal", "-shm"] {
             let _ = std::fs::remove_file(format!("{}{end}", sounds_db.display()));
         }
-        assert_eq!(
-            one_start(&sounds_db, &library_db, &Feed::default()),
-            ["6 sounds from sounds-rust.db, 2 plays", "6 fingerprints", "used: true"]
-        );
+        assert_eq!(one_start(&sounds_db, &library_db, &Feed::default()), first);
     }
 
     /// Makes the app's own sound library at `copy` one of the format before, as the version before this one kept it:

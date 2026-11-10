@@ -51,7 +51,10 @@ pub mod backup;
 pub mod did;
 pub mod grow;
 pub mod maps;
+mod salvage;
 pub mod yours;
+
+pub use salvage::Salvaged;
 
 /// The copy's name, beside `sounds.db`.
 pub const FILE_NAME: &str = "sounds-rust.db";
@@ -233,6 +236,9 @@ pub struct Synced {
     pub from_backup: Option<SystemTime>,
     /// Found damaged, it was made again from `sounds.db` because its backup copy couldn't be used, and why.
     pub backup_unused: Option<String>,
+    /// Made again so, what could still be read of the damaged library, set aside, was kept in the new one
+    /// ([`Salvaged`]).
+    pub salvaged: Option<Salvaged>,
 }
 
 impl Synced {
@@ -280,7 +286,7 @@ pub fn own_since(copy: &Path) -> Option<i64> {
 /// itself) is left as it is, and this says so. Nor is one made on a disk without room for it and
 /// [`ROOM_LEFT`] to spare. Nor is the app's own sound library ([`own_since`]) made again: that's refused.
 pub fn sync(sounds_db: &Path, copy: &Path) -> Result<Synced, SoundsError> {
-    run(sounds_db, copy, Job { read_for: None, adopt: false, afresh: false }, &mut None)
+    run(sounds_db, copy, Job { read_for: None, adopt: false, afresh: false, mend: None }, &mut None)
 }
 
 /// [`sync`] one last time, and the copy becomes the app's own sound library ([`own_since`]): for a copy the page
@@ -289,7 +295,7 @@ pub fn last_sync(sounds_db: &Path, copy: &Path) -> Result<Synced, SoundsError> {
     if own_since(copy).is_some() {
         return Ok(Synced::default());
     }
-    run(sounds_db, copy, Job { read_for: None, adopt: true, afresh: false }, &mut None)
+    run(sounds_db, copy, Job { read_for: None, adopt: true, afresh: false, mend: None }, &mut None)
 }
 
 /// The Sounds page's first read of the library: the quickest way to its sounds there is.
@@ -837,24 +843,31 @@ pub fn sync_reading(
     copy: &Path,
     now: NaiveDateTime,
 ) -> Result<(Everything, Result<Synced, SoundsError>), SoundsError> {
-    read_while(sounds_db, copy, now, false)
+    read_while(sounds_db, copy, now)
 }
 
 /// Mends the copy at `copy`, found damaged inside ([`SoundsError::damaged`]), and reads it for the page: put back
 /// from its backup copy when there's a whole one ([`backup`]: what the app wrote into it is there, up to the last
 /// backup), else made again from `sounds_db` while that's there, reading it on the same pass as [`sync_reading`] does
-/// (a copy that was the app's own stays so, from the same time). With neither, an error that names the copy as damaged
-/// ([`SoundsError::Damaged`]). The copy must not be open meanwhile (Windows won't move an open file).
+/// (a copy that was the app's own stays so, from the same time). Made again so, the app's own library (or one so
+/// damaged it can't be told) is set aside first, never removed, and what can still be read of it is kept in the new
+/// one ([`Salvaged`]); if it can't be made again, it's put back, to be mended the next time. With neither, an error
+/// that names the copy as damaged ([`SoundsError::Damaged`]). The copy must not be open meanwhile (Windows won't move
+/// an open file).
 pub fn mend_reading(
     sounds_db: &Path,
     copy: &Path,
     now: NaiveDateTime,
 ) -> Result<(Everything, Result<Synced, SoundsError>), SoundsError> {
     let unused = match backup::restore(copy) {
-        Ok(made) => {
+        Ok((made, salvaged)) => {
             let everything = SoundsDb::open_read_only(copy)?.everything(now)?;
             let sounds = everything.sounds.len();
-            return Ok((everything, Ok(Synced { made: true, sounds, from_backup: Some(made), ..Synced::default() })));
+            let from_backup = Some(made);
+            return Ok((
+                everything,
+                Ok(Synced { made: true, sounds, from_backup, salvaged: Some(salvaged), ..Default::default() }),
+            ));
         }
         // There's a backup copy, but it can't be put back just now: never made again from `sounds.db` meanwhile,
         // which would lose what the app wrote into it.
@@ -872,20 +885,65 @@ pub fn mend_reading(
             why: format!("{unused}, and there's no sounds.db to make it again from"),
         });
     }
-    let (everything, made) = read_while(sounds_db, copy, now, true)?;
+    let damaged = |why: String| SoundsError::Damaged {
+        path: copy.to_owned(),
+        why: format!("{unused}, and {why}; it's tried again the next time the app starts"),
+    };
+    // What the app wrote into its own library lives nowhere else (review finding S-1). One that was never the app's
+    // own holds only what sounds.db has: it's simply made again.
+    let mend = match look_at(copy, WAIT) {
+        // One a newer version of the app made holds what this version can't read, nor keep.
+        Ok(Found::Copy { format, .. }) if format > FORMAT => {
+            return Err(damaged(format!(
+                "a newer version of the app made it (format {format}), so it's left as it is"
+            )));
+        }
+        Ok(Found::Copy { own: Some(own), .. }) => Some(Mend { from: backup::damaged_of(copy), own: Some(own) }),
+        Ok(Found::Unreadable) => Some(Mend { from: backup::damaged_of(copy), own: None }),
+        Ok(_) => None,
+        Err(why) => return Err(damaged(format!("it couldn't be looked at just now ({why})"))),
+    };
+    let mut read = None;
+    let job = Job { read_for: Some(now), adopt: true, afresh: true, mend: mend.as_ref() };
+    let made = run(sounds_db, copy, job, &mut read);
+    // Couldn't be set aside (something else has it open): left as it is.
+    if let Err(SoundsError::Damaged { why, .. }) = made {
+        return Err(damaged(why));
+    }
+    let mut everything = match read {
+        Some(everything) => everything,
+        None => match SoundsDb::open_read_only(sounds_db).and_then(|db| db.everything(now)) {
+            Ok(everything) => everything,
+            // Not made again either: why not says more.
+            Err(e) => return Err(made.err().unwrap_or(e)),
+        },
+    };
+    // The page's read came from sounds.db, on the same pass: what was kept of the damaged one is read with it now.
+    if let Ok(Synced { salvaged: Some(salvaged), .. }) = &made
+        && salvaged.kept > 0
+    {
+        everything = SoundsDb::open_read_only(copy)?.everything(now)?;
+    }
     Ok((everything, made.map(|synced| Synced { backup_unused: Some(unused), ..synced })))
 }
 
-/// [`sync_reading`] or [`mend_reading`]: the page's own passes, so the copy becomes the app's own library on them
-/// (or stays it, from the same moment, when it's made again).
+/// The app's own library, found damaged with no backup copy to put it back from, set aside to be made again
+/// ([`mend_reading`]).
+struct Mend {
+    /// Where it was set aside ([`backup::damaged_of`]).
+    from: PathBuf,
+    /// Since when it was the app's own library, when that could be read: it stays so, from the same time.
+    own: Option<i64>,
+}
+
+/// [`sync_reading`]'s pass, so the copy becomes the app's own library on it.
 fn read_while(
     sounds_db: &Path,
     copy: &Path,
     now: NaiveDateTime,
-    afresh: bool,
 ) -> Result<(Everything, Result<Synced, SoundsError>), SoundsError> {
     let mut read = None;
-    let synced = run(sounds_db, copy, Job { read_for: Some(now), adopt: true, afresh }, &mut read);
+    let synced = run(sounds_db, copy, Job { read_for: Some(now), adopt: true, afresh: false, mend: None }, &mut read);
     let everything = match read {
         Some(everything) => everything,
         None => SoundsDb::open_read_only(sounds_db)?.everything(now)?,
@@ -895,7 +953,7 @@ fn read_while(
 
 /// What one pass over `sounds.db` is asked to do.
 #[derive(Clone, Copy)]
-struct Job {
+struct Job<'a> {
     /// When "now" is for the page's read, taken on the same pass ([`sync_reading`]); `None` when the page isn't
     /// reading.
     read_for: Option<NaiveDateTime>,
@@ -903,14 +961,46 @@ struct Job {
     adopt: bool,
     /// A copy of this version is made again rather than brought up to date ([`mend_reading`]).
     afresh: bool,
+    /// Made again in place of the app's own library, set aside damaged: what can be read of it is kept in the new one.
+    mend: Option<&'a Mend>,
 }
 
 /// What [`sync`] does, also reading the library for the page into `read` on the way when the job says when "now" is
 /// ([`sync_reading`]). `read` is left as `None` if the pass stopped before every sound was read, or there was nothing
 /// to make.
-fn run(sounds_db: &Path, copy: &Path, job: Job, read: &mut Option<Everything>) -> Result<Synced, SoundsError> {
-    let Job { read_for, afresh, .. } = job;
+fn run(sounds_db: &Path, copy: &Path, job: Job<'_>, read: &mut Option<Everything>) -> Result<Synced, SoundsError> {
     let _one_at_a_time = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
+    // The app's own library found damaged is set aside under the same lock as it's made again, so nothing writes into
+    // its place meanwhile (review finding S-1). [`SoundsError::Damaged`] when it can't be: nothing else gives that.
+    if job.mend.is_some() {
+        backup::set_aside(copy).map_err(|why| SoundsError::Damaged { path: copy.to_owned(), why })?;
+    }
+    let made = run_locked(sounds_db, copy, job, read);
+    if job.mend.is_none() || made.is_ok() || copy.exists() {
+        return made;
+    }
+    // Not made again: the damaged one goes back to its place, to be mended the next time. When it can't be, it's
+    // where it was set aside, and said so.
+    match backup::put_back(copy) {
+        Ok(()) => made,
+        Err(stuck) => made.map_err(|e| SoundsError::Copy {
+            path: copy.to_owned(),
+            why: format!(
+                "{e}; the damaged library couldn't be put back ({stuck}), so it's left as {}",
+                backup::damaged_of(copy).display()
+            ),
+        }),
+    }
+}
+
+/// [`run`], with the lock taken.
+fn run_locked(
+    sounds_db: &Path,
+    copy: &Path,
+    job: Job<'_>,
+    read: &mut Option<Everything>,
+) -> Result<Synced, SoundsError> {
+    let Job { read_for, afresh, mend, .. } = job;
     let failed = |why: String| SoundsError::Copy { path: copy.to_owned(), why };
     if same_file(sounds_db, copy) {
         return Err(failed("that's the library itself".into()));
@@ -929,13 +1019,13 @@ fn run(sounds_db: &Path, copy: &Path, job: Job, read: &mut Option<Everything>) -
     // Half-made copies left by an app that stopped while making one, whatever this pass does.
     remove_parts(copy, true);
     let dir = dir_of(copy);
-    // Made again, the app's own library keeps the time it became so.
+    // Made again, the app's own library keeps the time it became so (one set aside damaged too).
     let own = match &found {
         Found::Copy { format, own, .. } if readable(*format) => *own,
-        _ => None,
+        _ => mend.and_then(|m| m.own),
     };
     let adopt = job.adopt.then(|| own.unwrap_or_else(unix_now));
-    let was_own = own.is_some();
+    let was_own = own.is_some() || mend.is_some();
     match found {
         // The app's own sound library takes nothing more from `sounds.db`: only made again, when it's damaged.
         Found::Copy { format, own: Some(_), .. } if readable(format) && !afresh => {
@@ -963,7 +1053,8 @@ fn run(sounds_db: &Path, copy: &Path, job: Job, read: &mut Option<Everything>) -
         // it's what the page still has.
         Found::Nothing | Found::Unreadable | Found::Copy { .. } => {
             let keep = matches!(found, Found::Copy { format, .. } if readable(format)) && !afresh;
-            make(&old, copy, keep, Pass { stamp: &stamp, read_for, read, dir, adopt, was_own })
+            let salvage_from = mend.map(|m| m.from.as_path());
+            make(&old, copy, keep, Pass { stamp: &stamp, read_for, read, dir, adopt, was_own, salvage_from })
         }
         Found::Foreign => {
             Err(failed("a database that isn't a copy of the library is there, so it's left as it is".into()))
@@ -996,6 +1087,8 @@ struct Pass<'a> {
     adopt: Option<i64>,
     /// It was already, before this pass.
     was_own: bool,
+    /// The app's own library, set aside damaged: what can be read of it goes into the new one ([`salvage`]).
+    salvage_from: Option<&'a Path>,
 }
 
 /// A new copy, made under a name of its own beside the copy's and then renamed. `keep`: the copy there now stays until
@@ -1027,6 +1120,7 @@ fn make(old: &SoundsDb, copy: &Path, keep: bool, pass: Pass<'_>) -> Result<Synce
     let part = part_of(copy);
     remove_database(&part).map_err(|e| failed(format!("a half-made copy couldn't be removed ({e})")))?;
     let _part = Part(part.clone());
+    let (dir, salvage_from) = (pass.dir, pass.salvage_from);
     let made = (|| -> Result<Synced, Failed> {
         let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let conn = open_for_writing(&part, flags)?;
@@ -1035,7 +1129,13 @@ fn make(old: &SoundsDb, copy: &Path, keep: bool, pass: Pass<'_>) -> Result<Synce
         conn.pragma_update(None, "journal_mode", "OFF")?;
         conn.pragma_update(None, "synchronous", "OFF")?;
         conn.execute_batch(SCHEMA)?;
-        let synced = fill(old, &conn, pass)?;
+        let mut synced = fill(old, &conn, pass)?;
+        if let Some(damaged) = salvage_from {
+            synced.salvaged = Some(salvage::salvage(&conn, damaged, dir)?);
+            // With the sounds the app's scan added, and without those it forgot.
+            let sounds: i64 = conn.query_row("SELECT COUNT(*) FROM sounds", [], |r| r.get(0))?;
+            synced.sounds = usize::try_from(sounds).unwrap_or_default();
+        }
         // From now on it's written to while the page may be reading it: in WAL mode readers never wait for a writer.
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.close().map_err(|(_, e)| e)?;
@@ -1322,12 +1422,8 @@ impl Columns {
         // A column that is the row number: the only key column, declared INTEGER (SQLite's rule).
         let keys: Vec<&(String, String, i64)> = info.iter().filter(|c| c.2 > 0).collect();
         let row_number_column = keys.len() == 1 && keys[0].1.eq_ignore_ascii_case("INTEGER");
-        // "WITHOUT ROWID" comes after the columns' closing bracket.
-        let without_rowid = sql.rfind(')').is_some_and(|end| {
-            sql[end..].to_ascii_uppercase().split_whitespace().collect::<String>().contains("WITHOUTROWID")
-        });
         let mut names = Vec::with_capacity(info.len() + 1);
-        if !row_number_column && !without_rowid {
+        if !row_number_column && !without_rowid(sql) {
             names.push("rowid".to_owned());
         }
         names.extend(info.into_iter().map(|c| quoted(&c.0)));
@@ -1337,6 +1433,13 @@ impl Columns {
     fn list(&self) -> String {
         self.names.join(", ")
     }
+}
+
+/// Whether the table `sql` makes has no row numbers of its own: "WITHOUT ROWID" comes after its columns' closing bracket.
+fn without_rowid(sql: &str) -> bool {
+    sql.rfind(')').is_some_and(|end| {
+        sql[end..].to_ascii_uppercase().split_whitespace().collect::<String>().contains("WITHOUTROWID")
+    })
 }
 
 /// Copies every row `select` gives from `from` into `to` with `insert`, one at a time.

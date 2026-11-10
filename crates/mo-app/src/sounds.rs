@@ -1553,12 +1553,38 @@ pub fn not_remade_line(e: &SoundsError) -> String {
 }
 
 /// What the card says when the app's own sound library was found damaged and put back from its backup copy made at
-/// `made` (`mo_sounds::compact::backup`): from when, and that the damaged one is kept a while.
-pub fn put_back_line(made: chrono::DateTime<chrono::Local>) -> String {
+/// `made` (`mo_sounds::compact::backup`), with what could still be read of it since (`salvaged`): from when, and that
+/// the damaged one is kept a while.
+pub fn put_back_line(made: chrono::DateTime<chrono::Local>, salvaged: Option<&mo_sounds::compact::Salvaged>) -> String {
+    let since = match salvaged.map(|s| (s.kept, s.unread)) {
+        None | Some((0, 0)) => "",
+        Some((0, _)) => " (nothing since could still be read of it)",
+        Some((_, 0)) => ", with everything since",
+        Some(_) => ", with everything since that could still be read of it",
+    };
     format!(
-        "It was damaged, so it was put back from its backup copy of {}. The damaged one is kept beside it for a week, \
-         as {}.",
+        "It was damaged, so it was put back from its backup copy of {}{since}. The damaged one is kept beside it for a \
+         week, as {}.",
         made.format("%-d %b %H:%M"),
+        mo_sounds::compact::backup::damaged_of(std::path::Path::new(mo_sounds::compact::FILE_NAME)).display()
+    )
+}
+
+/// What the card says when the app's own sound library was found damaged with no backup copy to put it back from
+/// (`unused`: why not, as [`Synced::backup_unused`] says it), so it was made again from `sounds.db` with what could
+/// still be read of it ([`mo_sounds::compact::Salvaged`]): how much of it was kept, and that the damaged one is kept a
+/// while.
+pub fn salvaged_line(salvaged: &mo_sounds::compact::Salvaged, unused: Option<&str>) -> String {
+    let kept = match (salvaged.kept, salvaged.unread) {
+        (0, 0) => "nothing in it differed from sounds.db",
+        (0, _) => "none of it could still be read, so it's as sounds.db has it",
+        (_, 0) => "with all of it: your stars, tags, plays and the sounds the scan added",
+        _ => "with all of it that could still be read (the rest is as sounds.db has it)",
+    };
+    let unused = unused.unwrap_or("there's no backup copy");
+    format!(
+        "It was damaged, and {unused}, so it was made again from sounds.db, {kept}. The damaged one is kept beside it \
+         for a week, as {}.",
         mo_sounds::compact::backup::damaged_of(std::path::Path::new(mo_sounds::compact::FILE_NAME)).display()
     )
 }
@@ -2259,10 +2285,30 @@ mod tests {
         );
         let made = chrono::Local.with_ymd_and_hms(2026, 11, 6, 21, 14, 30).unwrap();
         assert_eq!(
-            put_back_line(made),
+            put_back_line(made, None),
             "It was damaged, so it was put back from its backup copy of 6 Nov 21:14. The damaged one is kept beside \
              it for a week, as sounds-rust.db.damaged."
         );
+        let since = |kept, unread| put_back_line(made, Some(&mo_sounds::compact::Salvaged { kept, unread }));
+        assert_eq!(since(0, 0), put_back_line(made, None));
+        assert!(since(4, 0).contains("of 6 Nov 21:14, with everything since. The damaged one"));
+        assert!(since(4, 1).contains("of 6 Nov 21:14, with everything since that could still be read of it. The"));
+        assert!(since(0, 1).contains("of 6 Nov 21:14 (nothing since could still be read of it). The"));
+        let salvaged = |kept, unread| salvaged_line(&mo_sounds::compact::Salvaged { kept, unread }, None);
+        assert_eq!(
+            salvaged(12, 0),
+            "It was damaged, and there's no backup copy, so it was made again from sounds.db, with all of it: your \
+             stars, tags, plays and the sounds the scan added. The damaged one is kept beside it for a week, as \
+             sounds-rust.db.damaged."
+        );
+        let unusable = mo_sounds::compact::Salvaged { kept: 3, unread: 0 };
+        assert!(
+            salvaged_line(&unusable, Some("the backup copy can't be used: it's damaged"))
+                .starts_with("It was damaged, and the backup copy can't be used: it's damaged, so it was made again")
+        );
+        assert!(salvaged(12, 3).contains("with all of it that could still be read (the rest is as sounds.db has it)."));
+        assert!(salvaged(0, 1).contains("none of it could still be read, so it's as sounds.db has it."));
+        assert!(salvaged(0, 0).contains("nothing in it differed from sounds.db."));
         let full = SoundsError::Copy {
             path: "C:\\Users\\Solomon\\AppData\\Local\\MusicOrganiser\\sounds-rust.db".into(),
             why: "only 3.1 GB is free on its disk".into(),

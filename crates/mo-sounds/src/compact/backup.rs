@@ -28,8 +28,8 @@ use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use super::{
-    FORMAT, Found, LAYING_OUT, OWN_SINCE, Part, SYNCING, WAIT, dir_of, format_of, info_value, look_at, part_of,
-    readable, remove_database, remove_parts, room_for, side, unix_now,
+    FORMAT, Found, LAYING_OUT, OWN_SINCE, Part, SYNCING, Salvaged, WAIT, dir_of, format_of, info_value, look_at,
+    part_of, readable, remove_database, remove_parts, room_for, side, unix_now,
 };
 use crate::SoundsDb;
 use crate::db::is_damage;
@@ -49,7 +49,7 @@ const A_WEEK: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 pub const BACKED_UP_FROM: &str = "backed_up_from";
 
 /// The key in the backup's `copy_info` that holds when it was made (Unix seconds).
-const BACKED_UP_AT: &str = "backed_up_at";
+pub(super) const BACKED_UP_AT: &str = "backed_up_at";
 
 /// Where the backup copy of the library at `copy` is kept: beside it.
 pub fn backup_of(copy: &Path) -> PathBuf {
@@ -69,6 +69,10 @@ pub enum BackedUp {
     /// Not made this time, and why (the disk short of room, the library busy or changed meanwhile…). The backup
     /// copy before, if there is one, stays as it was; a new one is tried again the next time.
     NotNow(String),
+    /// Not made: the library itself is damaged where making the copy reads it, somewhere the page's read never looks
+    /// (the waveforms, say), and why. It wants mending ([`super::mend_reading`]: review finding S-3); the backup copy
+    /// before stays as it was.
+    Damaged(String),
 }
 
 /// How soon a library that changed since its backup copy was made is backed up again ([`back_up_when`]).
@@ -118,7 +122,7 @@ pub fn back_up_when(sounds_db: &Path, when: When) -> Option<BackedUp> {
         let began = Instant::now();
         Some(match make(&copy, &backup) {
             Ok(bytes) => BackedUp::Made { bytes, took: began.elapsed() },
-            Err(why) => BackedUp::NotNow(why),
+            Err(not) => not,
         })
     };
     // A library set aside as damaged goes a week after: the library has been whole (and backed up) since.
@@ -183,7 +187,7 @@ fn still_whole(backup: &Path) -> bool {
     }
 }
 
-fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
+pub(super) fn open_read_only(path: &Path) -> rusqlite::Result<Connection> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
     conn.busy_timeout(WAIT)?;
     Ok(conn)
@@ -195,15 +199,17 @@ fn size_of(path: &Path) -> u64 {
 }
 
 /// Makes the backup copy of `copy` at `backup`: under another name, noted with what it was made from and when,
-/// checked, put on the disk, and then given the backup's name. How big it is.
-fn make(copy: &Path, backup: &Path) -> Result<u64, String> {
+/// checked, put on the disk, and then given the backup's name. How big it is, or why not ([`BackedUp::NotNow`], or
+/// [`BackedUp::Damaged`] for damage met reading the library).
+fn make(copy: &Path, backup: &Path) -> Result<u64, BackedUp> {
+    let not_now = BackedUp::NotNow;
     if let Ok(free) = fs4::available_space(dir_of(copy)) {
-        room_for(free, size_of(copy), "making its backup copy")?;
+        room_for(free, size_of(copy), "making its backup copy").map_err(not_now)?;
     }
     let part = part_of(backup);
-    remove_database(&part).map_err(|e| format!("a half-made backup copy couldn't be removed ({e})"))?;
+    remove_database(&part).map_err(|e| not_now(format!("a half-made backup copy couldn't be removed ({e})")))?;
     let _part = Part(part.clone());
-    let name = part.to_str().ok_or("its folder's name can't be given to SQLite")?;
+    let name = part.to_str().ok_or_else(|| not_now("its folder's name can't be given to SQLite".into()))?;
     // How the library looks before it's read: the same after, so nothing was written to it in between.
     let from = SoundsDb::stamp(copy);
     let sounds = (|| -> rusqlite::Result<i64> {
@@ -213,9 +219,11 @@ fn make(copy: &Path, backup: &Path) -> Result<u64, String> {
         conn.execute("VACUUM INTO ?1", [name])?;
         Ok(sounds)
     })()
-    .map_err(|e| e.to_string())?;
+    .map_err(|e| {
+        if is_damage(&e) { BackedUp::Damaged(format!("the library is damaged ({e})")) } else { not_now(e.to_string()) }
+    })?;
     if SoundsDb::stamp(copy) != from {
-        return Err("the library changed while it was copied".into());
+        return Err(not_now("the library changed while it was copied".into()));
     }
     (|| -> rusqlite::Result<()> {
         let conn =
@@ -226,10 +234,10 @@ fn make(copy: &Path, backup: &Path) -> Result<u64, String> {
         )?;
         conn.close().map_err(|(_, e)| e)
     })()
-    .map_err(|e| format!("it couldn't be noted ({e})"))?;
-    check(&part, Some(sounds), true).map_err(|(NotRestored::NoBackup(why) | NotRestored::NotNow(why))| why)?;
-    fs::OpenOptions::new().write(true).open(&part).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
-    fs::rename(&part, backup).map_err(|e| format!("it couldn't be given its name ({e})"))?;
+    .map_err(|e| not_now(format!("it couldn't be noted ({e})")))?;
+    check(&part, Some(sounds), true).map_err(|(NotRestored::NoBackup(why) | NotRestored::NotNow(why))| not_now(why))?;
+    fs::OpenOptions::new().write(true).open(&part).and_then(|f| f.sync_all()).map_err(|e| not_now(e.to_string()))?;
+    fs::rename(&part, backup).map_err(|e| not_now(format!("it couldn't be given its name ({e})")))?;
     Ok(size_of(backup))
 }
 
@@ -271,9 +279,10 @@ pub(crate) enum NotRestored {
 }
 
 /// Puts the library at `copy` back from its backup copy, for a library found damaged: the backup checked again,
-/// copied beside the library, and given the library's name; the damaged library set aside ([`damaged_of`]), with its
-/// log. When the backup was made, or why it wasn't put back.
-pub(crate) fn restore(copy: &Path) -> Result<SystemTime, NotRestored> {
+/// copied beside the library, given everything that can still be read of the damaged library (it's newer:
+/// [`super::salvage`]), and given the library's name; the damaged library set aside ([`damaged_of`]), with its log.
+/// When the backup was made and what was kept of the damaged library, or why it wasn't put back.
+pub(crate) fn restore(copy: &Path) -> Result<(SystemTime, Salvaged), NotRestored> {
     use NotRestored::{NoBackup, NotNow};
     let backup = backup_of(copy);
     let _one_at_a_time = SYNCING.lock().unwrap_or_else(PoisonError::into_inner);
@@ -301,7 +310,7 @@ pub(crate) fn restore(copy: &Path) -> Result<SystemTime, NotRestored> {
     let part = part_of(copy);
     remove_database(&part).map_err(|e| NotNow(format!("a half-made copy couldn't be removed ({e})")))?;
     let _part = Part(part.clone());
-    let put = (|| -> Result<(), String> {
+    let put = (|| -> Result<Salvaged, String> {
         fs::copy(&backup, &part).map_err(|e| e.to_string())?;
         let conn =
             Connection::open_with_flags(&part, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)
@@ -309,15 +318,18 @@ pub(crate) fn restore(copy: &Path) -> Result<SystemTime, NotRestored> {
         // The library isn't a backup: what this one was made from goes with it.
         conn.execute("DELETE FROM copy_info WHERE key IN (?1, ?2)", [BACKED_UP_FROM, BACKED_UP_AT])
             .map_err(|e| e.to_string())?;
+        // What the app wrote since the backup was made, where it can still be read (review finding S-3).
+        let salvaged = super::salvage::salvage(&conn, copy, dir_of(copy)).map_err(|f| f.why)?;
         // Read and written as the library is: in WAL mode, so the page's readers never wait for a writer.
         conn.pragma_update(None, "journal_mode", "WAL").map_err(|e| e.to_string())?;
         conn.close().map_err(|(_, e)| e.to_string())?;
         if ["-wal", "-shm", "-journal"].iter().any(|end| side(&part, end).exists()) {
             return Err("its log was left beside it".into());
         }
-        fs::OpenOptions::new().write(true).open(&part).and_then(|f| f.sync_all()).map_err(|e| e.to_string())
+        fs::OpenOptions::new().write(true).open(&part).and_then(|f| f.sync_all()).map_err(|e| e.to_string())?;
+        Ok(salvaged)
     })();
-    put.map_err(|why| NotNow(format!("it couldn't be copied from its backup copy ({why})")))?;
+    let salvaged = put.map_err(|why| NotNow(format!("it couldn't be copied from its backup copy ({why})")))?;
     // No reader in this app opens the library while it's swapped.
     let _readers_wait = LAYING_OUT.lock().unwrap_or_else(PoisonError::into_inner);
     set_aside(copy).map_err(NotNow)?;
@@ -328,13 +340,13 @@ pub(crate) fn restore(copy: &Path) -> Result<SystemTime, NotRestored> {
         };
         return Err(NotNow(format!("the copy of its backup couldn't be given its name ({e}){undone}")));
     }
-    Ok(made)
+    Ok((made, salvaged))
 }
 
 /// Sets the damaged library at `copy` aside ([`damaged_of`]), with its log, so the two can still be opened together;
 /// the one set aside before goes. Not when something else has it open: then nothing is moved. A log left beside the
 /// copy put in its place would be read into it as if it were its own, so nothing is put there unless it has gone.
-fn set_aside(copy: &Path) -> Result<(), String> {
+pub(super) fn set_aside(copy: &Path) -> Result<(), String> {
     let held = || "the damaged library couldn't be set aside: something else has it open".to_owned();
     let busy =
         |e: std::io::Error| format!("the damaged library couldn't be set aside ({e}): something else may have it open");
@@ -373,7 +385,7 @@ fn set_aside(copy: &Path) -> Result<(), String> {
 
 /// Undoes [`set_aside`]: the damaged library at `copy` given its name again, then its log (never a log without its
 /// library, which would be read into another put there).
-fn put_back(copy: &Path) -> std::io::Result<()> {
+pub(super) fn put_back(copy: &Path) -> std::io::Result<()> {
     let damaged = damaged_of(copy);
     if copy.exists() {
         return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "something else is there in its place"));
