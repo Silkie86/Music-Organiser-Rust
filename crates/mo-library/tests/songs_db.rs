@@ -570,7 +570,11 @@ fn a_songs_db_made_before_them_gets_the_songs_lists_indexes_once() {
     Connection::open(&new).unwrap().execute_batch("CREATE INDEX ix_samples_project ON samples(project_id);").unwrap();
     assert!(songs_db::tune(&new).unwrap().is_some());
     assert_eq!(indexes(&new, "samples"), ["ix_samples_list", "ix_samples_path"]);
-    // Nothing there, or not the app's library: an error, and nothing made.
+    // Nothing there, or not the app's library (library.db here): an error, and nothing made or changed.
     assert!(songs_db::tune(&dir.join("none.db")).is_err());
     assert!(!dir.join("none.db").exists());
+    let other = library("tune-other");
+    let refused = songs_db::tune(&other).unwrap_err();
+    assert!(refused.contains("isn't the app's song library"), "{refused}");
+    assert_eq!(indexes(&other, "samples"), ["ix_samples_path", "ix_samples_project"]);
 }

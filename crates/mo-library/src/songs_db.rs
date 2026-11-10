@@ -118,41 +118,46 @@ const LIST_INDEXES: [(&str, &str, &str); 2] = [
     ("ix_samples_list", "samples(project_id, found)", "ix_samples_project"),
 ];
 
+/// How long [`tune`] waits for another program (another copy of the app) to let go of `songs.db`: as long as the
+/// writers do, and it's never called on the window's thread.
+const TUNE_WAIT: Duration = Duration::from_secs(5);
+
 /// Gives a `songs.db` that's the app's own library the indexes the Songs list is read from ([`LIST_INDEXES`]), where
 /// it was made before them, and removes the two they take the place of: all in one step, or none of it. How long it
 /// took, or `None` when there was nothing to do (which is only a look, and writes nothing).
 ///
-/// Indexes only change how quickly SQLite finds rows, never what a question answers, so the layout number stays as it
-/// is and an older build of the app reads the file as before. Call it at the start, before the pages read: it takes
-/// about a second for a large library, once. A library that isn't the app's own (yet) is left alone: it may be made
-/// again.
+/// Indexes only change how quickly SQLite finds rows, never which rows a question finds, so the layout number stays
+/// as it is. It reads the whole of `plugins` and `samples` once (about a second for a large library), so call it in
+/// the background: the pages read meanwhile as before, from the older indexes, and a writer waits for it. A library
+/// that isn't the app's own (yet) is left alone: it may be made again.
 pub fn tune(songs: &Path) -> Result<Option<Duration>, String> {
     let done = (|| -> rusqlite::Result<Result<Option<Duration>, String>> {
-        if !matches!(look(songs), Ok(Found::Songs { own: Some(_), .. })) {
-            return Ok(Err("it isn't the app's own song library (yet)".to_owned()));
-        }
         let has = |conn: &Connection, index: &str| -> rusqlite::Result<bool> {
             conn.query_row("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1", [index], |_| Ok(()))
                 .optional()
                 .map(|found| found.is_some())
         };
-        let to_do = |conn: &Connection| -> rusqlite::Result<bool> {
-            for (new, _, old) in LIST_INDEXES {
-                if !has(conn, new)? || has(conn, old)? {
-                    return Ok(true);
-                }
+        {
+            let conn = open_read_only(songs)?;
+            let id: i32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0))?;
+            let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+            if id != APPLICATION_ID || version != VERSION {
+                return Ok(Err("it isn't the app's song library, or it's of another layout".to_owned()));
             }
-            Ok(false)
-        };
-        if !to_do(&open_read_only(songs)?)? {
-            return Ok(Ok(None));
+            let mut to_do = false;
+            for (new, _, old) in LIST_INDEXES {
+                to_do |= !has(&conn, new)? || has(&conn, old)?;
+            }
+            if !to_do {
+                return Ok(Ok(None));
+            }
         }
         let started = std::time::Instant::now();
         let conn =
             Connection::open_with_flags(songs, OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
-        conn.busy_timeout(WAIT)?;
+        conn.busy_timeout(TUNE_WAIT)?;
         let tx = rusqlite::Transaction::new_unchecked(&conn, rusqlite::TransactionBehavior::Immediate)?;
-        // Looked at again under the write lock: only the app's own library is written.
+        // Looked at under the write lock: only the app's own library is written.
         let own: Option<Value> =
             tx.query_row("SELECT value FROM songs_info WHERE key = 'own_since'", [], |r| r.get(0)).optional()?;
         if !matches!(own, Some(Value::Integer(_))) {
