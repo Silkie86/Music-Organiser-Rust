@@ -304,6 +304,7 @@ struct Choices {
     order: FilterModels,
     placing: FilterModels,
     light: FilterModels,
+    sweep_play: FilterModels,
     re_type: FilterModels,
     re_count: FilterModels,
 }
@@ -3551,7 +3552,11 @@ fn read_and_play(job: PlayJob) {
     let went = match mo_audio::read(Path::new(&path), most) {
         // Looked at again as it starts, with no stop or other sound able to come in between: one asked for since
         // wins, rather than this sound starting after it and playing on while the page shows another or none.
-        Ok(audio) => player().play_if(Arc::new(audio), ask.to_string(), from * seconds, wanted),
+        Ok(mut audio) => {
+            // A sweep's short read stops where it was cut: faded, so it doesn't click there.
+            audio.fade_cut_end();
+            player().play_if(Arc::new(audio), ask.to_string(), from * seconds, wanted)
+        }
         Err(e) => match wanted() {
             Err(unwanted) => Err(unwanted),
             Ok(()) => {
