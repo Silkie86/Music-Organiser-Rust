@@ -15,6 +15,8 @@
 //! - Beside the first data folder (`%LOCALAPPDATA%`): what a crash left of the two files a data folder move writes
 //!   there (`MusicOrganiser-folder.txt.<number>-<number>.mo-part`, `MusicOrganiser-moving.txt.…`), an hour old. That
 //!   folder holds every app's data, so nothing else in it is ever looked at.
+//! - `old-databases\`: a copy of one of the old app's databases that was being put away when the app stopped
+//!   (`sounds.db.part-<number>`, [`crate::old_databases`]), an hour old. Never the databases put away there.
 //! - `Curves\`: a curve file whose writing a crash cut short (`… .mo-part-<number>-<number>`), an hour old.
 //! - `twin\cs\`: the twin test's copy of your library (`library-copy.db`), left when the test was stopped, a day old.
 //! - Your Temp folder: the Space page's lists for the administrator step (`mo-admin-<n>-<n>-<n>.txt`), a day old;
@@ -299,6 +301,10 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     }
     if let Some(curves) = real_folder(&places.data, &[CURVES]) {
         done.add(remove_older(&curves, mo_presets::export::is_half_written, WRITING, now, false));
+    }
+    // A copy of an old database that was being put away when the app stopped (its own name, only while it's written).
+    if let Some(archive) = real_folder(&places.data, &[crate::old_databases::FOLDER]) {
+        done.add(remove_older(&archive, crate::old_databases::is_part, WRITING, now, false));
     }
     if let Some(twin) = real_folder(&places.data, &["twin", "cs"]) {
         done.add(remove_older(&twin, is_library_copy, DAY, now, false));
@@ -1526,6 +1532,33 @@ mod tests {
         assert_eq!(sweep(&places, later, &bin).removed, 1);
         assert!(!copy.exists());
         assert!(places.data.join("library.db").exists() && places.data.join("songs.db").exists());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_half_written_copy_of_an_old_database_goes_and_what_was_put_away_never() {
+        let dir = test_folder("old-databases");
+        let places = test_places(&dir);
+        let bin = TestBin(dir.join("bin"));
+        let now = SystemTime::now();
+        let archive = places.data.join(crate::old_databases::FOLDER);
+        let part = archive.join("sounds.db.part-123");
+        let kept = [
+            archive.join("sounds.db"),
+            archive.join("sounds.db-wal"),
+            archive.join(crate::old_databases::READ_ME),
+            archive.join("yours.part-1"),
+            // The same name anywhere else is nobody's.
+            places.data.join("sounds.db.part-123"),
+        ];
+        for file in kept.iter().chain([&part]) {
+            changed_at(file, now);
+        }
+        // Being written just now, for all the sweep knows.
+        assert_eq!(sweep(&places, now, &bin).removed, 0);
+        assert_eq!(sweep(&places, now + WRITING * 2, &bin).removed, 1);
+        assert!(!part.exists());
+        assert!(kept.iter().all(|file| file.exists()));
         let _ = fs::remove_dir_all(&dir);
     }
 

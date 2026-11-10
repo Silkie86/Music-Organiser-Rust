@@ -109,18 +109,31 @@ impl Feed {
     /// A card that isn't a job: a warning that stays until its × takes it away (it never times out, as a failed job's
     /// card does), for something true the whole run, such as the app using an old copy of its data.
     pub fn notice(&self, title: &str, detail: &str) {
+        self.stays(title, detail, State::Failed);
+        log::warning("Notice", &format!("{title}{}", bracket(detail)));
+    }
+
+    /// A card that isn't a job, for something done you'd want to have seen however long you were away (the old app's
+    /// databases put away): it stays until its × takes it away, like [`Feed::notice`], but as a job done, not a
+    /// warning.
+    pub fn told(&self, title: &str, detail: &str) {
+        self.stays(title, detail, State::Done);
+        log::info("Notice", &format!("{title}{}", bracket(detail)));
+    }
+
+    /// A card with no end time, so it never goes by itself.
+    fn stays(&self, title: &str, detail: &str, state: State) {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         self.lock().cards.push(Card {
             id,
             title: title.to_owned(),
             detail: detail.to_owned(),
             progress: None,
-            state: State::Failed,
+            state,
             put_away: false,
             started: Instant::now(),
             ended: None,
         });
-        log::warning("Notice", &format!("{title}{}", bracket(detail)));
         self.changed();
     }
 

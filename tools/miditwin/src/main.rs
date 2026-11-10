@@ -59,11 +59,19 @@ fn data_folder(local: &std::path::Path) -> PathBuf {
     moved.unwrap_or_else(|| local.join("MusicOrganiser"))
 }
 
+/// The old app's database `name` in the data folder `data`, or in its `old-databases` folder once the app has put it
+/// away there.
+fn old_database(data: &std::path::Path, name: &str) -> PathBuf {
+    let top = data.join(name);
+    let put_away = data.join("old-databases").join(name);
+    if !top.is_file() && put_away.is_file() { put_away } else { top }
+}
+
 fn args() -> Result<Args, String> {
     let data = std::env::var_os("LOCALAPPDATA").map(|d| data_folder(&PathBuf::from(d)));
     let mut a = Args {
-        midi: data.as_ref().map(|d| d.join("midi.db")).unwrap_or_default(),
-        library: data.as_ref().map(|d| d.join("library.db")),
+        midi: data.as_ref().map(|d| old_database(d, "midi.db")).unwrap_or_default(),
+        library: data.as_ref().map(|d| old_database(d, "library.db")),
         summary: None,
         report: None,
     };

@@ -481,6 +481,16 @@ fn songs_db_held_as_the_app_starts_is_waited_for_and_settings_never_go_into_libr
     // Still held: it may be the app's own, so a settings change isn't written into library.db.
     let refused = folders::add_folder(&old, FolderList::Samples, "F:\\Lost samples", &[]).unwrap_err().to_string();
     assert!(refused.contains("open it again"), "{refused}");
+    // With library.db put away (the app does that once songs.db has worked for a week), songs.db is all there is: it's
+    // opened all the same, and no card speaks of a library.db that isn't there.
+    let away = dir.join("library.db.away");
+    std::fs::rename(&old, &away).unwrap();
+    let start = songs_db::at_start(&dir, APP);
+    assert_eq!(start.library, dir.join("songs.db"));
+    assert!(matches!(&start.state, State::Only { .. }), "{start:?}");
+    assert!(start.is_songs_db() && !start.make_wanted() && start.notice().is_none());
+    assert!(start.line().contains("there's no library.db"), "{}", start.line());
+    std::fs::rename(&away, &old).unwrap();
     release.send(()).unwrap();
     holder.join().unwrap();
     // Let go later: a settings change isn't written into library.db, where it would be lost at the next start.

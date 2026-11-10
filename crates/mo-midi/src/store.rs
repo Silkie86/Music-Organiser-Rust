@@ -510,6 +510,24 @@ fn took_in_text(roles: usize, octaves: usize, kept: usize) -> String {
     line
 }
 
+/// When (Unix seconds) the index at `path` took in the corrections you made in the C# app ([`bring_up_to_date`]):
+/// from then on its `midi.db` isn't opened again, so it may be archived (`mo_app::old_databases`). `None` while it
+/// hasn't, while the index is of an older layout (it's copied into this one first), or when that can't be told (no
+/// index there, one that can't be read just now).
+pub fn took_in_old_at(path: &Path) -> Option<i64> {
+    if !path.is_file() {
+        return None;
+    }
+    let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(path, flags).ok()?;
+    conn.busy_timeout(WAIT).ok()?;
+    let layout: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0)).ok()?;
+    if layout != LAYOUT {
+        return None;
+    }
+    conn.query_row("SELECT value FROM about WHERE name = ?1", [TOOK_IN_OLD], |r| r.get(0)).ok()
+}
+
 /// The index's layout, and whether the C# app's corrections have been taken in: one look, read-only.
 fn look(path: &Path) -> Result<(i64, bool), MidiError> {
     let open_error = |why: String| MidiError::Open { path: path.to_owned(), why };

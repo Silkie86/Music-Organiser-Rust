@@ -161,6 +161,10 @@ fn cs_midi_db(dir: &Path, roles: &[(&str, &str)], octaves: &[(&str, i64)]) -> Pa
     path
 }
 
+fn now_unix() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64)
+}
+
 #[test]
 fn an_index_of_the_older_layout_is_copied_into_this_one_with_every_row_kept() {
     let dir = folder("copied");
@@ -213,9 +217,14 @@ fn an_index_of_the_older_layout_is_copied_into_this_one_with_every_row_kept() {
     // Once done, nothing more to do.
     let again = bring_up_to_date(&path);
     assert!(again.done.is_empty() && again.later.is_empty(), "{again:?}");
-    // A midi.db that turns up (the data folder put back from a backup) is taken in then, once.
+    // A midi.db that turns up (the data folder put back from a backup) is taken in then, once: the index notes when,
+    // which is what lets midi.db be archived a week on.
+    assert_eq!(store::took_in_old_at(&path), None, "nothing taken in yet");
     cs_midi_db(&dir, &[], &[]);
+    let before = now_unix();
     let late = bring_up_to_date(&path);
+    assert!(store::took_in_old_at(&path).is_some_and(|at| (before..=now_unix()).contains(&at)));
+    assert_eq!(store::took_in_old_at(&dir.join("no-index.db")), None);
     assert_eq!(late.done, ["The old app's midi.db has no corrections to take in; it isn't opened again"]);
     assert!(bring_up_to_date(&path).done.is_empty());
 }

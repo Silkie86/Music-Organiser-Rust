@@ -1464,8 +1464,12 @@ fn show(app: &AppWindow) {
         let pending = p.data_pending.clone();
         let problems: Vec<String> =
             [mo_app::paths::problem(), mo_app::data_move::start_problem()].into_iter().flatten().collect();
-        let mut note =
-            mo_app::data_move::status_note(pending.as_deref(), mo_app::paths::moved_from().as_deref(), &problems);
+        let mut note = mo_app::data_move::status_note(
+            &mo_app::paths::data_dir(),
+            pending.as_deref(),
+            mo_app::paths::moved_from().as_deref(),
+            &problems,
+        );
         if !p.data_message.is_empty() {
             note = if note.is_empty() { p.data_message.clone() } else { format!("{}\n{note}", p.data_message) };
         }

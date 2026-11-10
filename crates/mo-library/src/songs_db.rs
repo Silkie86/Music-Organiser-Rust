@@ -149,6 +149,9 @@ pub enum State {
     /// held it longer than [`START_WAIT`]. It may be the app's own library, so the settings writers don't write into
     /// `library.db` while it may be ([`may_be_own`]): a change there would be lost at the next start.
     Unread { why: String },
+    /// `songs.db`, though it couldn't be looked at as the app started (`why`): `library.db` has gone (it's put away
+    /// once `songs.db` has worked for a week), so `songs.db` is all there is, and each page says what it finds.
+    Only { why: String },
 }
 
 impl AtStart {
@@ -159,7 +162,7 @@ impl AtStart {
 
     /// Whether the app reads its own `songs.db` (rather than `library.db`).
     pub fn is_songs_db(&self) -> bool {
-        matches!(self.state, State::Own | State::Switched)
+        matches!(self.state, State::Own | State::Switched | State::Only { .. })
     }
 
     /// What the log says.
@@ -172,6 +175,9 @@ impl AtStart {
             State::Old { why } => format!("Reading library.db: {why}, so songs.db will be made from it"),
             State::Kept { why } => format!("Reading library.db: {why}"),
             State::Unread { why } => format!("Reading library.db this time: songs.db couldn't be read ({why})"),
+            State::Only { why } => {
+                format!("Reading songs.db, though it couldn't be looked at just now ({why}): there's no library.db")
+            }
         }
     }
 
@@ -239,6 +245,8 @@ pub fn at_start(dir: &Path, app: &str) -> AtStart {
         Ok(Found::Newer(version)) => old_one(State::Kept {
             why: format!("songs.db was made by a newer version of the app (layout {version}), so it's left as it is"),
         }),
+        // library.db put away (or never there): songs.db is all there is to open.
+        Err(Unread { why, .. }) if !old.exists() => AtStart { library: songs, state: State::Only { why } },
         Err(Unread { why, passing: true }) => old_one(State::Unread { why }),
         Err(Unread { why, .. }) => {
             old_one(State::Kept { why: format!("songs.db couldn't be read ({why}), so it's left as it is") })

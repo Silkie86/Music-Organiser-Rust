@@ -136,6 +136,17 @@ pub fn to_mend(songs_db: &Path) -> Result<Option<Vec<i64>>, LibraryError> {
     Ok(Some(ids))
 }
 
+/// Whether the library at `songs_db` notes that the saves [`to_mend`] gave were read again: from then on `to_mend`
+/// never looks at the C# app's `library.db` beside it, so that may be archived (`mo_app::old_databases`). `false`
+/// when it can't be told (no library there, one that can't be read just now).
+pub fn mend_noted(songs_db: &Path) -> bool {
+    open_read_only(songs_db)
+        .and_then(|conn| {
+            Ok(conn.query_row("SELECT COUNT(*) > 0 FROM songs_info WHERE key = ?1", [MENDED_KEY], |r| r.get(0))?)
+        })
+        .unwrap_or(false)
+}
+
 /// What [`to_mend`] compares of a save's row: its file, as a read sets it.
 #[derive(Debug, PartialEq, Eq)]
 struct FlRow {
