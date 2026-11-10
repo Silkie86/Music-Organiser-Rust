@@ -71,6 +71,8 @@ fn main() -> Result<(), slint::PlatformError> {
         // read out of library.db itself; songs.db needs no copy).
         mo_library::list_copy::keep(&library, &data.join(mo_library::list_copy::FILE_NAME));
     }
+    // The Songs list is read from here on, while the settings load, the graphics card is found and the window is made.
+    let songs_ahead = mo_ui::songs::read_ahead(library.clone());
     let (settings, writable) = mo_ui::settings::load(&data, &library);
     let shortcuts = Shortcuts::from_setting(settings.get(mo_app::shortcuts::SETTING_KEY));
     // Settings' pace: how many low-priority threads background work gets, from now until the app closes.
@@ -103,7 +105,7 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::drag::connect(feed.clone());
     // The Songs page reads the song library (the C# app's library.db, read-only, until songs.db is the app's own), and
     // keeps what it reads of your saves, and the Bitwig copies it converts, only ever in songs.db.
-    mo_ui::songs::connect(&app, library.clone(), feed.clone());
+    mo_ui::songs::connect(&app, songs_ahead, feed.clone());
     mo_ui::startup::step("Songs page");
     mo_ui::sounds::connect(
         &app,
