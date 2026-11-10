@@ -135,6 +135,18 @@ export component Finder inherits Rectangle {
                 height: kinds.height;
                 content-width: kinds.width + 2 * Space.sm;
                 interactive: self.content-width > self.width;
+                // Tab (or a click) picks a kind: the row slides just enough to keep its tab in view.
+                property <length> lit-start: kinds.x + kinds.lit-x;
+                property <length> lit-end: self.lit-start + kinds.lit-width + Space.sm;
+                changed lit-start => { self.follow(); }
+                changed lit-end => { self.follow(); }
+                function follow() {
+                    if (self.lit-start - Space.sm < -self.content-x) {
+                        self.content-x = -max(0px, self.lit-start - Space.sm);
+                    } else if (self.lit-end > -self.content-x + self.width) {
+                        self.content-x = -(self.lit-end - self.width);
+                    }
+                }
                 kinds := Segmented {
                     x: Space.sm;
                     choices: FinderData.kinds;
