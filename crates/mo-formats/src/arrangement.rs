@@ -38,10 +38,39 @@ pub struct PreviewPoint {
     pub value: f64,
 }
 
+/// How a DAW stretches a piece of audio to the song's tempo, by Bitwig's names (the other DAWs' modes map onto these).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stretch {
+    /// Plays at its own speed and pitch, whatever the tempo.
+    Raw,
+    /// Speeds up or slows down with the tempo, and its pitch with it, like a record.
+    Repitch,
+    /// Bitwig's old Stretch.
+    Stretch,
+    StretchHd,
+    ElastiquePro,
+    /// A mode the reader doesn't know yet, by the number the file gives it.
+    Other(i32),
+}
+
+impl Stretch {
+    /// Bitwig's number for it (an audio playback's 0x4b0), as Solomon's recipe saves showed.
+    pub fn from_bitwig(code: i32) -> Stretch {
+        match code {
+            0 => Stretch::Raw,
+            1 => Stretch::Stretch,
+            2 => Stretch::Repitch,
+            3 => Stretch::StretchHd,
+            10 => Stretch::ElastiquePro,
+            other => Stretch::Other(other),
+        }
+    }
+}
+
 /// A stretch of an audio file playing in a clip, from `start` for `length` beats (timed from the clip's start). It
 /// starts `from` seconds into the file and moves through it at `seconds_per_beat`; when that's only known once the
 /// file's length is, `whole_file_beats` says how many beats the whole file takes instead.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct AudioPart {
     /// The file as the project saved it.
     pub path: String,
@@ -50,8 +79,15 @@ pub struct AudioPart {
     pub from: f64,
     pub seconds_per_beat: Option<f64>,
     pub whole_file_beats: Option<f64>,
-    /// Plays backwards (FL Studio's reverse switch).
+    /// Plays backwards, from the end of what it plays of the file to `from` (FL Studio's reverse switch, Bitwig's
+    /// Reverse). `seconds_per_beat` stays positive.
     pub reversed: bool,
+    /// How it's stretched to the tempo, when the project says.
+    pub stretch: Option<Stretch>,
+    /// Transposed this many semitones (0 when it isn't).
+    pub semitones: f64,
+    /// Its own gain in dB (0 when it's left alone, minus infinity when turned right down).
+    pub gain_db: f64,
 }
 
 impl AudioPart {
@@ -76,6 +112,9 @@ pub struct PreviewClip {
     pub points: Vec<PreviewPoint>,
     /// The clip's own colour (0xRRGGBB), when it has one; otherwise it takes its lane's.
     pub colour: Option<u32>,
+    /// How long it fades in and out, in beats (0 when it doesn't).
+    pub fade_in: f64,
+    pub fade_out: f64,
     /// The instruments whose notes the clip holds, by name, when a clip can hold more than one (an FL Studio pattern
     /// holds a part for each channel in it): a note's [`PreviewNote::part`] is its place here. Empty when every note is
     /// the lane's own.

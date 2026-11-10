@@ -554,6 +554,7 @@ fn part(c: &FlChannel, beats: f64, from: f64, tempo: f64) -> AudioPart {
         seconds_per_beat,
         whole_file_beats,
         reversed: s.reversed,
+        ..Default::default()
     }
 }
 

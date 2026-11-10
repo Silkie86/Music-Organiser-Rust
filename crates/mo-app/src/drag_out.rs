@@ -1028,6 +1028,7 @@ mod tests {
             seconds_per_beat: None,
             whole_file_beats: None,
             reversed: false,
+            ..Default::default()
         };
         let mut lane = PreviewLane::new("Drums", LaneKind::Audio);
         let clip =

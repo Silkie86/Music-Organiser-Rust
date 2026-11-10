@@ -115,6 +115,7 @@ impl Song<'_> {
                             seconds_per_beat: Some(spb * speed),
                             whole_file_beats: None,
                             reversed: false,
+                            ..Default::default()
                         };
                         clips.push(PreviewClip {
                             name,
