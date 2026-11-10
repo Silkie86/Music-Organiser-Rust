@@ -42,8 +42,9 @@ the tone the songs point at.
 
 ## Known gaps (what the readers miss)
 
-- Bitwig: deactivated tracks, arranger automation, time signature and cue markers. Stretch mode, transpose, gain
-  and clip fades are read but the app doesn't draw or play them yet.
+- Bitwig: nothing known from these saves now (10 Nov 2026). Stretch mode, transpose, gain and clip fades are read but
+  the app doesn't draw or play them yet. Not in them, so not checked: a time signature that isn't over 4 (6/8), a
+  muted track, how a curve bends between two points (drawn straight), and stretch modes 5, 6 and 12.
 - FL: clip fades, declicking, sampler IN/OUT, the second arrangement. Stretch mode and pitch are read (10 Nov 2026)
   but the app doesn't draw or play them yet.
 - Fender: nothing known from these saves now (10 Nov 2026). Not in them, so not checked: an event's Speedup on a

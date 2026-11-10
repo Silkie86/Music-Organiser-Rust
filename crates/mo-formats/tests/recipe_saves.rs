@@ -184,10 +184,20 @@ fn muted_tracks() {
 #[test]
 fn bitwig_group() {
     let a = bitwig("06 group and off");
-    let depths: Vec<_> = a.lanes.iter().map(|l| (l.kind, l.depth)).collect();
-    assert_eq!(depths[0], (LaneKind::Group, 0));
-    assert_eq!(depths[1], (LaneKind::Instrument, 1));
-    assert_eq!(depths[2], (LaneKind::Audio, 1));
+    // The save still holds step 3's automation: the tempo's curve first, the volume and pan under the Polysynth.
+    let depths: Vec<_> = a.lanes.iter().map(|l| (l.name.as_str(), l.kind, l.depth)).collect();
+    assert_eq!(
+        depths,
+        [
+            ("Tempo", LaneKind::Automation, 0),
+            ("Group 1", LaneKind::Group, 0),
+            ("Polysynth", LaneKind::Instrument, 1),
+            ("Volume", LaneKind::Automation, 2),
+            ("Pan", LaneKind::Automation, 2),
+            ("MO Tone A", LaneKind::Audio, 1),
+            ("Drum Machine", LaneKind::Instrument, 0),
+        ]
+    );
 }
 
 #[test]
@@ -351,7 +361,6 @@ fn fender_bus() {
 }
 
 #[test]
-#[ignore = "known gap: Bitwig time signature and cue markers are not read"]
 fn bitwig_time_signature_and_marker() {
     let a = bitwig("16 time signature and marker");
     assert_eq!(a.beats_per_bar, 3);
@@ -361,27 +370,39 @@ fn bitwig_time_signature_and_marker() {
     assert!(near(a.markers[0].beat, 4.0));
 }
 
-/// The volume, pan and tempo lanes from step 3: each a straight line between two points.
-fn step_3_automation(a: &Arrangement, what: &str) {
+#[test]
+fn bitwig_automation() {
+    let a = bitwig("03 automation");
     let points = |name: &str| -> Vec<(f64, f64)> {
-        let lane = a.lanes.iter().find(|l| l.kind == LaneKind::Automation && l.name.contains(name));
-        let lane = lane.unwrap_or_else(|| {
-            panic!("{what}: no {name} lane in {:?}", a.lanes.iter().map(|l| &l.name).collect::<Vec<_>>())
-        });
+        let lane = a.lanes.iter().find(|l| l.kind == LaneKind::Automation && l.name == name).unwrap();
         lane.clips.iter().flat_map(|c| c.points.iter().map(move |p| (c.start + p.beat, p.value))).collect()
     };
+    // The volume goes from 0 dB to -6 dB over bar 1. Bitwig saves the cube root of the level, and the top of its
+    // fader (1 here) is +6 dB.
+    let db = |v: f64| 60.0 * (v * 2f64.cbrt()).log10();
     let volume = points("Volume");
-    assert!(near(volume[0].0, 0.0) && near(volume[1].0, 4.0), "{what}: {volume:?}");
-    let pan = points("Pan");
-    assert!(near(pan[0].0, 4.0) && pan[0].1 < pan[1].1, "{what}: {pan:?}");
-    let tempo = points("Tempo");
-    assert!(near(tempo[0].0, 4.0) && near(tempo[0].1, 128.0) && near(tempo[1].1, 140.0), "{what}: {tempo:?}");
-}
-
-#[test]
-#[ignore = "known gap: Bitwig arranger automation is not shown"]
-fn bitwig_automation() {
-    step_3_automation(&bitwig("03 automation"), "Bitwig");
+    assert!(near(volume[0].0, 0.0) && near(volume[1].0, 4.0), "{volume:?}");
+    assert!(db(volume[0].1).abs() < 0.01 && (db(volume[1].1) + 6.0).abs() < 0.1, "{volume:?}");
+    // The pan holds one side to bar 2, then crosses to the other by bar 3.
+    assert_eq!(points("Pan"), [(0.0, 1.0), (4.0, 1.0), (8.0, 0.0)]);
+    // The tempo holds 128 to bar 2, then climbs to 140 at bar 3: 0 to 1 is Bitwig's 20 to 666 BPM.
+    let tempo: Vec<_> = points("Tempo").iter().map(|(beat, v)| (*beat, 20.0 + 646.0 * v)).collect();
+    assert_eq!(tempo.len(), 3);
+    assert!(near(tempo[0].0, 0.0) && near(tempo[1].0, 4.0) && near(tempo[2].0, 8.0), "{tempo:?}");
+    assert!(near(tempo[0].1, 128.0) && near(tempo[1].1, 128.0) && near(tempo[2].1, 140.0), "{tempo:?}");
+    // The curves sit under their track and say what they move.
+    let names: Vec<_> = a.lanes.iter().map(|l| (l.name.as_str(), l.detail.as_str(), l.depth)).collect();
+    assert_eq!(
+        names,
+        [
+            ("Tempo", "Song tempo", 0),
+            ("Polysynth", "Polysynth", 0),
+            ("Volume", "Moves Polysynth", 1),
+            ("Pan", "Moves Polysynth", 1)
+        ]
+    );
+    // A project whose settings never move has no curves.
+    assert!(bitwig("02 notes").lanes.iter().all(|l| l.kind != LaneKind::Automation));
 }
 
 #[test]
@@ -420,10 +441,12 @@ fn fender_automation() {
 }
 
 #[test]
-#[ignore = "known gap: Bitwig deactivated tracks are not marked"]
 fn bitwig_deactivated_track() {
-    assert!(lane(&bitwig("06 group and off"), LaneKind::Audio).muted);
-    assert!(!lane(&bitwig("05 drum machine"), LaneKind::Audio).muted);
+    let off = bitwig("06 group and off");
+    assert!(lane(&off, LaneKind::Audio).muted && lane(&off, LaneKind::Audio).disabled);
+    assert!(off.lanes.iter().filter(|l| l.kind != LaneKind::Audio).all(|l| !l.muted && !l.disabled));
+    let on = bitwig("05 drum machine");
+    assert!(on.lanes.iter().all(|l| !l.muted && !l.disabled));
 }
 
 #[test]

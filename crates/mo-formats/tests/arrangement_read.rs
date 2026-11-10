@@ -439,6 +439,147 @@ fn bitwig_projects_from_before_version_6_show_their_clips() {
     assert_eq!(jam.lanes[0].clips.iter().map(|c| (c.start, c.length)).collect::<Vec<_>>(), [(0.0, 4.0), (4.0, 4.0)]);
 }
 
+/// An automation lane as Bitwig 6.1 saves it: what it moves, and the points drawn on it (a value, or yes/no).
+fn automation_lane(b: &mut BwWriter, device: &str, setting: &str, points: &[(f64, f64)], on_off: bool) {
+    b.begin(0x23d);
+    b.obj(0x2a3);
+    b.begin(0xf1);
+    b.str(0x133b, device);
+    b.str(0x133a, setting);
+    b.end();
+    b.obj(0x2d8c);
+    b.begin(0xd91);
+    b.list(ITEMS);
+    b.end_list();
+    b.obj(0x35ac);
+    b.begin(0x6e);
+    b.list(ITEMS);
+    for &(beat, value) in points {
+        b.begin(if on_off { 0x7d } else { 0x108 });
+        b.f64(0x2af, beat);
+        if on_off {
+            b.bool(0x12e, value != 0.0);
+        } else {
+            b.f64(0x28f, value);
+        }
+        b.end();
+    }
+    b.end_list();
+    b.end();
+    b.end();
+    b.end();
+}
+
+/// A track with nothing on it but its on switch, its mute and its automation lanes.
+fn switched_track(b: &mut BwWriter, name: &str, active: bool, muted: bool, lanes: impl FnOnce(&mut BwWriter)) {
+    b.begin(0x285);
+    b.str(TRACK_NAME, name);
+    b.bool(0x1380, active);
+    b.obj(0x165);
+    b.begin(0xab);
+    b.obj(0x1a6);
+    b.begin(0x4ce);
+    b.bool(0xd2, muted);
+    b.end();
+    b.end();
+    b.obj(0x2dc9);
+    b.begin(0xfa2);
+    b.list(0x4ba);
+    lanes(b);
+    b.end_list();
+    b.end();
+    b.end();
+}
+
+#[test]
+fn bitwig_deactivated_tracks_time_signature_markers_and_automation() {
+    // The shapes Solomon's recipe saves showed (Bitwig 6.1.7, 10 Nov 2026).
+    let bytes = BwWriter::file(
+        |_| {},
+        |b| {
+            b.begin(0x520);
+            // The transport: 3/4 (12 sixteenths to the bar), two cue markers and the tempo's curve.
+            b.obj(0x190);
+            b.begin(0xd7);
+            b.obj(0x212);
+            b.begin(0x7f4);
+            b.i32(0x1cbe, 0x0C00_0024);
+            b.end();
+            b.obj(0x2adc);
+            b.begin(0x26a);
+            b.list(ITEMS);
+            for (beat, name) in [(8.0, "Drop"), (2.0, ""), (f64::NAN, "Lost")] {
+                b.begin(0x266);
+                b.f64(0x2af, beat);
+                b.str(0x98b, name);
+                b.end();
+            }
+            b.end_list();
+            b.end();
+            b.obj(0x2dc9);
+            b.begin(0xfa3);
+            b.list(0x4ba);
+            automation_lane(b, "Transport", "Tempo", &[(0.0, 20.0), (4.0, 343.0), (8.0, 666.0)], false);
+            b.end_list();
+            b.end();
+            b.end();
+            b.obj(PROJECT_GROUP);
+            b.begin(0x521);
+            b.list(GROUP_TRACKS);
+            switched_track(b, "Off", false, false, |b| {
+                automation_lane(b, "Mixer", "Volume", &[(0.0, 2f64.cbrt()), (4.0, 0.0)], false);
+                automation_lane(b, "Mixer", "Pan", &[(0.0, -1.0), (4.0, 0.0), (8.0, 1.0)], false);
+            });
+            switched_track(b, "Muted", true, true, |b| {
+                // Written out of order: an on/off setting holds each answer until the next in time.
+                automation_lane(b, "Filter", "On/Off", &[(4.0, 1.0), (0.0, 0.0)], true);
+            });
+            switched_track(b, "Synth", true, false, |b| {
+                // A setting that isn't 0 to 1 is spread over what its lane holds.
+                automation_lane(b, "Synth", "Cutoff", &[(0.0, 10.0), (2.0, 30.0), (4.0, 20.0)], false);
+                // A setting that never moves has no lane.
+                automation_lane(b, "Synth", "Resonance", &[(0.0, 0.5)], false);
+            });
+            b.end_list();
+            b.end();
+            b.end();
+        },
+        None,
+    );
+    let a = read("Song.bwproject", &bytes);
+    assert_eq!(a.beats_per_bar, 3);
+    let markers: Vec<_> = a.markers.iter().map(|m| (m.name.as_str(), m.beat)).collect();
+    assert_eq!(markers, [("Marker", 2.0), ("Drop", 8.0)]);
+    let shown: Vec<_> =
+        a.lanes.iter().map(|l| (l.name.as_str(), l.detail.as_str(), l.depth, l.muted, l.disabled)).collect();
+    assert_eq!(
+        shown,
+        [
+            ("Tempo", "Song tempo", 0, false, false),
+            // A deactivated track is muted too, and so are its curves.
+            ("Off", "", 0, true, true),
+            ("Volume", "Moves Off", 1, true, false),
+            ("Pan", "Moves Off", 1, true, false),
+            ("Muted", "", 0, true, false),
+            ("On/Off", "Moves Filter on Muted", 1, true, false),
+            ("Synth", "", 0, false, false),
+            ("Cutoff", "Moves Synth", 1, false, false),
+        ]
+    );
+    let points = |lane: usize| -> Vec<(f64, f64)> {
+        let clip = &a.lanes[lane].clips[0];
+        clip.points.iter().map(|p| (clip.start + p.beat, p.value)).collect()
+    };
+    // The tempo over Bitwig's 20 to 666 BPM; the volume up to the fader's top; the pan from left to right.
+    assert_eq!(points(0), [(0.0, 0.0), (4.0, 0.5), (8.0, 1.0)]);
+    assert_eq!(points(2), [(0.0, 1.0), (4.0, 0.0)]);
+    assert_eq!(points(3), [(0.0, 0.0), (4.0, 0.5), (8.0, 1.0)]);
+    assert_eq!(points(5), [(0.0, 0.0), (4.0, 0.0), (4.0, 1.0)]);
+    assert_eq!(points(7), [(0.0, 0.0), (2.0, 1.0), (4.0, 0.5)]);
+    // The curves aren't tracks: a project with nothing else on its timeline still says so.
+    assert_eq!(a.notes, ["Nothing is on the arrangement timeline or in the clip launcher yet."]);
+}
+
 #[test]
 fn the_bitwig_template_shows_its_audio_and_note_clips_and_what_plays_each_track() {
     let a = read("template.bwproject", &bitwig_template(Template::default()));
@@ -446,16 +587,22 @@ fn the_bitwig_template_shows_its_audio_and_note_clips_and_what_plays_each_track(
         a.lanes.iter().map(|l| (l.name.as_str(), l.kind, l.detail.as_str())).collect::<Vec<_>>(),
         [
             ("Kick", LaneKind::Instrument, "Sampler · Kick"),
+            // The template's automation: each curve under its track.
+            ("Volume", LaneKind::Automation, "Moves Kick"),
             ("Drops", LaneKind::Audio, ""),
             ("Serum 2", LaneKind::Instrument, "Serum 2"),
             ("Drumazon", LaneKind::Instrument, "Drumazon"),
+            ("Bass Drum Level", LaneKind::Automation, "Moves Drumazon"),
         ]
     );
-    let drops = &a.lanes[1].clips[0];
+    let drops = &a.lanes[2].clips[0];
     assert_eq!((drops.name.as_str(), drops.start, drops.length), ("Drops", 0.0, 64.0));
     let part = &drops.audio[0];
     assert_eq!((part.start, part.length, part.from, part.seconds_per_beat), (0.0, 64.0, 0.0, Some(0.5)));
-    assert_eq!(a.lanes[2].clips[0].notes.len(), 3);
+    assert_eq!(a.lanes[3].clips[0].notes.len(), 3);
+    // Each is an automation clip with one point.
+    let curve = &a.lanes[1].clips[0];
+    assert_eq!((curve.start, curve.length, curve.points.len()), (0.0, 4.0, 1));
 
     for bad in [bitwig_undecodable_bytes("Undecodable"), b"not bitwig".to_vec()] {
         let bad: Vec<u8> = bad;
