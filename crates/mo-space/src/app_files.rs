@@ -64,12 +64,15 @@ pub const OLD_DATABASES: &str = "Old app's databases";
 /// and could be archived (the whole-app review of 6 Nov, X1-4). Listed after [`databases`], so one the app still reads
 /// (its own isn't made yet) counts there instead: each file counts once ([`measure`]).
 pub fn old_databases(folder: &Path) -> Vec<AppDatabase> {
-    let what = "Kept from the old app: this app has its own now";
     ["library.db", "sounds.db", "midi.db"]
         .into_iter()
-        .map(|file| AppDatabase { name: OLD_DATABASES, what, path: folder.join(file) })
+        .map(|file| AppDatabase { name: OLD_DATABASES, what: OLD_DATABASES_WHAT, path: folder.join(file) })
         .collect()
 }
+
+/// What the old app's databases are, on the card: the same whether they're still at the top of the app's folder or
+/// put away in its `old-databases` folder ([`part_of`]), so both count as one part.
+const OLD_DATABASES_WHAT: &str = "Kept from the old app: this app has its own now";
 
 /// What the part with the sound library's backup copy is called ([`sound_lab_copies`]).
 pub const SOUND_LAB_BACKUP: &str = "Sound Lab backup";
@@ -199,6 +202,8 @@ pub fn part_of(name: &str, folder: bool) -> (&'static str, &'static str) {
         "logs" => ("Logs", "What the app did, for when something goes wrong"),
         "notes" => ("Notes for Claude", "What you wrote with F12, with its pictures"),
         "reports" | "probe" => ("Test reports", "Live tests, self-checks and MO Probe"),
+        // Where the app puts them away once its own have worked for a week (`mo_app::old_databases::FOLDER`).
+        "old-databases" => (OLD_DATABASES, OLD_DATABASES_WHAT),
         _ => ("Everything else", "Your Bitwig template and the rest"),
     }
 }

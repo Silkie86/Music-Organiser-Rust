@@ -317,8 +317,11 @@ fn the_fl_studio_saves_the_app_kept_are_read_again_once_for_their_muted_samples(
     assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![2]));
     // Read again but for two that couldn't be: noted with them, and only those still FL Studio saves there are
     // given after that (one since gone missing, one no longer in the library).
+    assert!(!song_writes::mend_noted(&songs), "library.db is still wanted for the mend");
     let noted = song_writes::write(&songs, &Batch { mended: true, owed: vec![2, 5, 99], ..Batch::default() }).unwrap();
     assert!(noted.mended);
+    assert!(song_writes::mend_noted(&songs), "from here on library.db isn't looked at");
+    assert!(!song_writes::mend_noted(&dir.join("no-songs.db")));
     assert_eq!(song_writes::to_mend(&songs).unwrap(), Some(vec![2]));
     // Once they're read again, a batch notes it (on its own too): none after that.
     let noted = song_writes::write(&songs, &Batch { mended: true, ..Batch::default() }).unwrap();

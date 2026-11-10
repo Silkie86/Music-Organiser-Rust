@@ -25,6 +25,7 @@ pub mod live;
 pub mod log;
 pub mod midi;
 pub mod note;
+pub mod old_databases;
 pub mod paths;
 pub mod piano_roll;
 pub mod places;

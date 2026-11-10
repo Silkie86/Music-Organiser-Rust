@@ -124,6 +124,25 @@ impl Feed {
         self.changed();
     }
 
+    /// A card that isn't a job, for something done you'd want to have seen however long you were away (the old app's
+    /// databases put away): it stays until its × takes it away, like [`Feed::notice`], but as a job done, not a
+    /// warning.
+    pub fn told(&self, title: &str, detail: &str) {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        self.lock().cards.push(Card {
+            id,
+            title: title.to_owned(),
+            detail: detail.to_owned(),
+            progress: None,
+            state: State::Done,
+            put_away: false,
+            started: Instant::now(),
+            ended: None,
+        });
+        log::info("Notice", &format!("{title}{}", bracket(detail)));
+        self.changed();
+    }
+
     /// The cards to show now, oldest first: put-away ones and finished ones past their time are left out.
     pub fn visible(&self, now: Instant) -> Vec<Card> {
         self.lock().cards.iter().filter(|c| !c.put_away && !c.gone_by(now)).cloned().collect()

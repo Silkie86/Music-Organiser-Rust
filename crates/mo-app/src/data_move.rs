@@ -815,10 +815,11 @@ fn moved_out_note(from: &Path, first: &Path, to: &Path, when: &str) -> String {
             keep.push(format!("{}: the launcher, which the Desktop shortcut starts", launchers.join(" and ")));
         }
     }
+    // Until the app has put them away in the new folder ([`crate::old_databases`]): after that, nothing waits.
     let left: Vec<&str> = LEFT_BEHIND
         .iter()
         .map(|&(old, _)| old)
-        .filter(|old| from.join(old).is_file() && left_behind(from, old))
+        .filter(|old| from.join(old).is_file() && left_behind(from, old) && !crate::old_databases::holds(to, old))
         .collect();
     if !left.is_empty() {
         keep.push(format!("{}: not copied, kept here until the app has archived them", left.join(", ")));
@@ -842,6 +843,22 @@ fn moved_out_note(from: &Path, first: &Path, to: &Path, when: &str) -> String {
     }
     note.push_str("\r\nThe rest can go once you're happy the app works from the new folder.\r\n");
     note
+}
+
+/// Writes the note in the folder the data in `data` was moved out of again, as it reads now: once the old databases
+/// the move left there are put away ([`crate::old_databases`]), it no longer says to keep them. Only a note that's
+/// there (never one you removed, nor through a link), and only when it would read differently; `first` is the
+/// system's own data folder. Whether it was written.
+pub fn renew_moved_out_note(data: &Path, first: &Path) -> bool {
+    let Some(moved) = moved_in(data) else { return false };
+    let from = PathBuf::from(&moved.from);
+    let file = from.join(MOVED_OUT_FILE);
+    if !fs::symlink_metadata(&file).is_ok_and(|m| m.is_file()) {
+        return false;
+    }
+    let Ok(now) = fs::read_to_string(&file) else { return false };
+    let note = moved_out_note(&from, first, data, &moved.switched);
+    note != now && fs::write(&file, note).is_ok()
 }
 
 /// Whether two folder paths name the same folder as written (Windows and a Mac ignore case).
@@ -888,8 +905,8 @@ pub fn size_text(bytes: u64) -> String {
 }
 
 /// The line Settings shows under the data folder: a move waiting for the next start, where the data came from, or
-/// why a move's folder isn't in use.
-pub fn status_note(pending: Option<&Path>, moved_from: Option<&Path>, problems: &[String]) -> String {
+/// why a move's folder isn't in use. `data` is the data folder in use.
+pub fn status_note(data: &Path, pending: Option<&Path>, moved_from: Option<&Path>, problems: &[String]) -> String {
     let mut lines: Vec<String> = problems.to_vec();
     if let Some(to) = pending {
         lines.push(format!(
@@ -909,7 +926,7 @@ pub fn status_note(pending: Option<&Path>, moved_from: Option<&Path>, problems: 
         let left: Vec<&str> = LEFT_BEHIND
             .iter()
             .map(|&(old, _)| old)
-            .filter(|old| from.join(old).is_file() && left_behind(from, old))
+            .filter(|old| from.join(old).is_file() && left_behind(from, old) && !crate::old_databases::holds(data, old))
             .collect();
         if !left.is_empty() {
             line.push_str(&format!(" Keep {} there until the app has archived it.", left.join(", ")));
@@ -1030,6 +1047,36 @@ mod tests {
             assert!(!s.to.join(name).exists(), "{name}");
             assert!(s.first.join(name).is_file(), "{name}");
         }
+    }
+
+    #[test]
+    fn the_old_folders_note_stops_asking_for_what_has_been_put_away() {
+        let s = Setup::new("put-away");
+        for name in ["sounds.db", "sounds.db-wal"] {
+            fs::write(s.first.join(name), b"C#").unwrap();
+        }
+        fs::write(s.first.join(mo_sounds::compact::FILE_NAME), b"Rust").unwrap();
+        s.copy().unwrap();
+        assert!(matches!(finish_in(&s.first), Some(AtStart::Switched { .. })));
+        let note_file = s.first.join(MOVED_OUT_FILE);
+        let note = || fs::read_to_string(&note_file).unwrap();
+        let asks = "sounds.db, sounds.db-wal: not copied, kept here until the app has archived them";
+        assert!(note().contains(asks), "{}", note());
+        assert!(!renew_moved_out_note(&s.to, &s.first), "it says what's so already");
+        // The app puts the old databases away: library.db from the new folder, sounds.db copied from the old one.
+        let done = crate::old_databases::archive(&s.to, Some(&s.first), &|_| Ok(()), &mut |_| {});
+        assert_eq!(done.moved.len(), 1, "{done:?}");
+        assert_eq!(done.copied, [("sounds.db", 4)], "{done:?}");
+        assert!(s.first.join("sounds.db").is_file() && s.first.join("library.db").is_file(), "left as they were");
+        assert!(renew_moved_out_note(&s.to, &s.first));
+        assert!(!note().contains("sounds.db") && !note().contains("archived"), "{}", note());
+        assert!(note().contains("The rest can go once you're happy the app works from the new folder."));
+        assert!(note().contains(&s.to.display().to_string()));
+        assert!(!renew_moved_out_note(&s.to, &s.first), "written once");
+        // A note you removed isn't written again, and a folder the data never moved into has none to write.
+        fs::remove_file(&note_file).unwrap();
+        assert!(!renew_moved_out_note(&s.to, &s.first) && !note_file.exists());
+        assert!(!renew_moved_out_note(&s.first, &s.first));
     }
 
     #[test]

@@ -147,6 +147,8 @@ fn main() -> Result<(), slint::PlatformError> {
     app.window().set_maximized(true);
     // A little after start, the MIDI files older drags left in Temp (rule 28).
     mo_ui::drag::sweep_later();
+    // Later still, the old app's databases put away, once the app's own have worked without them for a week.
+    mo_app::old_databases::archive_later(data.clone(), feed.clone());
     // A little after start too, songs.db made from library.db, for the next start.
     if songs_db.make_wanted() {
         mo_app::song_library::make_later(data, feed.clone());
