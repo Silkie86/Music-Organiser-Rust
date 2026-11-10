@@ -1857,6 +1857,314 @@ fn a_damaged_library_is_mended_from_its_backup_copy() {
     assert!(said.contains(compact::FILE_NAME) && said.contains("there's no backup copy"), "{said}");
 }
 
+/// Every row of `table` in the database at `db`, by row number.
+fn table(db: &Path, table: &str) -> Vec<String> {
+    rows(db, &format!("SELECT rowid, * FROM {table} ORDER BY rowid"))
+}
+
+/// The app's own library found damaged with no backup copy is set aside, never removed, and made again from sounds.db
+/// with everything that can still be read of it (review finding S-1): what the app wrote into it lives nowhere else.
+/// Where part of it can't be read, the new one has what sounds.db had there.
+#[test]
+fn a_damaged_library_without_a_backup_copy_keeps_what_can_still_be_read_of_it() {
+    use mo_sounds::compact::yours::{self, Change, Yours};
+    let dir = folder("salvage");
+    let old = library(&dir, 300);
+    let copy = compact::copy_of(&old);
+    let damaged = backup::damaged_of(&copy);
+    compact::sync(&old, &copy).unwrap();
+    compact::last_sync(&old, &copy).unwrap();
+    let since = compact::own_since(&copy).unwrap();
+    let ids: Vec<(i64, String)> = {
+        let c = Connection::open(&copy).unwrap();
+        let mut st = c.prepare("SELECT id, path FROM sounds ORDER BY id LIMIT 3").unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
+    };
+    let [(a, _), (b, _), (gone_id, gone)] = ids.as_slice() else { panic!("three sounds") };
+    let (a, b, gone_id) = (*a, *b, *gone_id);
+    let was_a = rating_of(&copy, a);
+    let stars = if was_a == 5 { 1 } else { 5 };
+    // What the app wrote: stars and a tag, a play, a sound its scan added, one it forgot, and one it added and forgot
+    // again, whose number is never given again.
+    let y = |id, change| Yours { id, change };
+    yours::keep(&old, &[y(a, Change::Stars(stars)), y(b, Change::Tag("Kept".into()))]).unwrap();
+    did::keep(&old, &[Did { id: a, kind: event::PLAY, at: unix(2026, 11, 9) }]).unwrap();
+    let listened =
+        |path: &str| Listened { path: path.to_owned(), size: 1000, mtime: unix(2026, 11, 9), analysed: Ok(heard(0.5)) };
+    let (kick, snare) = ("D:\\Samples\\New Pack\\Kick 01.wav", "D:\\Samples\\New Pack\\Snare 01.wav");
+    grow::keep(&old, &[listened(kick), listened(snare)]).unwrap();
+    let (kick_id, snare_id) = (id_of(&copy, kick).unwrap(), id_of(&copy, snare).unwrap());
+    grow::follow(&old, &[], &[gone.clone(), snare.to_owned()]).unwrap();
+    assert!(!backup::backup_of(&copy).exists());
+    let kept_tables = ["sounds", "sound_waves", "sound_clap", "sound_tags", "sound_events", "sound_maps", "settings"];
+    let before: Vec<Vec<String>> = kept_tables.iter().map(|t| table(&copy, t)).collect();
+    let info = "SELECT key, value FROM copy_info ORDER BY key";
+    let info_before = rows(&copy, info);
+    // A bad sector where the fingerprints are.
+    damage(&copy, "sound_features");
+    let (everything, made) = compact::mend_reading(&old, &copy, now()).unwrap();
+    let made = made.unwrap();
+    assert!(made.made && made.from_backup.is_none(), "{made:?}");
+    assert_eq!(made.backup_unused.as_deref(), Some("there's no backup copy"));
+    let salvaged = made.salvaged.unwrap();
+    assert_eq!(salvaged.unread, 1, "{salvaged:?}");
+    assert!(salvaged.kept >= 6, "{salvaged:?}");
+    // All but the fingerprints as they were, every row to the last bit; the page's read with them.
+    for (name, rows) in kept_tables.iter().zip(&before) {
+        assert_eq!(&table(&copy, name), rows, "{name}");
+    }
+    assert_eq!(rows(&copy, info), info_before);
+    assert_eq!(made.sounds, everything.sounds.len());
+    same_everything(&everything, &SoundsDb::open_read_only(&copy).unwrap().everything(now()).unwrap());
+    assert!(everything.sounds.iter().any(|s| s.id == kick_id));
+    assert!(!everything.sounds.iter().any(|s| s.id == gone_id));
+    assert_eq!(rating_of(&copy, a), i64::from(stars));
+    // The fingerprints as sounds.db has them (the scan's kick's can't be read), but the forgotten sound's: it takes
+    // them with it.
+    let features = format!("SELECT rowid, * FROM sound_features WHERE sound_id <> {gone_id} ORDER BY rowid");
+    assert_eq!(table(&copy, "sound_features"), {
+        let fresh = folder("salvage-fresh");
+        let fresh_copy = fresh.join(compact::FILE_NAME);
+        let fresh_old = fresh.join("sounds.db");
+        std::fs::copy(&old, &fresh_old).unwrap();
+        compact::sync(&fresh_old, &fresh_copy).unwrap();
+        assert!(count(&fresh_copy, "SELECT COUNT(*) FROM sound_features WHERE sound_id = ?1", gone_id) > 0);
+        rows(&fresh_copy, &features)
+    });
+    assert_eq!(compact::own_since(&copy), Some(since));
+    assert_eq!(pragma(&copy, "journal_mode"), "wal");
+    assert_eq!(pragma(&copy, "integrity_check"), "ok");
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+    // The damaged one set aside, as it was.
+    assert_ne!(pragma(&damaged, "quick_check"), "ok");
+    // The numbers it gave are never given again.
+    grow::keep(&old, &[listened("D:\\Samples\\New Pack\\Hat 01.wav")]).unwrap();
+    assert!(id_of(&copy, "D:\\Samples\\New Pack\\Hat 01.wav").unwrap() > snare_id);
+    // Its sounds' first page damaged: none of them can be read, so they're as sounds.db has them, the stars too; the
+    // tags and the plays are kept all the same.
+    let tags = table(&copy, "sound_tags");
+    let events = table(&copy, "sound_events");
+    // A tag of the scan's kick: it goes with the kick.
+    yours::keep(&old, &[y(kick_id, Change::Tag("Kick".into()))]).unwrap();
+    damage(&copy, "sounds");
+    let (_, made) = compact::mend_reading(&old, &copy, now()).unwrap();
+    let salvaged = made.unwrap().salvaged.unwrap();
+    assert!(salvaged.unread >= 1, "{salvaged:?}");
+    assert_eq!(rating_of(&copy, a), was_a);
+    assert_eq!(id_of(&copy, kick), None);
+    assert_eq!(id_of(&copy, gone), Some(gone_id));
+    assert_eq!(table(&copy, "sound_tags"), tags);
+    assert_eq!(table(&copy, "sound_events"), events);
+    assert_eq!(compact::own_since(&copy), Some(since));
+    assert_eq!(pragma(&copy, "integrity_check"), "ok");
+    assert_ne!(pragma(&damaged, "quick_check"), "ok");
+    // Nothing of it can be read (its first page): set aside all the same, and made again from sounds.db.
+    {
+        use std::io::{Seek, SeekFrom, Write};
+        let mut f = std::fs::File::options().write(true).open(&copy).unwrap();
+        f.seek(SeekFrom::Start(0)).unwrap();
+        f.write_all(&[0xEE; 100]).unwrap();
+    }
+    let unreadable = std::fs::read(&copy).unwrap();
+    let (everything, made) = compact::mend_reading(&old, &copy, now()).unwrap();
+    let made = made.unwrap();
+    assert_eq!(made.salvaged, Some(compact::Salvaged { kept: 0, unread: 1 }), "{made:?}");
+    same_everything(&everything, &read_for_page(&old));
+    assert!(std::fs::read(&damaged).unwrap() == unreadable, "set aside as it was");
+    assert_eq!(pragma(&copy, "integrity_check"), "ok");
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+}
+
+/// Damage inside a table, past its first page, leaves out only the rows there: the rest of the table is kept, whether
+/// it's where the table's first rows are, its last, or in between.
+#[test]
+fn damage_inside_a_table_leaves_out_only_its_rows() {
+    use std::io::{Seek, SeekFrom, Write};
+    for leaf in [Leaf::First, Leaf::Middle, Leaf::Last] {
+        let dir = folder(&format!("salvage-inside-{leaf:?}"));
+        let old = library(&dir, 1500);
+        let copy = compact::copy_of(&old);
+        compact::sync(&old, &copy).unwrap();
+        compact::last_sync(&old, &copy).unwrap();
+        // New stars for every sound.
+        let was = rows(&copy, "SELECT id, rating FROM sounds ORDER BY id");
+        Connection::open(&copy)
+            .unwrap()
+            .execute_batch("UPDATE sounds SET rating = (COALESCE(rating, 0) + 1) % 6;")
+            .unwrap();
+        let stars = rows(&copy, "SELECT id, rating FROM sounds ORDER BY id");
+        let at = leaf_of(&copy, "sounds", leaf);
+        let mut f = std::fs::File::options().write(true).open(&copy).unwrap();
+        f.seek(SeekFrom::Start(at)).unwrap();
+        f.write_all(&[0xEE; 64]).unwrap();
+        drop(f);
+        let (_, made) = compact::mend_reading(&old, &copy, now()).unwrap();
+        let salvaged = made.unwrap().salvaged.unwrap();
+        let now_stars = rows(&copy, "SELECT id, rating FROM sounds ORDER BY id");
+        assert_eq!(now_stars.len(), stars.len(), "{leaf:?}");
+        let kept = now_stars.iter().filter(|r| stars.contains(r)).count();
+        let left = now_stars.iter().filter(|r| was.contains(r)).count();
+        assert_eq!(kept + left, stars.len(), "{leaf:?}: each sound's stars are the damaged library's or sounds.db's");
+        assert!(kept > stars.len() / 2, "{leaf:?}: most are kept: {kept} of {}", stars.len());
+        assert!(left > 0 && left < stars.len() / 4, "{leaf:?}: {left} left out, {salvaged:?}");
+        assert!(salvaged.unread > 0, "{leaf:?}: {salvaged:?}");
+        assert_eq!(pragma(&copy, "integrity_check"), "ok");
+    }
+}
+
+/// Which of a table's pages of rows [`leaf_of`] finds.
+#[derive(Clone, Copy, Debug)]
+enum Leaf {
+    First,
+    Middle,
+    Last,
+}
+
+/// Where in the file at `db` one of the pages holding `table`'s rows is: the first, one halfway through, or the last,
+/// as the table's first page points to them (SQLite's file format, section 1.6).
+fn leaf_of(db: &Path, table: &str, leaf: Leaf) -> u64 {
+    let size: usize =
+        Connection::open(db).unwrap().query_row("PRAGMA page_size", [], |r| r.get::<_, i64>(0)).unwrap() as usize;
+    let file = std::fs::read(db).unwrap();
+    let root = usize::try_from(page_of(db, table)).unwrap();
+    let page = &file[root..root + size];
+    assert_eq!(page[0], 0x05, "its first page points to the pages with its rows");
+    let cells = usize::from(u16::from_be_bytes([page[3], page[4]]));
+    let pointer = |at: usize| u32::from_be_bytes(page[at..at + 4].try_into().unwrap()) as usize;
+    let child = match leaf {
+        Leaf::Last => pointer(8),
+        Leaf::First | Leaf::Middle => {
+            let at = 12 + 2 * if matches!(leaf, Leaf::First) { 0 } else { cells / 2 };
+            pointer(usize::from(u16::from_be_bytes([page[at], page[at + 1]])))
+        }
+    };
+    let leaf = (child - 1) * size;
+    assert_eq!(file[leaf], 0x0D, "a page of rows");
+    u64::try_from(leaf).unwrap()
+}
+
+/// Damage where the page's read never looks (the waveforms) is found when the backup copy is made, which then isn't
+/// (review finding S-3); mended from the backup copy, the library keeps everything since it that can still be read.
+#[test]
+fn damage_the_page_never_reads_is_found_by_the_backup_and_mended_keeping_what_came_since() {
+    let dir = folder("salvage-backup");
+    let old = library(&dir, 200);
+    let copy = compact::copy_of(&old);
+    let backup = backup::backup_of(&copy);
+    compact::sync(&old, &copy).unwrap();
+    compact::last_sync(&old, &copy).unwrap();
+    assert!(matches!(backup::back_up(&old), Some(BackedUp::Made { .. })));
+    // Since the backup copy: new stars and a tag.
+    let id: i64 = Connection::open(&copy).unwrap().query_row("SELECT MIN(id) FROM sounds", [], |r| r.get(0)).unwrap();
+    let stars = changed(&copy, id);
+    Connection::open(&copy)
+        .unwrap()
+        .execute("INSERT OR IGNORE INTO sound_tags (sound_id, tag, source) VALUES (?1, 'since', 'you')", [id])
+        .unwrap();
+    let tags = table(&copy, "sound_tags");
+    damage(&copy, "sound_waves");
+    // The page reads it as it is: it never reads the waveforms all at once.
+    let Ok(PageRead::Copy { .. }) = compact::read_for_page(&old, now(), |_| {}) else { panic!("read as it is") };
+    let before = std::fs::read(&backup).unwrap();
+    let Some(BackedUp::Damaged(why)) = backup::back_up(&old) else { panic!("found damaged") };
+    assert!(why.contains("malformed"), "{why}");
+    assert!(std::fs::read(&backup).unwrap() == before, "the backup copy before stays as it was");
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+    let (everything, made) = compact::mend_reading(&old, &copy, now()).unwrap();
+    let made = made.unwrap();
+    assert!(made.from_backup.is_some(), "{made:?}");
+    let salvaged = made.salvaged.unwrap();
+    assert_eq!(salvaged.unread, 1, "{salvaged:?}");
+    assert!(salvaged.kept >= 2, "{salvaged:?}");
+    same_everything(&everything, &SoundsDb::open_read_only(&copy).unwrap().everything(now()).unwrap());
+    assert_eq!(rating_of(&copy, id), stars);
+    assert_eq!(table(&copy, "sound_tags"), tags);
+    assert_eq!(table(&copy, "sound_waves"), table(&backup, "sound_waves"));
+    assert_eq!(rows(&copy, "SELECT key FROM copy_info WHERE key LIKE 'backed_up%'"), Vec::<String>::new());
+    assert_eq!(pragma(&copy, "journal_mode"), "wal");
+    assert_eq!(pragma(&copy, "integrity_check"), "ok");
+    assert_ne!(pragma(&backup::damaged_of(&copy), "quick_check"), "ok");
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+    // Whole again: backed up.
+    assert!(matches!(backup::back_up(&old), Some(BackedUp::Made { .. })));
+    assert_eq!(rating_of(&backup, id), stars);
+    // A sound's stars changed since, and the tags damaged: the backup copy's tags stay, with the sound's new stars
+    // (its row put in doesn't take its tags away with it).
+    let stars = changed(&copy, id);
+    assert!(count(&copy, "SELECT COUNT(*) FROM sound_tags WHERE sound_id = ?1", id) > 0);
+    damage(&copy, "sound_tags");
+    let (_, made) = compact::mend_reading(&old, &copy, now()).unwrap();
+    let salvaged = made.unwrap().salvaged.unwrap();
+    assert!(salvaged.unread >= 1, "{salvaged:?}");
+    assert_eq!(rating_of(&copy, id), stars);
+    assert_eq!(table(&copy, "sound_tags"), table(&backup, "sound_tags"));
+    assert_eq!(pragma(&copy, "integrity_check"), "ok");
+}
+
+/// A damaged library whose notes can't be read (since when it's the app's own, the numbers it gave its sounds) still
+/// has its sounds kept, and the numbers the app gave them noted again from them.
+#[test]
+fn a_damaged_library_whose_notes_cant_be_read_keeps_its_sounds_numbers() {
+    let dir = folder("salvage-notes");
+    let old = library(&dir, 50);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    compact::last_sync(&old, &copy).unwrap();
+    let kick = "D:\\Samples\\New Pack\\Kick 01.wav";
+    let listened = Listened { path: kick.to_owned(), size: 1000, mtime: unix(2026, 11, 9), analysed: Ok(heard(0.5)) };
+    grow::keep(&old, &[listened]).unwrap();
+    let kick_id = id_of(&copy, kick).unwrap();
+    assert_eq!(compact::grow::new_since(&copy), Some(kick_id));
+    damage(&copy, "copy_info");
+    let (_, made) = compact::mend_reading(&old, &copy, now()).unwrap();
+    let salvaged = made.unwrap().salvaged.unwrap();
+    assert!(salvaged.unread >= 1, "{salvaged:?}");
+    assert_eq!(id_of(&copy, kick), Some(kick_id));
+    assert_eq!(compact::grow::new_since(&copy), Some(kick_id));
+    assert_eq!(rows(&copy, "SELECT value FROM copy_info WHERE key = 'last_id'"), [format!("Integer({kick_id})")]);
+    assert!(compact::own_since(&copy).is_some());
+    assert_eq!(pragma(&copy, "integrity_check"), "ok");
+}
+
+/// A damaged library a newer version of the app made is left as it is: this version can't read what it holds.
+#[test]
+fn a_damaged_library_a_newer_version_made_is_left_as_it_is() {
+    let dir = folder("salvage-newer");
+    let old = library(&dir, 40);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    compact::last_sync(&old, &copy).unwrap();
+    Connection::open(&copy).unwrap().execute("UPDATE copy_info SET value = 3 WHERE key = 'format'", []).unwrap();
+    damage(&copy, "sound_features");
+    let before = std::fs::read(&copy).unwrap();
+    let Err(e) = compact::mend_reading(&old, &copy, now()) else { panic!("left as it is") };
+    assert!(e.to_string().contains("a newer version of the app made it"), "{e}");
+    assert!(std::fs::read(&copy).unwrap() == before);
+    assert!(!backup::damaged_of(&copy).exists());
+}
+
+/// A damaged library whose new one can't be made (sounds.db damaged on the way) is put back where it was, as it was,
+/// to be mended the next time.
+#[test]
+fn a_damaged_library_whose_new_one_cant_be_made_is_put_back() {
+    let dir = folder("salvage-put-back");
+    let old = library(&dir, 60);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    compact::last_sync(&old, &copy).unwrap();
+    let id: i64 = Connection::open(&copy).unwrap().query_row("SELECT MIN(id) FROM sounds", [], |r| r.get(0)).unwrap();
+    let stars = changed(&copy, id);
+    damage(&copy, "sound_features");
+    damage(&old, "sounds");
+    let before = std::fs::read(&copy).unwrap();
+    let made = compact::mend_reading(&old, &copy, now());
+    assert!(!matches!(made, Ok((_, Ok(_)))), "not made");
+    assert!(std::fs::read(&copy).unwrap() == before, "put back as it was");
+    assert!(!backup::damaged_of(&copy).exists());
+    assert_eq!(rating_of(&copy, id), stars);
+    assert_eq!(half_made(&dir), Vec::<String>::new());
+}
+
 /// What listening found for a test sound: `seconds` long, with a small waveform and features.
 fn heard(seconds: f64) -> mo_sounds::analyse::Analysed {
     mo_sounds::analyse::Analysed {
