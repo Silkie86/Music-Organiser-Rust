@@ -2577,7 +2577,7 @@ fn sample_plugins() -> (mo_app::plugins::Plugins, Vec<mo_library::plugins::Scann
 }
 
 /// The Backup page's Remove older versions button, and how far the page is turned down to show the question it asks.
-const REMOVE_OLDER_BUTTON: (f32, f32) = (1127.0, 820.0);
+const REMOVE_OLDER_BUTTON: (f32, f32) = (1150.0, 845.0);
 /// The Presets page's Plugin chip: the first in its filter row, so the other chips' words don't move it.
 const PLUGIN_CHIP: (f32, f32) = (262.0, 156.0);
 const PAGE_DOWN: f32 = 300.0;

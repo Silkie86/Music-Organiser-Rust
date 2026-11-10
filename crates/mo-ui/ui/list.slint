@@ -73,8 +73,12 @@ export component ListView inherits SlintListView {
         self.turn-to = 1px;
         if (self.show-top < -self.content-y
             || self.show-top + self.row-height > -self.content-y + self.visible-height) {
-            self.turn-to = -clamp(self.show-top - self.visible-height / 3, 0px,
-                max(0px, self.rows * self.row-height - self.visible-height));
+            // A third of the way down, but never so far down that the line's bottom is out of sight: in a list not
+            // much taller than a line, a third of the way down cut the last line off (10 Nov).
+            self.turn-to = -clamp(
+                min(self.show-top, max(self.show-top - self.visible-height / 3,
+                    self.show-top + self.row-height - self.visible-height)),
+                0px, max(0px, self.rows * self.row-height - self.visible-height));
             self.lands = -floor(-self.turn-to / self.row-height) * self.row-height;
             self.content-y = self.turn-to;
         }
