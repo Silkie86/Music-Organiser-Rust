@@ -10,7 +10,8 @@
 //!   (a galaxy's place, a cache) can't be taken for it.
 //! - **Changed** sounds are listened to again, keeping everything you gave them (type, stars, heart, plays, tags) and
 //!   CLAP's fingerprint (as the C# app did). The duplicate finder's print goes: it was of the file as it was.
-//! - **Moved** sounds keep their row, with the type their new name or folders say.
+//! - **Moved** sounds keep their row, with the type their new name or folders say, unless you gave them one
+//!   ([`retyped`]).
 //! - **Gone** sounds are forgotten, with their tags, plays, places and prints.
 //!
 //! Each call is one transaction, checked before it's kept, one at a time with every other change to the library, and
@@ -112,6 +113,12 @@ pub fn keep(sounds_db: &Path, listened: &[Listened]) -> Result<Kept, SoundsError
                         name_type.map_or(Value::Null, |t| Value::Text(t.to_owned())),
                     ];
                     values.extend(analysis_values(analysis));
+                    let (sound_type, source, sure) = crate::learn::named_or_unknown(name_type);
+                    values.extend([
+                        Value::Text(sound_type.to_owned()),
+                        Value::Text(source.to_owned()),
+                        Value::Real(sure),
+                    ]);
                     tx.prepare_cached(&update)?.execute(params_from_iter(values))?;
                     // What was of the file as it was: listened to again, and the duplicate finder's print goes.
                     for table in &gone_with {
@@ -182,10 +189,11 @@ pub fn follow(sounds_db: &Path, moves: &[(String, String)], gone: &[String]) -> 
         let last = last_id(tx)?;
         set_info(tx, LAST_ID, last)?;
         let gone_with = tables_of(tx, &["sound_waves", "sound_features", "sound_clap", "sound_prints"])?;
+        let moved = format!("UPDATE sounds SET path = ?2, name_type = ?3, {} WHERE path = ?1", retyped(3, 4));
         for (from, to) in moves {
-            kept.moved += tx
-                .prepare_cached("UPDATE sounds SET path = ?2, name_type = ?3 WHERE path = ?1")?
-                .execute(params![from, to, crate::types::from_path(to)])?;
+            let named = crate::types::from_path(to);
+            let (sound_type, source, sure) = crate::learn::named_or_unknown(named);
+            kept.moved += tx.prepare_cached(&moved)?.execute(params![from, to, named, sound_type, source, sure])?;
         }
         for path in gone {
             let ids: Vec<i64> = tx
@@ -237,12 +245,29 @@ fn last_id(tx: &Transaction<'_>) -> rusqlite::Result<i64> {
 }
 
 /// The update of a sound listened to again: its file's size and time, why it couldn't be listened to, the type its
-/// name says, and what listening found (`?1` is its number).
+/// name says, what listening found (`?1` is its number), then the type it takes ([`retyped`]).
 fn update_sql() -> String {
     let columns = ["size", "mtime", "error", "name_type"].into_iter().chain(analysis_columns!().split(", "));
     let set: Vec<String> = columns.enumerate().map(|(i, c)| format!("{c} = ?{}", i + 2)).collect();
     debug_assert_eq!(set.len(), 4 + ANALYSIS_COLUMNS);
-    format!("UPDATE sounds SET {} WHERE id = ?1", set.join(", "))
+    format!("UPDATE sounds SET {}, {} WHERE id = ?1", set.join(", "), retyped(5, 6 + ANALYSIS_COLUMNS))
+}
+
+/// The type a sound takes when what its name or folders say may have changed (it moved, or it was listened to
+/// again), as the C# app's scan worked every type out again after each one (`UpdateTypes`; review finding S-2), by
+/// the rule of [`crate::learn::resolve_type`]: yours stays; one guessed from how it sounds ("learned" or "model")
+/// stays while the name says nothing (only the next learning changes it); else the name's, or Unknown. `?{named}` is
+/// the type the name says, and `?{t}` on the three of [`crate::learn::named_or_unknown`] for it. The SET of an
+/// UPDATE reads the row as it was, so each column's choice is the same.
+fn retyped(named: usize, t: usize) -> String {
+    let stays = format!("user_type IS NOT NULL OR (?{named} IS NULL AND type_source IN ('learned', 'model'))");
+    format!(
+        "type = CASE WHEN {stays} THEN type ELSE ?{t} END, \
+         type_source = CASE WHEN {stays} THEN type_source ELSE ?{} END, \
+         type_conf = CASE WHEN {stays} THEN type_conf ELSE ?{} END",
+        t + 1,
+        t + 2
+    )
 }
 
 /// The analyser's features as `sounds.db` held them: each number's 4 bytes, little end first.

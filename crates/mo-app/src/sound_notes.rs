@@ -202,10 +202,12 @@ impl Noter {
                     }
                 }
                 let mut written = written.lock().unwrap_or_else(PoisonError::into_inner);
-                let kept_did = (!did.is_empty()).then(|| mo_catch::catch(|| did::keep(&sounds_db, &did)));
+                // They only write the app's own notes, so a panic in them is a bug: logged as a crash, in full (review
+                // finding S-7).
+                let kept_did = (!did.is_empty()).then(|| mo_catch::catch_crash(|| did::keep(&sounds_db, &did)));
                 let kept_yours = (!waiting.is_empty()).then(|| {
                     let yours: Vec<Yours> = waiting.iter().map(|(_, y, _)| y.clone()).collect();
-                    mo_catch::catch(|| yours::keep(&sounds_db, &yours))
+                    mo_catch::catch_crash(|| yours::keep(&sounds_db, &yours))
                 });
                 let why = |kept: Result<Result<usize, mo_sounds::SoundsError>, _>| match kept {
                     Ok(Ok(_)) => None,

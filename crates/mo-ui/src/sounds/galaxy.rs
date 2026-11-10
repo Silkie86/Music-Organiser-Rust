@@ -1435,7 +1435,8 @@ pub(super) fn finish_up() {
 fn keep_map(db: &Path, space: &str, points: &HashMap<i64, StarPoint>, replace: bool) -> bool {
     static SAID: Mutex<Vec<String>> = Mutex::new(Vec::new());
     let began = Instant::now();
-    let why = match mo_catch::catch(|| compact::maps::keep(db, space, points, replace)) {
+    // It only writes the app's own map, so a panic in it is a bug: logged as a crash, in full (review finding S-7).
+    let why = match mo_catch::catch_crash(|| compact::maps::keep(db, space, points, replace)) {
         Ok(Ok(0)) => return true,
         Ok(Ok(kept)) => {
             let took = began.elapsed().as_secs_f32();

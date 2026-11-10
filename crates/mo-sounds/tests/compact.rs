@@ -2294,6 +2294,80 @@ fn what_a_scan_found_is_kept_in_the_apps_own_library() {
     assert!(id_of(&backup::backup_of(&copy), &new_kick).is_some());
 }
 
+/// A moved or renamed sound takes the type its new name or folders say, as the C# app's scan worked it out again
+/// (review finding S-2): yours stays, one guessed from how it sounds stays while the new name says nothing, else the
+/// name's, or Unknown. One listened to again is worked out the same way.
+#[test]
+fn a_moved_sound_takes_the_type_its_new_name_says_unless_you_gave_it_one() {
+    let dir = folder("grow-types");
+    let old = library(&dir, 20);
+    let copy = compact::copy_of(&old);
+    compact::sync(&old, &copy).unwrap();
+    compact::last_sync(&old, &copy).unwrap();
+    let ids: Vec<(i64, String)> = {
+        let c = Connection::open(&copy).unwrap();
+        let mut st = c.prepare("SELECT id, path FROM sounds ORDER BY id LIMIT 6").unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(Result::unwrap).collect()
+    };
+    let snares = |n: usize| format!("E:\\Moved\\Snares\\{n}.wav");
+    let plain = |n: usize| format!("E:\\Moved\\{n}.wav");
+    let snare = mo_sounds::types::from_path(&snares(0)).unwrap();
+    // How each was typed before (yours, the type, where it came from), where it goes, and what it shows after (the
+    // type, where it came from, how sure).
+    struct Case<'a> {
+        yours: Option<&'a str>,
+        was: (&'a str, &'a str),
+        to: String,
+        shows: (&'a str, &'a str, f64),
+    }
+    let case = |yours, was, to, shows| Case { yours, was, to, shows };
+    let cases = [
+        case(None, ("Kick", "name"), snares(1), (snare, "name", 1.0)),
+        case(None, ("Kick", "name"), plain(2), ("Unknown", "", 0.0)),
+        case(Some("Vocal"), ("Vocal", "you"), snares(3), ("Vocal", "you", 0.75)),
+        case(None, ("Pad", "learned"), plain(4), ("Pad", "learned", 0.75)),
+        case(None, ("Pad", "learned"), snares(5), (snare, "name", 1.0)),
+        case(None, ("Unknown", ""), snares(6), (snare, "name", 1.0)),
+    ];
+    {
+        let c = Connection::open(&copy).unwrap();
+        for ((id, _), Case { yours, was: (was, source), .. }) in ids.iter().zip(&cases) {
+            let name_type = if *source == "name" { Some(*was) } else { None };
+            c.execute(
+                "UPDATE sounds SET user_type = ?2, type = ?3, type_source = ?4, type_conf = 0.75, name_type = ?5 \
+                 WHERE id = ?1",
+                rusqlite::params![id, yours, was, source, name_type],
+            )
+            .unwrap();
+        }
+    }
+    for n in [2, 4] {
+        assert_eq!(mo_sounds::types::from_path(&plain(n)), None, "{}", plain(n));
+    }
+    let moves: Vec<(String, String)> =
+        ids.iter().zip(&cases).map(|((_, from), c)| (from.clone(), c.to.clone())).collect();
+    assert_eq!(grow::follow(&old, &moves, &[]).unwrap(), Kept { moved: 6, ..Kept::default() });
+    let shown = |id: i64| {
+        let sounds = SoundsDb::open_read_only(&copy).unwrap().all(now()).unwrap();
+        let s = sounds.into_iter().find(|s| s.id == id).unwrap_or_else(|| panic!("{id}"));
+        (s.sound_type.as_str().to_owned(), s.type_source.as_str().to_owned(), s.type_confidence)
+    };
+    for ((id, _), Case { to, shows: (t, source, sure), .. }) in ids.iter().zip(&cases) {
+        assert_eq!(shown(*id), ((*t).to_owned(), (*source).to_owned(), *sure), "{to}");
+    }
+    // Listened to again: yours stays, the rest as the name says (here, with newer rules than the row was typed by).
+    let (renamed, yours) = (ids[0].0, ids[2].0);
+    Connection::open(&copy)
+        .unwrap()
+        .execute("UPDATE sounds SET type = 'Unknown', type_source = '', name_type = NULL WHERE id = ?1", [renamed])
+        .unwrap();
+    let listened = |path: String| Listened { path, size: 7, mtime: 8, analysed: Ok(heard(1.0)) };
+    let kept = grow::keep(&old, &[listened(snares(1)), listened(snares(3))]).unwrap();
+    assert_eq!(kept, Kept { updated: 2, ..Kept::default() });
+    assert_eq!(shown(renamed), (snare.to_owned(), "name".to_owned(), 1.0));
+    assert_eq!(shown(yours), ("Vocal".to_owned(), "you".to_owned(), 0.75));
+}
+
 /// A library without the duplicate finder's prints is written all the same, and the highest sound forgotten before
 /// anything was ever added keeps its number from being given again.
 #[test]
