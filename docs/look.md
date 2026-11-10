@@ -57,6 +57,10 @@ light that means something. It should feel like a rack unit on a desk, not a web
   card's place is always there, empty ("Pick a part") until something is picked, so nothing moves when it is. On
   MIDI, Presets and Plugins so far; `mo-screens` draws every place at 3440 x 1369 too (`wide-<place>.png`).
 
+- Column headings order a list (the UX review of 10 Nov, B5): a click on a heading (`ColumnHead` in `studio.slint`)
+  puts the list in that column's order, a second click turns it round; the heading the list goes by is lit in the
+  accent with a small arrow. A page whose headings do this has no "Order" row of chips. On Plugins so far.
+
 ## Next steps
 
 - Left out on purpose: a focus ring on every button (the app is driven by its shortcut list, and focusable buttons
