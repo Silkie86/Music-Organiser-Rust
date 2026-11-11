@@ -129,6 +129,8 @@ struct Slots {
     played: Mutex<Option<Played>>,
     /// A line dragged out: its row and its file, once it's been checked to be there, or why it can't go.
     drag: Mutex<Option<(usize, Result<std::path::PathBuf, String>)>>,
+    /// A drag out that has ended: its file, when it started and how it ended.
+    dragged: Mutex<Option<Dragged>>,
     /// The waveforms read for the lines on show, with their asking's round ([`Kept::to_read`]).
     waves: Mutex<Option<(u64, WavesRead)>>,
     /// The Galaxy's map as the app last kept it, or why there's none.
@@ -142,6 +144,9 @@ struct Slots {
     /// are lit.
     packed: Mutex<Option<(u64, Vec<u8>, u32)>>,
 }
+
+/// A drag out that has ended: its file, when it started and how it ended.
+type Dragged = (std::path::PathBuf, Instant, Result<crate::drag::Outcome, String>);
 
 type SkyPixels = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
 /// The Galaxy's picture drawn: its number, the view it was drawn for and its pixels; or just its number when it
@@ -1111,46 +1116,53 @@ impl Shown {
         self.render();
     }
 
-    /// Carries a dragged line's file out, once it's been found: the system's drag holds this thread until it's let
-    /// go (the timer still runs meanwhile, so nothing is kept borrowed across it).
+    /// Carries a dragged line's file out, once it's been found: the system's drag runs on a thread of its own
+    /// (`drag.rs`) and its end comes back in a slot ([`Shown::dragged`]).
     fn drag(&self) {
+        self.dragged();
         if self.dragging.get() {
             return;
         }
         let Some((row, found)) = take(&self.slots.drag) else { return };
-        let said = match found {
+        match found {
             Ok(path) => {
                 self.dragging.set(true);
                 self.panel.set_carried(i32::try_from(row).unwrap_or(-1));
-                self.render();
-                let started = Instant::now();
-                let done = crate::drag::file(&path);
-                let how = match &done {
-                    Ok(crate::drag::Outcome::Landed) => "landed".to_owned(),
-                    Ok(crate::drag::Outcome::Cancelled) => "let go where nothing took it, or called off".to_owned(),
-                    Err(why) => format!("failed: {why}"),
-                };
-                crate::log::took("Drag", &format!("{} {how}", path.display()), started);
-                self.dragging.set(false);
-                self.panel.set_carried(-1);
-                // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't
-                // left pressed.
-                let position = self.pointer.get();
-                let event =
-                    slint::platform::WindowEvent::PointerReleased { position, button: PointerEventButton::Left };
-                self.draws.window().dispatch_event(event);
-                self.draws.window().dispatch_event(slint::platform::WindowEvent::PointerExited);
-                done.err()
+                let (slots, started) = (Arc::clone(&self.slots), Instant::now());
+                crate::drag::file(path.clone(), move |ended| *lock(&slots.dragged) = Some((path, started, ended)));
             }
             Err(why) => {
                 crate::log::line("Drag", &why);
-                Some(why)
+                self.say_drag_failed(why);
             }
-        };
-        if let Some(why) = said {
-            self.playing.set(None);
-            self.panel.set_playing(why.into());
         }
+    }
+
+    /// A drag out has ended: the line is let go, and the panel says so if it couldn't be carried.
+    fn dragged(&self) {
+        let Some((path, started, ended)) = take(&self.slots.dragged) else { return };
+        let how = match &ended {
+            Ok(crate::drag::Outcome::Landed) => "landed".to_owned(),
+            Ok(crate::drag::Outcome::Cancelled) => "let go where nothing took it, or called off".to_owned(),
+            Err(why) => format!("failed: {why}"),
+        };
+        crate::log::took("Drag", &format!("{} {how}", path.display()), started);
+        self.dragging.set(false);
+        self.panel.set_carried(-1);
+        // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't left
+        // pressed.
+        let position = self.pointer.get();
+        let event = slint::platform::WindowEvent::PointerReleased { position, button: PointerEventButton::Left };
+        self.draws.window().dispatch_event(event);
+        self.draws.window().dispatch_event(slint::platform::WindowEvent::PointerExited);
+        if let Err(why) = ended {
+            self.say_drag_failed(why);
+        }
+    }
+
+    fn say_drag_failed(&self, why: String) {
+        self.playing.set(None);
+        self.panel.set_playing(why.into());
     }
 
     /// A waveform picture's size in the screen's own pixels: as wide as the panel now draws them.
