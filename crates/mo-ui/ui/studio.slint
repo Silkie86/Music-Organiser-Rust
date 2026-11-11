@@ -1896,6 +1896,31 @@ export component LinkText inherits Rectangle {
     }
 }
 
+// A longer explanation, folded to a line that opens it (the UX review of 10 Nov, C7: a card or a Settings tab opened
+// with a paragraph or two before its first button). What must be known before a button is pressed stays in sight
+// beside the button; this is for how the thing works.
+export component HowItWorks inherits VerticalLayout {
+    in property <string> text;
+    in-out property <bool> open;
+    spacing: Space.xs;
+    HorizontalLayout {
+        alignment: start;
+        LinkText {
+            text: root.open ? "Hide how this works" : "How this works";
+            tint: Theme.muted;
+            font-size: Type.meta;
+            clicked => { root.open = !root.open; }
+        }
+    }
+    if root.open: Text {
+        text: root.text;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+}
+
 // The mouse on a drawn view (arrangement, piano roll, galaxy): where it moves, a left press and its letting go, a
 // double-click, the wheel in notches (positive away from you) and leaving. Fills its parent.
 export component PointerPad inherits TouchArea {

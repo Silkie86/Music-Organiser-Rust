@@ -82,6 +82,9 @@ light that means something. It should feel like a rack unit on a desk, not a web
 - A list starts at the same height in every view of a page (the UX review of 10 Nov, E2). A view's own choices go
   in the side column where the filters are (Sounds' Rediscover and Kits; the folded tab then says CHOICES), and
   only its one main action sits in the top row (Shuffle, Roll a kit).
+- A long explanation folds behind a "How this works" line (`HowItWorks`, review C7): on a Space card under its
+  buttons, and at the top of Settings' Folders, DAWs and Shortcuts. What must be known before a button is pressed
+  (what Remove sends to the Recycle Bin) stays in sight beside the button.
 - Advice above a list folds into one strip (`NoticeStrip`, review A4): one line that says what there is, with
   Show and Hide, so the list starts high. Its words shorten with "..." before the Show button is pushed off. On
   Plugins it holds the install cards, the room-to-free line and the measure line; a warning the user must act on

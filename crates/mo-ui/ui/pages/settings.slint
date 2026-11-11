@@ -3,7 +3,7 @@
 // parts from studio.slint; mo-app decides every word (mo_app::settings), mo-ui/src/settings.rs fills it.
 import { AboutSlint } from "std-widgets.slint";
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, StudioButton, SearchBox, HoverSense, Segmented, MenuChip, PageHeader, Caps, Well, TabBar, EmptyState, Dot, ToggleChip, FolderRow } from "../studio.slint";
+import { Theme, Type, Space, StudioButton, SearchBox, HoverSense, HowItWorks, Segmented, MenuChip, PageHeader, Caps, Well, TabBar, EmptyState, Dot, ToggleChip, FolderRow } from "../studio.slint";
 
 // One theme to pick, drawn as a little picture of it in its own colours.
 export struct ThemeCardInfo {
@@ -592,12 +592,7 @@ component GeneralTab inherits VerticalLayout {
 component FoldersTab inherits VerticalLayout {
     spacing: Space.lg;
     alignment: start;
-    Text {
-        text: SettingsData.folders-note;
-        color: Theme.muted;
-        font-size: Type.meta;
-        wrap: word-wrap;
-    }
+    HowItWorks { text: SettingsData.folders-note; }
     if SettingsData.folders-message != "": Text {
         text: SettingsData.folders-message;
         color: Theme.text;
@@ -739,12 +734,7 @@ component KeyLineRow inherits HoverSense {
 component ShortcutsTab inherits VerticalLayout {
     spacing: Space.lg;
     alignment: start;
-    Text {
-        text: SettingsData.keys-note;
-        color: Theme.muted;
-        font-size: Type.meta;
-        wrap: word-wrap;
-    }
+    HowItWorks { text: SettingsData.keys-note; }
     HorizontalLayout {
         spacing: Space.md;
         SearchBox {
@@ -796,12 +786,7 @@ component ShortcutsTab inherits VerticalLayout {
 component DawsTab inherits VerticalLayout {
     spacing: Space.lg;
     alignment: start;
-    Text {
-        text: SettingsData.daws-note;
-        color: Theme.muted;
-        font-size: Type.meta;
-        wrap: word-wrap;
-    }
+    HowItWorks { text: SettingsData.daws-note; }
     if SettingsData.daws-message != "": Text {
         text: SettingsData.daws-message;
         color: Theme.text;
