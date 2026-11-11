@@ -2703,7 +2703,7 @@ const SPACE_CARD_WHEEL: (f32, f32, f32) = (1240.0, 600.0, -10.0 * PAGE_DOWN);
 /// The second line on the galaxy's Swept card, after the sweep.
 const SWEPT_LINE: (f32, f32) = (760.0, 410.0);
 /// The Lock chip on the kit's second pad (Snare).
-const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
+const SNARE_LOCK: (f32, f32) = (846.0, 217.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
 const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 /// Inside the first tile of the Sounds grid, and the first line of its List, at their top (x, y, width, height in

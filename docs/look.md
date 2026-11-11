@@ -79,6 +79,9 @@ light that means something. It should feel like a rack unit on a desk, not a web
   `TabBar`) is for views and tabs, and for one of three in the filter column.
   A chip for a choice that would show nothing ("Arranging 0") has faint words (`ToggleChip.dim`). A dot that shows
   a state is green, amber, red or grey, never a DAW's colour. Shuffle is a plain button everywhere.
+- A list starts at the same height in every view of a page (the UX review of 10 Nov, E2). A view's own choices go
+  in the side column where the filters are (Sounds' Rediscover and Kits; the folded tab then says CHOICES), and
+  only its one main action sits in the top row (Shuffle, Roll a kit).
 - Advice above a list folds into one strip (`NoticeStrip`, review A4): one line that says what there is, with
   Show and Hide, so the list starts high. Its words shorten with "..." before the Show button is pushed off. On
   Plugins it holds the install cards, the room-to-free line and the measure line; a warning the user must act on
