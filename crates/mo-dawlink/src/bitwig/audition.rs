@@ -205,7 +205,8 @@ impl Bitwig {
         let with_song = match song {
             None => WithSong::NotAsked,
             Some(_) if !link.hello().at_least(WITH_SONG_NEEDS) => WithSong::OldExtension(link.hello().answering()),
-            // Asking would be refused, with nothing played: the part alone still plays.
+            // Asking would be refused, with nothing played: the part alone still plays. Said before which project
+            // is open: bringing the song to the front wouldn't help, so this is the reason that would still stand.
             Some(_) if link.hello().song_loop == Some(false) => WithSong::NoLoop,
             // Only where the link keeps the change to that project (`onlyIn`), so the bars are never looped in
             // another that came to the front meanwhile.
