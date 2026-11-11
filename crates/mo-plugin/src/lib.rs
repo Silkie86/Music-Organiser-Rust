@@ -20,6 +20,7 @@
 pub mod audition;
 pub mod check;
 pub mod drag;
+pub mod galaxy;
 mod gpu;
 pub mod library;
 pub mod log;
