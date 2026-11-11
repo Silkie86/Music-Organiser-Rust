@@ -44,6 +44,30 @@ pub const TAB_KEY: &str = "settings_tab";
 /// choice. "" for the one in Documents. The C# app's name.
 pub const BITWIG_FOLDER_KEY: &str = "bitwig_user_folder";
 
+/// More of Bitwig's Library folders, beside the one in your Bitwig Studio folder (an old Library on another drive,
+/// say): added on Settings › DAWs, one folder a line. Space's Bitwig copies and Fix look in them too. This app's own.
+pub const BITWIG_LIBRARIES_KEY: &str = "bitwig_extra_libraries";
+
+/// The folders a list setting holds (one a line, blank lines left out), in its order.
+pub fn folder_list(value: &str) -> Vec<PathBuf> {
+    value.lines().map(str::trim).filter(|l| !l.is_empty()).map(PathBuf::from).collect()
+}
+
+/// A list setting's value: `folders` one a line, each once (by its name in any letter case, as Windows sees it).
+pub fn folder_list_value(folders: &[PathBuf]) -> String {
+    let mut seen: Vec<String> = Vec::new();
+    let mut out: Vec<String> = Vec::new();
+    for f in folders {
+        let line = f.to_string_lossy().trim().to_owned();
+        let k = line.to_lowercase();
+        if !line.is_empty() && !seen.contains(&k) {
+            seen.push(k);
+            out.push(line);
+        }
+    }
+    out.join("\n")
+}
+
 /// Whether a Galaxy sweep holds the pointer back to the star that's playing, so a quick sweep can't pass stars before
 /// they're heard: "1" for on. Off unless set (this app's own; the C# app had no such setting).
 pub const SWEEP_HOLD_KEY: &str = "galaxy_sweep_hold";
@@ -241,6 +265,15 @@ pub fn start_place(settings: &AppSettings) -> places::Place {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_list_keeps_each_folder_once_in_its_order() {
+        let folders = [PathBuf::from(r"K:\Old Library"), PathBuf::from(r"D:\Lib"), PathBuf::from(r"k:\old library")];
+        let value = folder_list_value(&folders);
+        assert_eq!(value, "K:\\Old Library\nD:\\Lib");
+        assert_eq!(folder_list(&value), folders[..2].to_vec());
+        assert_eq!(folder_list("\n  \n"), Vec::<PathBuf>::new());
+    }
 
     fn csharp(pairs: &[(&str, &str)]) -> HashMap<String, String> {
         pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect()

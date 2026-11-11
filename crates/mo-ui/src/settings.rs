@@ -328,6 +328,28 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         });
     });
     let weak = app.as_weak();
+    data.on_add_bitwig_library(move || {
+        // Not for the screenshots: nothing would be kept, and they never look at real folders.
+        if !PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live)) {
+            return;
+        }
+        let weak = weak.clone();
+        crate::backup::pick_folder(page::BITWIG_LIBRARY_PICK_TITLE, move |picked| {
+            if let Some(app) = weak.upgrade() {
+                edit_bitwig_libraries(&app, |list| list.push(page::bitwig_library_from_pick(&picked)));
+            }
+        });
+    });
+    let weak = app.as_weak();
+    data.on_remove_bitwig_library(move |folder| {
+        if let Some(app) = weak.upgrade()
+            && PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live))
+        {
+            let gone = folder.to_lowercase();
+            edit_bitwig_libraries(&app, |list| list.retain(|f| f.to_string_lossy().to_lowercase() != gone));
+        }
+    });
+    let weak = app.as_weak();
     data.on_documents_bitwig(move || {
         if let Some(app) = weak.upgrade()
             && PAGE.with(|p| p.borrow().as_ref().is_some_and(|p| p.live))
@@ -1014,6 +1036,23 @@ fn choose_bitwig_folder(app: &AppWindow, chosen: Option<(PathBuf, bool)>) {
     show(app);
 }
 
+/// Changes the list of more Bitwig Library folders and keeps it in the app's own settings file. Space reads it at its
+/// next look for Bitwig copies.
+fn edit_bitwig_libraries(app: &AppWindow, edit: impl FnOnce(&mut Vec<PathBuf>)) {
+    let mut list = value(app_settings::BITWIG_LIBRARIES_KEY).map(|v| app_settings::folder_list(&v)).unwrap_or_default();
+    edit(&mut list);
+    let value = app_settings::folder_list_value(&list);
+    let kept = remember(app_settings::BITWIG_LIBRARIES_KEY, &value);
+    let said = if value.is_empty() { "none".to_owned() } else { value.replace('\n', "; ") };
+    log::info("Settings", &format!("More Bitwig Library folders: {said}"));
+    PAGE.with(|p| {
+        if let Some(p) = p.borrow_mut().as_mut() {
+            p.daws_message = page::bitwig_libraries_note(kept);
+        }
+    });
+    show(app);
+}
+
 /// Puts the app's FL Studio script in FL's folders (Solomon's OK, 2026-11-03), away from the window, then looks again.
 fn install_fl(app: &AppWindow) {
     let folders = PAGE.with(|p| {
@@ -1470,6 +1509,8 @@ fn show(app: &AppWindow) {
         data.set_daws_installing(p.daws_installing);
         data.set_daws_message(p.daws_message.clone().into());
         data.set_bitwig_chosen(p.settings.get(app_settings::BITWIG_FOLDER_KEY).is_some_and(|f| !f.trim().is_empty()));
+        let libraries = app_settings::folder_list(p.settings.get(app_settings::BITWIG_LIBRARIES_KEY).unwrap_or(""));
+        data.set_bitwig_libraries(strings(libraries.iter().map(|f| f.display().to_string())));
         data.set_folders_busy(p.folders_busy);
         data.set_folders_message(p.folders_message.clone().into());
 

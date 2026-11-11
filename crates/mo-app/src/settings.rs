@@ -692,6 +692,31 @@ pub fn bitwig_extension_facts(
 /// The title of the picker Bitwig's card opens for your Bitwig Studio folder.
 pub const BITWIG_PICK_TITLE: &str = "Choose your Bitwig Studio folder";
 
+/// The folder picker's title for one more Bitwig Library folder.
+pub const BITWIG_LIBRARY_PICK_TITLE: &str = "Choose a Bitwig Library folder";
+
+/// The Library folder a pick names: a folder Bitwig keeps in its Library (Multisamples, Wavetables, Presets, Samples,
+/// ...) picked keeps the Library above it, as Fix finds a file by what comes after "Library" in its old path.
+pub fn bitwig_library_from_pick(picked: &Path) -> PathBuf {
+    const INSIDE: [&str; 6] = ["Multisamples", "Wavetables", "Presets", "Samples", "Templates", "Clips"];
+    let inside = picked.file_name().is_some_and(|n| INSIDE.iter().any(|d| n.to_string_lossy().eq_ignore_ascii_case(d)));
+    match picked.parent() {
+        Some(up) if inside && up.file_name().is_some() => up.to_owned(),
+        _ => picked.to_owned(),
+    }
+}
+
+/// What changing the list of more Bitwig Library folders did, in words: whether it's kept past this run.
+pub fn bitwig_libraries_note(kept: bool) -> String {
+    let mut note =
+        "Space looks in these Library folders too, the next time it looks for Bitwig copies (Measure again to look now)."
+            .to_owned();
+    if !kept {
+        note.push_str(" It's only kept until the app closes: your settings file couldn't be read.");
+    }
+    note
+}
+
 /// The folders a Bitwig Studio folder has in it, that tell it from another folder.
 const BITWIG_INSIDE: [&str; 3] = ["Extensions", "Library", "Projects"];
 
@@ -781,6 +806,14 @@ pub const SLINT_CREDIT: &str = "Music Organiser's screens are made with Slint, u
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_folder_inside_a_bitwig_library_picked_keeps_the_library() {
+        let lib = Path::new("/K/Old/Library");
+        assert_eq!(bitwig_library_from_pick(&lib.join("multisamples")), lib);
+        assert_eq!(bitwig_library_from_pick(lib), lib);
+        assert_eq!(bitwig_library_from_pick(Path::new("/Wavetables")), Path::new("/Wavetables"));
+    }
 
     #[test]
     fn tabs_open_where_you_left_them_and_csharp_tabs_fold_in() {
