@@ -11,10 +11,10 @@
 //! library, searching it and reading a sound all run on background threads at low priority.
 
 use crate::audition::Played;
-use crate::library::{self, Asked, Library, ORDERS, Read, TYPES_SHOWN};
+use crate::library::{self, Asked, Library, ORDERS, Read};
 use crate::threads::{background, lock};
 use crate::waves::{self, Kept};
-use crate::{ExtensionLine, Instance, Panel, SoundLine, TypeLine};
+use crate::{ExtensionLine, FilterChoice, FilterView, Instance, Panel, SoundLine};
 use baseview::dpi::{PhysicalPosition, Size};
 use baseview::{
     Event, EventStatus, HandlerError, MouseButton, MouseEvent, ScrollDelta, TimerHandle, WindowContext, WindowEvent,
@@ -22,12 +22,13 @@ use baseview::{
 };
 use keyboard_types::{Key, KeyState, NamedKey};
 use mo_app::backup::thousands;
-use mo_app::sounds::{Length, Order, SoundCounts, short_count};
+use mo_app::filters::{Filter, Shown as Choice};
+use mo_app::sounds::{Order, SoundCounts, TEMPO_HIGH, TEMPO_LOW, TEMPO_STEP};
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, TargetPixel,
 };
 use slint::platform::{PointerEventButton, WindowAdapter};
-use slint::{ComponentHandle, LogicalPosition, Model, ModelNotify, ModelRc, ModelTracker, SharedString};
+use slint::{ComponentHandle, LogicalPosition, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
 use std::num::NonZeroU32;
 use std::rc::Rc;
@@ -219,6 +220,7 @@ struct Shown {
     instance: Arc<Instance>,
     /// What the search box, the filter column and the order ask of the list.
     asked: Rc<RefCell<Asked>>,
+    column: Rc<Column>,
     /// The sound the "Playing" line names, as the player numbers it: the line goes when that sound ends.
     playing: Cell<Option<u64>>,
     _timer: TimerHandle,
@@ -261,6 +263,7 @@ impl Shown {
             slots,
             instance,
             asked: Rc::new(RefCell::new(Asked { seed: seed(), ..Asked::default() })),
+            column: Rc::new(Column::default()),
             playing: Cell::new(None),
             _timer: timer,
         };
@@ -304,37 +307,48 @@ impl Shown {
         panel.set_orders(ModelRc::new(slint::VecModel::from(
             ORDERS.iter().map(|o| SharedString::from(o.name())).collect::<Vec<_>>(),
         )));
+        panel.set_tempo_low_end(TEMPO_LOW);
+        panel.set_tempo_high_end(TEMPO_HIGH);
+        panel.set_tempo_step(TEMPO_STEP);
         // Each change to what's asked: the panel shows the change at once, the list follows from a background thread.
         let changed = {
             let lines = Rc::clone(&self.lines);
             let slots = Arc::clone(&self.slots);
             let asked = Rc::clone(&self.asked);
+            let column = Rc::clone(&self.column);
             let weak = panel.as_weak();
-            Rc::new(move |change: &dyn Fn(&mut Asked)| {
-                change(&mut asked.borrow_mut());
+            Rc::new(move |change: &dyn Fn(&mut Asked, Option<&Library>)| {
+                let library = lines.library.borrow().clone();
+                change(&mut asked.borrow_mut(), library.as_deref());
                 let asked = asked.borrow().clone();
                 if let Some(panel) = weak.upgrade() {
-                    show_asked(&panel, &asked);
+                    column.show(&panel, library.as_deref(), &asked);
                 }
-                if let Some(library) = lines.library.borrow().clone() {
+                if let Some(library) = library {
                     view(library, asked, Arc::clone(&slots));
                 }
             })
         };
         let change = Rc::clone(&changed);
-        panel.on_search(move |typed| change(&|a| a.words = typed.to_string()));
+        panel.on_search(move |typed| change(&|a, _| a.filters.search = typed.trim().to_owned()));
         let change = Rc::clone(&changed);
-        panel.on_toggle_type(move |kind| change(&|a| a.toggle_type(&kind)));
+        panel.on_pick(move |filter, choice| change(&|a, _| a.filters.pick(&filter, &choice)));
         let change = Rc::clone(&changed);
-        panel.on_toggle_hits(move || change(&|a| a.toggle_length(Length::Hits)));
+        panel.on_clear(move |filter| {
+            change(&|a, library| match filter.as_str() {
+                // The More types menu's Any keeps the types ticked in the column itself.
+                "more-types" => a.filters.clear_more_types(library.map_or(&[][..], |l| &l.types[..])),
+                filter => a.filters.clear_chip(filter),
+            });
+        });
         let change = Rc::clone(&changed);
-        panel.on_toggle_loops(move || change(&|a| a.toggle_length(Length::Loops)));
+        panel.on_toggle(move |line| change(&|a, _| a.filters.toggle(&line)));
         let change = Rc::clone(&changed);
-        panel.on_toggle_favourites(move || change(&|a| a.favourites = !a.favourites));
+        panel.on_tempo_picked(move |low, high| change(&|a, _| a.filters.set_tempo(low, high)));
         let change = changed;
         panel.on_pick_order(move |i| {
             let Some(&order) = usize::try_from(i).ok().and_then(|i| ORDERS.get(i)) else { return };
-            change(&|a| {
+            change(&|a, _| {
                 // Shuffled picked again shuffles again.
                 if order == Order::Shuffled {
                     a.seed = seed();
@@ -342,7 +356,7 @@ impl Shown {
                 a.order = order;
             });
         });
-        show_asked(panel, &self.asked.borrow());
+        self.column.show(panel, None, &self.asked.borrow());
 
         let instance = Arc::clone(&self.instance);
         let weak = panel.as_weak();
@@ -360,25 +374,6 @@ impl Shown {
         background("mo-plugin-library", move || *lock(&slots.library) = Some(library::read()));
     }
 
-    /// The filter column's types: the most used, each with how many sounds picking it would show (once known).
-    fn show_types(&self, library: &Library, counts: Option<&SoundCounts>) {
-        let asked = self.asked.borrow();
-        let types: Vec<TypeLine> = library
-            .types
-            .iter()
-            .take(TYPES_SHOWN)
-            .map(|(kind, _)| TypeLine {
-                text: kind.as_str().into(),
-                count: counts
-                    .map(|c| short_count(c.types.get(&kind.to_ascii_lowercase()).copied().unwrap_or(0)))
-                    .unwrap_or_default()
-                    .into(),
-                on: asked.types.iter().any(|t| t.eq_ignore_ascii_case(kind)),
-            })
-            .collect();
-        self.panel.set_types(ModelRc::new(slint::VecModel::from(types)));
-    }
-
     /// Takes in what background threads found, frees sounds done playing, and runs Slint's timers.
     fn tick(&self) {
         if let Some(read) = take(&self.slots.library) {
@@ -387,7 +382,7 @@ impl Shown {
                     // The list comes with its first view, so it never shows in an order nobody asked for.
                     self.lines.show(Some(Arc::clone(&library)), Vec::new());
                     self.panel.set_status("Getting the list ready".into());
-                    self.show_types(&library, None);
+                    self.column.show(&self.panel, Some(&library), &self.asked.borrow());
                     view(library, self.asked.borrow().clone(), Arc::clone(&self.slots));
                 }
                 Read::Not(why) => self.panel.set_status(why.into()),
@@ -401,9 +396,8 @@ impl Shown {
             let narrowed = self.asked.borrow().any();
             self.panel.set_status(count_line(total, narrowed.then_some(found.len())).into());
             self.panel.set_picked(-1);
-            if let Some(library) = &library {
-                self.show_types(library, Some(&counts));
-            }
+            *self.column.counts.borrow_mut() = Some(counts);
+            self.column.show(&self.panel, library.as_deref(), &self.asked.borrow());
             self.lines.show(library, found);
         }
         if let Some(played) = take(&self.slots.played) {
@@ -592,12 +586,67 @@ fn view(library: Arc<Library>, asked: Asked, slots: Arc<Slots>) {
     });
 }
 
-/// The panel's ticks and order as `asked` has them (the types' ticks come with their counts, [`Shown::show_types`]).
-fn show_asked(panel: &Panel, asked: &Asked) {
-    panel.set_hits(asked.length == Length::Hits);
-    panel.set_loops(asked.length == Length::Loops);
-    panel.set_favourites(asked.favourites);
-    panel.set_order(ORDERS.iter().position(|&o| o == asked.order).and_then(|i| i32::try_from(i).ok()).unwrap_or(0));
+/// The filter column's lines, kept from one showing to the next, and the counts of the list last worked out (the
+/// column shows them until the next list's are in).
+#[derive(Default)]
+struct Column {
+    types: Choices,
+    length: Choices,
+    key: Choices,
+    tag: Choices,
+    counts: RefCell<Option<SoundCounts>>,
+}
+
+impl Column {
+    /// The panel's filter column and order as `asked` has them, over `library`'s types and tags once it's read.
+    fn show(&self, panel: &Panel, library: Option<&Library>, asked: &Asked) {
+        let chips = asked.chips(library, self.counts.borrow().as_ref());
+        panel.set_type_filter(self.types.view(&chips.types));
+        panel.set_length_filter(self.length.view(&chips.length));
+        panel.set_key_filter(self.key.view(&chips.key));
+        panel.set_tag_filter(self.tag.view(&chips.tag));
+        panel.set_mix_well(asked.filters.mix_well);
+        panel.set_favourites(asked.filters.favourites);
+        panel.set_tempo_low(chips.tempo.low);
+        panel.set_tempo_high(chips.tempo.high);
+        panel.set_tempo_words(chips.tempo.words.as_str().into());
+        panel.set_tempo_bars(ModelRc::new(VecModel::from(chips.tempo.bars)));
+        panel.set_order(ORDERS.iter().position(|&o| o == asked.order).and_then(|i| i32::try_from(i).ok()).unwrap_or(0));
+    }
+}
+
+/// One filter's lines and menu lines. Only the lines that changed are changed, so an open menu keeps its place when a
+/// pick changes what its lines say (as the app's own pages keep theirs, mo-ui's `FilterModels`).
+#[derive(Default)]
+struct Choices {
+    chips: Rc<VecModel<FilterChoice>>,
+    more: Rc<VecModel<FilterChoice>>,
+}
+
+impl Choices {
+    fn view(&self, filter: &Filter) -> FilterView {
+        same_lines(&self.chips, &filter.chips);
+        same_lines(&self.more, &filter.more);
+        FilterView {
+            chips: ModelRc::from(Rc::clone(&self.chips)),
+            more: ModelRc::from(Rc::clone(&self.more)),
+            more_picked: filter.more_picked.as_str().into(),
+        }
+    }
+}
+
+/// Makes `model` say `list`, changing only the lines that differ (all of them when the number of lines changed).
+fn same_lines(model: &VecModel<FilterChoice>, list: &[Choice]) {
+    let line = |c: &Choice| FilterChoice { text: c.text.as_str().into(), count: c.count.as_str().into(), on: c.on };
+    if model.row_count() != list.len() {
+        model.set_vec(list.iter().map(line).collect::<Vec<_>>());
+        return;
+    }
+    for (at, c) in list.iter().enumerate() {
+        if model.row_data(at).is_none_or(|r| r != line(c)) {
+            model.set_row_data(at, line(c));
+        }
+    }
 }
 
 /// A new shuffled order: the clock's nanoseconds.
