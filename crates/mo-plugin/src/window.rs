@@ -304,12 +304,12 @@ impl Shown {
         let player = Arc::clone(&self.instance.player);
         let slots = Arc::clone(&self.slots);
         let last_played = Rc::clone(&self.played);
-        panel.on_play(move |row| {
+        panel.on_play(move |row, from| {
             let Some(row) = usize::try_from(row).ok() else { return };
             let Some(path) = lines.path(row) else { return };
             *last_played.borrow_mut() = lines.sound(row).map(|sound| (row, sound, path.clone().into()));
             let slots = Arc::clone(&slots);
-            player.play(path.into(), move |played| *lock(&slots.played) = Some(played));
+            player.play(path.into(), from, move |played| *lock(&slots.played) = Some(played));
         });
         let player = Arc::clone(&self.instance.player);
         let weak = panel.as_weak();
