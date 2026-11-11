@@ -78,11 +78,11 @@ struct Stretch {
     hash: String,
     notes: Vec<NoteEvent>,
     middle: f64,
-    /// Most of its notes start together with another: chords, not a line.
+    /// How many of its notes sound together with another (0 to 1), and whether that's most: chords, not a line.
+    together: f32,
     chordal: bool,
-    /// The top note it starts on, and the top note of its last chord or note: where a tune carries on from.
+    /// The top note it starts on.
     first_key: u8,
-    last_key: u8,
     lowest: u8,
     highest: u8,
 }
@@ -170,6 +170,23 @@ fn stretches(at: usize, v: &Voice) -> Vec<Stretch> {
     out
 }
 
+/// How many notes sound together with another for at least a sixteenth: chords played in by hand start a little
+/// apart, but they ring together; a line's notes barely touch.
+fn sounding_together(notes: &[NoteEvent]) -> usize {
+    const LEAST: i64 = PPQ / 4;
+    // Sorted by start: only the notes starting before this one ends can ring with it.
+    notes
+        .iter()
+        .enumerate()
+        .filter(|&(at, n)| {
+            let ends = n.start + n.length;
+            let before = notes.get(..at).unwrap_or_default().iter().rev().take(64);
+            let after = notes.get(at + 1..).unwrap_or_default().iter().take_while(|m| m.start < ends);
+            before.chain(after).any(|m| m.start.max(n.start) + LEAST <= (m.start + m.length).min(ends))
+        })
+        .count()
+}
+
 fn stretch_of(voice: usize, notes: Vec<NoteEvent>) -> Stretch {
     let first = notes.first().map_or(0, |n| n.start);
     let last_end = notes.iter().map(|n| n.start + n.length).max().unwrap_or(first);
@@ -179,11 +196,10 @@ fn stretch_of(voice: usize, notes: Vec<NoteEvent>) -> Stretch {
     let middle = notes.iter().map(|n| f64::from(n.key)).sum::<f64>() / notes.len().max(1) as f64;
     let lowest = notes.iter().map(|n| n.key).min().unwrap_or(0);
     let highest = notes.iter().map(|n| n.key).max().unwrap_or(0);
-    let together = notes.iter().filter(|n| notes.iter().filter(|m| m.start == n.start).count() > 1).count();
-    let chordal = together * 2 > notes.len();
+    let together = sounding_together(&notes) as f32 / notes.len().max(1) as f32;
+    let chordal = together > 0.5;
     let top_at = |start: i64| notes.iter().filter(|n| n.start == start).map(|n| n.key).max().unwrap_or(0);
     let first_key = top_at(first);
-    let last_key = top_at(notes.last().map_or(first, |n| n.start));
     Stretch {
         voice,
         from,
@@ -193,9 +209,9 @@ fn stretch_of(voice: usize, notes: Vec<NoteEvent>) -> Stretch {
         hash: analyser::hash_of(&moved),
         notes: moved,
         middle,
+        together,
         chordal,
         first_key,
-        last_key,
         lowest,
         highest,
     }
@@ -230,9 +246,15 @@ fn near_enough(a: &Stretch, b: &Stretch) -> bool {
     ranges_meet(a, b) || (a.middle - b.middle).abs() <= MAX_REGISTER_GAP
 }
 
-/// How far the tune jumps where one stretch hands to the next, in semitones.
+/// How far the tune jumps where one stretch hands to the next, in semitones: from the first's range (a lead often ends
+/// low and climbs back), 0 when the second starts inside it.
 fn step(a: &Stretch, b: &Stretch) -> u8 {
-    a.last_key.abs_diff(b.first_key)
+    b.first_key.saturating_sub(a.highest).max(a.lowest.saturating_sub(b.first_key))
+}
+
+/// How unlike two stretches' textures are (0 to 100): a line taking over from a line is 0, a pad of chords 80 or so.
+fn unlike(a: &Stretch, b: &Stretch) -> u8 {
+    ((a.together - b.together).abs() * 100.0).round() as u8
 }
 
 /// How strongly two stretches that hand over, coming back together `repeats` times, read as one phrase (see the
@@ -296,15 +318,16 @@ pub fn join(voices: &[Voice]) -> Vec<Joined> {
         }
     }
     // The links strong enough to join, from each stretch to the one it hands to.
-    // The strongest first; of two as strong (a lead and the pad doubling it both taking over), the one the tune steps
-    // to most smoothly; then first in the song, so the same song always joins the same way (a map has no order).
-    let mut strong: Vec<(i32, u8, Pairs)> = handovers
+    // The strongest first; of two as strong (a lead and the pad doubling it both taking over), the one most like the
+    // first in texture, then the one the tune steps to most smoothly; then first in the song, so the same song always
+    // joins the same way (a map has no order).
+    let mut strong: Vec<(i32, (u8, u8), Pairs)> = handovers
         .into_values()
         .filter(|pairs| pairs.len() >= MIN_REPEATS)
         .filter_map(|pairs| {
             let &(i, j) = pairs.first()?;
             let (a, b) = (all.get(i)?, all.get(j)?);
-            Some((score(a, b, pairs.len()), step(a, b), pairs))
+            Some((score(a, b, pairs.len()), (unlike(a, b), step(a, b)), pairs))
         })
         .filter(|(score, ..)| *score >= JOIN_SCORE)
         .collect();
@@ -496,9 +519,13 @@ mod tests {
             let mut climb = line(at + 8, 76, 84);
             climb[0].key = 75;
             lead.extend(climb);
-            pad.extend(
-                (0..8).flat_map(|b| [60, 64, 67, 72].map(|k| NoteEvent { length: BAR, ..note(at + 8 + b, 0, k) })),
-            );
+            // Played in by hand: each chord's notes a little apart, never on one tick.
+            pad.extend((0..8).flat_map(|b| {
+                [60u8, 64, 67, 72].into_iter().enumerate().map(move |(i, k)| {
+                    let n = note(at + 8 + b, 0, k);
+                    NoteEvent { start: n.start + 5 * i as i64, length: BAR - 20, ..n }
+                })
+            }));
         }
         let joined = join(&voices(&[
             channel("Cell #3", "LegacyCell", first),
