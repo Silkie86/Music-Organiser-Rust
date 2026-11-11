@@ -406,20 +406,23 @@ mod tests {
         let (search, found) = index.search(&tried, &target, 20);
         // The hi-hats' shape as a bassline is tried, as is every key's copy of the pack's tune.
         assert_eq!((search.looked, search.not_ready, search.unread, search.stopped), (12, 0, 0, false));
-        // The pack's tune is found as the copy that fits as it is (not the one in Eb, nor the other song's an octave
-        // up: the list has a loop once), and the bassline from another folder with the move that puts it on the
-        // chords' roots. None of the song's own parts is there.
-        assert!(found.contains(&("pack tune".to_owned(), 0)), "{found:?}");
+        // The pack's tune is found as the copy that needs no moving at all: the other song's, an octave up, which is
+        // in key and where a tune plays (the pack's own is in key an octave under that, the one in Eb isn't in
+        // key: the list has a loop once). And the bassline from another folder with the move
+        // that puts it on the chords' roots. None of the song's own parts is there.
+        assert!(found.contains(&("other song's tune".to_owned(), 0)), "{found:?}");
         assert!(found.contains(&("bass elsewhere".to_owned(), 5)), "{found:?}");
         let listed = |hash: &str| found.iter().any(|(found, _)| found == hash);
-        assert!(!listed("pack tune in Eb") && !listed("other song's tune"));
+        assert!(!listed("pack tune in Eb") && !listed("pack tune"));
+        let tune = search.found.iter().find(|f| f.at == cat.find("other song's tune").unwrap()).unwrap();
+        assert_eq!((tune.octaves, tune.moved()), (0, 0));
         assert!(found.iter().all(|(hash, _)| !own.has(cat.find(hash).unwrap())), "{found:?}");
         // The best first.
         let sits: Vec<f64> = search.found.iter().map(|f| f.sits.judged()).collect();
         assert!(sits.is_sorted_by(|a, b| a >= b), "{sits:?}");
 
         // What the page's filters hide isn't tried: without the files only the other projects' two are left. The
-        // other song's tune is found with nothing moved (octaves don't count), the sketch's riff moved back down.
+        // other song's tune is found with nothing moved, the sketch's riff moved back down.
         let from_projects = super::tried(&cat, &own, |e| e.is_project());
         assert_eq!(from_projects.len(), 2);
         let (_, mut found) = index.search(&from_projects, &target, 3);

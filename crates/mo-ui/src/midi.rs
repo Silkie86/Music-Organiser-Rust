@@ -153,6 +153,7 @@ struct Page {
 /// How the picked part is moved to fit a song: what its card says, and how it's shown, played, dragged and sent.
 #[derive(Clone, Debug, PartialEq)]
 struct PickedFit {
+    /// How far in all, in semitones: into the song's key and to the octave ([`Fit::moved`]).
     semitones: i32,
     /// The song the list that had it was fitted to, as it was then.
     song: SongChoice,
@@ -192,14 +193,14 @@ impl Page {
         self.fits.as_ref()?.iter().find(|fit| fit.entry == at).copied()
     }
 
-    /// How far the part at `at` is moved wherever its notes leave the page ([`Page::part_out`]), in semitones. The
-    /// picked part: as its card says ([`Page::fit_picked`]). A line dragged out: by what the line says. 0 in a list
-    /// that isn't "Fits my song"'s.
+    /// How far the part at `at` is moved wherever its notes leave the page ([`Page::part_out`]), in semitones: into
+    /// the song's key and to the octave, in all ([`Fit::moved`]). The picked part: as its card says
+    /// ([`Page::fit_picked`]). A line dragged out: by what the line says. 0 in a list that isn't "Fits my song"'s.
     fn fit_move(&self, at: usize) -> i32 {
         if self.picked == Some(at) {
             self.picked_fit.as_ref().map_or(0, |fit| fit.semitones)
         } else {
-            self.fit_of(at).map_or(0, |fit| fit.semitones)
+            self.fit_of(at).map_or(0, |fit| fit.moved())
         }
     }
 
@@ -211,7 +212,7 @@ impl Page {
         let line = self.picked.and_then(|at| self.fit_of(at));
         let song = self.fits_song.as_ref().filter(|_| self.picked.is_some() && self.fits.is_some());
         self.picked_fit = match (line, song) {
-            (Some(fit), Some(song)) => Some(PickedFit { semitones: fit.semitones, song: song.clone() }),
+            (Some(fit), Some(song)) => Some(PickedFit { semitones: fit.moved(), song: song.clone() }),
             (None, Some(song)) => self.picked_fit.take().filter(|was| was.song == *song),
             _ => None,
         };
@@ -2422,7 +2423,8 @@ pub fn sample() -> Loaded {
             true,
             4,
             400,
-            &[69, 72, 74, 76, 74, 72],
+            // High, as a flute's hook is written: fitted to a song it comes down an octave.
+            &[81, 84, 86, 88, 86, 84],
         ),
     ];
     for (i, (path, part, clip, role, tonic, minor, bars, age, keys)) in parts.into_iter().enumerate() {
@@ -3459,7 +3461,7 @@ mod tests {
     #[test]
     fn the_picked_part_stays_moved_while_the_list_is_its_songs() {
         let songs = sample_songs();
-        let fit = |entry: usize, semitones: i32| Fit { entry, semitones, sits: 0.8 };
+        let fit = |entry: usize, semitones: i32| Fit { entry, semitones, octaves: 0, sits: 0.8 };
         let mut p = Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), ..Page::default() };
         let listed = |p: &mut Page, fits: Option<Vec<Fit>>, song: Option<&SongChoice>| {
             p.fits = fits.map(Arc::new);
@@ -3496,6 +3498,13 @@ mod tests {
         assert_eq!(p.picked_fit_text(), midi_fits::card_text(5, "Glass"));
         listed(&mut p, None, None);
         assert_eq!((p.fit_move(4), p.picked_fit.clone()), (0, None));
+        // A part that goes to another octave as well is moved by both in one: the picked one and a line alike.
+        let low = |entry: usize| Fit { octaves: -1, ..fit(entry, 3) };
+        listed(&mut p, Some(vec![low(4), low(2)]), Some(&songs[0]));
+        assert_eq!((p.fit_move(4), p.fit_move(2)), (-9, -9));
+        assert_eq!(p.picked_fit_text(), midi_fits::card_text(-9, "Night drive"));
+        assert!(p.part_out(4).is_some_and(|part| part.semitones == -9 && part.name.ends_with(" (9 semitones down)")));
+        assert!(p.part_out(2).is_some_and(|part| part.semitones == -9 && part.name.ends_with(" (9 semitones down)")));
         // "Fits my song" off while its list is still on show: a line is no longer moved.
         listed(&mut p, Some(vec![fit(4, 3), fit(2, -2)]), Some(&songs[0]));
         p.fit_song = None;
@@ -3658,6 +3667,15 @@ mod tests {
         assert!(!looked.fits.is_empty());
         let own = |fit: &Fit| ask.cat.entry(fit.entry).is_none_or(|e| e.phrase.source.path.contains("Night drive"));
         assert!(!looked.fits.iter().any(own), "{looked:?}");
+        // Each comes with its octave: the arp is where an arp plays once it's in key; the flute hook is written
+        // high, and 5 semitones up for the key it would be well above where a tune plays, so it comes down an
+        // octave.
+        let fit = |name: &str| {
+            let named = |f: &&Fit| ask.cat.entry(f.entry).is_some_and(|e| page::title(e).starts_with(name));
+            looked.fits.iter().find(named).map(|f| (f.semitones, f.octaves, midi_fits::fit_text(f)))
+        };
+        assert_eq!(fit("Arp"), Some((3, 0, "Fits 62%, 3 semitones up".to_owned())));
+        assert_eq!(fit("Flute hook A"), Some((5, -1, "Fits 38%, 7 semitones down".to_owned())));
         // Told to stop, it gives nothing to show.
         let stopped = FitAsk { stop: Arc::new(AtomicBool::new(true)), ..ask };
         assert_eq!(fit_search(&stopped, &mut FitKept::default()), Answer::Stopped);

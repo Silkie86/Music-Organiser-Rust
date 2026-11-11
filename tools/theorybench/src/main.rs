@@ -20,6 +20,7 @@ mod keyfit;
 mod keys;
 mod metrics;
 mod naming;
+mod octave;
 mod packs;
 mod pairs;
 mod profiles;
@@ -48,6 +49,7 @@ theorybench candidates <labelled.jsonl>... [--inputs <kinds>] [--misses <file>]
 theorybench tables <labelled.jsonl>... [--write <tables.rs>]
 theorybench pairs <labelled.jsonl>... [--bars <n>] [--others <n>] [--folds <folds>] [--set <name>=<x>,...]
                   [--fit <steps> [--tie <worth>=<worth>,...] [--without <worths>] [--pull <x>]] [--quick <n>]
+theorybench octave <labelled.jsonl>... [--bars <n>] [--folds <folds>]
 
   keys       how often each key finder names the labelled key, on whole songs and on clips (8 bars long unless --bars
              gives other lengths, such as 1,2,4,8,16)
@@ -148,7 +150,10 @@ theorybench pairs <labelled.jsonl>... [--bars <n>] [--others <n>] [--folds <fold
   --pull     how hard the fit pulls the worths towards 0 (1e-4)
   --quick    measures the first look a search takes at every part instead (mo-harmony's Outline): for about this
              many stretches, how many of the close look's best are still there when a first look keeps only a share
-             of the parts, and how long each look takes a part";
+             of the parts, and how long each look takes a part
+  octave     how often a part found for a song is put at the octave it was written at (mo-midi's fit::octave), beside
+             the C# app's rule: each part of each song, a few bars at a time (--bars, 8), asked about as if found for
+             the rest of its song; folds 1,2,3,4 unless --folds says (0 is kept back for a last look)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -165,6 +170,7 @@ fn main() -> ExitCode {
         Some("songkeys") => songkeys::run(&args[1..]),
         Some("tables") => tables::run(&args[1..]),
         Some("pairs") => pairs::run(&args[1..]),
+        Some("octave") => octave::run(&args[1..]),
         _ => Err(USAGE.to_owned()),
     };
     match result {

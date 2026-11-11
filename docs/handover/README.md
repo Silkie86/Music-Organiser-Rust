@@ -210,7 +210,21 @@ the next PR step by step). Solomon wants the highest effort here.
     brings what's seen and heard into line, each compared with the move it was made with (`card_move`,
     `loop_move`, `daw_move`): the roll and chords are read again, the loop or the part in a DAW started again,
     only when the move is another.
-  Not built yet: picking a song's parts and bars by hand, the octave a part goes at, and putting the part found
+  - The octave a part goes at (2026-11-11): `mo_midi::fit::octave`. A search settles the key and says nothing of
+    the octave (octaves make no difference to how a part sits), so the search works it out for each part it finds
+    (`Found::octaves`, from `Registers::octaves_for`): the octave that brings the middle of the part (half-way
+    between its lowest and highest key, strays aside) nearest to where its kind belongs. That's the kind's usual
+    place (`octave::usual`); for a bassline or chords, half-way from there to where the song's own play in the bars
+    fitted to (`Registers::by_bars`, kept in the `Target` that `Target::of_song` makes). Never an octave that takes
+    the part off the keyboard. A loop the library has octaves apart is given as the copy that needs the least
+    moving in all (`Found::moved`, `nearer_copies`). `Fit::octaves` holds it on the page's side, and `Fit::moved` is
+    the whole move (semitones for the key plus 12 an octave), which is what the line, the card and the name say in
+    one go (`move_words`: "9 semitones down", "an octave up") and what `Page::fit_move`, `PickedFit` and `PartOut`
+    carry. Measured by `theorybench octave` (`docs/harmony/together-experiments.md`): about 3 in 4 tunes land at
+    the octave they were written at (the C# app's rule: 52 to 68 in 100), and no rule does better, so changing it
+    by hand is next. The index already keeps an octave you chose for a set of notes (`your_octaves`,
+    `MidiStore::set_your_octave`, taken in from the C# app); nothing reads it yet.
+  Not built yet: changing the octave by hand, picking a song's parts and bars by hand, and putting the part found
   at the right bar of the project.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db

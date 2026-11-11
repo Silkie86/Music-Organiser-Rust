@@ -31,17 +31,13 @@ use mo_harmony::{
 };
 use rayon::prelude::*;
 
-use crate::item::{self, Item};
+use crate::item::{self, Item, LEAST_BACKING, LEAST_TUNE};
 use crate::keyfit;
 use crate::keys;
 use crate::metrics;
 
 /// Every piece is brought to this many ticks a beat, so two songs' stretches can be played together.
 const PPQ: i64 = 480;
-
-/// A stretch needs this many notes in its tune and in its accompaniment to count.
-const LEAST_TUNE: usize = 8;
-const LEAST_BACKING: usize = 16;
 
 /// One stretch of a song: its tune and its accompaniment, from tick 0.
 struct Stretch {
@@ -427,10 +423,8 @@ fn stretches_of(song: usize, item: &Item, bars: i64) -> Vec<Stretch> {
     let length = bars * item.bar();
     let mut reader = ChordReader::new();
     let mut out = Vec::new();
-    let mut from = item.grid_origin();
-    while from + length <= item.length {
+    for from in item.stretch_starts(bars) {
         let (t, b) = (cut(&tune, from, length), cut(&backing, from, length));
-        from += length;
         if t.len() < LEAST_TUNE || b.len() < LEAST_BACKING {
             continue;
         }
