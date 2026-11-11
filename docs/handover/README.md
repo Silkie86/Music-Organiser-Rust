@@ -236,8 +236,31 @@ the next PR step by step). Solomon wants the highest effort here.
     it is in the library: no octave buttons; drums never have them, and an octave kept for the same notes doesn't
     move a drum part. A held key steps once (7 octaves to be at; each step starts what's playing again), and at
     the last octave the key is still the page's.
-  Not built yet: picking a song's parts and bars by hand, hearing a part with the song, and putting the part
-  found at the right bar of the project.
+  - Heard with the song (2026-11-11): in a "Fits my song" list, Play loop plays the part with what it was fitted
+    to: the song's picked parts over the picked bars, read from its save, at the song's tempo, through the
+    SoundFont. `midi_fits::SongBars` is that stretch of the song (`SongBars::of`: each part once, in the song's
+    order, never drums or a part resting there, each with a General MIDI sound guessed from its track and
+    plugin names, in the order the page's line names them); an answer carries it (`Answer::Fits::with`) and the
+    picked part keeps the one it was found with (`PickedFit::with`), so a tune found over the chords still plays
+    over them after the list turns to chords. How long they play: `SongBars::round`, until both loops start
+    together again or once through the longer past 32 bars (`mo_harmony::round_of`, the matcher's rule), held to
+    the two minutes of sound there can be by whole turns or whole bars, so a slow song never jumps the beat.
+    The sound is the part's loop as it's dropped (from its first bar line, at the song's tempo) and the song's
+    loop under it, each going round from its own bar lines (`mo_audio::gm::layered`: a turn a frame longer than
+    its sound goes on with the loop's start, a loop cut where the whole goes round fades, and nothing is ever
+    louder than full). The song's parts are made in one pass by one synth, a channel for each sound
+    (`mo_audio::gm::render_together`), and go in at `SONG_GAIN` of their own loudness, or turned down to that
+    much of the part's when they're louder (`song_gain`, by `mo_audio::gm::level`): six parts of a song don't
+    drown the one being tried. The song's loop is kept (`SONG_LOOP`, one loop) so stepping down the list makes
+    only each part, and let go with the chip or the list (`forget_song_loop`). If it can't be made, the part
+    plays alone and the log says why. A "Play with the song" chip (on by default, the setting
+    `midi_fits_with_song`) turns it off; the button says which it is, and the card's sound line says what's
+    heard (`midi_fits::with_song_line`, or the part's own tempo: `show_sound` picks between the two with nothing
+    read again). Never for drums or a plain list. Play in Bitwig and FL, Send and the drag are the part alone, as
+    before. Not the same loop the search judged for every part: see "What's judged isn't always what's dropped"
+    in `docs/harmony/together-experiments.md`.
+  Not built yet: picking a song's parts and bars by hand, hearing a part with the song playing in the DAW, and
+  putting the part found at the right bar of the project.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db
 writes once trusted. A decoder panic on a damaged file is caught with `mo_catch::catch`: one warning line in the log,

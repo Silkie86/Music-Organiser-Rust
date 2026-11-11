@@ -135,6 +135,9 @@ export global MidiData {
     in property <[string]> fit-wants-words;
     callback fit-song-picked(string);
     callback fit-wants-picked(int);
+    // "Play with the song": Play loop plays a part found with the parts of the song it fits, at the song's tempo.
+    in property <bool> fit-with-song;
+    callback fit-with-song-toggled();
     // Said in the list's place while it has no lines of "Fits my song": it's looking, no part fits, or the search
     // couldn't be made ("" otherwise). And whether fewer filters could give it lines, so clearing them is offered.
     in property <string> fit-none-title;
@@ -185,6 +188,8 @@ export global MidiData {
     // Playing the picked part as a loop with a General MIDI sound matched to it: whether it plays, the sound and why
     // ("Electric Piano 1 · from its name: rhodes · 120 BPM"), what went wrong, and the key that plays or stops it.
     in property <bool> playing;
+    // Play loop plays the picked part with the song it's fitted to, not alone.
+    in property <bool> play-with-song;
     in property <string> sound-line;
     in property <string> play-note;
     in property <string> play-key;
@@ -572,8 +577,10 @@ component PartPanel inherits SidePanel {
             main: true;
             width: max(self.min-width, buttons.cell);
             enabled: !MidiData.soundfont-missing || MidiData.playing;
-            text: MidiData.playing ? "Stop" : "Play loop";
-            tip: MidiData.playing ? "Stop the loop" : "Play the part round and round with a General MIDI sound matched to it";
+            text: MidiData.playing ? "Stop" : MidiData.play-with-song ? "Play with the song" : "Play loop";
+            tip: MidiData.playing ? "Stop the loop"
+                : MidiData.play-with-song ? "Play the part round and round with the parts of your song it fits, at the song's tempo"
+                : "Play the part round and round with a General MIDI sound matched to it";
             key: MidiData.play-key;
             clicked => { MidiData.play-toggled(); }
         }
@@ -831,6 +838,15 @@ export component MidiPage inherits Rectangle {
                         joined-right: i + 1 < MidiData.fit-wants-words.length;
                         clicked => { MidiData.fit-wants-picked(i); }
                     }
+                }
+            }
+            // How a part found is heard: with the song's parts it fits (lit), or alone.
+            if MidiData.fit-song != "": VerticalLayout {
+                alignment: center;
+                ToggleChip {
+                    text: "Play with the song";
+                    on: MidiData.fit-with-song;
+                    clicked => { MidiData.fit-with-song-toggled(); }
                 }
             }
             // Only the parts like this one: the shared chip, as on the other pages; a click shows them all again.

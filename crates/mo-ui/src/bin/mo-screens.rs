@@ -160,6 +160,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !moved.fit.starts_with("Moved ") {
         return Err("midi-fits.png: the card of the part picked doesn't say how it's moved to fit".into());
     }
+    // It plays with the song's parts it fits, as the chip, the Play button and the card's sound line say.
+    let with_song = midi.get_sound_line();
+    if !midi.get_fit_with_song()
+        || !midi.get_play_with_song()
+        || !with_song.contains(" · with Sub from Night drive (bars 1–8), at the song's ")
+    {
+        return Err(format!("midi-fits.png: the part picked doesn't play with the song: \"{with_song}\"").into());
+    }
     // Off, it stays picked as it is in the library: the card no longer says it's moved, and its roll and chords are
     // its own.
     mo_ui::midi::fit_sample(&app, false);
@@ -170,13 +178,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if own.title != moved.title || !own.fit.is_empty() || own.roll_low == moved.roll_low || own.chords == moved.chords {
         return Err("midi-fits.png: the part picked is still shown moved with \"Fits my song\" off".into());
     }
+    if midi.get_play_with_song() || midi.get_sound_line().contains("Night drive") {
+        return Err("midi-fits.png: the part picked still plays with the song with \"Fits my song\" off".into());
+    }
     // On again with the part still picked: its card follows the list.
     mo_ui::midi::fit_sample(&app, true);
     let again = midi.get_picked();
     if (&again.fit, &again.roll_low, &again.chords) != (&moved.fit, &moved.roll_low, &moved.chords) {
         return Err("midi-fits.png: the part picked isn't shown moved when the list becomes \"Fits my song\"'s".into());
     }
+    if !midi.get_play_with_song() || midi.get_sound_line() != with_song {
+        return Err(
+            "midi-fits.png: the part picked doesn't play with the song once the list is its song's again".into()
+        );
+    }
     shots.push(("midi-fits.png".into(), capture(&window)));
+    // "Play with the song" off: it plays alone at its own tempo, still moved to fit; and on again.
+    midi.invoke_fit_with_song_toggled();
+    let alone = midi.get_sound_line();
+    if midi.get_fit_with_song()
+        || midi.get_play_with_song()
+        || alone.contains("Night drive")
+        || !alone.contains("BPM")
+        || midi.get_picked().fit != moved.fit
+    {
+        return Err(format!("midi-fits.png: with the chip off the part doesn't play alone: \"{alone}\"").into());
+    }
+    midi.invoke_fit_with_song_toggled();
+    if !midi.get_fit_with_song() || !midi.get_play_with_song() || midi.get_sound_line() != with_song {
+        return Err("midi-fits.png: the chip on again didn't bring the song back".into());
+    }
     // Dragged out from its line it goes moved too, under a name that says so.
     let carried = mo_ui::midi::card_at_row(&app, 0).and_then(|c| c.cards.first().map(|c| c.title.clone()));
     if carried != Some(format!("{} (3 semitones up)", moved.title)) {
