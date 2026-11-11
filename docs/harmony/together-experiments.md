@@ -263,7 +263,8 @@ place, 71.4% half-way, 64.4% by the song's other tune (the C# app 63.2% and 54.2
 
 - **About 3 in 4 is the ceiling for a tune.** Tunes are written anywhere over an octave and a half, and nothing
   tried gets past it: other middles of the part, the tune's lowest note kept over a line, the accompaniment's
-  middle plus a usual gap. So the octave is a first guess, and the page needs it changeable by hand.
+  middle plus a usual gap. So the octave is a first guess, and the page lets it be changed by hand (Octave up and
+  Octave down on a fitted part's card, remembered for its notes).
 - **The other kinds of part say next to nothing.** The C# app nudged a kind's usual place by how far the song's other
   kinds were from theirs. That loses 23 points for a tune and 31 for an accompaniment: a song with low chords doesn't
   have a low tune. The rule doesn't ask them.

@@ -177,7 +177,8 @@ fn key_pressed(weak: &Weak<AppWindow>, feed: &Feed, key: &str, repeat: bool) -> 
     if let Some(app) = weak.upgrade()
         && app.get_place() == Place::Midi.index() as i32
         && let Some(id) = shortcuts.page_action_for(key, MIDI_ACTIONS)
-        && (repeat || midi::run_action(&app, id))
+        // Held down, a key has done its job, but for the ones that step (an octave, then the next).
+        && ((repeat && !repeats(id)) || midi::run_action(&app, id))
     {
         return true;
     }

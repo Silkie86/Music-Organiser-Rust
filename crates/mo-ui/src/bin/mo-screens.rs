@@ -192,9 +192,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err("midi-fits.png: no part of the list is dragged out moved to another octave".into());
     }
-    // The song saved again (the Songs page gives its list again): the list follows it, by its saves.
+    // The octave by hand, on the picked part's card (the best fit, 3 semitones up for the key): Octave down takes
+    // it an octave under that. Its card, its roll, its buttons and its line's drag all say so, a list worked out
+    // again keeps it there, Alt+Up takes it back up, and The app's octave makes it the app's again.
+    let octave_buttons = || midi.get_octave_actions().iter().map(|a| a.text.to_string()).collect::<Vec<_>>();
+    if octave_buttons() != ["Octave down", "Octave up"] {
+        return Err("midi-fits-octave.png: the card of a part that's fitted has no octave buttons".into());
+    }
+    if !mo_ui::midi::run_action(&app, "midi.octaveDown") {
+        return Err("midi-fits-octave.png: Octave down did nothing".into());
+    }
+    let lower = midi.get_picked();
+    if carried(0) != Some(format!("{} (9 semitones down)", moved.title))
+        || !lower.fit.starts_with("Moved 9 semitones down")
+        || !lower.fit.contains("at the octave you chose")
+        || lower.roll_low == moved.roll_low
+        || octave_buttons() != ["Octave down", "Octave up", "The app's octave"]
+    {
+        return Err("midi-fits-octave.png: the part isn't an octave down everywhere after Octave down".into());
+    }
+    shots.push(("midi-fits-octave.png".into(), capture(&window)));
+    // The song saved again (the Songs page gives its list again): the list follows it, by its saves, and in the
+    // list worked out again the part is still where you put it.
     if !mo_ui::midi::fit_sample_follows(&app) || midi.get_shown() == 0 {
         return Err("midi-fits.png: the list didn't follow its song when the songs were given again".into());
+    }
+    if carried(0) != Some(format!("{} (9 semitones down)", moved.title)) || midi.get_picked().fit != lower.fit {
+        return Err("midi-fits-octave.png: a list worked out again lost the octave chosen".into());
+    }
+    // Alt+Up as a key held down (it steps): up an octave, back where the app had it, and still yours.
+    let up = char::from(slint::platform::Key::UpArrow).to_string();
+    let held = app.global::<mo_ui::AppKeys>().invoke_key(up.into(), false, false, true, false, true);
+    let upper = midi.get_picked();
+    if !held
+        || !upper.fit.starts_with("Moved 3 semitones up")
+        || !upper.fit.contains("at the octave you chose")
+        || upper.roll_low != moved.roll_low
+        || octave_buttons().len() != 3
+    {
+        return Err("midi-fits-octave.png: Alt+Up held down didn't take the part up an octave".into());
+    }
+    let back = mo_ui::midi::run_action(&app, "midi.octaveApp");
+    let again = midi.get_picked();
+    if !back || (&again.fit, &again.roll_low) != (&moved.fit, &moved.roll_low) || octave_buttons().len() != 2 {
+        return Err("midi-fits-octave.png: The app's octave didn't bring the part back".into());
     }
     mo_ui::midi::fit_sample(&app, false);
     if !midi.get_fit_song().is_empty() || !midi.get_fit_none_title().is_empty() || !midi.get_picked().fit.is_empty() {

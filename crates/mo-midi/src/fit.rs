@@ -319,6 +319,9 @@ pub struct Found {
     /// How many octaves to move it as well, once it's moved into key, so it plays where its kind of part plays
     /// beside the target ([`Registers::octaves_for`]): up for more than 0. Octaves make no difference to how it sits.
     pub octaves: i32,
+    /// The lowest and the highest key it plays as it is, strays aside ([`octave::edges`]): what an octave chosen by
+    /// hand mustn't take off the keyboard either ([`octave::on_keyboard`]).
+    pub edges: (u8, u8),
 }
 
 impl Found {
@@ -543,8 +546,9 @@ impl Target {
             read.par_iter()
                 .filter_map(|(at, part, notes)| {
                     let sits = self.fit(notes, part.role, part.cut)?;
-                    let octaves = self.registers.octaves_for(part.role, notes, sits.best().0)?;
-                    Some(Found { at: *at, sits, octaves })
+                    let edges = octave::edges(notes)?;
+                    let octaves = self.registers.octaves_for(part.role, edges, sits.best().0);
+                    Some(Found { at: *at, sits, octaves, edges })
                 })
                 .collect()
         };
