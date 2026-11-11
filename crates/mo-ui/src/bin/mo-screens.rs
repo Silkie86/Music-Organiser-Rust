@@ -2524,7 +2524,7 @@ fn sample_detail() -> mo_library::SaveDetail {
 /// Where the song panel's Show in folder and Older saves buttons are in the shots, beside the filter column. If
 /// the page's layout moves them, the tooltip and menu shots come out the same as the plain panel, and mo-screens stops
 /// with an error.
-const SHOW_BUTTON: (f32, f32) = (925.0, 323.0);
+const SHOW_BUTTON: (f32, f32) = (925.0, 381.0);
 /// Made-up songs and plugins for the Plugins page: some missing, some unused for years, one measured library.
 fn sample_plugins() -> (mo_app::plugins::Plugins, Vec<mo_library::plugins::ScannedPlugin>) {
     use mo_app::plugins::{Plugins, Read, SaveBrief, SongBrief};
@@ -2702,7 +2702,7 @@ const PAGE_DOWN: f32 = 300.0;
 /// Where the wheel turns the song panel down in the narrowest window, and by how much: on its status line, which
 /// doesn't scroll on its own, as the lists and the arrangement in it do.
 const NARROW_PANEL_WHEEL: (f32, f32, f32) = (760.0, 404.0, -2.0 * PAGE_DOWN);
-const OLDER_BUTTON: (f32, f32) = (1205.0, 283.0);
+const OLDER_BUTTON: (f32, f32) = (1205.0, 341.0);
 /// Space's Old copies after moving folders line, the page at its top, and a place on the page with nothing on it (right
 /// of its name, left of a card).
 const SPACE_OLD_LINE: (f32, f32) = (400.0, 516.0);
@@ -2730,7 +2730,7 @@ const TAG_BOX: (f32, f32) = (1130.0, 490.0);
 const SHORT_LIST: (u32, u32, u32, u32) = (230, 200, 760, 400);
 /// The mouse over each of those lists (Songs' is narrow beside its panel; Plugins' starts low), for the wheel.
 /// The second line of a song's Saves tab (an older save), at 1440 x 900.
-const SECOND_SAVE: (f32, f32) = (1025.0, 484.0);
+const SECOND_SAVE: (f32, f32) = (1025.0, 544.0);
 const SHORT_LIST_WHEEL: (f32, f32) = (600.0, 540.0);
 /// A short wheel turn: less than those lists show, so turning back down goes through lines the list has made.
 const SHORT_TURN: f32 = 100.0;

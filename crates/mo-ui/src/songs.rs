@@ -7,7 +7,7 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::{Arc, LazyLock, Mutex, mpsc};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError, mpsc};
 use std::time::{Duration, Instant};
 
 use chrono::{Local, NaiveDateTime};
@@ -24,6 +24,7 @@ use mo_app::song_panel::{self as panel, Go, SaveLine as PanelSaveLine, Tab};
 use mo_app::songs::{Entry, Filters, Listed, Order, SongRow, Songs, View};
 use mo_app::{paths, sound_library, year_strip};
 use mo_library::scan::is_project_file;
+use mo_library::song_fields::{self, Change};
 use mo_library::songs::DEFAULT_RUN_GAP_MONTHS;
 use mo_library::watch::{Changes, FolderWatch};
 use mo_library::{Library, STATUSES, SaveDetail};
@@ -33,7 +34,7 @@ use crate::filters::FilterModels;
 use crate::finder::How;
 use crate::{
     AppWindow, CountLine, DetailPair, HealthLine, MenuItem, OlderLine, PanelSong, PluginLine, SampleLine, SaveLine,
-    SongLine, SongsData, YearBar,
+    SongLine, SongTag, SongsData, YearBar,
 };
 
 /// The page's rows, filters and what they let through, kept on the window's thread.
@@ -270,6 +271,13 @@ pub fn connect(app: &AppWindow, ahead: Ahead, feed: Feed) {
             _ => {}
         }
     });
+    data.set_statuses(strings(STATUSES.iter().copied()));
+    let weak = app.as_weak();
+    data.on_give(move |what, value| {
+        if let Some(app) = weak.upgrade() {
+            give(&app, &what, &value);
+        }
+    });
     let weak = app.as_weak();
     data.on_close_panel(move || {
         if let Some(app) = weak.upgrade() {
@@ -355,11 +363,13 @@ fn say_empty(data: &SongsData, empty: bool) {
 /// walked once to catch up with what changed while the app was closed (even when the folders can't be watched), and
 /// what's read is kept in the app's own songs.db.
 fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
-    let (tx, rx) = mpsc::channel::<Changes>();
+    let (tx, rx) = mpsc::channel::<Told>();
     let to_watch = tx.clone();
     let watching = FolderWatch::start(live.roots(), is_project_file, WATCH_QUIET, move |c| {
-        let _ = to_watch.send(c);
+        let _ = to_watch.send(Told::Changed(c));
     });
+    // The card's status, stars, heart and tags come here too ([`give`]): this thread has the list.
+    *TELL.lock().unwrap_or_else(PoisonError::into_inner) = Some(tx.clone());
     // Held so the loop below waits rather than ends if the watch can't start: the catch-up and the retries still run.
     let _still_here = tx;
     let _watch = match watching {
@@ -379,8 +389,15 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
         let due = |at: Option<Instant>| at.map_or(RETRY_AFTER, |at| at.saturating_duration_since(now));
         // A save that couldn't be read (still being written, or locked) is tried again after a quiet moment.
         let wait = due(catch_up_at).min(due(keep_again_at)).min(RETRY_AFTER);
+        // What you gave a song on its card: kept, and the list made again with it. If it can't be kept the list is
+        // made again all the same, so the card goes back to what the library has, and a card says why.
+        let mut given: Option<Result<(), String>> = None;
         let changes = match rx.recv_timeout(wait) {
-            Ok(changes) => Some(changes),
+            Ok(Told::Changed(changes)) => Some(changes),
+            Ok(Told::Give(save_ids, change)) => {
+                given = Some(live.give(&save_ids, &change).map(|_| ()).map_err(|e| e.to_string()));
+                None
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => live.retries(),
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
         };
@@ -444,7 +461,7 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
                 None => None,
             };
         }
-        if updated.is_empty() && !renumbered {
+        if updated.is_empty() && !renumbered && given.is_none() {
             continue;
         }
         // Made again when a save's id changed too, so the page picks it by the id the library has.
@@ -454,6 +471,14 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
         let _ = weak.upgrade_in_event_loop(move |app| {
             show_again(&app, songs, years);
             crate::finder::add_source(&app, "songs", found);
+            if let Some(Err(why)) = given {
+                log::warning("Songs", &format!("Couldn't keep what the song was given: {why}"));
+                FEED.with(|f| {
+                    if let Some(feed) = f.borrow().as_ref() {
+                        feed.start(NOT_KEPT, "").failed(&why);
+                    }
+                });
+            }
             if !updated.for_card() {
                 return;
             }
@@ -464,6 +489,87 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
                 }
             });
         });
+    }
+}
+
+/// What the page's thread is told: the project folders changed, or you gave a song something on its card (its saves'
+/// ids and what).
+enum Told {
+    Changed(Changes),
+    Give(Vec<i64>, Change),
+}
+
+/// How the window's thread tells the page's thread ([`watch`]); None until the list is up.
+static TELL: Mutex<Option<mpsc::Sender<Told>>> = Mutex::new(None);
+
+/// The card's title when what you gave a song couldn't be kept.
+const NOT_KEPT: &str = "Couldn't keep that for the song";
+
+/// The change a click on the card asks for (`what` and `value` as songs.slint's `give` says them), for a song that
+/// has `favourite` now. None for words the card never sends.
+fn asked_change(what: &str, value: &str, favourite: bool) -> Option<Change> {
+    Some(match what {
+        "status" => Change::Status(value.to_owned()),
+        "stars" => Change::Rating(value.parse().ok()?),
+        "favourite" => Change::Favourite(!favourite),
+        "add-tag" => Change::AddTag(value.to_owned()),
+        "remove-tag" => Change::RemoveTag(value.to_owned()),
+        _ => return None,
+    })
+}
+
+/// Makes `change` (already checked) to a row of the list as it shows, ahead of the library: the page's thread may be
+/// busy reading folders for some seconds, and a click shows at once. The list made again after it has what's kept.
+fn show_given(row: &mut SongRow, change: &Change) {
+    match change {
+        Change::Status(status) => row.status.clone_from(status),
+        Change::Rating(stars) => row.rating = *stars,
+        Change::Favourite(on) => row.favourite = *on,
+        Change::AddTag(tag) => {
+            if !row.tags.iter().any(|t| song_fields::same_tag(t) == *tag) {
+                row.tags.push(tag.clone());
+            }
+        }
+        Change::RemoveTag(tag) => row.tags.retain(|t| song_fields::same_tag(t) != *tag),
+        Change::Key(_) | Change::Notes(_) => {}
+    }
+}
+
+/// You gave the picked song a status, stars, a heart or a tag on its card (rule 14: the song's, so every save of it
+/// gets it, its copies in other folders too). Shown at once, then kept by the page's thread ([`watch`]), which makes
+/// the list again; a card says so if it can't be kept.
+fn give(app: &AppWindow, what: &str, value: &str) {
+    let failed = |why: &str| {
+        FEED.with(|f| {
+            if let Some(feed) = f.borrow().as_ref() {
+                feed.start(NOT_KEPT, "").failed(why);
+            }
+        });
+    };
+    let asked = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let at = p.picked?;
+        let row = p.songs.rows.get_mut(at)?;
+        let change = match asked_change(what, value, row.favourite)?.checked() {
+            Ok(change) => change,
+            Err(why) => return Some(Err(why)),
+        };
+        let save_ids: Vec<i64> = row.song.saves().chain(&row.song.copies).map(|s| s.id).collect();
+        show_given(row, &change);
+        Some(Ok((save_ids, change)))
+    });
+    let (save_ids, change) = match asked {
+        Some(Ok(asked)) => asked,
+        Some(Err(why)) => return failed(&why),
+        None => return,
+    };
+    // The line in the list and the card show it now; the filters' counts follow when the list is made again.
+    LINES.with(|l| l.notify.reset());
+    fill_panel(app);
+    let told =
+        TELL.lock().unwrap_or_else(PoisonError::into_inner).as_ref().map(|t| t.send(Told::Give(save_ids, change)));
+    if !matches!(told, Some(Ok(()))) {
+        failed("the song list isn't being kept up to date just now; it shows again as it was when the app next starts");
     }
 }
 
@@ -807,6 +913,10 @@ fn refresh(app: &AppWindow) {
         if data.get_search().as_str() != f.search {
             data.set_search(f.search.as_str().into());
         }
+        // The card's tags light with the Tag filter.
+        if let Some(r) = p.picked.and_then(|i| p.songs.rows.get(i)) {
+            fill_tags(&data, f, r);
+        }
     });
 }
 
@@ -895,6 +1005,15 @@ fn arrived(app: &AppWindow, asked: u64, read: Result<Option<SaveDetail>, String>
     fill_detail(app);
 }
 
+/// The picked song's tags on its card, each lit while the Tag filter has it.
+fn fill_tags(data: &SongsData, filters: &Filters, r: &SongRow) {
+    data.set_song_tags(model(
+        r.tags
+            .iter()
+            .map(|t| SongTag { text: t.as_str().into(), on: filters.tags.iter().any(|f| f.eq_ignore_ascii_case(t)) }),
+    ));
+}
+
 /// Puts the picked song in the panel: what the list knows, then [`fill_detail`].
 fn fill_panel(app: &AppWindow) {
     let data = app.global::<SongsData>();
@@ -902,6 +1021,7 @@ fn fill_panel(app: &AppWindow) {
         let p = p.borrow();
         let Some(r) = p.picked.and_then(|i| p.songs.rows.get(i)) else { return };
         data.set_song(panel_song(r));
+        fill_tags(&data, &p.filters, r);
         data.set_runs(model(r.runs.iter().rev().map(|run| SharedString::from(panel::run_line(run)))));
         data.set_saves_heading(panel::saves_heading(r).into());
         let older = panel::older_saves(r);
@@ -1305,6 +1425,30 @@ fn copy_path(path: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// UX review A2: each click on the card is one change the library takes, and a word the card never sends is none.
+    #[test]
+    fn a_click_on_the_card_is_one_change_to_the_song() {
+        assert_eq!(asked_change("status", "Mixing", false), Some(Change::Status("Mixing".to_owned())));
+        assert_eq!(asked_change("stars", "4", false), Some(Change::Rating(4)));
+        assert_eq!(asked_change("stars", "lots", false), None);
+        // The heart turns over what the song has now.
+        assert_eq!(asked_change("favourite", "", false), Some(Change::Favourite(true)));
+        assert_eq!(asked_change("favourite", "", true), Some(Change::Favourite(false)));
+        assert_eq!(
+            asked_change("add-tag", " Dark ", false).and_then(|c| c.checked().ok()),
+            Some(Change::AddTag("dark".to_owned()))
+        );
+        assert_eq!(asked_change("remove-tag", "dark", false), Some(Change::RemoveTag("dark".to_owned())));
+        assert_eq!(asked_change("key", "F# minor", false), None);
+        // Every status the card's menu offers is one the library keeps.
+        for status in STATUSES {
+            assert!(asked_change("status", status, false).is_some_and(|c| c.checked().is_ok()), "{status}");
+        }
+        // Six stars, or a tag with no name, is refused before anything shows.
+        assert!(Change::Rating(6).checked().is_err());
+        assert!(Change::AddTag("  ".to_owned()).checked().is_err());
+    }
 
     #[test]
     fn an_fl_save_s_menu_also_opens_it_in_bitwig() {

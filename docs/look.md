@@ -85,6 +85,9 @@ light that means something. It should feel like a rack unit on a desk, not a web
 - A long explanation folds behind a "How this works" line (`HowItWorks`, review C7): on a Space card under its
   buttons, and at the top of Settings' Folders, DAWs and Shortcuts. What must be known before a button is pressed
   (what Remove sends to the Recycle Bin) stays in sight beside the button.
+- What you give a thing is set on its card, where it shows (review A2): a status in a `MenuChip`, stars in a
+  `StarsPick` (a click on the last lit star takes them away), a heart in a `HeartToggle`, tags as `TagChip`s with a
+  `WordBox` to add one. A click shows at once; the library is written off the window's thread.
 - Advice above a list folds into one strip (`NoticeStrip`, review A4): one line that says what there is, with
   Show and Hide, so the list starts high. Its words shorten with "..." before the Show button is pushed off. On
   Plugins it holds the install cards, the room-to-free line and the measure line; a warning the user must act on

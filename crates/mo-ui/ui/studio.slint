@@ -1654,6 +1654,39 @@ export component Stars inherits HorizontalLayout {
 }
 
 // A small heart, for a favourite.
+// Stars to click on a card: a click on a star gives that many, and a click on the last lit star takes them all away.
+// Bigger than the list's Stars, with room around each to hit; the stars up to the one under the mouse show lit.
+export component StarsPick inherits Rectangle {
+    in property <int> rating;
+    callback picked(int);
+    // The star the mouse is over, counted from 1; 0 for none.
+    property <int> over: touch.has-hover ? clamp(ceil(touch.mouse-x / 20px), 1, 5) : 0;
+    width: 100px;
+    height: 28px;
+    for i in 5: Path {
+        x: i * 20px + 3px;
+        y: (parent.height - self.height) / 2;
+        width: 14px;
+        height: 14px;
+        viewbox-width: 10;
+        viewbox-height: 10;
+        commands: "M 5 0.5 L 6.3 3.6 L 9.6 3.8 L 7.1 6 L 7.9 9.3 L 5 7.5 L 2.1 9.3 L 2.9 6 L 0.4 3.8 L 3.7 3.6 Z";
+        fill: i < root.rating ? Theme.warning : transparent;
+        stroke: i < root.rating ? Theme.warning : i < root.over ? Theme.muted : Theme.faint;
+        stroke-width: 0.8px;
+    }
+    touch := TouchArea {
+        clicked => {
+            root.picked(root.over == root.rating ? 0 : root.over);
+        }
+    }
+    Tip {
+        text: root.over == root.rating && root.rating > 0 ? "Take the stars away" : root.over == 1 ? "Give it 1 star" : "Give it " + root.over + " stars";
+        hovering: touch.has-hover && !touch.pressed;
+        at-y: root.height + Space.xs;
+    }
+}
+
 export component Heart inherits Path {
     in property <bool> on: true;
     width: 11px;
