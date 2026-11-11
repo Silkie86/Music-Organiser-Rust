@@ -1,8 +1,9 @@
 // The test plugin's panel: what shows inside the DAW's plugin window. Built from the app's own style (studio.slint),
 // so it looks like the app. Two views: Sounds (a list from the app's sound library, click to play through the track)
+// with the app's own filters and orders)
 // and DAW check (every CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart } from "../../mo-ui/ui/studio.slint";
 import { ListView } from "../../mo-ui/ui/list.slint";
 
 import "../../mo-ui/fonts/IBMPlexSans-400.ttf";
@@ -13,6 +14,16 @@ export struct SoundLine {
     name: string,
     // The folder it's in, shorter: the second line.
     folder: string,
+    // Its type, tempo, key and length, as far as the app knows them: after the folder.
+    facts: string,
+    favourite: bool,
+}
+
+// One type in the filter column, with how many sounds picking it would show.
+export struct TypeLine {
+    text: string,
+    count: string,
+    on: bool,
 }
 
 export struct ExtensionLine {
@@ -36,16 +47,29 @@ export component Panel inherits Window {
     in property <string> extensions-summary;
     // "Copied" after Copy list, or what went wrong.
     in property <string> copied;
+    // The filter column: the most used types, hits or loops, and your favourites.
+    in property <[TypeLine]> types;
+    in property <bool> hits;
+    in property <bool> loops;
+    in property <bool> favourites;
+    // The orders on offer, and the one the list is in.
+    in property <[string]> orders;
+    in property <int> order;
     in-out property <int> picked: -1;
     in-out property <int> view: 0;
     callback search(string);
     callback play(int);
     callback stop();
+    callback toggle-type(string);
+    callback toggle-hits();
+    callback toggle-loops();
+    callback toggle-favourites();
+    callback pick-order(int);
     callback copy();
 
     title: "Music Organiser";
-    preferred-width: 560px;
-    preferred-height: 520px;
+    preferred-width: 760px;
+    preferred-height: 560px;
     background: Theme.background;
     default-font-family: Theme.text-font;
     default-font-size: Type.body;
@@ -78,60 +102,127 @@ export component Panel inherits Window {
             }
         }
 
-        if root.view == 0: VerticalLayout {
-            spacing: Space.md;
-            HorizontalLayout {
-                spacing: Space.sm;
-                SearchBox {
-                    horizontal-stretch: 1;
-                    hint: "Search sounds";
-                    edited(text) => { root.search(text); }
+        if root.view == 0: HorizontalLayout {
+            spacing: Space.lg;
+            // The filter column, as the app's pages have it: ticks, each with its count.
+            VerticalLayout {
+                width: 176px;
+                alignment: start;
+                spacing: 0;
+                Caps {
+                    text: "TYPE";
+                    height: 22px;
                 }
-                StudioButton {
-                    horizontal-stretch: 0;
-                    text: "Stop";
-                    clicked => { root.stop(); }
+                for t in root.types: TickLine {
+                    text: t.text;
+                    count: t.count;
+                    on: t.on;
+                    dim: t.count == "0" && !t.on;
+                    clicked => { root.toggle-type(t.text); }
+                }
+                Rectangle { height: Space.md; }
+                Caps {
+                    text: "LENGTH";
+                    height: 22px;
+                }
+                TickLine {
+                    text: "Hits";
+                    on: root.hits;
+                    clicked => { root.toggle-hits(); }
+                }
+                TickLine {
+                    text: "Loops";
+                    on: root.loops;
+                    clicked => { root.toggle-loops(); }
+                }
+                Rectangle { height: Space.md; }
+                Caps {
+                    text: "YOURS";
+                    height: 22px;
+                }
+                TickLine {
+                    text: "Favourites";
+                    on: root.favourites;
+                    clicked => { root.toggle-favourites(); }
                 }
             }
-            Text {
-                text: root.status;
-                color: Theme.muted;
-                font-size: Type.meta;
-            }
-            ListView {
-                row-height: 48px;
-                rows: root.sounds.length;
-                for sound[i] in root.sounds: ListLine {
-                    height: 48px;
-                    selected: i == root.picked;
-                    clicked => {
-                        root.picked = i;
-                        root.play(i);
+            VerticalLayout {
+                spacing: Space.md;
+                HorizontalLayout {
+                    spacing: Space.sm;
+                    SearchBox {
+                        horizontal-stretch: 1;
+                        hint: "Search sounds";
+                        edited(text) => { root.search(text); }
                     }
-                    VerticalLayout {
-                        padding-left: Space.md;
-                        padding-right: Space.md;
-                        alignment: center;
-                        Text {
-                            text: sound.name;
-                            color: Theme.text;
-                            font-size: Type.row-title;
-                            overflow: elide;
+                    StudioButton {
+                        horizontal-stretch: 0;
+                        text: "Stop";
+                        clicked => { root.stop(); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: Space.md;
+                    Text {
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                        text: root.status;
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                        overflow: elide;
+                    }
+                    Segmented {
+                        horizontal-stretch: 0;
+                        choices: root.orders;
+                        current: root.order;
+                        pad: Space.md;
+                        picked(i) => { root.pick-order(i); }
+                    }
+                }
+                ListView {
+                    row-height: 48px;
+                    rows: root.sounds.length;
+                    for sound[i] in root.sounds: ListLine {
+                        height: 48px;
+                        selected: i == root.picked;
+                        clicked => {
+                            root.picked = i;
+                            root.play(i);
                         }
-                        Text {
-                            text: sound.folder;
-                            color: Theme.faint;
-                            font-size: Type.meta;
-                            overflow: elide;
+                        HorizontalLayout {
+                            padding-left: Space.md;
+                            padding-right: Space.md;
+                            spacing: Space.sm;
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                alignment: center;
+                                Text {
+                                    text: sound.name;
+                                    color: Theme.text;
+                                    font-size: Type.row-title;
+                                    overflow: elide;
+                                }
+                                Text {
+                                    text: sound.facts == "" ? sound.folder : sound.folder + "  ·  " + sound.facts;
+                                    color: Theme.faint;
+                                    font-size: Type.meta;
+                                    overflow: elide;
+                                }
+                            }
+                            if sound.favourite: VerticalLayout {
+                                horizontal-stretch: 0;
+                                alignment: center;
+                                Heart { }
+                            }
                         }
                     }
                 }
-            }
-            Text {
-                text: root.playing;
-                color: Theme.accent;
-                font-size: Type.meta;
-                overflow: elide;
+                Text {
+                    text: root.playing;
+                    color: Theme.accent;
+                    font-size: Type.meta;
+                    overflow: elide;
+                }
             }
         }
 
