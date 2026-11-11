@@ -75,7 +75,7 @@ light that means something. It should feel like a rack unit on a desk, not a web
   lit play button first, then into the DAW, then show and copy, then its facts side by side. On MIDI, Presets,
   Sounds and Plugins so far. Buttons that change files stand apart under a thin line (Plugins' Clean up, Uninstall
   and Move). A choice between numbers is a chip strip (`FilterPicks`); the lit-underline switch (`Segmented`,
-  `TabBar`) is only for views and tabs.
+  `TabBar`) is for views and tabs, and for one of three in the filter column.
   A chip for a choice that would show nothing ("Arranging 0") has faint words (`ToggleChip.dim`). A dot that shows
   a state is green, amber, red or grey, never a DAW's colour. Shuffle is a plain button everywhere.
   A line inside a card has no buttons of its own: a click picks it and the card's buttons act on it (a song's Saves
@@ -91,7 +91,11 @@ light that means something. It should feel like a rack unit on a desk, not a web
   filter (its name in capitals, each choice a `TickLine` with how many lines it would show, a long list's rest in a
   menu under them) and a `TickLine` for each on/off choice. Every choice stays in sight; a choice with nothing to
   show is greyed. A view's own settings are not filters and go on the view: the Galaxy's are small drop-downs
-  (`OneOfChip`) on the map. On Sounds first; the other pages follow.
+  (`OneOfChip`) on the map. On every list page. In a window under 860 px across the column folds to a slim
+  "FILTERS" tab, lit while a filter is picked; a click opens it over the list. Not every filter is a tick list: one
+  of three is a small switch (Sounds' Length: All, Hits, Loops), and a span of numbers is a slider with two handles
+  (`RangeSlider`, Sounds' Tempo), with bars over it for how many sounds there are at each tempo, the ones between the
+  handles lit.
 
 - Column headings order a list (the UX review of 10 Nov, B5): a click on a heading (`ColumnHead` in `studio.slint`)
   puts the list in that column's order, a second click turns it round; the heading the list goes by is lit in the

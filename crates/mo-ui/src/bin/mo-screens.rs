@@ -1244,17 +1244,31 @@ fn sounds_shots(
         return Err("sounds-types.png: picking two types changed nothing; are the type chips wired?".into());
     }
     shots.push(("sounds-types.png".into(), after));
-    // One type, a key and the keys that mix well with it, and two tempos.
+    // One type, a key and the keys that mix well with it, and a span of tempos.
     data.invoke_toggle_choice("type".into(), second);
     data.invoke_toggle_choice("key".into(), "A minor".into());
     data.invoke_toggle("mix-well".into());
-    data.invoke_toggle_choice("tempo".into(), "110 to 130".into());
-    data.invoke_toggle_choice("tempo".into(), "130 to 150".into());
+    data.invoke_tempo_picked(110, 150);
     let filtered = capture(window);
     if filtered == before {
         return Err("sounds-filtered.png: the key and tempo picks changed nothing".into());
     }
     shots.push(("sounds-filtered.png".into(), filtered));
+    data.invoke_clear();
+    // The Tempo slider's higher handle, dragged from its end to 150 BPM: the lower one stays where it is.
+    let button = slint::platform::PointerEventButton::Left;
+    let at = |x: f32| slint::LogicalPosition::new(x, TEMPO_TRACK_Y);
+    window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position: at(TEMPO_HIGH_END_X), button });
+    hover(window, TEMPO_150_X, TEMPO_TRACK_Y);
+    window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position: at(TEMPO_150_X), button });
+    hover(window, -1.0, -1.0);
+    if (data.get_tempo_low(), data.get_tempo_high()) != (60, 150) {
+        return Err(format!(
+            "The Tempo slider's higher handle wasn't dragged to 150: it says {} to {}. Has the filter column moved?",
+            data.get_tempo_low(),
+            data.get_tempo_high()
+        ));
+    }
     data.invoke_clear();
     // Hide duplicates on, with three sounds the same audio (the first three by id): one of them shows, and the chip
     // says how many it hides.
@@ -2784,6 +2798,12 @@ fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
     window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position, button });
     window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position, button });
 }
+
+/// The Sounds page's Tempo slider with no filter picked: its track's height in the window, where its higher handle
+/// rests, and where 150 BPM is along it.
+const TEMPO_TRACK_Y: f32 = 669.0;
+const TEMPO_HIGH_END_X: f32 = 419.0;
+const TEMPO_150_X: f32 = 357.0;
 
 /// The box (x, y, width, height, in pixels) round every pixel that differs between two pictures of the window, or
 /// None when none does.
