@@ -108,6 +108,9 @@ pub struct Filters {
     pub keys: Vec<KeyName>,
     /// Only parts from files saved in these years, first to last.
     pub years: Option<(i32, i32)>,
+    /// Only parts of at least this many notes (Settings › MIDI, [`SMALLEST_PART_KEY`]); 0 or 1: every part. Not one
+    /// of the filters you pick on the page, so [`Filters::any`] leaves it out.
+    pub smallest: usize,
 }
 
 impl Filters {
@@ -174,7 +177,63 @@ fn searched(cat: &Catalogue, f: &Filters, target: Option<Target>) -> Vec<Hit> {
         limit: usize::MAX,
         ..Query::default()
     };
-    cat.search(&q).0
+    let mut hits = cat.search(&q).0;
+    if f.smallest > 1 {
+        hits.retain(|h| cat.entry(h.entry).is_some_and(|e| big_enough(e, f.smallest)));
+    }
+    hits
+}
+
+/// Settings' smallest MIDI part: a part with fewer notes than this is hidden on the MIDI page. This app's own (the C#
+/// app always dropped parts under 3 notes).
+pub const SMALLEST_PART_KEY: &str = "midi_smallest_part";
+/// The smallest part when Settings hasn't picked one: the C# app's limit.
+pub const SMALLEST_PART_DEFAULT: usize = 3;
+/// What Settings offers, in notes.
+pub const SMALLEST_PART_CHOICES: [usize; 6] = [1, 2, 3, 4, 6, 8];
+
+/// Where a smallest part sits in [`SMALLEST_PART_CHOICES`] (the default's place for any other).
+pub fn smallest_part_index(n: usize) -> usize {
+    let at = |n| SMALLEST_PART_CHOICES.iter().position(|&c| c == n);
+    at(n).or_else(|| at(SMALLEST_PART_DEFAULT)).unwrap_or(0)
+}
+
+/// The smallest part as kept in the settings: one of [`SMALLEST_PART_CHOICES`], else the default.
+pub fn smallest_part_from(kept: Option<&str>) -> usize {
+    kept.and_then(|k| k.trim().parse::<usize>().ok())
+        .filter(|n| SMALLEST_PART_CHOICES.contains(n))
+        .unwrap_or(SMALLEST_PART_DEFAULT)
+}
+
+/// Settings' words for a smallest part: "Every part", "2 notes".
+pub fn smallest_part_words(n: usize) -> String {
+    if n <= 1 { "Every part".to_owned() } else { format!("{n} notes") }
+}
+
+/// Whether a part has at least `smallest` notes.
+pub fn big_enough(e: &Entry, smallest: usize) -> bool {
+    usize::try_from(e.phrase.notes).unwrap_or(0) >= smallest
+}
+
+/// How many lines the whole list has with parts under `smallest` notes hidden (the same loop in other keys is one
+/// line; those all have the same notes).
+pub fn line_count(cat: &Catalogue, smallest: usize) -> usize {
+    if smallest <= 1 {
+        return cat.line_count;
+    }
+    (0..cat.entries.len())
+        .into_par_iter()
+        .filter(|&at| cat.is_line(at) && cat.entry(at).is_some_and(|e| big_enough(e, smallest)))
+        .count()
+}
+
+/// Said after the page's summary when Settings hides small parts: " · 1,234 under 3 notes hidden".
+pub fn hidden_text(cat: &Catalogue, lines: usize, smallest: usize) -> String {
+    let hidden = cat.line_count.saturating_sub(lines);
+    if hidden == 0 || smallest <= 1 {
+        return String::new();
+    }
+    format!(" · {} under {smallest} notes hidden", thousands(hidden))
 }
 
 /// Whether a part is in the years picked (the year strip, which isn't one of the chips).
@@ -216,7 +275,8 @@ pub fn view(
             base.retain(|h| cat.entry(h.entry).is_none_or(|e| e.key_group != own));
         }
     }
-    let counts = counts(cat, &base, f, one_line);
+    let mut counts = counts(cat, &base, f, one_line);
+    counts.lines = line_count(cat, f.smallest);
     let mut hits: Vec<Hit> = base
         .into_par_iter()
         .filter(|h| cat.entry(h.entry).is_some_and(|e| in_years(f, e, &cat.dates) && chips_pass(f, e) == [true; 3]))
@@ -261,6 +321,8 @@ pub struct ChoiceCounts {
     pub froms: Vec<usize>,
     /// By key, majors then minors (the Key menu's order).
     pub keys: Vec<usize>,
+    /// How many lines the whole list has with the smallest parts hidden ([`line_count`]): the "of" in "40 of 900".
+    pub lines: usize,
 }
 
 impl ChoiceCounts {
@@ -269,6 +331,7 @@ impl ChoiceCounts {
             roles: vec![0; Role::ALL.len()],
             froms: vec![0; FROM_CHOICES.len()],
             keys: vec![0; key_list().len()],
+            lines: 0,
         }
     }
 
@@ -1327,10 +1390,51 @@ mod tests {
             p
         };
         let cat = Catalogue::new(vec![loop_in(9, "Am"), loop_in(6, "Fsm")]);
-        let parts: std::sync::Arc<dyn crate::finder::Source> = std::sync::Arc::new(crate::finder::midi_parts(&cat));
+        let parts: std::sync::Arc<dyn crate::finder::Source> = std::sync::Arc::new(crate::finder::midi_parts(&cat, 1));
         assert_eq!(parts.len(), 1, "one line for the loop");
         let g = crate::finder::find(&[parts], "pad loop fsm", None, 4);
         assert_eq!(g.len(), 1, "the other key's file is found by its own name");
+    }
+
+    #[test]
+    fn parts_under_the_smallest_part_are_hidden_and_said() {
+        let sized = |name: &str, hash: &str, notes: i32| {
+            let mut p = phrase(&format!("L:/New Midi/{name}.mid"), name, Role::Melody, hash, 1_760_000_000);
+            p.notes = notes;
+            p
+        };
+        let cat = Catalogue::new(vec![sized("Lead", "L", 16), sized("Pickup", "P", 1), sized("Answer", "A", 2)]);
+        // Every part (as the index keeps them now).
+        let every = Filters { smallest: 1, ..Filters::default() };
+        let (hits, counts) = view(&cat, &every, Order::Name, false, None, None);
+        assert_eq!(titles(&cat, &hits), ["Answer", "Lead", "Pickup"]);
+        assert_eq!(counts.lines, 3);
+        assert_eq!(hidden_text(&cat, counts.lines, 1), "");
+        // Settings' 3 notes: only the lead, and the list says how many it has of all there are to show.
+        let three = Filters { smallest: 3, ..Filters::default() };
+        assert!(!three.any(), "not one of the page's own filters");
+        let (hits, counts) = view(&cat, &three, Order::Name, false, None, None);
+        assert_eq!(titles(&cat, &hits), ["Lead"]);
+        assert_eq!(counts.lines, 1);
+        assert_eq!(counts.roles.iter().sum::<usize>(), 1, "the chips count only what can show");
+        assert_eq!(hidden_text(&cat, counts.lines, 3), " · 2 under 3 notes hidden");
+        let two = Filters { smallest: 2, ..Filters::default() };
+        assert_eq!(titles(&cat, &view(&cat, &two, Order::Name, false, None, None).0), ["Answer", "Lead"]);
+        // What Settings keeps.
+        assert_eq!(smallest_part_from(None), 3);
+        assert_eq!(smallest_part_from(Some(" 1 ")), 1);
+        assert_eq!(smallest_part_from(Some("8")), 8);
+        for odd in ["0", "5", "-1", "lots", ""] {
+            assert_eq!(smallest_part_from(Some(odd)), 3, "{odd:?}");
+        }
+        assert_eq!(smallest_part_words(1), "Every part");
+        assert_eq!(smallest_part_words(4), "4 notes");
+        assert_eq!(smallest_part_index(1), 0);
+        assert_eq!(smallest_part_index(3), 2);
+        assert_eq!(smallest_part_index(5), 2, "the default's place");
+        // Ctrl+K finds only what the list can show.
+        let parts = crate::finder::midi_parts(&cat, 3);
+        assert_eq!(crate::finder::Source::len(&parts), 1);
     }
 
     #[test]

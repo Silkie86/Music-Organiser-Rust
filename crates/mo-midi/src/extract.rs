@@ -19,8 +19,9 @@ use crate::instruments;
 use crate::member::PhraseMember;
 
 /// The analysis's own version; raised when what it finds changes, so every file is read again once. It follows the C#
-/// `MidiIndexer.Version` (9) it was ported from.
-pub const VERSION: u32 = 9;
+/// `MidiIndexer.Version` (9) it was ported from. 10: parts of one or two notes are kept too (the C# app dropped
+/// them); the MIDI page hides them by Settings' smallest part, so changing it needs no reading again.
+pub const VERSION: u32 = 10;
 /// What a `.mid` file was read with: the analysis and both MIDI file readers (a file is read as a Clip File when it
 /// starts as one, whatever its ending).
 pub const FILE_VERSION: u32 = VERSION * 10_000 + midi::smf::VERSION * 100 + midi::clip::VERSION;
@@ -261,7 +262,8 @@ fn add(
     program: Option<u8>,
     track_name: String,
 ) {
-    if notes.len() < 3 {
+    // Every part is kept, however few notes it has: the page hides the smallest by Settings › MIDI.
+    if notes.is_empty() {
         return;
     }
     for piece in analyser::split(&notes, None) {
@@ -350,8 +352,10 @@ mod tests {
         let drums = from_bytes(Path::new("x.mid"), &smf(8, 9, "Groove"), &[]).unwrap();
         assert!(drums[0].drums);
         assert_eq!(drums[0].analysis.role, Role::Drums);
-        // Too few notes: nothing.
-        assert!(from_bytes(Path::new("x.mid"), &smf(2, 0, "A"), &[]).unwrap().is_empty());
+        // Two notes are a part too (the page hides it unless Settings shows parts that small).
+        let two = from_bytes(Path::new("x.mid"), &smf(2, 0, "A"), &[]).unwrap();
+        assert_eq!(two.len(), 1);
+        assert_eq!(two[0].notes.len(), 2);
     }
 
     #[test]
@@ -379,7 +383,7 @@ mod tests {
 
     #[test]
     fn versions() {
-        assert_eq!(project_version("a.FLP"), Some(900 + fl::VERSION));
+        assert_eq!(project_version("a.FLP"), Some(1000 + fl::VERSION));
         assert_eq!(project_version("a.mid"), None);
     }
 }

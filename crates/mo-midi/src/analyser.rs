@@ -170,10 +170,8 @@ pub fn split(notes: &[NoteEvent], clip_starts: Option<&HashSet<i64>>) -> Vec<Pie
                 }
             }
         }
+        // Every piece is kept, however few notes: the page hides the smallest by Settings › MIDI.
         for piece in pieces {
-            if !whole && piece.len() < 3 {
-                continue;
-            }
             let first_bar = piece.first().map_or(0, |n| n.start / BAR);
             let trimmed: Vec<NoteEvent> =
                 piece.iter().take(MAX_NOTES).map(|n| NoteEvent { start: n.start - first_bar * BAR, ..*n }).collect();

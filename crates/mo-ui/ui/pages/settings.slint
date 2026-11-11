@@ -95,6 +95,9 @@ export global SettingsData {
     in property <bool> output-busy;
     // Whether a Galaxy sweep holds the pointer to the star that's playing.
     in property <bool> sweep-hold;
+    // The MIDI page's smallest part: the choices, and which is picked.
+    in property <[string]> smallest-parts;
+    in property <int> smallest-index;
     // Where the app keeps its data, and moving it to another drive (mo_app::data_move): the line under it, whether a
     // copy is running, and whether one is ready for the next start.
     in property <string> data-folder;
@@ -173,6 +176,7 @@ export global SettingsData {
     callback output-picked(string);
     callback refresh-outputs();
     callback toggle-sweep-hold();
+    callback smallest-picked(int);
     // The look back to the app's own: Graphite, its accent and font, at 100%.
     callback back-to-normal();
     // Developer: a fact's button (open its folder, show the log in its folder), by the fact's number; try an activity card.
@@ -498,6 +502,18 @@ component GeneralTab inherits VerticalLayout {
                 text: "Hold the pointer to the sound";
                 on: SettingsData.sweep-hold;
                 clicked => { SettingsData.toggle-sweep-hold(); }
+            }
+        }
+    }
+    SettingsCard {
+        title: "MIDI parts";
+        intro: "Every part in your projects and MIDI files is kept, however few notes it has. Parts smaller than this are hidden on the MIDI page, so a lone crash or a single kick doesn't crowd the list. Pick Every part to see them all; the list changes at once, with nothing read again.";
+        ChoiceRow {
+            label: "SMALLEST PART";
+            Segmented {
+                choices: SettingsData.smallest-parts;
+                current: SettingsData.smallest-index;
+                picked(i) => { SettingsData.smallest-picked(i); }
             }
         }
     }

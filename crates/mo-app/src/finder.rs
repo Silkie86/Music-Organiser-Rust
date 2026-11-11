@@ -736,8 +736,9 @@ impl Source for Presets {
 }
 
 /// Every MIDI part the MIDI page lists, found by its title, then where it's from. Its id is its notes' fingerprint, so
-/// the page finds it again after the index is read again.
-pub fn midi_parts(cat: &mo_midi::Catalogue) -> Lines {
+/// the page finds it again after the index is read again. Parts under `smallest` notes are left out, as the page hides
+/// them (Settings' smallest part).
+pub fn midi_parts(cat: &mo_midi::Catalogue, smallest: usize) -> Lines {
     // A line each, as the MIDI page lists them: the same loop in other keys once, found by those files' names too, as
     // the page's own search finds them ("Pad Loop F#m" when "Pad Loop Am" heads the group).
     let mut others: std::collections::HashMap<usize, String> = std::collections::HashMap::new();
@@ -754,7 +755,7 @@ pub fn midi_parts(cat: &mo_midi::Catalogue) -> Lines {
         .entries
         .iter()
         .enumerate()
-        .filter(|(at, _)| cat.is_line(*at))
+        .filter(|(at, e)| cat.is_line(*at) && crate::midi::big_enough(e, smallest))
         .map(|(at, e)| {
             let mut from = crate::midi::from_text(e);
             let details = crate::midi::details(e);

@@ -307,7 +307,9 @@ fn check_file(path: &str, mtime: i64, hashes: &[&str], folders: &[String]) -> Fi
         Ok(found) => found,
         Err(extract::Unread::InUse(why) | extract::Unread::Failed(why)) => return FileCheck::Unread(why),
     };
-    let rust: std::collections::HashSet<&str> = found.iter().map(|f| f.analysis.hash.as_str()).collect();
+    // The C# indexer dropped parts under 3 notes; the Rust index keeps them (the page hides them by Settings).
+    let rust: std::collections::HashSet<&str> =
+        found.iter().filter(|f| f.notes.len() >= 3).map(|f| f.analysis.hash.as_str()).collect();
     let cs: std::collections::HashSet<&str> = hashes.iter().copied().collect();
     let missing = cs.difference(&rust).count();
     let extra = rust.difference(&cs).count();

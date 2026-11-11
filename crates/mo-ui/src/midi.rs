@@ -50,6 +50,8 @@ pub struct Loaded {
     pub notes: NotesFrom,
     /// Worked out with the reading, off the window's thread: the summary and the year strip.
     pub summary: String,
+    /// What Settings' smallest part hides, said after the summary (" · 120 under 3 notes hidden").
+    pub hidden: String,
     pub years: Vec<(i32, usize)>,
     /// What Ctrl+K finds: every part.
     pub found: Arc<mo_app::finder::Lines>,
@@ -57,10 +59,13 @@ pub struct Loaded {
 
 impl Loaded {
     pub fn new(cat: Catalogue, notes: NotesFrom) -> Loaded {
+        let smallest = SMALLEST.load(Ordering::Relaxed);
+        // Said with what Settings hides from the first, so the line doesn't change once the list is worked out.
+        let hidden = page::hidden_text(&cat, page::line_count(&cat, smallest), smallest);
         let summary = page::summary(&cat);
         let years = page::year_counts(&cat);
-        let found = Arc::new(mo_app::finder::midi_parts(&cat));
-        Loaded { cat, notes, summary, years, found }
+        let found = Arc::new(mo_app::finder::midi_parts(&cat, smallest));
+        Loaded { cat, notes, summary, hidden, years, found }
     }
 }
 
@@ -111,6 +116,48 @@ struct Page {
     finder_for_page: bool,
     /// That read was let go unused (the page wasn't shown soon after): the page reads the index itself (M-3).
     finder_let_go: bool,
+    /// The summary of the whole index, before what Settings' smallest part hides is said after it.
+    summary: String,
+}
+
+/// Settings › MIDI's smallest part: parts with fewer notes are hidden ([`page::SMALLEST_PART_KEY`]).
+static SMALLEST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(page::SMALLEST_PART_DEFAULT);
+
+/// Hides parts under `notes` notes from now on (Settings › MIDI); a list on show is worked out again, off the window's
+/// thread, so changing it needs no reading again.
+pub fn smallest_part(app: Option<&AppWindow>, notes: usize) {
+    if SMALLEST.swap(notes, Ordering::Relaxed) == notes {
+        return;
+    }
+    let Some(app) = app else { return };
+    let (cat, hidden_pick) = PAGE.with(|p| {
+        let p = p.borrow();
+        let hidden = p.picked.and_then(|at| p.cat.entry(at)).is_some_and(|e| !page::big_enough(e, notes));
+        (p.cat.clone(), hidden)
+    });
+    if cat.entries.is_empty() {
+        return;
+    }
+    // The picked part is hidden now: its card goes with it.
+    if hidden_pick {
+        pick(app, None);
+    }
+    relist(app);
+    // Ctrl+K's lines too, off the window's thread: they're a line for every part.
+    let weak = app.as_weak();
+    let made = background::spawn("MIDI finder lines", move || {
+        let lines: Arc<dyn mo_app::finder::Source> = Arc::new(mo_app::finder::midi_parts(&cat, notes));
+        let _ = slint::invoke_from_event_loop(move || {
+            if let Some(app) = weak.upgrade()
+                && SMALLEST.load(Ordering::Relaxed) == notes
+            {
+                crate::finder::add_source(&app, "midi", lines);
+            }
+        });
+    });
+    if let Err(e) = made {
+        log::error("MIDI", &format!("Couldn't start making Ctrl+K's lines: {e}"));
+    }
 }
 
 /// How long the Ctrl+K read of the index is kept for the page: long enough to go from Ctrl+K to the MIDI page, short
@@ -612,10 +659,15 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         let hash = p.picked.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.hash.clone());
         let looping = p.looping.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.hash.clone());
         p.years = loaded.years;
+        p.summary = summary.clone();
         // The old index goes on the freeing thread: tens of thousands of parts take a while to let go.
         background::free_later(std::mem::replace(&mut p.cat, Arc::new(loaded.cat)));
         p.notes = Some(loaded.notes);
-        p.picked = hash.and_then(|h| p.cat.find(&h));
+        // Not one Settings now hides.
+        let smallest = SMALLEST.load(Ordering::Relaxed);
+        p.picked = hash
+            .and_then(|h| p.cat.find(&h))
+            .filter(|&at| p.cat.entry(at).is_some_and(|e| page::big_enough(e, smallest)));
         let was_looping = p.looping.is_some();
         p.looping = looping.and_then(|h| p.cat.find(&h));
         p.picked_row = None;
@@ -632,7 +684,7 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
     }
     LINES.with(|l| l.notify.reset());
     data.set_shown(0);
-    data.set_summary(summary.into());
+    data.set_summary(format!("{summary}{}", loaded.hidden).into());
     if empty {
         data.set_empty_title("No MIDI here yet".into());
         data.set_empty_text(
@@ -845,7 +897,7 @@ fn relist(app: &AppWindow) {
         Ask {
             id: p.asked,
             cat: p.cat.clone(),
-            filters: p.filters.clone(),
+            filters: Filters { smallest: SMALLEST.load(Ordering::Relaxed), ..p.filters.clone() },
             order: p.order,
             reversed: p.reversed,
             target: p.target,
@@ -907,10 +959,16 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
             None => String::new(),
         };
         let shown = p.shown.len();
-        let all = p.cat.line_count;
+        let all = p.counts.lines;
         (Some(shown), page::result_text(shown, all, p.order, p.reversed, p.target, p.seed.is_some()), target_text)
     });
     let Some(shown) = shown else { return };
+    let summary = PAGE.with(|p| {
+        let p = p.borrow();
+        let smallest = SMALLEST.load(Ordering::Relaxed);
+        format!("{}{}", p.summary, page::hidden_text(&p.cat, p.counts.lines, smallest))
+    });
+    app.global::<MidiData>().set_summary(summary.into());
     show_chips(app);
     LINES.with(|l| l.notify.reset());
     let data = app.global::<MidiData>();
