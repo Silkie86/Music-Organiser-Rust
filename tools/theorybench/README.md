@@ -611,6 +611,52 @@ Every choice comes from a hash of the song and the section, so each run writes t
 licence (Billboard's may be learned from, at a quarter weight, as Solomon chose for charts); set B and the sweep are
 for measuring only, so the reader is tested on voicings it never learned from.
 
+## Tunes and chords together (`pairs`)
+
+```
+cargo run -p mo-theorybench --release -- pairs path/to/bench/pop909cl.jsonl
+cargo run -p mo-theorybench --release -- pairs path/to/bench/pop909cl.jsonl --bars 4 --folds 1
+cargo run -p mo-theorybench --release -- pairs path/to/bench/pop909cl.jsonl --folds 2,3,4 --fit 8000 --tie colour=fifth --without above3,above4,above7,above8,above9
+```
+
+`pairs` measures how well the app tells which chords go with which tune (`mo_harmony::together`, the heart of "find
+chords for this melody" and "find a melody for these chords"), beside the C# app's way of doing it (`HarmonyMatcher`,
+ported in `src/pairs.rs` as it was).
+
+- **The music.** Every piece in 4/4 with its bar lines on the grid, a tune (its first melody part) and an
+  accompaniment (every other part but the drums), cut into stretches of `--bars` bars (8) one after another from its
+  first bar line. A stretch counts with at least 8 notes in its tune and 16 in its accompaniment. Only the folds named
+  count (`--folds`, 1; drawn as keyfit draws them).
+- **What is asked.** A stretch's own tune and accompaniment were written for each other, so a good matcher puts them
+  together. Given the tune: does its own accompaniment sit better than another song's (`--others`, 50 of them, the
+  same ones every run, each tried at all 12 moves and scored at its best, as a search tries every part in every key)?
+  Is it first of all 51? Does it sit better than another stretch of the same song (the same key and style, other
+  chords: the test of fitting bar by bar)? Then the same the other way round, from the accompaniment to the tune. A
+  tie counts as half. Last, how often the stretch's own pair sits best where it is, with no move.
+- **The two are lined up as written** (`Place::AsWritten`): bar 1 of the tune over bar 1 of the accompaniment, even
+  when the tune starts with a bar's rest. Starting each from its own first note's bar slides a tune against its own
+  chords and costs about 6 points.
+- **Three ways are scored:** the new one; the C# app's (its first look picks 3 of the 12 moves by the notes alone,
+  its closer look scores those); and the C# app's closer look on all 12 moves. The C# app's chord-order score is left
+  out: it only helped pick which moves got the closer look.
+- `--set root=0.7,outside=-0.4,longest=2` tries other numbers than the ones shipped (`Sitting::SHIPPED`), by name.
+- **`--fit <steps>`** fits the numbers instead of measuring. Each stretch asks two questions: which of its own
+  accompaniment and 20 other songs' its tune goes with, and which tune goes with its accompaniment, each pairing at all
+  12 moves; the right answer is its own pair, unmoved. The numbers are the ones that give the right answers the best
+  chances (a softmax over the answers; the scores are sums of shares times worths, so there is one best set whatever
+  the fit starts from, and it starts from nothing). `--pull` (0.0001) holds them near 0. Only pieces whose licence lets
+  fitted numbers ship are learned from, and never Solomon's own (rule 5). It then brings the numbers to the app's
+  scale (the best tenth of own pairs at 0.95 or more, the middle one of another song's parts at its best move at 0.5)
+  and prints them as a `--set` line, to measure before they go into `Sitting::SHIPPED`.
+- **`--tie colour=fifth`** keeps one number the same as another, and **`--without above3,...`** keeps numbers at 0.
+  The songs are pop: they say nothing of jazz, gospel or blues, and left to themselves they mark a 9th or a 13th down
+  and let a clashing note buy its clash back. The two rules above are what they can't teach, and the numbers a fit
+  gives must pass the hand cases in `mo_harmony::together`'s tests before they ship
+  (`SET="<the --set line>" cargo test -p mo-harmony together::tests::show -- --ignored --nocapture` shows them).
+- **Folds.** Fit on folds 2 to 4, report on fold 1. Fold 0 is kept back: each look at it is a line in `test-runs.md`.
+
+What was tried and what it found: `docs/harmony/together-experiments.md`.
+
 ## The C# baseline on POP909 (2026-10-31)
 
 Keys, 8-bar clips (8,850 clips from 909 songs): the C# app is right 77.7% of the time (76.0 to 79.3), MIREX 83.2;
@@ -1088,3 +1134,59 @@ threshold mends.
 - **Next.** With the keys alone that stopped the weights at a fifth of the way now under chords alone's 0.83 (and
   read a little less surely in a bar or two), the weights can move further towards the fit: each step needs the
   calibration fitted again on its own chances.
+
+## Tunes and chords together: the first fit (2026-11-11)
+
+`pairs pop909cl.jsonl` with `Sitting::SHIPPED` (`TOGETHER_VERSION` 1, chord reader version 5), 8-bar stretches, each
+against 50 from other songs. The old app is the C# matcher ported as it was.
+
+**Fold 1** (185 songs, 1,650 stretches; never fitted on):
+
+| | new | old app | new over old, in points (likely range) |
+|---|---|---|---|
+| chords for a tune: its own over another song's | 93.4% | 90.4% | +3.0 (+2.3 to +3.7) |
+| chords for a tune: first of all 51 | 53.8% | 40.0% | +13.8 (+11.2 to +16.7) |
+| chords for a tune: over another stretch of its song | 85.9% | 84.3% | +1.7 (+0.6 to +2.7) |
+| a tune for chords: its own over another song's | 92.6% | 90.3% | +2.3 (+1.6 to +3.0) |
+| a tune for chords: first of all 51 | 46.9% | 35.5% | +11.5 (+9.1 to +13.9) |
+| a tune for chords: over another stretch of its song | 85.4% | 83.7% | +1.7 (+1.0 to +2.6) |
+| its own pair sits best unmoved | 95.2% | 93.1% | +2.1 (+0.8 to +3.3) |
+
+**Fold 0, kept back** (170 songs, 1,425 stretches; looked at only with the numbers already chosen, see
+`test-runs.md`):
+
+| | new | old app | new over old, in points (likely range) |
+|---|---|---|---|
+| chords for a tune: its own over another song's | 93.1% | 89.5% | +3.6 (+2.7 to +4.6) |
+| chords for a tune: first of all 51 | 54.0% | 35.2% | +18.8 (+15.5 to +21.8) |
+| chords for a tune: over another stretch of its song | 85.0% | 83.1% | +1.9 (+0.8 to +3.0) |
+| a tune for chords: its own over another song's | 92.3% | 89.6% | +2.7 (+1.9 to +3.6) |
+| a tune for chords: first of all 51 | 45.5% | 36.5% | +9.0 (+6.1 to +11.8) |
+| a tune for chords: over another stretch of its song | 84.0% | 82.3% | +1.7 (+0.7 to +2.8) |
+| its own pair sits best unmoved | 94.7% | 93.8% | +1.0 (-0.4 to +2.4) |
+
+**Other lengths, fold 1** (`--bars`; the numbers were fitted on 8 bars only), new / old app:
+
+| stretch | stretches | chords for a tune: over another song's | first of 51 | a tune for chords: over another song's | first of 51 | best unmoved |
+|---|---|---|---|---|---|---|
+| 2 bars | 4,291 | 76.5% / 72.8% | 11.8% / 8.0% | 74.9% / 71.7% | 11.8% / 10.9% | 82.9% / 76.8% |
+| 4 bars | 3,024 | 87.7% / 83.7% | 30.3% / 21.7% | 86.2% / 83.1% | 27.4% / 20.4% | 89.8% / 87.5% |
+| 8 bars | 1,650 | 93.4% / 90.4% | 53.8% / 40.0% | 92.6% / 90.3% | 46.9% / 35.5% | 95.2% / 93.1% |
+| 16 bars | 877 | 96.6% / 94.5% | 70.5% / 56.3% | 96.2% / 94.7% | 63.5% / 53.8% | 97.6% / 96.2% |
+
+Every gain's likely range is above 0 but three: a tune for chords first of 51 at 2 bars (+1.0, -0.1 to +2.1), over
+another stretch of its song at 16 bars (+1.0, -0.1 to +2.1, both ways round), and best unmoved on fold 0.
+
+- **The fit.** `pairs pop909cl.jsonl --folds 2,3,4 --fit 8000 --tie colour=fifth --without
+  above3,above4,above7,above8,above9`: 512 songs, 4,402 stretches, 8,800 questions (two stretches' tunes hardly
+  play where their accompaniment sounds, and ask none), loss 1.5227 a question. It prints the numbers in `Sitting::SHIPPED`.
+- **What the number means.** Of pairs written for each other, 5% sit under 0.48, a quarter under 0.67, half under
+  0.79, a quarter over 0.88 and a tenth over 0.95. Of another song's parts at their best move, half sit under 0.50, a
+  quarter over 0.58, a tenth over 0.67 and 5% over 0.72. So the number sorts a list well, but two parts at 0.7 may or
+  may not have been written for each other.
+- **The two rules cost 6 points of first place** for chords for a tune on fold 1 (59.7% with every number free)
+  and under a point elsewhere, and buy the jazz, gospel and blues hand cases: `docs/harmony/together-experiments.md`.
+- **Short stretches are hard for both.** Two bars of a pop tune fit a great many accompaniments: its own is first of
+  51 one time in nine. A search should show a list, never one answer, and say less the shorter the part.
+- **Only pop is measured here.** Next: jazz tunes over jazz voicings, and Solomon's own packs' chord and melody
+  files made for each other (counts only, on his PC).

@@ -21,6 +21,7 @@ pub mod names;
 pub mod notes;
 pub mod pitch;
 pub mod spell;
+pub mod together;
 
 pub use chord::{Chord, Family, ToneRole};
 pub use chordread::{
@@ -36,3 +37,4 @@ pub use keyfind::{
 pub use notes::{Grid, Note, Part, Role};
 pub use pitch::{PcSet, PerPitch, PitchClass};
 pub use spell::{Degree, Spelled, Tpc};
+pub use together::{Backing, KINDS, Place, Shares, Sits, Sitting, TOGETHER_VERSION, WORTH_NAMES, WORTHS, shares, sit};
