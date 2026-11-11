@@ -1,0 +1,15 @@
+[package]
+name = "mo-sky"
+description = "The galaxy's painter on the graphics card (wgpu), shared by the app and the CLAP plugin. Only the drawing: what to draw comes from mo-app (galaxy_look, galaxy_view)."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mo-app.workspace = true
+# The same wgpu Slint draws with (`slint::wgpu_30` is this very crate, one copy in the build), so the picture made
+# here is one Slint can show. Named here for the shader language (WGSL), which nothing else promises to switch on.
+wgpu = { version = "30", default-features = false, features = ["wgsl"] }

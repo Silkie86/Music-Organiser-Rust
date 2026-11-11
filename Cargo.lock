@@ -3402,6 +3402,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mo-sky"
+version = "0.1.0"
+dependencies = [
+ "mo-app",
+ "wgpu",
+]
+
+[[package]]
 name = "mo-sounds"
 version = "0.1.0"
 dependencies = [
@@ -3494,6 +3502,7 @@ dependencies = [
  "mo-library",
  "mo-midi",
  "mo-presets",
+ "mo-sky",
  "mo-sounds",
  "mo-space",
  "raw-window-handle",
