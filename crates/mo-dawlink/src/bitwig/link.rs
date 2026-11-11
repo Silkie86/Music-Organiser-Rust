@@ -431,16 +431,30 @@ impl Link {
     /// Puts a MIDI file in the first empty clip launcher slot of the track Bitwig keeps under `track_id` and launches
     /// it (which starts Bitwig playing, in step with the song), noted as the app's audition clip so
     /// [`Link::delete_audition_clip`] may take it out again. Gives back the slot. Extension 3.19 and later.
-    pub fn add_audition_clip(&mut self, track_id: &str, path: &str) -> Result<usize, Error> {
+    ///
+    /// With `song_loop` (where the song's bars start and how long they are, in beats; extension 3.22): Bitwig stops
+    /// if it's playing, its arranger loops those bars, and the clip starts from its own start with the first of
+    /// them. The link notes the loop and play start it found, and [`Link::delete_audition_clip`] puts them back.
+    pub fn add_audition_clip(
+        &mut self,
+        track_id: &str,
+        path: &str,
+        song_loop: Option<(f64, f64)>,
+    ) -> Result<usize, Error> {
         let fields =
             [("trackId", track_id.into()), ("path", path.into()), ("launch", true.into()), ("audition", true.into())];
-        let answer = self.change(ask("clip", fields))?;
+        let mut request = ask("clip", fields);
+        if let Some((start, length)) = song_loop {
+            request.insert("loop".into(), json!({ "start": start, "length": length }));
+        }
+        let answer = self.change(request)?;
         index(answer.get("slot")).ok_or(Error::Unexpected)
     }
 
     /// Stops the track's clips and takes out the audition clip in `slot` ([`Link::add_audition_clip`]), only while it
     /// still has the name it came in with; with `stop_bitwig`, Bitwig stops playing too. Whether it was taken out:
-    /// false when it was renamed (so it's yours now) or is gone already.
+    /// false when it was renamed (so it's yours now) or is gone already. A clip that came with the song's bars
+    /// looping has the arranger's loop and the play start put back as the link found them, renamed or not.
     pub fn delete_audition_clip(&mut self, track_id: &str, slot: usize, stop_bitwig: bool) -> Result<bool, Error> {
         let fields = [
             ("trackId", track_id.into()),

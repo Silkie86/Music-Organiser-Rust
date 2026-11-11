@@ -1,5 +1,5 @@
 //! A stand-in for the Music Organiser link in Bitwig, for tests: no test reaches a real Bitwig (rule 11). It listens
-//! on a free port on this computer, greets each connection as extension 3.21 does, and answers `hello`, `newtrack`,
+//! on a free port on this computer, greets each connection as extension 3.22 does, and answers `hello`, `newtrack`,
 //! `insert`, `pads`, `clip`, `selectedtrack`, `transport`, `stoptracks`, `deleteclip` and `deletetrack` the way the extension does, in its words (`extensions/bitwig-java`'s `Link.java`), on a made-up project:
 //! the C# app's stand-in's, "Night Drive", with Drums, Kick, Bass and Master. It handles one request at a time,
 //! whichever connection it came on, as the extension makes changes one at a time.
@@ -26,7 +26,7 @@ use mo_formats::paths::{file_name, stem};
 use serde_json::{Map, Value, json};
 
 use super::link::{ascii_json, take_message};
-use super::{Bitwig, DRUM_MACHINE_NAME, DeviceId, PORT};
+use super::{Bitwig, DRUM_MACHINE_NAME, DeviceId, Hello, PORT, WITH_SONG_NEEDS};
 
 /// The extension's words when "Let the app make changes" is off.
 pub const CHANGES_OFF: &str = "Changes are turned off. To let the app change things, turn on \"Let the app make \
@@ -176,18 +176,47 @@ pub struct World {
     pub auditions: Vec<(String, usize, String)>,
     /// The audition tracks the link noted (extension 3.20): track ID, and the name the track came in with.
     pub audition_tracks: Vec<(String, String)>,
+    /// The arranger's loop: whether it's on, where it starts and how long it is (beats), and where Play starts from.
+    pub transport: FakeTransport,
+    /// Where Bitwig started playing from (beats), each time a launched clip started it.
+    pub started_at: Vec<f64>,
+    /// The loop the link set for audition clips that play with a song's bars (extension 3.22), until the last of them
+    /// is taken out: what it found, what it set, and the clips (track ID, slot).
+    pub song_loop: Option<FakeSongLoop>,
     /// How many tracks have been made, for their IDs.
     made: usize,
 }
 
+/// The parts of Bitwig's transport an audition with a song's bars sets and puts back ([`World::transport`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FakeTransport {
+    /// Whether the arranger's loop is on.
+    pub looping: bool,
+    /// Where the loop starts and how long it is, in beats.
+    pub loop_start: f64,
+    pub loop_length: f64,
+    /// Where Play starts from, in beats.
+    pub play_start: f64,
+}
+
+/// What the link keeps while audition clips play with a song's bars ([`World::song_loop`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FakeSongLoop {
+    /// The transport as the link found it, and as it set it.
+    pub before: FakeTransport,
+    pub set: FakeTransport,
+    /// The audition clips playing with the bars: track ID and slot.
+    pub clips: Vec<(String, usize)>,
+}
+
 impl Default for World {
-    /// "Night Drive" open, changes allowed, extension 3.21 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
+    /// "Night Drive" open, changes allowed, extension 3.22 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
     /// Drums (a group), Kick (audio, with EQ+), Bass (an instrument: Serum, then a Compressor, selected) and the
-    /// Master (with a Peak Limiter).
+    /// Master (with a Peak Limiter). The arranger's loop is off, over the first 4 bars, and Play starts at the start.
     fn default() -> World {
         let hello = json!({
             "link": 3, "product": "Bitwig Studio", "version": "6.1.5", "api": 23, "platform": "WINDOWS",
-            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.21", "loopback": true,
+            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.22", "loopback": true,
         });
         let mut serum = FakeDevice::new("Serum", "instrument");
         serum.preset = "Reese".into();
@@ -227,6 +256,9 @@ impl Default for World {
             launched: Vec::new(),
             auditions: Vec::new(),
             audition_tracks: Vec::new(),
+            transport: FakeTransport { looping: false, loop_start: 0.0, loop_length: 16.0, play_start: 0.0 },
+            started_at: Vec::new(),
+            song_loop: None,
             made: 0,
         };
         for track in &mut world.tracks {
@@ -491,6 +523,8 @@ impl World {
         if request.get("transport").and_then(Value::as_bool) == Some(true) {
             self.playing = false;
         }
+        // Whether it's the app's clip still or yours by now, the song's bars it came with stop going round.
+        let loop_back = self.forget_loop_clips(|(t, s)| *t == id && *s == slot);
         let noted = self.auditions.iter().position(|(t, s, _)| *t == id && *s == slot);
         let name = noted.and_then(|n| self.auditions.get(n)).map(|(_, _, name)| name.clone());
         if let Some(n) = noted {
@@ -513,7 +547,46 @@ impl World {
             self.modified = true;
         }
         self.next_step("deleteclip", request)?;
-        Ok(json!({ "deleted": deleted }))
+        Ok(match loop_back {
+            Some(back) => json!({ "deleted": deleted, "loopBack": back }),
+            None => json!({ "deleted": deleted }),
+        })
+    }
+
+    /// Lets go of the audition clips `which` that play with a song's bars, as the link's `loopBackFor` (3.22): once
+    /// none is left, the arranger's loop and the play start go back as the link found them, each only while it's still
+    /// as the link set it (one you moved meanwhile is yours). None when none of them played with a song's bars; else
+    /// whether everything the link still had to put back is back (it always is here).
+    fn forget_loop_clips(&mut self, which: impl Fn(&(String, usize)) -> bool) -> Option<bool> {
+        let kept = self.song_loop.as_mut()?;
+        let before = kept.clips.len();
+        kept.clips.retain(|clip| !which(clip));
+        if kept.clips.len() == before {
+            return None;
+        }
+        if kept.clips.is_empty() {
+            self.loop_back();
+        }
+        Some(true)
+    }
+
+    /// Puts the arranger's loop and the play start back as the link found them ([`World::song_loop`]), each only
+    /// while it's still as the link set it, and lets go of what it found.
+    fn loop_back(&mut self) {
+        let Some(FakeSongLoop { before, set, .. }) = self.song_loop.take() else { return };
+        let now = &mut self.transport;
+        if now.looping == set.looping {
+            now.looping = before.looping;
+        }
+        if now.loop_start == set.loop_start {
+            now.loop_start = before.loop_start;
+        }
+        if now.loop_length == set.loop_length {
+            now.loop_length = before.loop_length;
+        }
+        if now.play_start == set.play_start {
+            now.play_start = before.play_start;
+        }
     }
 
     /// Stops and takes out an audition track the link noted, while it keeps its name, as the link's `deleteTrack`
@@ -532,6 +605,7 @@ impl World {
         if request.get("transport").and_then(Value::as_bool) == Some(true) {
             self.playing = false;
         }
+        self.forget_loop_clips(|(t, _)| *t == id);
         let deleted = match (at, &noted) {
             (Some(t), Some(name)) => self.tracks.get(t).is_some_and(|track| track.name == *name),
             _ => false,
@@ -579,6 +653,7 @@ impl World {
     fn add_clip(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
         let at = self.requested_track(request)?;
         let path = given(request.get("path"), "file")?.to_owned();
+        let song_loop = self.asked_loop(request)?;
         let file = file_name(&path);
         let midi = file
             .rsplit_once('.')
@@ -589,26 +664,93 @@ impl World {
         if slot >= CLIP_SLOTS {
             return Err(format!("The track's first {CLIP_SLOTS} clip slots are full."));
         }
+        let id = track.id.clone();
+        // With a song's bars: Bitwig stops, and the loop and the play start are set before the clip goes in. A clip
+        // Bitwig doesn't make leaves them as they were found (and Bitwig stopped).
+        if song_loop.is_some() {
+            if id.is_empty() {
+                return Err("Bitwig hasn't said that track's ID, so the link couldn't take the part out again.".into());
+            }
+            self.playing = false;
+        }
         if !loads {
             return Err(format!("Bitwig didn't make a clip from {path}."));
         }
+        if let Some((start, length)) = song_loop {
+            let set = FakeTransport { looping: true, loop_start: start, loop_length: length, play_start: start };
+            // A part still playing with a song's bars keeps what the link found before the first of them.
+            let before = self.song_loop.as_ref().map_or(self.transport, |kept| kept.before);
+            let clips = self.song_loop.take().map(|kept| kept.clips).unwrap_or_default();
+            self.transport = set;
+            self.song_loop = Some(FakeSongLoop { before, set, clips });
+        }
+        let track = self.tracks.get_mut(at).ok_or("Bitwig didn't add the track.")?;
         if slot == track.clips.len() {
             track.clips.push(path);
         } else if let Some(empty) = track.clips.get_mut(slot) {
             *empty = path;
         }
-        let id = track.id.clone();
-        self.next_step("clip", request)?;
+        if let Err(stopped) = self.next_step("clip", request) {
+            // Stopped part way: the loop goes back while its project is still in front (changes were turned off);
+            // another project's transport isn't the link's to touch, so there it only lets go of what it found.
+            if song_loop.is_some() && self.song_loop.as_ref().is_some_and(|kept| kept.clips.is_empty()) {
+                let elsewhere = request.get("onlyIn").and_then(Value::as_str).is_some_and(|only| only != self.project);
+                if elsewhere {
+                    self.song_loop = None;
+                } else {
+                    self.loop_back();
+                }
+            }
+            return Err(stopped);
+        }
         if request.get("audition").and_then(Value::as_bool) == Some(true) && !id.is_empty() {
             let name = self.tracks.get(at).and_then(|t| t.clips.get(slot)).map(|c| sample_name(c).to_owned());
-            self.auditions.push((id, slot, name.unwrap_or_default()));
+            self.auditions.push((id.clone(), slot, name.unwrap_or_default()));
+        }
+        if song_loop.is_some()
+            && let Some(kept) = self.song_loop.as_mut()
+        {
+            kept.clips.push((id, slot));
         }
         if request.get("launch").and_then(Value::as_bool) == Some(true) {
             self.launched.push((at, slot));
+            // A launched clip starts Bitwig from where Play starts, when it isn't playing already.
+            if !self.playing {
+                self.started_at.push(self.transport.play_start);
+            }
             self.playing = true;
-            return Ok(json!({ "slot": slot, "launched": true }));
+            return Ok(match song_loop {
+                Some(_) => json!({ "slot": slot, "launched": true, "looping": true }),
+                None => json!({ "slot": slot, "launched": true }),
+            });
         }
         Ok(json!({ "slot": slot }))
+    }
+
+    /// The song's bars a `clip` asks Bitwig to loop (`loop`: `start` and `length` in beats), as the link reads them
+    /// from extension 3.22: only with a clip the app plays and takes out again. An older link doesn't know the field
+    /// and plays the clip as it always did.
+    fn asked_loop(&self, request: &Map<String, Value>) -> Result<Option<(f64, f64)>, String> {
+        let asked = match request.get("loop") {
+            None | Some(Value::Null) => return Ok(None),
+            Some(asked) => asked,
+        };
+        if !Hello::from_json(&self.greeting()).at_least(WITH_SONG_NEEDS) {
+            return Ok(None);
+        }
+        let on = |field: &str| request.get(field).and_then(Value::as_bool) == Some(true);
+        if !on("launch") || !on("audition") {
+            return Err("Only a part the app plays and takes out again (launch and audition) can loop the song's bars."
+                .into());
+        }
+        let beats = |field: &str| asked.get(field).and_then(Value::as_f64).filter(|b| b.is_finite());
+        match (beats("start"), beats("length")) {
+            (Some(start), Some(length)) if start >= 0.0 && length > 0.0 => Ok(Some((start, length))),
+            _ => Err(format!(
+                "The bars to loop are a start (0 or more) and a length (more than 0) in beats, not {}.",
+                js(Some(asked))
+            )),
+        }
     }
 
     fn insert(&mut self, request: &Map<String, Value>) -> Result<Value, String> {

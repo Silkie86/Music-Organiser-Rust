@@ -5,8 +5,8 @@
 use std::fs;
 use std::path::PathBuf;
 
-use mo_dawlink::bitwig::Error;
-use mo_dawlink::bitwig::fake::{FakeBitwig, World};
+use mo_dawlink::bitwig::fake::{FakeBitwig, FakeTransport, World};
+use mo_dawlink::bitwig::{Error, SongLoop, WithSong};
 use serde_json::json;
 
 /// A turn in the app's line of changes, as a screen takes one.
@@ -121,6 +121,155 @@ fn a_part_that_isnt_there_isnt_played() {
 }
 
 // ---- Audition: a preset on a track of its own, playing a part (extension 3.20) ----
+
+/// Bars 9 to 16 of "Night Drive" in 4/4, as the stand-in has it open.
+fn bars_9_to_16() -> SongLoop {
+    SongLoop { project: "Night Drive".into(), start: 32.0, length: 32.0 }
+}
+
+#[test]
+fn plays_a_part_with_its_songs_bars_going_round_and_puts_the_loop_back() {
+    // Bitwig playing somewhere, with a loop of your own (off) and Play starting at bar 3.
+    let yours = FakeTransport { looping: false, loop_start: 64.0, loop_length: 8.0, play_start: 8.0 };
+    let bitwig = with(|w| {
+        w.playing = true;
+        w.transport = yours;
+    });
+    let file = part("MO Play 20");
+    let playing = bitwig.bitwig().play_with_song(&file, Some(&bars_9_to_16()), &turn(), &|| true).unwrap();
+    assert_eq!((playing.track.as_str(), &playing.with_song), ("Bass", &WithSong::Looping));
+    {
+        let world = bitwig.world();
+        let asked = world.requests.iter().find(|r| r["cmd"] == "clip").unwrap();
+        assert_eq!(asked["loop"], json!({ "start": 32.0, "length": 32.0 }));
+        assert_eq!((asked["launch"].clone(), asked["audition"].clone()), (json!(true), json!(true)));
+        assert_eq!(asked["onlyIn"], "Night Drive", "only ever in the song's own project");
+        // The arranger goes round the bars, and Bitwig started again from the first of them with the part.
+        let looped = FakeTransport { looping: true, loop_start: 32.0, loop_length: 32.0, play_start: 32.0 };
+        assert_eq!(world.transport, looped);
+        assert_eq!(world.started_at, [32.0]);
+        assert!(world.playing);
+        assert_eq!(world.launched, [(2, 0)]);
+    }
+    assert!(bitwig.bitwig().stop_playing(&playing, &turn()).unwrap());
+    let world = bitwig.world();
+    // Stopping it stops Bitwig (the part started it at the bars), and your loop and play start are back.
+    assert_eq!(world.requests.last().unwrap()["transport"], true);
+    assert!(!world.playing);
+    assert_eq!(world.transport, yours);
+    assert_eq!(world.song_loop, None);
+    assert_eq!(world.tracks[2].clips, [""]);
+}
+
+#[test]
+fn what_you_moved_while_it_played_stays_yours() {
+    let bitwig = FakeBitwig::start().unwrap();
+    let before = bitwig.world().transport;
+    let playing = bitwig.bitwig().play_with_song(part("MO Play 21"), Some(&bars_9_to_16()), &turn(), &|| true).unwrap();
+    // You drag the loop's end out to 12 bars and click in bar 5 while it plays.
+    {
+        let mut world = bitwig.world();
+        world.transport.loop_length = 48.0;
+        world.transport.play_start = 16.0;
+    }
+    // A clip you renamed stays too; the loop still goes back.
+    bitwig.world().tracks[2].clips[0] = "C:\\MIDI\\Kept it.mid".into();
+    assert!(!bitwig.bitwig().stop_playing(&playing, &turn()).unwrap());
+    let world = bitwig.world();
+    let left = FakeTransport { looping: before.looping, loop_start: before.loop_start, loop_length: 48.0, play_start: 16.0 };
+    assert_eq!(world.transport, left, "only what's still as the link set it goes back");
+    assert_eq!(world.song_loop, None);
+}
+
+#[test]
+fn with_another_project_open_the_part_plays_alone() {
+    let bitwig = with(|w| w.playing = true);
+    let before = bitwig.world().transport;
+    let elsewhere = SongLoop { project: "Sunrise".into(), ..bars_9_to_16() };
+    let playing = bitwig.bitwig().play_with_song(part("MO Play 22"), Some(&elsewhere), &turn(), &|| true).unwrap();
+    assert_eq!(playing.with_song, WithSong::OtherProject("Night Drive".into()));
+    {
+        let world = bitwig.world();
+        let asked = world.requests.iter().find(|r| r["cmd"] == "clip").unwrap();
+        assert!(asked.get("loop").is_none(), "no bars of another song are looped: {asked}");
+        assert_eq!(world.transport, before);
+        assert!(world.started_at.is_empty(), "Bitwig plays on where it was");
+    }
+    // As a part alone: Bitwig was playing, so it plays on.
+    assert!(bitwig.bitwig().stop_playing(&playing, &turn()).unwrap());
+    assert!(bitwig.world().playing);
+
+    // The name as Bitwig shows it, give or take capitals.
+    let capitals = SongLoop { project: "night drive".into(), ..bars_9_to_16() };
+    let playing = bitwig.bitwig().play_with_song(part("MO Play 23"), Some(&capitals), &turn(), &|| true).unwrap();
+    assert_eq!(playing.with_song, WithSong::Looping);
+    assert!(bitwig.bitwig().stop_playing(&playing, &turn()).unwrap());
+
+    // A link that can't keep a change to one project (or didn't say which is open) loops nothing.
+    let unnamed = with(|w| w.project = String::new());
+    let playing = unnamed.bitwig().play_with_song(part("MO Play 24"), Some(&bars_9_to_16()), &turn(), &|| true).unwrap();
+    assert_eq!(playing.with_song, WithSong::OtherProject(String::new()));
+    assert_eq!(unnamed.world().song_loop, None);
+}
+
+#[test]
+fn an_older_extension_plays_the_part_alone() {
+    let old = with(|w| {
+        w.hello.insert("extension".into(), json!("3.21"));
+    });
+    let before = old.world().transport;
+    let playing = old.bitwig().play_with_song(part("MO Play 25"), Some(&bars_9_to_16()), &turn(), &|| true).unwrap();
+    assert_eq!(playing.with_song, WithSong::OldExtension("the Music Organiser extension 3.21".into()));
+    let world = old.world();
+    assert!(world.requests.iter().find(|r| r["cmd"] == "clip").unwrap().get("loop").is_none());
+    assert_eq!((world.transport, world.playing), (before, true));
+}
+
+#[test]
+fn a_part_alone_says_the_song_wasnt_asked_for() {
+    let bitwig = FakeBitwig::start().unwrap();
+    let playing = bitwig.bitwig().play_on_selected(part("MO Play 26"), &turn(), &|| true).unwrap();
+    assert_eq!(playing.with_song, WithSong::NotAsked);
+    assert!(bitwig.world().requests.iter().find(|r| r["cmd"] == "clip").unwrap().get("loop").is_none());
+}
+
+#[test]
+fn a_part_with_its_song_superseded_once_its_in_puts_the_loop_back() {
+    let bitwig = with(|w| w.playing = true);
+    let before = bitwig.world().transport;
+    let asked = std::cell::Cell::new(0);
+    // Wanted as its turn comes, not once the clip is in.
+    let wanted = || asked.replace(asked.get() + 1) == 0;
+    let played = bitwig.bitwig().play_with_song(part("MO Play 27"), Some(&bars_9_to_16()), &turn(), &wanted);
+    assert_eq!(played, Err(Error::Cancelled));
+    let world = bitwig.world();
+    assert_eq!(world.transport, before);
+    assert_eq!(world.song_loop, None);
+    assert_eq!(world.tracks[2].clips, [""]);
+    // The link stopped Bitwig to start it at the bars, so it stays stopped.
+    assert!(!world.playing);
+}
+
+#[test]
+fn a_part_bitwig_doesnt_load_leaves_the_loop_as_it_was() {
+    let bitwig = with(|w| w.unloadable.push("MO Play 28.mid".into()));
+    let before = bitwig.world().transport;
+    let refused = bitwig.bitwig().play_with_song(part("MO Play 28"), Some(&bars_9_to_16()), &turn(), &|| true);
+    assert!(matches!(refused, Err(Error::Bitwig(why)) if why.contains("didn't make a clip")));
+    let world = bitwig.world();
+    assert_eq!((world.transport, &world.song_loop), (before, &None));
+}
+
+#[test]
+fn bars_bitwig_cant_loop_are_never_sent() {
+    let bitwig = FakeBitwig::start().unwrap();
+    for (start, length) in [(-4.0, 16.0), (0.0, 0.0), (f64::NAN, 16.0), (0.0, f64::INFINITY)] {
+        let song = SongLoop { project: "Night Drive".into(), start, length };
+        let refused = bitwig.bitwig().play_with_song(part("MO Play 29"), Some(&song), &turn(), &|| true);
+        assert!(matches!(refused, Err(Error::Invalid(_))), "{start} {length}: {refused:?}");
+    }
+    assert!(bitwig.world().requests.is_empty());
+}
 
 fn preset(name: &str) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("audition-preset-{name}"));
