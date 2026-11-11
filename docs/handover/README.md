@@ -256,8 +256,20 @@ the next PR step by step). Solomon wants the highest effort here.
     plays alone and the log says why. A "Play with the song" chip (on by default, the setting
     `midi_fits_with_song`) turns it off; the button says which it is, and the card's sound line says what's
     heard (`midi_fits::with_song_line`, or the part's own tempo: `show_sound` picks between the two with nothing
-    read again). Never for drums or a plain list. Play in Bitwig and FL, Send and the drag are the part alone, as
-    before.
+    read again). Never for drums or a plain list. Play in FL, Send and the drag are the part alone, as before.
+  - The same in Bitwig (2026-11-11): with the chip on, Play in Bitwig starts the part on the selected track
+    with the song's fitted bars going round in Bitwig's arranger (`Bitwig::play_with_song` with a `SongLoop`;
+    the page's `bitwig_song`, the bars from `midi_fits::bitwig_loop`). Extension 3.22: a `clip` request may
+    carry `loop: {start, length}` in beats. The extension stops Bitwig, remembers its loop and play start, sets
+    them to the bars, and launches the part from its start; `deleteclip` (the app's Stop) stops Bitwig and puts
+    back each setting still as the link set it (what Solomon moved meanwhile stays his). Only when Bitwig has
+    the project the song was read from open (the pinned project's name is the save's), the song was read by
+    its arranger (not the clip launcher), and the extension is 3.22 or newer; otherwise the part plays alone
+    and the card says why (`midi_fits::bitwig_words`). The extension must be installed again from Settings >
+    DAWs. Not yet tried in a real Bitwig: whether a launcher clip plays on through the loop's jump back, and
+    what "none"/"from_start" do when Bitwig is stopped (`extensions/bitwig-java/README.md` lists them). The
+    extension can't be built on the cloud machine (its Maven host is blocked there): CI's "Bitwig extension"
+    job compiles and tests it.
   - What's judged is what's dropped (2026-11-11): one rule for a part's clip, `mo_midi::analyser::clip_of`
     (whole bars from its first bar line, as many as the index counts, or to the end of the bar its last heard
     note starts in; a note held a hair over the end stops there). The search hears a found part go round over it,
