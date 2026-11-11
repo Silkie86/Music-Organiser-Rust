@@ -167,7 +167,7 @@ fn fl_songs_sharing_a_folder_count_only_their_saves_and_their_autosaves() {
     write(&projects, "Backup/Night Drive.wav", b"1234", 4);
     let saves = [save(&a, 0), save(&b, 5)];
     let roots = [s(&projects)];
-    let settings = CompactSettings { keep_backups: 0, sitting_hours: 0 };
+    let settings = CompactSettings { keep_backups: 0, sitting_hours: 0, ..CompactSettings::default() };
     let stop = AtomicBool::new(false);
 
     let report = measure(&saves, &roots, &[], settings, None, &stop).unwrap();
@@ -216,7 +216,7 @@ fn songs_measured_together_list_fl_studios_backup_folder_once() {
         backup_folders: &backup_folders,
         compare: Compare::Afresh,
     };
-    let settings = CompactSettings { keep_backups: 0, sitting_hours: 0 };
+    let settings = CompactSettings { keep_backups: 0, sitting_hours: 0, ..CompactSettings::default() };
     let roots = [s(&projects)];
     let stop = AtomicBool::new(false);
     let measure_one = |save_of: &str, with: Option<&Elsewhere<'_>>| {
@@ -281,7 +281,7 @@ fn studio_ones_cache_folder_is_one_line() {
         &[save(&v, 0)],
         &[s(&root)],
         &[],
-        CompactSettings { keep_backups: 1, sitting_hours: 0 },
+        CompactSettings { keep_backups: 1, sitting_hours: 0, ..CompactSettings::default() },
         None,
         &AtomicBool::new(false),
     )
@@ -346,7 +346,7 @@ fn a_thinned_save_that_is_a_copy_or_kept_for_one_is_not_thinned() {
     let d = write(&song, "D.bwproject", b"d", 3);
     let e = write(&song, "E.bwproject", b"e", 4);
     let saves = [save(&a, 0), save(&b, 1), save(&c, 2), save(&d, 3), save(&e, 4)];
-    let settings = CompactSettings { keep_backups: 5, sitting_hours: 3 };
+    let settings = CompactSettings { keep_backups: 5, sitting_hours: 3, ..CompactSettings::default() };
     let report = measure(&saves, &[s(&root)], &[], settings, None, &AtomicBool::new(false)).unwrap();
     let lines: Vec<(CompactKind, &str)> =
         report.items.iter().map(|i| (i.kind, Path::new(&i.path).file_name().unwrap().to_str().unwrap())).collect();
@@ -425,7 +425,7 @@ fn a_save_dated_still_to_come_isnt_taken_for_the_newest() {
         save(&x, 1),
         SongSave { modified: to_come(), ..save(&y, 0) },
     ];
-    let settings = CompactSettings { keep_backups: 5, sitting_hours: 3 };
+    let settings = CompactSettings { keep_backups: 5, sitting_hours: 3, ..CompactSettings::default() };
     let report = measure(&saves, &[s(&root)], &[], settings, None, &AtomicBool::new(false)).unwrap();
     assert_eq!(key(&report.folder), key(&s(&root.join("Song"))));
     // Of the two the same, v3 stays: it's your newest save. v4, dated 2099, is the copy.
@@ -447,7 +447,7 @@ fn an_autosave_with_no_real_date_always_stays() {
     // one with no date was the oldest of all, listed first to go.
     write_at(&song, "auto-backups/Night Drive later.bwproject", b"auto", to_come());
     write_at(&song, "auto-backups/Night Drive undated.bwproject", b"auto", no_date());
-    let settings = CompactSettings { keep_backups: 5, sitting_hours: 0 };
+    let settings = CompactSettings { keep_backups: 5, sitting_hours: 0, ..CompactSettings::default() };
     let report = measure(&[save(&v, 9)], &[s(&root)], &[], settings, None, &AtomicBool::new(false)).unwrap();
     let going: Vec<&str> = report
         .items
@@ -457,6 +457,10 @@ fn an_autosave_with_no_real_date_always_stays() {
         .collect();
     assert_eq!(going, ["Night Drive 1.bwproject", "Night Drive 0.bwproject"]);
     assert_eq!(report.backups, 9 * 4);
+    // When none is to stay (the backup's Essentials), every autosave is on the list, those with no real date too.
+    let none = CompactSettings { keep_backups: 0, ..settings };
+    let report = measure(&[save(&v, 9)], &[s(&root)], &[], none, None, &AtomicBool::new(false)).unwrap();
+    assert_eq!(report.items.iter().filter(|i| i.kind == CompactKind::Backup).count(), 9);
 }
 
 #[test]
@@ -502,7 +506,7 @@ fn of_two_identical_saves_the_one_ending_a_sitting_stays() {
     let y = write(&song, "Y.bwproject", b"same", 6);
     let z = write(&song, "Z.bwproject", b"z", 7);
     let saves = [save(&a, 0), save(&x, 1), save(&y, 6), save(&z, 7)];
-    let settings = CompactSettings { keep_backups: 5, sitting_hours: 3 };
+    let settings = CompactSettings { keep_backups: 5, sitting_hours: 3, ..CompactSettings::default() };
     let report = measure(&saves, &[s(&root)], &[], settings, None, &AtomicBool::new(false)).unwrap();
     let lines: Vec<(CompactKind, &str)> =
         report.items.iter().map(|i| (i.kind, Path::new(&i.path).file_name().unwrap().to_str().unwrap())).collect();
@@ -527,7 +531,7 @@ fn identical_saves_read_before_are_not_read_again_until_they_change() {
     let c = write(&song, "C.bwproject", &ends_differ, 2);
     let d = write(&song, "D.bwproject", &middle_differs, 3);
     let saves = [save(&a, 0), save(&b, 1), save(&c, 2), save(&d, 3)];
-    let settings = CompactSettings { keep_backups: 5, sitting_hours: 0 };
+    let settings = CompactSettings { keep_backups: 5, sitting_hours: 0, ..CompactSettings::default() };
     let stop = AtomicBool::new(false);
     let prints = Prints::default();
     let none = |_: &[String]| HashSet::new();
@@ -586,7 +590,7 @@ fn a_save_read_again_is_compared_with_saves_read_again_too() {
     let y = write(&song, "Y.bwproject", &body(b'p'), 1);
     let z = write(&song, "Z.bwproject", &body(b'q'), 2);
     let saves = [save(&x, 0), save(&y, 1), save(&z, 2)];
-    let settings = CompactSettings { keep_backups: 5, sitting_hours: 0 };
+    let settings = CompactSettings { keep_backups: 5, sitting_hours: 0, ..CompactSettings::default() };
     let stop = AtomicBool::new(false);
     let prints = Prints::default();
     let none = |_: &[String]| HashSet::new();
@@ -629,7 +633,7 @@ fn only_the_daws_own_autosaves_are_autosaves() {
     write(&song, "Backup/MySong (overwritten at 2213h05).flp", b"fl", 8);
     write(&song, "History/MySong (Autosaved).song", b"s1", 9);
     write(&song, "auto-backups/MySong 3.bwproject", b"bw", 10);
-    let settings = CompactSettings { keep_backups: 0, sitting_hours: 3 };
+    let settings = CompactSettings { keep_backups: 0, sitting_hours: 3, ..CompactSettings::default() };
     let measure_it = || measure(&[save(&newest, 20)], &[s(&root)], &[], settings, None, &AtomicBool::new(false));
     let report = measure_it().unwrap();
     assert!(report.own_folder);

@@ -139,8 +139,10 @@ impl SongRow {
         }
     }
 
-    /// When its newest save was written, as the backup picks that save (`mo_backup::plan::newest_save`): the newest
-    /// real date, or the newest of all when none is real. For the song's "Backed up" line.
+    /// When its newest save was written, by the backup's rule for a song's newest save (`mo_backup::plan::newest_save`:
+    /// the newest real date, or the newest of all when none is real), over the saves the backup goes by: all of them,
+    /// moved ones too (when only copies of the song are in the backup's folders, the backup goes by the copies). For the
+    /// song's "Backed up" line, which compares it with the newest save the backup took.
     pub fn newest_time(&self) -> NaiveDateTime {
         self.saved.unwrap_or_else(|| self.song.saves().map(|s| s.modified).max().unwrap_or(self.song.latest.modified))
     }

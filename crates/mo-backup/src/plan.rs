@@ -21,7 +21,8 @@
 //! Your newest save of each song, any save you mark as a milestone, and everything in a Whole folder always go. Your
 //! newest save is the newest with a real date ([`mo_space::song::newest`], as Space picks it): a save dated still to
 //! come, or with no date, is no clue to when it was written ([`mo_formats::dates`]), so it's never taken for the newest,
-//! and it always goes too, as it could be.
+//! nor left out as older than it: it's a milestone, and never an older big save. Only a byte-for-byte copy of another
+//! save that goes stays out, as any copy does.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -33,6 +34,10 @@ use mo_formats::textscan::is_audio_path;
 use mo_space::key;
 use mo_space::size::{FileEntry, is_sound};
 use mo_space::song::{CompactKind, SongSave, SongSpaceReport};
+
+/// A song's newest save, as the Space page picks it: the newest with a real date, or of all of them when none has one;
+/// of two saved at the same moment, the first listed.
+pub use mo_space::song::newest as newest_save;
 
 /// 1 MB, as Explorer counts it.
 const MB: u64 = 1 << 20;
@@ -79,7 +84,8 @@ pub struct Rules {
     /// Also leave out big sample-library files (Kontakt, SoundFonts, REX...) no project names. Off at first: projects
     /// use these through a plugin, so a project's sample list never names them.
     pub leave_out_unused_libraries: bool,
-    /// Which dates are real, as of when the plan is made: a song's newest save is the newest with a real date.
+    /// Which dates are real, as of when the songs were measured ([`mo_space::song::CompactSettings::dates`]): a song's
+    /// newest save is the newest with a real date.
     pub dates: RealDates,
 }
 
@@ -331,8 +337,9 @@ impl Listed {
 /// Sorts the walked files into what goes and what's left out. A file met twice (two folders in the list that overlap)
 /// goes once.
 pub fn plan(files: Vec<FileEntry>, songs: &[SongInfo<'_>], used: &Used, folders: Folders<'_>, rules: Rules) -> Plan {
-    // Each song's newest save, and every save with no real date: it could be the newest.
     let mut newest: HashSet<String> = HashSet::new();
+    // Saves with no real date: any of them could be the newest.
+    let mut undated: HashSet<String> = HashSet::new();
     let mut saves: HashSet<String> = HashSet::new();
     // Audio beside a save, or anywhere in a song's own folder, is the song's (a bounce, a stem, a recording): it goes.
     let mut beside_saves: HashSet<String> = HashSet::new();
@@ -348,7 +355,7 @@ pub fn plan(files: Vec<FileEntry>, songs: &[SongInfo<'_>], used: &Used, folders:
         if let Some(n) = newest_save(song.saves, &rules.dates) {
             newest.insert(key(&n.path));
         }
-        newest.extend(song.saves.iter().filter(|s| !rules.dates.local(s.modified)).map(|s| key(&s.path)));
+        undated.extend(song.saves.iter().filter(|s| !rules.dates.local(s.modified)).map(|s| key(&s.path)));
         for s in song.saves {
             saves.insert(key(&s.path));
             beside_saves.insert(parent_key(&key(&s.path)).to_owned());
@@ -376,6 +383,7 @@ pub fn plan(files: Vec<FileEntry>, songs: &[SongInfo<'_>], used: &Used, folders:
         compact,
         caches,
         newest,
+        undated,
         saves,
         milestone_saves,
         beside_saves,
@@ -412,6 +420,7 @@ struct Context<'a> {
     compact: HashMap<String, CompactKind>,
     caches: HashSet<String>,
     newest: HashSet<String>,
+    undated: HashSet<String>,
     saves: HashSet<String>,
     milestone_saves: HashSet<String>,
     beside_saves: HashSet<String>,
@@ -445,7 +454,11 @@ impl Context<'_> {
         }
         let is_save = self.saves.contains(k);
         if is_save {
-            if rules.big_saves == BigSaves::NewestOnly && big_save && !self.newest.contains(k) {
+            if rules.big_saves == BigSaves::NewestOnly
+                && big_save
+                && !self.newest.contains(k)
+                && !self.undated.contains(k)
+            {
                 return Some(LeftOut::OlderBigSave);
             }
             return None;
@@ -463,12 +476,6 @@ impl Context<'_> {
         }
         None
     }
-}
-
-/// A song's newest save, as the Space page picks it ([`mo_space::song::newest`]): the newest with a real date
-/// (`real`), or of all of them when none has one; of two saved at the same moment, the first listed.
-pub fn newest_save<'a>(saves: &'a [SongSave], real: &RealDates) -> Option<&'a SongSave> {
-    mo_space::song::newest(saves, real)
 }
 
 /// Every folder a path key is in, nearest first, as keys.

@@ -98,7 +98,7 @@ fn dated(path: &str, when: chrono::NaiveDateTime) -> SongSave {
 }
 
 #[test]
-fn a_save_with_no_real_date_is_never_the_newest_and_always_goes() {
+fn a_save_with_no_real_date_is_never_the_newest_nor_left_out_as_older() {
     // Song 9 says 2099 and Song 0 has no date: neither says when it was written. The newest is Song 4, the first
     // Song.
     let to_come = NaiveDate::from_ymd_opt(2099, 12, 31).unwrap().and_hms_opt(12, 0, 0).unwrap();
@@ -139,6 +139,13 @@ fn a_save_with_no_real_date_is_never_the_newest_and_always_goes() {
     }
     assert_eq!(why(&p, "/music/Song/Song.flp"), Some(LeftOut::OlderBigSave));
     assert_eq!(why(&p, "/music/Song/Song 2.flp"), Some(LeftOut::OlderBigSave));
+    // But a byte-for-byte copy of a save that goes stays out, as any copy does.
+    let copy = SongSpaceReport { items: vec![item(CompactKind::SameSave, "/music/Song/Song 9.flp")], ..report };
+    let songs = [SongInfo { report: &copy, saves: &saves, milestones: &[] }];
+    let files: Vec<FileEntry> = saves.iter().map(|s| file(&s.path, 6 * MB)).collect();
+    let p = plan(files, &songs, &Used::default(), nowhere(), newest_only);
+    assert_eq!(why(&p, "/music/Song/Song 9.flp"), Some(LeftOut::SameSave));
+    assert!(goes(&p, "/music/Song/Song 0.flp"));
 }
 
 #[test]

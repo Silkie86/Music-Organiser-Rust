@@ -569,7 +569,8 @@ pub fn prepare(
     let used = Used::new(samples.values().flatten().map(String::as_str));
     let infos: Vec<SongInfo<'_>> =
         measured.iter().map(|m| SongInfo { report: &m.report, saves: &m.saves, milestones: &m.milestones }).collect();
-    let rules = Rules { level: settings.level, ..Rules::default() };
+    // The plan reads dates as the songs were measured: a save is real, or not, the same in both.
+    let rules = Rules { level: settings.level, dates: compact.dates, ..Rules::default() };
     // A file follows the nearest folder on the list it's in (a Slimmed one inside a Whole one keeps its choice).
     let listed = plan::Listed::new(&settings.folders);
     let plan = plan::plan(files, &infos, &used, Folders { backup: &backup, listed: &listed }, rules);

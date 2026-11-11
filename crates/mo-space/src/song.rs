@@ -143,11 +143,18 @@ pub struct CompactSettings {
     pub keep_backups: usize,
     /// How long without a save ends a sitting, for thinning older saves; 0 doesn't thin.
     pub sitting_hours: u32,
+    /// Which dates are real, as of when the settings were made: one for every song a look measures, so they all agree
+    /// (and Remove, measuring again with the look's settings, agrees with what the look offered).
+    pub dates: RealDates,
 }
 
 impl Default for CompactSettings {
     fn default() -> CompactSettings {
-        CompactSettings { keep_backups: DEFAULT_KEEP_BACKUPS, sitting_hours: DEFAULT_SITTING_HOURS }
+        CompactSettings {
+            keep_backups: DEFAULT_KEEP_BACKUPS,
+            sitting_hours: DEFAULT_SITTING_HOURS,
+            dates: RealDates::now(),
+        }
     }
 }
 
@@ -233,8 +240,8 @@ fn list_fl_autosaves(dir: &Path) -> FlAutosaves {
 /// project uses. Your newest save is never on the list, and neither is any sample in your sample folders.
 ///
 /// A save or autosave dated still to come, or with no date at all (1970), says nothing of when it was written
-/// (mo_formats::dates): your newest save is the newest with a real date, thinning goes by real dates only, and an
-/// autosave with no real date always stays, as one of the newest might.
+/// (mo_formats::dates, as of `settings.dates`): your newest save is the newest with a real date, thinning goes by real
+/// dates only, and an autosave with no real date stays whenever any stays, as it could be one of the newest.
 ///
 /// `roots` are your project folders (a song never has one of these to itself). `used_audio` is every sample path the
 /// song's saves use: projects store paths as they were on the PC that saved them, so a file counts as used when any
@@ -247,7 +254,7 @@ pub fn measure(
     elsewhere: Option<&Elsewhere<'_>>,
     stop: &AtomicBool,
 ) -> Result<SongSpaceReport, Stopped> {
-    let real = RealDates::now();
+    let real = settings.dates;
     let Some(newest) = newest(saves, &real) else { return Ok(SongSpaceReport::default()) };
     let folder = parent(&newest.path);
     let save_keys: HashSet<String> = saves.iter().map(|s| key(&s.path)).collect();
@@ -352,9 +359,11 @@ pub fn measure(
             });
         }
     }
-    // The newest few autosaves stay: they're what you'd reach for after a crash. One with no real date stays too: it
-    // could be one of them.
-    backups.retain(|b| real.local(b.2));
+    // The newest few autosaves stay: they're what you'd reach for after a crash. One with no real date stays too, as
+    // it could be one of them; when none is to stay (the backup's Essentials), it goes with the rest.
+    if settings.keep_backups > 0 {
+        backups.retain(|b| real.local(b.2));
+    }
     backups.sort_by_key(|b| std::cmp::Reverse(b.2));
     for (path, bytes, modified) in backups.into_iter().skip(settings.keep_backups) {
         report.items.push(CompactItem {

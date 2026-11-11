@@ -269,7 +269,7 @@ pub fn remove(
     let Ok((going, problems)) = still_offered(picked, &songs, from, &others, settings, stop) else {
         return stayed(picked, Refused::Stopped.text());
     };
-    let keep = kept_saves(&songs);
+    let keep = kept_saves(&songs, &settings.dates);
     let in_use = |name: &str| others.uses(name);
     let guard =
         Guard { project_roots: &from.roots, sample_folders: &from.sample_folders, keep: &keep, sample_in_use: &in_use };
@@ -364,10 +364,10 @@ fn not_offered(item: &CompactItem) -> String {
     .to_owned()
 }
 
-/// The saves that always stay, as [`key`]s: each song's newest (by time, as mo-space measures it: the newest with a
-/// real date, or of all when none has one, and every one saved at that moment) and the save it opens.
-fn kept_saves(songs: &[Song]) -> HashSet<String> {
-    let real = RealDates::now();
+/// The saves that always stay, as [`key`]s: each song's newest (by time, as mo-space measures it with the same `real`
+/// dates: the newest with a real date, or of all when none has one, and every one saved at that moment) and the save
+/// it opens.
+fn kept_saves(songs: &[Song], real: &RealDates) -> HashSet<String> {
     let by = |v: &Save| (real.local(v.modified), v.modified);
     let mut keep = HashSet::new();
     for song in songs {
@@ -1588,7 +1588,7 @@ mod tests {
             key: String::new(),
             copies: Vec::new(),
         };
-        let kept = kept_saves(&[song]);
+        let kept = kept_saves(&[song], &RealDates::now());
         let want: HashSet<String> = ["Night Drive_2", "Night Drive_3", "Night Drive_4"]
             .iter()
             .map(|n| key(&format!(r"D:\Projects\Night Drive\{n}.bwproject")))
