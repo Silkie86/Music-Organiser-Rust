@@ -1,9 +1,9 @@
 // The test plugin's panel: what shows inside the DAW's plugin window. Built from the app's own style (studio.slint),
-// so it looks like the app. Two views: Sounds (a list from the app's sound library, click to play through the track)
-// with the app's own filters and orders)
+// so it looks like the app. Two views: Sounds (the app's sound library as a list or as the Galaxy, click to play
+// through the track, with the app's own filters and orders)
 // and DAW check (every CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PointerPad, HoverNote } from "../../mo-ui/ui/studio.slint";
 export { FilterView, FilterChoice }
 import { ListView } from "../../mo-ui/ui/list.slint";
 
@@ -71,6 +71,39 @@ export component Panel inherits Window {
     // How wide a line's waveform is: it grows with the window (the list sets it); mo-plugin's waves.rs makes the
     // pictures this wide.
     in-out property <length> wave-width: 120px;
+    // The sounds as the Galaxy (every sound a star, as on the app's Sounds page) and not as a list.
+    in-out property <bool> galaxy;
+    // The stars' picture, and where it sits on the Galaxy's view now (it's moved and stretched with the view until
+    // the next picture is drawn).
+    in property <image> sky-picture;
+    in property <length> sky-x;
+    in property <length> sky-y;
+    in property <length> sky-w;
+    in property <length> sky-h;
+    // A word in the middle while there's no map to show ("Reading the galaxy", or why there's none).
+    in property <string> sky-note;
+    // The star under the mouse: its name ("" for none) and where the mouse is.
+    in property <string> sky-hover;
+    in property <length> sky-hover-x;
+    in property <length> sky-hover-y;
+    // The map is being dragged.
+    in property <bool> sky-grabbing;
+    // Every sound type's colour, for the stars.
+    out property <[color]> type-colours: Theme.sound-types;
+    // The Galaxy's view is this big now.
+    callback sky-size(length, length);
+    // A button went down on the Galaxy (true: the right or middle one, which moves the map), the mouse moved, and
+    // the button came up again; `sky-cancelled` first when the press was taken away.
+    callback sky-down(length, length, bool);
+    callback sky-move(length, length);
+    callback sky-up(bool);
+    callback sky-cancelled();
+    // The wheel, in notches (positive flies in).
+    callback sky-wheel(float);
+    // The mouse left the Galaxy.
+    callback sky-gone();
+    // Back out to the whole map.
+    callback sky-home();
     callback search(string);
     // Play a line's sound: from the start (0), or from the spot clicked on its waveform (up to 1, its end).
     callback play(int, float);
@@ -248,6 +281,13 @@ export component Panel inherits Window {
                         hint: "Search sounds";
                         edited(text) => { root.search(text); }
                     }
+                    Segmented {
+                        horizontal-stretch: 0;
+                        choices: ["List", "Galaxy"];
+                        current: root.galaxy ? 1 : 0;
+                        pad: Space.md;
+                        picked(i) => { root.galaxy = i == 1; }
+                    }
                     StudioButton {
                         horizontal-stretch: 0;
                         text: "Stop";
@@ -264,79 +304,137 @@ export component Panel inherits Window {
                         font-size: Type.meta;
                         overflow: elide;
                     }
-                    Segmented {
+                    if !root.galaxy: Segmented {
                         horizontal-stretch: 0;
                         choices: root.orders;
                         current: root.order;
                         pad: Space.md;
                         picked(i) => { root.pick-order(i); }
                     }
-                }
-                ListView {
-                    row-height: 48px;
-                    rows: root.sounds.length;
-                    // The waveforms take a bit under half of a line, in steps (so dragging the window's edge
-                    // doesn't ask for new pictures at every pixel), and never less than 120.
-                    function fit() {
-                        root.wave-width = max(120px, Math.floor(self.width * 0.45 / 40px) * 40px);
+                    if root.galaxy: StudioButton {
+                        horizontal-stretch: 0;
+                        text: "Whole galaxy";
+                        clicked => { root.sky-home(); }
                     }
-                    init => { self.fit(); }
-                    changed width => { self.fit(); }
-                    for sound[i] in root.sounds: ListLine {
-                        height: 48px;
-                        selected: i == root.picked;
-                        draggable: root.can-drag;
-                        lifted: i == root.carried;
-                        clicked => {
-                            root.picked = i;
-                            // A click on the waveform plays from that spot; anywhere else, from the start.
-                            root.play(i, wave.source.width > 0 && self.pressed-x >= wave.absolute-position.x - self.absolute-position.x
-                                && self.pressed-x < wave.absolute-position.x - self.absolute-position.x + wave.width
-                                ? (self.pressed-x - (wave.absolute-position.x - self.absolute-position.x)) / wave.width : 0);
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                    // The Galaxy: the wheel flies in and out, the right button moves the map, a click plays a star and
+                    // the left button held down plays the stars it passes.
+                    if root.galaxy: Rectangle {
+                        width: parent.width;
+                        height: parent.height;
+                        background: Theme.well;
+                        border-radius: Theme.radius;
+                        clip: true;
+                        init => { root.sky-size(self.width, self.height); }
+                        changed width => { root.sky-size(self.width, self.height); }
+                        changed height => { root.sky-size(self.width, self.height); }
+                        Image {
+                            x: root.sky-x;
+                            y: root.sky-y;
+                            width: root.sky-w;
+                            height: root.sky-h;
+                            source: root.sky-picture;
+                            image-fit: fill;
                         }
-                        drag-out => { root.drag-out(i); }
-                        HorizontalLayout {
-                            padding-left: Space.md;
-                            padding-right: Space.md;
-                            spacing: Space.sm;
-                            // Its type's colour, as the app's own sound lines show it.
-                            VerticalLayout {
-                                horizontal-stretch: 0;
-                                alignment: center;
-                                Dot { tint: Theme.sound-type(sound.colour); }
+                        if root.sky-note != "": Text {
+                            width: parent.width - 2 * Space.lg;
+                            text: root.sky-note;
+                            color: Theme.muted;
+                            font-size: Type.body;
+                            horizontal-alignment: center;
+                            vertical-alignment: center;
+                            wrap: word-wrap;
+                        }
+                        PointerPad {
+                            grabbing: root.sky-grabbing;
+                            down(x, y) => { root.sky-down(x, y, false); }
+                            side-down(x, y) => { root.sky-down(x, y, true); }
+                            side-up => { root.sky-up(true); }
+                            move(x, y) => { root.sky-move(x, y); }
+                            cancelled => { root.sky-cancelled(); }
+                            up => { root.sky-up(false); }
+                            wheel(x, dx, dy, ctrl, shift) => { root.sky-wheel(dy); }
+                            gone => { root.sky-gone(); }
+                        }
+                        if root.sky-hover != "": HoverNote {
+                            text: root.sky-hover;
+                            at-x: root.sky-hover-x;
+                            at-y: root.sky-hover-y;
+                            room-width: parent.width;
+                            room-height: parent.height;
+                        }
+                    }
+                    ListView {
+                        width: parent.width;
+                        height: parent.height;
+                        visible: !root.galaxy;
+                        row-height: 48px;
+                        rows: root.sounds.length;
+                        // The waveforms take a bit under half of a line, in steps (so dragging the window's edge
+                        // doesn't ask for new pictures at every pixel), and never less than 120.
+                        function fit() {
+                            root.wave-width = max(120px, Math.floor(self.width * 0.45 / 40px) * 40px);
+                        }
+                        init => { self.fit(); }
+                        changed width => { self.fit(); }
+                        for sound[i] in root.sounds: ListLine {
+                            height: 48px;
+                            selected: i == root.picked;
+                            draggable: root.can-drag;
+                            lifted: i == root.carried;
+                            clicked => {
+                                root.picked = i;
+                                // A click on the waveform plays from that spot; anywhere else, from the start.
+                                root.play(i, wave.source.width > 0 && self.pressed-x >= wave.absolute-position.x - self.absolute-position.x
+                                    && self.pressed-x < wave.absolute-position.x - self.absolute-position.x + wave.width
+                                    ? (self.pressed-x - (wave.absolute-position.x - self.absolute-position.x)) / wave.width : 0);
                             }
-                            VerticalLayout {
-                                horizontal-stretch: 1;
-                                alignment: center;
-                                Text {
-                                    text: sound.name;
-                                    color: Theme.text;
-                                    font-size: Type.row-title;
-                                    overflow: elide;
+                            drag-out => { root.drag-out(i); }
+                            HorizontalLayout {
+                                padding-left: Space.md;
+                                padding-right: Space.md;
+                                spacing: Space.sm;
+                                // Its type's colour, as the app's own sound lines show it.
+                                VerticalLayout {
+                                    horizontal-stretch: 0;
+                                    alignment: center;
+                                    Dot { tint: Theme.sound-type(sound.colour); }
                                 }
-                                Text {
-                                    text: sound.facts == "" ? sound.folder : sound.folder + "  ·  " + sound.facts;
-                                    color: Theme.faint;
-                                    font-size: Type.meta;
-                                    overflow: elide;
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    Text {
+                                        text: sound.name;
+                                        color: Theme.text;
+                                        font-size: Type.row-title;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: sound.facts == "" ? sound.folder : sound.folder + "  ·  " + sound.facts;
+                                        color: Theme.faint;
+                                        font-size: Type.meta;
+                                        overflow: elide;
+                                    }
                                 }
-                            }
-                            VerticalLayout {
-                                horizontal-stretch: 0;
-                                alignment: center;
-                                // The size mo-plugin's waves.rs makes the picture for.
-                                wave := Image {
-                                    width: root.wave-width;
-                                    height: 30px;
-                                    source: sound.wave;
-                                    image-fit: fill;
-                                    colorize: Theme.sound-type(sound.colour);
+                                VerticalLayout {
+                                    horizontal-stretch: 0;
+                                    alignment: center;
+                                    // The size mo-plugin's waves.rs makes the picture for.
+                                    wave := Image {
+                                        width: root.wave-width;
+                                        height: 30px;
+                                        source: sound.wave;
+                                        image-fit: fill;
+                                        colorize: Theme.sound-type(sound.colour);
+                                    }
                                 }
-                            }
-                            if sound.favourite: VerticalLayout {
-                                horizontal-stretch: 0;
-                                alignment: center;
-                                Heart { }
+                                if sound.favourite: VerticalLayout {
+                                    horizontal-stretch: 0;
+                                    alignment: center;
+                                    Heart { }
+                                }
                             }
                         }
                     }
