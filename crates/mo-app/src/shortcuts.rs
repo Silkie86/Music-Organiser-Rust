@@ -137,12 +137,18 @@ pub const CURVES_ACTIONS: &[Action] = &[
 
 /// The MIDI page's own actions, with the C# MIDI page's ids where it had them. What goes with this (midi.fit),
 /// the playground and Save as join as those parts are built. Esc goes back to the whole list as one of its steps back
-/// (`app.escape`). F5 reads the MIDI again on this page, as it measures again on Space. The octave keys are Alt with
-/// the arrows here: the C# app's Shift+Alt+= and Shift+Alt+- can't be told on every keyboard (a window here hears
-/// the character a key types, and with Shift down that's another on each layout).
+/// (`app.escape`). F5 reads the MIDI again on this page, as it measures again on Space. Put in the song writes into
+/// your project (over what's in those bars on the track), so it has no key until you give it one. The octave keys are
+/// Alt with the arrows here: the C# app's Shift+Alt+= and Shift+Alt+- can't be told on every keyboard (a window here
+/// hears the character a key types, and with Shift down that's another on each layout).
 pub const MIDI_ACTIONS: &[Action] = &[
     action("midi.moreLike", "Parts shaped like the picked one", "Ctrl+L"),
     action("midi.toBitwig", "Put the picked part into Bitwig as a clip on a new track", "Ctrl+B"),
+    action(
+        "midi.putInSong",
+        "Have Bitwig record the picked part into your song's arranger, at the bars it fits, on the selected track",
+        "",
+    ),
     action("midi.playBitwig", "Play the picked part through the track selected in Bitwig, or stop it", "Ctrl+Shift+B"),
     action("midi.playFl", "Play the picked part through the channel selected in FL Studio, or stop it", "Ctrl+Shift+F"),
     action("midi.within", "The longer phrases the picked part is in", ""),

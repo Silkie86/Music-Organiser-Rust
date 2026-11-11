@@ -70,6 +70,33 @@ pub fn send_part(job: Job, to: &Bitwig, path: &str, name: &str) -> bool {
     }
 }
 
+/// [`send_part`] for a part found for a song (`mo_dawlink::bitwig::Bitwig::send_part_for_song`): Bitwig's play start
+/// then marks the first of the song's `bars` it was found for, and the card's line says so, or why not, in the words
+/// `says` gives for the mark ([`crate::midi_fits::mark_words`]).
+pub fn send_part_for_song(
+    job: Job,
+    to: &Bitwig,
+    path: &str,
+    name: &str,
+    bars: &bitwig::SongLoop,
+    says: &dyn Fn(&bitwig::Mark) -> String,
+) -> bool {
+    match to.send_part_for_song(path, name, bars) {
+        Ok(sent) if sent.went_in() => {
+            job.done_as(&sent.title(), &format!("{}{}", sent.detail(), says(&sent.mark)));
+            true
+        }
+        Ok(sent) => {
+            job.failed_as(&sent.title(), &sent.detail());
+            false
+        }
+        Err(e) => {
+            job.failed_as(bitwig::PART_FAILED, &e.to_string());
+            false
+        }
+    }
+}
+
 /// The kit on show as the link takes it: each pad that has a sound, by the pad's name, with the kind of sound the pad
 /// is for (its first type, which places it the General MIDI way) and the sound's file, in the kit's order. Pads with no
 /// sound, and sounds no longer in the list, are left out. `sound` finds a sound by its id: the page's own map of them,

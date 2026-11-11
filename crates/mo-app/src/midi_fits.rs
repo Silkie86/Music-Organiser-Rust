@@ -27,13 +27,17 @@
 //! of those bars in the DAW. [`with_song_line`] says so on the card. Play in Bitwig does the same there
 //! ([`bitwig_loop`]): Bitwig's arranger goes round those bars of the project itself, and [`bitwig_words`] says so, or
 //! why the part plays alone.
+//!
+//! Then it goes into the song at those bars. Put in the song has Bitwig record it into its arranger there
+//! ([`put_place`] says which bars, [`put_words`] how it went), and Send to Bitwig moves Bitwig's play start to the
+//! first of them, so the clip it makes is dragged down to the mark ([`mark_words`]).
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
-use mo_dawlink::bitwig::{SongLoop, WithSong};
+use mo_dawlink::bitwig::{Mark, PutIn, Seen, SongLoop, WithSong};
 use mo_formats::NoteEvent;
 use mo_formats::dates::RealDates;
 use mo_library::songs::thousands;
@@ -314,6 +318,140 @@ pub const BITWIG_LOOP_LEFT: &str = " Bitwig's loop is still on your song's bars 
 /// loop and play start back as they were.
 pub const BITWIG_LOOP_NOT_BACK: &str = "It stopped, but Bitwig didn't show its loop and play start back as they were \
                                         before the part played with your song: have a look at them there.";
+
+/// Where a part found goes in Bitwig's arranger when it's put in its song ([`put_place`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PutPlace {
+    /// For the link (`mo_dawlink::bitwig::Bitwig::put_in_song`): the song's project, where the part starts and how
+    /// long Bitwig records it for, in beats.
+    pub bars: SongLoop,
+    /// The song's bars it fills, counted from 0, for the card's words.
+    pub range: std::ops::Range<i64>,
+    /// About how long Bitwig takes to record it, in seconds: those bars at the song's tempo.
+    pub seconds: f64,
+}
+
+/// Where a part found goes when it's put in its song: from the first of the bars it was found for (`fitted`,
+/// [`bitwig_loop`]'s answer for `with`), for as long as those bars, the part going round until they're full, as it
+/// was judged and is heard with them. A part longer than the bars goes in whole: its own length, to the end of the
+/// song's bar it stops in. `part`: how long its clip is, in ticks (`mo_formats::MidiClip::end`).
+pub fn put_place(fitted: &SongLoop, with: &SongBars, part: i64) -> PutPlace {
+    let bar = with.bar.max(1);
+    let found = with.bars.end.saturating_sub(with.bars.start).max(1);
+    // Whole bars of the song, rounded up.
+    let own = part.max(0).saturating_add(bar - 1) / bar;
+    let count = found.max(own);
+    let beats = count.saturating_mul(bar) as f64 / mo_midi::PPQ as f64;
+    PutPlace {
+        bars: SongLoop { length: beats, ..fitted.clone() },
+        range: with.bars.start..with.bars.start.saturating_add(count),
+        seconds: beats * 60.0 / with.bpm().max(1.0),
+    }
+}
+
+/// The card's headline while a part is put in its song: "Putting Saw Lead in Night drive".
+pub fn putting(name: &str, song: &str) -> String {
+    format!("Putting {name} in {song}")
+}
+
+/// The line under [`putting`] until the part's notes are read: where it goes.
+pub fn putting_line(with: &SongBars) -> String {
+    format!("Bitwig records it in from bar {} on the track selected there", with.bars.start + 1)
+}
+
+/// The line under [`putting`] while Bitwig records the part: which bars, and about how long it takes.
+pub fn recording_line(place: &PutPlace) -> String {
+    format!(
+        "Bitwig is recording it into {} on the track selected there: {}. Leave Bitwig stopped until it's done",
+        bars_words(&place.range),
+        about_seconds(place.seconds)
+    )
+}
+
+/// "about 8 seconds", "about a minute", "about 2 minutes".
+fn about_seconds(seconds: f64) -> String {
+    let seconds = if seconds.is_finite() { seconds.max(1.0).ceil() as i64 } else { 60 };
+    match seconds {
+        ..=1 => "about a second".to_owned(),
+        2..=49 => format!("about {seconds} seconds"),
+        50..=89 => "about a minute".to_owned(),
+        _ => format!("about {} minutes", (seconds + 30) / 60),
+    }
+}
+
+/// The card's headline when a part couldn't be put in its song; the line under it says why.
+pub const PUT_FAILED: &str = "Couldn't put the part in the song";
+
+/// What the card says once Bitwig has recorded a part into its song: whether all of it was seen to go in, the
+/// headline, and the line under it. `put`: what the link saw
+/// (`mo_dawlink::bitwig::Bitwig::put_in_song`).
+pub fn put_words(put: &PutIn, place: &PutPlace, name: &str, song: &str) -> (bool, String, String) {
+    let (track, bars) = (&put.track, bars_words(&place.range));
+    let first = place.range.start + 1;
+    let (whole, title, mut line) = match put.seen {
+        Seen::Whole => (
+            true,
+            format!("{name} is in {song}"),
+            format!("In {bars} on \u{201c}{track}\u{201d} in Bitwig's arranger. Undo there takes it out again."),
+        ),
+        Seen::Short => (
+            false,
+            format!("{name} may not be all in {song}"),
+            format!(
+                "Bitwig recorded it on \u{201c}{track}\u{201d} from bar {first}, but stopped before the part's end, \
+                 so its last bars may be missing: have a look there."
+            ),
+        ),
+        Seen::Unseen => (
+            false,
+            format!("{name} may not be in {song}"),
+            format!(
+                "Bitwig recorded on \u{201c}{track}\u{201d} from bar {first}, but the app didn't see the part play, \
+                 so have a look at what went in there."
+            ),
+        ),
+    };
+    if !put.not_back.is_empty() {
+        line.push_str(&format!(
+            " Bitwig didn't show these back as they were before: {}. Have a look at them there.",
+            put.not_back.join(", ")
+        ));
+    }
+    if put.clip_left {
+        line.push_str(&format!(
+            " The clip it was recorded from may still be in \u{201c}{track}\u{201d}'s clip launcher: delete it there."
+        ));
+    }
+    (whole && put.not_back.is_empty() && !put.clip_left, title, line)
+}
+
+/// What a sent part's card adds (after its own line) about Bitwig's play start marking the first of the song's bars
+/// the part was found for (`mo_dawlink::bitwig::Bitwig::send_part_for_song`): where to drag the clip to, or why the
+/// play start is where it was. "" when the mark wasn't asked for.
+pub fn mark_words(mark: &Mark, with: &SongBars, song: &str) -> String {
+    let bar = with.bars.start + 1;
+    match mark {
+        Mark::NotAsked => String::new(),
+        Mark::Moved => format!(
+            " Bitwig's play start is at bar {bar} now, where it fits {song}: drag the clip down to it in the arranger."
+        ),
+        Mark::OtherProject(open) if open.is_empty() => format!(
+            " Bitwig didn't say which project it has open, so its play start wasn't moved to where the part fits \
+             {song} (bar {bar})."
+        ),
+        Mark::OtherProject(open) => format!(
+            " Bitwig has \u{201c}{open}\u{201d} open, not {song}, so its play start wasn't moved to where the part \
+             fits (bar {bar} of {song})."
+        ),
+        Mark::OldExtension(_) => format!(
+            " It fits {song} from bar {bar}: to have Bitwig's play start mark the bar, install the Bitwig extension \
+             again from Settings > DAWs (Install on Bitwig's row)."
+        ),
+        Mark::NotMoved(why) => {
+            format!(" It fits {song} from bar {bar}, but Bitwig's play start wasn't moved there: {why}.")
+        }
+    }
+}
 
 /// What of `song` is fitted to, nothing picked by hand. `wanted`: what the page's switch asks for; none (the switch
 /// hasn't been touched): parts to play over the song's chords when it has any that can be read, else chords for its
@@ -1181,6 +1319,106 @@ mod tests {
         );
         assert_eq!(words(Ok(&WithSong::NoLoop)), ", alone: this Bitwig didn't let the app's extension set its loop");
         assert_eq!(words(Err("Didums isn't a Bitwig project")), ", alone: Didums isn't a Bitwig project");
+    }
+
+    #[test]
+    fn a_part_put_in_its_song_fills_the_bars_it_was_found_for_or_its_own_length() {
+        let with = SongBars {
+            view: mo_formats::bitwig::arrangement::VIEW,
+            tempo: Some(120.0),
+            ..(*fitted(&song(), None).unwrap().with).clone()
+        };
+        let bars = SongLoop { project: "Night drive v3".into(), start: 32.0, length: 16.0 };
+        // A 2-bar part in bars 9 to 12 goes round until they're full: 16 beats, 8 seconds at 120 BPM.
+        let place = put_place(&bars, &with, 2 * BAR);
+        assert_eq!((place.bars.clone(), place.range.clone(), place.seconds), (bars.clone(), 8..12, 8.0));
+        assert_eq!(put_place(&bars, &with, 4 * BAR), place, "as long as the bars: once through");
+        assert_eq!(put_place(&bars, &with, 0), place, "a clip with no length still fills them");
+        // A longer part goes in whole, to the end of the bar it stops in.
+        let long = put_place(&bars, &with, 6 * BAR + 1);
+        assert_eq!((long.bars.start, long.bars.length, long.range.clone()), (32.0, 28.0, 8..15));
+        assert_eq!(long.bars.project, "Night drive v3");
+        // In 3/4 a bar is three beats; with no tempo in the save, the time is at the tempo parts play at.
+        let waltz = SongBars { bar: 3 * mo_midi::PPQ, length: 12 * mo_midi::PPQ, tempo: None, ..with.clone() };
+        let in_three = put_place(&SongLoop { start: 24.0, length: 12.0, ..bars.clone() }, &waltz, 5 * 3 * mo_midi::PPQ);
+        assert_eq!((in_three.bars.length, in_three.range, in_three.seconds), (15.0, 8..13, 7.5));
+
+        assert_eq!(putting("Saw Lead", "Night drive"), "Putting Saw Lead in Night drive");
+        assert_eq!(putting_line(&with), "Bitwig records it in from bar 9 on the track selected there");
+        assert_eq!(
+            recording_line(&place),
+            "Bitwig is recording it into bars 9\u{2013}12 on the track selected there: about 8 seconds. Leave Bitwig \
+             stopped until it's done"
+        );
+        assert_eq!(about_seconds(0.2), "about a second");
+        assert_eq!(about_seconds(49.0), "about 49 seconds");
+        assert_eq!(about_seconds(64.0), "about a minute");
+        assert_eq!(about_seconds(150.0), "about 3 minutes");
+        assert_eq!(about_seconds(f64::NAN), "about a minute");
+    }
+
+    #[test]
+    fn the_card_says_how_a_part_went_into_its_song() {
+        let with = fitted(&song(), None).unwrap().with;
+        let bars = SongLoop { project: "Night drive".into(), start: 32.0, length: 16.0 };
+        let place = put_place(&bars, &with, 2 * BAR);
+        let put = |seen| PutIn { track: "Bass".into(), seen, not_back: Vec::new(), clip_left: false };
+        let words = |put: &PutIn| put_words(put, &place, "Saw Lead", "Night drive");
+        assert_eq!(
+            words(&put(Seen::Whole)),
+            (
+                true,
+                "Saw Lead is in Night drive".to_owned(),
+                "In bars 9\u{2013}12 on \u{201c}Bass\u{201d} in Bitwig's arranger. Undo there takes it out again."
+                    .to_owned()
+            )
+        );
+        let (whole, title, line) = words(&put(Seen::Short));
+        assert_eq!((whole, title.as_str()), (false, "Saw Lead may not be all in Night drive"));
+        assert!(line.contains("from bar 9, but stopped before the part's end"), "{line}");
+        let (whole, title, line) = words(&put(Seen::Unseen));
+        assert_eq!((whole, title.as_str()), (false, "Saw Lead may not be in Night drive"));
+        assert!(line.ends_with("so have a look at what went in there."), "{line}");
+        // It's in, but something of Bitwig's needs a look: the card doesn't say all is well.
+        let left =
+            PutIn { not_back: vec!["master mute".into(), "pre-roll".into()], clip_left: true, ..put(Seen::Whole) };
+        let (whole, title, line) = words(&left);
+        assert_eq!((whole, title.as_str()), (false, "Saw Lead is in Night drive"));
+        assert!(
+            line.ends_with(
+                " Bitwig didn't show these back as they were before: master mute, pre-roll. Have a look at them \
+                 there. The clip it was recorded from may still be in \u{201c}Bass\u{201d}'s clip launcher: delete \
+                 it there."
+            ),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_sent_parts_card_says_where_the_play_start_marks_its_bars() {
+        let with = fitted(&song(), None).unwrap().with;
+        let words = |mark: Mark| mark_words(&mark, &with, "Night drive");
+        assert_eq!(words(Mark::NotAsked), "");
+        assert_eq!(
+            words(Mark::Moved),
+            " Bitwig's play start is at bar 9 now, where it fits Night drive: drag the clip down to it in the arranger."
+        );
+        assert_eq!(
+            words(Mark::OtherProject("Sunrise".into())),
+            " Bitwig has \u{201c}Sunrise\u{201d} open, not Night drive, so its play start wasn't moved to where the \
+             part fits (bar 9 of Night drive)."
+        );
+        assert!(words(Mark::OtherProject(String::new())).starts_with(" Bitwig didn't say which project it has open"));
+        assert_eq!(
+            words(Mark::OldExtension("the Music Organiser extension 3.22".into())),
+            " It fits Night drive from bar 9: to have Bitwig's play start mark the bar, install the Bitwig extension \
+             again from Settings > DAWs (Install on Bitwig's row)."
+        );
+        assert_eq!(
+            words(Mark::NotMoved("Bitwig didn't move the play start to beat 32".into())),
+            " It fits Night drive from bar 9, but Bitwig's play start wasn't moved there: Bitwig didn't move the play \
+             start to beat 32."
+        );
     }
 
     #[test]
