@@ -1,5 +1,5 @@
 //! A stand-in for the Music Organiser link in Bitwig, for tests: no test reaches a real Bitwig (rule 11). It listens
-//! on a free port on this computer, greets each connection as extension 3.22 does, and answers `hello`, `newtrack`,
+//! on a free port on this computer, greets each connection as extension 3.23 does, and answers `hello`, `newtrack`,
 //! `insert`, `pads`, `clip`, `selectedtrack`, `transport`, `stoptracks`, `deleteclip` and `deletetrack` the way the extension does, in its words (`extensions/bitwig-java`'s `Link.java`), on a made-up project:
 //! the C# app's stand-in's, "Night Drive", with Drums, Kick, Bass and Master. It handles one request at a time,
 //! whichever connection it came on, as the extension makes changes one at a time.
@@ -26,7 +26,7 @@ use mo_formats::paths::{file_name, stem};
 use serde_json::{Map, Value, json};
 
 use super::link::{ascii_json, take_message};
-use super::{Bitwig, DRUM_MACHINE_NAME, DeviceId, Hello, PORT, WITH_SONG_NEEDS};
+use super::{Bitwig, DRUM_MACHINE_NAME, DeviceId, Hello, PLAY_START_NEEDS, PORT, WITH_SONG_NEEDS};
 
 /// The extension's words when "Let the app make changes" is off.
 pub const CHANGES_OFF: &str = "Changes are turned off. To let the app change things, turn on \"Let the app make \
@@ -186,6 +186,8 @@ pub struct World {
     /// Whether Bitwig doesn't show the loop back once the link has put it back: `deleteclip` then answers `loopBack`
     /// false, and the transport stays as the link set it.
     pub loop_stays: bool,
+    /// Whether Bitwig doesn't move the play start when `playstart` asks: the link then says so, and it stays.
+    pub play_start_stays: bool,
     /// The project's tempo in BPM and its time signature, as `transport` says them.
     pub tempo: f64,
     pub time_signature: String,
@@ -250,14 +252,14 @@ pub struct FakeSongLoop {
 }
 
 impl Default for World {
-    /// "Night Drive" open, changes allowed, extension 3.22 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
+    /// "Night Drive" open, changes allowed, extension 3.23 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
     /// Drums (a group), Kick (audio, with EQ+), Bass (an instrument: Serum, then a Compressor, selected) and the
     /// Master (with a Peak Limiter). The arranger's loop is off, over the first 4 bars, and Play starts at the start.
     /// 120 BPM in 4/4, with nothing recorded into the arranger.
     fn default() -> World {
         let hello = json!({
             "link": 3, "product": "Bitwig Studio", "version": "6.1.5", "api": 23, "platform": "WINDOWS",
-            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.22", "loopback": true,
+            "port": PORT, "engine": true, "onlyIn": true, "runtime": "java", "extension": "3.23", "loopback": true,
             "songLoop": true,
         });
         let mut serum = FakeDevice::new("Serum", "instrument");
@@ -302,6 +304,7 @@ impl Default for World {
             started_at: Vec::new(),
             song_loop: None,
             loop_stays: false,
+            play_start_stays: false,
             tempo: 120.0,
             time_signature: "4/4".into(),
             arranger: Vec::new(),
@@ -445,9 +448,10 @@ impl World {
         let cmd = map.get("cmd");
         let changes = match cmd.and_then(Value::as_str) {
             Some("hello" | "selectedtrack" | "transport") => false,
-            Some("newtrack" | "insert" | "pads" | "clip" | "deleteclip" | "deletetrack" | "stoptracks" | "record") => {
-                true
-            }
+            Some(
+                "newtrack" | "insert" | "pads" | "clip" | "deleteclip" | "deletetrack" | "stoptracks" | "record"
+                | "playstart",
+            ) => true,
             _ => return Err(format!("Unknown command: {}", js(cmd))),
         };
         self.check_allowed(map, changes)?;
@@ -465,6 +469,7 @@ impl World {
                 "playStart": self.transport.play_start, "tempo": self.tempo, "timeSignature": self.time_signature,
             })),
             Some("record") => self.record(map),
+            Some("playstart") => self.mark_play_start(map),
             Some("deleteclip") => self.delete_clip(map),
             Some("deletetrack") => self.delete_track(map),
             Some("stoptracks") => self.stop_tracks(map),
@@ -699,6 +704,27 @@ impl World {
             self.playing = false;
         }
         Ok(json!({ "stopped": stopped }))
+    }
+
+    /// Moves where Play starts from, as the link's `playstart` (3.23; an older link doesn't know the command). While
+    /// a part plays with its song's bars going round, the mark is where the play start goes back to when it stops.
+    fn mark_play_start(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
+        if !Hello::from_json(&self.greeting()).at_least(PLAY_START_NEEDS) {
+            return Err("Unknown command: playstart".into());
+        }
+        let at = match request.get("at").and_then(Value::as_f64) {
+            Some(at) if at.is_finite() && at >= 0.0 => at,
+            _ => return Err(format!("at is a number of beats, 0 or more, not {}.", js(request.get("at")))),
+        };
+        if self.play_start_stays {
+            return Err(format!("Bitwig didn't move the play start to beat {}.", js(Some(&json!(at)))));
+        }
+        let was = self.transport.play_start;
+        self.transport.play_start = at;
+        if let Some(kept) = self.song_loop.as_mut() {
+            kept.before.play_start = at;
+        }
+        Ok(json!({ "was": was, "playStart": at }))
     }
 
     /// A bar's length in beats, from the time signature, as the link's `barLength`.

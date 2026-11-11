@@ -19,8 +19,9 @@ use std::time::Duration;
 
 use mo_formats::paths::file_name;
 
-use super::link::{CHANGE_TIMEOUT, CONNECT_TIMEOUT, TIMEOUT};
-use super::{DRUM_MACHINE_NAME, DeviceId, Error, Hello, Inserted, Link, PORT};
+use super::audition::same_project;
+use super::link::{CHANGE_TIMEOUT, CONNECT_TIMEOUT, PLAY_START_NEEDS, TIMEOUT};
+use super::{DRUM_MACHINE_NAME, DeviceId, Error, Hello, Inserted, Link, PORT, SongLoop};
 
 /// The app's sends wait here for their turn, so they go in one at a time, in the order they came.
 pub(super) static SENDS: Queue = Queue::new();
@@ -197,6 +198,22 @@ impl Bitwig {
         part(&mut link, path.as_ref(), name)
     }
 
+    /// [`Bitwig::send_part`] for a part found for a song: once its clip is in, Bitwig's play start moves to the first
+    /// of the song's bars it was found for (`bars.start`), so it marks where the clip goes in the arranger: the
+    /// controller API can't put it there, and a clip dragged down from the launcher is dropped where you let go.
+    /// Only in the song's own project (by its name, as [`Bitwig::play_with_song`] tells it), and from the extension
+    /// 3.23: [`SentPart::mark`] says whether it's there. A Bitwig that's playing plays on.
+    pub fn send_part_for_song(&self, path: impl AsRef<Path>, name: &str, bars: &SongLoop) -> Result<SentPart, Error> {
+        let _turn = SENDS.wait_turn();
+        let mut link = self.connect()?;
+        link.stay_in_open_project();
+        let mut sent = part(&mut link, path.as_ref(), name)?;
+        if sent.slot.is_some() {
+            sent.mark = mark(&mut link, bars);
+        }
+        Ok(sent)
+    }
+
     /// Puts a kit's pads ([`kit_pads`]) on a Drum Machine in the project open in Bitwig: a new Drum Machine on a new
     /// track named `name`, or the one selected in Bitwig, where pads that already have something on them are left
     /// alone. A pad whose sound isn't where the app last saw it is left out. Waits for the sends asked for before it
@@ -335,6 +352,25 @@ pub struct SentPart {
     pub slot: Option<usize>,
     /// What didn't go to plan, in words without a full stop, or none.
     pub problem: Option<String>,
+    /// Whether Bitwig's play start marks where the part goes in its song ([`Bitwig::send_part_for_song`]).
+    pub mark: Mark,
+}
+
+/// Whether Bitwig's play start marks the first of the song's bars a sent part was found for ([`SentPart::mark`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Mark {
+    /// It wasn't asked for: the part wasn't sent for a song, or its clip didn't go in.
+    #[default]
+    NotAsked,
+    /// The play start is at the first of the song's bars.
+    Moved,
+    /// Bitwig has another project open than the song's (its name; "" when it didn't say), where the bars are
+    /// somewhere else: the play start is where it was.
+    OtherProject(String),
+    /// The extension is older than 3.23 (what answered): the play start is where it was.
+    OldExtension(String),
+    /// Bitwig didn't move it, or may not have: why, in words without a full stop.
+    NotMoved(String),
 }
 
 impl SentPart {
@@ -383,7 +419,7 @@ fn part(link: &mut Link, path: &Path, name: &str) -> Result<SentPart, Error> {
     if !path.is_file() {
         return Err(Error::Missing { file: file_name(&shown).to_owned(), path: shown });
     }
-    let mut sent = SentPart { name: name.to_owned(), track: None, slot: None, problem: None };
+    let mut sent = SentPart { name: name.to_owned(), track: None, slot: None, problem: None, mark: Mark::NotAsked };
     let track = match link.new_track(name) {
         Ok(track) => track,
         Err(e) => {
@@ -400,6 +436,23 @@ fn part(link: &mut Link, path: &Path, name: &str) -> Result<SentPart, Error> {
         }
     }
     Ok(sent)
+}
+
+/// Moves Bitwig's play start to the first of the song's bars, for a part just sent there
+/// ([`Bitwig::send_part_for_song`]).
+fn mark(link: &mut Link, bars: &SongLoop) -> Mark {
+    // Only where the link keeps the step to the song's own project (`onlyIn`): the bars are somewhere else in any
+    // other.
+    if !link.only_in().is_some_and(|open| same_project(open, &bars.project)) {
+        return Mark::OtherProject(link.hello().project.clone());
+    }
+    if !link.hello().at_least(PLAY_START_NEEDS) {
+        return Mark::OldExtension(link.hello().answering());
+    }
+    match link.move_play_start(bars.start) {
+        Ok(()) => Mark::Moved,
+        Err(e) => Mark::NotMoved(sentence(&e)),
+    }
 }
 
 /// A sound for a kit, from the kit builder.

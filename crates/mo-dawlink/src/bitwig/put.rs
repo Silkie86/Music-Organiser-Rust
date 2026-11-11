@@ -116,7 +116,19 @@ impl Bitwig {
         })?;
         stopped(&mut link)?;
         // Bitwig's own tempo is what the recording takes its time at; a link that doesn't say gets a long wait.
-        let tempo = link.tempo().ok().flatten();
+        let now = link.tempo_and_metre().unwrap_or_default();
+        let tempo = now.tempo;
+        // The record job takes whole bars of Bitwig's time signature only, and the song's bars are whole bars of
+        // the one it was saved in: said here, in plain words, before anything goes in.
+        if let Some(bar) = now.bar_beats()
+            && !(whole_bars(bars.start, bar) && whole_bars(bars.length, bar))
+        {
+            return Err(Error::Bitwig(format!(
+                "Bitwig is in {} now, and the song's bars as it was last saved aren't whole bars of that, so the part \
+                 wasn't recorded. Save the song in Bitwig, then look for parts that fit it again.",
+                now.time_signature.trim()
+            )));
+        }
         let slot = link.add_clip_to_record(&track_id, &shown)?;
         if !wanted() {
             return Err(match link.delete_audition_clip(&track_id, slot, false) {
@@ -181,6 +193,12 @@ fn stopped(link: &mut Link) -> Result<(), Error> {
         std::thread::sleep(Duration::from_millis(50));
     }
     Ok(())
+}
+
+/// Whether `beats` is a whole number of bars of `bar` beats, as the link's record job counts them.
+fn whole_bars(beats: f64, bar: f64) -> bool {
+    let bars = beats / bar;
+    (bars - bars.round()).abs() < 1e-6
 }
 
 /// How long the record job lets the clip play at most: its length and two bars more, at Bitwig's tempo.
@@ -283,6 +301,21 @@ mod tests {
         failed.why = "The track bank wasn't made.".into();
         assert_eq!(went(&failed).unwrap_err(), "The recording failed in Bitwig: The track bank wasn't made.");
         assert!(went(&job("something new", "", false)).unwrap_err().contains("wasn't what the app expected"));
+    }
+
+    #[test]
+    fn counts_bars_as_the_link_does() {
+        use super::super::Metre;
+        let metre = |sig: &str| Metre { tempo: None, time_signature: sig.into() }.bar_beats();
+        assert_eq!(metre("4/4"), Some(4.0));
+        assert_eq!(metre("7/8"), Some(3.5));
+        assert_eq!(metre(" 3 / 4,16"), Some(3.0), "what follows the two numbers is left out, as the link does");
+        assert_eq!(metre(""), None);
+        assert_eq!(metre("0/4"), None);
+        assert_eq!(metre("4/0"), None);
+        assert_eq!(metre("four four"), None);
+        assert!(whole_bars(32.0, 4.0) && whole_bars(0.0, 3.5) && whole_bars(10.5, 3.5));
+        assert!(!whole_bars(32.0, 3.5) && !whole_bars(2.0, 4.0));
     }
 
     #[test]

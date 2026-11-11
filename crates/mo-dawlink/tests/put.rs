@@ -167,16 +167,30 @@ fn says_when_bitwig_doesnt_take_what_the_recording_needs() {
 }
 
 #[test]
-fn what_the_link_refuses_in_its_own_words_leaves_nothing_behind() {
-    // Bars that aren't whole bars of Bitwig's time signature: the song was saved in 4/4, Bitwig is in 7/8 now.
+fn bars_that_arent_whole_bars_in_bitwig_now_are_said_before_anything_goes_in() {
+    // The song was saved in 4/4, and Bitwig is in 7/8 now.
     let bitwig = with(|w| w.time_signature = "7/8".into());
     let said = put(&bitwig, "Odd time").unwrap_err().to_string();
-    assert_eq!(said, "at, length and replayFrom have to be whole bars: 3.5 beats each in 7/8.");
+    assert_eq!(
+        said,
+        "Bitwig is in 7/8 now, and the song's bars as it was last saved aren't whole bars of that, so the part wasn't \
+         recorded. Save the song in Bitwig, then look for parts that fit it again."
+    );
     let world = bitwig.world();
     assert!(world.arranger.is_empty());
-    assert_eq!(world.tracks[2].clips, [""], "its clip came out again");
-    // A launcher clip of yours playing (or waiting to) is in the way: the link says which track.
+    assert!(world.tracks[2].clips.is_empty(), "nothing went in the launcher");
+    assert!(!world.commands().iter().any(|c| c == "clip" || c == "record"));
     drop(world);
+    // A time signature the app can't read is left to the link, which says so in its own words.
+    let bitwig = with(|w| w.time_signature = "free".into());
+    let said = put(&bitwig, "No time").unwrap_err().to_string();
+    assert_eq!(said, "The link can't tell a bar's length from Bitwig's time signature \"free\".");
+    assert_eq!(bitwig.world().tracks[2].clips, [""], "its clip came out again");
+}
+
+#[test]
+fn what_the_link_refuses_in_its_own_words_leaves_nothing_behind() {
+    // A launcher clip of yours playing (or waiting to) is in the way: the link says which track.
     let bitwig = with(|w| w.launched = vec![(1, 0)]);
     let said = put(&bitwig, "Busy").unwrap_err().to_string();
     assert!(said.starts_with("A launcher clip on \"Kick\" is playing"), "{said}");

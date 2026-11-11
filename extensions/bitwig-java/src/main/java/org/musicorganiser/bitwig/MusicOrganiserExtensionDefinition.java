@@ -15,7 +15,7 @@ import java.util.UUID;
 public final class MusicOrganiserExtensionDefinition extends ControllerExtensionDefinition {
     /** The ID the JavaScript script (extensions/bitwig/MusicOrganiser.control.js) was defined with. */
     static final UUID ID = UUID.fromString("ed35e3c7-c544-49ed-936d-c236b0c9b73b");
-    static final String VERSION = "3.22";
+    static final String VERSION = "3.23";
     /**
      * API 23 (Bitwig 6.1) has everything the link uses: parameter steps and names, origins, automation, channel
      * IDs, the last clicked parameter and the master recorder. Nothing newer (and no beta method) is used.

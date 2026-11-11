@@ -45,9 +45,12 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 /// The extension version from which `insert` and `pads` find a track by its ID too, as `clip` does.
 pub const TRACK_IDS_EVERYWHERE: &str = "3.21";
 
+/// The extension version from which `playstart` moves where Bitwig's Play starts from ([`Link::move_play_start`]).
+pub const PLAY_START_NEEDS: &str = "3.23";
+
 /// The commands that change or select something in Bitwig's project, as the link lists them: each carries
 /// [`Link::only_in`] when it's set. Not `recordabort`, which must reach the link whatever project is in front.
-const PROJECT_COMMANDS: [&str; 16] = [
+const PROJECT_COMMANDS: [&str; 17] = [
     "set",
     "insert",
     "newtrack",
@@ -64,6 +67,7 @@ const PROJECT_COMMANDS: [&str; 16] = [
     "stoptracks",
     "deleteclip",
     "deletetrack",
+    "playstart",
 ];
 
 /// How taking an audition clip out went ([`Link::delete_audition_clip`], [`super::Bitwig::stop_playing`]).
@@ -75,6 +79,26 @@ pub struct TakenOut {
     /// play start back as the link found them (as far as they were still the link's to put back). None for a clip
     /// that played alone, and when its loop had gone back already.
     pub loop_back: Option<bool>,
+}
+
+/// Bitwig's tempo and time signature as its transport shows them now ([`Link::tempo_and_metre`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Metre {
+    /// In BPM; none when the link doesn't say.
+    pub tempo: Option<f64>,
+    /// As Bitwig writes it ("4/4", "7/8"); "" when the link doesn't say.
+    pub time_signature: String,
+}
+
+impl Metre {
+    /// A bar's length in beats (quarter notes), read from the time signature as the link's record job reads it; none
+    /// when it can't be told.
+    pub fn bar_beats(&self) -> Option<f64> {
+        let (beats, rest) = self.time_signature.trim_start().split_once('/')?;
+        let unit: String = rest.trim_start().chars().take_while(char::is_ascii_digit).collect();
+        let (beats, unit) = (beats.trim_end().parse::<u32>().ok()?, unit.parse::<u32>().ok()?);
+        (beats > 0 && unit > 0).then(|| f64::from(beats) * 4.0 / f64::from(unit))
+    }
 }
 
 /// What the link's record job answered ([`Link::record_clip`]): it plays a launcher clip once with Bitwig's arranger
@@ -488,10 +512,21 @@ impl Link {
         answer.get("playing").and_then(Value::as_bool).ok_or(Error::Unexpected)
     }
 
-    /// Bitwig's tempo now, in BPM (`transport`, extension 3.16); none when the link doesn't say. Only reads.
-    pub fn tempo(&mut self) -> Result<Option<f64>, Error> {
+    /// Bitwig's tempo and time signature now (`transport`, extension 3.16). Only reads.
+    pub fn tempo_and_metre(&mut self) -> Result<Metre, Error> {
         let answer = self.request(ask("transport", []), self.timeout)?;
-        Ok(answer.get("tempo").and_then(Value::as_f64).filter(|bpm| bpm.is_finite() && *bpm > 0.0))
+        Ok(Metre {
+            tempo: answer.get("tempo").and_then(Value::as_f64).filter(|bpm| bpm.is_finite() && *bpm > 0.0),
+            time_signature: text(&answer, "timeSignature"),
+        })
+    }
+
+    /// Moves where Bitwig's Play starts from to `at` beats from the arranger's start (`playstart`, extension 3.23,
+    /// [`PLAY_START_NEEDS`]), so it marks a bar. A Bitwig that's playing plays on: the play start is where the next
+    /// Play begins. While a part plays with its song's bars going round ([`Link::add_audition_clip`]), the play start
+    /// goes back to this mark when the part stops, not to where it was before.
+    pub fn move_play_start(&mut self, at: f64) -> Result<(), Error> {
+        self.change(ask("playstart", [("at", at.into())])).map(|_| ())
     }
 
     /// Puts a MIDI file in the first empty clip launcher slot of the track Bitwig keeps under `track_id`, not
