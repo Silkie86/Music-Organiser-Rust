@@ -49,8 +49,10 @@ static CARD: Mutex<Shared> = Mutex::new(Shared { look: Look::NotStarted, held: 0
 /// Told when a look ends.
 static LOOKED: Condvar = Condvar::new();
 
-/// The longest a window waits for a look still going before it draws on the processor instead.
-const LONGEST_WAIT: Duration = Duration::from_secs(3);
+/// The longest a window waits for a look still going before it draws on the processor for now: it's the DAW's own
+/// thread that waits. The window moves to the card once it's found ([`found`]). (On Solomon's PC the first look
+/// took 3.7 s, 11 Nov 2026.)
+const LONGEST_WAIT: Duration = Duration::from_millis(100);
 
 /// One copy of the plugin's hold on the card: while any copy has one the card found stays, so a window opened again
 /// doesn't look for it again.
@@ -92,6 +94,11 @@ impl Drop for Held {
             shared.look = Look::NotStarted;
         }
     }
+}
+
+/// Whether a card has been found and is ready to draw with.
+pub fn found() -> bool {
+    matches!(lock(&CARD).look, Look::Found(_))
 }
 
 /// The card: found already, or waited for while a look is going (never longer than [`LONGEST_WAIT`]). An error is

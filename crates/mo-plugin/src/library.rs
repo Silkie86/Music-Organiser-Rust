@@ -63,6 +63,8 @@ pub struct Library {
     pub types: Vec<(String, usize)>,
     /// Every tag on a sound, sorted.
     pub tags: Vec<String>,
+    /// How many sounds were added in each year, newest first: the year strip.
+    pub years: Vec<(i32, usize)>,
 }
 
 impl Library {
@@ -73,7 +75,9 @@ impl Library {
         list.set_liked(|s| f64::from(u8::from(s.favourite)) * 1000.0 + f64::from(s.plays));
         let types = list.type_counts();
         let tags = list.tags();
-        Library { list, types, tags }
+        // By the year each sound was added (the plugin doesn't read which songs use a sound).
+        let years = list.year_counts(false);
+        Library { list, types, tags, years }
     }
 
     /// The places in the list of the sounds `asked` lets through, in its order, and how many each filter choice would
@@ -120,6 +124,13 @@ static SHARED: Mutex<Weak<Library>> = Mutex::new(Weak::new());
 /// The sound library, read once for every copy of the plugin while any of them holds it. Slow the first time
 /// (call it off the panel's thread).
 pub fn read() -> Read {
+    if let Some(library) = lock(&SHARED).upgrade() {
+        return Read::Ready(library);
+    }
+    // One read at a time: a second asker (another copy of the plugin, or a window made again) waits for the first
+    // and takes what it read.
+    static READING: Mutex<()> = Mutex::new(());
+    let _reading = lock(&READING);
     if let Some(library) = lock(&SHARED).upgrade() {
         return Read::Ready(library);
     }

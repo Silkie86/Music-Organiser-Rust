@@ -1,9 +1,12 @@
 //! Dragging a sound out of the panel onto a track, as its own file.
 //!
-//! On Windows this is Windows' own drag and drop (OLE), the same way the app's own lists hand files over (mo-ui's
-//! `drag/ole.rs`, which this follows): the file goes as a file list (`CF_HDROP`), as Explorer hands files over, so the
-//! DAW takes it as it takes a file from a folder. Only copying is offered: whatever takes the file can never move the
-//! sample away (rule 2). Windows runs the drag on the window's thread (in a DAW, its main thread) and holds it until
+//! CLAP itself has nothing for dragging out: a plugin hands the file to the system's own drag and drop, and the DAW
+//! takes it as it takes a file from a folder. On Windows that's OLE, as the app's own lists do it (mo-ui's
+//! `drag/ole.rs`). The file goes as the very thing Explorer hands over when the same file is dragged from a folder
+//! (the shell's own data object for it: the file list `CF_HDROP` and the shell's other forms), so a DAW that takes
+//! a file from Explorer finds what it looks for; if the shell can't make that, as a plain file list. Copying and
+//! linking are offered, never moving: whatever takes the file can use it where it is or copy it, and can never move
+//! the sample away (rule 2). How each drag went is in the plugin's log. Windows runs the drag on the window's thread (in a DAW, its main thread) and holds it until
 //! the file is let go, as it does for a drag from the DAW's own browser.
 //!
 //! Not on Mac or Linux yet: there the lines can't be dragged.
@@ -46,22 +49,27 @@ mod ole {
     use std::mem::{ManuallyDrop, size_of};
     use std::os::windows::ffi::OsStrExt;
     use std::path::Path;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use windows::Win32::Foundation::{
         DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, GlobalFree, HGLOBAL, POINT, S_OK,
     };
+    use windows::Win32::System::Com::IBindCtx;
     use windows::Win32::System::Com::{
         DVASPECT_CONTENT, FORMATETC, IDataObject, STGMEDIUM, STGMEDIUM_0, TYMED_HGLOBAL,
     };
     use windows::Win32::System::Memory::{GMEM_MOVEABLE, GMEM_ZEROINIT, GlobalAlloc, GlobalLock, GlobalUnlock};
     use windows::Win32::System::Ole::{
-        CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_NONE, DoDragDrop, IDropSource, IDropSource_Impl,
-        OleInitialize, OleUninitialize,
+        CF_HDROP, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_NONE, DoDragDrop, IDropSource,
+        IDropSource_Impl, OleInitialize, OleUninitialize,
     };
     use windows::Win32::System::SystemServices::{MK_LBUTTON, MK_MBUTTON, MK_RBUTTON, MODIFIERKEYS_FLAGS};
     use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
-    use windows::Win32::UI::Shell::{DROPFILES, SHCreateDataObject};
+    use windows::Win32::UI::Shell::{
+        BHID_DataObject, DROPFILES, IShellItem, SHCreateDataObject, SHCreateItemFromParsingName,
+    };
     use windows::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_SWAPBUTTON};
-    use windows::core::{BOOL, HRESULT, implement};
+    use windows::core::{BOOL, HRESULT, PCWSTR, implement};
 
     pub fn drag(file: &Path) -> Result<Outcome, String> {
         // SAFETY: called on the window's thread, which is the thread the drag runs on. The window (baseview) has set
@@ -82,13 +90,32 @@ mod ole {
         if !main_button_down() {
             return Ok(Outcome::Cancelled);
         }
-        let data = file_list(file).map_err(|e| format!("Couldn't hand the file to Windows ({e})"))?;
-        let source: IDropSource = Source.into();
+        let (data, handed) = match shell_data(file) {
+            Ok(data) => (data, "as Explorer hands it"),
+            Err(why) => {
+                crate::log::line("Drag", &format!("The shell couldn't hand the file over ({why}): a plain file list"));
+                let list = file_list(file).map_err(|e| format!("Couldn't hand the file to Windows ({e})"))?;
+                (list, "as a plain file list")
+            }
+        };
+        // What whatever was under the mouse said it would do with the file, all through the drag.
+        let offered = Arc::new(AtomicU32::new(0));
+        let source: IDropSource = Source { offered: Arc::clone(&offered) }.into();
+        let allowed = DROPEFFECT_COPY | DROPEFFECT_LINK;
         let mut effect = DROPEFFECT_NONE;
         // SAFETY: `data` and `source` are live COM objects for the whole call, and `effect` outlives it.
-        let hr = unsafe { DoDragDrop(&data, &source, DROPEFFECT_COPY, &mut effect) };
+        let hr = unsafe { DoDragDrop(&data, &source, allowed, &mut effect) };
+        crate::log::line(
+            "Drag",
+            &format!(
+                "Handed {handed}; Windows ended it with {hr:?}, what took it did {} (1 copy, 4 link, 0 nothing); \
+                 while carried, what was under the mouse offered {}",
+                effect.0,
+                offered.load(Ordering::Relaxed)
+            ),
+        );
         if hr == DRAGDROP_S_DROP {
-            Ok(if effect.0 & DROPEFFECT_COPY.0 != 0 { Outcome::Landed } else { Outcome::Cancelled })
+            Ok(if effect.0 & allowed.0 != 0 { Outcome::Landed } else { Outcome::Cancelled })
         } else if hr == DRAGDROP_S_CANCEL {
             Ok(Outcome::Cancelled)
         } else {
@@ -103,6 +130,18 @@ mod ole {
             // The buttons as they are, not as they're swapped: the main one is the right when they are.
             let main = if GetSystemMetrics(SM_SWAPBUTTON) != 0 { VK_RBUTTON } else { VK_LBUTTON };
             GetAsyncKeyState(i32::from(main.0)) < 0
+        }
+    }
+
+    /// The file as Explorer hands it over: the shell's own data object for it.
+    fn shell_data(file: &Path) -> windows::core::Result<IDataObject> {
+        let mut wide: Vec<u16> = file.as_os_str().encode_wide().filter(|&c| c != 0).collect();
+        wide.push(0);
+        // SAFETY: `wide` is a 0-ended UTF-16 path that lives through the call; the shell item is a live COM object
+        // while it's asked for its data object.
+        unsafe {
+            let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None::<&IBindCtx>)?;
+            item.BindToHandler(None::<&IBindCtx>, &BHID_DataObject)
         }
     }
 
@@ -155,7 +194,10 @@ mod ole {
 
     /// What Windows asks the plugin while the file is carried: whether to go on.
     #[implement(IDropSource)]
-    struct Source;
+    struct Source {
+        /// Every effect offered by what was under the mouse, added together (for the log).
+        offered: Arc<AtomicU32>,
+    }
 
     impl IDropSource_Impl for Source_Impl {
         fn QueryContinueDrag(&self, escape: BOOL, keys: MODIFIERKEYS_FLAGS) -> HRESULT {
@@ -169,7 +211,9 @@ mod ole {
             }
         }
 
-        fn GiveFeedback(&self, _effect: DROPEFFECT) -> HRESULT {
+        fn GiveFeedback(&self, effect: DROPEFFECT) -> HRESULT {
+            // The top bit only says the target is scrolling.
+            self.offered.fetch_or(effect.0 & 0x7, Ordering::Relaxed);
             DRAGDROP_S_USEDEFAULTCURSORS
         }
     }

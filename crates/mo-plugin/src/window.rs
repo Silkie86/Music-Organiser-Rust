@@ -16,7 +16,7 @@ use crate::gpu::Gpu;
 use crate::library::{self, Asked, Library, ORDERS, Read};
 use crate::threads::{background, lock};
 use crate::waves::{self, Kept};
-use crate::{ExtensionLine, FilterChoice, FilterView, Instance, Panel, SoundLine};
+use crate::{ExtensionLine, FilterChoice, FilterView, Instance, Panel, SoundLine, YearBar};
 use baseview::dpi::{PhysicalPosition, Size};
 use baseview::{
     Event, EventStatus, HandlerError, MouseButton, MouseEvent, ScrollDelta, TimerHandle, WindowContext, WindowEvent,
@@ -68,7 +68,9 @@ pub fn open(
     let settings =
         WindowSettings::new().with_title("Music Organiser").with_size(size).with_parent(parent).with_resizable(true);
     let window = baseview::Window::create(settings, move |context| {
-        Shown::new(context, instance).map_err(|why| HandlerError::from(std::io::Error::other(why)))
+        let shown = Shown::new(context.clone(), Arc::clone(&instance))
+            .map_err(|why| HandlerError::from(std::io::Error::other(why)))?;
+        Ok(Window { context, instance, shown: RefCell::new(Some(shown)) })
     })
     .map_err(|e| format!("Couldn't open the plugin's window: {e}"))?;
     window.show().map_err(|e| format!("Couldn't show the plugin's window: {e}"))?;
@@ -261,6 +263,10 @@ impl Draws {
                     return Ok(Draws::Card(gpu));
                 }
                 Ok(Err(why)) => {
+                    // With a card found and still no drawing on it, it isn't tried again in this DAW.
+                    if crate::gpu::found() {
+                        CARD_FAILED.store(true, Ordering::Release);
+                    }
                     crate::log::line("Graphics", &format!("The panel draws on the processor: {why}"));
                 }
                 Err(_) => {
@@ -363,10 +369,68 @@ impl Draws {
         }
     }
 
+    /// Drawing on the processor only because the card was still being looked for when the window opened, and it's
+    /// found now.
+    fn card_came(&self) -> bool {
+        matches!(self, Draws::Processor { .. })
+            && std::env::var_os("MO_DRAW_CPU").is_none()
+            && !CARD_FAILED.load(Ordering::Acquire)
+            && crate::gpu::found()
+    }
+
     /// Whether drawing waits for the screen (the card shows a frame in step with it): then the panel is drawn on the
     /// timer only, not after every move of the mouse, or the moves would queue up behind the screen.
     fn waits_for_the_screen(&self) -> bool {
         matches!(self, Draws::Card(_))
+    }
+}
+
+/// What the window hands its events to: the open panel, which is made again on the graphics card when the card
+/// wasn't ready as the window opened (finding it the first time in a DAW takes a few seconds; the window doesn't
+/// wait for it).
+struct Window {
+    context: WindowContext,
+    instance: Arc<Instance>,
+    shown: RefCell<Option<Shown>>,
+}
+
+impl Window {
+    /// Makes the panel again, drawn on the card, once the card is found. What was picked in the panel's first
+    /// moments starts again; the sound library is read once all the same (`library::read`).
+    fn move_to_the_card(&self) {
+        if !self.shown.borrow().as_ref().is_some_and(|shown| shown.draws.card_came()) {
+            return;
+        }
+        // Not while the panel is in the middle of something (a drag out holds this thread, and the timer still runs).
+        let Ok(mut shown) = self.shown.try_borrow_mut() else { return };
+        crate::log::line("Graphics", "The graphics card is ready: the panel moves to it");
+        // The old panel and its hold on the window go first.
+        drop(shown.take());
+        match Shown::new(self.context.clone(), Arc::clone(&self.instance)) {
+            Ok(new) => *shown = Some(new),
+            Err(why) => crate::log::line("Window", &format!("The panel couldn't be made again: {why}")),
+        }
+    }
+}
+
+impl WindowHandler for Window {
+    fn draw(&self) -> Result<(), HandlerError> {
+        self.shown.borrow().as_ref().map_or(Ok(()), WindowHandler::draw)
+    }
+
+    fn resized(&self, new_size: WindowSize) -> Result<(), HandlerError> {
+        self.shown.borrow().as_ref().map_or(Ok(()), |shown| shown.resized(new_size))
+    }
+
+    fn on_timer(&self, timer: &TimerHandle) {
+        self.move_to_the_card();
+        if let Some(shown) = self.shown.borrow().as_ref() {
+            shown.on_timer(timer);
+        }
+    }
+
+    fn on_event(&self, event: Event) -> EventStatus {
+        self.shown.borrow().as_ref().map_or(EventStatus::Ignored, |shown| shown.on_event(event))
     }
 }
 
@@ -394,6 +458,8 @@ struct Shown {
     wave_width: Cell<f32>,
     /// A line's file is being carried out now ([`Shown::drag`]).
     dragging: Cell<bool>,
+    /// Where the right button went down, while it's down: let go in the same spot, it's a click.
+    right_press: Cell<Option<LogicalPosition>>,
     /// The Galaxy: its map, its view and which picture is on show.
     sky: Rc<RefCell<Sky>>,
     /// The Galaxy's map has been asked for.
@@ -439,6 +505,7 @@ impl Shown {
             played: Rc::new(RefCell::new(None)),
             wave_width: Cell::new(waves::WIDTH as f32),
             dragging: Cell::new(false),
+            right_press: Cell::new(None),
             sky: Rc::default(),
             sky_asked: Cell::new(false),
             ticked: Cell::new(Instant::now()),
@@ -568,6 +635,16 @@ impl Shown {
         panel.on_toggle(move |line| change(&|a, _| a.filters.toggle(&line)));
         let change = Rc::clone(&changed);
         panel.on_tempo_picked(move |low, high| change(&|a, _| a.filters.set_tempo(low, high)));
+        // The year strip: places on it dragged over become the years picked.
+        let change = Rc::clone(&changed);
+        panel.on_years_picked(move |a, b| {
+            change(&|asked, library| {
+                let years = library.map_or(&[][..], |l| &l.years[..]);
+                asked.filters.years = mo_app::year_strip::year_span(years, a.min(b), a.max(b));
+            });
+        });
+        let change = Rc::clone(&changed);
+        panel.on_years_cleared(move || change(&|asked, _| asked.filters.years = None));
         let change = changed;
         panel.on_pick_order(move |i| {
             let Some(&order) = usize::try_from(i).ok().and_then(|i| ORDERS.get(i)) else { return };
@@ -996,6 +1073,13 @@ impl Shown {
         }
     }
 
+    /// Stops what's playing (the Stop button, a right click, Esc).
+    fn stop(&self) {
+        self.instance.player.stop();
+        self.playing.set(None);
+        self.panel.set_playing(SharedString::new());
+    }
+
     fn at(&self, position: PhysicalPosition<f64>) -> LogicalPosition {
         let scale = self.scale.get().max(0.1);
         let at = LogicalPosition::new((position.x / scale) as f32, (position.y / scale) as f32);
@@ -1032,9 +1116,19 @@ impl WindowHandler for Shown {
                     if !self.context.has_focus() {
                         let _ = self.context.focus();
                     }
+                    if button == MouseButton::Right {
+                        self.right_press.set(Some(self.pointer.get()));
+                    }
                     self.send(Slint::PointerPressed { position: self.pointer.get(), button: slint_button(button) });
                 }
                 MouseEvent::ButtonReleased { button, .. } => {
+                    // A right click stops the sound (a right drag is the Galaxy's map being moved: it doesn't).
+                    if button == MouseButton::Right
+                        && let Some(pressed) = self.right_press.take()
+                        && still(pressed, self.pointer.get())
+                    {
+                        self.stop();
+                    }
                     self.send(Slint::PointerReleased { position: self.pointer.get(), button: slint_button(button) });
                 }
                 MouseEvent::WheelScrolled { delta, .. } => {
@@ -1052,6 +1146,10 @@ impl WindowHandler for Shown {
                 _ => return EventStatus::Ignored,
             },
             Event::Keyboard(key) => {
+                // Esc stops the sound.
+                if key.state == KeyState::Down && !key.repeat && key.key == Key::Named(NamedKey::Escape) {
+                    self.stop();
+                }
                 let Some(text) = key_text(&key.key) else { return EventStatus::Ignored };
                 self.send(match (key.state, key.repeat) {
                     (KeyState::Down, false) => Slint::KeyPressed { text },
@@ -1103,6 +1201,8 @@ struct Column {
     counts: RefCell<Option<SoundCounts>>,
     /// How many types the column last showed as lines of their own (0 before the first showing).
     type_lines: Cell<usize>,
+    /// How many years the year strip was last given (the library's years don't change once it's read).
+    years: Cell<usize>,
 }
 
 impl Column {
@@ -1121,6 +1221,19 @@ impl Column {
         panel.set_tempo_high(chips.tempo.high);
         panel.set_tempo_words(chips.tempo.words.as_str().into());
         panel.set_tempo_bars(ModelRc::new(VecModel::from(chips.tempo.bars)));
+        // The year strip: each year's bar is its share of the fullest year.
+        let years = library.map_or(&[][..], |l| &l.years[..]);
+        let most = years.iter().map(|y| y.1).max().unwrap_or(1).max(1) as f32;
+        if self.years.replace(years.len()) != years.len() {
+            let bars: Vec<YearBar> = years
+                .iter()
+                .map(|&(year, n)| YearBar { year: year.to_string().into(), share: n as f32 / most })
+                .collect();
+            panel.set_years(ModelRc::new(VecModel::from(bars)));
+        }
+        let (from, to) = mo_app::year_strip::picked_places(years, asked.filters.years).unwrap_or((-1, -1));
+        panel.set_years_from(from);
+        panel.set_years_to(to);
         panel.set_order(ORDERS.iter().position(|&o| o == asked.order).and_then(|i| i32::try_from(i).ok()).unwrap_or(0));
     }
 }
@@ -1162,6 +1275,11 @@ fn same_lines(model: &VecModel<FilterChoice>, list: &[Choice]) {
 /// A new shuffled order: the clock's nanoseconds.
 fn seed() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
+}
+
+/// Whether the mouse let go where it was pressed (within a few points): a click, not a drag.
+fn still(pressed: LogicalPosition, now: LogicalPosition) -> bool {
+    (now.x - pressed.x).abs() + (now.y - pressed.y).abs() <= mo_app::galaxy_view::STILL
 }
 
 fn slint_button(button: MouseButton) -> PointerEventButton {
@@ -1224,6 +1342,13 @@ mod tests {
         assert_eq!(count_line(1, None), "1 sound");
         assert_eq!(count_line(1234567, None), "1,234,567 sounds");
         assert_eq!(count_line(1234, Some(12)), "12 of 1,234 sounds");
+    }
+
+    #[test]
+    fn a_right_click_is_a_press_let_go_in_the_same_spot() {
+        let at = |x, y| LogicalPosition::new(x, y);
+        assert!(still(at(100.0, 50.0), at(102.0, 51.0)));
+        assert!(!still(at(100.0, 50.0), at(120.0, 50.0)));
     }
 
     #[test]
