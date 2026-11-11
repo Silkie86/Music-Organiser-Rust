@@ -1113,7 +1113,8 @@ pub fn wanted(
     let mut out: Vec<Wanted> = if older {
         readable.iter().map(project).collect()
     } else {
-        mo_library::songs::group_songs(&readable, choices).iter().map(|song| project(&song.latest)).collect()
+        let real = RealDates::now();
+        mo_library::songs::group_songs(&readable, choices, &real).iter().map(|song| project(&song.latest)).collect()
     };
     out.extend(files.iter().map(|f| Wanted {
         path: f.path.clone(),

@@ -36,7 +36,7 @@ pub struct SongRow {
     /// When the song was first made: its oldest save, or the date its file keeps, whichever is earlier; real dates
     /// only, as `saved`.
     pub made: Option<NaiveDateTime>,
-    /// Its working periods, oldest first.
+    /// Its working periods, oldest first: its saves with a real date only, so a song with none has none.
     pub runs: Vec<SaveRun>,
     // Your fields are the song's, but the C# app stores them on the save you set them on, and a newer save starts
     // blank: each one the newest save hasn't got comes from the newest older save that has it.
@@ -55,7 +55,7 @@ impl SongRow {
     pub fn new(song: Song, gap_months: u32, real: &RealDates) -> SongRow {
         let saved = song.saves().map(|s| s.modified).filter(|m| real.local(*m)).max();
         let made = songs::first_made(song.saves(), real);
-        let runs = songs::runs(song.saves(), gap_months);
+        let runs = songs::runs(song.saves(), gap_months, real);
         let mut earlier: Vec<&mo_library::Save> = song.older.iter().collect();
         // Newest first, and a save with no real date after the rest, as the fields a new save takes over (live.rs).
         earlier.sort_by_key(|s| std::cmp::Reverse((real.local(s.modified), s.modified)));
@@ -312,6 +312,9 @@ pub struct Songs {
     pub daw_exes: HashMap<String, String>,
     /// Songs that may be saves of one, for the Health strip, newest first.
     pub doubts: Vec<Doubt>,
+    /// Which dates are real, as of when the list was made ([`RealDates`]): the save each song opens, the list's order,
+    /// its dates and years, and each song's card go by these, so they agree for as long as the list lasts.
+    pub real: RealDates,
 }
 
 /// Two songs that may be saves of one: the app asks rather than guessing (the C# app's question).
@@ -357,9 +360,10 @@ impl Songs {
         gap_months: u32,
         asking: Option<bool>,
     ) -> Songs {
-        let groups = songs::group_songs(saves, choices);
-        let found = asking.map(|across| songs::doubt_pairs(&groups, choices, across, MOST_DOUBTS)).unwrap_or_default();
+        // One set of real dates for the whole list ([`Songs::real`]).
         let real = RealDates::now();
+        let groups = songs::group_songs(saves, choices, &real);
+        let found = asking.map(|across| songs::doubt_pairs(&groups, choices, across, MOST_DOUBTS)).unwrap_or_default();
         let mut rows: Vec<(usize, SongRow)> =
             groups.into_iter().map(|g| SongRow::new(g, gap_months, &real)).enumerate().collect();
         // Stable, so songs saved at the same moment keep the order they were grouped in. A song with no real date
@@ -388,7 +392,7 @@ impl Songs {
         let copies = rows.iter().map(|r| r.song.copies.len()).sum();
         let daws: BTreeSet<&str> = rows.iter().map(|r| r.song.latest.daw.as_str()).collect();
         let daws = daws.into_iter().map(str::to_owned).collect();
-        Songs { rows, saves, copies, tags, daws, daw_exes: HashMap::new(), doubts }
+        Songs { rows, saves, copies, tags, daws, daw_exes: HashMap::new(), doubts, real }
     }
 
     /// The questions about the song at `row`.
@@ -1106,6 +1110,9 @@ mod tests {
         );
         assert_eq!(didums.date_tip(), "Last saved 1 Feb 2019. First made 1 Jan 2019.");
         assert_eq!(didums.rating, 3);
+        // Its versions too: the save dated 2099 is in none, and a song with no real date has none.
+        assert_eq!(didums.runs.iter().map(|r| r.label()).collect::<Vec<_>>(), ["2019 original"]);
+        assert!(future.runs.is_empty() && future.rework().is_none());
         // A year only finds a song by a real date.
         let search = |text: &str| Filters { search: text.into(), ..Filters::default() };
         assert_eq!(lines(Listed::default(), &search("2099")), Vec::<String>::new());

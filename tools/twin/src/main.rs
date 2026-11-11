@@ -110,7 +110,7 @@ fn options(args: &[String]) -> Result<Options, String> {
     Ok(o)
 }
 
-/// Runs the songs twin. `Ok(false)` when a difference isn't one the copied folders explain.
+/// Runs the songs twin. `Ok(false)` when a difference isn't a meant one (copied folders, dates that aren't real).
 fn run_songs(args: &[String]) -> Result<bool, String> {
     let o = options(args)?;
     let (Some(helper), [library]) = (&o.cs, o.inputs.as_slice()) else { return Err(USAGE.to_owned()) };

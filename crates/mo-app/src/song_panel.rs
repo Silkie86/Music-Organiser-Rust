@@ -3,11 +3,12 @@
 //! background thread when the song is picked (rule 12). As the C# app's panel, less what needs writing: the song's own
 //! fields (status, rating, notes, tags) can't be changed here yet.
 
+use mo_formats::dates::RealDates;
 use mo_formats::paths::file_name;
 use mo_library::{PluginKind, ProjectPlugin, ProjectSample, Save, SaveDetail, SaveRun};
 
 use crate::shell::folder_of;
-use crate::songs::{Other, SongRow, Songs, plural, tempo_text, thousands};
+use crate::songs::{Other, SongRow, Songs, When, plural, tempo_text, thousands};
 
 /// The line above the name: "124 BPM · First made 3 Mar 2019 · saved 27 Oct 2026", or "Saved 27 Oct 2026" when it
 /// was all one day; "Date unknown" when no save has a real date ([`SongRow::saved`]).
@@ -16,7 +17,6 @@ pub fn facts(row: &SongRow) -> String {
     if let Some(t) = row.song.latest.tempo {
         parts.push(format!("{} BPM", tempo_text(t)));
     }
-    let day = |d: chrono::NaiveDateTime| d.format("%-d %b %Y").to_string();
     parts.push(match (row.made, row.saved) {
         (Some(made), Some(saved)) if made.date() != saved.date() => {
             format!("First made {} · saved {}", day(made), day(saved))
@@ -26,6 +26,11 @@ pub fn facts(row: &SongRow) -> String {
         (None, None) => "Date unknown".to_owned(),
     });
     parts.join(" · ")
+}
+
+/// "3 Aug 2024".
+fn day(at: chrono::NaiveDateTime) -> String {
+    at.format("%-d %b %Y").to_string()
 }
 
 /// The line under the name: "Newest of 77 saves: Night Drive_77.flp · runs: 2019 original, 2022 rework", or "" for a
@@ -175,10 +180,11 @@ impl SampleLine {
     }
 }
 
-/// One line of the Saves tab: a run's heading ("2024 rework", "Didums_77 · 3 Aug 2024 · 12 saves") or a save.
+/// One line of the Saves tab: a heading or a save. A heading is a run's ("2024 rework", "Didums_77 · 3 Aug 2024 · 12
+/// saves"), or "Date unknown" over the saves with no real date, which are in no run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SaveLine {
-    Run {
+    Heading {
         label: String,
         details: String,
     },
@@ -194,40 +200,52 @@ pub enum SaveLine {
     },
 }
 
-/// The Saves tab: every save of the song, newest first, under the run it belongs to.
-pub fn save_lines(row: &SongRow) -> Vec<SaveLine> {
+/// The Saves tab: every save of the song, newest first, under the run it belongs to. A save with no real date (`real`,
+/// the list's: dated still to come, or not at all) is in no run, and its day isn't known: those come last, under
+/// "Date unknown", with no day.
+pub fn save_lines(row: &SongRow, real: &RealDates) -> Vec<SaveLine> {
     let mut saves: Vec<&Save> = row.song.saves().collect();
-    saves.sort_by_key(|s| std::cmp::Reverse(s.modified));
-    let mut out = Vec::with_capacity(saves.len() + row.runs.len());
-    let mut run_at = None;
+    saves.sort_by_key(|s| std::cmp::Reverse((real.local(s.modified), s.modified)));
+    let mut out = Vec::with_capacity(saves.len() + row.runs.len() + 1);
+    let (mut run_at, mut unknown) = (None, false);
     for s in saves {
-        // A save belongs to the run its date falls in. A moved file isn't in any run (runs only count files still
-        // there), so it goes with the run nearest its date.
-        let run = row
-            .runs
-            .iter()
-            .enumerate()
-            .min_by_key(|(_, r)| {
-                if s.modified < r.start {
-                    r.start - s.modified
-                } else if s.modified > r.end {
-                    s.modified - r.end
-                } else {
-                    chrono::TimeDelta::zero()
-                }
-            })
-            .map(|(i, _)| i);
-        if row.runs.len() > 1
-            && run.is_some()
-            && run != run_at
-            && let Some(r) = run.and_then(|i| row.runs.get(i))
-        {
-            out.push(SaveLine::Run { label: r.label(), details: r.details() });
-        }
-        run_at = run;
+        let date = if real.local(s.modified) {
+            // A save belongs to the run its date falls in. A moved file isn't in any run (runs only count files
+            // still there), so it goes with the run nearest its date.
+            let run = row
+                .runs
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, r)| {
+                    if s.modified < r.start {
+                        r.start - s.modified
+                    } else if s.modified > r.end {
+                        s.modified - r.end
+                    } else {
+                        chrono::TimeDelta::zero()
+                    }
+                })
+                .map(|(i, _)| i);
+            if row.runs.len() > 1
+                && run.is_some()
+                && run != run_at
+                && let Some(r) = run.and_then(|i| row.runs.get(i))
+            {
+                out.push(SaveLine::Heading { label: r.label(), details: r.details() });
+            }
+            run_at = run;
+            day(s.modified)
+        } else {
+            // Under its own heading even when the rest need none, so the empty day says why.
+            if !unknown {
+                out.push(SaveLine::Heading { label: When::Unknown.to_string(), details: NO_REAL_DATE.to_owned() });
+                unknown = true;
+            }
+            String::new()
+        };
         out.push(SaveLine::Save {
             name: s.name.clone(),
-            date: s.modified.format("%-d %b %Y").to_string(),
+            date,
             path: s.path.clone(),
             missing: s.file_missing,
             newest: s.path == row.song.latest.path,
@@ -236,6 +254,9 @@ pub fn save_lines(row: &SongRow) -> Vec<SaveLine> {
     }
     out
 }
+
+/// Why a save's day isn't known, under the Saves tab's "Date unknown".
+const NO_REAL_DATE: &str = "Dated still to come, or not at all";
 
 /// A version's line, in the Overview's list and the Older saves menu: "2024 rework · Didums_77 · 3 Aug 2024 · 12 saves".
 pub fn run_line(run: &SaveRun) -> String {
@@ -263,8 +284,9 @@ pub struct OlderSave {
 /// How many older saves the menu lists when the song has no versions (the C# app's `OlderSavesShown`).
 pub const OLDER_SAVES_SHOWN: usize = 8;
 
-/// The menu, or none for a song with only one save.
-pub fn older_saves(row: &SongRow) -> Option<OlderSaves> {
+/// The menu, or none for a song with only one save. Its newest older saves go by real dates (`real`, the list's): one
+/// dated still to come, or not at all, comes after the rest, its day unknown.
+pub fn older_saves(row: &SongRow, real: &RealDates) -> Option<OlderSaves> {
     let count = row.song.save_count();
     if count < 2 {
         return None;
@@ -276,11 +298,14 @@ pub fn older_saves(row: &SongRow) -> Option<OlderSaves> {
         return Some(OlderSaves { heading: "VERSIONS", lines, see_all });
     }
     let mut older: Vec<&Save> = row.song.saves().filter(|s| s.path != row.song.latest.path).collect();
-    older.sort_by_key(|s| std::cmp::Reverse(s.modified));
+    older.sort_by_key(|s| std::cmp::Reverse((real.local(s.modified), s.modified)));
     let lines = older
         .into_iter()
         .take(OLDER_SAVES_SHOWN)
-        .map(|s| OlderSave { text: format!("{} · {}", s.name, s.modified.format("%-d %b %Y")), path: s.path.clone() })
+        .map(|s| {
+            let when = if real.local(s.modified) { day(s.modified) } else { "date unknown".to_owned() };
+            OlderSave { text: format!("{} · {when}", s.name), path: s.path.clone() }
+        })
         .collect();
     Some(OlderSaves { heading: "RECENT SAVES", lines, see_all })
 }
@@ -424,6 +449,27 @@ mod tests {
         Songs::from_saves(saves, &SongChoices::default(), Vec::new(), 3, Some(false)).rows.remove(0)
     }
 
+    /// The Saves tab as text: "# label (details)" for a heading, else "name date", and whether it moved or is the newest.
+    fn texts(lines: Vec<SaveLine>) -> Vec<String> {
+        lines
+            .into_iter()
+            .map(|l| match l {
+                SaveLine::Heading { label, details } => format!("# {label} ({details})"),
+                SaveLine::Save { name, date, missing, newest, .. } => {
+                    format!(
+                        "{name} {date}{}{}",
+                        if missing { " missing" } else { "" },
+                        if newest { " newest" } else { "" }
+                    )
+                }
+            })
+            .collect()
+    }
+
+    fn menu(older: &OlderSaves) -> Vec<&str> {
+        older.lines.iter().map(|l| l.text.as_str()).collect()
+    }
+
     #[test]
     fn header_lines() {
         let newest = Save { tempo: Some(124.0), ..save("Night Drive_3", day(2026, 10, 27)) };
@@ -469,27 +515,30 @@ mod tests {
 
     #[test]
     fn the_older_saves_menu_lists_versions_or_the_newest_older_saves() {
-        assert_eq!(older_saves(&row(&[save("Solo", day(2025, 1, 1))])), None);
+        let real = RealDates::now();
+        assert_eq!(older_saves(&row(&[save("Solo", day(2025, 1, 1))]), &real), None);
 
-        let versions = older_saves(&row(&[
-            save("Didums_4", day(2024, 8, 3)),
-            save("Didums_3", day(2024, 8, 1)),
-            save("Didums_2", day(2019, 1, 20)),
-            save("Didums", day(2019, 1, 10)),
-        ]))
+        let versions = older_saves(
+            &row(&[
+                save("Didums_4", day(2024, 8, 3)),
+                save("Didums_3", day(2024, 8, 1)),
+                save("Didums_2", day(2019, 1, 20)),
+                save("Didums", day(2019, 1, 10)),
+            ]),
+            &real,
+        )
         .unwrap();
         assert_eq!(versions.heading, "VERSIONS");
         assert_eq!(versions.see_all, "See all 4 saves");
-        let texts: Vec<&str> = versions.lines.iter().map(|l| l.text.as_str()).collect();
         assert_eq!(
-            texts,
+            menu(&versions),
             ["2024 re-save · Didums_4 · 3 Aug 2024 · 2 saves", "2019 original · Didums_2 · 20 Jan 2019 · 2 saves"]
         );
         assert_eq!(versions.lines[0].path, r"C:\beats\Didums_4.flp");
 
         // One run: the newest older saves, at most eight, never the newest save itself.
         let saves: Vec<Save> = (1..=12).map(|n| save(&format!("Loop_{n}"), day(2025, 3, n))).collect();
-        let recent = older_saves(&row(&saves)).unwrap();
+        let recent = older_saves(&row(&saves), &real).unwrap();
         assert_eq!(recent.heading, "RECENT SAVES");
         assert_eq!(recent.lines.len(), OLDER_SAVES_SHOWN);
         assert_eq!(recent.lines[0].text, "Loop_11 · 11 Mar 2025");
@@ -505,21 +554,9 @@ mod tests {
             Save { file_missing: true, ..save("Didums", day(2019, 1, 10)) },
             Save { file_missing: true, ..save("Didums_1", day(2020, 1, 1)) },
         ]);
-        let lines: Vec<String> = save_lines(&r)
-            .into_iter()
-            .map(|l| match l {
-                SaveLine::Run { label, details } => format!("# {label} ({details})"),
-                SaveLine::Save { name, date, missing, newest, .. } => {
-                    format!(
-                        "{name} {date}{}{}",
-                        if missing { " missing" } else { "" },
-                        if newest { " newest" } else { "" }
-                    )
-                }
-            })
-            .collect();
+        let real = RealDates::now();
         assert_eq!(
-            lines,
+            texts(save_lines(&r, &real)),
             [
                 "# 2024 re-save (Didums_4 · 3 Aug 2024 · 2 saves)",
                 "Didums_4 3 Aug 2024 newest",
@@ -534,7 +571,60 @@ mod tests {
         assert_eq!(saves_heading(&r), "5 saves, newest first");
         // One run needs no heading.
         let one = row(&[save("X_2", day(2024, 8, 3)), save("X", day(2024, 8, 1))]);
-        assert!(save_lines(&one).iter().all(|l| matches!(l, SaveLine::Save { .. })));
+        assert!(save_lines(&one, &real).iter().all(|l| matches!(l, SaveLine::Save { .. })));
+    }
+
+    #[test]
+    fn saves_with_no_real_date_come_last_in_no_version() {
+        // Didums_5 has the highest number, so the song opens it, but it's dated 2099 (a clock or a copy that can't be
+        // right); Didums_1 has no date at all. No clue to when either was saved: they're in no version, come after the
+        // rest under "Date unknown", and show no day.
+        let real = RealDates::now();
+        let r = row(&[
+            save("Didums_5", day(2099, 1, 1)),
+            save("Didums_4", day(2024, 8, 3)),
+            save("Didums_3", day(2024, 8, 1)),
+            save("Didums_2", day(2019, 1, 20)),
+            Save { file_missing: true, ..save("Didums_1", NaiveDateTime::default()) },
+        ]);
+        assert_eq!(
+            texts(save_lines(&r, &real)),
+            [
+                "# 2024 re-save (Didums_4 · 3 Aug 2024 · 2 saves)",
+                "Didums_4 3 Aug 2024",
+                "Didums_3 1 Aug 2024",
+                "# 2019 original (Didums_2 · 20 Jan 2019)",
+                "Didums_2 20 Jan 2019",
+                "# Date unknown (Dated still to come, or not at all)",
+                "Didums_5  newest",
+                "Didums_1  missing",
+            ]
+        );
+        assert_eq!(saves_text(&r), "Newest of 5 saves: Didums_5.flp · runs: 2019 original, 2024 re-save");
+        assert_eq!(
+            menu(&older_saves(&r, &real).unwrap()),
+            ["2024 re-save · Didums_4 · 3 Aug 2024 · 2 saves", "2019 original · Didums_2 · 20 Jan 2019"]
+        );
+        // One version needs no heading of its own, but the saves with no real date still go under theirs.
+        let one =
+            row(&[save("X_3", NaiveDateTime::default()), save("X_2", day(2024, 8, 3)), save("X", day(2024, 8, 1))]);
+        assert_eq!(
+            texts(save_lines(&one, &real)),
+            ["X_2 3 Aug 2024", "X 1 Aug 2024", "# Date unknown (Dated still to come, or not at all)", "X_3  newest"]
+        );
+        // The menu's newest older saves: those with a real date first, then the rest, their day unknown.
+        let older = older_saves(
+            &row(&[
+                save("Loop", day(2099, 3, 1)),
+                save("Loop_2", day(2025, 3, 2)),
+                save("Loop_3", day(2025, 3, 3)),
+                save("Loop_4", day(2025, 3, 4)),
+            ]),
+            &real,
+        )
+        .unwrap();
+        assert_eq!(older.heading, "RECENT SAVES");
+        assert_eq!(menu(&older), ["Loop_3 · 3 Mar 2025", "Loop_2 · 2 Mar 2025", "Loop · date unknown"]);
     }
 
     #[test]
