@@ -1251,6 +1251,15 @@ export component TickLine inherits Rectangle {
     }
 }
 
+// A part that knows whether the mouse is over it (`hovered`), for what shows only then: a line's own small buttons
+// (Settings, Shortcuts). It takes no clicks from what's inside it. A button inside is over it, so a line that holds
+// one counts the mouse on that button with a HoverSense round the button too.
+export component HoverSense inherits Rectangle {
+    out property <bool> hovered: sense.has-hover;
+    sense := TouchArea { }
+    @children
+}
+
 // A slider with two handles, for a span of numbers (the Sounds page's Tempo, in the filter column): what's let
 // through lies between them, both ends in. A handle at its end sets no limit there, so with both at their ends nothing
 // is lit (the accent means "on"). `bars` stand over the track, one for each equal part of it: how much there is at
