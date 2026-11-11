@@ -8,11 +8,14 @@
 //! stay in force ([`tried`]): a kind chip narrows the list to basslines, the search box to a pack. The song's own
 //! parts are never offered.
 //!
-//! The slow work is the page's to run off the window's thread, newest wins (rule 12): reading the song
-//! (`mo_midi::playing::read`), the index's slots (`MidiStore::slots`, kept until a reading of the MIDI makes more),
-//! the song's own parts ([`SongChoice::own`], kept while the song and the list stay), then [`tried`] and [`look`].
+//! The slow work is the page's to run off the window's thread, newest wins (rule 12). [`search`] is all of it in
+//! one call: reading the song, the index's slots, the song's own parts, then [`tried`] and [`look`]. What it reads
+//! comes through [`Reads`] (the page's index on disk; made-up ones in the tests and the screenshots), and what's slow
+//! to make it keeps in a [`Kept`] for the next search: the song until its save is written again, the slots and the
+//! song's own parts until the index changes.
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
 use mo_formats::NoteEvent;
@@ -39,9 +42,12 @@ pub const LOOKING: &str = "Looking for parts that fit…";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SongChoice {
     pub name: String,
+    /// What the page's menu calls it: its name, with its folder after it where two of the songs offered share a name.
+    /// No two of the songs offered have the same.
+    pub label: String,
     /// Its newest save that can be read: the file the song is read from.
     pub save: String,
-    /// When that save was written (Unix seconds): a save written again is read again.
+    /// When that save was written (Unix seconds), as the song library last saw it.
     pub mtime: i64,
     /// Every save of the song, as the song library groups them (the ones you joined to it by hand too, and the same
     /// files found somewhere else): whatever the MIDI library has from any of them is the song's own.
@@ -54,19 +60,45 @@ impl SongChoice {
     pub fn own(&self, cat: &Catalogue) -> Own {
         Own::of(cat, self.saves.iter().map(String::as_str))
     }
+
+    /// This song among the songs offered `now`, which were made after it was: the one that has the save this one is
+    /// read from, else one that shares another save with it (that save gone, or split off by hand). By its saves,
+    /// never by its label: a second song of its name changes that. None when it isn't offered any more.
+    pub fn among<'a>(&self, now: &'a [SongChoice]) -> Option<&'a SongChoice> {
+        let shares = |s: &&SongChoice| s.saves.iter().any(|save| self.saves.contains(save));
+        now.iter().find(|s| s.saves.contains(&self.save)).or_else(|| now.iter().find(shares))
+    }
 }
 
-/// The songs saved last, the newest first: the first is the song being worked on.
-pub fn song_choices(songs: &[mo_library::Song], dates: &RealDates) -> Vec<SongChoice> {
-    playing::worked_on(songs, dates, SONGS_OFFERED)
-        .into_iter()
-        .map(|(song, save)| SongChoice {
+/// The songs saved last, the newest first: the first is the song being worked on. `songs`: every song, as the Songs
+/// page groups them.
+pub fn song_choices<'a>(songs: impl IntoIterator<Item = &'a mo_library::Song>, dates: &RealDates) -> Vec<SongChoice> {
+    let offered = playing::worked_on(songs, dates, SONGS_OFFERED);
+    let shared = |name: &str| offered.iter().filter(|(song, _)| song.name == name).count() > 1;
+    let mut out: Vec<SongChoice> = Vec::new();
+    for (song, save) in &offered {
+        // Two songs of one name are told apart by the folder each is in, and by a number if that's the same too.
+        let folder = mo_formats::paths::file_name(save.folder.trim_end_matches(['\\', '/']));
+        let named = if shared(&song.name) && !folder.is_empty() {
+            format!("{} · {folder}", song.name)
+        } else {
+            song.name.clone()
+        };
+        let mut label = named.clone();
+        let mut n = 1;
+        while out.iter().any(|c| c.label == label) {
+            n += 1;
+            label = format!("{named} ({n})");
+        }
+        out.push(SongChoice {
             name: song.name.clone(),
+            label,
             save: save.path.clone(),
             mtime: save.mtime,
             saves: song.saves().chain(&song.copies).map(|s| s.path.clone()).collect(),
-        })
-        .collect()
+        });
+    }
+    out
 }
 
 /// The switch's words for what's looked for.
@@ -317,6 +349,172 @@ pub fn log_line(l: &Looked) -> String {
     )
 }
 
+/// Under the toolbar once a search has ended: what of the song the list was fitted to (`to`, [`fitted_text`]), what
+/// the list holds, and what was left out.
+pub fn page_line(to: &str, l: &Looked) -> String {
+    let said = [to.to_owned(), result_text(l), left_out_text(l)];
+    said.into_iter().filter(|s| !s.is_empty()).collect::<Vec<_>>().join(" · ")
+}
+
+/// Where a search reads from: the song's save and the MIDI index. The page gives the ones on disk; the tests and the
+/// screenshots, made-up ones.
+pub trait Reads {
+    /// A number that's another once the save has been written again (its time on disk as it is now); 0 when that
+    /// can't be told, and the song is then read again for every search.
+    fn written(&mut self, save: &str) -> i64;
+    /// The song, read from its save as it plays (`mo_midi::playing::read`). Err: why not, in plain words.
+    fn song(&mut self, save: &str) -> Result<Song, String>;
+    /// The index's slots for every part, for the first look (`MidiStore::slots`). Err: why not, in plain words.
+    fn slots(&mut self) -> Result<SlotBook, String>;
+    /// One part's notes, by its row in the index and its notes' fingerprint; none when they can't be read.
+    fn notes(&mut self, id: i64, hash: &str) -> Option<Vec<NoteEvent>>;
+}
+
+/// What a search is asked.
+pub struct Asked<'a> {
+    pub song: &'a SongChoice,
+    /// What the page's switch asks for; none while it hasn't been touched ([`fitted`]).
+    pub wanted: Option<Wants>,
+    /// The page's catalogue. What a search keeps is for this very one: another (the index read again) has it made
+    /// again.
+    pub cat: &'a Arc<Catalogue>,
+    /// The page's filters, with Settings' smallest part.
+    pub filters: &'a Filters,
+    /// The page's count of the readings of the MIDI that made slots and no new catalogue: the slots kept are read
+    /// again when it's another.
+    pub slots_made: u64,
+}
+
+/// What a search came to.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Answer {
+    /// The list: what was looked for, what of the song it was fitted to ([`fitted_text`]) and the parts found.
+    Fits { wants: Wants, to: String, looked: Looked },
+    /// Nothing could be fitted, and why, in plain words.
+    Nothing(String),
+    /// Stopped for a newer search: nothing to show.
+    Stopped,
+}
+
+/// What the list's place says instead of a list that has no lines.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Empty {
+    pub title: &'static str,
+    /// Why, in plain words.
+    pub text: String,
+    /// Whether fewer filters could give the list lines, so "Clear the filters" is worth offering (when any is on):
+    /// not when the song or the index is why.
+    pub filters: bool,
+}
+
+/// The title in the list's place when the search couldn't be made at all (the song, the index).
+pub const COULDNT_LOOK: &str = "Couldn't look for parts that fit";
+
+/// What the list's place says instead of a list that has no lines. None when there's a list (or the search was
+/// stopped).
+pub fn empty_words(answer: &Answer) -> Option<Empty> {
+    match answer {
+        Answer::Nothing(why) => Some(Empty { title: COULDNT_LOOK, text: why.clone(), filters: false }),
+        Answer::Fits { looked, .. } if looked.fits.is_empty() => Some(Empty {
+            title: "No parts fit",
+            text: result_text(looked),
+            // Parts the index has no slots for yet aren't the filters' doing.
+            filters: looked.looked > 0 || looked.not_ready == 0,
+        }),
+        Answer::Fits { .. } | Answer::Stopped => None,
+    }
+}
+
+/// What one search made that the next can use again: the song as read, what of it is fitted to, its own parts in the
+/// catalogue and the index's slots. The page keeps one on its search's thread.
+#[derive(Default)]
+pub struct Kept {
+    song: Option<KeptSong>,
+    /// The song's own parts: in which catalogue, and for which saves.
+    own: Option<(Weak<Catalogue>, Vec<String>, Own)>,
+    /// The index's slots: read for which catalogue, at which count of slots made.
+    book: Option<(Weak<Catalogue>, u64, SlotBook)>,
+}
+
+impl Kept {
+    /// Whether nothing is kept: no search has read anything since it was made.
+    pub fn is_empty(&self) -> bool {
+        self.song.is_none() && self.own.is_none() && self.book.is_none()
+    }
+}
+
+struct KeptSong {
+    save: String,
+    written: i64,
+    song: Song,
+    /// What of it is fitted to, for what was asked last.
+    fitted: Option<(Option<Wants>, Result<Fitted, String>)>,
+}
+
+/// One search, start to end: the parts of the catalogue that go best with the song asked for. Reads the song when
+/// it isn't the one kept or its save has been written since, the slots and the song's own parts when the catalogue
+/// is another than the one they were made for (the slots also when a reading made some: `asked.slots_made`), then
+/// tries every part the filters let through ([`tried`], [`look`]). `stop` set ends it early. The first look and the
+/// judging run on `pool`; call it off the window's thread.
+pub fn search(
+    kept: &mut Kept,
+    reads: &mut dyn Reads,
+    asked: &Asked,
+    pool: &rayon::ThreadPool,
+    stop: &AtomicBool,
+) -> Answer {
+    let stopped = || stop.load(Ordering::Relaxed);
+    let save = &asked.song.save;
+    let written = reads.written(save);
+    if !kept.song.as_ref().is_some_and(|k| written != 0 && k.written == written && k.save == *save) {
+        kept.song = None;
+        if stopped() {
+            return Answer::Stopped;
+        }
+        match reads.song(save) {
+            Ok(song) => kept.song = Some(KeptSong { save: save.clone(), written, song, fitted: None }),
+            // Not kept: a save the DAW was writing just then reads the next time.
+            Err(why) => return Answer::Nothing(format!("{} couldn't be read. {why}", asked.song.name)),
+        }
+    }
+    let Some(song) = kept.song.as_mut() else { return Answer::Stopped };
+    if song.fitted.as_ref().is_none_or(|(wanted, _)| *wanted != asked.wanted) {
+        song.fitted = Some((asked.wanted, fitted(&song.song, asked.wanted)));
+    }
+    let fitted = match &song.fitted {
+        Some((_, Ok(fitted))) => fitted,
+        Some((_, Err(why))) => return Answer::Nothing(why.clone()),
+        None => return Answer::Stopped,
+    };
+    // The very catalogue asked about, not one like it: a kept weak hold lets no other take its place in memory, so
+    // the same place is the same catalogue.
+    let cat = Arc::downgrade(asked.cat);
+    if kept.book.as_ref().is_none_or(|(of, made, _)| !of.ptr_eq(&cat) || *made != asked.slots_made) {
+        kept.book = None;
+        if stopped() {
+            return Answer::Stopped;
+        }
+        match reads.slots() {
+            Ok(book) => kept.book = Some((cat.clone(), asked.slots_made, book)),
+            Err(why) => return Answer::Nothing(format!("The MIDI index couldn't be read. {why}")),
+        }
+    }
+    if kept.own.as_ref().is_none_or(|(of, saves, _)| !of.ptr_eq(&cat) || *saves != asked.song.saves) {
+        kept.own = None;
+        if stopped() {
+            return Answer::Stopped;
+        }
+        kept.own = Some((cat, asked.song.saves.clone(), asked.song.own(asked.cat)));
+    }
+    let (Some((_, _, book)), Some((_, _, own))) = (&kept.book, &kept.own) else { return Answer::Stopped };
+    let tried = tried(asked.cat, own, asked.filters);
+    let looked = look(fitted, &tried, book, &mut |id, hash| reads.notes(id, hash), pool, stop);
+    if looked.stopped {
+        return Answer::Stopped;
+    }
+    Answer::Fits { wants: fitted.wants, to: fitted_text(&song.song, fitted), looked }
+}
+
 #[cfg(test)]
 #[allow(clippy::indexing_slicing)]
 mod tests {
@@ -437,7 +635,13 @@ mod tests {
 
     /// The song as the page offers it: its saves are what the song library says they are.
     fn choice() -> SongChoice {
-        SongChoice { name: "Didums".into(), save: SAVE.into(), mtime: 1_760_000_000, saves: vec![SAVE.into()] }
+        SongChoice {
+            name: "Didums".into(),
+            label: "Didums".into(),
+            save: SAVE.into(),
+            mtime: 1_760_000_000,
+            saves: vec![SAVE.into()],
+        }
     }
 
     /// The song's own chords and lead, a pack's tune that fits a tone up (and a two-note scrap of it), one that
@@ -686,5 +890,227 @@ mod tests {
         );
         // No songs, nothing to offer.
         assert!(song_choices(&[], &RealDates::now()).is_empty());
+        // Each is called by its name in the menu.
+        assert_eq!(offered.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["Night drive", "Dawn"]);
+
+        // Two songs of one name are told apart by their folders, and by a number where those are the same too.
+        // (Each in a folder of its own is a song of its own.)
+        let in_own_folder = |path: &str, mtime: i64| mo_library::Save {
+            folder: path.rsplit_once('\\').map(|(folder, _)| folder.to_owned()).unwrap_or_default(),
+            ..save(path, mtime)
+        };
+        let saves = vec![
+            in_own_folder("C:\\Songs\\Beats\\Idea.flp", now - 100),
+            in_own_folder("D:\\Old\\Beats\\Idea.flp", now - 200),
+            in_own_folder("C:\\Songs\\Trap\\Idea.flp", now - 300),
+            in_own_folder("C:\\Songs\\Dawn.flp", now - 400),
+        ];
+        let songs = mo_library::songs::group_songs(&saves, &mo_library::SongChoices::default(), &dates);
+        let offered = song_choices(&songs, &dates);
+        let labels: Vec<&str> = offered.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(labels, ["Idea · Beats", "Idea · Beats (2)", "Idea · Trap", "Dawn"]);
+
+        // A song is found again among the songs offered later by its saves, not by what the menu calls it. Dawn gets
+        // a new save and a namesake in another folder: its label is another, and it's still the song.
+        let dawn = offered[3].clone();
+        let mut later = saves.clone();
+        later.push(in_own_folder("C:\\Songs\\Dawn 2.flp", now - 50));
+        later.push(in_own_folder("D:\\Old\\Dawn.flp", now - 60));
+        let choices = mo_library::SongChoices::default();
+        let songs = mo_library::songs::group_songs(&later, &choices, &dates);
+        let offered = song_choices(&songs, &dates);
+        let found = dawn.among(&offered).unwrap();
+        assert_eq!((found.label.as_str(), found.save.as_str()), ("Dawn · Songs", "C:\\Songs\\Dawn 2.flp"));
+        assert_ne!(found.label, dawn.label);
+        // Its namesake isn't it, though the label Dawn had would now be read as either.
+        let namesake = offered.iter().find(|c| c.save == "D:\\Old\\Dawn.flp").unwrap();
+        assert_eq!(namesake.label, "Dawn · Old");
+        assert_eq!(namesake.among(std::slice::from_ref(&dawn)), None);
+        // The save it was read from gone (deleted, or split off by hand): the song is the one with its other saves.
+        let was = SongChoice { save: "C:\\Songs\\Dawn 3.flp".into(), ..found.clone() };
+        assert_eq!(was.among(&offered), Some(found));
+        // A song that isn't offered any more isn't found (it's the first offered now, with the save written last).
+        assert_eq!((offered[0].save.as_str(), dawn.among(&offered[1..])), ("C:\\Songs\\Dawn 2.flp", None));
+    }
+
+    /// A made-up song and index to search, counting what's read.
+    struct Fake<'a> {
+        index: &'a Index,
+        song: Result<Song, String>,
+        written: i64,
+        songs_read: usize,
+        slots_read: usize,
+    }
+
+    impl<'a> Fake<'a> {
+        fn new(index: &'a Index) -> Fake<'a> {
+            Fake { index, song: Ok(song()), written: 7, songs_read: 0, slots_read: 0 }
+        }
+    }
+
+    impl Reads for Fake<'_> {
+        fn written(&mut self, _: &str) -> i64 {
+            self.written
+        }
+
+        fn song(&mut self, _: &str) -> Result<Song, String> {
+            self.songs_read += 1;
+            self.song.clone()
+        }
+
+        fn slots(&mut self) -> Result<SlotBook, String> {
+            self.slots_read += 1;
+            let mut book = SlotBook::default();
+            for (hash, notes) in &self.index.notes {
+                book.add(hash, &slots_of(notes));
+            }
+            Ok(book)
+        }
+
+        fn notes(&mut self, _: i64, hash: &str) -> Option<Vec<NoteEvent>> {
+            self.index.notes.get(hash).cloned()
+        }
+    }
+
+    #[test]
+    fn a_search_keeps_the_song_its_own_parts_and_the_slots_until_they_change() {
+        let index = library();
+        let cat = Arc::new(Catalogue::new(index.phrases.clone()));
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let filters = Filters { smallest: 3, ..Filters::default() };
+        let song = choice();
+        let go = AtomicBool::new(false);
+        let mut kept = Kept::default();
+        assert!(kept.is_empty());
+        let mut fake = Fake::new(&index);
+        let ask = |wanted, slots_made| Asked { song: &song, wanted, cat: &cat, filters: &filters, slots_made };
+        let entries = |answer: &Answer| match answer {
+            Answer::Fits { looked, .. } => looked.fits.iter().map(|f| f.entry).collect::<Vec<_>>(),
+            other => panic!("no list: {other:?}"),
+        };
+        let place = |hash: &str| cat.find(hash).unwrap();
+
+        // The first search reads the song and the slots, and gives the list with what it was fitted to.
+        let first = search(&mut kept, &mut fake, &ask(None, 1), &pool, &go);
+        let Answer::Fits { wants, to, looked } = &first else { panic!("{first:?}") };
+        assert_eq!((*wants, to.as_str()), (Wants::Tune, "To play over Keys, bars 9–12"));
+        assert_eq!((looked.tried, looked.fits[0].entry, looked.fits[0].semitones), (3, place("fits a tone down"), -2));
+        assert_eq!(page_line(to, looked), "To play over Keys, bars 9–12 · 3 parts, best fit first");
+        assert_eq!(empty_words(&first), None);
+        assert_eq!((fake.songs_read, fake.slots_read), (1, 1));
+        assert!(!kept.is_empty());
+
+        // The same again, and the other way: nothing is read again.
+        assert_eq!(entries(&search(&mut kept, &mut fake, &ask(None, 1), &pool, &go)), entries(&first));
+        let under = search(&mut kept, &mut fake, &ask(Some(Wants::Chords), 1), &pool, &go);
+        let Answer::Fits { wants, to, looked } = &under else { panic!("{under:?}") };
+        assert_eq!((*wants, to.as_str(), looked.fits.len()), (Wants::Chords, "Chords for Lead, bars 13–16", 0));
+        // No lines: the list's place says why, and so does the line under the toolbar.
+        let none = "No parts to try: the filters leave none of the right kind.";
+        assert_eq!(empty_words(&under), Some(Empty { title: "No parts fit", text: none.to_owned(), filters: true }));
+        assert_eq!(page_line(to, looked), format!("Chords for Lead, bars 13–16 · {none}"));
+        assert_eq!((fake.songs_read, fake.slots_read), (1, 1));
+
+        // The save written again: the song is read again, the slots aren't.
+        fake.written = 8;
+        search(&mut kept, &mut fake, &ask(None, 1), &pool, &go);
+        assert_eq!((fake.songs_read, fake.slots_read), (2, 1));
+        // A reading of the MIDI made slots and no new catalogue: the slots are read again.
+        search(&mut kept, &mut fake, &ask(None, 2), &pool, &go);
+        assert_eq!((fake.songs_read, fake.slots_read), (2, 2));
+        // The index read again: another catalogue, whatever the page counts. Its slots are read again, and the
+        // song's own parts are found again: here every part is at another place, and the song's own are still the
+        // ones left out.
+        let turned = Arc::new(Catalogue::new(index.phrases.iter().rev().cloned().collect()));
+        assert_ne!(turned.find("song lead"), cat.find("song lead"));
+        let again = search(&mut kept, &mut fake, &Asked { cat: &turned, ..ask(None, 2) }, &pool, &go);
+        assert_eq!((fake.songs_read, fake.slots_read), (2, 3));
+        let mut found: Vec<&str> =
+            entries(&again).into_iter().map(|at| turned.entries[at].phrase.hash.as_str()).collect();
+        found.sort_unstable();
+        assert_eq!(found, ["bassline", "clashes", "fits a tone down"]);
+        // And back to the first catalogue: made again for it, not taken from what was kept for the other.
+        let back = search(&mut kept, &mut fake, &ask(None, 2), &pool, &go);
+        assert_eq!((fake.songs_read, fake.slots_read), (2, 4));
+        assert_eq!(entries(&back), entries(&first));
+        // Another song's saves: the own parts are that song's. A song with none of these saves leaves nothing out,
+        // so the first song's lead is offered too.
+        let other = SongChoice { saves: vec!["C:/Songs/Other/Other.flp".into()], ..choice() };
+        let with_own = search(&mut kept, &mut fake, &Asked { song: &other, ..ask(None, 2) }, &pool, &go);
+        assert!(entries(&with_own).contains(&place("song lead")), "{with_own:?}");
+        assert!(!entries(&search(&mut kept, &mut fake, &ask(None, 2), &pool, &go)).contains(&place("song lead")));
+        // Neither read the slots again: they're the index's, whichever the song.
+        assert_eq!(fake.slots_read, 4);
+
+        // Another save with the same time on disk is another song to read.
+        let before = fake.songs_read;
+        let elsewhere = SongChoice { save: "C:/Songs/Didums/Didums_71.flp".into(), ..choice() };
+        search(&mut kept, &mut fake, &Asked { song: &elsewhere, ..ask(None, 2) }, &pool, &go);
+        assert_eq!(fake.songs_read, before + 1);
+        // A save whose time can't be told is read for every search.
+        fake.written = 0;
+        let before = fake.songs_read;
+        search(&mut kept, &mut fake, &ask(None, 2), &pool, &go);
+        search(&mut kept, &mut fake, &ask(None, 2), &pool, &go);
+        assert_eq!(fake.songs_read, before + 2);
+    }
+
+    #[test]
+    fn a_search_says_why_when_theres_nothing_to_fit_and_stops_when_told() {
+        let index = library();
+        let cat = Arc::new(Catalogue::new(index.phrases.clone()));
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+        let filters = Filters::default();
+        let song = choice();
+        let go = AtomicBool::new(false);
+        let ask = |wanted| Asked { song: &song, wanted, cat: &cat, filters: &filters, slots_made: 0 };
+
+        // The save can't be read: said with the song's name, and tried again the next time (the DAW may have been
+        // writing it).
+        let mut kept = Kept::default();
+        let mut fake = Fake::new(&index);
+        fake.song = Err("It couldn't be opened, maybe because another program had it open.".into());
+        let unread = search(&mut kept, &mut fake, &ask(None), &pool, &go);
+        let why = "Didums couldn't be read. It couldn't be opened, maybe because another program had it open.";
+        assert_eq!(unread, Answer::Nothing(why.to_owned()));
+        // The filters have nothing to do with it: clearing them isn't offered.
+        assert_eq!(empty_words(&unread), Some(Empty { title: COULDNT_LOOK, text: why.to_owned(), filters: false }));
+        assert_eq!((fake.songs_read, fake.slots_read), (1, 0));
+        assert!(kept.is_empty());
+        fake.song = Ok(song_of(vec![lane("Lead", 0, &tune(0))]));
+        // Read now. It has a melody alone: asked for parts to play over its chords, the answer is why not.
+        let no_chords = search(&mut kept, &mut fake, &ask(Some(Wants::Tune)), &pool, &go);
+        assert_eq!(
+            no_chords,
+            Answer::Nothing(
+                "No chords or bassline found in this song to play over. It has a melody: look for chords for that."
+                    .to_owned()
+            )
+        );
+        assert_eq!((fake.songs_read, fake.slots_read), (2, 0));
+
+        // Told to stop before it starts: nothing is read, and there's nothing to show.
+        let mut kept = Kept::default();
+        let mut fake = Fake::new(&index);
+        let stopped = search(&mut kept, &mut fake, &ask(None), &pool, &AtomicBool::new(true));
+        assert_eq!((stopped.clone(), empty_words(&stopped)), (Answer::Stopped, None));
+        assert_eq!((fake.songs_read, fake.slots_read), (0, 0));
+        // Stopped with everything kept already: the search itself stops, and still nothing shows.
+        search(&mut kept, &mut fake, &ask(None), &pool, &go);
+        assert_eq!(search(&mut kept, &mut fake, &ask(None), &pool, &AtomicBool::new(true)), Answer::Stopped);
+
+        // No lines: fewer filters could give some, unless what's missing is the index's slots (the MIDI has to be
+        // read again first, whatever the filters).
+        let fits = |looked| Answer::Fits { wants: Wants::Tune, to: String::new(), looked };
+        let words = |looked| empty_words(&fits(looked)).map(|e| (e.title, e.text, e.filters));
+        assert_eq!(
+            words(Looked { looked: 12, not_ready: 3, ..Looked::default() }),
+            Some(("No parts fit", "None of 12 parts fits.".to_owned(), true))
+        );
+        let read_again = "Nothing can be fitted yet: read your MIDI again first (Read MIDI again), then it can.";
+        assert_eq!(
+            words(Looked { not_ready: 3, ..Looked::default() }),
+            Some(("No parts fit", read_again.to_owned(), false))
+        );
     }
 }

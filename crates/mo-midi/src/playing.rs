@@ -472,7 +472,7 @@ fn role_of(part: &Playing, own_clips: bool) -> (Role, String) {
 /// date is real (not one still to come, or before 1981), that were there and readable at the last scan, of a kind
 /// [`read`] takes; `most` of them at the most, one for each song.
 pub fn worked_on<'a>(
-    songs: &'a [mo_library::Song],
+    songs: impl IntoIterator<Item = &'a mo_library::Song>,
     dates: &RealDates,
     most: usize,
 ) -> Vec<(&'a mo_library::Song, &'a mo_library::Save)> {
@@ -481,7 +481,7 @@ pub fn worked_on<'a>(
         !s.file_missing && s.error.is_none() && dates.seconds(s.mtime) && extract::project_version(&s.path).is_some()
     };
     let mut newest: Vec<(&mo_library::Song, &mo_library::Save)> = songs
-        .iter()
+        .into_iter()
         .filter_map(|song| Some((song, song.saves().filter(|s| reads(s)).max_by_key(|s| s.mtime)?)))
         .collect();
     // The newest first; songs saved in the same second stay in the order they came.
