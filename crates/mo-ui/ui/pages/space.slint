@@ -30,6 +30,8 @@ export struct RoomLine {
     title: string,
     why: string,
     size: string,
+    // Its part of all the room the wins free, 0 to 1: its meter. 0 for a line that frees nothing.
+    share: float,
 }
 
 // One part on the picked line's card: its name, what it holds and its size. A part can also have a tick, a line saying
@@ -179,12 +181,23 @@ component RoomLineView inherits ListLine {
                 overflow: elide;
             }
         }
+        // How much of all the room to free is this line's (the UX review of 10 Nov, C4).
+        if root.line.share > 0: VerticalLayout {
+            alignment: center;
+            Meter {
+                width: 118px;
+                height: 8px;
+                level: root.line.share;
+            }
+        }
         Text {
             text: root.line.size;
             color: Theme.text;
             font-family: Theme.number-font;
             font-size: Type.body;
             vertical-alignment: center;
+            horizontal-alignment: right;
+            min-width: 76px;
         }
     }
 }
