@@ -2629,11 +2629,11 @@ const FIRST_TILE: (u32, u32, u32, u32) = (250, 320, 200, 70);
 const FIRST_LINE: (u32, u32, u32, u32) = (250, 335, 400, 30);
 /// A point on a Sounds tile to right-click, and where a right-click menu's lines start under the mouse (its card's
 /// padding) and how tall each is (studio.slint's MenuItems and MenuLine).
-const MENU_TILE: (f32, f32) = (560.0, 345.0);
+const MENU_TILE: (f32, f32) = (560.0, 301.0);
 const MENU_LINES_TOP: f32 = 4.0;
 const MENU_LINE: f32 = 32.0;
 /// The Sounds card's Add a tag box, the card turned down to its end (with a sound's six tags over it).
-const TAG_BOX: (f32, f32) = (1130.0, 534.0);
+const TAG_BOX: (f32, f32) = (1130.0, 490.0);
 /// The Songs, Presets, MIDI and Plugins lists in the short window: left of the activity cards, which move on their own.
 const SHORT_LIST: (u32, u32, u32, u32) = (230, 200, 760, 400);
 /// The mouse over each of those lists (Songs' is narrow beside its panel; Plugins' starts low), for the wheel.
@@ -2801,7 +2801,7 @@ fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
 
 /// The Sounds page's Tempo slider with no filter picked: its track's height in the window, where its higher handle
 /// rests, and where 150 BPM is along it.
-const TEMPO_TRACK_Y: f32 = 669.0;
+const TEMPO_TRACK_Y: f32 = 625.0;
 const TEMPO_HIGH_END_X: f32 = 419.0;
 const TEMPO_150_X: f32 = 357.0;
 

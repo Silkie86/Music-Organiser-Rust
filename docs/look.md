@@ -101,8 +101,8 @@ light that means something. It should feel like a rack unit on a desk, not a web
   puts the list in that column's order, a second click turns it round; the heading the list goes by is lit in the
   accent with a small arrow. A page whose headings do this has no "Order" row of chips. On Plugins, MIDI,
   Presets, Songs and Sounds (Presets: a third click puts the list back as it was found; Songs: by name or status
-  the time headings step aside; Sounds: its List view's Sound, Type and Key, and the Order chips stay, since tiles
-  have no headings and Shuffled, Most liked and Newest have no column).
+  the time headings step aside; Sounds: its List view's Sound, Type and Key, and an "Order" drop-down stays in
+  the top row beside the search, since tiles have no headings and Shuffled, Most liked and Newest have no column).
 
 ## Next steps
 
