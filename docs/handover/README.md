@@ -116,6 +116,12 @@ the next PR step by step). Solomon wants the highest effort here.
   song he's working on, read from its newest save). Measured with `theorybench pairs` beside the C# matcher ported
   as it was; the numbers are fitted on pop and held to two rules for jazz, gospel and blues. What was tried:
   `docs/harmony/together-experiments.md`. No screen uses it yet.
+- The song being worked on (`mo_midi::playing`, `mo_midi::fit`, 2026-11-11): a saved project read as it plays, each
+  instrument's notes in their place in the song (from the arrangement readers, not `extract`, which moves every
+  pattern to bar 1), the song saved last picked from the library's songs, and a part from the library fitted to the
+  song's picked parts and bars: a tune over its chords, or chords under its tune, with the move that makes it fit.
+  Next: try every part of the library against it (a quick pass over what the catalogue holds, then this close look
+  at the best), then a list on the MIDI page and sending the part found into the project.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db
 writes once trusted. A decoder panic on a damaged file is caught with `mo_catch::catch`: one warning line in the log,
