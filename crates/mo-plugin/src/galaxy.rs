@@ -9,6 +9,7 @@
 use crate::library::Library;
 use mo_app::galaxy_grid::{Crowd, Grid};
 use mo_app::galaxy_look::{self, Look, on_view};
+use mo_app::galaxy_names::{self, Label, NO_KIND, Region};
 use mo_app::galaxy_picture::Picture;
 use mo_app::galaxy_view::{View, most_zoom_for};
 use mo_sounds::{Sound, StarPoint};
@@ -34,6 +35,54 @@ const MOVING_SCALE: f32 = 1.0;
 /// Each sound's star, by the sound's place in the list; `None` for a sound the map hasn't placed.
 pub type Stars = Arc<Vec<Option<StarPoint>>>;
 
+/// Each sound's type, for the names over the map: a place in `names` by the sound's place in the list ([`NO_KIND`]
+/// for none), and each type's colour (as the app's `kinds_of`).
+#[derive(Default)]
+pub struct Kinds {
+    of: Vec<u32>,
+    names: Vec<String>,
+    colours: Vec<i32>,
+}
+
+impl Kinds {
+    /// A sound with no type, or "Unknown", names nothing.
+    fn of(sounds: &[Sound]) -> Kinds {
+        let mut kinds = Kinds::default();
+        let mut ids: HashMap<&str, u32> = HashMap::new();
+        for s in sounds {
+            let t = s.sound_type.as_str();
+            if t.is_empty() || t == mo_sounds::types::UNKNOWN {
+                kinds.of.push(NO_KIND);
+                continue;
+            }
+            let id = *ids.entry(t).or_insert_with(|| {
+                kinds.names.push(t.to_owned());
+                kinds.colours.push(mo_app::sounds::type_colour(t));
+                (kinds.names.len() - 1) as u32
+            });
+            kinds.of.push(id);
+        }
+        kinds
+    }
+}
+
+/// What the names over the map are found from ([`Naming::find`]), with the number to hand them back with
+/// ([`Sky::set_regions`]).
+pub struct Naming {
+    pub set: u64,
+    stars: Stars,
+    kinds: Arc<Kinds>,
+    shown: Arc<Vec<usize>>,
+}
+
+impl Naming {
+    /// The neighbourhoods of the map where one sound type is most of the shown stars, biggest first. Slow with many
+    /// stars (call it off the panel's thread).
+    pub fn find(&self) -> Vec<Region> {
+        galaxy_names::find(&self.stars, &self.kinds.of, &self.kinds.names, &self.kinds.colours, &self.shown)
+    }
+}
+
 /// Where each sound of the list sits, and its colour.
 #[derive(Clone)]
 pub struct Map {
@@ -42,6 +91,8 @@ pub struct Map {
     pub colours: Arc<Vec<i32>>,
     /// How many are placed.
     pub count: usize,
+    /// Each sound's type, for the names over the map.
+    pub kinds: Arc<Kinds>,
 }
 
 impl Map {
@@ -51,7 +102,7 @@ impl Map {
             sounds.iter().map(|s| places.get(&s.id).copied().filter(|p| p.x.is_finite() && p.y.is_finite())).collect();
         let count = stars.iter().flatten().count();
         let colours = sounds.iter().map(|s| mo_app::sounds::type_colour(s.sound_type.as_str())).collect();
-        Map { stars: Arc::new(stars), colours: Arc::new(colours), count }
+        Map { stars: Arc::new(stars), colours: Arc::new(colours), count, kinds: Arc::new(Kinds::of(sounds)) }
     }
 }
 
@@ -117,6 +168,12 @@ pub struct Sky {
     pub palette: Vec<[u8; 3]>,
     /// Counts the pictures asked for.
     asked: u64,
+    /// The showing the names over the map were last asked for: asked once. And the neighbourhoods found.
+    naming: Option<u64>,
+    regions: Vec<Region>,
+    /// The star under the mouse and the star last played, as places in the list: each gets a ring.
+    pub hover: Option<usize>,
+    pub picked: Option<usize>,
     /// The showing the stars were last asked to be packed for the card: asked once.
     packing: Option<u64>,
     /// A picture is being drawn now.
@@ -142,11 +199,14 @@ impl Sky {
     /// The filters let these through now (places in the list).
     pub fn set_shown(&mut self, shown: Arc<Vec<usize>>) {
         self.shown = shown;
+        // The rings go: their stars may be ones the filters leave out now.
+        (self.hover, self.picked) = (None, None);
         self.changed_stars();
     }
 
     fn changed_stars(&mut self) {
         self.set += 1;
+        self.regions = Vec::new();
         self.grid = None;
         self.stale = true;
     }
@@ -190,6 +250,52 @@ impl Sky {
     /// The view moved (a glide, a pan): a new picture is wanted.
     pub fn moved(&mut self) {
         self.stale = true;
+    }
+
+    /// What the names over the map are found from now ([`Naming::find`] off the panel's thread, then
+    /// [`Sky::set_regions`]): `None` with no map, or when this showing's were asked for already.
+    pub fn names_ask(&mut self) -> Option<Naming> {
+        let map = self.map.as_ref()?;
+        if self.naming == Some(self.set) {
+            return None;
+        }
+        self.naming = Some(self.set);
+        Some(Naming {
+            set: self.set,
+            stars: Arc::clone(&map.stars),
+            kinds: Arc::clone(&map.kinds),
+            shown: Arc::clone(&self.shown),
+        })
+    }
+
+    /// Takes the neighbourhoods found for asking `set`, unless the stars have changed since.
+    pub fn set_regions(&mut self, set: u64, regions: Vec<Region>) {
+        if set == self.set {
+            self.regions = regions;
+        }
+    }
+
+    /// The names where they are on the view now: the biggest few, fading as the view flies in, none over another.
+    pub fn names(&self) -> Vec<Label> {
+        // About a capital's width with its letter spacing, and the line with its padding (as the app guesses them).
+        galaxy_names::place(&self.regions, &self.view, |name| (name.chars().count() as f32 * 10.5 + 16.0, 22.0))
+    }
+
+    /// Flies into the neighbourhood a clicked name is over (its place in the regions found).
+    pub fn fly_into_name(&mut self, region: usize) {
+        if let Some(region) = self.regions.get(region) {
+            self.view.fly_into(region.area);
+            self.stale = true;
+        }
+    }
+
+    /// Where the star of the sound at `at` in the list is on the view, in points: `None` when it's off the view
+    /// or has no star.
+    pub fn where_is(&self, at: usize) -> Option<(f32, f32)> {
+        let star = (*self.map.as_ref()?.stars.get(at)?)?;
+        let (x, y) = self.view.to_view(star.x, star.y, 1.0);
+        let on_view = (0.0..=self.view.width).contains(&x) && (0.0..=self.view.height).contains(&y);
+        on_view.then_some((x, y))
     }
 
     /// What the card's stars are made from now ([`Pack::pack`] it off the panel's thread, then [`Sky::packed`]):
@@ -409,6 +515,27 @@ mod tests {
         sky.set_shown(Arc::new(vec![0]));
         assert!(!sky.packed(pack.set));
         assert!(sky.pack_ask().is_some());
+    }
+
+    #[test]
+    fn names_are_found_once_a_showing_and_the_rings_follow_their_stars() {
+        let mut sky = sky();
+        let naming = sky.names_ask().expect("names to find");
+        assert!(sky.names_ask().is_none(), "asked once for a showing");
+        sky.set_regions(naming.set, naming.find());
+        // Three stars are too few for a neighbourhood: no names, and placing none is fine.
+        assert!(sky.names().len() <= 1);
+        // The first sound's star is on the view, the unplaced third has none.
+        let (x, y) = sky.where_is(0).expect("on the view");
+        assert!((0.0..=200.0).contains(&x) && (0.0..=100.0).contains(&y));
+        assert_eq!(sky.where_is(2), None);
+        // New filters: the rings go, and the names are asked for again.
+        (sky.hover, sky.picked) = (Some(0), Some(1));
+        sky.set_shown(Arc::new(vec![1]));
+        assert_eq!((sky.hover, sky.picked), (None, None));
+        sky.set_regions(naming.set, naming.find());
+        assert!(sky.names().is_empty(), "names found for the old showing are dropped");
+        assert!(sky.names_ask().is_some());
     }
 
     #[test]

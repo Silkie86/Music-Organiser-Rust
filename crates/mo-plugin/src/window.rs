@@ -16,7 +16,7 @@ use crate::gpu::Gpu;
 use crate::library::{self, Asked, Library, ORDERS, Read};
 use crate::threads::{background, lock};
 use crate::waves::{self, Kept};
-use crate::{ExtensionLine, FilterChoice, FilterView, Instance, Panel, SoundLine, YearBar};
+use crate::{ExtensionLine, FilterChoice, FilterView, Instance, Panel, SkyName, SoundLine, YearBar};
 use baseview::dpi::{PhysicalPosition, Size};
 use baseview::{
     Event, EventStatus, HandlerError, MouseButton, MouseEvent, ScrollDelta, TimerHandle, WindowContext, WindowEvent,
@@ -136,6 +136,8 @@ struct Slots {
     /// The grid for finding the star under the mouse, with its asking's number ([`Sky::grid_ask`]).
     grid: Mutex<Option<(u64, Grid)>>,
     sky: Mutex<Option<SkyDrawn>>,
+    /// The neighbourhoods the names over the map are for, with their asking's number ([`Sky::names_ask`]).
+    names: Mutex<Option<(u64, Vec<mo_app::galaxy_names::Region>)>>,
     /// The stars made ready for the graphics card, with their asking's number ([`Sky::pack_ask`]) and how many
     /// are lit.
     packed: Mutex<Option<(u64, Vec<u8>, u32)>>,
@@ -465,6 +467,8 @@ struct Shown {
     right_press: Cell<Option<LogicalPosition>>,
     /// The Galaxy: its map, its view and which picture is on show.
     sky: Rc<RefCell<Sky>>,
+    /// The names last put over the Galaxy's map.
+    sky_names: RefCell<Vec<SkyName>>,
     /// The Galaxy's painter on the graphics card (the app's own), once there are stars to give it.
     painter: RefCell<Option<mo_sky::Sky>>,
     /// Painting the stars on the card went wrong: the processor's picture from then on.
@@ -514,6 +518,7 @@ impl Shown {
             dragging: Cell::new(false),
             right_press: Cell::new(None),
             sky: Rc::default(),
+            sky_names: RefCell::default(),
             painter: RefCell::new(None),
             painter_failed: Cell::new(false),
             sky_asked: Cell::new(false),
@@ -732,6 +737,8 @@ impl Shown {
                 return;
             }
             sky.view.press(x, y, if pan { Hold::Pan } else { Hold::Sweep });
+            // While a button is held the ring round the star under the mouse stays away.
+            sky.hover = None;
             was_cancelled.set(false);
             last.set(None);
             if let Some(panel) = weak.upgrade() {
@@ -753,10 +760,12 @@ impl Shown {
                         && last.replace(Some(at)) != Some(at)
                     {
                         play_star(at);
+                        sky.picked = Some(at);
                     }
                 }
                 Moved::Hover => {
-                    let name = sky.star_at(x, y).and_then(|at| lines.path_at(at));
+                    sky.hover = sky.star_at(x, y);
+                    let name = sky.hover.and_then(|at| lines.path_at(at));
                     panel.set_sky_hover(name.as_deref().map(library::name).unwrap_or_default().into());
                     panel.set_sky_hover_x(x);
                     panel.set_sky_hover_y(y);
@@ -790,10 +799,18 @@ impl Shown {
             }
             if let Some(at) = click.and_then(|(x, y)| sky.star_at(x, y)) {
                 play(at);
+                sky.picked = Some(at);
             }
         });
-        let weak = panel.as_weak();
+        let sky = Rc::clone(&self.sky);
+        panel.on_sky_name(move |region| {
+            if let Ok(region) = usize::try_from(region) {
+                sky.borrow_mut().fly_into_name(region);
+            }
+        });
+        let (sky, weak) = (Rc::clone(&self.sky), panel.as_weak());
         panel.on_sky_gone(move || {
+            sky.borrow_mut().hover = None;
             if let Some(panel) = weak.upgrade() {
                 panel.set_sky_hover(SharedString::new());
             }
@@ -856,11 +873,58 @@ impl Shown {
         if !on_card {
             self.sky_on_processor(&mut sky);
         }
+        self.sky_names(&mut sky);
         if let Some((x, y, width, height)) = sky.place() {
             self.panel.set_sky_x(x);
             self.panel.set_sky_y(y);
             self.panel.set_sky_w(width);
             self.panel.set_sky_h(height);
+        }
+    }
+
+    /// What's over the Galaxy's picture: the names of its neighbourhoods (found on a background thread when the stars
+    /// on show change) and the rings round the star under the mouse and the star last played.
+    fn sky_names(&self, sky: &mut Sky) {
+        if let Some(naming) = sky.names_ask() {
+            let slots = Arc::clone(&self.slots);
+            background("mo-plugin-galaxy-names", move || {
+                let started = Instant::now();
+                let found = naming.find();
+                crate::log::took_if_slow("Galaxy", &format!("Named {} neighbourhoods", found.len()), started);
+                *lock(&slots.names) = Some((naming.set, found));
+            });
+        }
+        if let Some((set, regions)) = take(&self.slots.names) {
+            sky.set_regions(set, regions);
+        }
+        let names: Vec<SkyName> = sky
+            .names()
+            .into_iter()
+            .map(|l| SkyName {
+                region: i32::try_from(l.region).unwrap_or(-1),
+                name: l.name.to_uppercase().into(),
+                x: l.x,
+                y: l.y,
+                colour: l.colour,
+                fade: l.fade,
+            })
+            .collect();
+        // Only when they've changed: the panel isn't told to draw the same names again every tick.
+        if *self.sky_names.borrow() != names {
+            self.panel.set_sky_names(ModelRc::new(VecModel::from(names.clone())));
+            *self.sky_names.borrow_mut() = names;
+        }
+        let hover = sky.hover.and_then(|at| sky.where_is(at));
+        self.panel.set_sky_ring(hover.is_some());
+        if let Some((x, y)) = hover {
+            self.panel.set_sky_ring_x(x);
+            self.panel.set_sky_ring_y(y);
+        }
+        let picked = sky.picked.and_then(|at| sky.where_is(at));
+        self.panel.set_sky_picked(picked.is_some());
+        if let Some((x, y)) = picked {
+            self.panel.set_sky_picked_x(x);
+            self.panel.set_sky_picked_y(y);
         }
     }
 
