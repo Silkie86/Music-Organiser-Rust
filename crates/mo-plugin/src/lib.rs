@@ -34,7 +34,9 @@ use check::Offered;
 use clack_extensions::audio_ports::{
     AudioPortFlags, AudioPortInfo, AudioPortInfoWriter, AudioPortType, PluginAudioPorts, PluginAudioPortsImpl,
 };
-use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize, PluginGui, PluginGuiImpl, Window};
+use clack_extensions::gui::{
+    AspectRatioStrategy, GuiApiType, GuiConfiguration, GuiResizeHints, GuiSize, PluginGui, PluginGuiImpl, Window,
+};
 use clack_extensions::log::{HostLog, LogSeverity};
 use clack_extensions::note_ports::{
     NoteDialect, NoteDialects, NotePortInfo, NotePortInfoWriter, PluginNotePorts, PluginNotePortsImpl,
@@ -102,6 +104,7 @@ impl DefaultPluginFactory for MoPlugin {
             shared,
             window: RefCell::new(None),
             scale: Cell::new(1.0),
+            panel: Cell::new((window::WIDTH, window::HEIGHT)),
         };
         main.read_track();
         Ok(main)
@@ -122,6 +125,9 @@ pub struct MainThread<'a> {
     window: RefCell<Option<baseview::Window>>,
     /// The screen's scaling the DAW gave (Windows and Linux): the window's size in pixels is the panel's times it.
     scale: Cell<f64>,
+    /// The panel's size in its own units (before the screen's scaling) once the DAW has resized it: kept while the
+    /// plugin is loaded, so the window opens again at the size it was dragged to.
+    panel: Cell<(f64, f64)>,
 }
 
 impl<'a> PluginMainThread<'a, Shared> for MainThread<'a> {}
@@ -141,8 +147,22 @@ impl MainThread<'_> {
 
     /// The panel's size as the DAW counts it: in pixels at the scaling it gave (Windows, Linux), or in points (Mac).
     fn panel_size(&self) -> (u32, u32) {
-        let scale = if logical_sizes() { 1.0 } else { self.scale.get() };
-        ((window::WIDTH * scale).round() as u32, (window::HEIGHT * scale).round() as u32)
+        let scale = self.daw_scale();
+        let (width, height) = self.panel.get();
+        ((width * scale).round() as u32, (height * scale).round() as u32)
+    }
+
+    /// How many of the DAW's units one of the panel's is.
+    fn daw_scale(&self) -> f64 {
+        if logical_sizes() { 1.0 } else { self.scale.get() }
+    }
+
+    /// The size nearest `asked` (in the DAW's units) the panel can be, never bigger than asked unless that's under
+    /// the smallest: as the panel's own size and in the DAW's units.
+    fn fitted(&self, asked: GuiSize) -> ((f64, f64), GuiSize) {
+        let scale = self.daw_scale();
+        let panel = fit_panel(f64::from(asked.width) / scale, f64::from(asked.height) / scale);
+        (panel, GuiSize { width: (panel.0 * scale).round() as u32, height: (panel.1 * scale).round() as u32 })
     }
 
     /// A line in the DAW's log (Bitwig: Help, Show log), when the DAW keeps one.
@@ -240,6 +260,18 @@ impl PluginNotePortsImpl for MainThread<'_> {
     }
 }
 
+/// The panel size nearest `width` by `height` that the panel can be: between the smallest it still fits in and the
+/// biggest a screen could be. A size that isn't a number gives the size it opens at.
+fn fit_panel(width: f64, height: f64) -> (f64, f64) {
+    let fit = |asked: f64, least: f64, most: f64, usual: f64| {
+        if asked.is_finite() { asked.clamp(least, most) } else { usual }
+    };
+    (
+        fit(width, window::LEAST_WIDTH, window::MOST_WIDTH, window::WIDTH),
+        fit(height, window::LEAST_HEIGHT, window::MOST_HEIGHT, window::HEIGHT),
+    )
+}
+
 /// Whether the DAW gives and takes window sizes in points before the screen's scaling (Mac) rather than in pixels.
 fn logical_sizes() -> bool {
     GuiApiType::default_for_current_platform().is_some_and(|api| api.uses_logical_size())
@@ -281,8 +313,33 @@ impl PluginGuiImpl for MainThread<'_> {
         Some(GuiSize { width, height })
     }
 
-    fn set_size(&self, _size: GuiSize) -> Result<(), PluginError> {
-        // One size for now (it can't be dragged bigger).
+    fn can_resize(&self) -> bool {
+        true
+    }
+
+    fn get_resize_hints(&self) -> Option<GuiResizeHints> {
+        Some(GuiResizeHints {
+            can_resize_horizontally: true,
+            can_resize_vertically: true,
+            strategy: AspectRatioStrategy::Disregard,
+        })
+    }
+
+    fn adjust_size(&self, size: GuiSize) -> Option<GuiSize> {
+        Some(self.fitted(size).1)
+    }
+
+    fn set_size(&self, size: GuiSize) -> Result<(), PluginError> {
+        let (panel, fitted) = self.fitted(size);
+        self.panel.set(panel);
+        if let Some(window) = self.window.borrow().as_ref() {
+            let size: baseview::dpi::Size = if logical_sizes() {
+                baseview::dpi::LogicalSize::new(panel.0, panel.1).into()
+            } else {
+                baseview::dpi::PhysicalSize::new(fitted.width, fitted.height).into()
+            };
+            window.resize(size).map_err(|_| PluginError::Message("Couldn't resize the plugin's window"))?;
+        }
         Ok(())
     }
 
@@ -326,3 +383,16 @@ impl PluginGuiImpl for MainThread<'_> {
 }
 
 clack_export_entry!(SinglePluginEntry<MoPlugin>);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_panel_fits_what_the_daw_asks_within_its_limits() {
+        assert_eq!(fit_panel(900.0, 700.0), (900.0, 700.0));
+        assert_eq!(fit_panel(10.0, 10.0), (window::LEAST_WIDTH, window::LEAST_HEIGHT));
+        assert_eq!(fit_panel(1e9, 600.0), (window::MOST_WIDTH, 600.0));
+        assert_eq!(fit_panel(f64::NAN, f64::INFINITY), (window::WIDTH, window::HEIGHT));
+    }
+}
