@@ -4,6 +4,7 @@
 //! the list draws them, so 357,000 sounds cost what's on screen. Sounds are read and played off the window's thread.
 //! Rediscover (unused sounds that fit your taste) is dug out on its own low-priority thread too.
 
+mod bitwig;
 mod copies;
 mod did;
 mod drag_out;
@@ -2246,6 +2247,7 @@ fn rest_arrived(app: &AppWindow, rest: Refreshed) {
     });
     if first {
         brought_up_to_date(app, rest);
+        bitwig::sounds_read(app);
     }
 }
 
@@ -2300,6 +2302,7 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         _ => {}
     }
     crate::space::sounds_changed(app);
+    bitwig::sounds_read(app);
 }
 
 /// What the picked sound offers besides Play: (its words, its id in the shortcut list). The card shows them as
@@ -2670,6 +2673,26 @@ fn wire_yours(app: &AppWindow, data: &SoundsData) {
     data.on_remove_tag(move |t| {
         if let Some(app) = weak.upgrade() {
             yours::untag(&app, &t);
+        }
+    });
+    // Favourites from Bitwig ([`bitwig`]): its card, a multisample's tick (-1 all, -2 none), and Mark as favourites
+    // (or Stop).
+    let weak = app.as_weak();
+    data.on_bitwig_toggle(move || {
+        if let Some(app) = weak.upgrade() {
+            bitwig::toggle(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_bitwig_tick(move |at| {
+        if let Some(app) = weak.upgrade() {
+            bitwig::tick(&app, at);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_bitwig_mark(move || {
+        if let Some(app) = weak.upgrade() {
+            bitwig::mark(&app);
         }
     });
 }
@@ -3182,6 +3205,32 @@ pub fn copies_found() -> list::CopiesFound {
 /// For the screenshots: the copies Hide duplicates hides, as if they'd been found (`None`: none, not looked for).
 pub fn show_copies_for_screens(app: &AppWindow, same: Option<&mo_sounds::copies::SameAudio>) {
     copies::show_for_screens(app, same);
+}
+
+/// What the screenshots show on Favourites from Bitwig's card ([`show_bitwig_for_screens`]).
+pub struct BitwigShot<'a> {
+    pub names: &'a [&'a str],
+    pub ticked: &'a [&'a str],
+    pub said: &'a str,
+    pub missing: &'a [&'a str],
+}
+
+/// For the screenshots: Favourites from Bitwig's card open on made-up multisamples (`ticked` by name), with what a
+/// look said and the samples it didn't find (none for a card not used yet); `None` closes it. Never reads a folder.
+pub fn show_bitwig_for_screens(app: &AppWindow, shown: Option<BitwigShot<'_>>) {
+    match shown {
+        Some(BitwigShot { names, ticked, said, missing }) => {
+            let found = names
+                .iter()
+                .map(|n| mo_app::bitwig_favourites::Multisample {
+                    path: std::path::PathBuf::from(format!(r"K:\Bitwig Studio\Library\Multisamples\{n}.multisample")),
+                    name: (*n).to_owned(),
+                })
+                .collect();
+            bitwig::show_for_screens(app, found, ticked, said, missing);
+        }
+        None => bitwig::close(app),
+    }
 }
 
 /// Shows one of the views by its name (Ctrl+K's "Sounds › Galaxy"), as the view switch does.
@@ -3737,6 +3786,11 @@ pub fn escape(app: &AppWindow) -> bool {
     if !data.get_search().is_empty() {
         data.set_search(SharedString::new());
         data.invoke_search_edited(SharedString::new());
+        return true;
+    }
+    // Favourites from Bitwig's card lies over the sound card: it goes first.
+    if data.get_bitwig_shown() {
+        bitwig::close(app);
         return true;
     }
     if PAGE.with(|p| p.borrow().picked.is_some()) {

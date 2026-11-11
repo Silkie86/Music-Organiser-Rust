@@ -3225,6 +3225,7 @@ dependencies = [
  "thread-priority",
  "tiny-skia 0.12.0",
  "windows-sys 0.61.2",
+ "zip",
 ]
 
 [[package]]

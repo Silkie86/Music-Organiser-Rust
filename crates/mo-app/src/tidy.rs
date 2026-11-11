@@ -312,6 +312,8 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     done.add(remove_older(&places.temp, mo_space::admin::is_temp_file, DAY, now, true));
     // Play in Bitwig's MIDI files, which go again as soon as Bitwig has read them: a crash can leave one.
     done.add(remove_older(&places.temp, crate::midi::is_play_file, DAY, now, true));
+    // A Bitwig multisample's sample, written for a moment while Favourites from Bitwig looks for it: a crash can leave one.
+    done.add(remove_older(&places.temp, crate::bitwig_favourites::is_temp_file, DAY, now, true));
     // A part Send to Bitwig was still writing when the app stopped (its own name, given only while it's written).
     if let Some(sent) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::midi::EXPORT_SUBFOLDER])) {
         done.add(remove_older(&sent, crate::midi::is_half_sent, WRITING, now, false));

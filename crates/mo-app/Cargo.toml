@@ -29,6 +29,10 @@ mo-midi = { path = "../mo-midi" }
 # are written under while being made, so the start-up sweep (rule 28) knows the half-made ones a crash left.
 mo-presets = { path = "../mo-presets" }
 mo-sounds = { path = "../mo-sounds" }
+# Reading a Bitwig multisample's samples to find them in the sound library (Favourites from Bitwig); no playing here.
+mo-audio = { path = "../mo-audio", default-features = false }
+# A Bitwig multisample is a zip of its samples (the same crate and features as mo-formats).
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 mo-space = { path = "../mo-space" }
 # Moving the data folder: each copied file checked by its SHA-256, and the room on the new drive.
 sha2 = "0.10"

@@ -87,7 +87,7 @@ fn change(app: &AppWindow, what: impl FnOnce(Now) -> Option<Change>) {
 
 /// The lists, the filters and the picked sound's card, with what you just said: the tiles and lines at once, and the
 /// list as the filters see it now (a sound no longer a favourite leaves Favourites) once it's worked out again.
-fn shown_again(app: &AppWindow) {
+pub(super) fn shown_again(app: &AppWindow) {
     super::show_lists(app);
     let data = app.global::<SoundsData>();
     PAGE.with(|p| {
