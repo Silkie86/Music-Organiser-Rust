@@ -221,18 +221,26 @@ pub fn join(voices: &[Voice]) -> Vec<Joined> {
         }
     }
     // The links strong enough to join, from each stretch to the one it hands to.
+    // The strongest first, then first in the song, so the same song always joins the same way (a map has no order).
+    let mut strong: Vec<(i32, Vec<(usize, usize)>)> = handovers
+        .into_values()
+        .filter(|pairs| pairs.len() >= MIN_REPEATS)
+        .filter_map(|pairs| {
+            let &(i, j) = pairs.first()?;
+            Some((score(all.get(i)?, all.get(j)?, pairs.len()), pairs))
+        })
+        .filter(|(score, _)| *score >= JOIN_SCORE)
+        .collect();
+    strong.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
     let mut next: HashMap<usize, usize> = HashMap::new();
-    for pairs in handovers.values() {
-        let Some(&(i, j)) = pairs.first() else { continue };
-        let (Some(a), Some(b)) = (all.get(i), all.get(j)) else { continue };
-        if pairs.len() >= MIN_REPEATS && score(a, b, pairs.len()) >= JOIN_SCORE {
-            for &(i, j) in pairs {
-                // One way on from each stretch: the first found keeps it.
-                next.entry(i).or_insert(j);
-            }
+    for (_, pairs) in &strong {
+        for &(i, j) in pairs {
+            // One way on from each stretch: the strongest keeps it.
+            next.entry(i).or_insert(j);
         }
     }
-    let starts_a_chain = |i: &usize| !next.values().any(|j| j == i);
+    let taken: std::collections::HashSet<usize> = next.values().copied().collect();
+    let starts_a_chain = |i: &usize| !taken.contains(i);
     let mut heads: Vec<usize> = next.keys().copied().filter(starts_a_chain).collect();
     heads.sort_by_key(|&i| all.get(i).map_or(0, |s| s.first));
     let mut out: Vec<Joined> = Vec::new();
