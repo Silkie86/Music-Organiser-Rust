@@ -308,10 +308,15 @@ pub struct Line {
 }
 
 /// Biggest wins first: the lines that free room, each with the room it frees, biggest first. Lines that free the same
-/// keep their order.
-pub fn biggest_first(mut lines: Vec<(u64, Line)>) -> Vec<Line> {
+/// keep their order. Each comes with its share of all the room the lines free together, 0 to 1, for its meter (the
+/// UX review of 10 Nov, C4: the sizes alone made you read GB against MB to see which lines matter).
+pub fn biggest_first(mut lines: Vec<(u64, Line)>) -> Vec<(Line, f32)> {
     lines.sort_by_key(|(bytes, _)| std::cmp::Reverse(*bytes));
-    lines.into_iter().map(|(_, line)| line).collect()
+    let all: u64 = lines.iter().map(|(bytes, _)| *bytes).sum();
+    lines
+        .into_iter()
+        .map(|(bytes, line)| (line, if all == 0 { 0.0 } else { (bytes as f64 / all as f64) as f32 }))
+        .collect()
 }
 
 /// What the page says under Biggest wins first when no look found anything and none says why.
@@ -682,9 +687,14 @@ mod tests {
     fn the_biggest_win_comes_first() {
         let line = |id: &'static str| Line { id, title: "", why: String::new(), size: String::new() };
         let lines = biggest_first(vec![(2 * GB, line("small")), (60 * GB, line("big")), (2 * GB, line("also small"))]);
-        let ids: Vec<&str> = lines.iter().map(|l| l.id).collect();
+        let ids: Vec<&str> = lines.iter().map(|(l, _)| l.id).collect();
         // The two that free the same stay in the order they came.
         assert_eq!(ids, ["big", "small", "also small"]);
+        // Each one's share of the 64 GB they free together.
+        let shares: Vec<f32> = lines.iter().map(|(_, share)| *share).collect();
+        assert_eq!(shares, [60.0 / 64.0, 2.0 / 64.0, 2.0 / 64.0]);
+        // Lines that free nothing yet (still being measured) have no share.
+        assert_eq!(biggest_first(vec![(0, line("measuring"))])[0].1, 0.0);
     }
 
     #[test]

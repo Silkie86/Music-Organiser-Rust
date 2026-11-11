@@ -2296,8 +2296,9 @@ fn keep(p: &mut Page, kept: Option<Kept>) -> bool {
     }
 }
 
-fn room_line(line: space::Line) -> RoomLine {
-    RoomLine { id: line.id.into(), title: line.title.into(), why: line.why.into(), size: line.size.into() }
+/// A line for the page; `share` is its part of all the room the wins free (0 for a line with no meter).
+fn room_line(line: space::Line, share: f32) -> RoomLine {
+    RoomLine { id: line.id.into(), title: line.title.into(), why: line.why.into(), size: line.size.into(), share }
 }
 
 /// Shows what the page knows now: the summary, the drives, the lists and the picked line's card.
@@ -2344,7 +2345,8 @@ fn show_also(app: &AppWindow) {
         if (copies.is_none() && p.picked == SOUND_COPIES) || (bin.is_none() && p.picked == space_bin::RECYCLE_BIN) {
             p.picked.clear();
         }
-        let also: Vec<RoomLine> = std::iter::once(files).chain(copies).chain(bin).map(room_line).collect();
+        let also: Vec<RoomLine> =
+            std::iter::once(files).chain(copies).chain(bin).map(|line| room_line(line, 0.0)).collect();
         data.set_also(ModelRc::new(VecModel::from(also)));
     });
 }
@@ -2377,7 +2379,7 @@ fn show_wins(app: &AppWindow) {
         let lines = space::biggest_first(
             bitwig.into_iter().chain(old).chain(spare).chain(compact).chain(thin).chain(unused).collect(),
         );
-        let wins: Vec<RoomLine> = lines.into_iter().map(room_line).collect();
+        let wins: Vec<RoomLine> = lines.into_iter().map(|(line, share)| room_line(line, share)).collect();
         let shown = wins.len();
         data.set_wins(ModelRc::new(VecModel::from(wins)));
         let unused_none = space_plugins::none_note(p.plugins_shown.as_ref());
@@ -2401,7 +2403,7 @@ fn show_bitwig_looking(app: &AppWindow) {
         let p = p.borrow();
         (space_bitwig::line(p.bitwig.as_ref(), p.bitwig_looking), p.picked == BITWIG_COPIES)
     });
-    let shown = line.is_some_and(|(_, line)| replace_line(&app.global::<SpaceData>().get_wins(), room_line(line)));
+    let shown = line.is_some_and(|(_, line)| replace_line(&app.global::<SpaceData>().get_wins(), room_line(line, 0.0)));
     if !shown {
         // Its line isn't on show yet, or is gone: every line is made again.
         return show_wins(app);
