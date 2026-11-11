@@ -252,6 +252,14 @@ impl Page {
         }
     }
 
+    /// Whether the picked sound is on none of the kit's pads: the Kits view's card is for the pad you click, so a
+    /// sound picked in another view leaves it when Kits opens (the UX review of 10 Nov, E3).
+    fn picked_off_the_kit(&self) -> bool {
+        self.picked.is_some_and(|at| {
+            !self.kit.slots.iter().filter_map(|s| s.sound).any(|id| self.places.get(&id) == Some(&at))
+        })
+    }
+
     /// You turned Autoplay on or off: on, it says so.
     fn toggle_autoplay(&mut self) -> bool {
         self.autoplay = !self.autoplay;
@@ -2477,6 +2485,9 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
             rediscover_now(&app);
         }
         if v == KITS {
+            if PAGE.with(|p| p.borrow().picked_off_the_kit()) {
+                app.global::<SoundsData>().invoke_close_panel();
+            }
             kit::show(&app);
         }
         if v == GALAXY {
@@ -4730,6 +4741,19 @@ mod tests {
         p.pick_view(KITS);
         p.open_on(Some("List"), Some("1"));
         assert_eq!((p.view, p.autoplay), (KITS, true));
+    }
+
+    #[test]
+    fn a_sound_picked_elsewhere_is_off_the_kit_until_a_pad_holds_it() {
+        let mut p = Page { places: Arc::new(HashMap::from([(10, 0), (11, 1)])), ..Page::default() };
+        // Nothing picked: nothing to close.
+        assert!(!p.picked_off_the_kit());
+        p.picked = Some(1);
+        assert!(p.picked_off_the_kit());
+        p.kit.slots[0].sound = Some(10);
+        assert!(p.picked_off_the_kit());
+        p.kit.slots[1].sound = Some(11);
+        assert!(!p.picked_off_the_kit());
     }
 
     #[test]
