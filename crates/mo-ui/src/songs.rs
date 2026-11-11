@@ -703,10 +703,12 @@ pub fn show_save(app: &AppWindow, save: i64) -> bool {
 }
 
 /// The newest of your Bitwig saves with the name Bitwig shows for the project open in it (the file's name without its
-/// ending, in any case, as the C# app matched them), for the rail's "In your DAWs" line. None while the list is still
-/// being read.
+/// ending, in any case, as the C# app matched them), for the rail's "In your DAWs" line: by real dates, so one dated
+/// still to come, or with no date, isn't taken for the newest (mo_formats::dates). None while the list is still being
+/// read.
 pub fn bitwig_save_named(name: &str) -> Option<i64> {
     let wanted = name.trim().to_lowercase();
+    let real = mo_formats::dates::RealDates::now();
     PAGE.with(|p| {
         p.borrow()
             .songs
@@ -714,7 +716,7 @@ pub fn bitwig_save_named(name: &str) -> Option<i64> {
             .iter()
             .flat_map(|r| r.song.saves())
             .filter(|s| s.daw == BITWIG_STUDIO && s.name.trim().to_lowercase() == wanted)
-            .max_by_key(|s| s.mtime)
+            .max_by_key(|s| (real.seconds(s.mtime), s.mtime))
             .map(|s| s.id)
     })
 }
@@ -981,7 +983,7 @@ fn panel_song(r: &SongRow) -> PanelSong {
         facts: panel::facts(r).into(),
         name: r.song.name.as_str().into(),
         saves: panel::saves_text(r).into(),
-        backed: crate::backup::song_line(&r.song, r.saved).into(),
+        backed: crate::backup::song_line(&r.song, r.newest_time()).into(),
         status: r.status.as_str().into(),
         rating: r.rating,
         favourite: r.favourite,

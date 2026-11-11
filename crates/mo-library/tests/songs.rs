@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use chrono::{Days, NaiveDate, NaiveDateTime};
+use mo_formats::dates::RealDates;
 use mo_library::songs::{self, SongChoices, split_key};
 use mo_library::{Save, Song};
 
@@ -373,11 +374,18 @@ fn plugin_versions_are_the_same_plugin() {
 
 #[test]
 fn a_song_is_as_old_as_its_first_save_or_the_date_its_file_keeps() {
+    let real = RealDates::now();
     let saves = [counted("Didums_77", day(2024, 8, 3)), counted("Didums", day(2019, 1, 10))];
-    assert_eq!(songs::first_made(&saves), Some(day(2019, 1, 10)));
+    assert_eq!(songs::first_made(&saves, &real), Some(day(2019, 1, 10)));
     // Every save was re-saved in 2024, but FL Studio kept the day it was made.
     let kept = Save { created: Some(day(2018, 11, 5)), ..counted("Didums", day(2024, 8, 3)) };
-    assert_eq!(songs::first_made([&kept]), Some(day(2018, 11, 5)));
+    assert_eq!(songs::first_made([&kept], &real), Some(day(2018, 11, 5)));
+    // A save with no date (1970) or one still to come says nothing of when the song was made: nor does a date its
+    // file keeps that's still to come.
+    let none = counted("Didums_2", NaiveDateTime::default());
+    let to_come = Save { created: Some(day(2099, 1, 1)), ..counted("Didums_3", day(2099, 12, 31)) };
+    assert_eq!(songs::first_made([&none, &to_come, &saves[0]], &real), Some(day(2024, 8, 3)));
+    assert_eq!(songs::first_made([&none, &to_come], &real), None);
 }
 
 // Beyond the C# app (Solomon, 2026-10-31: improvements 2 and 3).

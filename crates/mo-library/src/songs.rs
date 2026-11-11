@@ -7,6 +7,7 @@ use std::sync::LazyLock;
 
 use chrono::{Datelike, Months, NaiveDateTime};
 use mo_formats::case;
+use mo_formats::dates::RealDates;
 use regex::Regex;
 
 use crate::Save;
@@ -386,9 +387,14 @@ fn mixed<'a>(names: impl Iterator<Item = &'a str>) -> bool {
 }
 
 /// When the song was first made: its oldest save, or the date its file records (FL Studio keeps it through re-saves),
-/// whichever is earlier.
-pub fn first_made<'a>(saves: impl IntoIterator<Item = &'a Save>) -> Option<NaiveDateTime> {
-    saves.into_iter().flat_map(|s| std::iter::once(s.modified).chain(s.created.filter(|c| c.year() >= 1995))).min()
+/// whichever is earlier. Only real dates count (`real`): a date still to come, or none (1970), says nothing of when
+/// the song was made. None when it has no real date.
+pub fn first_made<'a>(saves: impl IntoIterator<Item = &'a Save>, real: &RealDates) -> Option<NaiveDateTime> {
+    saves
+        .into_iter()
+        .flat_map(|s| std::iter::once(s.modified).chain(s.created.filter(|c| c.year() >= 1995)))
+        .filter(|d| real.local(*d))
+        .min()
 }
 
 /// The saves split into working periods, oldest first: a gap of `gap_months` or more between two saves starts a new

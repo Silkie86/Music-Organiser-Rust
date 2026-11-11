@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use chrono::{Datelike, NaiveDate};
+use mo_formats::dates::RealDates;
 use mo_formats::paths::file_name;
 use mo_library::scan::{is_inside, is_project_file};
 use mo_library::songs::group_songs;
@@ -268,7 +269,7 @@ pub fn remove(
     let Ok((going, problems)) = still_offered(picked, &songs, from, &others, settings, stop) else {
         return stayed(picked, Refused::Stopped.text());
     };
-    let keep = kept_saves(&songs);
+    let keep = kept_saves(&songs, &settings.dates);
     let in_use = |name: &str| others.uses(name);
     let guard =
         Guard { project_roots: &from.roots, sample_folders: &from.sample_folders, keep: &keep, sample_in_use: &in_use };
@@ -363,15 +364,17 @@ fn not_offered(item: &CompactItem) -> String {
     .to_owned()
 }
 
-/// The saves that always stay, as [`key`]s: each song's newest (by time, as mo-space measures it: every one saved at
-/// that moment) and the save it opens.
-fn kept_saves(songs: &[Song]) -> HashSet<String> {
+/// The saves that always stay, as [`key`]s: each song's newest (by time, as mo-space measures it with the same `real`
+/// dates: the newest with a real date, or of all when none has one, and every one saved at that moment) and the save
+/// it opens.
+fn kept_saves(songs: &[Song], real: &RealDates) -> HashSet<String> {
+    let by = |v: &Save| (real.local(v.modified), v.modified);
     let mut keep = HashSet::new();
     for song in songs {
         let present = present(song);
         keep.extend(present.first().map(|v| key(&v.path)));
-        if let Some(newest) = present.iter().map(|v| v.modified).max() {
-            keep.extend(present.iter().filter(|v| v.modified == newest).map(|v| key(&v.path)));
+        if let Some(newest) = present.iter().map(|v| by(v)).max() {
+            keep.extend(present.iter().filter(|v| by(v) == newest).map(|v| key(&v.path)));
         }
     }
     keep
@@ -1569,7 +1572,8 @@ mod tests {
             ..Save::default()
         };
         // It opens its second save; its third and fourth were saved at the same moment, the newest; its fifth is gone
-        // (so isn't the newest), and its sixth isn't a project the app knows.
+        // (so isn't the newest), its sixth isn't a project the app knows, and its seventh is dated still to come (no
+        // clue to when it was saved, so it isn't the newest either).
         let song = Song {
             name: "Night Drive".to_owned(),
             latest: save("Night Drive_2", at(10, "10:00")),
@@ -1579,11 +1583,12 @@ mod tests {
                 save("Night Drive_1", at(9, "09:00")),
                 Save { file_missing: true, ..save("Night Drive_5", at(13, "10:00")) },
                 Save { path: r"D:\Projects\Night Drive\Night Drive_6.txt".to_owned(), ..save("x", at(14, "10:00")) },
+                save("Night Drive_7", NaiveDate::from_ymd_opt(2099, 12, 31).unwrap().and_hms_opt(12, 0, 0).unwrap()),
             ],
             key: String::new(),
             copies: Vec::new(),
         };
-        let kept = kept_saves(&[song]);
+        let kept = kept_saves(&[song], &RealDates::now());
         let want: HashSet<String> = ["Night Drive_2", "Night Drive_3", "Night Drive_4"]
             .iter()
             .map(|n| key(&format!(r"D:\Projects\Night Drive\{n}.bwproject")))

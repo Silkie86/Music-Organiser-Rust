@@ -10,17 +10,21 @@ use crate::shell::folder_of;
 use crate::songs::{Other, SongRow, Songs, plural, tempo_text, thousands};
 
 /// The line above the name: "124 BPM · First made 3 Mar 2019 · saved 27 Oct 2026", or "Saved 27 Oct 2026" when it
-/// was all one day.
+/// was all one day; "Date unknown" when no save has a real date ([`SongRow::saved`]).
 pub fn facts(row: &SongRow) -> String {
     let mut parts = Vec::new();
     if let Some(t) = row.song.latest.tempo {
         parts.push(format!("{} BPM", tempo_text(t)));
     }
-    if row.made.date() == row.saved.date() {
-        parts.push(format!("Saved {}", row.saved.format("%-d %b %Y")));
-    } else {
-        parts.push(format!("First made {} · saved {}", row.made.format("%-d %b %Y"), row.saved.format("%-d %b %Y")));
-    }
+    let day = |d: chrono::NaiveDateTime| d.format("%-d %b %Y").to_string();
+    parts.push(match (row.made, row.saved) {
+        (Some(made), Some(saved)) if made.date() != saved.date() => {
+            format!("First made {} · saved {}", day(made), day(saved))
+        }
+        (_, Some(saved)) => format!("Saved {}", day(saved)),
+        (Some(made), None) => format!("First made {} · last saved: date unknown", day(made)),
+        (None, None) => "Date unknown".to_owned(),
+    });
     parts.join(" · ")
 }
 
@@ -431,6 +435,11 @@ mod tests {
         );
         let once = row(&[save("Solo", day(2025, 1, 1))]);
         assert_eq!((facts(&once).as_str(), saves_text(&once).as_str()), ("Saved 1 Jan 2025", ""));
+        // No real date (none at all, or one still to come): no day is given for it, but the day FL Studio kept for
+        // when it was made still counts.
+        assert_eq!(facts(&row(&[save("Lost", NaiveDateTime::default())])), "Date unknown");
+        let kept = Save { created: Some(day(2019, 3, 3)), ..save("Kept", day(2099, 1, 1)) };
+        assert_eq!(facts(&row(&[kept])), "First made 3 Mar 2019 · last saved: date unknown");
     }
 
     #[test]
