@@ -115,6 +115,15 @@ impl Noter {
         self.send(std::iter::once(Note::Yours(Yours { id, change })))
     }
 
+    /// Notes many changes at once under one number, as [`Noter::note_yours`] does each: kept together, in one write
+    /// (Favourites from Bitwig marks thousands of sounds). `None` when they can't be kept, or there are none.
+    pub fn note_all_yours(&self, yours: Vec<Yours>) -> Option<u64> {
+        if yours.is_empty() {
+            return None;
+        }
+        self.send(yours.into_iter().map(Note::Yours))
+    }
+
     /// Gives the writer `notes`, under the next number (starting it at the first note, so a page that's never used
     /// starts no thread).
     fn send(&self, notes: impl Iterator<Item = Note>) -> Option<u64> {

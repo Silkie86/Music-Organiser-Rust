@@ -342,6 +342,21 @@ export global SoundsData {
     // Hide duplicates: on, and its words with how many copies it hides (or how far finding them has got).
     in property <bool> hide-copies;
     in property <string> hide-copies-text: "Hide duplicates";
+    // Favourites from Bitwig: its card in the sound card's place (open), the multisamples in your Bitwig Library folders
+    // (listed: they've been looked for), each with its tick (`on`), how many are ticked, whether a look is on (busy),
+    // whether Mark as favourites (or Stop) can be clicked, what the last look said and the samples it didn't find.
+    in property <bool> bitwig-shown;
+    in property <bool> bitwig-listed;
+    in property <[FilterChoice]> bitwig-multisamples;
+    in property <string> bitwig-ticked;
+    in property <bool> bitwig-busy;
+    in property <bool> bitwig-can-mark;
+    in property <string> bitwig-said;
+    in property <[string]> bitwig-missing;
+    // Opens or closes the card; ticks a multisample by its place (-1 all, -2 none); Mark as favourites, or Stop.
+    callback bitwig-toggle();
+    callback bitwig-tick(int);
+    callback bitwig-mark();
     // The forgotten folder clicked on Rediscover that the list is narrowed to (its own sounds), or none.
     in property <string> folder;
     in property <bool> any-filter;
@@ -957,6 +972,116 @@ component FoldersCard inherits Rectangle {
     }
 }
 
+// Favourites from Bitwig: the multisamples in your Bitwig Library folders, ticked for the ones that hold favourites,
+// and Mark as favourites, which makes every sound in your library that is one of their samples a favourite. In the
+// sound card's place.
+component BitwigCard inherits Rectangle {
+    background: Theme.surface;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.edge;
+    VerticalLayout {
+        padding: Space.lg;
+        spacing: Space.sm;
+        HorizontalLayout {
+            spacing: Space.sm;
+            Caps {
+                text: "FAVOURITES FROM BITWIG";
+                horizontal-stretch: 1;
+            }
+            CloseButton {
+                clicked => { SoundsData.bitwig-toggle(); }
+            }
+        }
+        Text {
+            text: "Tick the multisamples that hold your favourite sounds. Every sound in your library that is one of their samples (the very same file or audio, never one that only sounds alike) becomes a favourite. Your Bitwig files stay as they are.";
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        if !SoundsData.bitwig-listed: Text {
+            text: "Looking in your Bitwig Library…";
+            color: Theme.muted;
+            font-size: Type.meta;
+        }
+        if SoundsData.bitwig-listed && SoundsData.bitwig-multisamples.length == 0: Text {
+            text: "No multisamples found in your Bitwig Library. Settings › DAWs says where your Bitwig Studio folder is.";
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        if SoundsData.bitwig-multisamples.length > 0: HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            StudioButton {
+                text: "Tick all";
+                enabled: !SoundsData.bitwig-busy;
+                clicked => { SoundsData.bitwig-tick(-1); }
+            }
+            StudioButton {
+                text: "Tick none";
+                enabled: !SoundsData.bitwig-busy;
+                clicked => { SoundsData.bitwig-tick(-2); }
+            }
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: SoundsData.bitwig-ticked;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                }
+            }
+        }
+        if SoundsData.bitwig-multisamples.length > 0: ListView {
+            vertical-stretch: 2;
+            min-height: 120px;
+            row-height: 26px;
+            rows: SoundsData.bitwig-multisamples.length;
+            for m[i] in SoundsData.bitwig-multisamples: TickLine {
+                text: m.text;
+                on: m.on;
+                dim: SoundsData.bitwig-busy;
+                clicked => {
+                    if (!SoundsData.bitwig-busy) {
+                        SoundsData.bitwig-tick(i);
+                    }
+                }
+            }
+        }
+        if SoundsData.bitwig-multisamples.length > 0: HorizontalLayout {
+            alignment: start;
+            StudioButton {
+                text: SoundsData.bitwig-busy ? "Stop" : "Mark as favourites";
+                main: !SoundsData.bitwig-busy;
+                enabled: SoundsData.bitwig-can-mark;
+                clicked => { SoundsData.bitwig-mark(); }
+            }
+        }
+        if SoundsData.bitwig-said != "": Text {
+            text: SoundsData.bitwig-said;
+            color: Theme.text;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        if SoundsData.bitwig-missing.length > 0: Caps { text: "NOT FOUND IN YOUR LIBRARY"; }
+        // A line a sample: "Snare 3 Select › Hmy_Snr.wav".
+        if SoundsData.bitwig-missing.length > 0: ListView {
+            vertical-stretch: 1;
+            min-height: 80px;
+            row-height: 22px;
+            rows: SoundsData.bitwig-missing.length;
+            for line in SoundsData.bitwig-missing: Text {
+                height: 22px;
+                text: line;
+                color: Theme.muted;
+                font-size: Type.meta;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
 // The picked sound: what it is, its waveform (click to play from there), Play and what else it can do, its facts and
 // tags. Nothing in it may be wider than the card: long names and paths wrap, and so do the buttons and tags.
 component SoundPanel inherits SidePanel {
@@ -1376,7 +1501,7 @@ export component SoundsPage inherits Rectangle {
                 property <length> lines-max: SoundsData.view == 1 || SoundsData.view == 3 ? Fit.list-max
                     : SoundsData.view == 4 ? Fit.list-max + 300px
                     : self.width;
-                property <length> list-width: min(self.lines-max, SoundsData.panel-shown
+                property <length> list-width: min(self.lines-max, SoundsData.panel-shown || SoundsData.bitwig-shown
                     ? max(380px, self.width - SoundsData.panel-width - divider.width)
                     : self.width);
                 property <length> card-width: self.width - self.list-width - divider.width;
@@ -1879,7 +2004,7 @@ export component SoundsPage inherits Rectangle {
                     height: parent.height;
                 }
                 divider := PanelDivider {
-                    visible: SoundsData.panel-shown;
+                    visible: SoundsData.panel-shown || SoundsData.bitwig-shown;
                     x: area.list-width;
                     height: parent.height;
                     panel-width: area.card-width;
@@ -1887,7 +2012,13 @@ export component SoundsPage inherits Rectangle {
                     resizing(w) => { SoundsData.panel-width = w; }
                     resized(w) => { SoundsData.panel-resized(w); }
                 }
-                if SoundsData.panel-shown: SoundPanel {
+                // Favourites from Bitwig, over the sound card while it's open.
+                if SoundsData.bitwig-shown: BitwigCard {
+                    x: area.list-width + divider.width;
+                    width: area.card-width;
+                    height: parent.height;
+                }
+                if SoundsData.panel-shown && !SoundsData.bitwig-shown: SoundPanel {
                     x: area.list-width + divider.width;
                     width: area.card-width;
                     height: parent.height;
@@ -1895,7 +2026,7 @@ export component SoundsPage inherits Rectangle {
                 }
                 // Where the lines stop short of a wide window, the card's place is there before a sound is picked,
                 // so a wide screen has no empty side (Solomon, 11 Nov).
-                if !SoundsData.panel-shown && area.width - area.list-width >= 360px: SidePanel {
+                if !SoundsData.panel-shown && !SoundsData.bitwig-shown && area.width - area.list-width >= 360px: SidePanel {
                     x: area.list-width + divider.width;
                     width: area.width - self.x;
                     height: parent.height;
@@ -2030,6 +2161,15 @@ export component SoundsPage inherits Rectangle {
                         text: SoundsData.hide-copies-text;
                         on: SoundsData.hide-copies;
                         clicked => { SoundsData.toggle("hide-copies"); }
+                    }
+                    // Favourites picked in Bitwig, saved as multisamples, brought in as the app's favourites.
+                    HorizontalLayout {
+                        alignment: start;
+                        StudioButton {
+                            text: "Favourites from Bitwig…";
+                            tip: "Make the sounds in your Bitwig multisamples favourites";
+                            clicked => { SoundsData.bitwig-toggle(); }
+                        }
                     }
                     if SoundsData.any-filter: HorizontalLayout {
                         alignment: start;

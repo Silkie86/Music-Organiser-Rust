@@ -1491,6 +1491,19 @@ fn sounds_shots(
     shots.push(("sounds-duplicates.png".into(), hidden));
     data.invoke_toggle("hide-copies".into());
     mo_ui::sounds::show_copies_for_screens(app, None);
+    // Favourites from Bitwig: its card in the sound card's place, some multisamples ticked, then after a look.
+    let names =
+        ["Clap 1 Select", "Kicks 1 Select", "OHH 2 Select", "rim 1", "Snare 3 Select", "Stylus Drums - Snare 2"];
+    let ticked = ["Kicks 1 Select", "rim 1", "Snare 3 Select"];
+    let shot = |said, missing| mo_ui::sounds::BitwigShot { names: &names, ticked: &ticked, said, missing };
+    mo_ui::sounds::show_bitwig_for_screens(app, Some(shot("", &[])));
+    shots.push(("sounds-bitwig-favourites.png".into(), capture(window)));
+    let missing = ["rim 1 › Rim 07.wav", "Snare 3 Select › Hmy_Snr.wav", "Snare 3 Select › Hyper Snare.wav"];
+    let said = "Found 368 of 371 samples in your sound library: 370 sounds now favourites (12 already were). 3 samples \
+        not found.";
+    mo_ui::sounds::show_bitwig_for_screens(app, Some(shot(said, &missing)));
+    shots.push(("sounds-bitwig-favourites-done.png".into(), capture(window)));
+    mo_ui::sounds::show_bitwig_for_screens(app, None);
     // A tile dragged out to a DAW: dimmed while it's carried, with the card that follows the mouse a little way on
     // from it, then lit for a moment once it has landed.
     let still = capture(window);
