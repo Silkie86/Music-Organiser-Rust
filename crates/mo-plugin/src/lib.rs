@@ -20,6 +20,7 @@
 pub mod audition;
 pub mod check;
 pub mod drag;
+mod gpu;
 pub mod library;
 pub mod log;
 mod threads;
@@ -90,8 +91,10 @@ impl DefaultPluginFactory for MoPlugin {
     fn new_shared(host: HostSharedHandle<'_>) -> Result<Shared, PluginError> {
         let info = host.info();
         threads::note_crashes();
-        // The tests' stand-in DAW gets no log: tests never write to the real logs folder (rule 11).
-        if info.vendor().map(|v| v.to_bytes()) != Some(TESTS_VENDOR.as_bytes()) {
+        // The tests' stand-in DAW gets no log: tests never write to the real logs folder (rule 11). Nor is the
+        // graphics card looked for in it.
+        let real = info.vendor().map(|v| v.to_bytes()) != Some(TESTS_VENDOR.as_bytes());
+        if real {
             log::start(&format!(
                 "Music Organiser test plugin {} in {}",
                 env!("CARGO_PKG_VERSION"),
@@ -108,6 +111,7 @@ impl DefaultPluginFactory for MoPlugin {
                 track: Mutex::new(String::new()),
                 player: Arc::new(Player::default()),
             }),
+            _card: real.then(gpu::hold),
         })
     }
 
@@ -131,6 +135,8 @@ pub const TESTS_VENDOR: &str = "Music Organiser tests";
 
 pub struct Shared {
     pub instance: Arc<Instance>,
+    /// This copy's hold on the graphics card the panel is drawn with (`gpu.rs`).
+    _card: Option<gpu::Held>,
 }
 
 impl PluginShared<'_> for Shared {}
