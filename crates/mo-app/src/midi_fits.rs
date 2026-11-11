@@ -250,13 +250,13 @@ pub fn fit_text(fit: &Fit) -> String {
     format!("Fits {}%{comma} {}", fit.percent(), move_words(fit.semitones))
 }
 
-/// Said on the card of a part picked in the list fitted to `song`: how it's moved, and that what's done with it is
+/// Said on the card of a part moved by `semitones` to fit `song`: how it's moved, and that what's done with it is
 /// moved so. "Moved 3 semitones up to fit Night drive: it plays, drags and goes to your DAW that way."
-pub fn card_text(fit: &Fit, song: &str) -> String {
-    if fit.semitones == 0 {
+pub fn card_text(semitones: i32, song: &str) -> String {
+    if semitones == 0 {
         return format!("Fits {song} as it is: nothing is moved.");
     }
-    format!("Moved {} to fit {song}: it plays, drags and goes to your DAW that way.", move_words(fit.semitones))
+    format!("Moved {} to fit {song}: it plays, drags and goes to your DAW that way.", move_words(semitones))
 }
 
 /// What a part is called where it goes moved (the file dragged out, the clip in the DAW): "Arp clip (3 semitones
@@ -265,37 +265,16 @@ pub fn moved_name(name: &str, semitones: i32) -> String {
     if semitones == 0 { name.to_owned() } else { format!("{name} ({})", move_words(semitones)) }
 }
 
-/// MIDI's keys run from 0 to this.
-const TOP_KEY: i32 = 127;
-
-/// A part's notes moved by `semitones`, as its line in the list says it fits. The part moves as one: where a note
-/// would go past the lowest or the highest key there is, the whole part goes the other way round instead (an octave
-/// off, which sits on the chords the same). A part too wide for that too (nearly the whole keyboard) loses the notes
-/// that have nowhere to go. A note that carries its own pitch (MIDI 2.0's 7.9 attribute, rule 22) has that moved
-/// with it, its fine tuning kept.
-pub fn moved(notes: &[NoteEvent], semitones: i32) -> Vec<NoteEvent> {
+/// A part's notes moved by `semitones`, as its line in the list says it fits: every note by exactly that
+/// (`NoteEvent::moved`), so what's heard is what the line and the name say. A note that would go past the lowest or
+/// the highest key there is has nowhere to go and is left out: that takes a move of at most 6 from a note within 6
+/// keys of the keyboard's ends, where no instrument plays (a key switch, or a stray).
+pub fn moved(notes: Vec<NoteEvent>, semitones: i32) -> Vec<NoteEvent> {
     if semitones == 0 {
-        return notes.to_vec();
+        return notes;
     }
-    let room = |by: i32| notes.iter().all(|n| (0..=TOP_KEY).contains(&(i32::from(n.key) + by)));
-    let by = [semitones, semitones - 12 * semitones.signum()].into_iter().find(|&by| room(by)).unwrap_or(semitones);
-    notes
-        .iter()
-        .filter_map(|n| {
-            let key = u8::try_from(i32::from(n.key) + by).ok().filter(|key| i32::from(*key) <= TOP_KEY)?;
-            let mut attribute = n.attribute;
-            if attribute.kind == PITCH_ATTRIBUTE {
-                // 7 bits of key over 9 bits of fine tuning.
-                let pitch = (i32::from(attribute.data >> 9) + by).clamp(0, TOP_KEY);
-                attribute.data = (u16::try_from(pitch).unwrap_or(0) << 9) | (attribute.data & 0x1ff);
-            }
-            Some(NoteEvent { key, attribute, ..*n })
-        })
-        .collect()
+    notes.into_iter().filter_map(|n| n.moved(semitones)).collect()
 }
-
-/// The type of a MIDI 2.0 note attribute that is a pitch in 7.9 form (`mo_formats::NoteAttribute`).
-const PITCH_ATTRIBUTE: u8 = 3;
 
 /// A key moved with its part: the key a chart of the moved notes is spelled in.
 pub fn moved_key(key: mo_harmony::Key, semitones: i32) -> mo_harmony::Key {
@@ -819,37 +798,25 @@ mod tests {
     }
 
     #[test]
-    fn a_part_is_moved_as_one_by_what_its_line_says() {
+    fn a_part_is_moved_by_what_its_line_says() {
         let keys = |notes: &[NoteEvent]| notes.iter().map(|n| n.key).collect::<Vec<_>>();
-        let part = [note(0, PPQ, 60), note(PPQ, PPQ, 64), note(2 * PPQ, 2 * PPQ, 67)];
+        let part = vec![note(0, PPQ, 60), note(PPQ, PPQ, 64), note(2 * PPQ, 2 * PPQ, 67)];
         // As it is: the same notes.
-        assert_eq!(moved(&part, 0), part);
+        assert_eq!(moved(part.clone(), 0), part);
         // Up and down: every note by as much, and nothing else about it changed.
-        let down = moved(&part, -2);
+        let down = moved(part.clone(), -2);
         assert_eq!(keys(&down), [58, 62, 65]);
         assert_eq!(down[2], NoteEvent { key: 65, ..part[2] });
-        assert_eq!(keys(&moved(&part, 5)), [65, 69, 72]);
-        // No room at the top: the whole part goes down instead, to the same notes an octave lower.
-        let high = [note(0, PPQ, 110), note(PPQ, PPQ, 125)];
-        assert_eq!(keys(&moved(&high, 3)), [101, 116]);
-        assert_eq!(keys(&moved(&high, 2)), [112, 127], "the top key itself has room");
-        // And none at the bottom: up instead.
-        let low = [note(0, PPQ, 2), note(PPQ, PPQ, 30)];
-        assert_eq!(keys(&moved(&low, -6)), [8, 36]);
-        // A part over nearly the whole keyboard has room neither way: the notes that have nowhere to go are left
-        // out, the rest move.
-        let wide = [note(0, PPQ, 1), note(PPQ, PPQ, 60), note(2 * PPQ, PPQ, 126)];
-        assert_eq!(keys(&moved(&wide, 4)), [5, 64]);
+        assert_eq!(keys(&moved(part.clone(), 5)), [65, 69, 72]);
         // Muted notes and steps move like the rest (what plays is decided where it's played).
         let muted = NoteEvent { muted: true, step: true, ..part[0] };
-        assert_eq!(moved(&[muted], 1), [NoteEvent { key: 61, ..muted }]);
-        // A note with a pitch of its own (MIDI 2.0's 7.9 attribute) has it moved too, its fine tuning kept.
-        let tuned = NoteEvent { attribute: NoteAttribute { kind: 3, data: (60 << 9) | 0x101 }, ..part[0] };
-        let up = moved(&[tuned], 3);
-        assert_eq!((up[0].key, up[0].attribute), (63, NoteAttribute { kind: 3, data: (63 << 9) | 0x101 }));
-        // Another kind of attribute is left alone.
-        let other = NoteEvent { attribute: NoteAttribute { kind: 1, data: 0x7e00 }, ..part[0] };
-        assert_eq!(moved(&[other], 3)[0].attribute, other.attribute);
+        assert_eq!(moved(vec![muted], 1), [NoteEvent { key: 61, ..muted }]);
+        // A note at the keyboard's end with nowhere to go is left out; the rest move by what the line says, never
+        // by anything else.
+        let ends = vec![note(0, PPQ, 1), note(PPQ, PPQ, 60), note(2 * PPQ, PPQ, 125)];
+        assert_eq!(keys(&moved(ends.clone(), 3)), [4, 63]);
+        assert_eq!(keys(&moved(ends.clone(), 2)), [3, 62, 127], "the top key itself is a key");
+        assert_eq!(keys(&moved(ends, -2)), [58, 123]);
 
         // Its key moves with it, round the octave, major or minor as it was.
         use mo_harmony::{Key, PitchClass};
@@ -858,16 +825,15 @@ mod tests {
         assert_eq!(moved_key(Key::minor(PitchClass::C), 0), Key::minor(PitchClass::C));
 
         // What the card and the DAW say about it.
-        let fit = |semitones| Fit { entry: 0, semitones, sits: 0.9 };
         assert_eq!(
-            card_text(&fit(3), "Night drive"),
+            card_text(3, "Night drive"),
             "Moved 3 semitones up to fit Night drive: it plays, drags and goes to your DAW that way."
         );
         assert_eq!(
-            card_text(&fit(-1), "Glass"),
+            card_text(-1, "Glass"),
             "Moved 1 semitone down to fit Glass: it plays, drags and goes to your DAW that way."
         );
-        assert_eq!(card_text(&fit(0), "Glass"), "Fits Glass as it is: nothing is moved.");
+        assert_eq!(card_text(0, "Glass"), "Fits Glass as it is: nothing is moved.");
         assert_eq!(moved_name("Arp clip", 3), "Arp clip (3 semitones up)");
         assert_eq!(moved_name("Arp clip", 0), "Arp clip");
     }
