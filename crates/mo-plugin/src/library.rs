@@ -1,7 +1,7 @@
 //! The sounds the panel lists: read from the app's sound library, read-only, on a background thread.
 //!
 //! The plugin never writes the app's files. It opens the app's own sound library (`sounds-rust.db`, beside the old
-//! `sounds.db` in the app's data folder, wherever Settings moved that), reads every sound's path in one quick read (leaving out the ones
+//! `sounds.db` in the app's data folder, wherever Settings moved that), reads every sound in one read (leaving out the ones
 //! hidden as duplicates, as the app's lists do), and closes it again at once: a file left open could stop the app from swapping in a new copy of its library on
 //! Windows. If the app hasn't made its library yet, the panel says so.
 //!
@@ -9,74 +9,119 @@
 //! and the others use the same one while any panel is open.
 
 use crate::threads::lock;
-use std::collections::HashSet;
+use mo_app::sounds::{self, Filters, Length, Order, SoundCounts, SoundList};
+use mo_sounds::Sound;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
 
-/// One sound in the list.
-pub struct Entry {
-    pub path: String,
-    /// Where the file's name starts in `path`.
-    name_at: usize,
-    /// What a search looks in: the name and the folders the list shows, in small letters (made once, not on every
-    /// search).
-    find: String,
+/// How many types the filter column lists, the most used first.
+pub const TYPES_SHOWN: usize = 12;
+
+/// The orders the panel offers, as the app names them.
+pub const ORDERS: [Order; 4] = [Order::Shuffled, Order::MostLiked, Order::Name, Order::Newest];
+
+/// A file's name in its path.
+pub fn name(path: &str) -> &str {
+    &path[path.rfind(['\\', '/']).map_or(0, |i| i + 1)..]
 }
 
-impl Entry {
-    pub fn new(path: String) -> Entry {
-        let name_at = path.rfind(['\\', '/']).map_or(0, |i| i + 1);
-        let mut entry = Entry { path, name_at, find: String::new() };
-        entry.find = format!("{} {}", entry.name(), entry.folder()).to_lowercase();
-        entry
-    }
-
-    pub fn name(&self) -> &str {
-        &self.path[self.name_at..]
-    }
-
-    /// The last two folders it's in: "Drums\Kicks".
-    pub fn folder(&self) -> &str {
-        let folders = self.path[..self.name_at].trim_end_matches(['\\', '/']);
-        let mut cut = folders.len();
-        for _ in 0..2 {
-            match folders[..cut].rfind(['\\', '/']) {
-                Some(i) => cut = i,
-                None => return folders,
-            }
+/// The last two folders a file is in: "Drums\Kicks".
+pub fn folder(path: &str) -> &str {
+    let folders = path[..path.len() - name(path).len()].trim_end_matches(['\\', '/']);
+    let mut cut = folders.len();
+    for _ in 0..2 {
+        match folders[..cut].rfind(['\\', '/']) {
+            Some(i) => cut = i,
+            None => return folders,
         }
-        &folders[cut + 1..]
     }
+    &folders[cut + 1..]
 }
 
-/// Every sound, by file name (ignoring letter case).
+/// What a line says after the folder: the sound's type, tempo, key and length, as far as the app knows them.
+pub fn facts(sound: &Sound) -> String {
+    let mut facts: Vec<String> = Vec::new();
+    let kind = sound.sound_type.as_str();
+    if !kind.is_empty() && !kind.eq_ignore_ascii_case(mo_sounds::types::UNKNOWN) {
+        facts.push(kind.to_owned());
+    }
+    if let Some(analysis) = &sound.analysis {
+        if let Some(bpm) = analysis.bpm.filter(|_| analysis.is_loop) {
+            facts.push(sounds::bpm_text(bpm));
+        }
+        let key = sounds::key_text(sound);
+        if !key.is_empty() {
+            facts.push(key);
+        }
+        facts.push(sounds::length_text(analysis.seconds));
+    }
+    facts.join("  \u{b7}  ")
+}
+
+/// The app's sound library as the app's own Sounds page holds it (`mo_app::sounds::SoundList`), so the plugin filters,
+/// searches and orders exactly as the app does.
 pub struct Library {
-    pub entries: Vec<Entry>,
+    pub list: SoundList,
+    /// The types, the most used first, with how many sounds each has.
+    pub types: Vec<(String, usize)>,
 }
 
 impl Library {
-    pub fn from_paths(paths: impl IntoIterator<Item = String>) -> Library {
-        let mut entries: Vec<Entry> = paths.into_iter().filter(|p| !p.is_empty()).map(Entry::new).collect();
-        entries.sort_by_cached_key(|e| e.name().to_lowercase());
-        Library { entries }
+    /// Sounds hidden as duplicates stay out, as in the app's lists (rule 2: their files are still there).
+    pub fn new(sounds: Vec<Sound>) -> Library {
+        let mut list = SoundList::new(sounds.into_iter().filter(|s| !s.hidden && !s.path.is_empty()).collect());
+        // Most liked, until the plugin reads how songs use each sound: favourites first, then the most played.
+        list.set_liked(|s| f64::from(u8::from(s.favourite)) * 1000.0 + f64::from(s.plays));
+        let types = list.type_counts();
+        Library { list, types }
     }
 
-    /// The places in [`Library::entries`] of the sounds whose name or shown folders hold `words` (every word, any
-    /// case); `None` as soon as `wanted` says the search isn't wanted any more (newer words were typed).
-    pub fn search(&self, words: &str, wanted: impl Fn() -> bool) -> Option<Vec<u32>> {
-        let words: Vec<String> = words.split_whitespace().map(str::to_lowercase).collect();
-        let mut found = Vec::new();
-        for (i, entry) in self.entries.iter().enumerate() {
-            if i % 4096 == 0 && !wanted() {
-                return None;
-            }
-            if words.iter().all(|w| entry.find.contains(w.as_str()))
-                && let Ok(i) = u32::try_from(i)
-            {
-                found.push(i);
-            }
+    /// The places in the list of the sounds `asked` lets through, in its order, and how many each filter choice would
+    /// show. Worked out on the app's low-priority pool (never the DAW's threads).
+    pub fn view(&self, asked: &Asked) -> (Vec<usize>, SoundCounts) {
+        mo_app::background::on_pool(|| self.list.view_counted(&asked.filters(), asked.order, asked.seed))
+    }
+}
+
+/// What the panel asks of the list: its search box, filter column and order.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Asked {
+    pub words: String,
+    pub types: Vec<String>,
+    pub length: Length,
+    pub favourites: bool,
+    pub order: Order,
+    /// Picks the shuffled order: a new one each time the panel opens or Shuffled is picked again.
+    pub seed: u64,
+}
+
+impl Asked {
+    pub fn filters(&self) -> Filters {
+        Filters {
+            search: self.words.trim().to_owned(),
+            sound_types: self.types.clone(),
+            length: self.length,
+            favourites: self.favourites,
+            ..Filters::default()
         }
-        Some(found)
+    }
+
+    /// Whether anything narrows the list: a filter, or words in the search box.
+    pub fn any(&self) -> bool {
+        self.filters().any() || !self.words.trim().is_empty()
+    }
+
+    /// Picks a type, or takes it off again.
+    pub fn toggle_type(&mut self, kind: &str) {
+        match self.types.iter().position(|t| t.eq_ignore_ascii_case(kind)) {
+            Some(at) => drop(self.types.remove(at)),
+            None => self.types.push(kind.to_owned()),
+        }
+    }
+
+    /// Picks Hits or Loops, or both again when it's already picked.
+    pub fn toggle_length(&mut self, length: Length) {
+        self.length = if self.length == length { Length::All } else { length };
     }
 }
 
@@ -113,16 +158,9 @@ pub fn read_from(sounds_db: &Path) -> Read {
         Ok(_) => return Read::Not("The sound library isn't one this plugin can read".into()),
         Err(e) => return Read::Not(format!("Couldn't open the sound library: {e}")),
     };
-    // Two quick reads, then the file is let go (`db` drops here). Sounds hidden as duplicates stay out, as in the
-    // app's lists (rule 2: their files are still there).
-    let hidden = match db.hidden_sounds() {
-        Ok(hidden) => hidden.into_iter().map(|s| s.path).collect::<HashSet<_>>(),
-        Err(e) => return Read::Not(format!("Couldn't read the sound library: {e}")),
-    };
-    match db.known_files() {
-        Ok(files) => Read::Ready(Arc::new(Library::from_paths(
-            files.into_iter().map(|f| f.path).filter(|p| !hidden.contains(p)),
-        ))),
+    // One read, then the file is let go (`db` drops here).
+    match db.all(chrono::Local::now().naive_local()) {
+        Ok(sounds) => Read::Ready(Arc::new(Library::new(sounds))),
         Err(e) => Read::Not(format!("Couldn't read the sound library: {e}")),
     }
 }
@@ -131,39 +169,81 @@ pub fn read_from(sounds_db: &Path) -> Read {
 mod tests {
     use super::*;
 
-    #[test]
-    fn names_and_folders() {
-        let e = Entry::new(r"D:\Samples\Drums\Kicks\Kick 01.wav".into());
-        assert_eq!(e.name(), "Kick 01.wav");
-        assert_eq!(e.folder(), r"Drums\Kicks");
-        let e = Entry::new("/home/s/kick.wav".into());
-        assert_eq!(e.folder(), "home/s");
-        let e = Entry::new("kick.wav".into());
-        assert_eq!((e.name(), e.folder()), ("kick.wav", ""));
-        let e = Entry::new(r"C:\kick.wav".into());
-        assert_eq!(e.folder(), "C:");
+    fn sound(id: i64, path: &str, kind: &str, favourite: bool) -> Sound {
+        let mut s = Sound::new(id, path);
+        s.sound_type = mo_sounds::Word::new(kind);
+        s.favourite = favourite;
+        s
+    }
+
+    fn library() -> Library {
+        let mut hidden = sound(4, r"D:\Drums\Kick A copy.wav", "Kick", false);
+        hidden.hidden = true;
+        Library::new(vec![
+            sound(1, r"D:\Drums\snare B.wav", "Snare", false),
+            sound(2, r"D:\Drums\Kick A.wav", "Kick", true),
+            sound(3, r"D:\Bass\sub kick.wav", "Bass", false),
+            hidden,
+        ])
+    }
+
+    fn names(lib: &Library, asked: &Asked) -> Vec<String> {
+        let (shown, _) = lib.view(asked);
+        shown.iter().filter_map(|&i| lib.list.sound(i)).map(|s| name(&s.path).to_owned()).collect()
     }
 
     #[test]
-    fn sorted_by_name_and_searched_by_every_word() {
-        let lib = Library::from_paths([
-            r"D:\Drums\snare B.wav".to_owned(),
-            r"D:\Drums\Kick A.wav".to_owned(),
-            r"D:\Bass\sub kick.wav".to_owned(),
-            String::new(),
-        ]);
-        let names: Vec<_> = lib.entries.iter().map(Entry::name).collect();
-        assert_eq!(names, ["Kick A.wav", "snare B.wav", "sub kick.wav"]);
-        let search = |words| lib.search(words, || true).unwrap();
-        assert_eq!(search(""), vec![0, 1, 2]);
-        assert_eq!(search("KICK"), vec![0, 2]);
-        assert_eq!(search("drums kick"), vec![0]);
-        // Only what the list shows is searched: not the folders above the last two.
-        let deep = Library::from_paths([r"E:\Samples\Drums\Kicks\Kick.wav".to_owned()]);
-        assert_eq!(deep.search("kicks", || true), Some(vec![0]));
-        assert_eq!(deep.search("samples", || true), Some(vec![]));
-        // A search no longer wanted stops.
-        assert_eq!(lib.search("kick", || false), None);
+    fn names_and_folders() {
+        let path = r"D:\Samples\Drums\Kicks\Kick 01.wav";
+        assert_eq!((name(path), folder(path)), ("Kick 01.wav", r"Drums\Kicks"));
+        assert_eq!(folder("/home/s/kick.wav"), "home/s");
+        assert_eq!((name("kick.wav"), folder("kick.wav")), ("kick.wav", ""));
+        assert_eq!(folder(r"C:\kick.wav"), "C:");
+    }
+
+    #[test]
+    fn filtered_searched_and_ordered_as_the_app_does() {
+        let lib = library();
+        let by_name = Asked { order: Order::Name, ..Asked::default() };
+        // The hidden duplicate stays out.
+        assert_eq!(names(&lib, &by_name), ["Kick A.wav", "snare B.wav", "sub kick.wav"]);
+        assert!(!by_name.any());
+        let kick = Asked { words: " KICK ".into(), ..by_name.clone() };
+        assert_eq!(names(&lib, &kick), ["Kick A.wav", "sub kick.wav"]);
+        assert!(kick.any());
+        let mut typed = by_name.clone();
+        typed.toggle_type("Kick");
+        typed.toggle_type("snare");
+        assert_eq!(names(&lib, &typed), ["Kick A.wav", "snare B.wav"]);
+        typed.toggle_type("KICK");
+        assert_eq!(names(&lib, &typed), ["snare B.wav"]);
+        assert_eq!(names(&lib, &Asked { favourites: true, ..by_name.clone() }), ["Kick A.wav"]);
+        // Most liked: the favourite first.
+        assert_eq!(names(&lib, &Asked { order: Order::MostLiked, ..by_name.clone() })[0], "Kick A.wav");
+        // Each type's count is what picking it would show.
+        let (_, counts) = lib.view(&kick);
+        assert_eq!(
+            (counts.types.get("kick"), counts.types.get("bass"), counts.types.get("snare")),
+            (Some(&1), Some(&1), None)
+        );
+        assert_eq!(lib.types.len(), 3);
+    }
+
+    #[test]
+    fn hits_or_loops_or_both() {
+        let mut asked = Asked::default();
+        asked.toggle_length(Length::Loops);
+        assert_eq!(asked.length, Length::Loops);
+        asked.toggle_length(Length::Hits);
+        assert_eq!(asked.length, Length::Hits);
+        asked.toggle_length(Length::Hits);
+        assert_eq!(asked.length, Length::All);
+    }
+
+    #[test]
+    fn a_line_says_what_the_app_knows() {
+        assert_eq!(facts(&sound(1, "a.wav", "Kick", false)), "Kick");
+        assert_eq!(facts(&Sound::new(1, "a.wav")), "");
     }
 
     #[test]

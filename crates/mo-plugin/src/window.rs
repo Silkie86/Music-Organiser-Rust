@@ -11,9 +11,9 @@
 //! library, searching it and reading a sound all run on background threads at low priority.
 
 use crate::audition::Played;
-use crate::library::{self, Library, Read};
+use crate::library::{self, Asked, Library, ORDERS, Read, TYPES_SHOWN};
 use crate::threads::{background, lock};
-use crate::{ExtensionLine, Instance, Panel, SoundLine};
+use crate::{ExtensionLine, Instance, Panel, SoundLine, TypeLine};
 use baseview::dpi::{PhysicalPosition, Size};
 use baseview::{
     Event, EventStatus, HandlerError, MouseButton, MouseEvent, ScrollDelta, TimerHandle, WindowContext, WindowEvent,
@@ -21,6 +21,7 @@ use baseview::{
 };
 use keyboard_types::{Key, KeyState, NamedKey};
 use mo_app::backup::thousands;
+use mo_app::sounds::{Length, Order, SoundCounts, short_count};
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, TargetPixel,
 };
@@ -34,8 +35,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// The panel's size, in logical pixels (before the screen's scaling).
-pub const WIDTH: f64 = 560.0;
-pub const HEIGHT: f64 = 520.0;
+pub const WIDTH: f64 = 760.0;
+pub const HEIGHT: f64 = 560.0;
 
 /// How often the window's timer runs: Slint's timers and animations, and what background threads found.
 const TICK: Duration = Duration::from_millis(30);
@@ -104,9 +105,9 @@ impl slint::platform::Platform for Platform {
 #[derive(Default)]
 struct Slots {
     library: Mutex<Option<Read>>,
-    /// A search's matches, and the words searched.
-    found: Mutex<Option<(String, Vec<u32>)>>,
-    /// Counts searches: a search stops when a newer one starts.
+    /// What the list shows for what was asked, with the filter column's counts and the asking's number.
+    found: Mutex<Option<(u64, Vec<usize>, SoundCounts)>>,
+    /// Counts askings: only the newest one's answer is shown.
     searches: AtomicU64,
     played: Mutex<Option<Played>>,
 }
@@ -118,12 +119,12 @@ fn take<T>(slot: &Mutex<Option<T>>) -> Option<T> {
 /// The list's lines, made only for the rows shown (the list can hold half a million sounds).
 struct Lines {
     library: RefCell<Option<Arc<Library>>>,
-    shown: RefCell<Vec<u32>>,
+    shown: RefCell<Vec<usize>>,
     notify: ModelNotify,
 }
 
 impl Lines {
-    fn show(&self, library: Option<Arc<Library>>, shown: Vec<u32>) {
+    fn show(&self, library: Option<Arc<Library>>, shown: Vec<usize>) {
         *self.library.borrow_mut() = library;
         *self.shown.borrow_mut() = shown;
         self.notify.reset();
@@ -132,7 +133,7 @@ impl Lines {
     fn path(&self, row: usize) -> Option<String> {
         let library = self.library.borrow();
         let at = *self.shown.borrow().get(row)?;
-        library.as_ref()?.entries.get(at as usize).map(|e| e.path.clone())
+        library.as_ref()?.list.sound(at).map(|s| s.path.clone())
     }
 }
 
@@ -146,8 +147,13 @@ impl Model for Lines {
     fn row_data(&self, row: usize) -> Option<SoundLine> {
         let library = self.library.borrow();
         let at = *self.shown.borrow().get(row)?;
-        let entry = library.as_ref()?.entries.get(at as usize)?;
-        Some(SoundLine { name: entry.name().into(), folder: entry.folder().into() })
+        let sound = library.as_ref()?.list.sound(at)?;
+        Some(SoundLine {
+            name: library::name(&sound.path).into(),
+            folder: library::folder(&sound.path).into(),
+            facts: library::facts(sound).into(),
+            favourite: sound.favourite,
+        })
     }
 
     fn model_tracker(&self) -> &dyn ModelTracker {
@@ -188,8 +194,8 @@ struct Shown {
     lines: Rc<Lines>,
     slots: Arc<Slots>,
     instance: Arc<Instance>,
-    /// The words last searched, so a search that comes back after newer words were typed is dropped.
-    words: Rc<RefCell<String>>,
+    /// What the search box, the filter column and the order ask of the list.
+    asked: Rc<RefCell<Asked>>,
     /// The sound the "Playing" line names, as the player numbers it: the line goes when that sound ends.
     playing: Cell<Option<u64>>,
     _timer: TimerHandle,
@@ -230,7 +236,7 @@ impl Shown {
             lines,
             slots,
             instance,
-            words: Rc::new(RefCell::new(String::new())),
+            asked: Rc::new(RefCell::new(Asked { seed: seed(), ..Asked::default() })),
             playing: Cell::new(None),
             _timer: timer,
         };
@@ -271,14 +277,48 @@ impl Shown {
                 panel.set_playing(SharedString::new());
             }
         });
-        let lines = Rc::clone(&self.lines);
-        let slots = Arc::clone(&self.slots);
-        let words = Rc::clone(&self.words);
-        panel.on_search(move |typed| {
-            *words.borrow_mut() = typed.to_string();
-            let Some(library) = lines.library.borrow().clone() else { return };
-            search(library, typed.to_string(), Arc::clone(&slots));
+        panel.set_orders(ModelRc::new(slint::VecModel::from(
+            ORDERS.iter().map(|o| SharedString::from(o.name())).collect::<Vec<_>>(),
+        )));
+        // Each change to what's asked: the panel shows the change at once, the list follows from a background thread.
+        let changed = {
+            let lines = Rc::clone(&self.lines);
+            let slots = Arc::clone(&self.slots);
+            let asked = Rc::clone(&self.asked);
+            let weak = panel.as_weak();
+            Rc::new(move |change: &dyn Fn(&mut Asked)| {
+                change(&mut asked.borrow_mut());
+                let asked = asked.borrow().clone();
+                if let Some(panel) = weak.upgrade() {
+                    show_asked(&panel, &asked);
+                }
+                if let Some(library) = lines.library.borrow().clone() {
+                    view(library, asked, Arc::clone(&slots));
+                }
+            })
+        };
+        let change = Rc::clone(&changed);
+        panel.on_search(move |typed| change(&|a| a.words = typed.to_string()));
+        let change = Rc::clone(&changed);
+        panel.on_toggle_type(move |kind| change(&|a| a.toggle_type(&kind)));
+        let change = Rc::clone(&changed);
+        panel.on_toggle_hits(move || change(&|a| a.toggle_length(Length::Hits)));
+        let change = Rc::clone(&changed);
+        panel.on_toggle_loops(move || change(&|a| a.toggle_length(Length::Loops)));
+        let change = Rc::clone(&changed);
+        panel.on_toggle_favourites(move || change(&|a| a.favourites = !a.favourites));
+        let change = changed;
+        panel.on_pick_order(move |i| {
+            let Some(&order) = usize::try_from(i).ok().and_then(|i| ORDERS.get(i)) else { return };
+            change(&|a| {
+                // Shuffled picked again shuffles again.
+                if order == Order::Shuffled {
+                    a.seed = seed();
+                }
+                a.order = order;
+            });
         });
+        show_asked(panel, &self.asked.borrow());
 
         let instance = Arc::clone(&self.instance);
         let weak = panel.as_weak();
@@ -296,30 +336,50 @@ impl Shown {
         background("mo-plugin-library", move || *lock(&slots.library) = Some(library::read()));
     }
 
+    /// The filter column's types: the most used, each with how many sounds picking it would show (once known).
+    fn show_types(&self, library: &Library, counts: Option<&SoundCounts>) {
+        let asked = self.asked.borrow();
+        let types: Vec<TypeLine> = library
+            .types
+            .iter()
+            .take(TYPES_SHOWN)
+            .map(|(kind, _)| TypeLine {
+                text: kind.as_str().into(),
+                count: counts
+                    .map(|c| short_count(c.types.get(&kind.to_ascii_lowercase()).copied().unwrap_or(0)))
+                    .unwrap_or_default()
+                    .into(),
+                on: asked.types.iter().any(|t| t.eq_ignore_ascii_case(kind)),
+            })
+            .collect();
+        self.panel.set_types(ModelRc::new(slint::VecModel::from(types)));
+    }
+
     /// Takes in what background threads found, frees sounds done playing, and runs Slint's timers.
     fn tick(&self) {
         if let Some(read) = take(&self.slots.library) {
             match read {
                 Read::Ready(library) => {
-                    let count = library.entries.len();
-                    let all = (0..count).filter_map(|i| u32::try_from(i).ok()).collect();
-                    self.lines.show(Some(Arc::clone(&library)), all);
-                    self.panel.set_status(count_line(count, None).into());
-                    let words = self.words.borrow().clone();
-                    if !words.trim().is_empty() {
-                        search(library, words, Arc::clone(&self.slots));
-                    }
+                    // The list comes with its first view, so it never shows in an order nobody asked for.
+                    self.lines.show(Some(Arc::clone(&library)), Vec::new());
+                    self.panel.set_status("Getting the list ready".into());
+                    self.show_types(&library, None);
+                    view(library, self.asked.borrow().clone(), Arc::clone(&self.slots));
                 }
                 Read::Not(why) => self.panel.set_status(why.into()),
             }
         }
-        if let Some((words, found)) = take(&self.slots.found)
-            && words == *self.words.borrow()
+        if let Some((number, found, counts)) = take(&self.slots.found)
+            && number == self.slots.searches.load(Ordering::Acquire)
         {
             let library = self.lines.library.borrow().clone();
-            let total = library.as_ref().map_or(0, |l| l.entries.len());
-            self.panel.set_status(count_line(total, (!words.trim().is_empty()).then_some(found.len())).into());
+            let total = library.as_ref().map_or(0, |l| l.list.len());
+            let narrowed = self.asked.borrow().any();
+            self.panel.set_status(count_line(total, narrowed.then_some(found.len())).into());
             self.panel.set_picked(-1);
+            if let Some(library) = &library {
+                self.show_types(library, Some(&counts));
+            }
             self.lines.show(library, found);
         }
         if let Some(played) = take(&self.slots.played) {
@@ -467,16 +527,31 @@ fn count_line(total: usize, found: Option<usize>) -> String {
     }
 }
 
-/// Searches `library` for `words` on a background thread; the matches land in `slots.found`. A search still going
-/// when a newer one starts stops there.
-fn search(library: Arc<Library>, words: String, slots: Arc<Slots>) {
+/// Works out what `asked` shows of `library` on a background thread; it lands in `slots.found` with this asking's
+/// number, and only the newest asking's answer is shown.
+fn view(library: Arc<Library>, asked: Asked, slots: Arc<Slots>) {
     let number = slots.searches.fetch_add(1, Ordering::AcqRel) + 1;
-    background("mo-plugin-search", move || {
-        let wanted = || slots.searches.load(Ordering::Acquire) == number;
-        if let Some(found) = library.search(&words, wanted) {
-            *lock(&slots.found) = Some((words, found));
+    background("mo-plugin-view", move || {
+        // Newer words were typed while this one waited for its thread: theirs is on its way.
+        if slots.searches.load(Ordering::Acquire) != number {
+            return;
         }
+        let (shown, counts) = library.view(&asked);
+        *lock(&slots.found) = Some((number, shown, counts));
     });
+}
+
+/// The panel's ticks and order as `asked` has them (the types' ticks come with their counts, [`Shown::show_types`]).
+fn show_asked(panel: &Panel, asked: &Asked) {
+    panel.set_hits(asked.length == Length::Hits);
+    panel.set_loops(asked.length == Length::Loops);
+    panel.set_favourites(asked.favourites);
+    panel.set_order(ORDERS.iter().position(|&o| o == asked.order).and_then(|i| i32::try_from(i).ok()).unwrap_or(0));
+}
+
+/// A new shuffled order: the clock's nanoseconds.
+fn seed() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
 }
 
 fn slint_button(button: MouseButton) -> PointerEventButton {
