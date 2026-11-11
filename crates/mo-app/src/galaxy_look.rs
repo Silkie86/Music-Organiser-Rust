@@ -65,11 +65,13 @@ impl LightBy {
 }
 
 /// How lit each sound in `list` is by `by`, from 0 to 1, by its place in the list: where it ranks among the sounds
-/// that have the measure (so one very long loop doesn't leave every other sound dark). A sound without it is 0, and
-/// one with it never is (the least lit is only just above), so "above 0" always means "has the measure".
+/// that have the measure (so one very long loop doesn't leave every other sound dark). A sound without it is 0 (by
+/// Newest, one whose date isn't real), and one with it never is (the least lit is only just above), so "above 0"
+/// always means "has the measure".
 /// When no sound has the measure (or `by` is Nothing) the list is empty: every star is drawn alike.
 pub fn light(list: &SoundList, by: LightBy) -> Vec<f32> {
     let n = list.len();
+    let dates = list.dates();
     let value = |i: usize| -> Option<f64> {
         let s = list.sound(i)?;
         match by {
@@ -77,7 +79,7 @@ pub fn light(list: &SoundList, by: LightBy) -> Vec<f32> {
             LightBy::Liked => list.liked_share(i).filter(|&v| v > 0.0),
             LightBy::Used => list.used_in(i).filter(|&u| u > 0).map(f64::from),
             LightBy::Length => s.analysis.as_ref().map(|a| a.seconds).filter(|&v| v > 0.0),
-            LightBy::Newest => Some(s.added.and_utc().timestamp() as f64),
+            LightBy::Newest => dates.local(s.added).then(|| s.added.and_utc().timestamp() as f64),
             LightBy::Tempo => s.analysis.as_ref().and_then(|a| a.bpm).filter(|&v| v > 0.0),
         }
     };
@@ -715,6 +717,14 @@ mod tests {
         assert!(light(&list, LightBy::Nothing).is_empty());
         assert!(light(&list, LightBy::Used).is_empty());
         assert_eq!(LightBy::from_name("Used in songs"), Some(LightBy::Used));
+
+        // By Newest, a date that isn't real (still to come, or a file with none) is no measure: those stay dark, and
+        // the brightest is the newest real one.
+        let mut sounds: Vec<mo_sounds::Sound> = (0..4).map(|i| mo_sounds::Sound::new(i, "x.wav")).collect();
+        for (s, y) in sounds.iter_mut().zip([2107, 2021, 1970, 2024]) {
+            s.added = day(y);
+        }
+        assert_eq!(light(&SoundList::new(sounds), LightBy::Newest), [0.0, f32::MIN_POSITIVE, 0.0, 1.0]);
     }
 
     #[test]

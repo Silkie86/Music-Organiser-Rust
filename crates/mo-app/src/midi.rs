@@ -9,8 +9,9 @@
 
 use std::collections::HashSet;
 
-use chrono::{Datelike, Local, TimeZone};
+use chrono::{Local, TimeZone};
 use mo_formats::NoteEvent;
+use mo_formats::dates::RealDates;
 use mo_harmony::keyfind::Why;
 use mo_harmony::{Key as KeyName, KeyAnswer, KeyFact, Mode};
 use mo_library::songs::thousands;
@@ -22,7 +23,8 @@ use crate::filters::{self, Filter};
 /// The orders the list can take.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Order {
-    /// The newest file first, as the index keeps them.
+    /// The newest file first, as the catalogue keeps them; a date that isn't real (still to come, or before 1981)
+    /// last, either way round ([`RealDates`]).
     #[default]
     Newest,
     Name,
@@ -176,8 +178,8 @@ fn searched(cat: &Catalogue, f: &Filters, target: Option<Target>) -> Vec<Hit> {
 }
 
 /// Whether a part is in the years picked (the year strip, which isn't one of the chips).
-fn in_years(f: &Filters, e: &Entry) -> bool {
-    f.years.is_none_or(|(a, b)| (a..=b).contains(&year_of(e.phrase.source.mtime)))
+fn in_years(f: &Filters, e: &Entry, dates: &RealDates) -> bool {
+    f.years.is_none_or(|(a, b)| (a..=b).contains(&year_of(dates, e.phrase.source.mtime)))
 }
 
 /// Whether each chip filter lets a part through: kind, From, key.
@@ -217,7 +219,7 @@ pub fn view(
     let counts = counts(cat, &base, f, one_line);
     let mut hits: Vec<Hit> = base
         .into_par_iter()
-        .filter(|h| cat.entry(h.entry).is_some_and(|e| in_years(f, e) && chips_pass(f, e) == [true; 3]))
+        .filter(|h| cat.entry(h.entry).is_some_and(|e| in_years(f, e, &cat.dates) && chips_pass(f, e) == [true; 3]))
         .collect();
     if one_line {
         one_per_key_group(cat, &mut hits);
@@ -292,7 +294,7 @@ impl ChoiceCounts {
 /// same loop in other keys is one line (`one_line`), so it then counts once beside each choice that would show it.
 fn counts(cat: &Catalogue, hits: &[Hit], f: &Filters, one_line: bool) -> ChoiceCounts {
     let keys = key_list();
-    let entries = || hits.par_iter().filter_map(|h| cat.entry(h.entry).filter(|e| in_years(f, e)));
+    let entries = || hits.par_iter().filter_map(|h| cat.entry(h.entry).filter(|e| in_years(f, e, &cat.dates)));
     let mut c = entries()
         .filter(|e| !one_line || e.key_group.is_none())
         .fold(ChoiceCounts::empty, |mut c, e| {
@@ -394,11 +396,16 @@ fn sort(cat: &Catalogue, hits: &mut [Hit], order: Order) {
     }
 }
 
-/// Turns a sorted list round (a second click on its heading). By key, the parts with no clear key still come last.
+/// Turns a sorted list round (a second click on its heading). The parts with nothing in the column still come last:
+/// by key those with no clear key, by date those whose date isn't real (oldest first doesn't start with 1970).
 fn turn_round(cat: &Catalogue, hits: &mut [Hit], order: Order) {
     hits.reverse();
-    if order == Order::Key {
-        hits.sort_by_key(|h| cat.entry(h.entry).and_then(sort_key).is_none());
+    match order {
+        Order::Key => hits.sort_by_key(|h| cat.entry(h.entry).and_then(sort_key).is_none()),
+        Order::Newest => {
+            hits.sort_by_key(|h| cat.entry(h.entry).is_none_or(|e| !cat.dates.seconds(e.phrase.source.mtime)))
+        }
+        Order::Name | Order::Bars | Order::Copies => {}
     }
 }
 
@@ -478,9 +485,9 @@ pub fn key_of_choice(name: &str) -> Option<KeyName> {
     KeyName::ALL.into_iter().find(|k| k.short().eq_ignore_ascii_case(name))
 }
 
-/// The year a file was saved in, here.
-pub fn year_of(mtime: i64) -> i32 {
-    Local.timestamp_opt(mtime, 0).single().map_or(0, |t| t.year())
+/// The year a file was saved in, here; 0 for a date that isn't real by `dates`, which is in no year.
+pub fn year_of(dates: &RealDates, mtime: i64) -> i32 {
+    dates.year(mtime).unwrap_or(0)
 }
 
 /// How many parts each year holds (by when their newest file was saved), newest first, for the year strip.
@@ -488,7 +495,7 @@ pub fn year_counts(cat: &Catalogue) -> Vec<(i32, usize)> {
     let mut counts: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
     // A line each, as the list: the same loop in other keys once.
     for (_, e) in cat.entries.iter().enumerate().filter(|(at, _)| cat.is_line(*at)) {
-        *counts.entry(year_of(e.phrase.source.mtime)).or_insert(0) += 1;
+        *counts.entry(year_of(&cat.dates, e.phrase.source.mtime)).or_insert(0) += 1;
     }
     crate::year_strip::strip(counts)
 }
@@ -592,8 +599,12 @@ pub fn phrase_text(e: &Entry) -> String {
     }
 }
 
-/// The date its newest file was saved: "3 Nov 2026".
-pub fn date_text(mtime: i64) -> String {
+/// The date its newest file was saved: "3 Nov 2026"; nothing for a date that isn't real by `dates` (one still to come,
+/// as a pack whose files all say 31 Dec 2027, or one before 1981, as a file with no date has).
+pub fn date_text(dates: &RealDates, mtime: i64) -> String {
+    if !dates.seconds(mtime) {
+        return String::new();
+    }
     Local.timestamp_opt(mtime, 0).single().map(|t| t.format("%-d %b %Y").to_string()).unwrap_or_default()
 }
 
@@ -859,13 +870,14 @@ pub fn result_text(
 }
 
 /// The card's facts, as (name, value): Bars, Notes, Range, Saved.
-pub fn facts(e: &Entry) -> Vec<(&'static str, String)> {
+pub fn facts(e: &Entry, dates: &RealDates) -> Vec<(&'static str, String)> {
     let p = &e.phrase;
     let mut out = vec![("BARS", p.bars.max(0).to_string()), ("NOTES", thousands(p.notes.max(0) as usize))];
     if p.notes > 0 && !p.drums {
         out.push(("RANGE", range_text(p.lowest, p.highest)));
     }
-    out.push(("SAVED", date_text(p.source.mtime)));
+    let saved = date_text(dates, p.source.mtime);
+    out.push(("SAVED", if saved.is_empty() { "Unknown".to_owned() } else { saved }));
     out
 }
 
@@ -1296,10 +1308,12 @@ mod tests {
         assert_eq!(titles(&cat, &list(&cat, &f, Order::Newest, None, None)), ["Bass"]);
         let f = Filters { from: Some(From::Files), ..Filters::default() };
         assert_eq!(titles(&cat, &list(&cat, &f, Order::Newest, None, None)), ["Piano", "Kick"]);
-        let y = year_of(1_700_000_000);
+        let y = year_of(&cat.dates, 1_700_000_000);
         let f = Filters { years: Some((y, y)), ..Filters::default() };
         assert_eq!(titles(&cat, &list(&cat, &f, Order::Newest, None, None)), ["Kick"]);
-        assert!(year_counts(&cat).first().is_some_and(|(year, n)| *year == year_of(1_760_000_000) && *n == 2));
+        assert!(
+            year_counts(&cat).first().is_some_and(|(year, n)| *year == year_of(&cat.dates, 1_760_000_000) && *n == 2)
+        );
     }
 
     #[test]
@@ -1422,6 +1436,36 @@ mod tests {
         for o in Order::ALL {
             assert_eq!(Order::from_column(o.column()), o);
         }
+    }
+
+    #[test]
+    fn a_date_that_isnt_real_comes_last_either_way_and_isnt_shown() {
+        // Two real dates; a pack whose files say a date still to come (one of Solomon's says 31 Dec 2027); and a file
+        // with no date, which reads as 1970. In the index's order (mo-midi's store puts them so).
+        let cat = Catalogue::new(vec![
+            phrase("L:/New Midi/a.mid", "New", Role::Melody, "A", 1_760_000_000),
+            phrase("L:/New Midi/b.mid", "Old", Role::Melody, "B", 1_700_000_000),
+            phrase("L:/New Midi/Pack/16BTFILL.MID", "Fill", Role::Drums, "C", 4_102_401_600),
+            phrase("L:/New Midi/c.mid", "Undated", Role::Melody, "D", 0),
+        ]);
+        let f = Filters::default();
+        assert_eq!(titles(&cat, &list(&cat, &f, Order::Newest, None, None)), ["New", "Old", "Fill", "Undated"]);
+        // Oldest first: the real ones turned round, the others still last.
+        assert_eq!(titles(&cat, &view(&cat, &f, Order::Newest, true, None, None).0), ["Old", "New", "Undated", "Fill"]);
+
+        // Neither the line nor the card shows a date that isn't real as the day the file was saved, and it's in no
+        // year: neither on the strip nor let through by a span of years.
+        let d = &cat.dates;
+        assert!(date_text(d, 4_102_401_600).is_empty() && date_text(d, 0).is_empty() && date_text(d, -1).is_empty());
+        let saved = |hash: &str| facts(cat.entry(cat.find(hash).unwrap()).unwrap(), d).pop().unwrap();
+        assert_eq!(saved("C"), ("SAVED", "Unknown".to_owned()));
+        assert_eq!(saved("D"), ("SAVED", "Unknown".to_owned()));
+        assert_eq!(saved("A"), ("SAVED", date_text(d, 1_760_000_000)));
+        assert!(date_text(d, 1_760_000_000).ends_with(" 2025"), "{}", date_text(d, 1_760_000_000));
+        assert_eq!((year_of(d, 4_102_401_600), year_of(d, 0)), (0, 0));
+        assert_eq!(year_counts(&cat).iter().map(|(_, n)| n).sum::<usize>(), 2);
+        let f = Filters { years: Some((1, 9999)), ..Filters::default() };
+        assert_eq!(titles(&cat, &list(&cat, &f, Order::Newest, None, None)), ["New", "Old"]);
     }
 
     #[test]

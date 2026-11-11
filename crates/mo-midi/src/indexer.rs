@@ -16,6 +16,7 @@ use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};
 
 use mo_formats::case;
+use mo_formats::dates::RealDates;
 
 use crate::extract::{self, Unread};
 use crate::index::{MidiError, SourceKind};
@@ -45,7 +46,8 @@ impl Wanted {
 /// What a run has to do.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Plan {
-    /// New and changed files (and failed ones, when asked), newest first: what you made lately shows up first.
+    /// New and changed files (and failed ones, when asked), newest first: what you made lately shows up first. A file
+    /// whose date isn't real ([`RealDates`]) comes after the rest, as it does in the page's list.
     pub todo: Vec<Wanted>,
     /// Files the index holds that aren't wanted any more, as the index spells them.
     pub forget: Vec<String>,
@@ -102,7 +104,8 @@ pub fn plan(wanted: &[Wanted], stamps: &[Stamp], away: &[String], retry_failed: 
         })
         .cloned()
         .collect();
-    todo.sort_by_key(|w| std::cmp::Reverse(w.mtime));
+    let real = RealDates::now();
+    todo.sort_by_key(|w| (!real.seconds(w.mtime), std::cmp::Reverse(w.mtime)));
     Plan { todo, forget }
 }
 

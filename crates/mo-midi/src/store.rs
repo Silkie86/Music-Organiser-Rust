@@ -39,6 +39,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use mo_formats::dates::RealDates;
 use mo_formats::{NoteAttribute, NoteEvent, case};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
@@ -1015,9 +1016,9 @@ impl MidiStore {
         Ok(list)
     }
 
-    /// Every part, newest file first, without its notes, as the page lists them. `cs_roles` and `cs_octaves` are the
-    /// C# app's corrections when they're not yet taken in ([`BroughtUp::old_roles`]), which the index's own win over;
-    /// empty once they are.
+    /// Every part, newest file first (a date that isn't real last), without its notes, as the page lists them.
+    /// `cs_roles` and `cs_octaves` are the C# app's corrections when they're not yet taken in
+    /// ([`BroughtUp::old_roles`]), which the index's own win over; empty once they are.
     pub fn all(
         &self,
         cs_roles: &HashMap<String, Role>,
@@ -1110,8 +1111,11 @@ impl MidiStore {
             });
         }
         // Newest file first, sorted here rather than in SQLite: no index has that order, so SQLite would hold a whole
-        // sorted copy of every row in memory beside this list.
-        list.sort_unstable_by_key(|p| (std::cmp::Reverse(p.source.mtime), p.id));
+        // sorted copy of every row in memory beside this list. A date that isn't real (a pack whose files all say
+        // 31 Dec 2027) is no clue to when the file was saved, so it comes after every real one: it doesn't top the
+        // list, and its file's copy of some notes doesn't stand for the copies with a real date.
+        let real = RealDates::now();
+        list.sort_unstable_by_key(|p| (!real.seconds(p.source.mtime), std::cmp::Reverse(p.source.mtime), p.id));
         Ok(list)
     }
 

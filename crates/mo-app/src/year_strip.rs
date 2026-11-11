@@ -2,11 +2,14 @@
 //! pick a span of years.
 
 use chrono::Datelike as _;
+use mo_formats::dates::FIRST_YEAR;
 
 /// The years on a strip, newest first, from how many there are in each year (in any order). A file with no date reads
 /// as 1970, and one whose date is broken can be years ahead (a sound dated 2107 on Solomon's PC, 5 Nov 2026): neither
 /// is a year anyone picks, so neither is on the strip. What's in them shows while no years are picked, and goes while
-/// some are.
+/// some are. Sounds, MIDI and Rediscover count no year for such a date in the first place
+/// ([`mo_formats::dates::RealDates`], which also knows a date later this year is still to come); this is the same rule
+/// by years, for the strips counted from elsewhere.
 pub fn strip(counts: impl IntoIterator<Item = (i32, usize)>) -> Vec<(i32, usize)> {
     strip_in(counts, chrono::Local::now().year())
 }
@@ -14,7 +17,7 @@ pub fn strip(counts: impl IntoIterator<Item = (i32, usize)>) -> Vec<(i32, usize)
 /// [`strip`] in `this_year`.
 fn strip_in(counts: impl IntoIterator<Item = (i32, usize)>, this_year: i32) -> Vec<(i32, usize)> {
     let mut years: Vec<(i32, usize)> =
-        counts.into_iter().filter(|&(year, _)| year > 1980 && year <= this_year).collect();
+        counts.into_iter().filter(|&(year, _)| year >= FIRST_YEAR && year <= this_year).collect();
     years.sort_unstable_by_key(|&(year, _)| std::cmp::Reverse(year));
     years
 }

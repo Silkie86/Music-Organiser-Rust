@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use chrono::Datelike;
 use mo_formats::case;
+use mo_formats::dates::RealDates;
 use rayon::prelude::*;
 
 use crate::dotnet_random::DotnetRandom;
@@ -68,10 +69,12 @@ pub(crate) fn used_in(usage: &HashMap<i64, Usage>, id: i64) -> u32 {
 }
 
 /// The years the sounds' files are dated, newest first, each with how many sounds, for the page's year strip (which
-/// leaves out the years no one picks: `mo_app::year_strip::strip`). Hidden copies are left out.
+/// leaves out the years no one picks: `mo_app::year_strip::strip`). Hidden copies are left out, and so is a date that
+/// isn't real (still to come, or before 1981), which is in no year.
 pub fn years(sounds: &[Sound]) -> Vec<(i32, usize)> {
     let mut counts: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
-    for s in sounds.iter().filter(|s| !s.hidden) {
+    let dates = RealDates::now();
+    for s in sounds.iter().filter(|s| !s.hidden && dates.local(s.added)) {
         *counts.entry(s.added.year()).or_default() += 1;
     }
     counts.into_iter().rev().collect()
@@ -86,9 +89,10 @@ fn types_in_words(types: &[String]) -> String {
     }
 }
 
-/// Whether a sound's file is dated in `years` (first to last; `None` is any year).
-fn dated_in(s: &Sound, years: Option<(i32, i32)>) -> bool {
-    years.is_none_or(|(first, last)| (first..=last).contains(&s.added.year()))
+/// Whether a sound's file is dated in `years` (first to last; `None` is any year): a date that isn't real by `dates`
+/// is in none.
+fn dated_in(s: &Sound, years: Option<(i32, i32)>, dates: &RealDates) -> bool {
+    years.is_none_or(|(first, last)| dates.local(s.added) && (first..=last).contains(&s.added.year()))
 }
 
 /// Suggests unused sounds you might like, best first. `sounds` is the whole library (hidden copies are left out
@@ -113,8 +117,9 @@ pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex
         })
         .collect();
     // The year narrows what's suggested, not what your taste is learned from.
+    let dates = RealDates::now();
     let candidates: Vec<&Sound> =
-        sounds.iter().filter(|s| used_in(usage, s.id) <= o.max_uses && dated_in(s, o.years)).copied().collect();
+        sounds.iter().filter(|s| used_in(usage, s.id) <= o.max_uses && dated_in(s, o.years, &dates)).copied().collect();
     if candidates.is_empty() {
         return Vec::new();
     }
@@ -298,7 +303,8 @@ pub fn why_nothing(sounds: &[Sound], index: &SoundIndex, o: &Options) -> String 
         return format!("None of your {kind}sounds have been listened to closely enough to suggest. {next}");
     }
     if let Some((first, last)) = o.years {
-        of_type.retain(|s| dated_in(s, o.years));
+        let dates = RealDates::now();
+        of_type.retain(|s| dated_in(s, o.years, &dates));
         if of_type.is_empty() {
             let when = if first == last { first.to_string() } else { format!("{first} to {last}") };
             return format!("No {kind}sounds are dated {when}. Pick other years on the strip, or clear it.");
@@ -553,10 +559,13 @@ mod tests {
         sounds[1].added = chrono::NaiveDate::from_ymd_opt(1970, 1, 1).unwrap().into();
         sounds[2].added = at(2024);
         sounds[3].added = at(2107);
-        assert_eq!(years(&sounds), [(2107, 1), (2024, 1), (2019, sounds.len() - 3), (1970, 1)]);
+        // A date still to come (a broken one) and a file with none (1970) are in no year.
+        assert_eq!(years(&sounds), [(2024, 1), (2019, sounds.len() - 3)]);
         // A span of years lets in each year in it, its ends too.
-        assert!(dated_in(&sounds[2], Some((2020, 2024))));
-        assert!(!dated_in(&sounds[0], Some((2020, 2024))));
-        assert!(dated_in(&sounds[0], None));
+        let d = RealDates::now();
+        assert!(dated_in(&sounds[2], Some((2020, 2024)), &d));
+        assert!(!dated_in(&sounds[0], Some((2020, 2024)), &d));
+        assert!(dated_in(&sounds[0], None, &d));
+        assert!(!dated_in(&sounds[3], Some((1, 9999)), &d) && !dated_in(&sounds[1], Some((1, 9999)), &d));
     }
 }

@@ -195,7 +195,7 @@ impl Model for Lines {
             details: details.into(),
             phrase: page::phrase_text(e).into(),
             key: page::key_text(e).into(),
-            date: page::date_text(e.phrase.source.mtime).into(),
+            date: page::date_text(&p.cat.dates, e.phrase.source.mtime).into(),
             bars: if e.phrase.bars > 0 { e.phrase.bars.to_string() } else { String::new() }.into(),
             files: thousands(e.copies()).into(),
             colour: colour(e.role()),
@@ -520,16 +520,17 @@ pub fn shown(app: &AppWindow) {
         Some(p.library.clone())
     });
     let Some(library) = library else { return };
-    // Ctrl+K read the index already: the page takes that read, or waits for it if it's still going.
+    // Ctrl+K read the index already: the page takes that read, or waits for it if it's still going. The read goes in a
+    // Box: on Windows, where a PathBuf is bigger, it's over clippy's size limit for one arm of an enum.
     enum Kept {
-        Read(Result<Loaded, String>),
+        Read(Box<Result<Loaded, String>>),
         Coming,
         None,
     }
     let kept = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         match p.finder_loaded.take() {
-            Some(read) => Kept::Read(read),
+            Some(read) => Kept::Read(Box::new(read)),
             None if p.finder_read && !p.finder_let_go => {
                 p.finder_for_page = true;
                 Kept::Coming
@@ -538,7 +539,7 @@ pub fn shown(app: &AppWindow) {
         }
     });
     match kept {
-        Kept::Read(read) => return show(app, read),
+        Kept::Read(read) => return show(app, *read),
         Kept::Coming => return,
         Kept::None => {}
     }
@@ -1028,8 +1029,10 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
         let shortcuts = p.shortcuts.clone();
         let e = p.cat.entry(at)?;
         let card = card(e);
-        let facts: Vec<MidiFact> =
-            page::facts(e).into_iter().map(|(n, v)| MidiFact { name: n.into(), value: v.into() }).collect();
+        let facts: Vec<MidiFact> = page::facts(e, &p.cat.dates)
+            .into_iter()
+            .map(|(n, v)| MidiFact { name: n.into(), value: v.into() })
+            .collect();
         let (actions, menu) = actions(e, &shortcuts);
         data.set_picked(card);
         data.set_facts(ModelRc::new(VecModel::from(facts)));
