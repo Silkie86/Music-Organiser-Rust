@@ -298,6 +298,33 @@ cargo run -p mo-theorybench --release -- keycheck "L:\New Midi" --counts
 - A path with `..` in it (`keycheck "..\Other Pack"`) is read as the folders it names: a file takes its key only from
   folders it's really in.
 
+### Checking the finder on his songs (`songkeys`)
+
+Before the Songs page shows keys, version 5 is measured on Solomon's own songs: it was fitted on public songs and
+rescaled on his packs, never on his projects. `songkeys` reads the song library (read-only) and every project in it
+with a key typed on the Songs page, or with a key in its name, and prints how often each answer gives that key.
+
+```
+cargo run -p mo-theorybench --release -- songkeys "I:\MusicOrganiser\songs.db" --counts
+cargo run -p mo-theorybench --release -- songkeys "I:\MusicOrganiser\songs.db" --misses
+```
+
+- Four answers side by side: the old app's (`detected_key`, as the library holds it), version 4 and the finder built
+  in, both hearing the song as it plays, and the finder built in hearing each pattern once ("patterns", as the MIDI
+  page finds them, one after another).
+- "As it plays": FL Studio's channels with their notes where the playlist puts them (muted clips and tracks left
+  out); Bitwig's and Studio One's instrument tracks from the arrangement preview's first view (Bitwig's scenes one
+  after another when its arranger is empty). Drums aren't heard: drum plugins (FPC, Battery, Drum Machine...), parts
+  the MIDI page's guess calls drums, and FL channels that play a sample, whose pitch the notes don't tell. All of it
+  is read as one whole song, four beats a bar.
+- The typed key is the one scored against. Songs with none whose name gives one key (read as `packs` reads names)
+  get a table of their own. Typed text that isn't a key ("Dorian") is listed and left out.
+- The tables say how often each answer gives the key or leans to it, the MIREX score, how the misses stand to the
+  key (relative, a fifth away, the same home note in the other mode, another key, none), how often the finder is sure
+  of one key and right, and how often it gives a key or its relative with one of them right. Every key, then the
+  minor and the major keys apart; the typed keys also by DAW.
+- It prints only. What it prints names his songs: save it outside the repository.
+
 ## Chords
 
 The C# app's chord reader runs unchanged through the small C# helper in `cs/`, which needs .NET 10 and a clone of the
