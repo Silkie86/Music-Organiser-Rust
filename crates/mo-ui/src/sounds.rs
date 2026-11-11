@@ -318,9 +318,8 @@ thread_local! {
     static TILE_ROWS: Rc<TileRows> = PAGE.with(|p| Rc::new(TileRows { page: p.clone(), notify: ModelNotify::default() }));
     static LINES: Rc<Lines> = PAGE.with(|p| Rc::new(Lines { page: p.clone(), notify: ModelNotify::default() }));
     static WORKER: RefCell<Option<Newest<Ask>>> = const { RefCell::new(None) };
-    /// The filters' chips and menu lines (type, length, key, tempo, tag), changed in place so an open menu keeps its
-    /// place.
-    static FILTER_MODELS: [FilterModels; 5] = Default::default();
+    /// The filters' chips and menu lines (type, length, key, tag), changed in place so an open menu keeps its place.
+    static FILTER_MODELS: [FilterModels; 4] = Default::default();
     /// The picked sound's tags on its panel.
     static PICKED_TAGS: FilterModels = FilterModels::default();
     /// Each view's own choices on show, changed in place as the filters' are.
@@ -2366,6 +2365,11 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     let weak = app.as_weak();
     data.on_toggle_choice(move |chip, choice| change(&weak, |f| f.pick(&chip, &choice)));
     let weak = app.as_weak();
+    data.on_tempo_picked(move |low, high| change(&weak, |f| f.set_tempo(low, high)));
+    data.set_tempo_low_end(list::TEMPO_LOW);
+    data.set_tempo_high_end(list::TEMPO_HIGH);
+    data.set_tempo_step(list::TEMPO_STEP);
+    let weak = app.as_weak();
     data.on_clear_chip(move |chip| {
         if chip == "more-types" {
             // The More types menu's Any: the types on chips of their own stay picked.
@@ -3266,9 +3270,12 @@ fn show_chips(app: &AppWindow) {
             data.set_type_filter(m[0].view(&chips.types));
             data.set_length_filter(m[1].view(&chips.length));
             data.set_key_filter(m[2].view(&chips.key));
-            data.set_tempo_filter(m[3].view(&chips.tempo));
-            data.set_tag_filter(m[4].view(&chips.tag));
+            data.set_tag_filter(m[3].view(&chips.tag));
         });
+        data.set_tempo_low(chips.tempo.low);
+        data.set_tempo_high(chips.tempo.high);
+        data.set_tempo_words(chips.tempo.words.into());
+        data.set_tempo_bars(ModelRc::new(VecModel::from(chips.tempo.bars)));
         data.set_any_type(!f.sound_types.is_empty());
         data.set_mix_well(f.mix_well);
         data.set_unused(f.unused);

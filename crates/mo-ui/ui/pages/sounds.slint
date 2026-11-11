@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, OneOfChip, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -313,9 +313,19 @@ export global SoundsData {
     in property <FilterView> type-filter;
     in property <FilterView> length-filter;
     in property <FilterView> key-filter;
-    in property <FilterView> tempo-filter;
     in property <FilterView> tag-filter;
-    // A choice was picked or unpicked: the filter ("type", "length", "key", "tempo" or "tag") and the choice's words.
+    // The Tempo slider: its two ends and step in BPM, where its handles are (at an end: no limit there), what's
+    // picked in words, and how many sounds there are at each tempo as bars (0 to 1 of the tallest).
+    in property <int> tempo-low-end: 60;
+    in property <int> tempo-high-end: 200;
+    in property <int> tempo-step: 5;
+    in property <int> tempo-low: 60;
+    in property <int> tempo-high: 200;
+    in property <string> tempo-words: "Any tempo";
+    in property <[float]> tempo-bars;
+    // A handle was moved: the lowest and highest tempo now.
+    callback tempo-picked(int, int);
+    // A choice was picked or unpicked: the filter ("type", "length", "key" or "tag") and the choice's words.
     callback toggle-choice(string, string);
     // Picks nothing on a filter: "type" (Clear types), "more-types" (the More types menu's Any) or another filter.
     callback clear-chip(string);
@@ -1989,11 +1999,28 @@ export component SoundsPage inherits Rectangle {
                     toggled(text) => { SoundsData.toggle-choice("type", text); }
                     cleared => { SoundsData.clear-chip("more-types"); }
                 }
-                FilterList {
-                    name: "LENGTH";
-                    filter: SoundsData.length-filter;
-                    toggled(text) => { SoundsData.toggle-choice("length", text); }
-                    cleared => { SoundsData.clear-chip("length"); }
+                // One of three, so a switch: both, hits (one-shots) or loops.
+                VerticalLayout {
+                    Caps {
+                        text: "LENGTH";
+                        height: 22px;
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        Segmented {
+                            property <[FilterChoice]> lengths: SoundsData.length-filter.chips;
+                            choices: ["All", "Hits", "Loops"];
+                            pad: Space.md;
+                            current: self.lengths.length < 2 ? 0 : self.lengths[0].on ? 1 : self.lengths[1].on ? 2 : 0;
+                            picked(i) => {
+                                if i == 0 {
+                                    SoundsData.clear-chip("length");
+                                } else if i != self.current {
+                                    SoundsData.toggle-choice("length", self.lengths[i - 1].text);
+                                }
+                            }
+                        }
+                    }
                 }
                 FilterList {
                     name: "KEY";
@@ -2006,11 +2033,34 @@ export component SoundsPage inherits Rectangle {
                     on: SoundsData.mix-well;
                     clicked => { SoundsData.toggle("mix-well"); }
                 }
-                FilterList {
-                    name: "TEMPO";
-                    filter: SoundsData.tempo-filter;
-                    toggled(text) => { SoundsData.toggle-choice("tempo", text); }
-                    cleared => { SoundsData.clear-chip("tempo"); }
+                // A span of tempos, so a slider with two handles; its bars show where the sounds are.
+                VerticalLayout {
+                    padding-right: Space.sm;
+                    HorizontalLayout {
+                        height: 22px;
+                        Caps {
+                            text: "TEMPO";
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            text: SoundsData.tempo-words;
+                            color: tempo.on ? Theme.text : Theme.faint;
+                            font-size: Type.meta;
+                            font-weight: tempo.on ? 600 : 400;
+                            horizontal-alignment: right;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                    }
+                    tempo := RangeSlider {
+                        low-end: SoundsData.tempo-low-end;
+                        high-end: SoundsData.tempo-high-end;
+                        step: SoundsData.tempo-step;
+                        low: SoundsData.tempo-low;
+                        high: SoundsData.tempo-high;
+                        bars: SoundsData.tempo-bars;
+                        changed(low, high) => { SoundsData.tempo-picked(low, high); }
+                    }
                 }
                 if SoundsData.tag-filter.chips.length + SoundsData.tag-filter.more.length > 0: FilterList {
                     name: "TAG";

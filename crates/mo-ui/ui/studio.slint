@@ -1251,6 +1251,99 @@ export component TickLine inherits Rectangle {
     }
 }
 
+// A slider with two handles, for a span of numbers (the Sounds page's Tempo, in the filter column): what's let
+// through lies between them, both ends in. A handle at its end sets no limit there, so with both at their ends nothing
+// is lit (the accent means "on"). `bars` stand over the track, one for each equal part of it: how much there is at
+// each place, 0 to 1 of the tallest, and the ones between the handles are the bright ones. A press takes the nearer
+// handle and a drag moves it a `step` at a time; `changed` says where both are, and the page gives them back as
+// `low` and `high`.
+export component RangeSlider inherits Rectangle {
+    in property <int> low-end;
+    in property <int> high-end: 100;
+    in property <int> step: 1;
+    in property <int> low;
+    in property <int> high: 100;
+    in property <[float]> bars;
+    callback changed(int, int);
+    out property <bool> on: root.low > root.low-end || root.high < root.high-end;
+    property <length> knob: 14px;
+    // How far a handle's middle can go.
+    property <length> run: self.width - root.knob;
+    property <length> track-y: 34px;
+    pure function place(value: int) -> length {
+        return root.knob / 2 + root.run * (value - root.low-end) / max(1, root.high-end - root.low-end);
+    }
+    pure function value-at(x: length) -> int {
+        return clamp(root.low-end + Math.round((x - root.knob / 2) / root.run * (root.high-end - root.low-end) / root.step) * root.step, root.low-end, root.high-end);
+    }
+    height: 46px;
+    for share[i] in root.bars: Rectangle {
+        property <length> slot: root.run / root.bars.length;
+        // The numbers this bar stands for, and whether any of them are between the handles.
+        property <float> from: root.low-end + i * (root.high-end - root.low-end) / root.bars.length;
+        property <float> to: root.low-end + (i + 1) * (root.high-end - root.low-end) / root.bars.length;
+        property <bool> inside: (self.to > root.low && self.from < root.high) || (root.low == root.high && self.from <= root.low && self.to > root.low);
+        x: root.knob / 2 + i * self.slot + 1px;
+        y: root.track-y - 6px - self.height;
+        width: self.slot - 2px;
+        height: max(2px, share * 26px);
+        border-radius: 1px;
+        background: !self.inside ? Theme.faint.transparentize(70%) : root.on ? Theme.accent : Theme.faint;
+    }
+    Rectangle {
+        x: root.knob / 2;
+        y: root.track-y;
+        width: root.run;
+        height: 4px;
+        border-radius: 2px;
+        background: Theme.well;
+        border-width: 1px;
+        border-color: Theme.stroke;
+    }
+    Rectangle {
+        x: root.place(root.low);
+        y: root.track-y;
+        width: root.place(root.high) - self.x;
+        height: 4px;
+        border-radius: 2px;
+        background: root.on ? Theme.accent : Theme.faint.transparentize(40%);
+    }
+    for at in [root.low, root.high]: Rectangle {
+        x: root.place(at) - root.knob / 2;
+        y: root.track-y + 2px - root.knob / 2;
+        width: root.knob;
+        height: root.knob;
+        border-radius: root.knob / 2;
+        border-width: 1px;
+        border-color: Theme.edge;
+        background: touch.has-hover || touch.pressed ? Theme.text : Theme.muted.brighter(20%);
+        animate background { duration: Motion.tap; }
+    }
+    touch := TouchArea {
+        // Which handle the press took: the higher one, or the lower.
+        property <bool> high-held;
+        function follow() {
+            if self.high-held {
+                root.changed(root.low, max(root.low, root.value-at(self.mouse-x)));
+            } else {
+                root.changed(min(root.high, root.value-at(self.mouse-x)), root.high);
+            }
+        }
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.left {
+                // The nearer handle; where they share a place, the one that can go the way the press is.
+                self.high-held = root.low == root.high ? self.mouse-x > root.place(root.high) : abs(self.mouse-x - root.place(root.high)) < abs(self.mouse-x - root.place(root.low));
+                self.follow();
+            }
+        }
+        moved => {
+            if self.pressed {
+                self.follow();
+            }
+        }
+    }
+}
+
 // A filter in the filter column (Solomon, 10 Nov 2026: the chips "are taking up alot of space and look messy"; he
 // picked a column of tick lists at the page's side): its name in capitals, each choice a TickLine under it, every one
 // in sight, and a longer list's rest in a menu under them (`more-name`). It shows the same FilterView as FilterPicks.

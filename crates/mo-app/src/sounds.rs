@@ -96,14 +96,15 @@ pub const TAG: &str = "tag";
 /// The Hide duplicates chip's name, as the page gives it to [`Filters::toggle`]; also the setting it's kept in.
 pub const HIDE_COPIES: &str = "hide-copies";
 
-/// The Tempo chips' choices, and the tempos each lets through (lowest, highest).
-pub const TEMPOS: [(&str, Option<f64>, Option<f64>); 5] = [
-    ("Up to 90", None, Some(90.0)),
-    ("90 to 110", Some(90.0), Some(110.0)),
-    ("110 to 130", Some(110.0), Some(130.0)),
-    ("130 to 150", Some(130.0), Some(150.0)),
-    ("150 and up", Some(150.0), None),
-];
+/// The Tempo slider's two ends in BPM, and how far a handle moves at a time. A handle at an end sets no limit there:
+/// the lowest place is "however slow", the highest "however fast".
+pub const TEMPO_LOW: i32 = 60;
+pub const TEMPO_HIGH: i32 = 200;
+pub const TEMPO_STEP: i32 = 5;
+/// The bars over the Tempo slider: how many sounds there are at each tempo, one bar for every [`TEMPO_BAR`] BPM from
+/// [`TEMPO_LOW`] to [`TEMPO_HIGH`]. Slower sounds are in the first bar and faster ones in the last.
+pub const TEMPO_BARS: usize = 14;
+const TEMPO_BAR: i32 = 10;
 
 /// How many types are chips of their own, the most used; the rest are in the type filter's More menu.
 pub const TYPE_CHIPS: usize = 9;
@@ -126,8 +127,9 @@ pub struct Filters {
     pub keys: Vec<(i32, bool)>,
     /// With keys picked: also the keys that mix well with each (Camelot neighbours).
     pub mix_well: bool,
-    /// The Tempo chips picked, by their words ([`TEMPOS`]): a sound shows when its tempo is in any of them.
-    pub tempos: Vec<String>,
+    /// The Tempo slider's lowest and highest tempo, both ends in ([`Filters::set_tempo`]). No lowest means however
+    /// slow, no highest however fast; with either set, a sound with no tempo is left out.
+    pub tempo: (Option<f64>, Option<f64>),
     /// Only sounds no project uses. Ignored until the use counts are known.
     pub unused: bool,
     /// Only sounds some project uses. Ignored until the use counts are known.
@@ -156,8 +158,8 @@ impl Filters {
     }
 
     /// Picks or unpicks `choice` (as its chip or menu line says it) on the filter `chip` ([`TYPE`], [`LENGTH`],
-    /// [`KEY`], [`TEMPO`], [`TAG`]). More than one type, key, tempo or tag can be picked; one length, as hits and loops
-    /// together are every sound.
+    /// [`KEY`], [`TAG`]). More than one type, key or tag can be picked; one length, as hits and loops together are
+    /// every sound. The tempo isn't picked from choices: it has a slider ([`Filters::set_tempo`]).
     pub fn pick(&mut self, chip: &str, choice: &str) {
         match chip {
             TYPE => self.toggle_type(choice),
@@ -175,10 +177,21 @@ impl Filters {
                     chips::toggle_as(&mut self.keys, &words((tonic, minor)), true, words, music::parse_key);
                 }
             }
-            TEMPO if TEMPOS.iter().any(|t| t.0 == choice) => chips::toggle(&mut self.tempos, choice, true),
             TAG => chips::toggle(&mut self.tags, choice, true),
             _ => {}
         }
+    }
+
+    /// The Tempo slider's handles were put at `low` and `high` BPM. They go to the nearest step between
+    /// [`TEMPO_LOW`] and [`TEMPO_HIGH`], the lower one first; a handle at an end sets no limit there, so both at
+    /// their ends is every tempo, and the sounds with none.
+    pub fn set_tempo(&mut self, low: i32, high: i32) {
+        let step = |bpm: i32| {
+            let bpm = bpm.clamp(TEMPO_LOW, TEMPO_HIGH);
+            TEMPO_LOW + (bpm - TEMPO_LOW + TEMPO_STEP / 2) / TEMPO_STEP * TEMPO_STEP
+        };
+        let (low, high) = (step(low.min(high)), step(low.max(high)));
+        self.tempo = ((low > TEMPO_LOW).then_some(f64::from(low)), (high < TEMPO_HIGH).then_some(f64::from(high)));
     }
 
     /// The type filter's More menu's Any: unpicks the types in the menu, and keeps the ones picked on chips of their
@@ -193,7 +206,7 @@ impl Filters {
             TYPE => self.sound_types.clear(),
             LENGTH => self.length = Length::All,
             KEY => self.keys.clear(),
-            TEMPO => self.tempos.clear(),
+            TEMPO => self.tempo = (None, None),
             TAG => self.tags.clear(),
             _ => {}
         }
@@ -963,8 +976,8 @@ struct Test<'a> {
     favourites: bool,
     tags: &'a [String],
     keys: Option<Vec<(i32, bool)>>,
-    /// The tempos picked, lowest and highest of each.
-    tempos: Vec<(Option<f64>, Option<f64>)>,
+    /// The lowest and highest tempo let through.
+    tempo: (Option<f64>, Option<f64>),
     years: Option<(i32, i32)>,
     folder: Option<&'a str>,
     words: Vec<String>,
@@ -994,7 +1007,7 @@ impl<'a> Test<'a> {
             favourites: f.favourites,
             tags: &f.tags,
             keys,
-            tempos: TEMPOS.iter().filter(|t| f.tempos.iter().any(|w| w == t.0)).map(|t| (t.1, t.2)).collect(),
+            tempo: f.tempo,
             years: f.years,
             folder: f.folder.as_deref(),
             words: f.search.split_whitespace().map(str::to_lowercase).collect(),
@@ -1025,7 +1038,7 @@ fn facets(now: &Now, t: &Test) -> [bool; FACETS] {
             Length::Loops => is_loop,
         },
         t.keys.as_ref().is_none_or(|keys| key_of(s).is_some_and(|k| keys.contains(&k))),
-        t.tempos.is_empty() || t.tempos.iter().any(|&range| tempo_in(bpm, range)),
+        tempo_in(bpm, t.tempo),
         t.tags.is_empty() || t.tags.iter().any(|w| now.tags.iter().any(|own| own.eq_ignore_ascii_case(w))),
     ]
 }
@@ -1034,6 +1047,39 @@ fn facets(now: &Now, t: &Test) -> [bool; FACETS] {
 /// is left out; with a highest, likewise.
 fn tempo_in(bpm: Option<f64>, (lo, hi): (Option<f64>, Option<f64>)) -> bool {
     !(lo.is_some_and(|lo| bpm.unwrap_or(-1.0) < lo) || hi.is_some_and(|hi| bpm.is_none_or(|b| b > hi)))
+}
+
+/// Which of the Tempo slider's bars a tempo is counted in.
+fn tempo_bar(bpm: f64) -> usize {
+    let bar = ((bpm - f64::from(TEMPO_LOW)) / f64::from(TEMPO_BAR)).floor();
+    // A tempo read wrongly (not a number, or huge) still lands in a bar.
+    if bar.is_nan() { 0 } else { bar.clamp(0.0, (TEMPO_BARS - 1) as f64) as usize }
+}
+
+/// The Tempo slider as the page shows it ([`chips`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TempoPick {
+    /// Where the two handles are, in BPM: [`TEMPO_LOW`] and [`TEMPO_HIGH`] when there's no limit.
+    pub low: i32,
+    pub high: i32,
+    /// What's picked, in words: "Any tempo", "90 to 130 BPM".
+    pub words: String,
+    /// How tall each bar is, 0 to 1 of the tallest ([`SoundCounts::tempos`]); all flat until a list has been counted.
+    pub bars: Vec<f32>,
+}
+
+fn tempo_pick(f: &Filters, counts: Option<&SoundCounts>) -> TempoPick {
+    let whole = |bpm: f64| bpm.round() as i32;
+    let words = match f.tempo {
+        (None, None) => "Any tempo".to_owned(),
+        (Some(low), None) => format!("{} BPM and up", whole(low)),
+        (None, Some(high)) => format!("Up to {} BPM", whole(high)),
+        (Some(low), Some(high)) if low == high => format!("{} BPM", whole(low)),
+        (Some(low), Some(high)) => format!("{} to {} BPM", whole(low), whole(high)),
+    };
+    let tallest = counts.and_then(|c| c.tempos.iter().copied().max()).unwrap_or(0).max(1);
+    let bars = (0..TEMPO_BARS).map(|i| counts.map_or(0.0, |c| c.tempos[i] as f32 / tallest as f32)).collect();
+    TempoPick { low: f.tempo.0.map_or(TEMPO_LOW, whole), high: f.tempo.1.map_or(TEMPO_HIGH, whole), words, bars }
 }
 
 /// A sound's key (tonic 0 to 11, minor), when the analysis found one.
@@ -1063,7 +1109,7 @@ struct Tally<'a> {
     types: HashMap<&'a str, usize>,
     lengths: [usize; 2],
     keys: [usize; 24],
-    tempos: [usize; TEMPOS.len()],
+    tempos: [usize; TEMPO_BARS],
     tags: HashMap<&'a str, usize>,
 }
 
@@ -1086,13 +1132,10 @@ impl<'a> Tally<'a> {
         {
             self.keys[key_place(tonic, minor)] += 1;
         }
-        if on(TEMPO_AT) {
-            let bpm = a.and_then(|a| a.bpm);
-            for (n, t) in self.tempos.iter_mut().zip(TEMPOS) {
-                if tempo_in(bpm, (t.1, t.2)) {
-                    *n += 1;
-                }
-            }
+        if on(TEMPO_AT)
+            && let Some(bpm) = a.and_then(|a| a.bpm)
+        {
+            self.tempos[tempo_bar(bpm)] += 1;
         }
         if on(TAG_AT) {
             let tags = now.tags;
@@ -1162,21 +1205,22 @@ pub struct SoundCounts {
     pub lengths: [usize; 2],
     /// By key: its tonic (0 = C) times two, plus one for minor.
     pub keys: [usize; 24],
-    /// In [`TEMPOS`]' order.
-    pub tempos: [usize; TEMPOS.len()],
+    /// By tempo: the Tempo slider's bars ([`TEMPO_BARS`]), slowest first. A sound with no tempo is in none.
+    pub tempos: [usize; TEMPO_BARS],
     /// By tag, in lower case (ASCII letters only).
     pub tags: HashMap<String, usize>,
 }
 
 /// The page's filters as their chips and menus show them, each choice with how many sounds it would show: the types
 /// (the most used as chips of their own, the rest in a More menu), hits or loops, the key (a menu: there are 24), the
-/// tempo, and the tags (chips, or a menu when there are many).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// tempo (a slider, with bars for how many sounds there are at each tempo), and the tags (chips, or a menu when there
+/// are many).
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct SoundChips {
     pub types: Filter,
     pub length: Filter,
     pub key: Filter,
-    pub tempo: Filter,
+    pub tempo: TempoPick,
     pub tag: Filter,
 }
 
@@ -1207,14 +1251,12 @@ pub fn chips(f: &Filters, counts: Option<&SoundCounts>, types: &[(String, usize)
     let keys: Vec<(String, String)> =
         every_key().map(|(t, m)| (music::key_name(t, m, false), shown(&|c| in_key(c, t, m)))).collect();
     let keys_picked: Vec<String> = f.keys.iter().map(|&(t, m)| music::key_name(t, m, false)).collect();
-    let tempos: Vec<(String, String)> =
-        TEMPOS.iter().enumerate().map(|(i, t)| (t.0.to_owned(), shown(&|c| c.tempos[i]))).collect();
     let tags: Vec<(String, String)> = tags.iter().map(|t| (t.clone(), shown(&|c| by_word(&c.tags, t)))).collect();
     SoundChips {
         types: chips::show_split(&types, &f.sound_types, TYPE_CHIPS),
         length: chips::show(&lengths, &length),
         key: chips::show(&keys, &keys_picked),
-        tempo: chips::show(&tempos, &f.tempos),
+        tempo: tempo_pick(f, counts),
         tag: chips::show(&tags, &f.tags),
     }
 }
@@ -1928,11 +1970,17 @@ mod tests {
         assert_eq!(by(Filters { tags: vec!["dark".into()], ..Filters::default() }), vec![3]);
         assert_eq!(by(Filters { keys: vec![(5, true)], ..Filters::default() }), vec![3]);
         assert_eq!(by(Filters { keys: vec![(5, true), (9, true)], ..Filters::default() }), vec![3, 2]);
-        let tempos = |t: &[&str]| Filters { tempos: t.iter().map(|w| (*w).to_owned()).collect(), ..Filters::default() };
-        assert_eq!(by(tempos(&["130 to 150"])), vec![2]);
-        // Both ends are in, so 90 is up to 90 and 90 to 110; a sound with no tempo is in none.
-        assert_eq!(by(tempos(&["Up to 90"])), vec![4]);
-        assert_eq!(by(tempos(&["90 to 110", "130 to 150"])), vec![4, 2]);
+        let tempo = |low: i32, high: i32| {
+            let mut f = Filters::default();
+            f.set_tempo(low, high);
+            f
+        };
+        assert_eq!(by(tempo(130, 150)), vec![2]);
+        // Both ends are in, so 90 is up to 90 and 90 and up; a sound with no tempo is in neither.
+        assert_eq!(by(tempo(TEMPO_LOW, 90)), vec![4]);
+        assert_eq!(by(tempo(90, TEMPO_HIGH)), vec![4, 2]);
+        // Both handles at their ends is every sound, the ones with no tempo too.
+        assert_eq!(by(tempo(TEMPO_LOW, TEMPO_HIGH)), vec![4, 3, 1, 2]);
         assert_eq!(by(Filters { search: "samples LOOPS".into(), ..Filters::default() }), vec![2]);
         assert_eq!(by(Filters { search: "kick pad".into(), ..Filters::default() }), Vec::<i64>::new());
     }
@@ -2009,14 +2057,19 @@ mod tests {
         f.pick(KEY, "A minor");
         f.pick(KEY, "C major");
         f.pick(KEY, "Am");
-        f.pick(TEMPO, "90 to 110");
-        f.pick(TEMPO, "No such tempo");
+        // The handles go to the nearest step, the lower one first, and stay on the slider.
+        f.set_tempo(112, 88);
         f.pick(TAG, "Dark");
         f.pick(TAG, "Warm");
         f.pick(LENGTH, "Loops");
         assert_eq!(f.sound_types, ["Kick", "Vocal"]);
         assert_eq!(f.keys, [(0, false)]);
-        assert_eq!(f.tempos, ["90 to 110"]);
+        assert_eq!(f.tempo, (Some(90.0), Some(110.0)));
+        let mut ends = Filters::default();
+        ends.set_tempo(20, 400);
+        assert!(!ends.any());
+        ends.set_tempo(TEMPO_LOW, 120);
+        assert_eq!(ends.tempo, (None, Some(120.0)));
         assert_eq!(f.tags, ["Dark", "Warm"]);
         assert_eq!(f.length, Length::Loops);
         // One length: hits takes the place of loops, and picking it again is both.
@@ -2046,7 +2099,20 @@ mod tests {
         let (shown, counts) = list.view_counted(&Filters::default(), Order::Name, 0);
         assert_eq!(shown.len(), 4);
         assert_eq!(counts.lengths, [2, 2]);
-        assert_eq!(counts.tempos, [1, 1, 0, 1, 0]);
+        // One sound at 90 BPM and one at 140: the bars are 10 BPM wide from 60.
+        assert_eq!(counts.tempos[3], 1);
+        assert_eq!(counts.tempos.iter().sum::<usize>(), 2);
+        let pick = chips(&Filters::default(), Some(&counts), &[], &[]).tempo;
+        assert_eq!((pick.low, pick.high, pick.words.as_str()), (TEMPO_LOW, TEMPO_HIGH, "Any tempo"));
+        assert_eq!((pick.bars.len(), pick.bars[3]), (TEMPO_BARS, 1.0));
+        let mut slow = Filters::default();
+        slow.set_tempo(TEMPO_LOW, 100);
+        assert_eq!(chips(&slow, None, &[], &[]).tempo.words, "Up to 100 BPM");
+        slow.set_tempo(90, 130);
+        assert_eq!(chips(&slow, None, &[], &[]).tempo.words, "90 to 130 BPM");
+        slow.set_tempo(150, TEMPO_HIGH);
+        assert_eq!(chips(&slow, None, &[], &[]).tempo.words, "150 BPM and up");
+        assert_eq!((tempo_bar(12.0), tempo_bar(999.0), tempo_bar(f64::NAN)), (0, TEMPO_BARS - 1, 0));
         assert_eq!(counts.tags.get("dark"), Some(&1));
         // Kick picked: the other types still count (picking one shows it too), the rest count only kicks.
         let kick = Filters { sound_types: vec!["kick".into()], ..Filters::default() };
