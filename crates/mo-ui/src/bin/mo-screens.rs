@@ -585,6 +585,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_note_open(false);
     // After the shots: it leaves a line picked on each of those pages.
     opened_in_sight(&app, &window)?;
+    lists_keep_their_place(&app, &window)?;
     key_checks(&app)?;
     card_keys_checks(&app, &window, &out)?;
     rail_checks(&app)?;
@@ -1083,6 +1084,82 @@ fn finder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
     finder::close(app);
 }
+
+/// Every list keeps its place (Solomon's F12 note of 11 Nov): turned down, its page left and shown again, it's where it
+/// was, and the button over its bottom right corner takes it back to its top, as Home does. Before, a page made again
+/// put its list back at its top. In the short window, where every list turns; each is left at its top for what follows.
+fn lists_keep_their_place(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    use mo_app::presets::Section;
+    use slint::platform::Key;
+    let sounds = app.global::<mo_ui::SoundsData>();
+    let (view_before, curves_before) = (sounds.get_view(), app.global::<mo_ui::PresetsData>().get_section() == 1);
+    window.set_size(PhysicalSize::new(WIDTH, SHORT));
+    let mut wrong = Vec::new();
+    let ((x, y), list) = (SHORT_LIST_WHEEL, SHORT_LIST);
+    for (name, place, view, (button_x, button_y)) in LISTS {
+        start_on(app, place);
+        match place {
+            Place::Sounds => sounds.invoke_pick_view(view),
+            Place::Presets => mo_ui::presets::show_section(app, Section::Sounds),
+            _ => {}
+        }
+        // Drawn once first: a list made for another view turns to the picked sound a turn later.
+        hover(window, -1.0, -1.0);
+        capture(window);
+        press(app, Key::Home, false);
+        let top = capture(window);
+        scroll(window, x, y, -2.0 * SHORT_TURN);
+        hover(window, -1.0, -1.0);
+        let down = capture(window);
+        if same_in(&top, &down, list) {
+            wrong.push(format!("{name}: the wheel at {x}, {y} moved nothing (is it still over the list?)"));
+            continue;
+        }
+        start_on(app, Place::Backup);
+        capture(window);
+        start_on(app, place);
+        // Drawn twice: the page is made in the first draw, and what it does a turn later shows in the second.
+        capture(window);
+        if !same_in(&down, &capture(window), list) {
+            wrong.push(format!("{name}: shown again after another page, it isn't where it was"));
+        }
+        click(window, button_x, button_y);
+        hover(window, -1.0, -1.0);
+        if !same_in(&top, &capture(window), list) {
+            wrong.push(format!("{name}: the button at {button_x}, {button_y} didn't take it back to its top"));
+        }
+        scroll(window, x, y, -2.0 * SHORT_TURN);
+        hover(window, -1.0, -1.0);
+        if same_in(&top, &capture(window), list) {
+            wrong.push(format!("{name}: the wheel moved nothing after the button"));
+            continue;
+        }
+        press(app, Key::Home, false);
+        if !same_in(&top, &capture(window), list) {
+            wrong.push(format!("{name}: Home didn't take it back to its top"));
+        }
+    }
+    sounds.invoke_pick_view(view_before);
+    if curves_before {
+        mo_ui::presets::show_section(app, Section::Curves);
+    }
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    start_on_songs(app);
+    capture(window);
+    if wrong.is_empty() { Ok(()) } else { Err(format!("A list's place: {}", wrong.join("; "))) }
+}
+
+/// Each list [`lists_keep_their_place`] turns, in the short window: its name, its page with the Sounds view, and the
+/// middle of its button (the wheel and the comparing are over [`SHORT_LIST`], as for [`opened_in_sight`]). Not the
+/// Presets page's curves: the sample's four fit in the window.
+const LISTS: [(&str, Place, i32, (f32, f32)); 6] = [
+    ("Songs", Place::Songs, 0, (737.0, 556.0)),
+    ("MIDI", Place::Midi, 0, (881.0, 556.0)),
+    ("Plugins", Place::Plugins, 0, (881.0, 556.0)),
+    ("Presets", Place::Presets, 0, (901.0, 556.0)),
+    ("Sounds tiles", Place::Sounds, 0, (901.0, 556.0)),
+    ("Sounds List", Place::Sounds, 1, (901.0, 556.0)),
+];
 
 /// Ctrl+K to the last song, preset, MIDI part and plugin of their pages' lists, each found by its name and opened with
 /// Enter: first from another page (Sounds), then from its own page with a search hiding it. In a short window, so each

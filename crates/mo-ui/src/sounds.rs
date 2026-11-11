@@ -108,6 +108,15 @@ struct Page {
     noter: Option<Arc<Noter>>,
     /// How many tiles fit side by side.
     columns: usize,
+    /// Whether the list made last was the tiles (or the List): a list made again comes back where it was by
+    /// itself (list.slint's `kept-y`), so only one made for the other view brings the picked sound into view.
+    made_tiles: Option<bool>,
+    /// While tiles made again are being laid out (from `list-made` until a turn later), how many columns they had
+    /// before. They first count their columns from a page that isn't laid out yet (1 or 2 for a moment), then their
+    /// own. Each count is taken at once, so the rows always fit the tiles' widths, but none of them turns the list to
+    /// the picked sound: that lost where the tiles were kept. A turn later, the picked sound is brought into view only
+    /// if the count is a new one (the window or the card changed width while the tiles were away).
+    columns_before: Option<usize>,
     /// The picked sound, as its place in `list`.
     picked: Option<usize>,
     /// A sound Ctrl+K jumped to that the filters hid: picked once the list without them arrives.
@@ -194,6 +203,8 @@ impl Default for Page {
             said: Vec::new(),
             noter: None,
             columns: 4,
+            made_tiles: None,
+            columns_before: None,
             picked: None,
             to_pick: None,
             autoplay: false,
@@ -2490,11 +2501,26 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     drag_out::wire(app);
     let weak = app.as_weak();
     data.on_list_made(move || {
+        // The tiles and the List each come back where they were when they're made again: back on the page, or
+        // back from "No sounds match". Going from one to the other brings the picked sound into view, as the
+        // other may never have shown it.
+        let other = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            let tiles = p.view == TILES;
+            let other = p.made_tiles.replace(tiles) != Some(tiles);
+            p.columns_before = (tiles && !other).then_some(p.columns);
+            other
+        });
         // A turn later, once the new list is laid out: an ask made while it's still being made is the one its
         // `changed show-ask` starts from, so it wouldn't scroll.
         let weak = weak.clone();
         Timer::single_shot(Duration::ZERO, move || {
-            if let Some(app) = weak.upgrade() {
+            let Some(app) = weak.upgrade() else { return };
+            let moved = PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.columns_before.take().is_some_and(|before| before != p.columns)
+            });
+            if other || moved {
                 bring_picked_into_view(&app);
             }
         });
@@ -2503,11 +2529,16 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     data.on_columns_changed(move |n| {
         let Some(app) = weak.upgrade() else { return };
         let n = n.max(1) as usize;
-        let changed = PAGE.with(|p| std::mem::replace(&mut p.borrow_mut().columns, n) != n);
+        let (changed, laying_out) = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            (std::mem::replace(&mut p.columns, n) != n, p.columns_before.is_some())
+        });
         if changed {
             TILE_ROWS.with(|m| m.notify.reset());
             grid::changed();
-            bring_picked_into_view(&app);
+            if !laying_out {
+                bring_picked_into_view(&app);
+            }
         }
     });
     let weak = app.as_weak();

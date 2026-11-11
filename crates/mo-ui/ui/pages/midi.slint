@@ -2,7 +2,7 @@
 // notes ("in 20 files"), with kind chips, From, Key, Order, Shuffle and the year strip; the picked part's card with
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
-import { ListView, Fit } from "../list.slint";
+import { ListView, ListBox, Fit } from "../list.slint";
 import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterList, FilterColumn, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
 
 // One part in the list.
@@ -134,6 +134,8 @@ export global MidiData {
     in property <int> show-ask;
     // The last ask the list has turned to (list.slint's ListView keeps it).
     in-out property <int> show-done;
+    // Where the list is turned to (list.slint's ListView keeps it): it's there again when the page is shown again.
+    in-out property <length> list-y;
     callback select(int);
     callback step(int);
 
@@ -836,25 +838,31 @@ export component MidiPage inherits Rectangle {
                             action: MidiData.empty-title == "" && MidiData.any-filter ? "Clear the filters" : "";
                             act => { MidiData.clear(); }
                         }
-                        if MidiData.empty-title == "" && MidiData.shown > 0: VerticalLayout {
-                            ListHeading {
-                                tight: area.list-width < 620px;
-                            }
-                            lines := ListView {
-                                row-height: 52px;
-                                rows: MidiData.lines.length;
-                                show-top: MidiData.show-row * self.row-height;
-                                show-ask: MidiData.show-ask;
-                                show-done <=> MidiData.show-done;
-                                for l in MidiData.lines: MidiLineView {
+                        if MidiData.empty-title == "" && MidiData.shown > 0: ListBox {
+                            turned: lines.content-y;
+                            after: lines.row-height;
+                            to-top => { lines.to-top(); }
+                            VerticalLayout {
+                                ListHeading {
                                     tight: area.list-width < 620px;
-                                    // Every line this height: the list counts on it.
-                                    height: lines.row-height;
-                                    line: l;
-                                    chosen => { keys.focus(); }
-                                    right-clicked(x, y) => {
-                                        keys.focus();
-                                        menu.open-at(x, y);
+                                }
+                                lines := ListView {
+                                    row-height: 52px;
+                                    rows: MidiData.lines.length;
+                                    show-top: MidiData.show-row * self.row-height;
+                                    show-ask: MidiData.show-ask;
+                                    show-done <=> MidiData.show-done;
+                                    kept-y <=> MidiData.list-y;
+                                    for l in MidiData.lines: MidiLineView {
+                                        tight: area.list-width < 620px;
+                                        // Every line this height: the list counts on it.
+                                        height: lines.row-height;
+                                        line: l;
+                                        chosen => { keys.focus(); }
+                                        right-clicked(x, y) => {
+                                            keys.focus();
+                                            menu.open-at(x, y);
+                                        }
                                     }
                                 }
                             }
