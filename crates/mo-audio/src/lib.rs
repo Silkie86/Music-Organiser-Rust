@@ -23,6 +23,13 @@ pub use read::{MAX_SECONDS, can_read_from, read, read_from, reads_exactly};
 pub use wma::WMA_EXTENSIONS;
 pub use write::write_wav;
 
+/// Which files this reader can read, as a number: raise it by one whenever it learns to read files it couldn't
+/// before (a new kind, or a fix that turns an error into sound). The sound library notes the number its unread
+/// sounds were last tried with, and tries just those again when this one is higher: files read fine before are left.
+///
+/// 1: up to November 2026. 2: WAV files that keep Ogg Vorbis inside (FL Studio's own sounds).
+pub const READS: i64 = 2;
+
 /// Whether this computer can decode this sound file (by its extension, ignoring case): WAV, AIFF, MP3, FLAC, M4A,
 /// OGG and AAC everywhere, WMA on Windows only. A sound it can't decode can be listed but not played or analysed.
 pub fn can_decode(path: &std::path::Path) -> bool {

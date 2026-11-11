@@ -116,6 +116,60 @@ pub fn plan(found: &Found, known: &[KnownSound], folders: &[String]) -> ScanPlan
     ScanPlan { listen, moves, forget }
 }
 
+/// Which files the reader can read, as a number ([`mo_audio::READS`]).
+pub const READS: i64 = mo_audio::READS;
+
+/// What [`again`] added to a scan's plan.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Again {
+    /// The paths added, in lower case as SQLite compares the library's paths (ASCII letters only).
+    pub added: HashSet<String>,
+    /// How many unread sounds couldn't be tried this time: their folder is on an unplugged drive, or couldn't be
+    /// read. Until they're tried, the library isn't noted as tried with this reader.
+    pub waiting: usize,
+}
+
+/// Adds to `listen` the files still there that the library couldn't listen to before (`unread`, by path), for when
+/// the reader has learnt to read more ([`READS`]). A file already in `listen` (it changed) isn't counted as added.
+/// `listen` stays in path order.
+///
+/// Paths are matched as the library matches them when the sound is kept (SQLite's NOCASE: ASCII letters only), so a
+/// file is never tried under a name the library would take for a new sound.
+pub fn again(listen: &mut Vec<FoundFile>, found: &Found, unread: &[String], folders: &[String]) -> Again {
+    if unread.is_empty() {
+        return Again::default();
+    }
+    let unread_keys: HashSet<String> = unread.iter().map(|p| p.to_ascii_lowercase()).collect();
+    let listening: HashSet<String> = listen.iter().map(|f| f.path.to_ascii_lowercase()).collect();
+    let mut added = HashSet::new();
+    let mut there: HashSet<String> = HashSet::new();
+    for f in &found.files {
+        let key = f.path.to_ascii_lowercase();
+        if !unread_keys.contains(&key) {
+            continue;
+        }
+        if !listening.contains(&key) {
+            listen.push(f.clone());
+            added.insert(key.clone());
+        }
+        there.insert(key);
+    }
+    if !added.is_empty() {
+        listen.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+    let away: Vec<&String> =
+        folders.iter().filter(|f| !Path::new(f.as_str()).is_dir()).chain(found.unreadable.iter()).collect();
+    let waiting = if away.is_empty() {
+        0
+    } else {
+        unread
+            .iter()
+            .filter(|p| !there.contains(&p.to_ascii_lowercase()) && away.iter().any(|a| is_inside(p, a)))
+            .count()
+    };
+    Again { added, waiting }
+}
+
 /// Whether a renamed or moved file's new path says what its old one did about what listening takes from names: loop
 /// or one-shot, tempo and key. When it doesn't ("Pad.wav" renamed "Pad 90bpm Cm.wav", or moved from "One Shots" into
 /// "Loops"), the sound is listened to again, keeping everything you gave it.

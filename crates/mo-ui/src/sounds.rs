@@ -1174,7 +1174,8 @@ fn scan_for_sounds(
     let job: RefCell<Option<Job>> = RefCell::new(None);
     let scanned = mo_app::sound_scan::scan(sounds_db, &folders, &|done, of| {
         let mut job = job.borrow_mut();
-        let job = job.get_or_insert_with(|| cards.start("Listening to new sounds", "Sounds works as usual meanwhile."));
+        let job =
+            job.get_or_insert_with(|| cards.start("Listening to your sounds", "Sounds works as usual meanwhile."));
         job.progress(done as f32 / of.max(1) as f32, Some(&format!("{} of {}", thousands(done), thousands(of))));
     });
     let job = job.into_inner();
