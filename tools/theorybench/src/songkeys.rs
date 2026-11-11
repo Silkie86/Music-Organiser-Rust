@@ -89,6 +89,11 @@ struct Song {
     typed: Result<Option<Key>, String>,
     /// The key the song's name gives.
     named: Named,
+    /// The key the names inside it give: its samples' and loops' file names, its patterns', clips' and tracks' names
+    /// ("Melody Cm 140.wav"), when they all name the same one.
+    inside: Named,
+    /// The old app's key.
+    old: Option<Key>,
     /// The old app's, version 4's and the built-in finder's answers, as the song plays; and the built-in one's with
     /// each pattern heard once. Or why the song couldn't be read.
     said: Result<[Said; 4], String>,
@@ -97,14 +102,65 @@ struct Song {
     parts: String,
 }
 
+/// What a song's key is taken from, to score the answers against. Each is a table of its own, and a song can be in
+/// more than one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Source {
+    /// The key typed on the Songs page.
+    Typed,
+    /// The key the song's own name gives.
+    Name,
+    /// The key the names inside it give ([`Song::inside`]).
+    Inside,
+    /// The old app's key: not a right answer, only one to agree with or not.
+    OldApp,
+}
+
+/// Each source: its table's title, and how a song's line says where its key came from.
+const SOURCES: [(Source, &str, &str); 4] = [
+    (Source::Typed, "Songs with a key you typed", "you typed"),
+    (Source::Name, "Songs whose own name gives one key", "its name says"),
+    (
+        Source::Inside,
+        "Songs whose samples, loops and patterns name one key (all the same one)",
+        "its samples and patterns say",
+    ),
+    (
+        Source::OldApp,
+        "Agreement with the old app, on every song it found a key for (the same key or not: neither is known right)",
+        "the old app found",
+    ),
+];
+
 impl Song {
-    /// The key it's scored against: the typed one, or else the name's (`by_name`).
-    fn truth(&self, by_name: bool) -> Option<Key> {
-        match (&self.typed, self.named, by_name) {
-            (Ok(Some(key)), _, false) => Some(*key),
-            (Ok(None), Named::Key(key), true) => Some(key),
-            _ => None,
+    /// The key it's scored against, from this source.
+    fn truth(&self, source: Source) -> Option<Key> {
+        let named = |n: Named| if let Named::Key(k) = n { Some(k) } else { None };
+        match source {
+            Source::Typed => self.typed.clone().ok().flatten(),
+            Source::Name => named(self.named),
+            Source::Inside => named(self.inside),
+            Source::OldApp => self.old,
         }
+    }
+}
+
+/// The one key a set of names gives: [`Named::Key`] when every name that gives a key gives the same one,
+/// [`Named::Unclear`] when they give different keys, [`Named::Nothing`] when none gives one.
+fn one_key<'a>(names: impl IntoIterator<Item = &'a str>) -> Named {
+    let mut keys: Vec<Key> = names
+        .into_iter()
+        .filter_map(|name| match packs::label(name, &[]).0 {
+            Named::Key(k) => Some(k),
+            Named::Nothing | Named::Unclear => None,
+        })
+        .collect();
+    keys.sort_by_key(|k| (k.tonic.number(), k.is_minor()));
+    keys.dedup();
+    match keys.as_slice() {
+        [] => Named::Nothing,
+        [k] => Named::Key(*k),
+        _ => Named::Unclear,
     }
 }
 
@@ -157,6 +213,10 @@ fn fl_parts(raw: &[u8]) -> Result<Vec<(Role, Vec<Note>)>, String> {
 fn arranged_parts(path: &Path, raw: &[u8]) -> Result<Vec<(Role, Vec<Note>)>, String> {
     let views = arrangement::read_bytes(path, raw);
     let Some(view) = views.first() else { return Err("not a project this reads".into()) };
+    // A project too damaged to draw gives an empty view that says so.
+    if view.lanes.is_empty() && view.notes.iter().any(|n| n.contains("couldn't be read")) {
+        return Err(view.notes.join(" "));
+    }
     let beat = PPQ as f64;
     let mut out = Vec::new();
     for lane in view.lanes.iter().filter(|l| l.kind == LaneKind::Instrument && !l.muted) {
@@ -174,7 +234,9 @@ fn arranged_parts(path: &Path, raw: &[u8]) -> Result<Vec<(Role, Vec<Note>)>, Str
                 });
             }
         }
-        let drums = is_unpitched_plugin(&lane.detail) || is_unpitched_plugin(&lane.name);
+        // Studio One's detail says where the track goes too: "Battery 4, to Drums".
+        let plugin = lane.detail.split(", to ").next().unwrap_or_default();
+        let drums = is_unpitched_plugin(plugin) || is_unpitched_plugin(&lane.name);
         out.extend(part(&notes, PPQ, &format!("{} {}", lane.name, lane.detail), drums));
     }
     Ok(out)
@@ -211,7 +273,7 @@ fn kinds(parts: &[(Role, Vec<Note>)]) -> String {
 }
 
 /// Reads one song's project and hears it both ways, with both finders.
-fn read_song(path: &Path) -> Result<([Said; 3], u32, String), String> {
+fn read_song(path: &Path) -> Result<([Said; 3], u32, String, Vec<String>), String> {
     let raw = std::fs::read(path).map_err(|e| format!("couldn't be opened: {e}"))?;
     let read = mo_catch::catch(AssertUnwindSafe(|| {
         let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
@@ -231,6 +293,15 @@ fn read_song(path: &Path) -> Result<([Said; 3], u32, String), String> {
                 heard.map_or(Said::Nothing, |h| Said::of(&keyfind::read_heard(h, Span::Song, model)))
             };
             let patterns = patterns_heard(reader, &found);
+            // The names of its patterns, clips and tracks, a piece's " · bars 9–16" left off.
+            let mut names: Vec<String> = found
+                .iter()
+                .flat_map(|f| [&f.part, &f.clip, &f.track_name])
+                .map(|n| n.split(" · ").next().unwrap_or_default().to_owned())
+                .filter(|n| !n.is_empty())
+                .collect();
+            names.sort();
+            names.dedup();
             Ok((
                 [
                     read(played.as_ref(), &keyfind_v4::MODEL),
@@ -239,6 +310,7 @@ fn read_song(path: &Path) -> Result<([Said; 3], u32, String), String> {
                 ],
                 bars,
                 kinds(&parts),
+                names,
             ))
         })
     }));
@@ -335,7 +407,9 @@ type Row = (&'static str, fn(&Group, &Counts) -> String);
 
 const ROWS: [Row; 11] = [
     ("Gives the key, or leans to it", |g, c| share(c.agrees, g.songs)),
-    ("MIREX score", |g, c| if g.songs == 0 { "-".into() } else { format!("{:.1}%", 100.0 * c.mirex / g.songs as f64) }),
+    ("MIREX score (fifths both ways)", |g, c| {
+        if g.songs == 0 { "-".into() } else { format!("{:.1}%", 100.0 * c.mirex / g.songs as f64) }
+    }),
     ("  the relative key", |g, c| share(c.relative, g.songs)),
     ("  a fifth away", |g, c| share(c.fifth, g.songs)),
     ("  same home note, other mode", |g, c| share(c.parallel, g.songs)),
@@ -392,7 +466,7 @@ fn report(songs: &[Song], show: Show, out: &mut impl Write) -> std::io::Result<(
     if numbers_hash(&keyfind::SHIPPED) == numbers_hash(&keyfind_v4::MODEL) {
         writeln!(out, "The finder built in has version {}'s numbers, so the two say the same.", keyfind_v4::VERSION)?;
     }
-    let (mut typed, mut named) = ([Group::default(); 3], [Group::default(); 3]);
+    let mut groups = [[Group::default(); 3]; SOURCES.len()];
     let (mut unread, mut silent, mut odd_typed, mut better, mut worse) = (0, 0, Vec::new(), 0, 0);
     let mut by_daw: HashMap<String, [usize; 3]> = HashMap::new();
     for song in songs {
@@ -403,7 +477,7 @@ fn report(songs: &[Song], show: Show, out: &mut impl Write) -> std::io::Result<(
             Ok(said) => said,
             Err(why) => {
                 unread += 1;
-                if show == Show::All && (song.truth(false).is_some() || song.truth(true).is_some()) {
+                if show == Show::All {
                     writeln!(out, "{} ({}): couldn't be read: {why}", song.name, song.daw)?;
                 }
                 continue;
@@ -412,12 +486,16 @@ fn report(songs: &[Song], show: Show, out: &mut impl Write) -> std::io::Result<(
         if said[1] == Said::Nothing && said[3] == Said::Nothing {
             silent += 1;
         }
-        for (groups, by_name) in [(&mut typed, false), (&mut named, true)] {
-            let Some(truth) = song.truth(by_name) else { continue };
+        for ((source, _, from), groups) in SOURCES.iter().zip(&mut groups) {
+            let Some(truth) = song.truth(*source) else { continue };
             for g in [0, if truth.is_minor() { 1 } else { 2 }] {
                 groups[g].add(said, truth);
             }
-            if !by_name {
+            if *source == Source::OldApp {
+                // Thousands of songs: counted, not listed.
+                continue;
+            }
+            if *source == Source::Typed {
                 let daw = by_daw.entry(song.daw.clone()).or_default();
                 daw[0] += 1;
                 daw[1] += usize::from(said[1].key() == Some(truth));
@@ -430,7 +508,6 @@ fn report(songs: &[Song], show: Show, out: &mut impl Write) -> std::io::Result<(
             }
             let missed = said[2].key() != Some(truth);
             if show == Show::All || show == Show::Misses && missed {
-                let from = if by_name { "its name says" } else { "you typed" };
                 writeln!(
                     out,
                     "{} ({}, {} bars: {}): {from} {truth}\n    old app {:<24} v{} {:<30} built in {:<30} patterns {}",
@@ -457,13 +534,22 @@ fn report(songs: &[Song], show: Show, out: &mut impl Write) -> std::io::Result<(
         odd_typed.dedup();
         writeln!(out, "Typed keys that aren't a key it can read (left out): {}", odd_typed.join(", "))?;
     }
-    table("Songs with a key you typed", &typed, out)?;
-    let mut daws: Vec<_> = by_daw.into_iter().collect();
-    daws.sort();
-    for (daw, [n, old, new]) in daws {
-        writeln!(out, "  {daw}: {n}; version {} {}, built in {}", keyfind_v4::VERSION, share(old, n), share(new, n))?;
-    }
-    if typed[0].songs > 0 {
+    for ((source, title, _), groups) in SOURCES.iter().zip(&groups) {
+        table(title, groups, out)?;
+        if *source != Source::Typed || groups[0].songs == 0 {
+            continue;
+        }
+        let mut daws: Vec<_> = by_daw.iter().collect();
+        daws.sort();
+        for (daw, [n, old, new]) in daws {
+            writeln!(
+                out,
+                "  {daw}: {n}; version {} {}, built in {}",
+                keyfind_v4::VERSION,
+                share(*old, *n),
+                share(*new, *n)
+            )?;
+        }
         writeln!(
             out,
             "  Built in better on {}: it gives your key where version {} doesn't. Worse on {worse}.",
@@ -471,7 +557,7 @@ fn report(songs: &[Song], show: Show, out: &mut impl Write) -> std::io::Result<(
             keyfind_v4::VERSION
         )?;
     }
-    table("Songs with no key typed whose name gives one", &named, out)
+    Ok(())
 }
 
 /// What was asked for: the library, and which songs to print.
@@ -492,36 +578,44 @@ fn asked(args: &[String]) -> Result<(PathBuf, Show), String> {
 
 pub fn run(args: &[String]) -> Result<(), String> {
     let (library, show) = asked(args)?;
-    let saves = Library::open_read_only(&library).and_then(|l| l.saves()).map_err(|e| e.to_string())?;
-    let saves: Vec<_> = saves.into_iter().filter(|s| !s.file_missing).collect();
+    let opened = Library::open_read_only(&library).map_err(|e| e.to_string())?;
+    let saves = opened.saves().map_err(|e| e.to_string())?;
+    let mut samples = opened.sample_paths().map_err(|e| e.to_string())?;
+    drop(opened);
+    let saves: Vec<_> = saves
+        .into_iter()
+        .filter(|s| !s.file_missing)
+        .map(|s| {
+            let used = samples.remove(&s.id).unwrap_or_default();
+            (s, used)
+        })
+        .collect();
     println!("Reading {}...", plural(saves.len(), "song"));
     let songs: Vec<Song> = saves
         .into_par_iter()
-        .map(|s| {
+        .map(|(s, used)| {
             let typed = match s.musical_key.trim() {
                 "" => Ok(None),
                 text => Key::parse(text).map(Some).ok_or_else(|| text.to_owned()),
             };
-            let stem = mo_formats::paths::stem(mo_formats::paths::file_name(&s.path));
-            let (named, _) = packs::label(stem, &[]);
-            // Only the songs with a key are read: the rest aren't scored.
-            let wanted = matches!(typed, Ok(Some(_))) || matches!((&typed, named), (Ok(None), Named::Key(_)));
-            let (said, bars, parts) = if wanted {
-                match read_song(Path::new(&s.path)) {
-                    Ok(([v4, built_in, patterns], bars, parts)) => {
-                        (Ok([old_key(&s.detected_key), v4, built_in, patterns]), bars, parts)
-                    }
-                    Err(why) => (Err(why), 0, String::new()),
+            let stem = |p: &str| mo_formats::paths::stem(mo_formats::paths::file_name(p)).to_owned();
+            let (named, _) = packs::label(&stem(&s.path), &[]);
+            let (said, bars, parts, names) = match read_song(Path::new(&s.path)) {
+                Ok(([v4, built_in, patterns], bars, parts, names)) => {
+                    (Ok([old_key(&s.detected_key), v4, built_in, patterns]), bars, parts, names)
                 }
-            } else {
-                (Err("not read: no key to score it against".into()), 0, String::new())
+                Err(why) => (Err(why), 0, String::new(), Vec::new()),
             };
-            Song { name: s.name, daw: s.daw, typed, named, said, bars, parts }
+            // A sample path may be Windows' (C:\\...) read anywhere: cut at either slash.
+            let sample_stems: Vec<String> =
+                used.iter().map(|p| stem(p.rsplit(['\\', '/']).next().unwrap_or(p))).collect();
+            let inside = one_key(sample_stems.iter().chain(&names).map(String::as_str));
+            let old = Key::parse(&s.detected_key);
+            Song { name: s.name, daw: s.daw, typed, named, inside, old, said, bars, parts }
         })
         .collect();
-    let scored: Vec<Song> = songs.into_iter().filter(|s| s.truth(false).is_some() || s.truth(true).is_some()).collect();
     let mut out = std::io::BufWriter::new(std::io::stdout().lock());
-    match report(&scored, show, &mut out).and_then(|()| out.flush()) {
+    match report(&songs, show, &mut out).and_then(|()| out.flush()) {
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         result => result.map_err(|e| e.to_string()),
     }
@@ -594,22 +688,31 @@ mod tests {
     }
 
     #[test]
-    fn a_typed_key_wins_over_the_name_and_the_name_counts_only_without_one() {
-        let song = |typed, named| Song {
+    fn each_source_gives_its_own_key() {
+        let (am, c) = (Key::parse("Am").unwrap(), Key::parse("C").unwrap());
+        let song = Song {
             name: String::new(),
             daw: String::new(),
-            typed,
-            named,
+            typed: Ok(Some(am)),
+            named: Named::Key(c),
+            inside: Named::Unclear,
+            old: Some(c),
             said: Err(String::new()),
             bars: 0,
             parts: String::new(),
         };
-        let (am, c) = (Key::parse("Am").unwrap(), Key::parse("C").unwrap());
-        let both = song(Ok(Some(am)), Named::Key(c));
-        assert_eq!((both.truth(false), both.truth(true)), (Some(am), None));
-        let name_only = song(Ok(None), Named::Key(c));
-        assert_eq!((name_only.truth(false), name_only.truth(true)), (None, Some(c)));
-        let odd = song(Err("Dorian".into()), Named::Key(c));
-        assert_eq!((odd.truth(false), odd.truth(true)), (None, None));
+        let truths = [Source::Typed, Source::Name, Source::Inside, Source::OldApp].map(|s| song.truth(s));
+        assert_eq!(truths, [Some(am), Some(c), None, Some(c)]);
+        let odd = Song { typed: Err("Dorian".into()), ..song };
+        assert_eq!(odd.truth(Source::Typed), None);
+    }
+
+    #[test]
+    fn the_names_inside_a_song_give_a_key_only_when_they_agree() {
+        let cm = Key::parse("Cm").unwrap();
+        assert_eq!(one_key(["Melody Cm 140", "Kick 01", "Pattern 3"]), Named::Key(cm));
+        assert_eq!(one_key(["Melody Cm 140", "Pad C minor"]), Named::Key(cm));
+        assert_eq!(one_key(["Melody Cm 140", "Bass Fm"]), Named::Unclear);
+        assert_eq!(one_key(["Kick 01", "Snare"]), Named::Nothing);
     }
 }
