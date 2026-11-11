@@ -148,6 +148,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     midi.invoke_toggle("from".into(), "MIDI folders".into());
     shots.push(("midi-filters.png".into(), capture(&window)));
     midi.invoke_clear();
+    // "Fits my song": the parts that go with a made-up song, the best fit first, each with how far to move it. Off
+    // again after, with no songs offered, so the pictures that follow have the page as it was.
+    mo_ui::midi::fit_sample(&app, true);
+    if midi.get_fit_song().is_empty() || midi.get_shown() == 0 {
+        return Err("midi-fits.png: no part was found to fit the made-up song".into());
+    }
+    shots.push(("midi-fits.png".into(), capture(&window)));
+    // The song saved again (the Songs page gives its list again): the list follows it, by its saves.
+    if !mo_ui::midi::fit_sample_follows(&app) || midi.get_shown() == 0 {
+        return Err("midi-fits.png: the list didn't follow its song when the songs were given again".into());
+    }
+    mo_ui::midi::fit_sample(&app, false);
+    if !midi.get_fit_song().is_empty() || !midi.get_fit_none_title().is_empty() {
+        return Err("midi-fits.png: \"Fits my song\" didn't go off".into());
+    }
 
     // The Backup page, filled with made-up folders.
     app.set_place(Place::Backup.index() as i32);

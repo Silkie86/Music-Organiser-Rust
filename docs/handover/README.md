@@ -159,8 +159,45 @@ the next PR step by step). Solomon wants the highest effort here.
   a song keeps its length). The bars a loop takes up are one rule for both looks (`mo_harmony::own_bars`), and
   parts are sorted by `Sits::judged`, the number the best move is picked by. Whether a part is a piece cut from a
   longer stretch is `StoredPhrase::is_cut` (the rule by name moved from `mo-app` to `mo_midi::index::is_cut`; the
-  MIDI page's card still spells the fallback out and should call it). Not built yet: a list on the MIDI page, and
-  sending the part found into the project.
+  MIDI page's card still spells the fallback out and should call it).
+- The MIDI page's "Fits my song" list (2026-11-11): the parts that go with a song you're working on.
+  - `mo_midi::fit::for_song`: `Pick::usual` (what of a song is fitted to when nothing is picked by hand: its
+    chords, arps and basslines for a tune, its melodies for chords, over up to 8 bars from where the most of them
+    play together, and only the parts that play in those bars), `Own::of` (the song's own parts in the catalogue:
+    whatever is in one of its saves, by the saves' paths as the song library groups them, since that knows the
+    saves joined or split by hand; and a pack's loop the song uses in the pack's other keys, which is the same
+    shape in the same folder of `.mid` files, never drums, as the catalogue's "in 12 keys". The same shape anywhere
+    else is not the song's: a held note or a one-pitch bassline is in many places), `tried` (the parts the page's
+    filters let through, without the song's own) and `Tried::search` (the search, its answer as places in the
+    catalogue).
+  - `mo_app::midi_fits`: the screen's logic and words. `song_choices` (the 8 songs saved last, each with every
+    save it has; the first is the one being worked on), `SongChoice::own`, `fitted` (what the song gives to fit
+    to, or why nothing can be, in plain words; nothing asked, chords that can't be read fall back to the melody),
+    `tried` (the page's own filters stay in force, through `mo_app::midi::passing`), `look` (the search, the best
+    200, with how long it took and how much of that was reading notes: `log_line` is for the log, so the time on a
+    real index gets measured), and the words (`fit_text`: "Fits 88%, 2 semitones down"; `result_text`,
+    `left_out_text`).
+  - One call does a whole search, `midi_fits::search`: it reads through `midi_fits::Reads` (the song's save, the
+    index's slots, a part's notes) and keeps in a `midi_fits::Kept` what's slow to make: the song until its save
+    is written again (its time on disk is looked at for every search), the slots and the song's own parts for the
+    very catalogue they were made for (another `Arc<Catalogue>` has them made again; the slots also when the
+    page's `fit_slots_made` goes up: a reading that only made slots, which the page's "changed" check doesn't
+    count). `page_line` and `empty_words` are what the page says about its answer.
+  - On the page (`mo-ui/src/midi.rs`, `midi.slint`): a "Fits my song" chip whose menu picks one of the songs
+    offered (or Off), two joined chips for what's looked for (the song decides until one is clicked), and the
+    list, each line with its fit before its details. The search has a thread of its own (`FITS`); with it on, the
+    list's own worker only counts what each filter's choice would show (`mo_app::midi::choice_counts`). Each new
+    list tells the search before it to stop. Off lets go of what the searches kept. A search always answers: one
+    that breaks says so in the list's place. "Parts like this one" and Ctrl+K's "show this part" turn it off:
+    the list is ranked one way at a time; headings and Shuffle do nothing while it's on.
+  - The songs offered come from the Songs page's thread (`songs.rs`'s `fit_songs`, given to
+    `midi::songs_offered` with every list it makes), so they're grouped as the Songs page groups them and nothing
+    is read for them. That's also how a list follows its song: the Songs page's folder watch reads a save a few
+    seconds after the DAW writes it, the song is found again by its saves (`SongChoice::among`, never by its
+    label), and its list is worked out again from the save written last. If the folders can't be watched, picking
+    the song again in the menu reads it again.
+  Not built yet: picking a song's parts and bars by hand, playing or sending a part moved by the semitones its
+  line says, and sending the part found into the project.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db
 writes once trusted. A decoder panic on a damaged file is caught with `mo_catch::catch`: one warning line in the log,

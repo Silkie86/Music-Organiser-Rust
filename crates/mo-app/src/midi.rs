@@ -253,6 +253,16 @@ fn chips_pass(f: &Filters, e: &Entry) -> [bool; 3] {
     ]
 }
 
+/// A test of one part by every filter at once (the words, Settings' smallest part, the years and the chips), for a
+/// list [`view`] doesn't make: the parts tried for a song ([`crate::midi_fits`]). What it lets through is what a list
+/// of everything would show, with every copy of a loop in other keys.
+pub fn passing<'a>(cat: &'a Catalogue, f: &'a Filters) -> impl Fn(&Entry) -> bool + Sync + 'a {
+    let words = mo_midi::catalogue::words_of(&f.text);
+    move |e| {
+        big_enough(e, f.smallest) && e.matches(&words) && in_years(f, e, &cat.dates) && chips_pass(f, e) == [true; 3]
+    }
+}
+
 /// The parts the filters let through, in order, as hits in the catalogue, and how many each chip's choices would
 /// show. Runs on every core; call it off the window's thread (rules 12 and 21). `seed` shuffles them (a random order
 /// this number decides).
@@ -275,8 +285,7 @@ pub fn view(
             base.retain(|h| cat.entry(h.entry).is_none_or(|e| e.key_group != own));
         }
     }
-    let mut counts = counts(cat, &base, f, one_line);
-    counts.lines = line_count(cat, f.smallest);
+    let counts = counted(cat, &base, f, one_line);
     let mut hits: Vec<Hit> = base
         .into_par_iter()
         .filter(|h| cat.entry(h.entry).is_some_and(|e| in_years(f, e, &cat.dates) && chips_pass(f, e) == [true; 3]))
@@ -296,6 +305,21 @@ pub fn view(
         shuffle(&mut hits, seed);
     }
     (hits, counts)
+}
+
+/// How many parts each chip's choices would show, as [`view`] counts them for a list that isn't ranked against a
+/// part, without making that list: for a page whose lines come from elsewhere (the parts that fit a song,
+/// [`crate::midi_fits`]) and whose filters still say what each choice would show. Runs on every core; call it off
+/// the window's thread.
+pub fn choice_counts(cat: &Catalogue, f: &Filters) -> ChoiceCounts {
+    counted(cat, &searched(cat, f, None), f, true)
+}
+
+/// The counts of `base` (what the words and the target let through), with how many lines the whole list has.
+fn counted(cat: &Catalogue, base: &[Hit], f: &Filters, one_line: bool) -> ChoiceCounts {
+    let mut counts = counts(cat, base, f, one_line);
+    counts.lines = line_count(cat, f.smallest);
+    counts
 }
 
 /// Keeps the first hit of each set of the same notes in other keys ([`Entry::key_group`]), in the order they come.
@@ -1280,14 +1304,14 @@ pub fn write_part(dir: &std::path::Path, name: &str, bytes: &[u8]) -> std::io::R
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use mo_midi::{Source, SourceKind, StoredPhrase};
 
     use super::*;
 
-    fn phrase(path: &str, part: &str, role: Role, hash: &str, mtime: i64) -> StoredPhrase {
+    pub(crate) fn phrase(path: &str, part: &str, role: Role, hash: &str, mtime: i64) -> StoredPhrase {
         StoredPhrase {
             id: 1,
             source: Arc::new(Source {
@@ -1415,6 +1439,7 @@ mod tests {
         assert_eq!(titles(&cat, &hits), ["Lead"]);
         assert_eq!(counts.lines, 1);
         assert_eq!(counts.roles.iter().sum::<usize>(), 1, "the chips count only what can show");
+        assert_eq!(choice_counts(&cat, &three), counts);
         assert_eq!(hidden_text(&cat, counts.lines, 3), " · 2 under 3 notes hidden");
         let two = Filters { smallest: 2, ..Filters::default() };
         assert_eq!(titles(&cat, &view(&cat, &two, Order::Name, false, None, None).0), ["Answer", "Lead"]);
@@ -1455,6 +1480,8 @@ mod tests {
         let cat = Catalogue::new(vec![loop_in(9, "Am", 0), loop_in(2, "Dm", 1), loop_in(4, "Em", 2), other]);
         let f = Filters::default();
         let (hits, counts) = view(&cat, &f, Order::Newest, false, None, None);
+        // The counts alone, for a page whose lines come from elsewhere, are the same.
+        assert_eq!(choice_counts(&cat, &f), counts);
         let keys = |hits: &[Hit]| hits.iter().map(|h| key_text(cat.entry(h.entry).unwrap())).collect::<Vec<_>>();
         assert_eq!(titles(&cat, &hits), ["Lead", "Pad"]);
         assert_eq!(keys(&hits), ["Am", ""], "the newest stands for them");
@@ -1831,6 +1858,9 @@ mod tests {
         let (hits, counts) = view(&cat, &f, Order::Newest, false, None, None);
         assert_eq!(titles(&cat, &hits), ["Piano", "Kick"]);
         assert_eq!(counts.froms, [1, 2]);
+        // And so are the counts alone, whichever way the list would be ordered.
+        assert_eq!(choice_counts(&cat, &f), counts);
+        assert_eq!(choice_counts(&cat, &f), view(&cat, &f, Order::Name, true, None, Some(7)).1);
         let drums = Role::ALL.iter().position(|r| *r == Role::Drums).unwrap();
         let bass = Role::ALL.iter().position(|r| *r == Role::Bass).unwrap();
         assert_eq!((counts.roles[drums], counts.roles[bass]), (1, 0));

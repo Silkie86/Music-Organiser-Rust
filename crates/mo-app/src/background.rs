@@ -296,10 +296,26 @@ impl<J: Send + 'static> Newest<J> {
         Ok(Newest { slot })
     }
 
-    /// Gives the thread `job`, in place of any job it hasn't started yet.
+    /// Gives the thread `job`, in place of any job it hasn't started yet; that one is let go here, before this
+    /// returns (a job that counts itself out as it goes is counted out by then).
     pub fn ask(&self, job: J) {
-        self.slot.state.lock().unwrap_or_else(PoisonError::into_inner).job = Some(job);
+        drop(self.replace(job));
+    }
+
+    /// As [`Newest::ask`], but the job it takes the place of is let go on the freeing thread ([`free_later`]), not
+    /// here: for asks from the window's thread whose jobs may hold the last of something big (a list worked out
+    /// again since, an index read again).
+    pub fn ask_freeing_later(&self, job: J) {
+        if let Some(replaced) = self.replace(job) {
+            free_later(replaced);
+        }
+    }
+
+    /// Puts `job` where the thread takes its next one from, and gives back the one that was waiting there.
+    fn replace(&self, job: J) -> Option<J> {
+        let replaced = self.slot.state.lock().unwrap_or_else(PoisonError::into_inner).job.replace(job);
         self.slot.ready.notify_one();
+        replaced
     }
 }
 
@@ -380,6 +396,42 @@ mod tests {
         drop(worker);
         // The thread stops and its sender goes with it.
         assert!(done.recv_timeout(Duration::from_secs(5)).is_err());
+    }
+
+    #[test]
+    fn a_job_replaced_while_it_waits_is_let_go_on_the_freeing_thread() {
+        // Says which thread it was let go on.
+        struct Job(u32, mpsc::Sender<(u32, Option<String>)>);
+        impl Drop for Job {
+            fn drop(&mut self) {
+                let _ = self.1.send((self.0, std::thread::current().name().map(str::to_owned)));
+            }
+        }
+        let (gone_tx, gone) = mpsc::channel();
+        let (gate_tx, gate) = mpsc::channel::<()>();
+        let (started_tx, started) = mpsc::channel::<()>();
+        let worker = Newest::start("Test replaced", move |job: Job| {
+            if job.0 == 0 {
+                let _ = started_tx.send(());
+                let _ = gate.recv();
+            }
+        })
+        .unwrap();
+        worker.ask(Job(0, gone_tx.clone()));
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        // The first is being done; the second waits, and the third takes its place.
+        worker.ask(Job(1, gone_tx.clone()));
+        worker.ask_freeing_later(Job(2, gone_tx.clone()));
+        assert_eq!(gone.recv_timeout(Duration::from_secs(5)).unwrap(), (1, Some("Freeing".to_owned())));
+        // A plain ask lets the one it replaces go here, before it returns.
+        worker.ask(Job(3, gone_tx));
+        let here = std::thread::current().name().map(str::to_owned);
+        assert_eq!(gone.try_recv().unwrap(), (2, here));
+        gate_tx.send(()).unwrap();
+        // The jobs that are done end on the thread that does them.
+        let mut done = vec![gone.recv_timeout(Duration::from_secs(5)).unwrap()];
+        done.push(gone.recv_timeout(Duration::from_secs(5)).unwrap());
+        assert_eq!(done, [(0, Some("Test replaced".to_owned())), (3, Some("Test replaced".to_owned()))]);
     }
 
     #[test]

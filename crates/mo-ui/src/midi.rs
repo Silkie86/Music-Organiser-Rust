@@ -3,6 +3,11 @@
 //! each list (newest ask wins); and reading the picked part's notes for its piano roll and its key. Lines are only
 //! made when the list draws them, so 300,000 parts cost what's on screen.
 //!
+//! "Fits my song" ([`mo_app::midi_fits`]) makes the list the parts that go with a song you're working on, the best
+//! first: its chip picks one of the songs saved last (the Songs page's list gives them, [`songs_offered`]), the
+//! page's filters stay in force, and the search runs on a thread of its own (newest wins; an older search is told to
+//! stop), so the filters' counts never wait for it.
+//!
 //! Where the parts come from: the Rust app's own `midi-index.db`, read-only, which reading your MIDI fills. The first
 //! time it's read, it's brought up to this app's layout and the corrections you made in the C# app are taken in from
 //! its `midi.db` ([`mo_midi::store::bring_up_to_date`]); `midi.db` isn't opened after that.
@@ -19,6 +24,7 @@ use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::finder::Kind;
 use mo_app::midi::{self as page, Filters, Order, Roll, Target};
+use mo_app::midi_fits::{self, Answer, Fit, SongChoice};
 use mo_app::places::Place;
 use mo_app::shortcuts::{Shortcuts, what_of};
 use mo_app::{log, to_bitwig};
@@ -26,8 +32,10 @@ use mo_formats::NoteEvent;
 use mo_harmony::KeyFact;
 use mo_library::Library;
 use mo_library::songs::thousands;
+use mo_midi::fit::Wants;
 use mo_midi::indexer;
-use mo_midi::store::MidiStore;
+use mo_midi::playing::Song;
+use mo_midi::store::{MidiStore, SlotBook};
 use mo_midi::{Catalogue, Hit, Role, StoredPhrase};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 
@@ -118,7 +126,29 @@ struct Page {
     finder_let_go: bool,
     /// The summary of the whole index, before what Settings' smallest part hides is said after it.
     summary: String,
+    /// "Fits my song": the songs offered, and the one the list is fitted to (none: it's off).
+    fit_songs: Vec<SongChoice>,
+    fit_song: Option<SongChoice>,
+    /// What's looked for, once you've chosen; until then the song decides ([`midi_fits::fitted`]).
+    fit_wants: Option<Wants>,
+    /// Goes up each time a reading of the MIDI made slots and no new index to show: the slots a search kept are read
+    /// again.
+    fit_slots_made: u64,
+    /// Stops the search running now: set when a newer list is asked for.
+    fit_stop: Arc<AtomicBool>,
+    /// The list on show is the parts that fit: each line's fit, in the list's order.
+    fits: Option<Arc<Vec<Fit>>>,
 }
+
+impl Page {
+    /// Whether the list is "Fits my song"'s: it's on, and there's an index to search.
+    fn fitting(&self) -> bool {
+        self.fit_song.is_some() && self.notes.is_some()
+    }
+}
+
+/// What "Fits my song" can look for, in the order of its switch.
+const WANTS: [Wants; 2] = [Wants::Tune, Wants::Chords];
 
 /// Settings › MIDI's smallest part: parts with fewer notes are hidden ([`page::SMALLEST_PART_KEY`]).
 static SMALLEST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(page::SMALLEST_PART_DEFAULT);
@@ -172,6 +202,40 @@ struct Ask {
     reversed: bool,
     target: Option<Target>,
     seed: Option<u64>,
+    /// With "Fits my song" on, the list's lines are its search's: only what each filter's choice would show is
+    /// counted, and no list is made (or put in order) to be thrown away.
+    counts_only: bool,
+}
+
+impl Ask {
+    /// The list asked for and its filters' counts; call it off the window's thread.
+    fn work_out(&self) -> (Vec<Hit>, page::ChoiceCounts) {
+        if self.counts_only {
+            return (Vec::new(), page::choice_counts(&self.cat, &self.filters));
+        }
+        page::view(&self.cat, &self.filters, self.order, self.reversed, self.target, self.seed)
+    }
+}
+
+/// An ask for the parts that fit a song.
+struct FitAsk {
+    /// The list it's for ([`Ask::id`]).
+    id: u64,
+    cat: Arc<Catalogue>,
+    filters: Filters,
+    song: SongChoice,
+    wanted: Option<Wants>,
+    slots_made: u64,
+    from: NotesFrom,
+    stop: Arc<AtomicBool>,
+}
+
+/// A job for the "Fits my song" thread.
+enum FitJob {
+    /// In a box: an ask is a few hundred bytes, and the other job is none.
+    Search(Box<FitAsk>),
+    /// The switch went off: what the searches kept (the song, the index's slots) is let go.
+    LetGo,
 }
 
 /// An ask for a part's notes: the roll, and its key when the index has no reading of the new key finder.
@@ -209,6 +273,7 @@ thread_local! {
     static LINES: Rc<Lines> = PAGE.with(|p| Rc::new(Lines { page: p.clone(), notify: ModelNotify::default() }));
     static WORKER: RefCell<Option<Newest<Ask>>> = const { RefCell::new(None) };
     static NOTES: RefCell<Option<Newest<NotesAsk>>> = const { RefCell::new(None) };
+    static FITS: RefCell<Option<Newest<FitJob>>> = const { RefCell::new(None) };
     /// Works everything out in place, for the screenshots, which have no event loop to send answers back to.
     static HERE: RefCell<bool> = const { RefCell::new(false) };
     /// The filter chips' lines, kept between showings: kinds, From and Key.
@@ -234,6 +299,10 @@ impl Model for Lines {
         let mut details = page::details(e);
         if let Some(l) = hit.likeness {
             details = format!("{:.0}% alike · {details}", l * 100.0);
+        }
+        // In a "Fits my song" list: how well it fits, and how far to move it.
+        if let Some(fit) = p.fits.as_ref().and_then(|fits| fits.get(row)) {
+            details = format!("{} · {details}", midi_fits::fit_text(fit));
         }
         Some(MidiLine {
             row: row as i32,
@@ -360,11 +429,12 @@ pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
 }
 
 /// Lights the heading of the column the list goes by, with which way (the UX review of 10 Nov, B5); none while the
-/// list is shuffled or ranked (most alike, longest phrase), which no column stands for.
+/// list is shuffled or ranked (most alike, longest phrase, best fit), which no column stands for.
 fn show_order(data: &MidiData) {
     let (column, reversed) = PAGE.with(|p| {
         let p = p.borrow();
-        if p.seed.is_some() || p.target.is_some() { ("", false) } else { (p.order.column(), p.reversed) }
+        let ranked = p.seed.is_some() || p.target.is_some() || p.fitting();
+        if ranked { ("", false) } else { (p.order.column(), p.reversed) }
     });
     data.set_order_column(column.into());
     data.set_order_reversed(reversed);
@@ -410,18 +480,28 @@ fn wire(app: &AppWindow) {
             // A click on a heading: the list goes by its column, or turns round when it does already; a shuffle
             // ends.
             let order = Order::from_column(&value);
-            PAGE.with(|p| {
+            let fitting = PAGE.with(|p| {
                 let mut p = p.borrow_mut();
-                let lit = p.seed.is_none() && p.target.is_none() && p.order == order;
+                let lit = p.seed.is_none() && p.target.is_none() && !p.fitting() && p.order == order;
                 p.reversed = lit && !p.reversed;
                 p.order = order;
                 p.seed = None;
+                p.fitting()
             });
+            // The parts that fit a song are in the order of their fit: the heading counts once that's off, and
+            // there's nothing to work out again now.
+            if fitting {
+                return;
+            }
         }
         relist(&app);
     });
     let weak = app.as_weak();
     data.on_shuffle(move || {
+        // The parts that fit a song stay in the order of their fit.
+        if PAGE.with(|p| p.borrow().fitting()) {
+            return;
+        }
         if let Some(app) = weak.upgrade() {
             PAGE.with(|p| p.borrow_mut().seed = Some(new_seed()));
             relist(&app);
@@ -431,6 +511,21 @@ fn wire(app: &AppWindow) {
     data.on_clear_target(move || {
         if let Some(app) = weak.upgrade() {
             PAGE.with(|p| p.borrow_mut().target = None);
+            relist(&app);
+        }
+    });
+    data.set_fit_wants_words(strings(WANTS.map(midi_fits::wants_words)));
+    let weak = app.as_weak();
+    data.on_fit_song_picked(move |label| {
+        if let Some(app) = weak.upgrade() {
+            pick_fit_song(&app, &label);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_fit_wants_picked(move |place| {
+        if let (Some(app), Some(&wants)) = (weak.upgrade(), usize::try_from(place).ok().and_then(|i| WANTS.get(i))) {
+            PAGE.with(|p| p.borrow_mut().fit_wants = Some(wants));
+            show_fit(&app);
             relist(&app);
         }
     });
@@ -674,6 +769,7 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         p.target = None;
         // The old list points into the old index: nothing shows until the new one is worked out.
         background::free_later(std::mem::replace(&mut p.shown, Arc::new(Vec::new())));
+        p.fits = None;
         let read_now = !p.read_once && !HERE.with(|h| *h.borrow());
         p.read_once = true;
         (p.picked, read_now, was_looping && p.looping.is_none())
@@ -772,6 +868,8 @@ pub fn read_midi(app: &AppWindow, retry: bool) {
         }
         // What was read shows straight away; after a failed reading too, as it may have saved some before failing.
         let changed = ran.as_ref().map_or(true, |s| s.read > 0 || s.forgotten > 0 || s.rekeyed > 0 || s.shaped > 0);
+        // Slots alone change no line of the list, only what "Fits my song" can look at.
+        let slots_made = ran.as_ref().is_ok_and(|s| s.slots > 0);
         let loaded = changed.then(|| load(&library));
         let _ = slint::invoke_from_event_loop(move || {
             let Some(app) = weak.upgrade() else { return };
@@ -781,6 +879,15 @@ pub fn read_midi(app: &AppWindow, retry: bool) {
             data.set_busy("".into());
             if let Some(loaded) = loaded {
                 show(&app, loaded);
+            } else if slots_made {
+                let fitting = PAGE.with(|p| {
+                    let mut p = p.borrow_mut();
+                    p.fit_slots_made += 1;
+                    p.fitting()
+                });
+                if fitting {
+                    relist(&app);
+                }
             }
         });
     });
@@ -891,10 +998,10 @@ fn show_years(app: &AppWindow) {
 
 /// Works the list out again for the filters now: off the window's thread, newest ask first.
 fn relist(app: &AppWindow) {
-    let ask = PAGE.with(|p| {
+    let (ask, fit) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.asked += 1;
-        Ask {
+        let mut ask = Ask {
             id: p.asked,
             cat: p.cat.clone(),
             filters: Filters { smallest: SMALLEST.load(Ordering::Relaxed), ..p.filters.clone() },
@@ -902,22 +1009,38 @@ fn relist(app: &AppWindow) {
             reversed: p.reversed,
             target: p.target,
             seed: p.seed,
-        }
+            counts_only: false,
+        };
+        // With "Fits my song" on, the list is its search's; this ask still gives the filters their counts.
+        let fit = fit_ask(&mut p, &ask);
+        ask.counts_only = fit.is_some();
+        (ask, fit)
     });
-    app.global::<MidiData>().set_any_filter(PAGE.with(|p| p.borrow().filters.any()));
+    let data = app.global::<MidiData>();
+    data.set_any_filter(PAGE.with(|p| p.borrow().filters.any()));
     if HERE.with(|h| *h.borrow()) {
-        let (hits, counts) = page::view(&ask.cat, &ask.filters, ask.order, ask.reversed, ask.target, ask.seed);
+        let (hits, counts) = ask.work_out();
         listed(app, ask.id, hits, counts);
+        if let Some(fit) = fit {
+            let answer = fit_search(&fit, &mut FitKept::default());
+            fit_listed(app, fit.id, answer);
+        }
         return;
+    }
+    if let Some(fit) = fit {
+        // Until the search answers: said under the toolbar, and in the list's place if it has no lines (after the
+        // index was read again, or a search that found none).
+        data.set_result(midi_fits::LOOKING.into());
+        let looking = midi_fits::Empty { title: midi_fits::LOOKING, text: String::new(), filters: false };
+        show_fit_none(&data, Some(looking));
+        fit_job(app, FitJob::Search(Box::new(fit)));
     }
     WORKER.with(|w| {
         let mut w = w.borrow_mut();
         if w.is_none() {
             let weak = app.as_weak();
             match Newest::start("MIDI list", move |ask: Ask| {
-                let (hits, counts) = background::on_pool(|| {
-                    page::view(&ask.cat, &ask.filters, ask.order, ask.reversed, ask.target, ask.seed)
-                });
+                let (hits, counts) = background::on_pool(|| ask.work_out());
                 let weak = weak.clone();
                 let id = ask.id;
                 let _ = slint::invoke_from_event_loop(move || {
@@ -931,7 +1054,8 @@ fn relist(app: &AppWindow) {
             }
         }
         if let Some(w) = w.as_ref() {
-            w.ask(ask);
+            // As for the search above: the ask this takes the place of isn't let go on the window's thread.
+            w.ask_freeing_later(ask);
         }
     });
 }
@@ -942,11 +1066,18 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
         if p.asked != id {
             return (None, String::new(), String::new());
         }
+        p.counts = counts;
+        // With "Fits my song" on, the list is its search's ([`fit_listed`]): this one only gives the filters'
+        // choices their counts.
+        if p.fitting() {
+            background::free_later(hits);
+            return (None, String::new(), String::new());
+        }
         // The picked part's row in the new list: one look, here, rather than at every step.
         p.picked_row = p.picked.and_then(|at| page::row_of(&p.cat, &hits, at));
         // The old list (one line per part shown) is let go on the freeing thread.
         background::free_later(std::mem::replace(&mut p.shown, Arc::new(hits)));
-        p.counts = counts;
+        p.fits = None;
         let target = p.target.and_then(|t| {
             let at = match t {
                 Target::Like(at) | Target::Within(at) => at,
@@ -962,19 +1093,20 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
         let all = p.counts.lines;
         (Some(shown), page::result_text(shown, all, p.order, p.reversed, p.target, p.seed.is_some()), target_text)
     });
-    let Some(shown) = shown else { return };
-    let summary = PAGE.with(|p| {
-        let p = p.borrow();
-        let smallest = SMALLEST.load(Ordering::Relaxed);
-        format!("{}{}", p.summary, page::hidden_text(&p.cat, p.counts.lines, smallest))
-    });
-    app.global::<MidiData>().set_summary(summary.into());
-    show_chips(app);
+    let Some(shown) = shown else {
+        // The counts were this list's to give even so.
+        if PAGE.with(|p| p.borrow().asked == id) {
+            show_counts(app);
+        }
+        return;
+    };
+    show_counts(app);
     LINES.with(|l| l.notify.reset());
     let data = app.global::<MidiData>();
     data.set_shown(shown as i32);
     data.set_result(result.into());
     data.set_target(target.into());
+    show_fit_none(&data, None);
     show_order(&data);
     let scroll = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -990,8 +1122,371 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
     }
 }
 
-/// Shows one part, by its notes' fingerprint (Ctrl+K): picked, and in sight; when the filters hide it, they go. Before
-/// the index is read it's shown once it is.
+/// What the last list worked out says beside the list: what Settings' smallest part hides, after the summary, and
+/// how many parts each filter's choice would show.
+fn show_counts(app: &AppWindow) {
+    let summary = PAGE.with(|p| {
+        let p = p.borrow();
+        let smallest = SMALLEST.load(Ordering::Relaxed);
+        format!("{}{}", p.summary, page::hidden_text(&p.cat, p.counts.lines, smallest))
+    });
+    app.global::<MidiData>().set_summary(summary.into());
+    show_chips(app);
+}
+
+/// The search "Fits my song" wants for the list now asked for; none while it's off (or there's no index yet). A
+/// search still running is for an older list: it's told to stop.
+fn fit_ask(p: &mut Page, ask: &Ask) -> Option<FitAsk> {
+    p.fit_stop.store(true, Ordering::Relaxed);
+    let (song, from) = (p.fit_song.clone()?, p.notes.clone()?);
+    p.fit_stop = Arc::new(AtomicBool::new(false));
+    Some(FitAsk {
+        id: ask.id,
+        cat: ask.cat.clone(),
+        filters: ask.filters.clone(),
+        song,
+        wanted: p.fit_wants,
+        slots_made: p.fit_slots_made,
+        from,
+        stop: p.fit_stop.clone(),
+    })
+}
+
+/// What the "Fits my song" thread has from one search to the next: what the searches made (the song, the index's
+/// slots), the index open, and whether a search has been logged since it had nothing.
+#[derive(Default)]
+struct FitKept {
+    kept: midi_fits::Kept,
+    open: Option<(PathBuf, MidiStore)>,
+    logged: bool,
+}
+
+/// Hands the "Fits my song" thread a job, starting the thread the first time there's a search for it. Every search
+/// answers ([`fit_listed`]): one that breaks, or a thread that can't start, says so in the list's place rather than
+/// leaving the page looking.
+fn fit_job(app: &AppWindow, job: FitJob) {
+    let not_started = FITS.with(|w| {
+        let mut w = w.borrow_mut();
+        if w.is_none() && matches!(job, FitJob::Search(_)) {
+            let weak = app.as_weak();
+            let mut state = FitKept::default();
+            match Newest::start("MIDI fits", move |job: FitJob| {
+                let ask = match job {
+                    FitJob::Search(ask) => ask,
+                    FitJob::LetGo => {
+                        background::free_later(std::mem::take(&mut state.kept));
+                        state.open = None;
+                        state.logged = false;
+                        return;
+                    }
+                };
+                // A search that trips (it's logged as a crash) still answers, and what it kept may be half made:
+                // the next starts afresh.
+                let answer = background::guarded(|| fit_search(&ask, &mut state)).unwrap_or_else(|broke| {
+                    state = FitKept::default();
+                    Answer::Nothing(format!("The search didn't finish: {broke}."))
+                });
+                // The ask ends here, on this thread: it may hold the last of an index read again since.
+                let id = ask.id;
+                drop(ask);
+                let weak = weak.clone();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(app) = weak.upgrade() {
+                        fit_listed(&app, id, answer);
+                    }
+                });
+            }) {
+                Ok(n) => *w = Some(n),
+                Err(e) => {
+                    log::error("MIDI", &format!("The search for parts that fit couldn't start: {e}"));
+                    return Some((job, e.to_string()));
+                }
+            }
+        }
+        if let Some(w) = w.as_ref() {
+            // An ask it takes the place of may hold the last of an index read again since: not let go here.
+            w.ask_freeing_later(job);
+        }
+        None
+    });
+    if let Some((FitJob::Search(ask), why)) = not_started {
+        fit_listed(app, ask.id, Answer::Nothing(format!("The search couldn't start ({why}).")));
+    }
+}
+
+/// A search that took this long is worth a line in the log each time; quicker ones only the first.
+const SLOW_SEARCH: Duration = Duration::from_millis(300);
+
+/// One search, on the thread that asks.
+fn fit_search(ask: &FitAsk, state: &mut FitKept) -> Answer {
+    let started = Instant::now();
+    let own;
+    let pool = match background::pool() {
+        Some(pool) => pool,
+        None => {
+            let made = rayon::ThreadPoolBuilder::new()
+                .num_threads(1)
+                .thread_name(|_| "MIDI fits".to_owned())
+                .start_handler(|_| background::lower_priority())
+                .build();
+            match made {
+                Ok(pool) => {
+                    own = pool;
+                    &own
+                }
+                Err(e) => return Answer::Nothing(format!("The search couldn't start ({e}).")),
+            }
+        }
+    };
+    let mut reads = FitReads { from: &ask.from, cat: &ask.cat, open: &mut state.open };
+    let asked = midi_fits::Asked {
+        song: &ask.song,
+        wanted: ask.wanted,
+        cat: &ask.cat,
+        filters: &ask.filters,
+        slots_made: ask.slots_made,
+    };
+    let answer = midi_fits::search(&mut state.kept, &mut reads, &asked, pool, &ask.stop);
+    // How long a search of the real index takes is measured where it runs. Not a line for every letter typed in the
+    // search box: the first search (it reads the song and the index's slots too), and any that's slow.
+    if let Answer::Fits { looked, .. } = &answer {
+        let whole = started.elapsed();
+        if !state.logged || whole >= SLOW_SEARCH {
+            state.logged = true;
+            let line = midi_fits::log_line(looked);
+            log::info("MIDI", &format!("Fits my song: {line}; {:.2} s with what it read first", whole.as_secs_f64()));
+        }
+    }
+    answer
+}
+
+/// Where a "Fits my song" search reads from ([`midi_fits::Reads`]): the song's save on disk and the MIDI index, kept
+/// open from one search to the next; or, for the screenshots, the made-up parts.
+struct FitReads<'a> {
+    from: &'a NotesFrom,
+    cat: &'a Catalogue,
+    open: &'a mut Option<(PathBuf, MidiStore)>,
+}
+
+impl midi_fits::Reads for FitReads<'_> {
+    fn written(&mut self, save: &str) -> i64 {
+        match self.from {
+            NotesFrom::Made(_) => 1,
+            NotesFrom::Store(_) => written_now(save),
+        }
+    }
+
+    fn song(&mut self, save: &str) -> Result<Song, String> {
+        match self.from {
+            NotesFrom::Made(notes) => Ok(made_song(self.cat, notes, save)),
+            NotesFrom::Store(_) => mo_midi::playing::read(Path::new(save)).map_err(|e| match e {
+                mo_midi::extract::Unread::InUse(why) | mo_midi::extract::Unread::Failed(why) => why,
+            }),
+        }
+    }
+
+    fn slots(&mut self) -> Result<SlotBook, String> {
+        match self.from {
+            NotesFrom::Made(notes) => {
+                let mut book = SlotBook::default();
+                for (hash, notes) in notes.iter() {
+                    book.add(hash, &mo_midi::fit::slots_of(notes));
+                }
+                Ok(book)
+            }
+            NotesFrom::Store(path) => from_index(path, self.open, MidiStore::slots),
+        }
+    }
+
+    fn notes(&mut self, id: i64, hash: &str) -> Option<Vec<NoteEvent>> {
+        notes_of(self.from, id, hash, self.open).ok()
+    }
+}
+
+/// When the file at `save` was last written, as the disk says now, in milliseconds; 0 when it can't be told.
+fn written_now(save: &str) -> i64 {
+    let since = std::fs::metadata(save).and_then(|m| m.modified()).ok();
+    let since = since.and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok());
+    since.map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// For the screenshots: the song a made-up save "holds", which is the made-up parts that say they're from it, each
+/// on a track of its own from the song's first bar.
+fn made_song(cat: &Catalogue, notes: &HashMap<String, Vec<NoteEvent>>, save: &str) -> Song {
+    use mo_formats::arrangement::{Arrangement, LaneKind, PreviewClip, PreviewLane, PreviewNote};
+    let beats = |ticks: i64| ticks as f64 / mo_midi::PPQ as f64;
+    let lanes = cat
+        .entries
+        .iter()
+        .filter(|e| e.phrase.source.path == save)
+        .map(|e| {
+            let notes = notes.get(&e.phrase.hash).map(Vec::as_slice).unwrap_or_default();
+            let notes = notes
+                .iter()
+                .map(|n| PreviewNote {
+                    start: beats(n.start),
+                    length: beats(n.length),
+                    key: n.key,
+                    velocity: n.velocity,
+                    ..PreviewNote::default()
+                })
+                .collect();
+            let length = beats(i64::from(e.phrase.bars) * mo_midi::BAR);
+            let clip = PreviewClip { name: e.phrase.clip.clone(), start: 0.0, length, notes, ..PreviewClip::default() };
+            PreviewLane { clips: vec![clip], ..PreviewLane::new(&e.phrase.part, LaneKind::Instrument) }
+        })
+        .collect();
+    mo_midi::playing::of(&Arrangement {
+        view: "Made up",
+        tempo: 92.0,
+        beats_per_bar: 4,
+        lanes,
+        markers: Vec::new(),
+        notes: Vec::new(),
+    })
+}
+
+/// A "Fits my song" search has ended: the list is its parts, the best fit first; or its place says why there are
+/// none.
+fn fit_listed(app: &AppWindow, id: u64, answer: Answer) {
+    if answer == Answer::Stopped {
+        return;
+    }
+    let none = midi_fits::empty_words(&answer);
+    let said = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.asked != id || !p.fitting() {
+            return None;
+        }
+        let (fits, line, wants) = match answer {
+            Answer::Fits { wants, to, looked } => {
+                let line = midi_fits::page_line(&to, &looked);
+                (looked.fits, line, Some(wants))
+            }
+            Answer::Nothing(_) | Answer::Stopped => (Vec::new(), String::new(), p.fit_wants),
+        };
+        let hits: Vec<Hit> = fits.iter().map(|fit| Hit { entry: fit.entry, likeness: None }).collect();
+        p.picked_row = p.picked.and_then(|at| page::row_of(&p.cat, &hits, at));
+        background::free_later(std::mem::replace(&mut p.shown, Arc::new(hits)));
+        p.fits = Some(Arc::new(fits));
+        Some((p.shown.len(), line, wants))
+    });
+    let Some((shown, line, wants)) = said else { return };
+    LINES.with(|l| l.notify.reset());
+    let data = app.global::<MidiData>();
+    data.set_shown(shown as i32);
+    data.set_result(line.into());
+    data.set_target("".into());
+    show_fit_none(&data, none);
+    // What was looked for, which the song decided unless you chose.
+    data.set_fit_wants(wants_place(wants));
+    show_order(&data);
+}
+
+/// What the list's place says while "Fits my song" has no lines for it (none: nothing of its own).
+fn show_fit_none(data: &MidiData, none: Option<midi_fits::Empty>) {
+    let none = none.unwrap_or(midi_fits::Empty { title: "", text: String::new(), filters: false });
+    data.set_fit_none_title(none.title.into());
+    data.set_fit_none_text(none.text.into());
+    data.set_fit_none_filters(none.filters);
+}
+
+/// Where the switch for what's looked for stands: the place of `wants` in [`WANTS`], or -1 while it isn't known.
+fn wants_place(wants: Option<Wants>) -> i32 {
+    wants.and_then(|w| WANTS.iter().position(|x| *x == w)).map_or(-1, |at| at as i32)
+}
+
+/// The "Fits my song" chip and its switch, as the page has them now.
+fn show_fit(app: &AppWindow) {
+    let (song, wants) = PAGE.with(|p| {
+        let p = p.borrow();
+        (p.fit_song.as_ref().map(|s| s.label.clone()), p.fit_wants)
+    });
+    let data = app.global::<MidiData>();
+    // What's looked for is the song's to decide until you choose: the switch shows it once the song is read.
+    if wants.is_some() || song.is_none() {
+        data.set_fit_wants(wants_place(wants));
+    }
+    data.set_fit_song(song.unwrap_or_default().into());
+}
+
+/// The chip's menu picked a song by its label, or Off (""): the list is the parts that fit it, or the plain list
+/// again. The song that's on picked again is searched for again (and read again, if it was saved since).
+fn pick_fit_song(app: &AppWindow, label: &str) {
+    if label.is_empty() {
+        fit_off(app);
+        relist(app);
+        return;
+    }
+    let picked = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let song = p.fit_songs.iter().find(|s| s.label == label).cloned()?;
+        // Another song decides for itself what's looked for; the same one picked again keeps what you chose.
+        let another = p.fit_song.as_ref().is_none_or(|was| was.among(std::slice::from_ref(&song)).is_none());
+        if another {
+            p.fit_wants = None;
+        }
+        p.fit_song = Some(song);
+        // Ranked by how each part fits now, not by its likeness to one.
+        p.target = None;
+        Some(another)
+    });
+    let Some(another) = picked else { return };
+    if another {
+        app.global::<MidiData>().set_fit_wants(-1);
+    }
+    show_fit(app);
+    relist(app);
+}
+
+/// "Fits my song" goes off (the caller works the list out again): what its searches kept is let go, as the index's
+/// slots alone are tens of megabytes.
+fn fit_off(app: &AppWindow) {
+    let was_on = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.fit_stop.store(true, Ordering::Relaxed);
+        p.fit_wants = None;
+        p.fit_song.take().is_some()
+    });
+    show_fit(app);
+    if was_on {
+        fit_job(app, FitJob::LetGo);
+    }
+}
+
+/// The songs "Fits my song" offers (the few saved last, [`midi_fits::song_choices`]), as the Songs page's list has
+/// them: it tells this page each time it makes its list, at the start and whenever a save in your project folders
+/// changes (`crate::songs`). So the menu and the Songs page never disagree about which saves are one song, nothing
+/// is read here, and a list on show follows its song: saved again in the DAW (the same file or a new one), it's
+/// found here by its saves and its list is worked out again from the save written last.
+pub fn songs_offered(app: &AppWindow, songs: Vec<SongChoice>) {
+    let (menu, again) = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        // The song the list is fitted to, as it is now. Not offered any more (eight songs saved since): it stays as
+        // it was.
+        let now = p.fit_song.as_ref().and_then(|was| was.among(&songs)).cloned();
+        let again = now.is_some() && now != p.fit_song;
+        if again {
+            p.fit_song = now;
+        }
+        // The menu's lines only when they're others: a menu that's open keeps its place.
+        let labels = |songs: &[SongChoice]| songs.iter().map(|s| s.label.clone()).collect::<Vec<_>>();
+        let menu = (labels(&songs) != labels(&p.fit_songs)).then(|| labels(&songs));
+        p.fit_songs = songs;
+        (menu, again)
+    });
+    if let Some(menu) = menu {
+        app.global::<MidiData>().set_fit_songs(strings(menu));
+    }
+    if again {
+        // Its label may be another too (a second song of its name).
+        show_fit(app);
+        relist(app);
+    }
+}
+
+/// Shows one part, by its notes' fingerprint (Ctrl+K): picked, and in sight; when the filters hide it, they go (and
+/// "Fits my song", whose list it may not be in). Before the index is read it's shown once it is.
 fn show_part(app: &AppWindow, hash: &str) {
     let Some(at) = PAGE.with(|p| p.borrow().cat.find(hash)) else {
         PAGE.with(|p| p.borrow_mut().wanted = Some(hash.to_owned()));
@@ -1016,6 +1511,7 @@ fn show_part(app: &AppWindow, hash: &str) {
         p.seed = None;
         p.scroll_to_pick = true;
     });
+    fit_off(app);
     app.global::<MidiData>().set_search("".into());
     show_chips(app);
     show_years(app);
@@ -1174,31 +1670,37 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
     });
 }
 
-/// A part's notes, from wherever the index is; `open` keeps the index open for the next ask. Not one of an older
-/// layout, which can't be copied into this app's while it's open (reading your MIDI copies it), nor one a read failed
-/// on: the next ask opens it afresh.
+/// A part's notes, from wherever the index is; `open` keeps the index open for the next ask ([`from_index`]).
 fn notes_of(
     from: &NotesFrom,
     phrase_id: i64,
     hash: &str,
     open: &mut Option<(PathBuf, MidiStore)>,
 ) -> Result<Vec<NoteEvent>, String> {
-    Ok(match from {
-        NotesFrom::Made(made) => made.get(hash).cloned().unwrap_or_default(),
-        NotesFrom::Store(path) => {
-            if open.as_ref().is_none_or(|(p, _)| p != path) {
-                *open = Some((path.clone(), MidiStore::open_read_only(path).map_err(|e| e.to_string())?));
-            }
-            let read = match open.as_ref() {
-                Some((_, store)) => store.notes(phrase_id, hash).map_err(|e| e.to_string()),
-                None => Ok(Vec::new()),
-            };
-            if read.is_err() || open.as_ref().is_some_and(|(_, store)| !store.is_current()) {
-                *open = None;
-            }
-            read?
-        }
-    })
+    match from {
+        NotesFrom::Made(made) => Ok(made.get(hash).cloned().unwrap_or_default()),
+        NotesFrom::Store(path) => from_index(path, open, |store| store.notes(phrase_id, hash)),
+    }
+}
+
+/// Reads from the index at `path`; `open` keeps it open for the next ask. Not one of an older layout, which can't
+/// be copied into this app's while it's open (reading your MIDI copies it), nor one a read failed on: the next ask
+/// opens it afresh.
+fn from_index<T>(
+    path: &Path,
+    open: &mut Option<(PathBuf, MidiStore)>,
+    read: impl FnOnce(&MidiStore) -> Result<T, mo_midi::MidiError>,
+) -> Result<T, String> {
+    if open.as_ref().is_none_or(|(p, _)| p != path) {
+        *open = None;
+        *open = Some((path.to_owned(), MidiStore::open_read_only(path).map_err(|e| e.to_string())?));
+    }
+    let Some((_, store)) = open.as_ref() else { return Err("The index isn't open.".to_owned()) };
+    let got = read(store).map_err(|e| e.to_string());
+    if got.is_err() || !store.is_current() {
+        *open = None;
+    }
+    got
 }
 
 fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<NotesRead, String> {
@@ -1407,12 +1909,14 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             }
             true
         }
+        // The list is ranked one way at a time: by a part's likeness, or (with "Fits my song") by how each fits.
         ("midi.moreLike", Some((at, _))) => {
             PAGE.with(|p| {
                 let mut p = p.borrow_mut();
                 p.target = Some(Target::Like(at));
                 p.seed = None;
             });
+            fit_off(app);
             relist(app);
             true
         }
@@ -1422,6 +1926,7 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
                 p.target = Some(Target::Within(at));
                 p.seed = None;
             });
+            fit_off(app);
             relist(app);
             true
         }
@@ -1585,6 +2090,59 @@ pub fn work_here() {
 /// For the screenshots: picks the line at `row` of the list on show.
 pub fn pick_row(app: &AppWindow, row: usize) {
     select_row(app, row);
+}
+
+/// For the screenshots: "Fits my song" on, fitted to the made-up song the sample's first parts came from; or (`on`
+/// false) off again with no songs offered, as the other pictures have the page.
+pub fn fit_sample(app: &AppWindow, on: bool) {
+    if on {
+        songs_offered(app, sample_songs());
+        if let Some(first) = PAGE.with(|p| p.borrow().fit_songs.first().map(|s| s.label.clone())) {
+            pick_fit_song(app, &first);
+        }
+    } else {
+        pick_fit_song(app, "");
+        songs_offered(app, Vec::new());
+    }
+}
+
+/// For the screenshots' checks, with [`fit_sample`] on: the Songs page makes its list again with the fitted song
+/// saved once more, and called another name in the menu (a second song of its name turned up). Whether this page
+/// followed it: the chip has the new name, and the list was worked out again.
+pub fn fit_sample_follows(app: &AppWindow) -> bool {
+    let mut songs = sample_songs();
+    let Some(first) = songs.first_mut() else { return false };
+    first.label = format!("{} · Projects", first.name);
+    first.mtime += 60;
+    let label = first.label.clone();
+    let before = PAGE.with(|p| p.borrow().asked);
+    songs_offered(app, songs);
+    let followed = PAGE.with(|p| {
+        let p = p.borrow();
+        p.asked > before && p.fit_song.as_ref().is_some_and(|s| s.label == label)
+    });
+    followed && app.global::<MidiData>().get_fit_song() == label.as_str()
+}
+
+/// The songs [`sample`]'s parts came from, as "Fits my song" would offer them.
+fn sample_songs() -> Vec<SongChoice> {
+    let song = |name: &str, saves: &[&str]| SongChoice {
+        name: name.to_owned(),
+        label: name.to_owned(),
+        save: saves.first().copied().unwrap_or_default().to_owned(),
+        mtime: 1_762_100_000,
+        saves: saves.iter().map(|s| (*s).to_owned()).collect(),
+    };
+    vec![
+        song(
+            "Night drive",
+            &[
+                "I:\\Fl Studio Data\\FL Studio\\Projects\\Night drive\\Night drive 12.flp",
+                "I:\\Fl Studio Data\\FL Studio\\Projects\\Night drive\\Night drive 11.flp",
+            ],
+        ),
+        song("Glass", &["K:\\Bitwig Studio\\Projects\\Glass\\Glass.bwproject"]),
+    ]
 }
 
 /// Made-up parts for the screenshots, with their notes: a few songs' parts and a pack's.
@@ -2816,6 +3374,112 @@ mod tests {
         let mut open = None;
         assert!(notes_of(&loaded.notes, id, &hash, &mut open).is_ok_and(|n| n.len() == 15));
         assert!(open.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_samples_song_is_searched_for_parts_that_fit_it() {
+        let s = sample();
+        let songs = sample_songs();
+        let Some(song) = songs.first().cloned() else { panic!("the sample should offer a song") };
+        // Its saves are ones the sample's parts say they're from.
+        let from = |save: &str| s.cat.entries.iter().any(|e| e.phrase.source.path == save);
+        assert!(from(&song.save) && songs.iter().all(|song| from(&song.save)));
+        let ask = FitAsk {
+            id: 1,
+            cat: Arc::new(s.cat),
+            filters: Filters::default(),
+            song,
+            wanted: None,
+            slots_made: 0,
+            from: s.notes.clone(),
+            stop: Arc::default(),
+        };
+        let mut state = FitKept::default();
+        let answer = fit_search(&ask, &mut state);
+        let Answer::Fits { wants, to, looked } = answer else { panic!("no list: {answer:?}") };
+        // The made-up song is read from the sample's own parts: its bassline is what there is to play over (its
+        // keys are single notes in a row, which the song's reader doesn't take for chords).
+        assert_eq!((wants, to.as_str()), (Wants::Tune, "To play over Sub, bars 1–8"));
+        // The first search is logged, and what it read is kept for the next.
+        assert!(state.logged && !state.kept.is_empty());
+        // Parts are found, and none is the song's own (from either of its saves).
+        assert!(!looked.fits.is_empty());
+        let own = |fit: &Fit| ask.cat.entry(fit.entry).is_none_or(|e| e.phrase.source.path.contains("Night drive"));
+        assert!(!looked.fits.iter().any(own), "{looked:?}");
+        // Told to stop, it gives nothing to show.
+        let stopped = FitAsk { stop: Arc::new(AtomicBool::new(true)), ..ask };
+        assert_eq!(fit_search(&stopped, &mut FitKept::default()), Answer::Stopped);
+    }
+
+    #[test]
+    fn a_song_on_disk_is_fitted_from_the_index_on_disk() {
+        // The song: a recipe save (made by hand for tests), C D E G on FL Keys. The library: one MIDI file, a C
+        // major scale, read into a real index.
+        let dir = std::env::temp_dir().join("mo-ui-midi-fits-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        let pack = dir.join("New Midi").join("Keys");
+        assert!(std::fs::create_dir_all(&pack).is_ok());
+        assert!(std::fs::write(pack.join("Scale in C.mid"), scale_file()).is_ok());
+        let library = dir.join("library.db");
+        let Ok(c) = rusqlite::Connection::open(&library) else { panic!("couldn't make the library") };
+        let folders = format!("[\"{}\"]", dir.join("New Midi").to_string_lossy().replace('\\', "\\\\"));
+        let made = c.execute_batch(
+            "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE song_choices (kind TEXT, a TEXT, b TEXT, PRIMARY KEY (kind, a));
+             CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE, name TEXT NOT NULL,
+                 daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, file_missing INTEGER DEFAULT 0);",
+        );
+        assert!(made.is_ok(), "{made:?}");
+        assert!(c.execute("INSERT INTO settings (key, value) VALUES ('midi_folders', ?1)", [&folders]).is_ok());
+        drop(c);
+        let ran = read_into_index(&library, false, &AtomicBool::new(false), &|_, _, _| {});
+        assert!(ran.is_ok_and(|s| s.read == 1), "the scale should be read");
+        let Ok(loaded) = load(&library) else { panic!("the index should read") };
+
+        let save = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../mo-formats/tests/fixtures/recipe/fl/MO Recipe 02 notes.flp")
+            .to_string_lossy()
+            .into_owned();
+        let song = SongChoice {
+            name: "MO Recipe 02 notes".into(),
+            label: "MO Recipe 02 notes".into(),
+            save: save.clone(),
+            mtime: 0,
+            saves: vec![save.clone()],
+        };
+        let ask = |wanted| FitAsk {
+            id: 1,
+            cat: Arc::new(Catalogue::default()),
+            filters: Filters::default(),
+            song: song.clone(),
+            wanted,
+            slots_made: 0,
+            from: loaded.notes.clone(),
+            stop: Arc::default(),
+        };
+        let with_index = FitAsk { cat: Arc::new(loaded.cat), ..ask(Some(Wants::Chords)) };
+        let mut state = FitKept::default();
+        // Chords for its melody: the scale is tried (its slots and its notes come from the index, kept open), and
+        // the song's save is read from disk, where its time can be told.
+        let answer = fit_search(&with_index, &mut state);
+        let Answer::Fits { wants, to, looked } = answer else { panic!("no list: {answer:?}") };
+        assert_eq!((wants, looked.tried, looked.not_ready, looked.unread), (Wants::Chords, 1, 0, 0));
+        assert!(to.starts_with("Chords for "), "{to}");
+        assert!(written_now(&save) > 0 && state.open.is_some());
+        // A song with a melody alone has nothing to play a tune over: said in plain words.
+        let answer = fit_search(&ask(Some(Wants::Tune)), &mut state);
+        assert!(matches!(&answer, Answer::Nothing(why) if why.contains("look for chords for that")), "{answer:?}");
+        // The same song asked about another index (here an empty one): nothing of the first is offered.
+        let answer = fit_search(&ask(Some(Wants::Chords)), &mut state);
+        let Answer::Fits { looked, .. } = answer else { panic!("no list: {answer:?}") };
+        assert_eq!((looked.tried, looked.fits.len()), (0, 0));
+        // A save that isn't there: said with the song's name, and its time can't be told.
+        let gone = SongChoice { save: dir.join("Gone.flp").to_string_lossy().into_owned(), ..song.clone() };
+        assert_eq!(written_now(&gone.save), 0);
+        let answer = fit_search(&FitAsk { song: gone, ..ask(None) }, &mut state);
+        assert!(matches!(&answer, Answer::Nothing(why) if why.starts_with("MO Recipe 02 notes couldn't be read. ")));
+        drop(state);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
