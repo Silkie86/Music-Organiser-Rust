@@ -4148,8 +4148,8 @@ mod tests {
         let font = mo_audio::gm::open(&font_path).unwrap();
         let (heard, length) = page::loop_notes(&ask(None).part.notes(&mut None).unwrap(), 4);
         assert_eq!(length, 4 * bar);
-        let part = gm_part(&gm_notes(&heard), length, 100.0, &page::gm_sound(e));
-        let part = mo_audio::gm::render_loop(&font, &part).unwrap();
+        let heard = gm_notes(&heard);
+        let part = mo_audio::gm::render_loop(&font, &gm_part(&heard, length, 100.0, &page::gm_sound(e))).unwrap();
         let song = &kept.2;
         let (four, six) = (4 * 105_840, 6 * 105_840);
         assert_eq!((part.len(), song.len()), (four, six));
