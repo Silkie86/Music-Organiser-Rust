@@ -7,7 +7,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use mo_app::bitwig_favourites::{self, Multisample, is_temp_file, look, missing_lines, multisamples, summary};
+use mo_app::bitwig_favourites::{self, Marked, Multisample, is_temp_file, look, missing_lines, multisamples, summary};
 use mo_sounds::{Sound, SoundAnalysis};
 
 fn folder(name: &str) -> PathBuf {
@@ -112,7 +112,7 @@ fn samples_are_found_by_their_file_or_their_audio_only() {
     assert_eq!(found.unreadable.len(), 1);
     assert_eq!(missing_lines(&found)[0], "Drums Select: Clap.wav");
     assert!(
-        summary(&found, 3)
+        summary(&found, Marked { newly: 3, already: 1 })
             .starts_with("Found 3 of 4 samples in your sound library: 4 sounds now favourites (1 already were).")
     );
     // Every sample written to Temp went again.

@@ -41,9 +41,11 @@ pub const PICKS_KEY: &str = "bitwig_favourite_multisamples";
 /// The folder in a Bitwig Library its multisamples are kept in.
 pub const MULTISAMPLES: &str = "Multisamples";
 
-/// The biggest sample read out of a multisample (Bitwig's chord multisamples hold long files): a bigger one, or one
-/// that says it is, is left out and said to be. It's held in memory while it's looked for.
-pub const BIGGEST_SAMPLE: u64 = 512 << 20;
+/// The biggest sample read out of a multisample: a bigger one, or one that says it is, is left out and said to be.
+/// It's held in memory while it's looked for, and decoded whole for step 3, on each of the look's threads at once, so
+/// this keeps the look's memory in bounds. Drum hits are far smaller; Bitwig's chord multisamples hold samples of a
+/// few MB.
+pub const BIGGEST_SAMPLE: u64 = 64 << 20;
 
 /// How deep into a Multisamples folder multisamples are looked for (Bitwig lets you keep them in folders of your own).
 const DEEPEST: usize = 8;
@@ -92,22 +94,44 @@ fn key(path: &Path) -> String {
     path.to_string_lossy().to_lowercase()
 }
 
-/// The ticked multisamples a setting keeps ([`PICKS_KEY`]): a path a line.
-pub fn picks_of(setting: &str) -> HashSet<String> {
-    setting.lines().map(str::trim).filter(|l| !l.is_empty()).map(|l| key(Path::new(l))).collect()
-}
+/// The ticked multisamples, as the setting keeps them ([`PICKS_KEY`]: a path a line). A tick for a multisample not
+/// listed now (its drive not plugged in, say) is kept: only unticking it lets it go.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Picks(HashMap<String, PathBuf>);
 
-/// The setting for these ticked paths.
-pub fn picks_setting<'a>(ticked: impl IntoIterator<Item = &'a Path>) -> String {
-    let mut lines: Vec<String> = ticked.into_iter().map(|p| p.to_string_lossy().into_owned()).collect();
-    lines.sort();
-    lines.dedup();
-    lines.join("\n")
-}
+impl Picks {
+    /// The ticks a setting keeps.
+    pub fn of(setting: &str) -> Picks {
+        Picks(
+            setting
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(|l| (key(Path::new(l)), PathBuf::from(l)))
+                .collect(),
+        )
+    }
 
-/// Whether `m` is among the `picks` a setting keeps.
-pub fn is_picked(picks: &HashSet<String>, m: &Multisample) -> bool {
-    picks.contains(&key(&m.path))
+    /// The setting for these ticks.
+    pub fn setting(&self) -> String {
+        let mut lines: Vec<String> = self.0.values().map(|p| p.to_string_lossy().into_owned()).collect();
+        lines.sort();
+        lines.join("\n")
+    }
+
+    /// Whether `m` is ticked (its path in any capitals: Windows).
+    pub fn has(&self, m: &Multisample) -> bool {
+        self.0.contains_key(&key(&m.path))
+    }
+
+    /// Ticks `m`, or unticks it.
+    pub fn set(&mut self, m: &Multisample, on: bool) {
+        if on {
+            self.0.insert(key(&m.path), m.path.clone());
+        } else {
+            self.0.remove(&key(&m.path));
+        }
+    }
 }
 
 /// A sample that wasn't found in the library.
@@ -221,6 +245,10 @@ fn same_bytes(path: &Path, bytes: &[u8]) -> bool {
     }
 }
 
+/// How far a library file's size may be from a sample's to be compared by its audio (step 3): room for its notes
+/// (Bitwig's samples carry ID3 and ACID chunks of a few kB) and a cover picture.
+const NEAR_SIZE: u64 = 1 << 20;
+
 /// The start of the names a sample is written to Temp under: "mo-bitwig-sample-<process id>-<count>.<its kind>".
 const TEMP_PREFIX: &str = "mo-bitwig-sample-";
 
@@ -283,8 +311,13 @@ fn find(library: &Library, name: &str, bytes: &[u8], temp: &Path) -> Vec<usize> 
             found.push(i);
         }
     }
-    // 3: the same audio, by the strict print, among those not found yet.
-    let rest: Vec<usize> = named.iter().chain(&shaped).copied().filter(|i| !found.contains(i)).collect();
+    // 3: the same audio, by the strict print, among those not found yet whose file is about the sample's size (the
+    // same audio with other notes in the file is within a few kB; this keeps a sample with hundreds of loops of its
+    // length from decoding them all).
+    let near = |i: &usize| {
+        std::fs::metadata(path_of(*i)).is_ok_and(|m| (m.len() as i64 - bytes.len() as i64).unsigned_abs() <= NEAR_SIZE)
+    };
+    let rest: Vec<usize> = named.iter().chain(&shaped).copied().filter(|i| !found.contains(i)).filter(near).collect();
     if !rest.is_empty()
         && let Ok(print) = copies::print_of(&in_temp.0)
     {
@@ -419,25 +452,37 @@ pub fn look(
     found
 }
 
-/// What the page says once it's marked them: `newly` of `found.sounds` weren't favourites before.
-pub fn summary(found: &Found, newly: usize) -> String {
-    if found.samples == 0 {
-        return "The ticked multisamples hold no samples the app can read.".to_owned();
-    }
-    let mut words = format!(
-        "Found {} of {} in your sound library: {} now favourites",
-        thousands(found.samples_found),
-        plural(found.samples, "sample"),
-        plural(found.sounds.len(), "sound"),
-    );
-    let before = found.sounds.len() - newly.min(found.sounds.len());
-    if before > 0 {
-        words.push_str(&format!(" ({} already were)", thousands(before)));
-    }
-    words.push('.');
-    if !found.missing.is_empty() {
-        words.push_str(&format!(" {} not found.", plural(found.missing.len(), "sample")));
-    }
+/// What marking the sounds found did: how many became favourites, and how many were already.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Marked {
+    pub newly: usize,
+    pub already: usize,
+}
+
+/// What the page says once it's marked the sounds a look found.
+pub fn summary(found: &Found, marked: Marked) -> String {
+    let mut words = if found.samples == 0 {
+        if found.unreadable.is_empty() && !found.stopped {
+            "The ticked multisamples hold no samples the app can read.".to_owned()
+        } else {
+            "No samples were read.".to_owned()
+        }
+    } else {
+        let mut words = format!(
+            "Found {} of {} in your sound library: {} now favourites",
+            thousands(found.samples_found),
+            plural(found.samples, "sample"),
+            plural(marked.newly + marked.already, "sound"),
+        );
+        if marked.already > 0 {
+            words.push_str(&format!(" ({} already were)", thousands(marked.already)));
+        }
+        words.push('.');
+        if !found.missing.is_empty() {
+            words.push_str(&format!(" {} not found.", plural(found.missing.len(), "sample")));
+        }
+        words
+    };
     if !found.unreadable.is_empty() {
         words.push_str(&format!(" {} couldn't be read.", plural(found.unreadable.len(), "file")));
     }
@@ -491,14 +536,34 @@ mod tests {
 
     #[test]
     fn picks_keep_paths_a_line() {
-        let a = PathBuf::from(r"K:\Bitwig Studio\Library\Multisamples\Kicks 1 Select.multisample");
-        let b = PathBuf::from(r"K:\Bitwig Studio\Library\Multisamples\rim 1.multisample");
-        let setting = picks_setting([b.as_path(), a.as_path(), a.as_path()]);
-        assert_eq!(setting.lines().count(), 2);
-        let picks = picks_of(&setting);
         let m = |p: &str| Multisample { path: PathBuf::from(p), name: String::new() };
-        assert!(is_picked(&picks, &m(r"K:\Bitwig Studio\Library\Multisamples\KICKS 1 Select.multisample")));
-        assert!(!is_picked(&picks, &m(r"K:\Bitwig Studio\Library\Multisamples\Kicks 2 Select.multisample")));
+        let a = m(r"K:\Bitwig Studio\Library\Multisamples\Kicks 1 Select.multisample");
+        let b = m(r"K:\Bitwig Studio\Library\Multisamples\rim 1.multisample");
+        let mut picks = Picks::default();
+        picks.set(&b, true);
+        picks.set(&a, true);
+        picks.set(&a, true);
+        let setting = picks.setting();
+        assert_eq!(setting.lines().count(), 2);
+        let mut picks = Picks::of(&setting);
+        assert!(picks.has(&m(r"K:\Bitwig Studio\Library\Multisamples\KICKS 1 Select.multisample")));
+        assert!(!picks.has(&m(r"K:\Bitwig Studio\Library\Multisamples\Kicks 2 Select.multisample")));
+        // Unticking one keeps the other, listed or not, as it was written.
+        picks.set(&a, false);
+        assert_eq!(picks.setting(), r"K:\Bitwig Studio\Library\Multisamples\rim 1.multisample");
+    }
+
+    #[test]
+    fn summaries_say_what_happened() {
+        let none = Found { stopped: true, ..Found::default() };
+        assert_eq!(summary(&none, Marked::default()), "No samples were read. Stopped before the end.");
+        let bad = Found { unreadable: vec![("A".into(), "damaged".into())], ..Found::default() };
+        assert_eq!(summary(&bad, Marked::default()), "No samples were read. 1 file couldn't be read.");
+        let found = Found { samples: 4, samples_found: 3, sounds: vec![1, 2, 3, 4], ..Found::default() };
+        assert_eq!(
+            summary(&found, Marked { newly: 3, already: 1 }),
+            "Found 3 of 4 samples in your sound library: 4 sounds now favourites (1 already were)."
+        );
     }
 
     #[test]
