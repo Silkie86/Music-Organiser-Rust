@@ -24,7 +24,7 @@ use mo_app::activity::Feed;
 use mo_app::background::{self, Newest};
 use mo_app::finder::Kind;
 use mo_app::midi::{self as page, Filters, Order, Roll, Target};
-use mo_app::midi_fits::{self, Answer, Fit, SongChoice};
+use mo_app::midi_fits::{self, Answer, Fit, SongBars, SongChoice};
 use mo_app::places::Place;
 use mo_app::shortcuts::{Shortcuts, what_of};
 use mo_app::{log, to_bitwig};
@@ -152,6 +152,16 @@ struct Page {
     daw_move: i32,
     /// What the picked part's card says and offers about its fit now ([`show_card_fit`]).
     card_fit: CardFit,
+    /// "Play with the song": a part found plays with the parts of the song it fits ([`Page::heard_with`]); off: alone,
+    /// as in any other list. Remembered ([`midi_fits::WITH_SONG_KEY`]).
+    with_song: bool,
+    /// What a part in the list on show is heard with: the song's parts and bars the list is fitted to; none in a
+    /// list that isn't "Fits my song"'s.
+    fit_with: Option<Arc<SongBars>>,
+    /// What the picked part's card says it plays with, and what the loop playing was made with: brought into line by
+    /// [`fit_follows`], as `card_move` and `loop_move` are.
+    card_with: Option<Arc<SongBars>>,
+    loop_with: Option<Arc<SongBars>>,
 }
 
 /// How the picked part is moved to fit a song: what its card says, and how it's shown, played, dragged and sent.
@@ -162,6 +172,8 @@ struct PickedFit {
     fit: Fit,
     /// The song the list that had it was fitted to, as it was then.
     song: SongChoice,
+    /// The parts and bars of the song that list was fitted to: what it's heard with.
+    with: Option<Arc<SongBars>>,
 }
 
 /// A change to the picked part's octave, from its card or a key.
@@ -258,10 +270,36 @@ impl Page {
         let line = self.picked.and_then(|at| self.fit_of(at));
         let song = self.fits_song.as_ref().filter(|_| self.picked.is_some() && self.fits.is_some());
         self.picked_fit = match (line, song) {
-            (Some(fit), Some(song)) => Some(PickedFit { fit, song: song.clone() }),
+            (Some(fit), Some(song)) => Some(PickedFit { fit, song: song.clone(), with: self.fit_with.clone() }),
             (None, Some(song)) => self.picked_fit.take().filter(|was| was.song == *song),
             _ => None,
         };
+    }
+
+    /// What the part at `at` plays with when Play loop plays it: the parts and bars of the song it was fitted to,
+    /// while "Play with the song" is on. The picked part: those of the list that had it ([`Page::fit_picked`]), so a
+    /// tune found over the song's chords still plays over them once the list looks for chords. None for a part
+    /// that isn't fitted, for drums, with the chip off, and when nothing of the song plays in those bars: it plays
+    /// alone then.
+    fn heard_with(&self, at: usize) -> Option<Arc<SongBars>> {
+        if !self.with_song || self.cat.entry(at).is_none_or(|e| e.role() == Role::Drums) {
+            return None;
+        }
+        let with = if self.picked == Some(at) {
+            self.picked_fit.as_ref()?.with.clone()
+        } else {
+            self.fit_of(at).and(self.fit_with.clone())
+        };
+        with.filter(|with| with.length > 0 && !with.voices.is_empty())
+    }
+
+    /// The card's sound line for the part at `at` while it plays with the song ([`Page::heard_with`]), which needs
+    /// no tempo read: the song's is known. None when it plays alone.
+    fn with_song_line(&self, at: usize) -> Option<String> {
+        let with = self.heard_with(at)?;
+        let song = self.picked_fit.as_ref().filter(|_| self.picked == Some(at)).map(|picked| &picked.song);
+        let song = song.or(self.fits_song.as_ref())?;
+        Some(midi_fits::with_song_line(&page::gm_sound(self.cat.entry(at)?), &song.name, &with))
     }
 
     /// What the picked part's card says about how it's moved to fit ([`midi_fits::card_text`]); "" when it's as it
@@ -344,11 +382,14 @@ impl Page {
     /// None when there's no index or no such part.
     fn notes_ask(&mut self, at: usize) -> Option<NotesAsk> {
         self.notes_asked += 1;
+        self.card_with = self.heard_with(at);
         let part = self.part_out(at)?;
         self.card_move = part.semitones;
+        let with_song = self.with_song_line(at);
         let e = self.cat.entry(at)?;
         Some(NotesAsk {
             id: self.notes_asked,
+            with_song,
             part,
             role: e.role(),
             // As the stored key was read; the clip's name only for a part whose key isn't read yet.
@@ -455,6 +496,9 @@ enum FitJob {
 /// An ask for a part's notes: the roll, and its key when the index has no reading of the new key finder.
 struct NotesAsk {
     id: u64,
+    /// The card's sound line when the part plays with the song ([`Page::with_song_line`]); none: its own tempo is
+    /// read for the line.
+    with_song: Option<String>,
     /// The part, and how far the roll and the chords show it moved.
     part: PartOut,
     role: Role,
@@ -605,11 +649,15 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
             PAGE.with(|p| p.borrow_mut().finder_read = false);
         }
     });
+    // "Play with the song" is on until you turn it off.
+    let with_song = crate::settings::value(midi_fits::WITH_SONG_KEY).is_none_or(|v| v != "0");
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.library = library;
         p.feed = Some(feed);
+        p.with_song = with_song;
     });
+    app.global::<MidiData>().set_fit_with_song(with_song);
     wire(app);
     crate::piano_roll::connect(app);
     show_keys(app, shortcuts);
@@ -764,6 +812,12 @@ fn wire(app: &AppWindow) {
             PAGE.with(|p| p.borrow_mut().fit_wants = Some(wants));
             show_fit(&app);
             relist(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_fit_with_song_toggled(move || {
+        if let Some(app) = weak.upgrade() {
+            play_with_song(&app, !PAGE.with(|p| p.borrow().with_song));
         }
     });
     let weak = app.as_weak();
@@ -1012,6 +1066,7 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         background::free_later(std::mem::replace(&mut p.shown, Arc::new(Vec::new())));
         p.fits = None;
         p.fits_song = None;
+        p.fit_with = None;
         let read_now = !p.read_once && !HERE.with(|h| *h.borrow());
         p.read_once = true;
         (p.picked, read_now, was_looping && p.looping.is_none())
@@ -1321,6 +1376,7 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
         background::free_later(std::mem::replace(&mut p.shown, Arc::new(hits)));
         p.fits = None;
         p.fits_song = None;
+        p.fit_with = None;
         p.fit_picked();
         let target = p.target.and_then(|t| {
             let at = match t {
@@ -1604,12 +1660,12 @@ fn fit_listed(app: &AppWindow, id: u64, answer: Answer) {
         if p.asked != id || !p.fitting() {
             return None;
         }
-        let (fits, line, wants) = match answer {
-            Answer::Fits { wants, to, looked } => {
+        let (fits, line, wants, with) = match answer {
+            Answer::Fits { wants, to, looked, with } => {
                 let line = midi_fits::page_line(&to, &looked);
-                (looked.fits, line, Some(wants))
+                (looked.fits, line, Some(wants), Some(with))
             }
-            Answer::Nothing(_) | Answer::Stopped => (Vec::new(), String::new(), p.fit_wants),
+            Answer::Nothing(_) | Answer::Stopped => (Vec::new(), String::new(), p.fit_wants, None),
         };
         // A part whose octave you chose goes there, in this list as in any other.
         let mut fits = fits;
@@ -1619,6 +1675,7 @@ fn fit_listed(app: &AppWindow, id: u64, answer: Answer) {
         background::free_later(std::mem::replace(&mut p.shown, Arc::new(hits)));
         p.fits = Some(Arc::new(fits));
         p.fits_song = p.fit_song.clone();
+        p.fit_with = with;
         p.fit_picked();
         Some((p.shown.len(), line, wants))
     });
@@ -1635,19 +1692,33 @@ fn fit_listed(app: &AppWindow, id: u64, answer: Answer) {
     fit_follows(app);
 }
 
+/// "Play with the song" turned on or off: remembered, and the picked part's card and the loop playing follow at
+/// once ([`fit_follows`]).
+fn play_with_song(app: &AppWindow, on: bool) {
+    PAGE.with(|p| p.borrow_mut().with_song = on);
+    crate::settings::remember(midi_fits::WITH_SONG_KEY, if on { "1" } else { "0" });
+    app.global::<MidiData>().set_fit_with_song(on);
+    fit_follows(app);
+}
+
 /// A new list is on show: what's seen and heard of the picked part is brought into line with how it's moved now
-/// ([`Page::fit_picked`]). Its card's line and headings; its roll and chords, read again when the move is another
-/// (nothing else on the card changes, so nothing is blanked meanwhile); and the loop playing or the part in a DAW,
-/// started again moved the new way. Each is compared with the move it was made with, so a list that leaves the move
-/// as it was (a filter, a word typed, the song saved with the same chords) touches nothing that plays.
+/// ([`Page::fit_picked`]) and what of the song it plays with ([`Page::heard_with`]). Its card's lines and headings;
+/// its roll and chords, read again when the move is another (nothing else on the card changes, so nothing is blanked
+/// meanwhile); and the loop playing or the part in a DAW, started again the new way. Each is compared with what it
+/// was made with, so a list that leaves both as they were (a filter, a word typed, the song saved with the same
+/// chords) touches nothing that plays.
 fn fit_follows(app: &AppWindow) {
     let data = app.global::<MidiData>();
     let Some((at, ask, again)) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let at = p.picked?;
         let now = p.fit_move(at);
-        let ask = if now == p.card_move { None } else { p.notes_ask(at) };
-        let looping = p.looping == Some(at) && now != p.loop_move;
+        let with = p.heard_with(at);
+        let ask = if now == p.card_move && with == p.card_with { None } else { p.notes_ask(at) };
+        if ask.is_some() {
+            data.set_play_with_song(with.is_some());
+        }
+        let looping = p.looping == Some(at) && (now != p.loop_move || with != p.loop_with);
         let in_daw = p.in_daw.is_some() && p.in_daw == p.cat.entry(at).map(|e| e.phrase.id) && now != p.daw_move;
         show_card_fit(&data, &mut p);
         Some((at, ask, (looping, in_daw)))
@@ -1882,8 +1953,10 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
             .collect();
         data.set_picked(card);
         data.set_facts(ModelRc::new(VecModel::from(facts)));
-        // Its tempo follows with the notes (it's read from its song or file).
-        data.set_sound_line(page::sound_line(&page::gm_sound(e), None).into());
+        // Its tempo follows with the notes (it's read from its song or file); with the song, it's the song's.
+        let line = ask.as_ref().and_then(|ask| ask.with_song.clone());
+        data.set_sound_line(line.unwrap_or_else(|| page::sound_line(&page::gm_sound(e), None)).into());
+        data.set_play_with_song(p.card_with.is_some());
         crate::piano_roll::show(app, None);
         p.card_fit = fit;
         show_actions(&data, &p);
@@ -2009,9 +2082,12 @@ fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result
     Ok(NotesRead { read, roll: page::roll(&moved, ask.part.bars), fact, chart })
 }
 
-/// The card's sound line, with the part's tempo read now ([`tempo_of`]).
+/// The card's sound line: with the part's tempo read now ([`tempo_of`]), or what of the song it plays with.
 fn sound_line_of(ask: &NotesAsk) -> String {
-    page::sound_line(&ask.sound, Some(tempo_of(&ask.part.from, &ask.source, &ask.library)))
+    match &ask.with_song {
+        Some(line) => line.clone(),
+        None => page::sound_line(&ask.sound, Some(tempo_of(&ask.part.from, &ask.source, &ask.library))),
+    }
 }
 
 /// The picked part's tempo has been read: its card says it, unless another part was picked meanwhile.
@@ -2716,6 +2792,8 @@ struct PlayAsk {
     /// Its file, whose tempo it plays at, and the song library that has a project's.
     source: Arc<mo_midi::Source>,
     library: PathBuf,
+    /// The song's parts it plays with, at the song's tempo ([`Page::heard_with`]); none: alone.
+    with: Option<Arc<SongBars>>,
 }
 
 thread_local! {
@@ -2878,6 +2956,7 @@ fn play(app: &AppWindow, at: usize) {
             sound: page::gm_sound(e),
             source: Arc::clone(&e.phrase.source),
             library: p.library.clone(),
+            with: p.heard_with(at),
         })
     });
     let Some(ask) = ask else {
@@ -2888,6 +2967,7 @@ fn play(app: &AppWindow, at: usize) {
         let mut p = p.borrow_mut();
         p.looping = Some(at);
         p.loop_move = ask.part.semitones;
+        p.loop_with = ask.with.clone();
     });
     // A part playing in a DAW would play over it.
     if app.global::<MidiData>().get_daw_playing() != "" || app.global::<MidiData>().get_daw_starting() != "" {
@@ -2951,7 +3031,17 @@ fn play(app: &AppWindow, at: usize) {
     });
 }
 
-/// The part's loop: its notes read, the SoundFont read (once), and the two made into sound.
+/// How loud the song's parts go in beside a part found: a little under it, so the part is what's heard first.
+const SONG_GAIN: f32 = 0.7;
+
+/// The song's bars made into sound last ([`song_loop`]), by the SoundFont and the bars: every part of a list plays
+/// with the same ones, so stepping down the list makes each part's own loop and no more.
+static SONG_LOOP: std::sync::Mutex<Option<(PathBuf, Arc<SongBars>, Arc<mo_audio::AudioData>)>> =
+    std::sync::Mutex::new(None);
+
+/// The part's loop: its notes read, the SoundFont read (once), and the two made into sound. With the song
+/// ([`PlayAsk::with`]): at the song's tempo, over the song's parts in the bars it fits, the two going round until
+/// both are back at their starts ([`SongBars::round`]).
 fn make_loop(ask: &PlayAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<mo_audio::AudioData, String> {
     let notes = ask.part.notes(open)?;
     let (heard, length) = page::loop_notes(&notes, ask.part.bars);
@@ -2969,19 +3059,66 @@ fn make_loop(ask: &PlayAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<m
             }
         }
     };
-    let notes: Vec<mo_audio::gm::Note> = heard
+    let tempo = match &ask.with {
+        Some(with) => with.bpm(),
+        None => tempo_of(&ask.part.from, &ask.source, &ask.library).bpm(),
+    };
+    let alone = mo_audio::gm::render_loop(&font, &gm_part(&gm_notes(&heard), length, tempo, &ask.sound))?;
+    let Some(with) = &ask.with else { return Ok(alone) };
+    let song = song_loop(&font, &ask.font, with)?;
+    let layers = [
+        mo_audio::gm::Layer { sound: &alone, length, gain: 1.0 },
+        mo_audio::gm::Layer { sound: &song, length: with.length, gain: SONG_GAIN },
+    ];
+    mo_audio::gm::layered(&layers, with.round(length), mo_midi::PPQ, tempo)
+}
+
+/// A part's notes as the SoundFont's player takes them.
+fn gm_notes(notes: &[NoteEvent]) -> Vec<mo_audio::gm::Note> {
+    notes
         .iter()
         .map(|n| mo_audio::gm::Note { start: n.start, length: n.length, key: n.key, velocity: n.velocity7() })
-        .collect();
-    let part = mo_audio::gm::Part {
-        notes: &notes,
-        ppq: mo_midi::PPQ,
-        length,
-        tempo: tempo_of(&ask.part.from, &ask.source, &ask.library).bpm(),
-        program: ask.sound.program,
-        drums: ask.sound.drums,
+        .collect()
+}
+
+/// `notes` as a loop of `length` ticks at `tempo`, played with `sound`.
+fn gm_part<'a>(
+    notes: &'a [mo_audio::gm::Note],
+    length: i64,
+    tempo: f64,
+    sound: &mo_midi::gm::GmSound,
+) -> mo_audio::gm::Part<'a> {
+    mo_audio::gm::Part { notes, ppq: mo_midi::PPQ, length, tempo, program: sound.program, drums: sound.drums }
+}
+
+/// The song's parts over the bars a list is fitted to, as one loop at the song's tempo: each with the sound matched
+/// to it, together. Kept for the next part of the list ([`SONG_LOOP`]).
+fn song_loop(
+    font: &mo_audio::gm::Font,
+    font_path: &Path,
+    with: &Arc<SongBars>,
+) -> Result<Arc<mo_audio::AudioData>, String> {
+    let same = |kept: &(PathBuf, Arc<SongBars>, Arc<mo_audio::AudioData>)| {
+        kept.0 == font_path && (Arc::ptr_eq(&kept.1, with) || kept.1 == *with)
     };
-    mo_audio::gm::render_loop(&font, &part)
+    if let Some(kept) = SONG_LOOP.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().filter(|k| same(k))
+    {
+        return Ok(Arc::clone(&kept.2));
+    }
+    let voices = with
+        .voices
+        .iter()
+        .map(|voice| {
+            let notes = gm_notes(&voice.notes);
+            mo_audio::gm::render_loop(font, &gm_part(&notes, with.length, with.bpm(), &voice.sound))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let layers: Vec<mo_audio::gm::Layer> =
+        voices.iter().map(|sound| mo_audio::gm::Layer { sound, length: with.length, gain: 1.0 }).collect();
+    let made = Arc::new(mo_audio::gm::layered(&layers, with.length, mo_midi::PPQ, with.bpm())?);
+    *SONG_LOOP.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
+        Some((font_path.to_owned(), Arc::clone(with), Arc::clone(&made)));
+    Ok(made)
 }
 
 /// A DAW a part can play in, through what's on its selected track or channel.
@@ -3632,6 +3769,7 @@ mod tests {
     fn notes_ask(s: &Loaded, e: &mo_midi::Entry, semitones: i32) -> NotesAsk {
         NotesAsk {
             id: 1,
+            with_song: None,
             part: part_out(s, e, semitones),
             role: e.role(),
             cut: false,
@@ -3737,6 +3875,177 @@ mod tests {
         listed(&mut p, Some(vec![fit(4, 3), fit(2, -2)]), Some(&songs[0]));
         p.fit_song = None;
         assert_eq!((p.fit_move(2), p.fit_of(2)), (0, None));
+    }
+
+    /// A part found plays with the parts of the song its list was fitted to, while "Play with the song" is on: the
+    /// picked one keeps the ones it was found for, and its card says what they are.
+    #[test]
+    fn a_part_that_fits_plays_with_the_parts_of_the_song_it_was_fitted_to() {
+        let songs = sample_songs();
+        let fit = |entry: usize| Fit { entry, semitones: 3, octaves: 0, yours: None, edges: (48, 72), sits: 0.8 };
+        let bars = |wants: Wants, name: &str| {
+            let sound = mo_midi::gm::sound_for(Role::Chords, false, None, &[], None);
+            let notes = vec![NoteEvent {
+                start: 0,
+                length: 4 * mo_midi::BAR,
+                key: 57,
+                velocity: 40_000,
+                muted: false,
+                step: false,
+                attribute: mo_formats::NoteAttribute::NONE,
+            }];
+            Arc::new(SongBars {
+                voices: vec![midi_fits::SongVoice { name: name.into(), sound, notes }],
+                length: 4 * mo_midi::BAR,
+                bar: mo_midi::BAR,
+                tempo: Some(128.0),
+                wants,
+                names: name.into(),
+                bars: 8..12,
+            })
+        };
+        let (chords, lead) = (bars(Wants::Tune, "Keys"), bars(Wants::Chords, "Lead"));
+        let mut p =
+            Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), with_song: true, ..Page::default() };
+        p.fit_song = Some(songs[0].clone());
+        let listed = |p: &mut Page, entries: &[usize], with: Option<&Arc<SongBars>>| {
+            p.fits = with.map(|_| Arc::new(entries.iter().map(|&entry| fit(entry)).collect()));
+            p.fits_song = with.map(|_| songs[0].clone());
+            p.fit_with = with.cloned();
+            p.fit_picked();
+        };
+        // A line of the list plays with what the list is fitted to; a part that isn't in it plays alone.
+        listed(&mut p, &[4, 2], Some(&chords));
+        assert_eq!((p.heard_with(4), p.heard_with(7)), (Some(chords.clone()), None));
+        // Picked: its card's sound line says what it plays with, at once (the song's tempo needs no reading).
+        p.picked = Some(4);
+        p.fit_picked();
+        let line = midi_fits::with_song_line(&page::gm_sound(&p.cat.entries[4]), "Night drive", &chords);
+        assert!(line.ends_with("with Keys from Night drive (bars 9–12), at the song's 128 BPM"), "{line}");
+        assert_eq!((p.heard_with(4), p.with_song_line(4)), (Some(chords.clone()), Some(line.clone())));
+        let ask = p.notes_ask(4).unwrap();
+        assert_eq!(
+            (ask.with_song.clone(), sound_line_of(&ask), p.card_with.clone()),
+            (Some(line.clone()), line, Some(chords.clone()))
+        );
+        // The list now looks for chords under the song's lead and no longer has the part: it still plays over the
+        // chords it was found for, while a line of the new list plays with the lead.
+        listed(&mut p, &[2], Some(&lead));
+        assert_eq!((p.heard_with(4), p.heard_with(2)), (Some(chords.clone()), Some(lead.clone())));
+        // The chip off: alone, with its own tempo on the card.
+        p.with_song = false;
+        assert_eq!((p.heard_with(4), p.heard_with(2), p.with_song_line(4)), (None, None, None));
+        let ask = p.notes_ask(4).unwrap();
+        assert_eq!((ask.with_song.clone(), p.card_with.clone()), (None, None));
+        assert!(sound_line_of(&ask).contains("BPM") && !sound_line_of(&ask).contains("Night drive"));
+        p.with_song = true;
+        // Never drums, in the list or picked.
+        let drums = p.cat.entries.iter().position(|e| e.role() == Role::Drums).unwrap();
+        listed(&mut p, &[4, drums], Some(&chords));
+        assert_eq!((p.heard_with(drums), p.heard_with(4)), (None, Some(chords.clone())));
+        p.picked = Some(drums);
+        p.picked_fit = None;
+        p.fit_picked();
+        assert!(p.picked_fit.is_some());
+        assert_eq!((p.heard_with(drums), p.with_song_line(drums)), (None, None));
+        // Nothing of the song plays in the bars, or they have no length: alone.
+        p.picked = Some(4);
+        p.picked_fit = None;
+        let silent = Arc::new(SongBars { voices: Vec::new(), ..(*chords).clone() });
+        listed(&mut p, &[4, 2], Some(&silent));
+        assert_eq!((p.heard_with(4), p.heard_with(2)), (None, None));
+        let no_bars = Arc::new(SongBars { length: 0, ..(*chords).clone() });
+        listed(&mut p, &[4, 2], Some(&no_bars));
+        assert_eq!((p.heard_with(4), p.heard_with(2)), (None, None));
+        // The plain list: nothing is fitted, so nothing plays with the song.
+        listed(&mut p, &[4, 2], Some(&chords));
+        assert_eq!(p.heard_with(4), Some(chords));
+        listed(&mut p, &[], None);
+        assert_eq!((p.heard_with(4), p.heard_with(2), p.with_song_line(4)), (None, None, None));
+    }
+
+    /// With a real SoundFont (MO_SOUNDFONT=path): a part's loop with the song is the part and the song's parts added
+    /// up, each going round by its own length at the song's tempo, for as long as it takes both to come back to
+    /// their starts.
+    #[test]
+    #[ignore = "needs a SoundFont: MO_SOUNDFONT=path cargo test -p mo-ui --lib -- --ignored with_a_real_soundfont"]
+    fn a_part_plays_over_the_songs_parts_with_a_real_soundfont() {
+        let Some(font_path) = std::env::var_os("MO_SOUNDFONT").map(PathBuf::from) else { return };
+        let s = sample();
+        // The four-bar arp, over six bars of the song at 100 beats a minute: they meet again after twelve.
+        let e = s.cat.entries.iter().find(|e| e.role() == Role::Arp).unwrap();
+        assert_eq!(e.phrase.bars, 4);
+        let bar = mo_midi::BAR;
+        let held = |start: i64, length: i64, key: u8| NoteEvent {
+            start,
+            length,
+            key,
+            velocity: 40_000,
+            muted: false,
+            step: false,
+            attribute: mo_formats::NoteAttribute::NONE,
+        };
+        let voice = |name: &str, role: Role, notes: Vec<NoteEvent>| midi_fits::SongVoice {
+            name: name.into(),
+            sound: mo_midi::gm::sound_for(role, false, None, &[], None),
+            notes,
+        };
+        let keys = (0..6).flat_map(|b| [57u8, 60, 64].map(|key| held(b * bar, bar, key))).collect();
+        let sub = (0..6).map(|b| held(b * bar, bar / 2, 33)).collect();
+        let with = Arc::new(SongBars {
+            voices: vec![voice("Keys", Role::Chords, keys), voice("Sub", Role::Bass, sub)],
+            length: 6 * bar,
+            bar,
+            tempo: Some(100.0),
+            wants: Wants::Tune,
+            names: "Keys and Sub".into(),
+            bars: 8..14,
+        });
+        assert_eq!(with.round(4 * bar), 12 * bar);
+        let ask = |with: Option<Arc<SongBars>>| PlayAsk {
+            id: 1,
+            font: font_path.clone(),
+            part: part_out(&s, e, 0),
+            sound: page::gm_sound(e),
+            source: Arc::clone(&e.phrase.source),
+            library: PathBuf::new(),
+            with,
+        };
+        let started = Instant::now();
+        let together = make_loop(&ask(Some(Arc::clone(&with))), &mut None).unwrap();
+        let first = started.elapsed();
+        // A bar at 100 beats a minute is 105,840 frames.
+        assert_eq!((together.len(), together.sample_rate), (12 * 105_840, mo_audio::gm::RATE));
+        // The song's loop is kept for the next part of the list: the same one again makes only the part's.
+        let kept = SONG_LOOP.lock().unwrap().clone().unwrap();
+        assert!(kept.0 == font_path && Arc::ptr_eq(&kept.1, &with) && kept.2.len() == 6 * 105_840);
+        let started = Instant::now();
+        let again = make_loop(&ask(Some(Arc::new((*with).clone()))), &mut None).unwrap();
+        println!("first {first:?}, with the song's loop kept {:?}", started.elapsed());
+        assert!(Arc::ptr_eq(&SONG_LOOP.lock().unwrap().as_ref().unwrap().2, &kept.2), "the same bars: not made again");
+        assert_eq!(again.channels, together.channels);
+
+        // What's heard is the part alone at the song's tempo (no parts of the song: its bars are silent) and the
+        // song's loop a little under it, each going round by its own length: three times and twice.
+        let no_song = Arc::new(SongBars { voices: Vec::new(), ..(*with).clone() });
+        let part = make_loop(&ask(Some(no_song)), &mut None).unwrap();
+        assert_eq!(part.len(), together.len());
+        let song = &kept.2;
+        let (four, six) = (4 * 105_840, 6 * 105_840);
+        let mut loudest = 0.0f32;
+        let mut furthest = 0.0f32;
+        for i in (0..together.len()).step_by(97) {
+            let want = part.channels[0][i] + SONG_GAIN * song.channels[0][i % six];
+            loudest = loudest.max(want.abs());
+            furthest = furthest.max((together.channels[0][i] - want).abs());
+            // The part itself comes round every four bars.
+            assert!((part.channels[0][i] - part.channels[0][i % four]).abs() < 1e-6, "frame {i}");
+        }
+        assert!(loudest > 0.05, "there's sound in it: {loudest}");
+        assert!(loudest <= 1.0 && furthest < 1e-5, "added up as they are: off by {furthest}, peak {loudest}");
+        // Alone, it plays at its own tempo and for its own four bars.
+        let alone = make_loop(&ask(None), &mut None).unwrap();
+        assert!(alone.len() != four || tempo_of(&ask(None).part.from, &e.phrase.source, Path::new("")).bpm() == 100.0);
     }
 
     #[test]
@@ -3984,10 +4293,13 @@ mod tests {
         };
         let mut state = FitKept::default();
         let answer = fit_search(&ask, &mut state);
-        let Answer::Fits { wants, to, looked } = answer else { panic!("no list: {answer:?}") };
+        let Answer::Fits { wants, to, looked, with } = answer else { panic!("no list: {answer:?}") };
         // The made-up song is read from the sample's own parts: its bassline is what there is to play over (its
         // keys are single notes in a row, which the song's reader doesn't take for chords).
         assert_eq!((wants, to.as_str()), (Wants::Tune, "To play over Sub, bars 1–8"));
+        // And it's what a part found plays with: the bassline over those bars, at the song's tempo.
+        assert_eq!((with.names.as_str(), with.bars.clone(), with.voices.len()), ("Sub", 0..8, 1));
+        assert_eq!((with.length, with.wants, with.tempo.is_some()), (8 * mo_midi::BAR, Wants::Tune, true));
         // The first search is logged, and what it read is kept for the next.
         assert!(state.logged && !state.kept.is_empty());
         // Parts are found, and none is the song's own (from either of its saves).
@@ -4092,9 +4404,10 @@ mod tests {
         // Chords for its melody: the scale is tried (its slots and its notes come from the index, kept open), and
         // the song's save is read from disk, where its time can be told.
         let answer = fit_search(&with_index, &mut state);
-        let Answer::Fits { wants, to, looked } = answer else { panic!("no list: {answer:?}") };
+        let Answer::Fits { wants, to, looked, with } = answer else { panic!("no list: {answer:?}") };
         assert_eq!((wants, looked.tried, looked.not_ready, looked.unread), (Wants::Chords, 1, 0, 0));
         assert!(to.starts_with("Chords for "), "{to}");
+        assert!(with.wants == Wants::Chords && !with.voices.is_empty() && with.length > 0, "{with:?}");
         assert!(written_now(&save) > 0 && state.open.is_some());
         // A song with a melody alone has nothing to play a tune over: said in plain words.
         let answer = fit_search(&ask(Some(Wants::Tune)), &mut state);

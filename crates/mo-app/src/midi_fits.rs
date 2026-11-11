@@ -21,6 +21,10 @@
 //! `mo_midi::fit::octave`). The octave is a first guess: the card's Octave up and Octave down change it
 //! ([`Fit::octave_step`]), and what you chose is remembered for those notes ([`YourOctaves`], and the index's
 //! `your_octaves` for the next time), wherever they're fitted again.
+//!
+//! A part found can be heard with the song ([`SongBars`]): the parts it was fitted to, over the bars it was fitted
+//! to, go round beside it at the song's tempo, as the two were judged and as the part will sound dropped on the first
+//! of those bars in the DAW. [`with_song_line`] says so on the card.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -47,6 +51,9 @@ pub const SONGS_OFFERED: usize = 8;
 
 /// Said under the toolbar while a search runs.
 pub const LOOKING: &str = "Looking for parts that fit…";
+
+/// The setting for the page's "Play with the song" chip: "0" when you've turned it off; on until then.
+pub const WITH_SONG_KEY: &str = "midi_fits_with_song";
 
 /// A song the page offers to fit to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -125,6 +132,104 @@ pub struct Fitted {
     pub wants: Wants,
     pub pick: Pick,
     pub target: Target,
+    /// The same parts and bars to hear a part found with.
+    pub with: Arc<SongBars>,
+}
+
+/// What of a song a part found is heard with (the page's "Play with the song"): the parts the list is fitted to, over
+/// the bars it's fitted to, as the song has them. They go round as picked, every bar of them (one the parts rest in
+/// too), and the part found goes round beside them by its own length from the first of those bars
+/// ([`SongBars::round`]): as [`Target::fit`] judged the two, and as the part sounds dropped on that bar in the DAW.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SongBars {
+    /// What plays: each picked part that sounds in the bars (never drums), in the song's order.
+    pub voices: Vec<SongVoice>,
+    /// How long the bars are, and one bar of the song, in ticks ([`mo_midi::PPQ`] to a beat).
+    pub length: i64,
+    pub bar: i64,
+    /// The song's tempo, when its save gives one a part can play at.
+    pub tempo: Option<f64>,
+    /// What was looked for (parts over these, or chords under them), the names of the parts that play ("Keys and
+    /// Sub"; "" when none has a name) and the bars, counted from 0: for the card's words ([`with_song_line`]).
+    pub wants: Wants,
+    pub names: String,
+    pub bars: std::ops::Range<i64>,
+}
+
+/// One of a song's parts in the bars a list is fitted to ([`SongBars`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SongVoice {
+    pub name: String,
+    /// The General MIDI sound it's heard with, matched as a library part's is: by its name, the instrument its name
+    /// or its plugin's says, then its kind.
+    pub sound: mo_midi::gm::GmSound,
+    /// What it plays in the bars, the first of them at tick 0 ([`Song::stretch`]).
+    pub notes: Vec<NoteEvent>,
+}
+
+impl SongBars {
+    /// The picked parts of `song` over the picked bars, as [`Target::of_song`] takes them: each part once, in the
+    /// song's order, no drums, and none that rests through the bars.
+    pub fn of(song: &Song, pick: &Pick, wants: Wants) -> SongBars {
+        let mut places = pick.parts.clone();
+        places.sort_unstable();
+        places.dedup();
+        let voices: Vec<SongVoice> = places
+            .into_iter()
+            .filter_map(|at| {
+                let part = song.parts.get(at).filter(|p| !p.drums && p.role != Role::Drums)?;
+                let notes = song.stretch(at, &pick.bars);
+                if notes.is_empty() {
+                    return None;
+                }
+                // The part is pitched: a name that says drums (an "808" bassline's) doesn't put it on the drum kit.
+                let family = mo_midi::instruments::guess([part.name.as_str(), part.plugin.as_str()], false, None)
+                    .map(|guess| guess.family)
+                    .filter(|family| mo_midi::gm::for_family(*family).is_some());
+                let sound = mo_midi::gm::sound_for(part.role, false, None, &[&part.name], family);
+                Some(SongVoice { name: part.name.clone(), sound, notes })
+            })
+            .collect();
+        SongBars {
+            length: pick.bars.end.saturating_sub(pick.bars.start).max(0).saturating_mul(song.bar()),
+            bar: song.bar(),
+            tempo: page::usable_tempo(Some(song.tempo)),
+            wants,
+            names: names_words(voices.iter().map(|v| v.name.as_str())),
+            bars: pick.bars.clone(),
+            voices,
+        }
+    }
+
+    /// The tempo the two play at: the song's, else the one a part with none plays at ([`page::PLAY_TEMPO`]).
+    pub fn bpm(&self) -> f64 {
+        self.tempo.unwrap_or(page::PLAY_TEMPO)
+    }
+
+    /// How long a part whose loop is `part` ticks plays with these bars before both are back at their starts, in
+    /// ticks: until they meet again, or once through the longer when that's past 32 bars. The stretch
+    /// `mo_harmony::sit` heard them for ([`mo_harmony::round_of`]).
+    pub fn round(&self, part: i64) -> i64 {
+        mo_harmony::round_of(part.max(1), self.length.max(1), self.bar.max(1))
+    }
+}
+
+/// The card's sound line for a part found that plays with the song: its sound, what of `song` it's heard with, and
+/// whose tempo they play at. "Saw Lead · for its kind of part · with Keys and Sub from Night drive (bars
+/// 9–16), at the song's 128 BPM".
+pub fn with_song_line(sound: &mo_midi::gm::GmSound, song: &str, with: &SongBars) -> String {
+    let bars = bars_words(&with.bars);
+    let heard = match (with.names.is_empty(), with.wants) {
+        (false, _) => format!("with {} from {song} ({bars})", with.names),
+        (true, Wants::Tune) => format!("with {song}'s chords ({bars})"),
+        (true, Wants::Chords) => format!("with {song}'s melody ({bars})"),
+    };
+    let bpm = (with.bpm() * 10.0).round() / 10.0;
+    let tempo = match with.tempo {
+        Some(_) => format!("at the song's {bpm} BPM"),
+        None => format!("at {bpm} BPM, as the song gives no tempo"),
+    };
+    format!("{} · {heard}, {tempo}", page::sound_line(sound, None))
 }
 
 /// What of `song` is fitted to, nothing picked by hand. `wanted`: what the page's switch asks for; none (the switch
@@ -140,7 +245,8 @@ pub fn fitted(song: &Song, wanted: Option<Wants>) -> Result<Fitted, String> {
     let of = |pick: &Option<Pick>| {
         let pick = pick.clone()?;
         let target = pick.target(song)?;
-        Some(Fitted { wants: target.wants(), pick, target })
+        let with = Arc::new(SongBars::of(song, &pick, target.wants()));
+        Some(Fitted { wants: target.wants(), pick, target, with })
     };
     let (over, under) = (of(&chords), of(&melody));
     // The other way is only pointed to when it would work.
@@ -183,9 +289,14 @@ pub fn bars_words(bars: &std::ops::Range<i64>) -> String {
 
 /// The picked parts' names: "Keys", "Keys and Sub", "Keys, Pad and Sub", "Keys, Pad and 3 more".
 fn part_names(song: &Song, pick: &Pick) -> String {
+    names_words(pick.parts.iter().filter_map(|&at| song.parts.get(at)).map(|p| p.name.as_str()))
+}
+
+/// Names in a row, as [`part_names`] says them.
+fn names_words<'a>(all: impl Iterator<Item = &'a str>) -> String {
     // A name once: two channels called "Keys" (a layered sound) are "Keys".
     let mut names: Vec<&str> = Vec::new();
-    for name in pick.parts.iter().filter_map(|&at| song.parts.get(at)).map(|p| p.name.as_str()) {
+    for name in all {
         if !name.is_empty() && !names.contains(&name) {
             names.push(name);
         }
@@ -509,8 +620,9 @@ pub struct Asked<'a> {
 /// What a search came to.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Answer {
-    /// The list: what was looked for, what of the song it was fitted to ([`fitted_text`]) and the parts found.
-    Fits { wants: Wants, to: String, looked: Looked },
+    /// The list: what was looked for, what of the song it was fitted to ([`fitted_text`]), the parts found, and
+    /// what a part found is heard with.
+    Fits { wants: Wants, to: String, looked: Looked, with: Arc<SongBars> },
     /// Nothing could be fitted, and why, in plain words.
     Nothing(String),
     /// Stopped for a newer search: nothing to show.
@@ -633,7 +745,7 @@ pub fn search(
     if looked.stopped {
         return Answer::Stopped;
     }
-    Answer::Fits { wants: fitted.wants, to: fitted_text(&song.song, fitted), looked }
+    Answer::Fits { wants: fitted.wants, to: fitted_text(&song.song, fitted), looked, with: Arc::clone(&fitted.with) }
 }
 
 #[cfg(test)]
@@ -821,6 +933,95 @@ mod tests {
         assert_eq!(
             fitted(&song_of(Vec::new()), None).unwrap_err(),
             "This song has no notes to fit to yet (drums aside)."
+        );
+    }
+
+    #[test]
+    fn a_part_found_is_heard_with_the_parts_and_bars_its_list_is_fitted_to() {
+        let starts = |notes: &[NoteEvent]| notes.iter().map(|n| (n.start, n.length, n.key)).collect::<Vec<_>>();
+        // What the list is fitted to is what plays: the keys from bar 9, moved to start at tick 0.
+        let song = song();
+        let over = fitted(&song, None).unwrap();
+        let with = &over.with;
+        assert_eq!((with.voices.len(), with.voices[0].name.as_str()), (1, "Keys"));
+        assert_eq!(starts(&with.voices[0].notes), starts(&chords()));
+        assert_eq!((with.length, with.bar, with.tempo, with.bpm()), (4 * BAR, BAR, Some(120.0), 120.0));
+        assert_eq!((with.wants, with.names.as_str(), with.bars.clone()), (Wants::Tune, "Keys", 8..12));
+        // The other way: the lead, from bar 13.
+        let under = fitted(&song, Some(Wants::Chords)).unwrap();
+        assert_eq!((under.with.voices.len(), under.with.bars.clone(), under.with.wants), (1, 12..16, Wants::Chords));
+        assert_eq!(starts(&under.with.voices[0].notes), starts(&tune(0)));
+
+        // Each picked part once, in the song's order, however it was picked; never drums, nor a part that rests
+        // through the bars. A bassline called "808" is still a bass, not the drum kit.
+        let bass: Vec<NoteEvent> =
+            [45u8, 38, 43, 36].iter().zip(0i64..).map(|(&k, bar)| note(bar * BAR, BAR, k)).collect();
+        let kick: Vec<NoteEvent> = (0..16).map(|beat| note(beat * PPQ, PPQ / 2, 36)).collect();
+        let mut song = song_of(vec![
+            lane("Keys", 8, &chords()),
+            lane("808 sub", 8, &bass),
+            lane("Pad", 0, &chords()),
+            lane("Kit", 8, &kick),
+        ]);
+        song.parts[3].role = Role::Drums;
+        let pick = Pick { parts: vec![3, 1, 2, 0, 1], bars: 8..12 };
+        let with = SongBars::of(&song, &pick, Wants::Tune);
+        let names: Vec<&str> = with.voices.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["Keys", "808 sub"]);
+        assert_eq!(starts(&with.voices[1].notes), starts(&bass));
+        assert!(
+            with.voices.iter().all(|v| !v.sound.drums),
+            "{:?}",
+            with.voices.iter().map(|v| &v.sound).collect::<Vec<_>>()
+        );
+        assert_eq!(with.voices[1].sound.name(), "Synth Bass 1");
+        assert_eq!(with.names, "Keys and 808 sub");
+        // A song whose save gives no tempo a part can play at: the one a part with none plays at.
+        song.tempo = 0.0;
+        let slow = SongBars::of(&song, &pick, Wants::Tune);
+        assert_eq!((slow.tempo, slow.bpm()), (None, page::PLAY_TEMPO));
+        // No bars: nothing plays, and nothing has a length.
+        let none = SongBars::of(&song, &Pick { parts: vec![0], bars: 8..8 }, Wants::Tune);
+        assert_eq!((none.voices.len(), none.length), (0, 0));
+    }
+
+    #[test]
+    fn a_part_and_the_songs_bars_play_until_they_meet_again() {
+        let with = fitted(&song(), None).unwrap().with;
+        // Four bars of the song: a part as long plays once, a shorter one until both are back at their starts.
+        assert_eq!(with.round(4 * BAR), 4 * BAR);
+        assert_eq!(with.round(2 * BAR), 4 * BAR);
+        assert_eq!(with.round(8 * BAR), 8 * BAR);
+        assert_eq!(with.round(3 * BAR), 12 * BAR);
+        assert_eq!(with.round(7 * BAR), 28 * BAR);
+        // Past 32 bars they'd take too long to meet: once through the longer.
+        assert_eq!(with.round(9 * BAR), 9 * BAR);
+        // As the matcher hears them, whatever the numbers.
+        assert_eq!(with.round(5 * BAR), mo_harmony::round_of(5 * BAR, 4 * BAR, BAR));
+        assert_eq!(with.round(0), 4 * BAR);
+        let empty = SongBars { length: 0, bar: 0, ..(*with).clone() };
+        assert_eq!(empty.round(0), 1);
+    }
+
+    #[test]
+    fn the_card_says_what_a_part_plays_with_and_at_whose_tempo() {
+        let sound = mo_midi::gm::sound_for(Role::Melody, false, None, &[], None);
+        let with = fitted(&song(), None).unwrap().with;
+        assert_eq!(
+            with_song_line(&sound, "Night drive", &with),
+            "Saw Lead · for its kind of part · with Keys from Night drive (bars 9–12), at the song's 120 BPM"
+        );
+        // Parts with no names: what they are to the song. A tempo that isn't a whole number keeps a tenth.
+        let unnamed = SongBars { names: String::new(), tempo: Some(127.96), ..(*with).clone() };
+        assert_eq!(
+            with_song_line(&sound, "Night drive", &unnamed),
+            "Saw Lead · for its kind of part · with Night drive's chords (bars 9–12), at the song's 128 BPM"
+        );
+        let under = SongBars { wants: Wants::Chords, bars: 12..13, tempo: None, ..unnamed };
+        assert_eq!(
+            with_song_line(&sound, "Night drive", &under),
+            "Saw Lead · for its kind of part · with Night drive's melody (bar 13), at 120 BPM, as the song \
+             gives no tempo"
         );
     }
 
@@ -1327,8 +1528,9 @@ mod tests {
 
         // The first search reads the song and the slots, and gives the list with what it was fitted to.
         let first = search(&mut kept, &mut fake, &ask(None, 1), &pool, &go);
-        let Answer::Fits { wants, to, looked } = &first else { panic!("{first:?}") };
+        let Answer::Fits { wants, to, looked, with } = &first else { panic!("{first:?}") };
         assert_eq!((*wants, to.as_str()), (Wants::Tune, "To play over Keys, bars 9–12"));
+        assert_eq!((with.names.as_str(), with.bars.clone(), with.voices.len()), ("Keys", 8..12, 1));
         assert_eq!((looked.tried, looked.fits[0].entry, looked.fits[0].semitones), (3, place("fits a tone down"), -2));
         assert_eq!(page_line(to, looked), "To play over Keys, bars 9–12 · 3 parts, best fit first");
         assert_eq!(empty_words(&first), None);
@@ -1338,8 +1540,12 @@ mod tests {
         // The same again, and the other way: nothing is read again.
         assert_eq!(entries(&search(&mut kept, &mut fake, &ask(None, 1), &pool, &go)), entries(&first));
         let under = search(&mut kept, &mut fake, &ask(Some(Wants::Chords), 1), &pool, &go);
-        let Answer::Fits { wants, to, looked } = &under else { panic!("{under:?}") };
+        let Answer::Fits { wants, to, looked, with: with_tune } = &under else { panic!("{under:?}") };
         assert_eq!((*wants, to.as_str(), looked.fits.len()), (Wants::Chords, "Chords for Lead, bars 13–16", 0));
+        assert_eq!(
+            (with_tune.names.as_str(), with_tune.bars.clone(), with_tune.wants),
+            ("Lead", 12..16, Wants::Chords)
+        );
         // No lines: the list's place says why, and so does the line under the toolbar.
         let none = "No parts to try: the filters leave none of the right kind.";
         assert_eq!(empty_words(&under), Some(Empty { title: "No parts fit", text: none.to_owned(), filters: true }));
@@ -1436,7 +1642,8 @@ mod tests {
 
         // No lines: fewer filters could give some, unless what's missing is the index's slots (the MIDI has to be
         // read again first, whatever the filters).
-        let fits = |looked| Answer::Fits { wants: Wants::Tune, to: String::new(), looked };
+        let with = fitted(&super::tests::song(), None).unwrap().with;
+        let fits = |looked| Answer::Fits { wants: Wants::Tune, to: String::new(), looked, with: Arc::clone(&with) };
         let words = |looked| empty_words(&fits(looked)).map(|e| (e.title, e.text, e.filters));
         assert_eq!(
             words(Looked { looked: 12, not_ready: 3, ..Looked::default() }),

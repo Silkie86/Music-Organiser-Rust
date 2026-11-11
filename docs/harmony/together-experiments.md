@@ -305,6 +305,14 @@ place, 71.4% half-way, 64.4% by the song's other tune (the C# app 63.2% and 54.2
   from its first note's bar to its last note's: a four-bar loop that rests in its last bar is heard as three bars.
   Rounding up to 1, 2, 4, 8 or 16 bars is the likely fix; Solomon's packs' chord and melody pairs (below) are where
   to count whether it helps before it ships.
+- **What's judged isn't always what's dropped.** The search hears a found part from its first note's bar to the end
+  of the bar its last note ends in (`own_bars`). The clip the app plays, drags and sends starts at the part's first
+  bar line and lets a last note hang a hundredth of a bar over (`mo_midi::analyser::bars_of`, then
+  `mo_app::midi::loop_notes`). They're the same for most parts. A part with an empty bar before its first note, or a
+  last note a tick past a bar line, is judged over one loop and heard over another, a bar apart, and playing a part
+  with the song (`midi_fits::SongBars`) plays the clip as dropped. The fix is in the matcher and the kept slots (one
+  length rule for both, new `SLOTS_VERSION` and `TOGETHER_VERSION`, measured again); not counted yet how many parts
+  it touches.
 - **Only pop was measured.** Jazz, gospel and blues are held by the two rules and nine hand cases
   (`together::tests`), not by data. A set with real jazz tunes over real voicings would settle how much the rules
   cost or win there.

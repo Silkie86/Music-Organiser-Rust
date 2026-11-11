@@ -655,9 +655,10 @@ pub fn own_bars(notes: &[Note], bar: i64, bar_line: i64) -> Option<(i64, i64)> {
     Some((start, length))
 }
 
-/// How long two loops play together: until they meet again, or once through the longer when that's past
-/// [`MOST_BARS_ROUND`].
-fn round_of(a: i64, b: i64, bar: i64) -> i64 {
+/// How long two loops of `a` and `b` ticks play together, in a song whose bar is `bar` ticks: until they meet again,
+/// or once through the longer when that's past 32 bars ([`MOST_BARS_ROUND`]). What [`sit`] hears a tune and a backing
+/// for when both go round, so what plays a part found with its song goes round the same way.
+pub fn round_of(a: i64, b: i64, bar: i64) -> i64 {
     // Too long to count (a damaged file's stray note far away) is past it too.
     match (a / gcd(a, b)).checked_mul(b) {
         Some(both) if both <= MOST_BARS_ROUND.saturating_mul(bar) => both,

@@ -236,8 +236,23 @@ the next PR step by step). Solomon wants the highest effort here.
     it is in the library: no octave buttons; drums never have them, and an octave kept for the same notes doesn't
     move a drum part. A held key steps once (7 octaves to be at; each step starts what's playing again), and at
     the last octave the key is still the page's.
-  Not built yet: picking a song's parts and bars by hand, hearing a part with the song, and putting the part
-  found at the right bar of the project.
+  - Heard with the song (2026-11-11): in a "Fits my song" list, Play loop plays the part with what it was fitted
+    to: the song's picked parts over the picked bars, read from its save, at the song's tempo, through the
+    SoundFont. `midi_fits::SongBars` is that stretch of the song (`SongBars::of`: each part once, in the song's
+    order, never drums or a part resting there, each with a General MIDI sound guessed from its track and
+    plugin names); an answer carries it (`Answer::Fits::with`) and the picked part keeps the one it was found
+    with (`PickedFit::with`), so a tune found over the chords still plays over them after the list turns to
+    chords. How long they play: `SongBars::round`, until both loops start together again or once through the
+    longer past 32 bars (`mo_harmony::round_of`, the stretch the matcher judged). The sound is the part's loop
+    as it's dropped (from its first bar line, at the song's tempo) and the song's loop a little quieter
+    (`SONG_GAIN`), each going round from its own bar lines (`mo_audio::gm::layered`: a loop cut where the whole
+    goes round fades, and nothing is ever louder than full). The song's loop is made once and kept
+    (`SONG_LOOP`), so stepping down the list makes only each part. A "Play with the song" chip (on by default,
+    the setting `midi_fits_with_song`) turns it off; the button then says Play loop again and the card's sound
+    line says what's heard either way (`midi_fits::with_song_line`). Never for drums or a plain list. Play in
+    Bitwig and FL, Send and the drag are the part alone, as before.
+  Not built yet: picking a song's parts and bars by hand, hearing a part with the song playing in the DAW, and
+  putting the part found at the right bar of the project.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db
 writes once trusted. A decoder panic on a damaged file is caught with `mo_catch::catch`: one warning line in the log,

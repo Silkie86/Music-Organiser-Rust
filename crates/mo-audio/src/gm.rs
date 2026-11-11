@@ -73,11 +73,17 @@ pub struct Part<'a> {
     pub drums: bool,
 }
 
+/// How many frames of sound a tick takes at `tempo` (beats a minute; one that can't be is 120) with `ppq` ticks to a
+/// beat.
+fn frames_per_tick(tempo: f64, ppq: i64) -> f64 {
+    let tempo = if tempo.is_finite() && tempo > 0.0 { tempo.clamp(20.0, 400.0) } else { 120.0 };
+    f64::from(RATE) * 60.0 / (tempo * ppq.max(1) as f64)
+}
+
 /// The part as a stereo loop at [`RATE`], ready for `Player::play_looped`. Takes a while for a long part: call it
 /// off the window's thread.
 pub fn render_loop(font: &Font, part: &Part) -> Result<AudioData, String> {
-    let tempo = if part.tempo.is_finite() && part.tempo > 0.0 { part.tempo.clamp(20.0, 400.0) } else { 120.0 };
-    let frames_per_tick = f64::from(RATE) * 60.0 / (tempo * part.ppq.max(1) as f64);
+    let frames_per_tick = frames_per_tick(part.tempo, part.ppq);
     let at = |ticks: i64| (ticks.max(0) as f64 * frames_per_tick).round() as usize;
     let longest = (LONGEST_SECONDS * f64::from(RATE)) as usize;
     let len = at(part.length).min(longest);
@@ -162,9 +168,192 @@ pub fn render_loop(font: &Font, part: &Part) -> Result<AudioData, String> {
     })
 }
 
+/// One loop among those played together ([`layered`]).
+#[derive(Clone, Copy, Debug)]
+pub struct Layer<'a> {
+    /// The loop, as [`render_loop`] made it (at the tempo and ticks to a beat given to [`layered`]).
+    pub sound: &'a AudioData,
+    /// How long it is before it goes round, in ticks.
+    pub length: i64,
+    /// How loud it goes in: 1 for as it is.
+    pub gain: f32,
+}
+
+/// How long a loop cut short takes to fade out, in frames (5 ms), and how many frames short of its end a loop may
+/// stop without it counting as cut (where a bar's length in frames isn't a whole number).
+const CUT_FADE: usize = (RATE / 200) as usize;
+const CUT_SLACK: usize = 8;
+
+/// Loops played together for `length` ticks as one loop: each goes round by its own length from the start, as clips
+/// of different lengths do side by side in a DAW (a four-bar part twice over a song's eight bars). One that isn't
+/// back at its start where the whole goes round is cut there, faded over a few milliseconds so it doesn't click.
+/// Every loop is at `tempo` with `ppq` ticks to a beat. If together they'd be louder than full, all are turned down
+/// alike. Quick (it only adds up sound already made), but it copies up to two minutes of it: call it off the
+/// window's thread.
+pub fn layered(layers: &[Layer], length: i64, ppq: i64, tempo: f64) -> Result<AudioData, String> {
+    let frames_per_tick = frames_per_tick(tempo, ppq);
+    let at = |ticks: i64| (ticks.max(0) as f64 * frames_per_tick).round() as usize;
+    let longest = (LONGEST_SECONDS * f64::from(RATE)) as usize;
+    let len = at(length).min(longest);
+    if len == 0 {
+        return Err("There's nothing to play together".to_owned());
+    }
+    let mut left = vec![0.0f32; len];
+    let mut right = vec![0.0f32; len];
+    for layer in layers {
+        if layer.sound.sample_rate != RATE {
+            return Err("A loop to play together isn't at the SoundFont's rate".to_owned());
+        }
+        // One channel plays on both sides.
+        let Some(from_left) = layer.sound.channels.first() else { continue };
+        let from_right = layer.sound.channels.get(1).unwrap_or(from_left);
+        let has = from_left.len().min(from_right.len());
+        // A loop with no length, or shorter than a frame, can't go round.
+        let own = layer.length;
+        if has == 0 || own <= 0 || (own as f64 * frames_per_tick) < 1.0 {
+            continue;
+        }
+        let mut turn = 0i64;
+        loop {
+            // Each time round starts where its ticks say, so the turns never drift from the bar lines.
+            let start = at(turn.saturating_mul(own));
+            if start >= len {
+                break;
+            }
+            turn += 1;
+            let next = at(turn.saturating_mul(own)).max(start + 1);
+            let take = (next.min(len) - start).min(has);
+            // Cut by the whole's end, with more of it still to come: faded out.
+            let cut = next > len && has > take + CUT_SLACK;
+            let fade = if cut { CUT_FADE.min(take) } else { 0 };
+            for i in 0..take {
+                let gain =
+                    if i + fade >= take { layer.gain * (take - i) as f32 / fade.max(1) as f32 } else { layer.gain };
+                if let (Some(l), Some(r), Some(a), Some(b)) =
+                    (left.get_mut(start + i), right.get_mut(start + i), from_left.get(i), from_right.get(i))
+                {
+                    *l += a * gain;
+                    *r += b * gain;
+                }
+            }
+        }
+    }
+    let peak = left.iter().chain(&right).fold(0.0f32, |peak, s| peak.max(s.abs()));
+    if peak > 1.0 {
+        for s in left.iter_mut().chain(&mut right) {
+            *s /= peak;
+        }
+    }
+    Ok(AudioData {
+        sample_rate: RATE,
+        channels: vec![left, right],
+        file_seconds: len as f64 / f64::from(RATE),
+        embedded_is_loop: Some(true),
+        ..AudioData::default()
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A loop of `frames` frames, each frame its own place in the loop times `step` (left) and that halved (right).
+    fn ramp(frames: usize, step: f32) -> AudioData {
+        let left: Vec<f32> = (0..frames).map(|i| i as f32 * step).collect();
+        let right: Vec<f32> = left.iter().map(|s| s / 2.0).collect();
+        AudioData { sample_rate: RATE, channels: vec![left, right], ..AudioData::default() }
+    }
+
+    /// 60 beats a minute with 441 ticks to a beat: a tick is 100 frames exactly.
+    const PPQ: i64 = 441;
+    const TEMPO: f64 = 60.0;
+
+    #[test]
+    fn loops_played_together_each_go_round_by_their_own_length() {
+        // Two ticks and three ticks, for six: three times round and twice.
+        let (short, long) = (ramp(200, 0.001), ramp(300, 0.0001));
+        let layers = [Layer { sound: &short, length: 2, gain: 1.0 }, Layer { sound: &long, length: 3, gain: 0.5 }];
+        let both = layered(&layers, 6, PPQ, TEMPO).unwrap();
+        assert_eq!((both.len(), both.channels.len(), both.sample_rate), (600, 2, RATE));
+        assert_eq!(both.embedded_is_loop, Some(true));
+        assert!((both.file_seconds - 600.0 / f64::from(RATE)).abs() < 1e-9);
+        let near = |got: f32, want: f32| (got - want).abs() < 1e-6;
+        for (frame, in_short, in_long) in [(0, 0, 0), (199, 199, 199), (200, 0, 200), (300, 100, 0), (599, 199, 299)] {
+            let want = in_short as f32 * 0.001 + in_long as f32 * 0.0001 * 0.5;
+            assert!(near(both.channels[0][frame], want), "left at {frame}: {}", both.channels[0][frame]);
+            assert!(near(both.channels[1][frame], want / 2.0), "right at {frame}");
+        }
+        // One channel plays on both sides.
+        let mono = AudioData { channels: vec![vec![0.25; 200]], ..ramp(0, 0.0) };
+        let one = layered(&[Layer { sound: &mono, length: 2, gain: 1.0 }], 4, PPQ, TEMPO).unwrap();
+        assert!(one.channels.iter().all(|c| c.len() == 400 && c.iter().all(|s| near(*s, 0.25))));
+    }
+
+    #[test]
+    fn a_loop_cut_where_the_whole_goes_round_fades_out() {
+        // Thirty ticks over fifty: the second time round is cut after twenty.
+        let steady = AudioData { sample_rate: RATE, channels: vec![vec![0.5; 3000]; 2], ..AudioData::default() };
+        let cut = layered(&[Layer { sound: &steady, length: 30, gain: 1.0 }], 50, PPQ, TEMPO).unwrap();
+        let left = &cut.channels[0];
+        assert_eq!(left.len(), 5000);
+        // Whole the first time round and into the second; down to next to nothing at the cut, over the last 5 ms.
+        assert!(left[..5000 - CUT_FADE].iter().all(|s| (*s - 0.5).abs() < 1e-6));
+        assert!(left[4999] < 0.01 && left[4999] > 0.0, "the last frame: {}", left[4999]);
+        assert!(left[5000 - CUT_FADE..].windows(2).all(|w| w[1] < w[0]), "it fades all the way");
+        assert_eq!(cut.channels[1], *left);
+        // A loop a few frames longer than its ticks say (a bar that isn't a whole number of frames) isn't cut: no fade.
+        let over = AudioData { sample_rate: RATE, channels: vec![vec![0.5; 303]; 2], ..AudioData::default() };
+        let whole = layered(&[Layer { sound: &over, length: 3, gain: 1.0 }], 6, PPQ, TEMPO).unwrap();
+        assert!(whole.channels[0].iter().all(|s| (*s - 0.5).abs() < 1e-6));
+    }
+
+    #[test]
+    fn loops_together_are_never_louder_than_full_and_keep_to_the_bar_lines() {
+        let loud = AudioData { sample_rate: RATE, channels: vec![vec![0.8; 200]; 2], ..AudioData::default() };
+        let soft = AudioData { sample_rate: RATE, channels: vec![vec![-0.2; 100], vec![0.4; 100]], ..loud.clone() };
+        let layers = [Layer { sound: &loud, length: 2, gain: 1.0 }, Layer { sound: &soft, length: 1, gain: 2.0 }];
+        let both = layered(&layers, 2, PPQ, TEMPO).unwrap();
+        // 0.8 + 0.8 on the right is the loudest: everything comes down by that much.
+        assert!(both.channels[1].iter().all(|s| (*s - 1.0).abs() < 1e-6));
+        assert!(both.channels[0].iter().all(|s| (*s - 0.4 / 1.6).abs() < 1e-6));
+        // Quiet enough already: left as it is.
+        let quiet = layered(&[Layer { sound: &soft, length: 1, gain: 1.0 }], 2, PPQ, TEMPO).unwrap();
+        assert!(quiet.channels[1].iter().all(|s| (*s - 0.4).abs() < 1e-6));
+
+        // At 128 beats a minute a bar of 4/4 is 82,687.5 frames: every time round still starts on its bar line, and
+        // no frame of the whole is left silent.
+        let bar = 4 * 96;
+        let per_bar = |bars: i64| (bars as f64 * 82_687.5).round() as usize;
+        let one_bar = AudioData { sample_rate: RATE, channels: vec![vec![0.5; per_bar(1)]; 2], ..AudioData::default() };
+        let mut marked = one_bar.clone();
+        marked.channels[0][0] = 0.9;
+        let eight = layered(&[Layer { sound: &marked, length: bar, gain: 1.0 }], 8 * bar, 96, 128.0).unwrap();
+        assert_eq!(eight.len(), per_bar(8));
+        let starts: Vec<usize> =
+            eight.channels[0].iter().enumerate().filter(|(_, s)| **s > 0.8).map(|(i, _)| i).collect();
+        assert_eq!(starts, (0..8).map(per_bar).collect::<Vec<_>>());
+        assert!(eight.channels[1].iter().all(|s| *s >= 0.5 - 1e-6), "no gap between one time round and the next");
+    }
+
+    #[test]
+    fn nothing_to_play_together_is_an_error_not_silence() {
+        let loop_ = ramp(200, 0.001);
+        assert!(layered(&[Layer { sound: &loop_, length: 2, gain: 1.0 }], 0, PPQ, TEMPO).is_err());
+        let other_rate = AudioData { sample_rate: 48_000, ..loop_.clone() };
+        assert!(layered(&[Layer { sound: &other_rate, length: 2, gain: 1.0 }], 4, PPQ, TEMPO).is_err());
+        // So short that the whole is less than a frame.
+        assert!(layered(&[Layer { sound: &loop_, length: 2, gain: 1.0 }], 2, 1_000_000_000, TEMPO).is_err());
+        // A loop with no sound in it, or with no length, adds nothing; the others still play.
+        let empty = AudioData { sample_rate: RATE, ..AudioData::default() };
+        let layers = [
+            Layer { sound: &empty, length: 2, gain: 1.0 },
+            Layer { sound: &loop_, length: 0, gain: 1.0 },
+            Layer { sound: &loop_, length: 2, gain: 1.0 },
+        ];
+        assert_eq!(layered(&layers, 2, PPQ, TEMPO).unwrap().channels, loop_.channels);
+        let silent = layered(&layers[..2], 4, PPQ, TEMPO).unwrap();
+        assert!(silent.len() == 400 && silent.channels.iter().flatten().all(|s| *s == 0.0));
+    }
 
     #[test]
     fn only_a_soundfont_opens() {
