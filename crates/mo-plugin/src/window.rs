@@ -304,12 +304,12 @@ impl Shown {
         let player = Arc::clone(&self.instance.player);
         let slots = Arc::clone(&self.slots);
         let last_played = Rc::clone(&self.played);
-        panel.on_play(move |row| {
+        panel.on_play(move |row, from| {
             let Some(row) = usize::try_from(row).ok() else { return };
             let Some(path) = lines.path(row) else { return };
             *last_played.borrow_mut() = lines.sound(row).map(|sound| (row, sound, path.clone().into()));
             let slots = Arc::clone(&slots);
-            player.play(path.into(), move |played| *lock(&slots.played) = Some(played));
+            player.play(path.into(), from, move |played| *lock(&slots.played) = Some(played));
         });
         let player = Arc::clone(&self.instance.player);
         let weak = panel.as_weak();
@@ -486,7 +486,14 @@ impl Shown {
                 self.dragging.set(true);
                 self.panel.set_carried(i32::try_from(row).unwrap_or(-1));
                 self.render();
+                let started = Instant::now();
                 let done = crate::drag::file(&path);
+                let how = match &done {
+                    Ok(crate::drag::Outcome::Landed) => "landed".to_owned(),
+                    Ok(crate::drag::Outcome::Cancelled) => "let go where nothing took it, or called off".to_owned(),
+                    Err(why) => format!("failed: {why}"),
+                };
+                crate::log::took("Drag", &format!("{} {how}", path.display()), started);
                 self.dragging.set(false);
                 self.panel.set_carried(-1);
                 // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't
@@ -498,7 +505,10 @@ impl Shown {
                 self.window.window().dispatch_event(slint::platform::WindowEvent::PointerExited);
                 done.err()
             }
-            Err(why) => Some(why),
+            Err(why) => {
+                crate::log::line("Drag", &why);
+                Some(why)
+            }
         };
         if let Some(why) = said {
             self.playing.set(None);
@@ -683,7 +693,9 @@ fn view(library: Arc<Library>, asked: Asked, slots: Arc<Slots>) {
         if slots.searches.load(Ordering::Acquire) != number {
             return;
         }
+        let started = Instant::now();
         let (shown, counts) = library.view(&asked);
+        crate::log::took_if_slow("List", &format!("Worked out a list of {} sounds", shown.len()), started);
         *lock(&slots.found) = Some((number, shown, counts));
     });
 }

@@ -16,7 +16,7 @@ fn entry() -> PluginEntry {
 }
 
 fn instance(entry: &PluginEntry) -> PluginInstance<()> {
-    let info = HostInfo::new("Stand-in DAW", "Music Organiser tests", "", "1.0").unwrap();
+    let info = HostInfo::new("Stand-in DAW", mo_plugin::TESTS_VENDOR, "", "1.0").unwrap();
     PluginInstance::<()>::new(|_| (), |_| (), entry, c"com.silkie86.music-organiser.test", &info).unwrap()
 }
 

@@ -1507,6 +1507,9 @@ export component ListLine inherits Rectangle {
     callback right-clicked(length, length);
     // Whether the mouse is over it (it's shaded then).
     out property <bool> hovered: touch.has-hover;
+    // Where across the line the mouse was last pressed: a line with parts that mean something by where they're
+    // clicked (a waveform that plays from that spot) reads it in `clicked`.
+    out property <length> pressed-x: touch.pressed-x;
     // It can be dragged out of the app (a sound to a DAW): `drag-out` once the left button is down and the mouse has
     // moved a few points, then `drag-let-go` if the button comes up before the drag has got going (mo-ui's drag.rs).
     // `lifted` dims the line while it's carried, and `landed` glows round it for a moment once it has landed.

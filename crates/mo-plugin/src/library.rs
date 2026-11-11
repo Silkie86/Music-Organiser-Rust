@@ -123,9 +123,14 @@ pub fn read() -> Read {
     if let Some(library) = lock(&SHARED).upgrade() {
         return Read::Ready(library);
     }
+    let started = std::time::Instant::now();
     let read = read_from(&mo_app::paths::data_dir().join("sounds.db"));
-    if let Read::Ready(library) = &read {
-        *lock(&SHARED) = Arc::downgrade(library);
+    match &read {
+        Read::Ready(library) => {
+            *lock(&SHARED) = Arc::downgrade(library);
+            crate::log::took("Library", &format!("Read {} sounds", library.list.len()), started);
+        }
+        Read::Not(why) => crate::log::took("Library", &format!("Not read: {why}"), started),
     }
     read
 }
@@ -161,7 +166,17 @@ pub fn waves_from(sounds_db: &Path, ids: &[i64]) -> Vec<(i64, mo_sounds::Peaks)>
     if ids.is_empty() || !copy.is_file() {
         return Vec::new();
     }
-    mo_sounds::SoundsDb::open_read_only(&copy).and_then(|db| db.waves(ids)).unwrap_or_default()
+    let started = std::time::Instant::now();
+    match mo_sounds::SoundsDb::open_read_only(&copy).and_then(|db| db.waves(ids)) {
+        Ok(found) => {
+            crate::log::took_if_slow("Waveforms", &format!("Read {} of {} asked for", found.len(), ids.len()), started);
+            found
+        }
+        Err(e) => {
+            crate::log::took("Waveforms", &format!("Couldn't read {} from the library: {e}", ids.len()), started);
+            Vec::new()
+        }
+    }
 }
 
 #[cfg(test)]
