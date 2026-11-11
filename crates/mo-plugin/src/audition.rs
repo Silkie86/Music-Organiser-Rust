@@ -28,6 +28,10 @@ pub struct Voice {
     left: Vec<f32>,
     right: Vec<f32>,
     at: usize,
+    /// Where in the whole file this stretch begins and how much of the file it covers (0 to 1 each): for the line
+    /// on the waveform that shows where it's playing.
+    begins: f32,
+    covers: f32,
 }
 
 impl Voice {
@@ -38,7 +42,7 @@ impl Voice {
             Some(c) => resample(c, from_rate, to_rate),
             None => left.clone(),
         };
-        Voice { left, right, at: 0 }
+        Voice { left, right, at: 0, begins: 0.0, covers: 1.0 }
     }
 
     /// Starts `part` of the way in (0 the start, 1 the end) instead of at the start.
@@ -46,6 +50,19 @@ impl Voice {
         let len = self.left.len().min(self.right.len());
         self.at = ((part.clamp(0.0, 1.0) * len as f64) as usize).min(len);
         self
+    }
+
+    /// Says which stretch of the whole file this is: it begins `begins` of the way in and covers `covers` of it.
+    fn of_file(mut self, begins: f64, covers: f64) -> Voice {
+        self.begins = begins.clamp(0.0, 1.0) as f32;
+        self.covers = covers.clamp(0.0, 1.0) as f32;
+        self
+    }
+
+    /// Where it's playing now, as a part of the whole file (0 the start, 1 the end).
+    fn place(&self) -> f32 {
+        let len = self.left.len().min(self.right.len()).max(1);
+        self.begins + self.covers * (self.at.min(len) as f32 / len as f32)
     }
 
     fn done(&self) -> bool {
@@ -85,6 +102,8 @@ struct Counts {
     started: AtomicU64,
     /// Sounds that have ended: played to the end, stopped or replaced.
     ended: AtomicU64,
+    /// Where the sound playing is in its whole file ([`Voice::place`]), as an `f32`'s bits.
+    place: AtomicU32,
 }
 
 /// The audio thread's side: on the DAW's audio thread, from when the DAW starts the track's audio to when it stops it.
@@ -129,6 +148,7 @@ impl Playing {
                 voice.at += 1;
                 written += 1;
             }
+            self.counts.place.store(voice.place().to_bits(), Ordering::Release);
         }
         left[written..].fill(0.0);
         right[written..].fill(0.0);
@@ -335,6 +355,8 @@ impl Player {
     /// read (over a minute into a long file) is read from there instead, where the file's kind can be.
     fn voice_from(&self, pick: &Pick, mut audio: mo_audio::AudioData, rate: u32) -> Result<Voice, String> {
         let read = audio.channels.first().map_or(0, Vec::len);
+        // The whole file's length in frames, as `start` takes it.
+        let whole = (audio.file_seconds * f64::from(audio.sample_rate)).max(read as f64).max(1.0);
         match start(pick.from, read, audio.file_seconds, audio.sample_rate) {
             // Trim silence: the spot still counts into the whole sound; the play starts past the silence at the
             // start (or at the spot, when that's later) and ends with the sound.
@@ -344,9 +366,12 @@ impl Player {
             {
                 Some((first, end)) => {
                     audio.keep(first, end);
-                    Ok(Voice::new(&audio.channels, audio.sample_rate, rate))
+                    let kept = end.saturating_sub(first) as f64;
+                    Ok(Voice::new(&audio.channels, audio.sample_rate, rate).of_file(first as f64 / whole, kept / whole))
                 }
-                None => Ok(Voice::new(&audio.channels, audio.sample_rate, rate).from(part)),
+                None => Ok(Voice::new(&audio.channels, audio.sample_rate, rate)
+                    .of_file(0.0, read as f64 / whole)
+                    .from(part)),
             },
             Start::Past(_) if !mo_audio::can_read_from(&pick.path) => {
                 Err("Only the first minute of this kind of file plays".into())
@@ -359,7 +384,8 @@ impl Player {
                 if let Some(level) = self.trim_level() {
                     later.cut_end_silence(level);
                 }
-                Ok(Voice::new(&later.channels, later.sample_rate, rate))
+                let frames = later.channels.first().map_or(0, Vec::len) as f64;
+                Ok(Voice::new(&later.channels, later.sample_rate, rate).of_file(frame as f64 / whole, frames / whole))
             }
         }
     }
@@ -383,6 +409,14 @@ impl Player {
     pub fn still_playing(&self, n: u64) -> bool {
         let started = self.counts.started.load(Ordering::Acquire);
         started < n || (started == n && self.counts.ended.load(Ordering::Acquire) < started)
+    }
+
+    /// Where the `n`th sound handed to the audio thread is playing now, as a part of its whole file (0 the start, 1
+    /// the end): `None` before it has started and once it has ended.
+    pub fn place(&self, n: u64) -> Option<f32> {
+        let started = self.counts.started.load(Ordering::Acquire);
+        (started == n && self.counts.ended.load(Ordering::Acquire) < started)
+            .then(|| f32::from_bits(self.counts.place.load(Ordering::Acquire)).clamp(0.0, 1.0))
     }
 
     fn ask(&self, ask: Ask) -> Result<(), String> {
@@ -430,6 +464,8 @@ mod tests {
         let (mut l, mut r) = (vec![9.0; 3], vec![9.0; 3]);
         playing.fill(&mut l, &mut r);
         assert_eq!(l, vec![0.3 * LEVEL, 0.4 * LEVEL, 0.0]);
+        // Played to its end and handed back: no place to show any more.
+        assert_eq!(player.place(1), None);
         // The very end plays nothing, and doesn't run past the sound.
         assert!(Voice::new(&[vec![0.1; 4]], 48_000, 48_000).from(1.0).done());
     }
@@ -451,6 +487,8 @@ mod tests {
         // From the start: from the first loud frame to the end of the sound and its 10 ms tail.
         let v = player.voice_from(&pick(0.0), audio.clone(), 1_000).unwrap();
         assert_eq!((v.left.len(), v.left[0]), (40, 0.5));
+        // Its place on the waveform counts into the whole file: it starts a fifth of the way in.
+        assert!((v.place() - 0.2).abs() < 1e-6 && (v.covers - 0.4).abs() < 1e-6);
         // A spot in the sound plays from there; one in the quiet end plays as asked.
         assert_eq!(player.voice_from(&pick(0.3), audio.clone(), 1_000).unwrap().left.len(), 30);
         let v = player.voice_from(&pick(0.8), audio.clone(), 1_000).unwrap();
@@ -473,6 +511,28 @@ mod tests {
         // A file that doesn't say how long it is, and an empty one.
         assert_eq!(start(0.5, 100, 0.0, 100), Start::Within(0.5));
         assert_eq!(start(0.5, 0, 0.0, 100), Start::Within(0.0));
+    }
+
+    #[test]
+    fn the_place_playing_is_told_as_a_part_of_the_whole_file() {
+        let player = Player::default();
+        let mut playing = player.start(48_000);
+        // The second half of a file, played from its own start.
+        let voice = Voice::new(&[vec![0.1; 8]], 48_000, 48_000).of_file(0.5, 0.5);
+        let Played::Playing(_, n) = player.hand_over(Box::new(voice), "a".into()) else { panic!("not handed over") };
+        assert_eq!(player.place(n), None, "not started yet");
+        let (mut l, mut r) = (vec![0.0; 4], vec![0.0; 4]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(player.place(n), Some(0.75));
+        assert_eq!(player.place(n + 1), None);
+        // A spot clicked in a file read whole starts the line there.
+        let audio = mo_audio::AudioData {
+            sample_rate: 1_000,
+            channels: vec![vec![0.5; 100]],
+            file_seconds: 0.1,
+            ..Default::default()
+        };
+        assert!((player.voice_from(&pick(0.3), audio, 1_000).unwrap().place() - 0.3).abs() < 1e-6);
     }
 
     #[test]
