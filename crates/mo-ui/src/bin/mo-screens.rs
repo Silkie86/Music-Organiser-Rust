@@ -908,8 +908,8 @@ fn tag_box_checks(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Res
 /// A right click while a sound plays is for stopping it (Solomon, 11 Nov: "right click to stop could also work in the
 /// main app too"): a tile right-clicked then is neither picked nor given its menu (a pick could play it), and once Esc
 /// has stopped the sound the same right click picks the tile and opens its menu, as before. The stop itself is heard
-/// by the window's own watcher as the button comes up (right_click.rs, whose tests check it): these shots have no
-/// winit window to hear it. Last, as the tile it picks would show in the shots.
+/// by the window's own watcher as the button comes up, which these shots have no winit window for: right_click.rs's
+/// tests check when a press is a click and when it's a drag. Last, as the tile it picks would show in the shots.
 fn right_click_while_playing(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
     use slint::platform::Key;
     let sounds = app.global::<mo_ui::SoundsData>();

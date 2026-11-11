@@ -1,8 +1,8 @@
-//! A right click stops what plays, on every page (Solomon, 11 Nov: "right click to stop could also work in the main
-//! app too", as it does in the test plugin): the right button let go where it went down while a sound, the MIDI page's
-//! loop, a part or an audition in a DAW plays. It stops what Esc's first step stops ([`crate::stop_what_plays`]). Once
-//! the mouse has moved off while the button is down, it's a drag, which still moves the Galaxy's map and the
-//! arrangement.
+//! A right click stops what plays, on every page (Solomon, 11 Nov, of the test plugin's right click that stops its
+//! sound: "right click to stop could also work in the main app too"): the right button let go where it went down while
+//! a sound, the MIDI page's loop, a part or an audition in a DAW plays. It stops what Esc's first step stops
+//! ([`crate::stop_what_plays`]). Once the mouse has moved off while the button is down, it's a drag, which still moves
+//! the Galaxy's map and the arrangement.
 //!
 //! It's heard from the window's own events ([`crate::watchdog::watch_window`]), before Slint has them, so it works
 //! wherever the mouse is: over a button, a tile or a list line too. A list line opens no menu while something plays
@@ -74,6 +74,8 @@ impl RightClick {
                 if self.released()
                     && let Some(app) = app.upgrade()
                 {
+                    // Marked as Esc's stop is, so a freeze in it says what it was.
+                    let _doing = crate::watchdog::doing("a right click");
                     crate::stop_what_plays(&app);
                 }
             }
