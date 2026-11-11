@@ -465,6 +465,9 @@ struct Shown {
     dragging: Cell<bool>,
     /// Where the right button went down, while it's down: let go in the same spot, it's a click.
     right_press: Cell<Option<LogicalPosition>>,
+    /// The panel is being told of the right button going down or coming up, now: a line under the mouse takes
+    /// that as a click (the app's lines open a menu with it), and here it mustn't play the line.
+    right_now: Rc<Cell<bool>>,
     /// The Galaxy: its map, its view and which picture is on show.
     sky: Rc<RefCell<Sky>>,
     /// The names last put over the Galaxy's map.
@@ -517,6 +520,7 @@ impl Shown {
             wave_width: Cell::new(waves::WIDTH as f32),
             dragging: Cell::new(false),
             right_press: Cell::new(None),
+            right_now: Rc::default(),
             sky: Rc::default(),
             sky_names: RefCell::default(),
             painter: RefCell::new(None),
@@ -550,7 +554,12 @@ impl Shown {
         let player = Arc::clone(&self.instance.player);
         let slots = Arc::clone(&self.slots);
         let last_played = Rc::clone(&self.played);
+        let right_now = Rc::clone(&self.right_now);
         panel.on_play(move |row, from| {
+            // A right click stops the sound: it never starts the line under it.
+            if right_now.get() {
+                return;
+            }
             let Some(row) = usize::try_from(row).ok() else { return };
             let Some(path) = lines.path(row) else { return };
             *last_played.borrow_mut() = lines.sound(row).map(|sound| (row, sound, path.clone().into()));
@@ -1265,7 +1274,9 @@ impl WindowHandler for Shown {
                     if button == MouseButton::Right {
                         self.right_press.set(Some(self.pointer.get()));
                     }
+                    self.right_now.set(button == MouseButton::Right);
                     self.send(Slint::PointerPressed { position: self.pointer.get(), button: slint_button(button) });
+                    self.right_now.set(false);
                 }
                 MouseEvent::ButtonReleased { button, .. } => {
                     // A right click stops the sound (a right drag is the Galaxy's map being moved: it doesn't).
@@ -1275,7 +1286,9 @@ impl WindowHandler for Shown {
                     {
                         self.stop();
                     }
+                    self.right_now.set(button == MouseButton::Right);
                     self.send(Slint::PointerReleased { position: self.pointer.get(), button: slint_button(button) });
+                    self.right_now.set(false);
                 }
                 MouseEvent::WheelScrolled { delta, .. } => {
                     let (delta_x, delta_y) = match delta {
