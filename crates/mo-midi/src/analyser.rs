@@ -108,6 +108,11 @@ fn round(x: f64) -> i64 {
 /// How many bars the notes take, from tick 0: at least 1, and 0 for no notes.
 pub fn bars_of(notes: &[NoteEvent]) -> i64 {
     let Some(end) = notes.iter().map(|n| n.start + n.length).max() else { return 0 };
+    bars_to(end)
+}
+
+/// How many bars from tick 0 notes that end at `end` take: a hundredth of a bar over a bar line isn't another bar.
+fn bars_to(end: i64) -> i64 {
     ((end as f64 / BAR as f64 - 0.01).ceil() as i64).max(1)
 }
 
@@ -118,8 +123,9 @@ pub fn bars_of(notes: &[NoteEvent]) -> i64 {
 /// It lasts `bars` whole bars of 4/4 from tick 0 (the index's count of the part, which is [`bars_of`] its notes; one
 /// at the least), or to the end of the bar its last heard note starts in when that's later: [`bars_of`] gives a
 /// hundredth of a bar past a bar line, and a note that starts in that hair is still in the clip. Heard are the notes
-/// that aren't muted and don't start before tick 0, each cut where the clip ends (the hair of a last note held over
-/// the line), as a clip going round in a DAW cuts it.
+/// that aren't muted and don't start before tick 0, each cut where the clip ends, as a clip going round in a DAW
+/// cuts it. That's never more than the hair of a last note held over the line: a count smaller than the bars the
+/// heard notes fill (a stale one, or one of other notes) gives the bars they fill.
 pub fn clip_of(notes: &[NoteEvent], bars: i64) -> (Vec<NoteEvent>, i64) {
     let length = clip_ticks(notes, bars);
     let heard = notes
@@ -138,8 +144,10 @@ pub fn clip_length(notes: &[NoteEvent]) -> i64 {
 
 /// [`clip_of`]'s length.
 fn clip_ticks(notes: &[NoteEvent], bars: i64) -> i64 {
-    let last = notes.iter().filter(|n| !n.muted && n.start >= 0).map(|n| n.start).max().unwrap_or(0);
-    bars.max(1).saturating_mul(BAR).max((last / BAR).saturating_add(1).saturating_mul(BAR))
+    let heard = notes.iter().filter(|n| !n.muted && n.start >= 0);
+    let last = heard.clone().map(|n| n.start).max().unwrap_or(0);
+    let filled = heard.map(|n| n.start.saturating_add(n.length)).max().map_or(0, bars_to);
+    bars.max(filled).max(1).saturating_mul(BAR).max((last / BAR).saturating_add(1).saturating_mul(BAR))
 }
 
 /// One phrase of a part, from [`split`].
@@ -976,10 +984,12 @@ mod tests {
         muted.push(note(-10, 5, 60));
         let (heard, length) = clip_of(&muted, bars_of(&muted));
         assert_eq!((heard, length, clip_length(&muted)), (tune.clone(), 5 * BAR, 5 * BAR));
-        // More bars than the notes fill (a loop that rests at its end, told its length): as told. Fewer: its notes'.
+        // More bars than the notes fill (a loop that rests at its end, told its length): as told. Fewer (a count
+        // that's stale, or none): the bars its notes fill, so no note is ever cut by more than the hair.
         assert_eq!(clip_of(&tune, 8).1, 8 * BAR);
         assert_eq!(clip_of(&tune, 2), (tune.clone(), 4 * BAR));
-        assert_eq!(clip_of(&[note(0, 3 * BAR, 60)], 2), (vec![note(0, 2 * BAR, 60)], 2 * BAR));
+        assert_eq!(clip_of(&[note(0, 3 * BAR, 60)], 0), (vec![note(0, 3 * BAR, 60)], 3 * BAR));
+        assert_eq!(clip_of(&[note(0, 3 * BAR + 3, 60)], 2), (vec![note(0, 3 * BAR, 60)], 3 * BAR));
         // No notes: a bar of nothing to play, and no length to judge.
         assert_eq!((clip_of(&[], 0), clip_length(&[])), ((Vec::new(), BAR), 0));
         // Nothing overflows.

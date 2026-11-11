@@ -1206,10 +1206,9 @@ pub fn part_clip(name: &str, notes: &[NoteEvent], bars: i32) -> mo_formats::Midi
     let first = heard.iter().map(|n| n.start).min().unwrap_or(0).min(0);
     let moved: Vec<NoteEvent> =
         heard.into_iter().map(|n| NoteEvent { start: n.start.saturating_sub(first), ..n }).collect();
-    // Notes moved later to start at the clip's start may fill more bars than the part's count: never cut by more
-    // than the hair the count gives.
-    let bars = i64::from(bars).max(mo_midi::analyser::bars_of(&moved));
-    let (moved, end) = mo_midi::analyser::clip_of(&moved, bars);
+    // Notes moved later to start at the clip's start may fill more bars than the part's count: the clip has the
+    // bars they fill.
+    let (moved, end) = mo_midi::analyser::clip_of(&moved, i64::from(bars));
     let mut clip = mo_formats::MidiClip {
         name: name.to_owned(),
         ppq: u16::try_from(mo_midi::PPQ).unwrap_or(96),
@@ -1862,6 +1861,9 @@ pub(crate) mod tests {
         assert_eq!((heard.len(), length), (1, 2 * BAR));
         assert_eq!(loop_notes(&[n(5 * BAR + 10, false)], 4).1, 6 * BAR);
         assert_eq!(loop_notes(&[], 0).1, BAR);
+        // A count smaller than the bars the notes fill doesn't cut them: the loop has the bars they fill.
+        let held = NoteEvent { length: 3 * BAR, ..n(0, false) };
+        assert_eq!(loop_notes(&[held], 2), (vec![held], 3 * BAR));
     }
 
     #[test]
