@@ -101,8 +101,11 @@ the next PR step by step). Solomon wants the highest effort here.
 - Next PR: make the chord hand cases public (`chordread::cases`), have chordfit check every gate, then learn from
   the hand cases. The decode fingerprint must stay `300 pieces, all: 57bda66c6f357eee`.
 - Then the training mix, speed step 2, the mo-app hookup (key and chords on the MIDI page and Songs), Chord check.
-  Before the hookup gives Songs keys, measure key finder version 5 on Solomon's own songs: it was rescaled on his
-  packs and is worse on public songs (`docs/harmony/key-finder-experiments.md`, "Who pays").
+  Songs read keys with VERSION 4's numbers (`theorybench/src/keyfind_v4.rs` moved into mo-harmony as a second set),
+  not version 5's (Solomon, 2026-11-11): measured on his songs (`theorybench songkeys`, "Songs" in
+  `docs/harmony/key-finder-experiments.md`) version 5 pulls major songs to minor, and on public songs it is no better
+  whole and much worse on stretches. None of his songs has a typed key and he changes keys and samples as he works,
+  so the public sets stay the measure; the MIDI page keeps version 5.
 - The key-finder refit on Solomon's own MIDI packs (rule 5 exception) can only run on his PC. It needs a Remote
   Control session that Solomon starts, plus the folders where his MIDI packs are. The brief to give it is in
   `harmony-handoff.md`, word for word. Done once (2026-11-03): version 5. A second rescale starts from version 4's

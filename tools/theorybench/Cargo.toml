@@ -17,6 +17,8 @@ mo-formats = { path = "../../crates/mo-formats" }
 mo-harmony = { path = "../../crates/mo-harmony", features = ["hand-cases"] }
 # Solomon's packs are read as the MIDI page reads them (`theorybench packs`).
 mo-library = { path = "../../crates/mo-library" }
+# A damaged project is caught as the app catches one (`songkeys`).
+mo-catch = { path = "../../crates/mo-catch" }
 mo-midi = { path = "../../crates/mo-midi" }
 rayon.workspace = true
 thread-priority.workspace = true
