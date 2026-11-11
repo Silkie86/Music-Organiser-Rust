@@ -167,6 +167,7 @@ pub const MIDI_ACTIONS: &[Action] = &[
     action("midi.playBitwig", "Play the picked part through the track selected in Bitwig, or stop it", "Ctrl+Shift+B"),
     action("midi.playFl", "Play the picked part through the channel selected in FL Studio, or stop it", "Ctrl+Shift+F"),
     action("midi.within", "The longer phrases the picked part is in", ""),
+    action("midi.showInSongs", "Show the song the picked part is from on the Songs page", "Ctrl+O"),
     action("midi.source", "Show the picked part's file in its folder", "Ctrl+Shift+E"),
     action("midi.copyPath", "Copy where the picked part's file is", "Ctrl+Shift+C"),
     action(

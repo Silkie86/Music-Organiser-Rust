@@ -1285,6 +1285,10 @@ fn actions(e: &mo_midi::Entry, shortcuts: &Shortcuts) -> (Vec<CardAction>, Vec<M
     if !e.within.is_empty() {
         list.push(("midi.within", "Show the whole phrase", true));
     }
+    // A part from one of your songs: its song on the Songs page (Solomon's note, 11 Nov).
+    if e.is_project() {
+        list.push(("midi.showInSongs", "Show in Songs", true));
+    }
     list.push(("midi.source", "Show in folder", true));
     list.push(("midi.copyPath", "Copy path", true));
     let card = list
@@ -1316,6 +1320,14 @@ fn actions(e: &mo_midi::Entry, shortcuts: &Shortcuts) -> (Vec<CardAction>, Vec<M
         })
         .collect();
     (card, menu)
+}
+
+/// Opens the Songs page on the song a part's project belongs to, by the save's path, as Presets' Show in Songs does.
+fn show_in_songs(app: &AppWindow, save: &str) {
+    crate::go_to(app, mo_app::places::Place::Songs.index() as i32);
+    if !crate::songs::show_save_path(app, save) {
+        log::info("MIDI", "The song isn't on the Songs page yet (its list is still being read)");
+    }
 }
 
 /// Runs one of the page's actions on the picked part; false when there's nothing for it to do.
@@ -1351,6 +1363,13 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             });
             relist(app);
             true
+        }
+        ("midi.showInSongs", Some((at, path))) => {
+            let project = PAGE.with(|p| p.borrow().cat.entry(at).is_some_and(mo_midi::Entry::is_project));
+            if project {
+                show_in_songs(app, &path);
+            }
+            project
         }
         ("midi.source", Some((_, path))) => {
             if let Some(feed) = feed {
