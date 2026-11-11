@@ -4079,7 +4079,7 @@ mod tests {
             names: "Keys and Sub".into(),
             bars: 8..14,
         });
-        assert_eq!(with.round(4 * bar), 12 * bar);
+        assert_eq!(with.round(4 * bar, mo_audio::gm::longest_ticks(mo_midi::PPQ, 100.0)), 12 * bar);
         let ask = |with: Option<Arc<SongBars>>| PlayAsk {
             id: 1,
             font: font_path.clone(),
