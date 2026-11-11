@@ -8,12 +8,13 @@ use mo_sounds::Peaks;
 use slint::{Rgba8Pixel, SharedPixelBuffer};
 use std::collections::{HashMap, HashSet, VecDeque};
 
-/// A line's waveform on the panel, in logical pixels (before the screen's scaling): as panel.slint lays it out.
+/// A line's waveform on the panel, in logical pixels (before the screen's scaling): as panel.slint lays it out. The
+/// width is the least: it grows with the window.
 pub const WIDTH: f64 = 120.0;
 pub const HEIGHT: f64 = 30.0;
 
-/// How many pictures are kept: more than a tall screen's lines, and a few screens back (about 10 MB at most on a
-/// 4K screen, far less on others).
+/// How many pictures are kept: more than a tall screen's lines, and a few screens back (a few MB in a window of
+/// the usual size; about 100 MB at the very most, filling a 4K screen at double scaling).
 pub const MOST_KEPT: usize = 512;
 
 /// The waveform as a picture `width` by `height` pixels: one upright line per pixel across, about the middle, as tall
