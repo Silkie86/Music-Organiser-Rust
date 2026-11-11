@@ -35,6 +35,8 @@ pub const JOIN_SCORE: i32 = 5;
 pub const MAX_JOINED_BARS: i64 = analyser::MAX_BARS;
 /// How far apart, in semitones, the middles of two pieces may be and still be one voice.
 pub const MAX_REGISTER_GAP: f64 = 12.0;
+/// The most pieces one phrase is joined from: more, and it's a section passed back and forth, not a phrase.
+pub const MAX_PIECES: usize = 4;
 
 /// One voice of the song: a channel, with its " #2" copies that play the same sample or plugin folded in, its notes at
 /// [`PPQ`] where the playlist puts them.
@@ -42,9 +44,13 @@ pub const MAX_REGISTER_GAP: f64 = 12.0;
 pub struct Voice {
     /// The first channel's name ("SNAP_34" for SNAP_34 and SNAP_34 #2).
     pub name: String,
+    /// Its name as its copies share it ([`stem`]).
+    pub stem: String,
     pub notes: Vec<NoteEvent>,
-    /// Drums or other unpitched hits: never joined to another voice.
+    /// Drums, or a one-shot sample played on one or two keys: never joined to another voice.
     pub drums: bool,
+    /// It plays a sample, not a plugin.
+    pub sample: bool,
 }
 
 /// A phrase joined from several voices' stretches: the names joined ("LegacyCell #3 + M1"), its notes from its first
@@ -85,34 +91,57 @@ fn stem(name: &str) -> String {
     case::to_lower(base.trim())
 }
 
-/// The song's voices: each channel with notes, the copies named "#2" and so on that play the same sample (or the same
-/// plugin, when there's no sample) folded into the first. Notes both play (a doubled layer) are kept once.
+/// The song's voices: each channel with notes, with its copies named "#2" and so on folded in when they play the same
+/// sample (a copy made to add hits). Two plugin channels are two voices, even of one plugin (each has its own sound),
+/// unless a copy plays exactly the same notes (a doubled layer): then it's kept once.
 pub fn voices(channels: &[MidiChannel]) -> Vec<Voice> {
     let mut out: Vec<Voice> = Vec::new();
-    let mut by_key: HashMap<(String, String), usize> = HashMap::new();
+    let mut by_sample: HashMap<(String, String), usize> = HashMap::new();
     for c in channels.iter().filter(|c| !c.notes.is_empty()) {
-        let plays = if c.sample_path.is_empty() { c.plugin.as_str() } else { c.sample_path.as_str() };
-        let key = (stem(&c.name), case::to_lower(plays));
-        let notes = analyser::normalise(&c.notes, i64::from(c.ppq), true);
+        let stem = stem(&c.name);
+        let mut notes = analyser::normalise(&c.notes, i64::from(c.ppq), true);
+        notes.sort_by_key(|n| (n.start, n.key, n.length));
         let drums = crate::extract::is_unpitched_plugin(&c.plugin)
             || crate::extract::is_unpitched_plugin(&c.name)
             || analyser::roles_named(&format!("{} {}", c.name, c.source)).contains(&Role::Drums);
-        match by_key.get(&key).and_then(|&at| out.get_mut(at)) {
+        let folded = if c.sample_path.is_empty() {
+            // A layer: a copy of a plugin channel playing the very same notes.
+            out.iter().position(|v| v.stem == stem && same_notes(&v.notes, &notes))
+        } else {
+            by_sample.get(&(stem.clone(), case::to_lower(&c.sample_path))).copied()
+        };
+        match folded.and_then(|at| out.get_mut(at)) {
             Some(v) => {
                 v.notes.extend(notes);
                 v.drums |= drums;
             }
             None => {
-                by_key.insert(key, out.len());
-                out.push(Voice { name: c.name.clone(), notes, drums });
+                if !c.sample_path.is_empty() {
+                    by_sample.insert((stem.clone(), case::to_lower(&c.sample_path)), out.len());
+                }
+                out.push(Voice { name: c.name.clone(), stem, notes, drums, sample: !c.sample_path.is_empty() });
             }
         }
     }
     for v in &mut out {
         v.notes.sort_by_key(|n| (n.start, n.key, n.length));
         v.notes.dedup_by(|a, b| a.start == b.start && a.key == b.key && a.length == b.length);
+        // A one-shot: a sample (a hit, a kick, a vocal shot) played on one or two keys all song. Never half a tune. A
+        // synth playing one note can be: a pickup.
+        if !v.sample {
+            continue;
+        }
+        let mut keys: Vec<u8> = v.notes.iter().map(|n| n.key).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        v.drums |= keys.len() <= 2;
     }
     out
+}
+
+/// Whether two channels play the same notes (where, which key, how long), however loud.
+fn same_notes(a: &[NoteEvent], b: &[NoteEvent]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.start == y.start && x.key == y.key && x.length == y.length)
 }
 
 /// A voice's notes cut wherever a whole bar goes by with no note sounding.
@@ -243,20 +272,49 @@ pub fn join(voices: &[Voice]) -> Vec<Joined> {
     let starts_a_chain = |i: &usize| !taken.contains(i);
     let mut heads: Vec<usize> = next.keys().copied().filter(starts_a_chain).collect();
     heads.sort_by_key(|&i| all.get(i).map_or(0, |s| s.first));
-    let mut out: Vec<Joined> = Vec::new();
-    let mut by_hash: HashMap<String, usize> = HashMap::new();
+    let mut chains: Vec<Vec<usize>> = Vec::new();
     for head in heads {
         let mut chain = vec![head];
         let mut at = head;
         while let Some(&j) = next.get(&at) {
             let too_long = all.get(j).zip(all.get(head)).is_some_and(|(s, h)| s.to - h.from > MAX_JOINED_BARS);
-            if chain.contains(&j) || too_long {
+            if chain.contains(&j) || too_long || chain.len() >= MAX_PIECES {
                 break;
             }
             chain.push(j);
             at = j;
         }
-        let Some(first) = all.get(head) else { continue };
+        chains.push(chain);
+    }
+    // Where a chain plays in the song, in bars, and its voices.
+    let span = |chain: &[usize]| {
+        let from = chain.first().and_then(|&i| all.get(i)).map_or(0, |s| s.from);
+        let to = chain.iter().filter_map(|&i| all.get(i)).map(|s| s.to).max().unwrap_or(from);
+        (from, to)
+    };
+    // The longest first: a shorter chain over the same bars with one of its voices is a tail of it, not a phrase.
+    chains.sort_by_key(|c| {
+        let (from, to) = span(c);
+        (std::cmp::Reverse(to - from), from)
+    });
+    let mut kept: Vec<Vec<usize>> = Vec::new();
+    for chain in chains {
+        let (from, to) = span(&chain);
+        let voices_of = |c: &[usize]| c.iter().filter_map(|&i| all.get(i)).map(|s| s.voice).collect::<Vec<_>>();
+        let mine = voices_of(&chain);
+        let tail = kept.iter().any(|k| {
+            let (f, t) = span(k);
+            f < to && t > from && voices_of(k).iter().any(|v| mine.contains(v))
+        });
+        if !tail {
+            kept.push(chain);
+        }
+    }
+    kept.sort_by_key(|c| span(c).0);
+    let mut out: Vec<Joined> = Vec::new();
+    let mut by_hash: HashMap<String, usize> = HashMap::new();
+    for chain in kept {
+        let Some(first) = chain.first().and_then(|&i| all.get(i)) else { continue };
         let origin = first.from * BAR;
         let mut notes = Vec::new();
         let mut members = Vec::new();
@@ -281,6 +339,8 @@ pub fn join(voices: &[Voice]) -> Vec<Joined> {
         by_hash.insert(hash, out.len());
         out.push(Joined { name: names.join(" + "), notes, first_bar: first.from, repeats: 1, members });
     }
+    // The whole phrase must come back too, not only each of its hand-overs.
+    out.retain(|j| j.repeats >= MIN_REPEATS);
     out
 }
 
@@ -339,14 +399,18 @@ mod tests {
         let kick: Vec<NoteEvent> = (0..72).flat_map(|b| [note(b, 0, 36), note(b, 2, 36)]).collect();
         let snap: Vec<NoteEvent> = (0..18).map(|b| note(b * 4, 1, 40)).collect();
         let snap_2: Vec<NoteEvent> = (0..18).map(|b| note(b * 4 + 2, 1, 40)).collect();
+        let sampled = |name: &str, notes| MidiChannel {
+            sample_path: r"C:\Samples\snap_34.wav".into(),
+            ..channel(name, "", notes)
+        };
         vec![
             channel("Synth A", "Sytrus", lead_a),
             channel("Synth B", "3x Osc", lead_b),
             channel("Pickup", "TS404", pickup),
             channel("Answer", "SimSynth", answer),
             channel("Kick", "Sampler", kick),
-            channel("SNAP", "Sampler", snap),
-            channel("SNAP #2", "Sampler", snap_2),
+            sampled("SNAP", snap),
+            sampled("SNAP #2", snap_2),
         ]
     }
 
@@ -378,12 +442,39 @@ mod tests {
         let lead = tune(0, 2, 60);
         let v = voices(&[channel("Pad", "Sytrus", lead.clone()), channel("Pad #2", "Sytrus", lead)]);
         assert_eq!((v.len(), v[0].notes.len()), (1, 8));
-        // A copy that plays another plugin is another voice.
+        // Even on another plugin: the same notes are one part, layered.
         let v = voices(&[channel("Pad", "Sytrus", tune(0, 2, 60)), channel("Pad #2", "Harmor", tune(0, 2, 60))]);
+        assert_eq!(v.len(), 1);
+        // Two of one plugin playing different notes are two sounds: the lead copy isn't folded into the pad.
+        let v =
+            voices(&[channel("Cell", "LegacyCell", tune(0, 8, 48)), channel("Cell #3", "LegacyCell", tune(8, 8, 60))]);
         assert_eq!(v.len(), 2);
+        // A sample played on one key all song is a one-shot; a synth playing one note may be a pickup.
+        let v = voices(&song());
+        assert!(v[5].drums && !v[2].drums);
         assert_eq!(stem("SNARE_2319 #2"), "snare_2319");
         assert_eq!(stem("Track #two"), "track #two");
         assert_eq!(stem("#2"), "#2");
+    }
+
+    #[test]
+    fn a_section_passed_back_and_forth_is_one_phrase_of_four_pieces_listed_once() {
+        // Two synths swap every bar for a 12-bar section, three times over: four pieces at most, not the section, and
+        // not again from each bar it could start on.
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for cycle in 0..3 {
+            for bar in (0..12).step_by(2) {
+                a.extend(tune(cycle * 16 + bar, 1, 60));
+                b.extend(tune(cycle * 16 + bar + 1, 1, 62));
+            }
+        }
+        let joined = join(&voices(&[channel("A", "Sytrus", a), channel("B", "Harmor", b)]));
+        assert!(joined.iter().all(|j| j.members.len() <= MAX_PIECES));
+        assert!(joined.iter().all(|j| j.repeats >= MIN_REPEATS));
+        // No two of them over the same bars of the song.
+        let mut bars: Vec<i64> = joined.iter().map(|j| j.first_bar).collect();
+        bars.dedup();
+        assert_eq!(bars.len(), joined.len());
     }
 
     #[test]
@@ -414,5 +505,16 @@ mod tests {
         }
         let drums = [channel("Lead", "Sytrus", lead), channel("Snare fill", "Sampler", fill)];
         assert!(join(&voices(&drums)).is_empty());
+        // Nor do one-shot samples with any name ("01 #3"), however neatly they take turns.
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for cycle in 0..4 {
+            a.extend((0..4).map(|beat| note(cycle * 4, beat, 60)));
+            b.extend((0..4).map(|beat| note(cycle * 4 + 1, beat, 60)));
+        }
+        let shots = |name: &str, notes| MidiChannel {
+            sample_path: format!(r"C:\Samples\{name}.wav"),
+            ..channel(name, "", notes)
+        };
+        assert!(join(&voices(&[shots("01", a), shots("01 #3", b)])).is_empty());
     }
 }
