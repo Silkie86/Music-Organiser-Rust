@@ -49,7 +49,7 @@ pub const APP_ACTIONS: &[Action] = &[
     action("app.search", "Search this page", "Ctrl+F"),
     action("app.prevItem", "The item above in the list (even while typing a search)", "Ctrl+Up"),
     action("app.nextItem", "The item below in the list (even while typing a search)", "Ctrl+Down"),
-    action("app.listTop", "Back to the top of the list, as the button over its corner does", "Home"),
+    action("app.listTop", "Back to the top of the list", "Home"),
     action("app.prevTab", "The tab to the left on this page", "Ctrl+Left"),
     action("app.nextTab", "The tab to the right on this page", "Ctrl+Right"),
     action("app.play", "Play or stop what's picked", "Space"),
