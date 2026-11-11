@@ -159,8 +159,25 @@ the next PR step by step). Solomon wants the highest effort here.
   a song keeps its length). The bars a loop takes up are one rule for both looks (`mo_harmony::own_bars`), and
   parts are sorted by `Sits::judged`, the number the best move is picked by. Whether a part is a piece cut from a
   longer stretch is `StoredPhrase::is_cut` (the rule by name moved from `mo-app` to `mo_midi::index::is_cut`; the
-  MIDI page's card still spells the fallback out and should call it). Not built yet: a list on the MIDI page, and
-  sending the part found into the project.
+  MIDI page's card still spells the fallback out and should call it).
+- What the MIDI page's "Fits my song" list asks for (2026-11-11), no window in it yet:
+  - `mo_midi::fit::for_song`: `Pick::usual` (what of a song is fitted to when nothing is picked by hand: its
+    chords, arps and basslines for a tune, its melodies for chords, over up to 8 bars from where the most of them
+    play together), `Own::of` (the song's own parts in the catalogue, every save's, and the same notes in other
+    keys: one pass, kept by the caller while the song and the catalogue stay), `tried` (the parts the page's
+    filters let through, without the song's own) and `Tried::search` (the search, its answer as places in the
+    catalogue).
+  - `mo_app::midi_fits`: the screen's logic and words. `song_choices` (the 8 songs saved last; the first is the
+    one being worked on), `fitted` (what the song gives to fit to, or why nothing can be, in plain words),
+    `tried` (the page's own filters stay in force, through `mo_app::midi::passing`), `look` (the search, the best
+    200, with how long it took and how much of that was reading notes: `log_line` is for the log, so the time on a
+    real index gets measured), and the words (`fit_text`: "Fits 88%, 2 semitones down"; `result_text`,
+    `left_out_text`).
+  - Still the page's to do (`mo-ui`): read the song off the window's thread and keep it by its save's path and
+    date; keep the `SlotBook` and load it again after a read that saved parts or made slots; keep `Own` per song;
+    run `look` on a newest-wins worker with the stop flag; show a search that says `stopped` to nobody.
+  Not built yet: that list on the page, picking a song's parts and bars by hand, and sending the part found into
+  the project.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db
 writes once trusted. A decoder panic on a damaged file is caught with `mo_catch::catch`: one warning line in the log,

@@ -338,7 +338,7 @@ impl Catalogue {
             let hits = phrases.iter().take(q.limit).map(|&entry| Hit { entry, likeness: None }).collect();
             return (hits, phrases.len());
         }
-        let words: Vec<String> = q.text.split(' ').filter(|w| !w.is_empty()).map(case::to_lower).collect();
+        let words = words_of(&q.text);
         let pool: Vec<usize> = self
             .entries
             .par_iter()
@@ -380,6 +380,11 @@ impl Catalogue {
         let hits = pool.into_iter().take(q.limit).map(|entry| Hit { entry, likeness: None }).collect();
         (hits, matching)
     }
+}
+
+/// What's typed into a search, as the words [`Entry::matches`] takes: split at spaces, in small letters.
+pub fn words_of(text: &str) -> Vec<String> {
+    text.split(' ').filter(|w| !w.is_empty()).map(case::to_lower).collect()
 }
 
 /// How alike two parts' shapes are, 0 to 1 (the C# `PhraseAnalyser.Likeness`): the first six numbers (the kind of

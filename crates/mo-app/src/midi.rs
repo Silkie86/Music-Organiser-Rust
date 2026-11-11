@@ -253,6 +253,16 @@ fn chips_pass(f: &Filters, e: &Entry) -> [bool; 3] {
     ]
 }
 
+/// A test of one part by every filter at once (the words, Settings' smallest part, the years and the chips), for a
+/// list [`view`] doesn't make: the parts tried for a song ([`crate::midi_fits`]). What it lets through is what a list
+/// of everything would show, with every copy of a loop in other keys.
+pub fn passing<'a>(cat: &'a Catalogue, f: &'a Filters) -> impl Fn(&Entry) -> bool + Sync + 'a {
+    let words = mo_midi::catalogue::words_of(&f.text);
+    move |e| {
+        big_enough(e, f.smallest) && e.matches(&words) && in_years(f, e, &cat.dates) && chips_pass(f, e) == [true; 3]
+    }
+}
+
 /// The parts the filters let through, in order, as hits in the catalogue, and how many each chip's choices would
 /// show. Runs on every core; call it off the window's thread (rules 12 and 21). `seed` shuffles them (a random order
 /// this number decides).

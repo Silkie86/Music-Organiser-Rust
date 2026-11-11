@@ -28,6 +28,9 @@
 //! every key is one loop to both looks: one of its copies is read, and the copy given is the one that needs moving
 //! least.
 //!
+//! What the MIDI page asks for (the song saved last, its own parts left out, the page's filters kept, the answer as
+//! places in its catalogue) is in [`for_song`].
+//!
 //! Not here yet: sending the part found into the project.
 
 use std::collections::hash_map::Entry;
@@ -47,6 +50,8 @@ use crate::playing::Song;
 use crate::roles::Role;
 use crate::store::SlotBook;
 use crate::{BAR, PPQ};
+
+pub mod for_song;
 
 /// How long a first look's slot is ([`mo_harmony::Slot`]), in the index's ticks: two quarter notes, half a bar of
 /// 4/4, whatever the song's time signature.
@@ -620,7 +625,7 @@ mod tests {
     use mo_formats::NoteAttribute;
     use mo_formats::arrangement::{Arrangement, LaneKind, PreviewClip, PreviewLane, PreviewNote};
 
-    fn note(start: i64, length: i64, key: u8) -> NoteEvent {
+    pub(super) fn note(start: i64, length: i64, key: u8) -> NoteEvent {
         NoteEvent {
             start,
             length,
@@ -633,7 +638,7 @@ mod tests {
     }
 
     /// Am7, Dm7, G7, Cmaj7, a bar each, moved up by `up` semitones.
-    fn chords(up: u8) -> Vec<NoteEvent> {
+    pub(super) fn chords(up: u8) -> Vec<NoteEvent> {
         [[57, 60, 64, 67], [50, 60, 65, 69], [55, 59, 62, 65], [48, 59, 64, 67]]
             .iter()
             .zip(0i64..)
@@ -642,13 +647,13 @@ mod tests {
     }
 
     /// Their roots, low, a bar each.
-    fn bass() -> Vec<NoteEvent> {
+    pub(super) fn bass() -> Vec<NoteEvent> {
         [33, 38, 31, 36].iter().zip(0i64..).map(|(&k, bar)| note(bar * BAR, BAR, k)).collect()
     }
 
     /// A tune on the chords' thirds, sevenths and roots, two notes a beat apart then a held one each bar, moved up by
     /// `up` semitones.
-    fn tune(up: u8) -> Vec<NoteEvent> {
+    pub(super) fn tune(up: u8) -> Vec<NoteEvent> {
         [[72, 76, 79], [77, 72, 74], [71, 77, 74], [76, 71, 72]]
             .iter()
             .zip(0i64..)
@@ -667,7 +672,7 @@ mod tests {
         tune(0).into_iter().zip(60u8..).map(|(n, key)| NoteEvent { key, ..n }).collect()
     }
 
-    fn lane(name: &str, at_bar: i64, notes: &[NoteEvent]) -> PreviewLane {
+    pub(super) fn lane(name: &str, at_bar: i64, notes: &[NoteEvent]) -> PreviewLane {
         let beats = |ticks: i64| ticks as f64 / PPQ as f64;
         let notes: Vec<PreviewNote> = notes
             .iter()
@@ -686,7 +691,7 @@ mod tests {
 
     /// A song whose chords and bass come in at bar 9 and whose lead plays the tune over them from bar 13 (the chords
     /// go round twice).
-    fn song() -> playing::Song {
+    pub(super) fn song() -> playing::Song {
         let twice: Vec<NoteEvent> = chords(0)
             .into_iter()
             .chain(chords(0).into_iter().map(|n| NoteEvent { start: n.start + 4 * BAR, ..n }))
@@ -908,7 +913,7 @@ mod tests {
     }
 
     /// Four bars of notes a beat long that go nowhere in particular, a different set for each `seed`.
-    fn wandering(seed: u32) -> Vec<NoteEvent> {
+    pub(super) fn wandering(seed: u32) -> Vec<NoteEvent> {
         let mut state = seed.wrapping_mul(2_654_435_761).wrapping_add(12_345);
         (0..16i64)
             .map(|beat| {
