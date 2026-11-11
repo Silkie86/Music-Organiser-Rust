@@ -11,6 +11,7 @@
 pub mod arrangement;
 pub mod bitwig;
 pub mod case;
+pub mod dates;
 pub mod fl;
 pub mod midi;
 mod model;

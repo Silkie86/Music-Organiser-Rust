@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::Datelike;
+use mo_formats::dates::RealDates;
 use mo_library::ProjectFile;
 use mo_sounds::compact::Synced;
 use mo_sounds::copies::SameAudio;
@@ -48,6 +49,8 @@ pub enum Order {
     Name,
     Type,
     Key,
+    /// The file changed last first; a date that isn't real (still to come, or before 1981) last, either way round
+    /// ([`RealDates`]).
     Newest,
 }
 
@@ -263,6 +266,9 @@ struct Shared {
     hay: Vec<String>,
     /// Lower-cased names, for the name order and every order's tie-break.
     names: Vec<String>,
+    /// Which sounds' dates are real, as of when the list was read: the Newest order, the years and which copy is the
+    /// older all go by it, so they agree for as long as the list lasts.
+    dates: RealDates,
 }
 
 /// Every sound the page can show (hidden copies left out: they only hide in the app, rule 2), with what's worked out
@@ -448,7 +454,7 @@ impl SoundList {
         let hay = sounds.par_iter().map(|s| hay_of(&Now::of(s, None))).collect();
         let names = sounds.par_iter().map(|s| s.name().to_lowercase()).collect();
         SoundList {
-            shared: Arc::new(Shared { sounds, hay, names }),
+            shared: Arc::new(Shared { sounds, hay, names, dates: RealDates::now() }),
             used: None,
             projects: None,
             liked: None,
@@ -507,14 +513,15 @@ impl SoundList {
         self.projects.as_ref()
     }
 
-    /// The projects that use the sound at `i`, newest first (each one's file and when it was saved). None while
-    /// that isn't known; empty when none do.
+    /// The projects that use the sound at `i`, newest first (each one's file and when it was saved), a date that isn't
+    /// real last. None while that isn't known; empty when none do.
     pub fn projects_of(&self, i: usize) -> Option<Vec<&ProjectFile>> {
         let files = self.projects.as_deref()?;
         self.used.as_ref()?;
         let ids = self.usage(i).map_or(&[][..], |u| &u.project_ids[..]);
         let mut of: Vec<&ProjectFile> = ids.iter().filter_map(|id| files.get(id)).collect();
-        of.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.path.cmp(&b.path)));
+        let real = |f: &ProjectFile| self.shared.dates.seconds(f.mtime);
+        of.sort_by(|a, b| real(b).cmp(&real(a)).then(b.mtime.cmp(&a.mtime)).then_with(|| a.path.cmp(&b.path)));
         Some(of)
     }
 
@@ -643,12 +650,14 @@ impl SoundList {
         let (na, nb) = (self.now_at(a), self.now_at(b));
         let (sa, sb) = (na.sound, nb.sound);
         let used = |s: &Sound| self.used.as_ref().and_then(|u| u.get(&s.id)).map_or(0, |u| u.projects);
+        let real = |s: &Sound| self.shared.dates.local(s.added);
         let rules = [
             (KeptFor::Used, used(sb).cmp(&used(sa))),
             (KeptFor::Favourite, nb.favourite.cmp(&na.favourite)),
             (KeptFor::Plays, sb.plays.cmp(&sa.plays)),
             (KeptFor::Tags, nb.tags.len().cmp(&na.tags.len())),
-            (KeptFor::Older, sa.added.cmp(&sb.added)),
+            // A date that isn't real is no clue to which came first: the copies with a real date are older.
+            (KeptFor::Older, (!real(sa), sa.added).cmp(&(!real(sb), sb.added))),
         ];
         if let Some((rule, by)) = rules.into_iter().find(|(_, by)| by.is_ne()) {
             return (by, rule);
@@ -696,6 +705,11 @@ impl SoundList {
     /// Every sound in the list, in its order.
     pub fn sounds(&self) -> &[Sound] {
         &self.shared.sounds
+    }
+
+    /// Which of the sounds' dates are real, as of when the list was read.
+    pub fn dates(&self) -> &RealDates {
+        &self.shared.dates
     }
 
     /// How your projects use every sound (by id; ones no project uses are left out), if that's known yet.
@@ -889,7 +903,7 @@ impl SoundList {
             let within = |y: i32| y >= first && y <= last;
             let ok = match (&self.used, t.used) {
                 (Some(used), true) => used.get(&s.id).is_some_and(|u| u.years.iter().any(|&y| within(y))),
-                _ => within(s.added.year()),
+                _ => self.shared.dates.local(s.added) && within(s.added.year()),
             };
             if !ok {
                 return false;
@@ -919,7 +933,8 @@ impl SoundList {
                 }
             }
             _ => {
-                for s in self.shared.sounds.iter() {
+                // A date that isn't real is in no year.
+                for s in self.shared.sounds.iter().filter(|s| self.shared.dates.local(s.added)) {
                     *counts.entry(s.added.year()).or_default() += 1;
                 }
             }
@@ -928,14 +943,17 @@ impl SoundList {
     }
 
     /// Turns a list in `order` round (a second click on its heading; a shuffle has no other way round). By key, the
-    /// sounds with no key still come last.
+    /// sounds with no key still come last, and by date those whose date isn't real.
     pub fn turn_round(&self, shown: &mut [usize], order: Order) {
         if order == Order::Shuffled {
             return;
         }
         shown.reverse();
-        if order == Order::Key {
-            shown.sort_by_key(|&i| key_order(&self.shared.sounds[i]) == i32::MAX);
+        let sound = |i: usize| &self.shared.sounds[i];
+        match order {
+            Order::Key => shown.sort_by_key(|&i| key_order(sound(i)) == i32::MAX),
+            Order::Newest => shown.sort_by_key(|&i| !self.shared.dates.local(sound(i).added)),
+            Order::Shuffled | Order::MostLiked | Order::Name | Order::Type => {}
         }
     }
 
@@ -951,7 +969,10 @@ impl SoundList {
             // [`SoundList::ordered`] finds each type once.
             Order::Type => by_letters(self.now_at(a).sound_type, self.now_at(b).sound_type),
             Order::Key => key_order(sa).cmp(&key_order(sb)),
-            Order::Newest => sb.added.cmp(&sa.added),
+            Order::Newest => {
+                let real = |s: &Sound| self.shared.dates.local(s.added);
+                real(sb).cmp(&real(sa)).then(sb.added.cmp(&sa.added))
+            }
         };
         by.then_with(|| self.by_name(a, b))
     }
@@ -1451,8 +1472,13 @@ pub struct ProjectLine {
 
 /// The card's "Used in" side: `own`, the projects that use the sound, newest first (None while that isn't known
 /// yet); `like`, for a sound Rediscover dug out, the sound its line says it sounds like, by name, with that one's
-/// projects, which are listed when none use this one.
-pub fn projects_card(own: Option<&[&ProjectFile]>, like: Option<(&str, &[&ProjectFile])>) -> ProjectsCard {
+/// projects, which are listed when none use this one. Each line's day goes by `dates`, the list's
+/// ([`SoundList::dates`]), as the projects' order did.
+pub fn projects_card(
+    dates: &RealDates,
+    own: Option<&[&ProjectFile]>,
+    like: Option<(&str, &[&ProjectFile])>,
+) -> ProjectsCard {
     let Some(own) = own else {
         return ProjectsCard {
             title: "Used in".to_owned(),
@@ -1463,7 +1489,7 @@ pub fn projects_card(own: Option<&[&ProjectFile]>, like: Option<(&str, &[&Projec
     let title = format!("Used in {}", crate::songs::thousands(own.len()));
     if !own.is_empty() {
         let note = if own.len() > PROJECTS_SHOWN { format!("The newest {PROJECTS_SHOWN}:") } else { String::new() };
-        return ProjectsCard { title, note, lines: project_lines(own) };
+        return ProjectsCard { title, note, lines: project_lines(dates, own) };
     }
     match like {
         Some((name, theirs)) if !theirs.is_empty() => {
@@ -1476,14 +1502,14 @@ pub fn projects_card(own: Option<&[&ProjectFile]>, like: Option<(&str, &[&Projec
                 "No project of yours uses it yet. {name}, which it sounds like, is in {}{newest}:",
                 crate::songs::plural(theirs.len(), "project")
             );
-            ProjectsCard { title, note, lines: project_lines(theirs) }
+            ProjectsCard { title, note, lines: project_lines(dates, theirs) }
         }
         _ => ProjectsCard { title, note: "No project of yours uses it yet.".to_owned(), lines: Vec::new() },
     }
 }
 
 /// The card's lines for `projects`, newest first: the newest [`PROJECTS_SHOWN`].
-fn project_lines(projects: &[&ProjectFile]) -> Vec<ProjectLine> {
+fn project_lines(dates: &RealDates, projects: &[&ProjectFile]) -> Vec<ProjectLine> {
     projects
         .iter()
         .take(PROJECTS_SHOWN)
@@ -1492,7 +1518,7 @@ fn project_lines(projects: &[&ProjectFile]) -> Vec<ProjectLine> {
             name: mo_formats::paths::stem(mo_formats::paths::file_name(&f.path)).to_owned(),
             daw: mo_library::scan::daw_of(&f.path).unwrap_or_default().to_owned(),
             // A save the scan didn't date (0) shows none, rather than 1 Jan 1970.
-            saved: if f.mtime > 0 { crate::midi::date_text(f.mtime) } else { String::new() },
+            saved: crate::midi::date_text(dates, f.mtime),
         })
         .collect()
 }
@@ -2395,35 +2421,36 @@ mod tests {
         let a = project(7, r"K:\Projects\Didums_77.flp", 1_760_000_000);
         let b = project(3, r"K:\Projects\Old one.bwproject", 1_600_000_000);
         // Not known yet.
-        let card = projects_card(None, None);
+        let d = RealDates::now();
+        let card = projects_card(&d, None, None);
         assert_eq!((card.title.as_str(), card.lines.len()), ("Used in", 0));
         // Its own, newest first, by name without the ending, with its DAW and the day each was saved.
-        let card = projects_card(Some(&[&a, &b][..]), None);
+        let card = projects_card(&d, Some(&[&a, &b][..]), None);
         assert_eq!(card.title, "Used in 2");
         assert_eq!(card.note, "");
         let names: Vec<(i64, &str, &str)> =
             card.lines.iter().map(|l| (l.id, l.name.as_str(), l.daw.as_str())).collect();
         assert_eq!(names, [(7, "Didums_77", "FL Studio"), (3, "Old one", "Bitwig Studio")]);
-        assert_eq!(card.lines[0].saved, crate::midi::date_text(1_760_000_000));
+        assert_eq!(card.lines[0].saved, crate::midi::date_text(&d, 1_760_000_000));
         // A save the scan didn't date shows no day, rather than 1 Jan 1970.
         let undated = project(9, r"K:\Projects\Undated.flp", 0);
-        assert_eq!(projects_card(Some(&[&undated][..]), None).lines[0].saved, "");
+        assert_eq!(projects_card(&d, Some(&[&undated][..]), None).lines[0].saved, "");
         // None of its own: the sound it sounds like has some.
-        let card = projects_card(Some(&[][..]), Some(("VEH1 FX - 37", &[&a][..])));
+        let card = projects_card(&d, Some(&[][..]), Some(("VEH1 FX - 37", &[&a][..])));
         assert_eq!(card.title, "Used in 0");
         assert_eq!(card.note, "No project of yours uses it yet. VEH1 FX - 37, which it sounds like, is in 1 project:");
         assert_eq!(card.lines.len(), 1);
         // Neither has any.
-        let card = projects_card(Some(&[][..]), Some(("VEH1 FX - 37", &[][..])));
+        let card = projects_card(&d, Some(&[][..]), Some(("VEH1 FX - 37", &[][..])));
         assert_eq!((card.note.as_str(), card.lines.len()), ("No project of yours uses it yet.", 0));
         // A sound in more projects than the card lists: the newest.
         let many: Vec<ProjectFile> =
             (0..1_200).map(|n| project(n, &format!("K:\\P\\{n}.flp"), 1_700_000_000 - n)).collect();
         let many: Vec<&ProjectFile> = many.iter().collect();
-        let card = projects_card(Some(many.as_slice()), None);
+        let card = projects_card(&d, Some(many.as_slice()), None);
         assert_eq!((card.title.as_str(), card.note.as_str()), ("Used in 1,200", "The newest 50:"));
         assert_eq!(card.lines.len(), PROJECTS_SHOWN);
-        let card = projects_card(Some(&[][..]), Some(("VEH1 FX - 37", many.as_slice())));
+        let card = projects_card(&d, Some(&[][..]), Some(("VEH1 FX - 37", many.as_slice())));
         assert!(card.note.ends_with("is in 1,200 projects (the newest 50 here):"), "{}", card.note);
     }
 
@@ -2443,5 +2470,47 @@ mod tests {
         assert_eq!(list.projects_of(1).map(|of| of.len()), Some(0));
         // A list sharing its sounds starts without them, as it does without the use.
         assert_eq!(list.sharing().projects_of(0), None);
+    }
+
+    #[test]
+    fn a_date_that_isnt_real_comes_last_either_way() {
+        // A sound dated 2107 (a broken date), one with no date (it reads as 1970), and two real ones.
+        let day = |y: i32| NaiveDate::from_ymd_opt(y, 3, 1).and_then(|d| d.and_hms_opt(12, 0, 0)).unwrap();
+        let mut sounds: Vec<Sound> = (1..=4).map(|id| sound(id, &format!("{id}.wav"), "Kick", None)).collect();
+        for (s, y) in sounds.iter_mut().zip([2107, 2019, 1970, 2024]) {
+            s.added = day(y);
+        }
+        let mut list = SoundList::new(sounds);
+        let newest = list.view(&Filters::default(), Order::Newest, 0);
+        assert_eq!(ids(&list, &newest), vec![4, 2, 1, 3]);
+        let mut oldest = newest.clone();
+        list.turn_round(&mut oldest, Order::Newest);
+        assert_eq!(ids(&list, &oldest), vec![2, 4, 3, 1]);
+        // It's in no year: not on the strip, and no span of years lets it through.
+        assert_eq!(list.year_counts(false), [(2024, 1), (2019, 1)]);
+        let every_year = Filters { years: Some((1, 9999)), ..Filters::default() };
+        assert_eq!(ids(&list, &list.view(&every_year, Order::Newest, 0)), vec![4, 2]);
+
+        // Nor is it a clue to which copy came first: of the same audio, the one with a real date is the older.
+        let mut copies = list.sharing();
+        copies.set_copies(&SameAudio { groups: vec![vec![1, 2, 3]], ..SameAudio::default() });
+        let at = |id: i64| copies.find(id).unwrap();
+        assert_eq!(copies.why_kept(at(2), at(3)), KeptFor::Older);
+        assert!(copies.keep_first(at(2), at(3)).is_lt() && copies.keep_first(at(2), at(1)).is_lt());
+        let on = Filters { hide_copies: true, ..Filters::default() };
+        assert_eq!(ids(&copies, &copies.view(&on, Order::Newest, 0)), vec![4, 2]);
+
+        // The card's projects too: one dated 2099 comes after the real ones, as one the scan didn't date does.
+        list.set_used(HashMap::from([(1, Usage { projects: 3, project_ids: vec![10, 11, 12], ..Usage::default() })]));
+        let files = HashMap::from([
+            (10, project(10, "undated.flp", 0)),
+            (11, project(11, "2019.flp", 1_559_390_400)),
+            (12, project(12, "2099.flp", 4_102_401_600)),
+        ]);
+        list.set_project_files(Arc::new(files));
+        let of = list.projects_of(0).unwrap_or_default();
+        assert_eq!(of.iter().map(|f| f.path.as_str()).collect::<Vec<_>>(), ["2019.flp", "2099.flp", "undated.flp"]);
+        let card = projects_card(list.dates(), Some(&of), None);
+        assert_eq!(card.lines.iter().map(|l| l.saved.is_empty()).collect::<Vec<_>>(), [false, true, true]);
     }
 }

@@ -3417,7 +3417,7 @@ fn used_in(p: &Page, at: usize) -> list::ProjectsCard {
         .and_then(|s| p.re_likes.get(&s.id))
         .and_then(|id| p.places.get(id))
         .and_then(|&i| Some((p.list.sound(i)?.name(), p.list.projects_of(i)?)));
-    list::projects_card(own.as_deref(), like.as_ref().map(|(name, of)| (*name, of.as_slice())))
+    list::projects_card(p.list.dates(), own.as_deref(), like.as_ref().map(|(name, of)| (*name, of.as_slice())))
 }
 
 /// The arrow keys: across a row of tiles (-1, 1) or down and up the list (-2, 2), a row of tiles at a time; on the

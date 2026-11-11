@@ -126,6 +126,47 @@ fn reads_only_what_changed_and_stores_notes_once() {
     assert_eq!((count(&db, "notes"), count(&db, "parts")), (1, 1));
 }
 
+/// Sets the time a file was last changed, in seconds after 1970.
+fn date(path: &Path, seconds: u64) {
+    let file = std::fs::File::options().write(true).open(path).unwrap();
+    file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds)).unwrap();
+}
+
+#[test]
+fn a_date_still_to_come_goes_after_the_real_ones() {
+    let dir = folder("mo-midi-future-dates");
+    let pack = dir.join("Pack");
+    // Two files saved in 2019 and 2024; a pack whose dates are still to come (as one of Solomon's says 31 Dec 2027),
+    // one with the 2019 file's notes; and a file with no date, which reads as 1970.
+    let files: [(PathBuf, &[u8], u64); 5] = [
+        (dir.join("Old.mid"), BASS, 1_559_390_400),
+        (dir.join("Newer.mid"), TUNE, 1_709_294_400),
+        (pack.join("Old again.mid"), BASS, 4_102_401_600),
+        (pack.join("Fill.mid"), &[60, 64, 67, 72, 67, 64, 60, 55], 4_328_424_000),
+        (pack.join("No date.mid"), &[40, 40, 40, 52, 40, 40, 40, 52], 0),
+    ];
+    for (path, keys, seconds) in &files {
+        std::fs::write(path, smf(keys)).unwrap();
+        date(path, *seconds);
+    }
+    let name = |path: &str| mo_formats::paths::file_name(path).to_owned();
+    let in_order = ["Newer.mid", "Old.mid", "Fill.mid", "Old again.mid", "No date.mid"];
+    let mut store = MidiStore::open(&dir.join("midi-index.db")).unwrap();
+
+    // Read newest first, as the list shows them: the dates that aren't real after the rest.
+    let plan = indexer::plan(&wanted(&dir), &store.stamps().unwrap(), &[], false);
+    assert_eq!(plan.todo.iter().map(|w| name(&w.path)).collect::<Vec<_>>(), in_order);
+    run(&mut store, &dir, false);
+    let all = store.all(&HashMap::new(), &HashMap::new()).unwrap();
+    assert_eq!(all.iter().map(|p| name(&p.source.path)).collect::<Vec<_>>(), in_order);
+
+    // The copy with a real date stands for its notes, and the pack's copy is one of its other files.
+    let cat = Catalogue::new(all);
+    let lines: Vec<String> = cat.entries.iter().map(|e| name(&e.phrase.source.path)).collect();
+    assert_eq!(lines, ["Newer.mid", "Old.mid", "Fill.mid", "No date.mid"]);
+    assert_eq!(cat.entries[1].other_sources.iter().map(|s| name(&s.path)).collect::<Vec<_>>(), ["Old again.mid"]);
+}
+
 #[test]
 fn your_corrections_win_over_the_csharp_apps() {
     let dir = folder("mo-midi-corrections");

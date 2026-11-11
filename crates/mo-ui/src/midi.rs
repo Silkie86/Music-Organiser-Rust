@@ -195,7 +195,7 @@ impl Model for Lines {
             details: details.into(),
             phrase: page::phrase_text(e).into(),
             key: page::key_text(e).into(),
-            date: page::date_text(e.phrase.source.mtime).into(),
+            date: page::date_text(&p.cat.dates, e.phrase.source.mtime).into(),
             bars: if e.phrase.bars > 0 { e.phrase.bars.to_string() } else { String::new() }.into(),
             files: thousands(e.copies()).into(),
             colour: colour(e.role()),
@@ -1028,8 +1028,10 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
         let shortcuts = p.shortcuts.clone();
         let e = p.cat.entry(at)?;
         let card = card(e);
-        let facts: Vec<MidiFact> =
-            page::facts(e).into_iter().map(|(n, v)| MidiFact { name: n.into(), value: v.into() }).collect();
+        let facts: Vec<MidiFact> = page::facts(e, &p.cat.dates)
+            .into_iter()
+            .map(|(n, v)| MidiFact { name: n.into(), value: v.into() })
+            .collect();
         let (actions, menu) = actions(e, &shortcuts);
         data.set_picked(card);
         data.set_facts(ModelRc::new(VecModel::from(facts)));

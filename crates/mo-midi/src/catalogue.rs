@@ -1,6 +1,8 @@
 //! Every MIDI part in the index, held in memory for instant searching (the C# `MidiCatalogue`).
 //!
-//! Parts with the same notes are one entry, the newest copy, with the other files that have them ("in 20 files").
+//! Parts with the same notes are one entry, the newest copy, with the other files that have them ("in 20 files"). A
+//! file's date that isn't real (one still to come, or before 1981: [`RealDates`]) is no clue to when it was saved, so
+//! such a copy comes after the copies with a real date.
 //! Search words must all appear in a part's names, file, folders, kind, instrument or key. "More like this" ranks by
 //! the part's shape. Each search is one pass over the list, spread over the cores, quick even for hundreds of
 //! thousands of parts; the caller runs it off the UI thread at low priority (rules 12 and 21).
@@ -11,6 +13,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 
+use mo_formats::dates::RealDates;
 use mo_formats::{case, paths};
 use rayon::prelude::*;
 
@@ -172,13 +175,22 @@ pub struct Catalogue {
     pub phrase_count: usize,
     /// How many lines a list of every part has: the same loop in other keys is one ([`Entry::key_group`]).
     pub line_count: usize,
+    /// Which files' dates are real, as of when the catalogue was made: the entries' order, the dates the page shows
+    /// and the years it counts all go by it, so they agree for as long as the catalogue lasts.
+    pub dates: RealDates,
     by_hash: HashMap<String, usize>,
 }
 
 impl Catalogue {
-    /// The catalogue of `phrases`, which come newest file first (as [`crate::MidiIndex::all`] gives them), so the
-    /// first of each set of notes is the newest copy.
-    pub fn new(phrases: Vec<StoredPhrase>) -> Catalogue {
+    /// The catalogue of `phrases`, which come newest file first (as [`crate::store::MidiStore::all`] and
+    /// [`crate::MidiIndex::all`] give them), so the first of each set of notes is the newest copy. The phrases whose
+    /// file's date isn't real go after the rest first (the store's list has them there already), keeping their order.
+    pub fn new(mut phrases: Vec<StoredPhrase>) -> Catalogue {
+        let dates = RealDates::now();
+        let undated = |p: &StoredPhrase| !dates.seconds(p.source.mtime);
+        if !phrases.is_sorted_by_key(undated) {
+            phrases.sort_by_key(undated);
+        }
         let phrase_count = phrases.len();
         let mut by_hash: HashMap<String, usize> = HashMap::with_capacity(phrases.len());
         let mut firsts = Vec::new();
@@ -283,7 +295,7 @@ impl Catalogue {
             // Longest first; equal lengths keep their order (newest first), as the C# stable sort does.
             e.within.sort_by_key(|&p| std::cmp::Reverse(bars.get(p).copied().unwrap_or(0)));
         }
-        Catalogue { entries, phrase_count, line_count, by_hash }
+        Catalogue { entries, phrase_count, line_count, dates, by_hash }
     }
 
     /// The part with these notes. Entries are made again on every reload, so the page holds on to its picks by
@@ -590,6 +602,26 @@ mod tests {
         assert_eq!(verse.phrase.id, 1, "the newest copy is the one kept");
         assert!(verse.is_in_song(&song_of(r"C:\Projects\Didums\Didums_12.flp")));
         assert!(!verse.is_in_song(&song_of(r"C:\Projects\Other\Didums_12.flp")));
+    }
+
+    #[test]
+    fn a_copy_with_a_real_date_stands_for_its_notes() {
+        // As the C# app's index lists them, newest date first: a pack's copy dated 2099 (a date still to come, as one
+        // of Solomon's says 31 Dec 2027), then the song saved in 2024 with the same notes, then a file from 2019.
+        let pack = source(r"L:\New Midi\Pack\16BTFILL.mid", SourceKind::File, 4_102_401_600);
+        let song = source(r"C:\Projects\Didums\Didums_70.flp", SourceKind::Project, 1_709_294_400);
+        let old = source(r"L:\New Midi\Old.mid", SourceKind::File, 1_559_390_400);
+        let c = Catalogue::new(vec![
+            phrase(1, &pack, "", "16BTFILL", Role::Drums, "A"),
+            phrase(2, &pack, "", "16BTFILL", Role::Drums, "B"),
+            phrase(3, &song, "Drums", "Fill", Role::Drums, "A"),
+            phrase(4, &old, "", "Old", Role::Melody, "C"),
+        ]);
+        let ids: Vec<i64> = c.entries.iter().map(|e| e.phrase.id).collect();
+        assert_eq!(ids, [3, 4, 2], "the real dates first, newest first, then the rest");
+        let fill = &c.entries[c.find("A").unwrap()];
+        assert_eq!(fill.other_sources.iter().map(|s| s.mtime).collect::<Vec<_>>(), [4_102_401_600]);
+        assert!(c.dates.seconds(1_709_294_400) && !c.dates.seconds(4_102_401_600));
     }
 
     #[test]
