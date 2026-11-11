@@ -84,6 +84,11 @@ export struct PickedPart {
     // The other files with the same notes, and "and 12 more".
     others: [string],
     others-more: string,
+    // Moved to fit a song ("Fits my song"): how ("Moved 3 semitones up to fit Night drive…"), which is how the roll
+    // and the chords show it and how it plays, drags and is sent; "" when it's as it is in the library. And whether
+    // that's a move at all (a part can fit as it is): the key and the chords then say which of the two they are.
+    fit: string,
+    fit-moved: bool,
 }
 
 export global MidiData {
@@ -521,6 +526,14 @@ component PartPanel inherits SidePanel {
         wrap: word-wrap;
         min-width: 0px;
     }
+    // Straight above the roll, which shows the part as this line says it's moved.
+    if MidiData.picked.fit != "": Text {
+        text: MidiData.picked.fit;
+        color: Theme.text;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
     PianoRoll { }
     if MidiData.roll-keys > 0: RollChoices { }
     if MidiData.picked.roll-note != "": Text {
@@ -612,7 +625,7 @@ component PartPanel inherits SidePanel {
     }
     VerticalLayout {
         spacing: Space.xs;
-        Caps { text: "KEY"; }
+        Caps { text: MidiData.picked.fit-moved ? "KEY, AS IT IS IN YOUR LIBRARY" : "KEY"; }
         HorizontalLayout {
             spacing: Space.sm;
             alignment: start;
@@ -649,7 +662,7 @@ component PartPanel inherits SidePanel {
     }
     if MidiData.picked.chords != "": VerticalLayout {
         spacing: Space.xs;
-        Caps { text: "CHORDS"; }
+        Caps { text: MidiData.picked.fit-moved ? "CHORDS, MOVED TO FIT" : "CHORDS"; }
         Text {
             text: MidiData.picked.chords;
             color: Theme.text;

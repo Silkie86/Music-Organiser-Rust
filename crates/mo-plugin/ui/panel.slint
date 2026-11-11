@@ -72,7 +72,8 @@ export component Panel inherits Window {
     // pictures this wide.
     in-out property <length> wave-width: 120px;
     callback search(string);
-    callback play(int);
+    // Play a line's sound: from the start (0), or from the spot clicked on its waveform (up to 1, its end).
+    callback play(int, float);
     // A line is being dragged out (onto a track): its row.
     callback drag-out(int);
     // Whether lines can be dragged out on this system, and the row being carried (-1 for none).
@@ -288,7 +289,10 @@ export component Panel inherits Window {
                         lifted: i == root.carried;
                         clicked => {
                             root.picked = i;
-                            root.play(i);
+                            // A click on the waveform plays from that spot; anywhere else, from the start.
+                            root.play(i, wave.source.width > 0 && self.pressed-x >= wave.absolute-position.x - self.absolute-position.x
+                                && self.pressed-x < wave.absolute-position.x - self.absolute-position.x + wave.width
+                                ? (self.pressed-x - (wave.absolute-position.x - self.absolute-position.x)) / wave.width : 0);
                         }
                         drag-out => { root.drag-out(i); }
                         HorizontalLayout {
@@ -321,7 +325,7 @@ export component Panel inherits Window {
                                 horizontal-stretch: 0;
                                 alignment: center;
                                 // The size mo-plugin's waves.rs makes the picture for.
-                                Image {
+                                wave := Image {
                                     width: root.wave-width;
                                     height: 30px;
                                     source: sound.wave;
