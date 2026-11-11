@@ -17,6 +17,8 @@ export struct SoundLine {
     // Its type, tempo, key and length, as far as the app knows them: after the folder.
     facts: string,
     favourite: bool,
+    // Its waveform, white on nothing (the line tints it); empty until it's read, or when it has none.
+    wave: image,
 }
 
 // One type in the filter column, with how many sounds picking it would show.
@@ -207,6 +209,18 @@ export component Panel inherits Window {
                                     color: Theme.faint;
                                     font-size: Type.meta;
                                     overflow: elide;
+                                }
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 0;
+                                alignment: center;
+                                // The size mo-plugin's waves.rs makes the picture for.
+                                Image {
+                                    width: 120px;
+                                    height: 30px;
+                                    source: sound.wave;
+                                    image-fit: fill;
+                                    colorize: i == root.picked ? Theme.accent : Theme.muted;
                                 }
                             }
                             if sound.favourite: VerticalLayout {

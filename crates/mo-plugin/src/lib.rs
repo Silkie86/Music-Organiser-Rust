@@ -21,6 +21,7 @@ pub mod audition;
 pub mod check;
 pub mod library;
 mod threads;
+pub mod waves;
 mod window;
 
 #[allow(clippy::unwrap_used, clippy::expect_used)]

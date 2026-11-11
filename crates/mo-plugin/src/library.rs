@@ -165,6 +165,22 @@ pub fn read_from(sounds_db: &Path) -> Read {
     }
 }
 
+/// The waveforms of the sounds with these ids, for the lines on show: the library is opened, read and let go again,
+/// as [`read`] does. Slow (call it off the panel's thread).
+pub fn waves(ids: &[i64]) -> Vec<(i64, mo_sounds::Peaks)> {
+    waves_from(&mo_app::paths::data_dir().join("sounds.db"), ids)
+}
+
+/// [`waves`] from the app's own sound library beside `sounds_db`. None when it can't be read just now (the app may be
+/// swapping in a new copy): those lines stay without a waveform.
+pub fn waves_from(sounds_db: &Path, ids: &[i64]) -> Vec<(i64, mo_sounds::Peaks)> {
+    let copy = mo_sounds::compact::copy_of(sounds_db);
+    if ids.is_empty() || !copy.is_file() {
+        return Vec::new();
+    }
+    mo_sounds::SoundsDb::open_read_only(&copy).and_then(|db| db.waves(ids)).unwrap_or_default()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,5 +266,6 @@ mod tests {
     fn no_library_yet_says_so() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("no-such-folder");
         assert!(matches!(read_from(&dir.join("sounds.db")), Read::Not(why) if why.starts_with("No sound library")));
+        assert!(waves_from(&dir.join("sounds.db"), &[1, 2]).is_empty());
     }
 }
