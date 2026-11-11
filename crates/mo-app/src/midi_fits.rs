@@ -671,8 +671,9 @@ mod tests {
             save("C:\\Songs\\Night drive_11.flp", now - 100),
             save("C:\\Songs\\Dawn.flp", now - 300),
         ];
-        let songs = mo_library::songs::group_songs(&saves, &mo_library::SongChoices::default());
-        let offered = song_choices(&songs, &RealDates::at(now));
+        let dates = RealDates::at(now);
+        let songs = mo_library::songs::group_songs(&saves, &mo_library::SongChoices::default(), &dates);
+        let offered = song_choices(&songs, &dates);
         // The song saved last first, read from the save written last, with every save it has.
         assert_eq!(offered.len(), 2);
         assert_eq!((offered[0].save.as_str(), offered[0].mtime), ("C:\\Songs\\Night drive_11.flp", now - 100));
