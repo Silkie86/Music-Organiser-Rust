@@ -182,6 +182,10 @@ export global AppKeys {
     // text), passed on to the app's shortcuts, so Ctrl+Up and Ctrl+Down step through the list even while you type:
     // whether it ran. The text and Ctrl, Shift, Alt, Meta and repeat, as the window's own `key`.
     callback key(string, bool, bool, bool, bool, bool) -> bool;
+    // Whether anything plays that Esc would stop first (a sound, the MIDI page's loop, a part or an audition in a DAW).
+    // A right click then stops it (the window's own watcher, mo-ui's right_click.rs, once the button comes up where it
+    // went down), so a list line's right click opens no menu meanwhile. False where nothing answers (the test plugin).
+    callback plays() -> bool;
 }
 
 // The one tooltip (rules 15 and 16): after the mouse rests on a control for a moment, says what it does and shows its
@@ -1531,7 +1535,8 @@ export component ListLine inherits Rectangle {
     callback clicked;
     callback double-clicked;
     // A right click, after the line is picked, with the mouse's place in the window: the page opens its
-    // `RightClickMenu` there.
+    // `RightClickMenu` there. Not while anything plays (`AppKeys.plays`): that right click stops it instead, and the
+    // next one opens the menu.
     callback right-clicked(length, length);
     // Whether the mouse is over it (it's shaded then).
     out property <bool> hovered: touch.has-hover;
@@ -1591,7 +1596,9 @@ export component ListLine inherits Rectangle {
                 // the mouse): the button's coming up won't be heard here, so the drag is off now.
                 root.drag-let-go();
             }
-            if e.kind == PointerEventKind.down && e.button == PointerEventButton.right {
+            // While something plays, the right click is for stopping it: nothing is picked (a pick could play the line)
+            // and no menu opens.
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.right && !AppKeys.plays() {
                 // The menu acts on what's picked, so pick this line first.
                 root.clicked();
                 root.right-clicked(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);

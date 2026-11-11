@@ -2491,9 +2491,7 @@ fn keep_octaves(said: &[((PathBuf, String), Option<i32>)]) -> Result<(), String>
 /// Esc's first step, on any page (`app.escape`): the loop playing stops, and a part playing in a DAW, as both play on
 /// after the page goes. Whether either was playing.
 pub fn stop_on_escape(app: &AppWindow) -> bool {
-    let data = app.global::<MidiData>();
-    let looping = data.get_playing() || PAGE.with(|p| p.borrow().looping.is_some());
-    let in_daw = data.get_daw_playing() != "" || data.get_daw_starting() != "";
+    let (looping, in_daw) = playing(app);
     if looping {
         stop_playing(app);
     }
@@ -2501,6 +2499,20 @@ pub fn stop_on_escape(app: &AppWindow) -> bool {
         stop_daw(app);
     }
     looping || in_daw
+}
+
+/// Whether the loop or a part in a DAW plays now: what [`stop_on_escape`] stops.
+pub fn plays(app: &AppWindow) -> bool {
+    let (looping, in_daw) = playing(app);
+    looping || in_daw
+}
+
+/// Whether the loop plays, and whether a part plays (or is starting) in a DAW.
+fn playing(app: &AppWindow) -> (bool, bool) {
+    let data = app.global::<MidiData>();
+    let looping = data.get_playing() || PAGE.with(|p| p.borrow().looping.is_some());
+    let in_daw = data.get_daw_playing() != "" || data.get_daw_starting() != "";
+    (looping, in_daw)
 }
 
 /// Esc on the page (`app.escape`, in the search box or anywhere else), the same order on every page, one step a press

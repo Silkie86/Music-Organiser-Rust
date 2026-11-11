@@ -2388,7 +2388,7 @@ fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
     }
     data.set_menu(ModelRc::new(VecModel::from(menu)));
     data.set_actions(ModelRc::new(VecModel::from(actions)));
-    data.set_play_tip("Play or stop the picked sound".into());
+    data.set_play_tip("Play or stop the picked sound. A right click anywhere stops it too.".into());
     data.set_play_key(shortcuts.key_of("app.play").into());
     data.set_favourite_key(shortcuts.key_of(FAVOURITE).into());
     data.set_tag_key(shortcuts.key_of(TAG).into());
@@ -3937,11 +3937,16 @@ pub fn escape(app: &AppWindow) -> bool {
 /// Esc's first step, on any page (`app.escape`): the sound playing stops, as it plays on for a while after its page
 /// goes. Whether one was playing.
 pub fn stop_on_escape(app: &AppWindow) -> bool {
-    let playing = PAGE.with(|p| p.borrow().playing.is_some());
+    let playing = plays();
     if playing {
         stop(app);
     }
     playing
+}
+
+/// Whether a sound shown playing here plays now: what [`stop_on_escape`] stops.
+pub fn plays() -> bool {
+    PAGE.with(|p| p.borrow().playing.is_some())
 }
 
 /// Another page is about to play (the MIDI page's loop): the sound shown playing here stops, so this page doesn't go
