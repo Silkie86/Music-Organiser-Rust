@@ -186,6 +186,15 @@ pub const SPACE_ACTIONS: &[Action] = &[
     action("space.reveal", "Show the picked line's folder", "Ctrl+Shift+E"),
     action("space.fix", "Write a \"(fixed)\" Bitwig project beside each ticked save", ""),
     action(
+        "space.removeFixed",
+        if cfg!(windows) {
+            "Send every \"(fixed)\" Bitwig project Fix wrote to the Recycle Bin, so the saves can be fixed again"
+        } else {
+            "Send every \"(fixed)\" Bitwig project Fix wrote to the Trash, so the saves can be fixed again"
+        },
+        "",
+    ),
+    action(
         "space.remove",
         if cfg!(windows) {
             "Send what's ticked on the picked card to the Recycle Bin, each checked again first"

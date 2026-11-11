@@ -6,7 +6,9 @@
 //!
 //! [`LibraryIndex::copies_in`] finds the copies that are the same as a Library file byte for byte, and changes nothing.
 //! [`saves_in`] lists a project folder's saves, each with its "(fixed)" project when it has one. [`remove_copies`]
-//! sends the copies a "(fixed)" project no longer uses to the Recycle Bin, once you've opened it.
+//! sends the copies a "(fixed)" project no longer uses to the Recycle Bin, once you've opened it. [`fixed_projects`]
+//! and [`remove_fixed_projects`] send the "(fixed)" projects themselves there, so the saves can be fixed again (while
+//! Solomon tests Fix, 11 Nov 2026).
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -351,6 +353,76 @@ pub fn remove_copies(fixed: &FixedProject<'_>, bin: &dyn Bin, stop: &AtomicBool)
             }
             Sent::Stays => {}
         }
+    }
+    sending.finish(&mut done);
+    done
+}
+
+/// The "(fixed)" projects in these project folders: each "<save> (fixed).bwproject" ("(fixed 2)" and on) beside the
+/// save it was written from, as Fix names them, by folder in the order given. One whose save isn't beside it isn't
+/// listed (the name alone doesn't say Fix wrote it). A folder that can't be listed is left out. Call it off the
+/// window's thread.
+pub fn fixed_projects(folders: &[PathBuf], stop: &AtomicBool) -> Result<Vec<PathBuf>, Stopped> {
+    let mut out = Vec::new();
+    for folder in folders {
+        if stop.load(Ordering::Relaxed) {
+            return Err(Stopped);
+        }
+        let Ok(entries) = fs::read_dir(folder) else { continue };
+        let mut here: Vec<PathBuf> =
+            entries.flatten().map(|e| e.path()).filter(|p| written_by_fix(p).is_ok()).collect();
+        here.sort();
+        out.extend(here);
+    }
+    Ok(out)
+}
+
+/// Whether a file is a "(fixed)" project Fix wrote, as far as can be told: a plain file (not a link) named as Fix
+/// names them, with the save it was written from beside it. Err says why not, in plain words.
+fn written_by_fix(path: &Path) -> Result<u64, String> {
+    let stays = |why: &str| Err(why.to_owned());
+    let project = path.extension().is_some_and(|e| e.eq_ignore_ascii_case("bwproject"));
+    let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let Some(from) = fixed_from(&stem).filter(|_| project) else {
+        return stays("It isn't a \"(fixed)\" Bitwig project, so it stays.");
+    };
+    let meta = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == ErrorKind::NotFound => return stays("It isn't there any more."),
+        Err(_) => return stays("It can't be looked at now, so it stays."),
+    };
+    if meta.file_type().is_symlink() || !meta.is_file() {
+        return stays("It isn't a plain file, so it stays.");
+    }
+    let save = path.with_file_name(format!("{from}.bwproject"));
+    if !fs::metadata(&save).is_ok_and(|m| m.is_file()) {
+        return stays("The save it was written from isn't beside it, so it may not be Fix's: it stays.");
+    }
+    Ok(meta.len())
+}
+
+/// Sends "(fixed)" projects Fix wrote to the Recycle Bin, so their saves can be fixed again. Each is checked again
+/// just before it goes ([`fixed_projects`]: named as Fix names them, its save beside it); the save, its copies and
+/// everything else in the folder stay. Put back brings them back. One you've worked on in Bitwig since goes too: it's
+/// in the Recycle Bin, not gone.
+pub fn remove_fixed_projects(files: &[PathBuf], bin: &dyn Bin, stop: &AtomicBool) -> Done {
+    let mut done = Done::default();
+    let mut sending = Sending::new(bin, stop);
+    for file in files {
+        if stop.load(Ordering::Relaxed) {
+            done.problems.push(Problem { path: text(file), why: STOPPED.to_owned() });
+            continue;
+        }
+        let bytes = match written_by_fix(file) {
+            Ok(bytes) => bytes,
+            Err(why) => {
+                done.problems.push(Problem { path: text(file), why });
+                continue;
+            }
+        };
+        let real = real_path(&text(file)).unwrap_or_else(|| text(file));
+        let again = move || written_by_fix(file).map(|_| ());
+        sending.send(&text(file), real, bytes, What::FixedProject, &mut done, again);
     }
     sending.finish(&mut done);
     done

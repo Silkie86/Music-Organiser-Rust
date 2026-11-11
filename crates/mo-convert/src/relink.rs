@@ -192,7 +192,7 @@ fn texts_mut(value: &mut Value) -> Vec<&mut Text> {
 /// end and the offsets in the header stay right.
 pub fn relink(raw: &[u8], project_dir: &Path, relinks: &[Relink]) -> Result<(Vec<u8>, Vec<bool>), String> {
     let listed = listed(project_dir, relinks)?;
-    relink_listed(raw, project_dir, &listed).map(|r| (r.bytes, r.changed))
+    relink_listed(raw, project_dir, &listed, &[]).map(|r| (r.bytes, r.changed))
 }
 
 /// A project pointed back at the Library.
@@ -204,7 +204,12 @@ struct Relinked {
     found: Vec<String>,
 }
 
-fn relink_listed(raw: &[u8], project_dir: &Path, listed: &[Listed]) -> Result<Relinked, String> {
+fn relink_listed(
+    raw: &[u8],
+    project_dir: &Path,
+    listed: &[Listed],
+    known_libraries: &[PathBuf],
+) -> Result<Relinked, String> {
     let mut doc = bitwig::decode(raw).map_err(|_| "not a Bitwig project".to_owned())?;
     if let Some(e) = &doc.body_error {
         return Err(format!("the project couldn't be read to the end ({e}), so it's left as it is"));
@@ -311,8 +316,13 @@ fn relink_listed(raw: &[u8], project_dir: &Path, listed: &[Listed]) -> Result<Re
             }
         }
     }
-    // Bitwig's Library folders now, from the Library files the copies are of.
+    // Bitwig's Library folders now: the ones given (Settings' first), then the ones the copies' Library files are in.
     let mut libraries: Vec<PathBuf> = Vec::new();
+    for at in known_libraries {
+        if at.is_dir() && !libraries.contains(at) {
+            libraries.push(at.clone());
+        }
+    }
     for l in listed {
         let at = Path::new(&l.full)
             .ancestors()
@@ -592,6 +602,12 @@ fn fixed_names(project: &Path) -> impl Iterator<Item = PathBuf> + '_ {
 /// Writes the fixed project beside `project` (copy, check, then rename, never over a file that's there), and says
 /// which copies nothing uses any more but the original.
 pub fn fix_bitwig_project(project: &Path, relinks: &[Relink]) -> Result<Fixed, String> {
+    fix_bitwig_project_in(project, relinks, &[])
+}
+
+/// [`fix_bitwig_project`], with Bitwig's Library folders as you have them (your Bitwig Studio folder's in Settings
+/// first): a file whose folder moved is looked for in these first, then in the Library the copies' files are in.
+pub fn fix_bitwig_project_in(project: &Path, relinks: &[Relink], libraries: &[PathBuf]) -> Result<Fixed, String> {
     let dir = match project.parent() {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => PathBuf::from("."),
@@ -615,7 +631,7 @@ pub fn fix_bitwig_project(project: &Path, relinks: &[Relink]) -> Result<Fixed, S
         return Err(format!("no copy is the same as its Library file, so nothing was written: {}", left.join("; ")));
     }
     let raw = std::fs::read(project).map_err(|e| format!("Couldn't read {}: {e}", project.display()))?;
-    let Relinked { bytes, mut changed, found } = relink_listed(&raw, &dir, &listed)?;
+    let Relinked { bytes, mut changed, found } = relink_listed(&raw, &dir, &listed, libraries)?;
     if !changed.contains(&true) {
         left.push("the project uses none of the other copies".to_owned());
         return Err(format!("nothing was written: {}", left.join("; ")));

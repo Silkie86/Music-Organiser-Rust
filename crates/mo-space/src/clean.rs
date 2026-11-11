@@ -490,6 +490,8 @@ pub enum What {
     Plugin(SpaceKind),
     /// A Bitwig project's copy of a Library multisample, once a "(fixed)" project points at the Library file.
     BitwigCopy,
+    /// A "(fixed)" Bitwig project Fix wrote, beside its save.
+    FixedProject,
     /// An F12 note's words or picture, about 3 months old, put there by the app's start-up clean-up (rule 28).
     Note,
 }

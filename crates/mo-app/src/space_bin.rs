@@ -12,6 +12,7 @@ use mo_space::size::size_text;
 use crate::binned::{Binned, Kept};
 use crate::songs::thousands;
 use crate::space::{Card, Line, Part};
+use crate::space_bitwig::BITWIG_FIXED;
 use crate::space_old::OLD_COPIES;
 use crate::space_songs::{self, COMPACT};
 use crate::space_spare::SPARE_COPIES;
@@ -86,6 +87,7 @@ pub fn kind_title(kind: &str) -> &'static str {
         COMPACT => "Songs that can be compacted",
         PLUGIN_CLEAN => "A plugin's clean-up",
         PLUGIN_UNINSTALL => "Files an uninstall left",
+        BITWIG_FIXED => "Fixed Bitwig projects",
         _ => "A clean-up",
     }
 }
@@ -98,6 +100,7 @@ pub fn putting_back_title(kind: &str) -> &'static str {
         COMPACT => "Putting back old autosaves and caches",
         PLUGIN_CLEAN => "Putting back what a plugin's clean-up removed",
         PLUGIN_UNINSTALL => "Putting back the files an uninstall left",
+        BITWIG_FIXED => "Putting back fixed Bitwig projects",
         _ => "Putting back what a clean-up removed",
     }
 }
@@ -118,6 +121,8 @@ fn things(b: &Binned) -> String {
         OLD_COPIES => format!("{} old copies", thousands(n)),
         PLUGIN_UNINSTALL if n == 1 => "1 plugin file".to_owned(),
         PLUGIN_UNINSTALL => format!("{} plugin files", thousands(n)),
+        BITWIG_FIXED if n == 1 => "1 fixed Bitwig project".to_owned(),
+        BITWIG_FIXED => format!("{} fixed Bitwig projects", thousands(n)),
         _ if n == 1 => "1 file or folder".to_owned(),
         _ => format!("{} files and folders", thousands(n)),
     }
