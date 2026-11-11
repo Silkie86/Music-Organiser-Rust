@@ -140,6 +140,73 @@ fn the_sample_folders_are_scanned_into_the_apps_own_library() {
 }
 
 #[test]
+fn sounds_that_couldnt_be_read_are_tried_again_once_when_the_reader_learns_more() {
+    let dir = folder("again");
+    let samples = dir.join("Samples");
+    let kick = samples.join("Kick 01.wav");
+    let hat = samples.join("Hat 01.wav");
+    tone(&kick, 1.0, 60.0);
+    tone(&hat, 0.3, 8000.0);
+    let db = own_library(&dir, &[&kick, &hat]);
+    let copy = compact::copy_of(&db);
+    let folders = vec![samples.to_str().unwrap().to_owned()];
+    // As an older reader left it: the kick couldn't be read, and nothing notes which reader tried.
+    let unread = |name: &str| {
+        let c = Connection::open(&copy).unwrap();
+        let n =
+            c.execute("UPDATE sounds SET error = 'Couldn''t read the file' WHERE path LIKE ?1", [format!("%{name}")]);
+        assert_eq!(n.unwrap(), 1);
+    };
+    unread("Kick 01.wav");
+    assert_eq!(grow::unread_tried(&copy).unwrap(), None);
+    fs::write(samples.join("broken.wav"), b"RIFF not really").unwrap();
+    let (s, said) = scanned(&db, &folders);
+    let s = s.unwrap();
+    // Only the kick and the new file were listened to: the hat was read fine before.
+    assert_eq!(said.first(), Some(&(0, 2)));
+    assert_eq!(s.kept, grow::Kept { added: 1, updated: 1, ..grow::Kept::default() });
+    assert_eq!((s.tried_again, s.heard_now, s.unreadable, s.unheard_new), (1, 1, 1, 1));
+    assert_eq!(grow::unread_tried(&copy).unwrap(), Some(mo_audio::READS));
+    let sounds = SoundsDb::open_read_only(&copy).unwrap().all(chrono::Local::now().naive_local()).unwrap();
+    let k = sounds.iter().find(|s| s.path.ends_with("Kick 01.wav")).unwrap();
+    assert_eq!(k.error, None);
+    assert!(k.analysis.as_ref().is_some_and(|a| (a.seconds - 1.0).abs() < 0.01), "{:?}", k.analysis);
+    // What you gave it stays.
+    assert_eq!((k.rating, k.tags.clone()), (3, vec!["mine".to_owned()]));
+    // The same reader: a sound that can't be read isn't tried at every scan.
+    unread("Hat 01.wav");
+    let (s, said) = scanned(&db, &folders);
+    assert_eq!(s.unwrap().kept, grow::Kept::default());
+    assert!(said.is_empty());
+    // A reader that reads more: both unread ones are tried, and the one still broken is known to be.
+    Connection::open(&copy)
+        .unwrap()
+        .execute("UPDATE copy_info SET value = ?1 WHERE key = 'unread_tried'", [mo_audio::READS - 1])
+        .unwrap();
+    let (s, _) = scanned(&db, &folders);
+    let s = s.unwrap();
+    assert_eq!(s.kept, grow::Kept { updated: 2, ..grow::Kept::default() });
+    assert_eq!((s.tried_again, s.heard_now, s.unreadable), (2, 1, 0));
+    assert_eq!(mo_app::sound_scan::scanned_card(&s).1, "1 of 2 that couldn't be read before can be now.");
+    assert_eq!(grow::unread_tried(&copy).unwrap(), Some(mo_audio::READS));
+    // An unread sound on an unplugged drive can't be tried: the library isn't noted until it has been.
+    let c = Connection::open(&copy).unwrap();
+    c.execute("UPDATE copy_info SET value = ?1 WHERE key = 'unread_tried'", [mo_audio::READS - 1]).unwrap();
+    let away = dir.join("Not plugged in");
+    c.execute(
+        "INSERT INTO sounds (id, path, size, mtime, error, type, type_source, type_conf)
+         VALUES (90, ?1, 5, 5, 'Couldn''t read the file', 'Unknown', '', 1)",
+        [away.join("Clap.wav").to_str().unwrap()],
+    )
+    .unwrap();
+    drop(c);
+    let both = [folders[0].clone(), away.to_str().unwrap().to_owned()];
+    let (s, _) = scanned(&db, &both);
+    assert_eq!((s.as_ref().unwrap().tried_again, s.unwrap().unnoted), (1, None));
+    assert_eq!(grow::unread_tried(&copy).unwrap(), Some(mo_audio::READS - 1));
+}
+
+#[test]
 fn a_scan_that_stops_part_way_keeps_what_it_kept() {
     let dir = folder("stops");
     let samples = dir.join("Samples");

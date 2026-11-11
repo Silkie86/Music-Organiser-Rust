@@ -46,6 +46,30 @@ pub const NEW_SINCE: &str = "new_since";
 /// ([`super::backup::When::Daily`]), and one behind by anything else can't.
 pub const CHANGES: &str = "changes";
 
+/// The key in `copy_info` that holds which reader ([`mo_audio::READS`]) the sounds that couldn't be listened to were
+/// last tried with. When the app's reader is newer, a scan tries just those again, once.
+pub const UNREAD_TRIED: &str = "unread_tried";
+
+/// Which reader the unread sounds in the library at `copy` were last tried with ([`UNREAD_TRIED`]); `Ok(None)` when
+/// never noted (a library from before the note). An error when the library can't be read just now: not the same as
+/// never noted.
+pub fn unread_tried(copy: &Path) -> Result<Option<i64>, SoundsError> {
+    let conn = Connection::open_with_flags(copy, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    conn.busy_timeout(WAIT)?;
+    Ok(info_value(&conn, UNREAD_TRIED)?)
+}
+
+/// Notes that the unread sounds in the app's own sound library beside `sounds_db` have been tried with reader
+/// `reads`. Never lowers the note.
+pub fn note_unread_tried(sounds_db: &Path, reads: i64) -> Result<(), SoundsError> {
+    write_small(sounds_db, |tx| {
+        if info_value(tx, UNREAD_TRIED)?.is_none_or(|was| was < reads) {
+            set_info(tx, UNREAD_TRIED, reads)?;
+        }
+        Ok(Ok(()))
+    })
+}
+
 /// The first number the app gave a sound of its own scan ([`NEW_SINCE`]) in the library at `copy`; `None` when it has
 /// added none (or the library can't be read just now).
 pub fn new_since(copy: &Path) -> Option<i64> {

@@ -362,6 +362,24 @@ impl SoundsDb {
         Ok(self.conn.query_row(sql, [], |r| r.get(0))?)
     }
 
+    /// The paths of the sounds the library couldn't listen to (each kept with why). Only for the app's own sound
+    /// library; the others have none to give.
+    pub fn unread_files(&self) -> Result<Vec<String>, SoundsError> {
+        if !matches!(self.layout, Layout::Copy) {
+            return Ok(Vec::new());
+        }
+        let _turn = turns::long_turn();
+        let mut st = self.conn.prepare("SELECT path FROM sounds WHERE error IS NOT NULL")?;
+        let rows = st.query_map([], |r| {
+            turns::give_way();
+            Ok(match r.get_ref(0)? {
+                rusqlite::types::ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
+                _ => String::new(),
+            })
+        })?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Every file the library knows, as the last scan saw it. A size or time that isn't a whole number (a damaged
     /// row) reads as 0, so the file is listened to again; a path that isn't readable text, as near to it as it can be.
     pub fn known_files(&self) -> Result<Vec<KnownSound>, SoundsError> {
