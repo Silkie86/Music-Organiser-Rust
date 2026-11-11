@@ -1,7 +1,9 @@
 // The app's long lists: Slint's ListView, which makes only the lines in sight, and turns to a line when asked. The
 // compiler makes only the lines in sight for a `for` straight inside an element whose type is called ListView
-// (i-slint-compiler object_tree.rs, "Custom ListView is OK"), so this one keeps the name.
+// (i-slint-compiler object_tree.rs, "Custom ListView is OK"), so this one keeps the name. Nothing else may go in one,
+// so the button that takes a list back to its top goes round it, in a `ListBox`.
 import { ListView as SlintListView } from "std-widgets.slint";
+import { AppKeys, Icons, Motion, Space, StudioButton, Theme } from "studio.slint";
 
 // How wide a page's list of lines gets at most. In a wider window (Solomon's is 3440 across) the list stops here: a
 // line's name and its numbers stay within one look of each other, where they used to end up a screen apart (the UX
@@ -16,6 +18,11 @@ export global Fit {
 // Each time `show-ask` goes up, the list brings the line whose top is at `show-top` into sight, a third of the way
 // down (or the list to its end), once it has laid out its lines. Every line must be `row-height` tall: the list counts
 // on it to know when they're laid out. A list that never turns leaves these alone.
+//
+// A page is made each time it's shown, and its list with it, at its top: back on MIDI from another page, Solomon had
+// lost his place in the list (his F12 note of 11 Nov). So a list keeps where it's turned to in its page's `kept-y`, and
+// a list made again comes back there once it has laid out its lines, or as far down as its lines now go. A line asked
+// for meanwhile (Ctrl+K from another page) is then brought into sight from there, only if it isn't in sight already.
 export component ListView inherits SlintListView {
     in property <length> row-height;
     // How many lines there are: the model's length.
@@ -26,15 +33,28 @@ export component ListView inherits SlintListView {
     // The last ask turned to. Two-way with the page's own, so that a list made after the ask (a page is made when it's
     // shown, so Ctrl+K from another page asks first) still turns to it.
     in-out property <int> show-done;
+    // Where the list is turned to (its `content-y`). Two-way with the page's own, so a list made again comes back.
+    in-out property <length> kept-y;
 
     // Until the list has laid out the lines it was just given, its height is still the old lines' height: a turn then
     // stopped short, or with fewer lines left none drawn (7 Nov). So a turn waits for them. A list just made has its
     // own height until then, so one about a screen tall can look laid out early: a turn finds the end from `rows`.
     property <bool> laid-out: abs(self.content-height - self.rows * self.row-height) < self.row-height / 2;
     property <bool> turn-now: self.show-ask != self.show-done && self.laid-out;
+    // Whether it has come back to `kept-y` since it was made. Until then where it's turned to isn't kept: it's at its
+    // top as it's made, and its lines can move it as they come.
+    property <bool> back: false;
+    property <bool> back-now: !self.back && self.laid-out && self.rows > 0;
     init => {
-        if (self.turn-now) {
+        if (self.back-now) {
+            self.come-back();
+        } else if (self.turn-now) {
             self.turn();
+        }
+    }
+    changed back-now => {
+        if (self.back-now) {
+            self.come-back();
         }
     }
     changed turn-now => {
@@ -56,6 +76,9 @@ export component ListView inherits SlintListView {
             }
             self.turn-to = 1px;
         }
+        if (self.back) {
+            self.kept-y = self.content-y;
+        }
     }
     // The second turn is only for that jump: your own scroll, or other lines, ends the wait for it.
     scrolled => {
@@ -65,20 +88,97 @@ export component ListView inherits SlintListView {
         self.turn-to = 1px;
     }
 
-    // Turns only when the line is out of sight.
-    function turn() {
-        self.show-done = self.show-ask;
+    // Back to its top: the button over its corner, and the Home key (`ListBox`).
+    public function to-top() {
         self.turn-to = 1px;
+        self.content-y = 0px;
+    }
+
+    // Turns only when the line is out of sight. A list just made comes back where it was first, and turns from there.
+    function turn() {
+        if (self.back-now) {
+            self.come-back();
+        } else {
+            self.turn-to = 1px;
+            self.turn-from-here();
+        }
+    }
+
+    // Back where it was, or as far down as its lines now go; then to the line asked for meanwhile, if there is one.
+    // Kept as it comes back: where it's there already, nothing moves for `changed content-y` to keep.
+    function come-back() {
+        self.back = true;
+        self.kept-y = -clamp(-self.kept-y, 0px, max(0px, self.rows * self.row-height - self.visible-height));
+        self.go(self.kept-y);
+        if (self.show-ask != self.show-done) {
+            self.turn-from-here();
+        }
+    }
+
+    function turn-from-here() {
+        self.show-done = self.show-ask;
         if (self.show-top < -self.content-y
             || self.show-top + self.row-height > -self.content-y + self.visible-height) {
             // A third of the way down, but never so far down that the line's bottom is out of sight: in a list not
             // much taller than a line, a third of the way down cut the last line off (10 Nov).
-            self.turn-to = -clamp(
+            self.go(-clamp(
                 min(self.show-top, max(self.show-top - self.visible-height / 3,
                     self.show-top + self.row-height - self.visible-height)),
-                0px, max(0px, self.rows * self.row-height - self.visible-height));
-            self.lands = -floor(-self.turn-to / self.row-height) * self.row-height;
-            self.content-y = self.turn-to;
+                0px, max(0px, self.rows * self.row-height - self.visible-height)));
+        }
+    }
+
+    // Turns to `y` (a `content-y`), and once more if the jump lands short (`turn-to`).
+    function go(y: length) {
+        if (y != self.content-y) {
+            self.turn-to = y;
+            self.lands = -floor(-y / self.row-height) * self.row-height;
+            self.content-y = y;
+        }
+    }
+}
+
+// A list with a button over its bottom right corner that takes it back to its top (Solomon's F12 note of 11 Nov: "a
+// button to press to bring you back to the top", on every list). The button shows once the list's first line is out
+// of sight; the Home key does the same (`AppKeys.list-top`). Put the list in it, with its column headings if it has
+// them, and say how far the list is turned down.
+export component ListBox inherits Rectangle {
+    // How far the list is turned down: its `content-y` (0 at its top, less as it goes down).
+    in property <length> turned;
+    // The list's line height: the button shows once its first line is out of sight.
+    in property <length> after;
+    // Puts the list back at its top (`ListView.to-top`).
+    callback to-top();
+    // Bumped by the Home key. Only a list on show is there to see it change.
+    property <int> asked: AppKeys.list-top;
+    changed asked => {
+        root.to-top();
+    }
+
+    @children
+
+    Rectangle {
+        property <bool> wanted: -root.turned > root.after;
+        // Left of the list's scroll bar (14px in Slint's look).
+        x: root.width - self.width - 14px - Space.md;
+        y: root.height - self.height - Space.md;
+        // A StudioButton with an icon is this square.
+        width: 32px;
+        height: 32px;
+        border-radius: Theme.radius;
+        // Over the lines, so it's seen as a button on them, not part of a line.
+        drop-shadow-blur: 8px;
+        drop-shadow-color: Theme.shadow;
+        opacity: self.wanted ? 1 : 0;
+        visible: self.opacity > 0;
+        animate opacity { duration: Motion.tap; }
+        top := StudioButton {
+            icon: Icons.top;
+            tip: "Back to the top of the list";
+            key: AppKeys.list-top-key;
+            clicked => {
+                root.to-top();
+            }
         }
     }
 }

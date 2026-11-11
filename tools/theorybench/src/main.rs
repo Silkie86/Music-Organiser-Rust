@@ -21,6 +21,7 @@ mod keys;
 mod metrics;
 mod naming;
 mod packs;
+mod pairs;
 mod profiles;
 mod ruled;
 mod songkeys;
@@ -45,6 +46,8 @@ theorybench chordcal <labelled.jsonl>... [--weights <weights.json>] [--folds <fo
                    [--measure] [--calibration <calibration.json>] [--keep-sharpness] [--out <calibration.json>]
 theorybench candidates <labelled.jsonl>... [--inputs <kinds>] [--misses <file>]
 theorybench tables <labelled.jsonl>... [--write <tables.rs>]
+theorybench pairs <labelled.jsonl>... [--bars <n>] [--others <n>] [--folds <folds>] [--set <name>=<x>,...]
+                  [--fit <steps> [--tie <worth>=<worth>,...] [--without <worths>] [--pull <x>]]
 
   keys       how often each key finder names the labelled key, on whole songs and on clips (8 bars long unless --bars
              gives other lengths, such as 1,2,4,8,16)
@@ -130,7 +133,19 @@ theorybench tables <labelled.jsonl>... [--write <tables.rs>]
   --misses   write each stretch whose chord is missed even with its ends moved to a file (tab-separated)
   tables     counts how often each core is the labelled chord and each tension is named with it (the chord reader's
              template priors), from the labels of folds 1 to 4
-  --write    writes them as mo-harmony's counted tables (crates/mo-harmony/src/chordread/tables.rs)";
+  --write    writes them as mo-harmony's counted tables (crates/mo-harmony/src/chordread/tables.rs)
+  pairs      how well the app tells which chords go with which tune (mo-harmony's together), beside the C# app's
+             way: each song's stretches of a few bars, a stretch's own tune and accompaniment against other songs'
+             (at all 12 moves) and against other stretches of its own song, both ways round
+  --bars     how long a stretch is (8)
+  --others   how many other songs' stretches each is asked against (50; 20 at most in a fit)
+  --folds    the folds measured, or fitted on (1); fit on 2,3,4 and keep 0 back for a last look
+  --set      measures with these numbers in place of the built-in ones (the line a fit prints)
+  --fit      fits the worths in this many steps and prints them, measuring nothing; only on music whose licence
+             lets fitted numbers ship
+  --tie      keeps a worth the same as another through the fit (colour=fifth)
+  --without  holds these worths at 0 through the fit (above3,above4,above7,above8,above9)
+  --pull     how hard the fit pulls the worths towards 0 (1e-4)";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -146,6 +161,7 @@ fn main() -> ExitCode {
         Some("keycheck") => keycheck::run(&args[1..]),
         Some("songkeys") => songkeys::run(&args[1..]),
         Some("tables") => tables::run(&args[1..]),
+        Some("pairs") => pairs::run(&args[1..]),
         _ => Err(USAGE.to_owned()),
     };
     match result {

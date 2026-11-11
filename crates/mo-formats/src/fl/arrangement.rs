@@ -303,6 +303,9 @@ fn playlist_view(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
     let beats = |ticks: f64| ticks / ppq(pl.ppq);
     let channels: HashMap<u32, &FlChannel> = song.channels.iter().map(|c| (c.index, c)).collect();
     let part_names = part_names(&channels, pl);
+    // A channel switched off in the Channel rack (its green light) plays nothing: its notes and clips stay in the
+    // picture, marked muted, as the converter mutes its track.
+    let off = |ch: u32| channels.get(&ch).is_some_and(|c| !c.enabled);
     let mut by_track: BTreeMap<u32, Vec<&Placement>> = BTreeMap::new();
     for item in &pl.items {
         by_track.entry(item.track).or_default().push(item);
@@ -346,7 +349,7 @@ fn playlist_view(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
                                 length: beats(n.length.max(1).min(end - n.start) as f64),
                                 key: n.key,
                                 velocity: n.velocity,
-                                muted: n.muted,
+                                muted: n.muted || off(*ch),
                                 step: n.step,
                                 part: part_of(&mut parts, *ch),
                             })
@@ -389,7 +392,7 @@ fn playlist_view(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
                     name: c.name.clone(),
                     start,
                     length,
-                    muted: item.muted,
+                    muted: item.muted || !c.enabled,
                     fade_in,
                     fade_out,
                     audio,
@@ -474,6 +477,8 @@ fn by_channel(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
                 (None, true) => String::new(),
             };
             lane.colour = colour;
+            // Switched off in the Channel rack: the converter mutes its track.
+            lane.muted = !c.enabled;
             lane.clips = c
                 .clips
                 .iter()
@@ -509,6 +514,7 @@ fn by_channel(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
                 file_name(&c.sample).to_owned()
             };
             lane.colour = colour;
+            lane.muted = !c.enabled;
             lane.clips = c
                 .audio_clips
                 .iter()

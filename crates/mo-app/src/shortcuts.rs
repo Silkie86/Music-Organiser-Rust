@@ -49,6 +49,7 @@ pub const APP_ACTIONS: &[Action] = &[
     action("app.search", "Search this page", "Ctrl+F"),
     action("app.prevItem", "The item above in the list (even while typing a search)", "Ctrl+Up"),
     action("app.nextItem", "The item below in the list (even while typing a search)", "Ctrl+Down"),
+    action("app.listTop", "Back to the top of the list", "Home"),
     action("app.prevTab", "The tab to the left on this page", "Ctrl+Left"),
     action("app.nextTab", "The tab to the right on this page", "Ctrl+Right"),
     action("app.play", "Play or stop what's picked", "Space"),
@@ -431,7 +432,7 @@ impl Shortcuts {
 
 /// The app-wide actions the window does something for so far, besides going to a place ([`is_built`]). The rest
 /// (Back and Forward, the tabs, Rescan, the page sizes) aren't built yet.
-pub const BUILT: [&str; 12] = [
+pub const BUILT: [&str; 13] = [
     "app.jump",
     "app.prevPage",
     "app.nextPage",
@@ -444,6 +445,7 @@ pub const BUILT: [&str; 12] = [
     "app.escape",
     "app.prevItem",
     "app.nextItem",
+    "app.listTop",
 ];
 
 /// Whether the app-wide action `id` does something yet: one of [`BUILT`], or going to a place. One that doesn't is on

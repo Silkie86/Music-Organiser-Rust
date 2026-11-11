@@ -139,13 +139,14 @@ const KEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 pub fn look(
     roots: &[PathBuf],
     studios: &[PathBuf],
+    extra: &[PathBuf],
     index: &mut Option<LibraryIndex>,
     prints: Option<&Path>,
     stop: &AtomicBool,
     progress: impl FnMut(usize, usize),
 ) -> Result<Copies, Stopped> {
     let started = std::time::Instant::now();
-    let found = look_through(roots, studios, index, prints, stop, progress);
+    let found = look_through(roots, studios, extra, index, prints, stop, progress);
     if let Some(index) = index.as_ref() {
         // A look that stopped forgets nothing; a whole one forgets the files it didn't ask about. One that found no
         // Library, or with a project folder away (a drive asleep or unplugged), isn't whole: what's there is kept for
@@ -171,6 +172,7 @@ pub fn look(
 fn look_through(
     roots: &[PathBuf],
     studios: &[PathBuf],
+    extra: &[PathBuf],
     index: &mut Option<LibraryIndex>,
     prints: Option<&Path>,
     stop: &AtomicBool,
@@ -178,7 +180,7 @@ fn look_through(
 ) -> Result<Copies, Stopped> {
     let folders = bitwig::project_folders(roots, stop)?;
     progress(0, folders.len());
-    let library = if folders.is_empty() { Vec::new() } else { library_folders(&folders, studios) };
+    let library = if folders.is_empty() { Vec::new() } else { library_folders(&folders, studios, extra) };
     let mut found = Copies { library, folders: folders.len(), projects: Vec::new() };
     if found.library.is_empty() {
         return Ok(found);
@@ -225,17 +227,25 @@ fn look_through(
 /// folder as Settings › DAWs names it, then the one in Documents, where Bitwig keeps it unless told otherwise:
 /// `mo_space::bitwig::documents`), then the Library folder in each "Bitwig Studio" folder above a project (Solomon
 /// keeps his Bitwig Studio folder on K:). Settings' comes first so Fix points copies at the Library Bitwig uses now
-/// (Solomon, 11 Nov 2026). Only the ones that are there, each once.
-pub fn library_folders(projects: &[PathBuf], studios: &[PathBuf]) -> Vec<PathBuf> {
+/// (Solomon, 11 Nov 2026). The Library folders added on Settings › DAWs (`extra`) come straight after the first of
+/// `studios`. Only the ones that are there, each once.
+pub fn library_folders(projects: &[PathBuf], studios: &[PathBuf], extra: &[PathBuf]) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();
-    let mut add = |studio: &Path| {
-        let library = studio.join("Library");
+    let mut add_library = |library: PathBuf| {
         let known = |f: &PathBuf| key(&f.to_string_lossy()) == key(&library.to_string_lossy());
         if library.is_dir() && !found.iter().any(known) {
             found.push(library);
         }
     };
-    for studio in studios {
+    if let Some((first, _)) = studios.split_first() {
+        add_library(first.join("Library"));
+    }
+    // The Library folders added on Settings › DAWs, after your Bitwig Studio folder's own.
+    for library in extra {
+        add_library(library.clone());
+    }
+    let mut add = |studio: &Path| add_library(studio.join("Library"));
+    for studio in studios.iter().skip(1) {
         add(studio);
     }
     let is_studio = |folder: &&Path| folder.file_name().is_some_and(|n| n.eq_ignore_ascii_case("Bitwig Studio"));

@@ -591,6 +591,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     app.set_note_open(false);
     // After the shots: it leaves a line picked on each of those pages.
     opened_in_sight(&app, &window)?;
+    lists_keep_their_place(&app, &window)?;
     key_checks(&app)?;
     card_keys_checks(&app, &window, &out)?;
     rail_checks(&app)?;
@@ -1089,6 +1090,91 @@ fn finder_shots(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow, shots: &
     window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
     finder::close(app);
 }
+
+/// Every list keeps its place (Solomon's F12 note of 11 Nov): turned down, its page left and shown again, it's where it
+/// was, and the button over its bottom right corner takes it back to its top, as Home does. Before, a page made again
+/// put its list back at its top. In the short window, where every list turns; each is left at its top for what follows.
+fn lists_keep_their_place(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    use mo_app::presets::Section;
+    use slint::platform::Key;
+    let sounds = app.global::<mo_ui::SoundsData>();
+    let (view_before, curves_before) = (sounds.get_view(), app.global::<mo_ui::PresetsData>().get_section() == 1);
+    window.set_size(PhysicalSize::new(WIDTH, SHORT));
+    let mut wrong = Vec::new();
+    let ((x, y), list) = (SHORT_LIST_WHEEL, SHORT_LIST);
+    for (name, place, view, (button_x, button_y)) in LISTS {
+        start_on(app, place);
+        match place {
+            Place::Sounds => {
+                sounds.invoke_pick_view(view);
+                // With a sound picked, so its card is at the side, as the Sounds lines in LISTS have it. The Kits
+                // shots let go of the picked sound when the kit they rolled at random didn't hold it; then the tiles
+                // took the card's room too, their button sat at the far right, and the click picked a tile instead
+                // (the check failed on and off, 11 Nov).
+                if !sounds.get_panel_shown() {
+                    sounds.invoke_select(0);
+                }
+            }
+            Place::Presets => mo_ui::presets::show_section(app, Section::Sounds),
+            _ => {}
+        }
+        // Drawn once first: a list made for another view turns to the picked sound a turn later.
+        hover(window, -1.0, -1.0);
+        capture(window);
+        press(app, Key::Home, false);
+        let top = capture(window);
+        scroll(window, x, y, -2.0 * SHORT_TURN);
+        hover(window, -1.0, -1.0);
+        let down = capture(window);
+        if same_in(&top, &down, list) {
+            wrong.push(format!("{name}: the wheel at {x}, {y} moved nothing (is it still over the list?)"));
+            continue;
+        }
+        start_on(app, Place::Backup);
+        capture(window);
+        start_on(app, place);
+        // Drawn twice: the page is made in the first draw, and what it does a turn later shows in the second.
+        capture(window);
+        if !same_in(&down, &capture(window), list) {
+            wrong.push(format!("{name}: shown again after another page, it isn't where it was"));
+        }
+        click(window, button_x, button_y);
+        hover(window, -1.0, -1.0);
+        if !same_in(&top, &capture(window), list) {
+            wrong.push(format!("{name}: the button at {button_x}, {button_y} didn't take it back to its top"));
+        }
+        scroll(window, x, y, -2.0 * SHORT_TURN);
+        hover(window, -1.0, -1.0);
+        if same_in(&top, &capture(window), list) {
+            wrong.push(format!("{name}: the wheel moved nothing after the button"));
+            continue;
+        }
+        press(app, Key::Home, false);
+        if !same_in(&top, &capture(window), list) {
+            wrong.push(format!("{name}: Home didn't take it back to its top"));
+        }
+    }
+    sounds.invoke_pick_view(view_before);
+    if curves_before {
+        mo_ui::presets::show_section(app, Section::Curves);
+    }
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    start_on_songs(app);
+    capture(window);
+    if wrong.is_empty() { Ok(()) } else { Err(format!("A list's place: {}", wrong.join("; "))) }
+}
+
+/// Each list [`lists_keep_their_place`] turns, in the short window: its name, its page with the Sounds view, and the
+/// middle of its button (the wheel and the comparing are over [`SHORT_LIST`], as for [`opened_in_sight`]); on Sounds,
+/// with a sound's card open. Not the Presets page's curves: the sample's four fit in the window.
+const LISTS: [(&str, Place, i32, (f32, f32)); 6] = [
+    ("Songs", Place::Songs, 0, (737.0, 556.0)),
+    ("MIDI", Place::Midi, 0, (881.0, 556.0)),
+    ("Plugins", Place::Plugins, 0, (881.0, 556.0)),
+    ("Presets", Place::Presets, 0, (901.0, 556.0)),
+    ("Sounds tiles", Place::Sounds, 0, (901.0, 556.0)),
+    ("Sounds List", Place::Sounds, 1, (901.0, 556.0)),
+];
 
 /// Ctrl+K to the last song, preset, MIDI part and plugin of their pages' lists, each found by its name and opened with
 /// Enter: first from another page (Sounds), then from its own page with a search hiding it. In a short window, so each
@@ -2626,7 +2712,7 @@ const SPACE_CARD_WHEEL: (f32, f32, f32) = (1240.0, 600.0, -10.0 * PAGE_DOWN);
 /// The second line on the galaxy's Swept card, after the sweep.
 const SWEPT_LINE: (f32, f32) = (760.0, 410.0);
 /// The Lock chip on the kit's second pad (Snare).
-const SNARE_LOCK: (f32, f32) = (846.0, 333.0);
+const SNARE_LOCK: (f32, f32) = (846.0, 217.0);
 /// A point on a clip in the arrangement, from the view's top left, for the hover and zoom shots.
 const ARRANGEMENT_CLIP: (f32, f32) = (480.0, 180.0);
 /// Inside the first tile of the Sounds grid, and the first line of its List, at their top (x, y, width, height in
@@ -2744,6 +2830,8 @@ fn settings_shots(
     );
     // A Bitwig Studio folder chosen on another drive (its Use Documents shows): only the made-up settings change.
     mo_ui::settings::remember(mo_app::app_settings::BITWIG_FOLDER_KEY, r"K:\Bitwig Studio");
+    // And one more Library folder, an old one on another drive, on the list with its ×.
+    mo_ui::settings::remember(mo_app::app_settings::BITWIG_LIBRARIES_KEY, r"D:\Old Bitwig\Library");
     mo_ui::settings::show_bitwig_extension(
         app,
         mo_dawlink::scripts::ScriptState::Outdated,
@@ -2759,6 +2847,7 @@ fn settings_shots(
     shots.push(("settings-daws.png".into(), capture(window)));
     // No Bitwig Studio folder in Documents and none chosen: the card says to choose it (the 10 Nov review's X3-5).
     mo_ui::settings::remember(mo_app::app_settings::BITWIG_FOLDER_KEY, "");
+    mo_ui::settings::remember(mo_app::app_settings::BITWIG_LIBRARIES_KEY, "");
     mo_ui::settings::show_bitwig_extension(app, mo_dawlink::scripts::ScriptState::NotInstalled, "3.19", Vec::new());
     capture(window);
     shots.push(("settings-daws-no-folder.png".into(), capture(window)));
@@ -2821,7 +2910,7 @@ fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
 }
 
 /// Settings, Shortcuts: where the fourth line's "No key" button shows once the mouse is on the line.
-const KEY_LINE_NO_KEY: (f32, f32) = (1218.0, 425.0);
+const KEY_LINE_NO_KEY: (f32, f32) = (1218.0, 444.0);
 
 /// The Sounds page's Tempo slider with no filter picked: its track's height in the window, where its higher handle
 /// rests, and where 150 BPM is along it.

@@ -3,7 +3,7 @@
 // parts from studio.slint; mo-app decides every word (mo_app::settings), mo-ui/src/settings.rs fills it.
 import { AboutSlint } from "std-widgets.slint";
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, StudioButton, SearchBox, HoverSense, Segmented, MenuChip, PageHeader, Caps, Well, TabBar, EmptyState, Dot, ToggleChip, FolderRow } from "../studio.slint";
+import { Theme, Type, Space, StudioButton, SearchBox, HoverSense, HowItWorks, Segmented, MenuChip, PageHeader, Caps, Well, TabBar, EmptyState, Dot, ToggleChip, FolderRow } from "../studio.slint";
 
 // One theme to pick, drawn as a little picture of it in its own colours.
 export struct ThemeCardInfo {
@@ -147,6 +147,11 @@ export global SettingsData {
     callback choose-bitwig-folder();
     callback documents-bitwig();
     in property <bool> bitwig-chosen;
+    // More of Bitwig's Library folders (an old Library on another drive): Space's Bitwig copies and Fix look in them
+    // too. Add one, or take one off the list (nothing on disk changes).
+    in property <[string]> bitwig-libraries;
+    callback add-bitwig-library();
+    callback remove-bitwig-library(string);
 
     // Developer.
     in property <[SettingsFact]> facts;
@@ -587,12 +592,7 @@ component GeneralTab inherits VerticalLayout {
 component FoldersTab inherits VerticalLayout {
     spacing: Space.lg;
     alignment: start;
-    Text {
-        text: SettingsData.folders-note;
-        color: Theme.muted;
-        font-size: Type.meta;
-        wrap: word-wrap;
-    }
+    HowItWorks { text: SettingsData.folders-note; }
     if SettingsData.folders-message != "": Text {
         text: SettingsData.folders-message;
         color: Theme.text;
@@ -734,12 +734,7 @@ component KeyLineRow inherits HoverSense {
 component ShortcutsTab inherits VerticalLayout {
     spacing: Space.lg;
     alignment: start;
-    Text {
-        text: SettingsData.keys-note;
-        color: Theme.muted;
-        font-size: Type.meta;
-        wrap: word-wrap;
-    }
+    HowItWorks { text: SettingsData.keys-note; }
     HorizontalLayout {
         spacing: Space.md;
         SearchBox {
@@ -791,12 +786,7 @@ component ShortcutsTab inherits VerticalLayout {
 component DawsTab inherits VerticalLayout {
     spacing: Space.lg;
     alignment: start;
-    Text {
-        text: SettingsData.daws-note;
-        color: Theme.muted;
-        font-size: Type.meta;
-        wrap: word-wrap;
-    }
+    HowItWorks { text: SettingsData.daws-note; }
     if SettingsData.daws-message != "": Text {
         text: SettingsData.daws-message;
         color: Theme.text;
@@ -854,6 +844,28 @@ component DawsTab inherits VerticalLayout {
                 tip: "Bitwig's folder is the Bitwig Studio folder in your Documents again. The extension already installed stays where it is.";
                 enabled: !SettingsData.daws-installing;
                 clicked => { SettingsData.documents-bitwig(); }
+            }
+        }
+        // More Library folders, after your Bitwig Studio folder's own: the shared folder row, its × takes one off.
+        if d.bitwig && SettingsData.bitwig-libraries.length > 0: Text {
+            text: "More Library folders, looked in after your Bitwig Studio folder's own:";
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        if d.bitwig: VerticalLayout {
+            for f in SettingsData.bitwig-libraries: FolderRow {
+                path: f;
+                remove-tip: "Take this Library folder off the list (nothing on disk changes)";
+                remove => { SettingsData.remove-bitwig-library(f); }
+            }
+        }
+        if d.bitwig: HorizontalLayout {
+            alignment: start;
+            StudioButton {
+                text: "Add a Library folder\u{2026}";
+                tip: "Pick another of Bitwig's Library folders (the one with Multisamples, Wavetables and Presets in it), an old one on another drive say. Space's Bitwig copies and Fix look in it too.";
+                clicked => { SettingsData.add-bitwig-library(); }
             }
         }
     }

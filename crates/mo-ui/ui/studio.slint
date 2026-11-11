@@ -170,6 +170,10 @@ export global AppKeys {
     // Bumped by Ctrl+F (app.search): the page on show puts the keys in its search box. Only the page on show is there
     // to see it change.
     in-out property <int> search;
+    // Bumped by Home (app.listTop): the list on show goes back to its top (list.slint's ListBox), and its key, for
+    // the tooltip of the button that does the same.
+    in-out property <int> list-top;
+    in property <string> list-top-key;
     // Whether this window is the one in front, with the keys (set as the system says so, before Slint hears of it). A
     // text box loses the keys while another app's window is in front and gets them back after: a page doesn't count
     // that as the keys going to another part of the window.
@@ -1396,8 +1400,11 @@ export component FilterList inherits VerticalLayout {
 // its room; a click opens the column over the list, and another puts it away.
 export component FilterColumn inherits Rectangle {
     in property <length> page-width;
-    // Off where a view has no filters (Sounds' Rediscover and Kits): it takes no room.
+    // Off where a view has nothing to put in it: it takes no room.
     in property <bool> shown: true;
+    // What the folded column's tab says, a letter a line, and the line that folds it again.
+    in property <[string]> tab: ["F", "I", "L", "T", "E", "R", "S"];
+    in property <string> tab-close: "CLOSE FILTERS";
     in property <bool> active;
     property <bool> narrow: root.page-width < 860px;
     property <bool> open;
@@ -1444,7 +1451,7 @@ export component FilterColumn inherits Rectangle {
         if root.folded: VerticalLayout {
             y: Space.md;
             height: self.preferred-height;
-            for letter in ["F", "I", "L", "T", "E", "R", "S"]: Caps {
+            for letter in root.tab: Caps {
                 text: letter;
                 horizontal-alignment: center;
                 color: root.active ? Theme.accent : Theme.muted;
@@ -1452,7 +1459,7 @@ export component FilterColumn inherits Rectangle {
         }
         if !root.folded: Caps {
             x: Space.xs;
-            text: "CLOSE FILTERS";
+            text: root.tab-close;
             vertical-alignment: center;
             color: Theme.muted;
         }
@@ -1889,6 +1896,31 @@ export component LinkText inherits Rectangle {
     }
 }
 
+// A longer explanation, folded to a line that opens it (the UX review of 10 Nov, C7: a card or a Settings tab opened
+// with a paragraph or two before its first button). What must be known before a button is pressed stays in sight
+// beside the button; this is for how the thing works.
+export component HowItWorks inherits VerticalLayout {
+    in property <string> text;
+    in-out property <bool> open;
+    spacing: Space.xs;
+    HorizontalLayout {
+        alignment: start;
+        LinkText {
+            text: root.open ? "Hide how this works" : "How this works";
+            tint: Theme.muted;
+            font-size: Type.meta;
+            clicked => { root.open = !root.open; }
+        }
+    }
+    if root.open: Text {
+        text: root.text;
+        color: Theme.muted;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+}
+
 // The mouse on a drawn view (arrangement, piano roll, galaxy): where it moves, a left press and its letting go, a
 // double-click, the wheel in notches (positive away from you) and leaving. Fills its parent.
 export component PointerPad inherits TouchArea {
@@ -1971,6 +2003,8 @@ export global Icons {
     out property <string> more: "M 2.5 8 A 0.75 0.75 0 1 0 4 8 A 0.75 0.75 0 1 0 2.5 8 M 7.25 8 A 0.75 0.75 0 1 0 8.75 8 A 0.75 0.75 0 1 0 7.25 8 M 12 8 A 0.75 0.75 0 1 0 13.5 8 A 0.75 0.75 0 1 0 12 8";
     // A magnifier: search (the page's search box and Ctrl+K).
     out property <string> search: "M 11.5 6.5 A 5 5 0 1 1 1.5 6.5 A 5 5 0 1 1 11.5 6.5 M 10.2 10.2 L 14.5 14.5";
+    // An arrow up to a line: back to the top of a list.
+    out property <string> top: "M 3 2.5 L 13 2.5 M 8 14 L 8 5.5 M 4.5 9 L 8 5.5 L 11.5 9";
     // Two sliders: the page's own options.
     out property <string> options: "M 2 5 L 14 5 M 2 11 L 14 11 M 5.5 3 L 5.5 7 M 10.5 9 L 10.5 13";
     // The rail's places, one each.

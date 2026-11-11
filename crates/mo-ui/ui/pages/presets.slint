@@ -2,7 +2,7 @@
 // plays, in one list with the picked one's card beside it; and the Curves section, the shapes your settings moved in,
 // to drop onto a Bitwig lane (Solomon, 2 Nov 2026). Only shared parts from studio.slint; mo-app decides every word
 // (mo_app::presets), mo-ui/src/presets.rs fills it.
-import { ListView, Fit } from "../list.slint";
+import { ListView, ListBox, Fit } from "../list.slint";
 import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterList, FilterColumn, TickLine, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, Segmented, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, ActionKey } from "../studio.slint";
 
 // One line of the sounds list.
@@ -132,6 +132,8 @@ export global PresetsData {
     in property <int> show-ask;
     // The last ask the list has turned to (list.slint's ListView keeps it).
     in-out property <int> show-done;
+    // Where the list is turned to (list.slint's ListView keeps it): it's there again when the page is shown again.
+    in-out property <length> list-y;
     in property <bool> panel-shown;
     in-out property <length> panel-width: 400px;
     callback panel-resized(length);
@@ -171,6 +173,8 @@ export global PresetsData {
     in property <int> curve-show-row;
     in property <int> curve-show-ask;
     in-out property <int> curve-show-done;
+    // Where the curves' list is turned to, kept the same way.
+    in-out property <length> curve-list-y;
     in property <bool> curve-panel-shown;
     in property <CurveCardInfo> curve-card;
     in property <[PresetFact]> curve-facts;
@@ -799,25 +803,31 @@ export component PresetsPage inherits Rectangle {
                             action: PresetsData.any-filter && PresetsData.shown == 0 ? "Clear the filters" : "";
                             act => { PresetsData.clear(); }
                         }
-                        if PresetsData.section == 0 && PresetsData.empty-title == "": VerticalLayout {
-                            PresetHeading {
-                                tight: area.list-width < 620px;
-                            }
-                            list := ListView {
-                                row-height: 48px;
-                                rows: PresetsData.lines.length;
-                                show-top: PresetsData.show-row * self.row-height;
-                                show-ask: PresetsData.show-ask;
-                                show-done <=> PresetsData.show-done;
-                                for l in PresetsData.lines: PresetLineView {
+                        if PresetsData.section == 0 && PresetsData.empty-title == "": ListBox {
+                            turned: list.content-y;
+                            after: list.row-height;
+                            to-top => { list.to-top(); }
+                            VerticalLayout {
+                                PresetHeading {
                                     tight: area.list-width < 620px;
-                                    // Every line this height: the list counts on it.
-                                    height: list.row-height;
-                                    line: l;
-                                    chosen => { keys.focus(); }
-                                    right-clicked(x, y) => {
-                                        keys.focus();
-                                        menu.open-at(x, y);
+                                }
+                                list := ListView {
+                                    row-height: 48px;
+                                    rows: PresetsData.lines.length;
+                                    show-top: PresetsData.show-row * self.row-height;
+                                    show-ask: PresetsData.show-ask;
+                                    show-done <=> PresetsData.show-done;
+                                    kept-y <=> PresetsData.list-y;
+                                    for l in PresetsData.lines: PresetLineView {
+                                        tight: area.list-width < 620px;
+                                        // Every line this height: the list counts on it.
+                                        height: list.row-height;
+                                        line: l;
+                                        chosen => { keys.focus(); }
+                                        right-clicked(x, y) => {
+                                            keys.focus();
+                                            menu.open-at(x, y);
+                                        }
                                     }
                                 }
                             }
@@ -826,20 +836,26 @@ export component PresetsPage inherits Rectangle {
                             title: PresetsData.curve-empty-title;
                             text: PresetsData.curve-empty-text;
                         }
-                        if PresetsData.section == 1 && PresetsData.curve-empty-title == "": curve-list := ListView {
-                            row-height: 48px;
-                            rows: PresetsData.curve-lines.length;
-                            show-top: PresetsData.curve-show-row * self.row-height;
-                            show-ask: PresetsData.curve-show-ask;
-                            show-done <=> PresetsData.curve-show-done;
-                            for l in PresetsData.curve-lines: CurveLineView {
-                                // Every line this height: the list counts on it.
-                                height: curve-list.row-height;
-                                line: l;
-                                chosen => { keys.focus(); }
-                                right-clicked(x, y) => {
-                                    keys.focus();
-                                    curve-menu.open-at(x, y);
+                        if PresetsData.section == 1 && PresetsData.curve-empty-title == "": ListBox {
+                            turned: curve-list.content-y;
+                            after: curve-list.row-height;
+                            to-top => { curve-list.to-top(); }
+                            curve-list := ListView {
+                                row-height: 48px;
+                                rows: PresetsData.curve-lines.length;
+                                show-top: PresetsData.curve-show-row * self.row-height;
+                                show-ask: PresetsData.curve-show-ask;
+                                show-done <=> PresetsData.curve-show-done;
+                                kept-y <=> PresetsData.curve-list-y;
+                                for l in PresetsData.curve-lines: CurveLineView {
+                                    // Every line this height: the list counts on it.
+                                    height: curve-list.row-height;
+                                    line: l;
+                                    chosen => { keys.focus(); }
+                                    right-clicked(x, y) => {
+                                        keys.focus();
+                                        curve-menu.open-at(x, y);
+                                    }
                                 }
                             }
                         }

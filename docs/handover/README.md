@@ -111,6 +111,11 @@ the next PR step by step). Solomon wants the highest effort here.
   `harmony-handoff.md`, word for word. Done once (2026-11-03): version 5. A second rescale starts from version 4's
   weights (`tools/theorybench/README.md`, "Rescaling again").
 - Bench data is gone with the old container; rebuild it with `tools/theorybench/README.md`.
+- Tunes and chords together (`mo_harmony::together`, 2026-11-11): how well a tune sits over an accompaniment, in
+  all 12 keys, for "find chords for this melody" and "find a melody for these chords" (Solomon's ask: built round the
+  song he's working on, read from its newest save). Measured with `theorybench pairs` beside the C# matcher ported
+  as it was; the numbers are fitted on pop and held to two rules for jazz, gospel and blues. What was tried:
+  `docs/harmony/together-experiments.md`. No screen uses it yet.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db
 writes once trusted. A decoder panic on a damaged file is caught with `mo_catch::catch`: one warning line in the log,
