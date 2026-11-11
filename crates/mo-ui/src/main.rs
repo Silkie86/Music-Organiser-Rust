@@ -153,7 +153,7 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::daws::connect(&app);
     app.window().set_maximized(true);
     // A little after start, a card if the app's drive or the temp folder's is almost full.
-    mo_app::drive_room::warn_later(data.clone(), feed.clone());
+    mo_app::drive_room::watch(data.clone(), feed.clone());
     // A little after start, the MIDI files older drags left in Temp (rule 28).
     mo_ui::drag::sweep_later();
     // Later still, the old app's databases put away, once the app's own have worked without them for a week: never

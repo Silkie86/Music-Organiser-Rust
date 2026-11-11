@@ -223,6 +223,9 @@ impl MidiIndex {
         // The C# app may be saving what it read while this reads: wait a little for it rather than fail.
         conn.busy_timeout(Duration::from_secs(2)).map_err(|e| open_error(e.to_string()))?;
         conn.pragma_update(None, "query_only", true).map_err(|e| open_error(e.to_string()))?;
+        // The list's sort is done in memory, as the store's is: left to itself SQLite writes it to a working file in
+        // Windows' temp folder, and the read fails once that drive (C:) is full, wherever the index is.
+        conn.pragma_update(None, "temp_store", "MEMORY").map_err(|e| open_error(e.to_string()))?;
         let names = |sql: &str| -> rusqlite::Result<HashSet<String>> {
             let mut st = conn.prepare(sql)?;
             st.query_map([], |r| r.get::<_, String>(0))?.collect()

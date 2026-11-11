@@ -515,6 +515,7 @@ fn open(sounds_db: &Path) -> Option<rusqlite::Connection> {
     let conn = rusqlite::Connection::open_with_flags(sounds_db, flags).ok()?;
     // The C# app may be saving a scan: wait a little for it rather than fail.
     conn.busy_timeout(std::time::Duration::from_secs(2)).ok()?;
+    crate::db::sort_in_memory(&conn).ok()?;
     Some(conn)
 }
 
