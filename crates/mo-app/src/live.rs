@@ -21,6 +21,7 @@ use mo_library::plugin_writes;
 use mo_library::read::{Installed, read_save};
 use mo_library::samples::SampleLocator;
 use mo_library::scan::{self, KnownFile};
+use mo_library::song_fields::{self, Change, SaveRow};
 use mo_library::song_writes::{self, Batch, Missing, Put, Written};
 use mo_library::songs;
 use mo_library::watch::Changes;
@@ -282,6 +283,53 @@ impl Live {
     /// The project folders, for the folder watch.
     pub fn roots(&self) -> &[String] {
         &self.roots
+    }
+
+    /// Gives every save in `save_ids` (all the saves of one song, rule 14) `change`: kept in the library
+    /// ([`mo_library::song_fields::set`]: all of them or none) and then made to the saves held here, so the list shows
+    /// what's kept. Call it on the thread that owns this list, as [`Live::update`] and [`Live::keep`] are: then no
+    /// save can be read, or kept, between the two. It waits for another write to the library, up to five seconds.
+    ///
+    /// A save the library hasn't taken yet (just read, or refused) is changed here only, and is kept with the change
+    /// when the library takes it. While the list isn't kept in a library of the app's own ([`Live::writes`]) the change
+    /// is made here only, and lasts until the app closes.
+    ///
+    /// If the library can't keep it nothing is changed, here or there. Whether anything held here is different for
+    /// it: then [`Live::songs`] gives the list anew.
+    pub fn give(&mut self, save_ids: &[i64], change: &Change) -> Result<bool, LibraryError> {
+        if let Some(songs_db) = &self.writes {
+            // By id and the path the library keeps each under: an id alone may be another save's there by now.
+            let rows: Vec<SaveRow> = save_ids
+                .iter()
+                .filter_map(|id| self.kept_as.get(id).map(|path| SaveRow { id: *id, path: path.clone() }))
+                .collect();
+            song_fields::set(songs_db, &rows, change)?;
+        } else if let Err(why) = change.checked() {
+            return Err(LibraryError::Write { path: PathBuf::new(), why });
+        }
+        Ok(self.gave(save_ids, change))
+    }
+
+    /// Makes `change` to the saves held here, the panel's copies of them too ([`Live::give`]).
+    fn gave(&mut self, save_ids: &[i64], change: &Change) -> bool {
+        let mut differs = false;
+        for save in self.saves.iter_mut().filter(|s| save_ids.contains(&s.id)) {
+            differs |= change.apply(save);
+        }
+        let mut details = self.details.lock().unwrap_or_else(PoisonError::into_inner);
+        for id in save_ids {
+            if let Some(detail) = details.get_mut(id) {
+                differs |= change.apply(&mut detail.save);
+            }
+        }
+        // The list of every tag gains a new one at its end (the least used). One taken off stays in it until the app
+        // next starts: a save the list leaves out may still have it.
+        if let Ok(Change::AddTag(tag)) = change.checked()
+            && !self.tags.iter().any(|t| song_fields::same_tag(t) == tag)
+        {
+            self.tags.push(tag);
+        }
+        differs
     }
 
     /// The list, grouped into songs.
@@ -957,6 +1005,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_change_kept_in_the_library_is_made_to_the_saves_held_here_too() {
+        let mut eleven = save(1, "C:\\Music\\Night", "Night_11");
+        eleven.tags = vec!["dark".into()];
+        let mut live = live(vec![eleven, save(2, "C:\\Music\\Night", "Night_12"), save(3, "C:\\Music\\Day", "Day_1")]);
+        live.tags = vec!["dark".into()];
+        assert!(live.gave(&[1, 2], &Change::Rating(4)));
+        assert!(!live.gave(&[1, 2], &Change::Rating(4)), "the same again changes nothing");
+        assert!(live.gave(&[1, 2], &Change::AddTag("Techno".into())));
+        assert_eq!(live.saves.iter().map(|s| s.rating).collect::<Vec<_>>(), [4, 4, 0]);
+        assert_eq!(live.saves[1].tags, ["techno"]);
+        assert_eq!(live.tags, ["dark", "techno"]);
+        // Stars and hearts leave the list of every tag alone; so does a tag taken off (a hidden save may have it).
+        assert!(live.gave(&[1, 2], &Change::RemoveTag("dark".into())));
+        assert!(live.saves[0].tags == ["techno"] && live.tags == ["dark", "techno"]);
+        // The panel's copy of a save changes with it.
+        let panel = SaveDetail { save: live.saves[0].clone(), ..SaveDetail::default() };
+        live.details.lock().unwrap().insert(1, panel);
+        assert!(live.gave(&[1], &Change::Status("Finished".into())));
+        assert_eq!(live.details.lock().unwrap()[&1].save.status, "Finished");
+        // A save that isn't held here (hidden, or gone from the list) is no trouble.
+        assert!(!live.gave(&[77], &Change::Favourite(true)));
+        // With no library of the app's own to keep it in, a change is made here only; one that can't be kept, nowhere.
+        assert!(live.give(&[3], &Change::Rating(2)).unwrap());
+        assert!(live.give(&[3], &Change::Rating(9)).is_err());
+        assert_eq!(live.saves[2].rating, 2);
+    }
+
     fn save(id: i64, folder: &str, name: &str) -> Save {
         Save {
             id,
@@ -1060,6 +1136,75 @@ mod tests {
         b.extend(b"FLdt");
         b.extend(0i32.to_le_bytes());
         b
+    }
+
+    #[test]
+    fn what_you_give_a_song_is_kept_for_all_its_saves_and_stays_when_they_re_read_again() {
+        let dir = std::env::temp_dir().join(format!("mo-live-give-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let projects = dir.join("Projects");
+        std::fs::create_dir_all(&projects).unwrap();
+        rusqlite::Connection::open(dir.join("library.db"))
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT);
+                 CREATE TABLE roots (path TEXT PRIMARY KEY);
+                 CREATE TABLE projects (id INTEGER PRIMARY KEY, path TEXT UNIQUE NOT NULL COLLATE NOCASE,
+                     name TEXT NOT NULL, daw TEXT NOT NULL, folder TEXT, size INTEGER, mtime INTEGER, info TEXT);
+                 INSERT INTO roots VALUES ('{}');",
+                projects.display()
+            ))
+            .unwrap();
+        let songs = dir.join(mo_library::songs_db::FILE_NAME);
+        mo_library::songs_db::make(&dir.join("library.db"), &songs, &mut |_| {}).unwrap();
+        assert!(mo_library::songs_db::at_start(&dir, "test").is_songs_db());
+        let open = || {
+            let lib = Library::open_read_only(&songs).unwrap();
+            Live::load(&lib, 6, LiveDetails::default()).unwrap().with_writes(songs.clone())
+        };
+        std::fs::write(projects.join("Night_1.flp"), tiny_flp()).unwrap();
+        let mut live = open();
+        live.catch_up();
+        live.keep().unwrap().unwrap();
+        // A second save, read but not kept in the library yet.
+        std::fs::write(projects.join("Night_2.flp"), tiny_flp()).unwrap();
+        live.catch_up();
+        let ids: Vec<i64> = live.saves.iter().map(|s| s.id).collect();
+        assert_eq!(ids.len(), 2);
+        // Given to both: kept for the one the library has, held for the other, which is kept with it when it's taken.
+        assert!(live.give(&ids, &Change::Status("Mixing".into())).unwrap());
+        assert!(live.give(&ids, &Change::Rating(4)).unwrap());
+        assert!(live.give(&ids, &Change::AddTag("Dark".into())).unwrap());
+        assert!(!live.give(&ids, &Change::Rating(4)).unwrap(), "the same again changes nothing");
+        let kept = |songs: &std::path::Path| -> Vec<(String, i32, Vec<String>)> {
+            let mut saves = Library::open_read_only(songs).unwrap().saves().unwrap();
+            saves.sort_by_key(|s| s.id);
+            saves.into_iter().map(|s| (s.status, s.rating, s.tags)).collect()
+        };
+        let given = ("Mixing".to_owned(), 4, vec!["dark".to_owned()]);
+        assert_eq!(kept(&songs), std::slice::from_ref(&given));
+        live.keep().unwrap().unwrap();
+        assert_eq!(kept(&songs), [given.clone(), given.clone()]);
+        // One that can't be kept changes nothing, here or in the library.
+        assert!(live.give(&ids, &Change::Rating(9)).is_err());
+        assert!(live.saves.iter().all(|s| s.rating == 4));
+        // The library busy with another write: said so, and nothing changed here either.
+        let holder = rusqlite::Connection::open(&songs).unwrap();
+        holder.execute_batch("BEGIN IMMEDIATE;").unwrap();
+        assert!(live.give(&ids, &Change::Favourite(true)).unwrap_err().is_busy());
+        holder.execute_batch("ROLLBACK;").unwrap();
+        drop(holder);
+        assert!(live.saves.iter().all(|s| !s.favourite));
+        // A save changed on disk and read again keeps it, and a new save of the song starts with it.
+        std::fs::write(projects.join("Night_1.flp"), [tiny_flp(), vec![0]].concat()).unwrap();
+        std::fs::write(projects.join("Night_3.flp"), tiny_flp()).unwrap();
+        live.catch_up();
+        live.keep().unwrap().unwrap();
+        assert_eq!(kept(&songs), [given.clone(), given.clone(), given.clone()]);
+        // And the next start reads it all back.
+        let next = open();
+        assert!(next.saves.iter().all(|s| (s.status.as_str(), s.rating) == ("Mixing", 4) && s.tags == ["dark"]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

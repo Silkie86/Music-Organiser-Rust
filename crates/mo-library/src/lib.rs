@@ -19,6 +19,7 @@ pub mod read;
 pub mod samples;
 pub mod scan;
 mod setting_list;
+pub mod song_fields;
 pub mod song_writes;
 pub mod songs;
 pub mod songs_db;

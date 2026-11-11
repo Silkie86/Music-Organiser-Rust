@@ -21,6 +21,7 @@ use mo_formats::plugins::name_key;
 use mo_formats::{Confidence, PluginKind};
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
 
+use crate::song_fields::same_tag;
 use crate::{LibraryError, SaveDetail};
 
 /// A save read (for the first time, again, or in a new place), with what its reader found.
@@ -218,43 +219,69 @@ pub struct Written {
 /// How long a batch waits for another copy of the app to finish its own: this runs in the background.
 const WAIT: Duration = Duration::from_secs(5);
 
-/// Keeps `batch` in the app's own `songs.db` at `songs_db`, all of it or none.
-pub fn write(songs_db: &Path, batch: &Batch) -> Result<Written, LibraryError> {
-    let write_error = |why: String| LibraryError::Write { path: songs_db.to_owned(), why };
-    let sql = |e: rusqlite::Error| match e.sqlite_error_code() {
+/// An SQLite error writing `songs_db`, as the library's: busy when another write holds it, else that it wasn't
+/// changed and why.
+pub(crate) fn write_failed(songs_db: &Path, e: rusqlite::Error) -> LibraryError {
+    match e.sqlite_error_code() {
         Some(ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked) => LibraryError::Busy { path: songs_db.to_owned() },
-        _ => write_error(e.to_string()),
-    };
-    let not_own = || write_error("it isn't the app's own song library (yet), so it isn't written".to_owned());
+        _ => LibraryError::Write { path: songs_db.to_owned(), why: e.to_string() },
+    }
+}
+
+fn not_own(songs_db: &Path) -> LibraryError {
+    let why = "it isn't the app's own song library (yet), so it isn't written".to_owned();
+    LibraryError::Write { path: songs_db.to_owned(), why }
+}
+
+/// Opens the app's own `songs.db` at `songs_db` to be written, waiting [`WAIT`] for another write: never one that
+/// isn't the app's song library, or is of another layout. Whether it's the app's *own* is looked at once the write
+/// has begun ([`begin_own`]).
+pub(crate) fn open_to_write(songs_db: &Path) -> Result<Connection, LibraryError> {
+    let sql = |e| write_failed(songs_db, e);
     if !songs_db.is_file() {
-        return Err(write_error("it isn't there".to_owned()));
+        return Err(LibraryError::Write { path: songs_db.to_owned(), why: "it isn't there".to_owned() });
     }
     let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let mut conn = Connection::open_with_flags(songs_db, flags).map_err(sql)?;
+    let conn = Connection::open_with_flags(songs_db, flags).map_err(sql)?;
     conn.busy_timeout(WAIT).map_err(sql)?;
     conn.execute_batch("PRAGMA foreign_keys = ON;").map_err(sql)?;
     let id: i32 = conn.query_row("PRAGMA application_id", [], |r| r.get(0)).map_err(sql)?;
     let version: i32 = conn.query_row("PRAGMA user_version", [], |r| r.get(0)).map_err(sql)?;
     if id != crate::songs_db::APPLICATION_ID || version != crate::songs_db::VERSION {
-        return Err(not_own());
+        return Err(not_own(songs_db));
     }
+    Ok(conn)
+}
+
+/// Begins a write on `conn` ([`open_to_write`]), IMMEDIATE so nothing else writes meanwhile, and looks under that
+/// lock that the library is the app's own: only that one is written.
+pub(crate) fn begin_own<'c>(conn: &'c mut Connection, songs_db: &Path) -> Result<Transaction<'c>, LibraryError> {
+    let sql = |e| write_failed(songs_db, e);
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).map_err(sql)?;
-    // Looked at under the write lock: only the app's own library is written.
     let own: Option<rusqlite::types::Value> = tx
         .query_row("SELECT value FROM songs_info WHERE key = 'own_since'", [], |r| r.get(0))
         .optional()
         .map_err(sql)?;
     if own.is_none() {
-        return Err(not_own());
+        return Err(not_own(songs_db));
     }
+    Ok(tx)
+}
+
+/// Keeps `batch` in the app's own `songs.db` at `songs_db`, all of it or none.
+pub fn write(songs_db: &Path, batch: &Batch) -> Result<Written, LibraryError> {
+    let write_error = |why: String| LibraryError::Write { path: songs_db.to_owned(), why };
+    let sql = |e| write_failed(songs_db, e);
+    let mut conn = open_to_write(songs_db)?;
+    let tx = begin_own(&mut conn, songs_db)?;
     let mut written = Written::default();
     let mut kept = Vec::with_capacity(batch.put.len());
     for put in &batch.put {
-        let id = put_one(&tx, put).map_err(sql)?;
+        let (id, new) = put_one(&tx, put).map_err(sql)?;
         if id != put.detail.save.id {
             written.ids.push((put.detail.save.id, id));
         }
-        kept.push((id, &put.detail));
+        kept.push((id, new, &put.detail));
         written.put += 1;
     }
     for m in &batch.missing {
@@ -288,8 +315,14 @@ pub fn write(songs_db: &Path, batch: &Batch) -> Result<Written, LibraryError> {
     Ok(written)
 }
 
-/// Writes one save, and says which id it's kept under.
-fn put_one(tx: &Transaction<'_>, put: &Put) -> rusqlite::Result<i64> {
+/// Writes one save, and says which id it's kept under and whether its row is new.
+///
+/// A save the library has already keeps what you gave it there (its status, stars, heart, key, notes and tags:
+/// [`YOUR_COLUMNS`]): a read sets what the file says, and what's yours is set by [`crate::song_fields`] alone. So a
+/// read handed over with those as they were a moment ago (the folder watch reads while you click) can't undo a change
+/// of yours. Only a new row takes them from the read (a new save of a song starts with the song's). A tag for
+/// hardware the save uses is still put on as it's read, as the C# app did.
+fn put_one(tx: &Transaction<'_>, put: &Put) -> rusqlite::Result<(i64, bool)> {
     let save = &put.detail.save;
     let at_path: Option<i64> =
         tx.query_row("SELECT id FROM projects WHERE path = ?1", [&save.path], |r| r.get(0)).optional()?;
@@ -305,20 +338,24 @@ fn put_one(tx: &Transaction<'_>, put: &Put) -> rusqlite::Result<i64> {
             |r| r.get(0),
         )
     };
-    let id = match at_path {
+    let (id, new) = match at_path {
         Some(id) => {
             update(tx, id, put)?;
-            id
+            (id, false)
         }
         None if known_row()? => {
             update(tx, save.id, put)?;
-            save.id
+            (save.id, false)
         }
-        None if !id_taken()? => insert(tx, Some(save.id), put)?,
-        None => insert(tx, None, put)?,
+        None if !id_taken()? => (insert(tx, Some(save.id), put)?, true),
+        None => (insert(tx, None, put)?, true),
     };
-    for table in ["plugins", "samples", "tags"] {
+    for table in ["plugins", "samples"] {
         tx.execute(&format!("DELETE FROM {table} WHERE project_id = ?1"), [id])?;
+    }
+    if new {
+        // Whatever an older library left under this id (tags of a save the C# app removed) isn't this save's.
+        tx.execute("DELETE FROM tags WHERE project_id = ?1", [id])?;
     }
     let mut plugin = tx.prepare_cached(
         "INSERT INTO plugins (project_id, name, name_key, vendor, kind, format, path, installed)
@@ -342,8 +379,11 @@ fn put_one(tx: &Transaction<'_>, put: &Put) -> rusqlite::Result<i64> {
         sample.execute(params![id, s.path, s.found, s.use_number()])?;
     }
     let mut tag = tx.prepare_cached("INSERT OR IGNORE INTO tags (project_id, tag) VALUES (?1, ?2)")?;
-    for t in &save.tags {
-        tag.execute(params![id, t])?;
+    for t in tags_to_add(save, new) {
+        // Not beside the same tag in other letters (an older library's "Digitakt").
+        if new || crate::song_fields::tags_like(tx, id, &same_tag(t))?.is_empty() {
+            tag.execute(params![id, t])?;
+        }
     }
     match info_json(&put.detail) {
         Some(json) => {
@@ -355,7 +395,14 @@ fn put_one(tx: &Transaction<'_>, put: &Put) -> rusqlite::Result<i64> {
             tx.execute("DELETE FROM project_info WHERE project_id = ?1", [id])?;
         }
     }
-    Ok(id)
+    Ok((id, new))
+}
+
+/// The tags a read puts on a save's row: all it comes with for a new row, and for one the library has already only
+/// those for the hardware it uses (the rest are yours: [`put_one`]).
+fn tags_to_add(save: &crate::Save, new: bool) -> impl Iterator<Item = &String> {
+    let hardware: Vec<String> = save.hardware.iter().map(|h| same_tag(h)).collect();
+    save.tags.iter().filter(move |t| new || hardware.contains(&same_tag(t)))
 }
 
 /// The columns a read sets, in the order [`update`] and [`insert`] give them (`?2` on).
@@ -363,10 +410,19 @@ const READ_COLUMNS: &str = "path, name, daw, folder, size, mtime, tempo, version
     can_presets, error, file_missing, hardware, status, rating, favourite, musical_key, notes, detected_key, created, \
     note_count, length_bars, track_count";
 
+/// Those of [`READ_COLUMNS`] that are yours, not the file's: a read sets them only on a new row ([`put_one`]), and
+/// [`crate::song_fields::Change`] has a change for each (as `mo_app::live` carries each over to a new save of a song).
+pub(crate) const YOUR_COLUMNS: [&str; 5] = ["status", "rating", "favourite", "musical_key", "notes"];
+
 /// Sets a save's row as read. When it was last opened is left as it is: that's the app's to note, not the file's.
+/// What you gave it is left as it is too ([`YOUR_COLUMNS`]).
 fn update(tx: &Transaction<'_>, id: i64, put: &Put) -> rusqlite::Result<()> {
-    let set: Vec<String> =
-        READ_COLUMNS.split(", ").enumerate().map(|(i, c)| format!("{} = ?{}", c.trim(), i + 2)).collect();
+    let set: Vec<String> = READ_COLUMNS
+        .split(", ")
+        .enumerate()
+        .filter(|(_, c)| !YOUR_COLUMNS.contains(&c.trim()))
+        .map(|(i, c)| format!("{} = ?{}", c.trim(), i + 2))
+        .collect();
     let mut st = tx.prepare_cached(&format!("UPDATE projects SET {} WHERE id = ?1", set.join(", ")))?;
     st.execute(rusqlite::params_from_iter(std::iter::once(id.into()).chain(values(put))))?;
     Ok(())
@@ -441,7 +497,7 @@ impl From<rusqlite::Error> for Checked {
 
 /// Reads back what was written: each save's row and how many plugins, samples and tags it has; each save marked
 /// missing, missing.
-fn check(tx: &Transaction<'_>, kept: &[(i64, &SaveDetail)], batch: &Batch) -> Result<(), Checked> {
+fn check(tx: &Transaction<'_>, kept: &[(i64, bool, &SaveDetail)], batch: &Batch) -> Result<(), Checked> {
     let mut row = tx.prepare(
         "SELECT path, size, mtime, file_missing,
              (SELECT COUNT(*) FROM plugins WHERE project_id = p.id),
@@ -449,16 +505,26 @@ fn check(tx: &Transaction<'_>, kept: &[(i64, &SaveDetail)], batch: &Batch) -> Re
              (SELECT COUNT(*) FROM tags WHERE project_id = p.id)
          FROM projects p WHERE id = ?1",
     )?;
-    for (id, d) in kept {
-        let back: Option<(String, i64, i64, i64, i64, i64, i64)> = row
+    for (id, new, d) in kept {
+        let mut back: Option<(String, i64, i64, i64, i64, i64, i64)> = row
             .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))
             .optional()?;
-        let tags = {
-            let mut t: Vec<&str> = d.save.tags.iter().map(String::as_str).collect();
-            t.sort_unstable();
-            t.dedup();
-            t.len()
-        };
+        // A new row has just the tags it came with. One the library had keeps its own, however many, with one for
+        // each piece of hardware the save uses: those are looked for by name, and the count left out.
+        let mut tags: Vec<&str> = d.save.tags.iter().map(String::as_str).collect();
+        tags.sort_unstable();
+        tags.dedup();
+        let tags = if *new { tags.len() } else { 0 };
+        if !*new {
+            for hardware in tags_to_add(&d.save, false) {
+                if crate::song_fields::tags_like(tx, *id, &same_tag(hardware))?.is_empty() {
+                    return Err(Checked::Differs(format!("the save {} (its tag {hardware})", d.save.path)));
+                }
+            }
+            if let Some(back) = back.as_mut() {
+                back.6 = 0;
+            }
+        }
         let wanted = (
             d.save.path.clone(),
             d.save.size,
