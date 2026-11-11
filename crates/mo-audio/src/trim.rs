@@ -11,6 +11,17 @@ pub const LEVELS_DB: [i32; 4] = [-40, -50, -60, -70];
 /// noise floor or dither still counts as silence, loud enough that a soft fade-in doesn't.
 pub const DEFAULT_DB: i32 = -60;
 
+/// The Trim silence menu's choices, one per level ("-60 dB"); [`parse_pick`] reads one back.
+pub fn choices() -> Vec<String> {
+    LEVELS_DB.iter().map(|db| format!("{db} dB")).collect()
+}
+
+/// A pick from the Trim silence menu: `Some(level)` for one of [`choices`] ("-50 dB"), `None` for "" (off).
+pub fn parse_pick(picked: &str) -> Option<i32> {
+    let level = picked.trim().trim_end_matches("dB").trim();
+    (!level.is_empty()).then(|| level_db(Some(level)))
+}
+
 /// One of [`LEVELS_DB`] as kept in a setting ("-50"); [`DEFAULT_DB`] for anything else.
 pub fn level_db(setting: Option<&str>) -> i32 {
     setting.and_then(|s| s.trim().parse().ok()).filter(|db| LEVELS_DB.contains(db)).unwrap_or(DEFAULT_DB)
@@ -30,9 +41,15 @@ const TAIL_SECONDS: f64 = 0.010;
 /// all through (or empty): play it as it is.
 pub fn sound_span(audio: &AudioData, level: f32) -> Option<(usize, usize)> {
     let frames = audio.len();
-    let loud = |i: usize| audio.channels.iter().any(|c| c.get(i).is_some_and(|s| s.abs() > level));
-    let first = (0..frames).find(|&i| loud(i))?;
-    let last = (first..frames).rev().find(|&i| loud(i)).unwrap_or(first);
+    // One pass along each channel from each end (a frame past the shortest channel's end isn't counted).
+    let mut span: Option<(usize, usize)> = None;
+    for channel in &audio.channels {
+        let channel = &channel[..channel.len().min(frames)];
+        let Some(first) = channel.iter().position(|s| s.abs() > level) else { continue };
+        let last = channel.iter().rposition(|s| s.abs() > level).unwrap_or(first);
+        span = Some(span.map_or((first, last), |(a, b)| (a.min(first), b.max(last))));
+    }
+    let (first, last) = span?;
     let tail = (TAIL_SECONDS * f64::from(audio.sample_rate)).ceil() as usize;
     Some((first, (last + 1 + tail).min(frames)))
 }
@@ -61,9 +78,22 @@ impl AudioData {
     /// that's silent all through.
     pub fn cut_end_silence(&mut self, level: f32) {
         if let Some((_, end)) = sound_span(self, level) {
-            for channel in &mut self.channels {
-                channel.truncate(end);
-            }
+            self.keep(0, end);
+        }
+    }
+
+    /// Keeps frames `start..end` only (clamped to the shortest channel), fading the last 5 ms out when that cuts the
+    /// end off, so a tail still sounding at the level picked doesn't stop with a click.
+    pub fn keep(&mut self, start: usize, end: usize) {
+        // Every channel ends up the same length, even one the file left short.
+        let end = end.min(self.channels.iter().map(Vec::len).min().unwrap_or(0));
+        let cuts_end = end < self.len();
+        for channel in &mut self.channels {
+            channel.truncate(end);
+            channel.drain(..start.min(channel.len()));
+        }
+        if cuts_end {
+            self.fade_out_end();
         }
     }
 
@@ -71,10 +101,7 @@ impl AudioData {
     /// all through stays as it is.
     pub fn trim_silence(&mut self, level: f32) {
         if let Some((start, end)) = sound_span(self, level) {
-            for channel in &mut self.channels {
-                channel.truncate(end);
-                channel.drain(..start);
-            }
+            self.keep(start, end);
         }
     }
 }
@@ -128,6 +155,30 @@ mod tests {
         assert_eq!(play_span(&a, 30, L), Some((30, 60)));
         assert_eq!(play_span(&a, 70, L), None, "a spot in the quiet end plays as asked");
         assert_eq!(play_span(&audio(vec![vec![0.0; 10]]), 0, L), None);
+    }
+
+    #[test]
+    fn picks_from_the_menu_read_back() {
+        assert_eq!(choices(), ["-40 dB", "-50 dB", "-60 dB", "-70 dB"]);
+        assert_eq!(parse_pick("-50 dB"), Some(-50));
+        assert_eq!(parse_pick(""), None);
+        assert!(choices().iter().all(|c| parse_pick(c).is_some_and(|db| c.starts_with(&db.to_string()))));
+    }
+
+    #[test]
+    fn keeping_a_part_fades_a_cut_end_and_never_slices_past_a_short_channel() {
+        let mut a = audio(vec![vec![1.0; 100], vec![1.0; 10]]);
+        a.keep(20, 60);
+        assert_eq!((a.channels[0].len(), a.channels[1].len()), (0, 0));
+        let mut a = audio(vec![vec![1.0; 100], vec![1.0; 50]]);
+        a.keep(20, 60);
+        assert_eq!((a.channels[0].len(), a.channels[1].len()), (30, 30));
+        let mut b = audio(vec![vec![1.0; 100]]);
+        b.keep(0, 50);
+        assert_eq!(b.channels[0][49], 0.0, "faded out where it was cut");
+        let mut c = audio(vec![vec![1.0; 100]]);
+        c.keep(10, 100);
+        assert_eq!(c.channels[0][89], 1.0, "nothing cut at the end: no fade");
     }
 
     #[test]

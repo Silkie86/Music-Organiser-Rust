@@ -156,6 +156,9 @@ struct Page {
     /// How many seconds of it that play reads at most (a sweep reads only its start): a click on its waveform past
     /// that reads it again from there ([`seeks`]).
     play_reads: f64,
+    /// That play was trimmed (Trim silence was on): its samples don't hold the whole file, so a click on its waveform
+    /// plays it again from there rather than moving along what was read.
+    play_trimmed: bool,
     /// Each sound's place in `list`, by id.
     places: Arc<HashMap<i64, usize>>,
     /// Every sound's fingerprint, once read, for Sounds like this and Rediscover.
@@ -229,6 +232,7 @@ impl Default for Page {
             playing: None,
             play: 0,
             play_reads: 0.0,
+            play_trimmed: false,
             places: Arc::default(),
             index: None,
             no_index: None,
@@ -2504,13 +2508,13 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         let Some(app) = weak.upgrade() else { return };
         // "" turns it off; a level ("-50 dB") turns it on at that level. Both kept for next time, in the app's own
         // settings; they count from the next play (the one playing goes on).
-        let level = picked.trim().trim_end_matches("dB").trim();
-        let on = !level.is_empty();
+        let picked = mo_audio::trim::parse_pick(&picked);
+        let on = picked.is_some();
         let db = PAGE.with(|p| {
             let mut p = p.borrow_mut();
             p.trim = on;
-            if on {
-                p.trim_db = mo_audio::trim::level_db(Some(level));
+            if let Some(db) = picked {
+                p.trim_db = db;
             }
             p.trim_chosen = true;
             p.trim_db
@@ -3373,6 +3377,9 @@ fn show_chips(app: &AppWindow) {
         data.set_autoplay(p.autoplay);
         data.set_trim_silence(p.trim);
         data.set_trim_level_db(p.trim_db);
+        data.set_trim_choices(slint::ModelRc::new(slint::VecModel::from(
+            mo_audio::trim::choices().into_iter().map(SharedString::from).collect::<Vec<_>>(),
+        )));
         show_picked_tags(&data, &p);
     });
 }
@@ -3588,6 +3595,7 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
         p.playing = Some((at, seconds.max(0.001)));
         p.play = ask;
         p.play_reads = most;
+        p.play_trimmed = trim.is_some();
     });
     playing_changed(app);
     if here {
@@ -3731,12 +3739,17 @@ const TRIM_LEAD_ROOM: f64 = 2.0;
 fn trimmed(audio: &mut mo_audio::AudioData, from: f64, most: f64, level: f32) -> f64 {
     let rate = f64::from(audio.sample_rate.max(1));
     let asked = (from * rate).round() as usize;
-    let Some((first, end)) = mo_audio::trim::play_span(audio, asked, level) else { return from };
+    let Some((first, end)) = mo_audio::trim::play_span(audio, asked, level) else {
+        // Played as asked, as far as asked: a sweep's longer read is cut back to `most`.
+        let keep = ((from + most) * rate).round() as usize;
+        for channel in &mut audio.channels {
+            channel.truncate(keep);
+        }
+        return from;
+    };
     let start = if first > asked { first as f64 / rate } else { from };
-    let keep = end.min(((start + most) * rate).round() as usize);
-    for channel in &mut audio.channels {
-        channel.truncate(keep);
-    }
+    // The start stays in the samples (`keep` from 0); a cut end fades out.
+    audio.keep(0, end.min(((start + most) * rate).round() as usize));
     start
 }
 
@@ -3838,7 +3851,10 @@ pub fn stop_for_another(app: &AppWindow) {
 /// (`player_has`: its key), rather than reading the sound again from there: only when the player has that very play
 /// (not an older one, nor none while it's still being read) and the play read that far (a sweep reads only its start).
 fn seeks(p: &Page, player_has: Option<&str>, to: f64) -> bool {
-    p.playing.is_some() && player_has.is_some_and(|key| key.parse() == Ok(p.play)) && to < p.play_reads
+    p.playing.is_some()
+        && player_has.is_some_and(|key| key.parse() == Ok(p.play))
+        && to < p.play_reads
+        && !p.play_trimmed
 }
 
 /// A sound played to its end by itself: `key` is its play's number.

@@ -364,6 +364,7 @@ export global SoundsData {
     // quiet counts as silence, in dB below full scale; a pick from its menu: "-50 dB", or "" for off.
     in property <bool> trim-silence;
     in property <int> trim-level-db: -60;
+    in property <[string]> trim-choices;
     callback pick-trim(string);
 
     // How many sounds are shown, for the list's empty state.
@@ -1067,7 +1068,7 @@ component SoundPanel inherits SidePanel {
             name: "Trim silence";
             value: SoundsData.trim-silence ? SoundsData.trim-level-db + " dB" : "";
             none-text: "Off: play the whole file";
-            choices: ["-40 dB", "-50 dB", "-60 dB", "-70 dB"];
+            choices: SoundsData.trim-choices;
             picked(t) => { SoundsData.pick-trim(t); }
         }
     }

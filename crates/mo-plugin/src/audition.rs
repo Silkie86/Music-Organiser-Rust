@@ -222,12 +222,17 @@ impl Player {
         self.trim_db.store(db.unwrap_or(0), Ordering::Release);
     }
 
-    /// Trim silence's level as a sample's size, while it's on.
-    fn trim_level(&self) -> Option<f32> {
+    /// Trim silence's level in dB below full scale, while it's on.
+    pub fn trim(&self) -> Option<i32> {
         match self.trim_db.load(Ordering::Acquire) {
             0 => None,
-            db => Some(mo_audio::trim::level_of_db(db)),
+            db => Some(db),
         }
+    }
+
+    /// Trim silence's level as a sample's size, while it's on.
+    fn trim_level(&self) -> Option<f32> {
+        self.trim().map(mo_audio::trim::level_of_db)
     }
 
     /// The DAW starts the track's audio at `rate` samples a second: the audio thread's side, to give the DAW.
@@ -328,7 +333,7 @@ impl Player {
 
     /// The sound ready to play from the pick's spot. `audio` is the file read from its start; a spot past what was
     /// read (over a minute into a long file) is read from there instead, where the file's kind can be.
-    fn voice_from(&self, pick: &Pick, audio: mo_audio::AudioData, rate: u32) -> Result<Voice, String> {
+    fn voice_from(&self, pick: &Pick, mut audio: mo_audio::AudioData, rate: u32) -> Result<Voice, String> {
         let read = audio.channels.first().map_or(0, Vec::len);
         match start(pick.from, read, audio.file_seconds, audio.sample_rate) {
             // Trim silence: the spot still counts into the whole sound; the play starts past the silence at the
@@ -338,9 +343,8 @@ impl Player {
                 .and_then(|level| mo_audio::trim::play_span(&audio, (part * read as f64).round() as usize, level))
             {
                 Some((first, end)) => {
-                    let cut: Vec<Vec<f32>> =
-                        audio.channels.iter().map(|c| c[first..end.min(c.len())].to_vec()).collect();
-                    Ok(Voice::new(&cut, audio.sample_rate, rate))
+                    audio.keep(first, end);
+                    Ok(Voice::new(&audio.channels, audio.sample_rate, rate))
                 }
                 None => Ok(Voice::new(&audio.channels, audio.sample_rate, rate).from(part)),
             },
