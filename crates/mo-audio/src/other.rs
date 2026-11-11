@@ -9,7 +9,7 @@ use std::path::Path;
 use symphonia::core::codecs::audio::AudioDecoderOptions;
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
-use symphonia::core::formats::{FormatOptions, TrackType};
+use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
 use symphonia::core::io::{MediaSource, MediaSourceStream};
 use symphonia::core::meta::MetadataOptions;
 
@@ -54,15 +54,34 @@ fn after_id3v2(file: &File) -> Option<Vec<u8>> {
     Some(all.split_off(from))
 }
 
-fn decode(file: File, path: &Path, max_seconds: f64) -> Result<AudioData, AudioError> {
-    let format_error = |e: Error| match e {
+/// What a symphonia error means here.
+fn format_error(e: Error) -> AudioError {
+    match e {
         // symphonia gives an I/O error for a file that ends too soon or a bitstream that runs out: that's a damaged
         // file, not a drive or lock problem (as the WAV reader says it).
         Error::IoError(e) if e.kind() != ErrorKind::UnexpectedEof && e.kind() != ErrorKind::Other => AudioError::Io(e),
         Error::IoError(_) => AudioError::Format("The file is cut short or damaged".into()),
         Error::Unsupported(what) => AudioError::NotSupported(format!("Not supported: {what}")),
         other => AudioError::Format(other.to_string()),
-    };
+    }
+}
+
+/// Up to `max_seconds` of an Ogg Vorbis stream held in memory, starting `from_frame` frames in: the audio of a WAV file
+/// that keeps Ogg Vorbis inside it (FL Studio's own sounds). Damage is handled as [`read_other`] handles it.
+pub(crate) fn read_ogg_bytes(stream: Vec<u8>, max_seconds: f64, from_frame: u64) -> Result<AudioData, AudioError> {
+    mo_catch::catch(AssertUnwindSafe(|| {
+        let mut hint = Hint::new();
+        hint.with_extension("ogg");
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(stream)), Default::default());
+        let format = symphonia::default::get_probe()
+            .probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
+            .map_err(format_error)?;
+        decode_format(format, max_seconds, from_frame)
+    }))
+    .unwrap_or_else(|_| Err(AudioError::Format("The decoder couldn't read this file (it may be damaged)".into())))
+}
+
+fn decode(file: File, path: &Path, max_seconds: f64) -> Result<AudioData, AudioError> {
     let mut hint = Hint::new();
     if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
         hint.with_extension(ext);
@@ -71,7 +90,7 @@ fn decode(file: File, path: &Path, max_seconds: f64) -> Result<AudioData, AudioE
         let mss = MediaSourceStream::new(source, Default::default());
         symphonia::default::get_probe().probe(&hint, mss, FormatOptions::default(), MetadataOptions::default())
     };
-    let mut format = match probe(Box::new(file.try_clone()?)) {
+    let format = match probe(Box::new(file.try_clone()?)) {
         Ok(format) => format,
         // A leading ID3v2 tag that's damaged (a version or header symphonia refuses, or a size past the end of the
         // file) stops symphonia's tag reader. Before it had one, the probe looked past the tag for the first frame:
@@ -81,6 +100,13 @@ fn decode(file: File, path: &Path, max_seconds: f64) -> Result<AudioData, AudioE
             None => return Err(format_error(e)),
         },
     };
+    decode_format(format, max_seconds, 0)
+}
+
+/// Decodes up to `max_seconds` of a probed file's audio, leaving out its first `skip` frames.
+fn decode_format(mut format: Box<dyn FormatReader>, max_seconds: f64, skip: u64) -> Result<AudioData, AudioError> {
+    let mut skip = usize::try_from(skip).unwrap_or(usize::MAX);
+    let mut skipped = 0u64;
     let track = format
         .default_track(TrackType::Audio)
         .ok_or_else(|| AudioError::Format("The file has no audio in it".into()))?;
@@ -140,7 +166,12 @@ fn decode(file: File, path: &Path, max_seconds: f64) -> Result<AudioData, AudioE
         }
         let have = channels.first().map_or(0, Vec::len);
         let room = wanted.saturating_sub(have);
+        // The frames before the start asked for are decoded and left out.
+        let drop = skip.min(scratch.first().map_or(0, Vec::len));
+        skip -= drop;
+        skipped += drop as u64;
         for (ch, s) in channels.iter_mut().zip(&scratch) {
+            let s = s.get(drop..).unwrap_or_default();
             ch.extend_from_slice(s.get(..room.min(s.len())).unwrap_or_default());
         }
         if channels.first().map_or(0, Vec::len) >= wanted {
@@ -151,7 +182,7 @@ fn decode(file: File, path: &Path, max_seconds: f64) -> Result<AudioData, AudioE
     if rate == 0 || channels.is_empty() {
         return Err(AudioError::Format("The file has no audio in it".into()));
     }
-    let decoded = channels.first().map_or(0, Vec::len) as u64;
+    let decoded = skipped + channels.first().map_or(0, Vec::len) as u64;
     // The whole length: what the file says, else what was decoded when it was all decoded.
     let total = known_frames.filter(|_| !whole).unwrap_or(decoded).max(decoded);
     Ok(AudioData { sample_rate: rate, file_seconds: total as f64 / f64::from(rate), channels, ..AudioData::default() })

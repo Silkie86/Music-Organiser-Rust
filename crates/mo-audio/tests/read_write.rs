@@ -276,6 +276,35 @@ fn decodes_mp3_flac_m4a_ogg_and_aac() {
     assert!(read_from(&tone("tone.mp3"), 60.0, 10).unwrap_err().to_string().contains("only read from the start"));
 }
 
+/// A WAV as FL Studio keeps its own sounds: format 0x674F ("Og"), a whole Ogg Vorbis stream in the data chunk.
+#[test]
+fn a_wav_with_ogg_vorbis_inside_is_decoded() {
+    let ogg = std::fs::read(tone("tone.ogg")).unwrap();
+    let mut acid = vec![0u8; 24];
+    acid[20..24].copy_from_slice(&140f32.to_le_bytes());
+    let path = fixture(
+        "ogg-inside.wav",
+        &riff(&[fmt(0x674F, 2, 22050, 16), chunk(b"acid", &acid, false), chunk(b"data", &ogg, false)]),
+    );
+    let plain = read(&tone("tone.ogg"), 60.0).unwrap();
+    let a = read(&path, 60.0).unwrap();
+    assert_eq!((a.sample_rate, a.channels.len()), (22050, 2));
+    assert_eq!(a.channels, plain.channels);
+    assert_eq!(a.file_seconds, plain.file_seconds);
+    // The WAV's own notes still count.
+    assert_eq!(a.embedded_tempo, Some(140.0));
+    // Part way in, and only so long, with the whole length still known.
+    let part = read_from(&path, 0.1, 1000).unwrap();
+    assert_eq!(part.len(), 2205);
+    assert_eq!(part.channels[0][..], plain.channels[0][1000..3205]);
+    assert_eq!(read_from(&path, 60.0, 1000).unwrap().file_seconds, plain.file_seconds);
+    // The kinds that keep the Vorbis headers apart say what they are; damage is an error, never a crash.
+    let apart = fixture("ogg-apart.wav", &riff(&[fmt(0x6750, 2, 22050, 16), chunk(b"data", &[0u8; 64], false)]));
+    assert!(read(&apart, 60.0).unwrap_err().to_string().contains("Ogg Vorbis"));
+    let cut = fixture("ogg-inside-cut.wav", &riff(&[fmt(0x674F, 2, 22050, 16), chunk(b"data", &ogg[..40], false)]));
+    assert!(read(&cut, 60.0).is_err());
+}
+
 #[test]
 fn decodes_wma_on_windows_only() {
     let path = tone("tone.wma");
