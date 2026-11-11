@@ -168,6 +168,16 @@ struct Page {
     card_alone: Option<String>,
 }
 
+/// The song a part found plays with in Bitwig ([`Page::bitwig_song`]).
+#[derive(Clone, Debug, PartialEq)]
+struct BitwigSong {
+    /// Its bars for Bitwig's arranger to go round, or why Bitwig has none (the end of the card's line).
+    bars: Result<mo_dawlink::bitwig::SongLoop, String>,
+    /// The song's name, and the parts and bars the part was fitted to, for the card's words.
+    name: String,
+    with: Arc<SongBars>,
+}
+
 /// How the picked part is moved to fit a song: what its card says, and how it's shown, played, dragged and sent.
 #[derive(Clone, Debug, PartialEq)]
 struct PickedFit {
@@ -301,9 +311,24 @@ impl Page {
     /// no tempo read: the song's is known. None when it plays alone.
     fn with_song_line(&self, at: usize) -> Option<String> {
         let with = self.heard_with(at)?;
-        let song = self.picked_fit.as_ref().filter(|_| self.picked == Some(at)).map(|picked| &picked.song);
-        let song = song.or(self.fits_song.as_ref())?;
+        let song = self.heard_song(at)?;
         Some(midi_fits::with_song_line(&page::gm_sound(self.cat.entry(at)?), &song.name, &with))
+    }
+
+    /// The song whose parts the part at `at` plays with ([`Page::heard_with`]): the picked part's is the song of the
+    /// list that had it, as it was then.
+    fn heard_song(&self, at: usize) -> Option<&SongChoice> {
+        let song = self.picked_fit.as_ref().filter(|_| self.picked == Some(at)).map(|picked| &picked.song);
+        song.or(self.fits_song.as_ref())
+    }
+
+    /// What Play in Bitwig plays the part at `at` with while "Play with the song" is on: the bars of the song it was
+    /// fitted to, for Bitwig's arranger to go round ([`midi_fits::bitwig_loop`]), or why Bitwig has no such bars.
+    /// None when the part plays alone in the app too ([`Page::heard_with`]): nothing is said of the song then.
+    fn bitwig_song(&self, at: usize) -> Option<BitwigSong> {
+        let with = self.heard_with(at)?;
+        let song = self.heard_song(at)?;
+        Some(BitwigSong { bars: midi_fits::bitwig_loop(&with, song), name: song.name.clone(), with })
     }
 
     /// The card's sound line for the picked part `at`, as it plays now: what of the song it plays with
@@ -1732,6 +1757,8 @@ fn show_sound(data: &MidiData, p: &mut Page) {
         data.set_sound_line(line.into());
     }
     data.set_play_with_song(p.card_with.is_some());
+    // Play in Bitwig's tip only promises the song's bars where Bitwig has some to go round.
+    data.set_bitwig_with_song(p.bitwig_song(at).is_some_and(|song| song.bars.is_ok()));
 }
 
 /// A new list is on show: what's seen and heard of the picked part is brought into line with how it's moved now
@@ -3318,8 +3345,19 @@ fn stop_bitwig_in(
     turn: &mo_dawlink::bitwig::Turn<'_>,
     weak: Option<slint::Weak<AppWindow>>,
 ) {
-    let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_playing(&bitwig, turn) else { return };
+    let e = match mo_dawlink::bitwig::Bitwig::default().stop_playing(&bitwig, turn) {
+        Ok(out) => {
+            if out.loop_back == Some(false) {
+                loop_not_back(weak);
+            }
+            return;
+        }
+        Err(e) => e,
+    };
     log::warning("MIDI", &format!("The part playing in Bitwig couldn't be stopped: {e}"));
+    // What's left behind in Bitwig when the app lets go of it: its clip, and, for a part that played with its song's
+    // bars, the loop and the play start as the link set them.
+    let left = if bitwig.with_song == mo_dawlink::bitwig::WithSong::Looping { midi_fits::BITWIG_LOOP_LEFT } else { "" };
     // Put back once, so Stop can be pressed again once its project is in front; let go when the stop can never work
     // (Bitwig is gone) or it failed again after being put back, so a new Play isn't called off and Esc goes on (the 10
     // Nov review's D-1).
@@ -3342,7 +3380,7 @@ fn stop_bitwig_in(
     let words = if put_back.is_none() {
         format!(
             "It couldn't be stopped in Bitwig: {e} The app has let it go: if its clip still plays there, stop it in \
-             Bitwig."
+             Bitwig.{left}"
         )
     } else {
         format!(
@@ -3365,6 +3403,20 @@ fn stop_bitwig_in(
             }
         }
         data.set_daw_note(words.into());
+    });
+}
+
+/// A part that played with its song's bars stopped in Bitwig, but Bitwig didn't show its loop and play start back as
+/// they were: the log says so, and the card too unless something else plays or starts from this page by now.
+fn loop_not_back(weak: Option<slint::Weak<AppWindow>>) {
+    log::warning("MIDI", midi_fits::BITWIG_LOOP_NOT_BACK);
+    let Some(weak) = weak else { return };
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let data = app.global::<MidiData>();
+        if data.get_daw_playing() == "" && data.get_daw_starting() == "" {
+            data.set_daw_note(midi_fits::BITWIG_LOOP_NOT_BACK.into());
+        }
     });
 }
 
@@ -3423,10 +3475,12 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
     let ask = PAGE.with(|p| {
         let p = p.borrow();
         let e = p.cat.entry(at)?;
-        // Moved as it fits the song, in a "Fits my song" list; its name in the DAW says so.
-        Some((p.part_out(at)?, Arc::clone(&e.phrase.source), p.library.clone()))
+        // Moved as it fits the song, in a "Fits my song" list; its name in the DAW says so. In Bitwig it plays with
+        // the song's bars going round, as Play with the song plays it here.
+        let song = if daw == Daw::Bitwig { p.bitwig_song(at) } else { None };
+        Some((p.part_out(at)?, Arc::clone(&e.phrase.source), p.library.clone(), song))
     });
-    let Some((part, source, library)) = ask else {
+    let Some((part, source, library, song)) = ask else {
         return false;
     };
     let phrase_id = part.phrase_id;
@@ -3476,7 +3530,8 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
         };
         let made = read.and_then(|(notes, tempo)| {
             mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
-                start_in_daw(daw, &notes, part.bars, tempo, &part.name, turn.as_ref(), &wanted)
+                let clip = DawClip { notes: &notes, bars: part.bars, tempo, name: &part.name };
+                start_in_daw(daw, &clip, song.as_ref(), turn.as_ref(), &wanted)
             }))
             .unwrap_or_else(|_| Err(stopped()))
         });
@@ -3678,18 +3733,29 @@ fn fl_port(wanted: &dyn Fn() -> bool) -> Result<Box<dyn mo_dawlink::fl::NoteOut>
     }
 }
 
+/// A part to play in a DAW ([`start_in_daw`]): its notes as they leave the page, the bars the index counts, the tempo
+/// it plays at where the DAW takes one, and its name there.
+struct DawClip<'a> {
+    notes: &'a [NoteEvent],
+    bars: i32,
+    tempo: f64,
+    name: &'a str,
+}
+
 /// Starts the part in the DAW, and says where it plays. Waits for Bitwig, so never on the window's thread.
+///
+/// In Bitwig with `song`, the bars of the song the part was fitted to go round with it
+/// (`mo_dawlink::bitwig::Bitwig::play_with_song`); the words say so, or why it plays alone.
 ///
 /// `Err(None)` when it was no longer `wanted` (it put nothing in, or took it back); `Err(Some)` says why it can't play.
 fn start_in_daw(
     daw: Daw,
-    notes: &[NoteEvent],
-    bars: i32,
-    tempo: f64,
-    name: &str,
+    clip: &DawClip<'_>,
+    song: Option<&BitwigSong>,
     turn: Option<&mo_dawlink::bitwig::Turn<'_>>,
     wanted: &dyn Fn() -> bool,
 ) -> Result<(InDaw, String), Option<String>> {
+    let DawClip { notes, bars, tempo, name } = *clip;
     match daw {
         Daw::Fl => {
             // One start at a time: clicking down the list asks for each part, and the port takes one at a time.
@@ -3716,13 +3782,27 @@ fn start_in_daw(
             std::fs::write(&file, &bytes)
                 .map_err(|e| Some(format!("Its MIDI file couldn't be saved in Temp: {e}.")))?;
             // Bitwig has read the file into its clip once this answers, so it goes at once (rule 28).
-            let played = mo_dawlink::bitwig::Bitwig::default().play_on_selected(&file, turn, wanted);
+            let bars = song.and_then(|song| song.bars.as_ref().ok());
+            let played = mo_dawlink::bitwig::Bitwig::default().play_with_song(&file, bars, turn, wanted);
             let _ = std::fs::remove_file(&file);
             let playing = played.map_err(|e| (e != mo_dawlink::bitwig::Error::Cancelled).then(|| e.to_string()))?;
-            let note = format!("Playing {name} through \u{201c}{}\u{201d} in Bitwig.", playing.track);
+            let note = bitwig_note(name, &playing, song);
             Ok((InDaw::Bitwig(playing), note))
         }
     }
+}
+
+/// What the card says once a part plays in Bitwig: through which track, and, when it was to play with `song`, that
+/// the song's bars go round with it or why it plays alone ([`midi_fits::bitwig_words`]).
+fn bitwig_note(name: &str, playing: &mo_dawlink::bitwig::Playing, song: Option<&BitwigSong>) -> String {
+    let with_song = song.map_or_else(String::new, |song| {
+        let heard = match &song.bars {
+            Ok(_) => Ok(&playing.with_song),
+            Err(why) => Err(why.as_str()),
+        };
+        midi_fits::bitwig_words(heard, &song.with, &song.name)
+    });
+    format!("Playing {name} through \u{201c}{}\u{201d} in Bitwig{with_song}.", playing.track)
 }
 
 /// Opens the system's file picker for a SoundFont, without holding up the window; one that is one is kept.
@@ -4013,6 +4093,7 @@ mod tests {
                 wants,
                 names: name.into(),
                 bars: 8..12,
+                view: "Test",
             })
         };
         let (chords, lead) = (bars(Wants::Tune, "Keys"), bars(Wants::Chords, "Lead"));
@@ -4079,6 +4160,101 @@ mod tests {
         assert_eq!((p.heard_with(4), p.heard_with(2), p.with_song_line(4)), (None, None, None));
     }
 
+    /// Play in Bitwig, with "Play with the song" on: the bars the part was fitted to go round in Bitwig's arranger
+    /// when the song is a Bitwig project read by its arranger, and the card says so, or why the part is alone.
+    #[test]
+    fn a_part_that_fits_plays_in_bitwig_with_its_songs_bars_going_round() {
+        use mo_dawlink::bitwig::fake::FakeBitwig;
+        use mo_dawlink::bitwig::{SongLoop, WithSong};
+        let songs = sample_songs();
+        let (night, glass) = (songs[0].clone(), songs[1].clone());
+        let fit = |entry: usize| Fit { entry, semitones: 3, octaves: 0, yours: None, edges: (48, 72), sits: 0.8 };
+        let sound = mo_midi::gm::sound_for(Role::Chords, false, None, &[], None);
+        let held = NoteEvent {
+            start: 0,
+            length: 4 * mo_midi::BAR,
+            key: 57,
+            velocity: 40_000,
+            muted: false,
+            step: false,
+            attribute: mo_formats::NoteAttribute::NONE,
+        };
+        let arranger = Arc::new(SongBars {
+            voices: vec![midi_fits::SongVoice { name: "Keys".into(), sound, notes: vec![held] }],
+            length: 4 * mo_midi::BAR,
+            bar: mo_midi::BAR,
+            tempo: Some(128.0),
+            wants: Wants::Tune,
+            names: "Keys".into(),
+            bars: 8..12,
+            view: mo_formats::bitwig::arrangement::VIEW,
+        });
+        let mut p =
+            Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), with_song: true, ..Page::default() };
+        let listed = |p: &mut Page, song: &SongChoice, with: &Arc<SongBars>| {
+            p.fit_song = Some(song.clone());
+            p.fits = Some(Arc::new(vec![fit(4), fit(2)]));
+            p.fits_song = Some(song.clone());
+            p.fit_with = Some(with.clone());
+            p.fit_picked();
+        };
+        // A Bitwig song read by its arranger: bars 9 to 12 are 16 beats from beat 32, in the project its save names.
+        listed(&mut p, &glass, &arranger);
+        let song = p.bitwig_song(4).unwrap();
+        assert_eq!(song.bars, Ok(SongLoop { project: "Glass".into(), start: 32.0, length: 16.0 }));
+        assert_eq!((song.name.as_str(), &song.with), ("Glass", &arranger));
+        // Picked, it's the song of the list that had it, as in the app.
+        p.picked = Some(4);
+        p.fit_picked();
+        assert_eq!(p.bitwig_song(4), Some(song.clone()));
+        // A song from FL Studio has no bars in Bitwig; nor has one read from Bitwig's scenes.
+        listed(&mut p, &night, &arranger);
+        let fl = p.bitwig_song(2).unwrap();
+        assert_eq!(fl.bars, Err("Night drive isn't a Bitwig project".into()));
+        assert_eq!(p.bitwig_song(4), Some(fl.clone()));
+        let scenes = Arc::new(SongBars { view: mo_formats::bitwig::arrangement::SCENES_VIEW, ..(*arranger).clone() });
+        listed(&mut p, &glass, &scenes);
+        assert!(p.bitwig_song(4).unwrap().bars.is_err());
+        // The chip off, drums, or a part that isn't fitted: alone, with nothing said of the song.
+        let drums = p.cat.entries.iter().position(|e| e.role() == Role::Drums).unwrap();
+        assert_eq!((p.bitwig_song(drums), p.bitwig_song(7)), (None, None));
+        p.with_song = false;
+        assert_eq!(p.bitwig_song(4), None);
+
+        // What the card says, against the stand-in Bitwig (which has "Night Drive" open, not "Glass").
+        let bitwig = FakeBitwig::start().unwrap();
+        let dir = std::env::temp_dir().join(format!("mo-ui-midi-with-song-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("MO Play with song.mid");
+        std::fs::write(&file, scale_file()).unwrap();
+        let turn = mo_dawlink::bitwig::ticket().wait();
+        let play = |bars: &SongLoop| bitwig.bitwig().play_with_song(&file, Some(bars), &turn, &|| true).unwrap();
+        let other = play(song.bars.as_ref().unwrap());
+        assert_eq!(other.with_song, WithSong::OtherProject("Night Drive".into()));
+        assert_eq!(
+            bitwig_note("Saw lead", &other, Some(&song)),
+            "Playing Saw lead through \u{201c}Bass\u{201d} in Bitwig, alone: Bitwig has \u{201c}Night Drive\u{201d} \
+             open, not Glass."
+        );
+        let open = BitwigSong {
+            bars: Ok(SongLoop { project: "Night Drive".into(), start: 32.0, length: 16.0 }),
+            ..song.clone()
+        };
+        let looping = play(open.bars.as_ref().unwrap());
+        assert_eq!(
+            bitwig_note("Saw lead", &looping, Some(&open)),
+            "Playing Saw lead through \u{201c}Bass\u{201d} in Bitwig, with bars 9\u{2013}12 of Glass going round."
+        );
+        assert_eq!(
+            bitwig_note("Saw lead", &looping, Some(&fl)),
+            "Playing Saw lead through \u{201c}Bass\u{201d} in Bitwig, alone: Night drive isn't a Bitwig project."
+        );
+        // A part alone says nothing of a song.
+        assert_eq!(bitwig_note("Saw lead", &looping, None), "Playing Saw lead through \u{201c}Bass\u{201d} in Bitwig.");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// With a real SoundFont (MO_SOUNDFONT=path): a part's loop with the song is the part and the song's parts added
     /// up, each going round by its own length at the song's tempo, for as long as it takes both to come back to
     /// their starts.
@@ -4115,6 +4291,7 @@ mod tests {
             wants: Wants::Tune,
             names: "Keys and Sub".into(),
             bars: 8..14,
+            view: "Test",
         });
         assert_eq!(with.round(4 * bar, mo_audio::gm::longest_ticks(mo_midi::PPQ, 100.0)), 12 * bar);
         let ask = |with: Option<Arc<SongBars>>| PlayAsk {
@@ -4191,6 +4368,7 @@ mod tests {
                 wants: Wants::Tune,
                 names: String::new(),
                 bars: 0..4,
+                view: "Test",
             })
         };
         let (with, other) = (bars(120.0), bars(90.0));

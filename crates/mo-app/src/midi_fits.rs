@@ -24,13 +24,16 @@
 //!
 //! A part found can be heard with the song ([`SongBars`]): the parts it was fitted to, over the bars it was fitted
 //! to, go round beside it at the song's tempo, as the two were judged and as the part will sound dropped on the first
-//! of those bars in the DAW. [`with_song_line`] says so on the card.
+//! of those bars in the DAW. [`with_song_line`] says so on the card. Play in Bitwig does the same there
+//! ([`bitwig_loop`]): Bitwig's arranger goes round those bars of the project itself, and [`bitwig_words`] says so, or
+//! why the part plays alone.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
 
+use mo_dawlink::bitwig::{SongLoop, WithSong};
 use mo_formats::NoteEvent;
 use mo_formats::dates::RealDates;
 use mo_library::songs::thousands;
@@ -157,6 +160,9 @@ pub struct SongBars {
     pub wants: Wants,
     pub names: String,
     pub bars: std::ops::Range<i64>,
+    /// The layout the song was read in ([`Song::view`]): only Bitwig's arranger has bars Bitwig can go round
+    /// ([`bitwig_loop`]).
+    pub view: &'static str,
 }
 
 /// One of a song's parts in the bars a list is fitted to ([`SongBars`]).
@@ -204,6 +210,7 @@ impl SongBars {
             wants,
             names: names_words(voices.iter().map(|v| v.name.as_str())),
             bars: pick.bars.clone(),
+            view: song.view,
             voices,
         }
     }
@@ -250,6 +257,63 @@ pub fn with_song_line(sound: &mo_midi::gm::GmSound, song: &str, with: &SongBars)
     };
     format!("{} · {heard}, {tempo}", page::sound_line(sound, None))
 }
+
+/// The bars of `song` for Bitwig to go round while a part found plays there (Play in Bitwig with "Play with the
+/// song" on, `mo_dawlink::bitwig::Bitwig::play_with_song`): the bars `with` holds, in beats from the arranger's
+/// start, in the project Bitwig shows the song's save as (its file's name, less ".bwproject"). The save the song was
+/// read from, not another of its saves: an older version's bars may be somewhere else.
+///
+/// Err: why Bitwig has no such bars, in words that end the card's line ([`bitwig_words`]). A song from FL Studio
+/// or Studio One isn't open in Bitwig, and one read from Bitwig's scenes (its arranger is empty) has no bars there.
+pub fn bitwig_loop(with: &SongBars, song: &SongChoice) -> Result<SongLoop, String> {
+    if !mo_formats::paths::has_extension(&song.save, &["bwproject"]) {
+        return Err(format!("{} isn't a Bitwig project", song.name));
+    }
+    if with.view != mo_formats::bitwig::arrangement::VIEW {
+        return Err(format!(
+            "{}'s parts are in Bitwig's clip launcher, so its arranger has no bars to go round",
+            song.name
+        ));
+    }
+    let beats = |ticks: i64| ticks as f64 / mo_midi::PPQ as f64;
+    let (start, length) = (beats(with.bars.start.saturating_mul(with.bar)), beats(with.length));
+    if start < 0.0 || length <= 0.0 {
+        return Err(format!("{} has no bars to go round there", song.name));
+    }
+    let project = mo_formats::paths::stem(mo_formats::paths::file_name(&song.save)).to_owned();
+    Ok(SongLoop { project, start, length })
+}
+
+/// How the card's line ends once a part found plays in Bitwig with "Play with the song" on (after "Playing Saw
+/// lead through “Bass” in Bitwig", before the full stop): that `song`'s bars go round with it, or why it's alone.
+/// `heard`: what Bitwig did ([`mo_dawlink::bitwig::Playing::with_song`]), or why it wasn't asked ([`bitwig_loop`]).
+pub fn bitwig_words(heard: Result<&WithSong, &str>, with: &SongBars, song: &str) -> String {
+    match heard {
+        Ok(WithSong::NotAsked) => String::new(),
+        Ok(WithSong::Looping) => format!(", with {} of {song} going round", bars_words(&with.bars)),
+        Ok(WithSong::OtherProject(open)) if open.is_empty() => {
+            format!(", alone: Bitwig didn't say which project it has open, so the app left {song}'s bars alone")
+        }
+        Ok(WithSong::OtherProject(open)) => format!(", alone: Bitwig has \u{201c}{open}\u{201d} open, not {song}"),
+        Ok(WithSong::OldExtension(_)) => format!(
+            ", alone: to hear it with {song} there, install the Bitwig extension again from Settings > DAWs (Install \
+             on Bitwig's row)"
+        ),
+        Ok(WithSong::NoLoop) => ", alone: this Bitwig didn't let the app's extension set its loop".to_owned(),
+        Err(why) => format!(", alone: {why}"),
+    }
+}
+
+/// Added to what the card says when the app lets go of a part it couldn't stop in Bitwig, when the part played with
+/// its song's bars going round: the loop and the play start are still the link's there, and what puts them back.
+pub const BITWIG_LOOP_LEFT: &str = " Bitwig's loop is still on your song's bars there, and Play starts at the first \
+                                    of them: the next part you play there with the song puts both back when it \
+                                    stops, or set them yourself.";
+
+/// What the card says when a part that played with its song's bars stopped in Bitwig, but Bitwig didn't show its
+/// loop and play start back as they were.
+pub const BITWIG_LOOP_NOT_BACK: &str = "It stopped, but Bitwig didn't show its loop and play start back as they were \
+                                        before the part played with your song: have a look at them there.";
 
 /// What of `song` is fitted to, nothing picked by hand. `wanted`: what the page's switch asks for; none (the switch
 /// hasn't been touched): parts to play over the song's chords when it has any that can be read, else chords for its
@@ -1066,6 +1130,57 @@ mod tests {
             "Saw Lead · for its kind of part · with Night drive's melody (bar 13), at 120 BPM, as the song \
              gives no tempo"
         );
+    }
+
+    #[test]
+    fn bitwig_goes_round_the_bars_of_the_project_the_song_was_read_from() {
+        let read = fitted(&song(), None).unwrap().with;
+        assert_eq!(read.view, "Test", "the layout the song was read in is kept");
+        let arranger = SongBars { view: mo_formats::bitwig::arrangement::VIEW, ..(*read).clone() };
+        let night = SongChoice {
+            name: "Night drive".into(),
+            save: "K:\\Bitwig Studio\\Projects\\Night drive\\Night drive v3.BWPROJECT".into(),
+            ..choice()
+        };
+        // Bars 9 to 12 of a song in 4/4: from beat 32, 16 beats, in the project named as its save is.
+        let bars = SongLoop { project: "Night drive v3".into(), start: 32.0, length: 16.0 };
+        assert_eq!(bitwig_loop(&arranger, &night), Ok(bars));
+        // In 3/4 the same bars start at beat 24 and are 12 beats long.
+        let waltz = SongBars { bar: 3 * mo_midi::PPQ, length: 12 * mo_midi::PPQ, ..arranger.clone() };
+        let found = bitwig_loop(&waltz, &night).unwrap();
+        assert_eq!((found.start, found.length), (24.0, 12.0));
+        // A song from another DAW isn't open in Bitwig, and scenes have no bars in the arranger.
+        assert_eq!(bitwig_loop(&arranger, &choice()), Err("Didums isn't a Bitwig project".into()));
+        let scenes = SongBars { view: mo_formats::bitwig::arrangement::SCENES_VIEW, ..arranger.clone() };
+        assert_eq!(
+            bitwig_loop(&scenes, &night),
+            Err("Night drive's parts are in Bitwig's clip launcher, so its arranger has no bars to go round".into())
+        );
+        let none = SongBars { length: 0, ..arranger.clone() };
+        assert!(bitwig_loop(&none, &night).is_err());
+    }
+
+    #[test]
+    fn the_card_says_whether_the_songs_bars_go_round_in_bitwig_or_why_not() {
+        let with = fitted(&song(), None).unwrap().with;
+        let words = |heard: Result<&WithSong, &str>| bitwig_words(heard, &with, "Night drive");
+        assert_eq!(words(Ok(&WithSong::Looping)), ", with bars 9\u{2013}12 of Night drive going round");
+        assert_eq!(words(Ok(&WithSong::NotAsked)), "");
+        assert_eq!(
+            words(Ok(&WithSong::OtherProject("Sunrise".into()))),
+            ", alone: Bitwig has \u{201c}Sunrise\u{201d} open, not Night drive"
+        );
+        assert_eq!(
+            words(Ok(&WithSong::OtherProject(String::new()))),
+            ", alone: Bitwig didn't say which project it has open, so the app left Night drive's bars alone"
+        );
+        assert_eq!(
+            words(Ok(&WithSong::OldExtension("the Music Organiser extension 3.21".into()))),
+            ", alone: to hear it with Night drive there, install the Bitwig extension again from Settings > DAWs \
+             (Install on Bitwig's row)"
+        );
+        assert_eq!(words(Ok(&WithSong::NoLoop)), ", alone: this Bitwig didn't let the app's extension set its loop");
+        assert_eq!(words(Err("Didums isn't a Bitwig project")), ", alone: Didums isn't a Bitwig project");
     }
 
     #[test]

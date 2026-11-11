@@ -846,6 +846,20 @@ impl Shown {
             self.playing.set(None);
             self.panel.set_playing(SharedString::new());
         }
+        // The line on the waveform of the line clicked, while that sound plays and the line still shows it.
+        let line = self.playing.get().and_then(|n| {
+            let at = self.instance.player.place(n)?;
+            let played = self.played.borrow();
+            let (row, sound, _) = played.as_ref()?;
+            (self.lines.sound(*row) == Some(*sound)).then_some((i32::try_from(*row).ok()?, at))
+        });
+        match line {
+            Some((row, at)) => {
+                self.panel.set_playing_at(at);
+                self.panel.set_playing_row(row);
+            }
+            None => self.panel.set_playing_row(-1),
+        }
         self.instance.player.tidy();
         // The window is taller or shorter: the column shows as many types as it now has room for.
         if usize::try_from(self.panel.get_type_lines()).is_ok_and(|lines| lines != self.column.type_lines.get()) {

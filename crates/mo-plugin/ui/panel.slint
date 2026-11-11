@@ -104,6 +104,10 @@ export component Panel inherits Window {
     callback sky-gone();
     // Back out to the whole map.
     callback sky-home();
+    // Where the sound playing is in its file, for the line on its waveform: the row it's on (-1 for none) and how
+    // far through the whole sound (0 the start, 1 the end).
+    in property <int> playing-row: -1;
+    in property <float> playing-at;
     callback search(string);
     // Play a line's sound: from the start (0), or from the spot clicked on its waveform (up to 1, its end).
     callback play(int, float);
@@ -443,6 +447,15 @@ export component Panel inherits Window {
                                         source: sound.wave;
                                         image-fit: fill;
                                         colorize: Theme.sound-type(sound.colour);
+                                        // Where it's playing now.
+                                        if i == root.playing-row: Rectangle {
+                                            x: min(parent.width - self.width, max(0px, parent.width * root.playing-at - self.width / 2));
+                                            y: -3px;
+                                            width: 2px;
+                                            height: parent.height + 6px;
+                                            border-radius: 1px;
+                                            background: Theme.text;
+                                        }
                                     }
                                 }
                                 if sound.favourite: VerticalLayout {
