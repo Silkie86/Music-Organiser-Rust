@@ -16,6 +16,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use mo_formats::dates::RealDates;
 use mo_formats::{PluginRef, case, paths};
 use mo_library::plugin_writes;
 use mo_library::read::{Installed, read_save};
@@ -823,7 +824,8 @@ impl Live {
 
     /// A new save of a song (Song_12 next to Song_11) takes over the status, rating, notes and tags you gave the song,
     /// from the save just before it: the highest number below its own, else the last one saved. Tags the scan put on
-    /// for that save's hardware aren't carried over. As the C# library's InheritFromEarlierSave.
+    /// for that save's hardware aren't carried over. As the C# library's InheritFromEarlierSave, but a save dated still
+    /// to come, or with no date, isn't taken for the last one saved (mo_formats::dates): one with a real date is.
     fn inherit(&self, new: &mut Save) {
         let song = self.choices.key_of(&new.path, &new.folder, &new.daw, &new.name);
         let root = case::key(&songs::song_folder(&new.folder, &new.name));
@@ -838,11 +840,13 @@ impl Live {
             .filter(|s| s.daw == new.daw && s.id != new.id && inside(&s.folder))
             .filter(|s| self.choices.key_of(&s.path, &s.folder, &s.daw, &s.name) == song)
             .collect();
+        let real = RealDates::now();
+        let saved = |s: &Save| (real.seconds(s.mtime), s.mtime);
         let before = candidates
             .iter()
             .filter(|s| songs::split(&s.name).1 < number)
-            .max_by_key(|s| (songs::split(&s.name).1, s.mtime));
-        let Some(from) = before.or_else(|| candidates.iter().max_by_key(|s| s.mtime)) else { return };
+            .max_by_key(|s| (songs::split(&s.name).1, saved(s)));
+        let Some(from) = before.or_else(|| candidates.iter().max_by_key(|s| saved(s))) else { return };
         copy_song_fields(new, from);
         let hardware: HashSet<String> = from.hardware.iter().map(|h| case::to_lower(h)).collect();
         for tag in from.tags.iter().filter(|t| !hardware.contains(t.as_str())) {
@@ -1035,6 +1039,23 @@ mod tests {
         live.inherit(&mut twelve);
         assert_eq!((twelve.status.as_str(), twelve.rating), ("Mixing", 3));
         assert_eq!(twelve.tags, vec!["dark".to_owned()]);
+    }
+
+    #[test]
+    fn a_save_dated_still_to_come_isnt_taken_for_the_last_one_saved() {
+        // 1 Jan 2100: no clue to when the save was written (mo_formats::dates).
+        const TO_COME: i64 = 4_102_444_800;
+        let real = Save { rating: 3, ..save(1, "C:\\Music\\Night", "Night_5") };
+        let to_come = Save { rating: 5, mtime: TO_COME, ..save(2, "C:\\Music\\Night", "Night 5") };
+        let live = live(vec![real, to_come]);
+        // Of the two saves numbered just below Night_6, the one with a real date.
+        let mut six = save(100, "C:\\Music\\Night", "Night_6");
+        live.inherit(&mut six);
+        assert_eq!(six.rating, 3);
+        // Night_1 has none numbered below it, so it takes over from the last one saved: the newest with a real date.
+        let mut one = save(101, "C:\\Music\\Night", "Night_1");
+        live.inherit(&mut one);
+        assert_eq!(one.rating, 3);
     }
 
     #[test]

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use chrono::NaiveDate;
 use mo_backup::folders::{Folder, Mode};
 use mo_backup::plan::{BigSaves, Folders, LeftOut, Level, Listed, Rules, SongInfo, Used, place_on_backup, plan};
+use mo_formats::dates::RealDates;
 use mo_space::size::FileEntry;
 use mo_space::song::{CompactItem, CompactKind, SongSave, SongSpaceReport};
 
@@ -89,6 +90,55 @@ fn big_saves_from_the_middle_of_a_sitting_stay_out_small_ones_go() {
     assert_eq!(why(&p, "/music/Song/Song.flp"), Some(LeftOut::OlderBigSave));
     assert!(goes(&p, "/music/Song/Song 3.flp"), "small saves still go");
     assert!(goes(&p, "/music/Song/Song 4.flp"));
+}
+
+/// A save written at a date that isn't real (mo_formats::dates): 31 Dec 2099, or none (1970).
+fn dated(path: &str, when: chrono::NaiveDateTime) -> SongSave {
+    SongSave { path: path.to_owned(), size: 0, modified: when }
+}
+
+#[test]
+fn a_save_with_no_real_date_is_never_the_newest_and_always_goes() {
+    // Song 9 says 2099 and Song 0 has no date: neither says when it was written. The newest is Song 4, the first
+    // Song.
+    let to_come = NaiveDate::from_ymd_opt(2099, 12, 31).unwrap().and_hms_opt(12, 0, 0).unwrap();
+    let saves = [
+        save("/music/Song/Song.flp", 0),
+        save("/music/Song/Song 2.flp", 1),
+        save("/music/Song/Song 4.flp", 30),
+        dated("/music/Song/Song 9.flp", to_come),
+        dated("/music/Song/Song 0.flp", chrono::NaiveDateTime::default()),
+    ];
+    let real = RealDates::now();
+    assert_eq!(mo_backup::plan::newest_save(&saves, &real).map(|s| s.path.as_str()), Some("/music/Song/Song 4.flp"));
+    let mut m: Vec<String> = mo_backup::plan::milestones(&saves, &[], &real).into_iter().collect();
+    m.sort();
+    // The first (with a real date), the newest, the last of each sitting, and each save with no real date.
+    assert_eq!(
+        m,
+        [
+            "/MUSIC/SONG/SONG 0.FLP",
+            "/MUSIC/SONG/SONG 2.FLP",
+            "/MUSIC/SONG/SONG 4.FLP",
+            "/MUSIC/SONG/SONG 9.FLP",
+            "/MUSIC/SONG/SONG.FLP"
+        ]
+    );
+    // With none real, the newest is of all of them.
+    let none_real = [dated("/s/a.flp", chrono::NaiveDateTime::default()), dated("/s/b.flp", to_come)];
+    assert_eq!(mo_backup::plan::newest_save(&none_real, &real).map(|s| s.path.as_str()), Some("/s/b.flp"));
+
+    // Only the newest of the big saves: Song 4, not the one dated 2099; and the ones with no real date go too.
+    let report = SongSpaceReport::default();
+    let songs = [SongInfo { report: &report, saves: &saves, milestones: &[] }];
+    let files: Vec<FileEntry> = saves.iter().map(|s| file(&s.path, 6 * MB)).collect();
+    let newest_only = Rules { big_saves: BigSaves::NewestOnly, ..Rules::default() };
+    let p = plan(files, &songs, &Used::default(), nowhere(), newest_only);
+    for kept in ["Song 4.flp", "Song 9.flp", "Song 0.flp"] {
+        assert!(goes(&p, &format!("/music/Song/{kept}")), "{kept}");
+    }
+    assert_eq!(why(&p, "/music/Song/Song.flp"), Some(LeftOut::OlderBigSave));
+    assert_eq!(why(&p, "/music/Song/Song 2.flp"), Some(LeftOut::OlderBigSave));
 }
 
 #[test]
@@ -286,7 +336,7 @@ fn a_sitting_past_midnight_gives_one_milestone() {
             + chrono::TimeDelta::minutes(m),
     };
     let saves = [at(0), at(690), at(710), at(730), at(780)];
-    let m = mo_backup::plan::milestones(&saves, &[]);
+    let m = mo_backup::plan::milestones(&saves, &[], &RealDates::now());
     let mut got: Vec<&str> = m.iter().map(String::as_str).collect();
     got.sort();
     assert_eq!(got, ["/S/0.FLP", "/S/780.FLP"]);

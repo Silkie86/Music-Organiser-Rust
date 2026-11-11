@@ -12,6 +12,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 use chrono::{NaiveDateTime, TimeDelta};
 use mo_formats::case;
+use mo_formats::dates::RealDates;
 use mo_formats::paths::{extension, file_name, stem};
 use mo_formats::textscan::is_audio_path;
 use mo_library::scan::{daw_of, is_autosave_file, is_inside, is_project_file};
@@ -231,6 +232,10 @@ fn list_fl_autosaves(dir: &Path) -> FlAutosaves {
 /// the newest few, caches the DAW rebuilds, and (picked by hand only) saves from the middle of a sitting and audio no
 /// project uses. Your newest save is never on the list, and neither is any sample in your sample folders.
 ///
+/// A save or autosave dated still to come, or with no date at all (1970), says nothing of when it was written
+/// (mo_formats::dates): your newest save is the newest with a real date, thinning goes by real dates only, and an
+/// autosave with no real date always stays, as one of the newest might.
+///
 /// `roots` are your project folders (a song never has one of these to itself). `used_audio` is every sample path the
 /// song's saves use: projects store paths as they were on the PC that saved them, so a file counts as used when any
 /// save names a file of that name. Reads every file of the song's folder: call it away from the window's thread.
@@ -242,7 +247,8 @@ pub fn measure(
     elsewhere: Option<&Elsewhere<'_>>,
     stop: &AtomicBool,
 ) -> Result<SongSpaceReport, Stopped> {
-    let Some(newest) = newest(saves) else { return Ok(SongSpaceReport::default()) };
+    let real = RealDates::now();
+    let Some(newest) = newest(saves, &real) else { return Ok(SongSpaceReport::default()) };
     let folder = parent(&newest.path);
     let save_keys: HashSet<String> = saves.iter().map(|s| key(&s.path)).collect();
     // One walk of the folder says both whether it's the song's own and what's in it (the whole-app review of 6 Nov,
@@ -326,9 +332,10 @@ pub fn measure(
     if stop.load(Ordering::Relaxed) {
         return Err(Stopped);
     }
-    let thinned = thin(saves, settings.sitting_hours);
+    let thinned = thin(saves, settings.sitting_hours, &real);
     let thinned_keys: HashSet<String> = thinned.iter().map(|s| key(&s.path)).collect();
-    let same = same_saves(saves, newest, &thinned_keys, elsewhere.map_or(Compare::Afresh, |e| e.compare), stop)?;
+    let compare = elsewhere.map_or(Compare::Afresh, |e| e.compare);
+    let same = same_saves(saves, newest, &thinned_keys, &real, compare, stop)?;
     // Neither a copy nor the save it's a copy of is thinned: removing both would lose what they held (the last save
     // of a sitting, kept as a later identical save).
     let copies: HashSet<String> =
@@ -345,7 +352,9 @@ pub fn measure(
             });
         }
     }
-    // The newest few autosaves stay: they're what you'd reach for after a crash.
+    // The newest few autosaves stay: they're what you'd reach for after a crash. One with no real date stays too: it
+    // could be one of them.
+    backups.retain(|b| real.local(b.2));
     backups.sort_by_key(|b| std::cmp::Reverse(b.2));
     for (path, bytes, modified) in backups.into_iter().skip(settings.keep_backups) {
         report.items.push(CompactItem {
@@ -376,10 +385,13 @@ pub fn measure(
     Ok(report)
 }
 
-/// The newest save; of two saved at the same moment, the first listed (as .NET's `MaxBy`).
-fn newest(saves: &[SongSave]) -> Option<&SongSave> {
-    saves.iter().fold(None, |best: Option<&SongSave>, s| match best {
-        Some(b) if b.modified >= s.modified => Some(b),
+/// A song's newest save, the one [`measure`] never lists: the newest with a real date (`real`), or of all of them when
+/// none has one; of two saved at the same moment, the first listed (as .NET's `MaxBy`). The backup picks it the same
+/// way.
+pub fn newest<'a>(saves: impl IntoIterator<Item = &'a SongSave>, real: &RealDates) -> Option<&'a SongSave> {
+    let by = |s: &SongSave| (real.local(s.modified), s.modified);
+    saves.into_iter().fold(None, |best: Option<&SongSave>, s| match best {
+        Some(b) if by(b) >= by(s) => Some(b),
         _ => Some(s),
     })
 }
@@ -410,13 +422,15 @@ fn relative_parts(dir: &Path, path: &Path) -> Vec<String> {
 /// important ones are kept, the ones after a flurry of saves"). Saves less than `sitting_hours` apart make one
 /// sitting; the last save of each sitting stays, as do the very first save and the newest (the one [`measure`] keeps,
 /// even when another was written at the same moment). Beyond the C# app, a save written by a copy (less than
-/// [`COPY_SECONDS`] from another) stays, and so does the save before one: their times aren't when you saved them.
-pub fn thin(saves: &[SongSave], sitting_hours: u32) -> Vec<&SongSave> {
+/// [`COPY_SECONDS`] from another) stays, and so does the save before one: their times aren't when you saved them. So
+/// does a save with no real date (`real`: dated still to come, or with none): the sittings are the other saves', and
+/// the very first save is the first of those.
+pub fn thin<'a>(saves: &'a [SongSave], sitting_hours: u32, real: &RealDates) -> Vec<&'a SongSave> {
     if sitting_hours == 0 || saves.len() < 3 {
         return Vec::new();
     }
-    let newest = newest(saves).map(|n| key(&n.path)).unwrap_or_default();
-    let mut ordered: Vec<&SongSave> = saves.iter().collect();
+    let newest = newest(saves, real).map(|n| key(&n.path)).unwrap_or_default();
+    let mut ordered: Vec<&SongSave> = saves.iter().filter(|s| real.local(s.modified)).collect();
     // Stable, as .NET's OrderBy: saves written at the same moment keep their order.
     ordered.sort_by_key(|s| s.modified);
     let gap = TimeDelta::hours(i64::from(sitting_hours));
@@ -570,11 +584,12 @@ fn fl_backups(
 /// thinning would keep (`thinned` are the ones it wouldn't: the last save of a sitting, or the first), so a later
 /// Compact can't thin the copy that's left (the newest of those, or of the set when thinning keeps none). The C# app
 /// always kept the newest. Only files of the same size are read, to compare them, each once and at the same time, as
-/// `compare` says ([`Compare`]).
+/// `compare` says ([`Compare`]). Newest goes by `real` dates, as for the song's newest save.
 fn same_saves(
     saves: &[SongSave],
-    newest: &SongSave,
+    newest_save: &SongSave,
     thinned: &HashSet<String>,
+    real: &RealDates,
     compare: Compare<'_>,
     stop: &AtomicBool,
 ) -> Result<Vec<CompactItem>, Stopped> {
@@ -615,11 +630,12 @@ fn same_saves(
             }
         }
         for (_, same) in groups.into_iter().filter(|(_, g)| g.len() > 1) {
-            let keep = if same.iter().any(|s| key(&s.path) == key(&newest.path)) {
-                newest
+            let keep = if same.iter().any(|s| key(&s.path) == key(&newest_save.path)) {
+                newest_save
             } else {
                 let kept: Vec<&SongSave> = same.iter().copied().filter(|s| !thinned.contains(&key(&s.path))).collect();
-                match newest_of(if kept.is_empty() { &same } else { &kept }) {
+                let of = if kept.is_empty() { &same } else { &kept };
+                match newest(of.iter().copied(), real) {
                     Some(k) => k,
                     None => continue,
                 }
@@ -689,11 +705,4 @@ fn confirmed(
 fn more_than_one<'a>(prints: impl Iterator<Item = &'a [u8; 32]>) -> HashSet<[u8; 32]> {
     let mut seen: HashSet<[u8; 32]> = HashSet::new();
     prints.filter(|p| !seen.insert(**p)).copied().collect()
-}
-
-fn newest_of<'a>(saves: &[&'a SongSave]) -> Option<&'a SongSave> {
-    saves.iter().fold(None, |best: Option<&SongSave>, s| match best {
-        Some(b) if b.modified >= s.modified => Some(b),
-        _ => Some(s),
-    })
 }

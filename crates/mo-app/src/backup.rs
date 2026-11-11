@@ -594,10 +594,11 @@ pub fn prepare(
             }
         }
     }
-    // Picked as the plan picks it (the first of two saved at the same moment), so the song's line follows the plan.
+    // Picked as the plan picks it (by real dates, the first of two saved at the same moment), so the song's line
+    // follows the plan.
     let newest = measured
         .iter()
-        .filter_map(|m| plan::newest_save(&m.saves).map(|s| (m.id, PathBuf::from(&s.path), s.modified)))
+        .filter_map(|m| plan::newest_save(&m.saves, &rules.dates).map(|s| (m.id, PathBuf::from(&s.path), s.modified)))
         .collect();
     let song_files = songs
         .iter()

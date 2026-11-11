@@ -981,7 +981,7 @@ fn panel_song(r: &SongRow) -> PanelSong {
         facts: panel::facts(r).into(),
         name: r.song.name.as_str().into(),
         saves: panel::saves_text(r).into(),
-        backed: crate::backup::song_line(&r.song, r.saved).into(),
+        backed: crate::backup::song_line(&r.song, r.newest_time()).into(),
         status: r.status.as_str().into(),
         rating: r.rating,
         favourite: r.favourite,

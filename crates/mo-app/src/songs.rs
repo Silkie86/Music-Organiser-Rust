@@ -9,6 +9,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chrono::{Datelike, Days, NaiveDateTime};
 use mo_formats::case;
+use mo_formats::dates::RealDates;
 use mo_library::songs::{self, SaveRun, Song};
 use mo_library::{STATUSES, Save, SongChoices};
 
@@ -28,10 +29,13 @@ pub struct SongRow {
     pub song: Song,
     /// When it was last saved: its newest save's date. The list is in this order and its headings and dates use it.
     /// It isn't always `song.latest`'s date: the save with the highest number is the song's latest even when an
-    /// older-numbered one was saved after it.
-    pub saved: NaiveDateTime,
-    /// When the song was first made: its oldest save, or the date its file keeps, whichever is earlier.
-    pub made: NaiveDateTime,
+    /// older-numbered one was saved after it. Only a real date counts ([`RealDates`]: a save dated still to come, or
+    /// with no date, is no clue to when it was saved): none when no save has one, and the song comes after every song
+    /// that has, under "Date unknown", in no year.
+    pub saved: Option<NaiveDateTime>,
+    /// When the song was first made: its oldest save, or the date its file keeps, whichever is earlier; real dates
+    /// only, as `saved`.
+    pub made: Option<NaiveDateTime>,
     /// Its working periods, oldest first.
     pub runs: Vec<SaveRun>,
     // Your fields are the song's, but the C# app stores them on the save you set them on, and a newer save starts
@@ -47,12 +51,14 @@ pub struct SongRow {
 }
 
 impl SongRow {
-    pub fn new(song: Song, gap_months: u32) -> SongRow {
-        let saved = song.saves().map(|s| s.modified).max().unwrap_or(song.latest.modified);
-        let made = songs::first_made(song.saves()).unwrap_or(song.latest.modified);
+    /// The song's row, its dates as `real` says ([`RealDates`]: one for the whole list).
+    pub fn new(song: Song, gap_months: u32, real: &RealDates) -> SongRow {
+        let saved = song.saves().map(|s| s.modified).filter(|m| real.local(*m)).max();
+        let made = songs::first_made(song.saves(), real);
         let runs = songs::runs(song.saves(), gap_months);
         let mut earlier: Vec<&mo_library::Save> = song.older.iter().collect();
-        earlier.sort_by_key(|s| std::cmp::Reverse(s.modified));
+        // Newest first, and a save with no real date after the rest, as the fields a new save takes over (live.rs).
+        earlier.sort_by_key(|s| std::cmp::Reverse((real.local(s.modified), s.modified)));
         let latest = &song.latest;
         let pick = |own: &str, of: fn(&mo_library::Save) -> &str| -> String {
             if !own.trim().is_empty() {
@@ -110,9 +116,9 @@ impl SongRow {
         self.runs.last().filter(|r| r.reworked)
     }
 
-    /// When it was last saved: "3 Aug" this year, "3 Aug 2019" before.
+    /// When it was last saved: "3 Aug" this year, "3 Aug 2019" before; nothing when that isn't known.
     pub fn short_date(&self, now: NaiveDateTime) -> String {
-        let saved = self.saved;
+        let Some(saved) = self.saved else { return String::new() };
         if saved.year() == now.year() {
             saved.format("%-d %b").to_string()
         } else {
@@ -122,12 +128,21 @@ impl SongRow {
 
     /// The date's tooltip: when it was last saved, and when it was first made if that's another day.
     pub fn date_tip(&self) -> String {
-        let saved = self.saved;
-        if self.made.date() == saved.date() {
-            format!("Made {}", saved.format("%-d %b %Y"))
-        } else {
-            format!("Last saved {}. First made {}.", saved.format("%-d %b %Y"), self.made.format("%-d %b %Y"))
+        let day = |d: NaiveDateTime| d.format("%-d %b %Y").to_string();
+        match (self.saved, self.made) {
+            (Some(saved), Some(made)) if made.date() != saved.date() => {
+                format!("Last saved {}. First made {}.", day(saved), day(made))
+            }
+            (Some(saved), _) => format!("Made {}", day(saved)),
+            (None, Some(made)) => format!("First made {}. When it was last saved is unknown.", day(made)),
+            (None, None) => "Date unknown: its saves are dated still to come, or not at all".to_owned(),
         }
+    }
+
+    /// When its newest save was written, as the backup picks that save (`mo_backup::plan::newest_save`): the newest
+    /// real date, or the newest of all when none is real. For the song's "Backed up" line.
+    pub fn newest_time(&self) -> NaiveDateTime {
+        self.saved.unwrap_or_else(|| self.song.saves().map(|s| s.modified).max().unwrap_or(self.song.latest.modified))
     }
 
     /// The row's second line: "FL Studio · 140 BPM · G minor · 77 saves · reworked 2024", leaving out what isn't
@@ -182,7 +197,7 @@ impl SongRow {
     fn matches_word(&self, word: &Word) -> bool {
         self.find.contains(&word.key)
             || case::eq_ignore_case(self.key(), &word.text)
-            || word.year.is_some_and(|y| y == self.saved.year() || y == self.made.year())
+            || word.year.is_some_and(|y| [self.saved, self.made].into_iter().flatten().any(|d| d.year() == y))
     }
 }
 
@@ -237,18 +252,21 @@ pub fn plural(n: usize, what: &str) -> String {
 
 pub use mo_library::songs::thousands;
 
-/// The list's time headings: "This week", "This month", "Earlier in 2026", then one per year.
+/// The list's time headings: "This week", "This month", "Earlier in 2026", then one per year, and last "Date unknown".
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum When {
     ThisWeek,
     ThisMonth,
     EarlierIn(i32),
     Year(i32),
+    /// No save of the song has a real date ([`SongRow::saved`]).
+    Unknown,
 }
 
 impl When {
     /// The heading a song last saved on `saved` goes under.
-    pub fn of(saved: NaiveDateTime, now: NaiveDateTime) -> When {
+    pub fn of(saved: Option<NaiveDateTime>, now: NaiveDateTime) -> When {
+        let Some(saved) = saved else { return When::Unknown };
         let week_ago = now.date().checked_sub_days(Days::new(7)).unwrap_or(now.date());
         if saved.date() > week_ago {
             When::ThisWeek
@@ -269,6 +287,7 @@ impl std::fmt::Display for When {
             When::ThisMonth => f.write_str("This month"),
             When::EarlierIn(y) => write!(f, "Earlier in {y}"),
             When::Year(y) => write!(f, "{y}"),
+            When::Unknown => f.write_str("Date unknown"),
         }
     }
 }
@@ -338,9 +357,11 @@ impl Songs {
     ) -> Songs {
         let groups = songs::group_songs(saves, choices);
         let found = asking.map(|across| songs::doubt_pairs(&groups, choices, across, MOST_DOUBTS)).unwrap_or_default();
+        let real = RealDates::now();
         let mut rows: Vec<(usize, SongRow)> =
-            groups.into_iter().map(|g| SongRow::new(g, gap_months)).enumerate().collect();
-        // Stable, so songs saved at the same moment keep the order they were grouped in.
+            groups.into_iter().map(|g| SongRow::new(g, gap_months, &real)).enumerate().collect();
+        // Stable, so songs saved at the same moment keep the order they were grouped in. A song with no real date
+        // (none) comes after the rest.
         rows.sort_by_key(|(_, r)| std::cmp::Reverse(r.saved));
         // Where each group ended up in the list.
         let mut at = vec![0; rows.len()];
@@ -374,11 +395,11 @@ impl Songs {
     }
 
     /// How many songs were last saved in each year, newest first, for the year strip (every song, whatever the
-    /// filters, so the strip doesn't shrink to the years picked).
+    /// filters, so the strip doesn't shrink to the years picked). A song with no real date is in no year.
     pub fn year_counts(&self) -> Vec<(i32, usize)> {
         let mut counts: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
-        for r in &self.rows {
-            *counts.entry(r.saved.year()).or_default() += 1;
+        for saved in self.rows.iter().filter_map(|r| r.saved) {
+            *counts.entry(saved.year()).or_default() += 1;
         }
         crate::year_strip::strip(counts)
     }
@@ -518,7 +539,7 @@ impl Listed {
 impl View {
     /// Puts the songs shown in `listed`'s order. By the date they keep their time headings (turned round, the oldest
     /// year's comes first); by name or status there are none, songs the same there stay newest first, and a song with
-    /// no status comes last either way round.
+    /// no status, or by the date one with no real date, comes last either way round.
     pub fn put_in_order(&mut self, songs: &Songs, listed: Listed, now: NaiveDateTime) {
         if listed == Listed::default() {
             return;
@@ -537,8 +558,10 @@ impl View {
         }
         if listed.reversed {
             rows.reverse();
-            if listed.by == Order::Status {
-                rows.sort_by_key(|i| status(i) == STATUSES.len());
+            match listed.by {
+                Order::Saved => rows.sort_by_key(|&i| songs.rows[i].saved.is_none()),
+                Order::Status => rows.sort_by_key(|i| status(i) == STATUSES.len()),
+                Order::Name => {}
             }
         }
         self.entries.clear();
@@ -622,7 +645,7 @@ pub struct Filters {
     pub missing: bool,
     /// Archived songs are left out unless their status is picked.
     pub hide_archived: bool,
-    /// Only songs last saved in these years, first to last (the year strip).
+    /// Only songs last saved in these years, first to last (the year strip); a song with no real date is in none.
     pub years: Option<(i32, i32)>,
     /// Only the songs with a save among these, and what the chip calls them ("Using Serum"): the Plugins page's
     /// Show in Songs.
@@ -681,7 +704,7 @@ impl Filters {
             return false;
         }
         if let Some((first, last)) = self.years
-            && !(first..=last).contains(&r.saved.year())
+            && !r.saved.is_some_and(|saved| (first..=last).contains(&saved.year()))
         {
             return false;
         }
@@ -743,10 +766,11 @@ mod tests {
     #[test]
     fn headings_follow_the_newest_save() {
         let now = day(2026, 10, 31);
-        assert_eq!(When::of(day(2026, 10, 28), now).to_string(), "This week");
-        assert_eq!(When::of(day(2026, 10, 2), now).to_string(), "This month");
-        assert_eq!(When::of(day(2026, 3, 1), now).to_string(), "Earlier in 2026");
-        assert_eq!(When::of(day(2019, 3, 1), now).to_string(), "2019");
+        assert_eq!(When::of(Some(day(2026, 10, 28)), now).to_string(), "This week");
+        assert_eq!(When::of(Some(day(2026, 10, 2)), now).to_string(), "This month");
+        assert_eq!(When::of(Some(day(2026, 3, 1)), now).to_string(), "Earlier in 2026");
+        assert_eq!(When::of(Some(day(2019, 3, 1)), now).to_string(), "2019");
+        assert_eq!(When::of(None, now).to_string(), "Date unknown");
 
         let s = songs(&[
             save("Didums_77", day(2026, 10, 30)),
@@ -1026,6 +1050,64 @@ mod tests {
         assert_eq!(view.counts.statuses[at("Idea")], 2);
         let shown = odd.view(&Filters { tags: vec!["dark".into()], ..Filters::default() }, day(2026, 1, 1)).shown;
         assert_eq!((view.counts.tags.get("dark"), shown), (Some(&1), 1));
+    }
+
+    #[test]
+    fn a_song_with_no_real_date_comes_last_in_no_year() {
+        // Saved in 2099 (a clock or a copy that can't be right), or with no date at all: no clue to when, so neither
+        // song is newer than the rest, nor in a year. Didums goes by its saves with a real date, and takes its rating
+        // from the newest of them that has one, not from the one dated 2099.
+        let now = day(2026, 10, 31);
+        let s = songs(&[
+            save("Future", day(2099, 12, 31)),
+            save("Alpha", day(2026, 6, 1)),
+            save("Undated", NaiveDateTime::default()),
+            Save { rating: 5, ..save("Didums_8", day(2099, 1, 1)) },
+            Save { rating: 3, ..save("Didums_7", day(2019, 1, 1)) },
+            save("Didums_9", day(2019, 2, 1)),
+        ]);
+        let lines = |listed: Listed, filters: &Filters| {
+            let mut v = s.view(filters, now);
+            v.put_in_order(&s, listed, now);
+            v.entries
+                .iter()
+                .map(|e| match e {
+                    Entry::Heading(h) => format!("# {h}"),
+                    Entry::Song(i) => s.rows[*i].song.name.clone(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let all = Filters::default();
+        assert_eq!(
+            lines(Listed::default(), &all),
+            ["# Earlier in 2026", "Alpha", "# 2019", "Didums", "# Date unknown", "Future", "Undated"]
+        );
+        // Turned round, they still come last.
+        let oldest_first = Listed { by: Order::Saved, reversed: true };
+        assert_eq!(
+            lines(oldest_first, &all),
+            ["# 2019", "Didums", "# Earlier in 2026", "Alpha", "# Date unknown", "Undated", "Future"]
+        );
+        assert_eq!(s.year_counts(), [(2026, 1), (2019, 1)]);
+        let years = Filters { years: Some((1970, 2099)), ..Filters::default() };
+        assert_eq!(lines(Listed::default(), &years), ["# Earlier in 2026", "Alpha", "# 2019", "Didums"]);
+
+        let row = |name: &str| s.rows.iter().find(|r| r.song.name == name).unwrap();
+        let (future, didums) = (row("Future"), row("Didums"));
+        assert_eq!((future.saved, future.made, future.short_date(now)), (None, None, String::new()));
+        assert_eq!(future.date_tip(), "Date unknown: its saves are dated still to come, or not at all");
+        // The backup line compares the newest save as the backup picks it: of all of them, when none is real.
+        assert_eq!(future.newest_time(), day(2099, 12, 31));
+        assert_eq!(
+            (didums.saved, didums.made, didums.newest_time()),
+            (Some(day(2019, 2, 1)), Some(day(2019, 1, 1)), day(2019, 2, 1))
+        );
+        assert_eq!(didums.date_tip(), "Last saved 1 Feb 2019. First made 1 Jan 2019.");
+        assert_eq!(didums.rating, 3);
+        // A year only finds a song by a real date.
+        let search = |text: &str| Filters { search: text.into(), ..Filters::default() };
+        assert_eq!(lines(Listed::default(), &search("2099")), Vec::<String>::new());
+        assert_eq!(lines(Listed::default(), &search("2019")), ["# 2019", "Didums"]);
     }
 
     #[test]

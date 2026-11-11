@@ -9,6 +9,7 @@ use std::sync::atomic::AtomicBool;
 use std::time::SystemTime;
 
 use chrono::{DateTime, Local, NaiveDate, NaiveDateTime, TimeDelta};
+use mo_formats::dates::RealDates;
 use mo_space::key;
 use mo_space::prints::Prints;
 use mo_space::song::{BackupFolders, CompactKind, CompactSettings, Compare, Elsewhere, SongSave, measure, thin};
@@ -30,11 +31,15 @@ fn day() -> NaiveDateTime {
 
 /// Writes a file with these bytes, last written `hours` after noon on 14 March 2026.
 fn write(dir: &Path, rel: &str, bytes: &[u8], hours: i64) -> String {
+    write_at(dir, rel, bytes, day() + TimeDelta::hours(hours))
+}
+
+/// Writes a file with these bytes, last written `when` (local time).
+fn write_at(dir: &Path, rel: &str, bytes: &[u8], when: NaiveDateTime) -> String {
     let p = dir.join(rel);
     fs::create_dir_all(p.parent().unwrap()).unwrap();
     fs::write(&p, bytes).unwrap();
-    let when = day() + TimeDelta::hours(hours);
-    let local = when.and_local_timezone(Local).single().unwrap();
+    let local = when.and_local_timezone(Local).earliest().unwrap();
     fs::File::options().write(true).open(&p).unwrap().set_modified(SystemTime::from(local)).unwrap();
     p.to_string_lossy().into_owned()
 }
@@ -295,17 +300,20 @@ fn thinning_keeps_the_first_save_the_newest_and_the_last_of_each_sitting() {
         .iter()
         .map(|&h| SongSave { path: format!("C:/Song/S{h}.flp"), size: 1, modified: day() + TimeDelta::hours(h) })
         .collect();
-    let thinned: Vec<&str> = thin(&saves, 3).iter().map(|s| s.path.as_str()).collect();
+    let real = RealDates::now();
+    let thinned: Vec<&str> = thin(&saves, 3, &real).iter().map(|s| s.path.as_str()).collect();
     assert_eq!(thinned, ["C:/Song/S1.flp", "C:/Song/S10.flp"]);
-    assert!(thin(&saves, 0).is_empty());
-    assert!(thin(&saves[..2], 3).is_empty());
+    assert!(thin(&saves, 0, &real).is_empty());
+    assert!(thin(&saves[..2], 3, &real).is_empty());
 }
 
 #[test]
 fn saves_a_copy_wrote_all_at_once_are_not_thinned() {
     let at = |hour: i64, seconds: i64| day() + TimeDelta::hours(hour) + TimeDelta::seconds(seconds);
     let one = |name: &str, modified| SongSave { path: format!("C:/Song/{name}.flp"), size: 1, modified };
-    let thinned = |saves: &[SongSave]| -> Vec<String> { thin(saves, 3).iter().map(|s| s.path.clone()).collect() };
+    let real = RealDates::now();
+    let thinned =
+        |saves: &[SongSave]| -> Vec<String> { thin(saves, 3, &real).iter().map(|s| s.path.clone()).collect() };
     // A copied folder: the copy wrote its six saves within a few seconds, so by time alone four would be thinned.
     let copied: Vec<SongSave> = (1..=6).map(|n| one(&format!("S{n}"), at(9, n))).collect();
     assert_eq!(thinned(&copied), Vec::<String>::new());
@@ -375,8 +383,80 @@ fn the_newest_save_is_never_thinned_even_sharing_its_moment() {
         SongSave { path: "C:/Song/U.flp".into(), size: 1, modified: at(5) },
     ];
     // X is the newest (listed first of the two at 10:00); sorted, it comes before Y, as if from the middle of a sitting.
-    let thinned: Vec<&str> = thin(&saves, 3).iter().map(|s| s.path.as_str()).collect();
+    let thinned: Vec<&str> = thin(&saves, 3, &RealDates::now()).iter().map(|s| s.path.as_str()).collect();
     assert_eq!(thinned, ["C:/Song/U.flp"]);
+}
+
+/// A date no file of yours was really written on: still to come.
+fn to_come() -> NaiveDateTime {
+    NaiveDate::from_ymd_opt(2099, 12, 31).unwrap().and_hms_opt(12, 0, 0).unwrap()
+}
+
+/// The date of a file that has none, out of a zip (or 1970).
+fn no_date() -> NaiveDateTime {
+    NaiveDate::from_ymd_opt(1980, 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap()
+}
+
+#[test]
+fn a_save_with_no_real_date_is_never_thinned_and_the_first_real_one_stays() {
+    // One with no date sorts first and one dated still to come last: neither is when you saved it. By the plain date, A
+    // (your first save) and B were from the middle of a sitting.
+    let one = |name: &str, modified| SongSave { path: format!("C:/Song/{name}.flp"), size: 1, modified };
+    let at = |h: i64| day() + TimeDelta::hours(h);
+    let saves = [one("Z", no_date()), one("A", at(0)), one("B", at(1)), one("C", at(2)), one("F", to_come())];
+    let thinned: Vec<&str> = thin(&saves, 3, &RealDates::now()).iter().map(|s| s.path.as_str()).collect();
+    assert_eq!(thinned, ["C:/Song/B.flp"]);
+    // With none real, none is thinned.
+    let none_real = [one("X", no_date()), one("Y", to_come()), one("Z", to_come() + TimeDelta::hours(1))];
+    assert!(thin(&none_real, 3, &RealDates::now()).is_empty());
+}
+
+#[test]
+fn a_save_dated_still_to_come_isnt_taken_for_the_newest() {
+    let root = fixtures("mo-space-to-come");
+    // The newest real save is in Song: the song's folder is that one, not the folder of an old copy dated 2099.
+    let old = write_at(&root, "Old/Song v1.bwproject", b"old!", to_come());
+    let a = write(&root, "Song/Song v2.bwproject", b"a", 0);
+    let x = write(&root, "Song/Song v3.bwproject", b"same", 1);
+    let y = write_at(&root, "Song/Song v4.bwproject", b"same", to_come());
+    let saves = [
+        SongSave { modified: to_come(), ..save(&old, 0) },
+        save(&a, 0),
+        save(&x, 1),
+        SongSave { modified: to_come(), ..save(&y, 0) },
+    ];
+    let settings = CompactSettings { keep_backups: 5, sitting_hours: 3 };
+    let report = measure(&saves, &[s(&root)], &[], settings, None, &AtomicBool::new(false)).unwrap();
+    assert_eq!(key(&report.folder), key(&s(&root.join("Song"))));
+    // Of the two the same, v3 stays: it's your newest save. v4, dated 2099, is the copy.
+    let lines: Vec<(CompactKind, &str)> =
+        report.items.iter().map(|i| (i.kind, Path::new(&i.path).file_name().unwrap().to_str().unwrap())).collect();
+    assert_eq!(lines, [(CompactKind::SameSave, "Song v4.bwproject")]);
+    assert_eq!(report.items[0].same_as.as_deref(), Some(x.as_str()));
+}
+
+#[test]
+fn an_autosave_with_no_real_date_always_stays() {
+    let root = fixtures("mo-space-autosave-dates");
+    let song = root.join("Night Drive");
+    let v = write(&song, "Night Drive.bwproject", b"song", 9);
+    for n in 0..7 {
+        write(&song, &format!("auto-backups/Night Drive {n}.bwproject"), b"auto", n);
+    }
+    // By the plain date, the one dated 2099 was the newest of all and kept out one of the real newest five, and the
+    // one with no date was the oldest of all, listed first to go.
+    write_at(&song, "auto-backups/Night Drive later.bwproject", b"auto", to_come());
+    write_at(&song, "auto-backups/Night Drive undated.bwproject", b"auto", no_date());
+    let settings = CompactSettings { keep_backups: 5, sitting_hours: 0 };
+    let report = measure(&[save(&v, 9)], &[s(&root)], &[], settings, None, &AtomicBool::new(false)).unwrap();
+    let going: Vec<&str> = report
+        .items
+        .iter()
+        .filter(|i| i.kind == CompactKind::Backup)
+        .map(|i| Path::new(&i.path).file_name().unwrap().to_str().unwrap())
+        .collect();
+    assert_eq!(going, ["Night Drive 1.bwproject", "Night Drive 0.bwproject"]);
+    assert_eq!(report.backups, 9 * 4);
 }
 
 #[test]
