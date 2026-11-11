@@ -484,16 +484,25 @@ pub struct KeyLine {
 
 /// The Shortcuts tab's lines: the keys that work everywhere, then each page's own, each under its page's name. An
 /// app-wide action that isn't built yet isn't listed, as on the key sheet, so every key here works (the whole-app
-/// review of 10 Nov, X3-1).
-pub fn key_lines(keys: &crate::shortcuts::Shortcuts) -> Vec<KeyLine> {
+/// review of 10 Nov, X3-1). With words in `search`, only the actions with every word in what they do, their key or
+/// their page's name, capitals aside, and only the pages that have one (the UX review of 10 Nov, C3: about 85 keys
+/// in one list).
+pub fn key_lines(keys: &crate::shortcuts::Shortcuts, search: &str) -> Vec<KeyLine> {
+    let words: Vec<String> = search.split_whitespace().map(str::to_lowercase).collect();
     let mut out = Vec::new();
     let mut last = "";
     for (page, a) in crate::shortcuts::all_actions().filter(|(page, a)| crate::shortcuts::is_listed(page, a.id)) {
+        let key = keys.key_of(a.id);
+        if !words.is_empty() {
+            let hay = format!("{}\n{}\n{}", a.what, key, page).to_lowercase();
+            if !words.iter().all(|w| hay.contains(w)) {
+                continue;
+            }
+        }
         if page != last {
             out.push(KeyLine { page, id: "", what: "", key: String::new(), changed: false, starts: String::new() });
             last = page;
         }
-        let key = keys.key_of(a.id);
         out.push(KeyLine {
             page: "",
             id: a.id,
@@ -870,8 +879,16 @@ mod tests {
         let mut keys = crate::shortcuts::Shortcuts::default();
         keys.set("app.fullScreen", "F6");
         keys.set("sounds.toBitwig", "");
-        let lines = key_lines(&keys);
+        let lines = key_lines(&keys, "");
         assert_eq!(lines[0].page, crate::shortcuts::EVERYWHERE);
+        // A search keeps the actions with every word, by what they do, their key or their page, under their pages.
+        let found = key_lines(&keys, "  ctrl+f ");
+        assert!(found.iter().any(|l| l.id == "app.search"));
+        assert!(found.len() < lines.len() && !found[0].page.is_empty());
+        assert!(found.iter().filter(|l| l.page.is_empty()).all(|l| l.key.to_lowercase().contains("ctrl+f")));
+        let sounds = key_lines(&keys, "SOUNDS bitwig");
+        assert!(sounds.iter().any(|l| l.id == "sounds.toBitwig"));
+        assert!(key_lines(&keys, "no such key anywhere").is_empty());
         let heads: Vec<&str> = lines.iter().filter(|l| !l.page.is_empty()).map(|l| l.page).collect();
         let pages = ["Everywhere", "Songs", "Sounds", "Presets", "Curves", "MIDI", "Plugins", "Space", "Backup"];
         assert_eq!(heads, pages);

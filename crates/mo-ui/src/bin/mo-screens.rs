@@ -2756,6 +2756,18 @@ fn settings_shots(
     data.invoke_tab_picked(3);
     capture(window);
     shots.push(("settings-shortcuts.png".into(), capture(window)));
+    // The mouse on a line's "No key" button: the line's two buttons show, and stay while the mouse is on one.
+    hover(window, KEY_LINE_NO_KEY.0, KEY_LINE_NO_KEY.1);
+    let pointed = capture(window);
+    hover(window, -1.0, -1.0);
+    shots.push(("settings-shortcuts-pointed.png".into(), pointed));
+    // A search leaves only the actions with its words, under their pages.
+    data.set_keys_search("bitwig".into());
+    data.invoke_keys_search_edited("bitwig".into());
+    let found = capture(window);
+    shots.push(("settings-shortcuts-search.png".into(), found));
+    data.set_keys_search("".into());
+    data.invoke_keys_search_edited("".into());
     data.invoke_tab_picked(4);
     capture(window);
     shots.push(("settings-developer.png".into(), capture(window)));
@@ -2798,6 +2810,9 @@ fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
     window.dispatch_event(slint::platform::WindowEvent::PointerPressed { position, button });
     window.dispatch_event(slint::platform::WindowEvent::PointerReleased { position, button });
 }
+
+/// Settings, Shortcuts: where the fourth line's "No key" button shows once the mouse is on the line.
+const KEY_LINE_NO_KEY: (f32, f32) = (1218.0, 425.0);
 
 /// The Sounds page's Tempo slider with no filter picked: its track's height in the window, where its higher handle
 /// rests, and where 150 BPM is along it.

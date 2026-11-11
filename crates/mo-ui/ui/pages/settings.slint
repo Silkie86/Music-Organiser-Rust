@@ -3,7 +3,7 @@
 // parts from studio.slint; mo-app decides every word (mo_app::settings), mo-ui/src/settings.rs fills it.
 import { AboutSlint } from "std-widgets.slint";
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, StudioButton, Segmented, MenuChip, PageHeader, Caps, Well, TabBar, EmptyState, Dot, ToggleChip, FolderRow } from "../studio.slint";
+import { Theme, Type, Space, StudioButton, SearchBox, HoverSense, Segmented, MenuChip, PageHeader, Caps, Well, TabBar, EmptyState, Dot, ToggleChip, FolderRow } from "../studio.slint";
 
 // One theme to pick, drawn as a little picture of it in its own colours.
 export struct ThemeCardInfo {
@@ -155,6 +155,9 @@ export global SettingsData {
     in property <string> keys-note;
     in property <string> keys-message;
     in property <bool> keys-changed;
+    // The words typed in the Shortcuts search box: the list then holds only the actions with them.
+    in-out property <string> keys-search;
+    callback keys-search-edited(string);
     callback listen(string);
     callback clear-key(string);
     callback default-key(string);
@@ -647,39 +650,68 @@ component FoldersTab inherits VerticalLayout {
 }
 
 // An action and its key: click the key to give it another.
-component KeyLineRow inherits HorizontalLayout {
+// An action and its key. A key that isn't the one it started with has a lit dot before it, and its Default button
+// stays in sight; the other lines show "No key" and "Default" only under the mouse or while listening, so the list
+// reads as actions and keys, not as three columns of buttons (the UX review of 10 Nov, C3).
+component KeyLineRow inherits HoverSense {
     in property <KeyLineInfo> line;
-    spacing: Space.sm;
-    Text {
-        horizontal-stretch: 1;
-        min-width: 0px;
-        text: root.line.what;
-        color: Theme.text;
-        font-size: Type.body;
-        vertical-alignment: center;
-        overflow: elide;
-    }
-    StudioButton {
-        horizontal-stretch: 0;
-        width: 150px;
-        main: SettingsData.listening == root.line.id;
-        text: SettingsData.listening == root.line.id ? "Press a key…" : root.line.key;
-        tip: "Click, then press the key you want";
-        clicked => { SettingsData.listen(root.line.id); }
-    }
-    StudioButton {
-        horizontal-stretch: 0;
-        text: "No key";
-        enabled: root.line.key != "None";
-        tip: "Take its key away";
-        clicked => { SettingsData.clear-key(root.line.id); }
-    }
-    StudioButton {
-        horizontal-stretch: 0;
-        text: "Default";
-        enabled: root.line.changed;
-        tip: root.line.starts;
-        clicked => { SettingsData.default-key(root.line.id); }
+    property <bool> listening: SettingsData.listening == root.line.id;
+    property <bool> pointed: self.hovered || no-key.hovered || default.hovered || root.listening;
+    height: 32px;
+    border-radius: Theme.radius;
+    background: self.pointed ? Theme.hover.transparentize(50%) : transparent;
+    HorizontalLayout {
+        padding-left: Space.sm;
+        spacing: Space.sm;
+        Text {
+            horizontal-stretch: 1;
+            min-width: 0px;
+            text: root.line.what;
+            color: Theme.text;
+            font-size: Type.body;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        default := HoverSense {
+            horizontal-stretch: 0;
+            width: default-button.min-width;
+            default-button := StudioButton {
+                width: 100%;
+                visible: root.line.changed;
+                text: "Default";
+                tip: root.line.starts;
+                clicked => { SettingsData.default-key(root.line.id); }
+            }
+        }
+        no-key := HoverSense {
+            horizontal-stretch: 0;
+            width: no-key-button.min-width;
+            no-key-button := StudioButton {
+                width: 100%;
+                visible: root.pointed && root.line.key != "None";
+                text: "No key";
+                tip: "Take its key away";
+                clicked => { SettingsData.clear-key(root.line.id); }
+            }
+        }
+        VerticalLayout {
+            horizontal-stretch: 0;
+            alignment: center;
+            width: 8px;
+            Rectangle {
+                height: 8px;
+                border-radius: 4px;
+                background: root.line.changed ? Theme.accent : transparent;
+            }
+        }
+        StudioButton {
+            horizontal-stretch: 0;
+            width: 150px;
+            main: root.listening;
+            text: root.listening ? "Press a key…" : root.line.key;
+            tip: "Click, then press the key you want";
+            clicked => { SettingsData.listen(root.line.id); }
+        }
     }
 }
 
@@ -694,6 +726,13 @@ component ShortcutsTab inherits VerticalLayout {
     }
     HorizontalLayout {
         spacing: Space.md;
+        SearchBox {
+            horizontal-stretch: 0;
+            width: 320px;
+            hint: "Search actions and keys";
+            text <=> SettingsData.keys-search;
+            edited(words) => { SettingsData.keys-search-edited(words); }
+        }
         Text {
             horizontal-stretch: 1;
             text: SettingsData.keys-message;
@@ -723,6 +762,11 @@ component ShortcutsTab inherits VerticalLayout {
                     Caps { text: l.page; }
                 }
                 if l.page == "": KeyLineRow { line: l; }
+            }
+            if SettingsData.key-lines.length == 0: Text {
+                text: "No action or key has those words.";
+                color: Theme.muted;
+                font-size: Type.body;
             }
         }
     }

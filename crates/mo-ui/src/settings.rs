@@ -44,6 +44,8 @@ struct Page {
     folders_asked: u64,
     /// The action Shortcuts is listening for a new key for.
     listening: Option<&'static str>,
+    /// The words in Shortcuts' search box: only the actions with them show.
+    keys_search: String,
     /// What the last key change did.
     keys_message: String,
     /// How Bitwig's link stood when last checked, whether a check is running, and how many were asked for (newest
@@ -199,6 +201,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
             unsaved: false,
             folders_asked: 0,
             listening: None,
+            keys_search: String::new(),
             keys_message: String::new(),
             bitwig: page::bitwig_checking(),
             folder_lists: Vec::new(),
@@ -484,6 +487,17 @@ pub fn connect(app: &AppWindow, setup: Setup) {
                 // A second click on the one listening stops it.
                 p.listening = if p.listening == id { None } else { id };
                 p.keys_message.clear();
+            }
+        });
+        if let Some(app) = weak.upgrade() {
+            show(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_keys_search_edited(move |words| {
+        PAGE.with(|p| {
+            if let Some(p) = p.borrow_mut().as_mut() {
+                p.keys_search = words.to_string();
             }
         });
         if let Some(app) = weak.upgrade() {
@@ -1411,7 +1425,7 @@ fn show(app: &AppWindow) {
         data.set_facts(ModelRc::new(VecModel::from(facts)));
 
         let keys = crate::shortcuts();
-        let lines: Vec<KeyLineInfo> = page::key_lines(&keys)
+        let lines: Vec<KeyLineInfo> = page::key_lines(&keys, &p.keys_search)
             .into_iter()
             .map(|l| KeyLineInfo {
                 page: l.page.into(),
