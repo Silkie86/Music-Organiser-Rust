@@ -113,10 +113,8 @@ pub fn render_together(font: &Font, parts: &[Part]) -> Result<AudioData, String>
     settings.enable_reverb_and_chorus = true;
     let mut synth = Synthesizer::new(font, &settings).map_err(|e| format!("The synth wouldn't start: {e:?}"))?;
     let channels = channels_of(parts);
-    for (part, &channel) in parts.iter().zip(&channels) {
-        if !part.drums {
-            synth.process_midi_message(channel, 0xC0, i32::from(part.program & 0x7f), 0);
-        }
+    for (channel, program) in sounds_of(parts, &channels) {
+        synth.process_midi_message(channel, 0xC0, i32::from(program), 0);
     }
 
     // Every note on and off, for both times round: (frame, off before on at the same frame, channel, key, velocity).
@@ -219,6 +217,19 @@ fn channels_of(parts: &[Part]) -> Vec<i32> {
             channel
         })
         .collect()
+}
+
+/// The sound each channel is set to, once a channel: that of the first part given it ([`channels_of`]), so the sounds
+/// past the fifteenth, which share the last channel, don't change the sound of the part that had it first. Drums
+/// have their own channel and no sound to set.
+fn sounds_of(parts: &[Part], channels: &[i32]) -> Vec<(i32, u8)> {
+    let mut sounds: Vec<(i32, u8)> = Vec::new();
+    for (part, &channel) in parts.iter().zip(channels) {
+        if !part.drums && sounds.iter().all(|(set, _)| *set != channel) {
+            sounds.push((channel, part.program & 0x7f));
+        }
+    }
+    sounds
 }
 
 /// How loud a loop is where it has sound: the root mean square of its frames, the silent ones (its rests) left out,
@@ -467,6 +478,12 @@ mod tests {
         assert_eq!(channels[..10], [0, 1, 2, 3, 4, 5, 6, 7, 8, 10]);
         assert_eq!(channels[10..], [11, 12, 13, 14, 15, 15, 15, 15, 15, 15]);
         assert!(channels_of(&[]).is_empty());
+        // Each channel is told its sound once, by the first part given it: the fifteenth sound keeps the last
+        // channel's, whatever the sounds after it are. Drums' channel is told nothing.
+        let sounds = sounds_of(&many, &channels);
+        assert_eq!(sounds.len(), 15);
+        assert_eq!((sounds[0], sounds[9], sounds[14]), ((0, 0), (10, 9), (15, 14)));
+        assert_eq!(sounds_of(&parts, &channels_of(&parts)), [(0, 4), (1, 38), (2, 80)]);
     }
 
     #[test]

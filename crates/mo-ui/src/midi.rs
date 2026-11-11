@@ -3083,13 +3083,45 @@ fn song_gain(part: f32, song: f32) -> f32 {
 /// The song's bars made into sound last ([`song_loop`]), by the SoundFont and the bars: every part of a list plays
 /// with the same ones, so stepping down the list makes each part's own loop and no more. One loop at the most (two
 /// minutes of sound), let go when nothing plays with a song any more ([`forget_song_loop`]).
-static SONG_LOOP: std::sync::Mutex<Option<(PathBuf, Arc<SongBars>, Arc<mo_audio::AudioData>)>> =
-    std::sync::Mutex::new(None);
+static SONG_LOOP: std::sync::Mutex<SongKept> = std::sync::Mutex::new(SongKept { forgotten: 0, kept: None });
+
+/// A song's loop as it's kept: the SoundFont's path, the bars, and their sound.
+type SongSound = (PathBuf, Arc<SongBars>, Arc<mo_audio::AudioData>);
+
+/// What [`SONG_LOOP`] holds: the loop, and how many times it has been let go, so that a loop still being made on
+/// the player's thread when that happens isn't kept after all.
+#[derive(Default)]
+struct SongKept {
+    forgotten: u64,
+    kept: Option<SongSound>,
+}
+
+impl SongKept {
+    /// The loop kept, when it's of these bars made with this SoundFont.
+    fn of(&self, font_path: &Path, with: &Arc<SongBars>) -> Option<Arc<mo_audio::AudioData>> {
+        let (path, bars, sound) = self.kept.as_ref()?;
+        (path == font_path && (Arc::ptr_eq(bars, with) || bars == with)).then(|| Arc::clone(sound))
+    }
+
+    /// Keeps a loop whose making started when `forgotten` was what it is now; one let go of meanwhile is dropped.
+    fn keep(&mut self, forgotten: u64, sound: SongSound) {
+        if self.forgotten == forgotten {
+            self.kept = Some(sound);
+        }
+    }
+
+    /// Lets go: gives back the loop to free, and any being made now won't be kept.
+    fn forget(&mut self) -> Option<SongSound> {
+        self.forgotten = self.forgotten.wrapping_add(1);
+        self.kept.take()
+    }
+}
 
 /// Lets go of the song's loop kept for the next part ([`SONG_LOOP`]): "Play with the song" went off, or the list on
 /// show isn't "Fits my song"'s.
 fn forget_song_loop() {
-    if let Some(kept) = SONG_LOOP.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+    let kept = SONG_LOOP.lock().unwrap_or_else(std::sync::PoisonError::into_inner).forget();
+    if let Some(kept) = kept {
         background::free_later(kept);
     }
 }
@@ -3119,7 +3151,10 @@ fn make_loop(ask: &PlayAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<m
         None => tempo_of(&ask.part.from, &ask.source, &ask.library).bpm(),
     };
     let alone = mo_audio::gm::render_loop(&font, &gm_part(&gm_notes(&heard), length, tempo, &ask.sound))?;
-    let Some(with) = &ask.with else { return Ok(alone) };
+    // Nothing of the song to play (the page never asks for that): alone, with nothing to say about it.
+    let Some(with) = ask.with.as_ref().filter(|with| with.length > 0 && !with.voices.is_empty()) else {
+        return Ok(alone);
+    };
     match with_song(&font, &ask.font, with, &alone, length, tempo) {
         Ok(both) => Ok(both),
         Err(e) => {
@@ -3176,13 +3211,13 @@ fn song_loop(
     font_path: &Path,
     with: &Arc<SongBars>,
 ) -> Result<Arc<mo_audio::AudioData>, String> {
-    let same = |kept: &(PathBuf, Arc<SongBars>, Arc<mo_audio::AudioData>)| {
-        kept.0 == font_path && (Arc::ptr_eq(&kept.1, with) || kept.1 == *with)
+    let forgotten = {
+        let song = SONG_LOOP.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(kept) = song.of(font_path, with) {
+            return Ok(kept);
+        }
+        song.forgotten
     };
-    if let Some(kept) = SONG_LOOP.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().filter(|k| same(k))
-    {
-        return Ok(Arc::clone(&kept.2));
-    }
     let notes: Vec<Vec<mo_audio::gm::Note>> = with.voices.iter().map(|voice| gm_notes(&voice.notes)).collect();
     let parts: Vec<mo_audio::gm::Part> = with
         .voices
@@ -3191,8 +3226,10 @@ fn song_loop(
         .map(|(voice, notes)| gm_part(notes, with.length, with.bpm(), &voice.sound))
         .collect();
     let made = Arc::new(mo_audio::gm::render_together(font, &parts)?);
-    *SONG_LOOP.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
-        Some((font_path.to_owned(), Arc::clone(with), Arc::clone(&made)));
+    SONG_LOOP
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .keep(forgotten, (font_path.to_owned(), Arc::clone(with), Arc::clone(&made)));
     Ok(made)
 }
 
@@ -4095,12 +4132,15 @@ mod tests {
         // A bar at 100 beats a minute is 105,840 frames.
         assert_eq!((together.len(), together.sample_rate), (12 * 105_840, mo_audio::gm::RATE));
         // The song's loop is kept for the next part of the list: the same one again makes only the part's.
-        let kept = SONG_LOOP.lock().unwrap().clone().unwrap();
+        let kept = SONG_LOOP.lock().unwrap().kept.clone().unwrap();
         assert!(kept.0 == font_path && Arc::ptr_eq(&kept.1, &with) && kept.2.len() == 6 * 105_840);
         let started = Instant::now();
         let again = make_loop(&ask(Some(Arc::new((*with).clone()))), &mut None).unwrap();
         println!("first {first:?}, with the song's loop kept {:?}", started.elapsed());
-        assert!(Arc::ptr_eq(&SONG_LOOP.lock().unwrap().as_ref().unwrap().2, &kept.2), "the same bars: not made again");
+        assert!(
+            Arc::ptr_eq(&SONG_LOOP.lock().unwrap().kept.as_ref().unwrap().2, &kept.2),
+            "the same bars: not made again"
+        );
         assert_eq!(again.channels, together.channels);
 
         // What's heard is the part at the song's tempo and the song's loop under it, turned down until it's a little
@@ -4135,7 +4175,43 @@ mod tests {
         assert!(alone.len() != four || tempo_of(&ask(None).part.from, &e.phrase.source, Path::new("")).bpm() == 100.0);
         // The song's loop is let go once nothing plays with a song.
         forget_song_loop();
-        assert!(SONG_LOOP.lock().unwrap().is_none());
+        assert!(SONG_LOOP.lock().unwrap().kept.is_none());
+    }
+
+    /// The song's loop is kept for the next part of the list, by its bars and the SoundFont; one let go while it was
+    /// still being made isn't kept after all.
+    #[test]
+    fn a_songs_loop_let_go_while_its_made_isnt_kept() {
+        let bars = |tempo: f64| {
+            Arc::new(SongBars {
+                voices: Vec::new(),
+                length: 4 * mo_midi::BAR,
+                bar: mo_midi::BAR,
+                tempo: Some(tempo),
+                wants: Wants::Tune,
+                names: String::new(),
+                bars: 0..4,
+            })
+        };
+        let (with, other) = (bars(120.0), bars(90.0));
+        let sound = Arc::new(mo_audio::AudioData::default());
+        let font = Path::new("a.sf2");
+        let made = |with: &Arc<SongBars>| (font.to_owned(), Arc::clone(with), Arc::clone(&sound));
+        let mut song = SongKept::default();
+        // Made with nothing let go meanwhile: kept, for the same bars (the very same, or read again) and SoundFont.
+        let started = song.forgotten;
+        song.keep(started, made(&with));
+        assert!(song.of(font, &with).is_some() && song.of(font, &Arc::new((*with).clone())).is_some());
+        assert!(song.of(font, &other).is_none() && song.of(Path::new("b.sf2"), &with).is_none());
+        // Let go while the next was being made: that one isn't kept, and the one before is given back to free.
+        let started = song.forgotten;
+        assert!(song.forget().is_some());
+        song.keep(started, made(&other));
+        assert!(song.kept.is_none() && song.forget().is_none());
+        // The next made after that is kept again.
+        let started = song.forgotten;
+        song.keep(started, made(&other));
+        assert!(song.of(font, &other).is_some());
     }
 
     #[test]
