@@ -175,13 +175,22 @@ fn start(path: PathBuf, details: LiveDetails) -> std::io::Result<mpsc::Sender<sl
                 return;
             }
         };
+        let offered = fit_songs(&songs);
         let _ = weak.upgrade_in_event_loop(move |app| {
             show(&app, songs, years);
             crate::finder::add_source(&app, "songs", found);
+            crate::midi::songs_offered(&app, offered);
         });
         watch(&mut live, &weak);
     })?;
     Ok(window)
+}
+
+/// The songs the MIDI page's "Fits my song" offers (the few saved last), from a list as it was just made: worked out
+/// here, on the page's thread, and given to the MIDI page with each list, so it follows the songs you save without
+/// reading the library itself.
+fn fit_songs(songs: &Songs) -> Vec<mo_app::midi_fits::SongChoice> {
+    mo_app::midi_fits::song_choices(songs.rows.iter().map(|r| &r.song), &songs.real)
 }
 
 /// Reads the library at `path` and makes the page's list from it. Why not, when it can't be read.
@@ -468,9 +477,11 @@ fn watch(live: &mut Live, weak: &slint::Weak<AppWindow>) {
         let songs = live.songs();
         let found = Arc::new(finder::songs(&songs, Local::now().naive_local()));
         let years = songs.year_counts();
+        let offered = fit_songs(&songs);
         let _ = weak.upgrade_in_event_loop(move |app| {
             show_again(&app, songs, years);
             crate::finder::add_source(&app, "songs", found);
+            crate::midi::songs_offered(&app, offered);
             if let Some(Err(why)) = given {
                 log::warning("Songs", &format!("Couldn't keep what the song was given: {why}"));
                 FEED.with(|f| {

@@ -3,7 +3,7 @@
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, FilterList, FilterColumn, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, MenuChip, FilterList, FilterColumn, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
 
 // One part in the list.
 export struct MidiLine {
@@ -119,6 +119,21 @@ export global MidiData {
     in property <string> target;
     callback clear-target();
     in property <string> result;
+    // "Fits my song": the list is the parts that go with a song you're working on, the best first (mo-app's
+    // midi_fits). The songs offered, the one saved last first; the one picked ("" while it's off); and what's looked
+    // for, as a place in `fit-wants-words` (parts to play over the song's chords, or chords for its melody; -1 until
+    // the song has been read).
+    in property <[string]> fit-songs;
+    in property <string> fit-song;
+    in property <int> fit-wants: -1;
+    in property <[string]> fit-wants-words;
+    callback fit-song-picked(string);
+    callback fit-wants-picked(int);
+    // Said in the list's place while it has no lines of "Fits my song": it's looking, no part fits, or the search
+    // couldn't be made ("" otherwise). And whether fewer filters could give it lines, so clearing them is offered.
+    in property <string> fit-none-title;
+    in property <string> fit-none-text;
+    in property <bool> fit-none-filters;
 
     in property <[YearBar]> years;
     // The picked years, as places in `years` (-1 for none).
@@ -771,6 +786,30 @@ export component MidiPage inherits Rectangle {
         HorizontalLayout {
             spacing: Space.sm;
             vertical-stretch: 0;
+            // "Fits my song": its chip picks the song (and Off), lit while it's on; then what's looked for, two
+            // joined chips with one lit. The list's own line follows, as it does the "parts like this one" chip.
+            if MidiData.fit-songs.length > 0 || MidiData.fit-song != "": VerticalLayout {
+                alignment: center;
+                MenuChip {
+                    name: "Fits my song";
+                    value: MidiData.fit-song;
+                    choices: MidiData.fit-songs;
+                    any-text: "Off";
+                    picked(song) => { MidiData.fit-song-picked(song); }
+                }
+            }
+            if MidiData.fit-song != "": VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    for words[i] in MidiData.fit-wants-words: ToggleChip {
+                        text: words;
+                        on: MidiData.fit-wants == i;
+                        joined-left: i > 0;
+                        joined-right: i + 1 < MidiData.fit-wants-words.length;
+                        clicked => { MidiData.fit-wants-picked(i); }
+                    }
+                }
+            }
             // Only the parts like this one: the shared chip, as on the other pages; a click shows them all again.
             if MidiData.target != "": VerticalLayout {
                 alignment: center;
@@ -830,9 +869,13 @@ export component MidiPage inherits Rectangle {
                     }
                     Well {
                         if MidiData.empty-title != "" || MidiData.shown == 0: EmptyState {
-                            title: MidiData.empty-title != "" ? MidiData.empty-title : "No parts match";
-                            text: MidiData.empty-title != "" ? MidiData.empty-text : "Try fewer filters or other words.";
-                            action: MidiData.empty-title == "" && MidiData.any-filter ? "Clear the filters" : "";
+                            title: MidiData.empty-title != "" ? MidiData.empty-title
+                                : MidiData.fit-none-title != "" ? MidiData.fit-none-title : "No parts match";
+                            text: MidiData.empty-title != "" ? MidiData.empty-text
+                                : MidiData.fit-none-title != "" ? MidiData.fit-none-text : "Try fewer filters or other words.";
+                            // Not where the filters aren't why the list is empty (a song that can't be read).
+                            action: MidiData.empty-title == "" && MidiData.any-filter
+                                && (MidiData.fit-none-title == "" || MidiData.fit-none-filters) ? "Clear the filters" : "";
                             act => { MidiData.clear(); }
                         }
                         if MidiData.empty-title == "" && MidiData.shown > 0: ListBox {
