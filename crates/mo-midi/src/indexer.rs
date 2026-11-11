@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::sync_channel;
 use std::time::{Duration, Instant};
 
+use mo_formats::NoteEvent;
 use mo_formats::case;
 use mo_formats::dates::RealDates;
 
@@ -120,6 +121,9 @@ pub struct Summary {
     pub rekeyed: usize,
     /// Sets of notes given their shape (the same in any key), kept before the index kept shapes.
     pub shaped: usize,
+    /// Sets of notes given their slots (what a search for parts that fit a song looks at first), kept before the
+    /// index kept slots or by another version of them.
+    pub slots: usize,
     /// Stopped before the end, because a newer run was wanted.
     pub stopped: bool,
 }
@@ -236,7 +240,7 @@ pub fn run(
 }
 
 /// What's done once the files are read: notes no file has any more go, keys are read again where the key finder got
-/// better, and notes kept before shapes were get theirs.
+/// better, and notes kept before shapes or slots were get theirs.
 fn after_reading(
     store: &mut MidiStore,
     pool: &rayon::ThreadPool,
@@ -254,36 +258,64 @@ fn after_reading(
         summary.shaped = shaped;
         summary.stopped = !finished;
     }
+    if !summary.stopped {
+        let (slots, finished) = fill_slots(store, pool, stop)?;
+        summary.slots = slots;
+        summary.stopped = !finished;
+    }
     Ok(())
 }
 
-/// Sets of notes given their shape at once.
-const SHAPE_BATCH: usize = 2_000;
+/// Sets of notes given something made from them (their shape, their slots) at once.
+const FILL_BATCH: usize = 2_000;
 
-/// Works out the shape (the same in every key) of the notes saved before the index kept shapes, from the notes kept
-/// in the index: no file is opened. Quick (a hash a set of notes), on `pool`, a batch at a time; `stop` ends it after
-/// the batch it's on. Gives how many were worked out and whether it got to the end.
-fn fill_shapes(store: &mut MidiStore, pool: &rayon::ThreadPool, stop: &AtomicBool) -> Result<(usize, bool), MidiError> {
-    if store.unshaped_count()? == 0 {
-        return Ok((0, true));
-    }
+/// Makes something from each set of notes that has none of it yet, from the notes kept in the index: no file is
+/// opened. `without` gives the next of those after a set of notes (by id) with their notes, `make` makes one's (on
+/// `pool`), `save` keeps a batch's. `stop` ends it after the batch it's on. Gives how many were made and whether it
+/// got to the end.
+fn fill<T: Send>(
+    store: &mut MidiStore,
+    pool: &rayon::ThreadPool,
+    stop: &AtomicBool,
+    without: impl Fn(&MidiStore, i64, usize) -> Result<Vec<(i64, Vec<NoteEvent>)>, MidiError>,
+    make: impl Fn(&[NoteEvent]) -> T + Sync,
+    save: impl Fn(&mut MidiStore, &[(i64, T)]) -> Result<(), MidiError>,
+) -> Result<(usize, bool), MidiError> {
     let (mut done, mut after) = (0, 0);
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok((done, false));
         }
-        let unshaped = store.unshaped(after, SHAPE_BATCH)?;
-        let Some(&(last, _)) = unshaped.last() else {
+        let batch = without(store, after, FILL_BATCH)?;
+        let Some(&(last, _)) = batch.last() else {
             return Ok((done, true));
         };
         after = last;
-        let shapes: Vec<(i64, Option<i64>)> = pool.install(|| {
+        let made: Vec<(i64, T)> = pool.install(|| {
             use rayon::prelude::*;
-            unshaped.par_iter().map(|(id, notes)| (*id, crate::analyser::shape_of(notes))).collect()
+            batch.par_iter().map(|(id, notes)| (*id, make(notes))).collect()
         });
-        store.save_shapes(&shapes)?;
-        done += shapes.len();
+        save(store, &made)?;
+        done += made.len();
     }
+}
+
+/// Works out the shape (the same in every key) of the notes saved before the index kept shapes ([`fill`]). Quick: a
+/// hash a set of notes.
+fn fill_shapes(store: &mut MidiStore, pool: &rayon::ThreadPool, stop: &AtomicBool) -> Result<(usize, bool), MidiError> {
+    if store.unshaped_count()? == 0 {
+        return Ok((0, true));
+    }
+    fill(store, pool, stop, MidiStore::unshaped, crate::analyser::shape_of, MidiStore::save_shapes)
+}
+
+/// Works out the slots (for a search's first look) of the notes saved before the index kept slots, or whose slots
+/// another [`crate::fit::SLOTS_VERSION`] made ([`fill`]). Quick: a few microseconds a set of notes.
+fn fill_slots(store: &mut MidiStore, pool: &rayon::ThreadPool, stop: &AtomicBool) -> Result<(usize, bool), MidiError> {
+    if store.without_slots_count()? == 0 {
+        return Ok((0, true));
+    }
+    fill(store, pool, stop, MidiStore::without_slots, crate::fit::slots_of, MidiStore::save_slots)
 }
 
 /// Sets of notes read again at once, for their key.

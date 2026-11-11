@@ -124,9 +124,23 @@ the next PR step by step). Solomon wants the highest effort here.
   move that makes it fit. The picked bars go round as picked, a bar of rest too. Known gaps: an FL sampler channel's
   notes aren't pitches the project vouches for (`Playing::sample`: left out unless picked); a library part's length
   is only known from its notes. (The FL arrangement layouts the Songs preview draws didn't mark a channel that's
-  switched off: PR #476 marks it muted.) Next: try every part of the library against it (a quick pass over what the
-  catalogue holds, then this close look at the best), then a list on the MIDI page and sending the part found into
-  the project.
+  switched off: PR #476 marks it muted.)
+- A first look for searching the whole library (`mo_harmony::together::first_look`, 2026-11-11): the close look
+  needs each part's notes from disk, so a search sorts every part first by a little kept in memory. Measured
+  (`theorybench pairs --quick`): what the catalogue holds today (which notes a part plays, with no timing) is no
+  better than chance; how long each pitch class sounds in every two quarter notes (`slots_of`, 12 bytes a slot) is
+  enough. A tune for chords: keep the best 2 in 100 (`Backing::outline`, about a microsecond a part). Chords for a
+  tune: keep the best 10 in 100 (`Outline::guessed`, 3 to 6 microseconds).
+- The MIDI index keeps each set of notes' slots for that first look (`slots` in `midi-index.db`,
+  `mo_midi::store::slots`, 2026-11-11): filled when notes are saved, and after a read for notes saved before the
+  table was there or by another `fit::SLOTS_VERSION` (`indexer::fill_slots`, from the notes the index keeps, no
+  file opened; `SLOTS_VERSION` is `mo_harmony::SLOTS_VERSION` and how `mo-midi` asks, like `keys::VERSION`). Kept
+  small: two bytes a slot for which pitch classes sound and a byte for each that does. A search loads them all once
+  (`MidiStore::slots`, a `SlotBook` by note hash, about 200 bytes a part in memory). Whoever keeps a book has to
+  load it again after a read that saved parts or made slots (`Summary::slots`): the MIDI page's "did anything
+  change" check after a read doesn't count `slots` yet, and must once it keeps a book. The fill tells no progress
+  (like the shapes one: seconds, once). Not built yet: the search itself (first look over all, close look at the
+  kept share, off the window's thread), a list on the MIDI page, and sending the part found into the project.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db
 writes once trusted. A decoder panic on a damaged file is caught with `mo_catch::catch`: one warning line in the log,

@@ -47,7 +47,7 @@ theorybench chordcal <labelled.jsonl>... [--weights <weights.json>] [--folds <fo
 theorybench candidates <labelled.jsonl>... [--inputs <kinds>] [--misses <file>]
 theorybench tables <labelled.jsonl>... [--write <tables.rs>]
 theorybench pairs <labelled.jsonl>... [--bars <n>] [--others <n>] [--folds <folds>] [--set <name>=<x>,...]
-                  [--fit <steps> [--tie <worth>=<worth>,...] [--without <worths>] [--pull <x>]]
+                  [--fit <steps> [--tie <worth>=<worth>,...] [--without <worths>] [--pull <x>]] [--quick <n>]
 
   keys       how often each key finder names the labelled key, on whole songs and on clips (8 bars long unless --bars
              gives other lengths, such as 1,2,4,8,16)
@@ -145,7 +145,10 @@ theorybench pairs <labelled.jsonl>... [--bars <n>] [--others <n>] [--folds <fold
              lets fitted numbers ship
   --tie      keeps a worth the same as another through the fit (colour=fifth)
   --without  holds these worths at 0 through the fit (above3,above4,above7,above8,above9)
-  --pull     how hard the fit pulls the worths towards 0 (1e-4)";
+  --pull     how hard the fit pulls the worths towards 0 (1e-4)
+  --quick    measures the first look a search takes at every part instead (mo-harmony's Outline): for about this
+             many stretches, how many of the close look's best are still there when a first look keeps only a share
+             of the parts, and how long each look takes a part";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();

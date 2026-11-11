@@ -37,4 +37,7 @@ pub use keyfind::{
 pub use notes::{Grid, Note, Part, Role};
 pub use pitch::{PcSet, PerPitch, PitchClass};
 pub use spell::{Degree, Spelled, Tpc};
-pub use together::{Backing, KINDS, LineUp, Shares, Sits, Sitting, TOGETHER_VERSION, WORTH_NAMES, WORTHS, shares, sit};
+pub use together::{
+    Backing, KINDS, LineUp, MOST_SLOTS, Outline, SLOT_FULL, SLOTS_VERSION, Shares, Sits, Sitting, Slot,
+    TOGETHER_VERSION, WORTH_NAMES, WORTHS, shares, sit, slots_of, slots_over,
+};

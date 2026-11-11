@@ -2,7 +2,7 @@
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
 import { ListView, ListBox, Fit } from "../list.slint";
 import { ArrangementPreview } from "arrangement.slint";
-import { Theme, AppKeys, Type, Space, PageHeader, Well, SearchBox, ToggleChip, FilterPicks, FilterList, FilterColumn, TickLine, FilterView, ListLine, Stars, YearRange, YearBar, Caps, ColumnHead, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState, SidePanel } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, PageHeader, Well, SearchBox, ToggleChip, FilterPicks, FilterList, FilterColumn, TickLine, FilterView, ListLine, Stars, YearRange, YearBar, Caps, ColumnHead, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState, SidePanel, StarsPick, HeartToggle, TagChip, WordBox, MenuChip } from "../studio.slint";
 
 // One line of the list: a heading ("This week", "2019") when `heading` isn't empty, else a song.
 export struct SongLine {
@@ -88,6 +88,12 @@ export struct PanelSong {
     key-heard: bool,
     tags: string,
     notes: string,
+}
+
+// One of the picked song's tags; `on` while the Tag filter has it.
+export struct SongTag {
+    text: string,
+    on: bool,
 }
 
 // What the page shows and what it reports, filled and answered by mo-ui's songs.rs.
@@ -201,6 +207,11 @@ export global SongsData {
     // Opens the Presets page on the picked song's sounds (its newest save's).
     callback show-presets();
     callback close-panel();
+    // You give the picked song something, kept for the song (all its saves): `what` is "status" (one of `statuses`),
+    // "stars" ("0" to "5"), "favourite" (turned over), "add-tag" or "remove-tag" (the tag).
+    callback give(string, string);
+    in property <[string]> statuses;
+    in property <[SongTag]> song-tags;
     // Headings and songs are one height. Slint's ListView places a far jump by the average height of the lines on
     // screen, so with two heights "Show it" landed hundreds of lines away from the song in a big library; with one,
     // a song's place is simply its line number times this.
@@ -329,25 +340,22 @@ component SongPanel inherits Rectangle {
                 padding-top: Space.xs;
                 padding-bottom: Space.sm;
                 vertical-stretch: 0;
-                Text {
-                    text: SongsData.song.status;
-                    color: Theme.text;
-                    font-size: Type.body;
-                    vertical-alignment: center;
+                MenuChip {
+                    name: "Status";
+                    value: SongsData.song.status;
+                    choices: SongsData.statuses;
+                    has-any: false;
+                    lights: false;
+                    picked(status) => { SongsData.give("status", status); }
                 }
-                if SongsData.song.rating > 0: Stars { rating: SongsData.song.rating; }
-                if SongsData.song.favourite: HorizontalLayout {
-                    spacing: Space.xs;
-                    VerticalLayout {
-                        alignment: center;
-                        Heart { }
-                    }
-                    Text {
-                        text: "Favourite";
-                        color: Theme.muted;
-                        font-size: Type.body;
-                        vertical-alignment: center;
-                    }
+                StarsPick {
+                    rating: SongsData.song.rating;
+                    picked(stars) => { SongsData.give("stars", stars); }
+                }
+                HeartToggle {
+                    on: SongsData.song.favourite;
+                    tip: SongsData.song.favourite ? "A favourite: click to make it not one" : "Make it a favourite";
+                    clicked => { SongsData.give("favourite", ""); }
                 }
                 if SongsData.song.key != "": HorizontalLayout {
                     spacing: Space.sm;
@@ -362,12 +370,27 @@ component SongPanel inherits Rectangle {
                         vertical-alignment: center;
                     }
                 }
-                if SongsData.song.tags != "": Text {
-                    text: SongsData.song.tags;
-                    color: Theme.muted;
-                    font-size: Type.body;
-                    vertical-alignment: center;
-                    overflow: elide;
+            }
+            // Its tags: a click filters the list by one, × takes it off, and the box adds one.
+            FlexboxLayout {
+                spacing: Space.xs;
+                padding-bottom: Space.sm;
+                vertical-stretch: 0;
+                for t in SongsData.song-tags: TagChip {
+                    text: t.text;
+                    on: t.on;
+                    remove-tip: "Take the tag " + t.text + " off this song";
+                    clicked => { SongsData.toggle-choice("tag", t.text); }
+                    removed => { SongsData.give("remove-tag", t.text); }
+                }
+                WordBox {
+                    width: 160px;
+                    hint: "Add a tag";
+                    tip: "Type a tag and press Enter: it's kept for the song, on all its saves";
+                    accepted(text) => {
+                        SongsData.give("add-tag", text);
+                        self.text = "";
+                    }
                 }
             }
             FlexboxLayout {
