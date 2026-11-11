@@ -139,8 +139,28 @@ the next PR step by step). Solomon wants the highest effort here.
   (`MidiStore::slots`, a `SlotBook` by note hash, about 200 bytes a part in memory). Whoever keeps a book has to
   load it again after a read that saved parts or made slots (`Summary::slots`): the MIDI page's "did anything
   change" check after a read doesn't count `slots` yet, and must once it keeps a book. The fill tells no progress
-  (like the shapes one: seconds, once). Not built yet: the search itself (first look over all, close look at the
-  kept share, off the window's thread), a list on the MIDI page, and sending the part found into the project.
+  (like the shapes one: seconds, once).
+- The search (`mo_midi::fit::Target::search`, 2026-11-11): every part of the right kind, each set of notes once,
+  sorted by its slots (the first look, on the pool). A loop a pack has in every key (one shape, read the same way:
+  its kind, cut or not) is one loop from there on. Then the best 2 in 100 (tunes) or 10 in 100 (chords), never
+  fewer than 300, have their notes read (on the caller's thread: the index's connection is one thread's) and get
+  the close look on the pool, 256 at a time, the likeliest first, a batch judged while the next is read (two wait
+  at the most). Of a loop's copies the one given is the one that needs moving least (it's read and looked at
+  closely too); where the copy picked can't be read, the next is. A stop flag ends it for a newer search (rule 12). On
+  100,000 made-up parts, 4 threads, the notes already in memory: 0.05 s for tunes, 0.46 s for chords; reading
+  the kept parts' notes from a real index on disk isn't in those times. For whoever calls it:
+  - leave the song's own parts out of the candidates before the search (they're in the library and fit their own
+    song best; taken out afterwards the list comes up short, and a pack loop the song uses goes with them);
+  - load the book again after a read that saved parts or made slots;
+  - the `notes` call is the caller's: keep what it read when searches follow close on each other;
+  - `Search::not_ready` and `Search::unread` count what was left out, and `stopped` says the list isn't whole;
+  - `Found::sits` is the part found moved, never the song: `best().0 == -2` is "drop it in two semitones down".
+  In a song that isn't in 4/4 a library part goes round by its own bars of 4/4 in both looks (a clip dropped into
+  a song keeps its length). The bars a loop takes up are one rule for both looks (`mo_harmony::own_bars`), and
+  parts are sorted by `Sits::judged`, the number the best move is picked by. Whether a part is a piece cut from a
+  longer stretch is `StoredPhrase::is_cut` (the rule by name moved from `mo-app` to `mo_midi::index::is_cut`; the
+  MIDI page's card still spells the fallback out and should call it). Not built yet: a list on the MIDI page, and
+  sending the part found into the project.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db
 writes once trusted. A decoder panic on a damaged file is caught with `mo_catch::catch`: one warning line in the log,

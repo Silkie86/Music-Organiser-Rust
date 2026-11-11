@@ -494,6 +494,18 @@ impl Sits {
     /// The best move, as semitones from -6 to +5 (down a fourth is nearer than up a fifth), and how it sits there. On
     /// a near tie the smaller move wins.
     pub fn best(&self) -> (i32, f64) {
+        let (semitones, sits, _) = self.best_judged();
+        (semitones, sits)
+    }
+
+    /// What [`Sits::best`] picks the move by, for sorting parts: how it sits at its best move, less a hair for each
+    /// semitone it's moved there. Of two parts that sit alike, the one that needs moving less comes first.
+    pub fn judged(&self) -> f64 {
+        self.best_judged().2
+    }
+
+    /// The best move, how it sits there, and that less a hair for each semitone moved (what the move is picked by).
+    fn best_judged(&self) -> (i32, f64, f64) {
         let mut best = (0, f64::NEG_INFINITY, f64::NEG_INFINITY);
         for (s, &score) in (0i32..).zip(&self.by_move) {
             let semitones = if s <= 5 { s } else { s - 12 };
@@ -502,7 +514,7 @@ impl Sits {
                 best = (semitones, score, judged);
             }
         }
-        (best.0, best.1)
+        best
     }
 
     /// How it sits moved by `semitones` (any whole number: octaves make no difference).
@@ -522,14 +534,14 @@ pub fn sit(tune: &[Note], backing: &Backing, line_up: LineUp, how: &Sitting) -> 
 /// matters here. See [`sit`].
 pub fn shares(tune: &[Note], backing: &Backing, line_up: LineUp, how: &Sitting) -> Option<Shares> {
     let (beat, bar, half) = (backing.grid.beat(), backing.grid.bar(), backing.half());
-    let first = tune.iter().map(|n| n.start).min()?;
-    let last = tune.iter().map(|n| n.end()).max()?;
+    if tune.is_empty() {
+        return None;
+    }
     // Where the tune's time starts, how long it is before it goes round, and how long the two play together.
     let (tune_start, tune_length, round) = match line_up {
         LineUp::Loops { bar_line } => {
             // The bar the tune's first note is in, on the tune's own bar lines (a bar is as long as the backing's).
-            let start = first.saturating_sub(bar_line).div_euclid(bar).saturating_mul(bar).saturating_add(bar_line);
-            let length = last.saturating_sub(start).saturating_add(bar - 1).div_euclid(bar).max(1).saturating_mul(bar);
+            let (start, length) = own_bars(tune, bar, bar_line)?;
             (start, length, round_of(length, backing.length, bar))
         }
         LineUp::LoopsFrom { start, length } => {
@@ -628,6 +640,19 @@ pub fn shares(tune: &[Note], backing: &Backing, line_up: LineUp, how: &Sitting) 
         }
     }
     Some(Shares { by_move, heard: (heard / all).min(1.0) })
+}
+
+/// The bars a loop's notes take up, on bar lines `bar` ticks apart with one at `bar_line`: the tick the bar of its
+/// first note starts at, and how long it is from there to the end of the bar its last note ends in (a bar at the
+/// least). None for no notes. What a loop goes round in when nothing else says ([`LineUp::Loops`]), and what its
+/// slots are made over ([`slots_of`]): one rule, so the first look and the close look hear a loop come round alike.
+pub fn own_bars(notes: &[Note], bar: i64, bar_line: i64) -> Option<(i64, i64)> {
+    let first = notes.iter().map(|n| n.start).min()?;
+    let last = notes.iter().map(|n| n.end()).max()?;
+    let bar = bar.max(1);
+    let start = first.saturating_sub(bar_line).div_euclid(bar).saturating_mul(bar).saturating_add(bar_line);
+    let length = last.saturating_sub(start).saturating_add(bar - 1).div_euclid(bar).max(1).saturating_mul(bar);
+    Some((start, length))
 }
 
 /// How long two loops play together: until they meet again, or once through the longer when that's past
@@ -1097,5 +1122,26 @@ mod tests {
         by_move[11] = 0.9;
         assert_eq!(Sits { by_move, heard: 1.0 }.best(), (-1, 0.9));
         assert_eq!(Sits { by_move: [0.0; 12], heard: 1.0 }.best(), (0, 0.0));
+    }
+
+    #[test]
+    fn of_parts_that_sit_alike_the_one_moved_less_is_judged_ahead() {
+        let at = |semitones: usize| {
+            let mut by_move = [0.2; 12];
+            by_move[semitones] = 0.9;
+            Sits { by_move, heard: 1.0 }
+        };
+        // As it is, up two, down two (up ten), up a fourth: the same 0.9 at their best, the nearer the better.
+        assert_eq!(at(0).judged(), 0.9);
+        assert!(at(0).judged() > at(2).judged() && at(2).judged() > at(5).judged());
+        assert_eq!(at(2).judged(), at(10).judged());
+        // A hair: never enough to put a part that sits worse ahead.
+        assert!(at(6).judged() > 0.89);
+        // It's the number the best move is picked by.
+        let mut by_move = [0.2; 12];
+        (by_move[1], by_move[6]) = (0.9, 0.9012);
+        let sits = Sits { by_move, heard: 1.0 };
+        assert_eq!(sits.best(), (1, 0.9));
+        assert!((sits.judged() - 0.8995).abs() < 1e-12);
     }
 }

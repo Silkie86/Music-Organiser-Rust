@@ -813,10 +813,7 @@ pub fn chart_key(fact: Option<&KeyFact>) -> Option<KeyName> {
 /// Whether a part's clip is a piece cut from a longer stretch (its name ends " · bars 9–16"), which the key finder
 /// hears as a window, not a loop.
 pub fn is_cut(clip: &str) -> bool {
-    clip.rsplit(" · ").next().is_some_and(|last| {
-        last.strip_prefix("bars ")
-            .is_some_and(|r| r.contains('–') && r.chars().next().is_some_and(|c| c.is_ascii_digit()))
-    })
+    mo_midi::index::is_cut(clip)
 }
 
 /// One note on the piano roll, each number 0 to 1 of the roll: left, top, width, height; and how hard it's played

@@ -504,3 +504,63 @@ fn every_set_of_notes_gets_its_slots_for_a_search() {
     assert_eq!(run(&mut store, &dir, false).slots, 2);
     assert_eq!(page.slots().unwrap().len(), 1);
 }
+
+#[test]
+fn a_search_finds_the_part_that_fits_through_the_index() {
+    use mo_formats::{NoteAttribute, NoteEvent};
+    use mo_midi::fit::{Candidate, Target};
+
+    let dir = folder("mo-midi-indexer-search");
+    // Over A minor, D minor, G and C, a bar each: a tune on each chord's notes, a note a beat.
+    let fits: &[u8] = &[69, 72, 76, 72, 74, 77, 81, 77, 67, 71, 74, 71, 72, 76, 79, 76];
+    let fourth_up: Vec<u8> = fits.iter().map(|k| k + 5).collect();
+    let climbing: Vec<u8> = (60..76).collect();
+    std::fs::write(dir.join("Fits.mid"), smf(fits)).unwrap();
+    std::fs::write(dir.join("Fits in F.mid"), smf(&fourth_up)).unwrap();
+    std::fs::write(dir.join("Climbing.mid"), smf(&climbing)).unwrap();
+    std::fs::write(dir.join("Pack").join("Basslines").join("Low 01.mid"), smf(BASS)).unwrap();
+    let db = dir.join("midi-index.db");
+    let mut store = MidiStore::open(&db).unwrap();
+    run(&mut store, &dir, false);
+
+    let chords: Vec<NoteEvent> = [[57u8, 60, 64], [50, 62, 65], [55, 59, 62], [48, 60, 64]]
+        .iter()
+        .zip(0i64..)
+        .flat_map(|(keys, bar)| {
+            keys.iter().map(move |&key| NoteEvent {
+                start: bar * mo_midi::BAR,
+                length: mo_midi::BAR,
+                key,
+                velocity: 40_000,
+                muted: false,
+                step: false,
+                attribute: NoteAttribute::default(),
+            })
+        })
+        .collect();
+    let grid = mo_harmony::Grid::four_four(mo_midi::PPQ as u32);
+    let target = Target::chords(&[(Role::Chords, &chords)], grid, None).unwrap();
+
+    // As the page would: its list, the index's slots, and notes read from the index for the close look alone.
+    let all = store.all(&HashMap::new(), &HashMap::new()).unwrap();
+    let candidates: Vec<Candidate> = all.iter().map(Candidate::of).collect();
+    let book = store.slots().unwrap();
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let mut read = 0;
+    let mut notes = |id: i64, hash: &str| {
+        read += 1;
+        store.notes(id, hash).ok()
+    };
+    let search = target.search(&candidates, &book, &mut notes, 10, &pool, &AtomicBool::new(false));
+    // The tune and its copy in F are one loop: one of them is read.
+    assert_eq!((search.looked, search.close, search.not_ready, search.stopped), (4, 3, 0, false));
+    assert_eq!((read, search.unread), (3, 0));
+    // The tune on the chords' notes first, as it is; the same tune in F isn't listed beside it.
+    let clips: Vec<&str> = search.found.iter().map(|f| all[f.at].clip.as_str()).collect();
+    assert_eq!(clips[0], "Fits");
+    assert_eq!(search.found[0].sits.best().0, 0);
+    assert!(!clips.contains(&"Fits in F"), "{clips:?}");
+    // The one climbing by half steps sits well below it.
+    let climbing = search.found.iter().find(|f| all[f.at].clip == "Climbing").unwrap();
+    assert!(climbing.sits.best().1 < search.found[0].sits.best().1 - 0.3);
+}

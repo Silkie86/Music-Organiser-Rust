@@ -24,7 +24,7 @@
 
 use super::{
     ABOVE, ALIKE, BESIDE, Backing, COLOUR, FIFTH, LEAST_HEARD, MOST_BARS_ROUND, NEAR_PLAYED, NO_CHORD, Near, OUTSIDE,
-    RARE, ROOT, Sits, Sitting, THIRD, alike_by_move, gcd, near_of, strongest, times_in,
+    RARE, ROOT, Sits, Sitting, THIRD, alike_by_move, gcd, near_of, own_bars, strongest, times_in,
 };
 use crate::notes::{Grid, Note};
 use crate::pitch::{PerPitch, PitchClass};
@@ -55,13 +55,10 @@ fn slots_round(length: i64, slot: i64) -> usize {
 /// the close look hears a loop go round ([`LineUp::Loops`](super::LineUp::Loops)). Its first [`MOST_SLOTS`] at the
 /// most; none for no notes.
 pub fn slots_of(notes: &[Note], grid: Grid, slot: i64) -> Vec<Slot> {
-    let (Some(first), Some(last)) = (notes.iter().map(|n| n.start).min(), notes.iter().map(|n| n.end()).max()) else {
-        return Vec::new();
-    };
-    let bar = grid.bar();
-    let from = first.saturating_sub(grid.bar_line).div_euclid(bar).saturating_mul(bar).saturating_add(grid.bar_line);
-    let length = last.saturating_sub(from).saturating_add(bar - 1).div_euclid(bar).max(1).saturating_mul(bar);
-    slots_over(notes, slot, from, length)
+    match own_bars(notes, grid.bar(), grid.bar_line) {
+        Some((from, length)) => slots_over(notes, slot, from, length),
+        None => Vec::new(),
+    }
 }
 
 /// A part's slots, each `slot` ticks long, over `length` ticks from `from`, a bar line (bars picked from a song: one

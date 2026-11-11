@@ -207,7 +207,43 @@ So the plan for the search: a first look at every part, then the close look at t
 for tunes and the best **10 in 100** when looking for chords (and never fewer than a few hundred, so a small
 library gets the close look throughout).
 
+## The search (2026-11-11)
+
+`mo_midi::fit::Target::search` puts the two looks together over the MIDI index.
+
+- **What's kept.** The index keeps each set of notes' slots (`slots` in `midi-index.db`, made when the notes are
+  saved, 3 to 7 bytes a slot), and a search loads them all into memory once (a `SlotBook`, about 200 bytes a part).
+- **The first look** goes over every part of the kind looked for, each set of notes once, on the app's background
+  threads. A chord part is looked at by its first 16 bars, the bars the close look reads its chords in.
+- **A loop in every key is one loop.** A pack's loop saved in twelve keys is twelve parts with one shape. After the
+  first look they count as one: one place in the share kept, one copy's notes read. (Before this, twelve copies
+  that sit alike took twelve places and twelve reads, and a list of 50 came up with 30 loops in it.) The same notes
+  read two ways (as chords and as an arp, or whole and as a piece cut from a longer stretch) are looked at closely
+  each way, and listed once.
+- **The close look** is given the best 2 in 100 loops (tunes) or 10 in 100 (chords), and never fewer than 300, so a
+  small library gets the close look throughout. Their notes are read from the index 256 parts at a time, the
+  likeliest first, so a search stopped for a newer one has already looked at the best of them; the app's threads
+  judge one batch while the next is read.
+- **The copy given is the one that needs moving least.** Where the copy read fits best moved (say down a fourth),
+  the library's copy that many semitones from it is read and looked at too, and given in its place. So a loop the
+  pack has in the song's key comes up as that file, to drop in as it is. Where the copy picked can't be read, the
+  next best copy is.
+- **What's left out is counted**: parts the index has no slots for yet (`not_ready`), and parts picked for the close
+  look whose notes couldn't be read (`unread`).
+- **The caller leaves the song's own parts out before the search**, not after. They are in the library too and fit
+  their own song best: left in, they take the list's first places, and a pack loop the song uses is found as the
+  song's copy and goes with it when that is taken out afterwards.
+- **How fast.** 100,000 made-up four-bar parts on 4 threads, their notes already in memory
+  (`fit::tests::how_long_a_search_takes`): 0.05 s looking for tunes (2,000 close looks), 0.46 s looking for
+  chords (10,000 close looks, each part's chords read first). Reading the kept parts' notes from a real index on
+  disk is on top of that and isn't measured yet; notes read can be kept by the caller between searches.
+
 ## What it doesn't know yet
+
+- **A song that isn't in 4/4.** The library's parts are all read as 4/4. Over such a song's chords a part found goes
+  round by its own bars of 4/4 in both looks, as a clip dropped into the song keeps its own length (before the
+  search, the close look re-barred it to the song's bars, which the first look couldn't follow). Whether a part
+  from a 4/4 pack is wanted in a waltz at all isn't measured: no measure set has such songs.
 
 - **How long a loop from the library is.** A part's length isn't saved with it, so a found part still goes round
   from its first note's bar to its last note's: a four-bar loop that rests in its last bar is heard as three bars.
