@@ -19,6 +19,7 @@
 
 pub mod audition;
 pub mod check;
+pub mod drag;
 pub mod library;
 mod threads;
 pub mod waves;

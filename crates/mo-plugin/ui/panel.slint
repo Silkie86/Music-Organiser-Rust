@@ -65,6 +65,11 @@ export component Panel inherits Window {
     in-out property <int> view: 0;
     callback search(string);
     callback play(int);
+    // A line is being dragged out (onto a track): its row.
+    callback drag-out(int);
+    // Whether lines can be dragged out on this system, and the row being carried (-1 for none).
+    in property <bool> can-drag;
+    in property <int> carried: -1;
     callback stop();
     // A choice was picked or unpicked on a filter ("type", "length", "key", "tag"): its words.
     callback pick(string, string);
@@ -255,10 +260,13 @@ export component Panel inherits Window {
                     for sound[i] in root.sounds: ListLine {
                         height: 48px;
                         selected: i == root.picked;
+                        draggable: root.can-drag;
+                        lifted: i == root.carried;
                         clicked => {
                             root.picked = i;
                             root.play(i);
                         }
+                        drag-out => { root.drag-out(i); }
                         HorizontalLayout {
                             padding-left: Space.md;
                             padding-right: Space.md;

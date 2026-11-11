@@ -118,6 +118,8 @@ struct Slots {
     /// Counts askings: only the newest one's answer is shown.
     searches: AtomicU64,
     played: Mutex<Option<Played>>,
+    /// A line dragged out: its row and its file, once it's been checked to be there, or why it can't go.
+    drag: Mutex<Option<(usize, Result<std::path::PathBuf, String>)>>,
     /// The waveforms read for the lines on show, with their asking's round ([`Kept::to_read`]).
     waves: Mutex<Option<(u64, WavesRead)>>,
 }
@@ -223,6 +225,8 @@ struct Shown {
     column: Rc<Column>,
     /// The sound the "Playing" line names, as the player numbers it: the line goes when that sound ends.
     playing: Cell<Option<u64>>,
+    /// A line's file is being carried out now ([`Shown::drag`]).
+    dragging: Cell<bool>,
     _timer: TimerHandle,
 }
 
@@ -265,6 +269,7 @@ impl Shown {
             asked: Rc::new(RefCell::new(Asked { seed: seed(), ..Asked::default() })),
             column: Rc::new(Column::default()),
             playing: Cell::new(None),
+            dragging: Cell::new(false),
             _timer: timer,
         };
         shown.fill_in();
@@ -303,6 +308,23 @@ impl Shown {
             if let Some(panel) = weak.upgrade() {
                 panel.set_playing(SharedString::new());
             }
+        });
+        panel.set_can_drag(crate::drag::CAN);
+        let lines = Rc::clone(&self.lines);
+        let slots = Arc::clone(&self.slots);
+        panel.on_drag_out(move |row| {
+            let Some((row, path)) = usize::try_from(row).ok().and_then(|r| Some((r, lines.path(r)?))) else { return };
+            let slots = Arc::clone(&slots);
+            // Whether the file is there is asked off the window's thread: its drive may be asleep or away.
+            background("mo-plugin-drag", move || {
+                let path = std::path::PathBuf::from(path);
+                let found = if path.is_file() {
+                    Ok(path)
+                } else {
+                    Err(format!("Can't drag {}: the file isn't there", library::name(&path.to_string_lossy())))
+                };
+                *lock(&slots.drag) = Some((row, found));
+            });
         });
         panel.set_orders(ModelRc::new(slint::VecModel::from(
             ORDERS.iter().map(|o| SharedString::from(o.name())).collect::<Vec<_>>(),
@@ -420,8 +442,41 @@ impl Shown {
             self.panel.set_playing(SharedString::new());
         }
         self.instance.player.tidy();
+        self.drag();
         self.waves();
         self.render();
+    }
+
+    /// Carries a dragged line's file out, once it's been found: the system's drag holds this thread until it's let
+    /// go (the timer still runs meanwhile, so nothing is kept borrowed across it).
+    fn drag(&self) {
+        if self.dragging.get() {
+            return;
+        }
+        let Some((row, found)) = take(&self.slots.drag) else { return };
+        let said = match found {
+            Ok(path) => {
+                self.dragging.set(true);
+                self.panel.set_carried(i32::try_from(row).unwrap_or(-1));
+                self.render();
+                let done = crate::drag::file(&path);
+                self.dragging.set(false);
+                self.panel.set_carried(-1);
+                // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't
+                // left pressed.
+                let position = self.pointer.get();
+                let event =
+                    slint::platform::WindowEvent::PointerReleased { position, button: PointerEventButton::Left };
+                self.window.window().dispatch_event(event);
+                self.window.window().dispatch_event(slint::platform::WindowEvent::PointerExited);
+                done.err()
+            }
+            Err(why) => Some(why),
+        };
+        if let Some(why) = said {
+            self.playing.set(None);
+            self.panel.set_playing(why.into());
+        }
     }
 
     /// Takes in the waveforms a background thread read, and has the ones the lines on show still lack read next.
