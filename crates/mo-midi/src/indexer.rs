@@ -120,6 +120,9 @@ pub struct Summary {
     pub rekeyed: usize,
     /// Sets of notes given their shape (the same in any key), kept before the index kept shapes.
     pub shaped: usize,
+    /// Sets of notes given their slots (what a search for parts that fit a song looks at first), kept before the
+    /// index kept slots or by an older version of them.
+    pub slots: usize,
     /// Stopped before the end, because a newer run was wanted.
     pub stopped: bool,
 }
@@ -236,7 +239,7 @@ pub fn run(
 }
 
 /// What's done once the files are read: notes no file has any more go, keys are read again where the key finder got
-/// better, and notes kept before shapes were get theirs.
+/// better, and notes kept before shapes or slots were get theirs.
 fn after_reading(
     store: &mut MidiStore,
     pool: &rayon::ThreadPool,
@@ -252,6 +255,11 @@ fn after_reading(
     if finished {
         let (shaped, finished) = fill_shapes(store, pool, stop)?;
         summary.shaped = shaped;
+        summary.stopped = !finished;
+    }
+    if !summary.stopped {
+        let (slots, finished) = fill_slots(store, pool, stop)?;
+        summary.slots = slots;
         summary.stopped = !finished;
     }
     Ok(())
@@ -283,6 +291,33 @@ fn fill_shapes(store: &mut MidiStore, pool: &rayon::ThreadPool, stop: &AtomicBoo
         });
         store.save_shapes(&shapes)?;
         done += shapes.len();
+    }
+}
+
+/// Works out the slots (for a search's first look) of the notes saved before the index kept slots, or whose slots
+/// an older [`crate::fit::SLOTS_VERSION`] made, from the notes kept in the index: no file is opened. Quick (a few
+/// microseconds a set of notes), on `pool`, a batch at a time; `stop` ends it after the batch it's on. Gives how many
+/// were worked out and whether it got to the end.
+fn fill_slots(store: &mut MidiStore, pool: &rayon::ThreadPool, stop: &AtomicBool) -> Result<(usize, bool), MidiError> {
+    if store.without_slots_count()? == 0 {
+        return Ok((0, true));
+    }
+    let (mut done, mut after) = (0, 0);
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok((done, false));
+        }
+        let without = store.without_slots(after, SHAPE_BATCH)?;
+        let Some(&(last, _)) = without.last() else {
+            return Ok((done, true));
+        };
+        after = last;
+        let slots: Vec<(i64, Vec<mo_harmony::Slot>)> = pool.install(|| {
+            use rayon::prelude::*;
+            without.par_iter().map(|(id, notes)| (*id, crate::fit::slots_of(notes))).collect()
+        });
+        store.save_slots(&slots)?;
+        done += slots.len();
     }
 }
 

@@ -25,12 +25,28 @@
 use std::ops::Range;
 
 use mo_formats::NoteEvent;
-use mo_harmony::{Backing, ChordContext, Grid, LineUp, Note, Part, Sits, Sitting, Span, sit};
+use mo_harmony::{Backing, ChordContext, Grid, LineUp, Note, Part, Sits, Sitting, Slot, Span, sit};
 
+use crate::PPQ;
 use crate::chart;
 use crate::keys::{heard_as, heard_notes};
 use crate::playing::Song;
 use crate::roles::Role;
+
+/// How long a first look's slot is ([`mo_harmony::Slot`]), in the index's ticks: two quarter notes, half a bar of
+/// 4/4, whatever the song's time signature.
+pub const SLOT: i64 = 2 * PPQ;
+
+/// What made the slots the index keeps of each set of notes ([`slots_of`]). Raised when what they hold changes, so
+/// the index makes them again from the notes it keeps (rule 7).
+pub const SLOTS_VERSION: i64 = 1;
+
+/// A library part's slots, for a search's first look: how long it plays each pitch class in every [`SLOT`], from the
+/// bar its first note is in to the bar its last note ends in (bars of 4/4, as every part of the library is read), its
+/// first 32 bars at the most. The same stretch the close look hears go round ([`Target::fit`]).
+pub fn slots_of(notes: &[NoteEvent]) -> Vec<Slot> {
+    mo_harmony::slots_of(&heard_notes(notes), Grid::four_four(PPQ as u32), SLOT)
+}
 
 /// What's looked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]

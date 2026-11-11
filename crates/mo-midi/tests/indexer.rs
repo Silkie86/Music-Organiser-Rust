@@ -433,3 +433,62 @@ fn a_file_away_mid_reading_keeps_its_parts_and_is_read_again() {
     assert_eq!(again.read, 1);
     assert!(store.failures().unwrap().is_empty());
 }
+
+#[test]
+fn every_set_of_notes_gets_its_slots_for_a_search() {
+    let dir = folder("mo-midi-indexer-slots");
+    std::fs::write(dir.join("Pack").join("Basslines").join("Low 01.mid"), smf(BASS)).unwrap();
+    std::fs::write(dir.join("Tune.mid"), smf(TUNE)).unwrap();
+    // The same notes played softer: another set of notes, the same slots.
+    std::fs::write(dir.join("Tune soft.mid"), smf_at(TUNE, 40)).unwrap();
+    let db = dir.join("midi-index.db");
+    let mut store = MidiStore::open(&db).unwrap();
+    assert_eq!(run(&mut store, &dir, false).slots, 0, "new notes get their slots as they're saved");
+    assert_eq!(count(&db, "slots"), 3);
+
+    // A search's book: each part's slots by its note hash. Eight quarter notes are two bars, four slots, each with
+    // two notes half a slot long.
+    let all = store.all(&HashMap::new(), &HashMap::new()).unwrap();
+    let book = store.slots().unwrap();
+    assert_eq!(book.len(), 2, "the soft copy shares the tune's hash");
+    let tune = all.iter().find(|p| p.clip == "Tune").unwrap();
+    let slots = book.of(&tune.hash).unwrap();
+    assert_eq!(slots.len(), 4);
+    let half = mo_harmony::SLOT_FULL / 2;
+    // C and D, then E and G.
+    assert_eq!((slots[0][0], slots[0][2], slots[0][4]), (half, half, 0));
+    assert_eq!((slots[1][4], slots[1][7], slots[1][0]), (half, half, 0));
+    assert_eq!(slots, mo_midi::fit::slots_of(&store.notes(tune.id, &tune.hash).unwrap()).as_slice());
+    // The page's own connection reads the same.
+    assert_eq!(MidiStore::open_read_only(&db).unwrap().slots().unwrap().len(), 2);
+
+    // Notes saved before slots were kept get theirs at the next read, from the notes in the index.
+    let raw = rusqlite::Connection::open(&db).unwrap();
+    raw.execute("DELETE FROM slots", []).unwrap();
+    assert!(store.slots().unwrap().is_empty());
+    let again = run(&mut store, &dir, false);
+    assert_eq!((again.read, again.slots), (0, 3));
+    assert_eq!(run(&mut store, &dir, false).slots, 0, "worked out once");
+    assert_eq!(store.slots().unwrap().of(&tune.hash), Some(slots));
+
+    // Slots an older version made aren't searched by, and are made again; a damaged row is left out.
+    raw.execute("UPDATE slots SET version = 0, data = x'0100FF'", []).unwrap();
+    assert!(store.slots().unwrap().is_empty());
+    assert_eq!(run(&mut store, &dir, false).slots, 3);
+    assert_eq!(store.slots().unwrap().of(&tune.hash), Some(slots));
+    raw.execute("UPDATE slots SET data = x'0100'", []).unwrap();
+    assert!(store.slots().unwrap().is_empty());
+
+    // Notes no file has any more take their slots with them.
+    std::fs::remove_file(dir.join("Pack").join("Basslines").join("Low 01.mid")).unwrap();
+    run(&mut store, &dir, false);
+    assert_eq!(count(&db, "slots"), 2);
+
+    // An index from before slots were kept, read by the page before the indexer has opened it: an empty book.
+    drop(store);
+    raw.execute("DROP TABLE slots", []).unwrap();
+    assert!(MidiStore::open_read_only(&db).unwrap().slots().unwrap().is_empty());
+    // And the indexer gives it the table and fills it.
+    let mut store = MidiStore::open(&db).unwrap();
+    assert_eq!(run(&mut store, &dir, false).slots, 2);
+}
