@@ -118,7 +118,7 @@ const TABLES: &str = "
         shape INTEGER NOT NULL
     );
     -- How long the notes play each pitch class in every two quarter notes (fit::slots_of), for a search's first
-    -- look. Filled when notes are saved; for notes saved before this table was there, or by an older version, after
+    -- look. Filled when notes are saved; for notes saved before this table was there, or by another version, after
     -- a read (indexer::fill_slots).
     CREATE TABLE IF NOT EXISTS slots (
         notes INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
@@ -653,8 +653,6 @@ pub struct MidiStore {
     has_keys: bool,
     /// Whether it has its `shapes` table (the same).
     has_shapes: bool,
-    /// Whether it has its `slots` table (the same).
-    has_slots: bool,
     /// Its layout ([`LAYOUT`] once the indexer has opened it; the page reads an older one as it is).
     layout: i64,
 }
@@ -719,14 +717,7 @@ fn open_for_writing(path: &Path) -> Result<(MidiStore, Option<(i64, i64)>), Midi
             // A new index: of this layout from the start.
             .and_then(|()| if layout == LAYOUT { Ok(()) } else { conn.pragma_update(None, "user_version", LAYOUT) })
             .map_err(|e| open_error(e.to_string()))?;
-        let store = MidiStore {
-            conn,
-            path: path.to_owned(),
-            has_keys: true,
-            has_shapes: true,
-            has_slots: true,
-            layout: LAYOUT,
-        };
+        let store = MidiStore { conn, path: path.to_owned(), has_keys: true, has_shapes: true, layout: LAYOUT };
         return Ok((store, copied));
     }
 }
@@ -776,9 +767,7 @@ impl MidiStore {
         let has_keys = has_table("keys")?;
         // One made before shapes were kept (until the indexer next opens it): listed with no loop in other keys.
         let has_shapes = has_table("shapes")?;
-        // One made before slots were kept (the same): nothing in it comes up in a search for parts that fit a song.
-        let has_slots = has_table("slots")?;
-        Ok(MidiStore { conn, path: path.to_owned(), has_keys, has_shapes, has_slots, layout })
+        Ok(MidiStore { conn, path: path.to_owned(), has_keys, has_shapes, layout })
     }
 
     pub fn path(&self) -> &Path {
@@ -842,10 +831,12 @@ impl MidiStore {
                 tx.prepare_cached("INSERT INTO note_data (notes, data) VALUES (?1, ?2) ON CONFLICT(notes) DO NOTHING")?;
             let mut shape =
                 tx.prepare_cached("INSERT INTO shapes (notes, shape) VALUES (?1, ?2) ON CONFLICT(notes) DO NOTHING")?;
-            // The same notes found again have the same slots, unless an older version made the ones there.
+            // The same notes found again have the same slots: nothing is written then. Unless another version made
+            // the ones there, or they aren't what these notes make (a damaged row): reading the file again puts
+            // them right.
             let mut slot = tx.prepare_cached(
                 "INSERT INTO slots (notes, version, data) VALUES (?1, ?2, ?3)
-                 ON CONFLICT(notes) DO UPDATE SET version = ?2, data = ?3 WHERE version <> ?2",
+                 ON CONFLICT(notes) DO UPDATE SET version = ?2, data = ?3 WHERE version <> ?2 OR data <> ?3",
             )?;
             let mut key = tx.prepare_cached(
                 "INSERT INTO keys (notes, version, role, cut, fact) VALUES (?1, ?2, ?3, ?4, ?5)
@@ -893,6 +884,8 @@ impl MidiStore {
                             if let Some(s) = analyser::shape_of(&p.notes) {
                                 shape.execute(params![notes, s])?;
                             }
+                            // Made here, a few microseconds a part, like the shape above: a part is in a search
+                            // as soon as it's saved.
                             let slots = slots::encode(&fit::slots_of(&p.notes));
                             slot.execute(params![notes, fit::SLOTS_VERSION, slots])?;
                             key.execute(params![

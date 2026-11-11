@@ -478,6 +478,16 @@ fn every_set_of_notes_gets_its_slots_for_a_search() {
     assert_eq!(store.slots().unwrap().of(&tune.hash), Some(slots));
     raw.execute("UPDATE slots SET data = x'0100'", []).unwrap();
     assert!(store.slots().unwrap().is_empty());
+    // So is a row that isn't bytes at all: it's never taken for a part with no notes in it.
+    raw.execute("UPDATE slots SET data = 'words'", []).unwrap();
+    assert!(store.slots().unwrap().is_empty());
+    // Reading a file again puts its damaged row right; the others' stay as they are until theirs is read.
+    date(&dir.join("Tune.mid"), 1_600_000_000);
+    assert_eq!(run(&mut store, &dir, false).read, 1);
+    let book = store.slots().unwrap();
+    assert_eq!((book.len(), book.of(&tune.hash)), (1, Some(slots)));
+    raw.execute("UPDATE slots SET version = 0", []).unwrap();
+    assert_eq!(run(&mut store, &dir, false).slots, 3);
 
     // Notes no file has any more take their slots with them.
     std::fs::remove_file(dir.join("Pack").join("Basslines").join("Low 01.mid")).unwrap();
@@ -487,8 +497,10 @@ fn every_set_of_notes_gets_its_slots_for_a_search() {
     // An index from before slots were kept, read by the page before the indexer has opened it: an empty book.
     drop(store);
     raw.execute("DROP TABLE slots", []).unwrap();
-    assert!(MidiStore::open_read_only(&db).unwrap().slots().unwrap().is_empty());
-    // And the indexer gives it the table and fills it.
+    let page = MidiStore::open_read_only(&db).unwrap();
+    assert!(page.slots().unwrap().is_empty());
+    // And the indexer gives it the table and fills it: the page's index, open since before, has them then.
     let mut store = MidiStore::open(&db).unwrap();
     assert_eq!(run(&mut store, &dir, false).slots, 2);
+    assert_eq!(page.slots().unwrap().len(), 1);
 }

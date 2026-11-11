@@ -30,10 +30,10 @@ pub(super) fn encode(slots: &[Slot]) -> Vec<u8> {
     data
 }
 
-/// The slots [`encode`] wrote. None for a damaged row (cut short, or naming a thirteenth pitch class): the part is
-/// then left out of a search rather than sorted by something made up.
-pub(super) fn decode(data: &[u8]) -> Option<Vec<Slot>> {
-    let mut slots = Vec::new();
+/// Puts the slots [`encode`] wrote at the end of `slots`. None for a damaged row (cut short, or naming a thirteenth
+/// pitch class), with what it put there before it found out left for the caller to take off: the part is then left
+/// out of a search rather than sorted by something made up.
+fn decode_into(data: &[u8], slots: &mut Vec<Slot>) -> Option<()> {
     let mut rest = data;
     while let [low, high, after @ ..] = rest {
         let mask = u16::from_le_bytes([*low, *high]);
@@ -51,7 +51,7 @@ pub(super) fn decode(data: &[u8]) -> Option<Vec<Slot>> {
         slots.push(slot);
         rest = after;
     }
-    rest.is_empty().then_some(slots)
+    rest.is_empty().then_some(())
 }
 
 /// Every part's slots in memory, by note hash (the same notes have the same slots, whatever file they're in): what
@@ -81,18 +81,35 @@ impl SlotBook {
     }
 
     /// Keeps a set of notes' slots; the first kept for a hash stays.
-    fn add(&mut self, hash: String, slots: &[Slot]) {
-        let (Ok(first), Ok(count)) = (u32::try_from(self.slots.len()), u16::try_from(slots.len())) else { return };
-        if let std::collections::hash_map::Entry::Vacant(place) = self.places.entry(hash) {
-            place.insert((first, count));
-            self.slots.extend_from_slice(slots);
+    pub fn add(&mut self, hash: &str, slots: &[Slot]) {
+        self.keep(hash, |all| {
+            all.extend_from_slice(slots);
+            Some(())
+        });
+    }
+
+    /// Keeps the slots `put` puts at the end of all of them, for a hash that has none yet (the hash is looked up
+    /// before anything is made for it). Nothing is kept when `put` gives up part of the way (a damaged row).
+    fn keep(&mut self, hash: &str, put: impl FnOnce(&mut Vec<Slot>) -> Option<()>) {
+        if self.places.contains_key(hash) {
+            return;
+        }
+        let first = self.slots.len();
+        let count = put(&mut self.slots).and_then(|()| u16::try_from(self.slots.len() - first).ok());
+        match (u32::try_from(first), count) {
+            (Ok(place), Some(count)) => {
+                self.places.insert(hash.to_owned(), (place, count));
+            }
+            _ => self.slots.truncate(first),
         }
     }
 }
 
 impl MidiStore {
-    /// How many sets of notes have no slots yet, or slots an older [`SLOTS_VERSION`] made: two counts, each read
-    /// from a small index, so it's quick when there are none.
+    /// How many sets of notes have no slots yet, or slots another [`SLOTS_VERSION`] made: two counts, each read
+    /// from a small index, so it's quick when there are none. (That's what each row's version and its index are
+    /// for: one version for the whole table would do to know when to make them again, but counting the rows would
+    /// then walk every slot the table holds, each time the indexer runs.)
     pub fn without_slots_count(&self) -> Result<usize, MidiError> {
         let n: i64 = self.conn.query_row(
             "SELECT (SELECT COUNT(*) FROM notes) - (SELECT COUNT(*) FROM slots WHERE version = ?1)",
@@ -117,7 +134,7 @@ impl MidiStore {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Keeps the slots worked out for [`MidiStore::without_slots`] notes, in place of any an older version made.
+    /// Keeps the slots worked out for [`MidiStore::without_slots`] notes, in place of any another version made.
     pub fn save_slots(&mut self, slots: &[(i64, Vec<Slot>)]) -> Result<(), MidiError> {
         let tx = self.conn.transaction()?;
         {
@@ -138,7 +155,14 @@ impl MidiStore {
     /// index from before slots were kept.
     pub fn slots(&self) -> Result<SlotBook, MidiError> {
         let mut book = SlotBook::default();
-        if !self.has_slots {
+        // Asked each time, not once when the index was opened: the page keeps its index open, and one from before
+        // slots were kept gets the table when the indexer next opens it.
+        let kept: bool = self.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'slots')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !kept {
             return Ok(book);
         }
         // The whole table in its own order (the `+` keeps SQLite off the version index, which would jump about in
@@ -148,8 +172,10 @@ impl MidiStore {
             .prepare("SELECT n.hash, s.data FROM slots s JOIN notes n ON n.id = s.notes WHERE +s.version = ?1")?;
         let mut rows = st.query([SLOTS_VERSION])?;
         while let Some(r) = rows.next()? {
-            if let Some(slots) = decode(r.get_ref(1)?.as_blob().unwrap_or_default()) {
-                book.add(r.get(0)?, &slots);
+            // A row that isn't what was written (not bytes, or damaged) is left out: never taken for a part with no
+            // notes in it. Each row's slots go straight to their place in the book.
+            if let (Ok(hash), Ok(data)) = (r.get_ref(0)?.as_str(), r.get_ref(1)?.as_blob()) {
+                book.keep(hash, |slots| decode_into(data, slots));
             }
         }
         Ok(book)
@@ -160,6 +186,11 @@ impl MidiStore {
 #[allow(clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    fn decode(data: &[u8]) -> Option<Vec<Slot>> {
+        let mut slots = Vec::new();
+        decode_into(data, &mut slots).map(|()| slots)
+    }
 
     #[test]
     fn slots_are_kept_small_and_come_back_the_same() {
@@ -183,11 +214,17 @@ mod tests {
     fn a_book_gives_each_hashs_slots_and_keeps_the_first() {
         let mut book = SlotBook::default();
         assert!(book.is_empty() && book.of("A").is_none());
-        book.add("A".into(), &[[1; 12], [2; 12]]);
-        book.add("B".into(), &[]);
-        book.add("C".into(), &[[3; 12]]);
-        book.add("A".into(), &[[9; 12]]);
-        assert_eq!(book.len(), 3);
+        book.add("A", &[[1; 12], [2; 12]]);
+        book.add("B", &[]);
+        book.add("C", &[[3; 12]]);
+        book.add("A", &[[9; 12]]);
+        // A damaged row keeps nothing, and what came before it and comes after it is where it was.
+        let damaged = encode(&[[4; 12], [5; 12]]);
+        book.keep("E", |slots| decode_into(&damaged[..damaged.len() - 1], slots));
+        book.keep("F", |slots| decode_into(&encode(&[[6; 12]]), slots));
+        assert!(book.of("E").is_none());
+        assert_eq!(book.of("F"), Some([[6; 12]].as_slice()));
+        assert_eq!(book.len(), 4);
         assert_eq!(book.of("A"), Some([[1; 12], [2; 12]].as_slice()));
         assert_eq!(book.of("B"), Some([].as_slice()));
         assert_eq!(book.of("C"), Some([[3; 12]].as_slice()));

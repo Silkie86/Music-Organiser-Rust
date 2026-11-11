@@ -29,7 +29,7 @@ use crate::notes::{Grid, Note, Part};
 use crate::pitch::{PerPitch, PitchClass};
 
 mod first_look;
-pub use first_look::{MOST_SLOTS, Outline, SLOT_FULL, Slot, slots_of, slots_over};
+pub use first_look::{MOST_SLOTS, Outline, SLOT_FULL, SLOTS_VERSION, Slot, slots_of, slots_over};
 
 /// Bumped when what [`sit`] finds changes (rule 7): a new number in [`Sitting::SHIPPED`], a new rule. The chord
 /// reader's own version counts too: a [`Backing`] is its reading.

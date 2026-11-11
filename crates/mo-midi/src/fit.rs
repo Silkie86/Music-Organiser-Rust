@@ -37,9 +37,13 @@ use crate::roles::Role;
 /// 4/4, whatever the song's time signature.
 pub const SLOT: i64 = 2 * PPQ;
 
-/// What made the slots the index keeps of each set of notes ([`slots_of`]). Raised when what they hold changes, so
-/// the index makes them again from the notes it keeps (rule 7).
-pub const SLOTS_VERSION: i64 = 1;
+/// How this crate asks for a part's slots ([`slots_of`]: which of its notes are heard, the slot's length, bars of
+/// 4/4): bump it when that changes.
+const SLOTS_ASKING: u32 = 1;
+
+/// What made the slots the index keeps of each set of notes: how `mo_harmony` makes slots and how it was asked, like
+/// [`crate::keys::VERSION`]. When the app's is another, the index makes them again from the notes it keeps (rule 7).
+pub const SLOTS_VERSION: u32 = mo_harmony::SLOTS_VERSION * 100 + SLOTS_ASKING;
 
 /// A library part's slots, for a search's first look: how long it plays each pitch class in every [`SLOT`], from the
 /// bar its first note is in to the bar its last note ends in (bars of 4/4, as every part of the library is read), its
