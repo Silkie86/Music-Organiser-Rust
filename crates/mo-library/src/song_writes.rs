@@ -198,6 +198,7 @@ fn open_read_only(path: &Path) -> Result<Connection, LibraryError> {
     let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
     let conn = Connection::open_with_flags(path, flags).map_err(open_error)?;
     conn.busy_timeout(WAIT).map_err(open_error)?;
+    crate::db::sort_in_memory(&conn).map_err(open_error)?;
     Ok(conn)
 }
 

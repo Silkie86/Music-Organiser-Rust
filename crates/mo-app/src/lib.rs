@@ -13,6 +13,7 @@ pub mod bitwig_convert;
 pub mod data_move;
 pub mod drag_card;
 pub mod drag_out;
+pub mod drive_room;
 pub mod filters;
 pub mod finder;
 pub mod frame_timing;
