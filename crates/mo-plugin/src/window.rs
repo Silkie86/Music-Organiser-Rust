@@ -319,6 +319,20 @@ impl Shown {
                 panel.set_playing(SharedString::new());
             }
         });
+        // Trim silence, for this plugin while it's open: it starts off, at -60 dB.
+        let player = Arc::clone(&self.instance.player);
+        let weak = panel.as_weak();
+        panel.on_pick_trim(move |picked| {
+            let Some(panel) = weak.upgrade() else { return };
+            // "" turns it off; a level ("-50 dB") turns it on at that level.
+            let level = picked.trim().trim_end_matches("dB").trim();
+            let on = !level.is_empty();
+            if on {
+                panel.set_trim_level_db(mo_audio::trim::level_db(Some(level)));
+            }
+            panel.set_trim_silence(on);
+            player.set_trim(on.then(|| panel.get_trim_level_db()));
+        });
         panel.set_can_drag(crate::drag::CAN);
         let lines = Rc::clone(&self.lines);
         let slots = Arc::clone(&self.slots);

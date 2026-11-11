@@ -37,6 +37,16 @@ pub fn sound_span(audio: &AudioData, level: f32) -> Option<(usize, usize)> {
     Some((first, (last + 1 + tail).min(frames)))
 }
 
+/// What to play of `audio` for a play asked to start at frame `from`, with Trim silence on: frames `start..end`,
+/// starting past the silence at the start (or at `from`, when that's later) and ending with the sound ([`sound_span`]).
+/// `None` when there's nothing to trim to: it's silent all through, or `from` is in the silence at the end (play it
+/// as asked).
+pub fn play_span(audio: &AudioData, from: usize, level: f32) -> Option<(usize, usize)> {
+    let (first, end) = sound_span(audio, level)?;
+    let start = from.max(first);
+    (start < end).then_some((start, end))
+}
+
 impl AudioData {
     /// The seconds of silence at the start ([`sound_span`]); 0 when it starts loud or is silent all through.
     pub fn lead_silence_seconds(&self, level: f32) -> f64 {
@@ -107,6 +117,17 @@ mod tests {
         assert_eq!(quiet.len(), 50);
         assert_eq!(sound_span(&audio(vec![]), L), None);
         assert_eq!(audio(vec![]).lead_silence_seconds(L), 0.0);
+    }
+
+    #[test]
+    fn a_play_starts_past_the_silence_or_at_a_later_spot_and_ends_with_the_sound() {
+        let mut s = vec![0.0; 100];
+        s[20..50].fill(0.5);
+        let a = audio(vec![s]);
+        assert_eq!(play_span(&a, 0, L), Some((20, 60)));
+        assert_eq!(play_span(&a, 30, L), Some((30, 60)));
+        assert_eq!(play_span(&a, 70, L), None, "a spot in the quiet end plays as asked");
+        assert_eq!(play_span(&audio(vec![vec![0.0; 10]]), 0, L), None);
     }
 
     #[test]

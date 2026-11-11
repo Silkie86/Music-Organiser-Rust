@@ -2500,28 +2500,25 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         crate::settings::remember(AUTOPLAY_KEY, if on { "1" } else { "0" });
     });
     let weak = app.as_weak();
-    data.on_toggle_trim_silence(move || {
+    data.on_pick_trim(move |picked| {
         let Some(app) = weak.upgrade() else { return };
-        let on = PAGE.with(|p| {
+        // "" turns it off; a level ("-50 dB") turns it on at that level. Both kept for next time, in the app's own
+        // settings; they count from the next play (the one playing goes on).
+        let level = picked.trim().trim_end_matches("dB").trim();
+        let on = !level.is_empty();
+        let db = PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            p.trim = !p.trim;
+            p.trim = on;
+            if on {
+                p.trim_db = mo_audio::trim::level_db(Some(level));
+            }
             p.trim_chosen = true;
-            p.trim
+            p.trim_db
         });
-        app.global::<SoundsData>().set_trim_silence(on);
-        // Kept for next time, in the app's own settings. It counts from the next play: the one playing goes on.
+        let data = app.global::<SoundsData>();
+        data.set_trim_silence(on);
+        data.set_trim_level_db(db);
         crate::settings::remember(list::TRIM_SILENCE_KEY, if on { "on" } else { "off" });
-    });
-    let weak = app.as_weak();
-    data.on_pick_trim_level(move |db| {
-        let Some(app) = weak.upgrade() else { return };
-        let db = mo_audio::trim::level_db(Some(&db));
-        PAGE.with(|p| {
-            let mut p = p.borrow_mut();
-            p.trim_db = db;
-            p.trim_chosen = true;
-        });
-        app.global::<SoundsData>().set_trim_level_db(db);
         crate::settings::remember(list::TRIM_LEVEL_KEY, &db.to_string());
     });
     let weak = app.as_weak();
@@ -3732,12 +3729,10 @@ const TRIM_LEAD_ROOM: f64 = 2.0;
 /// the same second of the file. A sound silent all through, or a play from inside the silence at the end, plays as
 /// asked.
 fn trimmed(audio: &mut mo_audio::AudioData, from: f64, most: f64, level: f32) -> f64 {
-    let Some((first, end)) = mo_audio::trim::sound_span(audio, level) else { return from };
     let rate = f64::from(audio.sample_rate.max(1));
-    let start = from.max(first as f64 / rate);
-    if start * rate >= end as f64 {
-        return from;
-    }
+    let asked = (from * rate).round() as usize;
+    let Some((first, end)) = mo_audio::trim::play_span(audio, asked, level) else { return from };
+    let start = if first > asked { first as f64 / rate } else { from };
     let keep = end.min(((start + most) * rate).round() as usize);
     for channel in &mut audio.channels {
         channel.truncate(keep);
