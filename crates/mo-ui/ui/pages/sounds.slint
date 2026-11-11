@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Heights, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -329,6 +329,10 @@ export global SoundsData {
     callback toggle-choice(string, string);
     // Picks nothing on a filter: "type" (Clear types), "more-types" (the More types menu's Any) or another filter.
     callback clear-chip(string);
+    // How many types the filter column has room for as tick lines, before More types: the Type filter's, or
+    // Rediscover's (0 for the other, and for one not counted yet: sounds.rs keeps what it had, and never shows fewer
+    // than nine).
+    callback type-room(int, int);
     // Whether any type is picked: shows the Clear types chip.
     in property <bool> any-type;
     in property <bool> mix-well;
@@ -1904,12 +1908,25 @@ export component SoundsPage inherits Rectangle {
                 tab: SoundsData.view < 4 ? ["F", "I", "L", "T", "E", "R", "S"] : ["C", "H", "O", "I", "C", "E", "S"];
                 tab-close: SoundsData.view < 4 ? "CLOSE FILTERS" : "CLOSE CHOICES";
                 active: SoundsData.view < 4 ? SoundsData.any-filter : SoundsData.view == 4 && SoundsData.re-any-type;
+                // Room for what comes as you pick (Keys that mix well, a Clear button), so a pick never moves a type
+                // into More types: the types fill the rest.
+                keep-free: SoundsData.view < 4
+                    ? (SoundsData.key-filter.more-picked == "" ? Heights.tick-line + Space.md : 0px) + (SoundsData.any-filter ? 0px : Heights.button + Space.md)
+                    : SoundsData.view == 4 && !SoundsData.re-any-type ? Heights.button + Space.md : 0px;
                 if SoundsData.view < 4: VerticalLayout {
                     spacing: Space.md;
                     FilterList {
                         name: "TYPE";
                         more-name: "More types";
                         filter: SoundsData.type-filter;
+                        // As many types as there's room for as tick lines, the rest in More types (Solomon, 11 Nov
+                        // 2026: "the more types should fill is there more space").
+                        spare-lines: column.spare-lines;
+                        changed fits => {
+                            if SoundsData.view < 4 {
+                                SoundsData.type-room(self.fits, 0);
+                            }
+                        }
                         toggled(text) => { SoundsData.toggle-choice("type", text); }
                         cleared => { SoundsData.clear-chip("more-types"); }
                     }
@@ -2031,6 +2048,14 @@ export component SoundsPage inherits Rectangle {
                         name: "TYPE";
                         more-name: "More types";
                         filter: SoundsData.re-type-filter;
+                        spare-lines: column.spare-lines;
+                        // Not while it digs: the words under its choices say so meanwhile, and change back.
+                        property <int> room: SoundsData.re-busy ? 0 : self.fits;
+                        changed room => {
+                            if SoundsData.view == 4 {
+                                SoundsData.type-room(0, self.room);
+                            }
+                        }
                         toggled(text) => { SoundsData.re-pick("type", text); }
                         cleared => { SoundsData.re-pick("more-types", ""); }
                     }
@@ -2086,11 +2111,20 @@ export component SoundsPage inherits Rectangle {
                         on: SoundsData.re-rarely;
                         clicked => { SoundsData.re-toggle-rarely(); }
                     }
-                    if SoundsData.re-intro != "": Text {
-                        text: SoundsData.re-intro;
-                        color: Theme.muted;
-                        font-size: Type.meta;
-                        wrap: word-wrap;
+                    // As tall as its words, wrapped at the column's width. Slint 1.18 counts a wrapping Text that an
+                    // `if` shows as one line in the room the column works out, so the types took the room of its other
+                    // lines and cut them off at the column's foot.
+                    if SoundsData.re-intro != "": Rectangle {
+                        height: intro.preferred-height;
+                        intro := Text {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            text: SoundsData.re-intro;
+                            color: Theme.muted;
+                            font-size: Type.meta;
+                            wrap: word-wrap;
+                        }
                     }
                 }
                 // The kit builder's choices, in the filters' place.

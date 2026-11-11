@@ -611,7 +611,118 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     card_keys_checks(&app, &window, &out)?;
     rail_checks(&app)?;
     wide_shots(&app, &window, &out)?;
+    types_fill_the_column(&app, &window)?;
     tag_box_checks(&app, &window)?;
+    Ok(())
+}
+
+/// The filter column shows as many types as it has room for as tick lines, and only the rest in More types (Solomon,
+/// 11 Nov 2026: "the more types should fill is there more space"): more than the usual nine in a tall window, the nine
+/// in a short one, on the Type filter and on Rediscover alike, and as many again when a view comes back after the
+/// window changed. A type ticked on the last line stays there, with as many lines as before (Clear filters comes into
+/// room kept for it), and More types' Any keeps it picked. (Rediscover's lines may grow when what it digs out for the
+/// type changes the words under them: only its ticked line is held to its place.) With nothing picked, the room kept
+/// for what comes as you pick is still free under the column's last line: less, and something in the column is drawn
+/// taller than it was measured, so the types would push its foot out of sight (Rediscover's words under its choices
+/// did: Slint counted them as one line).
+fn types_fill_the_column(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    use mo_app::sounds::TYPE_CHIPS;
+    let sounds = app.global::<mo_ui::SoundsData>();
+    let types = || {
+        let f = sounds.get_type_filter();
+        (f.chips.row_count(), f.more.row_count())
+    };
+    let re_types = || {
+        let f = sounds.get_re_type_filter();
+        (f.chips.row_count(), f.more.row_count())
+    };
+    let line = |rediscover: bool, at: usize| {
+        let f = if rediscover { sounds.get_re_type_filter() } else { sounds.get_type_filter() };
+        f.chips.row_data(at).map(|c| (c.text.to_string(), c.on)).unwrap_or_default()
+    };
+    let sized = |height: u32| {
+        window.set_size(PhysicalSize::new(WIDTH, height));
+        capture_sized(window, (WIDTH, height), Duration::from_millis(400))
+    };
+    let kept_free = |name: &str, shot: &[u8], free: u32| match column_room_below(shot, WIDTH) {
+        Some(room) if room >= free => Ok(()),
+        room => Err(format!(
+            "types: {name}'s filter column ends {room:?} pixels above its foot, not the {free} kept for what comes as \
+             you pick: is something in it drawn taller than it was measured?"
+        )),
+    };
+    start_on(app, Place::Sounds);
+    sounds.invoke_pick_view(0);
+    let shot = sized(WIDE.1);
+    let (lines, more) = types();
+    if lines <= TYPE_CHIPS || more == 0 {
+        return Err(format!(
+            "types: {lines} type lines and {more} in More types at {WIDTH} x {}, where the column has room for more \
+             than {TYPE_CHIPS} and not for all",
+            WIDE.1
+        ));
+    }
+    // Keys that mix well and Clear filters: a tick line (26) and a button (32), each with the space above it (12).
+    kept_free("The Type filter", &shot, 26 + 12 + 32 + 12)?;
+    let (last, _) = line(false, lines - 1);
+    sounds.invoke_toggle_choice("type".into(), last.clone().into());
+    sized(WIDE.1);
+    let ticked = (types(), line(false, lines - 1));
+    sounds.invoke_clear_chip("more-types".into());
+    sized(WIDE.1);
+    let kept = line(false, lines - 1);
+    sounds.invoke_clear_chip("type".into());
+    if ticked != ((lines, more), (last.clone(), true)) || kept != (last.clone(), true) {
+        return Err(format!(
+            "types: {last}, ticked on the last type line, then More types' Any: {ticked:?}, then {kept:?}"
+        ));
+    }
+    // Rediscover in the usual window: more than nine, and the rest in More types.
+    sized(HEIGHT);
+    sounds.invoke_pick_view(4);
+    let shot = sized(HEIGHT);
+    let (re_lines, re_more) = re_types();
+    if re_lines <= TYPE_CHIPS || re_more == 0 {
+        return Err(format!(
+            "types: Rediscover shows {re_lines} type lines and {re_more} in More types at {WIDTH} x {HEIGHT}, where \
+             it has room for more than {TYPE_CHIPS} and not for all"
+        ));
+    }
+    // Clear types: a button (32) and the space above it (12).
+    kept_free("Rediscover", &shot, 32 + 12)?;
+    let (last, _) = line(true, re_lines - 1);
+    sounds.invoke_re_pick("type".into(), last.clone().into());
+    sized(HEIGHT);
+    let ticked = line(true, re_lines - 1);
+    sounds.invoke_re_pick("more-types".into(), "".into());
+    sized(HEIGHT);
+    let kept = line(true, re_lines - 1);
+    sounds.invoke_re_pick("type".into(), "".into());
+    if ticked != (last.clone(), true) || kept != (last.clone(), true) {
+        return Err(format!(
+            "types: on Rediscover, {last} ticked on the last type line, then More types' Any: {ticked:?}, then {kept:?}"
+        ));
+    }
+    // Shorter while Rediscover shows: its types go back to nine, and so do the Type filter's once it's back.
+    sized(SHORT);
+    let re_short = re_types();
+    sounds.invoke_pick_view(0);
+    sized(SHORT);
+    let back = types();
+    sized(WIDE.1);
+    let again = types();
+    sized(HEIGHT);
+    if re_short.0 != TYPE_CHIPS || back != (TYPE_CHIPS, lines + more - TYPE_CHIPS) || again != (lines, more) {
+        return Err(format!(
+            "types: in a short window Rediscover showed {} type lines and the Type filter {} ({} in More types), \
+             then {} once tall again (not {TYPE_CHIPS}, {TYPE_CHIPS}, {} and {lines})",
+            re_short.0,
+            back.0,
+            back.1,
+            again.0,
+            lines + more - TYPE_CHIPS
+        ));
+    }
     Ok(())
 }
 
@@ -3055,6 +3166,32 @@ fn save_narrow_scrolled(
 /// Lets hover and slide-in animations finish, then draws the window.
 fn capture(window: &MinimalSoftwareWindow) -> Vec<u8> {
     capture_after(window, Duration::from_millis(400))
+}
+
+/// How wide the filter column is (studio.slint's FilterColumn).
+const COLUMN_WIDTH: u32 = 208;
+
+/// How far above the filter column's foot the lowest thing drawn in it ends, in pixels, in a picture of the window
+/// `width` across. The column is found by the line down its right side: the first from the left, after the rail's own,
+/// that runs unbroken from near the top of the page to near its foot. None without one.
+fn column_room_below(pixels: &[u8], width: u32) -> Option<u32> {
+    let height = u32::try_from(pixels.len() / 3).ok()? / width;
+    let at = |x: u32, y: u32| {
+        let i = ((y * width + x) * 3) as usize;
+        [pixels[i], pixels[i + 1], pixels[i + 2]]
+    };
+    let rows = 200..height.saturating_sub(100);
+    let line = (COLUMN_WIDTH + 4..width / 2).find(|&x| {
+        let c = at(x, rows.start);
+        rows.clone().all(|y| at(x, y) == c && at(x - 1, y) != c && at(x + 1, y) != c)
+    })?;
+    let edge = at(line, rows.start);
+    let foot = (rows.start..height).take_while(|&y| at(line, y) == edge).last()?;
+    // The column's last points before its line are always empty: the page's own colour.
+    let empty = at(line - 4, foot);
+    let drawn = |y: u32| (line + 2 - COLUMN_WIDTH..line - 1).any(|x| at(x, y) != empty);
+    let lowest = (rows.start..=foot).rev().find(|&y| drawn(y))?;
+    Some(foot - lowest)
 }
 
 /// Draws the window once its timers and animations have run for `wait`.

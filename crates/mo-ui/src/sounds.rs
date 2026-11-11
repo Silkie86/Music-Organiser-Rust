@@ -141,6 +141,9 @@ struct Page {
     partial: Option<usize>,
     /// The type chips' types with their counts, in chip order, then the rest (the More types menu).
     types: Vec<(String, usize)>,
+    /// How many of them the filter column shows as tick lines, the rest in More types: as many as it has room for,
+    /// and never fewer than the usual [`list::TYPE_CHIPS`] ([`room`]).
+    type_lines: usize,
     /// Every tag on a sound, for the Tag filter.
     tags: Vec<String>,
     /// How many sounds each filter's choices would show, from the newest list worked out (none before the first).
@@ -166,6 +169,9 @@ struct Page {
     rediscover: Vec<(usize, String)>,
     /// What Rediscover digs out next time.
     re: rediscover::Options,
+    /// How many types Rediscover's choices show as tick lines, as `type_lines` is for the Type filter (the column
+    /// has other things under them there).
+    re_type_lines: usize,
     /// Counts Rediscover's asks, so an older answer that arrives late is dropped.
     re_asked: u64,
     /// Rediscover has run on this library (so changing a choice picks again).
@@ -217,6 +223,7 @@ impl Default for Page {
             unread: false,
             partial: None,
             types: Vec::new(),
+            type_lines: list::TYPE_CHIPS,
             tags: Vec::new(),
             counts: None,
             now: Local::now().naive_local(),
@@ -228,6 +235,7 @@ impl Default for Page {
             no_index: None,
             rediscover: Vec::new(),
             re: rediscover::Options { count: COUNT, ..rediscover::Options::default() },
+            re_type_lines: list::TYPE_CHIPS,
             re_asked: 0,
             re_started: false,
             re_busy: false,
@@ -2391,11 +2399,30 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     let weak = app.as_weak();
     data.on_clear_chip(move |chip| {
         if chip == "more-types" {
-            // The More types menu's Any: the types on chips of their own stay picked.
-            let types = PAGE.with(|p| p.borrow().types.clone());
-            change(&weak, |f| f.clear_more_types(&types));
+            // The More types menu's Any: the types on tick lines of their own stay picked.
+            let (types, lines) = PAGE.with(|p| {
+                let p = p.borrow();
+                (p.types.clone(), p.type_lines)
+            });
+            change(&weak, |f| list::keep_first_types(&mut f.sound_types, &types, lines));
         } else {
             change(&weak, |f| f.clear_chip(&chip));
+        }
+    });
+    // The filter column has room for more or fewer types (the window or what's under them changed): its type list
+    // shows as many again.
+    let weak = app.as_weak();
+    data.on_type_room(move |lines, re_lines| {
+        let Some(app) = weak.upgrade() else { return };
+        let (types, re_types) = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            (room(&mut p.type_lines, lines), room(&mut p.re_type_lines, re_lines))
+        });
+        if types {
+            show_chips(&app);
+        }
+        if re_types {
+            show_rediscover_chips(&app);
         }
     });
     let weak = app.as_weak();
@@ -2852,15 +2879,15 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
 /// Picks `value` on Rediscover's `what`, saying whether that changed anything (its years are picked on the year
 /// strip). "type": as on the Type filter, a click picks one more type or unpicks it, and "" is any type (the
 /// whole-app review of 6 Nov, X3-23: it picked one at most, so Kick then Snare lost Kick). "more-types": the More
-/// types menu's Any, which unpicks the types picked in that menu but keeps the ones picked on chips of their own, by
-/// the Type filter's own rule (`types` is the type counts the chips are shown from). "count": one of the counts is
-/// always picked.
-fn re_pick(re: &mut rediscover::Options, what: &str, value: &str, types: &[(String, usize)]) -> bool {
+/// types menu's Any, which unpicks the types picked in that menu but keeps the ones picked on tick lines of their
+/// own, by the Type filter's own rule (`types` is the type counts they're shown from, the first `lines` of them on
+/// tick lines). "count": one of the counts is always picked.
+fn re_pick(re: &mut rediscover::Options, what: &str, value: &str, types: &[(String, usize)], lines: usize) -> bool {
     let before = (re.sound_types.clone(), re.count);
     match what {
         "type" if value.is_empty() => re.sound_types.clear(),
         "type" => filters::toggle(&mut re.sound_types, value, true),
-        "more-types" => list::keep_chip_types(&mut re.sound_types, types),
+        "more-types" => list::keep_first_types(&mut re.sound_types, types, lines),
         "count" => {
             if let Some(c) = value.parse().ok().filter(|c| COUNTS.contains(c)) {
                 re.count = c;
@@ -2879,7 +2906,7 @@ fn show_rediscover_chips(app: &AppWindow) {
     PAGE.with(|p| {
         let p = p.borrow();
         let types: Vec<(String, String)> = p.types.iter().map(|(t, _)| (t.clone(), String::new())).collect();
-        let types = filters::show_split(&types, &p.re.sound_types, list::TYPE_CHIPS);
+        let types = filters::show_split(&types, &p.re.sound_types, p.re_type_lines);
         data.set_re_any_type(!p.re.sound_types.is_empty());
         let counts = filters::one_of(&COUNTS.map(|c| c.to_string()), &p.re.count.to_string());
         CHOICES.with(|c| {
@@ -2933,7 +2960,7 @@ fn wire_rediscover(app: &AppWindow) {
             let mut p = p.borrow_mut();
             let p = &mut *p;
             // Picking again only when something changed: a click on the count picked already keeps the list.
-            let changed = re_pick(&mut p.re, &what, &value, &p.types);
+            let changed = re_pick(&mut p.re, &what, &value, &p.types, p.re_type_lines);
             (changed && p.re_started, (changed && what == "count").then_some(p.re.count))
         });
         // How many is kept for the next start (review G-3).
@@ -3007,6 +3034,15 @@ fn keep_view(v: i32) {
     if let Some(name) = usize::try_from(v).ok().and_then(|i| VIEWS.get(i)) {
         crate::settings::remember(VIEW_KEY, name);
     }
+}
+
+/// Keeps in `kept` how many types the filter column has room for as tick lines, `lines` as the page counted them
+/// (0 while the view they're for is away: `kept` stays as it is), and never fewer than the usual
+/// [`list::TYPE_CHIPS`], as in a window too short for them. Says whether that's a new count, which shows them again.
+fn room(kept: &mut usize, lines: i32) -> bool {
+    let Some(lines) = usize::try_from(lines).ok().filter(|&n| n > 0) else { return false };
+    let lines = lines.max(list::TYPE_CHIPS);
+    std::mem::replace(kept, lines) != lines
 }
 
 fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
@@ -3307,7 +3343,7 @@ fn show_chips(app: &AppWindow) {
     PAGE.with(|p| {
         let p = p.borrow();
         let f = &p.filters;
-        let chips = list::chips(f, p.counts.as_ref(), &p.types, &p.tags);
+        let chips = list::chips_showing(f, p.counts.as_ref(), &p.types, &p.tags, p.type_lines);
         FILTER_MODELS.with(|m| {
             data.set_type_filter(m[0].view(&chips.types));
             data.set_length_filter(m[1].view(&chips.length));
@@ -3917,7 +3953,7 @@ mod tests {
     fn rediscover_picks_types_as_the_type_filter_does_and_always_a_count() {
         let mut re = rediscover::Options { count: COUNT, ..rediscover::Options::default() };
         let types = [("Kick".to_owned(), 9), ("Snare".to_owned(), 5)];
-        let mut pick = |what: &str, value: &str| re_pick(&mut re, what, value, &types);
+        let mut pick = |what: &str, value: &str| re_pick(&mut re, what, value, &types, list::TYPE_CHIPS);
         // As on the Type filter: each click picks one more type, and a click on one picked unpicks it (X3-23).
         assert!(pick("type", "Kick"));
         assert!(pick("type", "Snare"));
@@ -3939,6 +3975,27 @@ mod tests {
         assert!(!pick("count", "120"));
         assert!(!pick("count", "7"));
         assert_eq!((re.sound_types, re.years, re.count), (vec!["Snare".to_owned(), "Kick".to_owned()], None, 120));
+    }
+
+    #[test]
+    fn the_type_lists_show_as_many_types_as_the_column_has_room_for() {
+        // The page's count, never under the usual nine; 0 (or less) while the view is away keeps the count.
+        let mut kept = list::TYPE_CHIPS;
+        assert!(room(&mut kept, 14));
+        assert!(!room(&mut kept, 14));
+        assert!(!room(&mut kept, 0) && !room(&mut kept, -3));
+        assert_eq!(kept, 14);
+        assert!(room(&mut kept, 2));
+        assert_eq!(kept, list::TYPE_CHIPS);
+        assert!(!room(&mut kept, 5));
+        // Rediscover's More types menu's Any keeps the types on tick lines, as many as there are.
+        let types: Vec<(String, usize)> = (0..12).map(|i| (format!("Type {i:02}"), 100 - i)).collect();
+        let mut re =
+            rediscover::Options { sound_types: vec!["Type 10".into(), "Type 11".into()], ..Default::default() };
+        assert!(re_pick(&mut re, "more-types", "", &types, 11));
+        assert_eq!(re.sound_types, ["Type 10"]);
+        assert!(re_pick(&mut re, "more-types", "", &types, list::TYPE_CHIPS));
+        assert!(re.sound_types.is_empty());
     }
 
     /// A small song library like the C# app's: two songs, a kick in both, a pad with no notes in one, and settings.
