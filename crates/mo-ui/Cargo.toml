@@ -17,6 +17,8 @@ path = "src/bin/mo-screens.rs"
 [dependencies]
 rayon.workspace = true
 mo-app.workspace = true
+# The galaxy's painter on the graphics card, shared with the CLAP plugin.
+mo-sky = { path = "../mo-sky" }
 mo-catch = { path = "../mo-catch" }
 mo-library = { path = "../mo-library" }
 mo-harmony = { path = "../mo-harmony" }
