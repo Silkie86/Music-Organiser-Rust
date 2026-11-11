@@ -3,8 +3,8 @@
 // through the track, with the app's own filters and orders)
 // and DAW check (every CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PickButton, PointerPad, HoverNote } from "../../mo-ui/ui/studio.slint";
-export { FilterView, FilterChoice }
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PickButton, PointerPad, HoverNote, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
+export { FilterView, FilterChoice, YearBar }
 import { ListView } from "../../mo-ui/ui/list.slint";
 
 import "../../mo-ui/fonts/IBMPlexSans-400.ttf";
@@ -104,6 +104,13 @@ export component Panel inherits Window {
     callback sky-gone();
     // Back out to the whole map.
     callback sky-home();
+    // The year strip beside the sounds, as on the app's Sounds page: the years sounds were added in, newest first,
+    // and the places of the years picked (-1 for none). Drag over years to show only those.
+    in property <[YearBar]> years;
+    in property <int> years-from: -1;
+    in property <int> years-to: -1;
+    callback years-picked(int, int);
+    callback years-cleared();
     // Where the sound playing is in its file, for the line on its waveform: the row it's on (-1 for none) and how
     // far through the whole sound (0 the start, 1 the end).
     in property <int> playing-row: -1;
@@ -338,10 +345,23 @@ export component Panel inherits Window {
                 }
                 Rectangle {
                     vertical-stretch: 1;
+                    property <length> years-width: root.years.length > 1 ? 56px : 0px;
+                    if self.years-width > 0: YearRange {
+                        x: parent.width - self.width;
+                        y: 0;
+                        width: parent.years-width;
+                        height: parent.height;
+                        years: root.years;
+                        picked-from: root.years-from;
+                        picked-to: root.years-to;
+                        picked(a, b) => { root.years-picked(a, b); }
+                        cleared => { root.years-cleared(); }
+                    }
                     // The Galaxy: the wheel flies in and out, the right button moves the map, a click plays a star and
                     // the left button held down plays the stars it passes.
                     if root.galaxy: Rectangle {
-                        width: parent.width;
+                        x: 0;
+                        width: parent.width - parent.years-width;
                         height: parent.height;
                         background: Theme.well;
                         border-radius: Theme.radius;
@@ -386,7 +406,8 @@ export component Panel inherits Window {
                         }
                     }
                     ListView {
-                        width: parent.width;
+                        x: 0;
+                        width: parent.width - parent.years-width;
                         height: parent.height;
                         visible: !root.galaxy;
                         row-height: 48px;
