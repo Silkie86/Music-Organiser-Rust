@@ -192,6 +192,12 @@ pub const SMALLEST_PART_DEFAULT: usize = 3;
 /// What Settings offers, in notes.
 pub const SMALLEST_PART_CHOICES: [usize; 6] = [1, 2, 3, 4, 6, 8];
 
+/// Where a smallest part sits in [`SMALLEST_PART_CHOICES`] (the default's place for any other).
+pub fn smallest_part_index(n: usize) -> usize {
+    let at = |n| SMALLEST_PART_CHOICES.iter().position(|&c| c == n);
+    at(n).or_else(|| at(SMALLEST_PART_DEFAULT)).unwrap_or(0)
+}
+
 /// The smallest part as kept in the settings: one of [`SMALLEST_PART_CHOICES`], else the default.
 pub fn smallest_part_from(kept: Option<&str>) -> usize {
     kept.and_then(|k| k.trim().parse::<usize>().ok())
@@ -1384,7 +1390,7 @@ mod tests {
             p
         };
         let cat = Catalogue::new(vec![loop_in(9, "Am"), loop_in(6, "Fsm")]);
-        let parts: std::sync::Arc<dyn crate::finder::Source> = std::sync::Arc::new(crate::finder::midi_parts(&cat));
+        let parts: std::sync::Arc<dyn crate::finder::Source> = std::sync::Arc::new(crate::finder::midi_parts(&cat, 1));
         assert_eq!(parts.len(), 1, "one line for the loop");
         let g = crate::finder::find(&[parts], "pad loop fsm", None, 4);
         assert_eq!(g.len(), 1, "the other key's file is found by its own name");
@@ -1423,6 +1429,12 @@ mod tests {
         }
         assert_eq!(smallest_part_words(1), "Every part");
         assert_eq!(smallest_part_words(4), "4 notes");
+        assert_eq!(smallest_part_index(1), 0);
+        assert_eq!(smallest_part_index(3), 2);
+        assert_eq!(smallest_part_index(5), 2, "the default's place");
+        // Ctrl+K finds only what the list can show.
+        let parts = crate::finder::midi_parts(&cat, 3);
+        assert_eq!(crate::finder::Source::len(&parts), 1);
     }
 
     #[test]

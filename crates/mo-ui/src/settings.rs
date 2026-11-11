@@ -445,7 +445,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         change(SMALLEST_PART_KEY, &notes.to_string());
         if let Some(app) = weak.upgrade() {
             crate::midi::smallest_part(Some(&app), notes);
-            show(&app);
+            app.global::<SettingsData>().set_smallest_index(i);
         }
     });
     let weak = app.as_weak();
@@ -1423,7 +1423,7 @@ fn show(app: &AppWindow) {
         data.set_pace_note(page::pace_note(pace, p.running_pace, background::cores()).into());
         data.set_sweep_hold(sweep_hold(s));
         let smallest = smallest_part(s);
-        data.set_smallest_index(SMALLEST_PART_CHOICES.iter().position(|&n| n == smallest).unwrap_or(2) as i32);
+        data.set_smallest_index(mo_app::midi::smallest_part_index(smallest) as i32);
         data.set_outputs(strings(p.outputs.labels.iter().cloned()));
         data.set_output(p.outputs.labels.get(p.outputs.picked).cloned().unwrap_or_default().into());
 
