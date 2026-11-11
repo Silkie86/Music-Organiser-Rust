@@ -171,7 +171,7 @@ many of the close look's best ten are still there when the first look keeps only
 
 | the first look goes by | kept 0.5% | 1% | 2% | 5% | 10% | 20% |
 |---|---|---|---|---|---|---|
-| **a tune for chords:** each tune's notes with no timing (the old app's first look) | 1.2% | 2.3% | 3.5% | 7.3% | 13.1% | 22.9% |
+| **a tune for chords:** each tune's notes with no timing | 1.2% | 2.3% | 3.5% | 7.3% | 13.1% | 22.9% |
 | **a tune for chords:** each tune two beats at a time | 78.4% | 96.9% | **99.1%** | 99.9% | 100% | 100% |
 | **chords for a tune:** each chord part's notes with no timing | 2.4% | 4.2% | 8.0% | 16.1% | 27.4% | 44.2% |
 | **chords for a tune:** each chord part guessed, two beats at a time | 40.2% | 60.5% | 77.6% | 93.3% | **97.8%** | 99.4% |
@@ -179,14 +179,16 @@ many of the close look's best ten are still there when the first look keeps only
 | **chords for a tune:** the old app's closer look (24 numbers a half bar) | 34.0% | 53.2% | 73.4% | 91.0% | 96.4% | 99.0% |
 
 - **Which notes a part plays, with no timing, is no use at all**: it keeps the close look's best about as often as
-  picking at random would. That is all the library keeps of each part today (`chroma`, 12 bytes), and it is what the
-  old app's first look went by. Two parts go together bar by bar, not on the whole.
+  picking at random would. That is all the library keeps of each part today (`chroma`, 12 bytes). Two parts go
+  together bar by bar, not on the whole.
 - **Two beats at a time is enough.** `mo_harmony::slots_of` keeps how long each of the 12 pitch classes sounds in each
   two beats (12 bytes a slot, 24 a bar, about 200 a part). A slot is two quarter notes whatever the time signature, so
-  a song in 6/8 is looked at in the same stretches of time as the library's parts, which are all read as 4/4. For the
-  song's chords, `Backing::outline` works out what each pitch class is worth in each slot by the close look's own
-  numbers, so a tune made of whole slots gets exactly the close look's answer (`first_look::tests`), and real tunes
-  land near it: keeping 2 parts in 100 loses 1 of the close look's best hundred.
+  a song in 6/8 is looked at in the same stretches of time as the library's parts, which are all read as 4/4; a loop
+  that ends inside a slot (a bar of 6/8 is a slot and a half) is kept going round until it ends on a slot's line. No
+  more than 64 slots are kept of a part: one longer than 32 bars is looked at by its first 32. For the song's chords,
+  `Backing::outline` works out what each pitch class is worth in each slot by the close look's own numbers, so a tune
+  made of whole slots gets exactly the close look's answer (`first_look::tests`), and real tunes land near it: keeping
+  2 parts in 100 loses 1 of the close look's best hundred.
 - **The other way round is harder**, since the found part is the chords and its chords aren't read yet.
   `Outline::guessed` guesses them from the slots: a pitch class played for a good part of a slot is worth what a
   chord note is, the rest sit beside it or outside by the part's own scale, and a note a semitone or so over a played

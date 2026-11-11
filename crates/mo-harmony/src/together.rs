@@ -322,47 +322,15 @@ impl Backing {
         // How long each pitch class sounds in each half bar, and in all of it.
         let half = half_bar(grid);
         let count = usize::try_from(length.saturating_add(half - 1) / half).unwrap_or(0);
-        let mut times = vec![PerPitch([0i64; 12]); count];
+        let pitched = parts.iter().filter(|p| p.role.pitched()).flat_map(|p| p.notes);
+        let times = times_in(pitched, origin, length, half, count);
         let mut whole = PerPitch([0i64; 12]);
-        for note in parts.iter().filter(|p| p.role.pitched()).flat_map(|p| p.notes) {
-            let (from, to) = (note.start.saturating_sub(origin).max(0), note.end().saturating_sub(origin).min(length));
-            let pc = note.pitch_class();
-            let mut at = from;
-            while at < to {
-                let k = at / half;
-                let until = (k + 1).saturating_mul(half).min(to);
-                if let Some(time) = usize::try_from(k).ok().and_then(|k| times.get_mut(k)) {
-                    time[pc] = time[pc].saturating_add(until - at);
-                }
-                whole[pc] = whole[pc].saturating_add(until - at);
-                at = until;
+        for time in &times {
+            for pc in PitchClass::ALL {
+                whole[pc] = whole[pc].saturating_add(time[pc]);
             }
         }
-        let strongest = |time: &PerPitch<i64>| -> Option<PerPitch<f64>> {
-            let most = time.0.iter().copied().max().filter(|m| *m > 0)?;
-            Some(PerPitch(time.0.map(|t| t as f64 / most as f64)))
-        };
-        let halves = times
-            .iter()
-            .map(|time| {
-                let strength = strongest(time)?;
-                let mut out = PerPitch([Near::default(); 12]);
-                for pc in PitchClass::ALL {
-                    let played = strength[pc] >= PLAYED_SHARE;
-                    let mut above = [0.0; 11];
-                    if !played {
-                        for (d, cell) in (1i32..).zip(above.iter_mut()) {
-                            let below = strength[pc.up(-d)];
-                            if below >= PLAYED_SHARE {
-                                *cell = below;
-                            }
-                        }
-                    }
-                    out[pc] = Near { played, above };
-                }
-                Some(out)
-            })
-            .collect();
+        let halves = times.iter().map(|time| Some(near_of(&strongest(time)?))).collect();
         let scale = strongest(&whole).unwrap_or_default();
         let stretches = reading
             .spans
@@ -399,6 +367,78 @@ impl Backing {
 const fn half_bar(grid: Grid) -> i64 {
     let bar = grid.bar();
     if grid.bar_beats() % 2 == 0 && bar >= 2 { bar / 2 } else { bar }
+}
+
+/// How long each pitch class sounds in each `piece` ticks of the `length` ticks from `origin`, for `count` pieces.
+/// What's played outside the stretch is left out. Where the pieces run on past the stretch (one that doesn't end on
+/// a piece's line), it goes round again under them.
+fn times_in<'a>(
+    notes: impl Iterator<Item = &'a Note>,
+    origin: i64,
+    length: i64,
+    piece: i64,
+    count: usize,
+) -> Vec<PerPitch<i64>> {
+    let (length, piece) = (length.max(1), piece.max(1));
+    let mut times = vec![PerPitch([0i64; 12]); count];
+    let end = i64::try_from(count).unwrap_or(i64::MAX).saturating_mul(piece);
+    for note in notes {
+        let (from, to) = (note.start.saturating_sub(origin).max(0), note.end().saturating_sub(origin).min(length));
+        let pc = note.pitch_class();
+        // Once for each time the stretch goes round under the pieces.
+        let mut lap = 0i64;
+        while from < to && lap < end {
+            let (mut at, to) = (from.saturating_add(lap), to.saturating_add(lap).min(end));
+            while at < to {
+                let k = at / piece;
+                let until = (k + 1).saturating_mul(piece).min(to);
+                if let Some(time) = usize::try_from(k).ok().and_then(|k| times.get_mut(k)) {
+                    time[pc] = time[pc].saturating_add(until - at);
+                }
+                at = until;
+            }
+            lap = lap.saturating_add(length);
+        }
+    }
+    times
+}
+
+/// How strongly each pitch class is played, the most-played 1; none where nothing sounds.
+fn strongest(time: &PerPitch<i64>) -> Option<PerPitch<f64>> {
+    let most = time.0.iter().copied().max().filter(|m| *m > 0)?;
+    Some(PerPitch(time.0.map(|t| t as f64 / most as f64)))
+}
+
+/// What each pitch class is where the twelve are played this strongly: played itself ([`PLAYED_SHARE`] of the
+/// strongest or more), or how strongly the notes 1 to 11 semitones under it are.
+fn near_of(strength: &PerPitch<f64>) -> PerPitch<Near> {
+    let mut out = PerPitch([Near::default(); 12]);
+    for pc in PitchClass::ALL {
+        let played = strength[pc] >= PLAYED_SHARE;
+        let mut above = [0.0; 11];
+        if !played {
+            for (d, cell) in (1i32..).zip(above.iter_mut()) {
+                let below = strength[pc.up(-d)];
+                if below >= PLAYED_SHARE {
+                    *cell = below;
+                }
+            }
+        }
+        out[pc] = Near { played, above };
+    }
+    out
+}
+
+/// How alike a tune's notes and a backing's are as wholes, by how long each pitch class sounds, with the tune moved
+/// up by each of 0 to 11 semitones: 1 for the same notes in the same shares, 0 for none in common.
+fn alike_by_move(tune_time: &PerPitch<f64>, scale: &PerPitch<f64>) -> [f64; 12] {
+    let (mine, theirs): (f64, f64) = (tune_time.0.iter().map(|t| t * t).sum(), scale.0.iter().map(|t| t * t).sum());
+    let mut out = [0.0; 12];
+    for (s, alike) in (0i32..).zip(out.iter_mut()) {
+        let on: f64 = tune_time.iter().map(|(pc, time)| time * scale[pc.up(s)]).sum();
+        *alike = if mine > 0.0 && theirs > 0.0 { on / (mine * theirs).sqrt() } else { 0.0 };
+    }
+    out
 }
 
 /// How a tune and a backing are lined up to be played together.
@@ -582,12 +622,9 @@ pub fn shares(tune: &[Note], backing: &Backing, line_up: LineUp, how: &Sitting) 
     }
     let mut by_move = sums.map(|sum| sum.map(|share| share / heard));
     // The tune as a whole beside the backing as a whole.
-    let (mine, theirs): (f64, f64) =
-        (tune_time.0.iter().map(|t| t * t).sum(), backing.scale.0.iter().map(|t| t * t).sum());
-    for (s, shares) in (0i32..).zip(by_move.iter_mut()) {
-        let on: f64 = tune_time.iter().map(|(pc, time)| time * backing.scale[pc.up(s)]).sum();
+    for (shares, alike) in by_move.iter_mut().zip(alike_by_move(&tune_time, &backing.scale)) {
         if let Some(cell) = shares.get_mut(ALIKE) {
-            *cell = if mine > 0.0 && theirs > 0.0 { on / (mine * theirs).sqrt() } else { 0.0 };
+            *cell = alike;
         }
     }
     Some(Shares { by_move, heard: (heard / all).min(1.0) })

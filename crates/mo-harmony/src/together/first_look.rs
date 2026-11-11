@@ -9,7 +9,12 @@
 //!
 //! How long a slot is, in ticks, is the caller's to say, and the same for everything looked at together: two
 //! quarter notes, half a bar of 4/4, is what was measured. (A [`Grid`]'s beat is the time signature's own, an
-//! eighth in 6/8, so two of its beats wouldn't be the same stretch of time in every song.)
+//! eighth in 6/8, so two of its beats wouldn't be the same stretch of time in every song.) A loop that doesn't end
+//! on a slot's line (a bar of 6/8 is a slot and a half) is kept going round until it does, so slots go round just as
+//! the loop does.
+//!
+//! No more than [`MOST_SLOTS`] are kept of anything: a part longer than 32 bars of 4/4 is looked at by its first 32
+//! alone, and the close look hears the rest.
 //!
 //! How much it may leave out was measured (`theorybench pairs --quick`; `docs/harmony/together-experiments.md` has
 //! the numbers): for a tune over chords, keeping the best 2 parts in 100 keeps 99 in 100 of the close look's best
@@ -18,11 +23,11 @@
 //! in 100 of the close look's best ten tunes and 16 in 100 of its best ten chord parts.
 
 use super::{
-    ABOVE, ALIKE, BESIDE, Backing, COLOUR, FIFTH, LEAST_HEARD, MOST_BARS_ROUND, NEAR_PLAYED, NO_CHORD, OUTSIDE,
-    PLAYED_SHARE, RARE, ROOT, Sits, Sitting, THIRD,
+    ABOVE, ALIKE, BESIDE, Backing, COLOUR, FIFTH, LEAST_HEARD, MOST_BARS_ROUND, NEAR_PLAYED, NO_CHORD, Near, OUTSIDE,
+    RARE, ROOT, Sits, Sitting, THIRD, alike_by_move, gcd, near_of, strongest, times_in,
 };
 use crate::notes::{Grid, Note};
-use crate::pitch::PitchClass;
+use crate::pitch::{PerPitch, PitchClass};
 
 /// How long a part plays each pitch class (from C up) in one slot of time, two quarter notes as a rule:
 /// [`SLOT_FULL`] for all of it. The same note in two octaves counts twice, up to 255.
@@ -31,8 +36,15 @@ pub type Slot = [u8; 12];
 /// A pitch class played all through a [`Slot`].
 pub const SLOT_FULL: u8 = 64;
 
-/// The most slots kept of a part or looked at together: the 32 bars two loops are played round for at the most.
+/// The most slots kept of a part, or of chords: 32 bars of 4/4 in half bars, which is as long as the close look
+/// plays two loops round for.
 pub const MOST_SLOTS: usize = 2 * MOST_BARS_ROUND as usize;
+
+/// How many slots a loop `length` ticks long is kept for: until it ends on a slot's line, going round again when
+/// once through ends inside a slot. [`MOST_SLOTS`] at the most.
+fn slots_round(length: i64, slot: i64) -> usize {
+    usize::try_from(length / gcd(length, slot)).unwrap_or(MOST_SLOTS).min(MOST_SLOTS)
+}
 
 /// A part's slots, each `slot` ticks long, from the bar its first note is in to the bar its last note ends in, as
 /// the close look hears a loop go round ([`LineUp::Loops`](super::LineUp::Loops)). Its first [`MOST_SLOTS`] at the
@@ -48,34 +60,18 @@ pub fn slots_of(notes: &[Note], grid: Grid, slot: i64) -> Vec<Slot> {
 }
 
 /// A part's slots, each `slot` ticks long, over `length` ticks from `from`, a bar line (bars picked from a song: one
-/// the part rests in is still a slot or two). What it plays outside them is left out. The first [`MOST_SLOTS`] at
-/// the most.
+/// the part rests in is still a slot or two). What it plays outside them is left out. Where the stretch ends inside
+/// a slot it goes round again until it ends on a slot's line. The first [`MOST_SLOTS`] at the most; none for no
+/// length.
 pub fn slots_over(notes: &[Note], slot: i64, from: i64, length: i64) -> Vec<Slot> {
-    let slot = slot.max(1);
-    let length = length.max(0);
-    let count = usize::try_from(length.saturating_add(slot - 1) / slot).unwrap_or(0).min(MOST_SLOTS);
-    let mut times = vec![[0i64; 12]; count];
-    let end = (count as i64).saturating_mul(slot).min(length);
-    for note in notes {
-        let (start, stop) = (note.start.saturating_sub(from).max(0), note.end().saturating_sub(from).min(end));
-        let mut at = start;
-        while at < stop {
-            let k = at / slot;
-            let until = (k + 1).saturating_mul(slot).min(stop);
-            if let Some(time) = usize::try_from(k)
-                .ok()
-                .and_then(|k| times.get_mut(k))
-                .and_then(|t| t.get_mut(note.pitch_class().index()))
-            {
-                *time = time.saturating_add(until - at);
-            }
-            at = until;
-        }
+    if length <= 0 {
+        return Vec::new();
     }
-    times
+    let slot = slot.max(1);
+    times_in(notes.iter(), from, length, slot, slots_round(length, slot))
         .iter()
         .map(|time| {
-            time.map(|t| {
+            time.0.map(|t| {
                 // To the nearest part of a slot, but never to nothing: a grace note is still a note.
                 let parts = (t.saturating_mul(i64::from(SLOT_FULL)).saturating_add(slot / 2) / slot).min(255);
                 if t > 0 { parts.max(1) as u8 } else { 0 }
@@ -87,12 +83,31 @@ pub fn slots_over(notes: &[Note], slot: i64, from: i64, length: i64) -> Vec<Slot
 /// Chords as a first look hears them: what a note of each pitch class is worth over them in each slot.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Outline {
-    /// For each slot, from C up; none where nothing is heard.
+    /// For each slot, from C up; none where nothing is heard. The chords going round until they end on a slot's
+    /// line, so it may be more than once through.
     worth: Vec<Option<[f64; 12]>>,
+    /// How many of the slots are once through the chords.
+    once: usize,
+    /// The most slots a tune and the chords are played round for: past it, once through the longer. As many as the
+    /// close look's [`MOST_BARS_ROUND`] bars of the chords' own.
+    most: usize,
     /// How much of the chords' sounding time each pitch class takes, the most-played 1.
-    scale: [f64; 12],
+    scale: PerPitch<f64>,
     /// What being alike is worth ([`Sitting`]'s `alike`).
     alike: f64,
+}
+
+/// A note's worth with what sounds near it added: the close look's `near_played`, and its rub over each note
+/// played 1 to 11 semitones under it.
+fn with_near(worth: f64, near: &Near, worth_of: impl Fn(usize) -> f64) -> f64 {
+    let mut worth = worth;
+    if near.played {
+        worth += worth_of(NEAR_PLAYED);
+    }
+    for (d, strength) in near.above.iter().enumerate().filter(|(_, s)| **s > 0.0) {
+        worth += strength * worth_of(ABOVE + d);
+    }
+    worth
 }
 
 impl Backing {
@@ -102,26 +117,31 @@ impl Backing {
     pub fn outline(&self, slot: i64, how: &Sitting) -> Outline {
         let worths = how.worths();
         let worth_of = |place: usize| worths.get(place).copied().unwrap_or(0.0);
-        let (slot, half) = (slot.max(1), self.half());
-        let count = usize::try_from(self.length.saturating_add(slot - 1) / slot).unwrap_or(0).min(MOST_SLOTS);
+        let (slot, half, length) = (slot.max(1), self.half(), self.length.max(1));
+        let count = slots_round(length, slot);
         let mut worth = Vec::with_capacity(count);
         for k in 0..count as i64 {
-            let to = (k + 1).saturating_mul(slot).min(self.length);
+            let to = (k + 1).saturating_mul(slot);
             let mut sums = [0.0f64; 12];
             let mut heard = 0i64;
-            // Each chord and each half bar in the slot in turn, as the close look walks them under a note.
+            // Each chord and each half bar in the slot in turn, the backing going round under it, as the close look
+            // walks them under a note.
             let mut at = k.saturating_mul(slot);
             while at < to {
-                let s = self.stretches.partition_point(|s| s.end <= at);
-                let stretch = self.stretches.get(s).filter(|s| s.start <= at);
+                let within = at.rem_euclid(length);
+                let lap = at - within;
+                let s = self.stretches.partition_point(|s| s.end <= within);
+                let stretch = self.stretches.get(s).filter(|s| s.start <= within);
                 let until = match stretch {
                     Some(s) => s.end,
-                    None => self.stretches.get(s).map_or(self.length, |s| s.start),
+                    None => self.stretches.get(s).map_or(length, |s| s.start),
                 }
+                .min(length)
+                .min((within / half + 1).saturating_mul(half))
+                .saturating_add(lap)
                 .min(to)
-                .min((at / half + 1).saturating_mul(half))
                 .max(at + 1);
-                let near = usize::try_from(at / half).ok().and_then(|h| self.halves.get(h).copied().flatten());
+                let near = usize::try_from(within / half).ok().and_then(|h| self.halves.get(h).copied().flatten());
                 let time = until - at;
                 at = until;
                 // Where there's neither a chord nor sound, a note isn't heard.
@@ -130,74 +150,62 @@ impl Backing {
                 }
                 heard += time;
                 for (pc, sum) in PitchClass::ALL.into_iter().zip(&mut sums) {
-                    let mut worth = worth_of(stretch.map_or(NO_CHORD, |s| s.kinds[pc]));
-                    if let Some(near) = near {
-                        let near = near[pc];
-                        if near.played {
-                            worth += worth_of(NEAR_PLAYED);
-                        }
-                        for (d, strength) in near.above.iter().enumerate().filter(|(_, s)| **s > 0.0) {
-                            worth += strength * worth_of(ABOVE + d);
-                        }
-                    }
+                    let kind = worth_of(stretch.map_or(NO_CHORD, |s| s.kinds[pc]));
+                    let worth = near.map_or(kind, |near| with_near(kind, &near[pc], worth_of));
                     *sum += time as f64 * worth;
                 }
             }
             worth.push((heard > 0).then(|| sums.map(|sum| sum / heard as f64)));
         }
-        Outline { worth, scale: self.scale.0, alike: worth_of(ALIKE) }
+        let slots_in = |ticks: i64| usize::try_from(ticks / slot).unwrap_or(usize::MAX);
+        Outline {
+            worth,
+            once: slots_in(length.saturating_add(slot - 1)).min(count),
+            most: slots_in(MOST_BARS_ROUND.saturating_mul(self.grid.bar())).max(1),
+            scale: self.scale,
+            alike: worth_of(ALIKE),
+        }
     }
 }
 
 impl Outline {
     /// Chords guessed from a chord part's slots alone, with no chord read in them: a note played in a slot is taken
     /// for a note of the chord there, one that isn't for a note beside it, rubbing the ones that are as the close
-    /// look counts it. For trying chord parts under a tune without reading each one's chords first.
+    /// look counts it. For trying chord parts under a tune without reading each one's chords first. The slots are a
+    /// part's read in 4/4, half a bar each, as a library keeps them.
     pub fn guessed(slots: &[Slot], how: &Sitting) -> Outline {
         let worths = how.worths();
         let worth_of = |place: usize| worths.get(place).copied().unwrap_or(0.0);
         let slots = slots.get(..MOST_SLOTS).unwrap_or(slots);
         // The same note in two octaves is one note of the chord: no pitch class counts for more than the whole
         // slot. (Measured: without this the guess keeps 4 in 100 fewer of the close look's best.)
-        let heard = |slot: &Slot| slot.map(|t| t.min(SLOT_FULL));
-        let mut whole = [0u32; 12];
+        let heard = |slot: &Slot| PerPitch(slot.map(|t| i64::from(t.min(SLOT_FULL))));
+        let mut whole = PerPitch([0i64; 12]);
         for slot in slots {
-            for (sum, time) in whole.iter_mut().zip(heard(slot)) {
-                *sum += u32::from(time);
+            for (pc, time) in heard(slot).iter() {
+                whole[pc] = whole[pc].saturating_add(time);
             }
         }
-        let most = whole.iter().copied().max().unwrap_or(0);
-        let scale = if most > 0 { whole.map(|t| f64::from(t) / f64::from(most)) } else { [0.0; 12] };
+        let scale = strongest(&whole).unwrap_or_default();
         // A played note could be any note of the chord.
-        let played_worth =
-            (worth_of(ROOT) + worth_of(THIRD) + worth_of(FIFTH) + worth_of(COLOUR)) / 4.0 + worth_of(NEAR_PLAYED);
+        let chord_note = (worth_of(ROOT) + worth_of(THIRD) + worth_of(FIFTH) + worth_of(COLOUR)) / 4.0;
         let worth = slots
             .iter()
             .map(|slot| {
-                let slot = heard(slot);
-                let most = slot.iter().copied().max().filter(|m| *m > 0)?;
-                let strength = slot.map(|t| f64::from(t) / f64::from(most));
-                let at = |pc: usize| strength.get(pc % 12).copied().unwrap_or(0.0);
+                let near = near_of(&strongest(&heard(slot))?);
                 let mut out = [0.0f64; 12];
-                for (pc, (cell, in_scale)) in out.iter_mut().zip(&scale).enumerate() {
-                    *cell = if at(pc) >= PLAYED_SHARE {
-                        played_worth
+                for (pc, cell) in PitchClass::ALL.into_iter().zip(&mut out) {
+                    let kind = if near[pc].played {
+                        chord_note
                     } else {
-                        let mut off = worth_of(if *in_scale >= RARE { BESIDE } else { OUTSIDE });
-                        // The played notes it's 1 to 11 semitones above.
-                        for d in 0..11usize {
-                            let below = at(pc + 11 - d);
-                            if below >= PLAYED_SHARE {
-                                off += below * worth_of(ABOVE + d);
-                            }
-                        }
-                        off
+                        worth_of(if scale[pc] >= RARE { BESIDE } else { OUTSIDE })
                     };
+                    *cell = with_near(kind, &near[pc], worth_of);
                 }
                 Some(out)
             })
             .collect();
-        Outline { worth, scale, alike: worth_of(ALIKE) }
+        Outline { worth, once: slots.len(), most: MOST_SLOTS, scale, alike: worth_of(ALIKE) }
     }
 
     /// How a tune is likely to sit over the chords, from its slots alone, moved up by each of 0 to 11 semitones:
@@ -210,11 +218,12 @@ impl Outline {
         if mine == 0 || theirs == 0 {
             return None;
         }
-        // Until they meet again, or once through the longer when that's past the most looked at.
-        let together = mine / gcd(mine, theirs) * theirs;
-        let round = if together <= MOST_SLOTS { together } else { mine.max(theirs) };
+        // Until they meet again, or once through the longer when that's past the most two loops are played round.
+        let shared = usize::try_from(gcd(mine as i64, theirs as i64)).unwrap_or(1).max(1);
+        let together = mine / shared * theirs;
+        let round = if together <= self.most { together } else { mine.max(self.once) };
         let mut sums = [0.0f64; 12];
-        let mut tune_time = [0.0f64; 12];
+        let mut tune_time = PerPitch([0.0f64; 12]);
         let (mut heard, mut all) = (0.0f64, 0.0f64);
         for k in 0..round {
             let (Some(slot), Some(worth)) = (tune.get(k % mine), self.worth.get(k % theirs)) else { continue };
@@ -222,13 +231,11 @@ impl Outline {
             all += f64::from(time);
             let Some(worth) = worth else { continue };
             heard += f64::from(time);
-            for (pc, time) in slot.iter().enumerate().filter(|(_, t)| **t > 0) {
+            for (pc, time) in PitchClass::ALL.into_iter().zip(slot).filter(|(_, t)| **t > 0) {
                 let time = f64::from(*time);
-                if let Some(sum) = tune_time.get_mut(pc) {
-                    *sum += time;
-                }
-                for (s, sum) in sums.iter_mut().enumerate() {
-                    *sum += time * worth.get((pc + s) % 12).copied().unwrap_or(0.0);
+                tune_time[pc] += time;
+                for (s, sum) in (0i32..).zip(sums.iter_mut()) {
+                    *sum += time * worth.get(pc.up(s).index()).copied().unwrap_or(0.0);
                 }
             }
         }
@@ -236,23 +243,12 @@ impl Outline {
             return None;
         }
         // The tune as a whole beside the chords as a whole.
-        let (own, other): (f64, f64) = (tune_time.iter().map(|t| t * t).sum(), self.scale.iter().map(|t| t * t).sum());
         let mut by_move = [0.0f64; 12];
-        for (s, (sits, sum)) in by_move.iter_mut().zip(&sums).enumerate() {
-            let on: f64 = tune_time
-                .iter()
-                .enumerate()
-                .map(|(pc, time)| time * self.scale.get((pc + s) % 12).copied().unwrap_or(0.0))
-                .sum();
-            let alike = if own > 0.0 && other > 0.0 { on / (own * other).sqrt() } else { 0.0 };
+        for ((sits, sum), alike) in by_move.iter_mut().zip(&sums).zip(alike_by_move(&tune_time, &self.scale)) {
             *sits = sum / heard + self.alike * alike;
         }
         Some(Sits { by_move, heard: (heard / all).min(1.0) })
     }
-}
-
-fn gcd(a: usize, b: usize) -> usize {
-    if b == 0 { a.max(1) } else { gcd(b, a % b) }
 }
 
 #[cfg(test)]
@@ -347,27 +343,79 @@ mod tests {
         assert!((close.moved(0) - first.moved(0)).abs() < 1e-9, "{close:?} {first:?}");
     }
 
-    #[test]
-    fn a_song_in_six_eight_is_looked_at_in_the_same_slots_as_a_part_read_in_four_four() {
-        // Two bars of 6/8 at 48 ticks an eighth: A minor, then G. A bar is 288 ticks, a slot still two quarter notes
-        // (192), so two bars are three slots, the middle one over the bar line.
-        let six_eight = Grid { ticks_per_beat: 48, beats_per_bar: 6, bar_line: 0 };
-        let bar = six_eight.bar();
-        let chords: Vec<Note> = [[45, 57, 60, 64], [43, 55, 59, 62]]
+    /// Bars of 6/8 at 48 ticks an eighth, a chord a bar. A bar is 288 ticks: a slot and a half.
+    fn six_eight(bars: &[[u8; 4]]) -> Backing {
+        let grid = Grid { ticks_per_beat: 48, beats_per_bar: 6, bar_line: 0 };
+        let chords: Vec<Note> = bars
             .iter()
             .zip(0i64..)
-            .flat_map(|(keys, at)| keys.iter().map(move |&k| note(at * bar, bar, k)))
+            .flat_map(|(keys, at)| keys.iter().map(move |&k| note(at * grid.bar(), grid.bar(), k)))
             .collect();
         let parts = [Part { role: Role::Harmony, notes: &chords }];
-        let backing = Backing::read(&mut ChordReader::new(), &parts, six_eight, Span::Loop).unwrap();
-        let outline = backing.outline(SLOT, &Sitting::SHIPPED);
-        // A tune from the library, read as 4/4 as every part there is: a note a slot, C, B, D.
-        let tune: Vec<Note> = [72u8, 71, 74].iter().zip(0i64..).map(|(&k, at)| note(at * SLOT, SLOT, k)).collect();
-        let first = outline.sits(&slots_over(&tune, SLOT, 0, 2 * bar)).unwrap();
-        let close = sit(&tune, &backing, LineUp::LoopsFrom { start: 0, length: 2 * bar }, &Sitting::SHIPPED).unwrap();
+        Backing::read(&mut ChordReader::new(), &parts, grid, Span::Loop).unwrap()
+    }
+
+    const A_MINOR: [u8; 4] = [45, 57, 60, 64];
+    const G_MAJOR: [u8; 4] = [43, 55, 59, 62];
+
+    /// A tune from the library, read as 4/4 as every part there is: a note a slot.
+    fn a_note_a_slot(keys: &[u8]) -> Vec<Note> {
+        keys.iter().zip(0i64..).map(|(&k, at)| note(at * SLOT, SLOT, k)).collect()
+    }
+
+    /// The first look of a tune of whole slots over a backing, beside the close look of the same two loops.
+    fn both_looks(tune: &[Note], backing: &Backing) -> (Sits, Sits) {
+        let length = tune.len() as i64 * SLOT;
+        let first = backing.outline(SLOT, &Sitting::SHIPPED).sits(&slots_over(tune, SLOT, 0, length)).unwrap();
+        let close = sit(tune, backing, LineUp::LoopsFrom { start: 0, length }, &Sitting::SHIPPED).unwrap();
+        (first, close)
+    }
+
+    fn assert_same(first: &Sits, close: &Sits) {
         for (a, b) in close.by_move.iter().zip(&first.by_move) {
             assert!((a - b).abs() < 1e-9, "{close:?} {first:?}");
         }
+        assert!((first.heard - close.heard).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_song_in_six_eight_is_looked_at_in_the_same_slots_as_a_part_read_in_four_four() {
+        // Two bars are three slots, the middle one over the bar line.
+        let (first, close) = both_looks(&a_note_a_slot(&[72, 71, 74]), &six_eight(&[A_MINOR, G_MAJOR]));
+        assert_same(&first, &close);
+    }
+
+    #[test]
+    fn a_loop_that_ends_inside_a_slot_goes_round_until_it_ends_on_a_slots_line() {
+        // One bar of 6/8 is a slot and a half: twice round is three slots, and the second slot hears the end of the
+        // bar and its start again.
+        let one_bar = six_eight(&[A_MINOR]);
+        assert_eq!(one_bar.outline(SLOT, &Sitting::SHIPPED).worth.len(), 3);
+        let (first, close) = both_looks(&a_note_a_slot(&[72, 76, 69]), &one_bar);
+        assert_same(&first, &close);
+        // Three bars are four slots and a half: nine slots, twice round.
+        let three_bars = six_eight(&[A_MINOR, G_MAJOR, A_MINOR]);
+        assert_eq!(three_bars.outline(SLOT, &Sitting::SHIPPED).worth.len(), 9);
+        let (first, close) = both_looks(&a_note_a_slot(&[72, 71, 74, 76, 79, 77, 72, 67, 69]), &three_bars);
+        assert_same(&first, &close);
+        // A part's slots the same way: an eighth note at the start of a bar of 6/8 is heard in the first slot, and
+        // again in the second, where the bar comes round.
+        let bar = slots_over(&[note(0, 48, 60)], SLOT, 0, 288);
+        assert_eq!(bar.len(), 3);
+        assert_eq!((bar[0][0], bar[1][0], bar[2][0]), (SLOT_FULL / 4, SLOT_FULL / 4, 0));
+    }
+
+    #[test]
+    fn two_loops_are_played_round_for_as_long_as_the_close_look_plays_them() {
+        // Two bars of 6/8 (three slots) and a tune of 20 slots meet again after 60 slots: more than 32 bars of 6/8
+        // (48 slots), so both looks play the tune once through.
+        let keys: Vec<u8> = (0..20u8).map(|i| 60 + (i * 7) % 12).collect();
+        let backing = six_eight(&[A_MINOR, G_MAJOR]);
+        let (first, close) = both_looks(&a_note_a_slot(&keys), &backing);
+        assert_same(&first, &close);
+        // And a tune of 16 slots meets them after exactly 48: played all the way round.
+        let (first, close) = both_looks(&a_note_a_slot(&keys[..16]), &backing);
+        assert_same(&first, &close);
     }
 
     #[test]

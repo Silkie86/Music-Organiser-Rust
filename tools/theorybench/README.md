@@ -666,7 +666,8 @@ ported in `src/pairs.rs` as it was).
   look's best is still there and how many of its best ten are, then how long each look takes a part on one core.
   Six first looks are scored: the notes with no timing (what the library keeps of every part today), two beats at a
   time (`slots_of`, against `Backing::outline` or `Outline::guessed`), each chord part's own chords kept by the two
-  beats, and the old app's closer look.
+  beats, and the old app's closer look. It goes with `--bars` up to 32 (a first look keeps 32 bars of a part at the
+  most) and not with `--fit`.
 
 What was tried and what it found: `docs/harmony/together-experiments.md`.
 
