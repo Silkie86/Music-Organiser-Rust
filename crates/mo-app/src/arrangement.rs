@@ -129,6 +129,20 @@ impl Peaks {
     }
 }
 
+/// Why an arrangement couldn't be read, for the page: a file that's gone or can't be opened in plain words, anything
+/// else as the reader says it, without the system's error number.
+fn couldnt_read(why: &str) -> String {
+    if why.contains("(os error 2)") || why.contains("(os error 3)") {
+        return "Couldn't read the arrangement: the save isn't where it was. It may have been moved or deleted."
+            .to_owned();
+    }
+    if why.contains("(os error 5)") || why.contains("(os error 13)") {
+        return "Couldn't read the arrangement: the app isn't allowed to open the save.".to_owned();
+    }
+    let plain = why.split(" (os error").next().unwrap_or(why).trim_end_matches('.');
+    format!("Couldn't read the arrangement: {plain}.")
+}
+
 /// Reads a project's arrangement views. Its audio files are looked for after, by [`find_samples`] (until then
 /// `found` is `None`; it's empty at once when no clip plays one). Reads the disk, so never on the window's thread. An
 /// error is the message to show instead.
@@ -138,7 +152,13 @@ pub fn read(project: &Path) -> Result<Preview, String> {
     // instead of ending the page's reader with the arrangement never shown.
     let views: Vec<Arc<Arrangement>> = mo_catch::catch(|| mo_formats::arrangement::read(project))
         .map_err(|_| "Couldn't read the arrangement: the save holds something the reader didn't expect.".to_owned())?
-        .map_err(|e| format!("Couldn't read the arrangement: {e}."))?
+        .map_err(|e| {
+            // What happened and what to do, in a line; the system's own words go to the log (the UX review of
+            // 10 Nov, C6: "No such file or directory (os error 2)" was on the page).
+            let why = e.to_string();
+            crate::log::warning("Arrangement", &format!("Couldn't read {}: {why}", project.display()));
+            couldnt_read(&why)
+        })?
         .into_iter()
         .map(Arc::new)
         .collect();
@@ -1185,6 +1205,15 @@ fn describe(lane: &PreviewLane, clip: &PreviewClip, file_here: impl Fn(&str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_read_is_said_in_plain_words() {
+        let gone = couldnt_read("No such file or directory (os error 2)");
+        assert!(gone.contains("isn't where it was") && !gone.contains("os error"), "{gone}");
+        assert!(couldnt_read("Access is denied. (os error 5)").contains("isn't allowed"));
+        assert_eq!(couldnt_read("not a Bitwig project"), "Couldn't read the arrangement: not a Bitwig project.");
+        assert_eq!(couldnt_read("disk trouble (os error 23)"), "Couldn't read the arrangement: disk trouble.");
+    }
 
     #[test]
     fn a_waveform_keeps_the_loudest_of_each_slice() {
