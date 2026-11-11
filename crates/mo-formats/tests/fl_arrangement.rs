@@ -143,6 +143,10 @@ fn markers_colours_and_the_time_signature() {
     let [playlist, bitwig] = read(&bytes);
     assert_eq!((playlist.tempo, playlist.beats_per_bar), (90.0, 3));
     assert_eq!(playlist.markers, [PreviewMarker { beat: 3.0, name: "Drop".into() }]);
+    // The same two facts alone, for a reader that needs no more of the playlist.
+    let flp = events::load(&bytes).expect("an FL project");
+    assert_eq!(arrangement::bars_and_markers(&flp), (3, playlist.markers.clone()));
+    assert_eq!(arrangement::bars_and_markers(&events::load(&fl_studio_project()).expect("an FL project")), (4, vec![]));
     assert_eq!(lanes(&playlist), [("Bass line", LaneKind::Instrument, "Riff")]);
     // FL saves colours blue first; they come out red first. The pattern's colour is the clip's.
     assert_eq!(playlist.lanes[0].clips[0].colour, Some(0x00_00FF));

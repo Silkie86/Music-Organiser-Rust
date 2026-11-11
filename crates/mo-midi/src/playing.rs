@@ -1,15 +1,17 @@
-//! A saved song's parts as they play: each instrument's notes through the song, read from the project's arrangement
-//! (`mo_formats::arrangement`, what the Songs page's preview draws).
+//! A saved song's parts as they play: each instrument's notes through the song.
 //!
 //! [`crate::extract`] reads a project for the library: there every pattern or clip is a part of its own, moved to
 //! start in bar 1. Here the parts keep their place against each other, so the chords and the bass of bars 17 to 24 of
 //! the song being worked on can be taken together, and a tune from the library fitted over them ([`crate::fit`]).
 //!
-//! Only what plays is read: nothing from a muted track or clip, no muted notes. FL Studio projects are read one
-//! channel a part (the "As it opens in Bitwig" layout), where patterns played in pattern mode come one after another;
-//! Bitwig projects by their arranger, or their scenes one after another when the arranger is empty.
+//! Only what plays is read: nothing from a muted track or clip, no muted notes, nothing from an FL Studio channel
+//! switched off in the Channel rack. An FL Studio project is read one channel a part, from the song as the converter
+//! reads it (`mo_formats::fl::song`: where each channel's patterns play, and patterns played in pattern mode one
+//! after another); a Bitwig project by its arranger, or its scenes one after another when the arranger is empty,
+//! and a Studio One song by its tracks (`mo_formats::arrangement`, what the Songs page's preview draws).
 //!
-//! Files are only read. A damaged file gives an error in plain words, never a crash.
+//! Files are only read. A damaged file gives an error in plain words, never a crash. Reading a project takes about as
+//! long as the Songs page's preview of it does: callers read off the window's thread.
 
 use std::ops::Range;
 use std::panic::AssertUnwindSafe;
@@ -24,6 +26,10 @@ use crate::PPQ;
 use crate::analyser::{self, Shape};
 use crate::extract::{self, Unread};
 use crate::roles::Role;
+
+/// The layout an FL Studio project is read in ([`Song::view`]): a part for each channel that's switched on, its notes
+/// where its patterns play.
+pub const FL_VIEW: &str = "FL Studio channels";
 
 /// One clip (in FL Studio, one pattern) of a part where it plays in the song.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,7 +49,12 @@ pub struct Playing {
     pub notes: Vec<NoteEvent>,
     /// Played by a drum plugin, whose notes pick pads, not pitches.
     pub drums: bool,
-    /// What kind of part it is, guessed from everything it plays and its names.
+    /// An FL Studio channel with no plugin on it (a sampler, or a layer): a sampler's notes say how far from the
+    /// sample's own pitch it plays, and the project doesn't say what that pitch is (most are drum hits). Left out of
+    /// [`Song::harmony_parts`] and [`Song::melody_parts`]; picked by hand, its notes are taken as written, which is
+    /// right when the sample is tuned to the keys.
+    pub sample: bool,
+    /// What kind of part it is, guessed a phrase at a time from what it plays and its names.
     pub role: Role,
     /// Why, in a few words.
     pub role_why: String,
@@ -64,7 +75,8 @@ pub struct Marker {
 /// A saved song as it plays.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Song {
-    /// Which of the project's layouts this is, as the Songs page names it.
+    /// Which of the project's layouts this is: [`FL_VIEW`], or the one the Songs page names (Bitwig's arranger or
+    /// scenes, Studio One's tracks).
     pub view: &'static str,
     pub tempo: f64,
     /// Beats in a bar. A song that changes its time signature on the way is read by the one it starts with.
@@ -93,18 +105,19 @@ impl Song {
     }
 
     /// The parts that carry the song's chords (chords, arps, basslines), as places in [`Song::parts`]: what a tune is
-    /// fitted over when nothing is picked.
+    /// fitted over when nothing is picked. No drums, and no samples ([`Playing::sample`]).
     pub fn harmony_parts(&self) -> Vec<usize> {
         self.parts_that(|role| matches!(role, Role::Chords | Role::Arp | Role::Bass))
     }
 
-    /// The song's melodies, as places in [`Song::parts`]: what chords are fitted under when nothing is picked.
+    /// The song's melodies, as places in [`Song::parts`]: what chords are fitted under when nothing is picked. No
+    /// samples ([`Playing::sample`]).
     pub fn melody_parts(&self) -> Vec<usize> {
         self.parts_that(|role| role == Role::Melody)
     }
 
     fn parts_that(&self, is: impl Fn(Role) -> bool) -> Vec<usize> {
-        self.parts.iter().enumerate().filter(|(_, p)| !p.drums && is(p.role)).map(|(at, _)| at).collect()
+        self.parts.iter().enumerate().filter(|(_, p)| !p.drums && !p.sample && is(p.role)).map(|(at, _)| at).collect()
     }
 
     /// What the part at `part` plays in `bars` (counted from 0), moved so the first of those bars starts at tick 0. A
@@ -135,37 +148,35 @@ impl Song {
         let mut places = parts.to_vec();
         places.sort_unstable();
         places.dedup();
-        let picked: Vec<&Playing> =
-            places.iter().filter_map(|&p| self.parts.get(p)).filter(|p| !p.notes.is_empty()).collect();
-        let first = picked.iter().map(|p| p.bars.start).min()?;
-        let last = picked.iter().map(|p| p.bars.end).max()?;
         let bar = self.bar();
-        let count = usize::try_from(last - first).ok()?;
-        // How many of the parts sound in each bar. Each part's bars are marked where its notes start and stop and
-        // then added up along the song, so a note held for a thousand bars costs no more than a short one.
-        let mut playing = vec![0u32; count];
-        let mut edges = vec![0i32; count + 1];
-        for p in &picked {
-            edges.fill(0);
-            for n in &p.notes {
-                let from = usize::try_from(n.start.div_euclid(bar) - first).unwrap_or(0).min(count);
-                let to = usize::try_from((n.start + n.length.max(1) - 1).div_euclid(bar) - first + 1).unwrap_or(0);
-                if let Some(edge) = edges.get_mut(from) {
-                    *edge += 1;
-                }
-                if let Some(edge) = edges.get_mut(to.min(count)) {
-                    *edge -= 1;
+        // Where each part starts sounding (+1) and stops (-1), in bars. A part's notes come in order, so its bars
+        // with sound are gathered as runs: what this costs goes by the notes, however long the song or a held note.
+        let mut edges: Vec<(i64, i32)> = Vec::new();
+        let mut last = None;
+        for part in places.iter().filter_map(|&p| self.parts.get(p)).filter(|p| !p.notes.is_empty()) {
+            last = last.max(Some(part.bars.end));
+            let mut run: Option<Range<i64>> = None;
+            for n in &part.notes {
+                let from = n.start.div_euclid(bar);
+                let to = n.start.saturating_add(n.length.max(1) - 1).div_euclid(bar) + 1;
+                match &mut run {
+                    Some(run) if from <= run.end => run.end = run.end.max(to),
+                    _ => edges.extend(run.replace(from..to).into_iter().flat_map(|r| [(r.start, 1), (r.end, -1)])),
                 }
             }
-            let mut sounding = 0;
-            for (bar_count, edge) in playing.iter_mut().zip(&edges) {
-                sounding += edge;
-                *bar_count += u32::from(sounding > 0);
+            edges.extend(run.into_iter().flat_map(|r| [(r.start, 1), (r.end, -1)]));
+        }
+        // In order, a part stopping at a bar before one starting there.
+        edges.sort_unstable();
+        let (mut sounding, mut fullest, mut start) = (0, 0, None);
+        for (at, change) in edges {
+            sounding += change;
+            if sounding > fullest {
+                (fullest, start) = (sounding, Some(at));
             }
         }
-        let fullest = playing.iter().copied().max()?;
-        let start = first + playing.iter().position(|&c| c == fullest)? as i64;
-        Some(start..last.min(start.saturating_add(most.max(1))))
+        let start = start?;
+        Some(start..last?.min(start.saturating_add(most.max(1))))
     }
 }
 
@@ -178,62 +189,148 @@ pub fn read(path: &Path) -> Result<Song, Unread> {
 /// A project's bytes, already read from `path`, as the song plays.
 pub fn from_bytes(path: &Path, raw: &[u8]) -> Result<Song, Unread> {
     let text = path.to_string_lossy();
-    match mo_catch::catch(AssertUnwindSafe(|| views(&text, raw))) {
-        Ok(views) => {
-            let mut views = views?;
-            // FL Studio's second layout has a lane for each channel; the playlist's lanes are its own tracks.
-            let at = views.iter().position(|v| v.view == fl::arrangement::BITWIG_VIEW).unwrap_or(0);
-            if at >= views.len() {
-                return Err(Unread::Failed("It has no arrangement to read".into()));
-            }
-            Ok(of(&views.swap_remove(at)))
-        }
-        Err(_) => Err(Unread::Failed(
-            "The reader stopped on it: it looks damaged in a way the reader doesn't know yet".into(),
-        )),
-    }
+    // Reading it and working out its parts both: a damaged file's numbers reach both.
+    mo_catch::catch(AssertUnwindSafe(|| by_ending(&text, raw))).unwrap_or_else(|_| {
+        Err(Unread::Failed("The reader stopped on it: it looks damaged in a way the reader doesn't know yet".into()))
+    })
 }
 
-/// The project's layouts, by its ending.
-fn views(path: &str, raw: &[u8]) -> Result<Vec<Arrangement>, Unread> {
+/// The song, read by its file's ending.
+fn by_ending(path: &str, raw: &[u8]) -> Result<Song, Unread> {
     match case::to_lower(paths::extension(paths::file_name(path))).as_str() {
         ".flp" => {
             let flp = fl::events::load(raw).map_err(|_| extract::damaged("not an FL Studio project, or damaged"))?;
-            Ok(fl::arrangement::read(&flp))
+            Ok(of_fl(&flp))
         }
         ".bwproject" => {
             let doc = bitwig::decode(raw).map_err(|_| extract::damaged("not a Bitwig project, or damaged"))?;
-            Ok(bitwig::arrangement::read(&doc))
+            let views = bitwig::arrangement::read(&doc);
+            views.first().map(of).ok_or_else(|| Unread::Failed("It has no arrangement to read".into()))
         }
         ".song" => {
             let mut song = studio_one::Song::open(raw).map_err(|e| extract::damaged(&e.to_string()))?;
-            Ok(vec![song.arrangement()])
+            Ok(of(&song.arrangement()))
         }
         _ => Err(Unread::Failed("It isn't a project this app reads (FL Studio, Bitwig or Studio One)".into())),
     }
 }
 
-/// The parts of an arrangement already read. A clip that holds several instruments' notes (an FL Studio pattern in
-/// the playlist's own layout) gives each instrument its part, the same instrument on two lanes one part.
+/// A part as it's put together, with what [`finish`] needs to know of it.
+struct Gathered {
+    part: Playing,
+    /// Its clips are its own (a track's clips), so their names say something of it. A pattern's name doesn't: it's
+    /// every channel's in the pattern.
+    own_clips: bool,
+}
+
+impl Gathered {
+    fn new(name: &str, plugin: &str, sample: bool, own_clips: bool) -> Gathered {
+        let part = Playing {
+            name: name.to_owned(),
+            plugin: plugin.to_owned(),
+            notes: Vec::new(),
+            drums: false,
+            sample,
+            role: Role::Other,
+            role_why: String::new(),
+            bars: 0..0,
+            clips: Vec::new(),
+        };
+        Gathered { part, own_clips }
+    }
+}
+
+/// Beats as [`PPQ`] ticks. None for a number no song holds (a damaged file's), so it's left out, not followed.
+fn ticks_of(beats: f64) -> Option<i64> {
+    (beats.is_finite() && beats.abs() <= MOST_BEATS).then(|| (beats * PPQ as f64).round_ties_even() as i64)
+}
+
+/// The bars a clip takes up, counted from 0, by its start and length in ticks.
+fn clip_bars(start: i64, length: i64, bar: i64) -> Range<i64> {
+    let last = (start + length.max(1) - 1).div_euclid(bar);
+    start.div_euclid(bar).max(0)..last.max(0) + 1
+}
+
+/// An FL Studio project's song: a part for each channel that's switched on and plays notes.
+fn of_fl(flp: &fl::events::Flp<'_>) -> Song {
+    let song = fl::song::read_song_with(flp, false);
+    let (beats_per_bar, markers) = fl::arrangement::bars_and_markers(flp);
+    let beats_per_bar = beats_per_bar.max(1);
+    let bar = PPQ * i64::from(beats_per_bar);
+    // A damaged header can say 0 ticks a beat: FL's default stands in, as in the arrangement's layouts.
+    let per_beat = if song.ppq > 0 { f64::from(song.ppq) } else { 96.0 };
+    let ticks = |at: i64| ticks_of(at as f64 / per_beat);
+    let mut gathered = Vec::new();
+    // A channel switched off in the Channel rack (its green light off) plays nothing. One whose light is automated
+    // counts as on: what it would play while off is muted, clip by clip and note by note.
+    for c in song.channels.iter().filter(|c| c.enabled && !c.notes.is_empty()) {
+        let plugin = c.instrument.as_ref().map_or("", |i| i.name.as_str());
+        let mut found = Gathered::new(&c.name, plugin, c.instrument.is_none(), false);
+        // What plays of it across the song: no muted notes, none from a muted clip or track, none past its clip.
+        found.part.notes = c
+            .notes
+            .iter()
+            .filter_map(|n| {
+                let start = ticks(n.start).filter(|start| *start >= 0)?;
+                // A step-sequencer note has no length of its own: a sixteenth, as the library's parts give it.
+                let length = if n.step { PPQ / 4 } else { ticks(n.length)?.clamp(1, analyser::MAX_HOLD) };
+                Some(NoteEvent { start, length, muted: false, step: false, ..*n })
+            })
+            .collect();
+        found.part.clips = c
+            .clips
+            .iter()
+            .filter(|k| !k.muted && !k.on_muted_track && k.notes.iter().any(|n| !n.muted))
+            .filter_map(|k| {
+                Some(ClipPlace { name: k.name.clone(), bars: clip_bars(ticks(k.start)?, ticks(k.length)?, bar) })
+            })
+            .collect();
+        if !found.part.notes.is_empty() {
+            gathered.push(found);
+        }
+    }
+    // What the song couldn't hold, then notes left out above MIDI's keys or damaged note events.
+    let mut warnings: Vec<String> = song.warning.map(str::to_owned).into_iter().collect();
+    warnings.extend(fl::notes::trouble(flp));
+    Song {
+        view: FL_VIEW,
+        tempo: if song.tempo > 0.0 { song.tempo } else { 120.0 },
+        beats_per_bar,
+        parts: finish(gathered, bar),
+        markers: markers
+            .iter()
+            .filter_map(|m| Some(Marker { bar: ticks_of(m.beat)?.div_euclid(bar).max(0), name: m.name.clone() }))
+            .collect(),
+        warnings,
+    }
+}
+
+/// The parts of an arrangement already read (the Songs page's preview holds one). A clip that holds several
+/// instruments' notes (an FL Studio pattern in the playlist's own layout) gives each instrument its part, the same
+/// instrument on two lanes one part.
+///
+/// For an FL Studio project [`read`] knows more: the arrangement's layouts don't say which channels are switched
+/// off, or which play a sample.
 pub fn of(arrangement: &Arrangement) -> Song {
     let beats_per_bar = arrangement.beats_per_bar.max(1);
     let bar = PPQ * i64::from(beats_per_bar);
-    let ticks = |beats: f64| -> Option<i64> {
-        (beats.is_finite() && beats.abs() <= MOST_BEATS).then(|| (beats * PPQ as f64).round_ties_even() as i64)
-    };
+    // FL Studio's lane-a-channel layout: the clips on a lane are patterns, which other channels play in too.
+    let patterns = arrangement.view == fl::arrangement::BITWIG_VIEW;
     // (the lane it's on, or none for an instrument named by its clips; its name) -> its place in `parts`.
     let mut places: Vec<(Option<usize>, String)> = Vec::new();
-    let mut parts: Vec<Playing> = Vec::new();
+    let mut parts: Vec<Gathered> = Vec::new();
     for (lane_at, lane) in arrangement.lanes.iter().enumerate().filter(|(_, l)| !l.muted && !l.disabled) {
         // The lane's own part, and each clip's named instruments' parts: looked up once, not for every note.
         let mut own: Option<usize> = None;
         for clip in lane.clips.iter().filter(|c| !c.muted) {
-            let (Some(clip_start), Some(clip_length)) = (ticks(clip.start), ticks(clip.length)) else { continue };
+            let (Some(clip_start), Some(clip_length)) = (ticks_of(clip.start), ticks_of(clip.length)) else {
+                continue;
+            };
             let mut named: Vec<Option<usize>> = vec![None; clip.parts.len()];
             // Which parts this clip gave notes to, to note where the clip plays in each.
             let mut gave: Vec<usize> = Vec::new();
             for n in clip.notes.iter().filter(|n| !n.muted) {
-                let (Some(at), Some(length)) = (ticks(n.start), ticks(n.length)) else { continue };
+                let (Some(at), Some(length)) = (ticks_of(n.start), ticks_of(n.length)) else { continue };
                 // A step-sequencer note has no length of its own: a sixteenth, as the library's parts give it.
                 let length = if n.step { PPQ / 4 } else { length.clamp(1, analyser::MAX_HOLD) };
                 // Nothing of a note sounds before its clip starts or past its end, or before the song starts.
@@ -252,15 +349,9 @@ pub fn of(arrangement: &Arrangement) -> Song {
                         None => (Some(lane_at), lane.name.clone()),
                     };
                     let at = places.iter().position(|p| *p == key).unwrap_or_else(|| {
-                        parts.push(Playing {
-                            name: key.1.clone(),
-                            plugin: if name.is_some() { String::new() } else { lane.detail.clone() },
-                            notes: Vec::new(),
-                            drums: false,
-                            role: Role::Other,
-                            role_why: String::new(),
-                            bars: 0..0,
-                            clips: Vec::new(),
+                        parts.push(match name {
+                            Some(name) => Gathered::new(name, "", false, false),
+                            None => Gathered::new(&lane.name, &lane.detail, false, !patterns),
                         });
                         places.push(key);
                         parts.len() - 1
@@ -271,8 +362,8 @@ pub fn of(arrangement: &Arrangement) -> Song {
                     }
                     at
                 });
-                if let Some(part) = parts.get_mut(part_at) {
-                    part.notes.push(NoteEvent {
+                if let Some(found) = parts.get_mut(part_at) {
+                    found.part.notes.push(NoteEvent {
                         start,
                         length: end - start,
                         key: n.key,
@@ -286,47 +377,83 @@ pub fn of(arrangement: &Arrangement) -> Song {
                     }
                 }
             }
-            let last_bar = (clip_start + clip_length.max(1) - 1).div_euclid(bar);
-            let bars = clip_start.div_euclid(bar).max(0)..last_bar.max(0) + 1;
             for at in gave {
-                if let Some(part) = parts.get_mut(at) {
-                    part.clips.push(ClipPlace { name: clip.name.clone(), bars: bars.clone() });
+                if let Some(found) = parts.get_mut(at) {
+                    found
+                        .part
+                        .clips
+                        .push(ClipPlace { name: clip.name.clone(), bars: clip_bars(clip_start, clip_length, bar) });
                 }
             }
         }
     }
-    for part in &mut parts {
-        part.notes.sort_by_key(|n| (n.start, n.key));
-        part.clips.sort_by_key(|c| (c.bars.start, c.bars.end));
-        let first = part.notes.first().map_or(0, |n| n.start);
-        let end = part.notes.iter().map(|n| n.start + n.length).max().unwrap_or(0);
-        part.bars = first.div_euclid(bar)..(end - 1).div_euclid(bar) + 1;
-        part.drums = extract::is_unpitched_plugin(&part.name) || extract::is_unpitched_plugin(&part.plugin);
-        // Its names: its own, and each clip's once.
-        let mut names: Vec<&str> = Vec::new();
-        for c in &part.clips {
-            if !names.contains(&c.name.as_str()) {
-                names.push(&c.name);
-            }
-        }
-        let hints = extract::project_hints(&part.name, &names.join(" "));
-        // A song-long part is judged by its first notes: as many as the library's longest part holds.
-        let judged = part.notes.get(..analyser::MAX_NOTES).unwrap_or(&part.notes);
-        (part.role, part.role_why) = analyser::role(&Shape::of(judged), judged, &hints, part.drums);
-    }
     let markers = arrangement
         .markers
         .iter()
-        .filter_map(|m| Some(Marker { bar: ticks(m.beat)?.div_euclid(bar).max(0), name: m.name.clone() }))
+        .filter_map(|m| Some(Marker { bar: ticks_of(m.beat)?.div_euclid(bar).max(0), name: m.name.clone() }))
         .collect();
     Song {
         view: arrangement.view,
         tempo: arrangement.tempo,
         beats_per_bar,
-        parts,
+        parts: finish(parts, bar),
         markers,
         warnings: arrangement.notes.clone(),
     }
+}
+
+/// The parts once every note is in: in order, with the bars each plays in and what kind of part it is.
+fn finish(gathered: Vec<Gathered>, bar: i64) -> Vec<Playing> {
+    gathered
+        .into_iter()
+        .map(|Gathered { mut part, own_clips }| {
+            part.notes.sort_by_key(|n| (n.start, n.key));
+            part.clips.sort_by_key(|c| (c.bars.start, c.bars.end));
+            let first = part.notes.first().map_or(0, |n| n.start);
+            let end = part.notes.iter().map(|n| n.start + n.length).max().unwrap_or(0);
+            part.bars = first.div_euclid(bar)..(end - 1).div_euclid(bar) + 1;
+            part.drums = extract::is_unpitched_plugin(&part.name) || extract::is_unpitched_plugin(&part.plugin);
+            (part.role, part.role_why) = role_of(&part, own_clips);
+            part
+        })
+        .collect()
+}
+
+/// What kind of part it is, and why. It's judged a phrase at a time, as the library's parts are
+/// ([`analyser::split`]), and the kind most of its notes are in wins: a part's notes through a whole song aren't one
+/// phrase (an arp that comes in at bar 33 plays few notes for the song's length, and a lead's verse and chorus
+/// together wander further than either).
+fn role_of(part: &Playing, own_clips: bool) -> (Role, String) {
+    // Its names: its own, and each of its own clips' once.
+    let mut names: Vec<&str> = Vec::new();
+    for c in part.clips.iter().filter(|_| own_clips) {
+        if !names.contains(&c.name.as_str()) {
+            names.push(&c.name);
+        }
+    }
+    let hints = extract::project_hints(&part.name, &names.join(" "));
+    // By its first notes: as many as the library's longest part holds.
+    let judged = part.notes.get(..analyser::MAX_NOTES).unwrap_or(&part.notes);
+    if part.drums {
+        return analyser::role(&Shape::of(judged), judged, &hints, true);
+    }
+    // Each kind found, why (the first time), and how many notes are in phrases of that kind.
+    let mut kinds: Vec<(Role, String, usize)> = Vec::new();
+    for piece in analyser::split(judged, None) {
+        let (role, why) = analyser::role(&Shape::of(&piece.notes), &piece.notes, &hints, false);
+        match kinds.iter_mut().find(|(kind, ..)| *kind == role) {
+            Some((.., notes)) => *notes += piece.notes.len(),
+            None => kinds.push((role, why, piece.notes.len())),
+        }
+    }
+    // The kind with the most notes: the one found first when two have as many.
+    let mut most: Option<(Role, String, usize)> = None;
+    for kind in kinds {
+        if most.as_ref().is_none_or(|(.., notes)| kind.2 > *notes) {
+            most = Some(kind);
+        }
+    }
+    most.map_or((Role::Other, String::new()), |(role, why, _)| (role, why))
 }
 
 /// The saves written last, newest first, each with its song: the first is the song being worked on. Only saves whose
@@ -337,14 +464,9 @@ pub fn worked_on<'a>(
     dates: &RealDates,
     most: usize,
 ) -> Vec<(&'a mo_library::Song, &'a mo_library::Save)> {
+    // The projects the MIDI library reads are the ones read here.
     let reads = |s: &mo_library::Save| {
-        !s.file_missing
-            && s.error.is_none()
-            && dates.seconds(s.mtime)
-            && matches!(
-                case::to_lower(paths::extension(paths::file_name(&s.path))).as_str(),
-                ".flp" | ".bwproject" | ".song"
-            )
+        !s.file_missing && s.error.is_none() && dates.seconds(s.mtime) && extract::project_version(&s.path).is_some()
     };
     let mut newest: Vec<(&mo_library::Song, &mo_library::Save)> = songs
         .iter()
@@ -510,6 +632,62 @@ mod tests {
         // Picked twice, a part counts once.
         assert_eq!(song.busiest_bars(&[0, 0, 1], 8), Some(4..12));
         assert_eq!(song.busiest_bars(&[], 8), None);
+
+        // A part that stops as another starts: they never play together, so the first bar either plays in. And two
+        // that meet again after a gap: the first bar both play in, which is after the gap.
+        let run = |from: i64, bars: i64| -> PreviewClip {
+            clip("r", from as f64 * 4.0, bars as f64 * 4.0, (0..bars).map(|b| note(b as f64 * 4.0, 4.0, 60)).collect())
+        };
+        let song = of(&arrangement(vec![lane("A", vec![run(0, 4)]), lane("B", vec![run(4, 4)])]));
+        assert_eq!(song.busiest_bars(&[0, 1], 8), Some(0..8));
+        let song = of(&arrangement(vec![lane("A", vec![run(0, 2), run(6, 2)]), lane("B", vec![run(6, 4)])]));
+        assert_eq!(song.busiest_bars(&[0, 1], 2), Some(6..8));
+        assert_eq!(song.busiest_bars(&[0, 1], 8), Some(6..10));
+        // A note held for a thousand bars is one run of bars, not a thousand steps for each part.
+        let drone = lane("Drone", vec![clip("d", 0.0, 4096.0, vec![note(0.0, 4096.0, 36)])]);
+        let song = of(&arrangement(vec![drone, lane("B", vec![run(1000, 4)])]));
+        assert_eq!(song.busiest_bars(&[0, 1], 8), Some(1000..1008));
+    }
+
+    #[test]
+    fn a_part_is_judged_a_phrase_at_a_time() {
+        // Eight bars of sixteenths going up and down a chord, coming in at bar 33: an arp. Counted over the song's
+        // length it plays few notes a beat, which a tune does.
+        let arp: Vec<PreviewNote> =
+            (0..128).map(|i| note(i as f64 * 0.25, 0.25, [57, 60, 64, 69, 64, 60][i % 6])).collect();
+        let late = lane("Track 5", vec![clip("c", 128.0, 32.0, arp)]);
+        // Chords for eight bars, then, after a long rest, a bar of single notes: most of it is chords.
+        let mut fill = clip("d", 80.0, 4.0, (0..4).map(|b| note(b as f64, 1.0, 72)).collect());
+        fill.name = "c".into();
+        let keys = lane(
+            "Track 6",
+            vec![
+                clip(
+                    "c",
+                    0.0,
+                    32.0,
+                    (0..8).flat_map(|b| chord([57, 60, 64]).into_iter().map(shifted(b as f64 * 4.0))).collect(),
+                ),
+                fill,
+            ],
+        );
+        let song = of(&arrangement(vec![late, keys]));
+        assert_eq!(song.parts.iter().map(|p| p.role).collect::<Vec<_>>(), [Role::Arp, Role::Chords], "{song:?}");
+    }
+
+    #[test]
+    fn a_clips_name_says_what_its_own_track_plays_and_a_patterns_does_not() {
+        // Single notes around middle C, in a clip called "Bass".
+        let line = || vec![note(0.0, 1.0, 60), note(1.0, 1.0, 62), note(2.0, 1.0, 64), note(3.0, 1.0, 62)];
+        let track = of(&arrangement(vec![lane("Synth", vec![clip("Bass", 0.0, 4.0, line())])]));
+        assert_eq!(track.parts[0].role, Role::Bass, "{track:?}");
+        // An FL Studio pattern of that name holds whichever channels play in it: the name isn't this channel's.
+        let mut patterns = arrangement(vec![lane("Synth", vec![clip("Bass", 0.0, 4.0, line())])]);
+        patterns.view = fl::arrangement::BITWIG_VIEW;
+        assert_eq!(of(&patterns).parts[0].role, Role::Melody);
+        let mut pattern = clip("Bass", 0.0, 4.0, line());
+        pattern.parts = vec!["Synth".into()];
+        assert_eq!(of(&arrangement(vec![lane("Track 1", vec![pattern])])).parts[0].role, Role::Melody);
     }
 
     #[test]
@@ -592,16 +770,24 @@ mod tests {
     fn real_saves_read_as_they_play() {
         // The recipe saves (made by hand for tests, rule 4's one exception): C D E G on FL Keys, and on Polysynth.
         let fl = read(&recipe("fl", "MO Recipe 02 notes.flp")).unwrap();
-        assert_eq!(fl.view, fl::arrangement::BITWIG_VIEW);
+        assert_eq!(fl.view, FL_VIEW);
         assert_eq!(fl.tempo, 128.0);
         let keys: Vec<u8> = fl.parts.iter().flat_map(|p| &p.notes).map(|n| n.key % 12).collect();
         assert_eq!(keys, [0, 2, 4, 7], "{fl:?}");
+        // FL Keys is a plugin, so its notes are pitches: a part the song's own tune or chords can be.
+        assert_eq!((fl.parts[0].plugin.as_str(), fl.parts[0].sample), ("FL Keys", false));
         let bitwig = read(&recipe("bitwig", "MO Recipe 02 notes.bwproject")).unwrap();
         let keys: Vec<u8> = bitwig.parts.iter().flat_map(|p| &p.notes).map(|n| n.key % 12).collect();
         assert_eq!(keys, [0, 2, 4, 7], "{bitwig:?}");
-        // A save with no notes has no parts; 3/4 is read as 3 beats a bar.
+        // A save with no notes has no parts.
         assert!(read(&recipe("fl", "MO Recipe 01 empty.flp")).unwrap().parts.is_empty());
-        assert_eq!(read(&recipe("fl", "MO Recipe 16 time signature and marker.flp")).unwrap().beats_per_bar, 3);
+        // 3/4 is read as 3 beats a bar, and the marker is in the bar it was put in: FL's on beat 4 (bar 2), Bitwig's
+        // on beat 5 (bar 2 too).
+        let verse = [Marker { bar: 1, name: "Verse".into() }];
+        let fl = read(&recipe("fl", "MO Recipe 16 time signature and marker.flp")).unwrap();
+        assert_eq!((fl.beats_per_bar, fl.markers.as_slice()), (3, verse.as_slice()));
+        let bitwig = read(&recipe("bitwig", "MO Recipe 16 time signature and marker.bwproject")).unwrap();
+        assert_eq!((bitwig.beats_per_bar, bitwig.markers.as_slice()), (3, verse.as_slice()));
     }
 
     #[test]

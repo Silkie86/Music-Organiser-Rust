@@ -147,8 +147,25 @@ README are from after the fixes and a fresh fit (loss 1.5175; it was 1.5227).
   stretch is drawn twice, so "first of 51" is of 51; velocities and the cutting of stretches use the bench's shared
   code. All ten together moved the 8-bar numbers by 0.3 points at most.
 
+## Bars picked from a song (2026-11-11)
+
+Fitting to the song being worked on (`mo_midi::fit`) showed one more thing the two-loops line-up got wrong: it took
+each side's length from its notes, from the bar of the first note to the bar the last one ends in. For bars picked
+from a song that isn't the length: a lead that rests in the last of four picked bars went round every three bars
+against four bars of chords, slipping a bar each time, and chords that come in a bar after the first picked bar
+were heard a bar early. Two additions hold the picked bars as picked, a bar of rest too (`together::tests` and
+`fit::tests` have the cases):
+
+- `Backing::over(reading, parts, from, length)`: the chords over a stretch of time the caller gives.
+  `Backing::of` is the same thing over the reading's own stretch, so nothing measured above moves.
+- `LineUp::LoopsFrom { start, length }`: the tune's own round given, against the backing going round.
+
 ## What it doesn't know yet
 
+- **How long a loop from the library is.** A part's length isn't saved with it, so a found part still goes round
+  from its first note's bar to its last note's: a four-bar loop that rests in its last bar is heard as three bars.
+  Rounding up to 1, 2, 4, 8 or 16 bars is the likely fix; Solomon's packs' chord and melody pairs (below) are where
+  to count whether it helps before it ships.
 - **Only pop was measured.** Jazz, gospel and blues are held by the two rules and nine hand cases
   (`together::tests`), not by data. A set with real jazz tunes over real voicings would settle how much the rules
   cost or win there.

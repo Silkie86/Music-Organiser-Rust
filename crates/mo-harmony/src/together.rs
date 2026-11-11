@@ -300,12 +300,20 @@ impl Backing {
         Some(Backing::of(&reading, parts))
     }
 
-    /// The backing of a reading already made of `parts`.
+    /// The backing of a reading already made of `parts`: from the bar its first note is in to where its last ends.
     pub fn of(reading: &ChordReading, parts: &[Part]) -> Backing {
-        let origin = reading.start;
+        Backing::over(reading, parts, reading.start, reading.end.saturating_sub(reading.start))
+    }
+
+    /// The backing of a reading already made of `parts`, over a stretch of time the caller gives: `length` ticks from
+    /// `from`, a bar line. For bars picked from a song, where a bar the parts rest in, first or last, is still a bar
+    /// of what goes round ([`Backing::of`] would start at the first note's bar and stop with the last note). What
+    /// the parts play outside the stretch is left out.
+    pub fn over(reading: &ChordReading, parts: &[Part], from: i64, length: i64) -> Backing {
+        let origin = from;
         let grid = Grid { bar_line: origin, ..reading.grid };
         let bar = grid.bar();
-        let span = reading.end.saturating_sub(origin).max(1);
+        let span = length.max(1);
         // Whole bars: a stretch that ends mid-bar goes round at the next bar line.
         let length = span.saturating_add(bar - 1).div_euclid(bar).max(1).saturating_mul(bar);
         // How long each pitch class sounds in each half bar, and in all of it.
@@ -359,11 +367,9 @@ impl Backing {
             .filter(|s| s.end > s.start)
             .filter_map(|s| {
                 let chord = s.shown()?.written;
-                Some(Stretch {
-                    start: s.start.saturating_sub(origin),
-                    end: s.end.saturating_sub(origin),
-                    kinds: kinds_over(chord, &scale),
-                })
+                // Only what lies in the stretch.
+                let (start, end) = (s.start.saturating_sub(origin).max(0), s.end.saturating_sub(origin).min(length));
+                (end > start).then(|| Stretch { start, end, kinds: kinds_over(chord, &scale) })
             })
             .collect();
         Backing { grid, origin, length, stretches, scale, halves }
@@ -401,6 +407,11 @@ pub enum LineUp {
         /// A tick where one of the tune's own bars starts (its grid's `bar_line`; 0 for a clip that starts on a bar).
         bar_line: i64,
     },
+    /// Two loops, the tune's own round given: it goes round every `length` ticks from `start`, a bar line of its own,
+    /// against the backing going round from its first bar. For bars picked from a song, where a bar the tune rests
+    /// in, first or last, is still a bar of what goes round ([`LineUp::Loops`] would start at the first note's bar and
+    /// go round after the last note's). The tune's notes lie within it.
+    LoopsFrom { start: i64, length: i64 },
     /// Both as written, in the same time (a tick of the tune sounds with the same tick of the backing), played once:
     /// two parts of one song, or a tune already laid over the backing.
     AsWritten,
@@ -478,11 +489,15 @@ pub fn shares(tune: &[Note], backing: &Backing, line_up: LineUp, how: &Sitting) 
             let length = last.saturating_sub(start).saturating_add(bar - 1).div_euclid(bar).max(1).saturating_mul(bar);
             (start, length, round_of(length, backing.length, bar))
         }
+        LineUp::LoopsFrom { start, length } => {
+            let length = length.max(1);
+            (start, length, round_of(length, backing.length, bar))
+        }
         // Once through: a note before the backing or after it plays over silence.
         LineUp::AsWritten => (backing.origin, i64::MAX, backing.length),
     };
 
-    let loops = matches!(line_up, LineUp::Loops { .. });
+    let loops = !matches!(line_up, LineUp::AsWritten);
     // A note is followed over the backing no further than this: past it (a drone, or a damaged file's note that never
     // ends) it would only hear the same again.
     let furthest = MOST_BARS_ROUND.saturating_mul(bar);
@@ -925,6 +940,49 @@ mod tests {
     }
 
     #[test]
+    fn bars_a_part_rests_in_are_still_bars_of_what_goes_round() {
+        // A tune that plays over Am7, Dm7 and G7 and rests in the fourth bar, over the four-bar turnaround.
+        let backing = turnaround();
+        let line = tune(&[(0, 8, 72), (8, 8, 77), (16, 8, 71)]);
+        // Taken from its notes it's three bars long: its second time round starts over Cmaj7, a bar early.
+        let from_notes = sit(&line, &backing, LineUp::Loops { bar_line: 0 }, &Sitting::SHIPPED).unwrap();
+        // Told it's four bars long it meets the same chords every time round, as it does written out once.
+        let given = sit(&line, &backing, LineUp::LoopsFrom { start: 0, length: 4 * BAR }, &Sitting::SHIPPED).unwrap();
+        let written = sit(&line, &backing, LineUp::AsWritten, &Sitting::SHIPPED).unwrap();
+        for (given, written) in given.by_move.iter().zip(&written.by_move) {
+            assert!((given - written).abs() < 1e-9, "{given} {written}");
+        }
+        assert_eq!(given.best().0, 0);
+        assert!(given.best().1 > from_notes.best().1 + 0.2, "{given:?} {from_notes:?}");
+        // The same for a tune that rests in its first bar: it starts where it's told, not at its first note's bar.
+        let late = tune(&[(8, 8, 77), (16, 8, 71), (24, 8, 76)]);
+        let given = sit(&late, &backing, LineUp::LoopsFrom { start: 0, length: 4 * BAR }, &Sitting::SHIPPED).unwrap();
+        let from_notes = sit(&late, &backing, LineUp::Loops { bar_line: 0 }, &Sitting::SHIPPED).unwrap();
+        assert_eq!(given.best().0, 0);
+        assert!(given.best().1 > from_notes.best().1 + 0.2, "{given:?} {from_notes:?}");
+
+        // A backing that rests in its first bar: Dm7, G7, Cmaj7 from bar 2 of four picked bars.
+        let chords = [chord(4, 4, &[50, 60, 65, 69]), chord(8, 4, &[43, 59, 62, 65]), chord(12, 4, &[48, 59, 64, 67])];
+        let notes = chords.concat();
+        let parts = [Part { role: Role::Harmony, notes: &notes }];
+        let reading =
+            ChordReader::new().read(&parts, Grid::four_four(BEAT as u32), &ChordContext::new(Span::Window)).unwrap();
+        let from_notes = Backing::of(&reading, &parts);
+        let picked = Backing::over(&reading, &parts, 0, 4 * BAR);
+        assert_eq!((from_notes.length(), picked.length()), (3 * BAR, 4 * BAR));
+        assert_eq!(picked.grid().bar_line, 0);
+        // A four-bar tune written for the picked bars (anything over the rest, then the chords' thirds).
+        let line = tune(&[(0, 8, 72), (8, 8, 77), (16, 8, 71), (24, 8, 76)]);
+        let over_picked = sits(&line, &picked);
+        assert_eq!(over_picked.best().0, 0);
+        assert!(over_picked.best().1 > sits(&line, &from_notes).best().1 + 0.2);
+        // What the parts play outside the stretch is left out: the last two bars alone hold G7 and Cmaj7.
+        let last_two = Backing::over(&reading, &parts, 2 * BAR, 2 * BAR);
+        assert_eq!(last_two.length(), 2 * BAR);
+        assert_eq!(sits(&tune(&[(0, 8, 71), (8, 8, 76)]), &last_two).best().0, 0);
+    }
+
+    #[test]
     fn a_damaged_tune_neither_hangs_nor_overflows() {
         // A note that never ends and one struck far away, as a damaged file gives them.
         let backing = turnaround();
@@ -932,7 +990,10 @@ mod tests {
         line.push(Note { start: 0, length: i64::MAX, key: 64, velocity: 50_000 });
         line.push(Note { start: 1 << 62, length: 1 << 40, key: 60, velocity: 50_000 });
         line.push(Note { start: i64::MIN, length: 96, key: 60, velocity: 50_000 });
-        for line_up in [LineUp::Loops { bar_line: 0 }, LineUp::Loops { bar_line: i64::MAX }, LineUp::AsWritten] {
+        let lengths =
+            [LineUp::LoopsFrom { start: i64::MIN, length: i64::MAX }, LineUp::LoopsFrom { start: 0, length: 0 }];
+        let line_ups = [LineUp::Loops { bar_line: 0 }, LineUp::Loops { bar_line: i64::MAX }, LineUp::AsWritten];
+        for line_up in line_ups.into_iter().chain(lengths) {
             let sits = sit(&line, &backing, line_up, &Sitting::SHIPPED);
             assert!(sits.is_none_or(|s| s.by_move.iter().all(|v| v.is_finite())), "{line_up:?}");
         }

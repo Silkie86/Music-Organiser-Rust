@@ -3336,6 +3336,7 @@ dependencies = [
 name = "mo-midi"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "fs4",
  "mo-catch",
  "mo-formats",

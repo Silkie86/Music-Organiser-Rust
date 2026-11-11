@@ -10,8 +10,14 @@
 //! found part sits moved up by each of 0 to 11 semitones, so a part saved in another key comes with the move that
 //! makes it fit.
 //!
-//! The found part is a loop from the library: it goes round from its own first bar, against the target going round
-//! from its first bar with notes ([`LineUp::Loops`]).
+//! How the two are lined up: the bars picked from a song go round as picked, every one of them, a bar the picked
+//! parts rest in too (the first or the last as well), so the part found is heard as it will sound dropped on the
+//! first picked bar. The found part is a loop from the library, and how long that loop is isn't saved with it: it
+//! goes round from the bar its first note is in to the bar its last note ends in, so a four-bar loop that rests in
+//! its last bar is heard as three bars going round.
+//!
+//! A song that isn't in 4/4 is fitted to as it is, but the library's parts are all read as 4/4 (the MIDI page's
+//! rule), so there the answer says less.
 //!
 //! Not here yet: trying every part of the library (a quick first pass over what the catalogue holds in memory, then
 //! this close look at the best of them), and sending the part found into the project.
@@ -19,7 +25,7 @@
 use std::ops::Range;
 
 use mo_formats::NoteEvent;
-use mo_harmony::{Backing, Grid, LineUp, Note, Part, Sits, Sitting, Span, sit};
+use mo_harmony::{Backing, ChordContext, Grid, LineUp, Note, Part, Sits, Sitting, Span, sit};
 
 use crate::chart;
 use crate::keys::{heard_as, heard_notes};
@@ -45,15 +51,18 @@ pub struct Target {
 enum Given {
     /// Chords, read once.
     Chords(Backing),
-    /// A tune, from tick 0 at a bar line.
-    Tune(Vec<Note>),
+    /// A tune, and how it goes round.
+    Tune { notes: Vec<Note>, line_up: LineUp },
 }
 
 impl Target {
     /// Chords to find a tune for: `parts` are what plays together (the chords, the bass), each with its kind, on
-    /// `grid`. `window`: they're a stretch cut from a longer piece (some bars of a song), not a whole loop, so the
-    /// first chord needn't come after the last. None for drums alone, or when no chord can be read in them.
-    pub fn chords(parts: &[(Role, &[NoteEvent])], grid: Grid, window: bool) -> Option<Target> {
+    /// `grid`. `span`: the ticks they're a stretch of, from a bar line to a bar line, when they're cut from a longer
+    /// piece (bars picked from a song): the first chord needn't come after the last, a bar the parts rest in is still
+    /// one of the bars that go round, and what they play outside it is left out. Without one they're a whole loop,
+    /// from the bar of its first note to the bar its last note ends in. None for drums alone, a span with no length,
+    /// or when no chord can be read in them.
+    pub fn chords(parts: &[(Role, &[NoteEvent])], grid: Grid, span: Option<Range<i64>>) -> Option<Target> {
         let heard: Vec<(Role, Vec<Note>)> = parts
             .iter()
             .filter(|(role, _)| *role != Role::Drums)
@@ -67,20 +76,37 @@ impl Target {
         if parts.is_empty() {
             return None;
         }
-        let span = if window { Span::Window } else { Span::Loop };
-        let backing = chart::with_reader(|reader| Backing::read(reader, &parts, grid, span))?;
+        let backing = chart::with_reader(|reader| match span {
+            Some(span) => {
+                let length = span.end.checked_sub(span.start).filter(|l| *l > 0)?;
+                let reading = reader.read(&parts, grid, &ChordContext::new(Span::Window))?;
+                Some(Backing::over(&reading, &parts, span.start, length))
+            }
+            None => Backing::read(reader, &parts, grid, Span::Loop),
+        })?;
         Some(Target { given: Given::Chords(backing) })
     }
 
-    /// A tune to find chords for: its notes, with tick 0 on one of its bar lines. None without notes.
-    pub fn tune(notes: &[NoteEvent]) -> Option<Target> {
-        let tune = heard_notes(notes);
-        (!tune.is_empty()).then_some(Target { given: Given::Tune(tune) })
+    /// A tune to find chords for: its notes, with tick 0 on one of its bar lines. `span`: the ticks it goes round in,
+    /// from a bar line to a bar line (bars picked from a song: a bar the tune rests in is still one of them; its
+    /// notes lie within it). Without one it goes round from the bar of its first note to the bar its last note ends
+    /// in. None without notes, or for a span with no length.
+    pub fn tune(notes: &[NoteEvent], span: Option<Range<i64>>) -> Option<Target> {
+        let line_up = match span {
+            Some(span) => {
+                let length = span.end.checked_sub(span.start).filter(|l| *l > 0)?;
+                LineUp::LoopsFrom { start: span.start, length }
+            }
+            None => LineUp::Loops { bar_line: 0 },
+        };
+        let notes = heard_notes(notes);
+        (!notes.is_empty()).then_some(Target { given: Given::Tune { notes, line_up } })
     }
 
     /// The picked parts of a song (places in [`Song::parts`]) over `bars` of it, counted from 0: a tune to find chords
-    /// for when every one of them is a melody, else chords to find a tune for. Drums are left out. None when the
-    /// picked parts play nothing pitched in those bars.
+    /// for when every one of them is a melody, else chords to find a tune for. Drums are left out; a sampler's notes
+    /// ([`crate::playing::Playing::sample`]) are heard as written when it's picked. Every picked bar counts, one the
+    /// parts rest in too. None when the picked parts play nothing pitched in those bars.
     pub fn of_song(song: &Song, parts: &[usize], bars: &Range<i64>) -> Option<Target> {
         // Each part once, in the song's order, however it was picked.
         let mut places = parts.to_vec();
@@ -97,20 +123,22 @@ impl Target {
         if picked.is_empty() {
             return None;
         }
+        // The picked bars in ticks, the first of them at 0 as `Song::stretch` gives their notes.
+        let span = Some(0..bars.end.saturating_sub(bars.start).saturating_mul(song.bar()));
         if picked.iter().all(|(role, _)| *role == Role::Melody) {
             let mut tune: Vec<NoteEvent> = picked.into_iter().flat_map(|(_, notes)| notes).collect();
             tune.sort_by_key(|n| (n.start, n.key));
-            return Target::tune(&tune);
+            return Target::tune(&tune, span);
         }
         let parts: Vec<(Role, &[NoteEvent])> = picked.iter().map(|(role, notes)| (*role, notes.as_slice())).collect();
-        Target::chords(&parts, song.grid(), true)
+        Target::chords(&parts, song.grid(), span)
     }
 
     /// What kind of part goes with it.
     pub fn wants(&self) -> Wants {
         match self.given {
             Given::Chords(_) => Wants::Tune,
-            Given::Tune(_) => Wants::Chords,
+            Given::Tune { .. } => Wants::Chords,
         }
     }
 
@@ -119,7 +147,7 @@ impl Target {
     pub fn tries(&self, role: Role) -> bool {
         match self.given {
             Given::Chords(_) => role != Role::Drums,
-            Given::Tune(_) => matches!(role, Role::Chords | Role::Arp | Role::Other),
+            Given::Tune { .. } => matches!(role, Role::Chords | Role::Arp | Role::Other),
         }
     }
 
@@ -132,12 +160,14 @@ impl Target {
         if role == Role::Drums {
             return None;
         }
-        let loops = LineUp::Loops { bar_line: 0 };
         match &self.given {
-            Given::Chords(backing) => sit(&heard_notes(notes), backing, loops, &Sitting::SHIPPED),
-            Given::Tune(tune) => {
+            // The part found goes round from its own first bar.
+            Given::Chords(backing) => {
+                sit(&heard_notes(notes), backing, LineUp::Loops { bar_line: 0 }, &Sitting::SHIPPED)
+            }
+            Given::Tune { notes: tune, line_up } => {
                 let backing = chart::backing(notes, role, cut)?;
-                let tune_moved = sit(tune, &backing, loops, &Sitting::SHIPPED)?;
+                let tune_moved = sit(tune, &backing, *line_up, &Sitting::SHIPPED)?;
                 // The chords moved up by a number of semitones under the tune sound as the tune moved down by as
                 // many over the chords.
                 let mut by_move = [0.0; 12];
@@ -285,7 +315,7 @@ mod tests {
         assert_eq!(third_up.best().0, -3);
         assert!((third_up.best().1 - written.best().1).abs() < 1e-9);
         // Both ways round agree: the song's chords with this tune, or the song's tune with these chords.
-        let other_way = Target::chords(&[(Role::Chords, &chords(0))], Grid::four_four(PPQ as u32), false)
+        let other_way = Target::chords(&[(Role::Chords, &chords(0))], Grid::four_four(PPQ as u32), None)
             .unwrap()
             .fit(&tune(0), Role::Melody, false)
             .unwrap();
@@ -322,6 +352,53 @@ mod tests {
     }
 
     #[test]
+    fn a_bar_the_picked_parts_rest_in_is_still_one_of_the_bars() {
+        let grid = Grid::four_four(PPQ as u32);
+        let three_bars =
+            |notes: Vec<NoteEvent>| -> Vec<NoteEvent> { notes.into_iter().filter(|n| n.start < 3 * BAR).collect() };
+        let song_of = |lanes: Vec<PreviewLane>| {
+            playing::of(&Arrangement {
+                view: "Test",
+                tempo: 120.0,
+                beats_per_bar: 4,
+                lanes,
+                markers: Vec::new(),
+                notes: Vec::new(),
+            })
+        };
+        // A lead that rests in the last of the four bars picked: the four bars of chords written for it still line
+        // up with it bar for bar.
+        let lead = song_of(vec![lane("Lead", 12, &three_bars(tune(0)))]);
+        let target = Target::of_song(&lead, &[0], &(12..16)).unwrap();
+        assert_eq!(target.wants(), Wants::Chords);
+        let rested = target.fit(&chords(0), Role::Chords, false).unwrap();
+        assert_eq!(rested.best().0, 0);
+        // Heard as three bars going round (no bars given), the tune slips against the chords and sits lower.
+        let slips = Target::tune(&three_bars(tune(0)), None).unwrap().fit(&chords(0), Role::Chords, false).unwrap();
+        assert!(rested.moved(0) > slips.moved(0) + 0.1, "{rested:?} {slips:?}");
+
+        // Chords that rest in the last picked bar (Am7, Dm7, G7, a bar of nothing): the same for a four-bar tune,
+        // whose last bar then plays over the rest.
+        let keys = song_of(vec![lane("Keys", 8, &three_bars(chords(0)))]);
+        let rested = Target::of_song(&keys, &[0], &(8..12)).unwrap().fit(&tune(0), Role::Melody, false).unwrap();
+        assert_eq!(rested.best().0, 0);
+        assert!(rested.heard < 0.9, "{rested:?}");
+        let slips = Target::chords(&[(Role::Chords, &three_bars(chords(0)))], grid, None)
+            .unwrap()
+            .fit(&tune(0), Role::Melody, false)
+            .unwrap();
+        assert!((slips.heard - 1.0).abs() < 1e-9);
+        assert!(rested.moved(0) > slips.moved(0) + 0.1, "{rested:?} {slips:?}");
+
+        // Picked from the bar before the chords come in, the tune found is heard as it will sound dropped on that
+        // bar: a bar early for these chords.
+        let song = song();
+        let on_time = Target::of_song(&song, &[0, 1], &(8..12)).unwrap().fit(&tune(0), Role::Melody, false).unwrap();
+        let early = Target::of_song(&song, &[0, 1], &(7..11)).unwrap().fit(&tune(0), Role::Melody, false).unwrap();
+        assert!(early.moved(0) < on_time.moved(0) - 0.1, "{early:?} {on_time:?}");
+    }
+
+    #[test]
     fn nothing_to_fit_to_gives_no_target() {
         let song = song();
         // No part picked, a part that isn't there, drums alone, or bars where the picked parts are silent.
@@ -332,8 +409,15 @@ mod tests {
         // Drums picked beside the chords are left out, not heard as notes.
         let with_drums = Target::of_song(&song, &[0, 3], &(8..12)).unwrap();
         assert_eq!(with_drums, Target::of_song(&song, &[0], &(8..12)).unwrap());
-        assert!(Target::tune(&[]).is_none());
-        assert!(Target::chords(&[], Grid::four_four(PPQ as u32), false).is_none());
-        assert!(Target::chords(&[(Role::Drums, &bass())], Grid::four_four(PPQ as u32), false).is_none());
+        assert!(Target::tune(&[], None).is_none());
+        assert!(Target::chords(&[], Grid::four_four(PPQ as u32), None).is_none());
+        assert!(Target::chords(&[(Role::Drums, &bass())], Grid::four_four(PPQ as u32), None).is_none());
+        // A span with no length, or the wrong way round, is nothing to fit to.
+        #[allow(clippy::reversed_empty_ranges)]
+        let backwards = Some(4 * BAR..0);
+        assert!(Target::tune(&tune(0), Some(0..0)).is_none());
+        assert!(Target::tune(&tune(0), backwards.clone()).is_none());
+        assert!(Target::chords(&[(Role::Chords, &chords(0))], Grid::four_four(PPQ as u32), Some(0..0)).is_none());
+        assert!(Target::chords(&[(Role::Chords, &chords(0))], Grid::four_four(PPQ as u32), backwards).is_none());
     }
 }

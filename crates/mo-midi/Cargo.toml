@@ -20,3 +20,7 @@ rusqlite = { version = "0.41", features = ["bundled"] }
 sha2 = "0.10"
 # How much room is free on the disk before the index is copied into a new layout.
 fs4 = "1.1"
+
+[dev-dependencies]
+# The made-up project files shared from mo-formats' tests use it.
+flate2 = "1"

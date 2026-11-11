@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use super::events::{
     EV_CHANNEL_NAME_OLD, EV_CHANNEL_TYPE, EV_PATTERN_NAME, EV_PATTERN_NEW, EV_PATTERN_NOTES, EV_PLAYLIST,
-    EV_PLUGIN_NAME, Flp, byte_at, u32_at,
+    EV_PLUGIN_NAME, Event, Flp, byte_at, u32_at,
 };
 use super::notes;
 use super::song::{
@@ -52,6 +52,57 @@ pub fn read(flp: &Flp<'_>) -> Vec<Arrangement> {
         view.notes.extend(trouble.iter().cloned());
     }
     views.into()
+}
+
+/// The song's beats in a bar, and its first arrangement's markers in beats, as [`read`]'s playlist view gives them:
+/// for a reader that needs no more of the playlist (one pass over the events, no notes read).
+pub fn bars_and_markers(flp: &Flp<'_>) -> (u32, Vec<PreviewMarker>) {
+    let mut timeline = Timeline::new();
+    for e in &flp.events {
+        timeline.step(flp, e);
+    }
+    (timeline.beats_per_bar, markers(&timeline.markers, flp.ppq))
+}
+
+/// The song's beats in a bar and its first arrangement's markers (ticks, name), found event by event.
+struct Timeline {
+    beats_per_bar: u32,
+    markers: Vec<(i64, String)>,
+    arrangements: u32,
+}
+
+impl Timeline {
+    fn new() -> Timeline {
+        Timeline { beats_per_bar: 4, markers: Vec::new(), arrangements: 0 }
+    }
+
+    /// Still in the first arrangement: the next one repeats its playlist, tracks and markers.
+    fn first(&self) -> bool {
+        self.arrangements <= 1
+    }
+
+    fn step(&mut self, flp: &Flp<'_>, e: &Event<'_>) {
+        let first = self.first();
+        match e.id {
+            EV_TIME_SIG_NUMERATOR if (1..=32).contains(&e.int()) => self.beats_per_bar = e.int(),
+            EV_ARRANGEMENT_NEW => self.arrangements += 1,
+            EV_TIME_MARKER if first => self.markers.push(((e.int() & 0x07FF_FFFF) as i64, String::new())),
+            EV_MARKER_NAME if first => {
+                if let Some(m) = self.markers.last_mut() {
+                    m.1 = flp.text(&e.data);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Markers in beats, from ticks.
+fn markers(markers: &[(i64, String)], ticks_per_beat: u16) -> Vec<PreviewMarker> {
+    markers
+        .iter()
+        .map(|(at, name)| PreviewMarker { beat: *at as f64 / ppq(ticks_per_beat), name: name.clone() })
+        .collect()
 }
 
 /// FL's 0x00BBGGRR colour as 0xRRGGBB.
@@ -114,7 +165,7 @@ struct Playlist {
 
 fn read_playlist(flp: &Flp<'_>) -> Playlist {
     let known = known_channels(flp);
-    let mut beats_per_bar = 4;
+    let mut timeline = Timeline::new();
     let mut channel_colours = HashMap::new();
     let mut channel_names = HashMap::new();
     let mut automation_channels = HashSet::new();
@@ -122,19 +173,17 @@ fn read_playlist(flp: &Flp<'_>) -> Playlist {
     let mut pattern_colours: HashMap<u32, u32> = HashMap::new();
     let mut raw_notes: BTreeMap<u32, Vec<(u32, crate::NoteEvent)>> = BTreeMap::new();
     let mut tracks: BTreeMap<u32, Track> = BTreeMap::new();
-    let mut markers: Vec<(i64, String)> = Vec::new();
     let mut playlist: Option<&[u8]> = None;
     let (mut pattern, mut track): (Option<u32>, Option<u32>) = (None, None);
-    let mut arrangements = 0;
     let mut rack = Rack::default();
 
     for e in &flp.events {
         rack.step(e);
         let channel = rack.channel();
         // Only the first arrangement: the next one repeats its playlist, tracks and markers.
-        let first = arrangements <= 1;
+        let first = timeline.first();
+        timeline.step(flp, e);
         match e.id {
-            EV_TIME_SIG_NUMERATOR if (1..=32).contains(&e.int()) => beats_per_bar = e.int(),
             EV_PLUGIN_NAME | EV_CHANNEL_NAME_OLD => {
                 if let Some(c) = channel {
                     channel_names.entry(c).or_insert_with(|| flp.text(&e.data));
@@ -167,7 +216,6 @@ fn read_playlist(flp: &Flp<'_>) -> Playlist {
                     raw_notes.entry(p).or_default().extend(notes::decode(&e.data, size));
                 }
             }
-            EV_ARRANGEMENT_NEW => arrangements += 1,
             EV_PLAYLIST if playlist.is_none() => playlist = Some(&e.data),
             EV_TRACK_DATA if first => {
                 // Settings too short to read: the name that follows isn't put on the track before.
@@ -181,12 +229,6 @@ fn read_playlist(flp: &Flp<'_>) -> Playlist {
             EV_TRACK_NAME if first => {
                 if let Some(t) = track.and_then(|t| tracks.get_mut(&t)) {
                     t.name = flp.text(&e.data);
-                }
-            }
-            EV_TIME_MARKER if first => markers.push(((e.int() & 0x07FF_FFFF) as i64, String::new())),
-            EV_MARKER_NAME if first => {
-                if let Some(m) = markers.last_mut() {
-                    m.1 = flp.text(&e.data);
                 }
             }
             _ => {}
@@ -246,11 +288,11 @@ fn read_playlist(flp: &Flp<'_>) -> Playlist {
 
     Playlist {
         ppq: flp.ppq,
-        beats_per_bar,
+        beats_per_bar: timeline.beats_per_bar,
         tracks,
         patterns,
         items,
-        markers,
+        markers: timeline.markers,
         channel_colours,
         channel_names,
         automation_channels,
@@ -431,11 +473,7 @@ fn playlist_view(song: &FlSong, pl: &Playlist, tempo: f64) -> Arrangement {
         tempo,
         beats_per_bar: pl.beats_per_bar,
         lanes,
-        markers: pl
-            .markers
-            .iter()
-            .map(|(at, name)| PreviewMarker { beat: beats(*at as f64), name: name.clone() })
-            .collect(),
+        markers: markers(&pl.markers, pl.ppq),
         notes,
     }
 }
