@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use mo_formats::{NoteAttribute, NoteEvent};
-use mo_midi::fit::octave::{MOST_OCTAVES, Registers, middle, octaves_to, stands_in, usual};
+use mo_midi::fit::octave::{MOST_OCTAVES, Registers, edges, middle, octaves_to, stands_in, usual};
 use mo_midi::{PPQ, Role};
 
 use crate::item::{self, Item, LEAST_BACKING, LEAST_TUNE};
@@ -221,15 +221,16 @@ pub fn run(args: &[String]) -> Result<(), String> {
                     continue;
                 }
                 let (Some(middle), Some(centre)) = (middle(&stretch), old_centre(&stretch)) else { continue };
+                let Some(edges) = edges(&stretch) else { continue };
                 asked.stretches += 1;
-                asked.alone_usual.add(alone.octaves_for(part.role, &stretch, 0).unwrap_or(0));
+                asked.alone_usual.add(alone.octaves_for(part.role, edges, 0));
                 asked.alone_old.add(old_octaves(&other_kinds, part.role, centre));
                 if let Some(in_song) = in_song {
                     asked.with_own += 1;
                     asked.own_usual.add(octaves_to(usual, middle));
                     asked.own_beside.add(octaves_to(in_song, middle));
                     asked.own_half_way.add(octaves_to((usual + in_song) / 2.0, middle));
-                    asked.own_shipped.add(registers.octaves_for(part.role, &stretch, 0).unwrap_or(0));
+                    asked.own_shipped.add(registers.octaves_for(part.role, edges, 0));
                     asked.own_old.add(old_octaves(&others, part.role, centre));
                 }
             }

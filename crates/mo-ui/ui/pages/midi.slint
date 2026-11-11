@@ -85,8 +85,9 @@ export struct PickedPart {
     others: [string],
     others-more: string,
     // Moved to fit a song ("Fits my song"): how ("Moved 3 semitones up to fit Night drive…"), which is how the roll
-    // and the chords show it and how it plays, drags and is sent; "" when it's as it is in the library. And whether
-    // that's a move at all (a part can fit as it is): the key and the chords then say which of the two they are.
+    // and the chords show it and how it plays, drags and is sent, and whether the octave is one you chose; "" when
+    // it's as it is in the library. And whether that's a move at all (a part can fit as it is): the key and the
+    // chords then say which of the two they are.
     fit: string,
     fit-moved: bool,
 }
@@ -213,6 +214,9 @@ export global MidiData {
     in property <bool> landed-picked;
     in property <[MidiFact]> facts;
     in property <[CardAction]> actions;
+    // A fitted part's octave buttons, under the line that says how it's moved: Octave down, Octave up, and The app's
+    // octave once the octave is one you chose. None for a part that isn't fitted to a song.
+    in property <[CardAction]> octave-actions;
     in property <[MenuItem]> menu;
     callback menu-chosen(string);
 }
@@ -533,6 +537,12 @@ component PartPanel inherits SidePanel {
         font-size: Type.meta;
         wrap: word-wrap;
         min-width: 0px;
+    }
+    // The octave is the app's first guess: these move the part from where it is, and the app remembers.
+    if MidiData.octave-actions.length > 0: CardActions {
+        room: root.inside;
+        actions: MidiData.octave-actions;
+        chosen(id) => { MidiData.menu-chosen(id); }
     }
     PianoRoll { }
     if MidiData.roll-keys > 0: RollChoices { }

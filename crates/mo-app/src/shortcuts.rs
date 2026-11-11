@@ -136,14 +136,23 @@ pub const CURVES_ACTIONS: &[Action] = &[
 ];
 
 /// The MIDI page's own actions, with the C# MIDI page's ids where it had them. What goes with this (midi.fit),
-/// the playground, Save as and the octave keys join as those parts are built. Esc goes back to the whole list as one
-/// of its steps back (`app.escape`). F5 reads the MIDI again on this page, as it measures again on Space.
+/// the playground and Save as join as those parts are built. Esc goes back to the whole list as one of its steps back
+/// (`app.escape`). F5 reads the MIDI again on this page, as it measures again on Space. The octave keys are Alt with
+/// the arrows here: the C# app's Shift+Alt+= and Shift+Alt+- can't be told on every keyboard (a window here hears
+/// the character a key types, and with Shift down that's another on each layout).
 pub const MIDI_ACTIONS: &[Action] = &[
     action("midi.moreLike", "Parts shaped like the picked one", "Ctrl+L"),
     action("midi.toBitwig", "Put the picked part into Bitwig as a clip on a new track", "Ctrl+B"),
     action("midi.playBitwig", "Play the picked part through the track selected in Bitwig, or stop it", "Ctrl+Shift+B"),
     action("midi.playFl", "Play the picked part through the channel selected in FL Studio, or stop it", "Ctrl+Shift+F"),
     action("midi.within", "The longer phrases the picked part is in", ""),
+    action("midi.octaveUp", "Move the picked part up an octave where it's fitted to a song; remembered", "Alt+Up"),
+    action(
+        "midi.octaveDown",
+        "Move the picked part down an octave where it's fitted to a song; remembered",
+        "Alt+Down",
+    ),
+    action("midi.octaveApp", "Let the app pick the picked part's octave again", ""),
     action("midi.showInSongs", "Show the song the picked part is from on the Songs page", "Ctrl+O"),
     action("midi.source", "Show the picked part's file in its folder", "Ctrl+Shift+E"),
     action("midi.copyPath", "Copy where the picked part's file is", "Ctrl+Shift+C"),
@@ -480,11 +489,12 @@ pub fn written(key: &str) -> String {
     }
 }
 
-/// Whether an action does its job again and again while its key is held: stepping through a list and moving an
-/// octave (as in the C# app). Every other key does its job once however long it's held, so holding F11 doesn't flick
-/// full screen on and off.
+/// Whether an action does its job again and again while its key is held: stepping through a list. Every other key
+/// does its job once however long it's held, so holding F11 doesn't flick full screen on and off. The MIDI page's
+/// octave keys are among those (the C# app's repeated): there are 7 octaves to be at, a held key would fly to the
+/// last, and each step starts what's playing again.
 pub fn repeats(id: &str) -> bool {
-    matches!(id, "app.prevItem" | "app.nextItem" | "midi.octaveUp" | "midi.octaveDown")
+    matches!(id, "app.prevItem" | "app.nextItem")
 }
 
 /// Keys with names rather than one character, in the spelling the list uses.
@@ -785,9 +795,14 @@ mod tests {
         for arrow in ["Up", "Down", "Left", "Right"] {
             assert!(keys.set("app.search", arrow).contains("kept for moving through the lists"), "{arrow}");
         }
-        // With a key held, an arrow is a key of its own (as Ctrl+Up, which steps even while you type a search).
-        assert_eq!(keys.set("app.search", "Alt+Up"), "");
-        assert_eq!(keys.key_of("app.search"), "Alt+Up");
+        // With a key held, an arrow is a key of its own (as Ctrl+Up, which steps even while you type a search, and
+        // Alt+Up, the MIDI page's octave up).
+        assert_eq!(keys.set("app.search", "Shift+Alt+Up"), "");
+        assert_eq!(keys.key_of("app.search"), "Shift+Alt+Up");
+        assert_eq!(keys.page_action_for("Alt+Up", MIDI_ACTIONS), Some("midi.octaveUp"));
+        assert_eq!(keys.page_action_for("Alt+Down", MIDI_ACTIONS), Some("midi.octaveDown"));
+        // Held down, an octave key steps once: a held key would fly to the last octave.
+        assert!(!repeats("midi.octaveUp") && !repeats("midi.octaveDown") && !repeats("midi.octaveApp"));
         // Each page with a list says what its arrows do on the key sheet; the pages without one say nothing.
         for place in [Place::Songs, Place::Sounds, Place::Presets, Place::Midi, Place::Plugins] {
             assert!(list_keys(place).iter().any(|(k, _)| k.contains("Up")), "{place:?}");

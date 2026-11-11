@@ -10,8 +10,8 @@
 //!
 //! Measured on POP909-CL, 8 bars at a time (`theorybench octave`, `docs/harmony/together-experiments.md`): how often
 //! a part taken out of its song is put back at the octave it was written at. No rule gets past about 3 in 4,
-//! because the octave a tune is written at is partly taste: it's a first guess, and changing it by hand is the
-//! page's next step. What the numbers do say:
+//! because the octave a tune is written at is partly taste: it's a first guess, which the page lets you change by
+//! hand (within [`MOST_OCTAVES`] and [`on_keyboard`], as the guess is). What the numbers do say:
 //!
 //! - The usual place alone does as well as anything. Where the song's other kinds of part play says next to
 //!   nothing about this one (the C# app nudged the usual place by them, which loses about 20 points for a tune
@@ -110,6 +110,28 @@ pub fn middle(notes: &[NoteEvent]) -> Option<f64> {
     sounding.middle()
 }
 
+/// The lowest and the highest key a part itself plays, strays aside (the keys at either end that sound for less than
+/// a twentieth of its time between them): what its [`middle`] is half-way between, and what an octave mustn't take
+/// off the keyboard ([`on_keyboard`]). None when it has no notes that sound.
+pub fn edges(notes: &[NoteEvent]) -> Option<(u8, u8)> {
+    let mut sounding = Sounding::NONE;
+    sounding.add(notes);
+    sounding.edges()
+}
+
+/// `octaves`, or as many of them as leave the part on the keyboard: a part whose [`edges`] are `edges`, moved
+/// `semitones` into key first. One too wide to go that far goes an octave short of it, and so on down to none.
+/// That's the part itself, strays aside: a key switch far under it may still have no key to go to.
+pub fn on_keyboard(edges: (u8, u8), semitones: i32, octaves: i32) -> i32 {
+    let (low, high) = (i32::from(edges.0) + semitones, i32::from(edges.1) + semitones);
+    let stays = |octaves: i32| low + 12 * octaves >= 0 && high + 12 * octaves <= i32::from(NoteEvent::TOP_KEY);
+    let mut octaves = octaves;
+    while octaves != 0 && !stays(octaves) {
+        octaves -= octaves.signum();
+    }
+    octaves
+}
+
 /// Where each kind of part plays in a song: the [`middle`] of all the song's parts of that kind together.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Registers {
@@ -175,21 +197,11 @@ impl Registers {
     }
 
     /// The octaves a part of this kind goes at beside the song, once it's moved `semitones` into key
-    /// ([`Registers::octaves`], by its [`middle`]), and never so many that the part leaves the keyboard: a part too
-    /// wide to go where its kind belongs goes an octave short of it. That's the part itself, strays aside: a key
-    /// switch far under it may still have no key to go to. None when it has no notes that sound.
-    pub fn octaves_for(&self, role: Role, notes: &[NoteEvent], semitones: i32) -> Option<i32> {
-        let mut sounding = Sounding::NONE;
-        sounding.add(notes);
-        let (low, high) = sounding.edges()?;
-        let (low, high) = (i32::from(low) + semitones, i32::from(high) + semitones);
-        let on_keyboard =
-            |octaves: i32| low + 12 * octaves >= 0 && high + 12 * octaves <= i32::from(NoteEvent::TOP_KEY);
-        let mut octaves = self.octaves(role, f64::from(low + high) / 2.0);
-        while octaves != 0 && !on_keyboard(octaves) {
-            octaves -= octaves.signum();
-        }
-        Some(octaves)
+    /// ([`Registers::octaves`], by the middle of its [`edges`]), and never so many that the part leaves the keyboard
+    /// ([`on_keyboard`]): a part too wide to go where its kind belongs goes an octave short of it.
+    pub fn octaves_for(&self, role: Role, edges: (u8, u8), semitones: i32) -> i32 {
+        let middle = (f64::from(edges.0) + f64::from(edges.1)) / 2.0 + f64::from(semitones);
+        on_keyboard(edges, semitones, self.octaves(role, middle))
     }
 }
 
@@ -312,33 +324,57 @@ mod tests {
         }
     }
 
+    /// The octaves `notes` go at as a part of this kind beside a song with these registers; none when nothing sounds.
+    fn octaves_for(registers: &Registers, role: Role, notes: &[NoteEvent], semitones: i32) -> Option<i32> {
+        Some(registers.octaves_for(role, edges(notes)?, semitones))
+    }
+
     #[test]
     fn the_octave_goes_by_the_part_in_key_and_keeps_it_on_the_keyboard() {
-        let none = Registers::default();
+        let none = &Registers::default();
         // A chord saved around middle C, as a bassline: two octaves down, to a bass's place.
-        assert_eq!(none.octaves_for(Role::Bass, &line(&[60, 64, 67]), 0), Some(-2));
+        assert_eq!(octaves_for(none, Role::Bass, &line(&[60, 64, 67]), 0), Some(-2));
         // By where it is once it's in key: a tune whose middle is 66 is just near enough to 72; a semitone down
         // for the key it isn't, and goes up.
         let tune = line(&[64, 68]);
         assert_eq!(
-            (none.octaves_for(Role::Melody, &tune, 0), none.octaves_for(Role::Melody, &tune, -1)),
+            (octaves_for(none, Role::Melody, &tune, 0), octaves_for(none, Role::Melody, &tune, -1)),
             (Some(0), Some(1))
         );
         // A part too wide to go where its kind belongs goes an octave short rather than off the keyboard: this one
         // (its middle is 60) would go two octaves down as a bassline, and its low notes have only one to go.
-        assert_eq!(none.octaves_for(Role::Bass, &line(&[20, 100]), 0), Some(-1));
-        assert_eq!(none.octaves_for(Role::Bass, &line(&[20, 100]), -5), Some(-1));
-        assert_eq!(none.octaves_for(Role::Bass, &line(&[5, 115]), 0), Some(0));
+        assert_eq!(octaves_for(none, Role::Bass, &line(&[20, 100]), 0), Some(-1));
+        assert_eq!(octaves_for(none, Role::Bass, &line(&[20, 100]), -5), Some(-1));
+        assert_eq!(octaves_for(none, Role::Bass, &line(&[5, 115]), 0), Some(0));
         // The same at the top: an octave up would take its high notes past the last key.
-        assert_eq!(none.octaves_for(Role::Melody, &line(&[0, 110]), 0), Some(1));
-        assert_eq!(none.octaves_for(Role::Melody, &line(&[0, 118]), 0), Some(0));
+        assert_eq!(octaves_for(none, Role::Melody, &line(&[0, 110]), 0), Some(1));
+        assert_eq!(octaves_for(none, Role::Melody, &line(&[0, 118]), 0), Some(0));
         // A stray doesn't hold the part back (it's the one note that may have no key to go to).
         let mut keys: Vec<u8> = (0..31).map(|at| 60 + (at % 8)).collect();
         keys.push(5);
-        assert_eq!(none.octaves_for(Role::Bass, &line(&keys), 0), Some(-2));
+        assert_eq!(octaves_for(none, Role::Bass, &line(&keys), 0), Some(-2));
         // Nothing that sounds: no octave. Drums: none.
-        assert_eq!(none.octaves_for(Role::Bass, &[], 0), None);
-        assert_eq!(none.octaves_for(Role::Drums, &line(&[100, 110]), 0), Some(0));
+        assert_eq!(octaves_for(none, Role::Bass, &[], 0), None);
+        assert_eq!(octaves_for(none, Role::Drums, &line(&[100, 110]), 0), Some(0));
+    }
+
+    #[test]
+    fn an_octave_asked_for_is_held_on_the_keyboard() {
+        // The part's own lowest and highest key, strays aside.
+        assert_eq!((edges(&line(&[60, 64, 67])), edges(&[])), (Some((60, 67)), None));
+        // Three octaves down asked of a part that has room for one; three up, of one that has room for two.
+        assert_eq!((on_keyboard((20, 100), 0, -3), on_keyboard((20, 100), 0, 3)), (-1, 2));
+        // The move into key counts: 5 semitones up it has room for one octave up, 9 down for none down.
+        assert_eq!((on_keyboard((20, 100), 5, 3), on_keyboard((20, 100), -9, -3)), (1, 0));
+        // With room, what's asked is what's given; the last key itself is on the keyboard.
+        assert_eq!(
+            (on_keyboard((60, 72), 0, 3), on_keyboard((60, 72), 0, -3), on_keyboard((60, 72), 0, 0)),
+            (3, -3, 0)
+        );
+        assert_eq!(
+            (on_keyboard((0, 103), 0, 2), on_keyboard((0, 104), 0, 2), on_keyboard((24, 127), 0, -2)),
+            (2, 1, -2)
+        );
     }
 
     #[test]

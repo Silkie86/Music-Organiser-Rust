@@ -142,21 +142,67 @@ struct Page {
     fits_song: Option<SongChoice>,
     /// How the picked part is moved to fit ([`Page::fit_picked`]); none: it's as it is in the library.
     picked_fit: Option<PickedFit>,
+    /// The octaves you've chosen for parts since the index was read ([`Page::change_octave`]).
+    your_octaves: midi_fits::YourOctaves,
     /// How far the picked part's card shows it moved (its roll and chords), how far the loop playing was moved when
     /// it was made, and the part playing in a DAW when it was sent: what [`fit_follows`] brings into line with
     /// `picked_fit`.
     card_move: i32,
     loop_move: i32,
     daw_move: i32,
+    /// What the picked part's card says and offers about its fit now ([`show_card_fit`]).
+    card_fit: CardFit,
 }
 
 /// How the picked part is moved to fit a song: what its card says, and how it's shown, played, dragged and sent.
 #[derive(Clone, Debug, PartialEq)]
 struct PickedFit {
-    /// How far in all, in semitones: into the song's key and to the octave ([`Fit::moved`]).
-    semitones: i32,
+    /// Its line in the list that had it: how far it's moved in all is [`Fit::moved`], into the song's key and to the
+    /// octave (the app's, or the one you chose).
+    fit: Fit,
     /// The song the list that had it was fitted to, as it was then.
     song: SongChoice,
+}
+
+/// A change to the picked part's octave, from its card or a key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OctaveChange {
+    Up,
+    Down,
+    /// Back to the app's pick.
+    Apps,
+}
+
+impl OctaveChange {
+    fn from_id(id: &str) -> Option<OctaveChange> {
+        match id {
+            "midi.octaveUp" => Some(OctaveChange::Up),
+            "midi.octaveDown" => Some(OctaveChange::Down),
+            "midi.octaveApp" => Some(OctaveChange::Apps),
+            _ => None,
+        }
+    }
+}
+
+/// What the picked part's card says and offers about how it's moved to fit a song.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CardFit {
+    /// [`midi_fits::card_text`]; "" when the part is as it is in the library.
+    text: String,
+    /// Whether it's moved at all (a part can fit as it is).
+    moved: bool,
+    /// The octave buttons, for a part that's fitted (drums aside).
+    octave: Option<OctaveButtons>,
+}
+
+/// What a fitted part's octave buttons can do now.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct OctaveButtons {
+    /// Whether it can go an octave up, and down ([`Fit::octave_step`]).
+    up: bool,
+    down: bool,
+    /// Whether the octave is one you chose, so the app's pick is offered back.
+    yours: bool,
 }
 
 /// A part's notes as they leave the index, for its card, the speakers, a DAW or a drag: where they're read from, how
@@ -198,7 +244,7 @@ impl Page {
     /// ([`Page::fit_picked`]). A line dragged out: by what the line says. 0 in a list that isn't "Fits my song"'s.
     fn fit_move(&self, at: usize) -> i32 {
         if self.picked == Some(at) {
-            self.picked_fit.as_ref().map_or(0, |fit| fit.semitones)
+            self.picked_fit.as_ref().map_or(0, |picked| picked.fit.moved())
         } else {
             self.fit_of(at).map_or(0, |fit| fit.moved())
         }
@@ -212,7 +258,7 @@ impl Page {
         let line = self.picked.and_then(|at| self.fit_of(at));
         let song = self.fits_song.as_ref().filter(|_| self.picked.is_some() && self.fits.is_some());
         self.picked_fit = match (line, song) {
-            (Some(fit), Some(song)) => Some(PickedFit { semitones: fit.moved(), song: song.clone() }),
+            (Some(fit), Some(song)) => Some(PickedFit { fit, song: song.clone() }),
             (None, Some(song)) => self.picked_fit.take().filter(|was| was.song == *song),
             _ => None,
         };
@@ -221,8 +267,63 @@ impl Page {
     /// What the picked part's card says about how it's moved to fit ([`midi_fits::card_text`]); "" when it's as it
     /// is in the library.
     fn picked_fit_text(&self) -> String {
-        let fit = self.picked_fit.as_ref();
-        fit.map(|fit| midi_fits::card_text(fit.semitones, &fit.song.name)).unwrap_or_default()
+        let picked = self.picked_fit.as_ref();
+        let said = |picked: &PickedFit| {
+            midi_fits::card_text(picked.fit.moved(), picked.fit.yours.is_some(), &picked.song.name)
+        };
+        picked.map(said).unwrap_or_default()
+    }
+
+    /// What the picked part's card says and offers about its fit. The octave buttons are a fitted part's (drums
+    /// aside: their notes pick pads).
+    fn card_fit(&self) -> CardFit {
+        let Some(picked) = self.picked_fit.as_ref() else { return CardFit::default() };
+        let drums = self.picked.and_then(|at| self.cat.entry(at)).is_none_or(|e| e.role() == Role::Drums);
+        let fit = &picked.fit;
+        CardFit {
+            text: self.picked_fit_text(),
+            moved: fit.moved() != 0,
+            octave: (!drums).then(|| OctaveButtons {
+                up: fit.octave_step(1).is_some(),
+                down: fit.octave_step(-1).is_some(),
+                yours: fit.yours.is_some(),
+            }),
+        }
+    }
+
+    /// Moves the picked part an octave where it's fitted to a song, or gives its octave back to the app. What you
+    /// choose is for its notes, wherever they're fitted ([`midi_fits::YourOctaves`]): its line and its card follow at
+    /// once. Gives the notes' fingerprint and the octaves to remember for them (none: the app's again), with the rows
+    /// of the list whose lines changed. None when there's nothing to change: no fitted part is picked, it can't go
+    /// further that way, or its octave is the app's already.
+    fn change_octave(&mut self, change: OctaveChange) -> Option<(String, Option<i32>, Vec<usize>)> {
+        let at = self.picked?;
+        let e = self.cat.entry(at).filter(|e| e.role() != Role::Drums)?;
+        let fit = self.picked_fit.as_ref()?.fit;
+        let yours = match change {
+            OctaveChange::Up => Some(fit.octave_step(1)?),
+            OctaveChange::Down => Some(fit.octave_step(-1)?),
+            OctaveChange::Apps => fit.yours.map(|_| None)?,
+        };
+        let hash = e.phrase.hash.clone();
+        self.your_octaves.set(&hash, yours);
+        if let Some(picked) = self.picked_fit.as_mut() {
+            picked.fit.yours = yours;
+        }
+        // The list's lines for those notes say it too.
+        let mut rows = Vec::new();
+        if let Some(fits) = self.fits.as_mut() {
+            let before = fits.clone();
+            midi_fits::with_yours(Arc::make_mut(fits).as_mut_slice(), &self.cat, &self.your_octaves);
+            rows = fits
+                .iter()
+                .zip(before.iter())
+                .enumerate()
+                .filter(|(_, (now, was))| now != was)
+                .map(|(r, _)| r)
+                .collect();
+        }
+        Some((hash, yours, rows))
     }
 
     /// The notes of the part at `at` as they leave the page, moved as it fits ([`Page::fit_move`]).
@@ -527,16 +628,41 @@ pub fn show_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     data.set_play_key(shortcuts.key_of("app.play").into());
     data.set_bitwig_key(shortcuts.key_of("midi.playBitwig").into());
     data.set_fl_key(shortcuts.key_of("midi.playFl").into());
-    let card = PAGE.with(|p| {
+    PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.shortcuts = shortcuts.clone();
-        let e = p.cat.entry(p.picked?)?;
-        Some(actions(e, shortcuts))
+        show_actions(&data, &p);
     });
-    if let Some((actions, menu)) = card {
-        data.set_actions(ModelRc::new(VecModel::from(actions)));
-        data.set_menu(ModelRc::new(VecModel::from(menu)));
+}
+
+/// The picked part's buttons, its octave buttons and its right-click menu, as the page has them now: the part, how
+/// it's fitted, and the keys.
+fn show_actions(data: &MidiData, p: &Page) {
+    let Some(e) = p.picked.and_then(|at| p.cat.entry(at)) else { return };
+    let (card, octave, menu) = actions(e, &p.shortcuts, p.card_fit().octave);
+    data.set_actions(ModelRc::new(VecModel::from(card)));
+    data.set_octave_actions(ModelRc::new(VecModel::from(octave)));
+    data.set_menu(ModelRc::new(VecModel::from(menu)));
+}
+
+/// Puts what the page says about the picked part's fit on its card ([`Page::card_fit`]): the line over the roll, the
+/// octave buttons and the menu's octave lines. Only when it's another than the card has, so a list that leaves the
+/// fit as it was redraws nothing.
+fn show_card_fit(data: &MidiData, p: &mut Page) {
+    let fit = p.card_fit();
+    let mut card = data.get_picked();
+    // By the card on screen as well as by what was last put there, so the two can't drift apart.
+    let said = card.fit == fit.text.as_str() && card.fit_moved == fit.moved;
+    if said && fit == p.card_fit {
+        return;
     }
+    if !said {
+        card.fit = fit.text.as_str().into();
+        card.fit_moved = fit.moved;
+        data.set_picked(card);
+    }
+    p.card_fit = fit;
+    show_actions(data, p);
 }
 
 /// Lights the heading of the column the list goes by, with which way (the UX review of 10 Nov, B5); none while the
@@ -1485,6 +1611,9 @@ fn fit_listed(app: &AppWindow, id: u64, answer: Answer) {
             }
             Answer::Nothing(_) | Answer::Stopped => (Vec::new(), String::new(), p.fit_wants),
         };
+        // A part whose octave you chose goes there, in this list as in any other.
+        let mut fits = fits;
+        midi_fits::with_yours(&mut fits, &p.cat, &p.your_octaves);
         let hits: Vec<Hit> = fits.iter().map(|fit| Hit { entry: fit.entry, likeness: None }).collect();
         p.picked_row = p.picked.and_then(|at| page::row_of(&p.cat, &hits, at));
         background::free_later(std::mem::replace(&mut p.shown, Arc::new(hits)));
@@ -1513,23 +1642,18 @@ fn fit_listed(app: &AppWindow, id: u64, answer: Answer) {
 /// as it was (a filter, a word typed, the song saved with the same chords) touches nothing that plays.
 fn fit_follows(app: &AppWindow) {
     let data = app.global::<MidiData>();
-    let Some((at, text, now, ask, again)) = PAGE.with(|p| {
+    let Some((at, ask, again)) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let at = p.picked?;
         let now = p.fit_move(at);
         let ask = if now == p.card_move { None } else { p.notes_ask(at) };
         let looping = p.looping == Some(at) && now != p.loop_move;
         let in_daw = p.in_daw.is_some() && p.in_daw == p.cat.entry(at).map(|e| e.phrase.id) && now != p.daw_move;
-        Some((at, p.picked_fit_text(), now, ask, (looping, in_daw)))
+        show_card_fit(&data, &mut p);
+        Some((at, ask, (looping, in_daw)))
     }) else {
         return;
     };
-    let mut card = data.get_picked();
-    if card.fit != text.as_str() || card.fit_moved != (now != 0) {
-        card.fit = text.into();
-        card.fit_moved = now != 0;
-        data.set_picked(card);
-    }
     if let Some(ask) = ask {
         ask_notes(app, ask);
     }
@@ -1749,20 +1873,20 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
         let ask = p.notes_ask(at);
         let e = p.cat.entry(at)?;
         let mut card = card(e);
-        card.fit = p.picked_fit_text().into();
-        card.fit_moved = p.fit_move(at) != 0;
+        let fit = p.card_fit();
+        card.fit = fit.text.as_str().into();
+        card.fit_moved = fit.moved;
         let facts: Vec<MidiFact> = page::facts(e, &p.cat.dates)
             .into_iter()
             .map(|(n, v)| MidiFact { name: n.into(), value: v.into() })
             .collect();
-        let (actions, menu) = actions(e, &p.shortcuts);
         data.set_picked(card);
         data.set_facts(ModelRc::new(VecModel::from(facts)));
-        data.set_actions(ModelRc::new(VecModel::from(actions)));
-        data.set_menu(ModelRc::new(VecModel::from(menu)));
         // Its tempo follows with the notes (it's read from its song or file).
         data.set_sound_line(page::sound_line(&page::gm_sound(e), None).into());
         crate::piano_roll::show(app, None);
+        p.card_fit = fit;
+        show_actions(&data, &p);
         ask
     });
     data.set_panel_shown(true);
@@ -2012,8 +2136,31 @@ fn card(e: &mo_midi::Entry) -> PickedPart {
     }
 }
 
-/// The card's buttons and the line's right-click menu: one list (rule 15: each shows its key).
-fn actions(e: &mo_midi::Entry, shortcuts: &Shortcuts) -> (Vec<CardAction>, Vec<MenuItem>) {
+/// The card's buttons, its octave buttons (`octave`, [`CardFit::octave`]: a fitted part's, by the line that says how
+/// it's moved) and the line's right-click menu, which has both: one list (rule 15: each shows its key).
+fn actions(
+    e: &mo_midi::Entry,
+    shortcuts: &Shortcuts,
+    octave: Option<OctaveButtons>,
+) -> (Vec<CardAction>, Vec<CardAction>, Vec<MenuItem>) {
+    // Down then up, as they sit side by side; the app's pick is offered back once the octave is yours.
+    let mut octaves: Vec<(&str, &str, bool)> = Vec::new();
+    if let Some(can) = octave {
+        octaves.push(("midi.octaveDown", "Octave down", can.down));
+        octaves.push(("midi.octaveUp", "Octave up", can.up));
+        if can.yours {
+            octaves.push(("midi.octaveApp", "The app's octave", true));
+        }
+    }
+    let button = |&(id, text, enabled): &(&str, &str, bool)| CardAction {
+        text: text.into(),
+        tip: what_of(id).into(),
+        key: shortcuts.key_of(id).into(),
+        id: id.into(),
+        enabled,
+        main: false,
+        danger: false,
+    };
     // Into your DAW first, by the drag handle above them; then finding more.
     let mut list: Vec<(&str, &str, bool)> =
         vec![("midi.toBitwig", "Send to Bitwig", true), ("midi.moreLike", "More like this", true)];
@@ -2026,18 +2173,7 @@ fn actions(e: &mo_midi::Entry, shortcuts: &Shortcuts) -> (Vec<CardAction>, Vec<M
     }
     list.push(("midi.source", "Show in folder", true));
     list.push(("midi.copyPath", "Copy path", true));
-    let card = list
-        .iter()
-        .map(|&(id, text, enabled)| CardAction {
-            text: text.into(),
-            tip: what_of(id).into(),
-            key: shortcuts.key_of(id).into(),
-            id: id.into(),
-            enabled,
-            main: false,
-            danger: false,
-        })
-        .collect();
+    let card = list.iter().map(button).collect();
     // The right-click menu starts with playing it, as Sounds' does: the card has those in its play row.
     let play = [
         ("app.play", "Play or stop the loop", true),
@@ -2046,6 +2182,7 @@ fn actions(e: &mo_midi::Entry, shortcuts: &Shortcuts) -> (Vec<CardAction>, Vec<M
     ];
     let menu = play
         .iter()
+        .chain(&octaves)
         .chain(&list)
         .map(|&(id, text, enabled)| MenuItem {
             what: text.into(),
@@ -2054,7 +2191,7 @@ fn actions(e: &mo_midi::Entry, shortcuts: &Shortcuts) -> (Vec<CardAction>, Vec<M
             enabled,
         })
         .collect();
-    (card, menu)
+    (card, octaves.iter().map(button).collect(), menu)
 }
 
 /// Opens the Songs page on the song a part's project belongs to, by the save's path, as Presets' Show in Songs does.
@@ -2128,8 +2265,88 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
             }
             true
         }
+        (id, Some(_)) => OctaveChange::from_id(id).is_some_and(|change| change_octave(app, change)),
         _ => false,
     }
+}
+
+/// Octave up, Octave down or The app's octave on the picked part ([`Page::change_octave`]): its line and its card
+/// say it at once, what's playing plays there ([`fit_follows`]), and the index is told for the next time. Whether
+/// the picked part has octave buttons at all: its key is then this page's even with nothing left to do (3 octaves up
+/// already), so it never goes on to do something else.
+fn change_octave(app: &AppWindow, change: OctaveChange) -> bool {
+    let (changed, has_buttons) = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let has_buttons = p.card_fit().octave.is_some();
+        let changed = p.change_octave(change).map(|(hash, octaves, rows)| {
+            // The screenshots' made-up parts have no index to keep it in.
+            let index = match &p.notes {
+                Some(NotesFrom::Store(index)) => Some(index.clone()),
+                _ => None,
+            };
+            (hash, octaves, rows, index)
+        });
+        (changed, has_buttons)
+    });
+    let Some((hash, octaves, rows, index)) = changed else { return has_buttons };
+    for row in rows {
+        LINES.with(|l| l.notify.row_changed(row));
+    }
+    if let Some(index) = index {
+        remember_octave(index, hash, octaves);
+    }
+    fit_follows(app);
+    true
+}
+
+/// The octaves chosen that the index hasn't been told yet, by its file and the notes' fingerprint: the newest for
+/// each, written in turn off the window's thread.
+static OCTAVES_SAID: background::Latest<(PathBuf, String), Option<i32>> = background::Latest::new();
+
+/// How many times an octave is given to the index, and how long apart, when the index doesn't take it: the indexer
+/// or another copy of the app may be writing for longer than the index waits (5 seconds each time).
+const OCTAVE_TRIES: u32 = 3;
+const OCTAVE_PAUSE: Duration = Duration::from_secs(2);
+
+/// How long the app waits, as it closes, for an octave chosen just before to reach the index.
+const OCTAVE_WAIT: Duration = Duration::from_secs(2);
+
+/// Has the index keep the octave you chose for a set of notes (none: the app's pick again). The page has it already
+/// ([`midi_fits::YourOctaves`]); this is for the next time the index is read.
+fn remember_octave(index: PathBuf, hash: String, octaves: Option<i32>) {
+    let said = OCTAVES_SAID.say("MIDI octaves", (index, hash), octaves, |said| {
+        if let Err(why) = background::try_again(OCTAVE_TRIES, OCTAVE_PAUSE, || keep_octaves(&said)) {
+            let why = format!("An octave you chose couldn't be kept in the MIDI index: {why}");
+            log::error("MIDI", &format!("{why} It holds until the app is closed."));
+        }
+    });
+    if let Err(e) = said {
+        log::error("MIDI", &format!("Couldn't start keeping the octave you chose: {e}"));
+    }
+}
+
+/// Writes octaves chosen into their index (`said`: the index's file and the notes' fingerprint, with the octaves;
+/// none for the app's pick again): each index in one go, and only one that's there (`MidiStore::keep_your_octaves`
+/// makes none). Every index is tried; Err: why the first that failed did.
+fn keep_octaves(said: &[((PathBuf, String), Option<i32>)]) -> Result<(), String> {
+    let mut indexes: Vec<&Path> = Vec::new();
+    for ((index, _), _) in said {
+        if !indexes.contains(&index.as_path()) {
+            indexes.push(index);
+        }
+    }
+    let mut failed = None;
+    for index in indexes {
+        let theirs: Vec<(&str, Option<i32>)> = said
+            .iter()
+            .filter(|((of, _), _)| of == index)
+            .map(|((_, hash), octaves)| (hash.as_str(), *octaves))
+            .collect();
+        if let Err(e) = MidiStore::keep_your_octaves(index, &theirs) {
+            failed.get_or_insert(e.to_string());
+        }
+    }
+    failed.map_or(Ok(()), Err)
 }
 
 /// Esc's first step, on any page (`app.escape`): the loop playing stops, and a part playing in a DAW, as both play on
@@ -3134,6 +3351,10 @@ fn watch_fl(app: &AppWindow) {
 /// When the app closes: stops a part playing in a DAW, so Bitwig's clip doesn't loop on and no note hangs in FL.
 /// Waits a moment at most (Bitwig answers on this computer).
 pub fn finish_up() {
+    // An octave chosen just before closing still reaches the index: waited for a moment.
+    if !OCTAVES_SAID.wait(OCTAVE_WAIT) {
+        log::warning("MIDI", "An octave you chose was still on its way to the MIDI index when the app closed.");
+    }
     // A start still on its way sees it's no longer wanted and takes back what it put in: waited for a moment (the
     // review's D-fp4; the Presets page's finish_up waits for its own the same way).
     let first = take_in_daw();
@@ -3461,7 +3682,14 @@ mod tests {
     #[test]
     fn the_picked_part_stays_moved_while_the_list_is_its_songs() {
         let songs = sample_songs();
-        let fit = |entry: usize, semitones: i32| Fit { entry, semitones, octaves: 0, sits: 0.8 };
+        let fit = |entry: usize, semitones: i32| Fit {
+            entry,
+            semitones,
+            octaves: 0,
+            yours: None,
+            edges: (48, 72),
+            sits: 0.8,
+        };
         let mut p = Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), ..Page::default() };
         let listed = |p: &mut Page, fits: Option<Vec<Fit>>, song: Option<&SongChoice>| {
             p.fits = fits.map(Arc::new);
@@ -3476,7 +3704,7 @@ mod tests {
         p.picked = Some(4);
         p.fit_picked();
         assert_eq!((p.fit_move(4), p.fit_move(2)), (3, -2));
-        assert_eq!(p.picked_fit_text(), midi_fits::card_text(3, "Night drive"));
+        assert_eq!(p.picked_fit_text(), midi_fits::card_text(3, false, "Night drive"));
         assert_eq!(p.part_out(4).map(|part| part.semitones), Some(3));
         assert!(p.part_out(4).is_some_and(|part| part.name.ends_with(" (3 semitones up)")));
         // A newer list of the same save that has it another way: as that one says.
@@ -3484,7 +3712,7 @@ mod tests {
         assert_eq!(p.fit_move(4), 1);
         // One that no longer has it (a filter hides it): as it was.
         listed(&mut p, Some(vec![fit(2, -2)]), Some(&songs[0]));
-        assert_eq!((p.fit_move(4), p.picked_fit_text()), (1, midi_fits::card_text(1, "Night drive")));
+        assert_eq!((p.fit_move(4), p.picked_fit_text()), (1, midi_fits::card_text(1, false, "Night drive")));
         // Through the index read again too, when no list is on show for a while.
         p.fits = None;
         assert_eq!(p.fit_move(4), 1);
@@ -3495,20 +3723,119 @@ mod tests {
         assert!(p.part_out(4).is_some_and(|part| part.semitones == 0 && !part.name.contains("semitone")));
         // Another song's list, or the plain list: as its line says, or not at all.
         listed(&mut p, Some(vec![fit(4, 5)]), Some(&songs[1]));
-        assert_eq!(p.picked_fit_text(), midi_fits::card_text(5, "Glass"));
+        assert_eq!(p.picked_fit_text(), midi_fits::card_text(5, false, "Glass"));
         listed(&mut p, None, None);
         assert_eq!((p.fit_move(4), p.picked_fit.clone()), (0, None));
         // A part that goes to another octave as well is moved by both in one: the picked one and a line alike.
         let low = |entry: usize| Fit { octaves: -1, ..fit(entry, 3) };
         listed(&mut p, Some(vec![low(4), low(2)]), Some(&songs[0]));
         assert_eq!((p.fit_move(4), p.fit_move(2)), (-9, -9));
-        assert_eq!(p.picked_fit_text(), midi_fits::card_text(-9, "Night drive"));
+        assert_eq!(p.picked_fit_text(), midi_fits::card_text(-9, false, "Night drive"));
         assert!(p.part_out(4).is_some_and(|part| part.semitones == -9 && part.name.ends_with(" (9 semitones down)")));
         assert!(p.part_out(2).is_some_and(|part| part.semitones == -9 && part.name.ends_with(" (9 semitones down)")));
         // "Fits my song" off while its list is still on show: a line is no longer moved.
         listed(&mut p, Some(vec![fit(4, 3), fit(2, -2)]), Some(&songs[0]));
         p.fit_song = None;
         assert_eq!((p.fit_move(2), p.fit_of(2)), (0, None));
+    }
+
+    #[test]
+    fn an_octave_chosen_for_the_picked_part_moves_it_everywhere_and_is_remembered() {
+        use OctaveChange::{Apps, Down, Up};
+        let songs = sample_songs();
+        // Each line 3 semitones up for the key, and brought down an octave by the app.
+        let fit = |entry: usize| Fit { entry, semitones: 3, octaves: -1, yours: None, edges: (48, 72), sits: 0.8 };
+        let mut p = Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), ..Page::default() };
+        p.fit_song = Some(songs[0].clone());
+        // As a search's answer is listed: the octaves you chose go over the app's.
+        let listed = |p: &mut Page, entries: &[usize]| {
+            let mut fits: Vec<Fit> = entries.iter().map(|&entry| fit(entry)).collect();
+            midi_fits::with_yours(&mut fits, &p.cat, &p.your_octaves);
+            p.fits = Some(Arc::new(fits));
+            p.fits_song = Some(songs[0].clone());
+            p.fit_picked();
+        };
+        listed(&mut p, &[2, 4]);
+        // Nothing picked: nothing to change, and no buttons.
+        assert_eq!((p.change_octave(Up), p.card_fit()), (None, CardFit::default()));
+        p.picked = Some(4);
+        p.fit_picked();
+        let hash = p.cat.entry(4).map(|e| e.phrase.hash.clone()).unwrap_or_default();
+        let card = p.card_fit();
+        let can = |up, down, yours| Some(OctaveButtons { up, down, yours });
+        assert_eq!((card.octave, card.moved), (can(true, true, false), true));
+        assert_eq!(card.text, midi_fits::card_text(-9, false, "Night drive"));
+
+        // Up from where the app put it: back where it's saved, which is what's remembered for its notes. Its line
+        // (the second) says so, and the other line stays.
+        assert_eq!(p.change_octave(Up), Some((hash.clone(), Some(0), vec![1])));
+        assert_eq!((p.fit_move(4), p.fit_move(2)), (3, -9));
+        assert_eq!(p.fit_of(4).map(|f| (f.octaves, f.yours)), Some((-1, Some(0))));
+        let card = p.card_fit();
+        assert_eq!(card.text, midi_fits::card_text(3, true, "Night drive"));
+        assert!(card.text.contains("at the octave you chose"), "{}", card.text);
+        assert_eq!(card.octave, can(true, true, true), "the app's octave is offered back");
+        assert!(p.part_out(4).is_some_and(|part| part.semitones == 3 && part.name.ends_with(" (3 semitones up)")));
+        // Up to the top: 3 octaves, and there Octave up has nothing more to do.
+        for octaves in 1..=3 {
+            assert_eq!(p.change_octave(Up).map(|(_, kept, _)| kept), Some(Some(octaves)));
+        }
+        assert_eq!((p.change_octave(Up), p.fit_move(4)), (None, 39));
+        assert_eq!(p.card_fit().octave, can(false, true, true));
+
+        // A new list (a filter ticked, the song saved again) has the part where you put it.
+        listed(&mut p, &[4, 2]);
+        assert_eq!((p.fit_move(4), p.fit_move(2)), (39, -9));
+        // In a list that no longer has it, the picked part's buttons still work: no line to say it.
+        listed(&mut p, &[2]);
+        assert_eq!(p.change_octave(Down), Some((hash.clone(), Some(2), Vec::new())));
+        assert_eq!(p.fit_move(4), 27);
+        // The app's octave: its pick again, remembered as no choice; a second press has nothing to do.
+        listed(&mut p, &[2, 4]);
+        assert_eq!(p.change_octave(Apps), Some((hash.clone(), None, vec![1])));
+        assert_eq!((p.fit_move(4), p.card_fit().octave), (-9, can(true, true, false)));
+        assert_eq!(p.change_octave(Apps), None);
+        listed(&mut p, &[2, 4]);
+        assert_eq!(p.fit_move(4), -9, "and a new list leaves it with the app");
+
+        // The buttons and the menu's lines, with their keys: down and up side by side, the app's octave once it's
+        // yours; the menu has them after playing.
+        let keys = Shortcuts::default();
+        let e = p.cat.entry(4).unwrap();
+        let said = |list: &[CardAction]| -> Vec<(String, String, bool)> {
+            list.iter().map(|a| (a.text.to_string(), a.key.to_string(), a.enabled)).collect()
+        };
+        let (card, octave, menu) = actions(e, &keys, can(false, true, true));
+        assert_eq!(
+            said(&octave),
+            [
+                ("Octave down".to_owned(), "Alt+Down".to_owned(), true),
+                ("Octave up".to_owned(), "Alt+Up".to_owned(), false),
+                ("The app's octave".to_owned(), String::new(), true),
+            ]
+        );
+        let lines: Vec<&str> = menu.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            lines[..6],
+            ["app.play", "midi.playBitwig", "midi.playFl", "midi.octaveDown", "midi.octaveUp", "midi.octaveApp"]
+        );
+        assert!(card.iter().all(|a| !a.id.starts_with("midi.octave")), "the card's own buttons stay as they were");
+        // The app's pick still stands: nothing to give back. A part that isn't fitted: no octave buttons at all.
+        assert_eq!(actions(e, &keys, can(true, true, false)).1.len(), 2);
+        let (_, octave, menu) = actions(e, &keys, None);
+        assert!(octave.is_empty() && menu.iter().all(|m| !m.id.starts_with("midi.octave")));
+
+        // Drums aren't moved by octaves (their notes pick pads), wherever they turn up.
+        let drums = p.cat.entries.iter().position(|e| e.role() == Role::Drums).unwrap();
+        p.picked = Some(drums);
+        listed(&mut p, &[drums]);
+        assert_eq!((p.card_fit().octave, p.change_octave(Up)), (None, None));
+        // In a plain list nothing is fitted: no buttons, nothing to change.
+        p.picked = Some(4);
+        p.fits = None;
+        p.fits_song = None;
+        p.fit_picked();
+        assert_eq!((p.card_fit(), p.change_octave(Up)), (CardFit::default(), None));
     }
 
     #[test]
@@ -3705,6 +4032,39 @@ mod tests {
         let ran = read_into_index(&library, false, &AtomicBool::new(false), &|_, _, _| {});
         assert!(ran.is_ok_and(|s| s.read == 1), "the scale should be read");
         let Ok(loaded) = load(&library) else { panic!("the index should read") };
+
+        // An octave chosen for the scale is kept in the index, for the next time it's read; the app's pick again
+        // takes it out.
+        let index = MidiStore::path_beside(&library);
+        let scale = loaded.cat.entries[0].phrase.hash.clone();
+        assert_eq!(loaded.cat.entries[0].phrase.your_octave, None);
+        let read_again = || load(&library).ok().and_then(|l| l.cat.entries.first().map(|e| e.phrase.your_octave));
+        let said = |octaves| [((index.clone(), scale.clone()), octaves)];
+        assert_eq!(keep_octaves(&said(Some(-2))), Ok(()));
+        assert_eq!(read_again(), Some(Some(-2)));
+        // Several in one go, the index opened once; one for notes it doesn't have is kept too (it has no part to
+        // show it on).
+        let more = [said(Some(1)).to_vec(), vec![((index.clone(), "no such notes".to_owned()), Some(3))]].concat();
+        assert_eq!((keep_octaves(&more), read_again()), (Ok(()), Some(Some(1))));
+        assert_eq!((keep_octaves(&said(None)), read_again()), (Ok(()), Some(None)));
+        // An index that can't be opened (here its folder is a file) says why, and the others are still written.
+        let nowhere = library.join("midi-index.db");
+        let both = [vec![((nowhere.clone(), scale.clone()), Some(2))], said(Some(2)).to_vec()].concat();
+        assert!(keep_octaves(&both).is_err());
+        assert_eq!(read_again(), Some(Some(2)));
+        // The other way round: what was meant for the index that didn't open isn't written into the one that did.
+        let other_way = [said(Some(1)).to_vec(), vec![((nowhere, scale.clone()), Some(3))]].concat();
+        assert!(keep_octaves(&other_way).is_err());
+        assert_eq!(read_again(), Some(Some(1)));
+        // From the page it goes off the window's thread, the newest said for the notes last.
+        remember_octave(index.clone(), scale.clone(), Some(-3));
+        remember_octave(index.clone(), scale.clone(), Some(-1));
+        let kept = (0..500).any(|_| {
+            std::thread::sleep(Duration::from_millis(10));
+            read_again() == Some(Some(-1))
+        });
+        assert!(kept, "the octave said last should be the one kept");
+        assert_eq!(keep_octaves(&said(None)), Ok(()));
 
         let save = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../mo-formats/tests/fixtures/recipe/fl/MO Recipe 02 notes.flp")

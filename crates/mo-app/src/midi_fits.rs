@@ -18,8 +18,11 @@
 //! what the page then plays, drags out and sends to a DAW ([`moved_name`] names it so there), and [`card_text`] says
 //! so on its card. The move is two things added up ([`Fit::moved`]): the semitones that put the part in the song's
 //! key, and the octaves that put it where its kind of part plays beside the song (the search's,
-//! `mo_midi::fit::octave`).
+//! `mo_midi::fit::octave`). The octave is a first guess: the card's Octave up and Octave down change it
+//! ([`Fit::octave_step`]), and what you chose is remembered for those notes ([`YourOctaves`], and the index's
+//! `your_octaves` for the next time), wherever they're fitted again.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -28,10 +31,11 @@ use mo_formats::NoteEvent;
 use mo_formats::dates::RealDates;
 use mo_library::songs::thousands;
 use mo_midi::fit::for_song::{Own, Pick, Tried};
+use mo_midi::fit::octave::{self, MOST_OCTAVES};
 use mo_midi::fit::{Found, Target, Wants};
 use mo_midi::playing::{self, Song};
 use mo_midi::store::SlotBook;
-use mo_midi::{Catalogue, Role};
+use mo_midi::{Catalogue, Role, StoredPhrase};
 
 use crate::midi::{self as page, Filters};
 
@@ -221,9 +225,16 @@ pub struct Fit {
     /// How far to move it into the song's key, in semitones (-6 to 5; 0: it's in key as it is). The part moves, never
     /// the song.
     pub semitones: i32,
-    /// How many octaves to move it as well, to where its kind of part plays beside the bars of the song it's fitted
-    /// to (-3 to 3; up for more than 0; `mo_midi::fit::octave`): a bassline saved two octaves up comes down.
+    /// How many octaves the app would move it as well, to where its kind of part plays beside the bars of the song
+    /// it's fitted to (-3 to 3; up for more than 0; `mo_midi::fit::octave`): a bassline saved two octaves up comes
+    /// down.
     pub octaves: i32,
+    /// The octaves you chose for its notes, from how they're saved, when you have ([`YourOctaves`]): they go in place
+    /// of the app's ([`Fit::octaves_now`]).
+    pub yours: Option<i32>,
+    /// The lowest and the highest key it plays as it's saved, strays aside (`octave::edges`): no octave takes them off
+    /// the keyboard.
+    pub edges: (u8, u8),
     /// How it sits moved so: about 0 (it clashes) to about 1 (as a tune written for those chords does).
     pub sits: f64,
 }
@@ -231,13 +242,31 @@ pub struct Fit {
 impl Fit {
     fn of(found: &Found) -> Fit {
         let (semitones, sits) = found.sits.best();
-        Fit { entry: found.at, semitones, octaves: found.octaves, sits }
+        Fit { entry: found.at, semitones, octaves: found.octaves, yours: None, edges: found.edges, sits }
+    }
+
+    /// The octaves it's moved by: the ones you chose for its notes when you have, else the app's. Yours are held as
+    /// the app's are: 3 either way at the most, and never so many that the part, in the song's key, leaves the
+    /// keyboard (an octave chosen beside a song in another key may not fit beside this one).
+    pub fn octaves_now(&self) -> i32 {
+        match self.yours {
+            Some(yours) => octave::on_keyboard(self.edges, self.semitones, yours.clamp(-MOST_OCTAVES, MOST_OCTAVES)),
+            None => self.octaves,
+        }
     }
 
     /// How far it's moved in all, in semitones, up for more than 0: into the key and to the octave. What its line
     /// says ([`move_words`]) and what [`moved`] does to its notes.
     pub fn moved(&self) -> i32 {
-        self.semitones + 12 * self.octaves
+        self.semitones + 12 * self.octaves_now()
+    }
+
+    /// The octaves it would be moved by one further up (`by` more than 0) or down: what's then remembered as yours.
+    /// None when it can't go: it's 3 that way already, or the part would leave the keyboard.
+    pub fn octave_step(&self, by: i32) -> Option<i32> {
+        let wanted = self.octaves_now() + by.signum();
+        let stays = octave::on_keyboard(self.edges, self.semitones, wanted) == wanted;
+        (wanted.abs() <= MOST_OCTAVES && stays).then_some(wanted)
     }
 
     /// How it sits, for a meter and for words: 0 to 100.
@@ -275,14 +304,43 @@ pub fn fit_text(fit: &Fit) -> String {
     format!("Fits {}%{comma} {}", fit.percent(), move_words(fit.moved()))
 }
 
-/// Said on the card of a part moved by `semitones` in all ([`Fit::moved`]) to fit `song`: how it's moved, and that
-/// what's done with it is moved so. "Moved 3 semitones up to fit Night drive: it plays, drags and goes to your DAW
-/// that way."
-pub fn card_text(semitones: i32, song: &str) -> String {
+/// Said on the card of a part moved by `semitones` in all ([`Fit::moved`]) to fit `song`: how it's moved, that the
+/// octave is one you chose when it is (`yours`: the card then offers the app's back), and that what's done with it is
+/// moved so. "Moved 3 semitones up to fit Night drive: it plays, drags and goes to your DAW that way."
+pub fn card_text(semitones: i32, yours: bool, song: &str) -> String {
+    let chosen = if yours { ", at the octave you chose" } else { "" };
     if semitones == 0 {
-        return format!("Fits {song} as it is: nothing is moved.");
+        return format!("Fits {song} as it is{chosen}: nothing is moved.");
     }
-    format!("Moved {} to fit {song}: it plays, drags and goes to your DAW that way.", move_words(semitones))
+    format!("Moved {} to fit {song}{chosen}: it plays, drags and goes to your DAW that way.", move_words(semitones))
+}
+
+/// The octaves you've chosen for sets of notes since the catalogue was read, by the notes' fingerprint: they go over
+/// what the catalogue was read with (`StoredPhrase::your_octave`, the index's `your_octaves`), so a choice shows at
+/// once and holds however long the index takes to write it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct YourOctaves(HashMap<String, Option<i32>>);
+
+impl YourOctaves {
+    /// You chose `octaves` for the notes with this fingerprint (from how they're saved); none: the app picks again.
+    pub fn set(&mut self, hash: &str, octaves: Option<i32>) {
+        self.0.insert(hash.to_owned(), octaves);
+    }
+
+    /// The octaves you chose for a part's notes: here, else as the catalogue has them; none when you haven't.
+    pub fn of(&self, phrase: &StoredPhrase) -> Option<i32> {
+        self.0.get(&phrase.hash).copied().unwrap_or(phrase.your_octave)
+    }
+}
+
+/// Gives each line the octave you chose for its notes ([`Fit::yours`]), and takes it from a line whose notes are back
+/// at the app's pick: after a search, and after each change of octave. Never a drum part's: its notes pick pads, so
+/// an octave kept for the same notes (chosen while they counted as another kind, or in the old app) doesn't move it.
+pub fn with_yours(fits: &mut [Fit], cat: &Catalogue, yours: &YourOctaves) {
+    for fit in fits {
+        let pitched = cat.entry(fit.entry).filter(|e| e.role() != Role::Drums);
+        fit.yours = pitched.and_then(|e| yours.of(&e.phrase));
+    }
 }
 
 /// What a part is called where it goes moved by `semitones` in all (the file dragged out, the clip in the DAW): "Arp
@@ -827,7 +885,7 @@ mod tests {
                 "3 octaves up"
             ]
         );
-        let fit = |semitones, sits| Fit { entry: 0, semitones, octaves: 0, sits };
+        let fit = |semitones, sits| Fit { entry: 0, semitones, octaves: 0, yours: None, edges: (60, 72), sits };
         assert_eq!(fit_text(&fit(0, 0.917)), "Fits 92% as it is");
         assert_eq!(fit_text(&fit(-2, 0.88)), "Fits 88%, 2 semitones down");
         // The key's semitones and the octaves add up: 3 up and an octave down is 9 down.
@@ -873,19 +931,25 @@ mod tests {
 
         // What the card and the DAW say about it.
         assert_eq!(
-            card_text(3, "Night drive"),
+            card_text(3, false, "Night drive"),
             "Moved 3 semitones up to fit Night drive: it plays, drags and goes to your DAW that way."
         );
         assert_eq!(
-            card_text(-1, "Glass"),
+            card_text(-1, false, "Glass"),
             "Moved 1 semitone down to fit Glass: it plays, drags and goes to your DAW that way."
         );
-        assert_eq!(card_text(0, "Glass"), "Fits Glass as it is: nothing is moved.");
+        assert_eq!(card_text(0, false, "Glass"), "Fits Glass as it is: nothing is moved.");
+        // At an octave you chose, the card says whose it is.
+        assert_eq!(
+            card_text(-9, true, "Glass"),
+            "Moved 9 semitones down to fit Glass, at the octave you chose: it plays, drags and goes to your DAW that way."
+        );
+        assert_eq!(card_text(0, true, "Glass"), "Fits Glass as it is, at the octave you chose: nothing is moved.");
         assert_eq!(moved_name("Arp clip", 3), "Arp clip (3 semitones up)");
         assert_eq!(moved_name("Arp clip", 0), "Arp clip");
         // Moved to another octave as well, it's all said in one.
         assert_eq!(
-            card_text(-9, "Glass"),
+            card_text(-9, false, "Glass"),
             "Moved 9 semitones down to fit Glass: it plays, drags and goes to your DAW that way."
         );
         assert_eq!(moved_name("Sub line", -12), "Sub line (an octave down)");
@@ -934,12 +998,102 @@ mod tests {
         assert_eq!(fit("bassline").octaves, 0);
         let mid = fit("mid bass");
         assert_eq!((mid.semitones, mid.octaves, mid.moved()), (0, -1, -12));
+        // A line comes with its part's lowest and highest key, for the octave buttons: back up is what's remembered.
+        assert_eq!(
+            (mid.edges, mid.yours, mid.octave_step(1), mid.octave_step(-1)),
+            ((38, 48), None, Some(0), Some(-2))
+        );
         // A tune found goes up here too.
         assert_eq!(fit("fits a tone down").octaves, 1);
         // The octave goes by where the part is once it's in key: as saved, the low tune is just within half an
         // octave of 72 (66); 3 semitones down for the key it's at 63, and goes up.
         let low = fit("low tune");
         assert_eq!((low.semitones, low.octaves, low.moved()), (-3, 1, 9));
+    }
+
+    #[test]
+    fn an_octave_you_chose_goes_in_place_of_the_apps() {
+        // A bassline saved from C3 to C4 that the app brings down an octave, 3 semitones up for the key.
+        let fit = Fit { entry: 0, semitones: 3, octaves: -1, yours: None, edges: (48, 60), sits: 0.8 };
+        assert_eq!((fit.octaves_now(), fit.moved()), (-1, -9));
+        // A step is from where it is now, whoever put it there, and is what's then remembered.
+        assert_eq!((fit.octave_step(1), fit.octave_step(-1)), (Some(0), Some(-2)));
+        assert_eq!((fit.octave_step(5), fit.octave_step(-5)), (Some(0), Some(-2)), "a step is one octave");
+        let yours = Fit { yours: Some(0), ..fit };
+        assert_eq!((yours.octaves_now(), yours.moved(), fit_text(&yours).as_str()), (0, 3, "Fits 80%, 3 semitones up"));
+        assert_eq!((yours.octave_step(1), yours.octave_step(-1)), (Some(1), Some(-1)));
+        // 3 octaves either way at the most: from there it only comes back.
+        let top = Fit { yours: Some(3), ..fit };
+        assert_eq!((top.octaves_now(), top.moved(), top.octave_step(1), top.octave_step(-1)), (3, 39, None, Some(2)));
+        let bottom = Fit { yours: Some(-3), ..fit };
+        assert_eq!((bottom.octaves_now(), bottom.octave_step(-1), bottom.octave_step(1)), (-3, None, Some(-2)));
+        // One chosen in the old app beyond that is held to 3.
+        assert_eq!(
+            (Fit { yours: Some(7), ..fit }.octaves_now(), Fit { yours: Some(-7), ..fit }.octaves_now()),
+            (3, -3)
+        );
+
+        // Never off the keyboard. A part whose lowest key is 10 is at 7 once it's 3 semitones down for the key: it
+        // has no octave under it to go to, and can go up.
+        let low = Fit { semitones: -3, octaves: 0, edges: (10, 40), ..fit };
+        assert_eq!((low.octave_step(-1), low.octave_step(1)), (None, Some(1)));
+        // The same at the top: its highest key, 2 up for the key, is 5 short of the last one.
+        let high = Fit { semitones: 2, octaves: 0, edges: (90, 120), ..fit };
+        assert_eq!((high.octave_step(1), high.octave_step(-1)), (None, Some(-1)));
+        // An octave chosen beside a song in another key (2 down) that has no room beside this one goes as far as
+        // there are keys: none here, one for a part that starts on key 14.
+        let chosen = Fit { yours: Some(-2), ..low };
+        assert_eq!((chosen.octaves_now(), chosen.moved()), (0, -3));
+        let wide = Fit { semitones: 0, edges: (14, 100), yours: Some(-3), ..fit };
+        assert_eq!((wide.octaves_now(), wide.octave_step(-1), wide.octave_step(1)), (-1, None, Some(0)));
+    }
+
+    #[test]
+    fn the_octave_you_chose_is_the_newest_said_else_the_one_the_catalogue_was_read_with() {
+        let mut index = library();
+        // The index has an octave for one of the parts (chosen before, here or in the old app).
+        let before = index.phrases.iter_mut().find(|p| p.hash == "bassline").unwrap();
+        before.your_octave = Some(-1);
+        let cat = Catalogue::new(index.phrases.clone());
+        let place = |hash: &str| cat.find(hash).unwrap();
+        let line =
+            |hash: &str| Fit { entry: place(hash), semitones: 0, octaves: 1, yours: None, edges: (60, 72), sits: 1.0 };
+        let mut fits = vec![line("bassline"), line("fits a tone down"), Fit { yours: Some(2), ..line("clashes") }];
+        let octaves =
+            |fits: &[Fit]| -> Vec<(Option<i32>, i32)> { fits.iter().map(|f| (f.yours, f.octaves_now())).collect() };
+
+        // Nothing said since: the index's choice for the first, the app's pick for the others (a choice a line was
+        // given before and that's no longer anyone's is taken from it).
+        let mut said = YourOctaves::default();
+        with_yours(&mut fits, &cat, &said);
+        assert_eq!(octaves(&fits), [(Some(-1), -1), (None, 1), (None, 1)]);
+        // What's said since goes over it: another octave for the first, one for the second.
+        said.set("bassline", Some(2));
+        said.set("fits a tone down", Some(0));
+        with_yours(&mut fits, &cat, &said);
+        assert_eq!(octaves(&fits), [(Some(2), 2), (Some(0), 0), (None, 1)]);
+        // Back to the app's pick, which the index's older choice doesn't undo.
+        said.set("bassline", None);
+        with_yours(&mut fits, &cat, &said);
+        assert_eq!(octaves(&fits), [(None, 1), (Some(0), 0), (None, 1)]);
+        // A line whose part the catalogue no longer has is left with the app's.
+        let mut gone = [Fit { entry: 9_999, yours: Some(1), ..line("clashes") }];
+        with_yours(&mut gone, &cat, &said);
+        assert_eq!(gone[0].yours, None);
+
+        // Drums are never moved by octaves (their notes pick pads): an octave kept for the same notes, from when
+        // they counted as another kind or from the old app, isn't theirs, whoever said it and when.
+        let drums = index.phrases.iter_mut().find(|p| p.hash == "scrap").unwrap();
+        (drums.your_role, drums.your_octave) = (Some(Role::Drums), Some(2));
+        let cat = Catalogue::new(index.phrases.clone());
+        let scrap = cat.find("scrap").unwrap();
+        assert_eq!(cat.entry(scrap).map(|e| e.role()), Some(Role::Drums));
+        let mut beat = [Fit { entry: scrap, semitones: 0, octaves: 0, yours: Some(1), edges: (36, 46), sits: 1.0 }];
+        with_yours(&mut beat, &cat, &said);
+        assert_eq!((beat[0].yours, beat[0].moved()), (None, 0));
+        said.set("scrap", Some(-1));
+        with_yours(&mut beat, &cat, &said);
+        assert_eq!((beat[0].yours, beat[0].moved()), (None, 0));
     }
 
     #[test]
@@ -1035,7 +1189,7 @@ mod tests {
         let nothing = Looked { looked: 1_234, ..Looked::default() };
         assert_eq!(result_text(&nothing), "None of 1,234 parts fits.");
         // A list cut to its length says of how many.
-        let fit = Fit { entry: 0, semitones: 0, octaves: 0, sits: 1.0 };
+        let fit = Fit { entry: 0, semitones: 0, octaves: 0, yours: None, edges: (60, 72), sits: 1.0 };
         let cut = Looked { fits: vec![fit; MOST], looked: 212_345, ..Looked::default() };
         assert_eq!(result_text(&cut), "The 200 that fit best, of 212,345 parts tried");
     }
