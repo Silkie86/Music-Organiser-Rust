@@ -193,6 +193,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     mo_ui::plugins::show_sample(&app, plugins.clone(), serum, 0, &copies);
     capture(&window);
     shots.push(("plugins.png".into(), capture(&window)));
+    // The strip above the list opened: the plugins to install as cards, and the room to free.
+    let plugins_data = app.global::<mo_ui::PluginsData>();
+    plugins_data.set_strip_open(true);
+    capture(&window);
+    shots.push(("plugins-strip.png".into(), capture(&window)));
+    plugins_data.set_strip_open(false);
     mo_ui::plugins::show_sample(&app, plugins.clone(), kontakt, 1, &[]);
     capture(&window);
     shots.push(("plugins-on-disk.png".into(), capture(&window)));

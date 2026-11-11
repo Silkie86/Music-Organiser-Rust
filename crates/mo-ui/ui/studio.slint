@@ -2604,8 +2604,11 @@ export component NoticeStrip inherits Rectangle {
                 color: root.quiet ? Theme.muted : Theme.warning;
                 font-size: Type.body;
                 font-weight: 500;
+                // A long line is cut short with dots, not run under Show.
+                horizontal-stretch: 1;
+                min-width: 0px;
+                overflow: elide;
             }
-            Rectangle { horizontal-stretch: 1; }
             LinkText {
                 text: root.open ? "Hide" : "Show";
                 tint: Theme.muted;

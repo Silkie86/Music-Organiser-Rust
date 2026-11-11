@@ -56,12 +56,13 @@ light that means something. It should feel like a rack unit on a desk, not a web
   theme's faint words brighter (darker on Paper) so they reach about 4.5:1 on the page.
 
 - Wide windows (the UX review of 10 Nov, A1 and B1; Solomon's window is 3440 across): a page's list of lines stops
-  at 1280 px and its side card at 760 px (`Fit` in `ui/list.slint`), side by side from the left with the page's rows
-  of controls stopping at the same width, so a line's name and its numbers stay within one look of each other. The
-  card's place is always there, empty ("Pick a part") until something is picked, so nothing moves when it is. On
-  MIDI, Presets, Plugins and Songs so far; `mo-screens` draws every place at 3440 x 1369 too (`wide-<place>.png`).
-  Songs turns it round, since a song's card holds its arrangement: the list takes a third of the room up to 760 px
-  and the card the rest, up to twice 1280 px.
+  at 1280 px (`Fit` in `ui/list.slint`), so a line's name and its numbers stay within one look of each other, and
+  the side card takes all the room that's left: the page fills the window (Solomon, 11 Nov: the card stopped at
+  760 px too, and the right of a wide screen stood empty). The card's place is always there, empty ("Pick a part")
+  until something is picked, so nothing moves when it is; on Space it shows once the window is wider than the
+  lines get. Backup's right column grows the same way. `mo-screens` draws every place at 3440 x 1369 too
+  (`wide-<place>.png`). Songs turns it round, since a song's card holds its arrangement: the list takes a third of
+  the room up to 760 px and the card the rest, up to twice 1280 px. Settings stops at a list's width.
   Space's lines and its card stop at the same widths (the card still shows only when a line is picked: the drives
   need the room at 1440), Settings stops at a list's width, and Backup at a list and a card's.
   On Sounds the card stops at 760 px and the views made of lines (List, History, Rediscover) at 1280 px; Tiles and
@@ -78,6 +79,10 @@ light that means something. It should feel like a rack unit on a desk, not a web
   `TabBar`) is for views and tabs, and for one of three in the filter column.
   A chip for a choice that would show nothing ("Arranging 0") has faint words (`ToggleChip.dim`). A dot that shows
   a state is green, amber, red or grey, never a DAW's colour. Shuffle is a plain button everywhere.
+- Advice above a list folds into one strip (`NoticeStrip`, review A4): one line that says what there is, with
+  Show and Hide, so the list starts high. Its words shorten with "..." before the Show button is pushed off. On
+  Plugins it holds the install cards, the room-to-free line and the measure line; a warning the user must act on
+  (a half-made copy) stays outside it.
   A line inside a card has no buttons of its own: a click picks it and the card's buttons act on it (a song's Saves
   tab), with the same in its right-click menu.
 

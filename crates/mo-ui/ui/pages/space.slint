@@ -5,7 +5,7 @@
 // (2026-11-03): the drives across the top, Biggest wins first, Also taking room, and the picked line's card beside
 // them. Only shared parts from studio.slint; mo-app decides every word (mo_app::space), mo-ui/src/space.rs fills it.
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, CardAction, CardActions, TickBox, LinkText, Meter, MenuItem, RightClickMenu } from "../studio.slint";
+import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, EmptyState, CardAction, CardActions, TickBox, LinkText, Meter, MenuItem, RightClickMenu } from "../studio.slint";
 
 // One drive across the top.
 export struct DriveCard {
@@ -355,10 +355,10 @@ component SpaceCard inherits SidePanel {
 
 export component SpacePage inherits Rectangle {
     property <bool> card-shown: SpaceData.picked != "";
-    // In a wide window the lines stop at `Fit.list-max` and the card at `Fit.card-max`, side by side from the left
-    // (the UX review of 10 Nov, A1), so a line's name and its size stay within one look of each other.
-    property <length> main-width: min(Fit.list-max + 2 * Space.xl, self.card-shown ? max(480px, self.width - SpaceData.panel-width - divider.width, self.width - Fit.card-max - Space.xl - divider.width) : self.width);
-    property <length> card-width: min(Fit.card-max, self.width - self.main-width - divider.width - Space.xl);
+    // In a wide window the lines stop at `Fit.list-max` (the UX review of 10 Nov, A1), so a line's name and its size
+    // stay within one look of each other; the card takes the room that's left.
+    property <length> main-width: min(Fit.list-max + 2 * Space.xl, self.card-shown ? max(480px, self.width - SpaceData.panel-width - divider.width) : self.width);
+    property <length> card-width: self.width - self.main-width - divider.width - Space.xl;
     Flickable {
         x: 0;
         width: root.main-width;
@@ -429,8 +429,7 @@ export component SpacePage inherits Rectangle {
         }
     }
     divider := PanelDivider {
-        // No seam to drag once the window has room for the lines and the card at their widest.
-        visible: root.card-shown && root.card-width < Fit.card-max;
+        visible: root.card-shown;
         x: root.main-width;
         height: parent.height;
         panel-width: root.card-width + Space.xl;
@@ -444,6 +443,20 @@ export component SpacePage inherits Rectangle {
         y: Space.xl;
         width: root.card-width;
         height: parent.height - 2 * Space.xl;
+    }
+    // In a window wider than the lines get, the card's place is there before a line is picked, as on the list pages,
+    // so a wide screen has no empty side (Solomon, 11 Nov).
+    if !root.card-shown && root.width - root.main-width >= 360px: SidePanel {
+        x: root.main-width + divider.width;
+        y: Space.xl;
+        width: root.width - self.x - Space.xl;
+        height: parent.height - 2 * Space.xl;
+        closable: false;
+        EmptyState {
+            vertical-stretch: 1;
+            title: "Pick a line";
+            text: "What it holds and what you can do about it show here.";
+        }
     }
     // A line's right-click menu: its card's buttons, each with its key (rule 15), as on Songs.
     line-menu := RightClickMenu {

@@ -1475,16 +1475,16 @@ export component SoundsPage inherits Rectangle {
                 y: 0;
                 width: split.width - self.x;
                 height: split.height;
-                // In a wide window (the UX review of 10 Nov, A1) the card stops at `Fit.card-max`, and so do the views
-                // made of lines (List, History, Rediscover) at `Fit.list-max`, so a line's name and its numbers stay
-                // within one look of each other. Tiles and the Galaxy take all the room: more of them is the point.
+                // In a wide window (the UX review of 10 Nov, A1) the views made of lines (List, History, Rediscover)
+                // stop at `Fit.list-max`, so a line's name and its numbers stay within one look of each other, and the
+                // card takes the room that's left. Tiles and the Galaxy take all the room: more of them is the point.
                 property <length> lines-max: SoundsData.view == 1 || SoundsData.view == 3 ? Fit.list-max
                     : SoundsData.view == 4 ? Fit.list-max + 300px
                     : self.width;
                 property <length> list-width: min(self.lines-max, SoundsData.panel-shown
-                    ? max(380px, self.width - SoundsData.panel-width - divider.width, self.width - Fit.card-max - divider.width)
+                    ? max(380px, self.width - SoundsData.panel-width - divider.width)
                     : self.width);
-                property <length> card-width: min(Fit.card-max, self.width - self.list-width - divider.width);
+                property <length> card-width: self.width - self.list-width - divider.width;
                 // Rediscover's forgotten folders take the list's right side when there's room.
                 property <length> folders-width: SoundsData.view == 4 && SoundsData.folders.length > 0 && self.list-width >= 900px
                     ? 300px
@@ -1984,8 +1984,7 @@ export component SoundsPage inherits Rectangle {
                     height: parent.height;
                 }
                 divider := PanelDivider {
-                    // No seam to drag once the window has room for the sounds and the card at their widest.
-                    visible: SoundsData.panel-shown && area.card-width < Fit.card-max;
+                    visible: SoundsData.panel-shown;
                     x: area.list-width;
                     height: parent.height;
                     panel-width: area.card-width;
@@ -1998,6 +1997,19 @@ export component SoundsPage inherits Rectangle {
                     width: area.card-width;
                     height: parent.height;
                     tag-keys <=> root.card-keys;
+                }
+                // Where the lines stop short of a wide window, the card's place is there before a sound is picked,
+                // so a wide screen has no empty side (Solomon, 11 Nov).
+                if !SoundsData.panel-shown && area.width - area.list-width >= 360px: SidePanel {
+                    x: area.list-width + divider.width;
+                    width: area.width - self.x;
+                    height: parent.height;
+                    closable: false;
+                    EmptyState {
+                        vertical-stretch: 1;
+                        title: "Pick a sound";
+                        text: "Its waveform, its facts and what you can do with it show here.";
+                    }
                 }
                 menu := RightClickMenu {
                     items: SoundsData.menu;

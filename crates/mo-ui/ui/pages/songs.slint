@@ -789,10 +789,10 @@ export component SongsPage inherits Rectangle {
 
     VerticalLayout {
         // In a window wider than the list and the song's panel at their widest, the page stops there (the UX review
-        // of 10 Nov, A1): the list a third of the room up to `Fit.card-max`, the panel up to twice `Fit.list-max`
+        // of 10 Nov, A1): the list a third of the room up to `Fit.narrow-max`, the panel up to twice `Fit.list-max`
         // (its arrangement likes the width), side by side from the left.
         x: 0;
-        width: min(root.width, Fit.card-max + 16px + 2 * Fit.list-max + 2 * Space.xl);
+        width: min(root.width, Fit.narrow-max + 16px + 2 * Fit.list-max + 2 * Space.xl);
         padding: Space.xl;
         padding-bottom: Space.lg;
         spacing: Space.md;
@@ -837,7 +837,7 @@ export component SongsPage inherits Rectangle {
                     height: parent.height;
                     // The same width whether a song is picked or not: the panel's place is always there (review B1), so
                     // nothing moves when one is picked.
-                    width: clamp((parent.width - 16px) / 3, 380px, Fit.card-max);
+                    width: clamp((parent.width - 16px) / 3, 380px, Fit.narrow-max);
                     key-pressed(event) => {
                         if (event.modifiers.control || event.modifiers.alt || event.modifiers.meta) {
                             return reject;

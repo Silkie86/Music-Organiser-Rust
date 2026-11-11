@@ -4,7 +4,7 @@
 // there. Only shared parts from studio.slint; mo-app decides every word (mo_app::plugins), mo-ui/src/plugins.rs
 // fills it. Read-only for now: Clean up, Uninstall and Move join in the page's second part.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, TickBox, FilterPicks, FilterList, FilterColumn, FilterView, ListLine, Caps, ColumnHead, StudioButton, LinkText, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, NoticeStrip, SearchBox, ToggleChip, TickBox, FilterPicks, FilterList, FilterColumn, FilterView, ListLine, Caps, ColumnHead, StudioButton, LinkText, CardAction, CardActions, MenuItem, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar, TabBar } from "../studio.slint";
 
 // One line of the list.
 export struct PluginListLine {
@@ -129,6 +129,8 @@ export global PluginsData {
     // plugin (so the cards' count shows even when they're off); has-sizes: some plugin's room is measured.
     in property <bool> has-missing;
     in property <bool> has-sizes;
+    // Whether the strip above the list (what to install, room to free) is opened; it stays so for the sitting.
+    in-out property <bool> strip-open;
     // How many Install cards show and how long unused counts as unused: numbers, so chip strips as on Rediscover's
     // "How many", not the lit-underline switch that means a view (the UX review of 10 Nov, B6).
     in property <FilterView> card-filter;
@@ -782,9 +784,6 @@ export component PluginsPage inherits Rectangle {
     changed search-asked => { search-box.focus-all(); }
 
     VerticalLayout {
-        // In a window wider than the list and card at their widest, the page stops there (see `Fit`).
-        x: 0;
-        width: min(root.width, Fit.page-max + 2 * Space.xl);
         padding: Space.xl;
         padding-bottom: Space.lg;
         spacing: Space.md;
@@ -819,77 +818,6 @@ export component PluginsPage inherits Rectangle {
                 }
             }
         }
-        // What to install to open more of your songs.
-        if PluginsData.has-missing: VerticalLayout {
-            spacing: Space.sm;
-            vertical-stretch: 0;
-            HorizontalLayout {
-                spacing: Space.md;
-                Caps {
-                    text: "INSTALL THESE TO OPEN MORE OF YOUR SONGS";
-                    vertical-alignment: center;
-                }
-                Text {
-                    text: PluginsData.cards.length > 0 ? PluginsData.cards-summary : "Cards are off.";
-                    color: Theme.muted;
-                    font-size: Type.meta;
-                    vertical-alignment: center;
-                    horizontal-stretch: 1;
-                    overflow: elide;
-                }
-                VerticalLayout {
-                    alignment: center;
-                    FilterPicks {
-                        name: "Cards";
-                        filter: PluginsData.card-filter;
-                        toggled(text) => { PluginsData.card-count-picked(text); }
-                    }
-                }
-            }
-            if PluginsData.cards.length > 0: HorizontalLayout {
-                spacing: Space.sm;
-                alignment: start;
-                for c in PluginsData.cards: NeededTile {
-                    card: c;
-                    picked: c.row == PluginsData.selected;
-                    clicked => { PluginsData.select(c.row); }
-                }
-            }
-        }
-        if PluginsData.all-installed: Text {
-            text: "Every song has the plugins it needs on this computer.";
-            color: Theme.ok;
-            font-size: Type.meta;
-        }
-        if PluginsData.has-sizes: HorizontalLayout {
-            spacing: Space.sm;
-            vertical-stretch: 0;
-            Text {
-                text: PluginsData.freeable != "" ? "Room to free: " + PluginsData.freeable
-                    : "No installed plugin has gone unused that long.";
-                color: Theme.muted;
-                font-size: Type.meta;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-            if PluginsData.freeable != "": VerticalLayout {
-                alignment: center;
-                LinkText {
-                    text: "Show them";
-                    font-size: Type.meta;
-                    clicked => { PluginsData.show-unused(); }
-                }
-            }
-            Rectangle { horizontal-stretch: 1; }
-            VerticalLayout {
-                alignment: center;
-                FilterPicks {
-                    name: "Unused after";
-                    filter: PluginsData.unused-filter;
-                    toggled(text) => { PluginsData.unused-picked(text); }
-                }
-            }
-        }
         if PluginsData.half-copy-text != "": HorizontalLayout {
             spacing: Space.sm;
             vertical-stretch: 0;
@@ -910,26 +838,110 @@ export component PluginsPage inherits Rectangle {
                 }
             }
         }
-        if PluginsData.measure-text != "": HorizontalLayout {
-            spacing: Space.sm;
-            vertical-stretch: 0;
-            Text {
-                text: PluginsData.measure-text;
-                color: Theme.faint;
-                font-size: Type.meta;
-                vertical-alignment: center;
-                overflow: elide;
-            }
-            if PluginsData.can-measure: VerticalLayout {
-                alignment: center;
-                StudioButton {
-                    text: "Measure again";
-                    tip: PluginsData.measure-tip;
-                    key: PluginsData.measure-key;
-                    clicked => { PluginsData.measure-plugins(); }
+        // What to install and what room to free, folded to one line until opened (the UX review of 10 Nov, A4: the
+        // install cards, their switch, the room line and its switch stood in four rows above the list, which
+        // started more than halfway down the window).
+        if PluginsData.has-missing || PluginsData.all-installed || PluginsData.has-sizes || PluginsData.measure-text != "": NoticeStrip {
+            quiet: true;
+            property <string> needs: PluginsData.has-missing ? PluginsData.cards-summary
+                : PluginsData.all-installed ? "Every song has the plugins it needs on this computer." : "";
+            property <string> room: PluginsData.freeable != "" ? "Room to free: " + PluginsData.freeable
+                : PluginsData.has-sizes ? "No installed plugin has gone unused that long." : PluginsData.measure-text;
+            text: self.needs != "" && self.room != "" ? self.needs + "  \u{00b7}  " + self.room : self.needs + self.room;
+            open <=> PluginsData.strip-open;
+            if PluginsData.strip-open: VerticalLayout {
+                spacing: Space.md;
+                padding-right: Space.sm;
+                padding-bottom: Space.xs;
+                // What to install to open more of your songs.
+                if PluginsData.has-missing: VerticalLayout {
+                    spacing: Space.sm;
+                    vertical-stretch: 0;
+                    HorizontalLayout {
+                        spacing: Space.md;
+                        Caps {
+                            text: "INSTALL THESE TO OPEN MORE OF YOUR SONGS";
+                            vertical-alignment: center;
+                        }
+                        Text {
+                            // The strip's own line says how many songs they open.
+                            text: PluginsData.cards.length > 0 ? "" : "Cards are off.";
+                            color: Theme.muted;
+                            font-size: Type.meta;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                            overflow: elide;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            FilterPicks {
+                                name: "Cards";
+                                filter: PluginsData.card-filter;
+                                toggled(text) => { PluginsData.card-count-picked(text); }
+                            }
+                        }
+                    }
+                    if PluginsData.cards.length > 0: HorizontalLayout {
+                        spacing: Space.sm;
+                        alignment: start;
+                        for c in PluginsData.cards: NeededTile {
+                            card: c;
+                            picked: c.row == PluginsData.selected;
+                            clicked => { PluginsData.select(c.row); }
+                        }
+                    }
+                }
+                if PluginsData.has-sizes: HorizontalLayout {
+                    spacing: Space.sm;
+                    vertical-stretch: 0;
+                    Text {
+                        text: PluginsData.freeable != "" ? "Room to free: " + PluginsData.freeable
+                            : "No installed plugin has gone unused that long.";
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    if PluginsData.freeable != "": VerticalLayout {
+                        alignment: center;
+                        LinkText {
+                            text: "Show them";
+                            font-size: Type.meta;
+                            clicked => { PluginsData.show-unused(); }
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
+                    VerticalLayout {
+                        alignment: center;
+                        FilterPicks {
+                            name: "Unused after";
+                            filter: PluginsData.unused-filter;
+                            toggled(text) => { PluginsData.unused-picked(text); }
+                        }
+                    }
+                }
+                if PluginsData.measure-text != "": HorizontalLayout {
+                    spacing: Space.sm;
+                    vertical-stretch: 0;
+                    Text {
+                        text: PluginsData.measure-text;
+                        color: Theme.faint;
+                        font-size: Type.meta;
+                        vertical-alignment: center;
+                        overflow: elide;
+                    }
+                    if PluginsData.can-measure: VerticalLayout {
+                        alignment: center;
+                        StudioButton {
+                            text: "Measure again";
+                            tip: PluginsData.measure-tip;
+                            key: PluginsData.measure-key;
+                            clicked => { PluginsData.measure-plugins(); }
+                        }
+                    }
+                    Rectangle { horizontal-stretch: 1; }
                 }
             }
-            Rectangle { horizontal-stretch: 1; }
         }
         split := Rectangle {
             vertical-stretch: 1;
@@ -939,8 +951,8 @@ export component PluginsPage inherits Rectangle {
                 y: 0;
                 width: split.width - self.x;
                 height: split.height;
-                property <length> list-width: min(Fit.list-max, max(380px, self.width - PluginsData.panel-width - divider.width, self.width - Fit.card-max - divider.width));
-                property <length> card-width: min(Fit.card-max, self.width - self.list-width - divider.width);
+                property <length> list-width: min(Fit.list-max, max(380px, self.width - PluginsData.panel-width - divider.width));
+                property <length> card-width: self.width - self.list-width - divider.width;
                 property <length> years-width: PluginsData.years.length > 1 && PluginsData.message == "" ? 56px : 0px;
                 property <bool> wide: self.list-width > 640px;
                 keys := FocusScope {
@@ -1120,9 +1132,8 @@ export component PluginsPage inherits Rectangle {
                 divider := PanelDivider {
                     x: area.list-width;
                     height: parent.height;
-                    // The card's width as it's shown, so a drag starts from what you see; no seam to drag once the
-                    // window has room for the list and the card at their widest.
-                    visible: area.card-width < Fit.card-max;
+                    // The card's width as it's shown, so a drag starts from what you see. The list stops at its
+                    // widest, so in a wide window the seam only goes left of there.
                     panel-width: area.card-width;
                     room: area.width;
                     resizing(w) => { PluginsData.panel-width = w; }
