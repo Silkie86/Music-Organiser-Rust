@@ -229,3 +229,27 @@ fn step_sequencer_notes_are_marked_as_steps() {
     assert_eq!(clip.notes.len(), 3);
     assert!(clip.notes.iter().all(|n| n.step && n.part == 0));
 }
+
+#[test]
+fn a_channel_switched_off_in_the_channel_rack_is_muted_in_both_views() {
+    // The Hat and the Vox have their green lights off: FL plays neither.
+    let [playlist, bitwig] = read(&fl_studio_25_muted_tracks());
+    for name in ["Hat", "Vox"] {
+        let lanes: Vec<_> = bitwig.lanes.iter().filter(|l| l.name == name).collect();
+        assert!(!lanes.is_empty(), "{name} has a lane");
+        assert!(lanes.iter().all(|l| l.muted), "{name} is muted, as the converter mutes its track");
+    }
+    assert!(bitwig.lanes.iter().filter(|l| !["Hat", "Vox"].contains(&l.name.as_str())).all(|l| !l.muted));
+    // In the playlist the Vox's clip is muted on a track that plays, and so is every note of the Hat's.
+    assert!(!playlist.lanes[2].muted);
+    assert!(playlist.lanes[2].clips.iter().all(|c| c.name == "Vox" && c.muted));
+    let mut hat = 0;
+    for clip in playlist.lanes.iter().flat_map(|l| &l.clips) {
+        for n in &clip.notes {
+            let on_hat = clip.parts.get(n.part as usize).is_some_and(|p| p == "Hat");
+            assert_eq!(n.muted, on_hat, "only the Hat's notes are muted ({})", clip.name);
+            hat += usize::from(on_hat);
+        }
+    }
+    assert!(hat > 0, "the Hat's notes are still in the picture");
+}

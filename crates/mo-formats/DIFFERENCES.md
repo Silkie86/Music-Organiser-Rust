@@ -43,6 +43,7 @@ library.
 | Notes above G10 (FL's keys 128 to 131) | The key cut to 7 bits, so they land at the bottom of the keyboard. | Left out of the notes, with a warning (VERSION 17). | Better |
 | A sampler channel's Time knob in an FL 25 save (worked out from the recipe saves and Solomon's FL 12 to 21 projects, 10 Nov 2026) | Read as a whole number, though FL 25 writes a float: 410 units came out as 1,137,508,352, a clip millions of beats long. | A float from FL 25, a whole number before. Less than one unit or more than a million beats is taken as off. | Better |
 | An audio clip's own fades (FL 21 onwards) in the arrangement preview | Not read. | Read from the playlist item, in milliseconds, and drawn on the clip in both views. | Better |
+| A channel switched off in the Channel rack (its green light) in the arrangement preview | Drawn and played like any other. | Muted in both views: its track as it opens in Bitwig (the converter mutes it too), and its notes and audio clips in the playlist. A channel that automation switches stays on. | Better |
 | An audio clip's stretch mode and pitch in the arrangement preview | Not read. | The mode by the shared names (Resample, Elastique, Stretch pro, Auto, Slice) and the pitch in semitones, by the converter's own rule. | Better |
 
 ## Bitwig Studio
