@@ -280,6 +280,7 @@ impl Player {
             return;
         }
         let name = pick.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let started = std::time::Instant::now();
         let read = mo_audio::read(&pick.path, MOST_SECONDS);
         if self.picks.load(Ordering::Acquire) != pick.number {
             return;
@@ -301,6 +302,10 @@ impl Player {
                 }
             }
         };
+        match &played {
+            Played::Playing(..) => crate::log::took_if_slow("Play", &format!("Read {}", pick.path.display()), started),
+            Played::Not(why) => crate::log::took("Play", &format!("{}: {why}", pick.path.display()), started),
+        }
         (pick.told)(played);
     }
 

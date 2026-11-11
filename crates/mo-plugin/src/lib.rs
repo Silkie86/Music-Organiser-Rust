@@ -21,6 +21,7 @@ pub mod audition;
 pub mod check;
 pub mod drag;
 pub mod library;
+pub mod log;
 mod threads;
 pub mod waves;
 mod window;
@@ -88,10 +89,22 @@ impl DefaultPluginFactory for MoPlugin {
 
     fn new_shared(host: HostSharedHandle<'_>) -> Result<Shared, PluginError> {
         let info = host.info();
+        threads::note_crashes();
+        // The tests' stand-in DAW gets no log: tests never write to the real logs folder (rule 11).
+        if info.vendor().map(|v| v.to_bytes()) != Some(TESTS_VENDOR.as_bytes()) {
+            log::start(&format!(
+                "Music Organiser test plugin {} in {}",
+                env!("CARGO_PKG_VERSION"),
+                check::host_line(&info)
+            ));
+        }
+        let offered = check::ask(&info);
+        let yes = offered.iter().filter(|o| o.offered).count();
+        log::line("Plugin", &format!("Added to a track; the DAW offers {yes} of {} CLAP extensions", offered.len()));
         Ok(Shared {
             instance: Arc::new(Instance {
                 host: check::host_line(&info),
-                offered: check::ask(&info),
+                offered,
                 track: Mutex::new(String::new()),
                 player: Arc::new(Player::default()),
             }),
@@ -112,6 +125,9 @@ impl DefaultPluginFactory for MoPlugin {
         Ok(main)
     }
 }
+
+/// Who the tests' stand-in DAW says made it (`tests/host.rs`): the plugin keeps no log in it.
+pub const TESTS_VENDOR: &str = "Music Organiser tests";
 
 pub struct Shared {
     pub instance: Arc<Instance>,
@@ -196,6 +212,13 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
         audio_config: PluginAudioConfiguration,
     ) -> Result<Self, PluginError> {
         let rate = audio_config.sample_rate.round().clamp(1.0, f64::from(u32::MAX)) as u32;
+        log::line(
+            "Audio",
+            &format!(
+                "The DAW started the track's audio: {rate} Hz, up to {} frames at a time",
+                audio_config.max_frames_count
+            ),
+        );
         Ok(Processor {
             playing: shared.instance.player.start(rate),
             spare: vec![0.0; audio_config.max_frames_count as usize],
@@ -223,6 +246,7 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
 
     fn deactivate(self, main_thread: &MainThread<'a>) {
         main_thread.shared.instance.player.stop_all();
+        log::line("Audio", "The DAW stopped the track's audio");
     }
 }
 
@@ -300,13 +324,16 @@ impl PluginGuiImpl for MainThread<'_> {
 
     fn destroy(&self) {
         // Its window goes, and Slint's panel with it.
-        self.window.borrow_mut().take();
+        if self.window.borrow_mut().take().is_some() {
+            log::line("Window", "Closed");
+        }
     }
 
     fn set_scale(&self, scale: f64) -> Result<(), PluginError> {
         if scale.is_finite() && scale > 0.0 {
             self.scale.set(scale);
         }
+        log::line("Window", &format!("The DAW gave the screen's scaling: {scale}"));
         Ok(())
     }
 
@@ -353,12 +380,15 @@ impl PluginGuiImpl for MainThread<'_> {
         } else {
             baseview::dpi::PhysicalSize::new(width, height).into()
         };
+        let started = std::time::Instant::now();
         match window::open(&parent, size, Arc::clone(&self.shared.instance)) {
             Ok(window) => {
                 *self.window.borrow_mut() = Some(window);
+                log::took("Window", &format!("Opened at {width} x {height}"), started);
                 Ok(())
             }
             Err(why) => {
+                log::line("Window", &format!("Couldn't open: {why}"));
                 self.say(LogSeverity::Error, &format!("Music Organiser: {why}"));
                 Err(PluginError::Message("Couldn't open the plugin's window"))
             }
