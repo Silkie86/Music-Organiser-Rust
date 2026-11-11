@@ -154,15 +154,54 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if midi.get_fit_song().is_empty() || midi.get_shown() == 0 {
         return Err("midi-fits.png: no part was found to fit the made-up song".into());
     }
+    // The best fit picked: its card says how it's moved to fit, and its roll and chords show it moved so.
+    mo_ui::midi::pick_row(&app, 0);
+    let moved = midi.get_picked();
+    if !moved.fit.starts_with("Moved ") {
+        return Err("midi-fits.png: the card of the part picked doesn't say how it's moved to fit".into());
+    }
+    // Off, it stays picked as it is in the library: the card no longer says it's moved, and its roll and chords are
+    // its own.
+    mo_ui::midi::fit_sample(&app, false);
+    let own = midi.get_picked();
+    if !midi.get_fit_song().is_empty() || !midi.get_fit_none_title().is_empty() {
+        return Err("midi-fits.png: \"Fits my song\" didn't go off".into());
+    }
+    if own.title != moved.title || !own.fit.is_empty() || own.roll_low == moved.roll_low || own.chords == moved.chords {
+        return Err("midi-fits.png: the part picked is still shown moved with \"Fits my song\" off".into());
+    }
+    // On again with the part still picked: its card follows the list.
+    mo_ui::midi::fit_sample(&app, true);
+    let again = midi.get_picked();
+    if (&again.fit, &again.roll_low, &again.chords) != (&moved.fit, &moved.roll_low, &moved.chords) {
+        return Err("midi-fits.png: the part picked isn't shown moved when the list becomes \"Fits my song\"'s".into());
+    }
     shots.push(("midi-fits.png".into(), capture(&window)));
+    // Dragged out from its line it goes moved too, under a name that says so.
+    let carried = mo_ui::midi::card_at_row(&app, 0).and_then(|c| c.cards.first().map(|c| c.title.clone()));
+    if carried != Some(format!("{} (3 semitones up)", moved.title)) {
+        return Err(format!("midi-fits.png: the best fit is dragged out as {carried:?}, not moved").into());
+    }
+    // A part that goes to another octave as well (the flute hook: 5 up for the key and an octave down) goes out
+    // with the whole move.
+    let carried = |row| mo_ui::midi::card_at_row(&app, row).and_then(|c| c.cards.first().map(|c| c.title.clone()));
+    let lines = usize::try_from(midi.get_shown()).unwrap_or(0);
+    if !(0..lines)
+        .filter_map(carried)
+        .any(|title| title.starts_with("Flute hook") && title.ends_with("(7 semitones down)"))
+    {
+        return Err("midi-fits.png: no part of the list is dragged out moved to another octave".into());
+    }
     // The song saved again (the Songs page gives its list again): the list follows it, by its saves.
     if !mo_ui::midi::fit_sample_follows(&app) || midi.get_shown() == 0 {
         return Err("midi-fits.png: the list didn't follow its song when the songs were given again".into());
     }
     mo_ui::midi::fit_sample(&app, false);
-    if !midi.get_fit_song().is_empty() || !midi.get_fit_none_title().is_empty() {
+    if !midi.get_fit_song().is_empty() || !midi.get_fit_none_title().is_empty() || !midi.get_picked().fit.is_empty() {
         return Err("midi-fits.png: \"Fits my song\" didn't go off".into());
     }
+    // The first part picked again, as the pictures that follow have the page.
+    mo_ui::midi::pick_row(&app, 0);
 
     // The Backup page, filled with made-up folders.
     app.set_place(Place::Backup.index() as i32);

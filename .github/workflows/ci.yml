@@ -73,7 +73,13 @@ jobs:
           save-if: ${{ github.event_name != 'pull_request' }}
       - name: Linux libraries for the window
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libasound2-dev
+        run: |
+          # GitHub's machines sometimes can't find Ubuntu's download servers for a while: tried again, a few times.
+          for try in 1 2 3 4; do
+            sudo apt-get update && sudo apt-get install -y -o Acquire::Retries=3 libfontconfig1-dev libxkbcommon-dev libwayland-dev libasound2-dev && exit 0
+            sleep 30
+          done
+          exit 1
       - name: Launcher scripts parse in Windows PowerShell 5.1
         if: runner.os == 'Windows' && needs.scope.outputs.launcher == 'true'
         shell: powershell
@@ -152,7 +158,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.event_name != 'pull_request' }}
-      - run: sudo apt-get update && sudo apt-get install -y libfontconfig1-dev libxkbcommon-dev libwayland-dev libasound2-dev
+      - name: Linux libraries for the window
+        run: |
+          # GitHub's machines sometimes can't find Ubuntu's download servers for a while: tried again, a few times.
+          for try in 1 2 3 4; do
+            sudo apt-get update && sudo apt-get install -y -o Acquire::Retries=3 libfontconfig1-dev libxkbcommon-dev libwayland-dev libasound2-dev && exit 0
+            sleep 30
+          done
+          exit 1
       - name: Draw every page
         run: cargo run --bin mo-screens -- screenshots
       - uses: actions/upload-artifact@v4

@@ -138,12 +138,125 @@ struct Page {
     fit_stop: Arc<AtomicBool>,
     /// The list on show is the parts that fit: each line's fit, in the list's order.
     fits: Option<Arc<Vec<Fit>>>,
+    /// The song that list was fitted to, as it was then (which save, written when).
+    fits_song: Option<SongChoice>,
+    /// How the picked part is moved to fit ([`Page::fit_picked`]); none: it's as it is in the library.
+    picked_fit: Option<PickedFit>,
+    /// How far the picked part's card shows it moved (its roll and chords), how far the loop playing was moved when
+    /// it was made, and the part playing in a DAW when it was sent: what [`fit_follows`] brings into line with
+    /// `picked_fit`.
+    card_move: i32,
+    loop_move: i32,
+    daw_move: i32,
+}
+
+/// How the picked part is moved to fit a song: what its card says, and how it's shown, played, dragged and sent.
+#[derive(Clone, Debug, PartialEq)]
+struct PickedFit {
+    /// How far in all, in semitones: into the song's key and to the octave ([`Fit::moved`]).
+    semitones: i32,
+    /// The song the list that had it was fitted to, as it was then.
+    song: SongChoice,
+}
+
+/// A part's notes as they leave the index, for its card, the speakers, a DAW or a drag: where they're read from, how
+/// far they're moved to fit the song, and the name that says so.
+#[derive(Clone)]
+struct PartOut {
+    from: NotesFrom,
+    phrase_id: i64,
+    hash: String,
+    /// How far it's moved to fit the song ([`Page::fit_move`]); 0 for as it is in the library.
+    semitones: i32,
+    /// Its title, saying how it's moved when it is ([`midi_fits::moved_name`]).
+    name: String,
+    bars: i32,
+}
+
+impl PartOut {
+    /// Its notes as they're played, dragged out and sent: read from the index ([`notes_of`]: `open` keeps it open
+    /// for the next ask) and moved to fit.
+    fn notes(&self, open: &mut Option<(PathBuf, MidiStore)>) -> Result<Vec<NoteEvent>, String> {
+        Ok(midi_fits::moved(notes_of(&self.from, self.phrase_id, &self.hash, open)?, self.semitones))
+    }
 }
 
 impl Page {
     /// Whether the list is "Fits my song"'s: it's on, and there's an index to search.
     fn fitting(&self) -> bool {
         self.fit_song.is_some() && self.notes.is_some()
+    }
+
+    /// How the part at `at` in the catalogue fits the song, while "Fits my song" is on and the list on show has it.
+    fn fit_of(&self, at: usize) -> Option<Fit> {
+        self.fit_song.as_ref()?;
+        self.fits.as_ref()?.iter().find(|fit| fit.entry == at).copied()
+    }
+
+    /// How far the part at `at` is moved wherever its notes leave the page ([`Page::part_out`]), in semitones: into
+    /// the song's key and to the octave, in all ([`Fit::moved`]). The picked part: as its card says
+    /// ([`Page::fit_picked`]). A line dragged out: by what the line says. 0 in a list that isn't "Fits my song"'s.
+    fn fit_move(&self, at: usize) -> i32 {
+        if self.picked == Some(at) {
+            self.picked_fit.as_ref().map_or(0, |fit| fit.semitones)
+        } else {
+            self.fit_of(at).map_or(0, |fit| fit.moved())
+        }
+    }
+
+    /// Works out how the picked part is moved, for the list now on show. In a "Fits my song" list that has it: by
+    /// what its line says. In one that doesn't (the filters hide it now, or it's no longer among the best): as it was,
+    /// while the list is still fitted to the same save of the same song, so a word typed in the search box or a
+    /// filter ticked while it plays changes nothing that's heard. In any other list: not moved.
+    fn fit_picked(&mut self) {
+        let line = self.picked.and_then(|at| self.fit_of(at));
+        let song = self.fits_song.as_ref().filter(|_| self.picked.is_some() && self.fits.is_some());
+        self.picked_fit = match (line, song) {
+            (Some(fit), Some(song)) => Some(PickedFit { semitones: fit.moved(), song: song.clone() }),
+            (None, Some(song)) => self.picked_fit.take().filter(|was| was.song == *song),
+            _ => None,
+        };
+    }
+
+    /// What the picked part's card says about how it's moved to fit ([`midi_fits::card_text`]); "" when it's as it
+    /// is in the library.
+    fn picked_fit_text(&self) -> String {
+        let fit = self.picked_fit.as_ref();
+        fit.map(|fit| midi_fits::card_text(fit.semitones, &fit.song.name)).unwrap_or_default()
+    }
+
+    /// The notes of the part at `at` as they leave the page, moved as it fits ([`Page::fit_move`]).
+    fn part_out(&self, at: usize) -> Option<PartOut> {
+        let e = self.cat.entry(at)?;
+        let semitones = self.fit_move(at);
+        Some(PartOut {
+            from: self.notes.clone()?,
+            phrase_id: e.phrase.id,
+            hash: e.phrase.hash.clone(),
+            semitones,
+            name: midi_fits::moved_name(&page::title(e), semitones),
+            bars: e.phrase.bars,
+        })
+    }
+
+    /// The ask for the picked part's notes, for its card (the newest ask is the one the card takes the answer of).
+    /// None when there's no index or no such part.
+    fn notes_ask(&mut self, at: usize) -> Option<NotesAsk> {
+        self.notes_asked += 1;
+        let part = self.part_out(at)?;
+        self.card_move = part.semitones;
+        let e = self.cat.entry(at)?;
+        Some(NotesAsk {
+            id: self.notes_asked,
+            part,
+            role: e.role(),
+            // As the stored key was read; the clip's name only for a part whose key isn't read yet.
+            cut: e.phrase.cut.unwrap_or_else(|| page::is_cut(&e.phrase.clip)),
+            key: e.phrase.key_fact,
+            source: Arc::clone(&e.phrase.source),
+            library: self.library.clone(),
+            sound: page::gm_sound(e),
+        })
     }
 }
 
@@ -241,12 +354,10 @@ enum FitJob {
 /// An ask for a part's notes: the roll, and its key when the index has no reading of the new key finder.
 struct NotesAsk {
     id: u64,
-    from: NotesFrom,
-    phrase_id: i64,
-    hash: String,
+    /// The part, and how far the roll and the chords show it moved.
+    part: PartOut,
     role: Role,
     cut: bool,
-    bars: i32,
     /// The stored key reading, which the chord chart is spelled in; none: the key is read now, from the notes.
     key: Option<KeyFact>,
     /// The file it's from, whose tempo is read too (for the card's sound line), and the song library that has a
@@ -763,6 +874,10 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         p.picked = hash
             .and_then(|h| p.cat.find(&h))
             .filter(|&at| p.cat.entry(at).is_some_and(|e| page::big_enough(e, smallest)));
+        // Still picked, it stays moved as it was until the list is worked out again ([`Page::fit_picked`]).
+        if p.picked.is_none() {
+            p.picked_fit = None;
+        }
         let was_looping = p.looping.is_some();
         p.looping = looping.and_then(|h| p.cat.find(&h));
         p.picked_row = None;
@@ -770,6 +885,7 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         // The old list points into the old index: nothing shows until the new one is worked out.
         background::free_later(std::mem::replace(&mut p.shown, Arc::new(Vec::new())));
         p.fits = None;
+        p.fits_song = None;
         let read_now = !p.read_once && !HERE.with(|h| *h.borrow());
         p.read_once = true;
         (p.picked, read_now, was_looping && p.looping.is_none())
@@ -1078,6 +1194,8 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
         // The old list (one line per part shown) is let go on the freeing thread.
         background::free_later(std::mem::replace(&mut p.shown, Arc::new(hits)));
         p.fits = None;
+        p.fits_song = None;
+        p.fit_picked();
         let target = p.target.and_then(|t| {
             let at = match t {
                 Target::Like(at) | Target::Within(at) => at,
@@ -1091,7 +1209,8 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
         };
         let shown = p.shown.len();
         let all = p.counts.lines;
-        (Some(shown), page::result_text(shown, all, p.order, p.reversed, p.target, p.seed.is_some()), target_text)
+        let result = page::result_text(shown, all, p.order, p.reversed, p.target, p.seed.is_some());
+        (Some(shown), result, target_text)
     });
     let Some(shown) = shown else {
         // The counts were this list's to give even so.
@@ -1120,6 +1239,7 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
         data.set_show_row(row as i32);
         data.set_show_ask(data.get_show_ask() + 1);
     }
+    fit_follows(app);
 }
 
 /// What the last list worked out says beside the list: what Settings' smallest part hides, after the summary, and
@@ -1369,6 +1489,8 @@ fn fit_listed(app: &AppWindow, id: u64, answer: Answer) {
         p.picked_row = p.picked.and_then(|at| page::row_of(&p.cat, &hits, at));
         background::free_later(std::mem::replace(&mut p.shown, Arc::new(hits)));
         p.fits = Some(Arc::new(fits));
+        p.fits_song = p.fit_song.clone();
+        p.fit_picked();
         Some((p.shown.len(), line, wants))
     });
     let Some((shown, line, wants)) = said else { return };
@@ -1381,6 +1503,45 @@ fn fit_listed(app: &AppWindow, id: u64, answer: Answer) {
     // What was looked for, which the song decided unless you chose.
     data.set_fit_wants(wants_place(wants));
     show_order(&data);
+    fit_follows(app);
+}
+
+/// A new list is on show: what's seen and heard of the picked part is brought into line with how it's moved now
+/// ([`Page::fit_picked`]). Its card's line and headings; its roll and chords, read again when the move is another
+/// (nothing else on the card changes, so nothing is blanked meanwhile); and the loop playing or the part in a DAW,
+/// started again moved the new way. Each is compared with the move it was made with, so a list that leaves the move
+/// as it was (a filter, a word typed, the song saved with the same chords) touches nothing that plays.
+fn fit_follows(app: &AppWindow) {
+    let data = app.global::<MidiData>();
+    let Some((at, text, now, ask, again)) = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let at = p.picked?;
+        let now = p.fit_move(at);
+        let ask = if now == p.card_move { None } else { p.notes_ask(at) };
+        let looping = p.looping == Some(at) && now != p.loop_move;
+        let in_daw = p.in_daw.is_some() && p.in_daw == p.cat.entry(at).map(|e| e.phrase.id) && now != p.daw_move;
+        Some((at, p.picked_fit_text(), now, ask, (looping, in_daw)))
+    }) else {
+        return;
+    };
+    let mut card = data.get_picked();
+    if card.fit != text.as_str() || card.fit_moved != (now != 0) {
+        card.fit = text.into();
+        card.fit_moved = now != 0;
+        data.set_picked(card);
+    }
+    if let Some(ask) = ask {
+        ask_notes(app, ask);
+    }
+    let (looping, in_daw) = again;
+    if looping && data.get_playing() {
+        play(app, at);
+    }
+    let daw_now = if data.get_daw_starting() != "" { data.get_daw_starting() } else { data.get_daw_playing() };
+    if let Some(daw) = Daw::from_id(&daw_now).filter(|_| in_daw) {
+        stop_daw(app);
+        start_daw(app, daw, at);
+    }
 }
 
 /// What the list's place says while "Fits my song" has no lines for it (none: nothing of its own).
@@ -1553,7 +1714,14 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
     let row = picked.and_then(|(_, row)| row);
     let before = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        p.picked = picked.map(|(at, _)| at);
+        let at = picked.map(|(at, _)| at);
+        // Another part: moved as its line in the list on show says. The same one picked again (its line clicked, the
+        // index read again) stays moved as it was: each new list keeps that right ([`fit_follows`]).
+        if p.picked != at {
+            p.picked = at;
+            p.picked_fit = None;
+            p.fit_picked();
+        }
         match (picked, row) {
             (Some(_), None) => None,
             _ => std::mem::replace(&mut p.picked_row, row),
@@ -1577,17 +1745,17 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
     };
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        p.notes_asked += 1;
-        let id = p.notes_asked;
-        let notes = p.notes.clone()?;
-        let shortcuts = p.shortcuts.clone();
+        // Counted even when there's nothing to ask for, so an older ask's answer isn't taken.
+        let ask = p.notes_ask(at);
         let e = p.cat.entry(at)?;
-        let card = card(e);
+        let mut card = card(e);
+        card.fit = p.picked_fit_text().into();
+        card.fit_moved = p.fit_move(at) != 0;
         let facts: Vec<MidiFact> = page::facts(e, &p.cat.dates)
             .into_iter()
             .map(|(n, v)| MidiFact { name: n.into(), value: v.into() })
             .collect();
-        let (actions, menu) = actions(e, &shortcuts);
+        let (actions, menu) = actions(e, &p.shortcuts);
         data.set_picked(card);
         data.set_facts(ModelRc::new(VecModel::from(facts)));
         data.set_actions(ModelRc::new(VecModel::from(actions)));
@@ -1595,20 +1763,7 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
         // Its tempo follows with the notes (it's read from its song or file).
         data.set_sound_line(page::sound_line(&page::gm_sound(e), None).into());
         crate::piano_roll::show(app, None);
-        Some(NotesAsk {
-            id,
-            from: notes,
-            phrase_id: e.phrase.id,
-            hash: e.phrase.hash.clone(),
-            role: e.role(),
-            // As the stored key was read; the clip's name only for a part whose key isn't read yet.
-            cut: e.phrase.cut.unwrap_or_else(|| page::is_cut(&e.phrase.clip)),
-            bars: e.phrase.bars,
-            key: e.phrase.key_fact,
-            source: Arc::clone(&e.phrase.source),
-            library: p.library.clone(),
-            sound: page::gm_sound(e),
-        })
+        ask
     });
     data.set_panel_shown(true);
     show_soundfont(app);
@@ -1628,7 +1783,14 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
         stop_daw(app);
         start_daw(app, daw, at);
     }
-    let Some(ask) = ask else { return };
+    if let Some(ask) = ask {
+        ask_notes(app, ask);
+    }
+}
+
+/// Reads the picked part's notes for its card, off the window's thread: its roll, its chords, and its key when the
+/// index has no reading of it. Newest wins.
+fn ask_notes(app: &AppWindow, ask: NotesAsk) {
     if HERE.with(|h| *h.borrow()) {
         let id = ask.id;
         let read = read_notes(&ask, &mut None);
@@ -1703,22 +1865,29 @@ fn from_index<T>(
     got
 }
 
+/// What the picked part's card shows of its notes. Its key is its own, read from the notes as they are in the
+/// library; its roll and its chords are of the part as it fits (what plays and drags): the notes moved, and the
+/// chords spelled in the key moved with them.
 fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<NotesRead, String> {
-    let notes = notes_of(&ask.from, ask.phrase_id, &ask.hash, open)?;
+    // As they are in the index: the part's own.
+    let notes = notes_of(&ask.part.from, ask.part.phrase_id, &ask.part.hash, open)?;
     let fact = if ask.key.is_none() {
         mo_midi::keys::with_reader(|r| mo_midi::keys::read(r, &notes, ask.role, ask.cut)).1
     } else {
         None
     };
-    // The chords too (their first 16 bars: quick even for a long part), spelled in the part's key.
-    let chords = mo_midi::chart::read(&notes, ask.role, ask.cut);
-    let chart = page::chord_chart(chords.as_ref(), page::chart_key(ask.key.as_ref().or(fact.as_ref())));
-    Ok(NotesRead { read: notes.len(), roll: page::roll(&notes, ask.bars), fact, chart })
+    let read = notes.len();
+    let (moved, semitones) = (midi_fits::moved(notes, ask.part.semitones), ask.part.semitones);
+    let key = page::chart_key(ask.key.as_ref().or(fact.as_ref())).map(|k| midi_fits::moved_key(k, semitones));
+    // The chords (their first 16 bars: quick even for a long part).
+    let chords = mo_midi::chart::read(&moved, ask.role, ask.cut);
+    let chart = page::chord_chart(chords.as_ref(), key);
+    Ok(NotesRead { read, roll: page::roll(&moved, ask.part.bars), fact, chart })
 }
 
 /// The card's sound line, with the part's tempo read now ([`tempo_of`]).
 fn sound_line_of(ask: &NotesAsk) -> String {
-    page::sound_line(&ask.sound, Some(tempo_of(&ask.from, &ask.source, &ask.library)))
+    page::sound_line(&ask.sound, Some(tempo_of(&ask.part.from, &ask.source, &ask.library)))
 }
 
 /// The picked part's tempo has been read: its card says it, unless another part was picked meanwhile.
@@ -1837,6 +2006,9 @@ fn card(e: &mo_midi::Entry) -> PickedPart {
         chords_why: "".into(),
         others: strings(others),
         others_more: if more > 0 { format!("and {} more", thousands(more)).into() } else { "".into() },
+        // The page's to say ([`pick`]): it knows the list the part was picked in.
+        fit: "".into(),
+        fit_moved: false,
     }
 }
 
@@ -1997,41 +2169,23 @@ pub fn escape(app: &AppWindow) -> bool {
     false
 }
 
-/// What a send to Bitwig needs, taken from the page so it can go on a thread of its own.
-struct Sending {
-    library: PathBuf,
-    from: NotesFrom,
-    phrase_id: i64,
-    hash: String,
-    name: String,
-    bars: i32,
-}
-
 /// Send to Bitwig: the picked part as a new MIDI file in the export folder's "MIDI browser" folder, then as a clip
-/// on a new track in the project open in Bitwig (as the C# MIDI page did). The part's own file is never touched.
-/// Its card shows at once and says how it went.
+/// on a new track in the project open in Bitwig (as the C# MIDI page did). In a "Fits my song" list it goes moved as
+/// it fits, under a name that says so. The part's own file is never touched. Its card shows at once and says how it
+/// went.
 fn send_to_bitwig(at: usize) {
-    let Some((sending, feed)) = PAGE.with(|p| {
+    let Some((part, library, feed)) = PAGE.with(|p| {
         let p = p.borrow();
-        let e = p.cat.entry(at)?;
-        let sending = Sending {
-            library: p.library.clone(),
-            from: p.notes.clone()?,
-            phrase_id: e.phrase.id,
-            hash: e.phrase.hash.clone(),
-            name: page::title(e),
-            bars: e.phrase.bars,
-        };
-        Some((sending, p.feed.clone()?))
+        Some((p.part_out(at)?, p.library.clone(), p.feed.clone()?))
     }) else {
         return;
     };
-    let job = to_bitwig::part_card(&feed, &sending.name);
+    let job = to_bitwig::part_card(&feed, &part.name);
     let started = background::spawn("Send to Bitwig", move || {
         // A panic in it (finding the export folder too) is logged as a crash and fails the card as it goes.
         let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
-            let export = export_dir(&sending.library);
-            send_part(job, &to_bitwig::Bitwig::default(), &sending, export.as_deref().map_err(String::as_str))
+            let export = export_dir(&library);
+            send_part(job, &to_bitwig::Bitwig::default(), &part, export.as_deref().map_err(String::as_str))
         }));
     });
     // Its card was taken into the thread, so it fails by itself ("It stopped before it finished").
@@ -2051,7 +2205,7 @@ fn export_dir(library: &Path) -> Result<PathBuf, String> {
 fn send_part(
     job: mo_app::activity::Job,
     to: &to_bitwig::Bitwig,
-    part: &Sending,
+    part: &PartOut,
     export: Result<&Path, &str>,
 ) -> Option<PathBuf> {
     let failed = |job: mo_app::activity::Job, why: String| {
@@ -2063,7 +2217,7 @@ fn send_part(
         Ok(dir) => dir,
         Err(why) => return failed(job, why.to_owned()),
     };
-    let notes = match notes_of(&part.from, part.phrase_id, &part.hash, &mut None) {
+    let notes = match part.notes(&mut None) {
         Ok(notes) if notes.iter().any(|n| !n.muted) => notes,
         Ok(_) => return failed(job, "It has no notes to send (every note in it is muted).".to_owned()),
         Err(e) => return failed(job, format!("Its notes couldn't be read: {e}.")),
@@ -2269,7 +2423,8 @@ pub fn sample() -> Loaded {
             true,
             4,
             400,
-            &[69, 72, 74, 76, 74, 72],
+            // High, as a flute's hook is written: fitted to a song it comes down an octave.
+            &[81, 84, 86, 88, 86, 84],
         ),
     ];
     for (i, (path, part, clip, role, tonic, minor, bars, age, keys)) in parts.into_iter().enumerate() {
@@ -2339,10 +2494,7 @@ const PLAY_KEY: &str = "midi:";
 struct PlayAsk {
     id: u64,
     font: PathBuf,
-    from: NotesFrom,
-    phrase_id: i64,
-    hash: String,
-    bars: i32,
+    part: PartOut,
     sound: mo_midi::gm::GmSound,
     /// Its file, whose tempo it plays at, and the song library that has a project's.
     source: Arc<mo_midi::Source>,
@@ -2505,10 +2657,7 @@ fn play(app: &AppWindow, at: usize) {
         Some(PlayAsk {
             id: PLAY_ASKED.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1,
             font,
-            from: p.notes.clone()?,
-            phrase_id: e.phrase.id,
-            hash: e.phrase.hash.clone(),
-            bars: e.phrase.bars,
+            part: p.part_out(at)?,
             sound: page::gm_sound(e),
             source: Arc::clone(&e.phrase.source),
             library: p.library.clone(),
@@ -2518,7 +2667,11 @@ fn play(app: &AppWindow, at: usize) {
         stop_playing(app);
         return;
     };
-    PAGE.with(|p| p.borrow_mut().looping = Some(at));
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.looping = Some(at);
+        p.loop_move = ask.part.semitones;
+    });
     // A part playing in a DAW would play over it.
     if app.global::<MidiData>().get_daw_playing() != "" || app.global::<MidiData>().get_daw_starting() != "" {
         stop_daw(app);
@@ -2583,8 +2736,8 @@ fn play(app: &AppWindow, at: usize) {
 
 /// The part's loop: its notes read, the SoundFont read (once), and the two made into sound.
 fn make_loop(ask: &PlayAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<mo_audio::AudioData, String> {
-    let notes = notes_of(&ask.from, ask.phrase_id, &ask.hash, open)?;
-    let (heard, length) = page::loop_notes(&notes, ask.bars);
+    let notes = ask.part.notes(open)?;
+    let (heard, length) = page::loop_notes(&notes, ask.part.bars);
     if heard.is_empty() {
         return Err("Every note in it is muted, so there's nothing to hear.".to_owned());
     }
@@ -2607,7 +2760,7 @@ fn make_loop(ask: &PlayAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<m
         notes: &notes,
         ppq: mo_midi::PPQ,
         length,
-        tempo: tempo_of(&ask.from, &ask.source, &ask.library).bpm(),
+        tempo: tempo_of(&ask.part.from, &ask.source, &ask.library).bpm(),
         program: ask.sound.program,
         drums: ask.sound.drums,
     };
@@ -2804,16 +2957,21 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
     let ask = PAGE.with(|p| {
         let p = p.borrow();
         let e = p.cat.entry(at)?;
-        let place = (Arc::clone(&e.phrase.source), p.library.clone());
-        Some((p.notes.clone()?, e.phrase.id, e.phrase.hash.clone(), e.phrase.bars, place, page::title(e)))
+        // Moved as it fits the song, in a "Fits my song" list; its name in the DAW says so.
+        Some((p.part_out(at)?, Arc::clone(&e.phrase.source), p.library.clone()))
     });
-    let Some((from, phrase_id, hash, bars, (source, library), name)) = ask else {
+    let Some((part, source, library)) = ask else {
         return false;
     };
+    let phrase_id = part.phrase_id;
     // The loop with a General MIDI sound would play over it.
     stop_playing(app);
     let asked = DAW_ASKED.load(std::sync::atomic::Ordering::SeqCst);
-    PAGE.with(|p| p.borrow_mut().in_daw = Some(phrase_id));
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.in_daw = Some(phrase_id);
+        p.daw_move = part.semitones;
+    });
     data.set_daw_starting(daw.id().into());
     if HERE.with(|h| *h.borrow()) {
         data.set_daw_starting("".into());
@@ -2838,9 +2996,8 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
             if !wanted() {
                 return Err(None);
             }
-            let notes = notes_of(&from, phrase_id, &hash, &mut None)
-                .map_err(|e| Some(format!("Its notes couldn't be read: {e}.")))?;
-            Ok((notes, tempo_of(&from, &source, &library).bpm()))
+            let notes = part.notes(&mut None).map_err(|e| Some(format!("Its notes couldn't be read: {e}.")))?;
+            Ok((notes, tempo_of(&part.from, &source, &library).bpm()))
         }))
         .unwrap_or_else(|_| Err(stopped()));
         // Its place in the line is given up when it won't start.
@@ -2853,7 +3010,7 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
         };
         let made = read.and_then(|(notes, tempo)| {
             mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
-                start_in_daw(daw, &notes, bars, tempo, &name, turn.as_ref(), &wanted)
+                start_in_daw(daw, &notes, part.bars, tempo, &part.name, turn.as_ref(), &wanted)
             }))
             .unwrap_or_else(|_| Err(stopped()))
         });
@@ -2881,7 +3038,11 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
             Err(Some(why)) => {
                 log::warning(
                     "MIDI",
-                    &format!("{name} couldn't play in {}: {why}", if daw == Daw::Fl { "FL Studio" } else { "Bitwig" }),
+                    &format!(
+                        "{} couldn't play in {}: {why}",
+                        part.name,
+                        if daw == Daw::Fl { "FL Studio" } else { "Bitwig" }
+                    ),
                 );
                 Err(why)
             }
@@ -3152,10 +3313,10 @@ enum Spot {
 /// Drags the part at `at` in the catalogue out as a new MIDI file of its notes, written to a drag folder in Temp
 /// (cleared later, rule 28). Its notes are read and the file written off the window's thread, as the drag gets going.
 fn carry(app: &AppWindow, at: usize, spot: Spot) {
-    let Some((from, phrase_id, hash, name, bars, colour)) = PAGE.with(|p| {
+    // Moved as it fits the song, in a "Fits my song" list; the file's name says so.
+    let Some((part, colour)) = PAGE.with(|p| {
         let p = p.borrow();
-        let e = p.cat.entry(at)?;
-        Some((p.notes.clone()?, e.phrase.id, e.phrase.hash.clone(), page::title(e), e.phrase.bars, colour(e.role())))
+        Some((p.part_out(at)?, colour(p.cat.entry(at)?.role())))
     }) else {
         return;
     };
@@ -3164,11 +3325,11 @@ fn carry(app: &AppWindow, at: usize, spot: Spot) {
         app,
         crate::drag::Drag {
             make: Box::new(move || {
-                let notes = notes_of(&from, phrase_id, &hash, &mut None).map_err(|e| {
+                let notes = part.notes(&mut None).map_err(|e| {
                     log::warning("MIDI", &format!("A dragged part's notes couldn't be read: {e}"));
                     format!("Its notes couldn't be read: {e}.")
                 })?;
-                mo_app::drag_out::from_part(&name, &notes, bars, tint)?
+                mo_app::drag_out::from_part(&part.name, &notes, part.bars, tint)?
                     .write(&std::env::temp_dir())
                     .map_err(|e| format!("Couldn't write the MIDI file in Temp: {e}."))
             }),
@@ -3188,13 +3349,13 @@ fn carry(app: &AppWindow, at: usize, spot: Spot) {
 /// For the screenshots: what dragging the line at `row` carries (its card), without writing anything. None when
 /// there's no part there or its notes can't be read.
 pub fn card_at_row(app: &AppWindow, row: usize) -> Option<mo_app::drag_out::Payload> {
-    let (from, phrase_id, hash, name, bars, colour) = PAGE.with(|p| {
+    let (part, colour) = PAGE.with(|p| {
         let p = p.borrow();
-        let e = p.cat.entry(p.shown.get(row)?.entry)?;
-        Some((p.notes.clone()?, e.phrase.id, e.phrase.hash.clone(), page::title(e), e.phrase.bars, colour(e.role())))
+        let at = p.shown.get(row)?.entry;
+        Some((p.part_out(at)?, colour(p.cat.entry(at)?.role())))
     })?;
-    let notes = notes_of(&from, phrase_id, &hash, &mut None).ok()?;
-    let out = mo_app::drag_out::from_part(&name, &notes, bars, tint(app, colour)).ok()?;
+    let notes = part.notes(&mut None).ok()?;
+    let out = mo_app::drag_out::from_part(&part.name, &notes, part.bars, tint(app, colour)).ok()?;
     Some(mo_app::drag_out::Payload { files: Vec::new(), cards: out.cards, caption: out.caption, numbered: false })
 }
 
@@ -3234,23 +3395,36 @@ mod tests {
         assert!(Role::ALL.iter().filter(|r| **r != Role::Other).all(|r| s.cat.role_counts().contains_key(r)));
     }
 
-    #[test]
-    fn notes_are_read_and_keyed_for_the_card() {
-        let s = sample();
-        let e = &s.cat.entries[0];
-        let ask = NotesAsk {
-            id: 1,
+    /// The made-up part `e`'s notes as they leave the page, moved by `semitones`.
+    fn part_out(s: &Loaded, e: &mo_midi::Entry, semitones: i32) -> PartOut {
+        PartOut {
             from: s.notes.clone(),
             phrase_id: e.phrase.id,
             hash: e.phrase.hash.clone(),
+            semitones,
+            name: midi_fits::moved_name(&page::title(e), semitones),
+            bars: e.phrase.bars,
+        }
+    }
+
+    /// The ask for its card, with no key stored for it.
+    fn notes_ask(s: &Loaded, e: &mo_midi::Entry, semitones: i32) -> NotesAsk {
+        NotesAsk {
+            id: 1,
+            part: part_out(s, e, semitones),
             role: e.role(),
             cut: false,
-            bars: e.phrase.bars,
             key: None,
             source: Arc::clone(&e.phrase.source),
             library: PathBuf::new(),
             sound: page::gm_sound(e),
-        };
+        }
+    }
+
+    #[test]
+    fn notes_are_read_and_keyed_for_the_card() {
+        let s = sample();
+        let ask = notes_ask(&s, &s.cat.entries[0], 0);
         let Ok(read) = read_notes(&ask, &mut None) else { panic!("the made-up notes should read") };
         // Made up, so its tempo is the sample's own, with no file opened for it.
         let line = sound_line_of(&ask);
@@ -3260,18 +3434,88 @@ mod tests {
         assert!(!read.chart.bars.is_empty(), "its chords are read too");
     }
 
+    /// A part picked in a "Fits my song" list is shown as it fits: its roll and chords moved by what its line says,
+    /// while its key stays the one its notes have in the library (the card's line says how it's moved).
+    #[test]
+    fn a_part_that_fits_is_shown_moved_with_its_own_key() {
+        let s = sample();
+        let read = |semitones: i32| read_notes(&notes_ask(&s, &s.cat.entries[0], semitones), &mut None).unwrap();
+        let (plain, up, down) = (read(0), read(3), read(-2));
+        let keys = |r: &NotesRead| r.roll.notes.iter().map(|n| n.key).collect::<Vec<_>>();
+        assert_eq!(keys(&up), keys(&plain).iter().map(|k| k + 3).collect::<Vec<_>>());
+        assert_eq!(keys(&down), keys(&plain).iter().map(|k| k - 2).collect::<Vec<_>>());
+        assert_eq!([(plain.roll.low, plain.roll.high), (up.roll.low, up.roll.high)], [(44, 69), (47, 72)]);
+        // Its chords are the moved notes', spelled in the key moved with them (A minor up three is C minor: flats).
+        assert_eq!(plain.chart.bars, "Am | – | F | – | C | – | G | –");
+        assert_eq!(up.chart.bars, "Cm | – | Ab | – | Eb | – | Bb | –");
+        assert_eq!(down.chart.bars, "Gm | – | Eb | – | Bb | – | F | –");
+        // The key read is the part's own, whichever way it's moved.
+        assert!(plain.fact.is_some());
+        assert_eq!((&up.fact, &down.fact), (&plain.fact, &plain.fact));
+        assert_eq!((up.read, down.read), (plain.read, plain.read));
+    }
+
+    /// The picked part's move belongs to it: its line's in a "Fits my song" list, kept when a newer list of the same
+    /// song no longer has it (so what plays doesn't jump when a filter is ticked), and gone with the song or the
+    /// list.
+    #[test]
+    fn the_picked_part_stays_moved_while_the_list_is_its_songs() {
+        let songs = sample_songs();
+        let fit = |entry: usize, semitones: i32| Fit { entry, semitones, octaves: 0, sits: 0.8 };
+        let mut p = Page { cat: Arc::new(sample().cat), notes: Some(sample().notes), ..Page::default() };
+        let listed = |p: &mut Page, fits: Option<Vec<Fit>>, song: Option<&SongChoice>| {
+            p.fits = fits.map(Arc::new);
+            p.fits_song = song.cloned();
+            p.fit_picked();
+        };
+        // Nothing picked, or a plain list: nothing is moved.
+        p.fit_song = Some(songs[0].clone());
+        listed(&mut p, Some(vec![fit(4, 3), fit(2, -2)]), Some(&songs[0]));
+        assert_eq!((p.picked_fit.clone(), p.fit_move(4), p.fit_move(7)), (None, 3, 0), "a line is moved as it says");
+        // Picked in the list: moved as its line says, and its card says so.
+        p.picked = Some(4);
+        p.fit_picked();
+        assert_eq!((p.fit_move(4), p.fit_move(2)), (3, -2));
+        assert_eq!(p.picked_fit_text(), midi_fits::card_text(3, "Night drive"));
+        assert_eq!(p.part_out(4).map(|part| part.semitones), Some(3));
+        assert!(p.part_out(4).is_some_and(|part| part.name.ends_with(" (3 semitones up)")));
+        // A newer list of the same save that has it another way: as that one says.
+        listed(&mut p, Some(vec![fit(4, 1)]), Some(&songs[0]));
+        assert_eq!(p.fit_move(4), 1);
+        // One that no longer has it (a filter hides it): as it was.
+        listed(&mut p, Some(vec![fit(2, -2)]), Some(&songs[0]));
+        assert_eq!((p.fit_move(4), p.picked_fit_text()), (1, midi_fits::card_text(1, "Night drive")));
+        // Through the index read again too, when no list is on show for a while.
+        p.fits = None;
+        assert_eq!(p.fit_move(4), 1);
+        // The song saved again, and the new list doesn't have it: what it was moved for is gone.
+        let saved_again = SongChoice { mtime: songs[0].mtime + 60, ..songs[0].clone() };
+        listed(&mut p, Some(vec![fit(2, -2)]), Some(&saved_again));
+        assert_eq!((p.fit_move(4), p.picked_fit_text()), (0, String::new()));
+        assert!(p.part_out(4).is_some_and(|part| part.semitones == 0 && !part.name.contains("semitone")));
+        // Another song's list, or the plain list: as its line says, or not at all.
+        listed(&mut p, Some(vec![fit(4, 5)]), Some(&songs[1]));
+        assert_eq!(p.picked_fit_text(), midi_fits::card_text(5, "Glass"));
+        listed(&mut p, None, None);
+        assert_eq!((p.fit_move(4), p.picked_fit.clone()), (0, None));
+        // A part that goes to another octave as well is moved by both in one: the picked one and a line alike.
+        let low = |entry: usize| Fit { octaves: -1, ..fit(entry, 3) };
+        listed(&mut p, Some(vec![low(4), low(2)]), Some(&songs[0]));
+        assert_eq!((p.fit_move(4), p.fit_move(2)), (-9, -9));
+        assert_eq!(p.picked_fit_text(), midi_fits::card_text(-9, "Night drive"));
+        assert!(p.part_out(4).is_some_and(|part| part.semitones == -9 && part.name.ends_with(" (9 semitones down)")));
+        assert!(p.part_out(2).is_some_and(|part| part.semitones == -9 && part.name.ends_with(" (9 semitones down)")));
+        // "Fits my song" off while its list is still on show: a line is no longer moved.
+        listed(&mut p, Some(vec![fit(4, 3), fit(2, -2)]), Some(&songs[0]));
+        p.fit_song = None;
+        assert_eq!((p.fit_move(2), p.fit_of(2)), (0, None));
+    }
+
     #[test]
     fn a_part_goes_to_bitwig_as_a_new_midi_file_on_a_new_track() {
         let s = sample();
         let e = &s.cat.entries[0];
-        let part = Sending {
-            library: PathBuf::new(),
-            from: s.notes.clone(),
-            phrase_id: e.phrase.id,
-            hash: e.phrase.hash.clone(),
-            name: page::title(e),
-            bars: e.phrase.bars,
-        };
+        let part = part_out(&s, e, 0);
         let dir = std::env::temp_dir().join(format!("mo-ui-midi-to-bitwig-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let bitwig = mo_dawlink::bitwig::fake::FakeBitwig::start().unwrap();
@@ -3289,11 +3533,27 @@ mod tests {
         assert!(cards.iter().any(|c| c.title == format!("{} is in Bitwig", part.name)), "{cards:?}");
         drop(world);
 
+        // Sent from a "Fits my song" list it goes as it fits: every note moved by what its line says, in a file and
+        // on a track whose name says so. The part's own file above is as it was.
+        let keys = |file: &Path| -> Vec<u8> {
+            let parts = mo_formats::midi::read(file).unwrap();
+            parts.iter().flat_map(|p| p.notes.iter().map(|n| n.key)).collect()
+        };
+        let own = keys(&file);
+        let moved = part_out(&s, e, 3);
+        let feed = mo_app::activity::Feed::default();
+        let moved_file = send_part(feed.start("Sending", ""), &bitwig.bitwig(), &moved, Ok(dir.as_path())).unwrap();
+        assert!(moved_file.to_string_lossy().ends_with("(3 semitones up).mid"), "{moved_file:?}");
+        assert!(!own.is_empty());
+        assert_eq!(keys(&moved_file), own.iter().map(|k| k + 3).collect::<Vec<_>>());
+        assert_eq!(keys(&file), own);
+        assert!(bitwig.world().tracks.iter().any(|t| t.name == moved.name && t.name.ends_with("(3 semitones up)")));
+
         // An export folder that isn't there: nothing is written or sent, and the card says why.
         let feed = mo_app::activity::Feed::default();
         let gone = "The export folder isn't there.";
         assert!(send_part(feed.start("Sending", ""), &bitwig.bitwig(), &part, Err(gone)).is_none());
-        assert_eq!(bitwig.world().commands(), ["newtrack", "clip"]);
+        assert_eq!(bitwig.world().commands(), ["newtrack", "clip", "newtrack", "clip"]);
         let cards = feed.visible(Instant::now());
         assert!(cards.iter().any(|c| c.detail == gone), "{cards:?}");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3407,6 +3667,15 @@ mod tests {
         assert!(!looked.fits.is_empty());
         let own = |fit: &Fit| ask.cat.entry(fit.entry).is_none_or(|e| e.phrase.source.path.contains("Night drive"));
         assert!(!looked.fits.iter().any(own), "{looked:?}");
+        // Each comes with its octave: the arp is where an arp plays once it's in key; the flute hook is written
+        // high, and 5 semitones up for the key it would be well above where a tune plays, so it comes down an
+        // octave.
+        let fit = |name: &str| {
+            let named = |f: &&Fit| ask.cat.entry(f.entry).is_some_and(|e| page::title(e).starts_with(name));
+            looked.fits.iter().find(named).map(|f| (f.semitones, f.octaves, midi_fits::fit_text(f)))
+        };
+        assert_eq!(fit("Arp"), Some((3, 0, "Fits 62%, 3 semitones up".to_owned())));
+        assert_eq!(fit("Flute hook A"), Some((5, -1, "Fits 38%, 7 semitones down".to_owned())));
         // Told to stop, it gives nothing to show.
         let stopped = FitAsk { stop: Arc::new(AtomicBool::new(true)), ..ask };
         assert_eq!(fit_search(&stopped, &mut FitKept::default()), Answer::Stopped);

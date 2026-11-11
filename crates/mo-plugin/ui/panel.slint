@@ -3,7 +3,7 @@
 // with the app's own filters and orders)
 // and DAW check (every CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PickButton } from "../../mo-ui/ui/studio.slint";
 export { FilterView, FilterChoice }
 import { ListView } from "../../mo-ui/ui/list.slint";
 
@@ -47,6 +47,9 @@ export component Panel inherits Window {
     in property <string> copied;
     // The filter column, as the app's Sounds page has it (mo-app's `sounds::chips`): each choice with its count.
     in property <FilterView> type-filter;
+    // How many types the column has room for as lines of their own, before the More types menu: what's left of its
+    // height once everything under the types has its room, in lines (a TickLine is 26px high). Never under 9.
+    in-out property <int> type-lines: 9;
     in property <FilterView> length-filter;
     in property <FilterView> key-filter;
     in property <FilterView> tag-filter;
@@ -65,14 +68,25 @@ export component Panel inherits Window {
     in property <int> order;
     in-out property <int> picked: -1;
     in-out property <int> view: 0;
+    // How wide a line's waveform is: it grows with the window (the list sets it); mo-plugin's waves.rs makes the
+    // pictures this wide.
+    in-out property <length> wave-width: 120px;
     callback search(string);
-    callback play(int);
+    // Play a line's sound: from the start (0), or from the spot clicked on its waveform (up to 1, its end).
+    callback play(int, float);
     // A line is being dragged out (onto a track): its row.
     callback drag-out(int);
     // Whether lines can be dragged out on this system, and the row being carried (-1 for none).
     in property <bool> can-drag;
     in property <int> carried: -1;
     callback stop();
+    // Trim silence: sounds play without the silence at their start and end (the files stay as they are), with how
+    // quiet counts as silence in dB below full scale, and a pick from its menu ("-50").
+    in property <bool> trim-silence;
+    in property <int> trim-level-db: -60;
+    in property <[string]> trim-choices;
+    // A pick from its menu: "-50 dB", or "" for off.
+    callback pick-trim(string);
     // A choice was picked or unpicked on a filter ("type", "length", "key", "tag"): its words.
     callback pick(string, string);
     // Nothing picked on a filter (or "more-types": only the types in the More menu).
@@ -127,6 +141,15 @@ export component Panel inherits Window {
                 content-width: self.width;
                 content-height: max(self.height, lists.preferred-height);
                 mouse-drag-pan-enabled: false;
+                // The column was made taller or shorter, or what's under the types changed.
+                // What everything but the types' own lines needs.
+                property <length> rest: lists.preferred-height - root.type-filter.chips.length * 26px;
+                function fit() {
+                    root.type-lines = max(9, Math.floor((self.height - self.rest) / 26px));
+                }
+                init => { self.fit(); }
+                changed height => { self.fit(); }
+                changed rest => { self.fit(); }
                 lists := VerticalLayout {
                     x: 0;
                     y: 0;
@@ -232,6 +255,14 @@ export component Panel inherits Window {
                         hint: "Search sounds";
                         edited(text) => { root.search(text); }
                     }
+                    PickButton {
+                        horizontal-stretch: 0;
+                        name: "Trim silence";
+                        value: root.trim-silence ? root.trim-level-db + " dB" : "";
+                        none-text: "Off: play the whole file";
+                        choices: root.trim-choices;
+                        picked(t) => { root.pick-trim(t); }
+                    }
                     StudioButton {
                         horizontal-stretch: 0;
                         text: "Stop";
@@ -259,6 +290,13 @@ export component Panel inherits Window {
                 ListView {
                     row-height: 48px;
                     rows: root.sounds.length;
+                    // The waveforms take a bit under half of a line, in steps (so dragging the window's edge
+                    // doesn't ask for new pictures at every pixel), and never less than 120.
+                    function fit() {
+                        root.wave-width = max(120px, Math.floor(self.width * 0.45 / 40px) * 40px);
+                    }
+                    init => { self.fit(); }
+                    changed width => { self.fit(); }
                     for sound[i] in root.sounds: ListLine {
                         height: 48px;
                         selected: i == root.picked;
@@ -266,7 +304,10 @@ export component Panel inherits Window {
                         lifted: i == root.carried;
                         clicked => {
                             root.picked = i;
-                            root.play(i);
+                            // A click on the waveform plays from that spot; anywhere else, from the start.
+                            root.play(i, wave.source.width > 0 && self.pressed-x >= wave.absolute-position.x - self.absolute-position.x
+                                && self.pressed-x < wave.absolute-position.x - self.absolute-position.x + wave.width
+                                ? (self.pressed-x - (wave.absolute-position.x - self.absolute-position.x)) / wave.width : 0);
                         }
                         drag-out => { root.drag-out(i); }
                         HorizontalLayout {
@@ -299,8 +340,8 @@ export component Panel inherits Window {
                                 horizontal-stretch: 0;
                                 alignment: center;
                                 // The size mo-plugin's waves.rs makes the picture for.
-                                Image {
-                                    width: 120px;
+                                wave := Image {
+                                    width: root.wave-width;
                                     height: 30px;
                                     source: sound.wave;
                                     image-fit: fill;

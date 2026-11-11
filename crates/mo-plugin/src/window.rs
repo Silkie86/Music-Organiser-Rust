@@ -2,8 +2,8 @@
 //!
 //! Slint normally opens and runs its own windows. In a DAW the DAW owns the window, so:
 //! - [`baseview`] makes the plugin's own small window inside the DAW's one, and hands it the mouse and keys;
-//! - Slint draws the panel on the CPU with its software renderer (no graphics card steps to share with the DAW) into
-//!   a picture in memory, which [`softbuffer`] puts in that window;
+//! - Slint draws the panel into that window on the graphics card (`gpu.rs`), or, when there's no card to draw with,
+//!   on the CPU with its software renderer into a picture in memory, which [`softbuffer`] puts in the window;
 //! - a short timer on the window's thread runs Slint's timers and animations and takes in what background threads
 //!   found (the sound list, a search), newest first.
 //!
@@ -11,6 +11,7 @@
 //! library, searching it and reading a sound all run on background threads at low priority.
 
 use crate::audition::Played;
+use crate::gpu::Gpu;
 use crate::library::{self, Asked, Library, ORDERS, Read};
 use crate::threads::{background, lock};
 use crate::waves::{self, Kept};
@@ -23,7 +24,7 @@ use baseview::{
 use keyboard_types::{Key, KeyState, NamedKey};
 use mo_app::backup::thousands;
 use mo_app::filters::{Filter, Shown as Choice};
-use mo_app::sounds::{Order, SoundCounts, TEMPO_HIGH, TEMPO_LOW, TEMPO_STEP};
+use mo_app::sounds::{Order, SoundCounts, TEMPO_HIGH, TEMPO_LOW, TEMPO_STEP, TYPE_CHIPS};
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, TargetPixel,
 };
@@ -31,8 +32,9 @@ use slint::platform::{PointerEventButton, WindowAdapter};
 use slint::{ComponentHandle, LogicalPosition, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
 use std::num::NonZeroU32;
+use std::panic::AssertUnwindSafe;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -47,7 +49,7 @@ pub const MOST_WIDTH: f64 = 7680.0;
 pub const MOST_HEIGHT: f64 = 4320.0;
 
 /// How often the window's timer runs: Slint's timers and animations, and what background threads found.
-const TICK: Duration = Duration::from_millis(30);
+const TICK: Duration = Duration::from_millis(16);
 
 /// Opens the panel inside `parent` (the window the DAW lends), at `size`: the size the plugin told the DAW, so the two
 /// match. The DAW resizes it afterwards ([`baseview::Window::resize`]); the panel follows in its `resized`. The window goes when the returned one is dropped.
@@ -94,13 +96,12 @@ struct Platform {
 }
 
 thread_local! {
-    static NEXT: RefCell<Option<Rc<MinimalSoftwareWindow>>> = const { RefCell::new(None) };
+    static NEXT: RefCell<Option<Rc<dyn WindowAdapter>>> = const { RefCell::new(None) };
 }
 
 impl slint::platform::Platform for Platform {
     fn create_window_adapter(&self) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
         NEXT.with(|next| next.borrow_mut().take())
-            .map(|w| w as Rc<dyn WindowAdapter>)
             .ok_or_else(|| slint::PlatformError::Other("no plugin window to draw in".into()))
     }
 
@@ -207,14 +208,154 @@ fn copy_text(text: String) -> Result<(), arboard::Error> {
     })
 }
 
+/// How the panel gets into the window.
+enum Draws {
+    /// On the graphics card (`gpu.rs`).
+    Card(Rc<Gpu>),
+    /// On the processor: Slint draws a picture in memory, and `softbuffer` puts it in the window.
+    Processor {
+        window: Rc<MinimalSoftwareWindow>,
+        surface: RefCell<softbuffer::Surface<baseview::PlatformHandle, baseview::PlatformHandle>>,
+        /// The last picture Slint drew, put in the window whenever it's asked to show.
+        picture: RefCell<Vec<Pixel>>,
+    },
+}
+
+/// Set once drawing on the card has gone wrong in this DAW: windows opened afterwards draw on the processor.
+static CARD_FAILED: AtomicBool = AtomicBool::new(false);
+
+impl Draws {
+    /// On the card when there's one to draw with; if not, on the processor (and the log says why).
+    fn new(handle: baseview::PlatformHandle, size: WindowSize) -> Result<Draws, String> {
+        let (width, height) = (size.physical.width.max(1), size.physical.height.max(1));
+        if std::env::var_os("MO_DRAW_CPU").is_some() {
+            crate::log::line("Graphics", "MO_DRAW_CPU is set: the panel draws on the processor");
+        } else if CARD_FAILED.load(Ordering::Acquire) {
+            crate::log::line("Graphics", "Drawing on the card went wrong earlier: the panel draws on the processor");
+        } else {
+            // A fault in the card's own code is caught here, so it never reaches the DAW.
+            match mo_catch::catch_crash(AssertUnwindSafe(|| Gpu::new(&handle, width, height))) {
+                Ok(Ok(gpu)) => {
+                    crate::log::line("Graphics", "The panel draws on the graphics card");
+                    return Ok(Draws::Card(gpu));
+                }
+                Ok(Err(why)) => {
+                    crate::log::line("Graphics", &format!("The panel draws on the processor: {why}"));
+                }
+                Err(_) => {
+                    CARD_FAILED.store(true, Ordering::Release);
+                    crate::log::line("Graphics", "Setting up the card crashed: the panel draws on the processor");
+                }
+            }
+        }
+        let soft = softbuffer::Context::new(handle.clone()).map_err(|e| format!("Couldn't draw in the window: {e}"))?;
+        let surface =
+            softbuffer::Surface::new(&soft, handle).map_err(|e| format!("Couldn't draw in the window: {e}"))?;
+        Ok(Draws::Processor {
+            window: MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer),
+            surface: RefCell::new(surface),
+            picture: RefCell::new(Vec::new()),
+        })
+    }
+
+    /// What Slint takes the window as.
+    fn adapter(&self) -> Rc<dyn WindowAdapter> {
+        match self {
+            Draws::Card(gpu) => Rc::clone(gpu) as Rc<dyn WindowAdapter>,
+            Draws::Processor { window, .. } => Rc::clone(window) as Rc<dyn WindowAdapter>,
+        }
+    }
+
+    fn window(&self) -> &slint::Window {
+        match self {
+            Draws::Card(gpu) => gpu.window(),
+            Draws::Processor { window, .. } => window.window(),
+        }
+    }
+
+    /// The window is now `width` by `height` pixels: the panel is drawn again at that size.
+    fn resize(&self, width: u32, height: u32) {
+        match self {
+            Draws::Card(gpu) => gpu.resize(width, height),
+            Draws::Processor { window, picture, .. } => {
+                *picture.borrow_mut() = vec![Pixel::default(); width as usize * height as usize];
+                window.set_size(slint::PhysicalSize::new(width, height));
+                window.request_redraw();
+            }
+        }
+    }
+
+    /// Whether a picture has been made at the window's size yet.
+    fn sized(&self) -> bool {
+        match self {
+            Draws::Card(_) => true,
+            Draws::Processor { picture, .. } => !picture.borrow().is_empty(),
+        }
+    }
+
+    /// Slint draws the panel again if anything on it changed. On the card it goes straight into the window; on the
+    /// processor into the picture, and true says the window should be asked to show it.
+    fn draw_if_needed(&self, width: u32) -> bool {
+        match self {
+            Draws::Card(gpu) => {
+                if CARD_FAILED.load(Ordering::Acquire) {
+                    return false;
+                }
+                match mo_catch::catch_crash(AssertUnwindSafe(|| gpu.draw_if_needed())) {
+                    Ok(Ok(())) => {}
+                    Ok(Err(why)) => crate::log::line("Graphics", &format!("A frame wasn't drawn: {why}")),
+                    Err(_) => {
+                        // Nothing more is drawn in this window; one opened next draws on the processor.
+                        CARD_FAILED.store(true, Ordering::Release);
+                        crate::log::line("Graphics", "Drawing on the card crashed: close and open the panel again");
+                    }
+                }
+                false
+            }
+            Draws::Processor { window, picture, .. } => window.draw_if_needed(|renderer| {
+                let mut picture = picture.borrow_mut();
+                renderer.render(picture.as_mut_slice(), width as usize);
+            }),
+        }
+    }
+
+    /// The system asks for the window to be shown again (it was uncovered): `width` by `height` pixels.
+    fn show(&self, width: u32, height: u32) -> Result<(), HandlerError> {
+        match self {
+            Draws::Card(gpu) => {
+                gpu.request_redraw();
+                Ok(())
+            }
+            Draws::Processor { surface, picture, .. } => {
+                let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) else { return Ok(()) };
+                let mut surface = surface.borrow_mut();
+                surface.resize(w, h).map_err(|e| HandlerError::from(std::io::Error::other(e.to_string())))?;
+                let mut buffer =
+                    surface.buffer_mut().map_err(|e| HandlerError::from(std::io::Error::other(e.to_string())))?;
+                let picture = picture.borrow();
+                let pixels: &[u32] = bytemuck::cast_slice(picture.as_slice());
+                let len = buffer.len().min(pixels.len());
+                buffer[..len].copy_from_slice(&pixels[..len]);
+                buffer.present().map_err(|e| HandlerError::from(std::io::Error::other(e.to_string())))?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Whether drawing waits for the screen (the card shows a frame in step with it): then the panel is drawn on the
+    /// timer only, not after every move of the mouse, or the moves would queue up behind the screen.
+    fn waits_for_the_screen(&self) -> bool {
+        matches!(self, Draws::Card(_))
+    }
+}
+
 /// The open panel, on the window's thread.
 struct Shown {
     context: WindowContext,
-    window: Rc<MinimalSoftwareWindow>,
+    /// Before `panel`, which draws through it: dropped after it. And before the window closes (baseview drops this
+    /// handler first), as `gpu.rs` needs.
+    draws: Draws,
     panel: Panel,
-    surface: RefCell<softbuffer::Surface<baseview::PlatformHandle, baseview::PlatformHandle>>,
-    /// The last picture Slint drew, put in the window whenever it's asked to show.
-    picture: RefCell<Vec<Pixel>>,
     size: Cell<(u32, u32)>,
     scale: Cell<f64>,
     pointer: Cell<LogicalPosition>,
@@ -228,6 +369,8 @@ struct Shown {
     playing: Cell<Option<u64>>,
     /// The line last clicked to play: its row, its sound and its file.
     played: Rc<RefCell<Option<(usize, i64, std::path::PathBuf)>>>,
+    /// How wide the panel draws a line's waveform, in logical pixels: the pictures are made for it.
+    wave_width: Cell<f32>,
     /// A line's file is being carried out now ([`Shown::drag`]).
     dragging: Cell<bool>,
     _timer: TimerHandle,
@@ -237,17 +380,13 @@ impl Shown {
     fn new(context: WindowContext, instance: Arc<Instance>) -> Result<Shown, String> {
         // Already there for an earlier plugin window on this thread: that one is used.
         let _ = slint::platform::set_platform(Box::new(Platform { started: Instant::now() }));
-        let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
-        NEXT.with(|next| *next.borrow_mut() = Some(Rc::clone(&window)));
+        let draws = Draws::new(context.platform_handle(), context.size())?;
+        NEXT.with(|next| *next.borrow_mut() = Some(draws.adapter()));
         let panel = Panel::new();
         // Taken back whether or not the panel was made, so no later window gets this one.
         NEXT.with(|next| next.borrow_mut().take());
         let panel = panel.map_err(|e| format!("Couldn't make the panel: {e}"))?;
 
-        let handle = context.platform_handle();
-        let soft = softbuffer::Context::new(handle.clone()).map_err(|e| format!("Couldn't draw in the window: {e}"))?;
-        let surface =
-            softbuffer::Surface::new(&soft, handle).map_err(|e| format!("Couldn't draw in the window: {e}"))?;
         let timer = context.create_timer(TICK).map_err(|e| format!("Couldn't start the window's timer: {e}"))?;
 
         let lines = Rc::new(Lines {
@@ -259,10 +398,8 @@ impl Shown {
         let slots = Arc::new(Slots::default());
         let shown = Shown {
             context,
-            window,
+            draws,
             panel,
-            surface: RefCell::new(surface),
-            picture: RefCell::new(Vec::new()),
             size: Cell::new((0, 0)),
             scale: Cell::new(1.0),
             pointer: Cell::new(LogicalPosition::default()),
@@ -273,6 +410,7 @@ impl Shown {
             column: Rc::new(Column::default()),
             playing: Cell::new(None),
             played: Rc::new(RefCell::new(None)),
+            wave_width: Cell::new(waves::WIDTH as f32),
             dragging: Cell::new(false),
             _timer: timer,
         };
@@ -301,12 +439,12 @@ impl Shown {
         let player = Arc::clone(&self.instance.player);
         let slots = Arc::clone(&self.slots);
         let last_played = Rc::clone(&self.played);
-        panel.on_play(move |row| {
+        panel.on_play(move |row, from| {
             let Some(row) = usize::try_from(row).ok() else { return };
             let Some(path) = lines.path(row) else { return };
             *last_played.borrow_mut() = lines.sound(row).map(|sound| (row, sound, path.clone().into()));
             let slots = Arc::clone(&slots);
-            player.play(path.into(), move |played| *lock(&slots.played) = Some(played));
+            player.play(path.into(), from, move |played| *lock(&slots.played) = Some(played));
         });
         let player = Arc::clone(&self.instance.player);
         let weak = panel.as_weak();
@@ -315,6 +453,27 @@ impl Shown {
             if let Some(panel) = weak.upgrade() {
                 panel.set_playing(SharedString::new());
             }
+        });
+        // Trim silence, for this plugin while it's loaded: it starts off, at -60 dB, and shows what the player has
+        // when the window opens again.
+        panel.set_trim_choices(ModelRc::new(slint::VecModel::from(
+            mo_audio::trim::choices().into_iter().map(SharedString::from).collect::<Vec<_>>(),
+        )));
+        if let Some(db) = self.instance.player.trim() {
+            panel.set_trim_level_db(db);
+            panel.set_trim_silence(true);
+        }
+        let player = Arc::clone(&self.instance.player);
+        let weak = panel.as_weak();
+        panel.on_pick_trim(move |picked| {
+            let Some(panel) = weak.upgrade() else { return };
+            // "" turns it off; a level ("-50 dB") turns it on at that level.
+            let picked = mo_audio::trim::parse_pick(&picked);
+            if let Some(db) = picked {
+                panel.set_trim_level_db(db);
+            }
+            panel.set_trim_silence(picked.is_some());
+            player.set_trim(picked);
         });
         panel.set_can_drag(crate::drag::CAN);
         let lines = Rc::clone(&self.lines);
@@ -363,10 +522,15 @@ impl Shown {
         let change = Rc::clone(&changed);
         panel.on_pick(move |filter, choice| change(&|a, _| a.filters.pick(&filter, &choice)));
         let change = Rc::clone(&changed);
+        let shown = Rc::clone(&self.column);
         panel.on_clear(move |filter| {
             change(&|a, library| match filter.as_str() {
                 // The More types menu's Any keeps the types ticked in the column itself.
-                "more-types" => a.filters.clear_more_types(library.map_or(&[][..], |l| &l.types[..])),
+                "more-types" => mo_app::sounds::keep_first_types(
+                    &mut a.filters.sound_types,
+                    library.map_or(&[][..], |l| &l.types[..]),
+                    shown.type_lines.get().max(TYPE_CHIPS),
+                ),
                 filter => a.filters.clear_chip(filter),
             });
         });
@@ -449,6 +613,18 @@ impl Shown {
             self.panel.set_playing(SharedString::new());
         }
         self.instance.player.tidy();
+        // The window is taller or shorter: the column shows as many types as it now has room for.
+        if usize::try_from(self.panel.get_type_lines()).is_ok_and(|lines| lines != self.column.type_lines.get()) {
+            let library = self.lines.library.borrow().clone();
+            self.column.show(&self.panel, library.as_deref(), &self.asked.borrow());
+        }
+        // The window is wider or narrower: the waveforms are too, so their pictures are made again.
+        let wave_width = self.panel.get_wave_width();
+        if (wave_width - self.wave_width.get()).abs() > 0.5 {
+            self.wave_width.set(wave_width);
+            self.lines.waves.borrow_mut().forget();
+            self.lines.notify.reset();
+        }
         self.drag();
         self.waves();
         self.render();
@@ -466,7 +642,14 @@ impl Shown {
                 self.dragging.set(true);
                 self.panel.set_carried(i32::try_from(row).unwrap_or(-1));
                 self.render();
+                let started = Instant::now();
                 let done = crate::drag::file(&path);
+                let how = match &done {
+                    Ok(crate::drag::Outcome::Landed) => "landed".to_owned(),
+                    Ok(crate::drag::Outcome::Cancelled) => "let go where nothing took it, or called off".to_owned(),
+                    Err(why) => format!("failed: {why}"),
+                };
+                crate::log::took("Drag", &format!("{} {how}", path.display()), started);
                 self.dragging.set(false);
                 self.panel.set_carried(-1);
                 // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't
@@ -474,16 +657,26 @@ impl Shown {
                 let position = self.pointer.get();
                 let event =
                     slint::platform::WindowEvent::PointerReleased { position, button: PointerEventButton::Left };
-                self.window.window().dispatch_event(event);
-                self.window.window().dispatch_event(slint::platform::WindowEvent::PointerExited);
+                self.draws.window().dispatch_event(event);
+                self.draws.window().dispatch_event(slint::platform::WindowEvent::PointerExited);
                 done.err()
             }
-            Err(why) => Some(why),
+            Err(why) => {
+                crate::log::line("Drag", &why);
+                Some(why)
+            }
         };
         if let Some(why) = said {
             self.playing.set(None);
             self.panel.set_playing(why.into());
         }
+    }
+
+    /// A waveform picture's size in the screen's own pixels: as wide as the panel now draws them.
+    fn wave_size(&self) -> (u32, u32) {
+        let scale = self.scale.get().clamp(0.5, 8.0);
+        let width = f64::from(self.wave_width.get()).clamp(waves::WIDTH, MOST_WIDTH);
+        ((width * scale).round() as u32, (waves::HEIGHT * scale).round() as u32)
     }
 
     /// Takes in the waveforms a background thread read, and has the ones the lines on show still lack read next.
@@ -504,8 +697,7 @@ impl Shown {
             && played == path
             && self.lines.waves.borrow().has_none(sound)
         {
-            let scale = self.scale.get().clamp(0.5, 8.0);
-            let (width, height) = ((waves::WIDTH * scale).round() as u32, (waves::HEIGHT * scale).round() as u32);
+            let (width, height) = self.wave_size();
             if let Some(pixels) = waves::picture(&peaks, width, height) {
                 self.lines.waves.borrow_mut().give(sound, slint::Image::from_rgba8(pixels));
                 if self.lines.sound(row) == Some(sound) {
@@ -514,8 +706,7 @@ impl Shown {
             }
         }
         let Some((round, ids)) = self.lines.waves.borrow_mut().to_read() else { return };
-        let scale = self.scale.get().clamp(0.5, 8.0);
-        let (width, height) = ((waves::WIDTH * scale).round() as u32, (waves::HEIGHT * scale).round() as u32);
+        let (width, height) = self.wave_size();
         let slots = Arc::clone(&self.slots);
         background("mo-plugin-waves", move || {
             let found = library::waves(&ids);
@@ -528,11 +719,7 @@ impl Shown {
     fn render(&self) {
         slint::platform::update_timers_and_animations();
         let (width, _) = self.size.get();
-        let drew = self.window.draw_if_needed(|renderer| {
-            let mut picture = self.picture.borrow_mut();
-            renderer.render(picture.as_mut_slice(), width as usize);
-        });
-        if drew {
+        if self.draws.draw_if_needed(width) {
             self.context.request_redraw();
         }
     }
@@ -540,24 +727,24 @@ impl Shown {
     fn resize_to(&self, size: WindowSize) {
         let (width, height) = (size.physical.width.max(1), size.physical.height.max(1));
         self.size.set((width, height));
-        if (size.scale_factor - self.scale.get()).abs() > f64::EPSILON || self.picture.borrow().is_empty() {
+        if (size.scale_factor - self.scale.get()).abs() > f64::EPSILON || !self.draws.sized() {
             self.scale.set(size.scale_factor);
             // Pictures made for the old scaling are the wrong size: the lines ask again.
             self.lines.waves.borrow_mut().forget();
             self.lines.notify.reset();
-            self.window.window().dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged {
+            self.draws.window().dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged {
                 scale_factor: size.scale_factor as f32,
             });
         }
-        *self.picture.borrow_mut() = vec![Pixel::default(); width as usize * height as usize];
-        self.window.set_size(slint::PhysicalSize::new(width, height));
-        self.window.request_redraw();
+        self.draws.resize(width, height);
         self.render();
     }
 
     fn send(&self, event: slint::platform::WindowEvent) {
-        self.window.window().dispatch_event(event);
-        self.render();
+        self.draws.window().dispatch_event(event);
+        if !self.draws.waits_for_the_screen() {
+            self.render();
+        }
     }
 
     fn at(&self, position: PhysicalPosition<f64>) -> LogicalPosition {
@@ -571,16 +758,7 @@ impl Shown {
 impl WindowHandler for Shown {
     fn draw(&self) -> Result<(), HandlerError> {
         let (width, height) = self.size.get();
-        let (Some(w), Some(h)) = (NonZeroU32::new(width), NonZeroU32::new(height)) else { return Ok(()) };
-        let mut surface = self.surface.borrow_mut();
-        surface.resize(w, h).map_err(|e| HandlerError::from(std::io::Error::other(e.to_string())))?;
-        let mut buffer = surface.buffer_mut().map_err(|e| HandlerError::from(std::io::Error::other(e.to_string())))?;
-        let picture = self.picture.borrow();
-        let pixels: &[u32] = bytemuck::cast_slice(picture.as_slice());
-        let len = buffer.len().min(pixels.len());
-        buffer[..len].copy_from_slice(&pixels[..len]);
-        buffer.present().map_err(|e| HandlerError::from(std::io::Error::other(e.to_string())))?;
-        Ok(())
+        self.draws.show(width, height)
     }
 
     fn resized(&self, new_size: WindowSize) -> Result<(), HandlerError> {
@@ -658,7 +836,9 @@ fn view(library: Arc<Library>, asked: Asked, slots: Arc<Slots>) {
         if slots.searches.load(Ordering::Acquire) != number {
             return;
         }
+        let started = Instant::now();
         let (shown, counts) = library.view(&asked);
+        crate::log::took_if_slow("List", &format!("Worked out a list of {} sounds", shown.len()), started);
         *lock(&slots.found) = Some((number, shown, counts));
     });
 }
@@ -672,12 +852,16 @@ struct Column {
     key: Choices,
     tag: Choices,
     counts: RefCell<Option<SoundCounts>>,
+    /// How many types the column last showed as lines of their own (0 before the first showing).
+    type_lines: Cell<usize>,
 }
 
 impl Column {
     /// The panel's filter column and order as `asked` has them, over `library`'s types and tags once it's read.
     fn show(&self, panel: &Panel, library: Option<&Library>, asked: &Asked) {
-        let chips = asked.chips(library, self.counts.borrow().as_ref());
+        let type_lines = usize::try_from(panel.get_type_lines()).unwrap_or(0).max(TYPE_CHIPS);
+        self.type_lines.set(type_lines);
+        let chips = asked.chips(library, self.counts.borrow().as_ref(), type_lines);
         panel.set_type_filter(self.types.view(&chips.types));
         panel.set_length_filter(self.length.view(&chips.length));
         panel.set_key_filter(self.key.view(&chips.key));

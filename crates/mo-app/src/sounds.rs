@@ -116,7 +116,13 @@ pub const TYPE_CHIPS: usize = 9;
 /// menu, and keeps the ones picked on chips of their own, in any case. `types` is [`SoundList::type_counts`], as the
 /// chips were shown from.
 pub fn keep_chip_types(picked: &mut Vec<String>, types: &[(String, usize)]) {
-    let on_chips = &types[..types.len().min(TYPE_CHIPS)];
+    keep_first_types(picked, types, TYPE_CHIPS);
+}
+
+/// [`keep_chip_types`] where the first `shown` types are on show (a column with room for more or fewer than
+/// [`TYPE_CHIPS`], [`chips_showing`]).
+pub fn keep_first_types(picked: &mut Vec<String>, types: &[(String, usize)], shown: usize) {
+    let on_chips = &types[..types.len().min(shown)];
     picked.retain(|t| on_chips.iter().any(|(c, _)| c.eq_ignore_ascii_case(t)));
 }
 
@@ -1251,6 +1257,18 @@ pub struct SoundChips {
 /// and `tags` is [`SoundList::tags`]. With Keys that mix well on, a key's count is how many sounds it and the keys
 /// that mix well with it hold.
 pub fn chips(f: &Filters, counts: Option<&SoundCounts>, types: &[(String, usize)], tags: &[String]) -> SoundChips {
+    chips_showing(f, counts, types, tags, TYPE_CHIPS)
+}
+
+/// [`chips`] with the first `type_lines` types on show and the rest in the More menu: for a filter column that shows
+/// as many types as it has room for (Solomon, 11 Nov 2026: "the more types should fill if there is more space").
+pub fn chips_showing(
+    f: &Filters,
+    counts: Option<&SoundCounts>,
+    types: &[(String, usize)],
+    tags: &[String],
+    type_lines: usize,
+) -> SoundChips {
     let shown = |n: &dyn Fn(&SoundCounts) -> usize| counts.map(|c| short_count(n(c))).unwrap_or_default();
     let by_word = |map: &HashMap<String, usize>, name: &str| map.get(&name.to_ascii_lowercase()).copied().unwrap_or(0);
     let types: Vec<(String, String)> =
@@ -1274,7 +1292,7 @@ pub fn chips(f: &Filters, counts: Option<&SoundCounts>, types: &[(String, usize)
     let keys_picked: Vec<String> = f.keys.iter().map(|&(t, m)| music::key_name(t, m, false)).collect();
     let tags: Vec<(String, String)> = tags.iter().map(|t| (t.clone(), shown(&|c| by_word(&c.tags, t)))).collect();
     SoundChips {
-        types: chips::show_split(&types, &f.sound_types, TYPE_CHIPS),
+        types: chips::show_split(&types, &f.sound_types, type_lines),
         length: chips::show(&lengths, &length),
         key: chips::show(&keys, &keys_picked),
         tempo: tempo_pick(f, counts),
@@ -1303,6 +1321,13 @@ fn key_order(s: &Sound) -> i32 {
 
 /// The setting Hide duplicates is kept in, in the app's own settings ("on" or "off").
 pub const HIDE_COPIES_KEY: &str = "sounds_hide_duplicates";
+
+/// The setting Trim silence is kept in, in the app's own settings ("on" or "off"): when it's on, a sound plays
+/// without the silence at its start and end (`mo_audio::trim`); the file is never changed.
+pub const TRIM_SILENCE_KEY: &str = "sounds_trim_silence";
+/// The setting the level Trim silence counts as silence is kept in: dB below full scale, one of
+/// `mo_audio::trim::LEVELS_DB` ("-60").
+pub const TRIM_LEVEL_KEY: &str = "sounds_trim_level_db";
 
 /// The page's view as you left it ("Tiles", "List", "Galaxy"...), whether Autoplay is on ("1" or "0") and how many
 /// sounds Rediscover digs out: kept in the app's own settings as you change them (never in `library.db`), and until
@@ -2170,6 +2195,26 @@ mod tests {
         twice.tags = vec!["Dark".into(), "DARK".into()];
         let list = SoundList::new(vec![twice]);
         assert_eq!(list.view_counted(&Filters::default(), Order::Name, 0).1.tags.get("dark"), Some(&1));
+    }
+
+    #[test]
+    fn a_column_with_room_shows_more_types_before_the_more_menu() {
+        // Twelve types, the most used first.
+        let types: Vec<(String, usize)> = (0..12).map(|i| (format!("Type {i:02}"), 100 - i)).collect();
+        let f = Filters { sound_types: vec!["Type 10".into(), "Type 03".into()], ..Filters::default() };
+        let split = |lines: usize| {
+            let shown = chips_showing(&f, None, &types, &[], lines).types;
+            (shown.chips.len(), shown.more.len())
+        };
+        // As ever by default; then as many as there's room for, and no menu once they all fit.
+        assert_eq!(chips(&f, None, &types, &[]).types, chips_showing(&f, None, &types, &[], TYPE_CHIPS).types);
+        assert_eq!((split(TYPE_CHIPS), split(11), split(12), split(40)), ((9, 3), (11, 1), (12, 0), (12, 0)));
+        // The menu's Any unpicks only what's in the menu as it's shown.
+        let mut picked = f.sound_types.clone();
+        keep_first_types(&mut picked, &types, 11);
+        assert_eq!(picked, ["Type 10", "Type 03"]);
+        keep_first_types(&mut picked, &types, 9);
+        assert_eq!(picked, ["Type 03"]);
     }
 
     #[test]

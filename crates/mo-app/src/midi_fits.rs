@@ -13,6 +13,12 @@
 //! comes through [`Reads`] (the page's index on disk; made-up ones in the tests and the screenshots), and what's slow
 //! to make it keeps in a [`Kept`] for the next search: the song until its save is written again, the slots and the
 //! song's own parts until the index changes.
+//!
+//! A part picked in the list is the part as it fits: [`moved`] gives its notes moved by what its line says, which is
+//! what the page then plays, drags out and sends to a DAW ([`moved_name`] names it so there), and [`card_text`] says
+//! so on its card. The move is two things added up ([`Fit::moved`]): the semitones that put the part in the song's
+//! key, and the octaves that put it where its kind of part plays beside the song (the search's,
+//! `mo_midi::fit::octave`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -212,8 +218,12 @@ pub fn tried<'a>(cat: &'a Catalogue, own: &Own, filters: &'a Filters) -> Tried<'
 pub struct Fit {
     /// Its place in the catalogue's entries.
     pub entry: usize,
-    /// How far to move it, in semitones (-6 to 5; 0: as it is). The part moves, never the song.
+    /// How far to move it into the song's key, in semitones (-6 to 5; 0: it's in key as it is). The part moves, never
+    /// the song.
     pub semitones: i32,
+    /// How many octaves to move it as well, to where its kind of part plays beside the bars of the song it's fitted
+    /// to (-3 to 3; up for more than 0; `mo_midi::fit::octave`): a bassline saved two octaves up comes down.
+    pub octaves: i32,
     /// How it sits moved so: about 0 (it clashes) to about 1 (as a tune written for those chords does).
     pub sits: f64,
 }
@@ -221,7 +231,13 @@ pub struct Fit {
 impl Fit {
     fn of(found: &Found) -> Fit {
         let (semitones, sits) = found.sits.best();
-        Fit { entry: found.at, semitones, sits }
+        Fit { entry: found.at, semitones, octaves: found.octaves, sits }
+    }
+
+    /// How far it's moved in all, in semitones, up for more than 0: into the key and to the octave. What its line
+    /// says ([`move_words`]) and what [`moved`] does to its notes.
+    pub fn moved(&self) -> i32 {
+        self.semitones + 12 * self.octaves
     }
 
     /// How it sits, for a meter and for words: 0 to 100.
@@ -230,20 +246,67 @@ impl Fit {
     }
 }
 
-/// How a part is moved to fit: "as it is", "1 semitone up", "3 semitones down".
+/// How a part is moved to fit, all of it in one go (`semitones`: [`Fit::moved`]), so it can be done by hand as said
+/// and never points two ways: "as it is", "1 semitone up", "9 semitones down" (3 up for the key and an octave down),
+/// "an octave up", "2 octaves down", "an octave and 3 semitones up".
 pub fn move_words(semitones: i32) -> String {
     let way = if semitones > 0 { "up" } else { "down" };
-    match semitones.unsigned_abs() {
-        0 => "as it is".to_owned(),
-        1 => format!("1 semitone {way}"),
-        n => format!("{n} semitones {way}"),
+    let (octaves, rest) = (semitones.unsigned_abs() / 12, semitones.unsigned_abs() % 12);
+    let octaves = match octaves {
+        0 => None,
+        1 => Some("an octave".to_owned()),
+        n => Some(format!("{n} octaves")),
+    };
+    let rest = match rest {
+        0 => None,
+        1 => Some("1 semitone".to_owned()),
+        n => Some(format!("{n} semitones")),
+    };
+    match (octaves, rest) {
+        (None, None) => "as it is".to_owned(),
+        (Some(far), None) | (None, Some(far)) => format!("{far} {way}"),
+        (Some(octaves), Some(rest)) => format!("{octaves} and {rest} {way}"),
     }
 }
 
-/// Said first in a line's details: "Fits 92% as it is", "Fits 88%, 2 semitones up".
+/// Said first in a line's details: "Fits 92% as it is", "Fits 88%, 2 semitones up", "Fits 71%, an octave down".
 pub fn fit_text(fit: &Fit) -> String {
-    let comma = if fit.semitones == 0 { "" } else { "," };
-    format!("Fits {}%{comma} {}", fit.percent(), move_words(fit.semitones))
+    let comma = if fit.moved() == 0 { "" } else { "," };
+    format!("Fits {}%{comma} {}", fit.percent(), move_words(fit.moved()))
+}
+
+/// Said on the card of a part moved by `semitones` in all ([`Fit::moved`]) to fit `song`: how it's moved, and that
+/// what's done with it is moved so. "Moved 3 semitones up to fit Night drive: it plays, drags and goes to your DAW
+/// that way."
+pub fn card_text(semitones: i32, song: &str) -> String {
+    if semitones == 0 {
+        return format!("Fits {song} as it is: nothing is moved.");
+    }
+    format!("Moved {} to fit {song}: it plays, drags and goes to your DAW that way.", move_words(semitones))
+}
+
+/// What a part is called where it goes moved by `semitones` in all (the file dragged out, the clip in the DAW): "Arp
+/// clip (3 semitones up)", so it isn't taken for the part as it is in the library. Its own name when it isn't moved.
+pub fn moved_name(name: &str, semitones: i32) -> String {
+    if semitones == 0 { name.to_owned() } else { format!("{name} ({})", move_words(semitones)) }
+}
+
+/// A part's notes moved by `semitones` in all ([`Fit::moved`]), as its line in the list says it fits: every note by
+/// exactly that (`NoteEvent::moved`), so what's heard is what the line and the name say. A note that would go past
+/// the lowest or the highest key there is has nowhere to go and is left out. The octave is never one that takes the
+/// part itself off the keyboard (`Registers::octaves_for`), so that's a stray far from the rest of it (a key switch),
+/// or a note within 6 keys of the keyboard's ends moved for the key.
+pub fn moved(notes: Vec<NoteEvent>, semitones: i32) -> Vec<NoteEvent> {
+    if semitones == 0 {
+        return notes;
+    }
+    notes.into_iter().filter_map(|n| n.moved(semitones)).collect()
+}
+
+/// A key moved with its part (`semitones`: all of the move; whole octaves leave a key as it is): the key a chart of
+/// the moved notes is spelled in.
+pub fn moved_key(key: mo_harmony::Key, semitones: i32) -> mo_harmony::Key {
+    mo_harmony::Key { tonic: mo_harmony::PitchClass::new(i32::from(key.tonic.number()) + semitones), ..key }
 }
 
 /// What a search came to, for the list and the words about it.
@@ -751,15 +814,132 @@ mod tests {
             [0, 1, -1, 5, -6].map(move_words),
             ["as it is", "1 semitone up", "1 semitone down", "5 semitones up", "6 semitones down"]
         );
-        let fit = |semitones, sits| Fit { entry: 0, semitones, sits };
+        // With octaves in it the move is still said in one go, one way.
+        assert_eq!(
+            [12, -24, 15, -13, -9, 11, 36].map(move_words),
+            [
+                "an octave up",
+                "2 octaves down",
+                "an octave and 3 semitones up",
+                "an octave and 1 semitone down",
+                "9 semitones down",
+                "11 semitones up",
+                "3 octaves up"
+            ]
+        );
+        let fit = |semitones, sits| Fit { entry: 0, semitones, octaves: 0, sits };
         assert_eq!(fit_text(&fit(0, 0.917)), "Fits 92% as it is");
         assert_eq!(fit_text(&fit(-2, 0.88)), "Fits 88%, 2 semitones down");
+        // The key's semitones and the octaves add up: 3 up and an octave down is 9 down.
+        let low = Fit { octaves: -1, ..fit(3, 0.71) };
+        assert_eq!((low.moved(), fit_text(&low)), (-9, "Fits 71%, 9 semitones down".to_owned()));
+        let high = Fit { octaves: 1, ..fit(0, 0.6) };
+        assert_eq!((high.moved(), fit_text(&high)), (12, "Fits 60%, an octave up".to_owned()));
+        assert_eq!(Fit { octaves: 2, ..fit(-6, 0.6) }.moved(), 18);
         // The score isn't held to 0 to 1; the words are.
         assert_eq!((fit(0, 1.07).percent(), fit(0, -0.2).percent()), (100, 0));
         assert_eq!(
             (wants_words(Wants::Tune), wants_words(Wants::Chords)),
             ("To play over its chords", "Chords for its melody")
         );
+    }
+
+    #[test]
+    fn a_part_is_moved_by_what_its_line_says() {
+        let keys = |notes: &[NoteEvent]| notes.iter().map(|n| n.key).collect::<Vec<_>>();
+        let part = vec![note(0, PPQ, 60), note(PPQ, PPQ, 64), note(2 * PPQ, 2 * PPQ, 67)];
+        // As it is: the same notes.
+        assert_eq!(moved(part.clone(), 0), part);
+        // Up and down: every note by as much, and nothing else about it changed.
+        let down = moved(part.clone(), -2);
+        assert_eq!(keys(&down), [58, 62, 65]);
+        assert_eq!(down[2], NoteEvent { key: 65, ..part[2] });
+        assert_eq!(keys(&moved(part.clone(), 5)), [65, 69, 72]);
+        // Muted notes and steps move like the rest (what plays is decided where it's played).
+        let muted = NoteEvent { muted: true, step: true, ..part[0] };
+        assert_eq!(moved(vec![muted], 1), [NoteEvent { key: 61, ..muted }]);
+        // A note at the keyboard's end with nowhere to go is left out; the rest move by what the line says, never
+        // by anything else.
+        let ends = vec![note(0, PPQ, 1), note(PPQ, PPQ, 60), note(2 * PPQ, PPQ, 125)];
+        assert_eq!(keys(&moved(ends.clone(), 3)), [4, 63]);
+        assert_eq!(keys(&moved(ends.clone(), 2)), [3, 62, 127], "the top key itself is a key");
+        assert_eq!(keys(&moved(ends, -2)), [58, 123]);
+
+        // Its key moves with it, round the octave, major or minor as it was.
+        use mo_harmony::{Key, PitchClass};
+        assert_eq!(moved_key(Key::major(PitchClass::D), 3), Key::major(PitchClass::F));
+        assert_eq!(moved_key(Key::minor(PitchClass::C), -2), Key::minor(PitchClass::new(10)));
+        assert_eq!(moved_key(Key::minor(PitchClass::C), 0), Key::minor(PitchClass::C));
+
+        // What the card and the DAW say about it.
+        assert_eq!(
+            card_text(3, "Night drive"),
+            "Moved 3 semitones up to fit Night drive: it plays, drags and goes to your DAW that way."
+        );
+        assert_eq!(
+            card_text(-1, "Glass"),
+            "Moved 1 semitone down to fit Glass: it plays, drags and goes to your DAW that way."
+        );
+        assert_eq!(card_text(0, "Glass"), "Fits Glass as it is: nothing is moved.");
+        assert_eq!(moved_name("Arp clip", 3), "Arp clip (3 semitones up)");
+        assert_eq!(moved_name("Arp clip", 0), "Arp clip");
+        // Moved to another octave as well, it's all said in one.
+        assert_eq!(
+            card_text(-9, "Glass"),
+            "Moved 9 semitones down to fit Glass: it plays, drags and goes to your DAW that way."
+        );
+        assert_eq!(moved_name("Sub line", -12), "Sub line (an octave down)");
+        assert_eq!(keys(&moved(part, -21)), [39, 43, 46]);
+    }
+
+    #[test]
+    fn a_part_found_goes_at_the_octave_its_kind_plays_at() {
+        // A pack's bassline on the chords' roots, in a bass's usual place: A2, D2, G2, C3.
+        let roots = |keys: [u8; 4]| -> Vec<NoteEvent> {
+            keys.iter().zip(0i64..).map(|(&k, bar)| note(bar * BAR, BAR, k)).collect()
+        };
+        let mut index = library();
+        index.add("mid bass", "D:/Packs/Bass/Bass 02.mid", Role::Bass, roots([45, 38, 43, 48]));
+        // And a tune 3 semitones up from the key and an octave down: its middle is 66.
+        let low: Vec<NoteEvent> = tune(3).into_iter().map(|n| NoteEvent { key: n.key - 12, ..n }).collect();
+        index.add("low tune", "D:/Packs/Leads/Lead 03.mid", Role::Melody, low);
+        let cat = Catalogue::new(index.phrases.clone());
+        let place = |hash: &str| cat.find(hash).unwrap();
+        let filters = Filters::default();
+        let fits = |song: &Song| {
+            let over = fitted(song, Some(Wants::Tune)).unwrap();
+            let looked = index.look(&over, &tried(&cat, &choice().own(&cat), &filters));
+            move |hash: &str| *looked.fits.iter().find(|f| f.entry == place(hash)).unwrap()
+        };
+
+        // A tune belongs by a tune's usual place (72), wherever the song's own lead is. The pack's tune is saved an
+        // octave under that (its middle is 65, and 63 moved into the key): it goes up, 2 semitones down for the key
+        // and an octave up.
+        let song = song();
+        let fit = fits(&song);
+        let registers = *fitted(&song, None).unwrap().target.registers();
+        assert_eq!((registers.of_kind(Role::Melody), registers.wanted(Role::Melody)), (Some(75.0), Some(72.0)));
+        let tune = fit("fits a tone down");
+        assert_eq!((tune.semitones, tune.octaves, tune.moved()), (-2, 1, 10));
+        assert_eq!(fit_text(&tune), format!("Fits {}%, 10 semitones up", tune.percent()));
+        // The song has no bass: the basslines are by a bass's usual place already (40), and stay.
+        assert_eq!((fit("bassline").octaves, fit("mid bass").octaves), (0, 0));
+
+        // The same chords over a sub bass an octave under that (its middle is 31): a bassline now belongs at 35.5.
+        // The pack's low one is there (34.5); the other (43) comes down an octave, to play where the sub does.
+        let with_sub = song_of(vec![lane("Keys", 8, &chords()), lane("Sub", 8, &roots([33, 26, 31, 36]))]);
+        let over = fitted(&with_sub, Some(Wants::Tune)).unwrap();
+        assert_eq!((over.pick.parts.clone(), over.target.registers().of_kind(Role::Bass)), (vec![0, 1], Some(31.0)));
+        let fit = fits(&with_sub);
+        assert_eq!(fit("bassline").octaves, 0);
+        let mid = fit("mid bass");
+        assert_eq!((mid.semitones, mid.octaves, mid.moved()), (0, -1, -12));
+        // A tune found goes up here too.
+        assert_eq!(fit("fits a tone down").octaves, 1);
+        // The octave goes by where the part is once it's in key: as saved, the low tune is just within half an
+        // octave of 72 (66); 3 semitones down for the key it's at 63, and goes up.
+        let low = fit("low tune");
+        assert_eq!((low.semitones, low.octaves, low.moved()), (-3, 1, 9));
     }
 
     #[test]
@@ -782,6 +962,7 @@ mod tests {
         assert_eq!(looked.fits.len(), 3);
         let best = looked.fits[0];
         assert_eq!((best.entry, best.semitones), (place("fits a tone down"), -2));
+        assert_eq!(best.moved(), best.semitones + 12 * best.octaves);
         assert!(best.percent() > 80, "{best:?}");
         let clashes = looked.fits.iter().find(|f| f.entry == place("clashes")).unwrap();
         assert!(clashes.sits < best.sits - 0.3, "{clashes:?}");
@@ -854,7 +1035,7 @@ mod tests {
         let nothing = Looked { looked: 1_234, ..Looked::default() };
         assert_eq!(result_text(&nothing), "None of 1,234 parts fits.");
         // A list cut to its length says of how many.
-        let fit = Fit { entry: 0, semitones: 0, sits: 1.0 };
+        let fit = Fit { entry: 0, semitones: 0, octaves: 0, sits: 1.0 };
         let cut = Looked { fits: vec![fit; MOST], looked: 212_345, ..Looked::default() };
         assert_eq!(result_text(&cut), "The 200 that fit best, of 212,345 parts tried");
     }

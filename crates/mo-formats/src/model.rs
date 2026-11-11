@@ -141,12 +141,35 @@ pub struct NoteAttribute {
 impl NoteAttribute {
     /// No attribute: type 0, as MIDI 2.0 writes it.
     pub const NONE: NoteAttribute = NoteAttribute { kind: 0, data: 0 };
+    /// The type of an attribute that is the note's pitch in 7.9 form: 7 bits of key over 9 bits of fine tuning.
+    pub const PITCH: u8 = 3;
+
+    /// The attribute of the note once it's moved by `semitones`: a pitch in 7.9 form moves with the note, its fine
+    /// tuning kept (held at the lowest and the highest key); any other attribute is as it was.
+    pub fn moved(self, semitones: i32) -> NoteAttribute {
+        if self.kind != NoteAttribute::PITCH {
+            return self;
+        }
+        let key = i32::from(self.data >> 9).saturating_add(semitones).clamp(0, i32::from(NoteEvent::TOP_KEY));
+        NoteAttribute { data: (u16::try_from(key).unwrap_or(0) << 9) | (self.data & 0x1ff), ..self }
+    }
 }
 
 impl NoteEvent {
+    /// The highest MIDI key; the lowest is 0.
+    pub const TOP_KEY: u8 = 127;
+
     /// The velocity as MIDI 1.0 has it, 1 to 127: only for a MIDI 1.0 file, port or DAW, at the last step.
     pub fn velocity7(&self) -> u8 {
         velocity::to_7(self.velocity)
+    }
+
+    /// The note `semitones` higher (lower, below 0) and otherwise as it was; none when there's no such key. A pitch
+    /// of its own ([`NoteAttribute::PITCH`]) moves with it.
+    pub fn moved(self, semitones: i32) -> Option<NoteEvent> {
+        let key = i32::from(self.key).checked_add(semitones)?;
+        let key = u8::try_from(key).ok().filter(|key| *key <= NoteEvent::TOP_KEY)?;
+        Some(NoteEvent { key, attribute: self.attribute.moved(semitones), ..self })
     }
 }
 
@@ -264,6 +287,41 @@ mod tests {
             let csharp = (raw as f64 * 127.0 / 128.0).round_ties_even().clamp(1.0, 127.0) as u8;
             assert_eq!(velocity::to_7(velocity::from_unit(raw as f64 / 128.0)), csharp, "{raw}");
         }
+    }
+
+    #[test]
+    fn a_note_moves_by_semitones_with_a_pitch_of_its_own() {
+        let note = NoteEvent {
+            start: 96,
+            length: 48,
+            key: 60,
+            velocity: 40000,
+            muted: true,
+            step: true,
+            attribute: NoteAttribute::NONE,
+        };
+        // Only its key changes.
+        assert_eq!(note.moved(3), Some(NoteEvent { key: 63, ..note }));
+        assert_eq!(note.moved(-12), Some(NoteEvent { key: 48, ..note }));
+        assert_eq!(note.moved(0), Some(note));
+        // The keys there are, and no others.
+        assert_eq!(note.moved(67).map(|n| n.key), Some(127));
+        assert_eq!(note.moved(-60).map(|n| n.key), Some(0));
+        assert_eq!(
+            (note.moved(68), note.moved(-61), note.moved(i32::MAX), note.moved(i32::MIN)),
+            (None, None, None, None)
+        );
+        // A pitch in 7.9 form moves with it, its fine tuning kept, and stops at the keyboard's ends.
+        let pitch = |key: u16, fine: u16| NoteAttribute { kind: NoteAttribute::PITCH, data: (key << 9) | fine };
+        let tuned = NoteEvent { attribute: pitch(60, 0x101), ..note };
+        assert_eq!(tuned.moved(3), Some(NoteEvent { key: 63, attribute: pitch(63, 0x101), ..note }));
+        assert_eq!(pitch(126, 0x1ff).moved(5), pitch(127, 0x1ff));
+        assert_eq!(pitch(2, 7).moved(-5), pitch(0, 7));
+        assert_eq!(pitch(2, 7).moved(i32::MAX), pitch(127, 7));
+        // Any other attribute is left alone.
+        let own = NoteAttribute { kind: 1, data: 0x7e00 };
+        assert_eq!(own.moved(3), own);
+        assert_eq!(NoteAttribute::NONE.moved(3), NoteAttribute::NONE);
     }
 
     #[test]
