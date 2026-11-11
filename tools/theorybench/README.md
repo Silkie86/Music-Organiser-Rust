@@ -617,6 +617,7 @@ for measuring only, so the reader is tested on voicings it never learned from.
 cargo run -p mo-theorybench --release -- pairs path/to/bench/pop909cl.jsonl
 cargo run -p mo-theorybench --release -- pairs path/to/bench/pop909cl.jsonl --bars 4 --folds 1
 cargo run -p mo-theorybench --release -- pairs path/to/bench/pop909cl.jsonl --folds 2,3,4 --fit 8000 --tie colour=fifth --without above3,above4,above7,above8,above9
+cargo run -p mo-theorybench --release -- pairs path/to/bench/pop909cl.jsonl --quick 200
 ```
 
 `pairs` measures how well the app tells which chords go with which tune (`mo_harmony::together`, the heart of "find
@@ -657,6 +658,15 @@ ported in `src/pairs.rs` as it was).
   gives must pass the hand cases in `mo_harmony::together`'s tests before they ship
   (`SET="<the --set line>" cargo test -p mo-harmony together::tests::show -- --ignored --nocapture` shows them).
 - **Folds.** Fit on folds 2 to 4, report on fold 1. Fold 0 is kept back: each look at it is a line in `test-runs.md`.
+- **`--quick <n>`** measures the first look instead (`mo_harmony::Outline`). A search over a library can't take the
+  close look at every part (that needs each part's notes, and a chord part's chords read), so a first look sorts
+  every part by a little kept in memory and only the best share get the close look. About `n` stretches, spread
+  evenly, are each tried against every stretch of another song at all 12 moves, both ways round, by the close look
+  and by each first look. It prints, for each share a first look might keep (0.5 to 20 in 100), how often the close
+  look's best is still there and how many of its best ten are, then how long each look takes a part on one core.
+  Six first looks are scored: the notes with no timing (what the library keeps of every part today), two beats at a
+  time (`slots_of`, against `Backing::outline` or `Outline::guessed`), each chord part's own chords kept by the two
+  beats, and the old app's closer look.
 
 What was tried and what it found: `docs/harmony/together-experiments.md`.
 
@@ -1194,3 +1204,25 @@ its song at 16 bars (+1.0, +0.0 to +2.0).
   51 about one time in eight. A search should show a list, never one answer, and say less the shorter the part.
 - **Only pop is measured here.** Next: jazz tunes over jazz voicings, and Solomon's own packs' chord and melody
   files made for each other (counts only, on his PC).
+
+## Tunes and chords together: the first look (2026-11-11)
+
+`pairs pop909cl.jsonl --quick 200` on fold 1: 207 of its 1,650 eight-bar stretches asked, each against every stretch
+of another song (about 1,650) at all 12 moves. How many of the close look's best ten are still there when a first
+look keeps only a share of the parts:
+
+| the first look goes by | kept 0.5% | 1% | 2% | 5% | 10% | 20% |
+|---|---|---|---|---|---|---|
+| a tune for chords: the notes with no timing | 1.2% | 2.3% | 3.5% | 7.3% | 13.1% | 22.9% |
+| a tune for chords: two beats at a time | 78.4% | 96.9% | 99.1% | 99.9% | 100% | 100% |
+| chords for a tune: the notes with no timing | 2.4% | 4.2% | 8.0% | 16.1% | 27.4% | 44.2% |
+| chords for a tune: each chord part guessed, two beats at a time | 40.2% | 60.5% | 77.6% | 93.3% | 97.8% | 99.4% |
+| chords for a tune: each chord part's own chords kept, two beats at a time | 80.1% | 96.2% | 98.9% | 99.8% | 100% | 100% |
+| chords for a tune: the old app's closer look | 34.0% | 53.2% | 73.4% | 91.0% | 96.4% | 99.0% |
+
+And the close look's one best: kept 100% of the time from a 2 in 100 share for a tune for chords, 99.0% from 10 in
+100 for chords for a tune (guessed). A part takes about 1 microsecond as a tune and 3 to 6 as chords, on one core.
+
+- **The notes with no timing are no better than picking at random.** Two beats at a time is what a first look needs.
+- **The shares chosen:** the best 2 in 100 get the close look when looking for tunes, the best 10 in 100 when
+  looking for chords. Why, and what is kept for it: `docs/harmony/together-experiments.md`.

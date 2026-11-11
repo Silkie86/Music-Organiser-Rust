@@ -14,6 +14,11 @@
 //! best set of worths whatever the fit starts from). Only pieces whose licence lets fitted numbers ship are learned
 //! from, and never Solomon's own (rule 5). Fit on folds 2 to 4, report on fold 1; fold 0 is kept back for a last look.
 //!
+//! `--quick N` measures the first look instead (`mo_harmony::Outline`): a library can't take the close look at every
+//! part, since that needs each part's notes from disk, so a first look sorts every part by a little kept in memory
+//! and only the best share get the close look. For N stretches, every stretch of another song is tried both ways
+//! round, and it prints how often the close look's best, and how many of its best ten, are in the share kept.
+//!
 //! The songs are pop, and say nothing of jazz, gospel or blues. So the fit is held to two rules they can't teach
 //! (`--tie colour=fifth --without above3,above4,above7,above8,above9`, see `Sitting`), and the numbers it gives must
 //! pass the hand cases in `mo_harmony::together`'s tests before they ship.
@@ -21,7 +26,8 @@
 use std::path::PathBuf;
 
 use mo_harmony::{
-    Backing, ChordReader, Grid, KINDS, LineUp, Note, Part, Role, Shares, Sitting, Span, WORTH_NAMES, WORTHS, shares,
+    Backing, ChordContext, ChordReader, Grid, KINDS, LineUp, Note, Outline, Part, Role, Shares, Sitting, Slot, Span,
+    WORTH_NAMES, WORTHS, shares, slots_over,
 };
 use rayon::prelude::*;
 
@@ -43,7 +49,17 @@ struct Stretch {
     tune: Vec<Note>,
     /// Its accompaniment's chords, as the app reads them; none when the reader hears nothing in it.
     read: Option<Backing>,
+    /// The same chords over all of the stretch's bars from its first bar line, as bars picked from a song are
+    /// fitted to ([`Backing::over`]): what the first look is given.
+    whole: Option<Backing>,
     old: Old,
+    /// How long each plays each pitch class over all of it, with no timing: what the library has kept of every part
+    /// so far ([`kept_chroma`]).
+    tune_chroma: [f64; 12],
+    backing_chroma: [f64; 12],
+    /// The same two beats at a time: what the first look goes by.
+    tune_slots: Vec<Slot>,
+    backing_slots: Vec<Slot>,
 }
 
 /// What the C# app kept of a part to match it: how long each pitch class sounds, and its notes half a bar at a time.
@@ -84,6 +100,7 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let mut paths = Vec::new();
     let (mut bars, mut others, mut folds, mut how) = (8i64, 50usize, vec![1usize], Sitting::SHIPPED);
     let (mut fit_steps, mut pull) = (0usize, 1e-4f64);
+    let mut quick_asked = 0usize;
     let mut without: Vec<usize> = Vec::new();
     let mut ties: Vec<(usize, usize)> = Vec::new();
     let mut it = args.iter();
@@ -119,6 +136,9 @@ pub fn run(args: &[String]) -> Result<(), String> {
                 }
             }
             "--pull" => pull = value("--pull")?.parse().map_err(|_| "--pull takes a number".to_owned())?,
+            "--quick" => {
+                quick_asked = value("--quick")?.parse().map_err(|_| "--quick takes how many stretches".to_owned())?;
+            }
             _ if arg.starts_with("--") => return Err(format!("pairs doesn't know {arg}")),
             _ => paths.push(PathBuf::from(arg)),
         }
@@ -157,6 +177,10 @@ pub fn run(args: &[String]) -> Result<(), String> {
     }
     if fitting {
         fit(&stretches, others.min(FIT_OTHERS), &how, fit_steps, pull, &without, &ties);
+        return Ok(());
+    }
+    if quick_asked > 0 {
+        quick(&stretches, quick_asked, &how);
         return Ok(());
     }
     let mut by_way = Vec::new();
@@ -399,12 +423,220 @@ fn stretches_of(song: usize, item: &Item, bars: i64) -> Vec<Stretch> {
         if t.len() < LEAST_TUNE || b.len() < LEAST_BACKING {
             continue;
         }
-        let parts = [Part { role: Role::Harmony, notes: &b }];
-        let read = Backing::read(&mut reader, &parts, Grid::four_four(PPQ as u32), Span::Window);
-        let old = Old::of(&t, &b, bars as usize * 2);
-        out.push(Stretch { song, tune: t, read, old });
+        out.push(Stretch::of(song, &mut reader, t, &b, bars));
     }
     out
+}
+
+impl Stretch {
+    /// A stretch of `bars` bars from tick 0: its accompaniment read as the app reads it, and what each way of
+    /// matching keeps of the two.
+    fn of(song: usize, reader: &mut ChordReader, tune: Vec<Note>, backing: &[Note], bars: i64) -> Stretch {
+        let parts = [Part { role: Role::Harmony, notes: backing }];
+        let grid = Grid::four_four(PPQ as u32);
+        let length = bars * 4 * PPQ;
+        let reading = reader.read(&parts, grid, &ChordContext::new(Span::Window));
+        Stretch {
+            song,
+            read: reading.as_ref().map(|r| Backing::of(r, &parts)),
+            whole: reading.as_ref().map(|r| Backing::over(r, &parts, 0, length)),
+            old: Old::of(&tune, backing, bars as usize * 2),
+            tune_chroma: kept_chroma(&tune),
+            backing_chroma: kept_chroma(backing),
+            tune_slots: slots_over(&tune, SLOT, 0, length),
+            backing_slots: slots_over(backing, SLOT, 0, length),
+            tune,
+        }
+    }
+}
+
+/// What the library has kept in memory of a part's notes so far: how long each pitch class sounds over all of it,
+/// each note counted from a sixteenth to two bars, the strongest as 255 (`mo_midi::analyser::chroma_of`, as bytes).
+fn kept_chroma(notes: &[Note]) -> [f64; 12] {
+    let bar = (4 * PPQ) as f64;
+    let mut chroma = [0f64; 12];
+    for n in notes {
+        if let Some(c) = chroma.get_mut(n.pitch_class().index()) {
+            *c += (n.duration() as f64 / bar).clamp(1.0 / 16.0, 2.0);
+        }
+    }
+    let most = chroma.iter().copied().fold(0.0, f64::max).max(1e-9);
+    chroma.map(|c| (c / most * 255.0).round_ties_even().clamp(0.0, 255.0))
+}
+
+/// How alike a tune's notes and some chords' notes are with no timing, at the best of the 12 moves (the old app's
+/// first look, and the close look's `alike`).
+fn alike(tune: &[f64; 12], chords: &[f64; 12]) -> f64 {
+    let (mine, theirs): (f64, f64) = (tune.iter().map(|t| t * t).sum(), chords.iter().map(|t| t * t).sum());
+    if mine <= 0.0 || theirs <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    (0..12)
+        .map(|s| {
+            let on: f64 = tune
+                .iter()
+                .enumerate()
+                .map(|(pc, time)| time * chords.get((pc + s) % 12).copied().unwrap_or(0.0))
+                .sum();
+            on / (mine * theirs).sqrt()
+        })
+        .fold(f64::NEG_INFINITY, f64::max)
+}
+
+/// The shares of the library a first look might keep for the close look.
+const KEPT: [f64; 6] = [0.005, 0.01, 0.02, 0.05, 0.1, 0.2];
+/// How many of the close look's best are looked for among those kept.
+const BEST: usize = 10;
+
+/// The first looks tried, each with which way round it's asked (true: a tune for the stretch's chords).
+const QUICK_WAYS: [(&str, bool); 6] = [
+    ("a tune for chords, by their notes with no timing (how alike: the old app's first look)", true),
+    ("a tune for chords, two beats at a time (the first look: 12 bytes each a part)", true),
+    ("chords for a tune, by their notes with no timing (how alike)", false),
+    ("chords for a tune, each chord part guessed two beats at a time (the first look)", false),
+    ("chords for a tune, each chord part's own chords kept two beats at a time (12 numbers each)", false),
+    ("chords for a tune, the old app's closer look (24 numbers a half bar kept)", false),
+];
+
+/// One stretch's answers: for each first look and each share kept, whether the close look's best is among those
+/// kept, and how many of its best [`BEST`] are.
+#[derive(Clone, Copy, Default)]
+struct Kept {
+    first: [[f64; KEPT.len()]; QUICK_WAYS.len()],
+    best: [[f64; KEPT.len()]; QUICK_WAYS.len()],
+    asked: [f64; QUICK_WAYS.len()],
+}
+
+/// What each first look keeps for the stretches in `queries`, each asked against every stretch of another song.
+fn first_looks(stretches: &[Stretch], outlines: &[Option<Outline>], queries: &[usize], how: &Sitting) -> Vec<Kept> {
+    let nothing = f64::NEG_INFINITY;
+    queries
+        .par_iter()
+        .map(|&q| {
+            let mut kept = Kept::default();
+            let (Some(own), Some(Some(outline))) = (stretches.get(q), outlines.get(q)) else { return kept };
+            let others: Vec<usize> =
+                stretches.iter().enumerate().filter(|(_, s)| s.song != own.song).map(|(o, _)| o).collect();
+            // The close look, each way round.
+            let close_of = |tune_for_chords: bool| -> Vec<f64> {
+                others
+                    .iter()
+                    .map(|&o| {
+                        let (t, b) = if tune_for_chords { (o, q) } else { (q, o) };
+                        score(stretches, t, b, Way::New, how).map_or(nothing, |s| s.0)
+                    })
+                    .collect()
+            };
+            let (tunes, chords) = (close_of(true), close_of(false));
+            let first_look = |way: usize, o: usize| -> f64 {
+                let Some(other) = stretches.get(o) else { return nothing };
+                let best = |sits: Option<mo_harmony::Sits>| sits.map_or(nothing, |s| s.best().1);
+                match way {
+                    0 => alike(&other.tune_chroma, &own.backing_chroma),
+                    1 => best(outline.sits(&other.tune_slots)),
+                    2 => alike(&own.tune_chroma, &other.backing_chroma),
+                    3 => best(Outline::guessed(&other.backing_slots, how).sits(&own.tune_slots)),
+                    4 => best(outlines.get(o).and_then(|o| o.as_ref()).and_then(|o| o.sits(&own.tune_slots))),
+                    _ => old_fit(&own.old, &other.old, 12).0,
+                }
+            };
+            for (way, (_, tune_for_chords)) in QUICK_WAYS.iter().enumerate() {
+                let close = if *tune_for_chords { &tunes } else { &chords };
+                let at = |i: usize| close.get(i).copied().unwrap_or(nothing);
+                // The close look's best, in order.
+                let mut by_close: Vec<usize> = (0..others.len()).filter(|&i| at(i) > nothing).collect();
+                by_close.sort_by(|&a, &b| at(b).total_cmp(&at(a)));
+                by_close.truncate(BEST);
+                let Some(&the_best) = by_close.first() else { continue };
+                let looked: Vec<f64> = others.iter().map(|&o| first_look(way, o)).collect();
+                // Each part's place in the first look's order.
+                let mut order: Vec<usize> = (0..others.len()).collect();
+                order.sort_by(|&a, &b| {
+                    looked.get(b).copied().unwrap_or(nothing).total_cmp(&looked.get(a).copied().unwrap_or(nothing))
+                });
+                let mut place = vec![usize::MAX; others.len()];
+                for (at, &i) in order.iter().enumerate() {
+                    if let Some(p) = place.get_mut(i) {
+                        *p = at;
+                    }
+                }
+                let place_of = |i: usize| place.get(i).copied().unwrap_or(usize::MAX);
+                if let Some(a) = kept.asked.get_mut(way) {
+                    *a = 1.0;
+                }
+                for (k, share) in KEPT.iter().enumerate() {
+                    let keep = ((others.len() as f64 * share).ceil() as usize).max(1);
+                    if let Some(cell) = kept.first.get_mut(way).and_then(|w| w.get_mut(k)) {
+                        *cell = f64::from(u8::from(place_of(the_best) < keep));
+                    }
+                    if let Some(cell) = kept.best.get_mut(way).and_then(|w| w.get_mut(k)) {
+                        *cell = by_close.iter().filter(|&&i| place_of(i) < keep).count() as f64 / by_close.len() as f64;
+                    }
+                }
+            }
+            kept
+        })
+        .collect()
+}
+
+/// `--quick N`: what a first look loses, and how long it takes. See the top of the file.
+fn quick(stretches: &[Stretch], asked: usize, how: &Sitting) {
+    let outlines: Vec<Option<Outline>> =
+        stretches.iter().map(|s| s.whole.as_ref().map(|b| b.outline(SLOT, how))).collect();
+    let step = (stretches.len() / asked.max(1)).max(1);
+    let queries: Vec<usize> = (0..stretches.len()).step_by(step).collect();
+    let answers = first_looks(stretches, &outlines, &queries, how);
+
+    println!(
+        "\nA first look at every part, then the close look at the share it keeps ({} stretches asked,",
+        queries.len()
+    );
+    println!("each against the {} or so stretches of other songs)", stretches.len());
+    println!("  share kept:                 {}", KEPT.map(|s| format!("{:>6.1}%", s * 100.0)).join(" "));
+    for (way, (name, _)) in QUICK_WAYS.iter().enumerate() {
+        let asked: f64 = answers.iter().filter_map(|a| a.asked.get(way)).sum();
+        let line = |cells: fn(&Kept) -> &[[f64; KEPT.len()]; QUICK_WAYS.len()]| -> String {
+            (0..KEPT.len())
+                .map(|k| {
+                    let sum: f64 =
+                        answers.iter().filter_map(|a| cells(a).get(way).and_then(|w| w.get(k))).copied().sum();
+                    format!("{:>6.1}%", if asked > 0.0 { 100.0 * sum / asked } else { 0.0 })
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        println!("\n{name}");
+        println!("  the close look's best kept: {}", line(|a| &a.first));
+        println!("  of its best {BEST}:             {}", line(|a| &a.best));
+    }
+
+    // How long each look takes a part, on one core.
+    let (Some(Some(outline)), Some(own)) = (outlines.first(), stretches.first()) else { return };
+    let per_part = |seconds: f64, rounds: usize| seconds * 1e6 / (rounds * stretches.len()) as f64;
+    let mut sum = 0.0;
+    let started = std::time::Instant::now();
+    for _ in 0..20 {
+        for other in stretches {
+            sum += outline.sits(&other.tune_slots).map_or(0.0, |s| s.best().1);
+        }
+    }
+    let tune_first = per_part(started.elapsed().as_secs_f64(), 20);
+    let started = std::time::Instant::now();
+    for _ in 0..20 {
+        for other in stretches {
+            sum += Outline::guessed(&other.backing_slots, how).sits(&own.tune_slots).map_or(0.0, |s| s.best().1);
+        }
+    }
+    let chords_first = per_part(started.elapsed().as_secs_f64(), 20);
+    let started = std::time::Instant::now();
+    for o in 0..stretches.len() {
+        sum += score(stretches, o, 0, Way::New, how).map_or(0.0, |s| s.0);
+    }
+    let tune_close = per_part(started.elapsed().as_secs_f64(), 1);
+    println!(
+        "\nA part takes, on one core: the first look {tune_first:.2} microseconds as a tune and {chords_first:.2} as \
+         chords; the close look {tune_close:.2} as a tune, with its notes already read ({sum:.0})"
+    );
 }
 
 /// What one stretch's questions came to.
@@ -722,10 +954,59 @@ mod tests {
     fn stretch(song: usize, read: bool) -> Stretch {
         let chord = [note(0, 4 * PPQ, 48), note(0, 4 * PPQ, 52), note(0, 4 * PPQ, 55)];
         let tune = vec![note(0, 4 * PPQ, 76)];
-        let parts = [Part { role: Role::Harmony, notes: &chord }];
-        let backing = Backing::read(&mut ChordReader::new(), &parts, Grid::four_four(PPQ as u32), Span::Window);
-        assert!(backing.is_some());
-        Stretch { song, old: Old::of(&tune, &chord, 2), tune, read: backing.filter(|_| read) }
+        let mut stretch = Stretch::of(song, &mut ChordReader::new(), tune, &chord, 1);
+        assert!(stretch.read.is_some());
+        if !read {
+            stretch.read = None;
+        }
+        stretch
+    }
+
+    /// Thirteen songs of a bar each, all in whole half bars: C then G under the first, and a tune of two notes
+    /// over each, a different step apart in every song.
+    fn half_bar_songs() -> Vec<Stretch> {
+        let half = 2 * PPQ;
+        let chords = [
+            note(0, half, 48),
+            note(0, half, 52),
+            note(0, half, 55),
+            note(half, half, 43),
+            note(half, half, 47),
+            note(half, half, 50),
+        ];
+        let mut reader = ChordReader::new();
+        (0..13u8)
+            .map(|song| {
+                let tune = vec![note(0, half, 72), note(half, half, 72 + song)];
+                Stretch::of(usize::from(song), &mut reader, tune, &chords, 1)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_first_look_is_counted_by_where_it_puts_the_close_looks_best() {
+        let how = Sitting::SHIPPED;
+        let stretches = half_bar_songs();
+        let outlines: Vec<Option<Outline>> =
+            stretches.iter().map(|s| s.whole.as_ref().map(|b| b.outline(SLOT, &how))).collect();
+        let kept = first_looks(&stretches, &outlines, &[0], &how);
+        let kept = kept.first().expect("one stretch asked");
+        // Way 1, a tune for the chords two beats at a time: these tunes are whole half bars, so the first look says
+        // what the close look does, and puts its best first whatever share is kept.
+        assert_eq!(kept.asked[1], 1.0);
+        assert_eq!(kept.first[1], [1.0; KEPT.len()]);
+        // Of 12 other songs, the shares keep 1, 1, 1, 1, 2 and 3 parts: that many of the close look's best ten.
+        assert_eq!(kept.best[1], [0.1, 0.1, 0.1, 0.1, 0.2, 0.3]);
+    }
+
+    #[test]
+    fn notes_with_no_timing_are_alike_at_their_best_move() {
+        let c = kept_chroma(&[note(0, 4 * PPQ, 48), note(0, 4 * PPQ, 52), note(0, 2 * PPQ, 55)]);
+        assert_eq!((c[0], c[4], c[7]), (255.0, 255.0, 128.0));
+        // The same notes a fourth up are as alike as can be, moved back.
+        let f = kept_chroma(&[note(0, 4 * PPQ, 53), note(0, 4 * PPQ, 57), note(0, 2 * PPQ, 60)]);
+        assert!((alike(&c, &f) - 1.0).abs() < 1e-9);
+        assert_eq!(alike(&c, &[0.0; 12]), f64::NEG_INFINITY);
     }
 
     #[test]
