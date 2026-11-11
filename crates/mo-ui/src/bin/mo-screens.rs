@@ -160,6 +160,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !moved.fit.starts_with("Moved ") {
         return Err("midi-fits.png: the card of the part picked doesn't say how it's moved to fit".into());
     }
+    // It plays with the song's parts it fits, as the chip, the Play button and the card's sound line say.
+    let with_song = midi.get_sound_line();
+    if !midi.get_fit_with_song()
+        || !midi.get_play_with_song()
+        || !with_song.contains(" · with Sub from Night drive (bars 1–8), at the song's ")
+    {
+        return Err(format!("midi-fits.png: the part picked doesn't play with the song: \"{with_song}\"").into());
+    }
     // Off, it stays picked as it is in the library: the card no longer says it's moved, and its roll and chords are
     // its own.
     mo_ui::midi::fit_sample(&app, false);
@@ -170,21 +178,110 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if own.title != moved.title || !own.fit.is_empty() || own.roll_low == moved.roll_low || own.chords == moved.chords {
         return Err("midi-fits.png: the part picked is still shown moved with \"Fits my song\" off".into());
     }
+    if midi.get_play_with_song() || midi.get_sound_line().contains("Night drive") {
+        return Err("midi-fits.png: the part picked still plays with the song with \"Fits my song\" off".into());
+    }
     // On again with the part still picked: its card follows the list.
     mo_ui::midi::fit_sample(&app, true);
     let again = midi.get_picked();
     if (&again.fit, &again.roll_low, &again.chords) != (&moved.fit, &moved.roll_low, &moved.chords) {
         return Err("midi-fits.png: the part picked isn't shown moved when the list becomes \"Fits my song\"'s".into());
     }
+    if !midi.get_play_with_song() || midi.get_sound_line() != with_song {
+        return Err(
+            "midi-fits.png: the part picked doesn't play with the song once the list is its song's again".into()
+        );
+    }
     shots.push(("midi-fits.png".into(), capture(&window)));
+    // "Play with the song" off: it plays alone at its own tempo, still moved to fit; and on again.
+    midi.invoke_fit_with_song_toggled();
+    let alone = midi.get_sound_line();
+    if midi.get_fit_with_song()
+        || midi.get_play_with_song()
+        || alone.contains("Night drive")
+        || !alone.contains("BPM")
+        || midi.get_picked().fit != moved.fit
+    {
+        return Err(format!("midi-fits.png: with the chip off the part doesn't play alone: \"{alone}\"").into());
+    }
+    midi.invoke_fit_with_song_toggled();
+    if !midi.get_fit_with_song() || !midi.get_play_with_song() || midi.get_sound_line() != with_song {
+        return Err("midi-fits.png: the chip on again didn't bring the song back".into());
+    }
     // Dragged out from its line it goes moved too, under a name that says so.
     let carried = mo_ui::midi::card_at_row(&app, 0).and_then(|c| c.cards.first().map(|c| c.title.clone()));
     if carried != Some(format!("{} (3 semitones up)", moved.title)) {
         return Err(format!("midi-fits.png: the best fit is dragged out as {carried:?}, not moved").into());
     }
-    // The song saved again (the Songs page gives its list again): the list follows it, by its saves.
+    // A part that goes to another octave as well (the flute hook: 5 up for the key and an octave down) goes out
+    // with the whole move.
+    let carried = |row| mo_ui::midi::card_at_row(&app, row).and_then(|c| c.cards.first().map(|c| c.title.clone()));
+    let lines = usize::try_from(midi.get_shown()).unwrap_or(0);
+    if !(0..lines)
+        .filter_map(carried)
+        .any(|title| title.starts_with("Flute hook") && title.ends_with("(7 semitones down)"))
+    {
+        return Err("midi-fits.png: no part of the list is dragged out moved to another octave".into());
+    }
+    // The octave by hand, on the picked part's card (the best fit, 3 semitones up for the key): Octave down takes
+    // it an octave under that. Its card, its roll, its buttons and its line's drag all say so, a list worked out
+    // again keeps it there, Alt+Up takes it back up, and The app's octave makes it the app's again.
+    let octave_buttons = || midi.get_octave_actions().iter().map(|a| a.text.to_string()).collect::<Vec<_>>();
+    if octave_buttons() != ["Octave down", "Octave up"] {
+        return Err("midi-fits-octave.png: the card of a part that's fitted has no octave buttons".into());
+    }
+    if !mo_ui::midi::run_action(&app, "midi.octaveDown") {
+        return Err("midi-fits-octave.png: Octave down did nothing".into());
+    }
+    let lower = midi.get_picked();
+    if carried(0) != Some(format!("{} (9 semitones down)", moved.title))
+        || !lower.fit.starts_with("Moved 9 semitones down")
+        || !lower.fit.contains("at the octave you chose")
+        || lower.roll_low == moved.roll_low
+        || octave_buttons() != ["Octave down", "Octave up", "The app's octave"]
+    {
+        return Err("midi-fits-octave.png: the part isn't an octave down everywhere after Octave down".into());
+    }
+    shots.push(("midi-fits-octave.png".into(), capture(&window)));
+    // The song saved again (the Songs page gives its list again): the list follows it, by its saves, and in the
+    // list worked out again the part is still where you put it.
     if !mo_ui::midi::fit_sample_follows(&app) || midi.get_shown() == 0 {
         return Err("midi-fits.png: the list didn't follow its song when the songs were given again".into());
+    }
+    if carried(0) != Some(format!("{} (9 semitones down)", moved.title)) || midi.get_picked().fit != lower.fit {
+        return Err("midi-fits-octave.png: a list worked out again lost the octave chosen".into());
+    }
+    // Alt+Up, as a key: up an octave, back where the app had it, and still yours. Held down it steps once only.
+    let alt_up = |repeat| {
+        let up = char::from(slint::platform::Key::UpArrow).to_string();
+        app.global::<mo_ui::AppKeys>().invoke_key(up.into(), false, false, true, false, repeat)
+    };
+    let pressed = alt_up(false);
+    let upper = midi.get_picked();
+    if !pressed
+        || !upper.fit.starts_with("Moved 3 semitones up")
+        || !upper.fit.contains("at the octave you chose")
+        || upper.roll_low != moved.roll_low
+        || octave_buttons().len() != 3
+    {
+        return Err("midi-fits-octave.png: Alt+Up didn't take the part up an octave".into());
+    }
+    if !alt_up(true) || midi.get_picked().fit != upper.fit {
+        return Err("midi-fits-octave.png: Alt+Up held down went on stepping, or wasn't the page's key".into());
+    }
+    // Up to the last octave (3 up): there the key is still the page's, and does nothing rather than something else.
+    let stepped = (0..3).all(|_| alt_up(false));
+    let top = midi.get_picked();
+    if !stepped || !top.fit.starts_with("Moved 3 octaves and 3 semitones up") {
+        return Err(format!("midi-fits-octave.png: three more Alt+Up gave \"{}\"", top.fit).into());
+    }
+    if !alt_up(false) || midi.get_picked().fit != top.fit {
+        return Err("midi-fits-octave.png: at the last octave Alt+Up wasn't the page's key any more".into());
+    }
+    let back = mo_ui::midi::run_action(&app, "midi.octaveApp");
+    let again = midi.get_picked();
+    if !back || (&again.fit, &again.roll_low) != (&moved.fit, &moved.roll_low) || octave_buttons().len() != 2 {
+        return Err("midi-fits-octave.png: The app's octave didn't bring the part back".into());
     }
     mo_ui::midi::fit_sample(&app, false);
     if !midi.get_fit_song().is_empty() || !midi.get_fit_none_title().is_empty() || !midi.get_picked().fit.is_empty() {
@@ -640,7 +737,122 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     card_keys_checks(&app, &window, &out)?;
     rail_checks(&app)?;
     wide_shots(&app, &window, &out)?;
+    types_fill_the_column(&app, &window)?;
     tag_box_checks(&app, &window)?;
+    Ok(())
+}
+
+/// The filter column shows as many types as it has room for as tick lines, and only the rest in More types (Solomon,
+/// 11 Nov 2026: "the more types should fill is there more space"): more than the usual nine in a tall window, the nine
+/// in a short one, on the Type filter and on Rediscover alike, and as many again when a view comes back after the
+/// window changed. A type ticked on the last line stays there, with as many lines as before (Clear filters comes into
+/// room kept for it), and More types' Any keeps it picked. (Rediscover's lines may grow when what it digs out for the
+/// type changes the words under them: only its ticked line is held to its place.) With nothing picked, the room kept
+/// for what comes as you pick is still free under the column's last line: less, and something in the column is drawn
+/// taller than it was measured, so the types would push its foot out of sight (Rediscover's words under its choices
+/// did: Slint counted them as one line).
+fn types_fill_the_column(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    use mo_app::sounds::TYPE_CHIPS;
+    let sounds = app.global::<mo_ui::SoundsData>();
+    let types = || {
+        let f = sounds.get_type_filter();
+        (f.chips.row_count(), f.more.row_count())
+    };
+    let re_types = || {
+        let f = sounds.get_re_type_filter();
+        (f.chips.row_count(), f.more.row_count())
+    };
+    let line = |rediscover: bool, at: usize| {
+        let f = if rediscover { sounds.get_re_type_filter() } else { sounds.get_type_filter() };
+        f.chips.row_data(at).map(|c| (c.text.to_string(), c.on)).unwrap_or_default()
+    };
+    let sized = |height: u32| {
+        window.set_size(PhysicalSize::new(WIDTH, height));
+        capture_sized(window, (WIDTH, height), Duration::from_millis(400))
+    };
+    // The sizes the column counts its room in (studio.slint's Heights and Space).
+    let heights = app.global::<mo_ui::Heights>();
+    let (tick_line, button, gap) =
+        (heights.get_tick_line(), heights.get_button(), app.global::<mo_ui::Space>().get_md());
+    let kept_free = |name: &str, shot: &[u8], free: f32| match column_room_below(shot, WIDTH) {
+        Some(room) if f64::from(room) >= f64::from(free) => Ok(()),
+        room => Err(format!(
+            "types: {name}'s filter column ends {room:?} pixels above its foot, not the {free} kept for what comes as \
+             you pick: is something in it drawn taller than it was measured?"
+        )),
+    };
+    start_on(app, Place::Sounds);
+    sounds.invoke_pick_view(0);
+    let shot = sized(WIDE.1);
+    let (lines, more) = types();
+    if lines <= TYPE_CHIPS || more == 0 {
+        return Err(format!(
+            "types: {lines} type lines and {more} in More types at {WIDTH} x {}, where the column has room for more \
+             than {TYPE_CHIPS} and not for all",
+            WIDE.1
+        ));
+    }
+    // Keys that mix well and Clear filters, each with the space above it.
+    kept_free("The Type filter", &shot, tick_line + gap + button + gap)?;
+    let (last, _) = line(false, lines - 1);
+    sounds.invoke_toggle_choice("type".into(), last.clone().into());
+    sized(WIDE.1);
+    let ticked = (types(), line(false, lines - 1));
+    sounds.invoke_clear_chip("more-types".into());
+    sized(WIDE.1);
+    let kept = line(false, lines - 1);
+    sounds.invoke_clear_chip("type".into());
+    if ticked != ((lines, more), (last.clone(), true)) || kept != (last.clone(), true) {
+        return Err(format!(
+            "types: {last}, ticked on the last type line, then More types' Any: {ticked:?}, then {kept:?}"
+        ));
+    }
+    // Rediscover in the usual window: more than nine, and the rest in More types.
+    sized(HEIGHT);
+    sounds.invoke_pick_view(4);
+    let shot = sized(HEIGHT);
+    let (re_lines, re_more) = re_types();
+    if re_lines <= TYPE_CHIPS || re_more == 0 {
+        return Err(format!(
+            "types: Rediscover shows {re_lines} type lines and {re_more} in More types at {WIDTH} x {HEIGHT}, where \
+             it has room for more than {TYPE_CHIPS} and not for all"
+        ));
+    }
+    // Clear types, with the space above it.
+    kept_free("Rediscover", &shot, button + gap)?;
+    let (last, _) = line(true, re_lines - 1);
+    sounds.invoke_re_pick("type".into(), last.clone().into());
+    sized(HEIGHT);
+    let ticked = line(true, re_lines - 1);
+    sounds.invoke_re_pick("more-types".into(), "".into());
+    sized(HEIGHT);
+    let kept = line(true, re_lines - 1);
+    sounds.invoke_re_pick("type".into(), "".into());
+    if ticked != (last.clone(), true) || kept != (last.clone(), true) {
+        return Err(format!(
+            "types: on Rediscover, {last} ticked on the last type line, then More types' Any: {ticked:?}, then {kept:?}"
+        ));
+    }
+    // Shorter while Rediscover shows: its types go back to nine, and so do the Type filter's once it's back.
+    sized(SHORT);
+    let re_short = re_types();
+    sounds.invoke_pick_view(0);
+    sized(SHORT);
+    let back = types();
+    sized(WIDE.1);
+    let again = types();
+    sized(HEIGHT);
+    if re_short.0 != TYPE_CHIPS || back != (TYPE_CHIPS, lines + more - TYPE_CHIPS) || again != (lines, more) {
+        return Err(format!(
+            "types: in a short window Rediscover showed {} type lines and the Type filter {} ({} in More types), \
+             then {} once tall again (not {TYPE_CHIPS}, {TYPE_CHIPS}, {} and {lines})",
+            re_short.0,
+            back.0,
+            back.1,
+            again.0,
+            lines + more - TYPE_CHIPS
+        ));
+    }
     Ok(())
 }
 
@@ -1425,6 +1637,19 @@ fn sounds_shots(
     shots.push(("sounds-duplicates.png".into(), hidden));
     data.invoke_toggle("hide-copies".into());
     mo_ui::sounds::show_copies_for_screens(app, None);
+    // Favourites from Bitwig: its card in the sound card's place, some multisamples ticked, then after a look.
+    let names =
+        ["Clap 1 Select", "Kicks 1 Select", "OHH 2 Select", "rim 1", "Snare 3 Select", "Stylus Drums - Snare 2"];
+    let ticked = ["Kicks 1 Select", "rim 1", "Snare 3 Select"];
+    let shot = |said, missing| mo_ui::sounds::BitwigShot { names: &names, ticked: &ticked, said, missing };
+    mo_ui::sounds::show_bitwig_for_screens(app, Some(shot("", &[])));
+    shots.push(("sounds-bitwig-favourites.png".into(), capture(window)));
+    let missing = ["rim 1 › Rim 07.wav", "Snare 3 Select › Hmy_Snr.wav", "Snare 3 Select › Hyper Snare.wav"];
+    let said = "Found 368 of 371 samples in your sound library: 370 sounds now favourites (12 already were). 3 samples \
+        not found.";
+    mo_ui::sounds::show_bitwig_for_screens(app, Some(shot(said, &missing)));
+    shots.push(("sounds-bitwig-favourites-done.png".into(), capture(window)));
+    mo_ui::sounds::show_bitwig_for_screens(app, None);
     // A tile dragged out to a DAW: dimmed while it's carried, with the card that follows the mouse a little way on
     // from it, then lit for a moment once it has landed.
     let still = capture(window);
@@ -3084,6 +3309,35 @@ fn save_narrow_scrolled(
 /// Lets hover and slide-in animations finish, then draws the window.
 fn capture(window: &MinimalSoftwareWindow) -> Vec<u8> {
     capture_after(window, Duration::from_millis(400))
+}
+
+/// How wide the filter column is (studio.slint's FilterColumn).
+const COLUMN_WIDTH: u32 = 208;
+
+/// How far above the filter column's foot the lowest thing drawn in it ends, in pixels, in a picture of the window
+/// `width` across. The column is found by the line down its right side: the first from the left, after the rail's own,
+/// that runs unbroken from near the top of the page to near its foot. None without one.
+fn column_room_below(pixels: &[u8], width: u32) -> Option<u32> {
+    let height = u32::try_from(pixels.len() / 3).ok()? / width;
+    let at = |x: u32, y: u32| {
+        let i = ((y * width + x) * 3) as usize;
+        [pixels[i], pixels[i + 1], pixels[i + 2]]
+    };
+    let rows = 200..height.saturating_sub(100);
+    if rows.is_empty() {
+        return None;
+    }
+    let line = (COLUMN_WIDTH + 4..width / 2).find(|&x| {
+        let c = at(x, rows.start);
+        rows.clone().all(|y| at(x, y) == c && at(x - 1, y) != c && at(x + 1, y) != c)
+    })?;
+    let edge = at(line, rows.start);
+    let foot = (rows.start..height).take_while(|&y| at(line, y) == edge).last()?;
+    // The column's last points before its line are always empty: the page's own colour.
+    let empty = at(line - 4, foot);
+    let drawn = |y: u32| (line + 2 - COLUMN_WIDTH..line - 1).any(|x| at(x, y) != empty);
+    let lowest = (rows.start..=foot).rev().find(|&y| drawn(y))?;
+    Some(foot - lowest)
 }
 
 /// Draws the window once its timers and animations have run for `wait`.

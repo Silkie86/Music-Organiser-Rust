@@ -4,6 +4,7 @@
 //! the list draws them, so 357,000 sounds cost what's on screen. Sounds are read and played off the window's thread.
 //! Rediscover (unused sounds that fit your taste) is dug out on its own low-priority thread too.
 
+mod bitwig;
 mod copies;
 mod did;
 mod drag_out;
@@ -141,6 +142,9 @@ struct Page {
     partial: Option<usize>,
     /// The type chips' types with their counts, in chip order, then the rest (the More types menu).
     types: Vec<(String, usize)>,
+    /// How many of them the filter column shows as tick lines, the rest in More types: as many as it has room for,
+    /// and never fewer than the usual [`list::TYPE_CHIPS`] ([`room`]).
+    type_lines: usize,
     /// Every tag on a sound, for the Tag filter.
     tags: Vec<String>,
     /// How many sounds each filter's choices would show, from the newest list worked out (none before the first).
@@ -156,6 +160,9 @@ struct Page {
     /// How many seconds of it that play reads at most (a sweep reads only its start): a click on its waveform past
     /// that reads it again from there ([`seeks`]).
     play_reads: f64,
+    /// That play was trimmed (Trim silence was on): its samples don't hold the whole file, so a click on its waveform
+    /// plays it again from there rather than moving along what was read.
+    play_trimmed: bool,
     /// Each sound's place in `list`, by id.
     places: Arc<HashMap<i64, usize>>,
     /// Every sound's fingerprint, once read, for Sounds like this and Rediscover.
@@ -166,6 +173,9 @@ struct Page {
     rediscover: Vec<(usize, String)>,
     /// What Rediscover digs out next time.
     re: rediscover::Options,
+    /// How many types Rediscover's choices show as tick lines, as `type_lines` is for the Type filter (the column
+    /// has other things under them there).
+    re_type_lines: usize,
     /// Counts Rediscover's asks, so an older answer that arrives late is dropped.
     re_asked: u64,
     /// Rediscover has run on this library (so changing a choice picks again).
@@ -179,6 +189,12 @@ struct Page {
     re_likes: HashMap<i64, i64>,
     /// Hide duplicates has been set: by you, or from its setting when the sounds first showed.
     hide_copies_chosen: bool,
+    /// Trim silence is on: sounds play without the silence at their start and end ([`mo_audio::trim`]).
+    trim: bool,
+    /// The level Trim silence counts as silence, in dB below full scale (`mo_audio::trim::LEVELS_DB`).
+    trim_db: i32,
+    /// Trim silence has been set: by you, or from its setting when the sounds first showed.
+    trim_chosen: bool,
     /// The kit builder's pads and choices.
     kit: kit::Kit,
     /// The galaxy's map and the part of it on show.
@@ -217,23 +233,29 @@ impl Default for Page {
             unread: false,
             partial: None,
             types: Vec::new(),
+            type_lines: list::TYPE_CHIPS,
             tags: Vec::new(),
             counts: None,
             now: Local::now().naive_local(),
             playing: None,
             play: 0,
             play_reads: 0.0,
+            play_trimmed: false,
             places: Arc::default(),
             index: None,
             no_index: None,
             rediscover: Vec::new(),
             re: rediscover::Options { count: COUNT, ..rediscover::Options::default() },
+            re_type_lines: list::TYPE_CHIPS,
             re_asked: 0,
             re_started: false,
             re_busy: false,
             re_years: Vec::new(),
             re_likes: HashMap::new(),
             hide_copies_chosen: false,
+            trim: false,
+            trim_db: mo_audio::trim::DEFAULT_DB,
+            trim_chosen: false,
             kit: kit::Kit::default(),
             galaxy: galaxy::Galaxy::default(),
         }
@@ -1174,7 +1196,8 @@ fn scan_for_sounds(
     let job: RefCell<Option<Job>> = RefCell::new(None);
     let scanned = mo_app::sound_scan::scan(sounds_db, &folders, &|done, of| {
         let mut job = job.borrow_mut();
-        let job = job.get_or_insert_with(|| cards.start("Listening to new sounds", "Sounds works as usual meanwhile."));
+        let job =
+            job.get_or_insert_with(|| cards.start("Listening to your sounds", "Sounds works as usual meanwhile."));
         job.progress(done as f32 / of.max(1) as f32, Some(&format!("{} of {}", thousands(done), thousands(of))));
     });
     let job = job.into_inner();
@@ -2246,6 +2269,7 @@ fn rest_arrived(app: &AppWindow, rest: Refreshed) {
     });
     if first {
         brought_up_to_date(app, rest);
+        bitwig::sounds_read(app);
     }
 }
 
@@ -2277,6 +2301,12 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
             p.hide_copies_chosen = true;
             p.filters.hide_copies = crate::settings::value(list::HIDE_COPIES_KEY).as_deref() == Some("on");
         }
+        // Trim silence too.
+        if !p.trim_chosen {
+            p.trim_chosen = true;
+            p.trim = crate::settings::value(list::TRIM_SILENCE_KEY).as_deref() == Some("on");
+            p.trim_db = mo_audio::trim::level_db(crate::settings::value(list::TRIM_LEVEL_KEY).as_deref());
+        }
         p.picked = None;
         p.rediscover.clear();
         p.re_started = false;
@@ -2300,6 +2330,7 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         _ => {}
     }
     crate::space::sounds_changed(app);
+    bitwig::sounds_read(app);
 }
 
 /// What the picked sound offers besides Play: (its words, its id in the shortcut list). The card shows them as
@@ -2391,12 +2422,35 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     let weak = app.as_weak();
     data.on_clear_chip(move |chip| {
         if chip == "more-types" {
-            // The More types menu's Any: the types on chips of their own stay picked.
-            let types = PAGE.with(|p| p.borrow().types.clone());
-            change(&weak, |f| f.clear_more_types(&types));
+            // The More types menu's Any: the types on tick lines of their own stay picked.
+            let (types, lines) = PAGE.with(|p| {
+                let p = p.borrow();
+                (p.types.clone(), p.type_lines)
+            });
+            change(&weak, |f| list::keep_first_types(&mut f.sound_types, &types, lines));
         } else {
             change(&weak, |f| f.clear_chip(&chip));
         }
+    });
+    // The filter column has room for more or fewer types (the window or what's under them changed): its type list
+    // shows as many again. Only the type list: the window's edge being dragged changes it at every line's height.
+    let weak = app.as_weak();
+    data.on_type_room(move |lines, re_lines| {
+        let Some(app) = weak.upgrade() else { return };
+        let (types, re_types) = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            (room(&mut p.type_lines, lines), room(&mut p.re_type_lines, re_lines))
+        });
+        let data = app.global::<SoundsData>();
+        PAGE.with(|p| {
+            let p = p.borrow();
+            if types {
+                show_types(&data, &p);
+            }
+            if re_types {
+                show_re_types(&data, &p);
+            }
+        });
     });
     let weak = app.as_weak();
     let weak_again = app.as_weak();
@@ -2483,6 +2537,28 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         app.global::<SoundsData>().set_autoplay(on);
         // Kept for the next start (review G-3).
         crate::settings::remember(AUTOPLAY_KEY, if on { "1" } else { "0" });
+    });
+    let weak = app.as_weak();
+    data.on_pick_trim(move |picked| {
+        let Some(app) = weak.upgrade() else { return };
+        // "" turns it off; a level ("-50 dB") turns it on at that level. Both kept for next time, in the app's own
+        // settings; they count from the next play (the one playing goes on).
+        let picked = mo_audio::trim::parse_pick(&picked);
+        let on = picked.is_some();
+        let db = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.trim = on;
+            if let Some(db) = picked {
+                p.trim_db = db;
+            }
+            p.trim_chosen = true;
+            p.trim_db
+        });
+        let data = app.global::<SoundsData>();
+        data.set_trim_silence(on);
+        data.set_trim_level_db(db);
+        crate::settings::remember(list::TRIM_SILENCE_KEY, if on { "on" } else { "off" });
+        crate::settings::remember(list::TRIM_LEVEL_KEY, &db.to_string());
     });
     let weak = app.as_weak();
     data.on_pick_view(move |v| {
@@ -2672,6 +2748,26 @@ fn wire_yours(app: &AppWindow, data: &SoundsData) {
             yours::untag(&app, &t);
         }
     });
+    // Favourites from Bitwig ([`bitwig`]): its card, a multisample's tick (-1 all, -2 none), and Mark as favourites
+    // (or Stop).
+    let weak = app.as_weak();
+    data.on_bitwig_toggle(move || {
+        if let Some(app) = weak.upgrade() {
+            bitwig::toggle(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_bitwig_tick(move |at| {
+        if let Some(app) = weak.upgrade() {
+            bitwig::tick(&app, at);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_bitwig_mark(move || {
+        if let Some(app) = weak.upgrade() {
+            bitwig::mark(&app);
+        }
+    });
 }
 
 /// A Rediscover ask: everything its thread needs, so the page can go on changing meanwhile.
@@ -2852,15 +2948,15 @@ fn rediscovered(app: &AppWindow, a: RediscoverAnswer) {
 /// Picks `value` on Rediscover's `what`, saying whether that changed anything (its years are picked on the year
 /// strip). "type": as on the Type filter, a click picks one more type or unpicks it, and "" is any type (the
 /// whole-app review of 6 Nov, X3-23: it picked one at most, so Kick then Snare lost Kick). "more-types": the More
-/// types menu's Any, which unpicks the types picked in that menu but keeps the ones picked on chips of their own, by
-/// the Type filter's own rule (`types` is the type counts the chips are shown from). "count": one of the counts is
-/// always picked.
-fn re_pick(re: &mut rediscover::Options, what: &str, value: &str, types: &[(String, usize)]) -> bool {
+/// types menu's Any, which unpicks the types picked in that menu but keeps the ones picked on tick lines of their
+/// own, by the Type filter's own rule (`types` is the type counts they're shown from, the first `lines` of them on
+/// tick lines). "count": one of the counts is always picked.
+fn re_pick(re: &mut rediscover::Options, what: &str, value: &str, types: &[(String, usize)], lines: usize) -> bool {
     let before = (re.sound_types.clone(), re.count);
     match what {
         "type" if value.is_empty() => re.sound_types.clear(),
         "type" => filters::toggle(&mut re.sound_types, value, true),
-        "more-types" => list::keep_chip_types(&mut re.sound_types, types),
+        "more-types" => list::keep_first_types(&mut re.sound_types, types, lines),
         "count" => {
             if let Some(c) = value.parse().ok().filter(|c| COUNTS.contains(c)) {
                 re.count = c;
@@ -2878,18 +2974,21 @@ fn show_rediscover_chips(app: &AppWindow) {
     let data = app.global::<SoundsData>();
     PAGE.with(|p| {
         let p = p.borrow();
-        let types: Vec<(String, String)> = p.types.iter().map(|(t, _)| (t.clone(), String::new())).collect();
-        let types = filters::show_split(&types, &p.re.sound_types, list::TYPE_CHIPS);
+        show_re_types(&data, &p);
         data.set_re_any_type(!p.re.sound_types.is_empty());
         let counts = filters::one_of(&COUNTS.map(|c| c.to_string()), &p.re.count.to_string());
-        CHOICES.with(|c| {
-            data.set_re_type_filter(c.re_type.view(&types));
-            data.set_re_count_filter(c.re_count.view(&counts));
-        });
+        CHOICES.with(|c| data.set_re_count_filter(c.re_count.view(&counts)));
         data.set_re_adventure(p.re.adventure as f32);
         data.set_re_rarely(p.re.max_uses > 0);
     });
     show_re_years(app);
+}
+
+/// Rediscover's types: as many on tick lines as the filter column has room for, the rest in its More types.
+fn show_re_types(data: &SoundsData, p: &Page) {
+    let types: Vec<(String, String)> = p.types.iter().map(|(t, _)| (t.clone(), String::new())).collect();
+    let types = filters::show_split(&types, &p.re.sound_types, p.re_type_lines);
+    CHOICES.with(|c| data.set_re_type_filter(c.re_type.view(&types)));
 }
 
 /// Rediscover's year strip, as [`show_years`] shows the filters' one: each year, how full it is, and the span picked.
@@ -2933,7 +3032,7 @@ fn wire_rediscover(app: &AppWindow) {
             let mut p = p.borrow_mut();
             let p = &mut *p;
             // Picking again only when something changed: a click on the count picked already keeps the list.
-            let changed = re_pick(&mut p.re, &what, &value, &p.types);
+            let changed = re_pick(&mut p.re, &what, &value, &p.types, p.re_type_lines);
             (changed && p.re_started, (changed && what == "count").then_some(p.re.count))
         });
         // How many is kept for the next start (review G-3).
@@ -3007,6 +3106,15 @@ fn keep_view(v: i32) {
     if let Some(name) = usize::try_from(v).ok().and_then(|i| VIEWS.get(i)) {
         crate::settings::remember(VIEW_KEY, name);
     }
+}
+
+/// Keeps in `kept` how many types the filter column has room for as tick lines, `lines` as the page counted them
+/// (0 while the view they're for is away: `kept` stays as it is), and never fewer than the usual
+/// [`list::TYPE_CHIPS`], as in a window too short for them. Says whether that's a new count, which shows them again.
+fn room(kept: &mut usize, lines: i32) -> bool {
+    let Some(lines) = usize::try_from(lines).ok().filter(|&n| n > 0) else { return false };
+    let lines = lines.max(list::TYPE_CHIPS);
+    std::mem::replace(kept, lines) != lines
 }
 
 fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
@@ -3184,6 +3292,32 @@ pub fn show_copies_for_screens(app: &AppWindow, same: Option<&mo_sounds::copies:
     copies::show_for_screens(app, same);
 }
 
+/// What the screenshots show on Favourites from Bitwig's card ([`show_bitwig_for_screens`]).
+pub struct BitwigShot<'a> {
+    pub names: &'a [&'a str],
+    pub ticked: &'a [&'a str],
+    pub said: &'a str,
+    pub missing: &'a [&'a str],
+}
+
+/// For the screenshots: Favourites from Bitwig's card open on made-up multisamples (`ticked` by name), with what a
+/// look said and the samples it didn't find (none for a card not used yet); `None` closes it. Never reads a folder.
+pub fn show_bitwig_for_screens(app: &AppWindow, shown: Option<BitwigShot<'_>>) {
+    match shown {
+        Some(BitwigShot { names, ticked, said, missing }) => {
+            let found = names
+                .iter()
+                .map(|n| mo_app::bitwig_favourites::Multisample {
+                    path: std::path::PathBuf::from(format!(r"K:\Bitwig Studio\Library\Multisamples\{n}.multisample")),
+                    name: (*n).to_owned(),
+                })
+                .collect();
+            bitwig::show_for_screens(app, found, ticked, said, missing);
+        }
+        None => bitwig::close(app),
+    }
+}
+
 /// Shows one of the views by its name (Ctrl+K's "Sounds › Galaxy"), as the view switch does.
 pub fn show_view(app: &AppWindow, name: &str) {
     if let Some(v) = VIEWS.iter().position(|n| *n == name) {
@@ -3300,6 +3434,13 @@ fn redraw() {
     kit::redraw();
 }
 
+/// The Type filter's chips alone: as many types on tick lines as the filter column has room for, the rest in More
+/// types (the other filters' chips are made too, and left as they are).
+fn show_types(data: &SoundsData, p: &Page) {
+    let chips = list::chips_showing(&p.filters, p.counts.as_ref(), &p.types, &p.tags, p.type_lines);
+    FILTER_MODELS.with(|m| data.set_type_filter(m[0].view(&chips.types)));
+}
+
 /// The filters' chips and menus as the filters are now, each choice with the counts from the newest list worked out
 /// (a pick shows at once; its counts come with the list it asked for).
 fn show_chips(app: &AppWindow) {
@@ -3307,7 +3448,7 @@ fn show_chips(app: &AppWindow) {
     PAGE.with(|p| {
         let p = p.borrow();
         let f = &p.filters;
-        let chips = list::chips(f, p.counts.as_ref(), &p.types, &p.tags);
+        let chips = list::chips_showing(f, p.counts.as_ref(), &p.types, &p.tags, p.type_lines);
         FILTER_MODELS.with(|m| {
             data.set_type_filter(m[0].view(&chips.types));
             data.set_length_filter(m[1].view(&chips.length));
@@ -3334,6 +3475,11 @@ fn show_chips(app: &AppWindow) {
         data.set_order_column(p.order.column().into());
         data.set_order_reversed(p.reversed);
         data.set_autoplay(p.autoplay);
+        data.set_trim_silence(p.trim);
+        data.set_trim_level_db(p.trim_db);
+        data.set_trim_choices(slint::ModelRc::new(slint::VecModel::from(
+            mo_audio::trim::choices().into_iter().map(SharedString::from).collect::<Vec<_>>(),
+        )));
         show_picked_tags(&data, &p);
     });
 }
@@ -3529,11 +3675,11 @@ fn play_picked(app: &AppWindow, from: f64) {
 /// galaxy's sweep plays the stars it passes without picking them), reading at most `most` seconds of it: a sweep only
 /// needs its start, which reads far quicker than a whole loop.
 fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
-    let Some((at, path, seconds)) = PAGE.with(|p| {
+    let Some((at, path, seconds, trim)) = PAGE.with(|p| {
         let p = p.borrow();
         let s = p.list.sound(at)?;
         let seconds = s.analysis.as_ref().map_or(0.0, |a| a.seconds).min(mo_audio::MAX_SECONDS);
-        Some((at, s.path.clone(), seconds))
+        Some((at, s.path.clone(), seconds, p.trim.then(|| mo_audio::trim::level_of_db(p.trim_db))))
     }) else {
         return;
     };
@@ -3549,12 +3695,13 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
         p.playing = Some((at, seconds.max(0.001)));
         p.play = ask;
         p.play_reads = most;
+        p.play_trimmed = trim.is_some();
     });
     playing_changed(app);
     if here {
         return;
     }
-    let job = PlayJob { ask, path, from, seconds, most, window: app.as_weak(), held: Arc::default() };
+    let job = PlayJob { ask, path, from, seconds, most, trim, window: app.as_weak(), held: Arc::default() };
     ask_reader(job);
 }
 
@@ -3604,6 +3751,9 @@ struct PlayJob {
     from: f64,
     seconds: f64,
     most: f64,
+    /// Trim silence was on when it was asked for, with the level it counts as silence: it starts past the silence at
+    /// its start and stops at the end of the sound, not the end of the file.
+    trim: Option<f32>,
     window: slint::Weak<AppWindow>,
     /// How many of its reader's jobs are held: one more while this one is, so the reader is free once it's none.
     held: Arc<AtomicUsize>,
@@ -3620,7 +3770,7 @@ impl Drop for PlayJob {
 /// (`mo_app::sweep_timing`) hear when it's being opened, and when it's handed to the output, overtaken by a newer sound
 /// or dropped, by this play's number; for a sound the sweep didn't ask for they count nothing.
 fn read_and_play(job: PlayJob) {
-    let PlayJob { ask, ref path, from, seconds, most, ref window, .. } = job;
+    let PlayJob { ask, ref path, from, seconds, most, trim, ref window, .. } = job;
     let (path, window) = (path.clone(), window.clone());
     // Still the newest play, with no stop since.
     let wanted = || {
@@ -3638,16 +3788,23 @@ fn read_and_play(job: PlayJob) {
         return;
     }
     sweep_timing::opening(&path, ask);
-    let went = match mo_audio::read(Path::new(&path), most) {
+    // Trimmed, a sweep's short read is read on past the silence at the start, so it still hears `most` of the sound.
+    let reads = if trim.is_some() && most < mo_audio::MAX_SECONDS { most + TRIM_LEAD_ROOM } else { most };
+    let went = match mo_audio::read(Path::new(&path), reads) {
         // Looked at again as it starts, with no stop or other sound able to come in between: one asked for since
         // wins, rather than this sound starting after it and playing on while the page shows another or none.
         Ok(mut audio) => {
+            let start = match trim {
+                Some(level) => trimmed(&mut audio, from * seconds, most, level),
+                None => from * seconds,
+            };
             // Read as far as it was asked to (a sweep reads only a sound's start; a long one is read so far): it
             // stops there, so it fades out rather than clicking.
-            if audio.sample_rate > 0 && audio.seconds() + 1.0 / f64::from(audio.sample_rate) >= most {
+            if audio.sample_rate > 0 && audio.seconds() + 1.0 / f64::from(audio.sample_rate) >= reads.min(start + most)
+            {
                 audio.fade_out_end();
             }
-            player().play_if(Arc::new(audio), ask.to_string(), from * seconds, wanted)
+            player().play_if(Arc::new(audio), ask.to_string(), start, wanted)
         }
         Err(e) => match wanted() {
             Err(unwanted) => Err(unwanted),
@@ -3668,6 +3825,32 @@ fn read_and_play(job: PlayJob) {
         Err(Unwanted::Overtaken) => sweep_timing::overtaken(&path, ask),
         Err(Unwanted::Stopped) => sweep_timing::dropped(&path, ask),
     }
+}
+
+/// How much further a sweep's read goes with Trim silence on, for the silence at the start it skips.
+const TRIM_LEAD_ROOM: f64 = 2.0;
+
+/// Trim silence for a sound about to play from `from` seconds, reading at most `most` seconds of it, with what's
+/// quieter than `level` as silence: cuts the silence
+/// at its end off (and what's past `most` of the sound, for a sweep's longer read) and gives where it starts, past the
+/// silence at its start. The start stays in the samples, so the waveform's place and the play's position still mean
+/// the same second of the file. A sound silent all through, or a play from inside the silence at the end, plays as
+/// asked.
+fn trimmed(audio: &mut mo_audio::AudioData, from: f64, most: f64, level: f32) -> f64 {
+    let rate = f64::from(audio.sample_rate.max(1));
+    let asked = (from * rate).round() as usize;
+    let Some((first, end)) = mo_audio::trim::play_span(audio, asked, level) else {
+        // Played as asked, as far as asked: a sweep's longer read is cut back to `most`.
+        let keep = ((from + most) * rate).round() as usize;
+        for channel in &mut audio.channels {
+            channel.truncate(keep);
+        }
+        return from;
+    };
+    let start = if first > asked { first as f64 / rate } else { from };
+    // The start stays in the samples (`keep` from 0); a cut end fades out.
+    audio.keep(0, end.min(((start + most) * rate).round() as usize));
+    start
 }
 
 /// Why a sound that was read isn't played.
@@ -3739,6 +3922,11 @@ pub fn escape(app: &AppWindow) -> bool {
         data.invoke_search_edited(SharedString::new());
         return true;
     }
+    // Favourites from Bitwig's card lies over the sound card: it goes first.
+    if data.get_bitwig_shown() {
+        bitwig::close(app);
+        return true;
+    }
     if PAGE.with(|p| p.borrow().picked.is_some()) {
         data.invoke_close_panel();
         return true;
@@ -3768,7 +3956,10 @@ pub fn stop_for_another(app: &AppWindow) {
 /// (`player_has`: its key), rather than reading the sound again from there: only when the player has that very play
 /// (not an older one, nor none while it's still being read) and the play read that far (a sweep reads only its start).
 fn seeks(p: &Page, player_has: Option<&str>, to: f64) -> bool {
-    p.playing.is_some() && player_has.is_some_and(|key| key.parse() == Ok(p.play)) && to < p.play_reads
+    p.playing.is_some()
+        && player_has.is_some_and(|key| key.parse() == Ok(p.play))
+        && to < p.play_reads
+        && !p.play_trimmed
 }
 
 /// A sound played to its end by itself: `key` is its play's number.
@@ -3913,11 +4104,44 @@ fn show_sending(app: &AppWindow, sending: bool) {
 mod tests {
     use super::*;
 
+    /// 100 frames a second: silent for 0.2 s, loud for 0.3 s, silent to 1 s.
+    fn quiet_loud_quiet() -> mo_audio::AudioData {
+        let mut s = vec![0.0; 100];
+        s[20..50].fill(0.5);
+        mo_audio::AudioData { sample_rate: 100, channels: vec![s.clone(), s], ..Default::default() }
+    }
+
+    #[test]
+    fn trim_silence_starts_past_the_quiet_start_and_stops_at_the_sounds_end() {
+        let mut a = quiet_loud_quiet();
+        let start = trimmed(&mut a, 0.0, mo_audio::MAX_SECONDS, 0.001);
+        assert!((start - 0.2).abs() < 1e-9);
+        // The start stays in the samples (the waveform's places still mean the same second); a 10 ms tail stays.
+        assert_eq!((a.channels[0].len(), a.channels[1].len()), (51, 51));
+        // A click past the start plays from there.
+        let mut a = quiet_loud_quiet();
+        assert!((trimmed(&mut a, 0.3, mo_audio::MAX_SECONDS, 0.001) - 0.3).abs() < 1e-9);
+        // A sweep hears `most` of the sound, not of the silence before it.
+        let mut a = quiet_loud_quiet();
+        assert!((trimmed(&mut a, 0.0, 0.1, 0.001) - 0.2).abs() < 1e-9);
+        assert_eq!(a.len(), 30);
+    }
+
+    #[test]
+    fn trim_silence_leaves_silence_all_through_and_a_click_in_the_quiet_end_as_asked() {
+        let mut a = quiet_loud_quiet();
+        assert_eq!(trimmed(&mut a, 0.8, mo_audio::MAX_SECONDS, 0.001), 0.8);
+        assert_eq!(a.len(), 100);
+        let mut quiet = mo_audio::AudioData { sample_rate: 100, channels: vec![vec![0.0; 50]], ..Default::default() };
+        assert_eq!(trimmed(&mut quiet, 0.1, mo_audio::MAX_SECONDS, 0.001), 0.1);
+        assert_eq!(quiet.len(), 50);
+    }
+
     #[test]
     fn rediscover_picks_types_as_the_type_filter_does_and_always_a_count() {
         let mut re = rediscover::Options { count: COUNT, ..rediscover::Options::default() };
         let types = [("Kick".to_owned(), 9), ("Snare".to_owned(), 5)];
-        let mut pick = |what: &str, value: &str| re_pick(&mut re, what, value, &types);
+        let mut pick = |what: &str, value: &str| re_pick(&mut re, what, value, &types, list::TYPE_CHIPS);
         // As on the Type filter: each click picks one more type, and a click on one picked unpicks it (X3-23).
         assert!(pick("type", "Kick"));
         assert!(pick("type", "Snare"));
@@ -3939,6 +4163,27 @@ mod tests {
         assert!(!pick("count", "120"));
         assert!(!pick("count", "7"));
         assert_eq!((re.sound_types, re.years, re.count), (vec!["Snare".to_owned(), "Kick".to_owned()], None, 120));
+    }
+
+    #[test]
+    fn the_type_lists_show_as_many_types_as_the_column_has_room_for() {
+        // The page's count, never under the usual nine; 0 (or less) while the view is away keeps the count.
+        let mut kept = list::TYPE_CHIPS;
+        assert!(room(&mut kept, 14));
+        assert!(!room(&mut kept, 14));
+        assert!(!room(&mut kept, 0) && !room(&mut kept, -3));
+        assert_eq!(kept, 14);
+        assert!(room(&mut kept, 2));
+        assert_eq!(kept, list::TYPE_CHIPS);
+        assert!(!room(&mut kept, 5));
+        // Rediscover's More types menu's Any keeps the types on tick lines, as many as there are.
+        let types: Vec<(String, usize)> = (0..12).map(|i| (format!("Type {i:02}"), 100 - i)).collect();
+        let mut re =
+            rediscover::Options { sound_types: vec!["Type 10".into(), "Type 11".into()], ..Default::default() };
+        assert!(re_pick(&mut re, "more-types", "", &types, 11));
+        assert_eq!(re.sound_types, ["Type 10"]);
+        assert!(re_pick(&mut re, "more-types", "", &types, list::TYPE_CHIPS));
+        assert!(re.sound_types.is_empty());
     }
 
     /// A small song library like the C# app's: two songs, a kick in both, a pad with no notes in one, and settings.

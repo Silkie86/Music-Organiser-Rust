@@ -369,7 +369,7 @@ export component StudioButton inherits Rectangle {
     in property <string> icon;
     callback clicked;
     min-width: icon != "" ? 32px : label.preferred-width + (menu ? 38px : 24px);
-    height: 32px;
+    height: Heights.button;
     border-radius: Theme.radius;
     border-width: 1px;
     border-color: Theme.edge;
@@ -1194,6 +1194,13 @@ export component FilterPicks inherits FlexboxLayout {
     }
 }
 
+// How tall the shared controls are, for a page that works out what fits in the room it has (the filter column's
+// types fill what its other filters leave, and keep room for a Clear button that comes as you pick).
+export global Heights {
+    out property <length> button: 32px;
+    out property <length> tick-line: 26px;
+}
+
 // A tick box with its words: one choice of a filter in the filter column (FilterList), or an on/off choice there
 // ("Favourites"). Picked, its box is filled with a tick; `count` is how many lines it would show, at the right; `dim`
 // (nothing to show) greys it, and it can still be clicked.
@@ -1203,7 +1210,7 @@ export component TickLine inherits Rectangle {
     in property <bool> on;
     in property <bool> dim;
     callback clicked;
-    height: 26px;
+    height: Heights.tick-line;
     border-radius: Theme.radius;
     background: touch.has-hover ? Theme.hover : transparent;
     animate background { duration: Motion.tap; }
@@ -1364,20 +1371,34 @@ export component FilterList inherits VerticalLayout {
     in property <string> name;
     in property <FilterView> filter;
     in property <string> more-name: "More";
+    // For a list that shows as many of its choices as there's room for (the Sounds page's types): the room its column
+    // has left under its filters (FilterColumn's `spare-room`), and so how many of its choices would fit as tick lines.
+    // That's those on show and as many more as the room holds, or all of them once the room and the More menu's row
+    // would hold the rest (the row goes with them). Never 0 then, as 0 means not counted: while it has no choices, and
+    // while its lines for new choices aren't made yet (they're made a moment after the choices come, and until then
+    // the room left is measured without them).
+    in property <length> spare-room;
+    // The More menu's row under the lines while it shows, 0 without it.
+    property <length> more-row: root.preferred-height - caps.height - lines.preferred-height;
+    out property <int> fits: root.filter.chips.length == 0 || round(lines.preferred-height / Heights.tick-line) != root.filter.chips.length ? 0
+        : root.filter.more.length * Heights.tick-line <= root.spare-room + root.more-row ? root.filter.chips.length + root.filter.more.length
+        : max(1, root.filter.chips.length + floor(root.spare-room / Heights.tick-line));
     callback toggled(string);
     callback cleared();
     alignment: start;
     spacing: 0;
-    Caps {
+    caps := Caps {
         text: root.name;
         height: 22px;
     }
-    for c in root.filter.chips: TickLine {
-        text: c.text;
-        count: c.count;
-        on: c.on;
-        dim: c.count == "0" && !c.on;
-        clicked => { root.toggled(c.text); }
+    lines := VerticalLayout {
+        for c in root.filter.chips: TickLine {
+            text: c.text;
+            count: c.count;
+            on: c.on;
+            dim: c.count == "0" && !c.on;
+            clicked => { root.toggled(c.text); }
+        }
     }
     if root.filter.more.length > 0: HorizontalLayout {
         alignment: start;
@@ -1411,6 +1432,13 @@ export component FilterColumn inherits Rectangle {
     property <bool> folded: root.narrow && !root.open;
     // How far in the page's list starts.
     out property <length> room: !root.shown ? 0px : root.narrow ? 28px + Space.sm : 208px + Space.lg;
+    // Room kept free under the filters for what comes and goes as you pick (a Clear button), so its coming doesn't
+    // take a line away from a list that fills the room.
+    in property <length> keep-free;
+    // The room left under the filters, less `keep-free` (less than none while they're taller than the column, which
+    // then scrolls): a FilterList can fill it with more of its choices, as the Sounds page's types do (Solomon, 11 Nov
+    // 2026: "the more types should fill is there more space").
+    out property <length> spare-room: flick.height - lists.preferred-height - root.keep-free;
     x: 0;
     y: 0;
     visible: root.shown;

@@ -113,14 +113,9 @@ const TEMPO_BAR: i32 = 10;
 pub const TYPE_CHIPS: usize = 9;
 
 /// A More types menu's Any (the Type filter's and Rediscover's alike): unpicks from `picked` the types picked in the
-/// menu, and keeps the ones picked on chips of their own, in any case. `types` is [`SoundList::type_counts`], as the
-/// chips were shown from.
-pub fn keep_chip_types(picked: &mut Vec<String>, types: &[(String, usize)]) {
-    keep_first_types(picked, types, TYPE_CHIPS);
-}
-
-/// [`keep_chip_types`] where the first `shown` types are on show (a column with room for more or fewer than
-/// [`TYPE_CHIPS`], [`chips_showing`]).
+/// menu, and keeps the ones picked on chips or tick lines of their own, in any case. `types` is
+/// [`SoundList::type_counts`], as the chips were shown from, and the first `shown` of them are on show: as many as the
+/// filter column has room for ([`chips_showing`]), [`TYPE_CHIPS`] at the least.
 pub fn keep_first_types(picked: &mut Vec<String>, types: &[(String, usize)], shown: usize) {
     let on_chips = &types[..types.len().min(shown)];
     picked.retain(|t| on_chips.iter().any(|(c, _)| c.eq_ignore_ascii_case(t)));
@@ -201,12 +196,6 @@ impl Filters {
         };
         let (low, high) = (step(low.min(high)), step(low.max(high)));
         self.tempo = ((low > TEMPO_LOW).then_some(f64::from(low)), (high < TEMPO_HIGH).then_some(f64::from(high)));
-    }
-
-    /// The type filter's More menu's Any: unpicks the types in the menu, and keeps the ones picked on chips of their
-    /// own. `types` is [`SoundList::type_counts`], as the chips were shown from.
-    pub fn clear_more_types(&mut self, types: &[(String, usize)]) {
-        keep_chip_types(&mut self.sound_types, types);
     }
 
     /// Picks nothing on the filter `chip`: its menu's Any, or Clear types.
@@ -1322,6 +1311,13 @@ fn key_order(s: &Sound) -> i32 {
 /// The setting Hide duplicates is kept in, in the app's own settings ("on" or "off").
 pub const HIDE_COPIES_KEY: &str = "sounds_hide_duplicates";
 
+/// The setting Trim silence is kept in, in the app's own settings ("on" or "off"): when it's on, a sound plays
+/// without the silence at its start and end (`mo_audio::trim`); the file is never changed.
+pub const TRIM_SILENCE_KEY: &str = "sounds_trim_silence";
+/// The setting the level Trim silence counts as silence is kept in: dB below full scale, one of
+/// `mo_audio::trim::LEVELS_DB` ("-60").
+pub const TRIM_LEVEL_KEY: &str = "sounds_trim_level_db";
+
 /// The page's view as you left it ("Tiles", "List", "Galaxy"...), whether Autoplay is on ("1" or "0") and how many
 /// sounds Rediscover digs out: kept in the app's own settings as you change them (never in `library.db`), and until
 /// you have, the C# app's own under the same names (`crate::app_settings::FROM_CSHARP`, review G-3).
@@ -2124,7 +2120,7 @@ mod tests {
         // The More menu's Any keeps the types picked on chips of their own.
         let types: Vec<(String, usize)> = (0..12).map(|n| (format!("Type {n}"), 12 - n)).collect();
         let mut more = Filters { sound_types: vec!["Type 0".into(), "Type 11".into()], ..Filters::default() };
-        more.clear_more_types(&types);
+        keep_first_types(&mut more.sound_types, &types, TYPE_CHIPS);
         assert_eq!(more.sound_types, ["Type 0"]);
         for chip in [TYPE, LENGTH, KEY, TEMPO, TAG] {
             f.clear_chip(chip);

@@ -12,9 +12,11 @@
 //!
 //! How the two are lined up: the bars picked from a song go round as picked, every one of them, a bar the picked
 //! parts rest in too (the first or the last as well), so the part found is heard as it will sound dropped on the
-//! first picked bar. The found part is a loop from the library, and how long that loop is isn't saved with it: it
-//! goes round from the bar its first note is in to the bar its last note ends in, so a four-bar loop that rests in
-//! its last bar is heard as three bars going round.
+//! first picked bar. The found part is a loop from the library, and it goes round as its clip does when the app
+//! plays, drags or sends it ([`crate::analyser::clip_of`]): whole bars from its first bar line, as many as the index
+//! counts from its notes. A last note held a hair over a bar line doesn't make it a bar longer, and an empty bar at
+//! its start is a bar of it. How long the loop was meant to be isn't saved with it, so a four-bar loop that rests in
+//! its last bar is still heard (and played) as three bars going round.
 //!
 //! A song that isn't in 4/4 is fitted to as it is, but the library's parts are all read as 4/4 (the MIDI page's
 //! rule): a part found goes round by its own bars of 4/4, as a clip dropped into the song keeps its own length, so
@@ -30,6 +32,8 @@
 //!
 //! What the MIDI page asks for (the song saved last, its own parts left out, the page's filters kept, the answer as
 //! places in its catalogue) is in [`for_song`].
+//!
+//! The octave a part found goes at beside a song is [`octave`]'s.
 //!
 //! Not here yet: sending the part found into the project.
 
@@ -52,24 +56,33 @@ use crate::store::SlotBook;
 use crate::{BAR, PPQ};
 
 pub mod for_song;
+pub mod octave;
+
+use octave::Registers;
 
 /// How long a first look's slot is ([`mo_harmony::Slot`]), in the index's ticks: two quarter notes, half a bar of
 /// 4/4, whatever the song's time signature.
 pub const SLOT: i64 = 2 * PPQ;
 
 /// How this crate asks for a part's slots ([`slots_of`]: which of its notes are heard, the slot's length, bars of
-/// 4/4): bump it when that changes.
-const SLOTS_ASKING: u32 = 1;
+/// 4/4, the stretch they're made over): bump it when that changes. 2: over the part's clip
+/// ([`crate::analyser::clip_of`]), where 1 went from the bar of its first note to the bar its last note ended in, a
+/// bar more for a last note a few ticks over a bar line.
+const SLOTS_ASKING: u32 = 2;
 
 /// What made the slots the index keeps of each set of notes: how `mo_harmony` makes slots and how it was asked, like
 /// [`crate::keys::VERSION`]. When the app's is another, the index makes them again from the notes it keeps (rule 7).
 pub const SLOTS_VERSION: u32 = mo_harmony::SLOTS_VERSION * 100 + SLOTS_ASKING;
 
-/// A library part's slots, for a search's first look: how long it plays each pitch class in every [`SLOT`], from the
-/// bar its first note is in to the bar its last note ends in (bars of 4/4, as every part of the library is read), its
-/// first 32 bars at the most. The same stretch the close look hears go round ([`Target::fit`]).
+/// A library part's slots, for a search's first look: how long it plays each pitch class in every [`SLOT`], over its
+/// clip as the app plays, drags and sends it ([`own_round`]: whole bars of 4/4 from its first bar line), its first 32
+/// bars at the most. The same notes over the same stretch as the close look hears go round ([`Target::fit`]). Empty
+/// when nothing in it is heard.
 pub fn slots_of(notes: &[NoteEvent]) -> Vec<Slot> {
-    mo_harmony::slots_of(&heard_notes(notes), Grid::four_four(PPQ as u32), SLOT)
+    match own_round(notes) {
+        Some((heard, length)) if !heard.is_empty() => mo_harmony::slots_over(&heard, SLOT, 0, length),
+        _ => Vec::new(),
+    }
 }
 
 /// What's looked for.
@@ -85,6 +98,9 @@ pub enum Wants {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Target {
     given: Given,
+    /// Where each kind of part plays beside it: what says the octave a part found goes at. A song's
+    /// ([`Target::of_song`]); for chords or a tune alone, nothing, so each kind goes by its usual place.
+    registers: Registers,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -124,7 +140,7 @@ impl Target {
             }
             None => Backing::read(reader, &parts, grid, Span::Loop),
         })?;
-        Some(Target { given: Given::Chords(backing) })
+        Some(Target { given: Given::Chords(backing), registers: Registers::default() })
     }
 
     /// A tune to find chords for: its notes, with tick 0 on one of its bar lines. `span`: the ticks it goes round in,
@@ -140,14 +156,21 @@ impl Target {
             None => LineUp::Loops { bar_line: 0 },
         };
         let notes = heard_notes(notes);
-        (!notes.is_empty()).then_some(Target { given: Given::Tune { notes, line_up } })
+        (!notes.is_empty()).then_some(Target { given: Given::Tune { notes, line_up }, registers: Registers::default() })
     }
 
     /// The picked parts of a song (places in [`Song::parts`]) over `bars` of it, counted from 0: a tune to find chords
     /// for when every one of them is a melody, else chords to find a tune for. Drums are left out; a sampler's notes
     /// ([`crate::playing::Playing::sample`]) are heard as written when it's picked. Every picked bar counts, one the
-    /// parts rest in too. None when the picked parts play nothing pitched in those bars.
+    /// parts rest in too. None when the picked parts play nothing pitched in those bars. A part found goes at the
+    /// octave its kind plays at beside those bars, whichever of the song's parts are picked
+    /// ([`Registers::by_bars`]).
     pub fn of_song(song: &Song, parts: &[usize], bars: &Range<i64>) -> Option<Target> {
+        let target = Target::of_picked(song, parts, bars)?;
+        Some(Target { registers: Registers::by_bars(song, bars), ..target })
+    }
+
+    fn of_picked(song: &Song, parts: &[usize], bars: &Range<i64>) -> Option<Target> {
         // Each part once, in the song's order, however it was picked.
         let mut places = parts.to_vec();
         places.sort_unstable();
@@ -172,6 +195,11 @@ impl Target {
         }
         let parts: Vec<(Role, &[NoteEvent])> = picked.iter().map(|(role, notes)| (*role, notes.as_slice())).collect();
         Target::chords(&parts, song.grid(), span)
+    }
+
+    /// Where each kind of part plays beside it: a song's bars' ([`Target::of_song`]), or nothing known.
+    pub fn registers(&self) -> &Registers {
+        &self.registers
     }
 
     /// What kind of part goes with it.
@@ -202,8 +230,8 @@ impl Target {
         }
         match &self.given {
             Given::Chords(backing) => {
-                let heard = heard_notes(notes);
-                sit(&heard, backing, own_round(&heard)?, &Sitting::SHIPPED)
+                let (heard, length) = own_round(notes)?;
+                sit(&heard, backing, LineUp::LoopsFrom { start: 0, length }, &Sitting::SHIPPED)
             }
             Given::Tune { notes: tune, line_up } => {
                 let backing = chart::backing(notes, role, cut)?;
@@ -220,12 +248,19 @@ impl Target {
     }
 }
 
-/// How a part from the library goes round over a song's chords: from the bar its first note is in to the bar its
-/// last note ends in, bars of 4/4 as every part of the library is read, whatever the song's time signature (a clip
-/// dropped into a song keeps its own length). The same stretch its slots are made over ([`slots_of`]), so the first
-/// look and the close look hear it go round alike. In a song in 4/4 it's [`LineUp::Loops`] from tick 0.
-fn own_round(notes: &[Note]) -> Option<LineUp> {
-    mo_harmony::own_bars(notes, BAR, 0).map(|(start, length)| LineUp::LoopsFrom { start, length })
+/// A part from the library as a search hears it go round over a song's chords: the notes of its clip, and how many
+/// ticks the clip lasts from tick 0 ([`crate::analyser::clip_of`], with its bars counted from its notes as the index
+/// counts them: bars of 4/4 whatever the song's time signature). It's the clip the app then plays, drags and sends,
+/// so what's judged is what's heard and dropped. An empty bar at its start is a bar of the clip, a last note that
+/// hangs a few ticks over a bar line doesn't make one and stops at the line, and every note lies inside it
+/// ([`LineUp::LoopsFrom`] asks that). Its slots are made of the same ([`slots_of`]), so the first look and the close
+/// look hear it alike. None for no notes.
+fn own_round(notes: &[NoteEvent]) -> Option<(Vec<Note>, i64)> {
+    if notes.is_empty() {
+        return None;
+    }
+    let (clip, length) = crate::analyser::clip_of(notes, crate::analyser::bars_of(notes));
+    Some((heard_notes(&clip), length))
 }
 
 /// Of the parts a first look sorts, the share that gets the close look, looking for tunes and for chords. Measured
@@ -296,6 +331,31 @@ pub struct Found {
     /// How it sits with the target, the part found moved up by each of 0 to 11 semitones (the song stays as it is):
     /// [`Sits::best`] gives the move of the part found that fits best, and how it sits there.
     pub sits: Sits,
+    /// How many octaves to move it as well, once it's moved into key, so it plays where its kind of part plays
+    /// beside the target ([`Registers::octaves_for`]): up for more than 0. Octaves make no difference to how it sits.
+    pub octaves: i32,
+    /// The lowest and the highest key it plays as it is, strays aside ([`octave::edges`]): what an octave chosen by
+    /// hand mustn't take off the keyboard either ([`octave::on_keyboard`]).
+    pub edges: (u8, u8),
+}
+
+impl Found {
+    /// How far it's moved in all, in semitones, up for more than 0: into the key ([`Sits::best`]) and to the octave.
+    pub fn moved(&self) -> i32 {
+        self.sits.best().0 + 12 * self.octaves
+    }
+
+    /// Whether this copy of a loop is the one to give in place of `other`, a copy of the same loop: it fits as
+    /// well and needs moving less. A semitone less shows in [`Sits::judged`]; copies octaves apart sit alike, and of
+    /// those it's the one that goes fewer octaves.
+    fn handier_than(&self, other: &Found) -> bool {
+        use std::cmp::Ordering::{Equal, Greater, Less};
+        match self.sits.judged().total_cmp(&other.sits.judged()) {
+            Greater => true,
+            Equal => self.octaves.abs() < other.octaves.abs(),
+            Less => false,
+        }
+    }
 }
 
 /// What a search came to.
@@ -461,9 +521,9 @@ impl Target {
         // whole: only some copies in it aren't the handiest.
         if !search.stopped {
             // Of a loop's copies, the one to give is the one that needs moving least: where the copy read fits best
-            // moved, the copy that many semitones from it (if the library has it) is read too, and given in its
-            // place when it does fit as well with less moving. For the parts that will be listed, and any below
-            // them that such a copy could lift into the list.
+            // moved (into the key, or to another octave), the copy that many semitones from it (if the library has
+            // it) is read too, and given in its place when it does fit as well with less moving. For the parts
+            // that will be listed, and any below them that such a copy could lift into the list.
             let last = most.checked_sub(1).and_then(|last| found.get(last)).map(|f| f.sits.judged());
             let in_reach = |place: usize, f: &Found| place < most || last.is_some_and(|last| f.sits.best().1 >= last);
             let nearer = nearer_copies(parts, &looked, &found, &in_reach);
@@ -473,7 +533,7 @@ impl Target {
             let given: HashMap<usize, usize> = nearer.into_iter().collect();
             for copy in self.close_look(parts, &places, notes, pool, stop, &mut search).found {
                 match given.get(&copy.at).map(|place| found.get_mut(*place)) {
-                    Some(Some(first)) if copy.sits.judged() > first.sits.judged() => *first = copy,
+                    Some(Some(first)) if copy.handier_than(first) => *first = copy,
                     Some(_) => {}
                     None => found.push(copy),
                 }
@@ -499,7 +559,12 @@ impl Target {
     ) -> Closely {
         let judge = |read: &[Read<'p>]| -> Vec<Found> {
             read.par_iter()
-                .filter_map(|(at, part, notes)| Some(Found { at: *at, sits: self.fit(notes, part.role, part.cut)? }))
+                .filter_map(|(at, part, notes)| {
+                    let sits = self.fit(notes, part.role, part.cut)?;
+                    let edges = octave::edges(notes)?;
+                    let octaves = self.registers.octaves_for(part.role, edges, sits.best().0);
+                    Some(Found { at: *at, sits, octaves, edges })
+                })
                 .collect()
         };
         let mut closely = Closely::default();
@@ -546,11 +611,12 @@ impl Target {
 /// A part read for the close look: its place among the candidates, the candidate, and its notes.
 type Read<'a> = (usize, Candidate<'a>, Vec<NoteEvent>);
 
-/// For each part found that `in_reach` takes (by its place in `found`), fits best moved, and is a loop the library
-/// has other copies of ([`Loop`]): the copy that many semitones from it, which would fit as it is. That copy's place
-/// among `parts` with the found part's place in `found`, in the order found. Of several such copies (octaves apart),
-/// the nearest in pitch to where the found part would be moved; of copies as near, the first listed. `looked` are the
-/// parts the first look sorted, in the order listed.
+/// For each part found that `in_reach` takes (by its place in `found`), fits best moved ([`Found::moved`]: into the
+/// key, to another octave, or both), and is a loop the library has other copies of ([`Loop`]): the copy that many
+/// semitones from it, which would fit as it is. That copy's place among `parts` with the found part's place in
+/// `found`, in the order found. Of several copies in that key (octaves apart), the nearest in pitch to where the
+/// found part would be moved; of copies as near, the first listed. `looked` are the parts the first look sorted, in
+/// the order listed.
 fn nearer_copies(
     parts: &[Candidate],
     looked: &[(f64, usize)],
@@ -560,12 +626,12 @@ fn nearer_copies(
     // By loop: the found part's place in `found`, and the lowest note a copy that fits unmoved would have.
     let mut wanted: HashMap<Loop, (usize, i32)> = HashMap::new();
     for (place, given) in found.iter().enumerate().filter(|(place, given)| in_reach(*place, given)) {
-        let semitones = given.sits.best().0;
-        if semitones != 0
+        let moved = given.moved();
+        if moved != 0
             && let Some(part) = parts.get(given.at)
             && let Some(of_loop) = part.of_loop()
         {
-            wanted.insert(of_loop, (place, i32::from(part.lowest) + semitones));
+            wanted.insert(of_loop, (place, i32::from(part.lowest) + moved));
         }
     }
     if wanted.is_empty() {
@@ -1082,13 +1148,81 @@ mod tests {
         let three_four = Grid { ticks_per_beat: PPQ as u32, beats_per_bar: 3, bar_line: 0 };
         let target = Target::chords(&[(Role::Chords, &waltz)], three_four, None).unwrap();
         // A part of the library, four bars of 4/4 from its second bar, each note two quarter notes long. Dropped
-        // into the song it keeps its own length: it comes round every 16 quarter notes, the chords every 12.
+        // into the song it keeps its own length, the empty bar at its start too: it comes round every 20 quarter
+        // notes, the chords every 12.
         let found: Vec<NoteEvent> =
             [72, 76, 74, 77, 71, 74, 72, 76].iter().zip(0i64..).map(|(&k, i)| note(BAR + i * SLOT, SLOT, k)).collect();
         let close = target.fit(&found, Role::Melody, false).unwrap();
         // Its notes fill whole slots, so the first look hears just what the close look does.
         let first = target.first().look(&slots_of(&found)).unwrap();
         assert!((first - close.judged()).abs() < 1e-9, "{first} {}", close.judged());
+    }
+
+    /// What the search judges is the clip you then get: the part's bars as the index counts them, from its first bar
+    /// line. A last note a few ticks over a bar line doesn't make the loop a bar longer, and an empty or muted bar
+    /// at its start or end is a bar of it.
+    #[test]
+    fn a_part_found_is_judged_over_the_clip_you_get() {
+        let length = |notes: &[NoteEvent]| own_round(notes).map(|(_, length)| length);
+        // The tune written for the chords, its last note held a 200th of a bar past the fourth bar line: still four bars
+        // (five, by the bar its last note ends in), so it comes round with the chords, not a bar later each time.
+        let mut over = tune(0);
+        over.last_mut().unwrap().length += BAR / 200;
+        assert_eq!((crate::analyser::bars_of(&over), slots_of(&over).len()), (4, 8));
+        assert_eq!((length(&over), length(&tune(0))), (Some(4 * BAR), Some(4 * BAR)));
+        // The hair over the line isn't heard: a clip going round stops the note where it ends.
+        let (heard, _) = own_round(&over).unwrap();
+        assert_eq!(heard.iter().map(|n| n.start + n.length).max(), Some(4 * BAR));
+        let target = Target::chords(&[(Role::Chords, &chords(0))], Grid::four_four(PPQ as u32), None).unwrap();
+        let (exact, hangs) =
+            (target.fit(&tune(0), Role::Melody, false).unwrap(), target.fit(&over, Role::Melody, false));
+        let hangs = hangs.unwrap();
+        assert_eq!((exact.best().0, hangs.best().0), (0, 0));
+        assert!((exact.judged() - hangs.judged()).abs() < 0.01, "{} {}", exact.judged(), hangs.judged());
+        // Going round a bar late each time, as it was judged before, it sat worse: the search would have ranked it
+        // under parts that fit less well.
+        let Given::Chords(backing) = &target.given else { panic!("chords were given") };
+        let late =
+            sit(&heard_notes(&over), backing, LineUp::LoopsFrom { start: 0, length: 5 * BAR }, &Sitting::SHIPPED);
+        assert!(late.unwrap().judged() < hangs.judged() - 0.05);
+        // The first look hears the same four bars.
+        let first = target.first();
+        let (a, b) = (first.look(&slots_of(&tune(0))).unwrap(), first.look(&slots_of(&over)).unwrap());
+        assert!((a - b).abs() < 0.01, "{a} {b}");
+
+        // A muted bar before the tune: the clip is five bars with a bar of rest first, and so is what's judged.
+        let mut led: Vec<NoteEvent> = vec![NoteEvent { muted: true, ..note(0, BAR, 60) }];
+        led.extend(tune(0).into_iter().map(|n| NoteEvent { start: n.start + BAR, ..n }));
+        assert_eq!(length(&led), Some(5 * BAR));
+        let slots = slots_of(&led);
+        assert_eq!(slots.len(), 10);
+        assert!(slots[..2].iter().all(|slot| slot.iter().all(|t| *t == 0)) && slots[2].iter().any(|t| *t > 0));
+        // Muted notes after it count the same way: they're in the clip.
+        let mut trailed = tune(0);
+        trailed.push(NoteEvent { muted: true, ..note(4 * BAR, BAR, 60) });
+        assert_eq!(length(&trailed), Some(5 * BAR));
+        // A grace note that starts in the hair past the fourth line is in the clip, which then has a fifth bar (the
+        // app's loop and its MIDI file have it too): both looks hear all five.
+        let mut grace = tune(0);
+        grace.push(note(4 * BAR + 1, 2, 72));
+        assert_eq!((crate::analyser::bars_of(&grace), length(&grace), slots_of(&grace).len()), (4, Some(5 * BAR), 10));
+        assert!(slots_of(&grace)[8].iter().any(|t| *t > 0));
+        // Nothing heard: no slots; no notes: nothing to go round.
+        assert!(slots_of(&[NoteEvent { muted: true, ..note(0, BAR, 60) }]).is_empty());
+        assert_eq!((length(&[]), slots_of(&[]).len()), (None, 0));
+
+        // The other way, chords found for a tune: chords whose last one is held a 200th of a bar past the fourth line
+        // go round every four bars under the tune, as the same chords cut on the line do.
+        let mut held = chords(0);
+        for n in held.iter_mut().filter(|n| n.start == 3 * BAR) {
+            n.length += BAR / 200;
+        }
+        let under = Target::tune(&tune(0), Some(0..4 * BAR)).unwrap();
+        let (exact, hangs) =
+            (under.fit(&chords(0), Role::Chords, false).unwrap(), under.fit(&held, Role::Chords, false));
+        let hangs = hangs.unwrap();
+        assert_eq!((exact.best().0, hangs.best().0), (0, 0));
+        assert!((exact.judged() - hangs.judged()).abs() < 0.01, "{} {}", exact.judged(), hangs.judged());
     }
 
     #[test]
@@ -1162,6 +1296,37 @@ mod tests {
         assert!(!candidate.cut && candidate.role == Role::Chords);
         part.drums = true;
         assert_eq!(Candidate::of(&part).role, Role::Drums);
+    }
+
+    #[test]
+    fn a_loop_the_library_has_octaves_apart_is_given_as_the_copy_at_the_right_octave() {
+        // The written tune (its middle is 75, where a tune plays) and the same an octave and two octaves down. The
+        // lowest is listed first, so it stands for all three and is the one read.
+        let down = |octaves: u8| -> Vec<NoteEvent> {
+            tune(0).iter().map(|n| NoteEvent { key: n.key - 12 * octaves, ..*n }).collect()
+        };
+        let target = Target::chords(&[(Role::Chords, &chords(0))], Grid::four_four(PPQ as u32), None).unwrap();
+        let alone = Library::of(vec![("two down".into(), Role::Melody, down(2))]);
+        let (search, read) = alone.search(&target, 10, false);
+        // With no other copy it's given with the octaves that bring it up to a tune's place.
+        assert_eq!((search.found.len(), read), (1, 1));
+        assert_eq!((search.found[0].sits.best().0, search.found[0].octaves, search.found[0].moved()), (0, 2, 24));
+        // With the copies there, the one given is the one that needs no moving: the copy two octaves up from the
+        // one read, not the nearer one that would still go up an octave.
+        let library = Library::of(vec![
+            ("two down".into(), Role::Melody, down(2)),
+            ("one down".into(), Role::Melody, down(1)),
+            ("written".into(), Role::Melody, tune(0)),
+        ]);
+        let (search, read) = library.search(&target, 10, false);
+        assert_eq!((search.found.len(), read, search.close), (1, 2, 2));
+        assert_eq!((search.found[0].at, search.found[0].moved()), (library.place("written"), 0));
+        // Without the written one, the copy an octave down is the handier of the two left.
+        let library =
+            Library::of(vec![("two down".into(), Role::Melody, down(2)), ("one down".into(), Role::Melody, down(1))]);
+        let (search, read) = library.search(&target, 10, false);
+        assert_eq!((search.found.len(), read), (1, 2));
+        assert_eq!((search.found[0].at, search.found[0].octaves), (library.place("one down"), 1));
     }
 
     /// A library whose book is out of step with its notes, so that the copy read first isn't the one that fits as

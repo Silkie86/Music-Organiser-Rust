@@ -16,8 +16,17 @@
 //!
 //! A part picked in the list is the part as it fits: [`moved`] gives its notes moved by what its line says, which is
 //! what the page then plays, drags out and sends to a DAW ([`moved_name`] names it so there), and [`card_text`] says
-//! so on its card.
+//! so on its card. The move is two things added up ([`Fit::moved`]): the semitones that put the part in the song's
+//! key, and the octaves that put it where its kind of part plays beside the song (the search's,
+//! `mo_midi::fit::octave`). The octave is a first guess: the card's Octave up and Octave down change it
+//! ([`Fit::octave_step`]), and what you chose is remembered for those notes ([`YourOctaves`], and the index's
+//! `your_octaves` for the next time), wherever they're fitted again.
+//!
+//! A part found can be heard with the song ([`SongBars`]): the parts it was fitted to, over the bars it was fitted
+//! to, go round beside it at the song's tempo, as the two were judged and as the part will sound dropped on the first
+//! of those bars in the DAW. [`with_song_line`] says so on the card.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, Instant};
@@ -26,10 +35,11 @@ use mo_formats::NoteEvent;
 use mo_formats::dates::RealDates;
 use mo_library::songs::thousands;
 use mo_midi::fit::for_song::{Own, Pick, Tried};
+use mo_midi::fit::octave::{self, MOST_OCTAVES};
 use mo_midi::fit::{Found, Target, Wants};
 use mo_midi::playing::{self, Song};
 use mo_midi::store::SlotBook;
-use mo_midi::{Catalogue, Role};
+use mo_midi::{Catalogue, Role, StoredPhrase};
 
 use crate::midi::{self as page, Filters};
 
@@ -41,6 +51,9 @@ pub const SONGS_OFFERED: usize = 8;
 
 /// Said under the toolbar while a search runs.
 pub const LOOKING: &str = "Looking for parts that fit…";
+
+/// The setting for the page's "Play with the song" chip: "0" when you've turned it off; on until then.
+pub const WITH_SONG_KEY: &str = "midi_fits_with_song";
 
 /// A song the page offers to fit to.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -119,6 +132,123 @@ pub struct Fitted {
     pub wants: Wants,
     pub pick: Pick,
     pub target: Target,
+    /// The same parts and bars to hear a part found with.
+    pub with: Arc<SongBars>,
+}
+
+/// What of a song a part found is heard with (the page's "Play with the song"): the parts the list is fitted to, over
+/// the bars it's fitted to, as the song has them. They go round as picked, every bar of them (one the parts rest in
+/// too), and the part found goes round beside them by its own length from the first of those bars
+/// ([`SongBars::round`]): as the part sounds dropped on that bar in the DAW. The search judges the two going round
+/// by the same rule over the same clip ([`mo_midi::analyser::clip_length`]), so what's heard here is what was judged
+/// (`docs/harmony/together-experiments.md`, "What's judged is what's dropped").
+#[derive(Clone, Debug, PartialEq)]
+pub struct SongBars {
+    /// What plays: each picked part that sounds in the bars (never drums), in the order they're picked, which is the
+    /// order the page's line names them in ([`fitted_text`]).
+    pub voices: Vec<SongVoice>,
+    /// How long the bars are, and one bar of the song, in ticks ([`mo_midi::PPQ`] to a beat).
+    pub length: i64,
+    pub bar: i64,
+    /// The song's tempo, when its save gives one a part can play at.
+    pub tempo: Option<f64>,
+    /// What was looked for (parts over these, or chords under them), the names of the parts that play ("Keys and
+    /// Sub"; "" when none has a name) and the bars, counted from 0: for the card's words ([`with_song_line`]).
+    pub wants: Wants,
+    pub names: String,
+    pub bars: std::ops::Range<i64>,
+}
+
+/// One of a song's parts in the bars a list is fitted to ([`SongBars`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct SongVoice {
+    pub name: String,
+    /// The General MIDI sound it's heard with, matched as a library part's is: by its name, the instrument its name
+    /// or its plugin's says, then its kind.
+    pub sound: mo_midi::gm::GmSound,
+    /// What it plays in the bars, the first of them at tick 0 ([`Song::stretch`]).
+    pub notes: Vec<NoteEvent>,
+}
+
+impl SongBars {
+    /// The picked parts of `song` over the picked bars, as [`Target::of_song`] takes them: each part once, in the
+    /// order they're picked, no drums, and none that rests through the bars (so the card names what's heard, which
+    /// is the page's line less any part that rests).
+    pub fn of(song: &Song, pick: &Pick, wants: Wants) -> SongBars {
+        let mut places: Vec<usize> = Vec::with_capacity(pick.parts.len());
+        for &at in &pick.parts {
+            if !places.contains(&at) {
+                places.push(at);
+            }
+        }
+        let voices: Vec<SongVoice> = places
+            .into_iter()
+            .filter_map(|at| {
+                let part = song.parts.get(at).filter(|p| !p.drums && p.role != Role::Drums)?;
+                let notes = song.stretch(at, &pick.bars);
+                if notes.is_empty() {
+                    return None;
+                }
+                // The part is pitched: a name that says drums (an "808" bassline's) doesn't put it on the drum kit.
+                let family = mo_midi::instruments::guess([part.name.as_str(), part.plugin.as_str()], false, None)
+                    .map(|guess| guess.family)
+                    .filter(|family| mo_midi::gm::for_family(*family).is_some());
+                let sound = mo_midi::gm::sound_for(part.role, false, None, &[&part.name], family);
+                Some(SongVoice { name: part.name.clone(), sound, notes })
+            })
+            .collect();
+        SongBars {
+            length: pick.bars.end.saturating_sub(pick.bars.start).max(0).saturating_mul(song.bar()),
+            bar: song.bar(),
+            tempo: page::usable_tempo(Some(song.tempo)),
+            wants,
+            names: names_words(voices.iter().map(|v| v.name.as_str())),
+            bars: pick.bars.clone(),
+            voices,
+        }
+    }
+
+    /// The tempo the two play at: the song's, else the one a part with none plays at ([`page::PLAY_TEMPO`]).
+    pub fn bpm(&self) -> f64 {
+        self.tempo.unwrap_or(page::PLAY_TEMPO)
+    }
+
+    /// How long a part whose loop is `part` ticks plays with these bars before both are back at their starts, in
+    /// ticks: until they meet again, or once through the longer when that's past 32 bars (the rule
+    /// `mo_harmony::sit` hears two loops by, [`mo_harmony::round_of`]). `most` is the longest that can be made into
+    /// sound (`mo_audio::gm::longest_ticks`: two minutes, which a slow song's 32 bars are over). What's longer than
+    /// that is held to as many times through the longer of the two as fit, or to as many whole bars when not even
+    /// one does: where it goes round is always a bar line, so the beat never jumps.
+    pub fn round(&self, part: i64, most: i64) -> i64 {
+        let (part, own, bar) = (part.max(1), self.length.max(1), self.bar.max(1));
+        let round = mo_harmony::round_of(part, own, bar);
+        if round <= most {
+            return round;
+        }
+        let longer = part.max(own);
+        match most / longer {
+            turns if turns >= 1 => turns.saturating_mul(longer),
+            _ => (most / bar).max(1).saturating_mul(bar),
+        }
+    }
+}
+
+/// The card's sound line for a part found that plays with the song: its sound, what of `song` it's heard with, and
+/// whose tempo they play at. "Saw Lead · for its kind of part · with Keys and Sub from Night drive (bars
+/// 9–16), at the song's 128 BPM".
+pub fn with_song_line(sound: &mo_midi::gm::GmSound, song: &str, with: &SongBars) -> String {
+    let bars = bars_words(&with.bars);
+    let heard = match (with.names.is_empty(), with.wants) {
+        (false, _) => format!("with {} from {song} ({bars})", with.names),
+        (true, Wants::Tune) => format!("with {song}'s chords ({bars})"),
+        (true, Wants::Chords) => format!("with {song}'s melody ({bars})"),
+    };
+    let bpm = (with.bpm() * 10.0).round() / 10.0;
+    let tempo = match with.tempo {
+        Some(_) => format!("at the song's {bpm} BPM"),
+        None => format!("at {bpm} BPM, as the song gives no tempo"),
+    };
+    format!("{} · {heard}, {tempo}", page::sound_line(sound, None))
 }
 
 /// What of `song` is fitted to, nothing picked by hand. `wanted`: what the page's switch asks for; none (the switch
@@ -134,7 +264,8 @@ pub fn fitted(song: &Song, wanted: Option<Wants>) -> Result<Fitted, String> {
     let of = |pick: &Option<Pick>| {
         let pick = pick.clone()?;
         let target = pick.target(song)?;
-        Some(Fitted { wants: target.wants(), pick, target })
+        let with = Arc::new(SongBars::of(song, &pick, target.wants()));
+        Some(Fitted { wants: target.wants(), pick, target, with })
     };
     let (over, under) = (of(&chords), of(&melody));
     // The other way is only pointed to when it would work.
@@ -177,9 +308,14 @@ pub fn bars_words(bars: &std::ops::Range<i64>) -> String {
 
 /// The picked parts' names: "Keys", "Keys and Sub", "Keys, Pad and Sub", "Keys, Pad and 3 more".
 fn part_names(song: &Song, pick: &Pick) -> String {
+    names_words(pick.parts.iter().filter_map(|&at| song.parts.get(at)).map(|p| p.name.as_str()))
+}
+
+/// Names in a row, as [`part_names`] says them.
+fn names_words<'a>(all: impl Iterator<Item = &'a str>) -> String {
     // A name once: two channels called "Keys" (a layered sound) are "Keys".
     let mut names: Vec<&str> = Vec::new();
-    for name in pick.parts.iter().filter_map(|&at| song.parts.get(at)).map(|p| p.name.as_str()) {
+    for name in all {
         if !name.is_empty() && !names.contains(&name) {
             names.push(name);
         }
@@ -216,8 +352,19 @@ pub fn tried<'a>(cat: &'a Catalogue, own: &Own, filters: &'a Filters) -> Tried<'
 pub struct Fit {
     /// Its place in the catalogue's entries.
     pub entry: usize,
-    /// How far to move it, in semitones (-6 to 5; 0: as it is). The part moves, never the song.
+    /// How far to move it into the song's key, in semitones (-6 to 5; 0: it's in key as it is). The part moves, never
+    /// the song.
     pub semitones: i32,
+    /// How many octaves the app would move it as well, to where its kind of part plays beside the bars of the song
+    /// it's fitted to (-3 to 3; up for more than 0; `mo_midi::fit::octave`): a bassline saved two octaves up comes
+    /// down.
+    pub octaves: i32,
+    /// The octaves you chose for its notes, from how they're saved, when you have ([`YourOctaves`]): they go in place
+    /// of the app's ([`Fit::octaves_now`]).
+    pub yours: Option<i32>,
+    /// The lowest and the highest key it plays as it's saved, strays aside (`octave::edges`): no octave takes them off
+    /// the keyboard.
+    pub edges: (u8, u8),
     /// How it sits moved so: about 0 (it clashes) to about 1 (as a tune written for those chords does).
     pub sits: f64,
 }
@@ -225,7 +372,31 @@ pub struct Fit {
 impl Fit {
     fn of(found: &Found) -> Fit {
         let (semitones, sits) = found.sits.best();
-        Fit { entry: found.at, semitones, sits }
+        Fit { entry: found.at, semitones, octaves: found.octaves, yours: None, edges: found.edges, sits }
+    }
+
+    /// The octaves it's moved by: the ones you chose for its notes when you have, else the app's. Yours are held as
+    /// the app's are: 3 either way at the most, and never so many that the part, in the song's key, leaves the
+    /// keyboard (an octave chosen beside a song in another key may not fit beside this one).
+    pub fn octaves_now(&self) -> i32 {
+        match self.yours {
+            Some(yours) => octave::on_keyboard(self.edges, self.semitones, yours.clamp(-MOST_OCTAVES, MOST_OCTAVES)),
+            None => self.octaves,
+        }
+    }
+
+    /// How far it's moved in all, in semitones, up for more than 0: into the key and to the octave. What its line
+    /// says ([`move_words`]) and what [`moved`] does to its notes.
+    pub fn moved(&self) -> i32 {
+        self.semitones + 12 * self.octaves_now()
+    }
+
+    /// The octaves it would be moved by one further up (`by` more than 0) or down: what's then remembered as yours.
+    /// None when it can't go: it's 3 that way already, or the part would leave the keyboard.
+    pub fn octave_step(&self, by: i32) -> Option<i32> {
+        let wanted = self.octaves_now() + by.signum();
+        let stays = octave::on_keyboard(self.edges, self.semitones, wanted) == wanted;
+        (wanted.abs() <= MOST_OCTAVES && stays).then_some(wanted)
     }
 
     /// How it sits, for a meter and for words: 0 to 100.
@@ -234,41 +405,85 @@ impl Fit {
     }
 }
 
-/// How a part is moved to fit: "as it is", "1 semitone up", "3 semitones down".
+/// How a part is moved to fit, all of it in one go (`semitones`: [`Fit::moved`]), so it can be done by hand as said
+/// and never points two ways: "as it is", "1 semitone up", "9 semitones down" (3 up for the key and an octave down),
+/// "an octave up", "2 octaves down", "an octave and 3 semitones up".
 pub fn move_words(semitones: i32) -> String {
     let way = if semitones > 0 { "up" } else { "down" };
-    match semitones.unsigned_abs() {
-        0 => "as it is".to_owned(),
-        1 => format!("1 semitone {way}"),
-        n => format!("{n} semitones {way}"),
+    let (octaves, rest) = (semitones.unsigned_abs() / 12, semitones.unsigned_abs() % 12);
+    let octaves = match octaves {
+        0 => None,
+        1 => Some("an octave".to_owned()),
+        n => Some(format!("{n} octaves")),
+    };
+    let rest = match rest {
+        0 => None,
+        1 => Some("1 semitone".to_owned()),
+        n => Some(format!("{n} semitones")),
+    };
+    match (octaves, rest) {
+        (None, None) => "as it is".to_owned(),
+        (Some(far), None) | (None, Some(far)) => format!("{far} {way}"),
+        (Some(octaves), Some(rest)) => format!("{octaves} and {rest} {way}"),
     }
 }
 
-/// Said first in a line's details: "Fits 92% as it is", "Fits 88%, 2 semitones up".
+/// Said first in a line's details: "Fits 92% as it is", "Fits 88%, 2 semitones up", "Fits 71%, an octave down".
 pub fn fit_text(fit: &Fit) -> String {
-    let comma = if fit.semitones == 0 { "" } else { "," };
-    format!("Fits {}%{comma} {}", fit.percent(), move_words(fit.semitones))
+    let comma = if fit.moved() == 0 { "" } else { "," };
+    format!("Fits {}%{comma} {}", fit.percent(), move_words(fit.moved()))
 }
 
-/// Said on the card of a part moved by `semitones` to fit `song`: how it's moved, and that what's done with it is
+/// Said on the card of a part moved by `semitones` in all ([`Fit::moved`]) to fit `song`: how it's moved, that the
+/// octave is one you chose when it is (`yours`: the card then offers the app's back), and that what's done with it is
 /// moved so. "Moved 3 semitones up to fit Night drive: it plays, drags and goes to your DAW that way."
-pub fn card_text(semitones: i32, song: &str) -> String {
+pub fn card_text(semitones: i32, yours: bool, song: &str) -> String {
+    let chosen = if yours { ", at the octave you chose" } else { "" };
     if semitones == 0 {
-        return format!("Fits {song} as it is: nothing is moved.");
+        return format!("Fits {song} as it is{chosen}: nothing is moved.");
     }
-    format!("Moved {} to fit {song}: it plays, drags and goes to your DAW that way.", move_words(semitones))
+    format!("Moved {} to fit {song}{chosen}: it plays, drags and goes to your DAW that way.", move_words(semitones))
 }
 
-/// What a part is called where it goes moved (the file dragged out, the clip in the DAW): "Arp clip (3 semitones
-/// up)", so it isn't taken for the part as it is in the library. Its own name when it isn't moved.
+/// The octaves you've chosen for sets of notes since the catalogue was read, by the notes' fingerprint: they go over
+/// what the catalogue was read with (`StoredPhrase::your_octave`, the index's `your_octaves`), so a choice shows at
+/// once and holds however long the index takes to write it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct YourOctaves(HashMap<String, Option<i32>>);
+
+impl YourOctaves {
+    /// You chose `octaves` for the notes with this fingerprint (from how they're saved); none: the app picks again.
+    pub fn set(&mut self, hash: &str, octaves: Option<i32>) {
+        self.0.insert(hash.to_owned(), octaves);
+    }
+
+    /// The octaves you chose for a part's notes: here, else as the catalogue has them; none when you haven't.
+    pub fn of(&self, phrase: &StoredPhrase) -> Option<i32> {
+        self.0.get(&phrase.hash).copied().unwrap_or(phrase.your_octave)
+    }
+}
+
+/// Gives each line the octave you chose for its notes ([`Fit::yours`]), and takes it from a line whose notes are back
+/// at the app's pick: after a search, and after each change of octave. Never a drum part's: its notes pick pads, so
+/// an octave kept for the same notes (chosen while they counted as another kind, or in the old app) doesn't move it.
+pub fn with_yours(fits: &mut [Fit], cat: &Catalogue, yours: &YourOctaves) {
+    for fit in fits {
+        let pitched = cat.entry(fit.entry).filter(|e| e.role() != Role::Drums);
+        fit.yours = pitched.and_then(|e| yours.of(&e.phrase));
+    }
+}
+
+/// What a part is called where it goes moved by `semitones` in all (the file dragged out, the clip in the DAW): "Arp
+/// clip (3 semitones up)", so it isn't taken for the part as it is in the library. Its own name when it isn't moved.
 pub fn moved_name(name: &str, semitones: i32) -> String {
     if semitones == 0 { name.to_owned() } else { format!("{name} ({})", move_words(semitones)) }
 }
 
-/// A part's notes moved by `semitones`, as its line in the list says it fits: every note by exactly that
-/// (`NoteEvent::moved`), so what's heard is what the line and the name say. A note that would go past the lowest or
-/// the highest key there is has nowhere to go and is left out: that takes a move of at most 6 from a note within 6
-/// keys of the keyboard's ends, where no instrument plays (a key switch, or a stray).
+/// A part's notes moved by `semitones` in all ([`Fit::moved`]), as its line in the list says it fits: every note by
+/// exactly that (`NoteEvent::moved`), so what's heard is what the line and the name say. A note that would go past
+/// the lowest or the highest key there is has nowhere to go and is left out. The octave is never one that takes the
+/// part itself off the keyboard (`Registers::octaves_for`), so that's a stray far from the rest of it (a key switch),
+/// or a note within 6 keys of the keyboard's ends moved for the key.
 pub fn moved(notes: Vec<NoteEvent>, semitones: i32) -> Vec<NoteEvent> {
     if semitones == 0 {
         return notes;
@@ -276,7 +491,8 @@ pub fn moved(notes: Vec<NoteEvent>, semitones: i32) -> Vec<NoteEvent> {
     notes.into_iter().filter_map(|n| n.moved(semitones)).collect()
 }
 
-/// A key moved with its part: the key a chart of the moved notes is spelled in.
+/// A key moved with its part (`semitones`: all of the move; whole octaves leave a key as it is): the key a chart of
+/// the moved notes is spelled in.
 pub fn moved_key(key: mo_harmony::Key, semitones: i32) -> mo_harmony::Key {
     mo_harmony::Key { tonic: mo_harmony::PitchClass::new(i32::from(key.tonic.number()) + semitones), ..key }
 }
@@ -423,8 +639,9 @@ pub struct Asked<'a> {
 /// What a search came to.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Answer {
-    /// The list: what was looked for, what of the song it was fitted to ([`fitted_text`]) and the parts found.
-    Fits { wants: Wants, to: String, looked: Looked },
+    /// The list: what was looked for, what of the song it was fitted to ([`fitted_text`]), the parts found, and
+    /// what a part found is heard with.
+    Fits { wants: Wants, to: String, looked: Looked, with: Arc<SongBars> },
     /// Nothing could be fitted, and why, in plain words.
     Nothing(String),
     /// Stopped for a newer search: nothing to show.
@@ -547,7 +764,7 @@ pub fn search(
     if looked.stopped {
         return Answer::Stopped;
     }
-    Answer::Fits { wants: fitted.wants, to: fitted_text(&song.song, fitted), looked }
+    Answer::Fits { wants: fitted.wants, to: fitted_text(&song.song, fitted), looked, with: Arc::clone(&fitted.with) }
 }
 
 #[cfg(test)]
@@ -739,6 +956,119 @@ mod tests {
     }
 
     #[test]
+    fn a_part_found_is_heard_with_the_parts_and_bars_its_list_is_fitted_to() {
+        let starts = |notes: &[NoteEvent]| notes.iter().map(|n| (n.start, n.length, n.key)).collect::<Vec<_>>();
+        // What the list is fitted to is what plays: the keys from bar 9, moved to start at tick 0.
+        let song = song();
+        let over = fitted(&song, None).unwrap();
+        let with = &over.with;
+        assert_eq!((with.voices.len(), with.voices[0].name.as_str()), (1, "Keys"));
+        assert_eq!(starts(&with.voices[0].notes), starts(&chords()));
+        assert_eq!((with.length, with.bar, with.tempo, with.bpm()), (4 * BAR, BAR, Some(120.0), 120.0));
+        assert_eq!((with.wants, with.names.as_str(), with.bars.clone()), (Wants::Tune, "Keys", 8..12));
+        // The other way: the lead, from bar 13.
+        let under = fitted(&song, Some(Wants::Chords)).unwrap();
+        assert_eq!((under.with.voices.len(), under.with.bars.clone(), under.with.wants), (1, 12..16, Wants::Chords));
+        assert_eq!(starts(&under.with.voices[0].notes), starts(&tune(0)));
+
+        // Each picked part once, in the order they're picked (as the page's line names them); never drums, nor a
+        // part that rests through the bars. A bassline called "808" is still a bass, not the drum kit.
+        let bass: Vec<NoteEvent> =
+            [45u8, 38, 43, 36].iter().zip(0i64..).map(|(&k, bar)| note(bar * BAR, BAR, k)).collect();
+        let kick: Vec<NoteEvent> = (0..16).map(|beat| note(beat * PPQ, PPQ / 2, 36)).collect();
+        let mut song = song_of(vec![
+            lane("Keys", 8, &chords()),
+            lane("808 sub", 8, &bass),
+            lane("Pad", 0, &chords()),
+            lane("Kit", 8, &kick),
+        ]);
+        song.parts[3].role = Role::Drums;
+        let pick = Pick { parts: vec![3, 1, 2, 0, 1], bars: 8..12 };
+        let with = SongBars::of(&song, &pick, Wants::Tune);
+        let names: Vec<&str> = with.voices.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["808 sub", "Keys"]);
+        assert_eq!(starts(&with.voices[0].notes), starts(&bass));
+        assert!(
+            with.voices.iter().all(|v| !v.sound.drums),
+            "{:?}",
+            with.voices.iter().map(|v| &v.sound).collect::<Vec<_>>()
+        );
+        assert_eq!(with.voices[0].sound.name(), "Synth Bass 1");
+        assert_eq!(with.names, "808 sub and Keys");
+        // The page's line names the same parts in the same order, and the one that rests there too.
+        assert_eq!(part_names(&song, &Pick { parts: vec![1, 2, 0], bars: 8..12 }), "808 sub, Pad and Keys");
+        assert_eq!(
+            SongBars::of(&song, &Pick { parts: vec![1, 2, 0], bars: 8..12 }, Wants::Tune).names,
+            "808 sub and Keys"
+        );
+        // A song whose save gives no tempo a part can play at: the one a part with none plays at.
+        song.tempo = 0.0;
+        let slow = SongBars::of(&song, &pick, Wants::Tune);
+        assert_eq!((slow.tempo, slow.bpm()), (None, page::PLAY_TEMPO));
+        // No bars: nothing plays, and nothing has a length.
+        let none = SongBars::of(&song, &Pick { parts: vec![0], bars: 8..8 }, Wants::Tune);
+        assert_eq!((none.voices.len(), none.length), (0, 0));
+    }
+
+    #[test]
+    fn a_part_and_the_songs_bars_play_until_they_meet_again() {
+        let with = fitted(&song(), None).unwrap().with;
+        // Two minutes at the song's 120 beats a minute: 60 bars, more than is ever asked for.
+        let most = 60 * BAR;
+        // Four bars of the song: a part as long plays once, a shorter one until both are back at their starts.
+        assert_eq!(with.round(4 * BAR, most), 4 * BAR);
+        assert_eq!(with.round(2 * BAR, most), 4 * BAR);
+        assert_eq!(with.round(8 * BAR, most), 8 * BAR);
+        assert_eq!(with.round(3 * BAR, most), 12 * BAR);
+        assert_eq!(with.round(7 * BAR, most), 28 * BAR);
+        // Past 32 bars they'd take too long to meet: once through the longer.
+        assert_eq!(with.round(9 * BAR, most), 9 * BAR);
+        // As the matcher hears them, whatever the numbers.
+        assert_eq!(with.round(5 * BAR, most), mo_harmony::round_of(5 * BAR, 4 * BAR, BAR));
+        assert_eq!(with.round(0, most), 4 * BAR);
+        let empty = SongBars { length: 0, bar: 0, ..(*with).clone() };
+        assert_eq!(empty.round(0, most), 1);
+    }
+
+    /// A slow song: two minutes of sound is the most there is, and what's played stops on a bar line before it.
+    #[test]
+    fn in_a_slow_song_a_part_and_the_songs_bars_stop_on_a_bar_line_within_two_minutes() {
+        let with = fitted(&song(), None).unwrap().with;
+        // At 56 beats a minute two minutes are 28 bars: a round of 28 still fits.
+        assert_eq!(with.round(7 * BAR, 28 * BAR), 28 * BAR);
+        // A bar less room (or a tick less): as many times through the longer of the two as fit. The seven-bar part
+        // three times; a three-bar part's twelve bars don't fit in eleven, so the song's four twice.
+        assert_eq!(with.round(7 * BAR, 28 * BAR - 1), 21 * BAR);
+        assert_eq!(with.round(3 * BAR, 11 * BAR), 8 * BAR);
+        // Not even once through the longer: whole bars, as many as fit, and one at the least.
+        assert_eq!(with.round(16 * BAR, 10 * BAR + 5), 10 * BAR);
+        assert_eq!(with.round(2 * BAR, 3 * BAR + BAR / 2), 3 * BAR);
+        assert_eq!(with.round(2 * BAR, BAR / 2), BAR);
+    }
+
+    #[test]
+    fn the_card_says_what_a_part_plays_with_and_at_whose_tempo() {
+        let sound = mo_midi::gm::sound_for(Role::Melody, false, None, &[], None);
+        let with = fitted(&song(), None).unwrap().with;
+        assert_eq!(
+            with_song_line(&sound, "Night drive", &with),
+            "Saw Lead · for its kind of part · with Keys from Night drive (bars 9–12), at the song's 120 BPM"
+        );
+        // Parts with no names: what they are to the song. A tempo that isn't a whole number keeps a tenth.
+        let unnamed = SongBars { names: String::new(), tempo: Some(127.96), ..(*with).clone() };
+        assert_eq!(
+            with_song_line(&sound, "Night drive", &unnamed),
+            "Saw Lead · for its kind of part · with Night drive's chords (bars 9–12), at the song's 128 BPM"
+        );
+        let under = SongBars { wants: Wants::Chords, bars: 12..13, tempo: None, ..unnamed };
+        assert_eq!(
+            with_song_line(&sound, "Night drive", &under),
+            "Saw Lead · for its kind of part · with Night drive's melody (bar 13), at 120 BPM, as the song \
+             gives no tempo"
+        );
+    }
+
+    #[test]
     fn chords_that_cant_be_read_fall_back_to_the_melody_and_say_which_couldnt() {
         // However it comes about that a part's notes give nothing to read (here they're all muted, which a song
         // read from a save never has): the chords are there, but no target can be made of them.
@@ -786,9 +1116,28 @@ mod tests {
             [0, 1, -1, 5, -6].map(move_words),
             ["as it is", "1 semitone up", "1 semitone down", "5 semitones up", "6 semitones down"]
         );
-        let fit = |semitones, sits| Fit { entry: 0, semitones, sits };
+        // With octaves in it the move is still said in one go, one way.
+        assert_eq!(
+            [12, -24, 15, -13, -9, 11, 36].map(move_words),
+            [
+                "an octave up",
+                "2 octaves down",
+                "an octave and 3 semitones up",
+                "an octave and 1 semitone down",
+                "9 semitones down",
+                "11 semitones up",
+                "3 octaves up"
+            ]
+        );
+        let fit = |semitones, sits| Fit { entry: 0, semitones, octaves: 0, yours: None, edges: (60, 72), sits };
         assert_eq!(fit_text(&fit(0, 0.917)), "Fits 92% as it is");
         assert_eq!(fit_text(&fit(-2, 0.88)), "Fits 88%, 2 semitones down");
+        // The key's semitones and the octaves add up: 3 up and an octave down is 9 down.
+        let low = Fit { octaves: -1, ..fit(3, 0.71) };
+        assert_eq!((low.moved(), fit_text(&low)), (-9, "Fits 71%, 9 semitones down".to_owned()));
+        let high = Fit { octaves: 1, ..fit(0, 0.6) };
+        assert_eq!((high.moved(), fit_text(&high)), (12, "Fits 60%, an octave up".to_owned()));
+        assert_eq!(Fit { octaves: 2, ..fit(-6, 0.6) }.moved(), 18);
         // The score isn't held to 0 to 1; the words are.
         assert_eq!((fit(0, 1.07).percent(), fit(0, -0.2).percent()), (100, 0));
         assert_eq!(
@@ -826,16 +1175,169 @@ mod tests {
 
         // What the card and the DAW say about it.
         assert_eq!(
-            card_text(3, "Night drive"),
+            card_text(3, false, "Night drive"),
             "Moved 3 semitones up to fit Night drive: it plays, drags and goes to your DAW that way."
         );
         assert_eq!(
-            card_text(-1, "Glass"),
+            card_text(-1, false, "Glass"),
             "Moved 1 semitone down to fit Glass: it plays, drags and goes to your DAW that way."
         );
-        assert_eq!(card_text(0, "Glass"), "Fits Glass as it is: nothing is moved.");
+        assert_eq!(card_text(0, false, "Glass"), "Fits Glass as it is: nothing is moved.");
+        // At an octave you chose, the card says whose it is.
+        assert_eq!(
+            card_text(-9, true, "Glass"),
+            "Moved 9 semitones down to fit Glass, at the octave you chose: it plays, drags and goes to your DAW that way."
+        );
+        assert_eq!(card_text(0, true, "Glass"), "Fits Glass as it is, at the octave you chose: nothing is moved.");
         assert_eq!(moved_name("Arp clip", 3), "Arp clip (3 semitones up)");
         assert_eq!(moved_name("Arp clip", 0), "Arp clip");
+        // Moved to another octave as well, it's all said in one.
+        assert_eq!(
+            card_text(-9, false, "Glass"),
+            "Moved 9 semitones down to fit Glass: it plays, drags and goes to your DAW that way."
+        );
+        assert_eq!(moved_name("Sub line", -12), "Sub line (an octave down)");
+        assert_eq!(keys(&moved(part, -21)), [39, 43, 46]);
+    }
+
+    #[test]
+    fn a_part_found_goes_at_the_octave_its_kind_plays_at() {
+        // A pack's bassline on the chords' roots, in a bass's usual place: A2, D2, G2, C3.
+        let roots = |keys: [u8; 4]| -> Vec<NoteEvent> {
+            keys.iter().zip(0i64..).map(|(&k, bar)| note(bar * BAR, BAR, k)).collect()
+        };
+        let mut index = library();
+        index.add("mid bass", "D:/Packs/Bass/Bass 02.mid", Role::Bass, roots([45, 38, 43, 48]));
+        // And a tune 3 semitones up from the key and an octave down: its middle is 66.
+        let low: Vec<NoteEvent> = tune(3).into_iter().map(|n| NoteEvent { key: n.key - 12, ..n }).collect();
+        index.add("low tune", "D:/Packs/Leads/Lead 03.mid", Role::Melody, low);
+        let cat = Catalogue::new(index.phrases.clone());
+        let place = |hash: &str| cat.find(hash).unwrap();
+        let filters = Filters::default();
+        let fits = |song: &Song| {
+            let over = fitted(song, Some(Wants::Tune)).unwrap();
+            let looked = index.look(&over, &tried(&cat, &choice().own(&cat), &filters));
+            move |hash: &str| *looked.fits.iter().find(|f| f.entry == place(hash)).unwrap()
+        };
+
+        // A tune belongs by a tune's usual place (72), wherever the song's own lead is. The pack's tune is saved an
+        // octave under that (its middle is 65, and 63 moved into the key): it goes up, 2 semitones down for the key
+        // and an octave up.
+        let song = song();
+        let fit = fits(&song);
+        let registers = *fitted(&song, None).unwrap().target.registers();
+        assert_eq!((registers.of_kind(Role::Melody), registers.wanted(Role::Melody)), (Some(75.0), Some(72.0)));
+        let tune = fit("fits a tone down");
+        assert_eq!((tune.semitones, tune.octaves, tune.moved()), (-2, 1, 10));
+        assert_eq!(fit_text(&tune), format!("Fits {}%, 10 semitones up", tune.percent()));
+        // The song has no bass: the basslines are by a bass's usual place already (40), and stay.
+        assert_eq!((fit("bassline").octaves, fit("mid bass").octaves), (0, 0));
+
+        // The same chords over a sub bass an octave under that (its middle is 31): a bassline now belongs at 35.5.
+        // The pack's low one is there (34.5); the other (43) comes down an octave, to play where the sub does.
+        let with_sub = song_of(vec![lane("Keys", 8, &chords()), lane("Sub", 8, &roots([33, 26, 31, 36]))]);
+        let over = fitted(&with_sub, Some(Wants::Tune)).unwrap();
+        assert_eq!((over.pick.parts.clone(), over.target.registers().of_kind(Role::Bass)), (vec![0, 1], Some(31.0)));
+        let fit = fits(&with_sub);
+        assert_eq!(fit("bassline").octaves, 0);
+        let mid = fit("mid bass");
+        assert_eq!((mid.semitones, mid.octaves, mid.moved()), (0, -1, -12));
+        // A line comes with its part's lowest and highest key, for the octave buttons: back up is what's remembered.
+        assert_eq!(
+            (mid.edges, mid.yours, mid.octave_step(1), mid.octave_step(-1)),
+            ((38, 48), None, Some(0), Some(-2))
+        );
+        // A tune found goes up here too.
+        assert_eq!(fit("fits a tone down").octaves, 1);
+        // The octave goes by where the part is once it's in key: as saved, the low tune is just within half an
+        // octave of 72 (66); 3 semitones down for the key it's at 63, and goes up.
+        let low = fit("low tune");
+        assert_eq!((low.semitones, low.octaves, low.moved()), (-3, 1, 9));
+    }
+
+    #[test]
+    fn an_octave_you_chose_goes_in_place_of_the_apps() {
+        // A bassline saved from C3 to C4 that the app brings down an octave, 3 semitones up for the key.
+        let fit = Fit { entry: 0, semitones: 3, octaves: -1, yours: None, edges: (48, 60), sits: 0.8 };
+        assert_eq!((fit.octaves_now(), fit.moved()), (-1, -9));
+        // A step is from where it is now, whoever put it there, and is what's then remembered.
+        assert_eq!((fit.octave_step(1), fit.octave_step(-1)), (Some(0), Some(-2)));
+        assert_eq!((fit.octave_step(5), fit.octave_step(-5)), (Some(0), Some(-2)), "a step is one octave");
+        let yours = Fit { yours: Some(0), ..fit };
+        assert_eq!((yours.octaves_now(), yours.moved(), fit_text(&yours).as_str()), (0, 3, "Fits 80%, 3 semitones up"));
+        assert_eq!((yours.octave_step(1), yours.octave_step(-1)), (Some(1), Some(-1)));
+        // 3 octaves either way at the most: from there it only comes back.
+        let top = Fit { yours: Some(3), ..fit };
+        assert_eq!((top.octaves_now(), top.moved(), top.octave_step(1), top.octave_step(-1)), (3, 39, None, Some(2)));
+        let bottom = Fit { yours: Some(-3), ..fit };
+        assert_eq!((bottom.octaves_now(), bottom.octave_step(-1), bottom.octave_step(1)), (-3, None, Some(-2)));
+        // One chosen in the old app beyond that is held to 3.
+        assert_eq!(
+            (Fit { yours: Some(7), ..fit }.octaves_now(), Fit { yours: Some(-7), ..fit }.octaves_now()),
+            (3, -3)
+        );
+
+        // Never off the keyboard. A part whose lowest key is 10 is at 7 once it's 3 semitones down for the key: it
+        // has no octave under it to go to, and can go up.
+        let low = Fit { semitones: -3, octaves: 0, edges: (10, 40), ..fit };
+        assert_eq!((low.octave_step(-1), low.octave_step(1)), (None, Some(1)));
+        // The same at the top: its highest key, 2 up for the key, is 5 short of the last one.
+        let high = Fit { semitones: 2, octaves: 0, edges: (90, 120), ..fit };
+        assert_eq!((high.octave_step(1), high.octave_step(-1)), (None, Some(-1)));
+        // An octave chosen beside a song in another key (2 down) that has no room beside this one goes as far as
+        // there are keys: none here, one for a part that starts on key 14.
+        let chosen = Fit { yours: Some(-2), ..low };
+        assert_eq!((chosen.octaves_now(), chosen.moved()), (0, -3));
+        let wide = Fit { semitones: 0, edges: (14, 100), yours: Some(-3), ..fit };
+        assert_eq!((wide.octaves_now(), wide.octave_step(-1), wide.octave_step(1)), (-1, None, Some(0)));
+    }
+
+    #[test]
+    fn the_octave_you_chose_is_the_newest_said_else_the_one_the_catalogue_was_read_with() {
+        let mut index = library();
+        // The index has an octave for one of the parts (chosen before, here or in the old app).
+        let before = index.phrases.iter_mut().find(|p| p.hash == "bassline").unwrap();
+        before.your_octave = Some(-1);
+        let cat = Catalogue::new(index.phrases.clone());
+        let place = |hash: &str| cat.find(hash).unwrap();
+        let line =
+            |hash: &str| Fit { entry: place(hash), semitones: 0, octaves: 1, yours: None, edges: (60, 72), sits: 1.0 };
+        let mut fits = vec![line("bassline"), line("fits a tone down"), Fit { yours: Some(2), ..line("clashes") }];
+        let octaves =
+            |fits: &[Fit]| -> Vec<(Option<i32>, i32)> { fits.iter().map(|f| (f.yours, f.octaves_now())).collect() };
+
+        // Nothing said since: the index's choice for the first, the app's pick for the others (a choice a line was
+        // given before and that's no longer anyone's is taken from it).
+        let mut said = YourOctaves::default();
+        with_yours(&mut fits, &cat, &said);
+        assert_eq!(octaves(&fits), [(Some(-1), -1), (None, 1), (None, 1)]);
+        // What's said since goes over it: another octave for the first, one for the second.
+        said.set("bassline", Some(2));
+        said.set("fits a tone down", Some(0));
+        with_yours(&mut fits, &cat, &said);
+        assert_eq!(octaves(&fits), [(Some(2), 2), (Some(0), 0), (None, 1)]);
+        // Back to the app's pick, which the index's older choice doesn't undo.
+        said.set("bassline", None);
+        with_yours(&mut fits, &cat, &said);
+        assert_eq!(octaves(&fits), [(None, 1), (Some(0), 0), (None, 1)]);
+        // A line whose part the catalogue no longer has is left with the app's.
+        let mut gone = [Fit { entry: 9_999, yours: Some(1), ..line("clashes") }];
+        with_yours(&mut gone, &cat, &said);
+        assert_eq!(gone[0].yours, None);
+
+        // Drums are never moved by octaves (their notes pick pads): an octave kept for the same notes, from when
+        // they counted as another kind or from the old app, isn't theirs, whoever said it and when.
+        let drums = index.phrases.iter_mut().find(|p| p.hash == "scrap").unwrap();
+        (drums.your_role, drums.your_octave) = (Some(Role::Drums), Some(2));
+        let cat = Catalogue::new(index.phrases.clone());
+        let scrap = cat.find("scrap").unwrap();
+        assert_eq!(cat.entry(scrap).map(|e| e.role()), Some(Role::Drums));
+        let mut beat = [Fit { entry: scrap, semitones: 0, octaves: 0, yours: Some(1), edges: (36, 46), sits: 1.0 }];
+        with_yours(&mut beat, &cat, &said);
+        assert_eq!((beat[0].yours, beat[0].moved()), (None, 0));
+        said.set("scrap", Some(-1));
+        with_yours(&mut beat, &cat, &said);
+        assert_eq!((beat[0].yours, beat[0].moved()), (None, 0));
     }
 
     #[test]
@@ -858,6 +1360,7 @@ mod tests {
         assert_eq!(looked.fits.len(), 3);
         let best = looked.fits[0];
         assert_eq!((best.entry, best.semitones), (place("fits a tone down"), -2));
+        assert_eq!(best.moved(), best.semitones + 12 * best.octaves);
         assert!(best.percent() > 80, "{best:?}");
         let clashes = looked.fits.iter().find(|f| f.entry == place("clashes")).unwrap();
         assert!(clashes.sits < best.sits - 0.3, "{clashes:?}");
@@ -930,7 +1433,7 @@ mod tests {
         let nothing = Looked { looked: 1_234, ..Looked::default() };
         assert_eq!(result_text(&nothing), "None of 1,234 parts fits.");
         // A list cut to its length says of how many.
-        let fit = Fit { entry: 0, semitones: 0, sits: 1.0 };
+        let fit = Fit { entry: 0, semitones: 0, octaves: 0, yours: None, edges: (60, 72), sits: 1.0 };
         let cut = Looked { fits: vec![fit; MOST], looked: 212_345, ..Looked::default() };
         assert_eq!(result_text(&cut), "The 200 that fit best, of 212,345 parts tried");
     }
@@ -1068,8 +1571,9 @@ mod tests {
 
         // The first search reads the song and the slots, and gives the list with what it was fitted to.
         let first = search(&mut kept, &mut fake, &ask(None, 1), &pool, &go);
-        let Answer::Fits { wants, to, looked } = &first else { panic!("{first:?}") };
+        let Answer::Fits { wants, to, looked, with } = &first else { panic!("{first:?}") };
         assert_eq!((*wants, to.as_str()), (Wants::Tune, "To play over Keys, bars 9–12"));
+        assert_eq!((with.names.as_str(), with.bars.clone(), with.voices.len()), ("Keys", 8..12, 1));
         assert_eq!((looked.tried, looked.fits[0].entry, looked.fits[0].semitones), (3, place("fits a tone down"), -2));
         assert_eq!(page_line(to, looked), "To play over Keys, bars 9–12 · 3 parts, best fit first");
         assert_eq!(empty_words(&first), None);
@@ -1079,8 +1583,12 @@ mod tests {
         // The same again, and the other way: nothing is read again.
         assert_eq!(entries(&search(&mut kept, &mut fake, &ask(None, 1), &pool, &go)), entries(&first));
         let under = search(&mut kept, &mut fake, &ask(Some(Wants::Chords), 1), &pool, &go);
-        let Answer::Fits { wants, to, looked } = &under else { panic!("{under:?}") };
+        let Answer::Fits { wants, to, looked, with: with_tune } = &under else { panic!("{under:?}") };
         assert_eq!((*wants, to.as_str(), looked.fits.len()), (Wants::Chords, "Chords for Lead, bars 13–16", 0));
+        assert_eq!(
+            (with_tune.names.as_str(), with_tune.bars.clone(), with_tune.wants),
+            ("Lead", 12..16, Wants::Chords)
+        );
         // No lines: the list's place says why, and so does the line under the toolbar.
         let none = "No parts to try: the filters leave none of the right kind.";
         assert_eq!(empty_words(&under), Some(Empty { title: "No parts fit", text: none.to_owned(), filters: true }));
@@ -1177,7 +1685,8 @@ mod tests {
 
         // No lines: fewer filters could give some, unless what's missing is the index's slots (the MIDI has to be
         // read again first, whatever the filters).
-        let fits = |looked| Answer::Fits { wants: Wants::Tune, to: String::new(), looked };
+        let with = fitted(&super::tests::song(), None).unwrap().with;
+        let fits = |looked| Answer::Fits { wants: Wants::Tune, to: String::new(), looked, with: Arc::clone(&with) };
         let words = |looked| empty_words(&fits(looked)).map(|e| (e.title, e.text, e.filters));
         assert_eq!(
             words(Looked { looked: 12, not_ready: 3, ..Looked::default() }),

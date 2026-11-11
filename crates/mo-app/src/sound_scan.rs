@@ -6,12 +6,15 @@
 //! their size and time are listened to; renamed and moved ones keep everything you gave them; a folder on an unplugged
 //! drive keeps its sounds ([`scan::plan`]). It all runs off the window's thread, on the bulk pool at low priority
 //! (rule 21), a few sounds at a time, each few kept in one short write ([`grow`]).
+//!
+//! A file that couldn't be listened to is kept with why and left alone until it changes, or until the reader learns
+//! to read more ([`mo_audio::READS`]): then the next scan tries just those again, once, and notes it in the library.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use mo_library::scan::FoundFile;
+use mo_library::scan::{Found, FoundFile};
 use mo_sounds::compact::{self, grow};
 use mo_sounds::scan::{self, ScanPlan};
 use mo_sounds::{KnownSound, SoundsDb, analyse};
@@ -42,6 +45,15 @@ pub struct Scanned {
     pub unreadable: usize,
     /// Of those, how many were new files: they aren't counted as new sounds found.
     pub unheard_new: usize,
+    /// How many unchanged sounds that couldn't be listened to before were tried again, as the reader has learnt to
+    /// read more since ([`mo_audio::READS`]). They count in [`grow::Kept::updated`], but not in `unreadable`: that
+    /// they couldn't be read was known.
+    pub tried_again: usize,
+    /// Of those, how many could be listened to this time.
+    pub heard_now: usize,
+    /// Why the library couldn't note that its unread sounds were tried, when it couldn't: they're tried again at the
+    /// next scan, and nothing else is lost.
+    pub unnoted: Option<String>,
     /// How many sounds looked gone but weren't forgotten: too many at once ([`MOST_GONE`]).
     pub not_forgotten: usize,
     /// How long it took.
@@ -69,19 +81,59 @@ pub fn scan(sounds_db: &Path, folders: &[String], progress: &dyn Fn(usize, usize
     }
     let found = background::on_bulk_pool(|| scan::find_sounds(folders));
     let known = SoundsDb::open_read_only(&copy).and_then(|db| db.known_files()).map_err(|e| e.to_string())?;
-    let ScanPlan { listen, moves, forget } = scan::plan(&found, &known, folders);
+    let ScanPlan { mut listen, moves, forget } = scan::plan(&found, &known, folders);
     let mut scanned = Scanned { found: found.files.len(), ..Scanned::default() };
+    let again = try_again(&copy, &mut listen, &found, &moves, folders);
     let forget = if forget.len() > FEW_GONE && forget.len() as f64 > known.len() as f64 * MOST_GONE {
         scanned.not_forgotten = forget.len();
         Vec::new()
     } else {
         forget
     };
-    if let Err(why) = keep_all(sounds_db, &known, &listen, &moves, &forget, &mut scanned, progress) {
-        scanned.stopped = Some(why);
+    let to_do = ToDo { listen: &listen, moves: &moves, forget: &forget, again: again.as_ref().map(|a| &a.added) };
+    match keep_all(sounds_db, &known, &to_do, &mut scanned, progress) {
+        // Noted only once every one was tried: a scan stopped part way, or one with an unread sound on an unplugged
+        // drive, tries them again at the next. A note that can't be written costs only that.
+        Ok(()) => {
+            if again.is_some_and(|a| a.waiting == 0) {
+                scanned.unnoted = grow::note_unread_tried(sounds_db, scan::READS).err().map(|e| e.to_string());
+            }
+        }
+        Err(why) => scanned.stopped = Some(why),
     }
     scanned.took = began.elapsed();
     Ok(Some(scanned))
+}
+
+/// When the reader has learnt to read more since the sounds that couldn't be listened to were last tried
+/// ([`scan::READS`]), adds just those to `listen`, to be tried again, once. Sounds read fine before aren't touched
+/// (their size and time say they're the same). `None` when there's no need, or the library can't say just now: the
+/// scan goes on without, and the next one asks again.
+fn try_again(
+    copy: &Path,
+    listen: &mut Vec<FoundFile>,
+    found: &Found,
+    moves: &[(String, String)],
+    folders: &[String],
+) -> Option<scan::Again> {
+    if grow::unread_tried(copy).ok()?.unwrap_or(0) >= scan::READS {
+        return None;
+    }
+    let unread = SoundsDb::open_read_only(copy).and_then(|db| db.unread_files()).ok()?;
+    // One renamed or moved since is tried under its new name.
+    let now_at: HashMap<String, &String> = moves.iter().map(|(from, to)| (from.to_ascii_lowercase(), to)).collect();
+    let unread: Vec<String> =
+        unread.into_iter().map(|p| now_at.get(&p.to_ascii_lowercase()).map_or(p, |to| (*to).clone())).collect();
+    Some(scan::again(listen, found, &unread, folders))
+}
+
+/// What a scan has to do: [`ScanPlan`]'s parts, and the unread sounds tried again among `listen`, if any (in lower
+/// case, as [`scan::Again::added`] has them).
+struct ToDo<'a> {
+    listen: &'a [FoundFile],
+    moves: &'a [(String, String)],
+    forget: &'a [String],
+    again: Option<&'a HashSet<String>>,
 }
 
 /// Follows the moved and gone sounds, then listens to the new and changed ones a few at a time, each few kept in one
@@ -89,12 +141,12 @@ pub fn scan(sounds_db: &Path, folders: &[String], progress: &dyn Fn(usize, usize
 fn keep_all(
     sounds_db: &Path,
     known: &[KnownSound],
-    listen: &[FoundFile],
-    moves: &[(String, String)],
-    forget: &[String],
+    to_do: &ToDo<'_>,
     scanned: &mut Scanned,
     progress: &dyn Fn(usize, usize),
 ) -> Result<(), String> {
+    let ToDo { listen, moves, forget, again } = *to_do;
+    let again = again.filter(|a| !a.is_empty());
     if !moves.is_empty() || !forget.is_empty() {
         let followed = grow::follow(sounds_db, moves, forget).map_err(|e| e.to_string())?;
         scanned.kept.moved = followed.moved;
@@ -114,7 +166,15 @@ fn keep_all(
         scanned.kept.added += kept.added;
         scanned.kept.updated += kept.updated;
         scanned.listened.extend(listened.iter().map(|l| l.path.clone()));
-        for l in listened.iter().filter(|l| l.analysed.is_err()) {
+        for l in &listened {
+            if again.is_some_and(|a| a.contains(&l.path.to_ascii_lowercase())) {
+                scanned.tried_again += 1;
+                scanned.heard_now += usize::from(l.analysed.is_ok());
+                continue;
+            }
+            if l.analysed.is_ok() {
+                continue;
+            }
             scanned.unreadable += 1;
             let known = known_paths.get_or_insert_with(|| {
                 known
@@ -161,6 +221,16 @@ pub fn scanned_line(s: &Scanned) -> String {
     if s.unreadable > 0 {
         line.push_str(&format!("; {} couldn't be listened to", thousands(s.unreadable)));
     }
+    if s.tried_again > 0 {
+        line.push_str(&format!(
+            "; {} that couldn't be read before were tried again, {} can be read now",
+            thousands(s.tried_again),
+            thousands(s.heard_now)
+        ));
+    }
+    if let Some(why) = &s.unnoted {
+        line.push_str(&format!("; couldn't note that they were tried, so they will be again: {why}"));
+    }
     if s.not_forgotten > 0 {
         line.push_str(&format!(
             "; {} that look gone were left, as that's over half the library",
@@ -177,15 +247,25 @@ pub fn scanned_line(s: &Scanned) -> String {
 pub fn scanned_card(s: &Scanned) -> (String, String) {
     let k = &s.kept;
     // A file that couldn't be listened to isn't a sound found.
-    let title = match (k.added.saturating_sub(s.unheard_new), k.updated) {
-        (0, 0) => "Couldn't listen to your new sound files".to_owned(),
-        (0, _) => "Listened to your changed sounds".to_owned(),
-        (1, _) => "Found a new sound".to_owned(),
-        (n, _) => format!("Found {} new sounds", thousands(n)),
+    // Sounds tried again because the reader learnt more didn't change.
+    let changed = k.updated.saturating_sub(s.tried_again);
+    let title = match (k.added.saturating_sub(s.unheard_new), changed, s.tried_again) {
+        (0, 0, 0) => "Couldn't listen to your new sound files".to_owned(),
+        (0, 0, _) => "Tried the sounds that couldn't be read before".to_owned(),
+        (0, _, _) => "Listened to your changed sounds".to_owned(),
+        (1, _, _) => "Found a new sound".to_owned(),
+        (n, _, _) => format!("Found {} new sounds", thousands(n)),
     };
     let mut detail = Vec::new();
-    if k.updated > 0 {
-        detail.push(format!("{} changed, listened to again", thousands(k.updated)));
+    if changed > 0 {
+        detail.push(format!("{} changed, listened to again", thousands(changed)));
+    }
+    if s.tried_again > 0 {
+        detail.push(match s.heard_now {
+            0 => format!("{} still can't be read", thousands(s.tried_again)),
+            n if n == s.tried_again => format!("{} that couldn't be read before can be now", thousands(n)),
+            n => format!("{} of {} that couldn't be read before can be now", thousands(n), thousands(s.tried_again)),
+        });
     }
     if k.moved > 0 {
         detail.push(format!("{} moved", thousands(k.moved)));
@@ -239,6 +319,9 @@ mod tests {
             kept: grow::Kept { added: 1_204, updated: 3, moved: 12, forgotten: 2 },
             unreadable: 2,
             unheard_new: 1,
+            tried_again: 0,
+            heard_now: 0,
+            unnoted: None,
             not_forgotten: 0,
             took: Duration::from_millis(61_250),
             stopped: None,
@@ -272,6 +355,25 @@ mod tests {
             ..Scanned::default()
         };
         assert_eq!(scanned_card(&unheard).0, "Couldn't listen to your new sound files");
+        // Only sounds tried again with a reader that reads more.
+        let again = Scanned {
+            kept: grow::Kept { updated: 40, ..grow::Kept::default() },
+            tried_again: 40,
+            heard_now: 37,
+            ..Scanned::default()
+        };
+        assert_eq!(
+            scanned_card(&again),
+            (
+                "Tried the sounds that couldn't be read before".to_owned(),
+                "37 of 40 that couldn't be read before can be now.".to_owned()
+            )
+        );
+        assert!(
+            scanned_line(&again).ends_with("; 40 that couldn't be read before were tried again, 37 can be read now")
+        );
+        let none = Scanned { heard_now: 0, ..again.clone() };
+        assert_eq!(scanned_card(&none).1, "40 still can't be read.");
         // Stopped part way, and before anything was kept.
         let stopped = Scanned {
             kept: grow::Kept { added: 128, ..grow::Kept::default() },

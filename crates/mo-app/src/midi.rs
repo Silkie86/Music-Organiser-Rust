@@ -1092,12 +1092,10 @@ pub fn sound_line(sound: &mo_midi::gm::GmSound, tempo: Option<Tempo>) -> String 
 }
 
 /// A part's heard notes (muted ones left out) and how long it loops for, in ticks at [`mo_midi::PPQ`]: its bars, or
-/// to the end of the bar its last note starts in when that's later.
+/// to the end of the bar its last note starts in when that's later, and a note held a hair past the loop's end stops
+/// there. The part's clip, by the one rule a search judges it by too ([`mo_midi::analyser::clip_of`]).
 pub fn loop_notes(notes: &[NoteEvent], bars: i32) -> (Vec<NoteEvent>, i64) {
-    let heard: Vec<NoteEvent> = notes.iter().filter(|n| !n.muted && n.start >= 0).copied().collect();
-    let last_start = heard.iter().map(|n| n.start).max().unwrap_or(0);
-    let length = (i64::from(bars.max(1)) * BAR).max((last_start / BAR + 1) * BAR);
-    (heard, length)
+    mo_midi::analyser::clip_of(notes, i64::from(bars))
 }
 
 /// The C# app's settings in `library.db` the reading follows: the MIDI library folders (a JSON list), and "1" to
@@ -1198,14 +1196,19 @@ impl ReadProgress {
 /// The folder in the export folder where parts sent to Bitwig are written, as the C# MIDI page's.
 pub const EXPORT_SUBFOLDER: &str = "MIDI browser";
 
-/// A part as a MIDI clip for Bitwig: its heard notes (muted ones left out) at [`mo_midi::PPQ`], on one track named
-/// after it, lasting `bars` (or to its last note, if that's later), starting where its first bar starts.
+/// A part as a MIDI clip for a DAW (Send to Bitwig, Play in Bitwig, the drag): its heard notes (muted ones left out)
+/// at [`mo_midi::PPQ`], on one track named after it, starting where its first bar starts. It lasts whole bars: `bars`
+/// of them, by the same rule as the loop the app plays and a search judges ([`mo_midi::analyser::clip_of`]), so a
+/// last note held a hair over the last bar line stops at the line and the clip goes round on it in the DAW. (A file
+/// that ended a few ticks after the line would loop a few ticks late each time round, or come out a bar longer.)
 pub fn part_clip(name: &str, notes: &[NoteEvent], bars: i32) -> mo_formats::MidiClip {
     let heard: Vec<NoteEvent> = notes.iter().filter(|n| !n.muted).copied().collect();
     let first = heard.iter().map(|n| n.start).min().unwrap_or(0).min(0);
-    let moved: Vec<NoteEvent> = heard.into_iter().map(|n| NoteEvent { start: n.start - first, ..n }).collect();
-    let last = moved.iter().map(|n| n.start + n.length).max().unwrap_or(0);
-    let end = (i64::from(bars.max(1)) * BAR).max(last);
+    let moved: Vec<NoteEvent> =
+        heard.into_iter().map(|n| NoteEvent { start: n.start.saturating_sub(first), ..n }).collect();
+    // Notes moved later to start at the clip's start may fill more bars than the part's count: the clip has the
+    // bars they fill.
+    let (moved, end) = mo_midi::analyser::clip_of(&moved, i64::from(bars));
     let mut clip = mo_formats::MidiClip {
         name: name.to_owned(),
         ppq: u16::try_from(mo_midi::PPQ).unwrap_or(96),
@@ -1800,6 +1803,49 @@ pub(crate) mod tests {
         );
     }
 
+    /// One rule for a part's clip, however it leaves the page: the loop played here and in FL, the MIDI file dragged
+    /// and sent, and the length a search judges it over.
+    #[test]
+    fn a_parts_loop_its_midi_file_and_what_a_search_judges_are_one_clip() {
+        use mo_midi::analyser::{bars_of, clip_length};
+        let n = |start, length| NoteEvent {
+            start,
+            length,
+            key: 60,
+            velocity: 30_000,
+            muted: false,
+            step: false,
+            attribute: mo_formats::NoteAttribute::NONE,
+        };
+        let four: Vec<NoteEvent> = (0..8).map(|i| n(i * BAR / 2, BAR / 2)).collect();
+        // The last note held a hair over the fourth bar line: four bars, and the note stops at the line.
+        let mut over = four.clone();
+        over[7].length += 3;
+        // A grace note that starts in that hair: in the clip, which then has a fifth bar.
+        let mut grace = four.clone();
+        grace.push(n(4 * BAR + 1, 2));
+        // A muted bar first: a bar of the clip.
+        let mut led = vec![NoteEvent { muted: true, ..n(0, BAR) }];
+        led.extend(four.iter().map(|x| NoteEvent { start: x.start + BAR, ..*x }));
+        for (notes, bars) in [(&four, 4), (&over, 4), (&grace, 5), (&led, 5)] {
+            // The index's count of the part.
+            let counted = i32::try_from(bars_of(notes)).unwrap();
+            let (heard, length) = loop_notes(notes, counted);
+            let clip = part_clip("Part", notes, counted);
+            assert_eq!(length, bars * BAR);
+            assert_eq!((clip_length(notes), clip.end), (length, Some(length)));
+            assert_eq!(clip.tracks[0].1, heard);
+            assert!(heard.iter().all(|x| x.start + x.length <= length));
+            assert_eq!(fl_part(notes, counted, 120.0).length, length);
+        }
+        assert_eq!(part_clip("Part", &over, 4).tracks[0].1[7].length, BAR / 2);
+        // Notes moved later to start at the clip's start (one before tick 0) keep their lengths: the file has the
+        // bars they then fill.
+        let early = [n(-BAR / 4, BAR / 4), n(3 * BAR, BAR)];
+        let clip = part_clip("Part", &early, 4);
+        assert_eq!((clip.end, clip.tracks[0].1[1].length), (Some(5 * BAR), BAR));
+    }
+
     #[test]
     fn a_loop_is_its_bars_or_to_its_last_note() {
         let n = |start, muted| NoteEvent {
@@ -1815,6 +1861,9 @@ pub(crate) mod tests {
         assert_eq!((heard.len(), length), (1, 2 * BAR));
         assert_eq!(loop_notes(&[n(5 * BAR + 10, false)], 4).1, 6 * BAR);
         assert_eq!(loop_notes(&[], 0).1, BAR);
+        // A count smaller than the bars the notes fill doesn't cut them: the loop has the bars they fill.
+        let held = NoteEvent { length: 3 * BAR, ..n(0, false) };
+        assert_eq!(loop_notes(&[held], 2), (vec![held], 3 * BAR));
     }
 
     #[test]

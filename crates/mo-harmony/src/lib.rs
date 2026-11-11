@@ -39,5 +39,5 @@ pub use pitch::{PcSet, PerPitch, PitchClass};
 pub use spell::{Degree, Spelled, Tpc};
 pub use together::{
     Backing, KINDS, LineUp, MOST_SLOTS, Outline, SLOT_FULL, SLOTS_VERSION, Shares, Sits, Sitting, Slot,
-    TOGETHER_VERSION, WORTH_NAMES, WORTHS, own_bars, shares, sit, slots_of, slots_over,
+    TOGETHER_VERSION, WORTH_NAMES, WORTHS, own_bars, round_of, shares, sit, slots_of, slots_over,
 };

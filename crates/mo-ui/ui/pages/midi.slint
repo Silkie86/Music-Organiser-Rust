@@ -85,8 +85,9 @@ export struct PickedPart {
     others: [string],
     others-more: string,
     // Moved to fit a song ("Fits my song"): how ("Moved 3 semitones up to fit Night drive…"), which is how the roll
-    // and the chords show it and how it plays, drags and is sent; "" when it's as it is in the library. And whether
-    // that's a move at all (a part can fit as it is): the key and the chords then say which of the two they are.
+    // and the chords show it and how it plays, drags and is sent, and whether the octave is one you chose; "" when
+    // it's as it is in the library. And whether that's a move at all (a part can fit as it is): the key and the
+    // chords then say which of the two they are.
     fit: string,
     fit-moved: bool,
 }
@@ -134,6 +135,9 @@ export global MidiData {
     in property <[string]> fit-wants-words;
     callback fit-song-picked(string);
     callback fit-wants-picked(int);
+    // "Play with the song": Play loop plays a part found with the parts of the song it fits, at the song's tempo.
+    in property <bool> fit-with-song;
+    callback fit-with-song-toggled();
     // Said in the list's place while it has no lines of "Fits my song": it's looking, no part fits, or the search
     // couldn't be made ("" otherwise). And whether fewer filters could give it lines, so clearing them is offered.
     in property <string> fit-none-title;
@@ -184,6 +188,8 @@ export global MidiData {
     // Playing the picked part as a loop with a General MIDI sound matched to it: whether it plays, the sound and why
     // ("Electric Piano 1 · from its name: rhodes · 120 BPM"), what went wrong, and the key that plays or stops it.
     in property <bool> playing;
+    // Play loop plays the picked part with the song it's fitted to, not alone.
+    in property <bool> play-with-song;
     in property <string> sound-line;
     in property <string> play-note;
     in property <string> play-key;
@@ -213,6 +219,9 @@ export global MidiData {
     in property <bool> landed-picked;
     in property <[MidiFact]> facts;
     in property <[CardAction]> actions;
+    // A fitted part's octave buttons, under the line that says how it's moved: Octave down, Octave up, and The app's
+    // octave once the octave is one you chose. None for a part that isn't fitted to a song.
+    in property <[CardAction]> octave-actions;
     in property <[MenuItem]> menu;
     callback menu-chosen(string);
 }
@@ -534,6 +543,12 @@ component PartPanel inherits SidePanel {
         wrap: word-wrap;
         min-width: 0px;
     }
+    // The octave is the app's first guess: these move the part from where it is, and the app remembers.
+    if MidiData.octave-actions.length > 0: CardActions {
+        room: root.inside;
+        actions: MidiData.octave-actions;
+        chosen(id) => { MidiData.menu-chosen(id); }
+    }
     PianoRoll { }
     if MidiData.roll-keys > 0: RollChoices { }
     if MidiData.picked.roll-note != "": Text {
@@ -562,8 +577,10 @@ component PartPanel inherits SidePanel {
             main: true;
             width: max(self.min-width, buttons.cell);
             enabled: !MidiData.soundfont-missing || MidiData.playing;
-            text: MidiData.playing ? "Stop" : "Play loop";
-            tip: MidiData.playing ? "Stop the loop" : "Play the part round and round with a General MIDI sound matched to it";
+            text: MidiData.playing ? "Stop" : MidiData.play-with-song ? "Play with the song" : "Play loop";
+            tip: MidiData.playing ? "Stop the loop"
+                : MidiData.play-with-song ? "Play the part round and round with the parts of your song it fits, at the song's tempo"
+                : "Play the part round and round with a General MIDI sound matched to it";
             key: MidiData.play-key;
             clicked => { MidiData.play-toggled(); }
         }
@@ -821,6 +838,15 @@ export component MidiPage inherits Rectangle {
                         joined-right: i + 1 < MidiData.fit-wants-words.length;
                         clicked => { MidiData.fit-wants-picked(i); }
                     }
+                }
+            }
+            // How a part found is heard: with the song's parts it fits (lit), or alone.
+            if MidiData.fit-song != "": VerticalLayout {
+                alignment: center;
+                ToggleChip {
+                    text: "Play with the song";
+                    on: MidiData.fit-with-song;
+                    clicked => { MidiData.fit-with-song-toggled(); }
                 }
             }
             // Only the parts like this one: the shared chip, as on the other pages; a click shows them all again.
