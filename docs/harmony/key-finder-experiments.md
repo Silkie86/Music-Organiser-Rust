@@ -301,3 +301,21 @@ clear key leaning A minor.
   to ship version 5 now and check songs when a song page reads keys: before that step gives the Songs page this
   finder, version 5 is to be measured on his own songs, and songs given version 4's numbers (a second set beside the
   packs') if those suit them better.
+
+### Songs (2026-11-11)
+
+`theorybench songkeys` on Solomon's song library (18,940 projects, read in about 2 minutes on his PC): no song has a
+key typed, three names give one (mixes with no notes), and the keys named by the samples and loops inside a song are
+no answer key (often one sample among hundreds, or a drum one-shot named for its note; he changes keys and samples as
+he works). So it can only say how often each finder agrees with the old app (13,039 songs, 78% of them minor), which
+isn't known right either:
+
+| Old app's key | version 4 | version 5 | version 5, each pattern once |
+|---|---|---|---|
+| Every song | 49.0% | 51.5% | 55.0% |
+| Minor | 50.9% | 58.8% | 61.7% |
+| Major | 42.1% | 25.2% | 30.8% |
+
+On major songs version 5 gives the relative minor 16.6% of the time and the same home note in minor 10.4%: the pull
+to minor the rescale showed on major loops. With the public songs above (whole songs no better, stretches 8 to 22
+points worse), Solomon chose (2026-11-11) that songs read keys with version 4's numbers.
