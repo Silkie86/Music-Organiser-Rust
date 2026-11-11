@@ -182,6 +182,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if carried != Some(format!("{} (3 semitones up)", moved.title)) {
         return Err(format!("midi-fits.png: the best fit is dragged out as {carried:?}, not moved").into());
     }
+    // A part that goes to another octave as well (the flute hook: 5 up for the key and an octave down) goes out
+    // with the whole move.
+    let carried = |row| mo_ui::midi::card_at_row(&app, row).and_then(|c| c.cards.first().map(|c| c.title.clone()));
+    let lines = usize::try_from(midi.get_shown()).unwrap_or(0);
+    if !(0..lines)
+        .filter_map(carried)
+        .any(|title| title.starts_with("Flute hook") && title.ends_with("(7 semitones down)"))
+    {
+        return Err("midi-fits.png: no part of the list is dragged out moved to another octave".into());
+    }
     // The song saved again (the Songs page gives its list again): the list follows it, by its saves.
     if !mo_ui::midi::fit_sample_follows(&app) || midi.get_shown() == 0 {
         return Err("midi-fits.png: the list didn't follow its song when the songs were given again".into());

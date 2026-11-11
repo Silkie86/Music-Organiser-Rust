@@ -1311,6 +1311,13 @@ fn key_order(s: &Sound) -> i32 {
 /// The setting Hide duplicates is kept in, in the app's own settings ("on" or "off").
 pub const HIDE_COPIES_KEY: &str = "sounds_hide_duplicates";
 
+/// The setting Trim silence is kept in, in the app's own settings ("on" or "off"): when it's on, a sound plays
+/// without the silence at its start and end (`mo_audio::trim`); the file is never changed.
+pub const TRIM_SILENCE_KEY: &str = "sounds_trim_silence";
+/// The setting the level Trim silence counts as silence is kept in: dB below full scale, one of
+/// `mo_audio::trim::LEVELS_DB` ("-60").
+pub const TRIM_LEVEL_KEY: &str = "sounds_trim_level_db";
+
 /// The page's view as you left it ("Tiles", "List", "Galaxy"...), whether Autoplay is on ("1" or "0") and how many
 /// sounds Rediscover digs out: kept in the app's own settings as you change them (never in `library.db`), and until
 /// you have, the C# app's own under the same names (`crate::app_settings::FROM_CSHARP`, review G-3).

@@ -112,10 +112,23 @@ pub struct Note {
     pub velocity: u8,
 }
 
+/// A stretch of a piece needs this many notes to count: in its tune, and in its accompaniment (or any other part).
+/// The same for every measure that cuts pieces into stretches (`pairs`, `octave`), so they count the same ones.
+pub const LEAST_TUNE: usize = 8;
+pub const LEAST_BACKING: usize = 16;
+
 impl Item {
     /// Ticks in a bar.
     pub fn bar(&self) -> i64 {
         i64::from(self.beats_per_bar.max(1)) * i64::from(self.ppq.max(1))
+    }
+
+    /// Where its stretches of `bars` bars start, one after another from its first bar line, each wholly within the
+    /// piece: how `pairs` and `octave` cut one up ([`cut`] gives a stretch's notes).
+    pub fn stretch_starts(&self, bars: i64) -> impl Iterator<Item = i64> + '_ {
+        let length = bars * self.bar();
+        let origin = self.grid_origin();
+        (0..).map(move |n| origin + n * length).take_while(move |from| length > 0 && from + length <= self.length)
     }
 
     /// The notes of the parts whose role passes `keep`, in order of start.

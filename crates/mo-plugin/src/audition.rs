@@ -12,7 +12,7 @@
 use crate::threads::lock;
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// The longest stretch of a sound that is read to play: a long loop plays its first minute.
@@ -210,9 +210,31 @@ pub struct Player {
     /// How many sounds were handed to the audio thread.
     handed: AtomicU64,
     counts: Arc<Counts>,
+    /// Trim silence: the level (dB below full scale, `mo_audio::trim::LEVELS_DB`) under which a sound's start and end
+    /// count as silence and aren't played; 0 while it's off.
+    trim_db: AtomicI32,
 }
 
 impl Player {
+    /// Turns Trim silence on at `db` below full scale (one of `mo_audio::trim::LEVELS_DB`), or off (`None`). It counts
+    /// from the next sound read.
+    pub fn set_trim(&self, db: Option<i32>) {
+        self.trim_db.store(db.unwrap_or(0), Ordering::Release);
+    }
+
+    /// Trim silence's level in dB below full scale, while it's on.
+    pub fn trim(&self) -> Option<i32> {
+        match self.trim_db.load(Ordering::Acquire) {
+            0 => None,
+            db => Some(db),
+        }
+    }
+
+    /// Trim silence's level as a sample's size, while it's on.
+    fn trim_level(&self) -> Option<f32> {
+        self.trim().map(mo_audio::trim::level_of_db)
+    }
+
     /// The DAW starts the track's audio at `rate` samples a second: the audio thread's side, to give the DAW.
     pub fn start(&self, rate: u32) -> Playing {
         let (asks_in, asks) = RingBuffer::new(4);
@@ -311,16 +333,32 @@ impl Player {
 
     /// The sound ready to play from the pick's spot. `audio` is the file read from its start; a spot past what was
     /// read (over a minute into a long file) is read from there instead, where the file's kind can be.
-    fn voice_from(&self, pick: &Pick, audio: mo_audio::AudioData, rate: u32) -> Result<Voice, String> {
-        match start(pick.from, audio.channels.first().map_or(0, Vec::len), audio.file_seconds, audio.sample_rate) {
-            Start::Within(part) => Ok(Voice::new(&audio.channels, audio.sample_rate, rate).from(part)),
+    fn voice_from(&self, pick: &Pick, mut audio: mo_audio::AudioData, rate: u32) -> Result<Voice, String> {
+        let read = audio.channels.first().map_or(0, Vec::len);
+        match start(pick.from, read, audio.file_seconds, audio.sample_rate) {
+            // Trim silence: the spot still counts into the whole sound; the play starts past the silence at the
+            // start (or at the spot, when that's later) and ends with the sound.
+            Start::Within(part) => match self
+                .trim_level()
+                .and_then(|level| mo_audio::trim::play_span(&audio, (part * read as f64).round() as usize, level))
+            {
+                Some((first, end)) => {
+                    audio.keep(first, end);
+                    Ok(Voice::new(&audio.channels, audio.sample_rate, rate))
+                }
+                None => Ok(Voice::new(&audio.channels, audio.sample_rate, rate).from(part)),
+            },
             Start::Past(_) if !mo_audio::can_read_from(&pick.path) => {
                 Err("Only the first minute of this kind of file plays".into())
             }
             Start::Past(frame) => {
                 drop(audio);
-                let later = mo_audio::read_from(&pick.path, MOST_SECONDS, frame)
+                let mut later = mo_audio::read_from(&pick.path, MOST_SECONDS, frame)
                     .map_err(|e| format!("Couldn't read from there: {e}"))?;
+                // A spot picked past the first minute plays from there: only the silence at the end is cut.
+                if let Some(level) = self.trim_level() {
+                    later.cut_end_silence(level);
+                }
                 Ok(Voice::new(&later.channels, later.sample_rate, rate))
             }
         }
@@ -394,6 +432,31 @@ mod tests {
         assert_eq!(l, vec![0.3 * LEVEL, 0.4 * LEVEL, 0.0]);
         // The very end plays nothing, and doesn't run past the sound.
         assert!(Voice::new(&[vec![0.1; 4]], 48_000, 48_000).from(1.0).done());
+    }
+
+    fn pick(from: f32) -> Pick {
+        Pick { path: PathBuf::new(), from, number: 1, told: Box::new(|_| {}) }
+    }
+
+    #[test]
+    fn trim_silence_skips_the_quiet_start_and_end_and_a_spot_still_counts_into_the_whole_sound() {
+        let mut s = vec![0.0; 100];
+        s[20..50].fill(0.5);
+        let audio =
+            mo_audio::AudioData { sample_rate: 1_000, channels: vec![s], file_seconds: 0.1, ..Default::default() };
+        let player = Player::default();
+        // Off: the whole sound.
+        assert_eq!(player.voice_from(&pick(0.0), audio.clone(), 1_000).unwrap().left.len(), 100);
+        player.set_trim(Some(-60));
+        // From the start: from the first loud frame to the end of the sound and its 10 ms tail.
+        let v = player.voice_from(&pick(0.0), audio.clone(), 1_000).unwrap();
+        assert_eq!((v.left.len(), v.left[0]), (40, 0.5));
+        // A spot in the sound plays from there; one in the quiet end plays as asked.
+        assert_eq!(player.voice_from(&pick(0.3), audio.clone(), 1_000).unwrap().left.len(), 30);
+        let v = player.voice_from(&pick(0.8), audio.clone(), 1_000).unwrap();
+        assert_eq!((v.left.len(), v.at), (100, 80));
+        player.set_trim(None);
+        assert_eq!(player.voice_from(&pick(0.0), audio, 1_000).unwrap().left.len(), 100);
     }
 
     #[test]

@@ -671,6 +671,32 @@ ported in `src/pairs.rs` as it was).
 
 What was tried and what it found: `docs/harmony/together-experiments.md`.
 
+## The octave a part goes at (`octave`)
+
+```
+cargo run -p mo-theorybench -- octave path/to/bench/pop909cl.jsonl
+cargo run -p mo-theorybench -- octave path/to/bench/pop909cl.jsonl --bars 4
+```
+
+`octave` measures the rule that picks the octave of a part found for a song (`mo_midi::fit::octave`), beside the C#
+app's (`HarmonyMatch.OctavesFor`, ported in `src/octave.rs` as it was).
+
+- **The music.** The pieces `pairs` takes (4/4, bar lines on the grid), every pitched part of each (a tune, an
+  accompaniment, a bass; no drums), cut into `pairs`' stretches of `--bars` bars (8) from the first bar line
+  (`Item::stretch_starts`). A stretch counts with at least 8 notes in a tune and 16 in anything else. Folds 1 to 4
+  unless `--folds` says; fold 0 is kept back, and each look at it is a line in `test-runs.md`.
+- **What is asked.** Each stretch is taken as a part found for the rest of its song, and the rule says how many
+  octaves to move it. None is right: that's where its writer had it. One octave out and further are counted too.
+  It's asked twice: beside the song's other kinds of part only (as if the song had no part of this kind), and beside
+  all the rest of the song where that has another part of the kind (POP909-CL's songs have two tunes). There it
+  prints the app's rule (`Registers::octaves_for`) and, beside it, the usual place alone, half-way to the song's
+  other part of the kind, and all the way to it.
+- **The C# app's rule** is ported as it was: a part's centre is its keys' average by each note's length (8 beats at
+  the most), a song's register for a kind is the average of its parts' centres (the lowest for a bass), and a half
+  rounds to the even number.
+- **Nothing is fitted.** The rule's numbers are the C# app's or picked by hand; the results are in
+  `docs/harmony/together-experiments.md`, "The octave a part found goes at".
+
 ## The C# baseline on POP909 (2026-10-31)
 
 Keys, 8-bar clips (8,850 clips from 909 songs): the C# app is right 77.7% of the time (76.0 to 79.3), MIREX 83.2;
