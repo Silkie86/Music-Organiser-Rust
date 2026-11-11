@@ -294,6 +294,15 @@ place, 71.4% half-way, 64.4% by the song's other tune (the C# app 63.2% and 54.2
   count with a throwaway script over all 906 songs, the kept-back fold among them, which is where the 58 came from;
   nothing was fitted.
 
+**What's judged is what's dropped** (2026-11-11). The search hears a found part over its clip: its bars as the
+index counts them (`mo_midi::analyser::clip_length`: from its first bar line, muted notes too, a last note that
+hangs up to a hundredth of a bar over a line not making a bar), which is what the app plays, drags and sends.
+Before, it went from the bar of the part's first note to the bar its last note ended in, so a 4-bar part with a
+last note a hair long was judged as 5 bars and heard as 4, drifting a bar against the song each time round. Both
+looks and both ways round use the clip now (`fit::slots_of`, `Target::fit`, `chart::backing`), and the index makes
+its slots again (`SLOTS_ASKING` 2). No measure here moves: they call `mo_harmony` on stretches cut on bar lines,
+not this.
+
 ## What it doesn't know yet
 
 - **A song that isn't in 4/4.** The library's parts are all read as 4/4. Over such a song's chords a part found goes
@@ -301,18 +310,11 @@ place, 71.4% half-way, 64.4% by the song's other tune (the C# app 63.2% and 54.2
   search, the close look re-barred it to the song's bars, which the first look couldn't follow). Whether a part
   from a 4/4 pack is wanted in a waltz at all isn't measured: no measure set has such songs.
 
-- **How long a loop from the library is.** A part's length isn't saved with it, so a found part still goes round
-  from its first note's bar to its last note's: a four-bar loop that rests in its last bar is heard as three bars.
+- **How long a loop from the library is.** A part's length isn't saved with it, so a found part goes round by the
+  bars its notes take: a four-bar loop that rests in its last bar is heard as three bars (and is a three-bar clip
+  when it's dropped: what's judged and what's played agree, both a bar short).
   Rounding up to 1, 2, 4, 8 or 16 bars is the likely fix; Solomon's packs' chord and melody pairs (below) are where
   to count whether it helps before it ships.
-- **What's judged isn't always what's dropped.** The search hears a found part from its first note's bar to the end
-  of the bar its last note ends in (`own_bars`). The clip the app plays, drags and sends starts at the part's first
-  bar line and lets a last note hang a hundredth of a bar over (`mo_midi::analyser::bars_of`, then
-  `mo_app::midi::loop_notes`). They're the same for most parts. A part with an empty bar before its first note, or a
-  last note a tick past a bar line, is judged over one loop and heard over another, a bar apart, and playing a part
-  with the song (`midi_fits::SongBars`) plays the clip as dropped. The fix is in the matcher and the kept slots (one
-  length rule for both, new `SLOTS_VERSION` and `TOGETHER_VERSION`, measured again); not counted yet how many parts
-  it touches.
 - **Only pop was measured.** Jazz, gospel and blues are held by the two rules and nine hand cases
   (`together::tests`), not by data. A set with real jazz tunes over real voicings would settle how much the rules
   cost or win there.
