@@ -208,7 +208,12 @@ final class FakeBitwig {
     private String layoutNow;
     private boolean timelineShown;
     private boolean launcherShown;
-    private double playStartAt;
+    double playStartAt;
+    /** The arranger's loop (extension 3.22): where it starts and how long it is now, in beats, and as the extension reads them. */
+    double loopStartAt;
+    double loopLengthAt;
+    final Value loopStart;
+    final Value loopLength;
     /** The panel with the focus: LAUNCHER, TIMELINE, or "" for another. */
     String focus;
     /** The launcher slot selected, as {track, scene}, or null. */
@@ -429,6 +434,20 @@ final class FakeBitwig {
                 if (!model.playStartIgnored) playStartAt = Math.max(0, ((Number) v).doubleValue());
             });
         });
+        loopStartAt = model.loopStart;
+        loopLengthAt = model.loopLength;
+        loopStart = new Value(SettableBeatTimeValue.class, loopStartAt, v -> {
+            calls.add(Arrays.asList("loopStart", v));
+            later(20, () -> {
+                if (!model.settingsIgnored.contains("arrangerLoopStart")) loopStartAt = Math.max(0, ((Number) v).doubleValue());
+            });
+        });
+        loopLength = new Value(SettableBeatTimeValue.class, loopLengthAt, v -> {
+            calls.add(Arrays.asList("loopLength", v));
+            later(20, () -> {
+                if (!model.settingsIgnored.contains("arrangerLoopDuration")) loopLengthAt = Math.max(0, ((Number) v).doubleValue());
+            });
+        });
         builtIn.put(SAMPLER, device("Sampler").id(SAMPLER).kind("note_to_audio").param("TRANSPOSE", 0));
         builtIn.put(NOTE_TRANSPOSE, device("Note Transpose").id(NOTE_TRANSPOSE).kind("note_to_note").param("COARSE", 0));
         if (model.drumMachine != null) {
@@ -482,6 +501,13 @@ final class FakeBitwig {
 
     /** Tells the extension about changes a test made to `state` itself. */
     void refresh() {
+        sync();
+    }
+
+    /** You press Stop in Bitwig: it stops playing; Stop while it's stopped moves the play start to the beginning. */
+    void pressStop() {
+        if (playingNow) stopPlaying();
+        else playStartAt = 0;
         sync();
     }
 
@@ -1005,6 +1031,8 @@ final class FakeBitwig {
         timeline.v = timelineShown;
         launcher.v = launcherShown;
         playStart.v = playStartAt;
+        loopStart.v = loopStartAt;
+        loopLength.v = loopLengthAt;
         Arranged selectedClip = state.arrangerSelected;
         arrangerClip.present.v = selectedClip != null;
         arrangerClip.colour.show(selectedClip == null ? null : selectedClip.colour());
@@ -1194,6 +1222,9 @@ final class FakeBitwig {
         boolean launcher = true;
         /** Where the play start is at first, in beats. */
         double playStart;
+        /** The arranger's loop at first: where it starts and how long it is, in beats (whether it's on is in `transport`). */
+        double loopStart;
+        double loopLength = 16;
         /** How long a launch, or Play, takes to start Bitwig playing, in ms (the record job looks every 25 ms). */
         long startDelay = 20;
         /** How long Bitwig takes to make a clip from a file put in a launcher slot, in ms (longer from a cold disk). */
@@ -1276,7 +1307,10 @@ final class FakeBitwig {
             transport.put("preRoll", "one_bar");
             transport.put("defaultLaunchQuantization", "1/4");
         }
-        /** What Bitwig ignores when the extension sets it: the transport's (by the API's names), "tempo" or "masterMute". */
+        /**
+         * What Bitwig ignores when the extension sets it: the transport's (by the API's names; "arrangerLoopStart" and
+         * "arrangerLoopDuration" too), "tempo" or "masterMute".
+         */
         final Set<String> settingsIgnored = new HashSet<>();
         /** Whether the master track is muted at first. */
         boolean masterMuted;
@@ -2333,7 +2367,10 @@ final class FakeBitwig {
             return clipName;
         }
 
-        /** Launched with options (extension 3.17 launches the Playground's clips "synced"): recorded, then launched as above. */
+        /**
+         * Launched with options (extension 3.17 launches the Playground's clips "synced"; 3.22 a part with its song's
+         * bars at once, from its start): recorded, then launched as above.
+         */
         void launchWithOptions(String quantization, String mode) {
             calls.add(Arrays.asList("launchWithOptions", track, scene, quantization, mode));
             FakeBitwig.this.launch(track, scene);
@@ -3137,6 +3174,15 @@ final class FakeBitwig {
 
             Value playStartPosition() {
                 return playStart;
+            }
+
+            // Extension 3.22.
+            Value arrangerLoopStart() {
+                return loopStart;
+            }
+
+            Value arrangerLoopDuration() {
+                return loopLength;
             }
 
             // Extension 3.9.

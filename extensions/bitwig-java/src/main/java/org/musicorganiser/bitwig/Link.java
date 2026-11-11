@@ -254,6 +254,13 @@ final class Link {
     private static final Set<Object> STOPS_AFTER_CLOSE = Set.of("stoptracks", "deleteclip", "deletetrack");
     /** The tracks made for auditions (`newtrack` with `audition`, extension 3.20), by ID, with the name each came in with. */
     private final Map<String, String> auditionTracks = new HashMap<>();
+    /** Whether the arranger's loop could be read and set (extension 3.22). */
+    private boolean loops;
+    /**
+     * The song's bars the arranger goes round while audition clips play with them (`clip` with `loop`, extension 3.22), or
+     * null when none does: see SongLoop.
+     */
+    private SongLoop songLoop;
     private final DeviceBank[] trackDevices = new DeviceBank[MAX_TRACKS];
     /** Where things go on each track: the start and end of its device chain. */
     private final InsertionPoint[] trackStarts = new InsertionPoint[MAX_TRACKS];
@@ -414,6 +421,9 @@ final class Link {
         // track made with newtrack's "audition" is noted, and deletetrack takes out only a track so noted, while it still
         // has the name it came in with, so it can never delete a track of yours.
         commands.put("deletetrack", Command.job(this::deleteTrack));
+        // Extension 3.22: clip takes "loop" (with "launch" and "audition"), for a part found for a song to play with the
+        // song's bars going round: Bitwig stops, the arranger loops the bars, and the clip starts with the first of them.
+        // deleteclip puts the loop and the play start back as they were found.
     }
 
     // ---- Starting and stopping ----
@@ -448,6 +458,17 @@ final class Link {
             followed = true;
         }, () -> "Bitwig is at beat " + Json.number(transport.playPosition().get()) + ", and Play starts at beat "
                  + Json.number(transport.playStartPosition().get()) + ".");
+
+        // For clip's "loop" (extension 3.22): the arranger's loop, which a part played with its song's bars sets and
+        // the link puts back.
+        feature("arranger loop", () -> {
+            transport.isArrangerLoopEnabled().markInterested();
+            transport.arrangerLoopStart().markInterested();
+            transport.arrangerLoopDuration().markInterested();
+            loops = true;
+        }, () -> "The arranger's loop is " + (transport.isArrangerLoopEnabled().get() ? "on" : "off") + ", from beat "
+                 + Json.number(transport.arrangerLoopStart().get()) + " for " + Json.number(transport.arrangerLoopDuration().get())
+                 + " beats.");
 
         // The track and device selected in Bitwig.
         feature("cursor track", () -> {
@@ -814,6 +835,8 @@ final class Link {
             stopping.emergency();
             stopping.done = true;
         }
+        // Nor do a song's bars stay looped for a part the link can no longer take out: put back, as far as can be.
+        loopLeft();
         for (Client client : clients) client.open = false;
         clients.clear();
         jobs.clear();
@@ -1874,26 +1897,78 @@ final class Link {
     /**
      * Puts a file (a MIDI file, or audio) in one of a track's clip launcher slots: the one given, or the first
      * empty one, and answers once Bitwig has made the clip. The track is `track`, or (extension 3.9) the one with ID `trackId`.
+     *
+     * With `loop` (`start` and `length` in beats; extension 3.22, only with `launch` and `audition`), the part plays with
+     * its song's bars: Bitwig stops if it's playing, the arranger loops the bars with Play starting at the first of them,
+     * and the clip is launched from its own start, which starts Bitwig there. What the link found (the loop on or off, its
+     * start and length, and the play start) is kept until `deleteclip` takes the clip out, and put back then.
      */
     private void addClip(Map<String, Object> request, Finish finish) {
+        // Everything that can be refused is, before anything changes.
+        int t = requestedTrack(request);
+        given(field(request, "path"), "file");
+        clipSlot(request, t);
+        double[] bars = loopAsked(request);
+        if (bars == null) {
+            putClip(request, false, finish);
+            return;
+        }
+        if (idOf(t).isEmpty()) throw new LinkError("Bitwig hasn't said that track's ID, so the link couldn't take the part out again.");
+        // Whatever stops the change from here, the loop goes back as it was found (see loopFailed).
+        Finish guarded = (result, error) -> {
+            if (error != null) loopFailed();
+            finish.done(result, error);
+        };
+        Runnable loop = () -> attempt(() -> {
+            setLoop(bars[0], bars[1]);
+            waitFor(() -> loopNotSet().isEmpty(), CHANGE_WAIT, set -> {
+                if (!set) throw new LinkError("Bitwig didn't set its loop to the song's bars (" + String.join(", ", loopNotSet()) + ").");
+                putClip(request, true, guarded);
+            }, guarded);
+        }, guarded);
+        // Stopped first, so Play starts at the first of the bars with the part. Stop while Bitwig is stopped already would
+        // move your play start to the beginning, so only while it plays.
+        if (!transport.isPlaying().get()) {
+            loop.run();
+            return;
+        }
+        transport.stop();
+        waitFor(() -> !transport.isPlaying().get(), CHANGE_WAIT, stopped -> {
+            if (!stopped) throw new LinkError("Bitwig didn't stop playing, so the link couldn't start it at the song's bars.");
+            loop.run();
+        }, guarded);
+    }
+
+    /** The slot a `clip` request's file goes in on the track at `t`: the one it names, or the first empty one. */
+    private int clipSlot(Map<String, Object> request, int t) {
+        boolean replace = flag(request, "replace", false);
+        if (replace && absent(field(request, "slot"))) throw new LinkError("Say which slot's clip to replace.");
+        ClipLauncherSlot[] slots = trackSlots[t];
+        Object s = field(request, "slot");
+        if (!absent(s)) {
+            if (!isIndex(s, SCENES))
+                throw new LinkError("The app can reach the first " + SCENES + " clip slots on a track, not slot " + Json.js(s) + ".");
+            int index = index(s);
+            if (slots[index].hasContent().get() && !replace) throw new LinkError("Slot " + index + " on that track already has a clip.");
+            return index;
+        }
+        int index = emptySlot(slots);
+        if (index < 0) throw new LinkError("The track's first " + SCENES + " clip slots are full.");
+        return index;
+    }
+
+    /**
+     * The file of a `clip` request into its slot, and launched when asked: `looping` when the arranger has just been set
+     * to go round the song's bars for it (see addClip).
+     */
+    private void putClip(Map<String, Object> request, boolean looping, Finish finish) {
         int t = requestedTrack(request);
         String path = given(field(request, "path"), "file");
         boolean replace = flag(request, "replace", false);
         boolean launch = flag(request, "launch", false);
         boolean audition = flag(request, "audition", false);
-        if (replace && absent(field(request, "slot"))) throw new LinkError("Say which slot's clip to replace.");
         ClipLauncherSlot[] slots = trackSlots[t];
-        Object s = field(request, "slot");
-        int index;
-        if (!absent(s)) {
-            if (!isIndex(s, SCENES))
-                throw new LinkError("The app can reach the first " + SCENES + " clip slots on a track, not slot " + Json.js(s) + ".");
-            index = index(s);
-            if (slots[index].hasContent().get() && !replace) throw new LinkError("Slot " + index + " on that track already has a clip.");
-        } else {
-            index = emptySlot(slots);
-            if (index < 0) throw new LinkError("The track's first " + SCENES + " clip slots are full.");
-        }
+        int index = clipSlot(request, t);
         // A replaced clip is there all along, so it's the clip's name that changes (the app names each file it swaps in
         // differently from the one before, extension 3.17).
         String before = replace ? str(slots[index].name().get()) : "";
@@ -1922,15 +1997,181 @@ final class Link {
                 String name = str(trackSlots[now][index].name().get());
                 if (!tid.isEmpty() && !name.isEmpty()) auditionClips.put(tid + "#" + index, name);
             }
-            if (launch) {
-                if (now < 0) throw new LinkError("The track went before its clip could be launched.");
+            if (!launch) {
+                finish.ok(m);
+                return;
+            }
+            if (now < 0) throw new LinkError("The track went before its clip could be launched.");
+            m.put("launched", true);
+            if (!looping) {
                 // In step with the song (extension 3.17): a swapped clip carries on from where Bitwig is, not from its own
                 // start, so it stays with the parts that didn't change.
                 trackSlots[now][index].launchWithOptions("default", "synced");
-                m.put("launched", true);
+                finish.ok(m);
+                return;
             }
+            // With its song's bars (extension 3.22): from its own start and at once, as Bitwig starts at the first of
+            // them, so the part's first bar is the bars' first, as the app judged the two.
+            SongLoop loop = songLoop;
+            if (loop == null) throw new LinkError("The link lost the loop it set for the song's bars.");
+            loop.clips.add(idOf(now) + "#" + index);
+            trackSlots[now][index].launchWithOptions("none", "from_start");
+            m.put("looping", true);
+            watchStart(loop);
             finish.ok(m);
         }, finish);
+    }
+
+    // ---- A part played with its song's bars (extension 3.22) ----
+
+    /**
+     * The bars a `clip` asks the arranger to go round (`loop`: `start` and `length`, in beats), or null when it asks for
+     * none. Only a clip the app plays and takes out again (`launch` and `audition`) can loop them: the loop is put back
+     * when that clip comes out.
+     */
+    private double[] loopAsked(Map<String, Object> request) {
+        Object asked = field(request, "loop");
+        if (absent(asked)) return null;
+        Map<String, Object> bars = asMap(asked);
+        if (bars == null) throw new LinkError("The bars to loop are a start and a length in beats, not " + Json.js(asked) + ".");
+        double start = beats(field(bars, "start"), "The loop's start", false);
+        double length = beats(field(bars, "length"), "The loop's length", true);
+        if (!flag(request, "launch", false) || !flag(request, "audition", false))
+            throw new LinkError("Only a part the app plays and takes out again (launch and audition) can loop the song's bars.");
+        if (!loops || !followed) throw new LinkError("This Bitwig didn't let the link set the arranger's loop. A selftest says why.");
+        return new double[] {start, length};
+    }
+
+    /**
+     * What a part played with its song's bars sets, in the order it sets them and puts them back: the play start last, so
+     * nothing set after it can move it.
+     */
+    private List<Setting> loopSettings(double start, double length) {
+        List<Setting> list = new ArrayList<>();
+        list.add(new Setting("loop start", () -> transport.arrangerLoopStart().get(), v -> transport.arrangerLoopStart().set((Double) v), start));
+        list.add(new Setting("loop length", () -> transport.arrangerLoopDuration().get(), v -> transport.arrangerLoopDuration().set((Double) v), length));
+        list.add(onOff("arranger loop", transport.isArrangerLoopEnabled(), true));
+        list.add(new Setting("play start", () -> transport.playStartPosition().get(), v -> transport.playStartPosition().set((Double) v), start));
+        return list;
+    }
+
+    /**
+     * Sets the arranger to go round the song's bars, with Play starting at the first of them, keeping what it found. A
+     * part still playing with other bars keeps what was found before it: that's what goes back in the end.
+     */
+    private void setLoop(double start, double length) {
+        List<Setting> settings = loopSettings(start, length);
+        String open = frontProject();
+        // Bars left looped in a project that's no longer in front aren't this one's to put back.
+        if (songLoop != null && !songLoop.project.equals(open)) songLoop = null;
+        if (songLoop == null) {
+            songLoop = new SongLoop(open == null ? "" : open);
+            for (Setting s : settings) songLoop.before.put(s.name(), s.read().get());
+        }
+        songLoop.settings = settings;
+        songLoop.starting = false;
+        for (Setting s : settings)
+            if (!same(s.read().get(), s.wanted())) s.write().accept(s.wanted());
+    }
+
+    /**
+     * A part with its song's bars was just launched, which starts Bitwig a moment later: `starting` until Bitwig is seen
+     * playing (or CHANGE_WAIT has passed), so a deleteclip that comes meanwhile still stops it. Looked at outside the
+     * changes' line: the launch's change has answered.
+     */
+    private void watchStart(SongLoop loop) {
+        long start = clock.millis();
+        loop.starting = true;
+        Runnable look = new Runnable() {
+            @Override
+            public void run() {
+                if (songLoop != loop || !loop.starting) return;
+                boolean playing;
+                try {
+                    playing = transport.isPlaying().get();
+                } catch (RuntimeException | LinkageError e) {
+                    playing = true;
+                }
+                if (playing || clock.millis() - start >= CHANGE_WAIT) loop.starting = false;
+                else host.scheduleTask(this, 50);
+            }
+        };
+        host.scheduleTask(look, 50);
+    }
+
+    /** The loop's settings that don't show the song's bars yet. */
+    private List<String> loopNotSet() {
+        List<String> list = new ArrayList<>();
+        if (songLoop == null) return list;
+        for (Setting s : songLoop.settings)
+            if (!same(s.read().get(), s.wanted())) list.add(s.name());
+        return list;
+    }
+
+    /**
+     * Puts back each of the loop's settings that's still as the link set it (one you changed since is yours), and
+     * gives what each should show once Bitwig has done it.
+     */
+    private Map<String, Object> putLoopBack(SongLoop loop) {
+        Map<String, Object> expected = new LinkedHashMap<>();
+        for (Setting s : loop.settings) {
+            Object now = s.read().get();
+            Object was = loop.before.get(s.name());
+            boolean ours = same(now, s.wanted());
+            expected.put(s.name(), ours ? was : now);
+            if (ours && !same(now, was)) s.write().accept(was);
+        }
+        return expected;
+    }
+
+    /**
+     * A part that was to play with its song's bars didn't go in: the loop goes back as it was found, at once, unless
+     * another part still plays with it. Not in another project that came to the front meanwhile: its transport isn't the
+     * link's to touch, so there the link only lets go of what it found.
+     */
+    private void loopFailed() {
+        SongLoop loop = songLoop;
+        if (loop == null || !loop.clips.isEmpty()) return;
+        loopLeft();
+    }
+
+    /** Lets go of the song's bars, putting the loop back at once, as far as can be, while its project is in front. */
+    private void loopLeft() {
+        SongLoop loop = songLoop;
+        songLoop = null;
+        if (loop == null || !loop.project.equals(frontProject())) return;
+        try {
+            putLoopBack(loop);
+        } catch (RuntimeException | LinkageError e) {
+            host.errorln("Music Organiser: couldn't put Bitwig's loop back (" + e + ").");
+        }
+    }
+
+    /**
+     * An audition clip is out (or yours now): if it played with its song's bars and no other part still does, the loop
+     * and the play start go back as they were found, once Bitwig has stopped when the link stopped it (`stopping`). Then
+     * the change ends with `m`, and `loopBack` in it: whether Bitwig shows them all back.
+     */
+    private void loopBack(String key, boolean stopping, Map<String, Object> m, Finish finish) {
+        SongLoop loop = songLoop;
+        if (loop == null || !loop.clips.remove(key) || !loop.clips.isEmpty()) {
+            finish.ok(m);
+            return;
+        }
+        songLoop = null;
+        Runnable back = () -> attempt(() -> {
+            Map<String, Object> expected = putLoopBack(loop);
+            waitFor(() -> {
+                for (Setting s : loop.settings)
+                    if (!same(s.read().get(), expected.get(s.name()))) return false;
+                return true;
+            }, CHANGE_WAIT, shown -> {
+                m.put("loopBack", shown);
+                finish.ok(m);
+            }, finish);
+        }, finish);
+        if (stopping) waitFor(() -> !transport.isPlaying().get(), CHANGE_WAIT, stopped -> back.run(), finish);
+        else back.run();
     }
 
     /**
@@ -1960,6 +2201,10 @@ final class Link {
      * on the track with ID `trackId`, only while it still has the name it came in with. Answers `deleted`: false when the
      * clip isn't one the app noted, was renamed (so it's yours now), or is already gone. With `stop`, the track's clips
      * stop first; with `transport`, Bitwig stops playing too (when the audition started it).
+     *
+     * A clip that came with its song's bars looping (`clip` with `loop`, extension 3.22) has the arranger's loop and the
+     * play start put back as the link found them, deleted or not, each only while it's still as the link set it. The
+     * answer then has `loopBack`: whether Bitwig shows them back.
      */
     private void deleteClip(Map<String, Object> request, Finish finish) {
         Object id = field(request, "trackId");
@@ -1976,13 +2221,18 @@ final class Link {
             // As stoptracks does: the track plays its arranger clips again, not the empty launcher.
             trackItems[t].returnToArrangement();
         }
-        if (flag(request, "transport", false) && transport != null) transport.stop();
+        // A part that played with its song's bars: Stop while Bitwig is stopped already (you stopped it) would move your
+        // play start to the beginning, so Bitwig is only stopped while it plays, or is about to.
+        SongLoop loop = songLoop != null && songLoop.clips.contains(key) ? songLoop : null;
+        boolean stopping = flag(request, "transport", false) && transport != null
+                           && (loop == null || transport.isPlaying().get() || loop.starting);
+        if (stopping) transport.stop();
         Map<String, Object> m = new LinkedHashMap<>();
         if (t < 0 || noted == null || !trackSlots[t][index].hasContent().get()
             || !noted.equals(str(trackSlots[t][index].name().get()))) {
             auditionClips.remove(key);
             m.put("deleted", false);
-            finish.ok(m);
+            loopBack(key, stopping, m, finish);
             return;
         }
         auditionClips.remove(key);
@@ -1992,7 +2242,7 @@ final class Link {
             return now < 0 || !trackSlots[now][index].hasContent().get();
         }, CHANGE_WAIT, gone -> {
             m.put("deleted", gone);
-            finish.ok(m);
+            loopBack(key, stopping, m, finish);
         }, finish);
     }
 
@@ -2008,6 +2258,8 @@ final class Link {
         String noted = auditionTracks.remove(id);
         // Its clips go with it, or stay yours with a track you kept: either way they're not the app's to take out now.
         auditionClips.keySet().removeIf(k -> k.startsWith(id + "#"));
+        // Nor do a song's bars stay looped for a part that went with its track.
+        if (songLoop != null && songLoop.clips.removeIf(k -> k.startsWith(id + "#")) && songLoop.clips.isEmpty()) loopLeft();
         int t = indexOf((String) id);
         if (t >= 0) {
             trackItems[t].stop();
@@ -4283,6 +4535,27 @@ final class Link {
 
     /** A change that waits for Bitwig, and whether it needs changes turned on. */
     record Job(Ask ask, Map<String, Object> request, JobRun run, boolean changes) {}
+
+    /**
+     * A song's bars the arranger goes round while audition clips play with them (`clip` with `loop`, extension 3.22): the
+     * project they're in, what the link found there before the first of the clips (the loop's start and length, whether
+     * it was on, and the play start), what it set, and the clips ("trackId#slot"). Once the last clip is out, each setting
+     * still as the link set it goes back to what was found; one changed since is left alone.
+     */
+    private static final class SongLoop {
+        final String project;
+        /** What the link found, by setting name. */
+        final Map<String, Object> before = new LinkedHashMap<>();
+        /** What it set (each setting's `wanted`), in the order it sets them and puts them back. */
+        List<Setting> settings = List.of();
+        final Set<String> clips = new HashSet<>();
+        /** Whether the newest of the clips was just launched and Bitwig hasn't been seen playing yet (see watchStart). */
+        boolean starting;
+
+        SongLoop(String project) {
+            this.project = project;
+        }
+    }
 
     record Tuning(Parameter sampler, Parameter transpose) {}
 
