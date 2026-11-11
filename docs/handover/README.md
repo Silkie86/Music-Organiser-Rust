@@ -262,12 +262,17 @@ the next PR step by step). Solomon wants the highest effort here.
     the page's `bitwig_song`, the bars from `midi_fits::bitwig_loop`). Extension 3.22: a `clip` request may
     carry `loop: {start, length}` in beats. The extension stops Bitwig, remembers its loop and play start, sets
     them to the bars, and launches the part from its start; `deleteclip` (the app's Stop) stops Bitwig and puts
-    back each setting still as the link set it (what Solomon moved meanwhile stays his). Only when Bitwig has
-    the project the song was read from open (the pinned project's name is the save's), the song was read by
-    its arranger (not the clip launcher), and the extension is 3.22 or newer; otherwise the part plays alone
-    and the card says why (`midi_fits::bitwig_words`). The extension must be installed again from Settings >
-    DAWs. Not yet tried in a real Bitwig: whether a launcher clip plays on through the loop's jump back, and
-    what "none"/"from_start" do when Bitwig is stopped (`extensions/bitwig-java/README.md` lists them). The
+    back each setting still as the link set it (what Solomon moved meanwhile stays his), and says whether
+    Bitwig showed them back (`TakenOut::loop_back`; the card and log say when it didn't). The bars go round
+    for the newest part only, so a part the app let go of (a stop that failed twice) doesn't keep the loop from
+    going back after the next one; a stop that fails part way leaves the loop for the next try. Only when
+    Bitwig has the project the song was read from open (the pinned project's name is the save's; the name is
+    all Bitwig tells, so two saves with one name can't be told apart), the song was read by its arranger (not
+    the clip launcher), the extension is 3.22 or newer and its greeting says Bitwig let it reach the loop
+    (`songLoop`); otherwise the part plays alone and the card says why (`midi_fits::bitwig_words`). The
+    extension must be installed again from Settings > DAWs. Not yet tried in a real Bitwig: whether a launcher
+    clip plays on through the loop's jump back, what "none"/"from_start" do when Bitwig is stopped, and how
+    soon after a launch Bitwig says it's playing (`extensions/bitwig-java/README.md` lists them). The
     extension can't be built on the cloud machine (its Maven host is blocked there): CI's "Bitwig extension"
     job compiles and tests it.
   - What's judged is what's dropped (2026-11-11): one rule for a part's clip, `mo_midi::analyser::clip_of`
