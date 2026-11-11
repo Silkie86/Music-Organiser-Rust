@@ -309,8 +309,8 @@ fn of_fl(flp: &fl::events::Flp<'_>) -> Song {
 /// instruments' notes (an FL Studio pattern in the playlist's own layout) gives each instrument its part, the same
 /// instrument on two lanes one part.
 ///
-/// For an FL Studio project [`read`] knows more: the arrangement's layouts don't say which channels are switched
-/// off, or which play a sample.
+/// For an FL Studio project use [`read`]: it reads the song itself, and knows which channels play a sample, not a
+/// plugin.
 pub fn of(arrangement: &Arrangement) -> Song {
     let beats_per_bar = arrangement.beats_per_bar.max(1);
     let bar = PPQ * i64::from(beats_per_bar);

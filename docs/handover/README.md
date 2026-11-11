@@ -123,8 +123,8 @@ the next PR step by step). Solomon wants the highest effort here.
   library fitted to the song's picked parts and bars: a tune over its chords, or chords under its tune, with the
   move that makes it fit. The picked bars go round as picked, a bar of rest too. Known gaps: an FL sampler channel's
   notes aren't pitches the project vouches for (`Playing::sample`: left out unless picked); a library part's length
-  is only known from its notes; neither FL arrangement layout the Songs preview draws marks a channel that's
-  switched off (the Songs page's to fix). Next: try every part of the library against it (a quick pass over what the
+  is only known from its notes. (The FL arrangement layouts the Songs preview draws didn't mark a channel that's
+  switched off: PR #476 marks it muted.) Next: try every part of the library against it (a quick pass over what the
   catalogue holds, then this close look at the best), then a list on the MIDI page and sending the part found into
   the project.
 

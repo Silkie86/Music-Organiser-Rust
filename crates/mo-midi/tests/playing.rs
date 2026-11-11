@@ -31,10 +31,13 @@ fn a_channel_switched_off_in_the_channel_rack_plays_nothing() {
     assert!(snare.sample);
     assert!(song.harmony_parts().is_empty() && song.melody_parts().is_empty());
 
-    // The arrangement's own layouts don't say the Hat is off: read from one of them, it plays.
+    // Read from the arrangement's lane-a-channel layout instead, the Snare plays the same. (Whether the Hat is left
+    // out there too is that layout's to say, by marking its lane muted.)
     let flp = fl::events::load(&bytes).unwrap();
     let views = fl::arrangement::read(&flp);
-    assert_eq!(names(&playing::of(&views[1])), ["Snare", "Hat"]);
+    let by_lanes = playing::of(&views[1]);
+    assert_eq!(by_lanes.parts[0].name, "Snare");
+    assert_eq!(by_lanes.parts[0].notes.iter().map(|n| (n.start, n.key)).collect::<Vec<_>>(), [(0, 60)]);
 }
 
 #[test]
