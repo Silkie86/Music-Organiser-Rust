@@ -536,5 +536,24 @@ mod tests {
                 assert!(start > 0.0005, "{start}");
             }
         }
+
+        // Played together by one synth, each sound on its own channel and the drums on theirs, they sound as each
+        // alone added up; and it takes one pass, not three.
+        let part = |notes, program, drums| Part { notes, ppq: 96, length: 2 * 4 * 96, tempo: 120.0, program, drums };
+        let parts = [part(&chord, 4, false), part(&chord, 38, false), part(&kick, 0, true)];
+        let alone: Vec<AudioData> = parts.iter().map(|part| render_loop(&font, part).unwrap()).collect();
+        let started = std::time::Instant::now();
+        let together = render_together(&font, &parts).unwrap();
+        println!("three together made in {:?}", started.elapsed());
+        assert_eq!(together.len(), 4 * RATE as usize);
+        let (mut furthest, mut loudest) = (0.0f32, 0.0f32);
+        for i in (0..together.len()).step_by(7) {
+            let sum: f32 = alone.iter().map(|sound| sound.channels[0][i]).sum();
+            furthest = furthest.max((together.channels[0][i] - sum).abs());
+            loudest = loudest.max(sum.abs());
+        }
+        println!("together and added up differ by {furthest} at the most, the loudest being {loudest}");
+        assert!(loudest > 0.01 && furthest < 1e-3, "off by {furthest}, loudest {loudest}");
+        println!("how loud each is: {:?}, together {}", alone.iter().map(level).collect::<Vec<_>>(), level(&together));
     }
 }
