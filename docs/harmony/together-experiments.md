@@ -160,6 +160,53 @@ were heard a bar early. Two additions hold the picked bars as picked, a bar of r
   `Backing::of` is the same thing over the reading's own stretch, so nothing measured above moves.
 - `LineUp::LoopsFrom { start, length }`: the tune's own round given, against the backing going round.
 
+## A first look, for searching a whole library (2026-11-11)
+
+The close look above needs a part's notes, and a found chord part has to be read by the chord reader first (about a
+quarter of a millisecond each). A library of a few hundred thousand parts can't have all of that done on every
+search, so a search takes two looks: a quick first look at every part, by a little kept in memory, then the close
+look at the best share only. The question was what the little has to be. `pairs --quick 200` measures it: 207
+stretches of fold 1, each tried against every stretch of another song (about 1,650) both ways round, counting how
+many of the close look's best ten are still there when the first look keeps only a share.
+
+| the first look goes by | kept 0.5% | 1% | 2% | 5% | 10% | 20% |
+|---|---|---|---|---|---|---|
+| **a tune for chords:** each tune's notes with no timing | 1.2% | 2.3% | 3.5% | 7.3% | 13.1% | 22.9% |
+| **a tune for chords:** each tune two beats at a time | 78.4% | 96.9% | **99.1%** | 99.9% | 100% | 100% |
+| **chords for a tune:** each chord part's notes with no timing | 2.4% | 4.2% | 8.0% | 16.1% | 27.4% | 44.2% |
+| **chords for a tune:** each chord part guessed, two beats at a time | 40.2% | 60.5% | 77.6% | 93.3% | **97.8%** | 99.4% |
+| **chords for a tune:** each chord part's own chords kept, two beats at a time | 80.1% | 96.2% | 98.9% | 99.8% | 100% | 100% |
+| **chords for a tune:** the old app's closer look (24 numbers a half bar) | 34.0% | 53.2% | 73.4% | 91.0% | 96.4% | 99.0% |
+
+- **Which notes a part plays, with no timing, is no use at all**: it keeps the close look's best about as often as
+  picking at random would. That is all the library keeps of each part today (`chroma`, 12 bytes). Two parts go
+  together bar by bar, not on the whole.
+- **Two beats at a time is enough.** `mo_harmony::slots_of` keeps how long each of the 12 pitch classes sounds in each
+  two beats (12 bytes a slot, 24 a bar, about 200 a part). A slot is two quarter notes whatever the time signature, so
+  a song in 6/8 is looked at in the same stretches of time as the library's parts, which are all read as 4/4; a loop
+  that ends inside a slot (a bar of 6/8 is a slot and a half) is kept going round until it ends on a slot's line. No
+  more than 64 slots are kept of a part: one longer than 32 bars is looked at by its first 32. For the song's chords,
+  `Backing::outline` works out what each pitch class is worth in each slot by the close look's own numbers, so a tune
+  made of whole slots gets exactly the close look's answer (`first_look::tests`), and real tunes land near it: keeping
+  2 parts in 100 loses 1 of the close look's best hundred.
+- **The other way round is harder**, since the found part is the chords and its chords aren't read yet.
+  `Outline::guessed` guesses them from the slots: a pitch class played for a good part of a slot is worth what a
+  chord note is, the rest sit beside it or outside by the part's own scale, and a note a semitone or so over a played
+  one rubs. Each pitch class counts once however many octaves double it (without that it kept 89.7% at 5 in 100
+  where it now keeps 93.3%). Keeping 10 in 100 loses 2 of the best hundred, and already beats the old app's closer
+  look at every share.
+- **Reading each chord part's chords ahead and keeping its own outline** would let chords for a tune keep 2 in 100
+  as well. It wasn't chosen yet: those numbers change whenever the chord reader or the worths do, so every part
+  would have to be read again each time. It is the next step if the close look at 10 in 100 proves slow on Solomon's
+  library.
+- **How fast.** On one core the first look takes about 1 microsecond a part as a tune and 3 to 6 as chords (so
+  200,000 parts in about a second at the worst, before the cores share it); the close look takes 10 to 15
+  microseconds as a tune once its notes are read, and about 250 as chords.
+
+So the plan for the search: a first look at every part, then the close look at the best **2 in 100** when looking
+for tunes and the best **10 in 100** when looking for chords (and never fewer than a few hundred, so a small
+library gets the close look throughout).
+
 ## What it doesn't know yet
 
 - **How long a loop from the library is.** A part's length isn't saved with it, so a found part still goes round
