@@ -114,9 +114,9 @@ const STOP_RETRY: Duration = Duration::from_millis(200);
 
 /// The tools' reports in `logs\`, by how their names start. Each name is this, then the time it ran (digits, `-` and
 /// `_`), then `.txt`: `twin-test-2026-11-02-1430.txt`. Written by `tools/dev/twin-test.ps1`, `tools/dev/MIDI twin
-/// test.cmd`, `tools/dev/real-files-check.ps1` and the galaxy check (`tools/galaxycheck`); the C# app writes none of
-/// these.
-pub const REPORTS: [&str; 8] = [
+/// test.cmd`, `tools/dev/real-files-check.ps1`, the galaxy check (`tools/galaxycheck`) and the CLAP plugin (its log of
+/// each run of a DAW, `mo-plugin`'s `log.rs`); the C# app writes none of these.
+pub const REPORTS: [&str; 9] = [
     "twin-test-",
     "twin-report-",
     "twin-songs-",
@@ -125,6 +125,7 @@ pub const REPORTS: [&str; 8] = [
     "galaxy-check-",
     "real-files-check-",
     "real-files-report-",
+    "plugin-log-",
 ];
 
 /// The folder in the data folder that curve files are written to.
@@ -312,6 +313,8 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     done.add(remove_older(&places.temp, mo_space::admin::is_temp_file, DAY, now, true));
     // Play in Bitwig's MIDI files, which go again as soon as Bitwig has read them: a crash can leave one.
     done.add(remove_older(&places.temp, crate::midi::is_play_file, DAY, now, true));
+    // A Bitwig multisample's sample, written for a moment while Favourites from Bitwig looks for it: a crash can leave one.
+    done.add(remove_older(&places.temp, crate::bitwig_favourites::is_temp_file, DAY, now, true));
     // A part Send to Bitwig was still writing when the app stopped (its own name, given only while it's written).
     if let Some(sent) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::midi::EXPORT_SUBFOLDER])) {
         done.add(remove_older(&sent, crate::midi::is_half_sent, WRITING, now, false));

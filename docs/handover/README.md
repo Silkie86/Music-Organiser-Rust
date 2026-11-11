@@ -196,8 +196,48 @@ the next PR step by step). Solomon wants the highest effort here.
     seconds after the DAW writes it, the song is found again by its saves (`SongChoice::among`, never by its
     label), and its list is worked out again from the save written last. If the folders can't be watched, picking
     the song again in the menu reads it again.
-  Not built yet: picking a song's parts and bars by hand, playing or sending a part moved by the semitones its
-  line says, and sending the part found into the project.
+  - A part in the list is the part as it fits (2026-11-11): `midi_fits::moved` moves its notes by exactly what its
+    line says (`NoteEvent::moved` in `mo-formats`; a note with no key to go to is left out), and on the page every
+    way a part's notes leave the index goes through one value, `PartOut` (`Page::part_out`: where to read them, how
+    far they're moved, the name that says so, "Arp clip (3 semitones up)"): the card's roll and chords
+    (`read_notes`), Play loop, Play in Bitwig and FL, Send to Bitwig and the drag. The card's key stays the part's
+    own (its heading says so, and the chords' that they're moved); a line above the roll says how it's moved
+    (`card_text`).
+  - How the picked part is moved is its own state (`Page::picked_fit`, worked out by `fit_picked` when a part is
+    picked and when a list comes on show): its line's in a "Fits my song" list; kept when a newer list of the same
+    save of the same song no longer has it (a filter ticked or a word typed while it plays changes nothing that's
+    heard) and through the index being read again; gone with the plain list or another song. `fit_follows` then
+    brings what's seen and heard into line, each compared with the move it was made with (`card_move`,
+    `loop_move`, `daw_move`): the roll and chords are read again, the loop or the part in a DAW started again,
+    only when the move is another.
+  - The octave a part goes at (2026-11-11): `mo_midi::fit::octave`. A search settles the key and says nothing of
+    the octave (octaves make no difference to how a part sits), so the search works it out for each part it finds
+    (`Found::octaves`, from `Registers::octaves_for`): the octave that brings the middle of the part (half-way
+    between its lowest and highest key, strays aside) nearest to where its kind belongs. That's the kind's usual
+    place (`octave::usual`); for a bassline or chords, half-way from there to where the song's own play in the bars
+    fitted to (`Registers::by_bars`, kept in the `Target` that `Target::of_song` makes). Never an octave that takes
+    the part off the keyboard. A loop the library has octaves apart is given as the copy that needs the least
+    moving in all (`Found::moved`, `nearer_copies`). `Fit::octaves` holds it on the page's side, and `Fit::moved` is
+    the whole move (semitones for the key plus 12 an octave), which is what the line, the card and the name say in
+    one go (`move_words`: "9 semitones down", "an octave up") and what `Page::fit_move`, `PickedFit` and `PartOut`
+    carry. Measured by `theorybench octave` (`docs/harmony/together-experiments.md`): about 3 in 4 tunes land at
+    the octave they were written at (the C# app's rule: 52 to 68 in 100), and no rule does better, so it can be
+    changed by hand.
+  - The octave by hand (2026-11-11): a fitted part's card has Octave down (Alt+Down), Octave up (Alt+Up) and,
+    once the octave is one you chose, The app's octave; the line's right-click menu has them too. A step is from
+    where the part is now (`Fit::octave_step`: 3 octaves at the most, never off the keyboard, by the part's
+    `Found::edges`), and what you chose goes in place of the app's pick for those notes wherever they're fitted
+    (`Fit::yours`, `Fit::octaves_now`), octaves chosen in the C# app too. The page has a choice at once
+    (`midi_fits::YourOctaves` over the catalogue's, `with_yours` after each search and each change;
+    `Page::change_octave`), and the index is told off the window's thread (`remember_octave`: the newest for each
+    set of notes, written in turn, `mo_app::background::Latest`; tried 3 times when the index is busy, and waited
+    for a moment as the app closes). `MidiStore::keep_your_octaves` writes it: only into an index that's there,
+    never making or converting one. The search itself doesn't know of your octaves. A part in a plain list is as
+    it is in the library: no octave buttons; drums never have them, and an octave kept for the same notes doesn't
+    move a drum part. A held key steps once (7 octaves to be at; each step starts what's playing again), and at
+    the last octave the key is still the page's.
+  Not built yet: picking a song's parts and bars by hand, hearing a part with the song, and putting the part
+  found at the right bar of the project.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db
 writes once trusted. A decoder panic on a damaged file is caught with `mo_catch::catch`: one warning line in the log,

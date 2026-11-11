@@ -198,6 +198,51 @@ fn your_corrections_win_over_the_csharp_apps() {
 }
 
 #[test]
+fn octaves_chosen_on_the_page_are_kept_in_an_index_thats_there_and_never_make_one() {
+    let dir = folder("mo-midi-octaves-kept");
+    std::fs::write(dir.join("Tune.mid"), smf(TUNE)).unwrap();
+    let db = dir.join("midi-index.db");
+    let mut store = MidiStore::open(&db).unwrap();
+    run(&mut store, &dir, false);
+    let hash = store.all(&HashMap::new(), &HashMap::new()).unwrap()[0].hash.clone();
+    let kept = |store: &MidiStore| store.all(&HashMap::new(), &HashMap::new()).unwrap()[0].your_octave;
+
+    // Several in one go, while the indexer has the index open too: the last said for the same notes stands, and
+    // notes the index doesn't have are kept as well (they may be read later).
+    MidiStore::keep_your_octaves(&db, &[(&hash, Some(1)), ("other notes", Some(3)), (&hash, Some(-2))]).unwrap();
+    assert_eq!(kept(&store), Some(-2));
+    // None: the app picks again.
+    MidiStore::keep_your_octaves(&db, &[(&hash, None)]).unwrap();
+    assert_eq!(kept(&store), None);
+    MidiStore::keep_your_octaves(&db, &[]).unwrap();
+
+    // An index that's gone isn't made again, nor its folder.
+    let gone = dir.join("Gone").join("midi-index.db");
+    assert!(MidiStore::keep_your_octaves(&gone, &[(&hash, Some(1))]).is_err());
+    assert!(!gone.exists() && !dir.join("Gone").exists());
+    let away = dir.join("midi-index-away.db");
+    assert!(MidiStore::keep_your_octaves(&away, &[(&hash, Some(1))]).is_err());
+    assert!(!away.exists());
+    // Another program's database is left as it is.
+    let other = dir.join("other.db");
+    let conn = rusqlite::Connection::open(&other).unwrap();
+    conn.execute_batch("CREATE TABLE your_octaves (hash TEXT PRIMARY KEY, octaves INTEGER);").unwrap();
+    drop(conn);
+    assert!(MidiStore::keep_your_octaves(&other, &[(&hash, Some(1))]).is_err());
+    let conn = rusqlite::Connection::open(&other).unwrap();
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM your_octaves", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    // One made by a newer version of the app too.
+    drop(store);
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    conn.pragma_update(None, "user_version", mo_midi::store::LAYOUT + 1).unwrap();
+    drop(conn);
+    assert!(MidiStore::keep_your_octaves(&db, &[(&hash, Some(2))]).is_err());
+    let conn = rusqlite::Connection::open(&db).unwrap();
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM your_octaves WHERE octaves = 2", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 0);
+}
+
+#[test]
 fn a_stopped_run_saves_what_it_read() {
     let dir = folder("mo-midi-stop");
     for i in 0..250u32 {

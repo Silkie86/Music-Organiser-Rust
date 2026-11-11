@@ -100,9 +100,11 @@ impl Asked {
 
     /// The filter column as the app's Sounds page shows it: each choice with how many sounds it would show
     /// (`counts`, once a list has been worked out), over `library`'s types and tags (none until it's read).
-    pub fn chips(&self, library: Option<&Library>, counts: Option<&SoundCounts>) -> SoundChips {
+    /// The first `type_lines` types are lines of their own (as many as the column has room for), the rest in the
+    /// More types menu.
+    pub fn chips(&self, library: Option<&Library>, counts: Option<&SoundCounts>, type_lines: usize) -> SoundChips {
         let (types, tags) = library.map_or((&[][..], &[][..]), |l| (&l.types[..], &l.tags[..]));
-        sounds::chips(&self.filters, counts, types, tags)
+        sounds::chips_showing(&self.filters, counts, types, tags, type_lines)
     }
 }
 
@@ -121,9 +123,14 @@ pub fn read() -> Read {
     if let Some(library) = lock(&SHARED).upgrade() {
         return Read::Ready(library);
     }
+    let started = std::time::Instant::now();
     let read = read_from(&mo_app::paths::data_dir().join("sounds.db"));
-    if let Read::Ready(library) = &read {
-        *lock(&SHARED) = Arc::downgrade(library);
+    match &read {
+        Read::Ready(library) => {
+            *lock(&SHARED) = Arc::downgrade(library);
+            crate::log::took("Library", &format!("Read {} sounds", library.list.len()), started);
+        }
+        Read::Not(why) => crate::log::took("Library", &format!("Not read: {why}"), started),
     }
     read
 }
@@ -159,7 +166,17 @@ pub fn waves_from(sounds_db: &Path, ids: &[i64]) -> Vec<(i64, mo_sounds::Peaks)>
     if ids.is_empty() || !copy.is_file() {
         return Vec::new();
     }
-    mo_sounds::SoundsDb::open_read_only(&copy).and_then(|db| db.waves(ids)).unwrap_or_default()
+    let started = std::time::Instant::now();
+    match mo_sounds::SoundsDb::open_read_only(&copy).and_then(|db| db.waves(ids)) {
+        Ok(found) => {
+            crate::log::took_if_slow("Waveforms", &format!("Read {} of {} asked for", found.len(), ids.len()), started);
+            found
+        }
+        Err(e) => {
+            crate::log::took("Waveforms", &format!("Couldn't read {} from the library: {e}", ids.len()), started);
+            Vec::new()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -229,18 +246,18 @@ mod tests {
         let mut kick = Asked::default();
         kick.filters.search = "kick".into();
         // Before the library is read: no types, the keys and lengths without numbers.
-        let before = kick.chips(None, None);
+        let before = kick.chips(None, None, sounds::TYPE_CHIPS);
         assert!(before.types.chips.is_empty() && before.types.more.is_empty());
         assert_eq!(before.tempo.words, "Any tempo");
         let (_, counts) = lib.view(&kick);
-        let chips = kick.chips(Some(&lib), Some(&counts));
+        let chips = kick.chips(Some(&lib), Some(&counts), sounds::TYPE_CHIPS);
         let count = |kind: &str| chips.types.chips.iter().find(|c| c.text == kind).map(|c| c.count.clone());
         assert_eq!(
             (count("Kick"), count("Bass"), count("Snare")),
             (Some("1".into()), Some("1".into()), Some("0".into()))
         );
         kick.filters.pick(sounds::TYPE, "Kick");
-        assert!(kick.chips(Some(&lib), Some(&counts)).types.chips.iter().any(|c| c.text == "Kick" && c.on));
+        assert!(kick.chips(Some(&lib), Some(&counts), 1).types.chips.iter().any(|c| c.text == "Kick" && c.on));
     }
 
     #[test]

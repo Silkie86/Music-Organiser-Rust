@@ -1166,6 +1166,40 @@ impl MidiStore {
         Ok(())
     }
 
+    /// Keeps octaves you chose on the page in the index at `path` (`said`: a note hash and the octaves, as
+    /// [`MidiStore::set_your_octave`] takes them), all or none. For a change made while the page shows the index: it
+    /// must be there already and this app's, and nothing is made or copied into a new layout from here (as
+    /// [`MidiStore::open`] would: a key press mustn't start that, nor leave an empty index where one was taken away).
+    /// Waits while the index is being copied into a new layout, so the copy has it too.
+    pub fn keep_your_octaves(path: &Path, said: &[(&str, Option<i32>)]) -> Result<(), MidiError> {
+        let open_error = |why: String| MidiError::Open { path: path.to_owned(), why };
+        let _one = BRINGING.lock().unwrap_or_else(PoisonError::into_inner);
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let mut conn = Connection::open_with_flags(path, flags).map_err(|e| open_error(e.to_string()))?;
+        conn.busy_timeout(WAIT).map_err(|e| open_error(e.to_string()))?;
+        let id: i64 =
+            conn.pragma_query_value(None, "application_id", |r| r.get(0)).map_err(|e| open_error(e.to_string()))?;
+        if id != APPLICATION_ID {
+            return Err(open_error("it isn't the Rust app's MIDI index, so it's left as it is".into()));
+        }
+        let layout: i64 =
+            conn.pragma_query_value(None, "user_version", |r| r.get(0)).map_err(|e| open_error(e.to_string()))?;
+        if layout > LAYOUT {
+            return Err(open_error("a newer version of the app made it, so this one leaves it as it is".into()));
+        }
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        {
+            let mut keep = tx.prepare(
+                "INSERT INTO your_octaves (hash, octaves) VALUES (?1, ?2) ON CONFLICT(hash) DO UPDATE SET octaves = ?2",
+            )?;
+            for (hash, octaves) in said {
+                keep.execute(params![hash, octaves])?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Takes in the corrections you made in the C# app (`roles`, `octaves`, by note hash), once: one already kept for
     /// the same notes wins (it was made in this app since), and the index notes that they're in, so the C# app's
     /// `midi.db` isn't opened again. One transaction, so they're all in, noted, or none: how many kinds and octave

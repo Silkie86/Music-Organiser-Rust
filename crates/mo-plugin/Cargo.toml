@@ -35,8 +35,15 @@ bytemuck = { version = "1", features = ["derive"] }
 raw-window-handle = "0.6"
 # The keys baseview hands the window, as it names them.
 keyboard-types = "0.8"
-# The screens: Slint without its own windows (the DAW's window stands in), drawn on the CPU.
-slint = { version = "1.18", default-features = false, features = ["std", "compat-1-2", "renderer-software"] }
+# The screens: Slint without its own windows (the DAW's window stands in), drawn on the graphics card with wgpu as
+# the app's are (`gpu.rs`), or on the CPU when there's no card to draw with.
+slint = { version = "1.18", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "renderer-software",
+    "renderer-femtovg-wgpu",
+    "unstable-wgpu-30",
+] }
 # Only to switch on Slint's reading of the pictures in its own widgets (the list's scroll bar): Slint's window libraries
 # switch it on themselves, and the plugin uses none of them. The same version as `slint` in Cargo.lock: update both.
 i-slint-core = { version = "=1.18.1", default-features = false, features = ["image-decoders", "svg"] }

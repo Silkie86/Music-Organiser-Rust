@@ -4,6 +4,7 @@
 use std::io;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError, mpsc};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// Starts `work` on a thread of its own called `name`, at low priority. Only the watchdog, which must notice the
 /// window freezing however busy the computer is, the session log's writer, which a crash waits for, and Play in FL
@@ -326,11 +327,220 @@ impl<J: Send + 'static> Drop for Newest<J> {
     }
 }
 
+/// Small things to write of which only the newest for each key counts (the octave you chose for a part, with the key
+/// held down). The newest value said for each key waits here, and a low-priority thread writes all that's waiting in
+/// one go, then looks again: it's started when there's something to write and ends when there's nothing. So two
+/// values for one key are never written out of order, and a burst of them is written once. A write that panics is
+/// logged (the panic hook does that) and what it was given is lost; the thread goes on to what's waiting.
+pub struct Latest<K, V> {
+    state: Mutex<LatestState<K, V>>,
+}
+
+struct LatestState<K, V> {
+    /// In the order each key was first said.
+    waiting: Vec<(K, V)>,
+    /// A thread is writing, and looks here again when it's done.
+    writing: bool,
+}
+
+impl<K: PartialEq + Send + 'static, V: Send + 'static> Latest<K, V> {
+    pub const fn new() -> Latest<K, V> {
+        Latest { state: Mutex::new(LatestState { waiting: Vec::new(), writing: false }) }
+    }
+
+    /// Says `value` for `key`, in place of a value still waiting for that key. Everything waiting is given to `write`
+    /// on a thread called `name`, which is started here unless one is writing already (that one then writes this
+    /// too, with the `write` it was started with: give every call the same one). Err: the thread couldn't start; the
+    /// value stays waiting, and goes with the next one said.
+    pub fn say(
+        &'static self,
+        name: &str,
+        key: K,
+        value: V,
+        write: impl Fn(Vec<(K, V)>) + Send + 'static,
+    ) -> io::Result<()> {
+        {
+            let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+            match state.waiting.iter_mut().find(|(k, _)| *k == key) {
+                Some(waiting) => waiting.1 = value,
+                None => state.waiting.push((key, value)),
+            }
+            if std::mem::replace(&mut state.writing, true) {
+                return Ok(());
+            }
+        }
+        let started = spawn(name, move || {
+            loop {
+                let batch = {
+                    let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                    if state.waiting.is_empty() {
+                        state.writing = false;
+                        return;
+                    }
+                    std::mem::take(&mut state.waiting)
+                };
+                let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| write(batch)));
+            }
+        });
+        if let Err(e) = started {
+            self.state.lock().unwrap_or_else(PoisonError::into_inner).writing = false;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Waits until everything said has been written, `longest` at the most: for when the app closes, so what was
+    /// said just before isn't lost with the thread. Whether it all was (false too when the thread never started).
+    pub fn wait(&self, longest: Duration) -> bool {
+        let until = Instant::now() + longest;
+        loop {
+            {
+                let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                if !state.writing {
+                    return state.waiting.is_empty();
+                }
+            }
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// Does `work` until it goes well, `tries` times at the most (once at the least) with `pause` between them: for a
+/// small write that the indexer or another copy of the app may be in the way of for longer than the database waits.
+/// What the last try gave. Never on the window's thread: it sleeps.
+pub fn try_again<T, E>(tries: u32, pause: Duration, mut work: impl FnMut() -> Result<T, E>) -> Result<T, E> {
+    let mut tried = 1;
+    loop {
+        match work() {
+            Err(_) if tried < tries => {
+                tried += 1;
+                std::thread::sleep(pause);
+            }
+            done => return done,
+        }
+    }
+}
+
+impl<K: PartialEq + Send + 'static, V: Send + 'static> Default for Latest<K, V> {
+    fn default() -> Latest<K, V> {
+        Latest::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::mpsc;
-    use std::time::Duration;
+
+    #[test]
+    fn the_newest_said_for_each_key_is_written_in_one_go() {
+        static SAID: Latest<&str, u32> = Latest::new();
+        let (done_tx, done) = mpsc::channel::<Vec<(&str, u32)>>();
+        let (gate_tx, gate) = mpsc::channel::<()>();
+        let (started_tx, started) = mpsc::channel::<()>();
+        let write = |done: mpsc::Sender<Vec<(&'static str, u32)>>| move |batch| drop(done.send(batch));
+        // The first write is held until more has been said.
+        let (first_done, first_started) = (done_tx.clone(), started_tx);
+        SAID.say("Test latest", "a", 0, move |batch| {
+            if batch == [("a", 0)] {
+                let _ = first_started.send(());
+                let _ = gate.recv();
+            }
+            let _ = first_done.send(batch);
+        })
+        .unwrap();
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        for n in 1..=3 {
+            SAID.say("Test latest", "a", n, write(done_tx.clone())).unwrap();
+            SAID.say("Test latest", "b", 10 + n, write(done_tx.clone())).unwrap();
+        }
+        gate_tx.send(()).unwrap();
+        assert_eq!(done.recv_timeout(Duration::from_secs(5)).unwrap(), [("a", 0)]);
+        // What was said meanwhile: the newest for each key, once, in the order the keys were first said.
+        assert_eq!(done.recv_timeout(Duration::from_secs(5)).unwrap(), [("a", 3), ("b", 13)]);
+        // With nothing waiting the thread ends, and the next thing said starts another.
+        let ended = || !SAID.state.lock().unwrap().writing;
+        for _ in 0..500 {
+            if ended() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(ended());
+        SAID.say("Test latest", "b", 99, write(done_tx)).unwrap();
+        assert_eq!(done.recv_timeout(Duration::from_secs(5)).unwrap(), [("b", 99)]);
+        assert!(done.recv_timeout(Duration::from_secs(5)).is_err(), "nothing is written twice");
+    }
+
+    #[test]
+    fn a_write_that_panics_leaves_the_next_thing_said_written() {
+        static SAID: Latest<&str, u32> = Latest::new();
+        let (done_tx, done) = mpsc::channel::<Vec<(&str, u32)>>();
+        let (started_tx, started) = mpsc::channel::<()>();
+        let write = |started: mpsc::Sender<()>, done: mpsc::Sender<Vec<(&'static str, u32)>>| {
+            move |batch: Vec<(&'static str, u32)>| {
+                let _ = started.send(());
+                assert!(batch != [("a", 1)], "a write that breaks (the test means it)");
+                let _ = done.send(batch);
+            }
+        };
+        SAID.say("Test latest panics", "a", 1, write(started_tx.clone(), done_tx.clone())).unwrap();
+        // Said once the first is breaking: still written, by that thread or by a new one.
+        started.recv_timeout(Duration::from_secs(5)).unwrap();
+        SAID.say("Test latest panics", "b", 2, write(started_tx, done_tx)).unwrap();
+        assert_eq!(done.recv_timeout(Duration::from_secs(5)).unwrap(), [("b", 2)]);
+    }
+
+    #[test]
+    fn what_was_said_can_be_waited_for_as_the_app_closes() {
+        static SAID: Latest<&str, u32> = Latest::new();
+        // Nothing said: nothing to wait for.
+        assert!(SAID.wait(Duration::ZERO));
+        let (gate_tx, gate) = mpsc::channel::<()>();
+        let (done_tx, done) = mpsc::channel::<Vec<(&str, u32)>>();
+        SAID.say("Test latest waits", "a", 1, move |batch| {
+            let _ = gate.recv();
+            let _ = done_tx.send(batch);
+        })
+        .unwrap();
+        // Still being written: the wait gives up when its time is up, and says so.
+        assert!(!SAID.wait(Duration::from_millis(30)));
+        assert!(done.try_recv().is_err());
+        // Let through: the wait ends once it's written.
+        gate_tx.send(()).unwrap();
+        assert!(SAID.wait(Duration::from_secs(5)));
+        assert_eq!(done.try_recv().unwrap(), [("a", 1)]);
+    }
+
+    #[test]
+    fn work_is_tried_again_until_it_goes_well_or_the_tries_are_up() {
+        let tries_until = |good_at: u32, tries: u32| {
+            let mut tried = 0;
+            let ended = try_again(tries, Duration::ZERO, || {
+                tried += 1;
+                if tried >= good_at { Ok(tried) } else { Err(tried) }
+            });
+            (ended, tried)
+        };
+        // Well at once: done once. Well at the third try: three tries.
+        assert_eq!(tries_until(1, 3), (Ok(1), 1));
+        assert_eq!(tries_until(3, 3), (Ok(3), 3));
+        // Never well: what the last try said, after as many tries as allowed; once at the least.
+        assert_eq!(tries_until(9, 3), (Err(3), 3));
+        assert_eq!(tries_until(9, 1), (Err(1), 1));
+        assert_eq!(tries_until(9, 0), (Err(1), 1));
+        // A pause between tries, and none after the last.
+        let started = Instant::now();
+        let mut tried = 0;
+        let _ = try_again(3, Duration::from_millis(20), || {
+            tried += 1;
+            if tried < 3 { Err(()) } else { Ok(()) }
+        });
+        assert!(started.elapsed() >= Duration::from_millis(40));
+    }
 
     #[test]
     fn paces_share_the_threads_like_the_csharp_app() {

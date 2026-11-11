@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Heights, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -329,6 +329,10 @@ export global SoundsData {
     callback toggle-choice(string, string);
     // Picks nothing on a filter: "type" (Clear types), "more-types" (the More types menu's Any) or another filter.
     callback clear-chip(string);
+    // How many types the filter column has room for as tick lines, before More types: the Type filter's, or
+    // Rediscover's (0 for the other, and for one not counted yet: sounds.rs keeps what it had, and never shows fewer
+    // than nine).
+    callback type-room(int, int);
     // Whether any type is picked: shows the Clear types chip.
     in property <bool> any-type;
     in property <bool> mix-well;
@@ -342,6 +346,21 @@ export global SoundsData {
     // Hide duplicates: on, and its words with how many copies it hides (or how far finding them has got).
     in property <bool> hide-copies;
     in property <string> hide-copies-text: "Hide duplicates";
+    // Favourites from Bitwig: its card in the sound card's place (open), the multisamples in your Bitwig Library folders
+    // (listed: they've been looked for), each with its tick (`on`), how many are ticked, whether a look is on (busy),
+    // whether Mark as favourites (or Stop) can be clicked, what the last look said and the samples it didn't find.
+    in property <bool> bitwig-shown;
+    in property <bool> bitwig-listed;
+    in property <[FilterChoice]> bitwig-multisamples;
+    in property <string> bitwig-ticked;
+    in property <bool> bitwig-busy;
+    in property <bool> bitwig-can-mark;
+    in property <string> bitwig-said;
+    in property <[string]> bitwig-missing;
+    // Opens or closes the card; ticks a multisample by its place (-1 all, -2 none); Mark as favourites, or Stop.
+    callback bitwig-toggle();
+    callback bitwig-tick(int);
+    callback bitwig-mark();
     // The forgotten folder clicked on Rediscover that the list is narrowed to (its own sounds), or none.
     in property <string> folder;
     in property <bool> any-filter;
@@ -360,6 +379,12 @@ export global SoundsData {
     callback shuffle();
     in property <bool> autoplay;
     callback toggle-autoplay();
+    // Trim silence: sounds play without the silence at their start and end (the files stay as they are), with how
+    // quiet counts as silence, in dB below full scale; a pick from its menu: "-50 dB", or "" for off.
+    in property <bool> trim-silence;
+    in property <int> trim-level-db: -60;
+    in property <[string]> trim-choices;
+    callback pick-trim(string);
 
     // How many sounds are shown, for the list's empty state.
     in property <int> shown;
@@ -951,6 +976,116 @@ component FoldersCard inherits Rectangle {
     }
 }
 
+// Favourites from Bitwig: the multisamples in your Bitwig Library folders, ticked for the ones that hold favourites,
+// and Mark as favourites, which makes every sound in your library that is one of their samples a favourite. In the
+// sound card's place.
+component BitwigCard inherits Rectangle {
+    background: Theme.surface;
+    border-radius: Theme.radius;
+    border-width: 1px;
+    border-color: Theme.edge;
+    VerticalLayout {
+        padding: Space.lg;
+        spacing: Space.sm;
+        HorizontalLayout {
+            spacing: Space.sm;
+            Caps {
+                text: "FAVOURITES FROM BITWIG";
+                horizontal-stretch: 1;
+            }
+            CloseButton {
+                clicked => { SoundsData.bitwig-toggle(); }
+            }
+        }
+        Text {
+            text: "Tick the multisamples that hold your favourite sounds. Every sound in your library that is one of their samples (the very same file or audio, never one that only sounds alike) becomes a favourite. Your Bitwig files stay as they are.";
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        if !SoundsData.bitwig-listed: Text {
+            text: "Looking in your Bitwig Library…";
+            color: Theme.muted;
+            font-size: Type.meta;
+        }
+        if SoundsData.bitwig-listed && SoundsData.bitwig-multisamples.length == 0: Text {
+            text: "No multisamples found in your Bitwig Library. Settings › DAWs says where your Bitwig Studio folder is.";
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        if SoundsData.bitwig-multisamples.length > 0: HorizontalLayout {
+            spacing: Space.sm;
+            alignment: start;
+            StudioButton {
+                text: "Tick all";
+                enabled: !SoundsData.bitwig-busy;
+                clicked => { SoundsData.bitwig-tick(-1); }
+            }
+            StudioButton {
+                text: "Tick none";
+                enabled: !SoundsData.bitwig-busy;
+                clicked => { SoundsData.bitwig-tick(-2); }
+            }
+            VerticalLayout {
+                alignment: center;
+                Text {
+                    text: SoundsData.bitwig-ticked;
+                    color: Theme.muted;
+                    font-size: Type.meta;
+                }
+            }
+        }
+        if SoundsData.bitwig-multisamples.length > 0: ListView {
+            vertical-stretch: 2;
+            min-height: 120px;
+            row-height: 26px;
+            rows: SoundsData.bitwig-multisamples.length;
+            for m[i] in SoundsData.bitwig-multisamples: TickLine {
+                text: m.text;
+                on: m.on;
+                dim: SoundsData.bitwig-busy;
+                clicked => {
+                    if (!SoundsData.bitwig-busy) {
+                        SoundsData.bitwig-tick(i);
+                    }
+                }
+            }
+        }
+        if SoundsData.bitwig-multisamples.length > 0: HorizontalLayout {
+            alignment: start;
+            StudioButton {
+                text: SoundsData.bitwig-busy ? "Stop" : "Mark as favourites";
+                main: !SoundsData.bitwig-busy;
+                enabled: SoundsData.bitwig-can-mark;
+                clicked => { SoundsData.bitwig-mark(); }
+            }
+        }
+        if SoundsData.bitwig-said != "": Text {
+            text: SoundsData.bitwig-said;
+            color: Theme.text;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        if SoundsData.bitwig-missing.length > 0: Caps { text: "NOT FOUND IN YOUR LIBRARY"; }
+        // A line a sample: "Snare 3 Select › Hmy_Snr.wav".
+        if SoundsData.bitwig-missing.length > 0: ListView {
+            vertical-stretch: 1;
+            min-height: 80px;
+            row-height: 22px;
+            rows: SoundsData.bitwig-missing.length;
+            for line in SoundsData.bitwig-missing: Text {
+                height: 22px;
+                text: line;
+                color: Theme.muted;
+                font-size: Type.meta;
+                overflow: elide;
+                vertical-alignment: center;
+            }
+        }
+    }
+}
+
 // The picked sound: what it is, its waveform (click to play from there), Play and what else it can do, its facts and
 // tags. Nothing in it may be wider than the card: long names and paths wrap, and so do the buttons and tags.
 component SoundPanel inherits SidePanel {
@@ -1046,15 +1181,24 @@ component SoundPanel inherits SidePanel {
             clicked => { SoundsData.play(); }
         }
     }
-    // Your own type for it: a button, not a filter's chip, as giving it a type filters nothing.
+    // Your own type for it: a button, not a filter's chip, as giving it a type filters nothing. Beside it Trim silence,
+    // for every sound played (here, by the Play button, as the page's top row has no room left).
     HorizontalLayout {
         alignment: start;
+        spacing: Space.sm;
         PickButton {
             name: "Your type";
             value: SoundsData.picked.own-type;
             none-text: "None of yours: its name's type";
             choices: SoundsData.type-choices;
             picked(t) => { SoundsData.set-type(t); }
+        }
+        PickButton {
+            name: "Trim silence";
+            value: SoundsData.trim-silence ? SoundsData.trim-level-db + " dB" : "";
+            none-text: "Off: play the whole file";
+            choices: SoundsData.trim-choices;
+            picked(t) => { SoundsData.pick-trim(t); }
         }
     }
     // In a narrow panel the facts wrap onto a second line, rather than run past its edge.
@@ -1361,7 +1505,7 @@ export component SoundsPage inherits Rectangle {
                 property <length> lines-max: SoundsData.view == 1 || SoundsData.view == 3 ? Fit.list-max
                     : SoundsData.view == 4 ? Fit.list-max + 300px
                     : self.width;
-                property <length> list-width: min(self.lines-max, SoundsData.panel-shown
+                property <length> list-width: min(self.lines-max, SoundsData.panel-shown || SoundsData.bitwig-shown
                     ? max(380px, self.width - SoundsData.panel-width - divider.width)
                     : self.width);
                 property <length> card-width: self.width - self.list-width - divider.width;
@@ -1864,7 +2008,7 @@ export component SoundsPage inherits Rectangle {
                     height: parent.height;
                 }
                 divider := PanelDivider {
-                    visible: SoundsData.panel-shown;
+                    visible: SoundsData.panel-shown || SoundsData.bitwig-shown;
                     x: area.list-width;
                     height: parent.height;
                     panel-width: area.card-width;
@@ -1872,7 +2016,13 @@ export component SoundsPage inherits Rectangle {
                     resizing(w) => { SoundsData.panel-width = w; }
                     resized(w) => { SoundsData.panel-resized(w); }
                 }
-                if SoundsData.panel-shown: SoundPanel {
+                // Favourites from Bitwig, over the sound card while it's open.
+                if SoundsData.bitwig-shown: BitwigCard {
+                    x: area.list-width + divider.width;
+                    width: area.card-width;
+                    height: parent.height;
+                }
+                if SoundsData.panel-shown && !SoundsData.bitwig-shown: SoundPanel {
                     x: area.list-width + divider.width;
                     width: area.card-width;
                     height: parent.height;
@@ -1880,7 +2030,7 @@ export component SoundsPage inherits Rectangle {
                 }
                 // Where the lines stop short of a wide window, the card's place is there before a sound is picked,
                 // so a wide screen has no empty side (Solomon, 11 Nov).
-                if !SoundsData.panel-shown && area.width - area.list-width >= 360px: SidePanel {
+                if !SoundsData.panel-shown && !SoundsData.bitwig-shown && area.width - area.list-width >= 360px: SidePanel {
                     x: area.list-width + divider.width;
                     width: area.width - self.x;
                     height: parent.height;
@@ -1904,12 +2054,26 @@ export component SoundsPage inherits Rectangle {
                 tab: SoundsData.view < 4 ? ["F", "I", "L", "T", "E", "R", "S"] : ["C", "H", "O", "I", "C", "E", "S"];
                 tab-close: SoundsData.view < 4 ? "CLOSE FILTERS" : "CLOSE CHOICES";
                 active: SoundsData.view < 4 ? SoundsData.any-filter : SoundsData.view == 4 && SoundsData.re-any-type;
+                // Room for what comes as you pick (Keys that mix well, a Clear button), so a pick never moves a type
+                // into More types: the types fill the rest.
+                keep-free: SoundsData.view < 4
+                    ? (SoundsData.key-filter.more-picked == "" ? Heights.tick-line + Space.md : 0px) + (SoundsData.any-filter ? 0px : Heights.button + Space.md)
+                    : SoundsData.view == 4 && !SoundsData.re-any-type ? Heights.button + Space.md : 0px;
                 if SoundsData.view < 4: VerticalLayout {
                     spacing: Space.md;
                     FilterList {
                         name: "TYPE";
                         more-name: "More types";
                         filter: SoundsData.type-filter;
+                        // As many types as there's room for as tick lines, the rest in More types (Solomon, 11 Nov
+                        // 2026: "the more types should fill is there more space").
+                        spare-room: column.spare-room;
+                        changed fits => {
+                            // Not from a list on its way out: it still says once, after the view has changed.
+                            if SoundsData.view < 4 {
+                                SoundsData.type-room(self.fits, 0);
+                            }
+                        }
                         toggled(text) => { SoundsData.toggle-choice("type", text); }
                         cleared => { SoundsData.clear-chip("more-types"); }
                     }
@@ -2016,6 +2180,15 @@ export component SoundsPage inherits Rectangle {
                         on: SoundsData.hide-copies;
                         clicked => { SoundsData.toggle("hide-copies"); }
                     }
+                    // Favourites picked in Bitwig, saved as multisamples, brought in as the app's favourites.
+                    HorizontalLayout {
+                        alignment: start;
+                        StudioButton {
+                            text: "Favourites from Bitwig…";
+                            tip: "Make the sounds in your Bitwig multisamples favourites";
+                            clicked => { SoundsData.bitwig-toggle(); }
+                        }
+                    }
                     if SoundsData.any-filter: HorizontalLayout {
                         alignment: start;
                         StudioButton {
@@ -2031,6 +2204,15 @@ export component SoundsPage inherits Rectangle {
                         name: "TYPE";
                         more-name: "More types";
                         filter: SoundsData.re-type-filter;
+                        spare-room: column.spare-room;
+                        // Not while it digs: the words under its choices say so meanwhile, and change back.
+                        property <int> room: SoundsData.re-busy ? 0 : self.fits;
+                        changed room => {
+                            // As for the Type filter: not from a list on its way out.
+                            if SoundsData.view == 4 {
+                                SoundsData.type-room(0, self.room);
+                            }
+                        }
                         toggled(text) => { SoundsData.re-pick("type", text); }
                         cleared => { SoundsData.re-pick("more-types", ""); }
                     }
@@ -2086,11 +2268,20 @@ export component SoundsPage inherits Rectangle {
                         on: SoundsData.re-rarely;
                         clicked => { SoundsData.re-toggle-rarely(); }
                     }
-                    if SoundsData.re-intro != "": Text {
-                        text: SoundsData.re-intro;
-                        color: Theme.muted;
-                        font-size: Type.meta;
-                        wrap: word-wrap;
+                    // As tall as its words, wrapped at the column's width. Slint 1.18 counts a wrapping Text that an
+                    // `if` shows as one line in the room the column works out, so the types took the room of its other
+                    // lines and cut them off at the column's foot.
+                    if SoundsData.re-intro != "": Rectangle {
+                        height: intro.preferred-height;
+                        intro := Text {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            text: SoundsData.re-intro;
+                            color: Theme.muted;
+                            font-size: Type.meta;
+                            wrap: word-wrap;
+                        }
                     }
                 }
                 // The kit builder's choices, in the filters' place.

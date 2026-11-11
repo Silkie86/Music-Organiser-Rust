@@ -12,7 +12,7 @@
 use crate::threads::lock;
 use rtrb::{Consumer, Producer, RingBuffer};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// The longest stretch of a sound that is read to play: a long loop plays its first minute.
@@ -39,6 +39,13 @@ impl Voice {
             None => left.clone(),
         };
         Voice { left, right, at: 0 }
+    }
+
+    /// Starts `part` of the way in (0 the start, 1 the end) instead of at the start.
+    fn from(mut self, part: f64) -> Voice {
+        let len = self.left.len().min(self.right.len());
+        self.at = ((part.clamp(0.0, 1.0) * len as f64) as usize).min(len);
+        self
     }
 
     fn done(&self) -> bool {
@@ -141,9 +148,37 @@ impl Playing {
     }
 }
 
+/// Where a pick's spot is, next to what was read of its file.
+#[derive(Debug, PartialEq)]
+enum Start {
+    /// In what was read: this part of the way through it.
+    Within(f64),
+    /// Past it: this many frames into the file.
+    Past(u64),
+}
+
+/// Where `from` of the way into the whole file (`file_seconds` long, at `rate`) is, when its first `read` frames were
+/// read.
+fn start(from: f32, read: usize, file_seconds: f64, rate: u32) -> Start {
+    // A file that doesn't say how long it is: what was read is taken as all of it.
+    let whole = (file_seconds * f64::from(rate)).max(read as f64);
+    let frame = f64::from(from.clamp(0.0, 1.0)) * whole;
+    // Read whole (within a hundredth: a file's own count of its length can be a little out), or the spot is in what
+    // was read.
+    if read == 0 {
+        Start::Within(0.0)
+    } else if read as f64 >= whole * 0.99 || frame < read as f64 {
+        Start::Within((frame / read as f64).min(1.0))
+    } else {
+        Start::Past(frame as u64)
+    }
+}
+
 /// What's to be read next.
 struct Pick {
     path: PathBuf,
+    /// Where in the whole sound to start: 0 the start, 1 the end.
+    from: f32,
     number: u64,
     told: Box<dyn FnOnce(Played) + Send>,
 }
@@ -161,6 +196,8 @@ pub enum Played {
 #[derive(Default)]
 pub struct Player {
     asks: Mutex<Option<Producer<Ask>>>,
+    /// The waveform of the sound last read whole to be played, with its path: the panel takes it.
+    pub heard: Mutex<Option<(PathBuf, mo_sounds::Peaks)>>,
     done: Mutex<Option<Consumer<Box<Voice>>>>,
     /// The DAW's sample rate while the track's audio runs; 0 when it doesn't.
     rate: AtomicU32,
@@ -173,9 +210,31 @@ pub struct Player {
     /// How many sounds were handed to the audio thread.
     handed: AtomicU64,
     counts: Arc<Counts>,
+    /// Trim silence: the level (dB below full scale, `mo_audio::trim::LEVELS_DB`) under which a sound's start and end
+    /// count as silence and aren't played; 0 while it's off.
+    trim_db: AtomicI32,
 }
 
 impl Player {
+    /// Turns Trim silence on at `db` below full scale (one of `mo_audio::trim::LEVELS_DB`), or off (`None`). It counts
+    /// from the next sound read.
+    pub fn set_trim(&self, db: Option<i32>) {
+        self.trim_db.store(db.unwrap_or(0), Ordering::Release);
+    }
+
+    /// Trim silence's level in dB below full scale, while it's on.
+    pub fn trim(&self) -> Option<i32> {
+        match self.trim_db.load(Ordering::Acquire) {
+            0 => None,
+            db => Some(db),
+        }
+    }
+
+    /// Trim silence's level as a sample's size, while it's on.
+    fn trim_level(&self) -> Option<f32> {
+        self.trim().map(mo_audio::trim::level_of_db)
+    }
+
     /// The DAW starts the track's audio at `rate` samples a second: the audio thread's side, to give the DAW.
     pub fn start(&self, rate: u32) -> Playing {
         let (asks_in, asks) = RingBuffer::new(4);
@@ -202,11 +261,12 @@ impl Player {
         self.counts.ended.store(handed, Ordering::Release);
     }
 
-    /// Plays the sound at `path`, read on a background thread at low priority; `told` hears how it went, unless a
-    /// newer pick came first.
-    pub fn play(self: &Arc<Self>, path: PathBuf, told: impl FnOnce(Played) + Send + 'static) {
+    /// Plays the sound at `path` from `from` of the way into the whole sound (0 the start, 1 the end), read on a
+    /// background thread at low priority; `told` hears how it went, unless a newer pick came first.
+    pub fn play(self: &Arc<Self>, path: PathBuf, from: f32, told: impl FnOnce(Played) + Send + 'static) {
         let number = self.picks.fetch_add(1, Ordering::AcqRel) + 1;
-        *lock(&self.next) = Some(Pick { path, number, told: Box::new(told) });
+        let from = if from.is_finite() { from.clamp(0.0, 1.0) } else { 0.0 };
+        *lock(&self.next) = Some(Pick { path, from, number, told: Box::new(told) });
         if self.reading.swap(true, Ordering::AcqRel) {
             // The reading thread is running: it takes this pick next.
             return;
@@ -242,6 +302,7 @@ impl Player {
             return;
         }
         let name = pick.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let started = std::time::Instant::now();
         let read = mo_audio::read(&pick.path, MOST_SECONDS);
         if self.picks.load(Ordering::Acquire) != pick.number {
             return;
@@ -251,11 +312,56 @@ impl Player {
             Err(e) => Played::Not(format!("Couldn't read {name}: {e}")),
             Ok(_) if rate == 0 => Played::Not(NOT_STARTED.into()),
             Ok(audio) => {
-                let voice = Box::new(Voice::new(&audio.channels, audio.sample_rate, rate));
-                self.hand_over(voice, name)
+                // The whole sound was read: its waveform, for a line the library has none for.
+                let frames = audio.channels.first().map_or(0, Vec::len);
+                if frames as f64 >= audio.file_seconds * f64::from(audio.sample_rate) * 0.99 {
+                    let wave = crate::waves::peaks(&audio.channels, crate::waves::PEAKS);
+                    *lock(&self.heard) = Some((pick.path.clone(), wave));
+                }
+                match self.voice_from(&pick, audio, rate) {
+                    Ok(voice) => self.hand_over(Box::new(voice), name),
+                    Err(why) => Played::Not(why),
+                }
             }
         };
+        match &played {
+            Played::Playing(..) => crate::log::took_if_slow("Play", &format!("Read {}", pick.path.display()), started),
+            Played::Not(why) => crate::log::took("Play", &format!("{}: {why}", pick.path.display()), started),
+        }
         (pick.told)(played);
+    }
+
+    /// The sound ready to play from the pick's spot. `audio` is the file read from its start; a spot past what was
+    /// read (over a minute into a long file) is read from there instead, where the file's kind can be.
+    fn voice_from(&self, pick: &Pick, mut audio: mo_audio::AudioData, rate: u32) -> Result<Voice, String> {
+        let read = audio.channels.first().map_or(0, Vec::len);
+        match start(pick.from, read, audio.file_seconds, audio.sample_rate) {
+            // Trim silence: the spot still counts into the whole sound; the play starts past the silence at the
+            // start (or at the spot, when that's later) and ends with the sound.
+            Start::Within(part) => match self
+                .trim_level()
+                .and_then(|level| mo_audio::trim::play_span(&audio, (part * read as f64).round() as usize, level))
+            {
+                Some((first, end)) => {
+                    audio.keep(first, end);
+                    Ok(Voice::new(&audio.channels, audio.sample_rate, rate))
+                }
+                None => Ok(Voice::new(&audio.channels, audio.sample_rate, rate).from(part)),
+            },
+            Start::Past(_) if !mo_audio::can_read_from(&pick.path) => {
+                Err("Only the first minute of this kind of file plays".into())
+            }
+            Start::Past(frame) => {
+                drop(audio);
+                let mut later = mo_audio::read_from(&pick.path, MOST_SECONDS, frame)
+                    .map_err(|e| format!("Couldn't read from there: {e}"))?;
+                // A spot picked past the first minute plays from there: only the silence at the end is cut.
+                if let Some(level) = self.trim_level() {
+                    later.cut_end_silence(level);
+                }
+                Ok(Voice::new(&later.channels, later.sample_rate, rate))
+            }
+        }
     }
 
     fn hand_over(&self, voice: Box<Voice>, name: String) -> Played {
@@ -313,6 +419,60 @@ mod tests {
         assert_eq!(resample(&s, 48_000, 48_000), s.to_vec());
         assert_eq!(resample(&s, 48_000, 24_000), vec![0.0, 2.0]);
         assert_eq!(resample(&s, 24_000, 48_000), vec![0.0, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 3.0]);
+    }
+
+    #[test]
+    fn a_sound_plays_from_the_spot_asked_for() {
+        let player = Player::default();
+        let mut playing = player.start(48_000);
+        let from_half = Voice::new(&[vec![0.1, 0.2, 0.3, 0.4]], 48_000, 48_000).from(0.5);
+        player.hand_over(Box::new(from_half), "a".into());
+        let (mut l, mut r) = (vec![9.0; 3], vec![9.0; 3]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![0.3 * LEVEL, 0.4 * LEVEL, 0.0]);
+        // The very end plays nothing, and doesn't run past the sound.
+        assert!(Voice::new(&[vec![0.1; 4]], 48_000, 48_000).from(1.0).done());
+    }
+
+    fn pick(from: f32) -> Pick {
+        Pick { path: PathBuf::new(), from, number: 1, told: Box::new(|_| {}) }
+    }
+
+    #[test]
+    fn trim_silence_skips_the_quiet_start_and_end_and_a_spot_still_counts_into_the_whole_sound() {
+        let mut s = vec![0.0; 100];
+        s[20..50].fill(0.5);
+        let audio =
+            mo_audio::AudioData { sample_rate: 1_000, channels: vec![s], file_seconds: 0.1, ..Default::default() };
+        let player = Player::default();
+        // Off: the whole sound.
+        assert_eq!(player.voice_from(&pick(0.0), audio.clone(), 1_000).unwrap().left.len(), 100);
+        player.set_trim(Some(-60));
+        // From the start: from the first loud frame to the end of the sound and its 10 ms tail.
+        let v = player.voice_from(&pick(0.0), audio.clone(), 1_000).unwrap();
+        assert_eq!((v.left.len(), v.left[0]), (40, 0.5));
+        // A spot in the sound plays from there; one in the quiet end plays as asked.
+        assert_eq!(player.voice_from(&pick(0.3), audio.clone(), 1_000).unwrap().left.len(), 30);
+        let v = player.voice_from(&pick(0.8), audio.clone(), 1_000).unwrap();
+        assert_eq!((v.left.len(), v.at), (100, 80));
+        player.set_trim(None);
+        assert_eq!(player.voice_from(&pick(0.0), audio, 1_000).unwrap().left.len(), 100);
+    }
+
+    #[test]
+    fn a_spot_is_counted_into_the_whole_file() {
+        // All 100 frames were read: half way is half way.
+        assert_eq!(start(0.5, 100, 1.0, 100), Start::Within(0.5));
+        assert_eq!(start(0.0, 100, 1.0, 100), Start::Within(0.0));
+        // The first 100 of 400 were read: an eighth of the way in is half way through them, and three quarters of
+        // the way in is past them, at frame 300.
+        assert_eq!(start(0.125, 100, 4.0, 100), Start::Within(0.5));
+        assert_eq!(start(0.75, 100, 4.0, 100), Start::Past(300));
+        // The end of a file read whole is its end, not a spot past it.
+        assert_eq!(start(1.0, 100, 1.0, 100), Start::Within(1.0));
+        // A file that doesn't say how long it is, and an empty one.
+        assert_eq!(start(0.5, 100, 0.0, 100), Start::Within(0.5));
+        assert_eq!(start(0.5, 0, 0.0, 100), Start::Within(0.0));
     }
 
     #[test]

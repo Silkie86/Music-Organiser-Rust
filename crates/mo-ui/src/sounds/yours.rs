@@ -87,7 +87,7 @@ fn change(app: &AppWindow, what: impl FnOnce(Now) -> Option<Change>) {
 
 /// The lists, the filters and the picked sound's card, with what you just said: the tiles and lines at once, and the
 /// list as the filters see it now (a sound no longer a favourite leaves Favourites) once it's worked out again.
-fn shown_again(app: &AppWindow) {
+pub(super) fn shown_again(app: &AppWindow) {
     super::show_lists(app);
     let data = app.global::<SoundsData>();
     PAGE.with(|p| {
@@ -108,6 +108,18 @@ pub(super) fn take(p: &mut Page, id: i64, change: Change, number: u64) {
     }
     known(p, &change);
     p.said.push(Said { number, id, change });
+    keep_showing(p);
+}
+
+/// The page takes `change` to each of the sounds `ids` (only those it lists), all noted as `number`, showing them
+/// once (Favourites from Bitwig marks thousands at a time: one by one, each would work the whole say out again).
+pub(super) fn take_all(p: &mut Page, ids: &[i64], change: &Change, number: u64) {
+    known(p, change);
+    for &id in ids {
+        if p.places.contains_key(&id) {
+            p.said.push(Said { number, id, change: change.clone() });
+        }
+    }
     keep_showing(p);
 }
 
