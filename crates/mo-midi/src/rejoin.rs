@@ -216,6 +216,9 @@ fn plays_in(stretches: &[&Stretch], from: i64, to: i64) -> bool {
     stretches.iter().any(|s| s.from < to && s.to > from)
 }
 
+/// Each time one stretch hands to another the same way, as places in the song's stretches.
+type Pairs = Vec<(usize, usize)>;
+
 /// Whether two stretches' ranges overlap, or come within 3 semitones of each other.
 fn ranges_meet(a: &Stretch, b: &Stretch) -> bool {
     b.lowest.saturating_sub(a.highest).max(a.lowest.saturating_sub(b.highest)) <= 3
@@ -295,7 +298,7 @@ pub fn join(voices: &[Voice]) -> Vec<Joined> {
     // The links strong enough to join, from each stretch to the one it hands to.
     // The strongest first; of two as strong (a lead and the pad doubling it both taking over), the one the tune steps
     // to most smoothly; then first in the song, so the same song always joins the same way (a map has no order).
-    let mut strong: Vec<(i32, u8, Vec<(usize, usize)>)> = handovers
+    let mut strong: Vec<(i32, u8, Pairs)> = handovers
         .into_values()
         .filter(|pairs| pairs.len() >= MIN_REPEATS)
         .filter_map(|pairs| {
