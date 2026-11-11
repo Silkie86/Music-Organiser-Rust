@@ -376,8 +376,8 @@ enum Changed {
     /// Biggest wins first, Also taking room and the card: a removal or a put back has finished, with what's in the
     /// Recycle Bin now. The page looks for spare copies, old copies or at your songs again (`spare`, `old`, `songs`):
     /// after a put back of them, and when a look of them stopped for it ([`hold_looks`]) or Measure again asked for one
-    /// meanwhile.
-    Bin { spare: bool, old: bool, songs: bool },
+    /// meanwhile. After a put back of fixed Bitwig projects it looks for Bitwig copies again (`bitwig`).
+    Bin { spare: bool, old: bool, songs: bool, bitwig: bool },
     /// Nothing: an older look's step, or how far a later look for Bitwig copies is while the last one's stay on show.
     Nothing,
 }
@@ -714,7 +714,7 @@ fn busy(p: &Page) -> bool {
 fn remove_fixed_button(p: &Page) -> Option<(String, bool)> {
     let wait = p.fixes.busy() || p.bitwig_looking.is_some() || busy(p);
     if p.fixed_removing {
-        return Some(("Sending to the Recycle Bin…".to_owned(), false));
+        return Some((format!("Sending to the {BIN}…"), false));
     }
     space_bitwig::remove_fixed_button(p.bitwig.as_ref(), wait)
 }
@@ -743,19 +743,19 @@ fn held(p: &Page) -> LookAfter {
 
 /// The spare copies card's Remove: it waits while a look for them is on, or something else is going or coming back.
 fn spare_remove_button(p: &Page) -> Option<(String, bool)> {
-    let wait = p.spare_looking || p.old_removing.busy() || p.songs_removing.busy();
+    let wait = p.spare_looking || p.fixed_removing || p.old_removing.busy() || p.songs_removing.busy();
     p.removing.remove_button(p.spare.as_ref(), wait, &p.put_backs)
 }
 
 /// The old copies card's Remove: it waits while a look for them is on, or something else is going or coming back.
 fn old_remove_button(p: &Page) -> Option<(String, bool)> {
-    let wait = p.old_looking || p.removing.busy() || p.songs_removing.busy();
+    let wait = p.old_looking || p.fixed_removing || p.removing.busy() || p.songs_removing.busy();
     p.old_removing.remove_button(p.old.as_ref(), wait, &p.put_backs)
 }
 
 /// The songs card's Remove: it waits while a look at your songs is on, or something else is going or coming back.
 fn songs_remove_button(p: &Page) -> Option<(String, bool)> {
-    let wait = p.songs_looking || p.removing.busy() || p.old_removing.busy();
+    let wait = p.songs_looking || p.fixed_removing || p.removing.busy() || p.old_removing.busy();
     p.songs_removing.remove_button(p.songs.as_ref(), wait, &p.put_backs)
 }
 
@@ -2289,21 +2289,21 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     keep(&mut p, kept);
                     p.removing.sent(when, done);
                     let LookAfter { spare, old, songs } = std::mem::take(&mut p.look_after);
-                    Changed::Bin { spare, old, songs }
+                    Changed::Bin { spare, old, songs, bitwig: false }
                 }
                 Step::OldSent(when, done, kept) => {
                     keep(&mut p, kept);
                     p.old_removing.sent(when, done);
                     p.old_stop = None;
                     let LookAfter { spare, old, songs } = std::mem::take(&mut p.look_after);
-                    Changed::Bin { spare, old, songs }
+                    Changed::Bin { spare, old, songs, bitwig: false }
                 }
                 Step::SongsSent(when, done, kept) => {
                     keep(&mut p, kept);
                     p.songs_removing.sent(when, done);
                     p.songs_stop = None;
                     let LookAfter { spare, old, songs } = std::mem::take(&mut p.look_after);
-                    Changed::Bin { spare, old, songs }
+                    Changed::Bin { spare, old, songs, bitwig: false }
                 }
                 Step::PutBack(kind, when, problems, kept) => {
                     let plugins = kind == space_bin::PLUGIN_CLEAN || kind == space_bin::PLUGIN_UNINSTALL;
@@ -2327,7 +2327,9 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                     let old = after.old || kind == OLD_COPIES && *p.old_removing.stage() == space_old::Stage::Picking;
                     let songs =
                         after.songs || kind == COMPACT && *p.songs_removing.stage() == space_songs::Stage::Picking;
-                    Changed::Bin { spare, old, songs }
+                    // Fixed Bitwig projects that came back are on the Bitwig card again.
+                    let bitwig = kind == space_bitwig::BITWIG_FIXED;
+                    Changed::Bin { spare, old, songs, bitwig }
                 }
                 _ => Changed::Nothing,
             }
@@ -2342,7 +2344,10 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
             PAGE.with(|p| p.borrow_mut().redraw = true);
             match changed {
                 Changed::LookAgain => look_for_copies(&app),
-                Changed::Bin { spare, old, songs } => {
+                Changed::Bin { spare, old, songs, bitwig } => {
+                    if bitwig {
+                        look_for_copies(&app);
+                    }
                     if spare {
                         look_for_spare(&app);
                     }
@@ -2368,9 +2373,12 @@ fn arrive(weak: &slint::Weak<AppWindow>, step: Step) {
                 // What's in the Recycle Bin from here counts on the plugins line too.
                 work_out_plugins(&app);
             }
-            Changed::Bin { spare, old, songs } => {
+            Changed::Bin { spare, old, songs, bitwig } => {
                 show_also(&app);
                 show_wins(&app);
+                if bitwig {
+                    look_for_copies(&app);
+                }
                 if spare {
                     look_for_spare(&app);
                 }

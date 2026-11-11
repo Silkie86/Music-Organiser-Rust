@@ -332,7 +332,12 @@ pub fn fix(job: &ToFix) -> Fixing {
         .map(|c| Relink { copy: PathBuf::from(&c.in_project), library: PathBuf::from(&c.library_file) })
         .collect();
     match relink::fix_bitwig_project_in(&job.save, &relinks, &job.libraries) {
-        Ok(fixed) => Fixing::Written(fixed.file),
+        Ok(fixed) => {
+            for line in &fixed.found {
+                crate::log::info("Space", &format!("Fix found again in {}: {line}", job.save.display()));
+            }
+            Fixing::Written(fixed.file)
+        }
         Err(why) => Fixing::Failed(why),
     }
 }
@@ -638,12 +643,8 @@ pub fn fixed_saves(found: Option<&Copies>) -> usize {
 pub fn remove_fixed_button(found: Option<&Copies>, wait: bool) -> Option<(String, bool)> {
     let n = fixed_saves(found);
     (n > 0).then(|| {
-        let words = if n == 1 {
-            format!("Send the fixed project to the {BIN}")
-        } else {
-            format!("Send the fixed projects of {} to the {BIN}", plural(n, "save"))
-        };
-        (words, !wait)
+        // Every "(fixed)" project in the folders goes, not only the newest of each save, so no count here.
+        (format!("Send every fixed Bitwig project to the {BIN}"), !wait)
     })
 }
 

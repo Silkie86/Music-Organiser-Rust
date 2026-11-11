@@ -225,8 +225,10 @@ fn relink_listed(
     };
     // The metadata: the list of files the project uses lists only files inside the project's folder, so a copy leaves
     // it (as a Library file Bitwig didn't copy is never in it); a single text is pointed at the Library file.
-    for (_, value) in &mut doc.meta {
-        if let Value::Strings(ts) = value {
+    for (name, value) in &mut doc.meta {
+        if name.as_str() == "used_files"
+            && let Value::Strings(ts) = value
+        {
             ts.retain(|t| match copy_of(t.as_str(), &folder, listed) {
                 Some(c) => {
                     changed[c] = true;
@@ -254,6 +256,13 @@ fn relink_listed(
         }
         let refs = file_refs(&doc, id);
         let o = doc.obj(id);
+        // One kept inside the project that isn't a copy listed here is another file (left as it is).
+        if let Some(Value::Str(inside)) = o.get(F_IN_PROJECT)
+            && !inside.as_str().is_empty()
+            && copy_of(inside.as_str(), &folder, listed).is_none()
+        {
+            continue;
+        }
         let texts = [F_IN_PROJECT, F_NAME].into_iter().filter_map(|f| match o.get(f) {
             Some(Value::Str(t)) => Some(t.as_str()),
             _ => None,
@@ -318,19 +327,25 @@ fn relink_listed(
     }
     // Bitwig's Library folders now: the ones given (Settings' first), then the ones the copies' Library files are in.
     let mut libraries: Vec<PathBuf> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    let mut add = |at: &Path| {
+        let k = key(&at.to_string_lossy());
+        if !seen.contains(&k) {
+            seen.push(k);
+            libraries.push(at.to_path_buf());
+        }
+    };
     for at in known_libraries {
-        if at.is_dir() && !libraries.contains(at) {
-            libraries.push(at.clone());
+        if at.is_dir() {
+            add(at);
         }
     }
     for l in listed {
         let at = Path::new(&l.full)
             .ancestors()
             .find(|a| a.file_name().is_some_and(|n| key(&n.to_string_lossy()) == "LIBRARY"));
-        if let Some(at) = at
-            && !libraries.contains(&at.to_path_buf())
-        {
-            libraries.push(at.to_path_buf());
+        if let Some(at) = at {
+            add(at);
         }
     }
     let found = found_again(&mut doc, project_dir, &libraries);
@@ -417,6 +432,13 @@ fn found_again(doc: &mut Document, project_dir: &Path, libraries: &[PathBuf]) ->
     }
     let files: Vec<ObjId> =
         (0..doc.objects.len()).map(|i| ObjId(i as u32)).filter(|&i| doc.obj(i).class == SAMPLE_FILE).collect();
+    // Each path's size if it's a file, asked of the disk once (many sample files share a folder's files).
+    let mut sizes: HashMap<PathBuf, Option<u64>> = HashMap::new();
+    let mut size_of = |path: &Path| -> Option<u64> {
+        *sizes
+            .entry(path.to_path_buf())
+            .or_insert_with(|| std::fs::metadata(path).ok().filter(|m| m.is_file()).map(|m| m.len()))
+    };
     for file in files {
         let o = doc.obj(file);
         if let Some(Value::Str(inside)) = o.get(F_IN_PROJECT)
@@ -426,25 +448,24 @@ fn found_again(doc: &mut Document, project_dir: &Path, libraries: &[PathBuf]) ->
             continue;
         }
         let size = integer(o.get(F_SIZE));
-        // Each file reference: where it is now, if it's there (or found in a moved folder), and whether it moved.
+        // Each file reference that's gone, and where the first one found again in a moved folder is now. (One that's
+        // there already may be another project's copy, so the others aren't pointed at it.)
         let mut gone = Vec::new();
         let mut there: Option<String> = None;
-        let mut moved = false;
         for r in file_refs(doc, file) {
             let Some(Value::Str(t)) = doc.obj(r).get(F_PATH) else { continue };
             let old = t.as_str().to_owned();
             if !paths::is_absolute(&old) {
                 continue;
             }
-            if Path::new(&old).is_file() {
-                there.get_or_insert(old);
+            if size_of(Path::new(&old)).is_some() {
                 continue;
             }
             let was = parts(&old);
             let keys: Vec<String> = was.iter().map(|p| key(p)).collect();
-            let same = |path: PathBuf| {
-                let meta = std::fs::metadata(&path).ok()?;
-                (meta.is_file() && size.is_none_or(|s| s == meta.len())).then_some(path)
+            let mut same = |path: PathBuf| {
+                let len = size_of(&path)?;
+                size.is_none_or(|s| s == len).then_some(path)
             };
             let moved_with_project = moves.iter().find_map(|(start, now)| {
                 if keys.len() <= start.len() || keys[..start.len()] != start[..] {
@@ -456,8 +477,9 @@ fn found_again(doc: &mut Document, project_dir: &Path, libraries: &[PathBuf]) ->
                 }
                 same(path)
             });
-            let in_library = || {
-                let at = keys[..keys.len() - 1].iter().rposition(|k| k == "LIBRARY")?;
+            let in_library = |same: &mut dyn FnMut(PathBuf) -> Option<PathBuf>| {
+                let (_, folders) = keys.split_last()?;
+                let at = folders.iter().rposition(|k| k == "LIBRARY")?;
                 libraries.iter().find_map(|library| {
                     let mut path = library.clone();
                     for p in &was[at + 1..] {
@@ -466,7 +488,10 @@ fn found_again(doc: &mut Document, project_dir: &Path, libraries: &[PathBuf]) ->
                     same(path)
                 })
             };
-            let new = moved_with_project.or_else(in_library);
+            let new = match moved_with_project {
+                Some(new) => Some(new),
+                None => in_library(&mut same),
+            };
             match new {
                 Some(new) => {
                     let new = new.to_string_lossy().into_owned();
@@ -476,14 +501,13 @@ fn found_again(doc: &mut Document, project_dir: &Path, libraries: &[PathBuf]) ->
                     }
                     doc.obj_mut(r).set(F_PATH, Value::Str(Text::new(&new)));
                     there.get_or_insert(new);
-                    moved = true;
                 }
                 None => gone.push(r),
             }
         }
         // One that's still gone (the copy in another project it came from, say) names the file where it is, so Bitwig
         // finds it whichever reference it reads first.
-        if let Some(there) = there.filter(|_| moved) {
+        if let Some(there) = there {
             for r in gone {
                 doc.obj_mut(r).set(F_PATH, Value::Str(Text::new(&there)));
             }

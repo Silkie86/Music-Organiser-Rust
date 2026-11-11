@@ -406,6 +406,15 @@ fn a_copy_becomes_a_library_file_as_bitwig_writes_one_and_moved_files_are_found(
         20,
     );
     sample_file(&mut doc, "Wrong Size.wt", "", r"I:\Bitwig Studio\Library\Wavetables\Analog\Wrong Size.wt", &[], 9);
+    // Another file kept inside the project, though it was once found where the copy is: it stays as it is.
+    sample_file(
+        &mut doc,
+        "Other.multisample",
+        "multi-samples/Other.multisample",
+        r"I:\Bitwig Studio\Projects\Song\multi-samples\Other.multisample",
+        &[&format!(r"I:\Bitwig Studio\Projects\Song\multi-samples\{COPY}")],
+        3,
+    );
     for (k, v) in &mut doc.meta {
         if k.as_str() == "used_files" {
             *v = Value::Strings(vec![Text::new(&format!("multi-samples/{COPY}")), Text::new("samples/Kick.wav")]);
@@ -435,6 +444,8 @@ fn a_copy_becomes_a_library_file_as_bitwig_writes_one_and_moved_files_are_found(
         r"I:\Bitwig Studio\Library\Wavetables\Analog\Wrong Size.wt",
         "another size isn't the same file"
     );
+    let other = sample_file_texts(&back, 5);
+    assert_eq!((other.0.as_str(), other.1.as_str()), ("Other.multisample", "multi-samples/Other.multisample"));
     assert_eq!(fixed.found.len(), 2, "{:?}", fixed.found);
     let used = back.meta.iter().find(|(k, _)| k.as_str() == "used_files").map(|(_, v)| v.clone());
     assert_eq!(used, Some(Value::Strings(vec![Text::new("samples/Kick.wav")])));
