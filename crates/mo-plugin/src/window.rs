@@ -454,6 +454,27 @@ impl Shown {
                 panel.set_playing(SharedString::new());
             }
         });
+        // Trim silence, for this plugin while it's loaded: it starts off, at -60 dB, and shows what the player has
+        // when the window opens again.
+        panel.set_trim_choices(ModelRc::new(slint::VecModel::from(
+            mo_audio::trim::choices().into_iter().map(SharedString::from).collect::<Vec<_>>(),
+        )));
+        if let Some(db) = self.instance.player.trim() {
+            panel.set_trim_level_db(db);
+            panel.set_trim_silence(true);
+        }
+        let player = Arc::clone(&self.instance.player);
+        let weak = panel.as_weak();
+        panel.on_pick_trim(move |picked| {
+            let Some(panel) = weak.upgrade() else { return };
+            // "" turns it off; a level ("-50 dB") turns it on at that level.
+            let picked = mo_audio::trim::parse_pick(&picked);
+            if let Some(db) = picked {
+                panel.set_trim_level_db(db);
+            }
+            panel.set_trim_silence(picked.is_some());
+            player.set_trim(picked);
+        });
         panel.set_can_drag(crate::drag::CAN);
         let lines = Rc::clone(&self.lines);
         let slots = Arc::clone(&self.slots);

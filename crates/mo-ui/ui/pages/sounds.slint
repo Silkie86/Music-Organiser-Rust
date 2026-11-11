@@ -360,6 +360,12 @@ export global SoundsData {
     callback shuffle();
     in property <bool> autoplay;
     callback toggle-autoplay();
+    // Trim silence: sounds play without the silence at their start and end (the files stay as they are), with how
+    // quiet counts as silence, in dB below full scale; a pick from its menu: "-50 dB", or "" for off.
+    in property <bool> trim-silence;
+    in property <int> trim-level-db: -60;
+    in property <[string]> trim-choices;
+    callback pick-trim(string);
 
     // How many sounds are shown, for the list's empty state.
     in property <int> shown;
@@ -1046,15 +1052,24 @@ component SoundPanel inherits SidePanel {
             clicked => { SoundsData.play(); }
         }
     }
-    // Your own type for it: a button, not a filter's chip, as giving it a type filters nothing.
+    // Your own type for it: a button, not a filter's chip, as giving it a type filters nothing. Beside it Trim silence,
+    // for every sound played (here, by the Play button, as the page's top row has no room left).
     HorizontalLayout {
         alignment: start;
+        spacing: Space.sm;
         PickButton {
             name: "Your type";
             value: SoundsData.picked.own-type;
             none-text: "None of yours: its name's type";
             choices: SoundsData.type-choices;
             picked(t) => { SoundsData.set-type(t); }
+        }
+        PickButton {
+            name: "Trim silence";
+            value: SoundsData.trim-silence ? SoundsData.trim-level-db + " dB" : "";
+            none-text: "Off: play the whole file";
+            choices: SoundsData.trim-choices;
+            picked(t) => { SoundsData.pick-trim(t); }
         }
     }
     // In a narrow panel the facts wrap onto a second line, rather than run past its edge.

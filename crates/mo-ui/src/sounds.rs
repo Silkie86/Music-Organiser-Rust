@@ -156,6 +156,9 @@ struct Page {
     /// How many seconds of it that play reads at most (a sweep reads only its start): a click on its waveform past
     /// that reads it again from there ([`seeks`]).
     play_reads: f64,
+    /// That play was trimmed (Trim silence was on): its samples don't hold the whole file, so a click on its waveform
+    /// plays it again from there rather than moving along what was read.
+    play_trimmed: bool,
     /// Each sound's place in `list`, by id.
     places: Arc<HashMap<i64, usize>>,
     /// Every sound's fingerprint, once read, for Sounds like this and Rediscover.
@@ -179,6 +182,12 @@ struct Page {
     re_likes: HashMap<i64, i64>,
     /// Hide duplicates has been set: by you, or from its setting when the sounds first showed.
     hide_copies_chosen: bool,
+    /// Trim silence is on: sounds play without the silence at their start and end ([`mo_audio::trim`]).
+    trim: bool,
+    /// The level Trim silence counts as silence, in dB below full scale (`mo_audio::trim::LEVELS_DB`).
+    trim_db: i32,
+    /// Trim silence has been set: by you, or from its setting when the sounds first showed.
+    trim_chosen: bool,
     /// The kit builder's pads and choices.
     kit: kit::Kit,
     /// The galaxy's map and the part of it on show.
@@ -223,6 +232,7 @@ impl Default for Page {
             playing: None,
             play: 0,
             play_reads: 0.0,
+            play_trimmed: false,
             places: Arc::default(),
             index: None,
             no_index: None,
@@ -234,6 +244,9 @@ impl Default for Page {
             re_years: Vec::new(),
             re_likes: HashMap::new(),
             hide_copies_chosen: false,
+            trim: false,
+            trim_db: mo_audio::trim::DEFAULT_DB,
+            trim_chosen: false,
             kit: kit::Kit::default(),
             galaxy: galaxy::Galaxy::default(),
         }
@@ -2277,6 +2290,12 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
             p.hide_copies_chosen = true;
             p.filters.hide_copies = crate::settings::value(list::HIDE_COPIES_KEY).as_deref() == Some("on");
         }
+        // Trim silence too.
+        if !p.trim_chosen {
+            p.trim_chosen = true;
+            p.trim = crate::settings::value(list::TRIM_SILENCE_KEY).as_deref() == Some("on");
+            p.trim_db = mo_audio::trim::level_db(crate::settings::value(list::TRIM_LEVEL_KEY).as_deref());
+        }
         p.picked = None;
         p.rediscover.clear();
         p.re_started = false;
@@ -2483,6 +2502,28 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         app.global::<SoundsData>().set_autoplay(on);
         // Kept for the next start (review G-3).
         crate::settings::remember(AUTOPLAY_KEY, if on { "1" } else { "0" });
+    });
+    let weak = app.as_weak();
+    data.on_pick_trim(move |picked| {
+        let Some(app) = weak.upgrade() else { return };
+        // "" turns it off; a level ("-50 dB") turns it on at that level. Both kept for next time, in the app's own
+        // settings; they count from the next play (the one playing goes on).
+        let picked = mo_audio::trim::parse_pick(&picked);
+        let on = picked.is_some();
+        let db = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.trim = on;
+            if let Some(db) = picked {
+                p.trim_db = db;
+            }
+            p.trim_chosen = true;
+            p.trim_db
+        });
+        let data = app.global::<SoundsData>();
+        data.set_trim_silence(on);
+        data.set_trim_level_db(db);
+        crate::settings::remember(list::TRIM_SILENCE_KEY, if on { "on" } else { "off" });
+        crate::settings::remember(list::TRIM_LEVEL_KEY, &db.to_string());
     });
     let weak = app.as_weak();
     data.on_pick_view(move |v| {
@@ -3334,6 +3375,11 @@ fn show_chips(app: &AppWindow) {
         data.set_order_column(p.order.column().into());
         data.set_order_reversed(p.reversed);
         data.set_autoplay(p.autoplay);
+        data.set_trim_silence(p.trim);
+        data.set_trim_level_db(p.trim_db);
+        data.set_trim_choices(slint::ModelRc::new(slint::VecModel::from(
+            mo_audio::trim::choices().into_iter().map(SharedString::from).collect::<Vec<_>>(),
+        )));
         show_picked_tags(&data, &p);
     });
 }
@@ -3529,11 +3575,11 @@ fn play_picked(app: &AppWindow, from: f64) {
 /// galaxy's sweep plays the stars it passes without picking them), reading at most `most` seconds of it: a sweep only
 /// needs its start, which reads far quicker than a whole loop.
 fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
-    let Some((at, path, seconds)) = PAGE.with(|p| {
+    let Some((at, path, seconds, trim)) = PAGE.with(|p| {
         let p = p.borrow();
         let s = p.list.sound(at)?;
         let seconds = s.analysis.as_ref().map_or(0.0, |a| a.seconds).min(mo_audio::MAX_SECONDS);
-        Some((at, s.path.clone(), seconds))
+        Some((at, s.path.clone(), seconds, p.trim.then(|| mo_audio::trim::level_of_db(p.trim_db))))
     }) else {
         return;
     };
@@ -3549,12 +3595,13 @@ fn play_sound(app: &AppWindow, at: usize, from: f64, most: f64) {
         p.playing = Some((at, seconds.max(0.001)));
         p.play = ask;
         p.play_reads = most;
+        p.play_trimmed = trim.is_some();
     });
     playing_changed(app);
     if here {
         return;
     }
-    let job = PlayJob { ask, path, from, seconds, most, window: app.as_weak(), held: Arc::default() };
+    let job = PlayJob { ask, path, from, seconds, most, trim, window: app.as_weak(), held: Arc::default() };
     ask_reader(job);
 }
 
@@ -3604,6 +3651,9 @@ struct PlayJob {
     from: f64,
     seconds: f64,
     most: f64,
+    /// Trim silence was on when it was asked for, with the level it counts as silence: it starts past the silence at
+    /// its start and stops at the end of the sound, not the end of the file.
+    trim: Option<f32>,
     window: slint::Weak<AppWindow>,
     /// How many of its reader's jobs are held: one more while this one is, so the reader is free once it's none.
     held: Arc<AtomicUsize>,
@@ -3620,7 +3670,7 @@ impl Drop for PlayJob {
 /// (`mo_app::sweep_timing`) hear when it's being opened, and when it's handed to the output, overtaken by a newer sound
 /// or dropped, by this play's number; for a sound the sweep didn't ask for they count nothing.
 fn read_and_play(job: PlayJob) {
-    let PlayJob { ask, ref path, from, seconds, most, ref window, .. } = job;
+    let PlayJob { ask, ref path, from, seconds, most, trim, ref window, .. } = job;
     let (path, window) = (path.clone(), window.clone());
     // Still the newest play, with no stop since.
     let wanted = || {
@@ -3638,16 +3688,23 @@ fn read_and_play(job: PlayJob) {
         return;
     }
     sweep_timing::opening(&path, ask);
-    let went = match mo_audio::read(Path::new(&path), most) {
+    // Trimmed, a sweep's short read is read on past the silence at the start, so it still hears `most` of the sound.
+    let reads = if trim.is_some() && most < mo_audio::MAX_SECONDS { most + TRIM_LEAD_ROOM } else { most };
+    let went = match mo_audio::read(Path::new(&path), reads) {
         // Looked at again as it starts, with no stop or other sound able to come in between: one asked for since
         // wins, rather than this sound starting after it and playing on while the page shows another or none.
         Ok(mut audio) => {
+            let start = match trim {
+                Some(level) => trimmed(&mut audio, from * seconds, most, level),
+                None => from * seconds,
+            };
             // Read as far as it was asked to (a sweep reads only a sound's start; a long one is read so far): it
             // stops there, so it fades out rather than clicking.
-            if audio.sample_rate > 0 && audio.seconds() + 1.0 / f64::from(audio.sample_rate) >= most {
+            if audio.sample_rate > 0 && audio.seconds() + 1.0 / f64::from(audio.sample_rate) >= reads.min(start + most)
+            {
                 audio.fade_out_end();
             }
-            player().play_if(Arc::new(audio), ask.to_string(), from * seconds, wanted)
+            player().play_if(Arc::new(audio), ask.to_string(), start, wanted)
         }
         Err(e) => match wanted() {
             Err(unwanted) => Err(unwanted),
@@ -3668,6 +3725,32 @@ fn read_and_play(job: PlayJob) {
         Err(Unwanted::Overtaken) => sweep_timing::overtaken(&path, ask),
         Err(Unwanted::Stopped) => sweep_timing::dropped(&path, ask),
     }
+}
+
+/// How much further a sweep's read goes with Trim silence on, for the silence at the start it skips.
+const TRIM_LEAD_ROOM: f64 = 2.0;
+
+/// Trim silence for a sound about to play from `from` seconds, reading at most `most` seconds of it, with what's
+/// quieter than `level` as silence: cuts the silence
+/// at its end off (and what's past `most` of the sound, for a sweep's longer read) and gives where it starts, past the
+/// silence at its start. The start stays in the samples, so the waveform's place and the play's position still mean
+/// the same second of the file. A sound silent all through, or a play from inside the silence at the end, plays as
+/// asked.
+fn trimmed(audio: &mut mo_audio::AudioData, from: f64, most: f64, level: f32) -> f64 {
+    let rate = f64::from(audio.sample_rate.max(1));
+    let asked = (from * rate).round() as usize;
+    let Some((first, end)) = mo_audio::trim::play_span(audio, asked, level) else {
+        // Played as asked, as far as asked: a sweep's longer read is cut back to `most`.
+        let keep = ((from + most) * rate).round() as usize;
+        for channel in &mut audio.channels {
+            channel.truncate(keep);
+        }
+        return from;
+    };
+    let start = if first > asked { first as f64 / rate } else { from };
+    // The start stays in the samples (`keep` from 0); a cut end fades out.
+    audio.keep(0, end.min(((start + most) * rate).round() as usize));
+    start
 }
 
 /// Why a sound that was read isn't played.
@@ -3768,7 +3851,10 @@ pub fn stop_for_another(app: &AppWindow) {
 /// (`player_has`: its key), rather than reading the sound again from there: only when the player has that very play
 /// (not an older one, nor none while it's still being read) and the play read that far (a sweep reads only its start).
 fn seeks(p: &Page, player_has: Option<&str>, to: f64) -> bool {
-    p.playing.is_some() && player_has.is_some_and(|key| key.parse() == Ok(p.play)) && to < p.play_reads
+    p.playing.is_some()
+        && player_has.is_some_and(|key| key.parse() == Ok(p.play))
+        && to < p.play_reads
+        && !p.play_trimmed
 }
 
 /// A sound played to its end by itself: `key` is its play's number.
@@ -3912,6 +3998,39 @@ fn show_sending(app: &AppWindow, sending: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 100 frames a second: silent for 0.2 s, loud for 0.3 s, silent to 1 s.
+    fn quiet_loud_quiet() -> mo_audio::AudioData {
+        let mut s = vec![0.0; 100];
+        s[20..50].fill(0.5);
+        mo_audio::AudioData { sample_rate: 100, channels: vec![s.clone(), s], ..Default::default() }
+    }
+
+    #[test]
+    fn trim_silence_starts_past_the_quiet_start_and_stops_at_the_sounds_end() {
+        let mut a = quiet_loud_quiet();
+        let start = trimmed(&mut a, 0.0, mo_audio::MAX_SECONDS, 0.001);
+        assert!((start - 0.2).abs() < 1e-9);
+        // The start stays in the samples (the waveform's places still mean the same second); a 10 ms tail stays.
+        assert_eq!((a.channels[0].len(), a.channels[1].len()), (51, 51));
+        // A click past the start plays from there.
+        let mut a = quiet_loud_quiet();
+        assert!((trimmed(&mut a, 0.3, mo_audio::MAX_SECONDS, 0.001) - 0.3).abs() < 1e-9);
+        // A sweep hears `most` of the sound, not of the silence before it.
+        let mut a = quiet_loud_quiet();
+        assert!((trimmed(&mut a, 0.0, 0.1, 0.001) - 0.2).abs() < 1e-9);
+        assert_eq!(a.len(), 30);
+    }
+
+    #[test]
+    fn trim_silence_leaves_silence_all_through_and_a_click_in_the_quiet_end_as_asked() {
+        let mut a = quiet_loud_quiet();
+        assert_eq!(trimmed(&mut a, 0.8, mo_audio::MAX_SECONDS, 0.001), 0.8);
+        assert_eq!(a.len(), 100);
+        let mut quiet = mo_audio::AudioData { sample_rate: 100, channels: vec![vec![0.0; 50]], ..Default::default() };
+        assert_eq!(trimmed(&mut quiet, 0.1, mo_audio::MAX_SECONDS, 0.001), 0.1);
+        assert_eq!(quiet.len(), 50);
+    }
 
     #[test]
     fn rediscover_picks_types_as_the_type_filter_does_and_always_a_count() {
