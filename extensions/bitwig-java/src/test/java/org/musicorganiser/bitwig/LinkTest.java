@@ -127,7 +127,9 @@ class LinkTest {
                        // Link version 3: which link this is.
                        "runtime", "java", "extension", MusicOrganiserExtensionDefinition.VERSION,
                        // Extension 3.7: whether the link's own MIDI has come back through the loopback (it isn't set up here).
-                       "loopback", false),
+                       "loopback", false,
+                       // Extension 3.22: a clip may come with the bars of its song to loop.
+                       "songLoop", true),
                    hello.get("result"));
         assertJson(obj("id", 1, "ok", true, "result", hello.get("result")), app.ask(obj("id", 1, "cmd", "hello")));
         assertEquals(List.of(), bitwig.popups);

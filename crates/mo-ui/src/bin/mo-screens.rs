@@ -168,6 +168,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     {
         return Err(format!("midi-fits.png: the part picked doesn't play with the song: \"{with_song}\"").into());
     }
+    // Night drive is an FL Studio song: Play in Bitwig's tip doesn't promise its bars going round there.
+    if midi.get_bitwig_with_song() {
+        return Err("midi-fits.png: Play in Bitwig says it plays with a song that isn't a Bitwig project".into());
+    }
     // Off, it stays picked as it is in the library: the card no longer says it's moved, and its roll and chords are
     // its own.
     mo_ui::midi::fit_sample(&app, false);

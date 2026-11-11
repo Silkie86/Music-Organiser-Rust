@@ -172,6 +172,17 @@ whether Bitwig's audio engine is on.) The rest is additions, which the app can i
   each whether its panel showed before and after each go (`visible`), whether the route `ran` it, and whether
   the link put the panel back as it was (`restored`). A panel that shows and hides with them means Bitwig
   carried them out for the link.
+- From 3.22, for the MIDI page's Play in Bitwig in a "Fits my song" list: `clip` with `loop` (the song's bars, in
+  beats) stops Bitwig, sets the arranger to go round those bars with Play starting at the first of them, and
+  launches the part from its own start (`launchWithOptions("none", "from_start")`), so the part's first bar is
+  the bars' first, as the app judged the two together. `deleteclip` then puts the loop and the play start back as
+  the link found them, each only while it's still as the link set it. If Bitwig stops the link meanwhile, it puts
+  them back as it goes. The bars go round for the newest part only, so one the app never took out (it let go of a
+  part it couldn't stop) doesn't keep the loop from going back after the next. `hello` says `songLoop`: whether
+  this Bitwig let the link reach the loop at all. Not yet tried in a real Bitwig: whether a launcher clip plays on
+  through the arranger's jump back to the loop's start (the app counts on it), what the launch does with a play
+  start off a bar line, and how soon after a launch Bitwig says it's playing (a `deleteclip` waits up to 3
+  seconds for it, so it never presses Stop on a Bitwig still stopped).
 - From 3.21, `insert` and `pads` find a track by `trackId` too (as `clip` does), so a send lands on its new track
   however tracks move meanwhile, and an audition's `deleteclip` and `deletetrack` still run after the app that asked
   has closed (as `stoptracks` does).

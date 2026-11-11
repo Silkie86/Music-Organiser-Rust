@@ -1,7 +1,7 @@
 //! The Bitwig link: the app talks to the Music Organiser extension (or the script it took over from) running inside
 //! Bitwig Studio, over a connection on this computer, and Send to Bitwig puts things into the project open there.
 //!
-//! The extension itself lives in this repo (`extensions/bitwig-java`, version 3.21; the C# app's copy is frozen):
+//! The extension itself lives in this repo (`extensions/bitwig-java`, version 3.22; the C# app's copy is frozen):
 //! Bitwig only runs Java extensions. Settings > DAWs installs it. Changing anything needs "Let the app make changes"
 //! on in Bitwig (Settings > Controllers > Music Organiser); reading never does.
 //!
@@ -12,7 +12,8 @@
 //!   each sound on the pad General MIDI drum parts play (kick on C1, snare on D1, closed hat on F#1...).
 //! - [`Bitwig::check`]: what Bitwig has open, and whether a send would go in now.
 //! - [`Bitwig::play_on_selected`] then [`Bitwig::stop_playing`]: a MIDI part looping through what's on the track
-//!   selected in Bitwig, for auditioning (extension 3.19).
+//!   selected in Bitwig, for auditioning (extension 3.19). [`Bitwig::play_with_song`]: the same, with the bars of the
+//!   song it was found for going round in Bitwig's arranger (extension 3.22).
 //! - [`Bitwig::audition_preset`] then [`Bitwig::stop_audition`] or [`Bitwig::keep_audition`]: a preset on a track of
 //!   its own playing a part (extension 3.20).
 //!
@@ -30,12 +31,12 @@ pub mod fake;
 mod link;
 mod send;
 
-pub use audition::{AUDITION_NEEDS, Auditioning, PLAY_NEEDS, Playing};
+pub use audition::{AUDITION_NEEDS, Auditioning, PLAY_NEEDS, Playing, SongLoop, WITH_SONG_NEEDS, WithSong};
 pub use device::{DRUM_MACHINE_KEY, DRUM_MACHINE_NAME, DeviceId, drum_machine};
 pub use error::{Error, LOOPBACK_PORT};
 pub use link::{
     CHANGE_TIMEOUT, CONNECT_TIMEOUT, Device, Hello, Inserted, LINK_VERSION, Link, NewTrack, PORT, PadContents,
-    PadsFilled, SelectedTrack, TIMEOUT,
+    PadsFilled, SelectedTrack, TIMEOUT, TakenOut,
 };
 pub use send::{
     Bitwig, KIT_FAILED, KitSound, KitTarget, PART_FAILED, PART_IN, PART_PLACE, Pad, SOUND_FAILED, SOUND_PLACE, SentKit,

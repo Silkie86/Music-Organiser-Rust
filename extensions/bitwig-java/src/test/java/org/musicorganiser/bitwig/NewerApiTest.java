@@ -14,6 +14,7 @@ import static org.musicorganiser.bitwig.Messages.listAt;
 import static org.musicorganiser.bitwig.Messages.obj;
 
 import java.nio.file.Path;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -489,6 +490,287 @@ class NewerApiTest {
         assertJson(obj("deleted", false), app.waitFor(obj("id", 3, "cmd", "deleteclip", "trackId", "bass-id", "slot", 0)).get("result"));
         assertFalse(bitwig.calls.stream().anyMatch(c -> c.get(0).equals("deleteClip")), String.valueOf(bitwig.calls));
         assertEquals("Say which track, by its ID.", error(app.waitFor(obj("id", 4, "cmd", "deleteclip", "slot", 0))));
+    }
+
+    // ---- playing a part with its song's bars going round (extension 3.22) ----
+
+    /** A part to play with bars 9 to 16 of a song in 4/4: from beat 32, for 32 beats. */
+    static Map<String, Object> partWithBars(int id, String file) {
+        return obj("id", id, "cmd", "clip", "trackId", "bass-id", "path", "C:\\MIDI\\" + file, "launch", true, "audition", true,
+                   "loop", obj("start", 32, "length", 32));
+    }
+
+    static Map<String, Object> takeOut(int id, int slot) {
+        return obj("id", id, "cmd", "deleteclip", "trackId", "bass-id", "slot", slot, "stop", true, "transport", true);
+    }
+
+    /** The song in 4/4, with a loop of your own (off, 2 bars from bar 17) and Play starting at bar 3. */
+    void startWithALoopOfYourOwn() {
+        Model m = LinkTest.song();
+        m.scenes = 3;
+        m.timeSignature = "4/4";
+        m.tracks.get(1).id("bass-id").slots("old.mid");
+        m.transport.put("isArrangerLoopEnabled", false);
+        m.loopStart = 64;
+        m.loopLength = 8;
+        m.playStart = 8;
+        start(m);
+        bitwig.allowChanges(true);
+    }
+
+    /** The arranger's loop and the play start, as Bitwig has them now. */
+    List<Object> loopNow() {
+        return List.of(bitwig.transportNow.get("isArrangerLoopEnabled"), bitwig.loopStartAt, bitwig.loopLengthAt, bitwig.playStartAt);
+    }
+
+    @Test
+    @DisplayName("loops the song's bars for a part, starts Bitwig at the first of them, and puts the loop back when the part comes out")
+    void loopsTheSongsBarsForAPart() {
+        startWithALoopOfYourOwn();
+        assertJson(obj("slot", 1, "launched", true, "looping", true), app.waitFor(partWithBars(1, "MO Play 1.mid")).get("result"));
+        assertEquals(List.of(true, 32.0, 32.0, 32.0), loopNow());
+        // At once and from its own start, so the part's first bar is the bars' first.
+        assertTrue(bitwig.calls.contains(List.of("launchWithOptions", 1, 1, "none", "from_start")), String.valueOf(bitwig.calls));
+        // Bitwig wasn't playing, so it isn't stopped (Stop would move your play start); it plays from the bars' start.
+        assertFalse(bitwig.calls.contains(List.of("stop")), String.valueOf(bitwig.calls));
+        assertTrue(bitwig.playingNow);
+        assertEquals(32.0, bitwig.state.tracks.get(1).launched.start);
+
+        assertJson(obj("deleted", true, "loopBack", true), app.waitFor(takeOut(2, 1)).get("result"));
+        assertFalse(bitwig.playingNow);
+        assertEquals(List.of(false, 64.0, 8.0, 8.0), loopNow());
+        assertEquals("old.mid", bitwig.state.tracks.get(1).slots.get(0));
+        // Only once: nothing of the app's is left there, and nothing more is put back.
+        assertJson(obj("deleted", false), app.waitFor(obj("id", 3, "cmd", "deleteclip", "trackId", "bass-id", "slot", 1)).get("result"));
+    }
+
+    @Test
+    @DisplayName("stops Bitwig first when it plays, so it starts again at the song's bars")
+    void stopsBitwigBeforeLoopingTheBars() {
+        startWithALoopOfYourOwn();
+        app.waitFor(obj("id", 1, "cmd", "clip", "trackId", "bass-id", "slot", 0, "path", "C:\\MIDI\\Bass.mid", "replace", true, "launch", true));
+        assertTrue(bitwig.playingNow);
+        assertJson(obj("slot", 1, "launched", true, "looping", true), app.waitFor(partWithBars(2, "MO Play 1.mid")).get("result"));
+        int stopped = bitwig.calls.indexOf(List.of("stop"));
+        int looped = bitwig.calls.indexOf(List.of("loopStart", 32.0));
+        int launched = bitwig.calls.indexOf(List.of("launchWithOptions", 1, 1, "none", "from_start"));
+        assertTrue(stopped >= 0 && looped > stopped && launched > looped, String.valueOf(bitwig.calls));
+        assertTrue(bitwig.playingNow);
+        assertEquals(32.0, bitwig.state.tracks.get(1).launched.start);
+        assertJson(obj("deleted", true, "loopBack", true), app.waitFor(takeOut(3, 1)).get("result"));
+        assertEquals(List.of(false, 64.0, 8.0, 8.0), loopNow());
+    }
+
+    @Test
+    @DisplayName("leaves what you changed while the part played, and puts the rest back even when the clip is yours now")
+    void leavesWhatYouChangedMeanwhile() {
+        startWithALoopOfYourOwn();
+        app.waitFor(partWithBars(1, "MO Play 1.mid"));
+        // You drag the loop's end out and click in bar 5, and rename the clip to keep it.
+        bitwig.loopLengthAt = 48;
+        bitwig.playStartAt = 16;
+        bitwig.state.tracks.get(1).slots.set(1, "Kept it.mid");
+        bitwig.refresh();
+        assertJson(obj("deleted", false, "loopBack", true), app.waitFor(takeOut(2, 1)).get("result"));
+        assertEquals(List.of(false, 64.0, 48.0, 16.0), loopNow());
+        assertEquals("Kept it.mid", bitwig.state.tracks.get(1).slots.get(1));
+    }
+
+    @Test
+    @DisplayName("doesn't press Stop on a Bitwig you stopped yourself, which would move your play start to the beginning")
+    void doesntStopABitwigAlreadyStopped() {
+        startWithALoopOfYourOwn();
+        app.waitFor(partWithBars(1, "MO Play 1.mid"));
+        bitwig.pressStop();
+        assertJson(obj("deleted", true, "loopBack", true), app.waitFor(takeOut(2, 1)).get("result"));
+        assertFalse(bitwig.calls.contains(List.of("stop")), String.valueOf(bitwig.calls));
+        assertFalse(bitwig.calls.contains(List.of("stopWhileStopped")), String.valueOf(bitwig.calls));
+        assertEquals(List.of(false, 64.0, 8.0, 8.0), loopNow());
+    }
+
+    @Test
+    @DisplayName("waits for a part taken out straight after its launch to start Bitwig, and stops it then: never a Bitwig still stopped")
+    void stopsAPartTakenOutAsItStarts() {
+        startWithALoopOfYourOwn();
+        bitwig.model.startDelay = 400;
+        // The clip answers once it's launched; Bitwig starts 400 ms later, after the app has asked to take it out.
+        app.send(partWithBars(1, "MO Play 1.mid"));
+        app.send(takeOut(2, 1));
+        bitwig.clock.advance(10000);
+        List<Map<String, Object>> replies = app.take();
+        assertJson(obj("slot", 1, "launched", true, "looping", true), replies.get(0).get("result"));
+        assertJson(obj("deleted", true, "loopBack", true), replies.get(1).get("result"));
+        assertTrue(bitwig.calls.contains(List.of("stop")), String.valueOf(bitwig.calls));
+        // Stop on a Bitwig still stopped would have moved your play start to the beginning, and not come back.
+        assertFalse(bitwig.calls.contains(List.of("stopWhileStopped")), String.valueOf(bitwig.calls));
+        assertFalse(bitwig.playingNow);
+        assertEquals(List.of(false, 64.0, 8.0, 8.0), loopNow());
+    }
+
+    @Test
+    @DisplayName("takes a part out without a long wait when its launch never starts Bitwig")
+    void takesOutAPartThatNeverStarted() {
+        startWithALoopOfYourOwn();
+        // Bitwig would only start an hour after the launch: it never does while the part is in.
+        bitwig.model.startDelay = 3600000;
+        app.send(partWithBars(1, "MO Play 1.mid"));
+        app.send(takeOut(2, 1));
+        bitwig.clock.advance(10000);
+        List<Map<String, Object>> replies = app.take();
+        assertJson(obj("slot", 1, "launched", true, "looping", true), replies.get(0).get("result"));
+        assertJson(obj("deleted", true, "loopBack", true), replies.get(1).get("result"));
+        // Bitwig was never seen playing, so it's never told to stop.
+        assertFalse(bitwig.calls.contains(List.of("stop")), String.valueOf(bitwig.calls));
+        assertEquals(List.of(false, 64.0, 8.0, 8.0), loopNow());
+    }
+
+    @Test
+    @DisplayName("puts the loop back after the newest part, though one before it was never taken out")
+    void aPartNeverTakenOutDoesntKeepTheLoop() {
+        startWithALoopOfYourOwn();
+        // The app let go of the first (it couldn't stop it), and plays a second with other bars.
+        app.waitFor(partWithBars(1, "MO Play 1.mid"));
+        Map<String, Object> second = partWithBars(2, "MO Play 2.mid");
+        second.put("loop", obj("start", 64, "length", 16));
+        assertJson(obj("slot", 2, "launched", true, "looping", true), app.waitFor(second).get("result"));
+        assertEquals(List.of(true, 64.0, 16.0, 64.0), loopNow());
+        // The second comes out: what goes back is what was found before the first. (The loop's start is where yours was.)
+        assertJson(obj("deleted", true, "loopBack", true), app.waitFor(takeOut(3, 2)).get("result"));
+        assertEquals(List.of(false, 64.0, 8.0, 8.0), loopNow());
+        // The first can still come out; there's no loop left to put back.
+        assertJson(obj("deleted", true), app.waitFor(obj("id", 4, "cmd", "deleteclip", "trackId", "bass-id", "slot", 1)).get("result"));
+        assertEquals(List.of(false, 64.0, 8.0, 8.0), loopNow());
+    }
+
+    @Test
+    @DisplayName("takes what you changed after a part that was never taken out as yours, when the next part plays")
+    void whatYouChangedAfterAPartNeverTakenOutIsYours() {
+        startWithALoopOfYourOwn();
+        app.waitFor(partWithBars(1, "MO Play 1.mid"));
+        // The app let go of it. You stop Bitwig, drag the loop's end out and click in bar 5.
+        bitwig.pressStop();
+        bitwig.loopLengthAt = 48;
+        bitwig.playStartAt = 16;
+        bitwig.refresh();
+        Map<String, Object> second = partWithBars(2, "MO Play 2.mid");
+        second.put("loop", obj("start", 64, "length", 16));
+        app.waitFor(second);
+        assertEquals(List.of(true, 64.0, 16.0, 64.0), loopNow());
+        // Your length and play start go back, not the ones from before the first part; the loop goes off as it was then.
+        assertJson(obj("deleted", true, "loopBack", true), app.waitFor(takeOut(3, 2)).get("result"));
+        assertEquals(List.of(false, 64.0, 48.0, 16.0), loopNow());
+    }
+
+    @Test
+    @DisplayName("still puts the loop back at the next try, after a take-out that was stopped part way")
+    void putsTheLoopBackAfterATakeOutStoppedPartWay() {
+        startWithALoopOfYourOwn();
+        app.waitFor(partWithBars(1, "MO Play 1.mid"));
+        // Changes go off just after the take-out has begun: it stops with the loop still on the song's bars.
+        app.send(takeOut(2, 1));
+        bitwig.clock.advance(10);
+        bitwig.allowChanges(false);
+        bitwig.clock.advance(10000);
+        assertMatches(LinkTest.CHANGES_OFF, error(app.take().get(0)));
+        assertEquals(List.of(true, 32.0, 32.0, 32.0), loopNow());
+        // Stop pressed again in the app, with changes back on: the clip went the first time, and the loop goes back now.
+        bitwig.allowChanges(true);
+        assertJson(obj("deleted", false, "loopBack", true), app.waitFor(takeOut(3, 1)).get("result"));
+        assertEquals(List.of(false, 64.0, 8.0, 8.0), loopNow());
+    }
+
+    @Test
+    @DisplayName("says so when it had stopped a Bitwig that was playing for a part that then didn't go in")
+    void saysItStoppedBitwigForAPartThatDidntGoIn() {
+        startWithALoopOfYourOwn();
+        app.waitFor(obj("id", 1, "cmd", "clip", "trackId", "bass-id", "slot", 0, "path", "C:\\MIDI\\Bass.mid", "replace", true, "launch", true));
+        assertTrue(bitwig.playingNow);
+        assertEquals("Bitwig didn't make a clip from C:\\MIDI\\notes.txt. Bitwig was playing: the link had stopped it, to start it at the song's bars.",
+                     error(app.waitFor(partWithBars(2, "notes.txt"))));
+        bitwig.clock.advance(1000);
+        assertEquals(List.of(false, 64.0, 8.0, 8.0), loopNow());
+        assertFalse(bitwig.playingNow);
+    }
+
+    @Test
+    @DisplayName("says in hello when this Bitwig doesn't let it reach the arranger's loop, and refuses bars to loop then")
+    void saysWhenItCantReachTheLoop() {
+        Model m = LinkTest.song();
+        m.timeSignature = "4/4";
+        m.tracks.get(1).id("bass-id");
+        m.broken.add("arrangerLoopStart");
+        start(m);
+        bitwig.allowChanges(true);
+        assertEquals(false, at(app.ask(obj("id", 1, "cmd", "hello")), "result", "songLoop"));
+        assertEquals("This Bitwig didn't let the link set the arranger's loop. A selftest says why.",
+                     error(app.waitFor(partWithBars(2, "MO Play 1.mid"))));
+        // The part alone still plays there.
+        assertJson(obj("slot", 0, "launched", true),
+                   app.waitFor(obj("id", 3, "cmd", "clip", "trackId", "bass-id", "path", "C:\\MIDI\\MO Play 1.mid", "launch", true,
+                                   "audition", true)).get("result"));
+    }
+
+    @Test
+    @DisplayName("puts the loop back when Bitwig makes no clip from the part's file")
+    void putsTheLoopBackWhenThePartDoesntGoIn() {
+        startWithALoopOfYourOwn();
+        // The stand-in makes clips from MIDI files only, as Bitwig makes none from a file it can't read.
+        assertEquals("Bitwig didn't make a clip from C:\\MIDI\\notes.txt.", error(app.waitFor(partWithBars(1, "notes.txt"))));
+        bitwig.clock.advance(1000);
+        assertEquals(List.of(false, 64.0, 8.0, 8.0), loopNow());
+        assertFalse(bitwig.playingNow);
+    }
+
+    @Test
+    @DisplayName("says when Bitwig doesn't set its loop, and leaves it as it was")
+    void saysWhenBitwigDoesntSetItsLoop() {
+        Model m = LinkTest.song();
+        m.timeSignature = "4/4";
+        m.tracks.get(1).id("bass-id");
+        m.transport.put("isArrangerLoopEnabled", false);
+        m.settingsIgnored.add("arrangerLoopDuration");
+        start(m);
+        bitwig.allowChanges(true);
+        assertEquals("Bitwig didn't set its loop to the song's bars (loop length).", error(app.waitFor(partWithBars(1, "MO Play 1.mid"))));
+        bitwig.clock.advance(1000);
+        assertEquals(List.of(false, 0.0, 16.0, 0.0), loopNow());
+        assertEquals(List.of(), bitwig.state.tracks.get(1).slots.stream().filter(c -> c != null).collect(Collectors.toList()));
+    }
+
+    @Test
+    @DisplayName("only loops bars for a part it plays and takes out again, and only bars that are bars")
+    void refusesALoopItCouldntPutBack() {
+        startWithALoopOfYourOwn();
+        String only = "Only a part the app plays and takes out again (launch and audition) can loop the song's bars.";
+        Map<String, Object> kept = partWithBars(1, "MO Play 1.mid");
+        kept.remove("audition");
+        assertEquals(only, error(app.waitFor(kept)));
+        Map<String, Object> silent = partWithBars(2, "MO Play 1.mid");
+        silent.remove("launch");
+        assertEquals(only, error(app.waitFor(silent)));
+        Map<String, Object> backwards = partWithBars(3, "MO Play 1.mid");
+        backwards.put("loop", obj("start", -4, "length", 16));
+        assertEquals("The loop's start is a number of beats, 0 or more, not -4.", error(app.waitFor(backwards)));
+        Map<String, Object> empty = partWithBars(4, "MO Play 1.mid");
+        empty.put("loop", obj("start", 0, "length", 0));
+        assertEquals("The loop's length is a number of beats, more than 0, not 0.", error(app.waitFor(empty)));
+        Map<String, Object> words = partWithBars(5, "MO Play 1.mid");
+        words.put("loop", "bars 9 to 16");
+        assertEquals("The bars to loop are a start and a length in beats, not bars 9 to 16.", error(app.waitFor(words)));
+        // Nothing changed for any of them.
+        assertEquals(List.of(false, 64.0, 8.0, 8.0), loopNow());
+        assertEquals(Arrays.asList("old.mid"), bitwig.state.tracks.get(1).slots.stream().filter(c -> c != null).collect(Collectors.toList()));
+        assertFalse(bitwig.playingNow);
+    }
+
+    @Test
+    @DisplayName("puts the loop back when Bitwig stops the link while a part plays with its song's bars")
+    void putsTheLoopBackWhenTheLinkStops() {
+        startWithALoopOfYourOwn();
+        app.waitFor(partWithBars(1, "MO Play 1.mid"));
+        bitwig.link.exit();
+        bitwig.clock.advance(1000);
+        assertEquals(List.of(false, 64.0, 8.0, 8.0), loopNow());
     }
 
     // ---- auditioning a preset on a track of its own (extension 3.20) ----
