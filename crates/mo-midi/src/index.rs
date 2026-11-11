@@ -192,6 +192,21 @@ impl StoredPhrase {
     pub fn role(&self) -> Role {
         self.your_role.unwrap_or(self.role)
     }
+
+    /// Whether it's a piece cut from a longer stretch: as its key was read ([`StoredPhrase::cut`]), or, before it
+    /// is, by its clip's name ([`is_cut`]).
+    pub fn is_cut(&self) -> bool {
+        self.cut.unwrap_or_else(|| is_cut(&self.clip))
+    }
+}
+
+/// Whether a part's clip is a piece cut from a longer stretch (its name ends " · bars 9–16"), which the key finder
+/// and the chord reader hear as a window, not a loop.
+pub fn is_cut(clip: &str) -> bool {
+    clip.rsplit(" · ").next().is_some_and(|last| {
+        last.strip_prefix("bars ")
+            .is_some_and(|r| r.contains('–') && r.chars().next().is_some_and(|c| c.is_ascii_digit()))
+    })
 }
 
 /// The C# app's `midi.db`, open for reading only.

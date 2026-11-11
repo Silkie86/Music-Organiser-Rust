@@ -552,8 +552,9 @@ fn a_search_finds_the_part_that_fits_through_the_index() {
         store.notes(id, hash).ok()
     };
     let search = target.search(&candidates, &book, &mut notes, 10, &pool, &AtomicBool::new(false));
-    assert_eq!((search.looked, search.close, search.not_ready, search.stopped), (4, 4, 0, false));
-    assert_eq!(read, 4);
+    // The tune and its copy in F are one loop: one of them is read.
+    assert_eq!((search.looked, search.close, search.not_ready, search.stopped), (4, 3, 0, false));
+    assert_eq!((read, search.unread), (3, 0));
     // The tune on the chords' notes first, as it is; the same tune in F isn't listed beside it.
     let clips: Vec<&str> = search.found.iter().map(|f| all[f.at].clip.as_str()).collect();
     assert_eq!(clips[0], "Fits");

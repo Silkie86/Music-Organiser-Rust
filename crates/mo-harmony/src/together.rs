@@ -494,6 +494,18 @@ impl Sits {
     /// The best move, as semitones from -6 to +5 (down a fourth is nearer than up a fifth), and how it sits there. On
     /// a near tie the smaller move wins.
     pub fn best(&self) -> (i32, f64) {
+        let (semitones, sits, _) = self.best_judged();
+        (semitones, sits)
+    }
+
+    /// What [`Sits::best`] picks the move by, for sorting parts: how it sits at its best move, less a hair for each
+    /// semitone it's moved there. Of two parts that sit alike, the one that needs moving less comes first.
+    pub fn judged(&self) -> f64 {
+        self.best_judged().2
+    }
+
+    /// The best move, how it sits there, and that less a hair for each semitone moved (what the move is picked by).
+    fn best_judged(&self) -> (i32, f64, f64) {
         let mut best = (0, f64::NEG_INFINITY, f64::NEG_INFINITY);
         for (s, &score) in (0i32..).zip(&self.by_move) {
             let semitones = if s <= 5 { s } else { s - 12 };
@@ -502,7 +514,7 @@ impl Sits {
                 best = (semitones, score, judged);
             }
         }
-        (best.0, best.1)
+        best
     }
 
     /// How it sits moved by `semitones` (any whole number: octaves make no difference).
@@ -1097,5 +1109,26 @@ mod tests {
         by_move[11] = 0.9;
         assert_eq!(Sits { by_move, heard: 1.0 }.best(), (-1, 0.9));
         assert_eq!(Sits { by_move: [0.0; 12], heard: 1.0 }.best(), (0, 0.0));
+    }
+
+    #[test]
+    fn of_parts_that_sit_alike_the_one_moved_less_is_judged_ahead() {
+        let at = |semitones: usize| {
+            let mut by_move = [0.2; 12];
+            by_move[semitones] = 0.9;
+            Sits { by_move, heard: 1.0 }
+        };
+        // As it is, up two, down two (up ten), up a fourth: the same 0.9 at their best, the nearer the better.
+        assert_eq!(at(0).judged(), 0.9);
+        assert!(at(0).judged() > at(2).judged() && at(2).judged() > at(5).judged());
+        assert_eq!(at(2).judged(), at(10).judged());
+        // A hair: never enough to put a part that sits worse ahead.
+        assert!(at(6).judged() > 0.89);
+        // It's the number the best move is picked by.
+        let mut by_move = [0.2; 12];
+        (by_move[1], by_move[6]) = (0.9, 0.9012);
+        let sits = Sits { by_move, heard: 1.0 };
+        assert_eq!(sits.best(), (1, 0.9));
+        assert!((sits.judged() - 0.8995).abs() < 1e-12);
     }
 }

@@ -17,31 +17,36 @@
 //! its last bar is heard as three bars going round.
 //!
 //! A song that isn't in 4/4 is fitted to as it is, but the library's parts are all read as 4/4 (the MIDI page's
-//! rule), so there the answer says less.
+//! rule): a part found goes round by its own bars of 4/4, as a clip dropped into the song keeps its own length, so
+//! there the answer says less.
 //!
 //! Trying the whole library ([`Target::search`]) takes two looks. Every part of the right kind is first sorted by
 //! its slots alone (how long it plays each pitch class in every two quarter notes, kept in the index and held in
 //! memory: about a microsecond a part), and only the best share of them have their notes read and get the close
 //! look: the best 2 in 100 when looking for tunes, 10 in 100 when looking for chords, which keeps 99 and 98 in 100 of
-//! what the close look alone would put in its best ten (`docs/harmony/together-experiments.md`).
+//! what the close look alone would put in its best ten (`docs/harmony/together-experiments.md`). A loop a pack has in
+//! every key is one loop to both looks: one of its copies is read, and the copy given is the one that needs moving
+//! least.
 //!
 //! Not here yet: sending the part found into the project.
 
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, sync_channel};
 
 use mo_formats::NoteEvent;
 use mo_harmony::{Backing, ChordContext, Grid, LineUp, Note, Outline, Part, Sits, Sitting, Slot, Span, sit};
 use rayon::prelude::*;
 
-use crate::PPQ;
 use crate::chart;
 use crate::index::StoredPhrase;
 use crate::keys::{heard_as, heard_notes};
 use crate::playing::Song;
 use crate::roles::Role;
 use crate::store::SlotBook;
+use crate::{BAR, PPQ};
 
 /// How long a first look's slot is ([`mo_harmony::Slot`]), in the index's ticks: two quarter notes, half a bar of
 /// 4/4, whatever the song's time signature.
@@ -191,9 +196,9 @@ impl Target {
             return None;
         }
         match &self.given {
-            // The part found goes round from its own first bar.
             Given::Chords(backing) => {
-                sit(&heard_notes(notes), backing, LineUp::Loops { bar_line: 0 }, &Sitting::SHIPPED)
+                let heard = heard_notes(notes);
+                sit(&heard, backing, own_round(&heard)?, &Sitting::SHIPPED)
             }
             Given::Tune { notes: tune, line_up } => {
                 let backing = chart::backing(notes, role, cut)?;
@@ -210,6 +215,18 @@ impl Target {
     }
 }
 
+/// How a part from the library goes round over a song's chords: from the bar its first note is in to the bar its
+/// last note ends in, bars of 4/4 as every part of the library is read, whatever the song's time signature (a clip
+/// dropped into a song keeps its own length). The same stretch its slots are made over ([`slots_of`]), so the first
+/// look and the close look hear it go round alike. In a song in 4/4 it's [`LineUp::Loops`] from tick 0.
+fn own_round(notes: &[Note]) -> Option<LineUp> {
+    let first = notes.iter().map(|n| n.start).min()?;
+    let last = notes.iter().map(|n| n.end()).max()?;
+    let start = first.div_euclid(BAR).saturating_mul(BAR);
+    let length = last.saturating_sub(start).saturating_add(BAR - 1).div_euclid(BAR).max(1).saturating_mul(BAR);
+    Some(LineUp::LoopsFrom { start, length })
+}
+
 /// Of the parts a first look sorts, the share that gets the close look, looking for tunes and for chords. Measured
 /// (`theorybench pairs --quick`): they keep 99.1% and 97.8% of the close look's best ten.
 const TUNES_KEPT: f64 = 0.02;
@@ -221,6 +238,10 @@ const LEAST_KEPT: usize = 300;
 /// Parts whose notes are read and looked at closely at once: a search stopped for a newer one ends after the batch
 /// it's on.
 const CLOSE_BATCH: usize = 256;
+
+/// The most slots of a chord part the first look goes by: the bars the close look reads its chords in
+/// ([`chart::MOST_BARS`]), so both looks judge the same music of a longer part.
+const CHORD_SLOTS: usize = chart::MOST_BARS * (BAR / SLOT) as usize;
 
 /// A part of the library for a search to try.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -235,6 +256,8 @@ pub struct Candidate<'a> {
     /// Its notes' shape in any key ([`StoredPhrase::shape`]). A loop a pack has in every key is found once: the copy
     /// that fits best, and of copies that fit alike the one that needs moving least.
     pub shape: Option<i64>,
+    /// Its lowest note: with the shape, how many semitones a copy in another key is from this one.
+    pub lowest: u8,
 }
 
 impl<'a> Candidate<'a> {
@@ -242,9 +265,10 @@ impl<'a> Candidate<'a> {
         Candidate {
             id: part.id,
             hash: &part.hash,
-            role: if part.drums { Role::Drums } else { part.your_role.unwrap_or(part.role) },
-            cut: part.cut.unwrap_or(false),
+            role: if part.drums { Role::Drums } else { part.role() },
+            cut: part.is_cut(),
             shape: part.shape,
+            lowest: part.lowest,
         }
     }
 }
@@ -254,17 +278,9 @@ impl<'a> Candidate<'a> {
 pub struct Found {
     /// Its place among the candidates given.
     pub at: usize,
-    /// How it sits with the target moved up by each of 0 to 11 semitones: [`Sits::best`] gives the move that fits
-    /// best and how it sits there.
+    /// How it sits with the target, the part found moved up by each of 0 to 11 semitones (the song stays as it is):
+    /// [`Sits::best`] gives the move of the part found that fits best, and how it sits there.
     pub sits: Sits,
-}
-
-impl Found {
-    /// What it's sorted by: how it sits at its best move, a part that needs moving less a hair ahead.
-    fn judged(&self) -> f64 {
-        let (semitones, sits) = self.sits.best();
-        sits - 0.0005 * f64::from(semitones.abs())
-    }
 }
 
 /// What a search came to.
@@ -272,12 +288,14 @@ impl Found {
 pub struct Search {
     /// The parts that fit best, the best first.
     pub found: Vec<Found>,
-    /// How many parts the first look sorted, and how many of them got the close look.
+    /// How many parts the first look sorted, and how many had their notes read for the close look.
     pub looked: usize,
     pub close: usize,
-    /// Parts of the right kind left out because the index has no slots for them yet: it makes them after its next
-    /// read.
+    /// Parts of the right kind left out because the book has no slots for them: the index makes them after its next
+    /// read (or, where a part's slots are damaged, when its file is read again).
     pub not_ready: usize,
+    /// Parts picked for the close look whose notes couldn't be read (the caller's `notes` gave none): left out.
+    pub unread: usize,
     /// Stopped before the end, because a newer search was wanted: `found` isn't the whole answer.
     pub stopped: bool,
 }
@@ -291,13 +309,16 @@ enum First {
 }
 
 impl First {
-    /// How a part with these slots is likely to sit with the target at its best move.
+    /// How a part with these slots is likely to sit with the target at its best move, a part that needs moving
+    /// less a hair ahead ([`Sits::judged`]).
     fn look(&self, slots: &[Slot]) -> Option<f64> {
         let sits = match self {
             First::Chords(outline) => outline.sits(slots),
-            First::Tune(tune) => Outline::guessed(slots, &Sitting::SHIPPED).sits(tune),
+            First::Tune(tune) => {
+                Outline::guessed(slots.get(..CHORD_SLOTS).unwrap_or(slots), &Sitting::SHIPPED).sits(tune)
+            }
         };
-        sits.map(|sits| sits.best().1)
+        sits.map(|sits| sits.judged())
     }
 }
 
@@ -314,13 +335,16 @@ impl Target {
 
     /// The parts of the library that go best with the target, at most `most` of them.
     ///
-    /// `parts` are the library's parts in the order the page lists them (the same notes are tried once, as the
-    /// first part given that has them), `book` their slots ([`crate::store::MidiStore::slots`]), and `notes` reads
-    /// one part's notes from the index, by its row and note hash ([`crate::store::MidiStore::notes`]): called on
-    /// this thread, and only for the share of parts that gets the close look. The first look and the close look run
-    /// on `pool`. `stop` set (a newer search is wanted) ends it early.
+    /// `parts` are the library's parts to try, in the order the page lists them (the same notes are tried once, as
+    /// the first part given that has them). What shouldn't come up is left out of them by the caller, before the
+    /// search: the parts of the song the target was made from are in the library too, and would be found first.
+    /// `book` has their slots ([`crate::store::MidiStore::slots`]), and `notes` reads one part's notes from the
+    /// index, by its row and note hash ([`crate::store::MidiStore::notes`]; none when they can't be read): called on
+    /// this thread, and only for the share of parts that gets the close look. It's the caller's to keep notes it has
+    /// read for the next search. The first look and the close look run on `pool`. `stop` set (a newer search is
+    /// wanted) ends it early.
     ///
-    /// Call it off the window's thread, and not from one of `pool`'s own.
+    /// Call it off the window's thread.
     pub fn search(
         &self,
         parts: &[Candidate],
@@ -348,7 +372,7 @@ impl Target {
 
         // The first look: every part by its slots alone.
         let first = self.first();
-        let mut looked: Vec<(f64, usize)> = pool.install(|| {
+        let looked: Vec<(f64, usize)> = pool.install(|| {
             tried
                 .par_iter()
                 .filter_map(|&(at, slots)| if stopped() { None } else { Some((first.look(slots)?, at)) })
@@ -358,51 +382,184 @@ impl Target {
             search.stopped = true;
             return search;
         }
+        // A loop that's there in several keys is one loop: the copy the first look puts first (the one that needs
+        // moving least, as they sit alike) stands for all of them, so a loop takes one place in the share kept and
+        // one read, however many keys a pack has it in.
+        let mut standing: HashMap<i64, usize> = HashMap::new();
+        let mut loops: Vec<(f64, usize)> = Vec::with_capacity(looked.len());
+        for &(judged, at) in &looked {
+            let place = match parts.get(at).and_then(|p| p.shape) {
+                Some(shape) => match standing.entry(shape) {
+                    Entry::Occupied(place) => Some(*place.get()),
+                    Entry::Vacant(place) => {
+                        place.insert(loops.len());
+                        None
+                    }
+                },
+                None => None,
+            };
+            match place.and_then(|place| loops.get_mut(place)) {
+                Some(stands) if judged > stands.0 => *stands = (judged, at),
+                Some(_) => {}
+                None => loops.push((judged, at)),
+            }
+        }
+        drop(standing);
         // The best share of them, the best first, so a search stopped early has looked closely at the likeliest.
         let share = match self.wants() {
             Wants::Tune => TUNES_KEPT,
             Wants::Chords => CHORDS_KEPT,
         };
-        let keep = ((looked.len() as f64 * share).ceil() as usize).max(LEAST_KEPT).min(looked.len());
+        let keep = ((loops.len() as f64 * share).ceil() as usize).max(LEAST_KEPT).min(loops.len());
         let best_first = |a: &(f64, usize), b: &(f64, usize)| b.0.total_cmp(&a.0).then(a.1.cmp(&b.1));
-        if keep < looked.len() {
-            looked.select_nth_unstable_by(keep, best_first);
-            looked.truncate(keep);
+        if keep < loops.len() {
+            loops.select_nth_unstable_by(keep, best_first);
+            loops.truncate(keep);
         }
-        looked.sort_unstable_by(best_first);
+        loops.sort_unstable_by(best_first);
+        let kept: Vec<usize> = loops.into_iter().map(|(_, at)| at).collect();
 
-        // The close look: their notes read here (the index's connection is this thread's), judged on the pool.
-        let mut found: Vec<Found> = Vec::with_capacity(looked.len());
-        for batch in looked.chunks(CLOSE_BATCH) {
-            if stopped() {
-                search.stopped = true;
-                break;
+        // The close look, and the best of what it finds.
+        let best_found = |a: &Found, b: &Found| b.sits.judged().total_cmp(&a.sits.judged()).then(a.at.cmp(&b.at));
+        let mut found = self.close_look(parts, &kept, notes, pool, stop, &mut search);
+        found.sort_by(best_found);
+        found.truncate(most);
+
+        // Of a loop's copies, the one to give is the one that needs moving least. Where the copy looked at fits
+        // best moved, the copy that many semitones from it (if the library has it) is looked at too, and given in
+        // its place when it does fit as well with less moving.
+        if !search.stopped {
+            let nearer = nearer_copies(parts, &looked, &found);
+            let places: Vec<usize> = nearer.keys().copied().collect();
+            for copy in self.close_look(parts, &places, notes, pool, stop, &mut search) {
+                if let Some(given) = nearer.get(&copy.at).and_then(|at| found.get_mut(*at))
+                    && copy.sits.judged() > given.sits.judged()
+                {
+                    *given = copy;
+                }
             }
-            let read: Vec<(usize, Candidate, Vec<NoteEvent>)> = batch
-                .iter()
-                .filter_map(|&(_, at)| {
-                    let part = *parts.get(at)?;
-                    Some((at, part, notes(part.id, part.hash)?))
-                })
-                .collect();
-            search.close += read.len();
-            let fits: Vec<Found> = pool.install(|| {
+            found.sort_by(best_found);
+        }
+        search.found = found;
+        search
+    }
+
+    /// The close look at the parts at `places` among `parts`, in that order: their notes are read here, a batch at
+    /// a time (the index's connection is this thread's), and judged on `pool` while the next batch is read. What
+    /// fits, in no order. `stop` ends it after the batch being read.
+    fn close_look<'p>(
+        &self,
+        parts: &[Candidate<'p>],
+        places: &[usize],
+        notes: &mut dyn FnMut(i64, &str) -> Option<Vec<NoteEvent>>,
+        pool: &rayon::ThreadPool,
+        stop: &AtomicBool,
+        search: &mut Search,
+    ) -> Vec<Found> {
+        let judge = |read: &[Read<'p>]| -> Vec<Found> {
+            pool.install(|| {
                 read.par_iter()
                     .filter_map(|(at, part, notes)| {
                         Some(Found { at: *at, sits: self.fit(notes, part.role, part.cut)? })
                     })
                     .collect()
-            });
-            found.extend(fits);
+            })
+        };
+        // Reads each batch and hands it over to be judged, until there are no more, it's stopped, or nobody takes it.
+        let mut read_all = |hand_over: &mut dyn FnMut(Vec<Read<'p>>) -> bool| {
+            for batch in places.chunks(CLOSE_BATCH) {
+                if stop.load(Ordering::Relaxed) {
+                    search.stopped = true;
+                    break;
+                }
+                let mut read: Vec<Read<'p>> = Vec::with_capacity(batch.len());
+                for &at in batch {
+                    let Some(part) = parts.get(at) else { continue };
+                    match notes(part.id, part.hash).filter(|notes| !notes.is_empty()) {
+                        Some(notes) => read.push((at, *part, notes)),
+                        None => search.unread += 1,
+                    }
+                }
+                search.close += read.len();
+                if !hand_over(read) {
+                    break;
+                }
+            }
+        };
+        if places.is_empty() {
+            return Vec::new();
         }
-        // The best first; a loop that's there in several keys once, as its best copy.
-        found.sort_by(|a, b| b.judged().total_cmp(&a.judged()).then(a.at.cmp(&b.at)));
-        let mut shapes = HashSet::new();
-        found.retain(|f| parts.get(f.at).and_then(|p| p.shape).is_none_or(|shape| shapes.insert(shape)));
-        found.truncate(most);
-        search.found = found;
-        search
+        // Called from one of the pool's own threads, waiting for the pool here would hold one of its threads: each
+        // batch is judged before the next is read.
+        if pool.current_thread_index().is_some() {
+            let mut found = Vec::new();
+            read_all(&mut |read| {
+                found.extend(judge(&read));
+                true
+            });
+            return found;
+        }
+        // One batch waits to be judged at the most, so notes read never pile up in memory.
+        let (to_judge, reads) = sync_channel::<Vec<Read<'p>>>(1);
+        let (judged, fits) = channel::<Vec<Found>>();
+        std::thread::scope(|scope| {
+            let judge = &judge;
+            scope.spawn(move || {
+                for read in reads {
+                    if judged.send(judge(&read)).is_err() {
+                        break;
+                    }
+                }
+            });
+            read_all(&mut |read| to_judge.send(read).is_ok());
+            drop(to_judge);
+        });
+        fits.into_iter().flatten().collect()
     }
+}
+
+/// A part read for the close look: its place among the candidates, the candidate, and its notes.
+type Read<'a> = (usize, Candidate<'a>, Vec<NoteEvent>);
+
+/// For each part found that fits best moved and is a loop the library has other copies of (the same shape): the
+/// copy that many semitones from it, which would fit as it is. By that copy's place among `parts`, the found part's
+/// place in `found`. Of several such copies (octaves apart), the nearest in pitch to where the found part would be
+/// moved; of copies as near, the first listed. `looked` are the parts the first look sorted, in the order listed.
+fn nearer_copies(parts: &[Candidate], looked: &[(f64, usize)], found: &[Found]) -> HashMap<usize, usize> {
+    // By shape: the found part's place in `found`, and the lowest note a copy that fits unmoved would have.
+    let mut wanted: HashMap<i64, (usize, i32)> = HashMap::new();
+    for (place, given) in found.iter().enumerate() {
+        let semitones = given.sits.best().0;
+        if semitones != 0
+            && let Some(part) = parts.get(given.at)
+            && let Some(shape) = part.shape
+        {
+            wanted.insert(shape, (place, i32::from(part.lowest) + semitones));
+        }
+    }
+    if wanted.is_empty() {
+        return HashMap::new();
+    }
+    // By the found part's place: the best copy so far, and how far its lowest note is from the one wanted.
+    let mut nearest: HashMap<usize, (usize, i32)> = HashMap::new();
+    for &(_, at) in looked {
+        let Some(part) = parts.get(at) else { continue };
+        let Some(&(place, lowest)) = part.shape.and_then(|shape| wanted.get(&shape)) else { continue };
+        let away = i32::from(part.lowest) - lowest;
+        if away.rem_euclid(12) != 0 || found.get(place).is_some_and(|given| given.at == at) {
+            continue;
+        }
+        match nearest.entry(place) {
+            Entry::Occupied(mut best) if away.abs() < best.get().1 => {
+                best.insert((at, away.abs()));
+            }
+            Entry::Occupied(_) => {}
+            Entry::Vacant(best) => {
+                best.insert((at, away.abs()));
+            }
+        }
+    }
+    nearest.into_iter().map(|(place, (at, _))| (at, place)).collect()
 }
 
 #[cfg(test)]
@@ -650,6 +807,8 @@ mod tests {
     struct Library {
         parts: Vec<(String, Role, Vec<NoteEvent>)>,
         book: SlotBook,
+        /// Note hashes whose notes the index can't give.
+        unreadable: Vec<&'static str>,
     }
 
     impl Library {
@@ -658,7 +817,7 @@ mod tests {
             for (hash, _, notes) in &parts {
                 book.add(hash, &slots_of(notes));
             }
-            Library { parts, book }
+            Library { parts, book, unreadable: Vec::new() }
         }
 
         fn place(&self, hash: &str) -> usize {
@@ -677,6 +836,7 @@ mod tests {
                     role: *role,
                     cut: false,
                     shape: crate::analyser::shape_of(notes),
+                    lowest: notes.iter().map(|n| n.key).min().unwrap_or(0),
                 })
                 .collect();
             let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
@@ -684,7 +844,7 @@ mod tests {
             let mut notes = |id: i64, hash: &str| {
                 read += 1;
                 let (own, _, notes) = self.parts.get(usize::try_from(id).ok()?)?;
-                (own == hash).then(|| notes.clone())
+                (own == hash && !self.unreadable.contains(&hash)).then(|| notes.clone())
             };
             let search = target.search(&candidates, &self.book, &mut notes, most, &pool, &AtomicBool::new(stop));
             (search, read)
@@ -741,7 +901,7 @@ mod tests {
         assert!(best.sits.best().1 > 0.8, "{best:?}");
         assert!(search.found.iter().all(|f| f.at != library.place("a fourth up")));
         // Best first, and never the drums.
-        assert!(search.found.windows(2).all(|pair| pair[0].judged() >= pair[1].judged()));
+        assert!(search.found.windows(2).all(|pair| pair[0].sits.judged() >= pair[1].sits.judged()));
         assert!(search.found.iter().all(|f| library.parts[f.at].1 != Role::Drums));
 
         // Only copies in other keys in the library (the one just read has its slots now): the tune is found as the
@@ -775,6 +935,182 @@ mod tests {
         assert!(search.found.iter().all(|f| f.at != library.place("a third up")));
     }
 
+    /// Some notes moved up by a number of semitones.
+    fn up(notes: &[NoteEvent], semitones: u8) -> Vec<NoteEvent> {
+        notes.iter().map(|n| NoteEvent { key: n.key + semitones, ..*n }).collect()
+    }
+
+    #[test]
+    fn a_loop_in_every_key_is_read_once_and_given_as_the_copy_that_fits_as_it_is() {
+        // As a pack has them: 40 loops, each in all twelve keys, and the tune written for the chords the same way
+        // (its own key listed last).
+        let mut parts: Vec<(String, Role, Vec<NoteEvent>)> = Vec::new();
+        for i in 0..40 {
+            parts.extend((0..12).map(|key| (format!("loop {i} up {key}"), Role::Melody, up(&wandering(i), key))));
+        }
+        parts.extend((0..12).rev().map(|key| (format!("written up {key}"), Role::Melody, tune(key))));
+        let library = Library::of(parts);
+        let target =
+            Target::chords(&[(Role::Chords, &chords(0)), (Role::Bass, &bass())], Grid::four_four(PPQ as u32), None)
+                .unwrap();
+        let (search, read) = library.search(&target, 20, false);
+        // Every copy gets the first look; each loop's notes are read once, and once more at the most for the copy
+        // that needs no moving.
+        assert_eq!(search.looked, 41 * 12);
+        assert!((41..=41 + 20).contains(&read), "{read}");
+        assert_eq!((search.close, search.unread), (read, 0));
+        // Twenty loops, not twenty copies of one or two; each as the copy that fits as it is.
+        assert_eq!(search.found.len(), 20);
+        assert_eq!(search.found[0].at, library.place("written up 0"));
+        assert!(search.found.iter().all(|f| f.sits.best().0 == 0), "{:?}", search.found);
+        assert!(search.found.windows(2).all(|pair| pair[0].sits.judged() >= pair[1].sits.judged()));
+    }
+
+    #[test]
+    fn the_copy_given_is_the_one_the_close_look_finds_fits_as_it_is() {
+        let octave_down: Vec<NoteEvent> = tune(0).iter().map(|n| NoteEvent { key: n.key - 12, ..*n }).collect();
+        let mut library = Library::of(vec![
+            ("a fourth up".into(), Role::Melody, tune(5)),
+            ("an octave down".into(), Role::Melody, octave_down),
+            ("written".into(), Role::Melody, tune(0)),
+        ]);
+        // A book out of step with the notes: by its slots the copy a fourth up looks like the one that fits as it
+        // is, so that's the copy read. The close look hears it fit best moved down a fourth, and the copy that is
+        // there is read and given: of the two in that key, the one nearest where the copy read would be moved to.
+        library.book = SlotBook::default();
+        library.book.add("a fourth up", &slots_of(&tune(0)));
+        library.book.add("an octave down", &slots_of(&tune(1)));
+        library.book.add("written", &slots_of(&tune(5)));
+        let target = Target::chords(&[(Role::Chords, &chords(0))], Grid::four_four(PPQ as u32), None).unwrap();
+        let (search, read) = library.search(&target, 10, false);
+        assert_eq!((search.found.len(), read, search.close), (1, 2, 2));
+        assert_eq!(search.found[0].at, library.place("written"));
+        assert_eq!(search.found[0].sits.best().0, 0);
+    }
+
+    #[test]
+    fn a_part_whose_notes_cant_be_read_is_counted_and_left_out() {
+        let mut library = Library::of(vec![
+            ("written".into(), Role::Melody, tune(0)),
+            ("wander".into(), Role::Melody, wandering(1)),
+            ("no notes any more".into(), Role::Melody, wandering(2)),
+        ]);
+        library.unreadable.push("written");
+        library.parts[2].2.clear();
+        let target = Target::chords(&[(Role::Chords, &chords(0))], Grid::four_four(PPQ as u32), None).unwrap();
+        let (search, read) = library.search(&target, 10, false);
+        assert_eq!((search.looked, read, search.close, search.unread), (3, 3, 1, 2));
+        assert_eq!(search.found.iter().map(|f| f.at).collect::<Vec<_>>(), [library.place("wander")]);
+    }
+
+    #[test]
+    fn a_long_chord_part_gets_its_first_look_by_the_bars_its_chords_are_read_in() {
+        let first = Target::tune(&tune(0), None).unwrap().first();
+        let later = |notes: Vec<NoteEvent>, bars: i64| {
+            notes.into_iter().map(move |n| NoteEvent { start: n.start + bars * BAR, ..n })
+        };
+        // The chords written for the tune four times round, 16 bars, then 8 bars of something else.
+        let sixteen: Vec<NoteEvent> = (0..4).flat_map(|round| later(chords(0), round * 4)).collect();
+        let mut long = sixteen.clone();
+        long.extend(later(wandering_chords(7), 16).chain(later(wandering_chords(8), 20)));
+        assert_eq!((slots_of(&sixteen).len(), slots_of(&long).len()), (32, 48));
+        assert!(first.look(&slots_of(&sixteen)).is_some());
+        assert_eq!(first.look(&slots_of(&long)), first.look(&slots_of(&sixteen)));
+    }
+
+    #[test]
+    fn in_a_song_not_in_four_four_a_part_found_goes_round_by_its_own_bars() {
+        // A waltz: the chords a bar of 3/4 each.
+        let waltz: Vec<NoteEvent> = [[57, 60, 64], [50, 62, 65], [55, 59, 62], [48, 60, 64]]
+            .iter()
+            .zip(0i64..)
+            .flat_map(|(keys, bar)| keys.iter().map(move |&k| note(bar * 3 * PPQ, 3 * PPQ, k)))
+            .collect();
+        let three_four = Grid { ticks_per_beat: PPQ as u32, beats_per_bar: 3, bar_line: 0 };
+        let target = Target::chords(&[(Role::Chords, &waltz)], three_four, None).unwrap();
+        // A part of the library, four bars of 4/4 from its second bar, each note two quarter notes long. Dropped
+        // into the song it keeps its own length: it comes round every 16 quarter notes, the chords every 12.
+        let found: Vec<NoteEvent> =
+            [72, 76, 74, 77, 71, 74, 72, 76].iter().zip(0i64..).map(|(&k, i)| note(BAR + i * SLOT, SLOT, k)).collect();
+        let close = target.fit(&found, Role::Melody, false).unwrap();
+        // Its notes fill whole slots, so the first look hears just what the close look does.
+        let first = target.first().look(&slots_of(&found)).unwrap();
+        assert!((first - close.judged()).abs() < 1e-9, "{first} {}", close.judged());
+    }
+
+    #[test]
+    fn a_search_run_on_one_of_the_pools_own_threads_gives_the_same() {
+        let parts: Vec<(String, Vec<NoteEvent>)> = (0..600).map(|i| (format!("wander {i}"), wandering(i))).collect();
+        let mut book = SlotBook::default();
+        for (hash, notes) in &parts {
+            book.add(hash, &slots_of(notes));
+        }
+        let candidates: Vec<Candidate> = parts
+            .iter()
+            .zip(0i64..)
+            .map(|((hash, _), id)| Candidate { id, hash, role: Role::Melody, cut: false, shape: None, lowest: 0 })
+            .collect();
+        let target = Target::chords(&[(Role::Chords, &chords(0))], Grid::four_four(PPQ as u32), None).unwrap();
+        // One thread: a search that waited for the pool from the pool's own thread would never end.
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(1).build().unwrap();
+        let search = || {
+            let mut notes = |id: i64, _: &str| parts.get(usize::try_from(id).ok()?).map(|(_, notes)| notes.clone());
+            target.search(&candidates, &book, &mut notes, 50, &pool, &AtomicBool::new(false))
+        };
+        let outside = search();
+        assert_eq!((outside.close, outside.found.len()), (300, 50));
+        assert_eq!(pool.install(search), outside);
+    }
+
+    #[test]
+    fn a_candidate_is_the_part_as_its_card_shows_it() {
+        let source = crate::index::Source {
+            path: r"D:\Packs\Long take.mid".into(),
+            kind: crate::index::SourceKind::File,
+            daw: "MIDI".into(),
+            mtime: 1,
+            size: 1,
+            tempo: None,
+        };
+        let mut part = StoredPhrase {
+            id: 7,
+            source: std::sync::Arc::new(source),
+            part: String::new(),
+            clip: "Long take · bars 9–16".into(),
+            role: Role::Melody,
+            role_why: String::new(),
+            your_role: None,
+            bars: 8,
+            notes: 16,
+            lowest: 48,
+            highest: 72,
+            key: None,
+            key_fact: None,
+            chroma: [0; 12],
+            chords: Vec::new(),
+            features: Vec::new(),
+            hash: "P".into(),
+            members: String::new(),
+            program: None,
+            drums: false,
+            track_name: String::new(),
+            your_octave: None,
+            shape: Some(5),
+            cut: None,
+        };
+        // Before its key is read, a piece cut from a longer stretch is known by its name, as on its card.
+        let candidate = Candidate::of(&part);
+        assert_eq!((candidate.id, candidate.hash, candidate.shape, candidate.lowest), (7, "P", Some(5), 48));
+        assert!(candidate.cut && candidate.role == Role::Melody);
+        // What the key reading said, and what you said it is.
+        part.cut = Some(false);
+        part.your_role = Some(Role::Chords);
+        let candidate = Candidate::of(&part);
+        assert!(!candidate.cut && candidate.role == Role::Chords);
+        part.drums = true;
+        assert_eq!(Candidate::of(&part).role, Role::Drums);
+    }
+
     #[test]
     fn a_search_stopped_for_a_newer_one_reads_nothing() {
         let library = Library::of((0..50).map(|i| (format!("wander {i}"), Role::Melody, wandering(i))).collect());
@@ -805,7 +1141,7 @@ mod tests {
             let candidates: Vec<Candidate> = parts
                 .iter()
                 .zip(0i64..)
-                .map(|((hash, _), id)| Candidate { id, hash, role, cut: false, shape: None })
+                .map(|((hash, _), id)| Candidate { id, hash, role, cut: false, shape: None, lowest: 0 })
                 .collect();
             let target = if role == Role::Chords {
                 Target::tune(&tune(0), None).unwrap()
