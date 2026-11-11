@@ -52,13 +52,9 @@ pub const APP_ACTIONS: &[Action] = &[
     action("app.listTop", "Back to the top of the list, as the button over its corner does", "Home"),
     action("app.prevTab", "The tab to the left on this page", "Ctrl+Left"),
     action("app.nextTab", "The tab to the right on this page", "Ctrl+Right"),
-    action("app.play", "Play or stop the picked sound or MIDI part (on Presets, audition it in Bitwig)", "Space"),
+    action("app.play", "Play or stop what's picked", "Space"),
     // The same order on every page (the whole-app review of 6 Nov, X3-12): each press takes one step back.
-    action(
-        "app.escape",
-        "Step back, one step a press: stop what's playing, then clear the search, then close the picked line's card",
-        "Esc",
-    ),
+    action("app.escape", "Step back: stop, then clear the search, then close the card", "Esc"),
     action("app.rescan", "Look for new and changed projects", "F5"),
     action("app.fullRescan", "Rescan everything: re-read every project, even unchanged ones", ""),
     action("app.fullScreen", "Full screen on or off", "F11"),
@@ -81,11 +77,7 @@ pub const APP_ACTIONS: &[Action] = &[
 /// (rule 15).
 pub const SONGS_ACTIONS: &[Action] = &[
     action("projects.open", "Open the picked song (FL Studio songs go to Bitwig)", "Ctrl+O"),
-    action(
-        "projects.openOwn",
-        "Open the picked song in the DAW it was made in (an FL Studio song in FL Studio itself)",
-        "Ctrl+Shift+O",
-    ),
+    action("projects.openOwn", "Open the picked song in the DAW it was made in", "Ctrl+Shift+O"),
     action("projects.openInBitwig", "Open the picked song in Bitwig (FL Studio songs are converted)", "Ctrl+B"),
     action("projects.reveal", "Show the picked song's file in its folder", "Ctrl+Shift+E"),
     action("projects.copyPath", "Copy where the picked song's file is", "Ctrl+Shift+C"),
@@ -108,31 +100,15 @@ pub const PLUGINS_ACTIONS: &[Action] = &[
     action("plugins.measure", "Measure your plugins again: which are installed and how much room each takes", "F5"),
     action("plugins.searchOnline", "Search the web for the picked plugin", "Ctrl+Shift+O"),
     action("plugins.cleanUp", "Clean up the picked plugin's presets and sounds (asks first)", "Ctrl+Shift+L"),
-    action(
-        "plugins.uninstall",
-        if cfg!(windows) {
-            "Uninstall the picked plugin: its own uninstaller, or its plugin files to the Recycle Bin (asks first)"
-        } else {
-            "Uninstall the picked plugin: its own uninstaller, or its plugin files to the Trash (asks first)"
-        },
-        "Ctrl+Shift+U",
-    ),
-    action(
-        "plugins.move",
-        "Move one of the picked plugin's folders to another drive, leaving a link behind (asks first)",
-        "Ctrl+Shift+M",
-    ),
+    action("plugins.uninstall", "Uninstall the picked plugin (asks first)", "Ctrl+Shift+U"),
+    action("plugins.move", "Move the picked plugin to another drive (asks first)", "Ctrl+Shift+M"),
 ];
 
 /// The Presets page's own actions on its Sounds section. Send to Bitwig takes the C# Sound Lab's key.
 pub const PRESETS_ACTIONS: &[Action] = &[
     action("presets.export", "Export the picked sound as a preset file", "Ctrl+E"),
     action("presets.toBitwig", "Make the picked sound a Bitwig preset and send it to Bitwig", "Ctrl+B"),
-    action(
-        "presets.audition",
-        "Hear the picked sound in Bitwig, playing a part on a track of its own; again to stop",
-        "Ctrl+Shift+B",
-    ),
+    action("presets.audition", "Hear the picked sound in Bitwig; again to stop", "Ctrl+Shift+B"),
     action("presets.keepAudition", "Keep the sound you're hearing in Bitwig: its track stays", "Ctrl+Shift+K"),
     action("presets.exportShown", "Export every sound in the list as it's filtered now", "Ctrl+Shift+S"),
     action("presets.reveal", "Show the picked sound's song file or preset file in its folder", "Ctrl+Shift+E"),
@@ -171,11 +147,7 @@ pub const MIDI_ACTIONS: &[Action] = &[
     action("midi.showInSongs", "Show the song the picked part is from on the Songs page", "Ctrl+O"),
     action("midi.source", "Show the picked part's file in its folder", "Ctrl+Shift+E"),
     action("midi.copyPath", "Copy where the picked part's file is", "Ctrl+Shift+C"),
-    action(
-        "midi.readAgain",
-        "Read MIDI again: new and changed projects and MIDI files, and the ones that failed; again to stop",
-        "F5",
-    ),
+    action("midi.readAgain", "Read MIDI again; again to stop", "F5"),
 ];
 
 /// The Space page's own actions (new: the C# app had no Space page). F5 measures again on this page; elsewhere it
@@ -188,20 +160,12 @@ pub const SPACE_ACTIONS: &[Action] = &[
     action("space.fix", "Write a \"(fixed)\" Bitwig project beside each ticked save", ""),
     action(
         "space.remove",
-        if cfg!(windows) {
-            "Send what's ticked on the picked card to the Recycle Bin, each checked again first"
-        } else {
-            "Send what's ticked on the picked card to the Trash, each checked again first"
-        },
+        if cfg!(windows) { "Send what's ticked to the Recycle Bin" } else { "Send what's ticked to the Trash" },
         "",
     ),
     action(
         "space.stop",
-        if cfg!(windows) {
-            "Stop sending to the Recycle Bin: what isn't checked yet stays where it is"
-        } else {
-            "Stop sending to the Trash: what isn't checked yet stays where it is"
-        },
+        if cfg!(windows) { "Stop sending to the Recycle Bin" } else { "Stop sending to the Trash" },
         "",
     ),
     action(
@@ -609,10 +573,7 @@ mod tests {
 
     #[test]
     fn what_an_action_does_is_found_in_any_list() {
-        assert_eq!(
-            what_of("app.play"),
-            "Play or stop the picked sound or MIDI part (on Presets, audition it in Bitwig)"
-        );
+        assert_eq!(what_of("app.play"), "Play or stop what's picked");
         assert_eq!(what_of("projects.reveal"), "Show the picked song's file in its folder");
         assert_eq!(what_of("sounds.copyPath"), "Copy where the sound's file is");
         assert_eq!(what_of("space.reveal"), "Show the picked line's folder");

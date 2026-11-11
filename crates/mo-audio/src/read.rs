@@ -218,6 +218,12 @@ fn read_wav(f: &mut File, len: u64, max_seconds: f64, from_frame: u64) -> Result
             a
         });
     }
+    if OGG_IN_WAV.contains(&format) {
+        return read_ogg_wav(f, format, start_byte, length, max_seconds, from_frame).map(|mut a| {
+            (a.embedded_tempo, a.embedded_root_note, a.embedded_is_loop) = (tempo, root, is_loop);
+            a
+        });
+    }
     // Rounded up, so a 12-bit or 20-bit file is read with the bytes each sample really takes.
     let bytes = usize::from(bits).div_ceil(8);
     if bytes == 0 {
@@ -241,6 +247,32 @@ fn read_wav(f: &mut File, len: u64, max_seconds: f64, from_frame: u64) -> Result
         embedded_root_note: root,
         embedded_is_loop: is_loop,
     })
+}
+
+/// The WAV formats that hold Ogg Vorbis ("Og", "Pg", "Qg" and their "+" twins "og", "pg", "qg"): FL Studio's own
+/// sounds are kept this way (0x674F, an ordinary Ogg stream in the data chunk).
+const OGG_IN_WAV: [u16; 6] = [0x674F, 0x6750, 0x6751, 0x676F, 0x6770, 0x6771];
+
+/// Up to `max_seconds` of a WAV whose audio is an Ogg Vorbis stream, from `from_frame` on. Only the kinds that keep a
+/// whole Ogg stream in the data chunk are decoded: the ones that keep the Vorbis headers apart say so.
+fn read_ogg_wav(
+    f: &mut File,
+    format: u16,
+    start_byte: u64,
+    length: u64,
+    max_seconds: f64,
+    from_frame: u64,
+) -> Result<AudioData, AudioError> {
+    f.seek(SeekFrom::Start(start_byte))?;
+    let want = length.min(MOST_BYTES);
+    let mut stream = Vec::with_capacity(usize::try_from(want).unwrap_or(0));
+    f.by_ref().take(want).read_to_end(&mut stream)?;
+    if !stream.starts_with(b"OggS") {
+        return Err(AudioError::NotSupported(format!(
+            "WAV format {format} (Ogg Vorbis kept without its Ogg stream) isn't decoded"
+        )));
+    }
+    crate::other::read_ogg_bytes(stream, max_seconds, from_frame)
 }
 
 /// Up to `max_seconds` of an ADPCM WAV's audio from `from_frame` on: the blocks that hold them are read and decoded,
