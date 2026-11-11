@@ -23,7 +23,7 @@ use baseview::{
 use keyboard_types::{Key, KeyState, NamedKey};
 use mo_app::backup::thousands;
 use mo_app::filters::{Filter, Shown as Choice};
-use mo_app::sounds::{Order, SoundCounts, TEMPO_HIGH, TEMPO_LOW, TEMPO_STEP};
+use mo_app::sounds::{Order, SoundCounts, TEMPO_HIGH, TEMPO_LOW, TEMPO_STEP, TYPE_CHIPS};
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, TargetPixel,
 };
@@ -228,6 +228,8 @@ struct Shown {
     playing: Cell<Option<u64>>,
     /// The line last clicked to play: its row, its sound and its file.
     played: Rc<RefCell<Option<(usize, i64, std::path::PathBuf)>>>,
+    /// How wide the panel draws a line's waveform, in logical pixels: the pictures are made for it.
+    wave_width: Cell<f32>,
     /// A line's file is being carried out now ([`Shown::drag`]).
     dragging: Cell<bool>,
     _timer: TimerHandle,
@@ -273,6 +275,7 @@ impl Shown {
             column: Rc::new(Column::default()),
             playing: Cell::new(None),
             played: Rc::new(RefCell::new(None)),
+            wave_width: Cell::new(waves::WIDTH as f32),
             dragging: Cell::new(false),
             _timer: timer,
         };
@@ -363,10 +366,15 @@ impl Shown {
         let change = Rc::clone(&changed);
         panel.on_pick(move |filter, choice| change(&|a, _| a.filters.pick(&filter, &choice)));
         let change = Rc::clone(&changed);
+        let shown = Rc::clone(&self.column);
         panel.on_clear(move |filter| {
             change(&|a, library| match filter.as_str() {
                 // The More types menu's Any keeps the types ticked in the column itself.
-                "more-types" => a.filters.clear_more_types(library.map_or(&[][..], |l| &l.types[..])),
+                "more-types" => mo_app::sounds::keep_first_types(
+                    &mut a.filters.sound_types,
+                    library.map_or(&[][..], |l| &l.types[..]),
+                    shown.type_lines.get().max(TYPE_CHIPS),
+                ),
                 filter => a.filters.clear_chip(filter),
             });
         });
@@ -449,6 +457,18 @@ impl Shown {
             self.panel.set_playing(SharedString::new());
         }
         self.instance.player.tidy();
+        // The window is taller or shorter: the column shows as many types as it now has room for.
+        if usize::try_from(self.panel.get_type_lines()).is_ok_and(|lines| lines != self.column.type_lines.get()) {
+            let library = self.lines.library.borrow().clone();
+            self.column.show(&self.panel, library.as_deref(), &self.asked.borrow());
+        }
+        // The window is wider or narrower: the waveforms are too, so their pictures are made again.
+        let wave_width = self.panel.get_wave_width();
+        if (wave_width - self.wave_width.get()).abs() > 0.5 {
+            self.wave_width.set(wave_width);
+            self.lines.waves.borrow_mut().forget();
+            self.lines.notify.reset();
+        }
         self.drag();
         self.waves();
         self.render();
@@ -486,6 +506,13 @@ impl Shown {
         }
     }
 
+    /// A waveform picture's size in the screen's own pixels: as wide as the panel now draws them.
+    fn wave_size(&self) -> (u32, u32) {
+        let scale = self.scale.get().clamp(0.5, 8.0);
+        let width = f64::from(self.wave_width.get()).clamp(waves::WIDTH, MOST_WIDTH);
+        ((width * scale).round() as u32, (waves::HEIGHT * scale).round() as u32)
+    }
+
     /// Takes in the waveforms a background thread read, and has the ones the lines on show still lack read next.
     fn waves(&self) {
         if let Some((round, found)) = take(&self.slots.waves) {
@@ -504,8 +531,7 @@ impl Shown {
             && played == path
             && self.lines.waves.borrow().has_none(sound)
         {
-            let scale = self.scale.get().clamp(0.5, 8.0);
-            let (width, height) = ((waves::WIDTH * scale).round() as u32, (waves::HEIGHT * scale).round() as u32);
+            let (width, height) = self.wave_size();
             if let Some(pixels) = waves::picture(&peaks, width, height) {
                 self.lines.waves.borrow_mut().give(sound, slint::Image::from_rgba8(pixels));
                 if self.lines.sound(row) == Some(sound) {
@@ -514,8 +540,7 @@ impl Shown {
             }
         }
         let Some((round, ids)) = self.lines.waves.borrow_mut().to_read() else { return };
-        let scale = self.scale.get().clamp(0.5, 8.0);
-        let (width, height) = ((waves::WIDTH * scale).round() as u32, (waves::HEIGHT * scale).round() as u32);
+        let (width, height) = self.wave_size();
         let slots = Arc::clone(&self.slots);
         background("mo-plugin-waves", move || {
             let found = library::waves(&ids);
@@ -672,12 +697,16 @@ struct Column {
     key: Choices,
     tag: Choices,
     counts: RefCell<Option<SoundCounts>>,
+    /// How many types the column last showed as lines of their own (0 before the first showing).
+    type_lines: Cell<usize>,
 }
 
 impl Column {
     /// The panel's filter column and order as `asked` has them, over `library`'s types and tags once it's read.
     fn show(&self, panel: &Panel, library: Option<&Library>, asked: &Asked) {
-        let chips = asked.chips(library, self.counts.borrow().as_ref());
+        let type_lines = usize::try_from(panel.get_type_lines()).unwrap_or(0).max(TYPE_CHIPS);
+        self.type_lines.set(type_lines);
+        let chips = asked.chips(library, self.counts.borrow().as_ref(), type_lines);
         panel.set_type_filter(self.types.view(&chips.types));
         panel.set_length_filter(self.length.view(&chips.length));
         panel.set_key_filter(self.key.view(&chips.key));
