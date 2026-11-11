@@ -1313,6 +1313,25 @@ export component SoundsPage inherits Rectangle {
                     clicked => { SoundsData.shuffle(); }
                 }
             }
+            // Rediscover's and Kits' own actions sit here too, and their choices in the column at the side, so the
+            // list starts at the same height in every view (the UX review of 10 Nov, E2: it started at three).
+            if SoundsData.view == 4: VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    text: SoundsData.re-busy ? "Shuffling…" : "Shuffle";
+                    tip: "Dig out a new set";
+                    clicked => { SoundsData.re-shuffle(); }
+                }
+            }
+            if SoundsData.view == 5: VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    text: SoundsData.kit-busy ? "Rolling…" : "Roll a kit";
+                    main: true;
+                    tip: "Fill every pad that isn't locked";
+                    clicked => { SoundsData.kit-roll(); }
+                }
+            }
             VerticalLayout {
                 alignment: center;
                 ToggleChip {
@@ -1321,145 +1340,6 @@ export component SoundsPage inherits Rectangle {
                     clicked => { SoundsData.toggle-autoplay(); }
                 }
             }
-        }
-        // Each view's own choices, every one on show rather than in a menu (Solomon, 4 Nov 2026: "makes sure things
-        // that are useful arent hidden away"). Each row is a FlexboxLayout in an `if`, with its filters in it always:
-        // a filter in an `if` inside a FlexboxLayout is measured as if it wrapped, and leaves a gap under the row.
-        // Rediscover's own choices, in place of the filters: the types as the Type filter shows them (the most used as
-        // chips, the rest in a menu), the years, and how many, each on show.
-        if SoundsData.view == 4: FlexboxLayout {
-            spacing: Space.md;
-            cross-axis-alignment: center;
-            vertical-stretch: 0;
-            FilterPicks {
-                name: "Type";
-                more-name: "More types";
-                filter: SoundsData.re-type-filter;
-                toggled(text) => { SoundsData.re-pick("type", text); }
-                cleared => { SoundsData.re-pick("more-types", ""); }
-            }
-            if SoundsData.re-any-type: ToggleChip {
-                text: "Clear types";
-                on: false;
-                clicked => { SoundsData.re-pick("type", ""); }
-            }
-            StudioSlider {
-                low: "Safe";
-                high: "Adventurous";
-                tip: "Left sticks close to what you already use; right goes further afield";
-                value <=> SoundsData.re-adventure;
-                released(v) => { SoundsData.re-adventure-set(v); }
-            }
-            FilterPicks {
-                name: "How many";
-                filter: SoundsData.re-count-filter;
-                toggled(text) => { SoundsData.re-pick("count", text); }
-            }
-            ToggleChip {
-                text: "Include sounds used once";
-                on: SoundsData.re-rarely;
-                clicked => { SoundsData.re-toggle-rarely(); }
-            }
-            StudioButton {
-                horizontal-stretch: 0;
-                text: SoundsData.re-busy ? "Shuffling…" : "Shuffle";
-                tip: "Dig out a new set";
-                clicked => { SoundsData.re-shuffle(); }
-            }
-        }
-        // The kit builder's choices, in place of the filters. They wrap in a narrow window, as the other rows do.
-        if SoundsData.view == 5: FlexboxLayout {
-            spacing: Space.sm;
-            cross-axis-alignment: center;
-            vertical-stretch: 0;
-            StudioButton {
-                horizontal-stretch: 0;
-                text: SoundsData.kit-busy ? "Rolling…" : "Roll a kit";
-                main: true;
-                tip: "Fill every pad that isn't locked";
-                clicked => { SoundsData.kit-roll(); }
-            }
-            StudioButton {
-                horizontal-stretch: 0;
-                text: SoundsData.kit-exporting ? "Exporting…" : "Export kit";
-                enabled: !SoundsData.kit-exporting;
-                tip: "Copy the pads into a folder of their own, ready for a sampler";
-                clicked => { SoundsData.kit-export(); }
-            }
-            StudioButton {
-                horizontal-stretch: 0;
-                text: SoundsData.kit-sending ? "Sending…" : "Send to Bitwig";
-                enabled: !SoundsData.kit-sending && !SoundsData.kit-busy;
-                tip: "Put the kit on a Drum Machine on a new track in the project open in Bitwig: kick on C1, snare on D1, closed hat on F#1, and the rest on the free pads";
-                clicked => { SoundsData.kit-to-bitwig(); }
-            }
-            ToggleChip {
-                text: "Favour sounds I haven't used";
-                on: SoundsData.kit-unused;
-                clicked => { SoundsData.kit-toggle("unused"); }
-            }
-            ToggleChip {
-                text: "One pack";
-                on: SoundsData.kit-pack;
-                clicked => { SoundsData.kit-toggle("pack"); }
-            }
-            MenuChip {
-                name: "Key for bass";
-                value: SoundsData.kit-key;
-                choices: SoundsData.kit-keys;
-                picked(v) => { SoundsData.kit-choose("key", v); }
-            }
-            StudioSlider {
-                low: "Best fits";
-                high: "Random";
-                tip: "Left picks the sounds that fit each pad best; right, anything that fits";
-                value <=> SoundsData.kit-randomness;
-                released(v) => { SoundsData.kit-randomness-set(v); }
-            }
-            // An action with a menu, so a button, not a filter's chip.
-            MenuButton {
-                text: "Add a pad";
-                items: SoundsData.kit-types;
-                chosen(id) => { SoundsData.kit-add(id); }
-            }
-        }
-        if SoundsData.view == 5: HorizontalLayout {
-            spacing: Space.sm;
-            alignment: start;
-            vertical-stretch: 0;
-            Text {
-                text: "Export as";
-                color: Theme.muted;
-                font-size: Type.meta;
-                vertical-alignment: center;
-            }
-            ToggleChip {
-                text: "Elektron ready (48 kHz, 16-bit WAV)";
-                on: SoundsData.kit-elektron;
-                clicked => { SoundsData.kit-toggle("elektron"); }
-            }
-            ToggleChip {
-                text: "Mono";
-                on: SoundsData.kit-mono;
-                clicked => { SoundsData.kit-toggle("mono"); }
-            }
-            ToggleChip {
-                text: "Normalise";
-                on: SoundsData.kit-normalise;
-                clicked => { SoundsData.kit-toggle("normalise"); }
-            }
-        }
-        if SoundsData.view == 5 && SoundsData.kit-status != "": Text {
-            text: SoundsData.kit-status;
-            color: Theme.muted;
-            font-size: Type.meta;
-            wrap: word-wrap;
-        }
-        if SoundsData.view == 4 && SoundsData.re-intro != "": Text {
-            text: SoundsData.re-intro;
-            color: Theme.muted;
-            font-size: Type.meta;
-            wrap: word-wrap;
         }
         split := Rectangle {
             vertical-stretch: 1;
@@ -2004,123 +1884,295 @@ export component SoundsPage inherits Rectangle {
             column := FilterColumn {
                 page-width: split.width;
                 height: split.height;
-                shown: SoundsData.view < 4;
-                active: SoundsData.any-filter;
-                FilterList {
-                    name: "TYPE";
-                    more-name: "More types";
-                    filter: SoundsData.type-filter;
-                    toggled(text) => { SoundsData.toggle-choice("type", text); }
-                    cleared => { SoundsData.clear-chip("more-types"); }
-                }
-                // One of three, so a switch: both, hits (one-shots) or loops.
-                VerticalLayout {
-                    Caps {
-                        text: "LENGTH";
-                        height: 22px;
+                // Rediscover and Kits keep choices here, not filters.
+                tab: SoundsData.view < 4 ? ["F", "I", "L", "T", "E", "R", "S"] : ["C", "H", "O", "I", "C", "E", "S"];
+                tab-close: SoundsData.view < 4 ? "CLOSE FILTERS" : "CLOSE CHOICES";
+                active: SoundsData.view < 4 ? SoundsData.any-filter : SoundsData.view == 4 && SoundsData.re-any-type;
+                if SoundsData.view < 4: VerticalLayout {
+                    spacing: Space.md;
+                    FilterList {
+                        name: "TYPE";
+                        more-name: "More types";
+                        filter: SoundsData.type-filter;
+                        toggled(text) => { SoundsData.toggle-choice("type", text); }
+                        cleared => { SoundsData.clear-chip("more-types"); }
                     }
-                    HorizontalLayout {
-                        alignment: start;
-                        Segmented {
-                            property <[FilterChoice]> lengths: SoundsData.length-filter.chips;
-                            choices: ["All", "Hits", "Loops"];
-                            pad: Space.md;
-                            current: self.lengths.length < 2 ? 0 : self.lengths[0].on ? 1 : self.lengths[1].on ? 2 : 0;
-                            picked(i) => {
-                                if i == 0 {
-                                    SoundsData.clear-chip("length");
-                                } else if i != self.current {
-                                    SoundsData.toggle-choice("length", self.lengths[i - 1].text);
+                    // One of three, so a switch: both, hits (one-shots) or loops.
+                    VerticalLayout {
+                        Caps {
+                            text: "LENGTH";
+                            height: 22px;
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            Segmented {
+                                property <[FilterChoice]> lengths: SoundsData.length-filter.chips;
+                                choices: ["All", "Hits", "Loops"];
+                                pad: Space.md;
+                                current: self.lengths.length < 2 ? 0 : self.lengths[0].on ? 1 : self.lengths[1].on ? 2 : 0;
+                                picked(i) => {
+                                    if i == 0 {
+                                        SoundsData.clear-chip("length");
+                                    } else if i != self.current {
+                                        SoundsData.toggle-choice("length", self.lengths[i - 1].text);
+                                    }
                                 }
                             }
                         }
                     }
-                }
-                FilterList {
-                    name: "KEY";
-                    filter: SoundsData.key-filter;
-                    toggled(text) => { SoundsData.toggle-choice("key", text); }
-                    cleared => { SoundsData.clear-chip("key"); }
-                }
-                if SoundsData.key-filter.more-picked != "": TickLine {
-                    text: "Keys that mix well";
-                    on: SoundsData.mix-well;
-                    clicked => { SoundsData.toggle("mix-well"); }
-                }
-                // A span of tempos, so a slider with two handles; its bars show where the sounds are.
-                VerticalLayout {
-                    padding-right: Space.sm;
-                    HorizontalLayout {
-                        height: 22px;
+                    FilterList {
+                        name: "KEY";
+                        filter: SoundsData.key-filter;
+                        toggled(text) => { SoundsData.toggle-choice("key", text); }
+                        cleared => { SoundsData.clear-chip("key"); }
+                    }
+                    if SoundsData.key-filter.more-picked != "": TickLine {
+                        text: "Keys that mix well";
+                        on: SoundsData.mix-well;
+                        clicked => { SoundsData.toggle("mix-well"); }
+                    }
+                    // A span of tempos, so a slider with two handles; its bars show where the sounds are.
+                    VerticalLayout {
+                        padding-right: Space.sm;
+                        HorizontalLayout {
+                            height: 22px;
+                            Caps {
+                                text: "TEMPO";
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: SoundsData.tempo-words;
+                                color: tempo.on ? Theme.text : Theme.faint;
+                                font-size: Type.meta;
+                                font-weight: tempo.on ? 600 : 400;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                        tempo := RangeSlider {
+                            low-end: SoundsData.tempo-low-end;
+                            high-end: SoundsData.tempo-high-end;
+                            step: SoundsData.tempo-step;
+                            low: SoundsData.tempo-low;
+                            high: SoundsData.tempo-high;
+                            bars: SoundsData.tempo-bars;
+                            changed(low, high) => { SoundsData.tempo-picked(low, high); }
+                        }
+                    }
+                    if SoundsData.tag-filter.chips.length + SoundsData.tag-filter.more.length > 0: FilterList {
+                        name: "TAG";
+                        more-name: "More tags";
+                        filter: SoundsData.tag-filter;
+                        toggled(text) => { SoundsData.toggle-choice("tag", text); }
+                        cleared => { SoundsData.clear-chip("tag"); }
+                    }
+                    VerticalLayout {
                         Caps {
-                            text: "TEMPO";
-                            vertical-alignment: center;
+                            text: "SHOW ONLY";
+                            height: 22px;
                         }
-                        Text {
-                            text: SoundsData.tempo-words;
-                            color: tempo.on ? Theme.text : Theme.faint;
-                            font-size: Type.meta;
-                            font-weight: tempo.on ? 600 : 400;
-                            horizontal-alignment: right;
-                            vertical-alignment: center;
-                            horizontal-stretch: 1;
+                        TickLine {
+                            text: "Favourites";
+                            on: SoundsData.favourites;
+                            clicked => { SoundsData.toggle("favourites"); }
+                        }
+                        if SoundsData.knows-use: TickLine {
+                            text: "In my projects";
+                            on: SoundsData.used;
+                            clicked => { SoundsData.toggle("used"); }
+                        }
+                        if SoundsData.knows-use: TickLine {
+                            text: "Unused";
+                            on: SoundsData.unused;
+                            clicked => { SoundsData.toggle("unused"); }
+                        }
+                        // Only while a forgotten folder narrows the list: a click shows every folder's sounds again.
+                        if SoundsData.folder != "": TickLine {
+                            text: "In " + SoundsData.folder;
+                            on: true;
+                            clicked => { SoundsData.toggle("folder"); }
                         }
                     }
-                    tempo := RangeSlider {
-                        low-end: SoundsData.tempo-low-end;
-                        high-end: SoundsData.tempo-high-end;
-                        step: SoundsData.tempo-step;
-                        low: SoundsData.tempo-low;
-                        high: SoundsData.tempo-high;
-                        bars: SoundsData.tempo-bars;
-                        changed(low, high) => { SoundsData.tempo-picked(low, high); }
+                    // Only sounds whose audio is exactly the same are copies: one of each shows while it's on.
+                    TickLine {
+                        text: SoundsData.hide-copies-text;
+                        on: SoundsData.hide-copies;
+                        clicked => { SoundsData.toggle("hide-copies"); }
+                    }
+                    if SoundsData.any-filter: HorizontalLayout {
+                        alignment: start;
+                        StudioButton {
+                            text: "Clear filters";
+                            clicked => { SoundsData.clear(); }
+                        }
                     }
                 }
-                if SoundsData.tag-filter.chips.length + SoundsData.tag-filter.more.length > 0: FilterList {
-                    name: "TAG";
-                    more-name: "More tags";
-                    filter: SoundsData.tag-filter;
-                    toggled(text) => { SoundsData.toggle-choice("tag", text); }
-                    cleared => { SoundsData.clear-chip("tag"); }
-                }
-                VerticalLayout {
-                    Caps {
-                        text: "SHOW ONLY";
-                        height: 22px;
+                // Rediscover's own choices, in the filters' place: the types, how far afield, and how many.
+                if SoundsData.view == 4: VerticalLayout {
+                    spacing: Space.md;
+                    FilterList {
+                        name: "TYPE";
+                        more-name: "More types";
+                        filter: SoundsData.re-type-filter;
+                        toggled(text) => { SoundsData.re-pick("type", text); }
+                        cleared => { SoundsData.re-pick("more-types", ""); }
+                    }
+                    if SoundsData.re-any-type: HorizontalLayout {
+                        alignment: start;
+                        StudioButton {
+                            text: "Clear types";
+                            clicked => { SoundsData.re-pick("type", ""); }
+                        }
+                    }
+                    VerticalLayout {
+                        padding-right: Space.sm;
+                        Caps {
+                            text: "HOW FAR AFIELD";
+                            height: 22px;
+                        }
+                        StudioSlider {
+                            low: "Safe";
+                            high: "Far";
+                            tip: "Left sticks close to what you already use; right goes further afield";
+                            value <=> SoundsData.re-adventure;
+                            released(v) => { SoundsData.re-adventure-set(v); }
+                        }
+                    }
+                    VerticalLayout {
+                        Caps {
+                            text: "HOW MANY";
+                            height: 22px;
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            Segmented {
+                                property <[FilterChoice]> counts: SoundsData.re-count-filter.chips;
+                                property <[string]> names: [
+                                    self.counts.length > 0 ? self.counts[0].text : "",
+                                    self.counts.length > 1 ? self.counts[1].text : "",
+                                    self.counts.length > 2 ? self.counts[2].text : "",
+                                    self.counts.length > 3 ? self.counts[3].text : "",
+                                ];
+                                choices: self.names;
+                                pad: Space.md;
+                                current: self.counts.length > 3 && self.counts[3].on ? 3 : self.counts.length > 2 && self.counts[2].on ? 2 : self.counts.length > 1 && self.counts[1].on ? 1 : 0;
+                                picked(i) => {
+                                    if i != self.current {
+                                        SoundsData.re-pick("count", self.counts[i].text);
+                                    }
+                                }
+                            }
+                        }
                     }
                     TickLine {
-                        text: "Favourites";
-                        on: SoundsData.favourites;
-                        clicked => { SoundsData.toggle("favourites"); }
+                        text: "Sounds used once too";
+                        on: SoundsData.re-rarely;
+                        clicked => { SoundsData.re-toggle-rarely(); }
                     }
-                    if SoundsData.knows-use: TickLine {
-                        text: "In my projects";
-                        on: SoundsData.used;
-                        clicked => { SoundsData.toggle("used"); }
-                    }
-                    if SoundsData.knows-use: TickLine {
-                        text: "Unused";
-                        on: SoundsData.unused;
-                        clicked => { SoundsData.toggle("unused"); }
-                    }
-                    // Only while a forgotten folder narrows the list: a click shows every folder's sounds again.
-                    if SoundsData.folder != "": TickLine {
-                        text: "In " + SoundsData.folder;
-                        on: true;
-                        clicked => { SoundsData.toggle("folder"); }
+                    if SoundsData.re-intro != "": Text {
+                        text: SoundsData.re-intro;
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                        wrap: word-wrap;
                     }
                 }
-                // Only sounds whose audio is exactly the same are copies: one of each shows while it's on.
-                TickLine {
-                    text: SoundsData.hide-copies-text;
-                    on: SoundsData.hide-copies;
-                    clicked => { SoundsData.toggle("hide-copies"); }
-                }
-                if SoundsData.any-filter: HorizontalLayout {
-                    alignment: start;
-                    StudioButton {
-                        text: "Clear filters";
-                        clicked => { SoundsData.clear(); }
+                // The kit builder's choices, in the filters' place.
+                if SoundsData.view == 5: VerticalLayout {
+                    spacing: Space.md;
+                    VerticalLayout {
+                        Caps {
+                            text: "ROLL FROM";
+                            height: 22px;
+                        }
+                        TickLine {
+                            text: "Sounds I haven't used";
+                            on: SoundsData.kit-unused;
+                            clicked => { SoundsData.kit-toggle("unused"); }
+                        }
+                        TickLine {
+                            text: "One pack";
+                            on: SoundsData.kit-pack;
+                            clicked => { SoundsData.kit-toggle("pack"); }
+                        }
+                    }
+                    VerticalLayout {
+                        padding-right: Space.sm;
+                        Caps {
+                            text: "HOW IT PICKS";
+                            height: 22px;
+                        }
+                        StudioSlider {
+                            low: "Best";
+                            high: "Any";
+                            tip: "Left picks the sounds that fit each pad best; right, anything that fits";
+                            value <=> SoundsData.kit-randomness;
+                            released(v) => { SoundsData.kit-randomness-set(v); }
+                        }
+                    }
+                    // An action with a menu, so a button, not a filter's chip.
+                    HorizontalLayout {
+                        alignment: start;
+                        MenuButton {
+                            text: "Add a pad";
+                            items: SoundsData.kit-types;
+                            chosen(id) => { SoundsData.kit-add(id); }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        MenuChip {
+                            name: "Key for bass";
+                            value: SoundsData.kit-key;
+                            choices: SoundsData.kit-keys;
+                            picked(v) => { SoundsData.kit-choose("key", v); }
+                        }
+                    }
+                    VerticalLayout {
+                        Caps {
+                            text: "EXPORT AS";
+                            height: 22px;
+                        }
+                        TickLine {
+                            text: "Elektron ready (48 kHz)";
+                            on: SoundsData.kit-elektron;
+                            clicked => { SoundsData.kit-toggle("elektron"); }
+                        }
+                        TickLine {
+                            text: "Mono";
+                            on: SoundsData.kit-mono;
+                            clicked => { SoundsData.kit-toggle("mono"); }
+                        }
+                        TickLine {
+                            text: "Normalise";
+                            on: SoundsData.kit-normalise;
+                            clicked => { SoundsData.kit-toggle("normalise"); }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        spacing: Space.sm;
+                        StudioButton {
+                            text: SoundsData.kit-exporting ? "Exporting…" : "Export kit";
+                            enabled: !SoundsData.kit-exporting;
+                            tip: "Copy the pads into a folder of their own, ready for a sampler";
+                            clicked => { SoundsData.kit-export(); }
+                        }
+                    }
+                    HorizontalLayout {
+                        alignment: start;
+                        StudioButton {
+                            text: SoundsData.kit-sending ? "Sending…" : "Send to Bitwig";
+                            enabled: !SoundsData.kit-sending && !SoundsData.kit-busy;
+                            tip: "Put the kit on a Drum Machine on a new track in the project open in Bitwig: kick on C1, snare on D1, closed hat on F#1, and the rest on the free pads";
+                            clicked => { SoundsData.kit-to-bitwig(); }
+                        }
+                    }
+                    if SoundsData.kit-status != "": Text {
+                        text: SoundsData.kit-status;
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                        wrap: word-wrap;
                     }
                 }
             }

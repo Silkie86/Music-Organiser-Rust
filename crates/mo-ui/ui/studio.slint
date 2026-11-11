@@ -1396,8 +1396,11 @@ export component FilterList inherits VerticalLayout {
 // its room; a click opens the column over the list, and another puts it away.
 export component FilterColumn inherits Rectangle {
     in property <length> page-width;
-    // Off where a view has no filters (Sounds' Rediscover and Kits): it takes no room.
+    // Off where a view has nothing to put in it: it takes no room.
     in property <bool> shown: true;
+    // What the folded column's tab says, a letter a line, and the line that folds it again.
+    in property <[string]> tab: ["F", "I", "L", "T", "E", "R", "S"];
+    in property <string> tab-close: "CLOSE FILTERS";
     in property <bool> active;
     property <bool> narrow: root.page-width < 860px;
     property <bool> open;
@@ -1444,7 +1447,7 @@ export component FilterColumn inherits Rectangle {
         if root.folded: VerticalLayout {
             y: Space.md;
             height: self.preferred-height;
-            for letter in ["F", "I", "L", "T", "E", "R", "S"]: Caps {
+            for letter in root.tab: Caps {
                 text: letter;
                 horizontal-alignment: center;
                 color: root.active ? Theme.accent : Theme.muted;
@@ -1452,7 +1455,7 @@ export component FilterColumn inherits Rectangle {
         }
         if !root.folded: Caps {
             x: Space.xs;
-            text: "CLOSE FILTERS";
+            text: root.tab-close;
             vertical-alignment: center;
             color: Theme.muted;
         }
