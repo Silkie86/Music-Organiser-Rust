@@ -3,7 +3,8 @@
 // with the app's own filters and orders)
 // and DAW check (every CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider } from "../../mo-ui/ui/studio.slint";
+export { FilterView, FilterChoice }
 import { ListView } from "../../mo-ui/ui/list.slint";
 
 import "../../mo-ui/fonts/IBMPlexSans-400.ttf";
@@ -17,13 +18,10 @@ export struct SoundLine {
     // Its type, tempo, key and length, as far as the app knows them: after the folder.
     facts: string,
     favourite: bool,
-}
-
-// One type in the filter column, with how many sounds picking it would show.
-export struct TypeLine {
-    text: string,
-    count: string,
-    on: bool,
+    // Its type's colour, as its place in the theme's list (mo-app's `sounds::type_colour`); -1 for grey.
+    colour: int,
+    // Its waveform, white on nothing (the line tints it in its type's colour); empty until it's read, or when it has none.
+    wave: image,
 }
 
 export struct ExtensionLine {
@@ -47,11 +45,21 @@ export component Panel inherits Window {
     in property <string> extensions-summary;
     // "Copied" after Copy list, or what went wrong.
     in property <string> copied;
-    // The filter column: the most used types, hits or loops, and your favourites.
-    in property <[TypeLine]> types;
-    in property <bool> hits;
-    in property <bool> loops;
+    // The filter column, as the app's Sounds page has it (mo-app's `sounds::chips`): each choice with its count.
+    in property <FilterView> type-filter;
+    in property <FilterView> length-filter;
+    in property <FilterView> key-filter;
+    in property <FilterView> tag-filter;
+    in property <bool> mix-well;
     in property <bool> favourites;
+    // The Tempo slider: its ends and step, where its handles are, what's picked in words, and its bars.
+    in property <int> tempo-low-end;
+    in property <int> tempo-high-end: 100;
+    in property <int> tempo-step: 1;
+    in property <int> tempo-low;
+    in property <int> tempo-high: 100;
+    in property <string> tempo-words;
+    in property <[float]> tempo-bars;
     // The orders on offer, and the one the list is in.
     in property <[string]> orders;
     in property <int> order;
@@ -59,11 +67,19 @@ export component Panel inherits Window {
     in-out property <int> view: 0;
     callback search(string);
     callback play(int);
+    // A line is being dragged out (onto a track): its row.
+    callback drag-out(int);
+    // Whether lines can be dragged out on this system, and the row being carried (-1 for none).
+    in property <bool> can-drag;
+    in property <int> carried: -1;
     callback stop();
-    callback toggle-type(string);
-    callback toggle-hits();
-    callback toggle-loops();
-    callback toggle-favourites();
+    // A choice was picked or unpicked on a filter ("type", "length", "key", "tag"): its words.
+    callback pick(string, string);
+    // Nothing picked on a filter (or "more-types": only the types in the More menu).
+    callback clear(string);
+    // An on/off line: "mix-well" or "favourites".
+    callback toggle(string);
+    callback tempo-picked(int, int);
     callback pick-order(int);
     callback copy();
 
@@ -104,46 +120,107 @@ export component Panel inherits Window {
 
         if root.view == 0: HorizontalLayout {
             spacing: Space.lg;
-            // The filter column, as the app's pages have it: ticks, each with its count.
-            VerticalLayout {
-                width: 176px;
-                alignment: start;
-                spacing: 0;
-                Caps {
-                    text: "TYPE";
-                    height: 22px;
-                }
-                for t in root.types: TickLine {
-                    text: t.text;
-                    count: t.count;
-                    on: t.on;
-                    dim: t.count == "0" && !t.on;
-                    clicked => { root.toggle-type(t.text); }
-                }
-                Rectangle { height: Space.md; }
-                Caps {
-                    text: "LENGTH";
-                    height: 22px;
-                }
-                TickLine {
-                    text: "Hits";
-                    on: root.hits;
-                    clicked => { root.toggle-hits(); }
-                }
-                TickLine {
-                    text: "Loops";
-                    on: root.loops;
-                    clicked => { root.toggle-loops(); }
-                }
-                Rectangle { height: Space.md; }
-                Caps {
-                    text: "YOURS";
-                    height: 22px;
-                }
-                TickLine {
-                    text: "Favourites";
-                    on: root.favourites;
-                    clicked => { root.toggle-favourites(); }
+            // The filter column, laid out as the app's Sounds page lays out its own: tick lists, each choice with its
+            // count. It scrolls with the wheel when the window is too short for them all.
+            flick := Flickable {
+                width: 196px;
+                content-width: self.width;
+                content-height: max(self.height, lists.preferred-height);
+                mouse-drag-pan-enabled: false;
+                lists := VerticalLayout {
+                    x: 0;
+                    y: 0;
+                    width: flick.width - Space.md;
+                    alignment: start;
+                    spacing: Space.md;
+                    FilterList {
+                        name: "TYPE";
+                        more-name: "More types";
+                        filter: root.type-filter;
+                        toggled(text) => { root.pick("type", text); }
+                        cleared => { root.clear("more-types"); }
+                    }
+                    // One of three, so a switch: both, hits (one-shots) or loops.
+                    VerticalLayout {
+                        Caps {
+                            text: "LENGTH";
+                            height: 22px;
+                        }
+                        HorizontalLayout {
+                            alignment: start;
+                            Segmented {
+                                property <[FilterChoice]> lengths: root.length-filter.chips;
+                                choices: ["All", "Hits", "Loops"];
+                                pad: Space.md;
+                                current: self.lengths.length < 2 ? 0 : self.lengths[0].on ? 1 : self.lengths[1].on ? 2 : 0;
+                                picked(i) => {
+                                    if i == 0 {
+                                        root.clear("length");
+                                    } else if i != self.current {
+                                        root.pick("length", self.lengths[i - 1].text);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    FilterList {
+                        name: "KEY";
+                        filter: root.key-filter;
+                        toggled(text) => { root.pick("key", text); }
+                        cleared => { root.clear("key"); }
+                    }
+                    if root.key-filter.more-picked != "": TickLine {
+                        text: "Keys that mix well";
+                        on: root.mix-well;
+                        clicked => { root.toggle("mix-well"); }
+                    }
+                    // A span of tempos, so a slider with two handles; its bars show where the sounds are.
+                    VerticalLayout {
+                        padding-right: Space.sm;
+                        HorizontalLayout {
+                            height: 22px;
+                            Caps {
+                                text: "TEMPO";
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.tempo-words;
+                                color: tempo.on ? Theme.text : Theme.faint;
+                                font-size: Type.meta;
+                                font-weight: tempo.on ? 600 : 400;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                                horizontal-stretch: 1;
+                            }
+                        }
+                        tempo := RangeSlider {
+                            low-end: root.tempo-low-end;
+                            high-end: root.tempo-high-end;
+                            step: root.tempo-step;
+                            low: root.tempo-low;
+                            high: root.tempo-high;
+                            bars: root.tempo-bars;
+                            changed(low, high) => { root.tempo-picked(low, high); }
+                        }
+                    }
+                    if root.tag-filter.chips.length + root.tag-filter.more.length > 0: FilterList {
+                        name: "TAG";
+                        more-name: "More tags";
+                        filter: root.tag-filter;
+                        toggled(text) => { root.pick("tag", text); }
+                        cleared => { root.clear("tag"); }
+                    }
+                    VerticalLayout {
+                        Caps {
+                            text: "SHOW ONLY";
+                            height: 22px;
+                        }
+                        TickLine {
+                            text: "Favourites";
+                            on: root.favourites;
+                            clicked => { root.toggle("favourites"); }
+                        }
+                    }
                 }
             }
             VerticalLayout {
@@ -185,14 +262,23 @@ export component Panel inherits Window {
                     for sound[i] in root.sounds: ListLine {
                         height: 48px;
                         selected: i == root.picked;
+                        draggable: root.can-drag;
+                        lifted: i == root.carried;
                         clicked => {
                             root.picked = i;
                             root.play(i);
                         }
+                        drag-out => { root.drag-out(i); }
                         HorizontalLayout {
                             padding-left: Space.md;
                             padding-right: Space.md;
                             spacing: Space.sm;
+                            // Its type's colour, as the app's own sound lines show it.
+                            VerticalLayout {
+                                horizontal-stretch: 0;
+                                alignment: center;
+                                Dot { tint: Theme.sound-type(sound.colour); }
+                            }
                             VerticalLayout {
                                 horizontal-stretch: 1;
                                 alignment: center;
@@ -207,6 +293,18 @@ export component Panel inherits Window {
                                     color: Theme.faint;
                                     font-size: Type.meta;
                                     overflow: elide;
+                                }
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 0;
+                                alignment: center;
+                                // The size mo-plugin's waves.rs makes the picture for.
+                                Image {
+                                    width: 120px;
+                                    height: 30px;
+                                    source: sound.wave;
+                                    image-fit: fill;
+                                    colorize: Theme.sound-type(sound.colour);
                                 }
                             }
                             if sound.favourite: VerticalLayout {

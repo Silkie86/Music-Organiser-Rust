@@ -9,13 +9,10 @@
 //! and the others use the same one while any panel is open.
 
 use crate::threads::lock;
-use mo_app::sounds::{self, Filters, Length, Order, SoundCounts, SoundList};
+use mo_app::sounds::{self, Filters, Order, SoundChips, SoundCounts, SoundList};
 use mo_sounds::Sound;
 use std::path::Path;
 use std::sync::{Arc, Mutex, Weak};
-
-/// How many types the filter column lists, the most used first.
-pub const TYPES_SHOWN: usize = 12;
 
 /// The orders the panel offers, as the app names them.
 pub const ORDERS: [Order; 4] = [Order::Shuffled, Order::MostLiked, Order::Name, Order::Newest];
@@ -64,6 +61,8 @@ pub struct Library {
     pub list: SoundList,
     /// The types, the most used first, with how many sounds each has.
     pub types: Vec<(String, usize)>,
+    /// Every tag on a sound, sorted.
+    pub tags: Vec<String>,
 }
 
 impl Library {
@@ -73,55 +72,37 @@ impl Library {
         // Most liked, until the plugin reads how songs use each sound: favourites first, then the most played.
         list.set_liked(|s| f64::from(u8::from(s.favourite)) * 1000.0 + f64::from(s.plays));
         let types = list.type_counts();
-        Library { list, types }
+        let tags = list.tags();
+        Library { list, types, tags }
     }
 
     /// The places in the list of the sounds `asked` lets through, in its order, and how many each filter choice would
     /// show. Worked out on the app's low-priority pool (never the DAW's threads).
     pub fn view(&self, asked: &Asked) -> (Vec<usize>, SoundCounts) {
-        mo_app::background::on_pool(|| self.list.view_counted(&asked.filters(), asked.order, asked.seed))
+        mo_app::background::on_pool(|| self.list.view_counted(&asked.filters, asked.order, asked.seed))
     }
 }
 
-/// What the panel asks of the list: its search box, filter column and order.
+/// What the panel asks of the list: the app's own filters (with the search box's words), and the order.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Asked {
-    pub words: String,
-    pub types: Vec<String>,
-    pub length: Length,
-    pub favourites: bool,
+    pub filters: Filters,
     pub order: Order,
     /// Picks the shuffled order: a new one each time the panel opens or Shuffled is picked again.
     pub seed: u64,
 }
 
 impl Asked {
-    pub fn filters(&self) -> Filters {
-        Filters {
-            search: self.words.trim().to_owned(),
-            sound_types: self.types.clone(),
-            length: self.length,
-            favourites: self.favourites,
-            ..Filters::default()
-        }
-    }
-
     /// Whether anything narrows the list: a filter, or words in the search box.
     pub fn any(&self) -> bool {
-        self.filters().any() || !self.words.trim().is_empty()
+        self.filters.any() || !self.filters.search.trim().is_empty()
     }
 
-    /// Picks a type, or takes it off again.
-    pub fn toggle_type(&mut self, kind: &str) {
-        match self.types.iter().position(|t| t.eq_ignore_ascii_case(kind)) {
-            Some(at) => drop(self.types.remove(at)),
-            None => self.types.push(kind.to_owned()),
-        }
-    }
-
-    /// Picks Hits or Loops, or both again when it's already picked.
-    pub fn toggle_length(&mut self, length: Length) {
-        self.length = if self.length == length { Length::All } else { length };
+    /// The filter column as the app's Sounds page shows it: each choice with how many sounds it would show
+    /// (`counts`, once a list has been worked out), over `library`'s types and tags (none until it's read).
+    pub fn chips(&self, library: Option<&Library>, counts: Option<&SoundCounts>) -> SoundChips {
+        let (types, tags) = library.map_or((&[][..], &[][..]), |l| (&l.types[..], &l.tags[..]));
+        sounds::chips(&self.filters, counts, types, tags)
     }
 }
 
@@ -163,6 +144,22 @@ pub fn read_from(sounds_db: &Path) -> Read {
         Ok(sounds) => Read::Ready(Arc::new(Library::new(sounds))),
         Err(e) => Read::Not(format!("Couldn't read the sound library: {e}")),
     }
+}
+
+/// The waveforms of the sounds with these ids, for the lines on show: the library is opened, read and let go again,
+/// as [`read`] does. Slow (call it off the panel's thread).
+pub fn waves(ids: &[i64]) -> Vec<(i64, mo_sounds::Peaks)> {
+    waves_from(&mo_app::paths::data_dir().join("sounds.db"), ids)
+}
+
+/// [`waves`] from the app's own sound library beside `sounds_db`. None when it can't be read just now (the app may be
+/// swapping in a new copy): those lines stay without a waveform.
+pub fn waves_from(sounds_db: &Path, ids: &[i64]) -> Vec<(i64, mo_sounds::Peaks)> {
+    let copy = mo_sounds::compact::copy_of(sounds_db);
+    if ids.is_empty() || !copy.is_file() {
+        return Vec::new();
+    }
+    mo_sounds::SoundsDb::open_read_only(&copy).and_then(|db| db.waves(ids)).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -208,36 +205,42 @@ mod tests {
         // The hidden duplicate stays out.
         assert_eq!(names(&lib, &by_name), ["Kick A.wav", "snare B.wav", "sub kick.wav"]);
         assert!(!by_name.any());
-        let kick = Asked { words: " KICK ".into(), ..by_name.clone() };
+        let mut kick = by_name.clone();
+        kick.filters.search = "KICK".into();
         assert_eq!(names(&lib, &kick), ["Kick A.wav", "sub kick.wav"]);
         assert!(kick.any());
         let mut typed = by_name.clone();
-        typed.toggle_type("Kick");
-        typed.toggle_type("snare");
+        typed.filters.pick(sounds::TYPE, "Kick");
+        typed.filters.pick(sounds::TYPE, "snare");
         assert_eq!(names(&lib, &typed), ["Kick A.wav", "snare B.wav"]);
-        typed.toggle_type("KICK");
+        typed.filters.pick(sounds::TYPE, "KICK");
         assert_eq!(names(&lib, &typed), ["snare B.wav"]);
-        assert_eq!(names(&lib, &Asked { favourites: true, ..by_name.clone() }), ["Kick A.wav"]);
+        let mut liked = by_name.clone();
+        liked.filters.toggle("favourites");
+        assert_eq!(names(&lib, &liked), ["Kick A.wav"]);
         // Most liked: the favourite first.
         assert_eq!(names(&lib, &Asked { order: Order::MostLiked, ..by_name.clone() })[0], "Kick A.wav");
-        // Each type's count is what picking it would show.
-        let (_, counts) = lib.view(&kick);
-        assert_eq!(
-            (counts.types.get("kick"), counts.types.get("bass"), counts.types.get("snare")),
-            (Some(&1), Some(&1), None)
-        );
         assert_eq!(lib.types.len(), 3);
     }
 
     #[test]
-    fn hits_or_loops_or_both() {
-        let mut asked = Asked::default();
-        asked.toggle_length(Length::Loops);
-        assert_eq!(asked.length, Length::Loops);
-        asked.toggle_length(Length::Hits);
-        assert_eq!(asked.length, Length::Hits);
-        asked.toggle_length(Length::Hits);
-        assert_eq!(asked.length, Length::All);
+    fn the_filter_column_counts_what_each_choice_would_show() {
+        let lib = library();
+        let mut kick = Asked::default();
+        kick.filters.search = "kick".into();
+        // Before the library is read: no types, the keys and lengths without numbers.
+        let before = kick.chips(None, None);
+        assert!(before.types.chips.is_empty() && before.types.more.is_empty());
+        assert_eq!(before.tempo.words, "Any tempo");
+        let (_, counts) = lib.view(&kick);
+        let chips = kick.chips(Some(&lib), Some(&counts));
+        let count = |kind: &str| chips.types.chips.iter().find(|c| c.text == kind).map(|c| c.count.clone());
+        assert_eq!(
+            (count("Kick"), count("Bass"), count("Snare")),
+            (Some("1".into()), Some("1".into()), Some("0".into()))
+        );
+        kick.filters.pick(sounds::TYPE, "Kick");
+        assert!(kick.chips(Some(&lib), Some(&counts)).types.chips.iter().any(|c| c.text == "Kick" && c.on));
     }
 
     #[test]
@@ -250,5 +253,6 @@ mod tests {
     fn no_library_yet_says_so() {
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("no-such-folder");
         assert!(matches!(read_from(&dir.join("sounds.db")), Read::Not(why) if why.starts_with("No sound library")));
+        assert!(waves_from(&dir.join("sounds.db"), &[1, 2]).is_empty());
     }
 }

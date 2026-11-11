@@ -4,7 +4,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
-use clack_extensions::gui::{GuiApiType, GuiConfiguration, PluginGui};
+use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize, PluginGui};
 use clack_extensions::note_ports::{NotePortInfoBuffer, PluginNotePorts};
 use clack_host::factory::plugin::PluginFactory;
 use clack_host::prelude::*;
@@ -51,6 +51,19 @@ fn one_stereo_output_one_note_input_and_a_window() {
     let api = GuiApiType::default_for_current_platform().unwrap();
     assert!(gui.is_api_supported(&handle, GuiConfiguration { api_type: api, is_floating: false }));
     assert!(!gui.is_api_supported(&handle, GuiConfiguration { api_type: api, is_floating: true }));
+
+    // The window can be dragged to another size (with no window open yet, the size is kept for when one opens):
+    // never smaller than the panel fits in, and it opens again at the size it was left.
+    assert!(gui.can_resize(&handle));
+    let hints = gui.get_resize_hints(&handle).unwrap();
+    assert!(hints.can_resize_horizontally && hints.can_resize_vertically);
+    let opens_at = gui.get_size(&handle).unwrap();
+    let small = gui.adjust_size(&handle, GuiSize { width: 10, height: 10 }).unwrap();
+    assert!(small.width > 10 && small.width <= opens_at.width && small.height <= opens_at.height);
+    let bigger = GuiSize { width: opens_at.width + 300, height: opens_at.height + 200 };
+    assert_eq!(gui.adjust_size(&handle, bigger), Some(bigger));
+    gui.set_size(&handle, bigger).unwrap();
+    assert_eq!(gui.get_size(&handle), Some(bigger));
 }
 
 #[test]

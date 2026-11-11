@@ -161,6 +161,8 @@ pub enum Played {
 #[derive(Default)]
 pub struct Player {
     asks: Mutex<Option<Producer<Ask>>>,
+    /// The waveform of the sound last read whole to be played, with its path: the panel takes it.
+    pub heard: Mutex<Option<(PathBuf, mo_sounds::Peaks)>>,
     done: Mutex<Option<Consumer<Box<Voice>>>>,
     /// The DAW's sample rate while the track's audio runs; 0 when it doesn't.
     rate: AtomicU32,
@@ -251,6 +253,12 @@ impl Player {
             Err(e) => Played::Not(format!("Couldn't read {name}: {e}")),
             Ok(_) if rate == 0 => Played::Not(NOT_STARTED.into()),
             Ok(audio) => {
+                // The whole sound was read: its waveform, for a line the library has none for.
+                let frames = audio.channels.first().map_or(0, Vec::len);
+                if frames as f64 >= audio.file_seconds * f64::from(audio.sample_rate) * 0.99 {
+                    let wave = crate::waves::peaks(&audio.channels, crate::waves::PEAKS);
+                    *lock(&self.heard) = Some((pick.path.clone(), wave));
+                }
                 let voice = Box::new(Voice::new(&audio.channels, audio.sample_rate, rate));
                 self.hand_over(voice, name)
             }

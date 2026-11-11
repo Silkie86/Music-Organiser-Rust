@@ -49,6 +49,22 @@ mo-audio = { path = "../mo-audio", default-features = false }
 mo-catch = { path = "../mo-catch" }
 mo-sounds = { path = "../mo-sounds" }
 
+[target.'cfg(windows)'.dependencies]
+# Dragging a sound out onto a track: Windows' own drag and drop, as mo-ui's lists hand files over.
+windows = { version = "0.62", features = [
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_SystemServices",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# `windows`' `#[implement]` (our side of the drag, which Windows asks how it's going) names this crate itself.
+windows-core = "0.62"
+
 [dev-dependencies]
 # A stand-in DAW for the tests: clack's host side.
 clack-host = { version = "0.2", features = ["clack-plugin"] }
