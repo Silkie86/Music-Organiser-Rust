@@ -76,6 +76,8 @@ export component Panel inherits Window {
     // The stars' picture, and where it sits on the Galaxy's view now (it's moved and stretched with the view until
     // the next picture is drawn).
     in property <image> sky-picture;
+    // What the Galaxy sits on: the graphics card paints its picture over the same colour.
+    out property <color> sky-well: Theme.well;
     in property <length> sky-x;
     in property <length> sky-y;
     in property <length> sky-w;

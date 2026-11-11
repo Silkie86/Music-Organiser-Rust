@@ -8,7 +8,7 @@
 
 use crate::library::Library;
 use mo_app::galaxy_grid::{Crowd, Grid};
-use mo_app::galaxy_look::on_view;
+use mo_app::galaxy_look::{self, Look, on_view};
 use mo_app::galaxy_picture::Picture;
 use mo_app::galaxy_view::{View, most_zoom_for};
 use mo_sounds::{Sound, StarPoint};
@@ -81,6 +81,24 @@ pub fn read_from(sounds_db: &std::path::Path, library: &Library) -> Result<Map, 
     Err(NONE.into())
 }
 
+/// The stars to be made ready for the graphics card (`mo_sky`), with the number to hand them back with
+/// ([`Sky::packed`]).
+pub struct Pack {
+    pub set: u64,
+    stars: Stars,
+    colours: Arc<Vec<i32>>,
+    shown: Arc<Vec<usize>>,
+    palette: Vec<[u8; 3]>,
+}
+
+impl Pack {
+    /// The stars as the card takes them, and how many at their end are lit (none: the plugin has no Light by yet).
+    /// On every core (call it off the panel's thread).
+    pub fn pack(&self) -> (Vec<u8>, u32) {
+        galaxy_look::pack(&self.stars, &self.colours, &self.palette, &self.shown, &[], &[])
+    }
+}
+
 /// The Galaxy's state on the panel's thread: the map, which stars are shown, the view, and which picture is on show.
 #[derive(Default)]
 pub struct Sky {
@@ -99,6 +117,8 @@ pub struct Sky {
     pub palette: Vec<[u8; 3]>,
     /// Counts the pictures asked for.
     asked: u64,
+    /// The showing the stars were last asked to be packed for the card: asked once.
+    packing: Option<u64>,
     /// A picture is being drawn now.
     drawing: bool,
     /// The view or the stars changed since the last picture was asked for.
@@ -170,6 +190,52 @@ impl Sky {
     /// The view moved (a glide, a pan): a new picture is wanted.
     pub fn moved(&mut self) {
         self.stale = true;
+    }
+
+    /// What the card's stars are made from now ([`Pack::pack`] it off the panel's thread, then [`Sky::packed`]):
+    /// `None` with no map, or when this showing's were asked for already.
+    pub fn pack_ask(&mut self) -> Option<Pack> {
+        let map = self.map.as_ref()?;
+        if self.packing == Some(self.set) {
+            return None;
+        }
+        self.packing = Some(self.set);
+        Some(Pack {
+            set: self.set,
+            stars: Arc::clone(&map.stars),
+            colours: Arc::clone(&map.colours),
+            shown: Arc::clone(&self.shown),
+            palette: self.palette.clone(),
+        })
+    }
+
+    /// Whether stars packed for asking `set` are still the ones to show (the filters haven't changed since): then
+    /// they go to the card, and the next picture is of them.
+    pub fn packed(&mut self, set: u64) -> bool {
+        let current = set == self.set;
+        if current {
+            self.stale = true;
+        }
+        current
+    }
+
+    /// The picture the card is to draw now, if one is wanted: the view, the pixels a point and the look. The card
+    /// draws at once, on the panel's thread, so the picture is on show as soon as this is asked: it sits exactly on
+    /// the view.
+    pub fn on_card(&mut self) -> Option<(View, f32, Look)> {
+        if !self.stale || self.view.width < 1.0 || self.view.height < 1.0 {
+            return None;
+        }
+        self.map.as_ref()?;
+        let (l, t, r, b) = on_view(&self.view);
+        let crowd = match &self.grid {
+            Some(grid) => grid.crowd(l, t, r, b),
+            None => Crowd::even(&self.view, self.shown.len()),
+        };
+        self.asked += 1;
+        self.stale = false;
+        self.drawn = Some((self.asked, self.view));
+        Some((self.view, self.scale.max(0.25), galaxy_look::look(&self.view, crowd, 0.0)))
     }
 
     /// The next picture to draw, if one is wanted and none is being drawn: [`Picture::draw`] it off the panel's
@@ -318,6 +384,31 @@ mod tests {
         // On show where it was drawn: the whole view.
         let (x, y, w, h) = sky.place().expect("a picture on show");
         assert!(x.abs() < 0.01 && y.abs() < 0.01 && (w - 200.0).abs() < 0.01 && (h - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_card_gets_the_stars_once_a_showing_and_a_picture_only_when_something_changed() {
+        let mut sky = sky();
+        let pack = sky.pack_ask().expect("the stars to pack");
+        assert!(sky.pack_ask().is_none(), "asked once for a showing");
+        // Every placed star, 16 bytes each (the unplaced third sound has none); none lit.
+        let (bytes, lit) = pack.pack();
+        assert_eq!((bytes.len(), lit), (2 * galaxy_look::STAR_BYTES, 0));
+        assert!(sky.packed(pack.set));
+        let (view, scale, _) = sky.on_card().expect("a picture for the card");
+        assert_eq!((view.width, view.height, scale), (200.0, 100.0, 1.0));
+        assert!(sky.on_card().is_none(), "nothing changed since");
+        // On show at once, exactly on the view.
+        let (x, y, w, h) = sky.place().expect("a picture on show");
+        assert!(x.abs() < 0.01 && y.abs() < 0.01 && (w - 200.0).abs() < 0.01 && (h - 100.0).abs() < 0.01);
+        sky.moved();
+        assert!(sky.on_card().is_some());
+        // The filters changed while the stars were being packed: those are dropped and asked for again.
+        let old = sky.pack_ask();
+        assert!(old.is_none());
+        sky.set_shown(Arc::new(vec![0]));
+        assert!(!sky.packed(pack.set));
+        assert!(sky.pack_ask().is_some());
     }
 
     #[test]

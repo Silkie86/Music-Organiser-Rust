@@ -3377,6 +3377,7 @@ dependencies = [
  "mo-app",
  "mo-audio",
  "mo-catch",
+ "mo-sky",
  "mo-sounds",
  "raw-window-handle",
  "rtrb",

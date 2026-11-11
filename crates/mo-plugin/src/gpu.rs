@@ -264,6 +264,11 @@ impl Gpu {
         self.redraw.set(true);
     }
 
+    /// The card's device and its queue, for what's drawn on the card beside the panel itself (the Galaxy's stars).
+    pub fn device(&self) -> (&wgpu::Device, &wgpu::Queue) {
+        (&self.card.device, &self.card.queue)
+    }
+
     /// Draws the panel into the window if Slint asked for it since the last time. An error is for the log: the
     /// frame is skipped.
     pub fn draw_if_needed(&self) -> Result<(), String> {

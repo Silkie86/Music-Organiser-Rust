@@ -54,6 +54,8 @@ mo-app = { workspace = true }
 # Decoding sounds only: the DAW plays them, not the system's sound output.
 mo-audio = { path = "../mo-audio", default-features = false }
 mo-catch = { path = "../mo-catch" }
+# The galaxy's painter on the graphics card, the one the app draws its Galaxy with.
+mo-sky = { path = "../mo-sky" }
 mo-sounds = { path = "../mo-sounds" }
 
 [target.'cfg(windows)'.dependencies]

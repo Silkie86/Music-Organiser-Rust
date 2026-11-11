@@ -136,6 +136,9 @@ struct Slots {
     /// The grid for finding the star under the mouse, with its asking's number ([`Sky::grid_ask`]).
     grid: Mutex<Option<(u64, Grid)>>,
     sky: Mutex<Option<SkyDrawn>>,
+    /// The stars made ready for the graphics card, with their asking's number ([`Sky::pack_ask`]) and how many
+    /// are lit.
+    packed: Mutex<Option<(u64, Vec<u8>, u32)>>,
 }
 
 type SkyPixels = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
@@ -462,6 +465,10 @@ struct Shown {
     right_press: Cell<Option<LogicalPosition>>,
     /// The Galaxy: its map, its view and which picture is on show.
     sky: Rc<RefCell<Sky>>,
+    /// The Galaxy's painter on the graphics card (the app's own), once there are stars to give it.
+    painter: RefCell<Option<mo_sky::Sky>>,
+    /// Painting the stars on the card went wrong: the processor's picture from then on.
+    painter_failed: Cell<bool>,
     /// The Galaxy's map has been asked for.
     sky_asked: Cell<bool>,
     /// When the timer last ran: a glide of the Galaxy goes on by the time since.
@@ -507,6 +514,8 @@ impl Shown {
             dragging: Cell::new(false),
             right_press: Cell::new(None),
             sky: Rc::default(),
+            painter: RefCell::new(None),
+            painter_failed: Cell::new(false),
             sky_asked: Cell::new(false),
             ticked: Cell::new(Instant::now()),
             _timer: timer,
@@ -840,6 +849,85 @@ impl Shown {
                 *lock(&slots.grid) = Some((set, grid));
             });
         }
+        let on_card = match &self.draws {
+            Draws::Card(gpu) if !self.painter_failed.get() => self.sky_on_card(&mut sky, gpu),
+            _ => false,
+        };
+        if !on_card {
+            self.sky_on_processor(&mut sky);
+        }
+        if let Some((x, y, width, height)) = sky.place() {
+            self.panel.set_sky_x(x);
+            self.panel.set_sky_y(y);
+            self.panel.set_sky_w(width);
+            self.panel.set_sky_h(height);
+        }
+    }
+
+    /// The Galaxy's stars painted by the graphics card, with the app's own painter: every star goes to the card once
+    /// (when the map or the filters change), and after that each picture only sends the view, so flying and moving
+    /// the map keep the screen's pace with half a million stars. `false` when the card can't (the processor's
+    /// picture is drawn instead).
+    fn sky_on_card(&self, sky: &mut Sky, gpu: &Gpu) -> bool {
+        if let Some(pack) = sky.pack_ask() {
+            let slots = Arc::clone(&self.slots);
+            background("mo-plugin-galaxy-stars", move || {
+                let started = Instant::now();
+                let (bytes, lit) = pack.pack();
+                crate::log::took_if_slow("Galaxy", "Made the stars ready for the graphics card", started);
+                *lock(&slots.packed) = Some((pack.set, bytes, lit));
+            });
+        }
+        let (device, queue) = gpu.device();
+        let well = self.panel.get_sky_well();
+        let background = [well.red(), well.green(), well.blue()].map(|c| f32::from(c) / 255.0);
+        let packed = take(&self.slots.packed).filter(|(set, ..)| sky.packed(*set));
+        let mut painter = self.painter.borrow_mut();
+        if painter.is_none() && packed.is_none() {
+            // No stars on the card yet: nothing is shown until they are (they're a moment away).
+            return true;
+        }
+        // A fault in the card's own code is caught here, so it never reaches the DAW.
+        let painted = mo_catch::catch_crash(AssertUnwindSafe(|| {
+            let painter = painter.get_or_insert_with(|| {
+                let started = Instant::now();
+                let painter = mo_sky::Sky::new(device, queue);
+                crate::log::took("Galaxy", "Set up the stars' painter on the graphics card", started);
+                painter
+            });
+            if let Some((_, bytes, lit)) = &packed {
+                painter.set_stars(bytes, *lit);
+            }
+            if !painter.has_stars() {
+                return Ok(None);
+            }
+            let Some((view, scale, look)) = sky.on_card() else { return Ok(None) };
+            let texture = painter.draw(&view, scale, &look, mo_sky::Shine::default(), background);
+            slint::Image::try_from(texture).map(Some).map_err(|e| format!("Slint wouldn't show the picture: {e}"))
+        }));
+        match painted {
+            Ok(Ok(Some(picture))) => self.panel.set_sky_picture(picture),
+            Ok(Ok(None)) => {}
+            Ok(Err(why)) => {
+                crate::log::line("Galaxy", &format!("{why}: the stars are drawn on the processor"));
+                self.give_up_the_painter(sky, &mut painter);
+            }
+            Err(_) => {
+                crate::log::line("Galaxy", "Painting the stars on the card crashed: they're drawn on the processor");
+                self.give_up_the_painter(sky, &mut painter);
+            }
+        }
+        !self.painter_failed.get()
+    }
+
+    fn give_up_the_painter(&self, sky: &mut Sky, painter: &mut Option<mo_sky::Sky>) {
+        *painter = None;
+        self.painter_failed.set(true);
+        sky.moved();
+    }
+
+    /// The Galaxy's picture drawn on the processor, on a background thread (no graphics card to draw with).
+    fn sky_on_processor(&self, sky: &mut Sky) {
         match take(&self.slots.sky) {
             Some(Ok((id, view, pixels))) => {
                 if sky.took(id, view) {
@@ -866,12 +954,6 @@ impl Shown {
                 crate::log::took_if_slow("Galaxy", "Drew the stars", started);
                 *lock(&slots.sky) = Some(drawn.ok().flatten().ok_or(id));
             });
-        }
-        if let Some((x, y, width, height)) = sky.place() {
-            self.panel.set_sky_x(x);
-            self.panel.set_sky_y(y);
-            self.panel.set_sky_w(width);
-            self.panel.set_sky_h(height);
         }
     }
 
