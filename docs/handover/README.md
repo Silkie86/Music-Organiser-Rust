@@ -196,8 +196,15 @@ the next PR step by step). Solomon wants the highest effort here.
     seconds after the DAW writes it, the song is found again by its saves (`SongChoice::among`, never by its
     label), and its list is worked out again from the save written last. If the folders can't be watched, picking
     the song again in the menu reads it again.
-  Not built yet: picking a song's parts and bars by hand, playing or sending a part moved by the semitones its
-  line says, and sending the part found into the project.
+  - A part in the list is the part as it fits (2026-11-11): `midi_fits::moved` moves its notes by what its line
+    says (the whole part an octave the other way when it would leave the keyboard), and the page uses that
+    wherever the notes leave the index: the card's roll and chords (`read_notes`), Play loop, Play in Bitwig and
+    FL, Send to Bitwig and the drag (all through `moved_notes_of`), under a name that says so (`moved_name`:
+    "Arp clip (3 semitones up)"). The card's key stays the part's own; a line above the roll says how it's moved
+    (`card_text`). What's moved is whatever the list on show says (`Page::fits`, `fit_move`): when a new list
+    changes the picked part's move, `fit_follows` makes its card again and restarts what's playing of it.
+  Not built yet: picking a song's parts and bars by hand, the octave a part goes at, and putting the part found
+  at the right bar of the project.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db
 writes once trusted. A decoder panic on a damaged file is caught with `mo_catch::catch`: one warning line in the log,

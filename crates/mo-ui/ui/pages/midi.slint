@@ -84,6 +84,9 @@ export struct PickedPart {
     // The other files with the same notes, and "and 12 more".
     others: [string],
     others-more: string,
+    // In a "Fits my song" list: how the part is moved to fit the song ("Moved 3 semitones up to fit Night drive…"),
+    // which is how the roll shows it and how it plays, drags and is sent; "" in any other list.
+    fit: string,
 }
 
 export global MidiData {
@@ -517,6 +520,14 @@ component PartPanel inherits SidePanel {
     Text {
         text: MidiData.picked.path;
         color: Theme.faint;
+        font-size: Type.meta;
+        wrap: word-wrap;
+        min-width: 0px;
+    }
+    // Straight above the roll, which shows the part as this line says it's moved.
+    if MidiData.picked.fit != "": Text {
+        text: MidiData.picked.fit;
+        color: Theme.text;
         font-size: Type.meta;
         wrap: word-wrap;
         min-width: 0px;
