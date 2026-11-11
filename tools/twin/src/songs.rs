@@ -1,7 +1,9 @@
 //! The songs twin: groups the library into songs the C# app's way (through the C# helper, on a copy of the library)
-//! and the Rust way (on the library itself, opened read-only), and sorts every difference by its cause. One cause is
+//! and the Rust way (on the library itself, opened read-only), and sorts every difference by its cause. Two causes are
 //! meant: the same file found in two places (a copied project folder) is one save in Rust, so the songs holding it are
-//! one song, and the extra copy is hidden. Any other difference is one to look at.
+//! one song, and the extra copy is hidden; and Rust never takes a save with no real date (dated still to come, or not
+//! at all) for the one saved last, so a song C# opens at such a save opens at its newest real one. Any other difference
+//! is one to look at.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
@@ -9,9 +11,11 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 use std::process::{Command, Stdio};
 
+use chrono::{NaiveDate, NaiveDateTime, TimeDelta};
 use mo_formats::case;
+use mo_formats::dates::RealDates;
 use mo_library::songs::{Song, file_id, group_songs};
-use mo_library::{Library, Save};
+use mo_library::{Library, Save, SongChoices};
 use serde_json::Value;
 
 /// How the C# app grouped one save.
@@ -41,9 +45,10 @@ pub fn run(helper: &Path, library: &Path, copy: &Path) -> Result<Outcome, String
     saves.retain(|s| !pending.contains(&s.path));
     let choices = lib.song_choices().map_err(|e| e.to_string())?;
     drop(lib);
-    let songs = group_songs(&saves, &choices);
+    let real = RealDates::now();
+    let songs = group_songs(&saves, &choices, &real);
     let cs = cs_songs(helper, copy)?;
-    Ok(compare(&cs, &songs, saves.len()))
+    Ok(compare(&cs, &songs, saves.len(), &choices, &real))
 }
 
 /// Deletes the library's copy (and SQLite's files beside it) when the songs twin ends, however it ends: it holds the
@@ -111,13 +116,20 @@ fn read_cs(stdout: impl std::io::Read) -> Result<HashMap<String, CsSave>, String
 /// The kinds of difference, as the summary counts them.
 const COPIES_JOIN: &str = "songs joined because they share a copied file (meant)";
 const COPY_OPENS: &str = "songs whose C# newest save is a copy Rust hides (meant)";
+const UNREAL_OPENS: &str = "songs whose C# newest save has no real date, so Rust opens a save that has (meant)";
 const OTHER_JOIN: &str = "songs joined for another reason";
 const SPLIT: &str = "C# songs split into more than one Rust song";
 const LATEST: &str = "songs that open a different save";
 const ONLY_CS: &str = "saves only the C# app lists";
 const ONLY_RUST: &str = "saves only Rust lists";
 
-fn compare(cs: &HashMap<String, CsSave>, songs: &[Song], save_count: usize) -> Outcome {
+fn compare(
+    cs: &HashMap<String, CsSave>,
+    songs: &[Song],
+    save_count: usize,
+    choices: &SongChoices,
+    real: &RealDates,
+) -> Outcome {
     let mut kinds: BTreeMap<&str, usize> = BTreeMap::new();
     let mut report = String::new();
     let note = |kinds: &mut BTreeMap<&str, usize>, kind: &'static str, song: &Song, why: &str, report: &mut String| {
@@ -167,12 +179,17 @@ fn compare(cs: &HashMap<String, CsSave>, songs: &[Song], save_count: usize) -> O
         if keys.first().is_some_and(|k| rust_of.get(k).is_some_and(|to| to.len() > 1)) {
             continue;
         }
-        // One C# song: it should open the same save, unless C#'s newest is a copy Rust keeps aside.
+        // One C# song: it should open the same save, unless C#'s newest is a copy Rust keeps aside, or a save with no
+        // real date that Rust doesn't take for the one saved last.
         let cs_latest = all.iter().find(|s| cs.get(&case::key(&s.path)).is_some_and(|c| c.latest));
         match cs_latest {
             Some(l) if case::key(&l.path) == case::key(&song.latest.path) => {}
             Some(l) if song.copies.iter().any(|c| case::key(&c.path) == case::key(&l.path)) => {
                 note(&mut kinds, COPY_OPENS, song, &format!("C# opens {}", l.path), &mut report);
+            }
+            Some(l) if !real.local(l.modified) && opens_if_every_date_were_real(song, choices, real, l) => {
+                let why = format!("C# opens {}, dated {}", l.path, l.modified.format("%-d %b %Y"));
+                note(&mut kinds, UNREAL_OPENS, song, &why, &mut report);
             }
             Some(l) => note(&mut kinds, LATEST, song, &format!("C# opens {}", l.path), &mut report),
             None => {}
@@ -203,7 +220,7 @@ fn compare(cs: &HashMap<String, CsSave>, songs: &[Song], save_count: usize) -> O
         cs.len(),
         songs.len()
     );
-    let meant = [COPIES_JOIN, COPY_OPENS];
+    let meant = [COPIES_JOIN, COPY_OPENS, UNREAL_OPENS];
     let mut same = true;
     if kinds.is_empty() {
         summary += "  Every song is grouped the same way.\n";
@@ -214,10 +231,33 @@ fn compare(cs: &HashMap<String, CsSave>, songs: &[Song], save_count: usize) -> O
             same &= meant.contains(kind);
         }
         if same {
-            summary += "  Every difference comes from copied folders, as meant.\n";
+            summary += "  Every difference is a meant one: copied folders, or dates that aren't real.\n";
         }
     }
     Outcome { summary, report, same }
+}
+
+/// Whether Rust would open `song` at `cs_latest` too if it took every date as real, as the C# app does: then the
+/// dates are why the two differ, and nothing else. The song's saves and their copies are grouped again with their
+/// dates moved into real years, in the same order.
+fn opens_if_every_date_were_real(song: &Song, choices: &SongChoices, real: &RealDates, cs_latest: &Save) -> bool {
+    let all: Vec<&Save> = song.saves().chain(&song.copies).collect();
+    let mut dates: Vec<NaiveDateTime> = all.iter().map(|s| s.modified).collect();
+    dates.sort_unstable();
+    dates.dedup();
+    let Some(start) = NaiveDate::from_ymd_opt(2000, 1, 1).and_then(|d| d.and_hms_opt(0, 0, 0)) else { return false };
+    let moved: Vec<Save> = all
+        .iter()
+        .map(|s| {
+            let rank = i64::try_from(dates.partition_point(|d| *d < s.modified)).unwrap_or(0);
+            let modified = TimeDelta::try_seconds(rank).and_then(|t| start.checked_add_signed(t)).unwrap_or(start);
+            Save { modified, ..(*s).clone() }
+        })
+        .collect();
+    group_songs(&moved, choices, real)
+        .iter()
+        .find(|g| g.saves().any(|s| s.path == song.latest.path))
+        .is_some_and(|g| case::key(&g.latest.path) == case::key(&cs_latest.path))
 }
 
 /// Whether the C# songs `keys` are all joined to each other by saves that are the same file.
@@ -261,7 +301,6 @@ fn linked_by_copies(all: &[&Save], cs: &HashMap<String, CsSave>, keys: &[&str]) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mo_library::SongChoices;
 
     fn save(id: i64, folder: &str, name: &str) -> Save {
         Save {
@@ -290,11 +329,11 @@ mod tests {
             Save { id: 3, path: "D:\\Copy\\Night\\Night_2.flp".into(), folder: "D:\\Copy\\Night".into(), ..x.clone() };
         let choices = SongChoices::from_rows([("split", x.path.as_str(), "")]);
         let saves = vec![a.clone(), x.clone(), copy.clone()];
-        let songs = group_songs(&saves, &choices);
+        let songs = group_songs(&saves, &choices, &RealDates::now());
         assert_eq!(songs.len(), 2);
         // The C# app keeps the copy in the first song.
         let cs = cs_of(&[(&a, "A", true), (&copy, "A", false), (&x, "S", true)]);
-        let out = compare(&cs, &songs, saves.len());
+        let out = compare(&cs, &songs, saves.len(), &choices, &RealDates::now());
         assert!(out.same, "{}", out.summary);
         assert!(!out.summary.contains(SPLIT), "{}", out.summary);
     }
@@ -303,11 +342,42 @@ mod tests {
     fn a_split_song_is_counted_once() {
         let a = save(1, "C:\\Music\\Night", "Night_1");
         let b = save(2, "C:\\Music\\Day", "Day_1");
-        let songs = group_songs(&[a.clone(), b.clone()], &SongChoices::default());
+        let songs = group_songs(&[a.clone(), b.clone()], &SongChoices::default(), &RealDates::now());
         assert_eq!(songs.len(), 2);
         // The C# app has them as one song, opening b.
-        let out = compare(&cs_of(&[(&a, "A", false), (&b, "A", true)]), &songs, 2);
+        let out = compare(
+            &cs_of(&[(&a, "A", false), (&b, "A", true)]),
+            &songs,
+            2,
+            &SongChoices::default(),
+            &RealDates::now(),
+        );
         assert!(!out.same);
         assert!(out.summary.contains(SPLIT) && !out.summary.contains(LATEST), "{}", out.summary);
+    }
+
+    #[test]
+    fn a_song_c_sharp_opens_at_a_save_with_no_real_date_is_meant() {
+        let (real, none) = (RealDates::now(), SongChoices::default());
+        let dated = |id, name: &str, year| Save {
+            modified: chrono::NaiveDate::from_ymd_opt(year, 1, 1).unwrap().and_hms_opt(12, 0, 0).unwrap(),
+            ..save(id, "C:\\Music\\Night", name)
+        };
+        // Names that aren't all one numbered: the C# app opens the one dated last, 2099; Rust the newest real one.
+        let (a, b, c) = (dated(1, "Night final", 2099), dated(2, "Night_2", 2025), dated(3, "Night", 2024));
+        let songs = group_songs(&[a.clone(), b.clone(), c.clone()], &none, &real);
+        assert_eq!((songs.len(), songs[0].latest.name.as_str()), (1, "Night_2"));
+        let out = compare(&cs_of(&[(&a, "A", true), (&b, "A", false), (&c, "A", false)]), &songs, 3, &none, &real);
+        assert!(out.same && out.summary.contains(UNREAL_OPENS), "{}", out.summary);
+        // Any other save it opens is still one to look at.
+        let out = compare(&cs_of(&[(&a, "A", false), (&b, "A", false), (&c, "A", true)]), &songs, 3, &none, &real);
+        assert!(!out.same && out.summary.contains(LATEST), "{}", out.summary);
+        // So is a save with no real date the dates don't explain: a numbered song opens its highest number whatever
+        // its date, so had the C# app opened Loop_2, dated 2099, over Loop_3, that's not the dates.
+        let (x, y) = (dated(4, "Loop_3", 2025), dated(5, "Loop_2", 2099));
+        let loops = group_songs(&[x.clone(), y.clone()], &none, &real);
+        assert_eq!((loops.len(), loops[0].latest.name.as_str()), (1, "Loop_3"));
+        let out = compare(&cs_of(&[(&x, "L", false), (&y, "L", true)]), &loops, 2, &none, &real);
+        assert!(!out.same && out.summary.contains(LATEST) && !out.summary.contains(UNREAL_OPENS), "{}", out.summary);
     }
 }

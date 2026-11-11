@@ -450,13 +450,14 @@ pub fn prepare(
     }
     let mut files = gathered.files;
     let have: HashSet<String> = files.iter().map(|f| case::key(&f.path.to_string_lossy())).collect();
-    let all_songs = group_songs(&saves, &choices);
-    let others = Others::new(&all_songs, &samples, sample_folders);
     let compact = CompactSettings {
         // Essentials leaves every autosave out: all of them go on the Compact list.
         keep_backups: if settings.level == Level::Essentials { 0 } else { DEFAULT_KEEP_BACKUPS },
         ..CompactSettings::default()
     };
+    // Each song's newest save by the same real dates the songs are measured and planned with.
+    let all_songs = group_songs(&saves, &choices, &compact.dates);
+    let others = Others::new(&all_songs, &samples, sample_folders);
     let compare = compare_for(settings.level, prints);
     // Only songs with a save in the folders are this backup's (a song there only as a copy, too).
     let songs: Vec<_> = all_songs

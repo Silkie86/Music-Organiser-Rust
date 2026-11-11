@@ -169,7 +169,7 @@ pub fn look(
     prints: Option<&Prints>,
     stop: &AtomicBool,
 ) -> Result<Found, Stopped> {
-    let songs = group_songs(&from.saves, &from.choices);
+    let songs = group_songs(&from.saves, &from.choices, &settings.dates);
     let others = Others::new(&songs, &from.samples, from.sample_folders.clone());
     let compare = prints.map_or(Compare::Afresh, Compare::Remembered);
     let measured: Result<Vec<Option<SongRoom>>, Stopped> =
@@ -264,7 +264,7 @@ pub fn remove(
     bin: &dyn Bin,
     stop: &AtomicBool,
 ) -> Done {
-    let songs = group_songs(&from.saves, &from.choices);
+    let songs = group_songs(&from.saves, &from.choices, &settings.dates);
     let others = Others::new(&songs, &from.samples, from.sample_folders.clone());
     let Ok((going, problems)) = still_offered(picked, &songs, from, &others, settings, stop) else {
         return stayed(picked, Refused::Stopped.text());

@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use crate::filters::{self, Filter};
 use chrono::{Datelike, Months, NaiveDateTime};
 use mo_formats::case;
+use mo_formats::dates::RealDates;
 use mo_formats::plugins::format_from_path;
 use mo_library::plugins::{NEEDED_COUNT_KEY, PluginUse, ScanCounts, ScannedPlugin, StoredSpace, UNUSED_YEARS_KEY};
 use mo_library::songs::group_songs;
@@ -83,7 +84,7 @@ pub fn read(lib: &Library) -> Result<Read, LibraryError> {
     // As the Songs page groups them: a Fix copy waiting for Keep isn't a save yet, and a save whose file has gone
     // doesn't count (its plugins aren't read either).
     let all: Vec<_> = lib.saves()?.into_iter().filter(|s| !s.file_missing && !pending.contains(&s.path)).collect();
-    let grouped = group_songs(&all, &lib.song_choices()?);
+    let grouped = group_songs(&all, &lib.song_choices()?, &RealDates::now());
     let mut song_of = HashMap::new();
     let mut songs = Vec::with_capacity(grouped.len());
     for (i, song) in grouped.iter().enumerate() {

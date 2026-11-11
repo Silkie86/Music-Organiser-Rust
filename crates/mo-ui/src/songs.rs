@@ -809,15 +809,15 @@ pub fn show_save(app: &AppWindow, save: i64) -> bool {
 }
 
 /// The newest of your Bitwig saves with the name Bitwig shows for the project open in it (the file's name without its
-/// ending, in any case, as the C# app matched them), for the rail's "In your DAWs" line: by real dates, so one dated
-/// still to come, or with no date, isn't taken for the newest (mo_formats::dates). None while the list is still being
-/// read.
+/// ending, in any case, as the C# app matched them), for the rail's "In your DAWs" line: by the list's real dates, so
+/// one dated still to come, or with no date, isn't taken for the newest (mo_formats::dates). None while the list is
+/// still being read.
 pub fn bitwig_save_named(name: &str) -> Option<i64> {
     let wanted = name.trim().to_lowercase();
-    let real = mo_formats::dates::RealDates::now();
     PAGE.with(|p| {
-        p.borrow()
-            .songs
+        let p = p.borrow();
+        let real = &p.songs.real;
+        p.songs
             .rows
             .iter()
             .flat_map(|r| r.song.saves())
@@ -1024,14 +1024,14 @@ fn fill_panel(app: &AppWindow) {
         fill_tags(&data, &p.filters, r);
         data.set_runs(model(r.runs.iter().rev().map(|run| SharedString::from(panel::run_line(run)))));
         data.set_saves_heading(panel::saves_heading(r).into());
-        let older = panel::older_saves(r);
+        let older = panel::older_saves(r, &p.songs.real);
         data.set_older_heading(older.as_ref().map_or("", |o| o.heading).into());
         data.set_older_see_all(older.as_ref().map(|o| o.see_all.as_str()).unwrap_or_default().into());
         data.set_older(model(
             older.into_iter().flat_map(|o| o.lines).map(|l| OlderLine { text: l.text.into(), path: l.path.into() }),
         ));
-        data.set_saves(model(panel::save_lines(r).into_iter().map(|l| match l {
-            PanelSaveLine::Run { label, details } => {
+        data.set_saves(model(panel::save_lines(r, &p.songs.real).into_iter().map(|l| match l {
+            PanelSaveLine::Heading { label, details } => {
                 SaveLine { run: label.into(), details: details.into(), ..SaveLine::default() }
             }
             PanelSaveLine::Save { name, date, path, missing, newest, daw } => SaveLine {
