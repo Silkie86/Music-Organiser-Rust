@@ -10,6 +10,7 @@ use mo_app::activity::Feed;
 use mo_app::app_settings::{self, AppSettings, PACE_KEY, SOUND_OUTPUT_KEY, START_PAGE_KEY, SWEEP_HOLD_KEY, TAB_KEY};
 use mo_app::background::{self, Newest, Pace};
 use mo_app::log;
+use mo_app::midi::{SMALLEST_PART_CHOICES, SMALLEST_PART_KEY};
 use mo_app::places::Place;
 use mo_app::settings::{self as page, Outputs, Tab};
 use mo_app::themes::{
@@ -189,6 +190,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     let start_output = setup.settings.get(SOUND_OUTPUT_KEY).filter(|s| !s.is_empty()).map(str::to_owned);
     crate::sounds::choose_output(start_output);
     crate::sounds::hold_sweeps(sweep_hold(&setup.settings));
+    crate::midi::smallest_part(None, smallest_part(&setup.settings));
     PAGE.with(|p| {
         *p.borrow_mut() = Some(Page {
             outputs: page::outputs(&[], setup.settings.get(SOUND_OUTPUT_KEY), cfg!(windows)),
@@ -252,6 +254,7 @@ pub fn connect(app: &AppWindow, setup: Setup) {
     data.set_sizes(strings(page::size_labels()));
     data.set_start_pages(strings(page::start_choices()));
     data.set_paces(strings(Pace::ALL.iter().map(|p| p.name())));
+    data.set_smallest_parts(strings(SMALLEST_PART_CHOICES.iter().map(|&n| mo_app::midi::smallest_part_words(n))));
     data.set_version(format!("Version {}", mo_app::version::version()).into());
     data.set_credit(page::SLINT_CREDIT.into());
     data.set_folders_note(page::FOLDERS_NOTE.into());
@@ -437,6 +440,15 @@ pub fn connect(app: &AppWindow, setup: Setup) {
         }
     });
     let weak = app.as_weak();
+    data.on_smallest_picked(move |i| {
+        let Some(&notes) = usize::try_from(i).ok().and_then(|i| SMALLEST_PART_CHOICES.get(i)) else { return };
+        change(SMALLEST_PART_KEY, &notes.to_string());
+        if let Some(app) = weak.upgrade() {
+            crate::midi::smallest_part(Some(&app), notes);
+            show(&app);
+        }
+    });
+    let weak = app.as_weak();
     data.on_refresh_outputs(move || {
         if let Some(app) = weak.upgrade() {
             list_outputs(&app);
@@ -552,6 +564,11 @@ pub fn connect(app: &AppWindow, setup: Setup) {
 
 fn strings<S: Into<SharedString>>(items: impl IntoIterator<Item = S>) -> ModelRc<SharedString> {
     ModelRc::new(VecModel::from(items.into_iter().map(Into::into).collect::<Vec<SharedString>>()))
+}
+
+/// The MIDI page's smallest part, in notes (3 unless picked).
+pub fn smallest_part(settings: &AppSettings) -> usize {
+    mo_app::midi::smallest_part_from(settings.get(SMALLEST_PART_KEY))
 }
 
 /// Whether a Galaxy sweep holds the pointer to the star that's playing (off unless turned on).
@@ -1405,6 +1422,8 @@ fn show(app: &AppWindow) {
         data.set_pace(Pace::ALL.iter().position(|x| *x == pace).unwrap_or(2) as i32);
         data.set_pace_note(page::pace_note(pace, p.running_pace, background::cores()).into());
         data.set_sweep_hold(sweep_hold(s));
+        let smallest = smallest_part(s);
+        data.set_smallest_index(SMALLEST_PART_CHOICES.iter().position(|&n| n == smallest).unwrap_or(2) as i32);
         data.set_outputs(strings(p.outputs.labels.iter().cloned()));
         data.set_output(p.outputs.labels.get(p.outputs.picked).cloned().unwrap_or_default().into());
 

@@ -111,6 +111,23 @@ struct Page {
     finder_for_page: bool,
     /// That read was let go unused (the page wasn't shown soon after): the page reads the index itself (M-3).
     finder_let_go: bool,
+    /// The summary of the whole index, before what Settings' smallest part hides is said after it.
+    summary: String,
+}
+
+/// Settings › MIDI's smallest part: parts with fewer notes are hidden ([`page::SMALLEST_PART_KEY`]).
+static SMALLEST: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(page::SMALLEST_PART_DEFAULT);
+
+/// Hides parts under `notes` notes from now on (Settings › MIDI); a list on show is worked out again, off the window's
+/// thread, so changing it needs no reading again.
+pub fn smallest_part(app: Option<&AppWindow>, notes: usize) {
+    if SMALLEST.swap(notes, Ordering::Relaxed) == notes {
+        return;
+    }
+    let shown = PAGE.with(|p| p.borrow().started);
+    if let Some(app) = app.filter(|_| shown) {
+        relist(app);
+    }
 }
 
 /// How long the Ctrl+K read of the index is kept for the page: long enough to go from Ctrl+K to the MIDI page, short
@@ -612,6 +629,7 @@ pub fn show(app: &AppWindow, loaded: Result<Loaded, String>) {
         let hash = p.picked.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.hash.clone());
         let looping = p.looping.and_then(|at| p.cat.entry(at)).map(|e| e.phrase.hash.clone());
         p.years = loaded.years;
+        p.summary = summary.clone();
         // The old index goes on the freeing thread: tens of thousands of parts take a while to let go.
         background::free_later(std::mem::replace(&mut p.cat, Arc::new(loaded.cat)));
         p.notes = Some(loaded.notes);
@@ -845,7 +863,7 @@ fn relist(app: &AppWindow) {
         Ask {
             id: p.asked,
             cat: p.cat.clone(),
-            filters: p.filters.clone(),
+            filters: Filters { smallest: SMALLEST.load(Ordering::Relaxed), ..p.filters.clone() },
             order: p.order,
             reversed: p.reversed,
             target: p.target,
@@ -907,10 +925,16 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
             None => String::new(),
         };
         let shown = p.shown.len();
-        let all = p.cat.line_count;
+        let all = p.counts.lines;
         (Some(shown), page::result_text(shown, all, p.order, p.reversed, p.target, p.seed.is_some()), target_text)
     });
     let Some(shown) = shown else { return };
+    let summary = PAGE.with(|p| {
+        let p = p.borrow();
+        let smallest = SMALLEST.load(Ordering::Relaxed);
+        format!("{}{}", p.summary, page::hidden_text(&p.cat, p.counts.lines, smallest))
+    });
+    app.global::<MidiData>().set_summary(summary.into());
     show_chips(app);
     LINES.with(|l| l.notify.reset());
     let data = app.global::<MidiData>();

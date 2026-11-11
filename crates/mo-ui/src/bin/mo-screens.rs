@@ -2679,7 +2679,10 @@ fn settings_shots(
     shots.push(("settings-general-lower.png".into(), capture(window)));
     scroll(window, 900.0, 500.0, -PAGE_DOWN);
     shots.push(("settings-about.png".into(), capture(window)));
-    scroll(window, 900.0, 500.0, 2.0 * PAGE_DOWN);
+    // The MIDI parts card, further down.
+    scroll(window, 900.0, 500.0, -PAGE_DOWN);
+    shots.push(("settings-midi-parts.png".into(), capture(window)));
+    scroll(window, 900.0, 500.0, 3.0 * PAGE_DOWN);
     data.invoke_theme_picked(4);
     data.invoke_accent_picked(2);
     shots.push(("settings-general-paper.png".into(), capture(window)));
