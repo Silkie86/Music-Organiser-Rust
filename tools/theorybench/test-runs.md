@@ -23,3 +23,12 @@ unmoved.
 | 2026-11-11 | pairs pop909cl --folds 0, the fit at 3,000 steps | 1 | f0564ad-dirty | 93.1% / 53.8% / 85.0% (89.5% / 35.2% / 83.1%) | 92.3% / 45.5% / 84.0% (89.6% / 36.5% / 82.3%) | 94.7% (93.8%) |
 | 2026-11-11 | pairs pop909cl --folds 0, the fit run on to 8,000 steps (no number moved more than 0.02) | 1 | f0564ad-dirty | 93.1% / 54.0% / 85.0% (89.5% / 35.2% / 83.1%) | 92.3% / 45.5% / 84.0% (89.6% / 36.5% / 82.3%) | 94.7% (93.8%) |
 | 2026-11-11 | pairs pop909cl --folds 0, after the code review's fixes and the fit run again (as shipped) | 1 | c9056f3-dirty | 93.2% / 54.0% / 85.2% (89.5% / 35.0% / 83.1%) | 92.3% / 45.3% / 84.1% (89.6% / 36.1% / 82.3%) | 94.7% (93.8%) |
+
+## The octave a part goes at (`octave`)
+
+Every `theorybench octave --folds 0` run adds a line here by hand: 8-bar stretches, how many are left at the octave
+they were written at.
+
+| Date | Run | Commit | A tune beside its song: shipped (usual place alone; C# app) | A tune, no other tune in the song: shipped (C# app) | An accompaniment: shipped (C# app) |
+|---|---|---|---|---|---|
+| 2026-11-11 | octave pop909cl --folds 0, the rule as shipped. Before the command there was a first count with a throwaway script over all 906 songs, this fold among them: where the half-way pull and the chords' 58 came from | 23c5ede-dirty | 71.5% (72.7%; 65.1%) | 72.7% (61.0%) | 85.0% (69.5%) |

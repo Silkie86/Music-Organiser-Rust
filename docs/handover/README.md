@@ -210,7 +210,19 @@ the next PR step by step). Solomon wants the highest effort here.
     brings what's seen and heard into line, each compared with the move it was made with (`card_move`,
     `loop_move`, `daw_move`): the roll and chords are read again, the loop or the part in a DAW started again,
     only when the move is another.
-  Not built yet: picking a song's parts and bars by hand, the octave a part goes at, and putting the part found
+  - The octave a part goes at (2026-11-11): `mo_midi::fit::octave`. A search settles the key and says nothing of
+    the octave (octaves make no difference to how a part sits), so `Found::middle` (the middle of where the part
+    plays: half-way between its lowest and highest key, strays aside) and `Registers` (where each kind of part plays
+    in the song, made in `midi_fits::fitted`) pick it: the octave nearest to half-way between the kind's usual
+    place (`octave::usual`) and where it plays in the song; the usual place when the song has none of the kind.
+    `Fit::octaves` holds it, and `Fit::moved` is the whole move (semitones for the key plus 12 an octave), which is
+    what the line, the card and the name say in one go (`move_words`: "9 semitones down", "an octave up") and what
+    `Page::fit_move`, `PickedFit` and `PartOut` carry. Measured by `theorybench octave`
+    (`docs/harmony/together-experiments.md`): about 3 in 4 tunes land at the octave they were written at, 14
+    points more than the C# app's rule, and no rule does better, so changing it by hand is next. The index already
+    keeps an octave you chose for a set of notes (`your_octaves`, `MidiStore::set_your_octave`, taken in from the
+    C# app); nothing reads it yet.
+  Not built yet: changing the octave by hand, picking a song's parts and bars by hand, and putting the part found
   at the right bar of the project.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db

@@ -31,6 +31,8 @@
 //! What the MIDI page asks for (the song saved last, its own parts left out, the page's filters kept, the answer as
 //! places in its catalogue) is in [`for_song`].
 //!
+//! The octave a part found goes at beside a song is [`octave`]'s.
+//!
 //! Not here yet: sending the part found into the project.
 
 use std::collections::hash_map::Entry;
@@ -52,6 +54,7 @@ use crate::store::SlotBook;
 use crate::{BAR, PPQ};
 
 pub mod for_song;
+pub mod octave;
 
 /// How long a first look's slot is ([`mo_harmony::Slot`]), in the index's ticks: two quarter notes, half a bar of
 /// 4/4, whatever the song's time signature.
@@ -296,6 +299,9 @@ pub struct Found {
     /// How it sits with the target, the part found moved up by each of 0 to 11 semitones (the song stays as it is):
     /// [`Sits::best`] gives the move of the part found that fits best, and how it sits there.
     pub sits: Sits,
+    /// The middle of where it plays as it is, as a key number ([`octave::middle`]): with its move, what says the
+    /// octave it goes at beside a song ([`octave::Registers::octaves`]).
+    pub middle: f64,
 }
 
 /// What a search came to.
@@ -499,7 +505,10 @@ impl Target {
     ) -> Closely {
         let judge = |read: &[Read<'p>]| -> Vec<Found> {
             read.par_iter()
-                .filter_map(|(at, part, notes)| Some(Found { at: *at, sits: self.fit(notes, part.role, part.cut)? }))
+                .filter_map(|(at, part, notes)| {
+                    let sits = self.fit(notes, part.role, part.cut)?;
+                    Some(Found { at: *at, sits, middle: octave::middle(notes)? })
+                })
                 .collect()
         };
         let mut closely = Closely::default();

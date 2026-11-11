@@ -238,6 +238,50 @@ library gets the close look throughout).
   chords (10,000 close looks, each part's chords read first). Reading the kept parts' notes from a real index on
   disk is on top of that and isn't measured yet; notes read can be kept by the caller between searches.
 
+## The octave a part found goes at (2026-11-11)
+
+The search settles a part's key (how many semitones to move it) and leaves its octave open: octaves make no
+difference to how a part sits. `mo_midi::fit::octave` picks the octave, and `theorybench octave` measures it: every
+part of every POP909-CL song, 8 bars at a time, asked about as if it had been found for the rest of its song. A rule
+that moves the stretch by no octaves has put it back where its writer had it.
+
+Folds 1 to 4 (727 songs; 12,754 stretches of a tune, 7,831 of an accompaniment):
+
+| | at its own octave | one octave out |
+|---|---|---|
+| a tune, by a tune's usual place (72) | 74.3% | 25.5% |
+| a tune, by where the song's other tune plays | 69.0% | 30.6% |
+| a tune, half-way between the two (shipped) | 73.8% | 26.0% |
+| a tune, the C# app: by the song's other tune | 67.7% | 31.8% |
+| a tune, the C# app with no other tune: 72, nudged by the accompaniment | 60.2% | 39.2% |
+| an accompaniment, by its usual place (58; shipped) | 84.8% | 15.2% |
+| an accompaniment, the C# app: 60, nudged by the tunes | 67.3% | 32.6% |
+
+The kept-back fold, looked at once with the rule as shipped (179 songs): a tune 71.5% (72.7% by the usual place
+alone, the C# app 65.1% and 61.0%), an accompaniment 85.0% (the C# app 69.5%).
+
+- **About 3 in 4 is the ceiling for a tune.** Tunes are written anywhere over an octave and a half, and nothing
+  tried gets past it: other middles of the part, the tune's lowest note kept over a line, the accompaniment's
+  middle plus a usual gap. So the octave is a first guess, and the page needs it changeable by hand.
+- **The other kinds of part say next to nothing.** The C# app nudged a kind's usual place by how far the song's other
+  kinds were from theirs. That loses 14 points for a tune and 17 for an accompaniment: a song with low chords doesn't
+  have a low tune. The rule doesn't ask them.
+- **The song's own part of the kind pulls half-way.** A second tune sits by a tune's usual place more often than by
+  the first tune's (they keep out of each other's way), so going all the way to the song's own part, as the C# app
+  did, loses 5 points. Half-way loses a half (1.2 on the kept-back fold; within the measure's noise) and keeps what
+  the measure can't count: a bassline found for a song with a low sub lands by the sub.
+- **The middle of a part** is half-way between its lowest and highest key, the lowest and highest twentieth of its
+  sounding time aside, each note counting for 1 to 8 beats. The average key (the C# app's) and the plain
+  middle of lowest and highest do as well within a point or two; this one isn't moved by a key switch four octaves
+  down, and a bassline that jumps octaves is in the middle of its jump however the notes fall.
+- **The usual places** are the C# app's (bass 40, arp 67, tune 72, other 62), but for chords: 58, not 60. POP909's
+  accompaniments are a piano's two hands, bass notes and all, and their middle is 55 to 56 (the first count had
+  95% of them at their own octave by 55.5). Chords with no bass under them sit higher, and the set has none to
+  count, so 58 is between the two.
+- **Not measured:** basslines, arps and chords alone (the set has one accompaniment a song), and any music but pop.
+  Before this command there was a first count with a throwaway script over all 906 songs, the kept-back fold among
+  them, which is how the half-way pull and the 58 were arrived at; nothing was fitted.
+
 ## What it doesn't know yet
 
 - **A song that isn't in 4/4.** The library's parts are all read as 4/4. Over such a song's chords a part found goes

@@ -190,6 +190,12 @@ impl Tried<'_> {
         self.places.is_empty()
     }
 
+    /// The kind the catalogue's part at `at` is tried as (what you said it is, else the app's guess; drums when a
+    /// drum plugin plays it), as a search has it ([`Candidate::role`]). None when the catalogue has no such part.
+    pub fn role(&self, at: usize) -> Option<Role> {
+        Some(Candidate::of(&self.cat.entry(at)?.phrase).role)
+    }
+
     /// The search ([`Target::search`]) of these parts for the ones that go best with `target`, `most` at the most.
     /// In the answer [`super::Found::at`] is a place in [`Catalogue::entries`]. `book` has the index's slots and
     /// `notes` reads one part's notes from it; `stop` set ends it early. Call it off the window's thread.
