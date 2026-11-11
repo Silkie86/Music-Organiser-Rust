@@ -534,14 +534,14 @@ pub fn sit(tune: &[Note], backing: &Backing, line_up: LineUp, how: &Sitting) -> 
 /// matters here. See [`sit`].
 pub fn shares(tune: &[Note], backing: &Backing, line_up: LineUp, how: &Sitting) -> Option<Shares> {
     let (beat, bar, half) = (backing.grid.beat(), backing.grid.bar(), backing.half());
-    let first = tune.iter().map(|n| n.start).min()?;
-    let last = tune.iter().map(|n| n.end()).max()?;
+    if tune.is_empty() {
+        return None;
+    }
     // Where the tune's time starts, how long it is before it goes round, and how long the two play together.
     let (tune_start, tune_length, round) = match line_up {
         LineUp::Loops { bar_line } => {
             // The bar the tune's first note is in, on the tune's own bar lines (a bar is as long as the backing's).
-            let start = first.saturating_sub(bar_line).div_euclid(bar).saturating_mul(bar).saturating_add(bar_line);
-            let length = last.saturating_sub(start).saturating_add(bar - 1).div_euclid(bar).max(1).saturating_mul(bar);
+            let (start, length) = own_bars(tune, bar, bar_line)?;
             (start, length, round_of(length, backing.length, bar))
         }
         LineUp::LoopsFrom { start, length } => {
@@ -640,6 +640,19 @@ pub fn shares(tune: &[Note], backing: &Backing, line_up: LineUp, how: &Sitting) 
         }
     }
     Some(Shares { by_move, heard: (heard / all).min(1.0) })
+}
+
+/// The bars a loop's notes take up, on bar lines `bar` ticks apart with one at `bar_line`: the tick the bar of its
+/// first note starts at, and how long it is from there to the end of the bar its last note ends in (a bar at the
+/// least). None for no notes. What a loop goes round in when nothing else says ([`LineUp::Loops`]), and what its
+/// slots are made over ([`slots_of`]): one rule, so the first look and the close look hear a loop come round alike.
+pub fn own_bars(notes: &[Note], bar: i64, bar_line: i64) -> Option<(i64, i64)> {
+    let first = notes.iter().map(|n| n.start).min()?;
+    let last = notes.iter().map(|n| n.end()).max()?;
+    let bar = bar.max(1);
+    let start = first.saturating_sub(bar_line).div_euclid(bar).saturating_mul(bar).saturating_add(bar_line);
+    let length = last.saturating_sub(start).saturating_add(bar - 1).div_euclid(bar).max(1).saturating_mul(bar);
+    Some((start, length))
 }
 
 /// How long two loops play together: until they meet again, or once through the longer when that's past
