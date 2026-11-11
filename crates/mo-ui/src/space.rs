@@ -90,6 +90,8 @@ struct BitwigAsk {
     library: PathBuf,
     /// Your Bitwig Studio folder as Settings › DAWs names it, when it does: its Library is used first.
     chosen: Option<PathBuf>,
+    /// The Library folders added on Settings › DAWs: looked in after the chosen folder's own.
+    libraries: Vec<PathBuf>,
     stop: Arc<AtomicBool>,
     feed: Feed,
 }
@@ -1646,7 +1648,10 @@ fn look_for_copies(app: &AppWindow) {
         let chosen = crate::settings::value(mo_app::app_settings::BITWIG_FOLDER_KEY)
             .filter(|f| !f.trim().is_empty())
             .map(PathBuf::from);
-        Some(BitwigAsk { id, library: p.library.clone(), chosen, stop, feed })
+        let libraries = crate::settings::value(mo_app::app_settings::BITWIG_LIBRARIES_KEY)
+            .map(|v| mo_app::app_settings::folder_list(&v))
+            .unwrap_or_default();
+        Some(BitwigAsk { id, library: p.library.clone(), chosen, libraries, stop, feed })
     });
     let Some(ask) = ask else { return };
     let weak = app.as_weak();
@@ -1686,7 +1691,7 @@ fn look_for_copies_now(ask: BitwigAsk, index: &mut Option<LibraryIndex>, weak: &
     // pool it would hold up the pages' quick jobs, and its threads are low in the system's memory there.
     let prints = mo_app::paths::data_dir().join(mo_space::prints::FILE_NAME);
     let found = background::on_bulk_pool(|| {
-        space_bitwig::look(&roots, &studios, index, Some(&prints), &ask.stop, |done, of| {
+        space_bitwig::look(&roots, &studios, &ask.libraries, index, Some(&prints), &ask.stop, |done, of| {
             if of > 0 {
                 job.progress(done as f32 / of as f32, Some(&space_bitwig::progress_words(done, of)));
             }
