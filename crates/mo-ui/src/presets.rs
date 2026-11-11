@@ -2030,11 +2030,16 @@ pub fn escape(app: &AppWindow) -> bool {
 /// Esc's first step (`app.escape`): the audition in Bitwig stops. Whether one was playing (only while its page is on
 /// show: it stops as the page goes, [`left`]).
 pub fn stop_on_escape(app: &AppWindow) -> bool {
-    let hearing = PAGE.with(|p| p.borrow().hearing.is_some());
+    let hearing = plays();
     if hearing {
         stop_audition_now(app);
     }
     hearing
+}
+
+/// Whether an audition plays in Bitwig now: what [`stop_on_escape`] stops.
+pub fn plays() -> bool {
+    PAGE.with(|p| p.borrow().hearing.is_some())
 }
 
 /// When another page comes to the front: the audition stops, so nothing plays in Bitwig that this page can't show (the

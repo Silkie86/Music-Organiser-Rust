@@ -743,6 +743,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     wide_shots(&app, &window, &out)?;
     types_fill_the_column(&app, &window)?;
     tag_box_checks(&app, &window)?;
+    right_click_while_playing(&app, &window)?;
     Ok(())
 }
 
@@ -902,6 +903,58 @@ fn tag_box_checks(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Res
         }
         None => Ok(()),
     }
+}
+
+/// A right click while a sound plays is for stopping it (Solomon, 11 Nov: "right click to stop could also work in the
+/// main app too"): a tile right-clicked then is neither picked nor given its menu (a pick could play it), and once Esc
+/// has stopped the sound the same right click picks the tile and opens its menu, as before. The stop itself is heard
+/// by the window's own watcher as the button comes up, which these shots have no winit window for: right_click.rs's
+/// tests check when a press is a click and when it's a drag. Last, as the tile it picks would show in the shots.
+fn right_click_while_playing(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+    use slint::platform::Key;
+    let sounds = app.global::<mo_ui::SoundsData>();
+    start_on(app, Place::Sounds);
+    sounds.invoke_pick_view(0);
+    sounds.invoke_select(0);
+    capture(window);
+    if !sounds.get_playing() {
+        sounds.invoke_play();
+    }
+    // The card put away with the sound still playing: nothing is picked, so a pick would show.
+    sounds.invoke_close_panel();
+    capture(window);
+    if !mo_ui::sounds::plays() {
+        return Err("right click: the sound didn't play, or stopped as its card was put away".into());
+    }
+    let (x, y) = MENU_TILE;
+    hover(window, x, y);
+    let before = capture(window);
+    right_click(window, x, y);
+    let after = capture(window);
+    if sounds.get_panel_shown() || !same_in(&before, &after, MENU_AREA) {
+        return Err(format!("right click: the tile at {x}, {y} was picked or opened its menu while a sound played"));
+    }
+    press(app, Key::Escape, false);
+    capture(window);
+    if mo_ui::sounds::plays() {
+        return Err("right click: Esc didn't stop the sound".into());
+    }
+    right_click(window, x, y);
+    let menu = capture(window);
+    if !sounds.get_panel_shown() || same_in(&after, &menu, MENU_AREA) {
+        return Err(format!(
+            "right click: with nothing playing, the tile at {x}, {y} didn't open its menu; has the grid moved?"
+        ));
+    }
+    // Away again: a click above the page shuts the menu, the card is put away, and what its pick played stops.
+    click(window, 600.0, 20.0);
+    sounds.invoke_close_panel();
+    if mo_ui::sounds::plays() {
+        press(app, Key::Escape, false);
+    }
+    hover(window, -1.0, -1.0);
+    capture(window);
+    Ok(())
 }
 
 /// Every place once more in a window as wide as Solomon's screen (3440 x 1369, the size of his F12 notes' pictures),
@@ -2997,6 +3050,8 @@ const FIRST_LINE: (u32, u32, u32, u32) = (250, 335, 400, 30);
 const MENU_TILE: (f32, f32) = (560.0, 301.0);
 const MENU_LINES_TOP: f32 = 4.0;
 const MENU_LINE: f32 = 32.0;
+/// Under the mouse at [`MENU_TILE`]: the tile's own corner and the menu's first three lines, once it's open.
+const MENU_AREA: (u32, u32, u32, u32) = (560, 301, 200, 100);
 /// The Sounds card's Add a tag box, the card turned down to its end (with a sound's six tags over it).
 const TAG_BOX: (f32, f32) = (1130.0, 490.0);
 /// The Songs, Presets, MIDI and Plugins lists in the short window: left of the activity cards, which move on their own.

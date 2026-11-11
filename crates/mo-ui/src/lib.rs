@@ -25,6 +25,7 @@ pub mod note;
 mod piano_roll;
 pub mod plugins;
 pub mod presets;
+mod right_click;
 pub mod settings;
 pub mod songs;
 pub mod sounds;
@@ -118,6 +119,9 @@ pub fn new_app(look: &Look, shortcuts: Shortcuts, start: Place, feed: Feed) -> R
     app.global::<AppKeys>().on_key(move |text, ctrl, shift, alt, meta, repeat| {
         key_pressed(&weak, &key_feed, &key_name(&text, ctrl, shift, alt, meta), repeat)
     });
+    // A list line asks before it opens its menu on a right click: while something plays, that click stops it.
+    let weak = app.as_weak();
+    app.global::<AppKeys>().on_plays(move || weak.upgrade().is_some_and(|app| plays(&app)));
 
     cards::connect(&app, &feed);
     note::connect(&app, &feed);
@@ -592,12 +596,17 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
 
 /// Esc's first step on every page: whatever plays stops, whichever page started it (a sound on Sounds, the MIDI page's
 /// loop or a part playing in a DAW go on after their page goes; an audition in Bitwig stops as its page goes). Each
-/// one, as two can play at once. Whether anything was playing.
-fn stop_what_plays(app: &AppWindow) -> bool {
+/// one, as two can play at once. Whether anything was playing. A right click does the same ([`right_click`]).
+pub(crate) fn stop_what_plays(app: &AppWindow) -> bool {
     let sound = sounds::stop_on_escape(app);
     let midi = midi::stop_on_escape(app);
     let audition = presets::stop_on_escape(app);
     sound || midi || audition
+}
+
+/// Whether anything plays that [`stop_what_plays`] would stop.
+pub(crate) fn plays(app: &AppWindow) -> bool {
+    sounds::plays() || midi::plays(app) || presets::plays()
 }
 
 /// Moves the pick of the list on show one line up (`by` -1) or down (1), as its Up and Down keys do (on Sounds' Tiles, a
