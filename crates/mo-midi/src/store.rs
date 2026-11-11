@@ -22,6 +22,9 @@
 //! - `shapes`: each set of notes' shape in any key (8 bytes, [`crate::analyser::shape_of`]), so a pack's loop in
 //!   every key is one line on the page. A table of its own, added after layout 2 came out: an index made before it
 //!   gets the table when the indexer opens it, and its shapes from the stored notes after the next read.
+//! - `slots`: how long each set of notes plays each pitch class in every two quarter notes ([`crate::fit::slots_of`]):
+//!   what a search for parts that go with a song sorts every part by first ([`slots`]). Added the same way as
+//!   `shapes`, with what made them, so they're made again from the stored notes when that changes.
 //! - `your_roles`, `your_octaves`: what you said about a set of notes, by its note hash, so it holds for every copy: the
 //!   ones you made in the C# app, taken in once, and the Rust app's own, which win (a row with no value says "back to
 //!   the app's guess", which wins too).
@@ -45,11 +48,16 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 
 use crate::analyser;
 use crate::extract::Found;
+use crate::fit;
 use crate::index::{MidiError, MidiIndex, Source, SourceKind, StoredPhrase};
 use crate::keys;
 use crate::member::PhraseMember;
 use crate::roles::Role;
 use mo_harmony::KeyFact;
+
+mod slots;
+
+pub use slots::SlotBook;
 
 /// The index's file name, in the same folder as the library.
 pub const FILE_NAME: &str = "midi-index.db";
@@ -109,6 +117,14 @@ const TABLES: &str = "
         notes INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
         shape INTEGER NOT NULL
     );
+    -- How long the notes play each pitch class in every two quarter notes (fit::slots_of), for a search's first
+    -- look. Filled when notes are saved; for notes saved before this table was there, or by another version, after
+    -- a read (indexer::fill_slots).
+    CREATE TABLE IF NOT EXISTS slots (
+        notes INTEGER PRIMARY KEY REFERENCES notes(id) ON DELETE CASCADE,
+        version INTEGER NOT NULL,       -- fit::SLOTS_VERSION that made them
+        data BLOB NOT NULL              -- slots::encode
+    );
     -- NULL: back to the app's guess (which wins over the C# app's correction too).
     CREATE TABLE IF NOT EXISTS your_roles (hash TEXT PRIMARY KEY, role INTEGER) WITHOUT ROWID;
     CREATE TABLE IF NOT EXISTS your_octaves (hash TEXT PRIMARY KEY, octaves INTEGER) WITHOUT ROWID;
@@ -121,6 +137,7 @@ const INDEXES: &str = "
     CREATE INDEX IF NOT EXISTS ix_parts_file ON parts(file);
     CREATE INDEX IF NOT EXISTS ix_parts_notes ON parts(notes);
     CREATE INDEX IF NOT EXISTS ix_keys_version ON keys(version);
+    CREATE INDEX IF NOT EXISTS ix_slots_version ON slots(version);
 ";
 
 /// The tables' layout this app makes (`PRAGMA user_version`). 2: the notes in `note_data`, a table of their own (1 kept
@@ -814,6 +831,13 @@ impl MidiStore {
                 tx.prepare_cached("INSERT INTO note_data (notes, data) VALUES (?1, ?2) ON CONFLICT(notes) DO NOTHING")?;
             let mut shape =
                 tx.prepare_cached("INSERT INTO shapes (notes, shape) VALUES (?1, ?2) ON CONFLICT(notes) DO NOTHING")?;
+            // The same notes found again have the same slots: nothing is written then. Unless another version made
+            // the ones there, or they aren't what these notes make (a damaged row): reading the file again puts
+            // them right.
+            let mut slot = tx.prepare_cached(
+                "INSERT INTO slots (notes, version, data) VALUES (?1, ?2, ?3)
+                 ON CONFLICT(notes) DO UPDATE SET version = ?2, data = ?3 WHERE version <> ?2 OR data <> ?3",
+            )?;
             let mut key = tx.prepare_cached(
                 "INSERT INTO keys (notes, version, role, cut, fact) VALUES (?1, ?2, ?3, ?4, ?5)
                  ON CONFLICT(notes) DO UPDATE SET version = ?2, role = ?3, cut = ?4, fact = ?5",
@@ -860,6 +884,10 @@ impl MidiStore {
                             if let Some(s) = analyser::shape_of(&p.notes) {
                                 shape.execute(params![notes, s])?;
                             }
+                            // Made here, a few microseconds a part, like the shape above: a part is in a search
+                            // as soon as it's saved.
+                            let slots = slots::encode(&fit::slots_of(&p.notes));
+                            slot.execute(params![notes, fit::SLOTS_VERSION, slots])?;
                             key.execute(params![
                                 notes,
                                 keys::VERSION,

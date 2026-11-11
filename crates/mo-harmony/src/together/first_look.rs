@@ -36,6 +36,11 @@ pub type Slot = [u8; 12];
 /// A pitch class played all through a [`Slot`].
 pub const SLOT_FULL: u8 = 64;
 
+/// What [`slots_of`] and [`slots_over`] make of a part's notes. Raised when the same notes would give other slots
+/// (how much of a slot a note fills, how a loop goes round, how many are kept), so slots that are kept somewhere
+/// are made again (rule 7). What's then done with slots ([`Outline`]) isn't part of it.
+pub const SLOTS_VERSION: u32 = 1;
+
 /// The most slots kept of a part, or of chords: 32 bars of 4/4 in half bars, which is as long as the close look
 /// plays two loops round for.
 pub const MOST_SLOTS: usize = 2 * MOST_BARS_ROUND as usize;
