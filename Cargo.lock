@@ -3444,6 +3444,7 @@ dependencies = [
 name = "mo-theorybench"
 version = "0.1.0"
 dependencies = [
+ "mo-catch",
  "mo-formats",
  "mo-harmony",
  "mo-library",

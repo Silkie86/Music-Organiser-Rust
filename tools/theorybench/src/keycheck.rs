@@ -418,7 +418,7 @@ fn counts(t: &Tally, old: &str, new: &str, out: &mut impl Write) -> std::io::Res
 /// at its end (`"L:\New Midi\" --changed`) comes as one argument holding a quote where the folder ended, and
 /// whatever was typed after it: `L:\New Midi" --changed`. No name on Windows can hold a quote, so there an argument
 /// with quotes in it is cut at them.
-fn as_typed(args: &[String], windows: bool) -> Vec<String> {
+pub(crate) fn as_typed(args: &[String], windows: bool) -> Vec<String> {
     let mut typed = Vec::new();
     for arg in args {
         if windows && arg.contains('"') {

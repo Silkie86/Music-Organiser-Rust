@@ -29,8 +29,11 @@ use mo_app::{frame_timing, log};
 pub const STALL: Duration = Duration::from_millis(250);
 /// Still stuck after this long gets its own line, before it ends.
 pub const STILL_STUCK: Duration = Duration::from_secs(5);
-/// Stuck this long, the window's thread is looked at to see where it is.
-pub const LOOK_AT_THREAD: Duration = Duration::from_secs(1);
+/// Stuck this long, the window's thread is looked at to see where it is: just past [`STALL`], so every freeze that
+/// gets a line also says which functions it was in. (It was a whole second, and the freezes of 0.3 to 0.9 s in
+/// Solomon's logs, such as 0.4 s opening the MIDI page on 11 Nov, said only "in no marked step".) The look stops the
+/// window's thread only while its stack is copied; the names are worked out on the watchdog's thread.
+pub const LOOK_AT_THREAD: Duration = Duration::from_millis(300);
 const KNOCK_EVERY: Duration = Duration::from_millis(200);
 const LOOK_EVERY: Duration = Duration::from_millis(25);
 
@@ -452,6 +455,19 @@ mod tests {
         assert!(paused_since(during), "sent while one was going on");
         // The next knock, sent after the drag, counts again.
         assert!(!paused_since(pauses_now()));
+    }
+
+    #[test]
+    fn a_freeze_long_enough_for_a_line_is_looked_at_before_it_ends() {
+        // Past the stall (a shorter wait is no freeze), and within two looks of it, so a freeze only a little over
+        // the stall is still caught in the act.
+        assert!(LOOK_AT_THREAD > STALL);
+        assert!(LOOK_AT_THREAD <= STALL + 2 * LOOK_EVERY);
+        assert!(LOOK_AT_THREAD < STILL_STUCK);
+        assert_eq!(
+            thread_line(LOOK_AT_THREAD, &["a".to_owned()]),
+            "Stuck for 0.3 s, the window's thread was in:\n    a"
+        );
     }
 
     #[test]
