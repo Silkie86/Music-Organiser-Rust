@@ -6,7 +6,7 @@ use std::fs;
 use std::path::PathBuf;
 
 use mo_dawlink::bitwig::fake::{FakeBitwig, FakeTransport, World};
-use mo_dawlink::bitwig::{Error, SongLoop, WithSong};
+use mo_dawlink::bitwig::{Error, SongLoop, TakenOut, WithSong};
 use serde_json::json;
 
 /// A turn in the app's line of changes, as a screen takes one.
@@ -42,7 +42,11 @@ fn plays_a_part_on_the_selected_track_and_takes_it_out_again() {
         assert_eq!(world.launched, [(2, 1)]);
         assert_eq!(world.tracks[2].clips[1], file.to_string_lossy());
     }
-    assert!(bitwig.bitwig().stop_playing(&playing, &turn()).unwrap());
+    assert_eq!(
+        bitwig.bitwig().stop_playing(&playing, &turn()),
+        Ok(TakenOut { deleted: true, loop_back: None }),
+        "a part alone has no loop to put back"
+    );
     let world = bitwig.world();
     // Bitwig wasn't playing before, so it stops; your own clip stays.
     assert!(!world.playing);
@@ -58,7 +62,7 @@ fn plays_a_part_on_the_selected_track_and_takes_it_out_again() {
 fn leaves_bitwig_playing_when_it_already_was() {
     let bitwig = with(|w| w.playing = true);
     let playing = bitwig.bitwig().play_on_selected(part("MO Play 2"), &turn(), &|| true).unwrap();
-    assert!(bitwig.bitwig().stop_playing(&playing, &turn()).unwrap());
+    assert!(bitwig.bitwig().stop_playing(&playing, &turn()).unwrap().deleted);
     let world = bitwig.world();
     assert!(world.playing);
     assert_eq!(world.requests.last().unwrap()["transport"], false);
@@ -69,7 +73,7 @@ fn a_clip_you_renamed_is_yours_and_stays() {
     let bitwig = FakeBitwig::start().unwrap();
     let playing = bitwig.bitwig().play_on_selected(part("MO Play 3"), &turn(), &|| true).unwrap();
     bitwig.world().tracks[2].clips[0] = "C:\\MIDI\\Kept it.mid".into();
-    assert!(!bitwig.bitwig().stop_playing(&playing, &turn()).unwrap());
+    assert!(!bitwig.bitwig().stop_playing(&playing, &turn()).unwrap().deleted);
     // It still stops playing.
     let world = bitwig.world();
     assert_eq!(world.tracks[2].clips, ["C:\\MIDI\\Kept it.mid"]);
@@ -151,7 +155,7 @@ fn plays_a_part_with_its_songs_bars_going_round_and_puts_the_loop_back() {
         assert!(world.playing);
         assert_eq!(world.launched, [(2, 0)]);
     }
-    assert!(bitwig.bitwig().stop_playing(&playing, &turn()).unwrap());
+    assert_eq!(bitwig.bitwig().stop_playing(&playing, &turn()), Ok(TakenOut { deleted: true, loop_back: Some(true) }));
     let world = bitwig.world();
     // Stopping it stops Bitwig (the part started it at the bars), and your loop and play start are back.
     assert_eq!(world.requests.last().unwrap()["transport"], true);
@@ -174,9 +178,10 @@ fn what_you_moved_while_it_played_stays_yours() {
     }
     // A clip you renamed stays too; the loop still goes back.
     bitwig.world().tracks[2].clips[0] = "C:\\MIDI\\Kept it.mid".into();
-    assert!(!bitwig.bitwig().stop_playing(&playing, &turn()).unwrap());
+    assert_eq!(bitwig.bitwig().stop_playing(&playing, &turn()), Ok(TakenOut { deleted: false, loop_back: Some(true) }));
     let world = bitwig.world();
-    let left = FakeTransport { looping: before.looping, loop_start: before.loop_start, loop_length: 48.0, play_start: 16.0 };
+    let left =
+        FakeTransport { looping: before.looping, loop_start: before.loop_start, loop_length: 48.0, play_start: 16.0 };
     assert_eq!(world.transport, left, "only what's still as the link set it goes back");
     assert_eq!(world.song_loop, None);
 }
@@ -196,18 +201,19 @@ fn with_another_project_open_the_part_plays_alone() {
         assert!(world.started_at.is_empty(), "Bitwig plays on where it was");
     }
     // As a part alone: Bitwig was playing, so it plays on.
-    assert!(bitwig.bitwig().stop_playing(&playing, &turn()).unwrap());
+    assert!(bitwig.bitwig().stop_playing(&playing, &turn()).unwrap().deleted);
     assert!(bitwig.world().playing);
 
     // The name as Bitwig shows it, give or take capitals.
     let capitals = SongLoop { project: "night drive".into(), ..bars_9_to_16() };
     let playing = bitwig.bitwig().play_with_song(part("MO Play 23"), Some(&capitals), &turn(), &|| true).unwrap();
     assert_eq!(playing.with_song, WithSong::Looping);
-    assert!(bitwig.bitwig().stop_playing(&playing, &turn()).unwrap());
+    assert!(bitwig.bitwig().stop_playing(&playing, &turn()).unwrap().deleted);
 
     // A link that can't keep a change to one project (or didn't say which is open) loops nothing.
     let unnamed = with(|w| w.project = String::new());
-    let playing = unnamed.bitwig().play_with_song(part("MO Play 24"), Some(&bars_9_to_16()), &turn(), &|| true).unwrap();
+    let playing =
+        unnamed.bitwig().play_with_song(part("MO Play 24"), Some(&bars_9_to_16()), &turn(), &|| true).unwrap();
     assert_eq!(playing.with_song, WithSong::OtherProject(String::new()));
     assert_eq!(unnamed.world().song_loop, None);
 }
@@ -223,6 +229,65 @@ fn an_older_extension_plays_the_part_alone() {
     let world = old.world();
     assert!(world.requests.iter().find(|r| r["cmd"] == "clip").unwrap().get("loop").is_none());
     assert_eq!((world.transport, world.playing), (before, true));
+}
+
+#[test]
+fn a_bitwig_that_doesnt_let_the_link_reach_its_loop_plays_the_part_alone() {
+    let bitwig = with(|w| {
+        w.playing = true;
+        w.hello.insert("songLoop".into(), json!(false));
+    });
+    let before = bitwig.world().transport;
+    let playing = bitwig.bitwig().play_with_song(part("MO Play 30"), Some(&bars_9_to_16()), &turn(), &|| true).unwrap();
+    assert_eq!(playing.with_song, WithSong::NoLoop);
+    let world = bitwig.world();
+    // Asking would have been refused, with nothing played.
+    assert!(world.requests.iter().find(|r| r["cmd"] == "clip").unwrap().get("loop").is_none());
+    assert_eq!((world.transport, world.playing), (before, true));
+    assert_eq!(world.launched, [(2, 0)]);
+}
+
+#[test]
+fn a_part_the_app_never_took_out_doesnt_keep_the_loop_from_going_back() {
+    let yours = FakeTransport { looping: false, loop_start: 64.0, loop_length: 8.0, play_start: 8.0 };
+    let bitwig = with(|w| w.transport = yours);
+    // The first is never stopped (the app let go of it); you click in bar 5 after it.
+    let _let_go = bitwig.bitwig().play_with_song(part("MO Play 31"), Some(&bars_9_to_16()), &turn(), &|| true).unwrap();
+    bitwig.world().transport.play_start = 16.0;
+    let bars_17_to_20 = SongLoop { project: "Night Drive".into(), start: 64.0, length: 16.0 };
+    let second = bitwig.bitwig().play_with_song(part("MO Play 32"), Some(&bars_17_to_20), &turn(), &|| true).unwrap();
+    assert_eq!(
+        bitwig.world().transport,
+        FakeTransport { looping: true, loop_start: 64.0, loop_length: 16.0, play_start: 64.0 }
+    );
+    // The second's stop puts back what was found before the first, and where you clicked since.
+    assert_eq!(bitwig.bitwig().stop_playing(&second, &turn()), Ok(TakenOut { deleted: true, loop_back: Some(true) }));
+    let world = bitwig.world();
+    assert_eq!(world.transport, FakeTransport { play_start: 16.0, ..yours });
+    assert_eq!(world.song_loop, None);
+}
+
+#[test]
+fn a_stop_stopped_part_way_puts_the_loop_back_at_the_next_try() {
+    let bitwig = FakeBitwig::start().unwrap();
+    let before = bitwig.world().transport;
+    let playing = bitwig.bitwig().play_with_song(part("MO Play 33"), Some(&bars_9_to_16()), &turn(), &|| true).unwrap();
+    // Another project comes to the front while the clip comes out: the stop fails, with the bars still looped.
+    bitwig.world().switch_during = Some(("deleteclip".into(), "Other Song".into()));
+    assert!(bitwig.bitwig().stop_playing(&playing, &turn()).unwrap_err().is_elsewhere());
+    assert!(bitwig.world().transport.looping);
+    // Its project back in front, Stop again: the clip went the first time, and the loop goes back now.
+    bitwig.world().project = "Night Drive".into();
+    assert_eq!(bitwig.bitwig().stop_playing(&playing, &turn()), Ok(TakenOut { deleted: false, loop_back: Some(true) }));
+    let world = bitwig.world();
+    assert_eq!((world.transport, &world.song_loop), (before, &None));
+}
+
+#[test]
+fn says_when_bitwig_doesnt_show_the_loop_back() {
+    let bitwig = with(|w| w.loop_stays = true);
+    let playing = bitwig.bitwig().play_with_song(part("MO Play 34"), Some(&bars_9_to_16()), &turn(), &|| true).unwrap();
+    assert_eq!(bitwig.bitwig().stop_playing(&playing, &turn()), Ok(TakenOut { deleted: true, loop_back: Some(false) }));
 }
 
 #[test]

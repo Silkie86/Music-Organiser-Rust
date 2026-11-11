@@ -270,7 +270,10 @@ pub fn bitwig_loop(with: &SongBars, song: &SongChoice) -> Result<SongLoop, Strin
         return Err(format!("{} isn't a Bitwig project", song.name));
     }
     if with.view != mo_formats::bitwig::arrangement::VIEW {
-        return Err(format!("{}'s parts are in Bitwig's clip launcher, so its arranger has no bars to go round", song.name));
+        return Err(format!(
+            "{}'s parts are in Bitwig's clip launcher, so its arranger has no bars to go round",
+            song.name
+        ));
     }
     let beats = |ticks: i64| ticks as f64 / mo_midi::PPQ as f64;
     let (start, length) = (beats(with.bars.start.saturating_mul(with.bar)), beats(with.length));
@@ -296,9 +299,21 @@ pub fn bitwig_words(heard: Result<&WithSong, &str>, with: &SongBars, song: &str)
             ", alone: to hear it with {song} there, install the Bitwig extension again from Settings > DAWs (Install \
              on Bitwig's row)"
         ),
+        Ok(WithSong::NoLoop) => ", alone: this Bitwig didn't let the app's extension set its loop".to_owned(),
         Err(why) => format!(", alone: {why}"),
     }
 }
+
+/// Added to what the card says when the app lets go of a part it couldn't stop in Bitwig, when the part played with
+/// its song's bars going round: the loop and the play start are still the link's there, and what puts them back.
+pub const BITWIG_LOOP_LEFT: &str = " Bitwig's loop is still on your song's bars there, and Play starts at the first \
+                                    of them: the next part you play there with the song puts both back when it \
+                                    stops, or set them yourself.";
+
+/// What the card says when a part that played with its song's bars stopped in Bitwig, but Bitwig didn't show its
+/// loop and play start back as they were.
+pub const BITWIG_LOOP_NOT_BACK: &str = "It stopped, but Bitwig didn't show its loop and play start back as they were \
+                                        before the part played with your song: have a look at them there.";
 
 /// What of `song` is fitted to, nothing picked by hand. `wanted`: what the page's switch asks for; none (the switch
 /// hasn't been touched): parts to play over the song's chords when it has any that can be read, else chords for its
@@ -1164,6 +1179,7 @@ mod tests {
             ", alone: to hear it with Night drive there, install the Bitwig extension again from Settings > DAWs \
              (Install on Bitwig's row)"
         );
+        assert_eq!(words(Ok(&WithSong::NoLoop)), ", alone: this Bitwig didn't let the app's extension set its loop");
         assert_eq!(words(Err("Didums isn't a Bitwig project")), ", alone: Didums isn't a Bitwig project");
     }
 

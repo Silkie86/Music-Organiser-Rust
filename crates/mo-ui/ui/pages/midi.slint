@@ -190,6 +190,8 @@ export global MidiData {
     in property <bool> playing;
     // Play loop plays the picked part with the song it's fitted to, not alone.
     in property <bool> play-with-song;
+    // Play in Bitwig plays it with that song's bars going round there: the song is a Bitwig project with bars to loop.
+    in property <bool> bitwig-with-song;
     in property <string> sound-line;
     in property <string> play-note;
     in property <string> play-key;
@@ -588,7 +590,7 @@ component PartPanel inherits SidePanel {
             width: max(self.min-width, buttons.cell);
             text: MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig" ? "Stop in Bitwig" : "Play in Bitwig";
             tip: MidiData.daw-playing == "bitwig" || MidiData.daw-starting == "bitwig" ? "Stop the part and take its clip out of Bitwig"
-                : MidiData.play-with-song ? "Play the part through what's on the track selected in Bitwig, with the bars of your song it fits going round there (when Bitwig has that song open)"
+                : MidiData.bitwig-with-song ? "Play the part through what's on the track selected in Bitwig, with the bars of your song it fits going round there (when Bitwig has that song open)"
                 : "Play the part round and round through what's on the track selected in Bitwig";
             key: MidiData.bitwig-key;
             clicked => { MidiData.daw-play("bitwig"); }

@@ -1757,6 +1757,8 @@ fn show_sound(data: &MidiData, p: &mut Page) {
         data.set_sound_line(line.into());
     }
     data.set_play_with_song(p.card_with.is_some());
+    // Play in Bitwig's tip only promises the song's bars where Bitwig has some to go round.
+    data.set_bitwig_with_song(p.bitwig_song(at).is_some_and(|song| song.bars.is_ok()));
 }
 
 /// A new list is on show: what's seen and heard of the picked part is brought into line with how it's moved now
@@ -3343,8 +3345,19 @@ fn stop_bitwig_in(
     turn: &mo_dawlink::bitwig::Turn<'_>,
     weak: Option<slint::Weak<AppWindow>>,
 ) {
-    let Err(e) = mo_dawlink::bitwig::Bitwig::default().stop_playing(&bitwig, turn) else { return };
+    let e = match mo_dawlink::bitwig::Bitwig::default().stop_playing(&bitwig, turn) {
+        Ok(out) => {
+            if out.loop_back == Some(false) {
+                loop_not_back(weak);
+            }
+            return;
+        }
+        Err(e) => e,
+    };
     log::warning("MIDI", &format!("The part playing in Bitwig couldn't be stopped: {e}"));
+    // What's left behind in Bitwig when the app lets go of it: its clip, and, for a part that played with its song's
+    // bars, the loop and the play start as the link set them.
+    let left = if bitwig.with_song == mo_dawlink::bitwig::WithSong::Looping { midi_fits::BITWIG_LOOP_LEFT } else { "" };
     // Put back once, so Stop can be pressed again once its project is in front; let go when the stop can never work
     // (Bitwig is gone) or it failed again after being put back, so a new Play isn't called off and Esc goes on (the 10
     // Nov review's D-1).
@@ -3367,7 +3380,7 @@ fn stop_bitwig_in(
     let words = if put_back.is_none() {
         format!(
             "It couldn't be stopped in Bitwig: {e} The app has let it go: if its clip still plays there, stop it in \
-             Bitwig."
+             Bitwig.{left}"
         )
     } else {
         format!(
@@ -3390,6 +3403,20 @@ fn stop_bitwig_in(
             }
         }
         data.set_daw_note(words.into());
+    });
+}
+
+/// A part that played with its song's bars stopped in Bitwig, but Bitwig didn't show its loop and play start back as
+/// they were: the log says so, and the card too unless something else plays or starts from this page by now.
+fn loop_not_back(weak: Option<slint::Weak<AppWindow>>) {
+    log::warning("MIDI", midi_fits::BITWIG_LOOP_NOT_BACK);
+    let Some(weak) = weak else { return };
+    let _ = slint::invoke_from_event_loop(move || {
+        let Some(app) = weak.upgrade() else { return };
+        let data = app.global::<MidiData>();
+        if data.get_daw_playing() == "" && data.get_daw_starting() == "" {
+            data.set_daw_note(midi_fits::BITWIG_LOOP_NOT_BACK.into());
+        }
     });
 }
 

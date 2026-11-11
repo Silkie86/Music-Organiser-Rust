@@ -26,7 +26,7 @@ use std::path::Path;
 use mo_formats::paths::file_name;
 
 use super::send::{Turn, sentence};
-use super::{Bitwig, Error, Hello, Link};
+use super::{Bitwig, Error, Hello, Link, TakenOut};
 
 /// The extension version Play on the selected track needs.
 pub const PLAY_NEEDS: &str = "3.19";
@@ -61,6 +61,9 @@ pub enum WithSong {
     /// What answers in Bitwig is older than [`WITH_SONG_NEEDS`] (its words: "the Music Organiser extension 3.21"):
     /// the part alone.
     OldExtension(String),
+    /// This Bitwig didn't let the extension reach the arranger's loop or the play start ([`Hello::song_loop`]): the
+    /// part alone.
+    NoLoop,
 }
 
 /// A part playing on the selected track in Bitwig ([`Bitwig::play_on_selected`]): what stopping it needs, and the
@@ -132,6 +135,10 @@ fn new_track_failed(e: Error, name: &str) -> Error {
 
 /// Whether Bitwig's name for the project it has open is the song's: as written, give or take capitals (a save's name
 /// is the same file on Windows and Mac whichever way it's typed).
+///
+/// The name is all Bitwig tells the link of the project it has open (never its folder), so two saves with one name
+/// can't be told apart here: with the other one open, its bars are the ones that go round. Stopping the part puts
+/// its loop and play start back all the same.
 fn same_project(open: &str, song: &str) -> bool {
     !open.is_empty() && open.to_lowercase() == song.to_lowercase()
 }
@@ -198,6 +205,8 @@ impl Bitwig {
         let with_song = match song {
             None => WithSong::NotAsked,
             Some(_) if !link.hello().at_least(WITH_SONG_NEEDS) => WithSong::OldExtension(link.hello().answering()),
+            // Asking would be refused, with nothing played: the part alone still plays.
+            Some(_) if link.hello().song_loop == Some(false) => WithSong::NoLoop,
             // Only where the link keeps the change to that project (`onlyIn`), so the bars are never looped in
             // another that came to the front meanwhile.
             Some(song) if link.only_in().is_some_and(|open| same_project(open, &song.project)) => WithSong::Looping,
@@ -237,21 +246,23 @@ impl Bitwig {
     }
 
     /// Stops a part [`Bitwig::play_on_selected`] started and takes its clip out of the track; Bitwig stops too when
-    /// the part started it. Whether the clip was taken out: false when it was renamed (it's yours now) or is gone.
+    /// the part started it. [`TakenOut`] says whether the clip was taken out (not when it was renamed: it's yours
+    /// now, or is gone), and, for a part that played with its song's bars, whether Bitwig showed its loop and play
+    /// start back as they were.
     ///
     /// It goes in `_turn` like everything that changes the project, so it never lands between another start's steps
     /// (where stopping Bitwig would silence that one).
-    pub fn stop_playing(&self, playing: &Playing, _turn: &Turn<'_>) -> Result<bool, Error> {
+    pub fn stop_playing(&self, playing: &Playing, _turn: &Turn<'_>) -> Result<TakenOut, Error> {
         self.stop_playing_now(playing)
     }
 
     /// [`Bitwig::stop_playing`] without waiting its turn, for when the app closes: the threads that would go first
     /// are going too, and the extension (3.21) still makes the stop after the app has gone.
-    pub fn stop_playing_as_app_closes(&self, playing: &Playing) -> Result<bool, Error> {
+    pub fn stop_playing_as_app_closes(&self, playing: &Playing) -> Result<TakenOut, Error> {
         self.stop_playing_now(playing)
     }
 
-    fn stop_playing_now(&self, playing: &Playing) -> Result<bool, Error> {
+    fn stop_playing_now(&self, playing: &Playing) -> Result<TakenOut, Error> {
         let mut link: Link = self.connect()?;
         check_version(link.hello(), PLAY_NEEDS)?;
         link.set_only_in(playing.project.clone());
