@@ -25,6 +25,7 @@ pub mod galaxy_view;
 pub mod live;
 pub mod log;
 pub mod midi;
+pub mod midi_fits;
 pub mod note;
 pub mod old_databases;
 pub mod paths;

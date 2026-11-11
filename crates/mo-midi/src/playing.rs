@@ -120,6 +120,13 @@ impl Song {
         self.parts.iter().enumerate().filter(|(_, p)| !p.drums && !p.sample && is(p.role)).map(|(at, _)| at).collect()
     }
 
+    /// Whether the part at `part` sounds anywhere in `bars` (counted from 0): whether [`Song::stretch`] has a note.
+    pub fn plays_in(&self, part: usize, bars: &Range<i64>) -> bool {
+        let bar = self.bar();
+        let (from, to) = (bars.start.saturating_mul(bar), bars.end.saturating_mul(bar));
+        self.parts.get(part).is_some_and(|part| part.notes.iter().any(|n| sounds_in(n, from, to)))
+    }
+
     /// What the part at `part` plays in `bars` (counted from 0), moved so the first of those bars starts at tick 0. A
     /// note held into the stretch sounds from its start, and one held past its end stops there.
     pub fn stretch(&self, part: usize, bars: &Range<i64>) -> Vec<NoteEvent> {
@@ -129,7 +136,7 @@ impl Song {
         let mut notes: Vec<NoteEvent> = part
             .notes
             .iter()
-            .filter(|n| n.start < to && n.start.saturating_add(n.length) > from)
+            .filter(|n| sounds_in(n, from, to))
             .map(|n| {
                 let start = n.start.max(from);
                 let end = n.start.saturating_add(n.length).min(to);
@@ -178,6 +185,11 @@ impl Song {
         let start = start?;
         Some(start..last?.min(start.saturating_add(most.max(1))))
     }
+}
+
+/// Whether a note sounds between two ticks (the first counted, the last not).
+fn sounds_in(n: &NoteEvent, from: i64, to: i64) -> bool {
+    n.start < to && n.start.saturating_add(n.length) > from
 }
 
 /// Reads a project from disk as it plays.
