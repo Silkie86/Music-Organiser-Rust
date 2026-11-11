@@ -90,7 +90,7 @@ impl Playing {
 }
 
 /// Refuses, with nothing sent, when the extension is older than `needs`.
-fn check_version(hello: &Hello, needs: &'static str) -> Result<(), Error> {
+pub(super) fn check_version(hello: &Hello, needs: &'static str) -> Result<(), Error> {
     hello.can_send()?;
     if !hello.at_least(needs) {
         let has = if hello.runtime == "java" { hello.answering() } else { String::new() };
@@ -139,12 +139,12 @@ fn new_track_failed(e: Error, name: &str) -> Error {
 /// The name is all Bitwig tells the link of the project it has open (never its folder), so two saves with one name
 /// can't be told apart here: with the other one open, its bars are the ones that go round. Stopping the part puts
 /// its loop and play start back all the same.
-fn same_project(open: &str, song: &str) -> bool {
+pub(super) fn same_project(open: &str, song: &str) -> bool {
     !open.is_empty() && open.to_lowercase() == song.to_lowercase()
 }
 
 /// Checks a file the link is to load is there, as each send does.
-fn there(path: &Path) -> Result<String, Error> {
+pub(super) fn there(path: &Path) -> Result<String, Error> {
     let shown = path.to_string_lossy().into_owned();
     if !path.is_file() {
         return Err(Error::Missing { file: file_name(&shown).to_owned(), path: shown });

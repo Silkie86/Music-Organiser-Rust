@@ -16,6 +16,8 @@
 //!   song it was found for going round in Bitwig's arranger (extension 3.22).
 //! - [`Bitwig::audition_preset`] then [`Bitwig::stop_audition`] or [`Bitwig::keep_audition`]: a preset on a track of
 //!   its own playing a part (extension 3.20).
+//! - [`Bitwig::put_in_song`]: a MIDI part into the arranger at a song's bars, on the selected track (Bitwig records
+//!   it in from the clip launcher).
 //!
 //! Each waits for Bitwig, so a screen calls them on a background thread (`mo_app::background::spawn`), never the
 //! window's. Everything that changes the project (sends, plays, auditions and their stops) goes in one after the
@@ -29,6 +31,7 @@ mod error;
 #[cfg(any(test, feature = "fake-bitwig"))]
 pub mod fake;
 mod link;
+mod put;
 mod send;
 
 pub use audition::{AUDITION_NEEDS, Auditioning, PLAY_NEEDS, Playing, SongLoop, WITH_SONG_NEEDS, WithSong};
@@ -36,8 +39,9 @@ pub use device::{DRUM_MACHINE_KEY, DRUM_MACHINE_NAME, DeviceId, drum_machine};
 pub use error::{Error, LOOPBACK_PORT};
 pub use link::{
     CHANGE_TIMEOUT, CONNECT_TIMEOUT, Device, Hello, Inserted, LINK_VERSION, Link, NewTrack, PORT, PadContents,
-    PadsFilled, SelectedTrack, TIMEOUT, TakenOut,
+    PadsFilled, Recorded, SelectedTrack, TIMEOUT, TakenOut,
 };
+pub use put::{PUT_NEEDS, PutIn, Seen};
 pub use send::{
     Bitwig, KIT_FAILED, KitSound, KitTarget, PART_FAILED, PART_IN, PART_PLACE, Pad, SOUND_FAILED, SOUND_PLACE, SentKit,
     SentPart, SentSound, Ticket, Turn, kit_name, kit_pads, note_name, send_kit, send_part, send_preset, send_sound,

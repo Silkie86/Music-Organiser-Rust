@@ -186,8 +186,44 @@ pub struct World {
     /// Whether Bitwig doesn't show the loop back once the link has put it back: `deleteclip` then answers `loopBack`
     /// false, and the transport stays as the link set it.
     pub loop_stays: bool,
+    /// The project's tempo in BPM and its time signature, as `transport` says them.
+    pub tempo: f64,
+    pub time_signature: String,
+    /// The clips on the arranger's timeline that the link's `record` job put there (extension 3.9).
+    pub arranger: Vec<FakeArrangerClip>,
+    /// How the next `record` goes.
+    pub recording: FakeRecording,
     /// How many tracks have been made, for their IDs.
     made: usize,
+}
+
+/// A clip the link's `record` job recorded into the arranger ([`World::arranger`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FakeArrangerClip {
+    /// The track it's on, by the ID Bitwig keeps it under.
+    pub track: String,
+    /// Where it starts and how long it is, in beats.
+    pub at: f64,
+    pub length: f64,
+    /// The file the launcher clip it was recorded from was made from.
+    pub file: String,
+    /// Whether the track was armed for it.
+    pub armed: bool,
+}
+
+/// How the stand-in's `record` job goes ([`World::recording`]): as the link's does when all is well, unless one of
+/// these says otherwise.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FakeRecording {
+    /// Settings Bitwig doesn't take for the recording ("pre-roll"): the job answers `refused` with them, and records
+    /// nothing.
+    pub refuses: Vec<String>,
+    /// Settings Bitwig doesn't show back afterwards ("master mute"): the answer's `restoreFailed`.
+    pub not_back: Vec<String>,
+    /// How the clip's playing ends when not at its end ("timedOut", "stoppedEarly"): the take is what played so far.
+    pub ends: Option<String>,
+    /// Whether the link never sees the clip's slot playing.
+    pub unseen: bool,
 }
 
 /// The parts of Bitwig's transport an audition with a song's bars sets and puts back ([`World::transport`]).
@@ -217,6 +253,7 @@ impl Default for World {
     /// "Night Drive" open, changes allowed, extension 3.22 answering on Bitwig 6.1.5, and the C# stand-in's tracks:
     /// Drums (a group), Kick (audio, with EQ+), Bass (an instrument: Serum, then a Compressor, selected) and the
     /// Master (with a Peak Limiter). The arranger's loop is off, over the first 4 bars, and Play starts at the start.
+    /// 120 BPM in 4/4, with nothing recorded into the arranger.
     fn default() -> World {
         let hello = json!({
             "link": 3, "product": "Bitwig Studio", "version": "6.1.5", "api": 23, "platform": "WINDOWS",
@@ -265,6 +302,10 @@ impl Default for World {
             started_at: Vec::new(),
             song_loop: None,
             loop_stays: false,
+            tempo: 120.0,
+            time_signature: "4/4".into(),
+            arranger: Vec::new(),
+            recording: FakeRecording::default(),
             made: 0,
         };
         for track in &mut world.tracks {
@@ -404,7 +445,9 @@ impl World {
         let cmd = map.get("cmd");
         let changes = match cmd.and_then(Value::as_str) {
             Some("hello" | "selectedtrack" | "transport") => false,
-            Some("newtrack" | "insert" | "pads" | "clip" | "deleteclip" | "deletetrack" | "stoptracks") => true,
+            Some("newtrack" | "insert" | "pads" | "clip" | "deleteclip" | "deletetrack" | "stoptracks" | "record") => {
+                true
+            }
             _ => return Err(format!("Unknown command: {}", js(cmd))),
         };
         self.check_allowed(map, changes)?;
@@ -417,7 +460,11 @@ impl World {
             Some("insert") => self.insert(map),
             Some("clip") => self.add_clip(map),
             Some("selectedtrack") => Ok(self.selected()),
-            Some("transport") => Ok(json!({ "playing": self.playing })),
+            Some("transport") => Ok(json!({
+                "playing": self.playing, "position": self.transport.play_start,
+                "playStart": self.transport.play_start, "tempo": self.tempo, "timeSignature": self.time_signature,
+            })),
+            Some("record") => self.record(map),
             Some("deleteclip") => self.delete_clip(map),
             Some("deletetrack") => self.delete_track(map),
             Some("stoptracks") => self.stop_tracks(map),
@@ -652,6 +699,125 @@ impl World {
             self.playing = false;
         }
         Ok(json!({ "stopped": stopped }))
+    }
+
+    /// A bar's length in beats, from the time signature, as the link's `barLength`.
+    fn bar_beats(&self) -> Result<f64, String> {
+        let parts = self
+            .time_signature
+            .split_once('/')
+            .and_then(|(beats, unit)| Some((beats.trim().parse::<u32>().ok()?, unit.trim().parse::<u32>().ok()?)));
+        match parts {
+            Some((beats, unit)) if beats > 0 && unit > 0 => Ok(f64::from(beats) * 4.0 / f64::from(unit)),
+            _ => Err(format!(
+                "The link can't tell a bar's length from Bitwig's time signature \"{}\".",
+                self.time_signature
+            )),
+        }
+    }
+
+    /// Records a launcher clip into the arranger, as the link's `record` job (3.9) answers once it's through: what
+    /// it refuses before it begins (in the link's words), then the take on the track's timeline, the launcher clip
+    /// taken out when asked, and what it says it saw. The stand-in doesn't play: the take is there at once, and the
+    /// settings the job changes meanwhile (the master's mute, the play start, the transport's switches) are as they
+    /// were again, unless [`World::recording`] says some aren't.
+    fn record(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
+        let id = match request.get("trackId") {
+            Some(Value::String(id)) if !id.is_empty() => id.clone(),
+            _ => return Err("Say which track to record by its ID (trackId).".into()),
+        };
+        let slot = index(request.get("slot"), CLIP_SLOTS).ok_or_else(|| {
+            format!(
+                "The app can reach the first {CLIP_SLOTS} clip slots on a track, not slot {}.",
+                js(request.get("slot"))
+            )
+        })?;
+        let beats = |field: &str, length: bool| match request.get(field).and_then(Value::as_f64) {
+            Some(b) if b.is_finite() && (b > 0.0 || (!length && b == 0.0)) => Ok(b),
+            _ => Err(format!(
+                "{field} is a number of beats, {}, not {}.",
+                if length { "more than 0" } else { "0 or more" },
+                js(request.get(field))
+            )),
+        };
+        let (at, length) = (beats("at", false)?, beats("length", true)?);
+        let on = |field: &str, otherwise: bool| request.get(field).and_then(Value::as_bool).unwrap_or(otherwise);
+        let bar = self.bar_beats()?;
+        let whole = |beats: f64| (beats / bar - (beats / bar).round()).abs() < 1e-6;
+        if !whole(at) || !whole(length) {
+            return Err(format!(
+                "at, length and replayFrom have to be whole bars: {bar} beats each in {}.",
+                self.time_signature
+            ));
+        }
+        let t = self
+            .tracks
+            .iter()
+            .position(|t| t.id == id)
+            .ok_or_else(|| format!("There's no track with ID {id} in the project listing."))?;
+        let track = self.tracks.get(t).ok_or("Bitwig didn't add the track.")?;
+        let name = track.name.clone();
+        let file = match track.clips.get(slot) {
+            Some(file) if !file.is_empty() => file.clone(),
+            _ => return Err(format!("Slot {slot} on that track has no clip to record.")),
+        };
+        if self.playing {
+            return Err("Bitwig is playing. Stop it, then ask again.".into());
+        }
+        if let Some(busy) = self.launched.first().and_then(|&(lt, _)| self.tracks.get(lt)) {
+            return Err(format!(
+                "A launcher clip on \"{}\" is playing, recording or about to. Stop it, then ask again.",
+                busy.name
+            ));
+        }
+        let (arm, replay) = (on("arm", false), on("replay", true));
+        let mut answer = json!({
+            "trackId": id, "track": name, "slot": slot, "at": at, "length": length, "bar": bar, "record": true,
+            "arm": arm, "tempo": { "project": self.tempo, "used": self.tempo }, "refused": self.recording.refuses,
+            "played": null, "launcherClipDeleted": null, "replay": null,
+        });
+        let mut say = |key: &str, value: Value| {
+            if let Some(map) = answer.as_object_mut() {
+                map.insert(key.to_owned(), value);
+            }
+        };
+        // A setting Bitwig doesn't take: everything goes back, and nothing is recorded.
+        if !self.recording.refuses.is_empty() {
+            say("decided", "refused".into());
+            say("after", json!({ "checked": true, "recordOff": true, "playing": false, "restoreFailed": [] }));
+            return Ok(answer);
+        }
+        // Another project comes to the front as it records: the job touches nothing more, and doesn't say what
+        // Bitwig shows (that's the other project's now).
+        if self.switch_during.as_ref().is_some_and(|(cmd, _)| cmd == "record")
+            && let Some((_, project)) = self.switch_during.take()
+        {
+            self.project = project;
+            say("decided", "abandoned".into());
+            say("after", json!({ "checked": false, "restoreFailed": null }));
+            return Ok(answer);
+        }
+        // The take: all of it, or what played before the clip's playing ended early (a bar less).
+        let ended = self.recording.ends.clone().unwrap_or_else(|| "done".to_owned());
+        let taken = if self.recording.ends.is_some() { (length - bar).max(bar) } else { length };
+        self.arranger.push(FakeArrangerClip { track: id, at, length: taken, file, armed: arm });
+        self.modified = true;
+        let deleted = on("deleteLauncherClip", false);
+        if deleted && let Some(clip) = self.tracks.get_mut(t).and_then(|t| t.clips.get_mut(slot)) {
+            clip.clear();
+        }
+        say("decided", if replay { "recorded" } else { "notChecked" }.into());
+        say("played", json!({ "from": at, "started": true, "ended": ended, "positionFrom": "bitwig", "heard": 4 }));
+        say("seen", json!({ "clipPlayed": !self.recording.unseen, "slotRecording": true }));
+        say("launcherClipDeleted", if deleted { true.into() } else { Value::Null });
+        say(
+            "after",
+            json!({
+                "checked": true, "recordOff": true, "playing": false, "playStart": self.transport.play_start,
+                "restoreFailed": self.recording.not_back,
+            }),
+        );
+        Ok(answer)
     }
 
     /// A file in a track's first empty clip launcher slot (of the first 8 the link reaches), as the link's `addClip`.
