@@ -45,6 +45,26 @@ pub fn picture(peaks: &Peaks, width: u32, height: u32) -> Option<SharedPixelBuff
     Some(buffer)
 }
 
+/// How many peaks a waveform made from a sound as it was played has: as many as a wide screen draws.
+pub const PEAKS: usize = 480;
+
+/// A waveform of audio as it was read (a list of samples per channel): at most `most` peaks, each the loudest sample
+/// of its part in any channel. For a sound the library has no waveform for.
+pub fn peaks(channels: &[Vec<f32>], most: usize) -> Peaks {
+    let frames = channels.iter().map(Vec::len).min().unwrap_or(0);
+    let points = frames.min(most);
+    let levels: Vec<f32> = (0..points)
+        .map(|i| {
+            let (from, to) = (i * frames / points, ((i + 1) * frames / points).max(i * frames / points + 1));
+            channels
+                .iter()
+                .flat_map(|c| &c[from..to.min(frames)])
+                .fold(0.0f32, |m, v| if v.is_finite() { m.max(v.abs()) } else { m })
+        })
+        .collect();
+    Peaks::new(&levels)
+}
+
 /// The pictures kept, by sound, and the ones to read next. `P` is the picture (the panel's is a Slint image).
 pub struct Kept<P> {
     /// `None`: read, and the sound has no waveform.
@@ -124,6 +144,19 @@ impl<P: Clone> Kept<P> {
         read
     }
 
+    /// Whether the sound was read and has no waveform in the library.
+    pub fn has_none(&self, sound: i64) -> bool {
+        matches!(self.pictures.get(&sound), Some(None))
+    }
+
+    /// Gives a picture to a sound the library has none for ([`Kept::has_none`]): one made from the audio itself, as
+    /// it was played. Nothing changes for any other sound.
+    pub fn give(&mut self, sound: i64, picture: P) {
+        if let Some(kept @ None) = self.pictures.get_mut(&sound) {
+            *kept = Some(picture);
+        }
+    }
+
     /// Forgets every picture and asking (the screen's scaling changed: they're the wrong size).
     pub fn forget(&mut self) {
         let round = self.round + 1;
@@ -175,6 +208,32 @@ mod tests {
         assert_eq!(kept.take_in(round, vec![(7, Some(1))]), [(0, 7), (1, 8)]);
         assert_eq!((kept.picture(0, 7), kept.picture(1, 8)), (Some(1), None));
         assert_eq!(kept.to_read().map(|(_, ids)| ids), Some(vec![9]));
+    }
+
+    #[test]
+    fn a_sound_with_no_waveform_can_be_given_one() {
+        let mut kept = Kept::<u8>::default();
+        kept.picture(0, 7);
+        kept.picture(1, 8);
+        // Not read yet: nothing to give to.
+        assert!(!kept.has_none(8));
+        kept.give(8, 5);
+        let (round, _) = kept.to_read().expect("two to read");
+        kept.take_in(round, vec![(7, Some(1))]);
+        assert!(kept.has_none(8) && !kept.has_none(7));
+        kept.give(8, 5);
+        kept.give(7, 9);
+        assert_eq!((kept.picture(0, 7), kept.picture(1, 8)), (Some(1), Some(5)));
+    }
+
+    /// The loudest of each part of a sound, for [`picture`].
+    #[test]
+    fn peaks_of_audio_as_it_was_read() {
+        let left = [0.0, 0.5, -1.0, 0.25];
+        let right = [0.1, -0.75, 0.5, 0.0];
+        assert_eq!(peaks(&[left.to_vec(), right.to_vec()], 2).to_vec(), [0.75, 1.0]);
+        assert_eq!(peaks(&[left.to_vec()], 400).len(), 4);
+        assert!(peaks(&[], 400).is_empty() && peaks(&[Vec::new()], 400).is_empty());
     }
 
     #[test]

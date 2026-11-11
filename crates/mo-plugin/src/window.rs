@@ -177,6 +177,7 @@ impl Model for Lines {
             folder: library::folder(&sound.path).into(),
             facts: library::facts(sound).into(),
             favourite: sound.favourite,
+            colour: mo_app::sounds::type_colour(&sound.sound_type),
             // Asked for here, so only the lines on show are ever read.
             wave: self.waves.borrow_mut().picture(row, sound.id).unwrap_or_default(),
         })
@@ -225,6 +226,8 @@ struct Shown {
     column: Rc<Column>,
     /// The sound the "Playing" line names, as the player numbers it: the line goes when that sound ends.
     playing: Cell<Option<u64>>,
+    /// The line last clicked to play: its row, its sound and its file.
+    played: Rc<RefCell<Option<(usize, i64, std::path::PathBuf)>>>,
     /// A line's file is being carried out now ([`Shown::drag`]).
     dragging: Cell<bool>,
     _timer: TimerHandle,
@@ -269,6 +272,7 @@ impl Shown {
             asked: Rc::new(RefCell::new(Asked { seed: seed(), ..Asked::default() })),
             column: Rc::new(Column::default()),
             playing: Cell::new(None),
+            played: Rc::new(RefCell::new(None)),
             dragging: Cell::new(false),
             _timer: timer,
         };
@@ -296,8 +300,11 @@ impl Shown {
         let lines = Rc::clone(&self.lines);
         let player = Arc::clone(&self.instance.player);
         let slots = Arc::clone(&self.slots);
+        let last_played = Rc::clone(&self.played);
         panel.on_play(move |row| {
-            let Some(path) = usize::try_from(row).ok().and_then(|r| lines.path(r)) else { return };
+            let Some(row) = usize::try_from(row).ok() else { return };
+            let Some(path) = lines.path(row) else { return };
+            *last_played.borrow_mut() = lines.sound(row).map(|sound| (row, sound, path.clone().into()));
             let slots = Arc::clone(&slots);
             player.play(path.into(), move |played| *lock(&slots.played) = Some(played));
         });
@@ -486,6 +493,21 @@ impl Shown {
             let rows = self.lines.waves.borrow_mut().take_in(round, found);
             for (row, sound) in rows {
                 // The list may have changed since the line asked.
+                if self.lines.sound(row) == Some(sound) {
+                    self.lines.notify.row_changed(row);
+                }
+            }
+        }
+        // A sound just played that the library has no waveform for gets the one made from its audio.
+        if let Some((path, peaks)) = take(&self.instance.player.heard)
+            && let Some((row, sound, played)) = self.played.borrow().clone()
+            && played == path
+            && self.lines.waves.borrow().has_none(sound)
+        {
+            let scale = self.scale.get().clamp(0.5, 8.0);
+            let (width, height) = ((waves::WIDTH * scale).round() as u32, (waves::HEIGHT * scale).round() as u32);
+            if let Some(pixels) = waves::picture(&peaks, width, height) {
+                self.lines.waves.borrow_mut().give(sound, slint::Image::from_rgba8(pixels));
                 if self.lines.sound(row) == Some(sound) {
                     self.lines.notify.row_changed(row);
                 }
