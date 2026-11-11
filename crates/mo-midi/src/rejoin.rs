@@ -8,7 +8,8 @@
 //! - they come back together, the same way, at least twice (the more often, the stronger);
 //! - one hands over to the other: the second starts in the bar after the first stops (or later in its last bar),
 //!   and neither channel plays while the other has the phrase;
-//! - they sound like one voice: their notes sit near each other, so the tune carries on;
+//! - they sound like one voice: their ranges meet (or their middles are near), a line hands to a line and chords to
+//!   chords, and where two could take over (a lead and a pad doubling it) the one the tune steps to most smoothly does;
 //! - the joined phrase is a tidy length (2, 4, 8 or 16 bars), or a piece is too short to be a part on its own.
 //!
 //! Drums never join (a fill answering a lead is two parts), and neither do pieces in far apart registers (a bass line
@@ -29,7 +30,7 @@ use crate::{BAR, PPQ};
 /// How many times two stretches must come back together, the same way, to be one phrase.
 pub const MIN_REPEATS: usize = 2;
 /// The score a pair of stretches needs to be joined ([`score`]).
-pub const JOIN_SCORE: i32 = 5;
+pub const JOIN_SCORE: i32 = 6;
 /// The most a phrase is joined to: longer, it's a section of the song, not a phrase (and the index would cut it into
 /// pieces again, [`analyser::MAX_BARS`]).
 pub const MAX_JOINED_BARS: i64 = analyser::MAX_BARS;
@@ -77,6 +78,11 @@ struct Stretch {
     hash: String,
     notes: Vec<NoteEvent>,
     middle: f64,
+    /// Most of its notes start together with another: chords, not a line.
+    chordal: bool,
+    /// The top note it starts on, and the top note of its last chord or note: where a tune carries on from.
+    first_key: u8,
+    last_key: u8,
     lowest: u8,
     highest: u8,
 }
@@ -173,7 +179,26 @@ fn stretch_of(voice: usize, notes: Vec<NoteEvent>) -> Stretch {
     let middle = notes.iter().map(|n| f64::from(n.key)).sum::<f64>() / notes.len().max(1) as f64;
     let lowest = notes.iter().map(|n| n.key).min().unwrap_or(0);
     let highest = notes.iter().map(|n| n.key).max().unwrap_or(0);
-    Stretch { voice, from, to, first, last_end, hash: analyser::hash_of(&moved), notes: moved, middle, lowest, highest }
+    let together = notes.iter().filter(|n| notes.iter().filter(|m| m.start == n.start).count() > 1).count();
+    let chordal = together * 2 > notes.len();
+    let top_at = |start: i64| notes.iter().filter(|n| n.start == start).map(|n| n.key).max().unwrap_or(0);
+    let first_key = top_at(first);
+    let last_key = top_at(notes.last().map_or(first, |n| n.start));
+    Stretch {
+        voice,
+        from,
+        to,
+        first,
+        last_end,
+        hash: analyser::hash_of(&moved),
+        notes: moved,
+        middle,
+        chordal,
+        first_key,
+        last_key,
+        lowest,
+        highest,
+    }
 }
 
 /// Whether `b` takes over from `a`: it starts once `a`'s last note has ended, in `a`'s last bar or the bar after.
@@ -191,6 +216,22 @@ fn plays_in(stretches: &[&Stretch], from: i64, to: i64) -> bool {
     stretches.iter().any(|s| s.from < to && s.to > from)
 }
 
+/// Whether two stretches' ranges overlap, or come within 3 semitones of each other.
+fn ranges_meet(a: &Stretch, b: &Stretch) -> bool {
+    b.lowest.saturating_sub(a.highest).max(a.lowest.saturating_sub(b.highest)) <= 3
+}
+
+/// Whether two stretches sit near enough to be one voice: their ranges meet, or their middles are within
+/// [`MAX_REGISTER_GAP`] (a lead climbing on from where the last synth topped out has a higher middle).
+fn near_enough(a: &Stretch, b: &Stretch) -> bool {
+    ranges_meet(a, b) || (a.middle - b.middle).abs() <= MAX_REGISTER_GAP
+}
+
+/// How far the tune jumps where one stretch hands to the next, in semitones.
+fn step(a: &Stretch, b: &Stretch) -> u8 {
+    a.last_key.abs_diff(b.first_key)
+}
+
 /// How strongly two stretches that hand over, coming back together `repeats` times, read as one phrase (see the
 /// module's notes). [`JOIN_SCORE`] or more joins them.
 fn score(a: &Stretch, b: &Stretch, repeats: usize) -> i32 {
@@ -204,9 +245,11 @@ fn score(a: &Stretch, b: &Stretch, repeats: usize) -> i32 {
         score += 1;
     }
     // The tune carries on: one's range meets the other's, or comes within a few semitones.
-    // 0 when they overlap.
-    let gap = b.lowest.saturating_sub(a.highest).max(a.lowest.saturating_sub(b.highest));
-    if gap <= 3 {
+    if ranges_meet(a, b) {
+        score += 1;
+    }
+    // A line hands to a line, chords to chords: a lead taken over by a pad of chords is two parts.
+    if a.chordal == b.chordal {
         score += 1;
     }
     if matches!(b.to - a.from, 2 | 4 | 8 | 16) {
@@ -239,7 +282,7 @@ pub fn join(voices: &[Voice]) -> Vec<Joined> {
         let near = [a.to - 1, a.to].into_iter().filter_map(|bar| starting.get(&bar)).flatten();
         for &j in near {
             let Some(b) = all.get(j) else { continue };
-            if !hands_over(a, b) || (a.middle - b.middle).abs() > MAX_REGISTER_GAP {
+            if !hands_over(a, b) || !near_enough(a, b) {
                 continue;
             }
             // A true hand-over: neither voice plays while the other has the phrase.
@@ -250,19 +293,21 @@ pub fn join(voices: &[Voice]) -> Vec<Joined> {
         }
     }
     // The links strong enough to join, from each stretch to the one it hands to.
-    // The strongest first, then first in the song, so the same song always joins the same way (a map has no order).
-    let mut strong: Vec<(i32, Vec<(usize, usize)>)> = handovers
+    // The strongest first; of two as strong (a lead and the pad doubling it both taking over), the one the tune steps
+    // to most smoothly; then first in the song, so the same song always joins the same way (a map has no order).
+    let mut strong: Vec<(i32, u8, Vec<(usize, usize)>)> = handovers
         .into_values()
         .filter(|pairs| pairs.len() >= MIN_REPEATS)
         .filter_map(|pairs| {
             let &(i, j) = pairs.first()?;
-            Some((score(all.get(i)?, all.get(j)?, pairs.len()), pairs))
+            let (a, b) = (all.get(i)?, all.get(j)?);
+            Some((score(a, b, pairs.len()), step(a, b), pairs))
         })
-        .filter(|(score, _)| *score >= JOIN_SCORE)
+        .filter(|(score, ..)| *score >= JOIN_SCORE)
         .collect();
-    strong.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    strong.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)).then_with(|| a.2.cmp(&b.2)));
     let mut next: HashMap<usize, usize> = HashMap::new();
-    for (_, pairs) in &strong {
+    for (.., pairs) in &strong {
         for &(i, j) in pairs {
             // One way on from each stretch: the strongest keeps it.
             next.entry(i).or_insert(j);
@@ -428,6 +473,37 @@ mod tests {
         assert_eq!(analyser::bars_of(&lead.notes), 16);
         assert_eq!(lead.members.len(), 2);
         assert_eq!((lead.members[1].start, lead.members[1].length), (8 * BAR, 8 * BAR));
+    }
+
+    #[test]
+    fn a_lead_climbing_on_goes_to_the_next_lead_not_the_pad_doubling_it() {
+        // Bars 0-7 on one synth, keys 60-75; then a lead from 75 up to 84 (its middle 13 higher) with a pad of
+        // chords under it on the same bars; three times.
+        let line = |from: i64, low: u8, high: u8| -> Vec<NoteEvent> {
+            (0..8)
+                .flat_map(|b| {
+                    (0..4).map(move |beat| note(from + b, beat, low + ((b * 4 + beat) as u8 % (high - low + 1))))
+                })
+                .collect()
+        };
+        let (mut first, mut lead, mut pad) = (Vec::new(), Vec::new(), Vec::new());
+        for cycle in 0..3 {
+            let at = cycle * 24;
+            first.extend(line(at, 60, 75));
+            let mut climb = line(at + 8, 76, 84);
+            climb[0].key = 75;
+            lead.extend(climb);
+            pad.extend(
+                (0..8).flat_map(|b| [60, 64, 67, 72].map(|k| NoteEvent { length: BAR, ..note(at + 8 + b, 0, k) })),
+            );
+        }
+        let joined = join(&voices(&[
+            channel("Cell #3", "LegacyCell", first),
+            channel("M1", "M1", lead),
+            channel("Pad #2", "Wavestation", pad),
+        ]));
+        assert_eq!(joined.iter().map(|j| j.name.as_str()).collect::<Vec<_>>(), ["Cell #3 + M1"]);
+        assert_eq!(joined[0].repeats, 3);
     }
 
     #[test]
