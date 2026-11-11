@@ -1,11 +1,13 @@
-//! What you give a song, kept in the app's own song library: its status, stars, heart and tags ([`set`]). Rule 14:
-//! they're the song's, so one change goes to every save of the song the caller names, in one SQLite transaction
-//! (IMMEDIATE, so nothing else writes meanwhile), read back and checked, all of it or none. Only a `songs.db` that's
-//! the app's own is ever written ([`crate::song_writes`]).
+//! What you give a song, kept in the app's own song library: its status, stars, heart, key, notes and tags ([`set`]).
+//! Rule 14: they're the song's, so one change goes to every save of the song the caller names, in one SQLite
+//! transaction (IMMEDIATE, so nothing else writes meanwhile), read back and checked, all of it or none. Only a
+//! `songs.db` that's the app's own is ever written ([`crate::song_writes`]).
 //!
 //! A save read again never sets these on a row the library has ([`crate::song_writes`]), so a change kept here stays
 //! whatever the folder watch reads meanwhile. The caller makes the same change to the saves it holds in memory
-//! ([`Change::apply`]) once it's kept, so what's shown is what's kept.
+//! ([`Change::apply`]), those the library doesn't have yet too: they're kept with it when the library takes them. The
+//! Songs list does both in one step, on the thread that reads saves, so neither can come between
+//! (`mo_app::live::Live::give`).
 //!
 //! It waits for another write (up to five seconds), so call it away from the window's thread.
 
@@ -21,6 +23,19 @@ use crate::{LibraryError, STATUSES, Save};
 pub const MOST_STARS: i32 = 5;
 /// The longest tag kept, in characters.
 pub const LONGEST_TAG: usize = 64;
+/// The longest key kept, in characters ("F# minor", or however you write it).
+pub const LONGEST_KEY: usize = 32;
+/// The longest notes kept, in characters.
+pub const LONGEST_NOTES: usize = 20_000;
+
+/// A save as the library has it: its id, and the path the library keeps it under. Only the row with both is changed,
+/// as everywhere a save's row is written: an id alone may be another save's by now (another copy of the app kept one
+/// under it).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SaveRow {
+    pub id: i64,
+    pub path: String,
+}
 
 /// One change to what you gave a song.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +45,10 @@ pub enum Change {
     /// 0 (none) to [`MOST_STARS`].
     Rating(i32),
     Favourite(bool),
+    /// The key you give it, as you write it (empty: none, so the key heard from its notes shows).
+    Key(String),
+    /// Your notes on it, as you write them.
+    Notes(String),
     /// Put a tag on: kept in small letters, as the app's tags are, without spaces around it.
     AddTag(String),
     /// Take a tag off, whatever its letter case.
@@ -37,22 +56,23 @@ pub enum Change {
 }
 
 impl Change {
-    /// The change as it's kept: a tag trimmed and in small letters. Why it can't be kept, otherwise: a status that
-    /// isn't one of the app's, stars out of range, or a tag that's empty, too long or holds a character that can't be
-    /// shown (the list read keeps a save's tags in one text, apart by such a character).
+    /// The change as it's kept: a tag or a key trimmed, a tag in small letters. Why it can't be kept, otherwise: a
+    /// status that isn't one of the app's, stars out of range, a tag that's empty, a tag, key or notes too long, or a
+    /// tag or key with a character that can't be shown (the list read keeps a save's tags in one text, apart by such
+    /// a character). A tag to take off only needs a name: one an older library holds, however long, can go.
     pub fn checked(&self) -> Result<Change, String> {
-        let tag = |tag: &str| -> Result<String, String> {
-            let tag = case::to_lower(tag.trim());
-            if tag.is_empty() {
-                return Err("a tag needs a name".to_owned());
+        let shown = |what: &str, text: &str, longest: usize| -> Result<(), String> {
+            if text.chars().count() > longest {
+                return Err(format!("{what} can be {longest} characters at most"));
             }
-            if tag.chars().count() > LONGEST_TAG {
-                return Err(format!("a tag can be {LONGEST_TAG} characters at most"));
+            if text.chars().any(char::is_control) {
+                return Err(format!("{what} can't hold a character that can't be shown"));
             }
-            if tag.chars().any(char::is_control) {
-                return Err("a tag can't hold a character that can't be shown".to_owned());
-            }
-            Ok(tag)
+            Ok(())
+        };
+        let named = |tag: &str| -> Result<String, String> {
+            let tag = same_tag(tag);
+            if tag.is_empty() { Err("a tag needs a name".to_owned()) } else { Ok(tag) }
         };
         match self {
             Change::Status(status) => STATUSES
@@ -63,13 +83,25 @@ impl Change {
             Change::Rating(stars) if (0..=MOST_STARS).contains(stars) => Ok(self.clone()),
             Change::Rating(stars) => Err(format!("{stars} stars isn't between 0 and {MOST_STARS}")),
             Change::Favourite(_) => Ok(self.clone()),
-            Change::AddTag(t) => tag(t).map(Change::AddTag),
-            Change::RemoveTag(t) => tag(t).map(Change::RemoveTag),
+            Change::Key(key) => {
+                let key = key.trim();
+                shown("a key", key, LONGEST_KEY).map(|()| Change::Key(key.to_owned()))
+            }
+            Change::Notes(notes) if notes.chars().count() > LONGEST_NOTES => {
+                Err(format!("notes can be {LONGEST_NOTES} characters at most"))
+            }
+            Change::Notes(_) => Ok(self.clone()),
+            Change::AddTag(tag) => {
+                let tag = named(tag)?;
+                shown("a tag", &tag, LONGEST_TAG).map(|()| Change::AddTag(tag))
+            }
+            Change::RemoveTag(tag) => named(tag).map(Change::RemoveTag),
         }
     }
 
-    /// Makes the change to a save held in memory, as [`set`] keeps it in the library: call it for each save [`set`]
-    /// says it changed ([`Kept::saves`]), once that returned. Whether the save is any different for it.
+    /// Makes the change to a save held in memory, as [`set`] keeps it in the library: for every save of the song,
+    /// once [`set`] returned, those it says the library doesn't have too (they're kept as they are in memory when
+    /// the library takes them). Whether the save is any different for it.
     pub fn apply(&self, save: &mut Save) -> bool {
         let Ok(change) = self.checked() else { return false };
         match change {
@@ -88,8 +120,18 @@ impl Change {
                 save.favourite = heart;
                 differs
             }
+            Change::Key(key) => {
+                let differs = save.musical_key != key;
+                save.musical_key = key;
+                differs
+            }
+            Change::Notes(notes) => {
+                let differs = save.notes != notes;
+                save.notes = notes;
+                differs
+            }
             Change::AddTag(tag) => {
-                let has = save.tags.iter().any(|t| case::to_lower(t) == tag);
+                let has = save.tags.iter().any(|t| same_tag(t) == tag);
                 if !has {
                     save.tags.push(tag);
                 }
@@ -97,28 +139,33 @@ impl Change {
             }
             Change::RemoveTag(tag) => {
                 let before = save.tags.len();
-                save.tags.retain(|t| case::to_lower(t) != tag);
+                save.tags.retain(|t| same_tag(t) != tag);
                 save.tags.len() != before
             }
         }
     }
 }
 
+/// A tag as two spellings of it are compared, and as a new one is kept: without spaces around it, in small letters.
+pub fn same_tag(tag: &str) -> String {
+    case::to_lower(tag.trim())
+}
+
 /// What [`set`] did.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Kept {
-    /// The saves the change is now kept for, by id, in the order asked: those of `save_ids` the library has.
+    /// The saves the change is now kept for, by id, in the order asked.
     pub saves: Vec<i64>,
-    /// Those of `save_ids` the library doesn't have (a save it wouldn't take, or one another copy of the app kept
-    /// under another id): nothing is kept for them.
+    /// Those asked for that the library doesn't have under that id and path (a save it hasn't taken yet, or one
+    /// another copy of the app kept under another id): nothing is kept for them here.
     pub unknown: Vec<i64>,
 }
 
-/// Keeps `change` for the saves `save_ids` (every save of one song, rule 14) in the app's own `songs.db` at
-/// `songs_db`: all of them or none. An id asked twice counts once. A change that can't be kept ([`Change::checked`])
-/// or a library that isn't the app's own changes nothing; a library busy with another write for longer than the wait
-/// gives [`LibraryError::Busy`], and trying again in a moment can work.
-pub fn set(songs_db: &Path, save_ids: &[i64], change: &Change) -> Result<Kept, LibraryError> {
+/// Keeps `change` for `saves` (every save of one song, rule 14) in the app's own `songs.db` at `songs_db`: all of
+/// them or none. A save asked twice counts once. A change that can't be kept ([`Change::checked`]) or a library that
+/// isn't the app's own changes nothing; a library busy with another write for longer than the wait gives
+/// [`LibraryError::Busy`], and trying again in a moment can work.
+pub fn set(songs_db: &Path, saves: &[SaveRow], change: &Change) -> Result<Kept, LibraryError> {
     let write_error = |why: String| LibraryError::Write { path: songs_db.to_owned(), why };
     let sql = |e| write_failed(songs_db, e);
     let change = change.checked().map_err(write_error)?;
@@ -126,34 +173,38 @@ pub fn set(songs_db: &Path, save_ids: &[i64], change: &Change) -> Result<Kept, L
     let tx = begin_own(&mut conn, songs_db)?;
     let mut kept = Kept::default();
     {
-        let mut has = tx.prepare("SELECT EXISTS (SELECT 1 FROM projects WHERE id = ?1)").map_err(sql)?;
-        for id in save_ids {
-            if kept.saves.contains(id) || kept.unknown.contains(id) {
+        let mut has = tx.prepare("SELECT EXISTS (SELECT 1 FROM projects WHERE id = ?1 AND path = ?2)").map_err(sql)?;
+        for save in saves {
+            if kept.saves.contains(&save.id) || kept.unknown.contains(&save.id) {
                 continue;
             }
-            let there: bool = has.query_row([id], |r| r.get(0)).map_err(sql)?;
-            if there { kept.saves.push(*id) } else { kept.unknown.push(*id) }
+            let there: bool = has.query_row(params![save.id, save.path], |r| r.get(0)).map_err(sql)?;
+            if there { kept.saves.push(save.id) } else { kept.unknown.push(save.id) }
         }
     }
-    for id in &kept.saves {
-        match &change {
-            Change::Status(status) => {
-                tx.execute("UPDATE projects SET status = ?2 WHERE id = ?1", params![id, status]).map_err(sql)?;
-            }
-            Change::Rating(stars) => {
-                tx.execute("UPDATE projects SET rating = ?2 WHERE id = ?1", params![id, stars]).map_err(sql)?;
-            }
-            Change::Favourite(heart) => {
-                tx.execute("UPDATE projects SET favourite = ?2 WHERE id = ?1", params![id, heart]).map_err(sql)?;
-            }
-            Change::AddTag(tag) => {
+    let column = |column: &str, value: &dyn rusqlite::ToSql| -> rusqlite::Result<()> {
+        let mut st = tx.prepare_cached(&format!("UPDATE projects SET {column} = ?2 WHERE id = ?1"))?;
+        for id in &kept.saves {
+            st.execute(params![id, value])?;
+        }
+        Ok(())
+    };
+    match &change {
+        Change::Status(status) => column("status", status).map_err(sql)?,
+        Change::Rating(stars) => column("rating", stars).map_err(sql)?,
+        Change::Favourite(heart) => column("favourite", heart).map_err(sql)?,
+        Change::Key(key) => column("musical_key", key).map_err(sql)?,
+        Change::Notes(notes) => column("notes", notes).map_err(sql)?,
+        Change::AddTag(tag) => {
+            for id in &kept.saves {
                 // One of another letter case (an older library's) is the same tag: it isn't put on twice.
-                if !tags_like(&tx, *id, tag).map_err(sql)?.is_empty() {
-                    continue;
+                if tags_like(&tx, *id, tag).map_err(sql)?.is_empty() {
+                    tx.execute("INSERT INTO tags (project_id, tag) VALUES (?1, ?2)", params![id, tag]).map_err(sql)?;
                 }
-                tx.execute("INSERT INTO tags (project_id, tag) VALUES (?1, ?2)", params![id, tag]).map_err(sql)?;
             }
-            Change::RemoveTag(tag) => {
+        }
+        Change::RemoveTag(tag) => {
+            for id in &kept.saves {
                 for spelt in tags_like(&tx, *id, tag).map_err(sql)? {
                     tx.execute("DELETE FROM tags WHERE project_id = ?1 AND tag = ?2", params![id, spelt])
                         .map_err(sql)?;
@@ -162,23 +213,19 @@ pub fn set(songs_db: &Path, save_ids: &[i64], change: &Change) -> Result<Kept, L
         }
     }
     // Read back: every save asked for has the change, before any of it is kept.
+    let text = |column: &str, id: i64| -> rusqlite::Result<Option<String>> {
+        tx.query_row(&format!("SELECT {column} FROM projects WHERE id = ?1"), [id], |r| r.get(0))
+    };
+    let number = |column: &str, id: i64| -> rusqlite::Result<Option<i64>> {
+        tx.query_row(&format!("SELECT {column} FROM projects WHERE id = ?1"), [id], |r| r.get(0))
+    };
     for id in &kept.saves {
         let right = match &change {
-            Change::Status(status) => {
-                let back: Option<String> =
-                    tx.query_row("SELECT status FROM projects WHERE id = ?1", [id], |r| r.get(0)).map_err(sql)?;
-                back.as_deref() == Some(status.as_str())
-            }
-            Change::Rating(stars) => {
-                let back: Option<i32> =
-                    tx.query_row("SELECT rating FROM projects WHERE id = ?1", [id], |r| r.get(0)).map_err(sql)?;
-                back == Some(*stars)
-            }
-            Change::Favourite(heart) => {
-                let back: Option<bool> =
-                    tx.query_row("SELECT favourite FROM projects WHERE id = ?1", [id], |r| r.get(0)).map_err(sql)?;
-                back == Some(*heart)
-            }
+            Change::Status(status) => text("status", *id).map_err(sql)?.as_deref() == Some(status.as_str()),
+            Change::Rating(stars) => number("rating", *id).map_err(sql)? == Some(i64::from(*stars)),
+            Change::Favourite(heart) => number("favourite", *id).map_err(sql)? == Some(i64::from(*heart)),
+            Change::Key(key) => text("musical_key", *id).map_err(sql)?.as_deref() == Some(key.as_str()),
+            Change::Notes(notes) => text("notes", *id).map_err(sql)?.as_deref() == Some(notes.as_str()),
             Change::AddTag(tag) => !tags_like(&tx, *id, tag).map_err(sql)?.is_empty(),
             Change::RemoveTag(tag) => tags_like(&tx, *id, tag).map_err(sql)?.is_empty(),
         };
@@ -190,10 +237,10 @@ pub fn set(songs_db: &Path, save_ids: &[i64], change: &Change) -> Result<Kept, L
     Ok(kept)
 }
 
-/// The tags the save `id` has that are `tag` but for letter case, as they're spelt. A save has a handful of tags, so
+/// The tags the save `id` has that are `tag` ([`same_tag`]), as they're spelt. A save has a handful of tags, so
 /// they're all looked at: letter case is compared as the app does, beyond English too.
-fn tags_like(tx: &rusqlite::Transaction<'_>, id: i64, tag: &str) -> rusqlite::Result<Vec<String>> {
+pub(crate) fn tags_like(tx: &rusqlite::Transaction<'_>, id: i64, tag: &str) -> rusqlite::Result<Vec<String>> {
     let mut st = tx.prepare_cached("SELECT tag FROM tags WHERE project_id = ?1")?;
     let all: Vec<Option<String>> = st.query_map([id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
-    Ok(all.into_iter().flatten().filter(|t| case::to_lower(t) == tag).collect())
+    Ok(all.into_iter().flatten().filter(|t| same_tag(t) == tag).collect())
 }

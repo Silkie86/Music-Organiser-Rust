@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use mo_library::song_fields::{self, Change, Kept};
+use mo_library::song_fields::{self, Change, Kept, SaveRow};
 use mo_library::song_writes::{self, Batch, Missing, Put};
 use mo_library::songs_db::{self, State};
 use mo_library::{Library, PluginKind, ProjectPlugin, ProjectSample, Save, SaveDetail};
@@ -330,6 +330,14 @@ fn the_fl_studio_saves_the_app_kept_are_read_again_once_for_their_muted_samples(
     assert_eq!(song_writes::to_mend(&songs).unwrap(), None);
 }
 
+/// The path the tests' second save is at.
+const TWO: &str = "C:\\Music\\Night\\Night_12.flp";
+
+/// Saves as [`song_fields::set`] is told of them: by id and the path the library keeps each under.
+fn rows(saves: &[(i64, &str)]) -> Vec<SaveRow> {
+    saves.iter().map(|(id, path)| SaveRow { id: *id, path: (*path).to_owned() }).collect()
+}
+
 /// What you gave the save `id`, as the library at `songs` reads it: status, stars, heart and tags (in order).
 fn yours(songs: &std::path::Path, id: i64) -> (String, i32, bool, Vec<String>) {
     let lib = Library::open_read_only(songs).unwrap();
@@ -342,8 +350,8 @@ fn yours(songs: &std::path::Path, id: i64) -> (String, i32, bool, Vec<String>) {
 #[test]
 fn what_you_give_a_song_is_kept_for_every_save_of_it_and_reads_back() {
     let songs = library("fields");
-    song_writes::write(&songs, &put(read(2, "C:\\Music\\Night\\Night_12.flp"), None)).unwrap();
-    let both = [1, 2];
+    song_writes::write(&songs, &put(read(2, TWO), None)).unwrap();
+    let both = rows(&[(1, ONE), (2, TWO)]);
     let set = |change: Change| song_fields::set(&songs, &both, &change).unwrap();
     assert_eq!(set(Change::Status("Finished".into())), Kept { saves: vec![1, 2], unknown: vec![] });
     set(Change::Rating(5));
@@ -363,10 +371,30 @@ fn what_you_give_a_song_is_kept_for_every_save_of_it_and_reads_back() {
     set(Change::Rating(0));
     assert_eq!(yours(&songs, 1), ("Finished".into(), 0, false, tags(&["techno"])));
     assert_eq!(yours(&songs, 2), ("Finished".into(), 0, false, tags(&["digitakt", "techno"])));
-    // A save the library doesn't have is said so, an id asked twice counts once, and the rest is kept.
-    let kept = song_fields::set(&songs, &[2, 77, 2], &Change::Rating(3)).unwrap();
-    assert_eq!(kept, Kept { saves: vec![2], unknown: vec![77] });
+    // A save the library doesn't have is said so, one asked twice counts once, and the rest is kept. An id the
+    // library has under another path is another save's: it's left alone. Paths are the same in any letter case.
+    let asked = rows(&[(2, "c:\\music\\night\\NIGHT_12.flp"), (77, "C:\\x.flp"), (2, TWO), (1, "C:\\other.flp")]);
+    let kept = song_fields::set(&songs, &asked, &Change::Rating(3)).unwrap();
+    assert_eq!(kept, Kept { saves: vec![2], unknown: vec![77, 1] });
     assert_eq!((yours(&songs, 1).1, yours(&songs, 2).1), (0, 3));
+    // Your key and notes, as you write them (a key without the spaces around it); empty takes them off.
+    set(Change::Key(" F# minor ".into()));
+    set(Change::Notes("louder kick\nthen bounce".into()));
+    let lib = Library::open_read_only(&songs).unwrap();
+    for s in lib.saves().unwrap() {
+        assert_eq!((s.musical_key.as_str(), s.notes.as_str()), ("F# minor", "louder kick\nthen bounce"));
+    }
+    drop(lib);
+    set(Change::Key(String::new()));
+    assert_eq!(Library::open_read_only(&songs).unwrap().saves().unwrap()[0].musical_key, "");
+    // A tag an older library holds that couldn't be put on now (too long, spaces around it) can still be taken off.
+    let long = "x".repeat(70);
+    let c = Connection::open(&songs).unwrap();
+    c.execute("INSERT INTO tags VALUES (1, ?1), (1, ' Loose ')", [&long]).unwrap();
+    drop(c);
+    set(Change::RemoveTag(long));
+    set(Change::RemoveTag("loose".into()));
+    assert_eq!(yours(&songs, 1).3, tags(&["techno"]));
     // Nothing else of the save is touched: its plugins, samples, details and when it was opened.
     let lib = Library::open_read_only(&songs).unwrap();
     let two = lib.detail(2).unwrap().unwrap();
@@ -384,8 +412,10 @@ fn a_save_read_again_cant_undo_what_you_gave_it() {
         Change::AddTag("techno".into()),
         Change::RemoveTag("dark".into()),
     ] {
-        song_fields::set(&songs, &[1], &change).unwrap();
+        song_fields::set(&songs, &rows(&[(1, ONE)]), &change).unwrap();
     }
+    // An older library spelt the hardware's tag its own way: it isn't put on again beside it.
+    Connection::open(&songs).unwrap().execute("INSERT INTO tags VALUES (1, 'Digitakt')", []).unwrap();
     // The folder watch hands the save over as it knew it a moment before: the old status, stars and tags.
     let mut again = read(1, ONE);
     again.save.status = "Mixing".into();
@@ -395,7 +425,7 @@ fn a_save_read_again_cant_undo_what_you_gave_it() {
     again.save.tags = vec!["dark".into(), "digitakt".into()];
     song_writes::write(&songs, &put(again, Some(ONE))).unwrap();
     // Yours as you left them; the file's as read; the tag for its hardware put on, as ever.
-    assert_eq!(yours(&songs, 1), ("Released".into(), 2, true, vec!["digitakt".to_owned(), "techno".to_owned()]));
+    assert_eq!(yours(&songs, 1), ("Released".into(), 2, true, vec!["Digitakt".to_owned(), "techno".to_owned()]));
     let lib = Library::open_read_only(&songs).unwrap();
     let one = lib.saves().unwrap().into_iter().find(|s| s.id == 1).unwrap();
     assert_eq!((one.size, one.notes.as_str(), one.plugin_count), (2_000, "louder kick", 2));
@@ -406,6 +436,7 @@ fn a_change_that_cant_be_kept_changes_nothing() {
     let songs = library("fields-refused");
     let dir = songs.parent().unwrap();
     let before = yours(&songs, 1);
+    let one = rows(&[(1, ONE)]);
     for (change, why) in [
         (Change::Status("Done".into()), "isn't one of the app's statuses"),
         (Change::Status("finished".into()), "isn't one of the app's statuses"),
@@ -415,31 +446,34 @@ fn a_change_that_cant_be_kept_changes_nothing() {
         (Change::AddTag("a\u{1f}b".into()), "can't be shown"),
         (Change::AddTag("x".repeat(65)), "64 characters at most"),
         (Change::RemoveTag(String::new()), "a tag needs a name"),
+        (Change::Key("x".repeat(33)), "32 characters at most"),
+        (Change::Key("A\tminor".into()), "can't be shown"),
+        (Change::Notes("x".repeat(20_001)), "20000 characters at most"),
     ] {
-        let refused = song_fields::set(&songs, &[1], &change).unwrap_err().to_string();
+        let refused = song_fields::set(&songs, &one, &change).unwrap_err().to_string();
         assert!(refused.contains(why), "{change:?}: {refused}");
         assert!(!change.apply(&mut Save::default()), "{change:?}");
     }
     assert_eq!(yours(&songs, 1), before);
     // library.db, and a songs.db not yet the app's own: never written.
-    let why = song_fields::set(&dir.join("library.db"), &[1], &Change::Rating(1)).unwrap_err().to_string();
+    let why = song_fields::set(&dir.join("library.db"), &one, &Change::Rating(1)).unwrap_err().to_string();
     assert!(why.contains("isn't the app's own"), "{why}");
     let not_own = dir.join("other").join(songs_db::FILE_NAME);
     std::fs::create_dir_all(not_own.parent().unwrap()).unwrap();
     songs_db::make(&dir.join("library.db"), &not_own, &mut |_| {}).unwrap();
-    assert!(song_fields::set(&not_own, &[1], &Change::Rating(1)).is_err());
+    assert!(song_fields::set(&not_own, &one, &Change::Rating(1)).is_err());
     assert_eq!(yours(&not_own, 1).1, 4);
-    assert!(song_fields::set(&dir.join("none.db"), &[1], &Change::Rating(1)).is_err());
+    assert!(song_fields::set(&dir.join("none.db"), &one, &Change::Rating(1)).is_err());
     assert!(!dir.join("none.db").exists());
     // Another write holding the library: busy, nothing changed, and it can be tried again.
     let holder = Connection::open(&songs).unwrap();
     holder.execute_batch("BEGIN IMMEDIATE;").unwrap();
-    let busy = song_fields::set(&songs, &[1], &Change::Rating(1)).unwrap_err();
+    let busy = song_fields::set(&songs, &one, &Change::Rating(1)).unwrap_err();
     assert!(busy.is_busy(), "{busy}");
     holder.execute_batch("ROLLBACK;").unwrap();
     drop(holder);
     assert_eq!(yours(&songs, 1), before);
-    song_fields::set(&songs, &[1], &Change::Rating(1)).unwrap();
+    song_fields::set(&songs, &one, &Change::Rating(1)).unwrap();
     assert_eq!(yours(&songs, 1).1, 1);
 }
 
@@ -454,11 +488,22 @@ fn the_same_change_made_to_a_save_in_memory_is_what_the_library_keeps() {
         Change::AddTag(" Techno".into()),
         Change::RemoveTag("Dark".into()),
     ] {
-        song_fields::set(&songs, &[1], &change).unwrap();
+        song_fields::set(&songs, &rows(&[(1, ONE)]), &change).unwrap();
         assert!(change.apply(&mut held), "{change:?}");
         assert!(!change.apply(&mut held), "{change:?}: the same change again changes nothing");
         held.tags.sort();
         assert_eq!(yours(&songs, 1), (held.status.clone(), held.rating, held.favourite, held.tags.clone()));
     }
     assert_eq!(held.tags, vec!["techno".to_owned()]);
+}
+
+#[test]
+fn a_new_save_doesnt_take_on_tags_an_older_library_left_under_its_id() {
+    let songs = library("leftover-tags");
+    // Tags of a save the C# app removed, copied over with the rest: no save has id 2 yet.
+    let c = Connection::open(&songs).unwrap();
+    c.execute_batch("PRAGMA foreign_keys = OFF; INSERT INTO tags VALUES (2, 'someone elses');").unwrap();
+    drop(c);
+    song_writes::write(&songs, &put(read(2, TWO), None)).unwrap();
+    assert_eq!(yours(&songs, 2).3, vec!["digitakt".to_owned()]);
 }

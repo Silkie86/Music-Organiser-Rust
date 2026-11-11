@@ -21,6 +21,7 @@ use mo_formats::plugins::name_key;
 use mo_formats::{Confidence, PluginKind};
 use rusqlite::{Connection, ErrorCode, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params};
 
+use crate::song_fields::same_tag;
 use crate::{LibraryError, SaveDetail};
 
 /// A save read (for the first time, again, or in a new place), with what its reader found.
@@ -352,6 +353,10 @@ fn put_one(tx: &Transaction<'_>, put: &Put) -> rusqlite::Result<(i64, bool)> {
     for table in ["plugins", "samples"] {
         tx.execute(&format!("DELETE FROM {table} WHERE project_id = ?1"), [id])?;
     }
+    if new {
+        // Whatever an older library left under this id (tags of a save the C# app removed) isn't this save's.
+        tx.execute("DELETE FROM tags WHERE project_id = ?1", [id])?;
+    }
     let mut plugin = tx.prepare_cached(
         "INSERT INTO plugins (project_id, name, name_key, vendor, kind, format, path, installed)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -375,7 +380,10 @@ fn put_one(tx: &Transaction<'_>, put: &Put) -> rusqlite::Result<(i64, bool)> {
     }
     let mut tag = tx.prepare_cached("INSERT OR IGNORE INTO tags (project_id, tag) VALUES (?1, ?2)")?;
     for t in tags_to_add(save, new) {
-        tag.execute(params![id, t])?;
+        // Not beside the same tag in other letters (an older library's "Digitakt").
+        if new || crate::song_fields::tags_like(tx, id, &same_tag(t))?.is_empty() {
+            tag.execute(params![id, t])?;
+        }
     }
     match info_json(&put.detail) {
         Some(json) => {
@@ -393,8 +401,8 @@ fn put_one(tx: &Transaction<'_>, put: &Put) -> rusqlite::Result<(i64, bool)> {
 /// The tags a read puts on a save's row: all it comes with for a new row, and for one the library has already only
 /// those for the hardware it uses (the rest are yours: [`put_one`]).
 fn tags_to_add(save: &crate::Save, new: bool) -> impl Iterator<Item = &String> {
-    let hardware: Vec<String> = save.hardware.iter().map(|h| mo_formats::case::to_lower(h)).collect();
-    save.tags.iter().filter(move |t| new || hardware.contains(t))
+    let hardware: Vec<String> = save.hardware.iter().map(|h| same_tag(h)).collect();
+    save.tags.iter().filter(move |t| new || hardware.contains(&same_tag(t)))
 }
 
 /// The columns a read sets, in the order [`update`] and [`insert`] give them (`?2` on).
@@ -402,7 +410,8 @@ const READ_COLUMNS: &str = "path, name, daw, folder, size, mtime, tempo, version
     can_presets, error, file_missing, hardware, status, rating, favourite, musical_key, notes, detected_key, created, \
     note_count, length_bars, track_count";
 
-/// Those of [`READ_COLUMNS`] that are yours, not the file's: a read sets them only on a new row ([`put_one`]).
+/// Those of [`READ_COLUMNS`] that are yours, not the file's: a read sets them only on a new row ([`put_one`]), and
+/// [`crate::song_fields::Change`] has a change for each (as `mo_app::live` carries each over to a new save of a song).
 pub(crate) const YOUR_COLUMNS: [&str; 5] = ["status", "rating", "favourite", "musical_key", "notes"];
 
 /// Sets a save's row as read. When it was last opened is left as it is: that's the app's to note, not the file's.
@@ -500,17 +509,21 @@ fn check(tx: &Transaction<'_>, kept: &[(i64, bool, &SaveDetail)], batch: &Batch)
         let mut back: Option<(String, i64, i64, i64, i64, i64, i64)> = row
             .query_row([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)))
             .optional()?;
-        // A new row has the tags it came with; one the library had keeps its own, however many.
-        let tags = if *new {
-            let mut t: Vec<&str> = d.save.tags.iter().map(String::as_str).collect();
-            t.sort_unstable();
-            t.dedup();
-            t.len()
-        } else {
-            0
-        };
-        if let (false, Some(back)) = (*new, back.as_mut()) {
-            back.6 = 0;
+        // A new row has just the tags it came with. One the library had keeps its own, however many, with one for
+        // each piece of hardware the save uses: those are looked for by name, and the count left out.
+        let mut tags: Vec<&str> = d.save.tags.iter().map(String::as_str).collect();
+        tags.sort_unstable();
+        tags.dedup();
+        let tags = if *new { tags.len() } else { 0 };
+        if !*new {
+            for hardware in tags_to_add(&d.save, false) {
+                if crate::song_fields::tags_like(tx, *id, &same_tag(hardware))?.is_empty() {
+                    return Err(Checked::Differs(format!("the save {} (its tag {hardware})", d.save.path)));
+                }
+            }
+            if let Some(back) = back.as_mut() {
+                back.6 = 0;
+            }
         }
         let wanted = (
             d.save.path.clone(),
