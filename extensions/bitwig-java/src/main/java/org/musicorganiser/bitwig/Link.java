@@ -400,7 +400,8 @@ final class Link {
         // Extension 3.8: another experiment, which only the live tests send.
         commands.put("filetrack", Command.job(this::fileTrack));
         // Extension 3.9: recording a launcher clip into the arranger, a way to stop it that doesn't wait behind it, and a
-        // probe of whether Bitwig carries out its panels' commands for the link. Only the live tests send them so far.
+        // probe of whether Bitwig carries out its panels' commands for the link. The live tests sent them first; the
+        // app's Put in the song (a part found for a song, into the arranger at the song's bars) sends record now.
         commands.put("record", Command.job(this::record));
         commands.put("recordabort", Command.answer(false, this::abortRecording));
         commands.put("probe", Command.job(this::probe));

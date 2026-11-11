@@ -1701,8 +1701,11 @@ fn made_song(cat: &Catalogue, notes: &HashMap<String, Vec<NoteEvent>>, save: &st
             PreviewLane { clips: vec![clip], ..PreviewLane::new(&e.phrase.part, LaneKind::Instrument) }
         })
         .collect();
+    // A made-up Bitwig project is read by its arranger, as a real one with clips there is: its bars are bars Bitwig
+    // can go round and record into.
+    let bitwig = mo_formats::paths::has_extension(save, &["bwproject"]);
     mo_midi::playing::of(&Arrangement {
-        view: "Made up",
+        view: if bitwig { mo_formats::bitwig::arrangement::VIEW } else { "Made up" },
         tempo: 92.0,
         beats_per_bar: 4,
         lanes,
@@ -2809,6 +2812,15 @@ pub fn fit_sample(app: &AppWindow, on: bool) {
     } else {
         pick_fit_song(app, "");
         songs_offered(app, Vec::new());
+    }
+}
+
+/// For the screenshots, with [`fit_sample`] on: fitted to the made-up Bitwig song instead ("Glass"), whose bars
+/// Bitwig's arranger has.
+pub fn fit_sample_bitwig(app: &AppWindow) {
+    if let Some(song) = PAGE.with(|p| p.borrow().fit_songs.iter().find(|s| s.name == "Glass").map(|s| s.label.clone()))
+    {
+        pick_fit_song(app, &song);
     }
 }
 
