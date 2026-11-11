@@ -2410,7 +2410,7 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         }
     });
     // The filter column has room for more or fewer types (the window or what's under them changed): its type list
-    // shows as many again.
+    // shows as many again. Only the type list: the window's edge being dragged changes it at every line's height.
     let weak = app.as_weak();
     data.on_type_room(move |lines, re_lines| {
         let Some(app) = weak.upgrade() else { return };
@@ -2418,12 +2418,16 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
             let mut p = p.borrow_mut();
             (room(&mut p.type_lines, lines), room(&mut p.re_type_lines, re_lines))
         });
-        if types {
-            show_chips(&app);
-        }
-        if re_types {
-            show_rediscover_chips(&app);
-        }
+        let data = app.global::<SoundsData>();
+        PAGE.with(|p| {
+            let p = p.borrow();
+            if types {
+                show_types(&data, &p);
+            }
+            if re_types {
+                show_re_types(&data, &p);
+            }
+        });
     });
     let weak = app.as_weak();
     let weak_again = app.as_weak();
@@ -2905,18 +2909,21 @@ fn show_rediscover_chips(app: &AppWindow) {
     let data = app.global::<SoundsData>();
     PAGE.with(|p| {
         let p = p.borrow();
-        let types: Vec<(String, String)> = p.types.iter().map(|(t, _)| (t.clone(), String::new())).collect();
-        let types = filters::show_split(&types, &p.re.sound_types, p.re_type_lines);
+        show_re_types(&data, &p);
         data.set_re_any_type(!p.re.sound_types.is_empty());
         let counts = filters::one_of(&COUNTS.map(|c| c.to_string()), &p.re.count.to_string());
-        CHOICES.with(|c| {
-            data.set_re_type_filter(c.re_type.view(&types));
-            data.set_re_count_filter(c.re_count.view(&counts));
-        });
+        CHOICES.with(|c| data.set_re_count_filter(c.re_count.view(&counts)));
         data.set_re_adventure(p.re.adventure as f32);
         data.set_re_rarely(p.re.max_uses > 0);
     });
     show_re_years(app);
+}
+
+/// Rediscover's types: as many on tick lines as the filter column has room for, the rest in its More types.
+fn show_re_types(data: &SoundsData, p: &Page) {
+    let types: Vec<(String, String)> = p.types.iter().map(|(t, _)| (t.clone(), String::new())).collect();
+    let types = filters::show_split(&types, &p.re.sound_types, p.re_type_lines);
+    CHOICES.with(|c| data.set_re_type_filter(c.re_type.view(&types)));
 }
 
 /// Rediscover's year strip, as [`show_years`] shows the filters' one: each year, how full it is, and the span picked.
@@ -3334,6 +3341,13 @@ fn redraw() {
     grid::changed();
     LINES.with(|m| m.notify.reset());
     kit::redraw();
+}
+
+/// The Type filter's chips alone: as many types on tick lines as the filter column has room for, the rest in More
+/// types (the other filters' chips are made too, and left as they are).
+fn show_types(data: &SoundsData, p: &Page) {
+    let chips = list::chips_showing(&p.filters, p.counts.as_ref(), &p.types, &p.tags, p.type_lines);
+    FILTER_MODELS.with(|m| data.set_type_filter(m[0].view(&chips.types)));
 }
 
 /// The filters' chips and menus as the filters are now, each choice with the counts from the newest list worked out

@@ -1921,8 +1921,9 @@ export component SoundsPage inherits Rectangle {
                         filter: SoundsData.type-filter;
                         // As many types as there's room for as tick lines, the rest in More types (Solomon, 11 Nov
                         // 2026: "the more types should fill is there more space").
-                        spare-lines: column.spare-lines;
+                        spare-room: column.spare-room;
                         changed fits => {
+                            // Not from a list on its way out: it still says once, after the view has changed.
                             if SoundsData.view < 4 {
                                 SoundsData.type-room(self.fits, 0);
                             }
@@ -2048,10 +2049,11 @@ export component SoundsPage inherits Rectangle {
                         name: "TYPE";
                         more-name: "More types";
                         filter: SoundsData.re-type-filter;
-                        spare-lines: column.spare-lines;
+                        spare-room: column.spare-room;
                         // Not while it digs: the words under its choices say so meanwhile, and change back.
                         property <int> room: SoundsData.re-busy ? 0 : self.fits;
                         changed room => {
+                            // As for the Type filter: not from a list on its way out.
                             if SoundsData.view == 4 {
                                 SoundsData.type-room(0, self.room);
                             }

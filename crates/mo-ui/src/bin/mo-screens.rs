@@ -673,8 +673,12 @@ fn types_fill_the_column(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow)
         window.set_size(PhysicalSize::new(WIDTH, height));
         capture_sized(window, (WIDTH, height), Duration::from_millis(400))
     };
-    let kept_free = |name: &str, shot: &[u8], free: u32| match column_room_below(shot, WIDTH) {
-        Some(room) if room >= free => Ok(()),
+    // The sizes the column counts its room in (studio.slint's Heights and Space).
+    let heights = app.global::<mo_ui::Heights>();
+    let (tick_line, button, gap) =
+        (heights.get_tick_line(), heights.get_button(), app.global::<mo_ui::Space>().get_md());
+    let kept_free = |name: &str, shot: &[u8], free: f32| match column_room_below(shot, WIDTH) {
+        Some(room) if f64::from(room) >= f64::from(free) => Ok(()),
         room => Err(format!(
             "types: {name}'s filter column ends {room:?} pixels above its foot, not the {free} kept for what comes as \
              you pick: is something in it drawn taller than it was measured?"
@@ -691,8 +695,8 @@ fn types_fill_the_column(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow)
             WIDE.1
         ));
     }
-    // Keys that mix well and Clear filters: a tick line (26) and a button (32), each with the space above it (12).
-    kept_free("The Type filter", &shot, 26 + 12 + 32 + 12)?;
+    // Keys that mix well and Clear filters, each with the space above it.
+    kept_free("The Type filter", &shot, tick_line + gap + button + gap)?;
     let (last, _) = line(false, lines - 1);
     sounds.invoke_toggle_choice("type".into(), last.clone().into());
     sized(WIDE.1);
@@ -717,8 +721,8 @@ fn types_fill_the_column(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow)
              it has room for more than {TYPE_CHIPS} and not for all"
         ));
     }
-    // Clear types: a button (32) and the space above it (12).
-    kept_free("Rediscover", &shot, 32 + 12)?;
+    // Clear types, with the space above it.
+    kept_free("Rediscover", &shot, button + gap)?;
     let (last, _) = line(true, re_lines - 1);
     sounds.invoke_re_pick("type".into(), last.clone().into());
     sized(HEIGHT);
@@ -3210,6 +3214,9 @@ fn column_room_below(pixels: &[u8], width: u32) -> Option<u32> {
         [pixels[i], pixels[i + 1], pixels[i + 2]]
     };
     let rows = 200..height.saturating_sub(100);
+    if rows.is_empty() {
+        return None;
+    }
     let line = (COLUMN_WIDTH + 4..width / 2).find(|&x| {
         let c = at(x, rows.start);
         rows.clone().all(|y| at(x, y) == c && at(x - 1, y) != c && at(x + 1, y) != c)

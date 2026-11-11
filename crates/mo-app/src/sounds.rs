@@ -113,14 +113,9 @@ const TEMPO_BAR: i32 = 10;
 pub const TYPE_CHIPS: usize = 9;
 
 /// A More types menu's Any (the Type filter's and Rediscover's alike): unpicks from `picked` the types picked in the
-/// menu, and keeps the ones picked on chips of their own, in any case. `types` is [`SoundList::type_counts`], as the
-/// chips were shown from.
-pub fn keep_chip_types(picked: &mut Vec<String>, types: &[(String, usize)]) {
-    keep_first_types(picked, types, TYPE_CHIPS);
-}
-
-/// [`keep_chip_types`] where the first `shown` types are on show (a column with room for more or fewer than
-/// [`TYPE_CHIPS`], [`chips_showing`]).
+/// menu, and keeps the ones picked on chips or tick lines of their own, in any case. `types` is
+/// [`SoundList::type_counts`], as the chips were shown from, and the first `shown` of them are on show: as many as the
+/// filter column has room for ([`chips_showing`]), [`TYPE_CHIPS`] at the least.
 pub fn keep_first_types(picked: &mut Vec<String>, types: &[(String, usize)], shown: usize) {
     let on_chips = &types[..types.len().min(shown)];
     picked.retain(|t| on_chips.iter().any(|(c, _)| c.eq_ignore_ascii_case(t)));
@@ -201,12 +196,6 @@ impl Filters {
         };
         let (low, high) = (step(low.min(high)), step(low.max(high)));
         self.tempo = ((low > TEMPO_LOW).then_some(f64::from(low)), (high < TEMPO_HIGH).then_some(f64::from(high)));
-    }
-
-    /// The type filter's More menu's Any: unpicks the types in the menu, and keeps the ones picked on chips of their
-    /// own. `types` is [`SoundList::type_counts`], as the chips were shown from.
-    pub fn clear_more_types(&mut self, types: &[(String, usize)]) {
-        keep_chip_types(&mut self.sound_types, types);
     }
 
     /// Picks nothing on the filter `chip`: its menu's Any, or Clear types.
@@ -2124,7 +2113,7 @@ mod tests {
         // The More menu's Any keeps the types picked on chips of their own.
         let types: Vec<(String, usize)> = (0..12).map(|n| (format!("Type {n}"), 12 - n)).collect();
         let mut more = Filters { sound_types: vec!["Type 0".into(), "Type 11".into()], ..Filters::default() };
-        more.clear_more_types(&types);
+        keep_first_types(&mut more.sound_types, &types, TYPE_CHIPS);
         assert_eq!(more.sound_types, ["Type 0"]);
         for chip in [TYPE, LENGTH, KEY, TEMPO, TAG] {
             f.clear_chip(chip);

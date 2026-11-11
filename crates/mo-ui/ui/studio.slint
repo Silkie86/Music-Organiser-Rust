@@ -1371,18 +1371,23 @@ export component FilterList inherits VerticalLayout {
     in property <string> name;
     in property <FilterView> filter;
     in property <string> more-name: "More";
-    // For a list that shows as many of its choices as there's room for (the Sounds page's types): how many more tick
-    // lines its column has room for (FilterColumn's `spare-lines`), and so how many of its choices would fit as tick
-    // lines, those on show and as many more. 0 while it has no choices, and while its lines for new choices aren't
-    // made yet: they're made a moment after the choices come, and until then the room left is measured without them.
-    in property <int> spare-lines;
-    out property <int> fits: root.filter.chips.length > 0 && round(lines.preferred-height / Heights.tick-line) == root.filter.chips.length
-        ? max(1, root.filter.chips.length + root.spare-lines) : 0;
+    // For a list that shows as many of its choices as there's room for (the Sounds page's types): the room its column
+    // has left under its filters (FilterColumn's `spare-room`), and so how many of its choices would fit as tick lines.
+    // That's those on show and as many more as the room holds, or all of them once the room and the More menu's row
+    // would hold the rest (the row goes with them). Never 0 then, as 0 means not counted: while it has no choices, and
+    // while its lines for new choices aren't made yet (they're made a moment after the choices come, and until then
+    // the room left is measured without them).
+    in property <length> spare-room;
+    // The More menu's row under the lines while it shows, 0 without it.
+    property <length> more-row: root.preferred-height - caps.height - lines.preferred-height;
+    out property <int> fits: root.filter.chips.length == 0 || round(lines.preferred-height / Heights.tick-line) != root.filter.chips.length ? 0
+        : root.filter.more.length * Heights.tick-line <= root.spare-room + root.more-row ? root.filter.chips.length + root.filter.more.length
+        : max(1, root.filter.chips.length + floor(root.spare-room / Heights.tick-line));
     callback toggled(string);
     callback cleared();
     alignment: start;
     spacing: 0;
-    Caps {
+    caps := Caps {
         text: root.name;
         height: 22px;
     }
@@ -1430,10 +1435,10 @@ export component FilterColumn inherits Rectangle {
     // Room kept free under the filters for what comes and goes as you pick (a Clear button), so its coming doesn't
     // take a line away from a list that fills the room.
     in property <length> keep-free;
-    // How many more TickLines there's room for under the filters, less `keep-free` (fewer than none while they're
-    // taller than the column, which then scrolls): a FilterList can show that many more of its choices, as the
-    // Sounds page's types do (Solomon, 11 Nov 2026: "the more types should fill is there more space").
-    out property <int> spare-lines: floor((flick.height - lists.preferred-height - root.keep-free) / Heights.tick-line);
+    // The room left under the filters, less `keep-free` (less than none while they're taller than the column, which
+    // then scrolls): a FilterList can fill it with more of its choices, as the Sounds page's types do (Solomon, 11 Nov
+    // 2026: "the more types should fill is there more space").
+    out property <length> spare-room: flick.height - lists.preferred-height - root.keep-free;
     x: 0;
     y: 0;
     visible: root.shown;
