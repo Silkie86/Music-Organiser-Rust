@@ -334,10 +334,12 @@ impl YourOctaves {
 }
 
 /// Gives each line the octave you chose for its notes ([`Fit::yours`]), and takes it from a line whose notes are back
-/// at the app's pick: after a search, and after each change of octave.
+/// at the app's pick: after a search, and after each change of octave. Never a drum part's: its notes pick pads, so
+/// an octave kept for the same notes (chosen while they counted as another kind, or in the old app) doesn't move it.
 pub fn with_yours(fits: &mut [Fit], cat: &Catalogue, yours: &YourOctaves) {
     for fit in fits {
-        fit.yours = cat.entry(fit.entry).and_then(|e| yours.of(&e.phrase));
+        let pitched = cat.entry(fit.entry).filter(|e| e.role() != Role::Drums);
+        fit.yours = pitched.and_then(|e| yours.of(&e.phrase));
     }
 }
 
@@ -1078,6 +1080,20 @@ mod tests {
         let mut gone = [Fit { entry: 9_999, yours: Some(1), ..line("clashes") }];
         with_yours(&mut gone, &cat, &said);
         assert_eq!(gone[0].yours, None);
+
+        // Drums are never moved by octaves (their notes pick pads): an octave kept for the same notes, from when
+        // they counted as another kind or from the old app, isn't theirs, whoever said it and when.
+        let drums = index.phrases.iter_mut().find(|p| p.hash == "scrap").unwrap();
+        (drums.your_role, drums.your_octave) = (Some(Role::Drums), Some(2));
+        let cat = Catalogue::new(index.phrases.clone());
+        let scrap = cat.find("scrap").unwrap();
+        assert_eq!(cat.entry(scrap).map(|e| e.role()), Some(Role::Drums));
+        let mut beat = [Fit { entry: scrap, semitones: 0, octaves: 0, yours: Some(1), edges: (36, 46), sits: 1.0 }];
+        with_yours(&mut beat, &cat, &said);
+        assert_eq!((beat[0].yours, beat[0].moved()), (None, 0));
+        said.set("scrap", Some(-1));
+        with_yours(&mut beat, &cat, &said);
+        assert_eq!((beat[0].yours, beat[0].moved()), (None, 0));
     }
 
     #[test]

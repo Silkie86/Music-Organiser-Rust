@@ -230,8 +230,12 @@ the next PR step by step). Solomon wants the highest effort here.
     (`Fit::yours`, `Fit::octaves_now`), octaves chosen in the C# app too. The page has a choice at once
     (`midi_fits::YourOctaves` over the catalogue's, `with_yours` after each search and each change;
     `Page::change_octave`), and the index is told off the window's thread (`remember_octave`: the newest for each
-    set of notes, written in turn, `mo_app::background::Latest`; `MidiStore::set_your_octave`). The search itself
-    doesn't know of your octaves. A part in a plain list is as it is in the library: no octave buttons.
+    set of notes, written in turn, `mo_app::background::Latest`; tried 3 times when the index is busy, and waited
+    for a moment as the app closes). `MidiStore::keep_your_octaves` writes it: only into an index that's there,
+    never making or converting one. The search itself doesn't know of your octaves. A part in a plain list is as
+    it is in the library: no octave buttons; drums never have them, and an octave kept for the same notes doesn't
+    move a drum part. A held key steps once (7 octaves to be at; each step starts what's playing again), and at
+    the last octave the key is still the page's.
   Not built yet: picking a song's parts and bars by hand, hearing a part with the song, and putting the part
   found at the right bar of the project.
 

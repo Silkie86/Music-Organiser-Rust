@@ -4,6 +4,7 @@
 use std::io;
 use std::sync::{Arc, Condvar, LazyLock, Mutex, PoisonError, mpsc};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// Starts `work` on a thread of its own called `name`, at low priority. Only the watchdog, which must notice the
 /// window freezing however busy the computer is, the session log's writer, which a crash waits for, and Play in FL
@@ -387,6 +388,40 @@ impl<K: PartialEq + Send + 'static, V: Send + 'static> Latest<K, V> {
         }
         Ok(())
     }
+
+    /// Waits until everything said has been written, `longest` at the most: for when the app closes, so what was
+    /// said just before isn't lost with the thread. Whether it all was (false too when the thread never started).
+    pub fn wait(&self, longest: Duration) -> bool {
+        let until = Instant::now() + longest;
+        loop {
+            {
+                let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+                if !state.writing {
+                    return state.waiting.is_empty();
+                }
+            }
+            if Instant::now() >= until {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+}
+
+/// Does `work` until it goes well, `tries` times at the most (once at the least) with `pause` between them: for a
+/// small write that the indexer or another copy of the app may be in the way of for longer than the database waits.
+/// What the last try gave. Never on the window's thread: it sleeps.
+pub fn try_again<T, E>(tries: u32, pause: Duration, mut work: impl FnMut() -> Result<T, E>) -> Result<T, E> {
+    let mut tried = 1;
+    loop {
+        match work() {
+            Err(_) if tried < tries => {
+                tried += 1;
+                std::thread::sleep(pause);
+            }
+            done => return done,
+        }
+    }
 }
 
 impl<K: PartialEq + Send + 'static, V: Send + 'static> Default for Latest<K, V> {
@@ -399,7 +434,6 @@ impl<K: PartialEq + Send + 'static, V: Send + 'static> Default for Latest<K, V> 
 mod tests {
     use super::*;
     use std::sync::mpsc;
-    use std::time::Duration;
 
     #[test]
     fn the_newest_said_for_each_key_is_written_in_one_go() {
@@ -458,6 +492,54 @@ mod tests {
         started.recv_timeout(Duration::from_secs(5)).unwrap();
         SAID.say("Test latest panics", "b", 2, write(started_tx, done_tx)).unwrap();
         assert_eq!(done.recv_timeout(Duration::from_secs(5)).unwrap(), [("b", 2)]);
+    }
+
+    #[test]
+    fn what_was_said_can_be_waited_for_as_the_app_closes() {
+        static SAID: Latest<&str, u32> = Latest::new();
+        // Nothing said: nothing to wait for.
+        assert!(SAID.wait(Duration::ZERO));
+        let (gate_tx, gate) = mpsc::channel::<()>();
+        let (done_tx, done) = mpsc::channel::<Vec<(&str, u32)>>();
+        SAID.say("Test latest waits", "a", 1, move |batch| {
+            let _ = gate.recv();
+            let _ = done_tx.send(batch);
+        })
+        .unwrap();
+        // Still being written: the wait gives up when its time is up, and says so.
+        assert!(!SAID.wait(Duration::from_millis(30)));
+        assert!(done.try_recv().is_err());
+        // Let through: the wait ends once it's written.
+        gate_tx.send(()).unwrap();
+        assert!(SAID.wait(Duration::from_secs(5)));
+        assert_eq!(done.try_recv().unwrap(), [("a", 1)]);
+    }
+
+    #[test]
+    fn work_is_tried_again_until_it_goes_well_or_the_tries_are_up() {
+        let tries_until = |good_at: u32, tries: u32| {
+            let mut tried = 0;
+            let ended = try_again(tries, Duration::ZERO, || {
+                tried += 1;
+                if tried >= good_at { Ok(tried) } else { Err(tried) }
+            });
+            (ended, tried)
+        };
+        // Well at once: done once. Well at the third try: three tries.
+        assert_eq!(tries_until(1, 3), (Ok(1), 1));
+        assert_eq!(tries_until(3, 3), (Ok(3), 3));
+        // Never well: what the last try said, after as many tries as allowed; once at the least.
+        assert_eq!(tries_until(9, 3), (Err(3), 3));
+        assert_eq!(tries_until(9, 1), (Err(1), 1));
+        assert_eq!(tries_until(9, 0), (Err(1), 1));
+        // A pause between tries, and none after the last.
+        let started = Instant::now();
+        let mut tried = 0;
+        let _ = try_again(3, Duration::from_millis(20), || {
+            tried += 1;
+            if tried < 3 { Err(()) } else { Ok(()) }
+        });
+        assert!(started.elapsed() >= Duration::from_millis(40));
     }
 
     #[test]

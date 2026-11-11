@@ -191,9 +191,18 @@ struct CardFit {
     text: String,
     /// Whether it's moved at all (a part can fit as it is).
     moved: bool,
-    /// The octave buttons, for a part that's fitted: whether it can go up, and down, and whether the octave is one
-    /// you chose (so the app's pick is offered back).
-    octave: Option<(bool, bool, bool)>,
+    /// The octave buttons, for a part that's fitted (drums aside).
+    octave: Option<OctaveButtons>,
+}
+
+/// What a fitted part's octave buttons can do now.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct OctaveButtons {
+    /// Whether it can go an octave up, and down ([`Fit::octave_step`]).
+    up: bool,
+    down: bool,
+    /// Whether the octave is one you chose, so the app's pick is offered back.
+    yours: bool,
 }
 
 /// A part's notes as they leave the index, for its card, the speakers, a DAW or a drag: where they're read from, how
@@ -274,8 +283,11 @@ impl Page {
         CardFit {
             text: self.picked_fit_text(),
             moved: fit.moved() != 0,
-            octave: (!drums)
-                .then(|| (fit.octave_step(1).is_some(), fit.octave_step(-1).is_some(), fit.yours.is_some())),
+            octave: (!drums).then(|| OctaveButtons {
+                up: fit.octave_step(1).is_some(),
+                down: fit.octave_step(-1).is_some(),
+                yours: fit.yours.is_some(),
+            }),
         }
     }
 
@@ -638,13 +650,17 @@ fn show_actions(data: &MidiData, p: &Page) {
 /// fit as it was redraws nothing.
 fn show_card_fit(data: &MidiData, p: &mut Page) {
     let fit = p.card_fit();
-    if fit == p.card_fit {
+    let mut card = data.get_picked();
+    // By the card on screen as well as by what was last put there, so the two can't drift apart.
+    let said = card.fit == fit.text.as_str() && card.fit_moved == fit.moved;
+    if said && fit == p.card_fit {
         return;
     }
-    let mut card = data.get_picked();
-    card.fit = fit.text.as_str().into();
-    card.fit_moved = fit.moved;
-    data.set_picked(card);
+    if !said {
+        card.fit = fit.text.as_str().into();
+        card.fit_moved = fit.moved;
+        data.set_picked(card);
+    }
     p.card_fit = fit;
     show_actions(data, p);
 }
@@ -2125,14 +2141,14 @@ fn card(e: &mo_midi::Entry) -> PickedPart {
 fn actions(
     e: &mo_midi::Entry,
     shortcuts: &Shortcuts,
-    octave: Option<(bool, bool, bool)>,
+    octave: Option<OctaveButtons>,
 ) -> (Vec<CardAction>, Vec<CardAction>, Vec<MenuItem>) {
     // Down then up, as they sit side by side; the app's pick is offered back once the octave is yours.
     let mut octaves: Vec<(&str, &str, bool)> = Vec::new();
-    if let Some((up, down, yours)) = octave {
-        octaves.push(("midi.octaveDown", "Octave down", down));
-        octaves.push(("midi.octaveUp", "Octave up", up));
-        if yours {
+    if let Some(can) = octave {
+        octaves.push(("midi.octaveDown", "Octave down", can.down));
+        octaves.push(("midi.octaveUp", "Octave up", can.up));
+        if can.yours {
             octaves.push(("midi.octaveApp", "The app's octave", true));
         }
     }
@@ -2255,20 +2271,24 @@ pub fn run_action(app: &AppWindow, id: &str) -> bool {
 }
 
 /// Octave up, Octave down or The app's octave on the picked part ([`Page::change_octave`]): its line and its card
-/// say it at once, what's playing plays there ([`fit_follows`]), and the index is told for the next time. False when
-/// there was nothing to change.
+/// say it at once, what's playing plays there ([`fit_follows`]), and the index is told for the next time. Whether
+/// the picked part has octave buttons at all: its key is then this page's even with nothing left to do (3 octaves up
+/// already), so it never goes on to do something else.
 fn change_octave(app: &AppWindow, change: OctaveChange) -> bool {
-    let changed = PAGE.with(|p| {
+    let (changed, has_buttons) = PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        let (hash, octaves, rows) = p.change_octave(change)?;
-        // The screenshots' made-up parts have no index to keep it in.
-        let index = match &p.notes {
-            Some(NotesFrom::Store(index)) => Some(index.clone()),
-            _ => None,
-        };
-        Some((hash, octaves, rows, index))
+        let has_buttons = p.card_fit().octave.is_some();
+        let changed = p.change_octave(change).map(|(hash, octaves, rows)| {
+            // The screenshots' made-up parts have no index to keep it in.
+            let index = match &p.notes {
+                Some(NotesFrom::Store(index)) => Some(index.clone()),
+                _ => None,
+            };
+            (hash, octaves, rows, index)
+        });
+        (changed, has_buttons)
     });
-    let Some((hash, octaves, rows, index)) = changed else { return false };
+    let Some((hash, octaves, rows, index)) = changed else { return has_buttons };
     for row in rows {
         LINES.with(|l| l.notify.row_changed(row));
     }
@@ -2280,14 +2300,22 @@ fn change_octave(app: &AppWindow, change: OctaveChange) -> bool {
 }
 
 /// The octaves chosen that the index hasn't been told yet, by its file and the notes' fingerprint: the newest for
-/// each, written in turn off the window's thread (a key held down says several a second).
+/// each, written in turn off the window's thread.
 static OCTAVES_SAID: background::Latest<(PathBuf, String), Option<i32>> = background::Latest::new();
+
+/// How many times an octave is given to the index, and how long apart, when the index doesn't take it: the indexer
+/// or another copy of the app may be writing for longer than the index waits (5 seconds each time).
+const OCTAVE_TRIES: u32 = 3;
+const OCTAVE_PAUSE: Duration = Duration::from_secs(2);
+
+/// How long the app waits, as it closes, for an octave chosen just before to reach the index.
+const OCTAVE_WAIT: Duration = Duration::from_secs(2);
 
 /// Has the index keep the octave you chose for a set of notes (none: the app's pick again). The page has it already
 /// ([`midi_fits::YourOctaves`]); this is for the next time the index is read.
 fn remember_octave(index: PathBuf, hash: String, octaves: Option<i32>) {
     let said = OCTAVES_SAID.say("MIDI octaves", (index, hash), octaves, |said| {
-        if let Err(why) = keep_octaves(&said) {
+        if let Err(why) = background::try_again(OCTAVE_TRIES, OCTAVE_PAUSE, || keep_octaves(&said)) {
             let why = format!("An octave you chose couldn't be kept in the MIDI index: {why}");
             log::error("MIDI", &format!("{why} It holds until the app is closed."));
         }
@@ -2298,24 +2326,23 @@ fn remember_octave(index: PathBuf, hash: String, octaves: Option<i32>) {
 }
 
 /// Writes octaves chosen into their index (`said`: the index's file and the notes' fingerprint, with the octaves;
-/// none for the app's pick again), each index opened once. Every one is tried; Err: why the first that failed did.
+/// none for the app's pick again): each index in one go, and only one that's there (`MidiStore::keep_your_octaves`
+/// makes none). Every index is tried; Err: why the first that failed did.
 fn keep_octaves(said: &[((PathBuf, String), Option<i32>)]) -> Result<(), String> {
-    let mut open: Option<(&Path, MidiStore)> = None;
-    let mut failed = None;
-    for ((index, hash), octaves) in said {
-        if open.as_ref().is_none_or(|(of, _)| *of != index.as_path()) {
-            open = None;
-            match MidiStore::open(index) {
-                Ok(store) => open = Some((index, store)),
-                Err(e) => {
-                    failed.get_or_insert(e.to_string());
-                    continue;
-                }
-            }
+    let mut indexes: Vec<&Path> = Vec::new();
+    for ((index, _), _) in said {
+        if !indexes.contains(&index.as_path()) {
+            indexes.push(index);
         }
-        if let Some((_, store)) = open.as_mut()
-            && let Err(e) = store.set_your_octave(hash, *octaves)
-        {
+    }
+    let mut failed = None;
+    for index in indexes {
+        let theirs: Vec<(&str, Option<i32>)> = said
+            .iter()
+            .filter(|((of, _), _)| of == index)
+            .map(|((_, hash), octaves)| (hash.as_str(), *octaves))
+            .collect();
+        if let Err(e) = MidiStore::keep_your_octaves(index, &theirs) {
             failed.get_or_insert(e.to_string());
         }
     }
@@ -3324,6 +3351,10 @@ fn watch_fl(app: &AppWindow) {
 /// When the app closes: stops a part playing in a DAW, so Bitwig's clip doesn't loop on and no note hangs in FL.
 /// Waits a moment at most (Bitwig answers on this computer).
 pub fn finish_up() {
+    // An octave chosen just before closing still reaches the index: waited for a moment.
+    if !OCTAVES_SAID.wait(OCTAVE_WAIT) {
+        log::warning("MIDI", "An octave you chose was still on its way to the MIDI index when the app closed.");
+    }
     // A start still on its way sees it's no longer wanted and takes back what it put in: waited for a moment (the
     // review's D-fp4; the Presets page's finish_up waits for its own the same way).
     let first = take_in_daw();
@@ -3731,7 +3762,8 @@ mod tests {
         p.fit_picked();
         let hash = p.cat.entry(4).map(|e| e.phrase.hash.clone()).unwrap_or_default();
         let card = p.card_fit();
-        assert_eq!((card.octave, card.moved), (Some((true, true, false)), true));
+        let can = |up, down, yours| Some(OctaveButtons { up, down, yours });
+        assert_eq!((card.octave, card.moved), (can(true, true, false), true));
         assert_eq!(card.text, midi_fits::card_text(-9, false, "Night drive"));
 
         // Up from where the app put it: back where it's saved, which is what's remembered for its notes. Its line
@@ -3742,14 +3774,14 @@ mod tests {
         let card = p.card_fit();
         assert_eq!(card.text, midi_fits::card_text(3, true, "Night drive"));
         assert!(card.text.contains("at the octave you chose"), "{}", card.text);
-        assert_eq!(card.octave, Some((true, true, true)), "the app's octave is offered back");
+        assert_eq!(card.octave, can(true, true, true), "the app's octave is offered back");
         assert!(p.part_out(4).is_some_and(|part| part.semitones == 3 && part.name.ends_with(" (3 semitones up)")));
         // Up to the top: 3 octaves, and there Octave up has nothing more to do.
         for octaves in 1..=3 {
             assert_eq!(p.change_octave(Up).map(|(_, kept, _)| kept), Some(Some(octaves)));
         }
         assert_eq!((p.change_octave(Up), p.fit_move(4)), (None, 39));
-        assert_eq!(p.card_fit().octave, Some((false, true, true)));
+        assert_eq!(p.card_fit().octave, can(false, true, true));
 
         // A new list (a filter ticked, the song saved again) has the part where you put it.
         listed(&mut p, &[4, 2]);
@@ -3761,7 +3793,7 @@ mod tests {
         // The app's octave: its pick again, remembered as no choice; a second press has nothing to do.
         listed(&mut p, &[2, 4]);
         assert_eq!(p.change_octave(Apps), Some((hash.clone(), None, vec![1])));
-        assert_eq!((p.fit_move(4), p.card_fit().octave), (-9, Some((true, true, false))));
+        assert_eq!((p.fit_move(4), p.card_fit().octave), (-9, can(true, true, false)));
         assert_eq!(p.change_octave(Apps), None);
         listed(&mut p, &[2, 4]);
         assert_eq!(p.fit_move(4), -9, "and a new list leaves it with the app");
@@ -3773,7 +3805,7 @@ mod tests {
         let said = |list: &[CardAction]| -> Vec<(String, String, bool)> {
             list.iter().map(|a| (a.text.to_string(), a.key.to_string(), a.enabled)).collect()
         };
-        let (card, octave, menu) = actions(e, &keys, Some((false, true, true)));
+        let (card, octave, menu) = actions(e, &keys, can(false, true, true));
         assert_eq!(
             said(&octave),
             [
@@ -3789,7 +3821,7 @@ mod tests {
         );
         assert!(card.iter().all(|a| !a.id.starts_with("midi.octave")), "the card's own buttons stay as they were");
         // The app's pick still stands: nothing to give back. A part that isn't fitted: no octave buttons at all.
-        assert_eq!(actions(e, &keys, Some((true, true, false))).1.len(), 2);
+        assert_eq!(actions(e, &keys, can(true, true, false)).1.len(), 2);
         let (_, octave, menu) = actions(e, &keys, None);
         assert!(octave.is_empty() && menu.iter().all(|m| !m.id.starts_with("midi.octave")));
 
@@ -4021,7 +4053,7 @@ mod tests {
         assert!(keep_octaves(&both).is_err());
         assert_eq!(read_again(), Some(Some(2)));
         // The other way round: what was meant for the index that didn't open isn't written into the one that did.
-        let other_way = [said(Some(1)).to_vec(), vec![((nowhere, "meant for another".to_owned()), Some(3))]].concat();
+        let other_way = [said(Some(1)).to_vec(), vec![((nowhere, scale.clone()), Some(3))]].concat();
         assert!(keep_octaves(&other_way).is_err());
         assert_eq!(read_again(), Some(Some(1)));
         // From the page it goes off the window's thread, the newest said for the notes last.

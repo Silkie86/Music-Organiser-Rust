@@ -489,11 +489,12 @@ pub fn written(key: &str) -> String {
     }
 }
 
-/// Whether an action does its job again and again while its key is held: stepping through a list and moving an
-/// octave (as in the C# app). Every other key does its job once however long it's held, so holding F11 doesn't flick
-/// full screen on and off.
+/// Whether an action does its job again and again while its key is held: stepping through a list. Every other key
+/// does its job once however long it's held, so holding F11 doesn't flick full screen on and off. The MIDI page's
+/// octave keys are among those (the C# app's repeated): there are 7 octaves to be at, a held key would fly to the
+/// last, and each step starts what's playing again.
 pub fn repeats(id: &str) -> bool {
-    matches!(id, "app.prevItem" | "app.nextItem" | "midi.octaveUp" | "midi.octaveDown")
+    matches!(id, "app.prevItem" | "app.nextItem")
 }
 
 /// Keys with names rather than one character, in the spelling the list uses.
@@ -800,7 +801,8 @@ mod tests {
         assert_eq!(keys.key_of("app.search"), "Shift+Alt+Up");
         assert_eq!(keys.page_action_for("Alt+Up", MIDI_ACTIONS), Some("midi.octaveUp"));
         assert_eq!(keys.page_action_for("Alt+Down", MIDI_ACTIONS), Some("midi.octaveDown"));
-        assert!(repeats("midi.octaveUp") && repeats("midi.octaveDown") && !repeats("midi.octaveApp"));
+        // Held down, an octave key steps once: a held key would fly to the last octave.
+        assert!(!repeats("midi.octaveUp") && !repeats("midi.octaveDown") && !repeats("midi.octaveApp"));
         // Each page with a list says what its arrows do on the key sheet; the pages without one say nothing.
         for place in [Place::Songs, Place::Sounds, Place::Presets, Place::Midi, Place::Plugins] {
             assert!(list_keys(place).iter().any(|(k, _)| k.contains("Up")), "{place:?}");

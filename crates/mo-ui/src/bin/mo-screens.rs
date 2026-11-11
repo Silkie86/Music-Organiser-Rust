@@ -220,17 +220,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if carried(0) != Some(format!("{} (9 semitones down)", moved.title)) || midi.get_picked().fit != lower.fit {
         return Err("midi-fits-octave.png: a list worked out again lost the octave chosen".into());
     }
-    // Alt+Up as a key held down (it steps): up an octave, back where the app had it, and still yours.
-    let up = char::from(slint::platform::Key::UpArrow).to_string();
-    let held = app.global::<mo_ui::AppKeys>().invoke_key(up.into(), false, false, true, false, true);
+    // Alt+Up, as a key: up an octave, back where the app had it, and still yours. Held down it steps once only.
+    let alt_up = |repeat| {
+        let up = char::from(slint::platform::Key::UpArrow).to_string();
+        app.global::<mo_ui::AppKeys>().invoke_key(up.into(), false, false, true, false, repeat)
+    };
+    let pressed = alt_up(false);
     let upper = midi.get_picked();
-    if !held
+    if !pressed
         || !upper.fit.starts_with("Moved 3 semitones up")
         || !upper.fit.contains("at the octave you chose")
         || upper.roll_low != moved.roll_low
         || octave_buttons().len() != 3
     {
-        return Err("midi-fits-octave.png: Alt+Up held down didn't take the part up an octave".into());
+        return Err("midi-fits-octave.png: Alt+Up didn't take the part up an octave".into());
+    }
+    if !alt_up(true) || midi.get_picked().fit != upper.fit {
+        return Err("midi-fits-octave.png: Alt+Up held down went on stepping, or wasn't the page's key".into());
+    }
+    // Up to the last octave (3 up): there the key is still the page's, and does nothing rather than something else.
+    let stepped = (0..3).all(|_| alt_up(false));
+    let top = midi.get_picked();
+    if !stepped || !top.fit.starts_with("Moved 3 octaves and 3 semitones up") {
+        return Err(format!("midi-fits-octave.png: three more Alt+Up gave \"{}\"", top.fit).into());
+    }
+    if !alt_up(false) || midi.get_picked().fit != top.fit {
+        return Err("midi-fits-octave.png: at the last octave Alt+Up wasn't the page's key any more".into());
     }
     let back = mo_ui::midi::run_action(&app, "midi.octaveApp");
     let again = midi.get_picked();
