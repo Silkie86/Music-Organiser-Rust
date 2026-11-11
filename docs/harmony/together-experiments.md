@@ -294,14 +294,18 @@ place, 71.4% half-way, 64.4% by the song's other tune (the C# app 63.2% and 54.2
   count with a throwaway script over all 906 songs, the kept-back fold among them, which is where the 58 came from;
   nothing was fitted.
 
-**What's judged is what's dropped** (2026-11-11). The search hears a found part over its clip: its bars as the
-index counts them (`mo_midi::analyser::clip_length`: from its first bar line, muted notes too, a last note that
-hangs up to a hundredth of a bar over a line not making a bar), which is what the app plays, drags and sends.
-Before, it went from the bar of the part's first note to the bar its last note ended in, so a 4-bar part with a
-last note a hair long was judged as 5 bars and heard as 4, drifting a bar against the song each time round. Both
-looks and both ways round use the clip now (`fit::slots_of`, `Target::fit`, `chart::backing`), and the index makes
-its slots again (`SLOTS_ASKING` 2). No measure here moves: they call `mo_harmony` on stretches cut on bar lines,
-not this.
+**What's judged is what's dropped** (2026-11-11). There's one rule for a part's clip now,
+`mo_midi::analyser::clip_of`: whole bars from its first bar line, as many as the index counts (muted notes too, a
+last note that hangs up to a hundredth of a bar over a line not making a bar), or to the end of the bar its last
+heard note starts in when that's later; a note held past the clip's end stops there. The search hears a found part
+over it, and it's the loop the app plays (`mo_app::midi::loop_notes`) and the MIDI file it drags and sends
+(`part_clip`). Before, the search went from the bar of the part's first note to the bar its last note ended in, so
+a 4-bar part with a last note a hair long was judged as 5 bars and heard as 4, drifting a bar against the song
+each time round; and the MIDI file ended a few ticks after the bar line. Both looks and both ways round use the
+clip now (`fit::slots_of`, `Target::fit`, `chart::backing`), and the index makes its slots again (`SLOTS_ASKING`
+2). No measure here moves: they call `mo_harmony` on stretches cut on bar lines, not this. Not known from here:
+how Bitwig and FL Studio took a MIDI file that ended a few ticks past a bar line (a loop a hair long, or a bar
+more); a file that ends on the line leaves nothing to guess.
 
 ## What it doesn't know yet
 

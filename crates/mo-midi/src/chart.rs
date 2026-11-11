@@ -36,35 +36,31 @@ pub(crate) fn with_reader<T>(f: impl FnOnce(&mut ChordReader) -> T) -> T {
 /// chord comes after its last), a piece `cut` from a longer stretch, or the first [`MOST_BARS`] of a longer part, as a
 /// stretch of a song. None for drums, or with no pitched notes.
 pub fn read(notes: &[NoteEvent], role: Role, cut: bool) -> Option<Read> {
-    let (heard, goes_on) = heard(notes, role)?;
+    let (heard, goes_on, _) = heard(notes, role)?;
     let reading = reading_of(&heard, role, cut || goes_on)?;
     Some(Read { reading, goes_on })
 }
 
 /// The same part's chords kept to fit tunes over ([`mo_harmony::sit`]): read as [`read`] reads them, its first
 /// [`MOST_BARS`] bars at most. They go round as the part's clip does dropped into a song
-/// ([`crate::analyser::clip_length`]: from its first bar line, for its bars as the index counts them), so what's
-/// judged is what's then played, dragged and sent.
+/// ([`crate::analyser::clip_length`]: whole bars from its first bar line), so what's judged is what's then played,
+/// dragged and sent.
 pub fn backing(notes: &[NoteEvent], role: Role, cut: bool) -> Option<Backing> {
-    let (heard, goes_on) = heard(notes, role)?;
+    let (heard, goes_on, until) = heard(notes, role)?;
     let reading = reading_of(&heard, role, cut || goes_on)?;
-    let length = crate::analyser::clip_length(notes).min(read_until(&heard)?).max(BAR);
+    let length = crate::analyser::clip_length(notes).min(until).max(BAR);
     Some(Backing::over(&reading, &[Part { role: heard_as(role), notes: &heard }], 0, length))
 }
 
-/// The tick the reading stops at: [`MOST_BARS`] bars on from the bar of the first note heard. None for no notes.
-fn read_until(heard: &[Note]) -> Option<i64> {
-    let first = heard.iter().map(|n| n.start).min()?;
-    Some(first.div_euclid(BAR) * BAR + MOST_BARS as i64 * BAR)
-}
-
-/// The notes [`read`] hears: the pitched ones of the first [`MOST_BARS`] bars, and whether the part goes on past them.
-fn heard(notes: &[NoteEvent], role: Role) -> Option<(Vec<Note>, bool)> {
+/// The notes [`read`] hears: the pitched ones of the first [`MOST_BARS`] bars, whether the part goes on past them,
+/// and the tick they stop at ([`MOST_BARS`] bars on from the bar of the first note heard).
+fn heard(notes: &[NoteEvent], role: Role) -> Option<(Vec<Note>, bool, i64)> {
     if role == Role::Drums {
         return None;
     }
     let mut heard = heard_notes(notes);
-    let until = read_until(&heard)?;
+    let first = heard.iter().map(|n| n.start).min()?;
+    let until = first.div_euclid(BAR) * BAR + MOST_BARS as i64 * BAR;
     let goes_on = heard.iter().any(|n| n.start >= until);
     if goes_on {
         heard.retain(|n| n.start < until);
@@ -72,7 +68,7 @@ fn heard(notes: &[NoteEvent], role: Role) -> Option<(Vec<Note>, bool)> {
             n.length = n.length.min(until - n.start);
         }
     }
-    Some((heard, goes_on))
+    Some((heard, goes_on, until))
 }
 
 fn reading_of(heard: &[Note], role: Role, window: bool) -> Option<ChordReading> {
