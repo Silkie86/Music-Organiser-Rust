@@ -1089,7 +1089,7 @@ fn read_all(at: &Where) -> Result<(), String> {
     let choices = lib.song_choices().unwrap_or_default();
     let export_root = bitwig::export_left_out(&lib).ok().flatten();
     drop(lib);
-    let songs = mo_library::songs::group_songs(&saves, &choices);
+    let songs = mo_library::songs::group_songs(&saves, &choices, &mo_formats::dates::RealDates::now());
     let newest = logic::newest_saves(&songs, export_root.as_deref());
     let bitwig_folders = logic::bitwig_folders(&plib::default_folders(), saves.iter().map(|s| s.path.as_str()));
     // Every song's newest save as it is now, read below or left out: Songs' link reads again only for another (U-2).

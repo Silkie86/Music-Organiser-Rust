@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use chrono::{Datelike, Local, NaiveDateTime};
 use mo_formats::case;
+use mo_formats::dates::RealDates;
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, Statement};
 use serde::de::{Deserializer, MapAccess, Visitor};
@@ -572,7 +573,7 @@ impl Library {
         let mut muted: HashSet<(i64, String)> = HashSet::new();
         if rules.not_muted_in_newest && has_unplayed {
             let saves = self.saves()?;
-            for song in crate::songs::group_songs(&saves, &self.song_choices()?) {
+            for song in crate::songs::group_songs(&saves, &self.song_choices()?, &RealDates::now()) {
                 for save in song.older.iter().chain(&song.copies).chain([&song.latest]) {
                     newest.insert(save.id, song.latest.id);
                 }

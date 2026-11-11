@@ -763,8 +763,8 @@ mod tests {
             mo_library::Save { file_missing: true, ..save("C:\\Songs\\Gone.flp", now - 10) },
             save("C:\\Songs\\Sketch.als", now - 20),
         ];
-        let songs = mo_library::songs::group_songs(&saves, &mo_library::SongChoices::default());
         let dates = RealDates::at(now);
+        let songs = mo_library::songs::group_songs(&saves, &mo_library::SongChoices::default(), &dates);
         let names = |most| -> Vec<String> {
             worked_on(&songs, &dates, most).into_iter().map(|(_, save)| save.name.clone()).collect()
         };

@@ -372,7 +372,8 @@ pub fn marked(name: &str) -> bool {
 }
 
 /// Whether a song's saves aren't all one name numbered (a marked save, or songs you joined). Their numbers then don't
-/// count against each other, so the newest is the one saved last: an old "final" doesn't win over newer saves.
+/// count against each other, so the newest is the one saved last (by real dates, see [`group_songs`]): an old "final"
+/// doesn't win over newer saves.
 fn mixed<'a>(names: impl Iterator<Item = &'a str>) -> bool {
     let mut first = None;
     for n in names {
@@ -398,9 +399,11 @@ pub fn first_made<'a>(saves: impl IntoIterator<Item = &'a Save>, real: &RealDate
 }
 
 /// The saves split into working periods, oldest first: a gap of `gap_months` or more between two saves starts a new
-/// one. Moved files are left out, since they can't be opened.
-pub fn runs<'a>(saves: impl IntoIterator<Item = &'a Save>, gap_months: u32) -> Vec<SaveRun> {
-    let mut ordered: Vec<&Save> = saves.into_iter().filter(|s| !s.file_missing).collect();
+/// one. Moved files are left out, since they can't be opened, and so are saves with no real date (`real`): a save dated
+/// still to come, or not at all, says nothing of when it was worked on, so it's in no period. A song with no real date
+/// has none.
+pub fn runs<'a>(saves: impl IntoIterator<Item = &'a Save>, gap_months: u32, real: &RealDates) -> Vec<SaveRun> {
+    let mut ordered: Vec<&Save> = saves.into_iter().filter(|s| !s.file_missing && real.local(s.modified)).collect();
     ordered.sort_by_cached_key(|s| (s.modified, split(&s.name).1));
     let mut groups: Vec<Vec<&Save>> = Vec::new();
     for save in ordered {
@@ -494,10 +497,13 @@ fn folder_of_song(folder: &str, song: &str) -> String {
 
 /// One group per song, in the order their first save comes in `saves` (newest first, as the library lists them).
 /// Beyond the C# app, the same file found in two places (a copied project folder) is one save, so their songs are one,
-/// and the extra copy is kept aside in [`Song::copies`]. The
-/// save a song opens is the highest-numbered file still on disk (ties go to the most recently saved); folder copies
-/// reset dates, numbers survive. `choices` win over the guess.
-pub fn group_songs(saves: &[Save], choices: &SongChoices) -> Vec<Song> {
+/// and the extra copy is kept aside in [`Song::copies`]. The save a song opens is the highest-numbered file still on
+/// disk (ties go to the most recently saved); folder copies reset dates, numbers survive. Only a real date makes a save
+/// the most recently saved (`real`, one for the whole library): a save dated still to come, or not at all, is no clue
+/// to when it was saved, so it comes after every save that has one. (Space and the backup judge dates the same way for
+/// the newest save they keep, `mo_space::song::newest`, which goes by dates alone, not numbers.) `choices` win over the
+/// guess.
+pub fn group_songs(saves: &[Save], choices: &SongChoices, real: &RealDates) -> Vec<Song> {
     let ids: Vec<Option<FileId>> = saves.iter().map(same_file).collect();
     // A copy of a save you split off goes with it, not back into the song it came from.
     let split_ids: HashMap<&FileId, String> = saves
@@ -539,7 +545,7 @@ pub fn group_songs(saves: &[Save], choices: &SongChoices) -> Vec<Song> {
                 (
                     s.file_missing,
                     std::cmp::Reverse(if is_mixed { 0 } else { n }),
-                    std::cmp::Reverse(s.modified),
+                    std::cmp::Reverse((real.local(s.modified), s.modified)),
                     // "Didums_70 - Copy" saved with Didums_70: the original.
                     marked(&s.name),
                     std::cmp::Reverse(n),

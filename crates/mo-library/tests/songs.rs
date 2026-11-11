@@ -31,7 +31,12 @@ fn bitwig(name: &str, folder: &str, saved: NaiveDateTime) -> Save {
 }
 
 fn group(saves: &[Save]) -> Vec<Song> {
-    songs::group_songs(saves, &SongChoices::default())
+    grouped(saves, &SongChoices::default())
+}
+
+/// The songs, by the real dates of now.
+fn grouped(saves: &[Save], choices: &SongChoices) -> Vec<Song> {
+    songs::group_songs(saves, choices, &RealDates::now())
 }
 
 fn names<'a>(saves: impl IntoIterator<Item = &'a Save>) -> Vec<&'a str> {
@@ -219,13 +224,39 @@ fn an_old_final_save_doesnt_open_over_newer_saves_and_the_app_asks_about_it() {
     let apart = songs::pair(&one.key, final_key);
     let copy_path = saves[1].path.clone();
     let choices = SongChoices::from_rows([("apart", apart.as_str(), ""), ("split", copy_path.as_str(), "")]);
-    let regrouped = songs::group_songs(&saves, &choices);
+    let regrouped = grouped(&saves, &choices);
     assert!(songs::doubts(&regrouped, &choices, false, 200).is_empty());
     assert_eq!(regrouped.len(), 2);
 
     // Saves that all carry the same mark have nothing to ask.
     let marked = group(&[p("Dub v2", day(2025, 1, 1)), p("Dub v3", day(2025, 2, 1))]);
     assert!(songs::doubts(&marked, &none, false, 200).is_empty());
+}
+
+#[test]
+fn a_save_with_no_real_date_is_never_the_one_saved_last() {
+    // Not one of the C# cases. A save dated still to come, or with no date, is no clue to when it was saved: a song
+    // whose saves aren't all one name numbered opens its newest with a real date, as Space and the backup take it.
+    let p = |name: &str, saved| fl(name, r"C:\beats", saved);
+    let opens = |saves: &[Save]| {
+        let groups = group(saves);
+        assert_eq!(groups.len(), 1, "{:?}", names(saves));
+        groups[0].latest.name.clone()
+    };
+    let mixed = [
+        p("Night Drive final", day(2099, 1, 1)),
+        p("Night Drive_2", day(2025, 6, 1)),
+        p("Night Drive", day(2025, 1, 1)),
+    ];
+    assert_eq!(opens(&mixed), "Night Drive_2");
+    // With no real date at all, the newest of them, as before.
+    assert_eq!(opens(&[p("Dub final", day(2099, 1, 1)), p("Dub", NaiveDateTime::default())]), "Dub final");
+    // Two saves with the same number: the one with a real date was saved after the other.
+    let fixed =
+        [p("Didums_5", day(2099, 1, 1)), p("Didums_5 (fixed)", day(2025, 6, 1)), p("Didums_4", day(2025, 5, 1))];
+    assert_eq!(opens(&fixed), "Didums_5 (fixed)");
+    // The highest number still opens whatever its date.
+    assert_eq!(opens(&[p("Loop_3", day(2099, 1, 1)), p("Loop_2", day(2025, 6, 1))]), "Loop_3");
 }
 
 #[test]
@@ -254,7 +285,7 @@ fn you_can_join_songs_split_a_save_off_and_move_a_save_and_reset_undoes_it() {
 
     // "track nd" goes under "track": one song, called track, newest track 3.
     let joined = SongChoices::from_rows([("join", nd.as_str(), track.as_str())]);
-    let groups = songs::group_songs(&saves, &joined);
+    let groups = grouped(&saves, &joined);
     assert_eq!(groups.len(), 2);
     let t = groups.iter().find(|g| g.name == "track").unwrap();
     assert_eq!(names(&t.older), ["track 2", "track nd 1"]);
@@ -265,7 +296,7 @@ fn you_can_join_songs_split_a_save_off_and_move_a_save_and_reset_undoes_it() {
     // track 2 split off into a song of its own, then moved under bossa.
     let split_path = saves[1].path.clone();
     let split = SongChoices::from_rows([("join", nd.as_str(), track.as_str()), ("split", split_path.as_str(), "")]);
-    assert_eq!(songs::group_songs(&saves, &split).len(), 3);
+    assert_eq!(grouped(&saves, &split).len(), 3);
     let bossa = key_of(&start, "bossa");
     let own = split_key(&saves[1].path);
     let moved = SongChoices::from_rows([
@@ -273,7 +304,7 @@ fn you_can_join_songs_split_a_save_off_and_move_a_save_and_reset_undoes_it() {
         ("split", split_path.as_str(), ""),
         ("join", own.as_str(), bossa.as_str()),
     ]);
-    let groups = songs::group_songs(&saves, &moved);
+    let groups = grouped(&saves, &moved);
     let b = groups.iter().find(|g| g.name == "bossa").unwrap();
     // Saved last, whatever the numbers.
     assert_eq!((b.latest.name.as_str(), names(&b.older)), ("bossa", vec!["track 2"]));
@@ -316,10 +347,28 @@ fn saves_three_months_apart_start_a_new_run() {
         counted("Didums_13", day(2019, 4, 30)),
         Save { note_count: 380, length_bars: 90, ..counted("Didums_40", day(2024, 7, 20)) },
     ];
-    let runs = songs::runs(&saves, songs::DEFAULT_RUN_GAP_MONTHS);
+    let runs = songs::runs(&saves, songs::DEFAULT_RUN_GAP_MONTHS, &RealDates::now());
     let got: Vec<_> = runs.iter().map(|r| (r.label(), r.last.name.as_str(), r.saves)).collect();
     assert_eq!(got, [("2019 original".to_owned(), "Didums_13", 3), ("2024 rework".to_owned(), "Didums_77", 2)]);
     assert_eq!(runs[1].details(), "Didums_77 · 3 Aug 2024 · 2 saves");
+}
+
+#[test]
+fn a_save_with_no_real_date_is_in_no_run() {
+    // Not one of the C# cases. Dated still to come, or with no date: no clue to when it was worked on, so it starts no
+    // run of its own, and the one dated 2099 makes no "2099 rework".
+    let real = RealDates::now();
+    let saves = [
+        counted("Didums", day(2019, 1, 10)),
+        counted("Didums_12", day(2019, 2, 2)),
+        Save { note_count: 400, length_bars: 96, ..counted("Didums_77", day(2099, 1, 1)) },
+        counted("Didums_2", NaiveDateTime::default()),
+    ];
+    let runs = songs::runs(&saves, songs::DEFAULT_RUN_GAP_MONTHS, &real);
+    let got: Vec<_> = runs.iter().map(|r| (r.label(), r.last.name.as_str(), r.saves)).collect();
+    assert_eq!(got, [("2019 original".to_owned(), "Didums_12", 2)]);
+    // A song with no real date has none.
+    assert!(songs::runs(&saves[2..], songs::DEFAULT_RUN_GAP_MONTHS, &real).is_empty());
 }
 
 #[test]
@@ -329,9 +378,10 @@ fn a_shorter_gap_from_settings_splits_saves_into_more_versions() {
         counted("Didums_12", day(2019, 2, 20)),
         counted("Didums_13", day(2019, 4, 30)),
     ];
-    assert_eq!(songs::runs(&saves, 3).len(), 1);
-    assert_eq!(songs::runs(&saves, 2).len(), 2);
-    assert_eq!(songs::runs(&saves, 1).len(), 3);
+    let real = RealDates::now();
+    assert_eq!(songs::runs(&saves, 3, &real).len(), 1);
+    assert_eq!(songs::runs(&saves, 2, &real).len(), 2);
+    assert_eq!(songs::runs(&saves, 1, &real).len(), 3);
 }
 
 #[test]
@@ -344,7 +394,7 @@ fn resaving_in_a_newer_daw_is_not_a_rework() {
         ..counted("Didums_13", day(2024, 8, 3))
     };
     assert!(!songs::is_reworked(&original, &resaved));
-    assert_eq!(songs::runs([&original, &resaved], 3)[1].label(), "2024 re-save");
+    assert_eq!(songs::runs([&original, &resaved], 3, &RealDates::now())[1].label(), "2024 re-save");
 
     let x = || counted("x", NaiveDateTime::default());
     let three = vec!["Serum".into(), "Fruity Reverb 2".into(), "Vital".into()];
@@ -461,7 +511,7 @@ fn your_choices_win_over_copies() {
     ];
     // A save split off takes its copy with it, rather than the copy going back into the song.
     let split = SongChoices::from_rows([("split", r"C:\dub\Didums_3.flp", "")]);
-    let groups = songs::group_songs(&saves, &split);
+    let groups = grouped(&saves, &split);
     assert_eq!(groups.len(), 2);
     let own_key = songs::split_key(r"C:\dub\Didums_3.flp");
     let own = groups.iter().find(|g| g.key == own_key).unwrap();
@@ -480,7 +530,7 @@ fn your_choices_win_over_copies() {
     let (c, e) = (songs::key(r"C:\dub", "FL Studio", "Didums"), songs::key(e, "FL Studio", "Didums"));
     assert_eq!(group(&three).len(), 1);
     let apart = songs::pair(&c, &e);
-    let groups = songs::group_songs(&three, &SongChoices::from_rows([("apart", apart.as_str(), "")]));
+    let groups = grouped(&three, &SongChoices::from_rows([("apart", apart.as_str(), "")]));
     assert_eq!(groups.len(), 2);
     assert!(
         groups
