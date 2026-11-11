@@ -8,6 +8,10 @@
 //! can be ticked too (Solomon, 4 Nov 2026). Nothing else changes: the saves and their copies stay as they are (rule 3).
 //! Next, once you've checked a fixed project plays, the copies it no longer needs go to the Recycle Bin (Solomon's
 //! choice, 31 Oct 2026).
+//!
+//! While Fix is being tried, every "(fixed)" project it wrote can go to the Recycle Bin in one go, so the saves can be
+//! fixed again (Solomon, 11 Nov 2026: "if i need to delete all the fixed ones as im testing i should be able to do
+//! that easily"). Put back on the Recycle Bin line brings them back.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -22,6 +26,7 @@ use mo_space::{Stopped, key};
 
 use crate::songs::{plural, thousands};
 use crate::space::{Card, Line, Opens, Part, and_list};
+use crate::space_bin::BIN;
 
 /// The Bitwig copies line's id.
 pub const BITWIG_COPIES: &str = "bitwig-copies";
@@ -42,6 +47,16 @@ pub const NEXT: &str = "Fix writes a \"(fixed)\" project beside each ticked save
 
 /// The activity card's title while Fix writes.
 pub const FIXING: &str = "Fixing Bitwig saves";
+
+/// The kind the app's list of what it put in the Recycle Bin keeps the fixed projects it sent there under.
+pub const BITWIG_FIXED: &str = "bitwig-fixed";
+
+/// The activity card's title while the fixed projects go to the Recycle Bin.
+pub const REMOVING_FIXED: &str = if cfg!(windows) {
+    "Sending fixed Bitwig projects to the Recycle Bin"
+} else {
+    "Sending fixed Bitwig projects to the Trash"
+};
 
 /// A Bitwig project folder with copies of Library multisamples in it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,7 +129,8 @@ impl Copies {
 const KEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Looks through the Bitwig projects in `roots` (your project folders) for copies of Library multisamples: the project
-/// folders with a `multi-samples` folder first, then Bitwig's Library ([`library_folders`]), then each project's
+/// folders with a `multi-samples` folder first, then Bitwig's Library ([`library_folders`], from `studios`: your Bitwig
+/// Studio folders, Settings' first), then each project's
 /// copies. `index` is the last look's Library, kept so a file already read isn't read again while it's unchanged
 /// (rule 12); the first look makes it, taking in the fingerprints kept in `prints` (the store in the app's data
 /// folder, `mo_space::prints::FILE_NAME`) so a restart doesn't read them again either. What was read is written there
@@ -122,14 +138,14 @@ const KEEP_EVERY: std::time::Duration = std::time::Duration::from_secs(30);
 /// Reads the disks, so call it off the window's thread, inside the low-priority pool (rule 21).
 pub fn look(
     roots: &[PathBuf],
-    documents: Option<&Path>,
+    studios: &[PathBuf],
     index: &mut Option<LibraryIndex>,
     prints: Option<&Path>,
     stop: &AtomicBool,
     progress: impl FnMut(usize, usize),
 ) -> Result<Copies, Stopped> {
     let started = std::time::Instant::now();
-    let found = look_through(roots, documents, index, prints, stop, progress);
+    let found = look_through(roots, studios, index, prints, stop, progress);
     if let Some(index) = index.as_ref() {
         // A look that stopped forgets nothing; a whole one forgets the files it didn't ask about. One that found no
         // Library, or with a project folder away (a drive asleep or unplugged), isn't whole: what's there is kept for
@@ -154,7 +170,7 @@ pub fn look(
 
 fn look_through(
     roots: &[PathBuf],
-    documents: Option<&Path>,
+    studios: &[PathBuf],
     index: &mut Option<LibraryIndex>,
     prints: Option<&Path>,
     stop: &AtomicBool,
@@ -162,7 +178,7 @@ fn look_through(
 ) -> Result<Copies, Stopped> {
     let folders = bitwig::project_folders(roots, stop)?;
     progress(0, folders.len());
-    let library = if folders.is_empty() { Vec::new() } else { library_folders(&folders, documents) };
+    let library = if folders.is_empty() { Vec::new() } else { library_folders(&folders, studios) };
     let mut found = Copies { library, folders: folders.len(), projects: Vec::new() };
     if found.library.is_empty() {
         return Ok(found);
@@ -205,10 +221,12 @@ fn look_through(
     Ok(found)
 }
 
-/// Bitwig's Library folders for these project folders: the Library folder in each "Bitwig Studio" folder above one
-/// (Solomon keeps his Bitwig Studio folder on K:), and the one in `documents`' Bitwig Studio folder, where Bitwig
-/// keeps it unless told otherwise (`mo_space::bitwig::documents`). Only the ones that are there, each once.
-pub fn library_folders(projects: &[PathBuf], documents: Option<&Path>) -> Vec<PathBuf> {
+/// Bitwig's Library folders for these project folders: first the Library in each of `studios` (your Bitwig Studio
+/// folder as Settings › DAWs names it, then the one in Documents, where Bitwig keeps it unless told otherwise:
+/// `mo_space::bitwig::documents`), then the Library folder in each "Bitwig Studio" folder above a project (Solomon
+/// keeps his Bitwig Studio folder on K:). Settings' comes first so Fix points copies at the Library Bitwig uses now
+/// (Solomon, 11 Nov 2026). Only the ones that are there, each once.
+pub fn library_folders(projects: &[PathBuf], studios: &[PathBuf]) -> Vec<PathBuf> {
     let mut found: Vec<PathBuf> = Vec::new();
     let mut add = |studio: &Path| {
         let library = studio.join("Library");
@@ -217,12 +235,12 @@ pub fn library_folders(projects: &[PathBuf], documents: Option<&Path>) -> Vec<Pa
             found.push(library);
         }
     };
+    for studio in studios {
+        add(studio);
+    }
     let is_studio = |folder: &&Path| folder.file_name().is_some_and(|n| n.eq_ignore_ascii_case("Bitwig Studio"));
     for project in projects {
         project.ancestors().skip(1).filter(is_studio).for_each(&mut add);
-    }
-    if let Some(documents) = documents {
-        add(&documents.join("Bitwig Studio"));
     }
     found
 }
@@ -298,6 +316,9 @@ pub enum Fixing {
 pub struct ToFix {
     pub save: PathBuf,
     pub copies: Vec<LibraryCopy>,
+    /// Bitwig's Library folders, as the look found them (Settings' first): where a file whose folder moved is looked
+    /// for.
+    pub libraries: Vec<PathBuf>,
 }
 
 /// Writes a "(fixed)" project beside a save that uses the Library's own files instead of its project's copies
@@ -310,8 +331,13 @@ pub fn fix(job: &ToFix) -> Fixing {
         .iter()
         .map(|c| Relink { copy: PathBuf::from(&c.in_project), library: PathBuf::from(&c.library_file) })
         .collect();
-    match relink::fix_bitwig_project(&job.save, &relinks) {
-        Ok(fixed) => Fixing::Written(fixed.file),
+    match relink::fix_bitwig_project_in(&job.save, &relinks, &job.libraries) {
+        Ok(fixed) => {
+            for line in &fixed.found {
+                crate::log::info("Space", &format!("Fix found again in {}: {line}", job.save.display()));
+            }
+            Fixing::Written(fixed.file)
+        }
         Err(why) => Fixing::Failed(why),
     }
 }
@@ -422,10 +448,11 @@ impl Fixes {
             .projects
             .iter()
             .flat_map(|p| {
-                p.saves
-                    .iter()
-                    .filter(move |s| ticked(p, s))
-                    .map(|s| ToFix { save: s.path.clone(), copies: p.copies.clone() })
+                p.saves.iter().filter(move |s| ticked(p, s)).map(|s| ToFix {
+                    save: s.path.clone(),
+                    copies: p.copies.clone(),
+                    libraries: found.library.clone(),
+                })
             })
             .collect()
     }
@@ -602,6 +629,40 @@ pub fn fixed_words(written: usize, failed: usize) -> Result<String, String> {
         (n, 0) => Ok(format!("Wrote {}. Open each in Bitwig and check it plays.", plural(n, "fixed project"))),
         (n, f) => {
             Ok(format!("Wrote {}; {} couldn't be fixed ({}).", plural(n, "fixed project"), plural(f, "save"), why(f)))
+        }
+    }
+}
+
+/// How many saves have a "(fixed)" project beside them, from the last look.
+pub fn fixed_saves(found: Option<&Copies>) -> usize {
+    found.map_or(0, |f| f.projects.iter().flat_map(|p| &p.saves).filter(|s| s.fixed.is_some()).count())
+}
+
+/// The card's button that sends every fixed project to the Recycle Bin: its words and whether it can be pressed now
+/// (not while Fix writes, a look is on, or something goes to the bin or comes back). None when no save has one.
+pub fn remove_fixed_button(found: Option<&Copies>, wait: bool) -> Option<(String, bool)> {
+    let n = fixed_saves(found);
+    (n > 0).then(|| {
+        // Every "(fixed)" project in the folders goes, not only the newest of each save, so no count here.
+        (format!("Send every fixed Bitwig project to the {BIN}"), !wait)
+    })
+}
+
+/// The activity card's line once the fixed projects went: Err when none did (the card then fails).
+pub fn removed_fixed_words(done: &mo_space::clean::Done) -> Result<String, String> {
+    let went: HashSet<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
+    let stayed = done.problems.iter().filter(|p| !went.contains(p.path.as_str())).count();
+    match (done.removed.len(), stayed) {
+        (0, 0) => Err("No fixed project was found, so nothing went.".to_owned()),
+        (0, m) => Err(format!("None could go ({} stayed): the log says why.", thousands(m))),
+        (n, m) => {
+            let stayed = if m == 0 { String::new() } else { format!("; {} stayed (the log says why)", thousands(m)) };
+            Ok(format!(
+                "Sent {} ({}) to the {BIN}{stayed}. Fix can write them again; Put back on the {BIN} line brings them \
+                 back.",
+                plural(n, "fixed project"),
+                size_text(done.bytes()),
+            ))
         }
     }
 }

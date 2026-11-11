@@ -113,9 +113,13 @@ fn every_reference_to_a_copy_points_at_the_library_file() {
     assert!(t.contains(&"Kicks 1 Select.multisample".to_owned()));
     assert_eq!(
         t.iter().filter(|x| **x == full).count(),
-        5,
-        "relative, absolute, the old Library path, the other project's copy and the used files list: {t:?}"
+        4,
+        "relative, absolute, the old Library path and the other project's copy: {t:?}"
     );
+    // The used files list holds only files inside the project's folder, as Bitwig's does: the copy leaves it.
+    let doc = bitwig::decode(std::fs::read(&fixed.file).unwrap()).unwrap();
+    let used = doc.meta.iter().find(|(k, _)| k.as_str() == "used_files").map(|(_, v)| v.clone());
+    assert_eq!(used, Some(Value::Strings(Vec::new())));
     assert!(!t.iter().any(|x| x.contains("-3-2-2")), "{t:?}");
     // Asked again: the first fixed project is kept, the new one is numbered, and the copy is still free to go.
     assert_eq!(fixed_file(&project), Some(dir.join("Song (fixed 2).bwproject")));
@@ -262,4 +266,187 @@ fn a_copy_is_asked_about_again_before_the_bin() {
     std::fs::write(&fixed.file, b"").unwrap();
     std::fs::remove_file(&relink.library).unwrap();
     assert!(still_named(&project, &relink).unwrap().contains("isn't a Library file"));
+}
+
+/// A file reference (0x2a) to a path.
+fn file_ref(doc: &mut bitwig::Document, path: &str) -> bitwig::ObjId {
+    let mut r = Object::new(0x2a);
+    r.fields.push(text(0x38, "PC"));
+    r.fields.push(text(0x3a, "user"));
+    r.fields.push(text(0x3b, path));
+    doc.add(r)
+}
+
+/// A sample file (0x4a6) laid out as Bitwig saves one: its name, where it is inside the project (or ""), its file
+/// reference, the files it was found at before, and its size.
+fn sample_file(
+    doc: &mut bitwig::Document,
+    name: &str,
+    inside: &str,
+    path: &str,
+    found: &[&str],
+    size: i32,
+) -> bitwig::ObjId {
+    let file = file_ref(doc, path);
+    let before: Vec<Slot> = found.iter().map(|p| Slot::Obj(file_ref(doc, p))).collect();
+    let mut location = Object::new(0x2b4);
+    location.fields.push(Field { id: 0xc5b, value: Value::List(before.clone()) });
+    let location = doc.add(location);
+    let mut o = Object::new(0x4a6);
+    o.fields.push(text(0x512, name));
+    o.fields.push(text(0xd3a, inside));
+    o.fields.push(text(0xcd4, ""));
+    o.fields.push(Field { id: 0xd3b, value: Value::Obj(Slot::Obj(file)) });
+    o.fields.push(Field { id: 0x15, value: Value::Obj(Slot::Obj(location)) });
+    o.fields.push(Field { id: 0x17, value: Value::I32(size) });
+    let o = doc.add(o);
+    doc.objects[file.0 as usize].parent = Some((o, 0xd3b));
+    doc.objects[location.0 as usize].parent = Some((o, 0x15));
+    for s in before {
+        if let Slot::Obj(r) = s {
+            doc.objects[r.0 as usize].parent = Some((location, 0xc5b));
+        }
+    }
+    let root = doc.root.unwrap();
+    doc.objects[o.0 as usize].parent = Some((root, 0x7f10));
+    doc.obj_mut(root).fields.push(Field { id: 0x7f10, value: Value::Obj(Slot::Obj(o)) });
+    o
+}
+
+fn path_of(doc: &bitwig::Document, r: bitwig::ObjId) -> String {
+    match doc.obj(r).get(0x3b) {
+        Some(Value::Str(t)) => t.as_str().to_owned(),
+        other => panic!("no path: {other:?}"),
+    }
+}
+
+/// The texts of the nth sample file in the fixed project (in the order they were added): its name, where it is inside the project, its file reference and
+/// the files it was found at before.
+fn sample_file_texts(doc: &bitwig::Document, nth: usize) -> (String, String, String, Vec<String>) {
+    let root = doc.root.unwrap();
+    let added: Vec<Slot> = doc
+        .obj(root)
+        .fields
+        .iter()
+        .filter(|f| f.id == 0x7f10)
+        .filter_map(|f| match f.value {
+            Value::Obj(s) => Some(s),
+            _ => None,
+        })
+        .collect();
+    let o = doc.resolve(added[nth]).unwrap();
+    let s = |id| match doc.obj(o).get(id) {
+        Some(Value::Str(t)) => t.as_str().to_owned(),
+        other => panic!("no text {id:#x}: {other:?}"),
+    };
+    let file = doc.field_obj(o, 0xd3b).unwrap();
+    let location = doc.field_obj(o, 0x15).unwrap();
+    let before = doc.field_list(location, 0xc5b).into_iter().map(|r| path_of(doc, r)).collect();
+    (s(0x512), s(0xd3a), path_of(doc, file), before)
+}
+
+/// Solomon's neon rmx 40 (fixed) showed its multisamples as missing in Bitwig: the Library path had gone where Bitwig
+/// keeps a path inside the project's folder, and the file reference still named the old drive. Now a copy's sample
+/// file is written as Bitwig writes a Library file it didn't copy, and files whose folder moved (Bitwig Studio's folder
+/// from I: to here, Bitwig's Library from Documents) are found where they are now, when the size is the same.
+#[test]
+fn a_copy_becomes_a_library_file_as_bitwig_writes_one_and_moved_files_are_found() {
+    let root = folder("relink layout");
+    let dir = root.join("Bitwig Studio").join("Projects").join("Song");
+    std::fs::create_dir_all(dir.join("multi-samples")).unwrap();
+    std::fs::write(dir.join("multi-samples").join(COPY), b"<multisample/>").unwrap();
+    let library = library(&root.join("Bitwig Studio"), "Kicks 1 Select.multisample");
+    let full = library.to_string_lossy().into_owned();
+    // A wavetable in the Library, and a Library multisample a template's copy named, both saved on old drives.
+    let tables = root.join("Bitwig Studio").join("Library").join("Wavetables").join("Analog");
+    std::fs::create_dir_all(&tables).unwrap();
+    std::fs::write(tables.join("Basic Shapes.wt"), [0u8; 12]).unwrap();
+    std::fs::write(
+        root.join("Bitwig Studio").join("Library").join("Multisamples").join("Snare 2 Select.multisample"),
+        [0u8; 20],
+    )
+    .unwrap();
+    std::fs::write(tables.join("Wrong Size.wt"), [0u8; 5]).unwrap();
+
+    let mut doc = bitwig::decode(fixtures::bitwig_template(fixtures::Template::default())).unwrap();
+    sample_file(
+        &mut doc,
+        COPY,
+        &format!("multi-samples/{COPY}"),
+        r"I:\Bitwig Studio\Projects\Garage Project\multi-samples\Kicks 1 Select-3-2.multisample",
+        &[&format!(r"I:\Bitwig Studio\Projects\Song\multi-samples\{COPY}")],
+        14,
+    );
+    // A sample file that names the copy only among the files it was found at before.
+    sample_file(
+        &mut doc,
+        "Kicks 1 Select.multisample",
+        "",
+        r"I:\Bitwig Studio\Projects\Facebook Garage\multi-samples\Kicks 1 Select-2.multisample",
+        &[
+            &format!(r"I:\Bitwig Studio\Projects\Song\multi-samples\{COPY}"),
+            r"D:\Library\Multisamples\Kicks 1 Select.multisample",
+        ],
+        14,
+    );
+    sample_file(
+        &mut doc,
+        "Basic Shapes.wt",
+        "",
+        r"I:\Bitwig Studio\Library\Wavetables\Analog\Basic Shapes.wt",
+        &[],
+        12,
+    );
+    sample_file(
+        &mut doc,
+        "Snare 2 Select.multisample",
+        "",
+        r"C:\Users\someone\Documents\Bitwig Studio\Library\Multisamples\Snare 2 Select.multisample",
+        &[r"F:\Bitwig Studio\Library\Templates\Keys.bwtemplate\project\multi-samples\Snare 2 Select-3-2.multisample"],
+        20,
+    );
+    sample_file(&mut doc, "Wrong Size.wt", "", r"I:\Bitwig Studio\Library\Wavetables\Analog\Wrong Size.wt", &[], 9);
+    // Another file kept inside the project, though it was once found where the copy is: it stays as it is.
+    sample_file(
+        &mut doc,
+        "Other.multisample",
+        "multi-samples/Other.multisample",
+        r"I:\Bitwig Studio\Projects\Song\multi-samples\Other.multisample",
+        &[&format!(r"I:\Bitwig Studio\Projects\Song\multi-samples\{COPY}")],
+        3,
+    );
+    for (k, v) in &mut doc.meta {
+        if k.as_str() == "used_files" {
+            *v = Value::Strings(vec![Text::new(&format!("multi-samples/{COPY}")), Text::new("samples/Kick.wav")]);
+        }
+    }
+    let zip = doc.zip().map(<[u8]>::to_vec);
+    let project = dir.join("Song.bwproject");
+    std::fs::write(&project, bitwig::encode(&doc, zip.as_deref()).unwrap()).unwrap();
+
+    let relinks = [relink(&dir, COPY, &library)];
+    let fixed = fix_bitwig_project(&project, &relinks).unwrap();
+    assert_eq!(fixed.changed, relinks, "{:?}", fixed.left);
+    let back = bitwig::decode(std::fs::read(&fixed.file).unwrap()).unwrap();
+    assert_eq!(back.body_error, None);
+    let lib = "Kicks 1 Select.multisample".to_owned();
+    assert_eq!(sample_file_texts(&back, 0), (lib.clone(), String::new(), full.clone(), vec![full.clone()]));
+    assert_eq!(sample_file_texts(&back, 1), (lib, String::new(), full.clone(), vec![full.clone(), full.clone()]));
+    let shapes = tables.join("Basic Shapes.wt").to_string_lossy().into_owned();
+    assert_eq!(sample_file_texts(&back, 2).2, shapes, "moved with Bitwig Studio's folder");
+    let snare_now = root.join("Bitwig Studio").join("Library").join("Multisamples").join("Snare 2 Select.multisample");
+    let snare_now = snare_now.to_string_lossy().into_owned();
+    let (_, _, file, before) = sample_file_texts(&back, 3);
+    assert_eq!(file, snare_now, "found in the Library now");
+    assert_eq!(before, vec![snare_now], "and the template's copy that's gone names it too");
+    assert_eq!(
+        sample_file_texts(&back, 4).2,
+        r"I:\Bitwig Studio\Library\Wavetables\Analog\Wrong Size.wt",
+        "another size isn't the same file"
+    );
+    let other = sample_file_texts(&back, 5);
+    assert_eq!((other.0.as_str(), other.1.as_str()), ("Other.multisample", "multi-samples/Other.multisample"));
+    assert_eq!(fixed.found.len(), 2, "{:?}", fixed.found);
+    let used = back.meta.iter().find(|(k, _)| k.as_str() == "used_files").map(|(_, v)| v.clone());
+    assert_eq!(used, Some(Value::Strings(vec![Text::new("samples/Kick.wav")])));
 }

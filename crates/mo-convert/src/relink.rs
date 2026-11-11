@@ -7,8 +7,17 @@
 //!
 //! A copy is referenced several ways: its bare name, a path relative to the project ("multi-samples/…"), an absolute
 //! path where the project was saved (maybe on another drive since), the list of files the project uses in its
-//! metadata, and beside them the Library path it was first copied from (maybe gone since). All of them point at the
-//! Library file in the fixed project.
+//! metadata, and beside them the Library path it was first copied from (maybe gone since). In the fixed project the
+//! copy's sample file is written as Bitwig writes a Library file it didn't copy (Solomon's neon rmx 40, 2026-11-11:
+//! the first fixed projects put the Library path where Bitwig keeps a path inside the project's folder, so Bitwig
+//! showed the multisamples as missing): nothing inside the project's folder, the Library file's name, and every path
+//! it's found by the Library file. The used files list only lists files inside the project's folder, so the copy
+//! leaves it.
+//!
+//! While it's at it, the fixed project finds files whose folder has moved since the project was saved (Bitwig
+//! Studio's folder moved from I: to K:, or its Library from Documents): each path of a sample file that's gone is
+//! pointed at the same file in the moved folder, or in Bitwig's Library now, when one is there with the same name and
+//! size (rule 13: the project's and the DAW's own folders only).
 //!
 //! A copy is only offered for the bin when it's still the same as its Library file and nothing else still names it:
 //! not the fixed project (anywhere, plugin settings in the zip at the end included) and no other Bitwig file in the
@@ -26,6 +35,19 @@ use mo_formats::{case, paths};
 use rayon::prelude::*;
 
 use crate::save::save_checked_new;
+
+/// A sample file (a multisample, wavetable or sample a device uses): 0x512 its name, 0xd3a where it is inside the
+/// project's folder ("" when it isn't in it), 0xd3b its file reference (0x2a, the path in 0x3b) that Bitwig finds it
+/// by when it isn't inside, 0x15 the files it was found at before (0xc5b, a list of file references), 0x17 its size.
+const SAMPLE_FILE: u32 = 0x4a6;
+const F_NAME: u32 = 0x512;
+const F_IN_PROJECT: u32 = 0xd3a;
+const F_FILE: u32 = 0xd3b;
+const F_FOUND: u32 = 0x15;
+const F_FOUND_FILES: u32 = 0xc5b;
+const F_SIZE: u32 = 0x17;
+/// A file reference's path.
+const F_PATH: u32 = 0x3b;
 
 /// The Bitwig files that can name a multisample.
 const BITWIG_FILES: [&str; 3] = ["bwproject", "bwclip", "bwpreset"];
@@ -49,6 +71,9 @@ pub struct Fixed {
     pub changed: Vec<Relink>,
     /// Listed copies that are still needed, or that this project doesn't use, said plainly.
     pub left: Vec<String>,
+    /// Files the project named in a folder that has moved since (Bitwig Studio's, to another drive), pointed at where
+    /// they are now: "Basic Shapes.wt is now at K:\Bitwig Studio\Library\…".
+    pub found: Vec<String>,
 }
 
 /// A listed copy, as the project's texts are compared with it.
@@ -167,10 +192,24 @@ fn texts_mut(value: &mut Value) -> Vec<&mut Text> {
 /// end and the offsets in the header stay right.
 pub fn relink(raw: &[u8], project_dir: &Path, relinks: &[Relink]) -> Result<(Vec<u8>, Vec<bool>), String> {
     let listed = listed(project_dir, relinks)?;
-    relink_listed(raw, project_dir, &listed)
+    relink_listed(raw, project_dir, &listed, &[]).map(|r| (r.bytes, r.changed))
 }
 
-fn relink_listed(raw: &[u8], project_dir: &Path, listed: &[Listed]) -> Result<(Vec<u8>, Vec<bool>), String> {
+/// A project pointed back at the Library.
+struct Relinked {
+    bytes: Vec<u8>,
+    /// Which listed copies it no longer names where it was changed.
+    changed: Vec<bool>,
+    /// Files found again in a moved folder, said plainly.
+    found: Vec<String>,
+}
+
+fn relink_listed(
+    raw: &[u8],
+    project_dir: &Path,
+    listed: &[Listed],
+    known_libraries: &[PathBuf],
+) -> Result<Relinked, String> {
     let mut doc = bitwig::decode(raw).map_err(|_| "not a Bitwig project".to_owned())?;
     if let Some(e) = &doc.body_error {
         return Err(format!("the project couldn't be read to the end ({e}), so it's left as it is"));
@@ -184,16 +223,68 @@ fn relink_listed(raw: &[u8], project_dir: &Path, listed: &[Listed]) -> Result<(V
         *t = Text::new(to);
         Some(c)
     };
-    // The metadata (the list of files the project uses).
-    for (_, value) in &mut doc.meta {
+    // The metadata: the list of files the project uses lists only files inside the project's folder, so a copy leaves
+    // it (as a Library file Bitwig didn't copy is never in it); a single text is pointed at the Library file.
+    for (name, value) in &mut doc.meta {
+        if name.as_str() == "used_files"
+            && let Value::Strings(ts) = value
+        {
+            ts.retain(|t| match copy_of(t.as_str(), &folder, listed) {
+                Some(c) => {
+                    changed[c] = true;
+                    false
+                }
+                None => true,
+            });
+            continue;
+        }
         for t in texts_mut(value) {
             if let Some(c) = point(t) {
                 changed[c] = true;
             }
         }
     }
-    // The objects, and which copies each held.
+    // Each sample file that names a copy (where it is inside the project, its name, or any of its file references)
+    // becomes the Library file, written as Bitwig writes a Library file it didn't copy: nothing inside the project's
+    // folder (a path there is read from the project's folder, so the Library's would be missing), its file reference
+    // and the files it was found at before all the Library file.
     let mut held: Vec<(ObjId, Vec<usize>)> = Vec::new();
+    for i in 0..doc.objects.len() {
+        let id = ObjId(i as u32);
+        if doc.obj(id).class != SAMPLE_FILE {
+            continue;
+        }
+        let refs = file_refs(&doc, id);
+        let o = doc.obj(id);
+        // One kept inside the project that isn't a copy listed here is another file (left as it is).
+        if let Some(Value::Str(inside)) = o.get(F_IN_PROJECT)
+            && !inside.as_str().is_empty()
+            && copy_of(inside.as_str(), &folder, listed).is_none()
+        {
+            continue;
+        }
+        let texts = [F_IN_PROJECT, F_NAME].into_iter().filter_map(|f| match o.get(f) {
+            Some(Value::Str(t)) => Some(t.as_str()),
+            _ => None,
+        });
+        let paths = refs.iter().filter_map(|&r| match doc.obj(r).get(F_PATH) {
+            Some(Value::Str(t)) => Some(t.as_str()),
+            _ => None,
+        });
+        let Some(c) = texts.chain(paths).find_map(|t| copy_of(t, &folder, listed)) else { continue };
+        let l = &listed[c];
+        let o = doc.obj_mut(id);
+        if o.has(F_IN_PROJECT) {
+            o.set(F_IN_PROJECT, Value::Str(Text::new("")));
+        }
+        o.set(F_NAME, Value::Str(Text::new(&l.library_name)));
+        for r in refs {
+            doc.obj_mut(r).set(F_PATH, Value::Str(Text::new(&l.full)));
+        }
+        changed[c] = true;
+        held.push((id, vec![c]));
+    }
+    // Any other text that names a copy (a layout not known here), and which copies each object held.
     for (i, o) in doc.objects.iter_mut().enumerate() {
         let mut here = Vec::new();
         for field in &mut o.fields {
@@ -234,8 +325,195 @@ fn relink_listed(raw: &[u8], project_dir: &Path, listed: &[Listed]) -> Result<(V
             }
         }
     }
+    // Bitwig's Library folders now: the ones given (Settings' first), then the ones the copies' Library files are in.
+    let mut libraries: Vec<PathBuf> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    let mut add = |at: &Path| {
+        let k = key(&at.to_string_lossy());
+        if !seen.contains(&k) {
+            seen.push(k);
+            libraries.push(at.to_path_buf());
+        }
+    };
+    for at in known_libraries {
+        if at.is_dir() {
+            add(at);
+        }
+    }
+    for l in listed {
+        let at = Path::new(&l.full)
+            .ancestors()
+            .find(|a| a.file_name().is_some_and(|n| key(&n.to_string_lossy()) == "LIBRARY"));
+        if let Some(at) = at {
+            add(at);
+        }
+    }
+    let found = found_again(&mut doc, project_dir, &libraries);
     let bytes = bitwig::encode(&doc, None)?;
-    Ok((bytes, changed))
+    Ok(Relinked { bytes, changed, found })
+}
+
+/// A sample file's file references: the one Bitwig finds it by, and the list of where it was found before.
+fn file_refs(doc: &Document, file: ObjId) -> Vec<ObjId> {
+    let mut out: Vec<ObjId> = doc.field_obj(file, F_FILE).into_iter().collect();
+    if let Some(found) = doc.field_obj(file, F_FOUND) {
+        out.extend(doc.field_list(found, F_FOUND_FILES));
+    }
+    out
+}
+
+/// A text's folders and name, split at either slash.
+fn parts(path: &str) -> Vec<&str> {
+    path.split(['/', '\\']).filter(|p| !p.is_empty()).collect()
+}
+
+/// Where the project's folder was when it was saved, if that's somewhere else now (Bitwig Studio's folder moved from
+/// I: to K:, say): the old start of a path, the folder it went on with, and where that start is now. Learned from the
+/// project's own texts: an absolute path through a folder of this project's name that ends the same way as where the
+/// project is now. Most seen first.
+fn moved_from(doc: &Document, project_dir: &Path) -> Vec<(Vec<String>, PathBuf)> {
+    let here = std::path::absolute(project_dir).unwrap_or_else(|_| project_dir.to_path_buf());
+    let here_text = here.to_string_lossy().into_owned();
+    let now: Vec<String> = parts(&here_text).iter().map(|p| key(p)).collect();
+    let Some(folder) = now.last() else { return Vec::new() };
+    let mut seen: HashMap<Vec<String>, (usize, usize)> = HashMap::new();
+    for o in &doc.objects {
+        for f in &o.fields {
+            let Value::Str(t) = &f.value else { continue };
+            let s = t.as_str();
+            if !paths::is_absolute(s) {
+                continue;
+            }
+            let was: Vec<String> = parts(s).iter().map(|p| key(p)).collect();
+            // The folder of this project's name, with something inside it.
+            let Some(at) = (0..was.len().saturating_sub(1)).rev().find(|&i| &was[i] == folder) else { continue };
+            let old_dir = &was[..=at];
+            let same = old_dir.iter().rev().zip(now.iter().rev()).take_while(|(a, b)| a == b).count();
+            if same == old_dir.len() || same == now.len() {
+                // The same place, or one start is inside the other: nothing moved.
+                continue;
+            }
+            // The old start, and the first folder both share: only paths through that folder are moved.
+            let start = old_dir[..old_dir.len() - same + 1].to_vec();
+            let entry = seen.entry(start).or_insert((0, same));
+            entry.0 += 1;
+        }
+    }
+    let mut out: Vec<(usize, Vec<String>, PathBuf)> = seen
+        .into_iter()
+        .filter_map(|(start, (count, same))| Some((count, start, here.ancestors().nth(same)?.to_path_buf())))
+        .collect();
+    out.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+    out.into_iter().map(|(_, start, now)| (start, now)).collect()
+}
+
+/// An integer field's value, whatever size Bitwig saved it in.
+fn integer(value: Option<&Value>) -> Option<u64> {
+    match *value? {
+        Value::U8(v) => Some(v.into()),
+        Value::I16(v) => u64::try_from(v).ok(),
+        Value::I32(v) => u64::try_from(v).ok(),
+        Value::I64(v) => u64::try_from(v).ok(),
+        _ => None,
+    }
+}
+
+/// Sample files Bitwig can't find because the folder they were in has moved: with the project's (Bitwig Studio's
+/// folder moved to another drive, its Library with it), or Bitwig's Library on its own (from Documents to K:, say).
+/// Each file reference that's gone is pointed at the same place in the moved folder, or in Bitwig's Library now (what
+/// came after "Library" in the old path), when a file is there with the same name and the size the project saved.
+/// Files inside the project's folder that are there are found already and aren't touched. Says which files were found
+/// again.
+fn found_again(doc: &mut Document, project_dir: &Path, libraries: &[PathBuf]) -> Vec<String> {
+    let moves = moved_from(doc, project_dir);
+    let mut found = Vec::new();
+    if moves.is_empty() && libraries.is_empty() {
+        return found;
+    }
+    let files: Vec<ObjId> =
+        (0..doc.objects.len()).map(|i| ObjId(i as u32)).filter(|&i| doc.obj(i).class == SAMPLE_FILE).collect();
+    // Each path's size if it's a file, asked of the disk once (many sample files share a folder's files).
+    let mut sizes: HashMap<PathBuf, Option<u64>> = HashMap::new();
+    let mut size_of = |path: &Path| -> Option<u64> {
+        *sizes
+            .entry(path.to_path_buf())
+            .or_insert_with(|| std::fs::metadata(path).ok().filter(|m| m.is_file()).map(|m| m.len()))
+    };
+    for file in files {
+        let o = doc.obj(file);
+        if let Some(Value::Str(inside)) = o.get(F_IN_PROJECT)
+            && !inside.as_str().is_empty()
+            && project_dir.join(inside.as_str()).is_file()
+        {
+            continue;
+        }
+        let size = integer(o.get(F_SIZE));
+        // Each file reference that's gone, and where the first one found again in a moved folder is now. (One that's
+        // there already may be another project's copy, so the others aren't pointed at it.)
+        let mut gone = Vec::new();
+        let mut there: Option<String> = None;
+        for r in file_refs(doc, file) {
+            let Some(Value::Str(t)) = doc.obj(r).get(F_PATH) else { continue };
+            let old = t.as_str().to_owned();
+            if !paths::is_absolute(&old) {
+                continue;
+            }
+            if size_of(Path::new(&old)).is_some() {
+                continue;
+            }
+            let was = parts(&old);
+            let keys: Vec<String> = was.iter().map(|p| key(p)).collect();
+            let mut same = |path: PathBuf| {
+                let len = size_of(&path)?;
+                size.is_none_or(|s| s == len).then_some(path)
+            };
+            let moved_with_project = moves.iter().find_map(|(start, now)| {
+                if keys.len() <= start.len() || keys[..start.len()] != start[..] {
+                    return None;
+                }
+                let mut path = now.clone();
+                for p in &was[start.len() - 1..] {
+                    path.push(p);
+                }
+                same(path)
+            });
+            let in_library = |same: &mut dyn FnMut(PathBuf) -> Option<PathBuf>| {
+                let (_, folders) = keys.split_last()?;
+                let at = folders.iter().rposition(|k| k == "LIBRARY")?;
+                libraries.iter().find_map(|library| {
+                    let mut path = library.clone();
+                    for p in &was[at + 1..] {
+                        path.push(p);
+                    }
+                    same(path)
+                })
+            };
+            let new = match moved_with_project {
+                Some(new) => Some(new),
+                None => in_library(&mut same),
+            };
+            match new {
+                Some(new) => {
+                    let new = new.to_string_lossy().into_owned();
+                    let said = format!("{} is now at {new}", file_name(&old));
+                    if !found.contains(&said) {
+                        found.push(said);
+                    }
+                    doc.obj_mut(r).set(F_PATH, Value::Str(Text::new(&new)));
+                    there.get_or_insert(new);
+                }
+                None => gone.push(r),
+            }
+        }
+        // One that's still gone (the copy in another project it came from, say) names the file where it is, so Bitwig
+        // finds it whichever reference it reads first.
+        if let Some(there) = there {
+            for r in gone {
+                doc.obj_mut(r).set(F_PATH, Value::Str(Text::new(&there)));
+            }
+        }
+    }
+    found
 }
 
 /// Each object's children, found once.
@@ -348,6 +626,12 @@ fn fixed_names(project: &Path) -> impl Iterator<Item = PathBuf> + '_ {
 /// Writes the fixed project beside `project` (copy, check, then rename, never over a file that's there), and says
 /// which copies nothing uses any more but the original.
 pub fn fix_bitwig_project(project: &Path, relinks: &[Relink]) -> Result<Fixed, String> {
+    fix_bitwig_project_in(project, relinks, &[])
+}
+
+/// [`fix_bitwig_project`], with Bitwig's Library folders as you have them (your Bitwig Studio folder's in Settings
+/// first): a file whose folder moved is looked for in these first, then in the Library the copies' files are in.
+pub fn fix_bitwig_project_in(project: &Path, relinks: &[Relink], libraries: &[PathBuf]) -> Result<Fixed, String> {
     let dir = match project.parent() {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => PathBuf::from("."),
@@ -371,7 +655,7 @@ pub fn fix_bitwig_project(project: &Path, relinks: &[Relink]) -> Result<Fixed, S
         return Err(format!("no copy is the same as its Library file, so nothing was written: {}", left.join("; ")));
     }
     let raw = std::fs::read(project).map_err(|e| format!("Couldn't read {}: {e}", project.display()))?;
-    let (bytes, mut changed) = relink_listed(&raw, &dir, &listed)?;
+    let Relinked { bytes, mut changed, found } = relink_listed(&raw, &dir, &listed, libraries)?;
     if !changed.contains(&true) {
         left.push("the project uses none of the other copies".to_owned());
         return Err(format!("nothing was written: {}", left.join("; ")));
@@ -430,7 +714,7 @@ pub fn fix_bitwig_project(project: &Path, relinks: &[Relink]) -> Result<Fixed, S
     }
     let file = file.ok_or("every \"(fixed …)\" name up to 999 is taken, so nothing was written")?;
     let changed = relinks.iter().zip(&changed).filter(|(_, c)| **c).map(|(r, _)| r.clone()).collect();
-    Ok(Fixed { file, changed, left })
+    Ok(Fixed { file, changed, left, found })
 }
 
 /// Asked again just before a copy goes to the Recycle Bin (Solomon may have saved new versions since the fixed project

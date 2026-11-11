@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, SystemTime};
 
-use mo_space::bitwig::{FixedProject, LibraryCopy, LibraryIndex, project_folders, remove_copies, saves_in};
+use mo_space::bitwig::{
+    FixedProject, LibraryCopy, LibraryIndex, fixed_projects, project_folders, remove_copies, remove_fixed_projects,
+    saves_in,
+};
 use mo_space::clean::{Bin, Problem, Removed, What, undo};
 use mo_space::key;
 
@@ -333,6 +336,55 @@ fn a_library_folder_inside_the_project_never_counts() {
         let index = LibraryIndex::new(&[library], &stop).unwrap();
         assert!(index.copies_in(&project, &stop).unwrap().is_empty());
     }
+}
+
+/// While Solomon tests Fix: every "(fixed)" project Fix wrote goes to the bin in one go, and only those; Put back
+/// brings them back.
+#[test]
+fn the_fixed_projects_fix_wrote_go_to_the_bin_and_come_back() {
+    let dir = fixtures("mo-space-bitwig-fixed-projects");
+    let (garage, other) = (dir.join("Projects/Garage"), dir.join("Projects/Other"));
+    for name in ["Garage 2.bwproject", "Garage 2 (fixed).bwproject", "Garage 2 (fixed 3).bwproject"] {
+        write(&garage, name, b"BtWg");
+    }
+    // Not Fix's: a save of yours, one whose save isn't beside it, another kind of file, and one in a folder below.
+    write(&garage, "Garage 2 (fixed)(fixed).bwproject", b"BtWg");
+    write(&garage, "Gone (fixed).bwproject", b"BtWg");
+    write(&garage, "Garage 2 (fixed).txt", b"notes");
+    write(&garage, "auto-backups/Garage 2 (fixed).bwproject", b"BtWg");
+    write(&other, "Other.bwproject", b"BtWg");
+    write(&other, "Other (fixed).bwproject", b"BtWg!");
+    let stop = AtomicBool::new(false);
+    let folders = [garage.clone(), dir.join("Projects/Missing"), other.clone()];
+    let found = fixed_projects(&folders, &stop).unwrap();
+    let fixed = [
+        garage.join("Garage 2 (fixed 3).bwproject"),
+        garage.join("Garage 2 (fixed).bwproject"),
+        other.join("Other (fixed).bwproject"),
+    ];
+    assert_eq!(found, fixed);
+
+    // One gone by the time it's sent, and one that was never Fix's, said plainly.
+    let mut sent = found.clone();
+    sent.push(garage.join("Gone (fixed).bwproject"));
+    fs::remove_file(&fixed[0]).unwrap();
+    let bin = FolderBin::new(&dir);
+    let done = remove_fixed_projects(&sent, &bin, &stop);
+    let gone: Vec<&str> = done.removed.iter().map(|r| r.path.as_str()).collect();
+    assert_eq!(gone, [s(&fixed[1]), s(&fixed[2])]);
+    assert!(done.removed.iter().all(|r| r.what == What::FixedProject));
+    assert_eq!(done.bytes(), 9);
+    let why: Vec<&str> = done.problems.iter().map(|p| p.why.as_str()).collect();
+    assert_eq!(
+        why,
+        ["It isn't there any more.", "The save it was written from isn't beside it, so it may not be Fix's: it stays.",]
+    );
+    assert!(garage.join("Garage 2.bwproject").is_file() && other.join("Other.bwproject").is_file(), "the saves stay");
+    assert!(garage.join("auto-backups/Garage 2 (fixed).bwproject").is_file());
+    let mut removed = done.removed.clone();
+    assert!(bin.find(&mut removed).is_empty());
+    assert!(undo(&mo_space::clean::Done { removed, ..done }, &bin).is_empty());
+    assert!(fixed[1].is_file() && fixed[2].is_file(), "Put back brings them back");
 }
 
 /// A folder standing in for the Recycle Bin.
