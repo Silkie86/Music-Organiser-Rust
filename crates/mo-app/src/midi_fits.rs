@@ -100,10 +100,13 @@ pub fn fitted(song: &Song, wanted: Option<Wants>) -> Result<Fitted, String> {
         let target = pick.target(song)?;
         Some(Fitted { wants: target.wants(), pick, target })
     };
+    let (over, under) = (of(&chords), of(&melody));
+    // The other way is only pointed to when it would work.
+    let (can_over, can_under) = (over.is_some(), under.is_some());
     let fitted = match wanted {
-        Some(Wants::Tune) => of(&chords),
-        Some(Wants::Chords) => of(&melody),
-        None => of(&chords).or_else(|| of(&melody)),
+        Some(Wants::Tune) => over,
+        Some(Wants::Chords) => under,
+        None => over.or(under),
     };
     if let Some(fitted) = fitted {
         return Ok(fitted);
@@ -117,16 +120,16 @@ pub fn fitted(song: &Song, wanted: Option<Wants>) -> Result<Fitted, String> {
         Some(pick) => format!("The melody couldn't be read in {} of this song.", bars_words(&pick.bars)),
         None => "No melody found in this song to put chords under.".to_owned(),
     };
-    Err(match (wanted, chords.is_some(), melody.is_some()) {
-        (Some(Wants::Tune), _, true) => format!("{no_chords} It has a melody: look for chords for that."),
-        (Some(Wants::Tune), _, false) => no_chords,
-        (Some(Wants::Chords), true, _) => format!("{no_melody} It has chords: look for parts to play over them."),
-        (Some(Wants::Chords), false, _) => no_melody,
-        (None, false, false) => {
+    Err(match wanted {
+        Some(Wants::Tune) if can_under => format!("{no_chords} It has a melody: look for chords for that."),
+        Some(Wants::Tune) => no_chords,
+        Some(Wants::Chords) if can_over => format!("{no_melody} It has chords: look for parts to play over them."),
+        Some(Wants::Chords) => no_melody,
+        None if chords.is_none() && melody.is_none() => {
             "No chords, bassline or melody found in this song (drums and samples aside).".to_owned()
         }
-        (None, true, _) => no_chords,
-        (None, false, true) => no_melody,
+        None if chords.is_some() => no_chords,
+        None => no_melody,
     })
 }
 
@@ -510,13 +513,21 @@ mod tests {
             fitted(&song, Some(Wants::Tune)).unwrap_err(),
             "No chords could be read in bars 9–12 of this song. It has a melody: look for chords for that."
         );
-        // The melody unreadable too: the words say it's the melody when chords for it were asked for.
+        // The melody unreadable too: the words say it's the melody when chords for it were asked for, and don't
+        // point to the other way, which wouldn't work either.
         song.parts[1].notes.iter_mut().for_each(|n| n.muted = true);
+        assert_eq!(
+            fitted(&song, Some(Wants::Chords)).unwrap_err(),
+            "The melody couldn't be read in bars 13–16 of this song."
+        );
+        assert_eq!(fitted(&song, Some(Wants::Tune)).unwrap_err(), "No chords could be read in bars 9–12 of this song.");
+        assert_eq!(fitted(&song, None).unwrap_err(), "No chords could be read in bars 9–12 of this song.");
+        // Only the melody unreadable: the chords are pointed to.
+        song.parts[0].notes.iter_mut().for_each(|n| n.muted = false);
         assert_eq!(
             fitted(&song, Some(Wants::Chords)).unwrap_err(),
             "The melody couldn't be read in bars 13–16 of this song. It has chords: look for parts to play over them."
         );
-        assert_eq!(fitted(&song, None).unwrap_err(), "No chords could be read in bars 9–12 of this song.");
     }
 
     #[test]
