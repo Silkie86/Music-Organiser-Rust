@@ -158,10 +158,14 @@ struct Page {
     /// What a part in the list on show is heard with: the song's parts and bars the list is fitted to; none in a
     /// list that isn't "Fits my song"'s.
     fit_with: Option<Arc<SongBars>>,
-    /// What the picked part's card says it plays with, and what the loop playing was made with: brought into line by
-    /// [`fit_follows`], as `card_move` and `loop_move` are.
+    /// What the picked part's card says it plays with ([`show_sound`]), and what the loop playing was made with:
+    /// brought into line by [`fit_follows`], as `card_move` and `loop_move` are.
     card_with: Option<Arc<SongBars>>,
     loop_with: Option<Arc<SongBars>>,
+    /// The picked part's sound line for when it plays alone, with its own tempo: none until that's read
+    /// ([`tempo_read`]). Kept beside the line with the song, so "Play with the song" changes the card's words with
+    /// nothing read again.
+    card_alone: Option<String>,
 }
 
 /// How the picked part is moved to fit a song: what its card says, and how it's shown, played, dragged and sent.
@@ -302,6 +306,15 @@ impl Page {
         Some(midi_fits::with_song_line(&page::gm_sound(self.cat.entry(at)?), &song.name, &with))
     }
 
+    /// The card's sound line for the picked part `at`, as it plays now: what of the song it plays with
+    /// ([`Page::with_song_line`]); alone, its sound and its own tempo once that's read (`card_alone`), and until
+    /// then its sound with no tempo rather than a made-up one.
+    fn sound_line_now(&self, at: usize) -> Option<String> {
+        self.with_song_line(at)
+            .or_else(|| self.card_alone.clone())
+            .or_else(|| Some(page::sound_line(&page::gm_sound(self.cat.entry(at)?), None)))
+    }
+
     /// What the picked part's card says about how it's moved to fit ([`midi_fits::card_text`]); "" when it's as it
     /// is in the library.
     fn picked_fit_text(&self) -> String {
@@ -382,14 +395,11 @@ impl Page {
     /// None when there's no index or no such part.
     fn notes_ask(&mut self, at: usize) -> Option<NotesAsk> {
         self.notes_asked += 1;
-        self.card_with = self.heard_with(at);
         let part = self.part_out(at)?;
         self.card_move = part.semitones;
-        let with_song = self.with_song_line(at);
         let e = self.cat.entry(at)?;
         Some(NotesAsk {
             id: self.notes_asked,
-            with_song,
             part,
             role: e.role(),
             // As the stored key was read; the clip's name only for a part whose key isn't read yet.
@@ -496,9 +506,6 @@ enum FitJob {
 /// An ask for a part's notes: the roll, and its key when the index has no reading of the new key finder.
 struct NotesAsk {
     id: u64,
-    /// The card's sound line when the part plays with the song ([`Page::with_song_line`]); none: its own tempo is
-    /// read for the line.
-    with_song: Option<String>,
     /// The part, and how far the roll and the chords show it moved.
     part: PartOut,
     role: Role,
@@ -1378,6 +1385,8 @@ fn listed(app: &AppWindow, id: u64, hits: Vec<Hit>, counts: page::ChoiceCounts) 
         p.fits_song = None;
         p.fit_with = None;
         p.fit_picked();
+        // Nothing plays with a song in a plain list.
+        forget_song_loop();
         let target = p.target.and_then(|t| {
             let at = match t {
                 Target::Like(at) | Target::Within(at) => at,
@@ -1698,15 +1707,39 @@ fn play_with_song(app: &AppWindow, on: bool) {
     PAGE.with(|p| p.borrow_mut().with_song = on);
     crate::settings::remember(midi_fits::WITH_SONG_KEY, if on { "1" } else { "0" });
     app.global::<MidiData>().set_fit_with_song(on);
+    if !on {
+        forget_song_loop();
+    }
     fit_follows(app);
 }
 
+/// Whether two parts' "what it plays with" are the same parts and bars of the same song: mostly the very same one,
+/// which is told without looking at a note.
+fn same_bars(a: &Option<Arc<SongBars>>, b: &Option<Arc<SongBars>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => Arc::ptr_eq(a, b) || a == b,
+        _ => false,
+    }
+}
+
+/// The picked part's sound line and its Play button, as it plays now: with the song's parts ("Play with the song",
+/// and what they are) or alone (its own tempo, once read). Everything it says is on the page already.
+fn show_sound(data: &MidiData, p: &mut Page) {
+    let Some(at) = p.picked else { return };
+    p.card_with = p.heard_with(at);
+    if let Some(line) = p.sound_line_now(at) {
+        data.set_sound_line(line.into());
+    }
+    data.set_play_with_song(p.card_with.is_some());
+}
+
 /// A new list is on show: what's seen and heard of the picked part is brought into line with how it's moved now
-/// ([`Page::fit_picked`]) and what of the song it plays with ([`Page::heard_with`]). Its card's lines and headings;
-/// its roll and chords, read again when the move is another (nothing else on the card changes, so nothing is blanked
-/// meanwhile); and the loop playing or the part in a DAW, started again the new way. Each is compared with what it
-/// was made with, so a list that leaves both as they were (a filter, a word typed, the song saved with the same
-/// chords) touches nothing that plays.
+/// ([`Page::fit_picked`]) and what of the song it plays with ([`Page::heard_with`]). Its card's lines and headings
+/// ([`show_sound`] for what it plays with: nothing is read for that); its roll and chords, read again when the move
+/// is another (nothing else on the card changes, so nothing is blanked meanwhile); and the loop playing or the part
+/// in a DAW, started again the new way. Each is compared with what it was made with, so a list that leaves both as
+/// they were (a filter, a word typed, the song saved with the same chords) touches nothing that plays.
 fn fit_follows(app: &AppWindow) {
     let data = app.global::<MidiData>();
     let Some((at, ask, again)) = PAGE.with(|p| {
@@ -1714,11 +1747,12 @@ fn fit_follows(app: &AppWindow) {
         let at = p.picked?;
         let now = p.fit_move(at);
         let with = p.heard_with(at);
-        let ask = if now == p.card_move && with == p.card_with { None } else { p.notes_ask(at) };
-        if ask.is_some() {
-            data.set_play_with_song(with.is_some());
+        let ask = if now == p.card_move { None } else { p.notes_ask(at) };
+        // What it plays with is said on the card at once: both lines are the page's already, nothing is read.
+        if !same_bars(&with, &p.card_with) {
+            show_sound(&data, &mut p);
         }
-        let looping = p.looping == Some(at) && (now != p.loop_move || with != p.loop_with);
+        let looping = p.looping == Some(at) && (now != p.loop_move || !same_bars(&with, &p.loop_with));
         let in_daw = p.in_daw.is_some() && p.in_daw == p.cat.entry(at).map(|e| e.phrase.id) && now != p.daw_move;
         show_card_fit(&data, &mut p);
         Some((at, ask, (looping, in_daw)))
@@ -1953,10 +1987,10 @@ fn pick(app: &AppWindow, picked: Option<(usize, Option<usize>)>) {
             .collect();
         data.set_picked(card);
         data.set_facts(ModelRc::new(VecModel::from(facts)));
-        // Its tempo follows with the notes (it's read from its song or file); with the song, it's the song's.
-        let line = ask.as_ref().and_then(|ask| ask.with_song.clone());
-        data.set_sound_line(line.unwrap_or_else(|| page::sound_line(&page::gm_sound(e), None)).into());
-        data.set_play_with_song(p.card_with.is_some());
+        // Its own tempo follows with the notes (it's read from its song or file); with the song, it's the song's,
+        // known already.
+        p.card_alone = None;
+        show_sound(&data, &mut p);
         crate::piano_roll::show(app, None);
         p.card_fit = fit;
         show_actions(&data, &p);
@@ -2082,19 +2116,21 @@ fn read_notes(ask: &NotesAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result
     Ok(NotesRead { read, roll: page::roll(&moved, ask.part.bars), fact, chart })
 }
 
-/// The card's sound line: with the part's tempo read now ([`tempo_of`]), or what of the song it plays with.
+/// The card's sound line for the part alone, with its tempo read now ([`tempo_of`]).
 fn sound_line_of(ask: &NotesAsk) -> String {
-    match &ask.with_song {
-        Some(line) => line.clone(),
-        None => page::sound_line(&ask.sound, Some(tempo_of(&ask.part.from, &ask.source, &ask.library))),
-    }
+    page::sound_line(&ask.sound, Some(tempo_of(&ask.part.from, &ask.source, &ask.library)))
 }
 
-/// The picked part's tempo has been read: its card says it, unless another part was picked meanwhile.
+/// The picked part's tempo has been read: its card says it when the part plays alone ([`show_sound`]), unless
+/// another part was picked meanwhile.
 fn tempo_read(app: &AppWindow, id: u64, line: String) {
-    if PAGE.with(|p| p.borrow().notes_asked) == id {
-        app.global::<MidiData>().set_sound_line(line.into());
-    }
+    PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        if p.notes_asked == id {
+            p.card_alone = Some(line);
+            show_sound(&app.global::<MidiData>(), &mut p);
+        }
+    });
 }
 
 /// The last tempo read, by the file's path and the size and time the index read it at: a part's card, its Play loop
@@ -3031,17 +3067,36 @@ fn play(app: &AppWindow, at: usize) {
     });
 }
 
-/// How loud the song's parts go in beside a part found: a little under it, so the part is what's heard first.
+/// How loud the song's parts go in beside a part found: a little under it, so the part is what's heard first. When
+/// the song's parts together are louder than the part (several of them, or one low and full), they're turned down
+/// to this much of the part's loudness ([`song_gain`]), never under [`SONG_LEAST`] of their own.
 const SONG_GAIN: f32 = 0.7;
+const SONG_LEAST: f32 = 0.2;
+
+/// How much of itself the song's loop goes in at, beside a part as loud as `part`, the song's loop as loud as `song`
+/// (`mo_audio::gm::level`): [`SONG_GAIN`] of its own when it's no louder than the part; louder, as much as leaves
+/// it at [`SONG_GAIN`] of the part's loudness, so six parts of a song don't drown the one being tried.
+fn song_gain(part: f32, song: f32) -> f32 {
+    if part > 0.0 && song > part { (SONG_GAIN * part / song).max(SONG_LEAST) } else { SONG_GAIN }
+}
 
 /// The song's bars made into sound last ([`song_loop`]), by the SoundFont and the bars: every part of a list plays
-/// with the same ones, so stepping down the list makes each part's own loop and no more.
+/// with the same ones, so stepping down the list makes each part's own loop and no more. One loop at the most (two
+/// minutes of sound), let go when nothing plays with a song any more ([`forget_song_loop`]).
 static SONG_LOOP: std::sync::Mutex<Option<(PathBuf, Arc<SongBars>, Arc<mo_audio::AudioData>)>> =
     std::sync::Mutex::new(None);
 
+/// Lets go of the song's loop kept for the next part ([`SONG_LOOP`]): "Play with the song" went off, or the list on
+/// show isn't "Fits my song"'s.
+fn forget_song_loop() {
+    if let Some(kept) = SONG_LOOP.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+        background::free_later(kept);
+    }
+}
+
 /// The part's loop: its notes read, the SoundFont read (once), and the two made into sound. With the song
-/// ([`PlayAsk::with`]): at the song's tempo, over the song's parts in the bars it fits, the two going round until
-/// both are back at their starts ([`SongBars::round`]).
+/// ([`PlayAsk::with`]): at the song's tempo, over the song's parts in the bars it fits ([`with_song`]). If the song's
+/// parts can't be made into sound, the part still plays, alone (the log says why).
 fn make_loop(ask: &PlayAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<mo_audio::AudioData, String> {
     let notes = ask.part.notes(open)?;
     let (heard, length) = page::loop_notes(&notes, ask.part.bars);
@@ -3065,12 +3120,34 @@ fn make_loop(ask: &PlayAsk, open: &mut Option<(PathBuf, MidiStore)>) -> Result<m
     };
     let alone = mo_audio::gm::render_loop(&font, &gm_part(&gm_notes(&heard), length, tempo, &ask.sound))?;
     let Some(with) = &ask.with else { return Ok(alone) };
-    let song = song_loop(&font, &ask.font, with)?;
+    match with_song(&font, &ask.font, with, &alone, length, tempo) {
+        Ok(both) => Ok(both),
+        Err(e) => {
+            log::warning("MIDI", &format!("A part plays without the song's parts, which couldn't be played: {e}"));
+            Ok(alone)
+        }
+    }
+}
+
+/// A part's loop (`alone`, `length` ticks long, made at the song's `tempo`) with the song's parts under it: each
+/// goes round from its own bar lines until both are back at their starts ([`SongBars::round`], held to what can be
+/// made into sound), the song's a little under the part ([`song_gain`]).
+fn with_song(
+    font: &mo_audio::gm::Font,
+    font_path: &Path,
+    with: &Arc<SongBars>,
+    alone: &mo_audio::AudioData,
+    length: i64,
+    tempo: f64,
+) -> Result<mo_audio::AudioData, String> {
+    use mo_audio::gm::{Layer, level};
+    let song = song_loop(font, font_path, with)?;
     let layers = [
-        mo_audio::gm::Layer { sound: &alone, length, gain: 1.0 },
-        mo_audio::gm::Layer { sound: &song, length: with.length, gain: SONG_GAIN },
+        Layer { sound: alone, length, gain: 1.0 },
+        Layer { sound: &song, length: with.length, gain: song_gain(level(alone), level(&song)) },
     ];
-    mo_audio::gm::layered(&layers, with.round(length), mo_midi::PPQ, tempo)
+    let round = with.round(length, mo_audio::gm::longest_ticks(mo_midi::PPQ, tempo));
+    mo_audio::gm::layered(&layers, round, mo_midi::PPQ, tempo)
 }
 
 /// A part's notes as the SoundFont's player takes them.
@@ -3092,7 +3169,8 @@ fn gm_part<'a>(
 }
 
 /// The song's parts over the bars a list is fitted to, as one loop at the song's tempo: each with the sound matched
-/// to it, together. Kept for the next part of the list ([`SONG_LOOP`]).
+/// to it, all made in one pass (`mo_audio::gm::render_together`). Kept for the next part of the list
+/// ([`SONG_LOOP`]).
 fn song_loop(
     font: &mo_audio::gm::Font,
     font_path: &Path,
@@ -3105,17 +3183,14 @@ fn song_loop(
     {
         return Ok(Arc::clone(&kept.2));
     }
-    let voices = with
+    let notes: Vec<Vec<mo_audio::gm::Note>> = with.voices.iter().map(|voice| gm_notes(&voice.notes)).collect();
+    let parts: Vec<mo_audio::gm::Part> = with
         .voices
         .iter()
-        .map(|voice| {
-            let notes = gm_notes(&voice.notes);
-            mo_audio::gm::render_loop(font, &gm_part(&notes, with.length, with.bpm(), &voice.sound))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
-    let layers: Vec<mo_audio::gm::Layer> =
-        voices.iter().map(|sound| mo_audio::gm::Layer { sound, length: with.length, gain: 1.0 }).collect();
-    let made = Arc::new(mo_audio::gm::layered(&layers, with.length, mo_midi::PPQ, with.bpm())?);
+        .zip(&notes)
+        .map(|(voice, notes)| gm_part(notes, with.length, with.bpm(), &voice.sound))
+        .collect();
+    let made = Arc::new(mo_audio::gm::render_together(font, &parts)?);
     *SONG_LOOP.lock().unwrap_or_else(std::sync::PoisonError::into_inner) =
         Some((font_path.to_owned(), Arc::clone(with), Arc::clone(&made)));
     Ok(made)
@@ -3769,7 +3844,6 @@ mod tests {
     fn notes_ask(s: &Loaded, e: &mo_midi::Entry, semitones: i32) -> NotesAsk {
         NotesAsk {
             id: 1,
-            with_song: None,
             part: part_out(s, e, semitones),
             role: e.role(),
             cut: false,
@@ -3923,22 +3997,26 @@ mod tests {
         let line = midi_fits::with_song_line(&page::gm_sound(&p.cat.entries[4]), "Night drive", &chords);
         assert!(line.ends_with("with Keys from Night drive (bars 9–12), at the song's 128 BPM"), "{line}");
         assert_eq!((p.heard_with(4), p.with_song_line(4)), (Some(chords.clone()), Some(line.clone())));
-        let ask = p.notes_ask(4).unwrap();
-        assert_eq!(
-            (ask.with_song.clone(), sound_line_of(&ask), p.card_with.clone()),
-            (Some(line.clone()), line, Some(chords.clone()))
-        );
+        assert_eq!(p.sound_line_now(4), Some(line.clone()));
         // The list now looks for chords under the song's lead and no longer has the part: it still plays over the
         // chords it was found for, while a line of the new list plays with the lead.
         listed(&mut p, &[2], Some(&lead));
         assert_eq!((p.heard_with(4), p.heard_with(2)), (Some(chords.clone()), Some(lead.clone())));
-        // The chip off: alone, with its own tempo on the card.
+        // The chip off: alone. Its card says its sound, and its own tempo once that's read; nothing is read again
+        // for the chip (the ask for its notes is the same either way).
+        let alone = page::sound_line(&page::gm_sound(&p.cat.entries[4]), None);
         p.with_song = false;
         assert_eq!((p.heard_with(4), p.heard_with(2), p.with_song_line(4)), (None, None, None));
-        let ask = p.notes_ask(4).unwrap();
-        assert_eq!((ask.with_song.clone(), p.card_with.clone()), (None, None));
-        assert!(sound_line_of(&ask).contains("BPM") && !sound_line_of(&ask).contains("Night drive"));
+        assert_eq!(p.sound_line_now(4), Some(alone.clone()));
+        p.card_alone = Some(format!("{alone} · 96 BPM"));
+        assert_eq!(p.sound_line_now(4), Some(format!("{alone} · 96 BPM")));
+        // On again: the song's parts and tempo, whatever the part's own.
         p.with_song = true;
+        assert_eq!(p.sound_line_now(4), Some(line));
+        // The same parts and bars read again (the song saved with nothing changed) are the same to play with.
+        let again = Arc::new((*chords).clone());
+        assert!(same_bars(&Some(chords.clone()), &Some(again)) && same_bars(&None, &None));
+        assert!(!same_bars(&Some(chords.clone()), &Some(lead.clone())) && !same_bars(&Some(chords.clone()), &None));
         // Never drums, in the list or picked.
         let drums = p.cat.entries.iter().position(|e| e.role() == Role::Drums).unwrap();
         listed(&mut p, &[4, drums], Some(&chords));
@@ -4025,27 +4103,50 @@ mod tests {
         assert!(Arc::ptr_eq(&SONG_LOOP.lock().unwrap().as_ref().unwrap().2, &kept.2), "the same bars: not made again");
         assert_eq!(again.channels, together.channels);
 
-        // What's heard is the part alone at the song's tempo (no parts of the song: its bars are silent) and the
-        // song's loop a little under it, each going round by its own length: three times and twice.
-        let no_song = Arc::new(SongBars { voices: Vec::new(), ..(*with).clone() });
-        let part = make_loop(&ask(Some(no_song)), &mut None).unwrap();
-        assert_eq!(part.len(), together.len());
+        // What's heard is the part at the song's tempo and the song's loop under it, turned down until it's a little
+        // under the part ([`song_gain`]), each going round by its own length: three times and twice.
+        let font = mo_audio::gm::open(&font_path).unwrap();
+        let (heard, length) = page::loop_notes(&ask(None).part.notes(&mut None).unwrap(), 4);
+        assert_eq!(length, 4 * bar);
+        let part = gm_part(&gm_notes(&heard), length, 100.0, &page::gm_sound(e));
+        let part = mo_audio::gm::render_loop(&font, &part).unwrap();
         let song = &kept.2;
         let (four, six) = (4 * 105_840, 6 * 105_840);
+        assert_eq!((part.len(), song.len()), (four, six));
+        let (part_level, song_level) = (mo_audio::gm::level(&part), mo_audio::gm::level(song));
+        let gain = song_gain(part_level, song_level);
+        println!("the part is {part_level:.4} loud and the song's parts {song_level:.4}: they go in at {gain:.3}");
+        assert!(part_level > 0.0 && song_level > 0.0 && (SONG_LEAST..=SONG_GAIN).contains(&gain));
         let mut loudest = 0.0f32;
         let mut furthest = 0.0f32;
         for i in (0..together.len()).step_by(97) {
-            let want = part.channels[0][i] + SONG_GAIN * song.channels[0][i % six];
+            let want = part.channels[0][i % four] + gain * song.channels[0][i % six];
             loudest = loudest.max(want.abs());
             furthest = furthest.max((together.channels[0][i] - want).abs());
-            // The part itself comes round every four bars.
-            assert!((part.channels[0][i] - part.channels[0][i % four]).abs() < 1e-6, "frame {i}");
         }
         assert!(loudest > 0.05, "there's sound in it: {loudest}");
         assert!(loudest <= 1.0 && furthest < 1e-5, "added up as they are: off by {furthest}, peak {loudest}");
+        // The song's parts can't be made into sound (there are none): the part still plays, alone at the song's
+        // tempo.
+        let no_song = Arc::new(SongBars { voices: Vec::new(), ..(*with).clone() });
+        assert_eq!(make_loop(&ask(Some(no_song)), &mut None).unwrap().channels, part.channels);
         // Alone, it plays at its own tempo and for its own four bars.
         let alone = make_loop(&ask(None), &mut None).unwrap();
         assert!(alone.len() != four || tempo_of(&ask(None).part.from, &e.phrase.source, Path::new("")).bpm() == 100.0);
+        // The song's loop is let go once nothing plays with a song.
+        forget_song_loop();
+        assert!(SONG_LOOP.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn the_songs_parts_go_in_a_little_under_the_part_found() {
+        // No louder than the part: as they are, a little under.
+        assert_eq!((song_gain(0.2, 0.1), song_gain(0.2, 0.2)), (SONG_GAIN, SONG_GAIN));
+        // Louder (several parts, or one low and full): turned down to that much of the part's loudness.
+        assert!((song_gain(0.1, 0.2) - SONG_GAIN / 2.0).abs() < 1e-6);
+        // Never to nothing, however quiet the part; and with silence on either side, as they are.
+        assert_eq!(song_gain(0.01, 1.0), SONG_LEAST);
+        assert_eq!((song_gain(0.0, 0.5), song_gain(0.3, 0.0)), (SONG_GAIN, SONG_GAIN));
     }
 
     #[test]
@@ -4106,6 +4207,13 @@ mod tests {
         assert_eq!(p.change_octave(Apps), None);
         listed(&mut p, &[2, 4]);
         assert_eq!(p.fit_move(4), -9, "and a new list leaves it with the app");
+        // Down to the bottom: 3 octaves under how it's saved, and there Octave down has nothing more to do.
+        for octaves in [-2, -3] {
+            assert_eq!(p.change_octave(Down).map(|(_, kept, _)| kept), Some(Some(octaves)));
+        }
+        assert_eq!((p.change_octave(Down), p.fit_move(4)), (None, -33));
+        assert_eq!(p.card_fit().octave, can(true, false, true));
+        assert_eq!(p.change_octave(Apps).map(|(_, kept, _)| kept), Some(None));
 
         // The buttons and the menu's lines, with their keys: down and up side by side, the app's octave once it's
         // yours; the menu has them after playing.

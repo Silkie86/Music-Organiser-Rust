@@ -80,42 +80,64 @@ fn frames_per_tick(tempo: f64, ppq: i64) -> f64 {
     f64::from(RATE) * 60.0 / (tempo * ppq.max(1) as f64)
 }
 
+/// The most ticks a loop can be at `tempo` with `ppq` ticks to a beat before it's cut ([`LONGEST_SECONDS`]): what's
+/// played together for longer than this has to be made shorter by whole bars, by who asks.
+pub fn longest_ticks(ppq: i64, tempo: f64) -> i64 {
+    (LONGEST_SECONDS * f64::from(RATE) / frames_per_tick(tempo, ppq)).floor() as i64
+}
+
 /// The part as a stereo loop at [`RATE`], ready for `Player::play_looped`. Takes a while for a long part: call it
 /// off the window's thread.
 pub fn render_loop(font: &Font, part: &Part) -> Result<AudioData, String> {
-    let frames_per_tick = frames_per_tick(part.tempo, part.ppq);
-    let at = |ticks: i64| (ticks.max(0) as f64 * frames_per_tick).round() as usize;
+    render_together(font, std::slice::from_ref(part))
+}
+
+/// The most voices the synth sounds at once: for one part, and for several played together (the most it takes).
+const VOICES: usize = 128;
+const VOICES_TOGETHER: usize = 256;
+
+/// Several parts as one stereo loop at [`RATE`], played by one synth as a band plays: each sound on a channel of its
+/// own (parts with the same sound share one), drums on theirs. Each part's notes are placed by its own tempo and
+/// ticks to a beat, and the loop is as long as the longest part. One pass makes them all, so six parts take little
+/// longer than one and no more memory. Call it off the window's thread.
+pub fn render_together(font: &Font, parts: &[Part]) -> Result<AudioData, String> {
+    let at = |part: &Part, ticks: i64| (ticks.max(0) as f64 * frames_per_tick(part.tempo, part.ppq)).round() as usize;
     let longest = (LONGEST_SECONDS * f64::from(RATE)) as usize;
-    let len = at(part.length).min(longest);
+    let len = parts.iter().map(|part| at(part, part.length)).max().unwrap_or(0).min(longest);
     if len == 0 {
         return Err("The part has no length".to_owned());
     }
 
     let mut settings = SynthesizerSettings::new(RATE as i32);
-    settings.maximum_polyphony = 128;
+    settings.maximum_polyphony = if parts.len() > 1 { VOICES_TOGETHER } else { VOICES };
     settings.enable_reverb_and_chorus = true;
     let mut synth = Synthesizer::new(font, &settings).map_err(|e| format!("The synth wouldn't start: {e:?}"))?;
-    let channel = if part.drums { DRUM_CHANNEL } else { 0 };
-    if !part.drums {
-        synth.process_midi_message(channel, 0xC0, i32::from(part.program & 0x7f), 0);
+    let channels = channels_of(parts);
+    for (part, &channel) in parts.iter().zip(&channels) {
+        if !part.drums {
+            synth.process_midi_message(channel, 0xC0, i32::from(part.program & 0x7f), 0);
+        }
     }
 
-    // Every note on and off, for both times round: (frame, off before on at the same frame, key, velocity).
-    let mut events: Vec<(usize, bool, u8, u8)> = Vec::with_capacity(part.notes.len() * 4);
+    // Every note on and off, for both times round: (frame, off before on at the same frame, channel, key, velocity).
+    let mut events: Vec<(usize, bool, i32, u8, u8)> =
+        Vec::with_capacity(parts.iter().map(|part| part.notes.len()).sum::<usize>() * 4);
     for round in 0..2 {
         let offset = round * len;
-        for n in part.notes {
-            let on = at(n.start);
-            if on >= len {
-                continue;
+        for (part, &channel) in parts.iter().zip(&channels) {
+            for n in part.notes {
+                let on = at(part, n.start);
+                if on >= len {
+                    continue;
+                }
+                let off = at(part, n.start + n.length.max(1)).max(on + 1);
+                events.push((offset + on, false, channel, n.key.min(127), n.velocity.clamp(1, 127)));
+                events.push((offset + off, true, channel, n.key.min(127), 0));
             }
-            let off = at(n.start + n.length.max(1)).max(on + 1);
-            events.push((offset + on, false, n.key.min(127), n.velocity.clamp(1, 127)));
-            events.push((offset + off, true, n.key.min(127), 0));
         }
     }
     // A note ending where the next starts lets go first.
-    events.sort_by_key(|&(frame, off, key, _)| (frame, !off, key));
+    events.sort_by_key(|&(frame, off, channel, key, _)| (frame, !off, channel, key));
 
     // The first time round is made into a small piece of memory used again and again, and only the second is kept:
     // a long loop takes the memory it keeps, not three times it.
@@ -135,24 +157,27 @@ pub fn render_loop(font: &Font, part: &Part) -> Result<AudioData, String> {
             synth.render(&mut left[from - len..to - len], &mut right[from - len..to - len]);
         }
     };
-    // How many notes hold each key down: a key is let go only when the last of them ends, so a note left over from
-    // the first time round doesn't cut short the same note starting again (the synth lets go of every voice of a key).
-    let mut held = [0u32; 128];
+    // How many notes hold each key of each channel down: a key is let go only when the last of them ends, so a note
+    // left over from the first time round doesn't cut short the same note starting again (the synth lets go of
+    // every voice of a key).
+    let mut held = [[0u32; 128]; CHANNELS];
     let mut done = 0;
-    for (frame, off, key, velocity) in events {
+    for (frame, off, channel, key, velocity) in events {
         let to = frame.min(total);
         if to > done {
             render_to(&mut synth, done, to);
             done = to;
         }
-        let k = usize::from(key);
+        let Some(holding) = held.get_mut(channel as usize).and_then(|keys| keys.get_mut(usize::from(key))) else {
+            continue;
+        };
         if off {
-            held[k] = held[k].saturating_sub(1);
-            if held[k] == 0 {
+            *holding = holding.saturating_sub(1);
+            if *holding == 0 {
                 synth.note_off(channel, i32::from(key));
             }
         } else {
-            held[k] += 1;
+            *holding += 1;
             synth.note_on(channel, i32::from(key), i32::from(velocity));
         }
     }
@@ -166,6 +191,51 @@ pub fn render_loop(font: &Font, part: &Part) -> Result<AudioData, String> {
         embedded_is_loop: Some(true),
         ..AudioData::default()
     })
+}
+
+/// The synth's MIDI channels.
+const CHANNELS: usize = 16;
+
+/// The channel each part plays on: drums on theirs, every other sound on one of its own, in the order the sounds
+/// come; parts with the same sound share. With more sounds than the 15 channels there are, the last ones share the
+/// last channel (and play its sound).
+fn channels_of(parts: &[Part]) -> Vec<i32> {
+    let mut given: Vec<(u8, i32)> = Vec::new();
+    let mut free = (0..CHANNELS as i32).filter(|&channel| channel != DRUM_CHANNEL);
+    let mut last = 0;
+    parts
+        .iter()
+        .map(|part| {
+            if part.drums {
+                return DRUM_CHANNEL;
+            }
+            let program = part.program & 0x7f;
+            if let Some(&(_, channel)) = given.iter().find(|(has, _)| *has == program) {
+                return channel;
+            }
+            let channel = free.next().unwrap_or(last);
+            last = channel;
+            given.push((program, channel));
+            channel
+        })
+        .collect()
+}
+
+/// How loud a loop is where it has sound: the root mean square of its frames, the silent ones (its rests) left out,
+/// so a part of a few notes counts as loud as its notes are. 0 for silence.
+pub fn level(sound: &AudioData) -> f32 {
+    /// Under this a frame is a rest (about -80 dB).
+    const QUIET: f32 = 1e-4;
+    let Some(left) = sound.channels.first() else { return 0.0 };
+    let right = sound.channels.get(1).unwrap_or(left);
+    let (mut squares, mut frames) = (0.0f64, 0u64);
+    for (l, r) in left.iter().zip(right) {
+        if l.abs() > QUIET || r.abs() > QUIET {
+            squares += f64::from(*l) * f64::from(*l) + f64::from(*r) * f64::from(*r);
+            frames += 1;
+        }
+    }
+    if frames == 0 { 0.0 } else { (squares / (2 * frames) as f64).sqrt() as f32 }
 }
 
 /// One loop among those played together ([`layered`]).
@@ -222,7 +292,12 @@ pub fn layered(layers: &[Layer], length: i64, ppq: i64, tempo: f64) -> Result<Au
             }
             turn += 1;
             let next = at(turn.saturating_mul(own)).max(start + 1);
-            let take = (next.min(len) - start).min(has);
+            // A turn can be a frame longer than the loop's sound (a bar is seldom a whole number of frames, and
+            // each turn starts on the frame nearest its bar line): it goes on with the loop's start, as the loop
+            // does going round, so there's no frame of silence where two turns meet. A turn much longer than the
+            // sound (a loop cut at the longest there is) has no more to give and rests.
+            let whole = next.min(len) - start;
+            let take = if next - start <= has + CUT_SLACK { whole } else { whole.min(has) };
             // Cut by the whole's end, with more of it still to come: faded out.
             let cut = next > len && has > take + CUT_SLACK;
             let fade = if cut { CUT_FADE.min(take) } else { 0 };
@@ -230,7 +305,7 @@ pub fn layered(layers: &[Layer], length: i64, ppq: i64, tempo: f64) -> Result<Au
                 let gain =
                     if i + fade >= take { layer.gain * (take - i) as f32 / fade.max(1) as f32 } else { layer.gain };
                 if let (Some(l), Some(r), Some(a), Some(b)) =
-                    (left.get_mut(start + i), right.get_mut(start + i), from_left.get(i), from_right.get(i))
+                    (left.get_mut(start + i), right.get_mut(start + i), from_left.get(i % has), from_right.get(i % has))
                 {
                     *l += a * gain;
                     *r += b * gain;
@@ -353,6 +428,69 @@ mod tests {
         assert_eq!(layered(&layers, 2, PPQ, TEMPO).unwrap().channels, loop_.channels);
         let silent = layered(&layers[..2], 4, PPQ, TEMPO).unwrap();
         assert!(silent.len() == 400 && silent.channels.iter().flatten().all(|s| *s == 0.0));
+    }
+
+    /// A loop whose length isn't a whole number of frames: some turns are a frame longer than its sound, and that
+    /// frame is the loop's start again, never a frame of silence in the middle of the sound.
+    #[test]
+    fn where_two_turns_of_a_loop_meet_theres_no_frame_of_silence() {
+        // 1,000 ticks to a beat at 60: a tick is 44.1 frames, so three ticks are 132.3 and the loop is made 132
+        // frames long. Turns start at frames 0, 132, 265 (264.6), 397, 529...: the second is 133 frames.
+        let ppq = 1000;
+        let loop_ = ramp(132, 0.001);
+        let both = layered(&[Layer { sound: &loop_, length: 3, gain: 1.0 }], 30, ppq, TEMPO).unwrap();
+        assert_eq!(both.len(), 1323);
+        let left = &both.channels[0];
+        assert!((left[263] - 0.131).abs() < 1e-6 && (left[265] - 0.0).abs() < 1e-6);
+        assert!((left[264] - 0.0).abs() < 1e-6, "the frame over is the loop's first again: {}", left[264]);
+        let steady = AudioData { channels: vec![vec![0.25; 132]], ..ramp(0, 0.0) };
+        let both = layered(&[Layer { sound: &steady, length: 3, gain: 1.0 }], 30, ppq, TEMPO).unwrap();
+        assert!(both.channels.iter().flatten().all(|s| (*s - 0.25).abs() < 1e-6), "no hole anywhere");
+        // A loop with far less sound than its length (it was cut at the longest there is) rests for what's left
+        // of each turn: it isn't played again early.
+        let short = AudioData { channels: vec![vec![0.25; 100]], ..ramp(0, 0.0) };
+        let both = layered(&[Layer { sound: &short, length: 3, gain: 1.0 }], 6, ppq, TEMPO).unwrap();
+        let left = &both.channels[0];
+        assert!(left[..100].iter().all(|s| *s == 0.25) && left[100..132].iter().all(|s| *s == 0.0));
+        assert!(left[132..232].iter().all(|s| *s == 0.25) && left[232..].iter().all(|s| *s == 0.0));
+    }
+
+    #[test]
+    fn each_sound_plays_on_a_channel_of_its_own_and_drums_on_theirs() {
+        let part = |program: u8, drums: bool| Part { notes: &[], ppq: 96, length: 96, tempo: 120.0, program, drums };
+        // The same sound shares a channel; drums are on channel 10 (9 from 0), which no other sound is given.
+        let parts = [part(4, false), part(38, false), part(0, true), part(4, false), part(80, false)];
+        assert_eq!(channels_of(&parts), [0, 1, 9, 0, 2]);
+        // Twenty sounds: fifteen channels, and the last sounds share the last.
+        let many: Vec<Part> = (0..20).map(|program| part(program, false)).collect();
+        let channels = channels_of(&many);
+        assert_eq!(channels[..10], [0, 1, 2, 3, 4, 5, 6, 7, 8, 10]);
+        assert_eq!(channels[10..], [11, 12, 13, 14, 15, 15, 15, 15, 15, 15]);
+        assert!(channels_of(&[]).is_empty());
+    }
+
+    #[test]
+    fn how_loud_a_loop_is_leaves_its_rests_out() {
+        // A steady tone for a quarter of the loop is as loud as the same tone all through.
+        let tone = |frames: usize, of: usize| {
+            let channel: Vec<f32> = (0..of).map(|i| if i < frames { 0.5 } else { 0.0 }).collect();
+            AudioData { sample_rate: RATE, channels: vec![channel.clone(), channel], ..AudioData::default() }
+        };
+        assert!((level(&tone(400, 400)) - 0.5).abs() < 1e-6);
+        assert!((level(&tone(100, 400)) - 0.5).abs() < 1e-6);
+        // One channel counts for both sides; silence and no sound at all are 0.
+        let mono = AudioData { sample_rate: RATE, channels: vec![vec![0.2; 50]], ..AudioData::default() };
+        assert!((level(&mono) - 0.2).abs() < 1e-6);
+        assert_eq!((level(&tone(0, 400)), level(&AudioData::default())), (0.0, 0.0));
+    }
+
+    #[test]
+    fn the_longest_loop_in_ticks_follows_the_tempo() {
+        // Two minutes at 120 with 96 ticks to a beat: 240 beats.
+        assert_eq!(longest_ticks(96, 120.0), 240 * 96);
+        assert_eq!(longest_ticks(96, 60.0), 120 * 96);
+        // A tempo that can't be is 120, as when the loop is made.
+        assert_eq!(longest_ticks(96, f64::NAN), 240 * 96);
     }
 
     #[test]

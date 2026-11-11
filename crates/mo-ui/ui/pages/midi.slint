@@ -577,7 +577,7 @@ component PartPanel inherits SidePanel {
             main: true;
             width: max(self.min-width, buttons.cell);
             enabled: !MidiData.soundfont-missing || MidiData.playing;
-            text: MidiData.playing ? "Stop" : MidiData.play-with-song ? "Play with song" : "Play loop";
+            text: MidiData.playing ? "Stop" : MidiData.play-with-song ? "Play with the song" : "Play loop";
             tip: MidiData.playing ? "Stop the loop"
                 : MidiData.play-with-song ? "Play the part round and round with the parts of your song it fits, at the song's tempo"
                 : "Play the part round and round with a General MIDI sound matched to it";

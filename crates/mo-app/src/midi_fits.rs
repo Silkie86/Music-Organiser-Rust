@@ -139,10 +139,13 @@ pub struct Fitted {
 /// What of a song a part found is heard with (the page's "Play with the song"): the parts the list is fitted to, over
 /// the bars it's fitted to, as the song has them. They go round as picked, every bar of them (one the parts rest in
 /// too), and the part found goes round beside them by its own length from the first of those bars
-/// ([`SongBars::round`]): as [`Target::fit`] judged the two, and as the part sounds dropped on that bar in the DAW.
+/// ([`SongBars::round`]): as the part sounds dropped on that bar in the DAW. The search judges the two going round
+/// by the same rule, over the part's bars as it counts them, which for a few parts is a bar off the clip's
+/// (`docs/harmony/together-experiments.md`, "What's judged isn't always what's dropped").
 #[derive(Clone, Debug, PartialEq)]
 pub struct SongBars {
-    /// What plays: each picked part that sounds in the bars (never drums), in the song's order.
+    /// What plays: each picked part that sounds in the bars (never drums), in the order they're picked, which is the
+    /// order the page's line names them in ([`fitted_text`]).
     pub voices: Vec<SongVoice>,
     /// How long the bars are, and one bar of the song, in ticks ([`mo_midi::PPQ`] to a beat).
     pub length: i64,
@@ -169,11 +172,15 @@ pub struct SongVoice {
 
 impl SongBars {
     /// The picked parts of `song` over the picked bars, as [`Target::of_song`] takes them: each part once, in the
-    /// song's order, no drums, and none that rests through the bars.
+    /// order they're picked, no drums, and none that rests through the bars (so the card names what's heard, which
+    /// is the page's line less any part that rests).
     pub fn of(song: &Song, pick: &Pick, wants: Wants) -> SongBars {
-        let mut places = pick.parts.clone();
-        places.sort_unstable();
-        places.dedup();
+        let mut places: Vec<usize> = Vec::with_capacity(pick.parts.len());
+        for &at in &pick.parts {
+            if !places.contains(&at) {
+                places.push(at);
+            }
+        }
         let voices: Vec<SongVoice> = places
             .into_iter()
             .filter_map(|at| {
@@ -207,10 +214,22 @@ impl SongBars {
     }
 
     /// How long a part whose loop is `part` ticks plays with these bars before both are back at their starts, in
-    /// ticks: until they meet again, or once through the longer when that's past 32 bars. The stretch
-    /// `mo_harmony::sit` heard them for ([`mo_harmony::round_of`]).
-    pub fn round(&self, part: i64) -> i64 {
-        mo_harmony::round_of(part.max(1), self.length.max(1), self.bar.max(1))
+    /// ticks: until they meet again, or once through the longer when that's past 32 bars (the rule
+    /// `mo_harmony::sit` hears two loops by, [`mo_harmony::round_of`]). `most` is the longest that can be made into
+    /// sound (`mo_audio::gm::longest_ticks`: two minutes, which a slow song's 32 bars are over). What's longer than
+    /// that is held to as many times through the longer of the two as fit, or to as many whole bars when not even
+    /// one does: where it goes round is always a bar line, so the beat never jumps.
+    pub fn round(&self, part: i64, most: i64) -> i64 {
+        let (part, own, bar) = (part.max(1), self.length.max(1), self.bar.max(1));
+        let round = mo_harmony::round_of(part, own, bar);
+        if round <= most {
+            return round;
+        }
+        let longer = part.max(own);
+        match most / longer {
+            turns if turns >= 1 => turns.saturating_mul(longer),
+            _ => (most / bar).max(1).saturating_mul(bar),
+        }
     }
 }
 
@@ -952,8 +971,8 @@ mod tests {
         assert_eq!((under.with.voices.len(), under.with.bars.clone(), under.with.wants), (1, 12..16, Wants::Chords));
         assert_eq!(starts(&under.with.voices[0].notes), starts(&tune(0)));
 
-        // Each picked part once, in the song's order, however it was picked; never drums, nor a part that rests
-        // through the bars. A bassline called "808" is still a bass, not the drum kit.
+        // Each picked part once, in the order they're picked (as the page's line names them); never drums, nor a
+        // part that rests through the bars. A bassline called "808" is still a bass, not the drum kit.
         let bass: Vec<NoteEvent> =
             [45u8, 38, 43, 36].iter().zip(0i64..).map(|(&k, bar)| note(bar * BAR, BAR, k)).collect();
         let kick: Vec<NoteEvent> = (0..16).map(|beat| note(beat * PPQ, PPQ / 2, 36)).collect();
@@ -967,15 +986,21 @@ mod tests {
         let pick = Pick { parts: vec![3, 1, 2, 0, 1], bars: 8..12 };
         let with = SongBars::of(&song, &pick, Wants::Tune);
         let names: Vec<&str> = with.voices.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(names, ["Keys", "808 sub"]);
-        assert_eq!(starts(&with.voices[1].notes), starts(&bass));
+        assert_eq!(names, ["808 sub", "Keys"]);
+        assert_eq!(starts(&with.voices[0].notes), starts(&bass));
         assert!(
             with.voices.iter().all(|v| !v.sound.drums),
             "{:?}",
             with.voices.iter().map(|v| &v.sound).collect::<Vec<_>>()
         );
-        assert_eq!(with.voices[1].sound.name(), "Synth Bass 1");
-        assert_eq!(with.names, "Keys and 808 sub");
+        assert_eq!(with.voices[0].sound.name(), "Synth Bass 1");
+        assert_eq!(with.names, "808 sub and Keys");
+        // The page's line names the same parts in the same order, and the one that rests there too.
+        assert_eq!(part_names(&song, &Pick { parts: vec![1, 2, 0], bars: 8..12 }), "808 sub, Pad and Keys");
+        assert_eq!(
+            SongBars::of(&song, &Pick { parts: vec![1, 2, 0], bars: 8..12 }, Wants::Tune).names,
+            "808 sub and Keys"
+        );
         // A song whose save gives no tempo a part can play at: the one a part with none plays at.
         song.tempo = 0.0;
         let slow = SongBars::of(&song, &pick, Wants::Tune);
@@ -988,19 +1013,37 @@ mod tests {
     #[test]
     fn a_part_and_the_songs_bars_play_until_they_meet_again() {
         let with = fitted(&song(), None).unwrap().with;
+        // Two minutes at the song's 120 beats a minute: 60 bars, more than is ever asked for.
+        let most = 60 * BAR;
         // Four bars of the song: a part as long plays once, a shorter one until both are back at their starts.
-        assert_eq!(with.round(4 * BAR), 4 * BAR);
-        assert_eq!(with.round(2 * BAR), 4 * BAR);
-        assert_eq!(with.round(8 * BAR), 8 * BAR);
-        assert_eq!(with.round(3 * BAR), 12 * BAR);
-        assert_eq!(with.round(7 * BAR), 28 * BAR);
+        assert_eq!(with.round(4 * BAR, most), 4 * BAR);
+        assert_eq!(with.round(2 * BAR, most), 4 * BAR);
+        assert_eq!(with.round(8 * BAR, most), 8 * BAR);
+        assert_eq!(with.round(3 * BAR, most), 12 * BAR);
+        assert_eq!(with.round(7 * BAR, most), 28 * BAR);
         // Past 32 bars they'd take too long to meet: once through the longer.
-        assert_eq!(with.round(9 * BAR), 9 * BAR);
+        assert_eq!(with.round(9 * BAR, most), 9 * BAR);
         // As the matcher hears them, whatever the numbers.
-        assert_eq!(with.round(5 * BAR), mo_harmony::round_of(5 * BAR, 4 * BAR, BAR));
-        assert_eq!(with.round(0), 4 * BAR);
+        assert_eq!(with.round(5 * BAR, most), mo_harmony::round_of(5 * BAR, 4 * BAR, BAR));
+        assert_eq!(with.round(0, most), 4 * BAR);
         let empty = SongBars { length: 0, bar: 0, ..(*with).clone() };
-        assert_eq!(empty.round(0), 1);
+        assert_eq!(empty.round(0, most), 1);
+    }
+
+    /// A slow song: two minutes of sound is the most there is, and what's played stops on a bar line before it.
+    #[test]
+    fn in_a_slow_song_a_part_and_the_songs_bars_stop_on_a_bar_line_within_two_minutes() {
+        let with = fitted(&song(), None).unwrap().with;
+        // At 56 beats a minute two minutes are 28 bars: a round of 28 still fits.
+        assert_eq!(with.round(7 * BAR, 28 * BAR), 28 * BAR);
+        // A bar less room (or a tick less): as many times through the longer of the two as fit. The seven-bar part
+        // three times; a three-bar part's twelve bars don't fit in eleven, so the song's four twice.
+        assert_eq!(with.round(7 * BAR, 28 * BAR - 1), 21 * BAR);
+        assert_eq!(with.round(3 * BAR, 11 * BAR), 8 * BAR);
+        // Not even once through the longer: whole bars, as many as fit, and one at the least.
+        assert_eq!(with.round(16 * BAR, 10 * BAR + 5), 10 * BAR);
+        assert_eq!(with.round(2 * BAR, 3 * BAR + BAR / 2), 3 * BAR);
+        assert_eq!(with.round(2 * BAR, BAR / 2), BAR);
     }
 
     #[test]
