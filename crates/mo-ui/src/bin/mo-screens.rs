@@ -1105,7 +1105,16 @@ fn lists_keep_their_place(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow
     for (name, place, view, (button_x, button_y)) in LISTS {
         start_on(app, place);
         match place {
-            Place::Sounds => sounds.invoke_pick_view(view),
+            Place::Sounds => {
+                sounds.invoke_pick_view(view);
+                // With a sound picked, so its card is at the side, as the Sounds lines in LISTS have it. The Kits
+                // shots let go of the picked sound when the kit they rolled at random didn't hold it; then the tiles
+                // took the card's room too, their button sat at the far right, and the click picked a tile instead
+                // (the check failed on and off, 11 Nov).
+                if !sounds.get_panel_shown() {
+                    sounds.invoke_select(0);
+                }
+            }
             Place::Presets => mo_ui::presets::show_section(app, Section::Sounds),
             _ => {}
         }
@@ -1156,8 +1165,8 @@ fn lists_keep_their_place(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow
 }
 
 /// Each list [`lists_keep_their_place`] turns, in the short window: its name, its page with the Sounds view, and the
-/// middle of its button (the wheel and the comparing are over [`SHORT_LIST`], as for [`opened_in_sight`]). Not the
-/// Presets page's curves: the sample's four fit in the window.
+/// middle of its button (the wheel and the comparing are over [`SHORT_LIST`], as for [`opened_in_sight`]); on Sounds,
+/// with a sound's card open. Not the Presets page's curves: the sample's four fit in the window.
 const LISTS: [(&str, Place, i32, (f32, f32)); 6] = [
     ("Songs", Place::Songs, 0, (737.0, 556.0)),
     ("MIDI", Place::Midi, 0, (881.0, 556.0)),
