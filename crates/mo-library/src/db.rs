@@ -33,6 +33,14 @@ pub enum LibraryError {
     Busy { path: PathBuf },
 }
 
+/// What SQLite's "database or disk is full" means, in plain words: it says the same whichever drive it was.
+pub const NO_ROOM: &str = "a drive has no room left: the one the library is on, or the one with Windows' temp folder                            (usually C:), where working files go. Free some room on it and try again";
+
+/// Whether SQLite stopped because a drive is full.
+pub fn is_full(e: &rusqlite::Error) -> bool {
+    e.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull)
+}
+
 impl LibraryError {
     /// Whether trying again in a moment could work: the library was busy.
     pub fn is_busy(&self) -> bool {
@@ -44,6 +52,7 @@ impl fmt::Display for LibraryError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             LibraryError::Open { path, why } => write!(f, "Couldn't open the library {}: {why}", path.display()),
+            LibraryError::Read(e) if is_full(e) => write!(f, "Couldn't read the library: {NO_ROOM}"),
             LibraryError::Read(e) => write!(f, "Couldn't read the library: {e}"),
             LibraryError::Write { path, why } => write!(f, "Couldn't change the library {}: {why}", path.display()),
             LibraryError::Setting { key, why } => write!(f, "The library's {key} setting couldn't be read: {why}"),
@@ -163,6 +172,10 @@ impl Library {
         // The C# app may be saving a scan while this reads: wait a little for it rather than fail.
         conn.busy_timeout(Duration::from_secs(2)).map_err(|e| open_error(e.to_string()))?;
         conn.pragma_update(None, "query_only", true).map_err(|e| open_error(e.to_string()))?;
+        // Sorting the saves list (a few MB) is done in memory. Left to itself SQLite writes it to a working file in
+        // Windows' temp folder, so a read failed with "database or disk is full" once drive C: had no room left
+        // (Solomon's log, 2026-11-11), though the library is on another drive and nothing of it is written.
+        conn.pragma_update(None, "temp_store", "MEMORY").map_err(|e| open_error(e.to_string()))?;
         let names = |sql: &str| -> rusqlite::Result<Vec<String>> {
             let mut st = conn.prepare(sql)?;
             st.query_map([], |r| r.get::<_, String>(0))?.collect()
@@ -944,6 +957,11 @@ mod tests {
 
         let lib = Library::open_read_only(&path).unwrap();
         let query_only: i64 = lib.conn.query_row("PRAGMA query_only", [], |r| r.get(0)).unwrap();
+        // 2 is memory: a sort never goes to a working file on another drive.
+        assert_eq!(lib.conn.query_row("PRAGMA temp_store", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        let full = rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL), None);
+        let said = LibraryError::Read(full).to_string();
+        assert!(said.starts_with("Couldn't read the library: a drive has no room left"), "{said}");
         assert_eq!(query_only, 1);
         assert!(lib.conn.execute("UPDATE projects SET rating = 5", []).is_err());
         assert!(lib.conn.execute_batch("CREATE TABLE x (y)").is_err());
