@@ -284,6 +284,27 @@ impl Live {
         &self.roots
     }
 
+    /// Makes to the saves held here the change [`mo_library::song_fields::set`] kept in the library for `save_ids`
+    /// (its [`mo_library::song_fields::Kept::saves`]), so the list shows what's kept, and a save read again later is
+    /// handed on with it. Whether anything is different for it: then [`Live::songs`] gives the list anew.
+    pub fn gave(&mut self, save_ids: &[i64], change: &mo_library::song_fields::Change) -> bool {
+        let mut differs = false;
+        for save in self.saves.iter_mut().filter(|s| save_ids.contains(&s.id)) {
+            differs |= change.apply(save);
+        }
+        if differs {
+            // The list of every tag: a new one joins at the end (the least used), one no save has any more leaves.
+            let used: HashSet<&str> = self.saves.iter().flat_map(|s| s.tags.iter().map(String::as_str)).collect();
+            let new: Vec<String> =
+                used.iter().filter(|t| !self.tags.iter().any(|k| k == *t)).map(|t| (*t).to_owned()).collect();
+            self.tags.retain(|t| used.contains(t.as_str()));
+            let mut new = new;
+            new.sort();
+            self.tags.extend(new);
+        }
+        differs
+    }
+
     /// The list, grouped into songs.
     pub fn songs(&self) -> Songs {
         let mut songs = Songs::from_saves(&self.saves, &self.choices, self.tags.clone(), self.gap_months, self.asking);
@@ -955,6 +976,26 @@ mod tests {
             reread: HashSet::new(),
             reread_put: HashSet::new(),
         }
+    }
+
+    #[test]
+    fn a_change_kept_in_the_library_is_made_to_the_saves_held_here_too() {
+        use mo_library::song_fields::Change;
+        let mut eleven = save(1, "C:\\Music\\Night", "Night_11");
+        eleven.tags = vec!["dark".into()];
+        let mut live = live(vec![eleven, save(2, "C:\\Music\\Night", "Night_12"), save(3, "C:\\Music\\Day", "Day_1")]);
+        live.tags = vec!["dark".into()];
+        assert!(live.gave(&[1, 2], &Change::Rating(4)));
+        assert!(!live.gave(&[1, 2], &Change::Rating(4)), "the same again changes nothing");
+        assert!(live.gave(&[1, 2], &Change::AddTag("Techno".into())));
+        assert_eq!(live.saves.iter().map(|s| s.rating).collect::<Vec<_>>(), [4, 4, 0]);
+        assert_eq!(live.saves[1].tags, ["techno"]);
+        assert_eq!(live.tags, ["dark", "techno"]);
+        // A tag no save has any more leaves the list of every tag.
+        assert!(live.gave(&[1, 2], &Change::RemoveTag("dark".into())));
+        assert_eq!(live.tags, ["techno"]);
+        // A save that isn't held here (hidden, or gone from the list) is no trouble.
+        assert!(!live.gave(&[77], &Change::Favourite(true)));
     }
 
     fn save(id: i64, folder: &str, name: &str) -> Save {
