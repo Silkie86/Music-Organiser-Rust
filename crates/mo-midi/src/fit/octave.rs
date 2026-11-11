@@ -14,8 +14,8 @@
 //! page's next step. What the numbers do say:
 //!
 //! - The usual place alone does as well as anything. Where the song's other kinds of part play says next to
-//!   nothing about this one (the C# app nudged the usual place by them, which loses 20 points and more), so they
-//!   aren't asked.
+//!   nothing about this one (the C# app nudged the usual place by them, which loses about 20 points for a tune
+//!   and more for an accompaniment), so they aren't asked.
 //! - A second tune written to go with a song's first is less often at the first tune's height than at a tune's usual
 //!   height: two lines keep out of each other's way. So a tune found isn't pulled to the song's tune at all
 //!   (half-way was tried: never better, up to 2 points worse), and nor is an arp or a part of no kind.

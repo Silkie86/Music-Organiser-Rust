@@ -1211,8 +1211,6 @@ mod tests {
         assert_eq!(Candidate::of(&part).role, Role::Drums);
     }
 
-    /// A library whose book is out of step with its notes, so that the copy read first isn't the one that fits as
-    /// it is: by its slots "a fourth up" looks like the copy that does. With them, whatever else is given.
     #[test]
     fn a_loop_the_library_has_octaves_apart_is_given_as_the_copy_at_the_right_octave() {
         // The written tune (its middle is 75, where a tune plays) and the same an octave and two octaves down. The
@@ -1244,6 +1242,8 @@ mod tests {
         assert_eq!((search.found[0].at, search.found[0].octaves), (library.place("one down"), 1));
     }
 
+    /// A library whose book is out of step with its notes, so that the copy read first isn't the one that fits as
+    /// it is: by its slots "a fourth up" looks like the copy that does. With them, whatever else is given.
     fn out_of_step(more: Vec<(String, Role, Vec<NoteEvent>)>) -> Library {
         let mut parts =
             vec![("a fourth up".to_string(), Role::Melody, tune(5)), ("written".to_string(), Role::Melody, tune(0))];
