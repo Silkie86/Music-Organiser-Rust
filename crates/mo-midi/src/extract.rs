@@ -20,8 +20,9 @@ use crate::member::PhraseMember;
 
 /// The analysis's own version; raised when what it finds changes, so every file is read again once. It follows the C#
 /// `MidiIndexer.Version` (9) it was ported from. 10: parts of one or two notes are kept too (the C# app dropped
-/// them); the MIDI page hides them by Settings' smallest part, so changing it needs no reading again.
-pub const VERSION: u32 = 10;
+/// them); the MIDI page hides them by Settings' smallest part, so changing it needs no reading again. 11: an FL
+/// song's phrases spread over several channels are joined back into one part too ([`crate::rejoin`]).
+pub const VERSION: u32 = 11;
 /// What a `.mid` file was read with: the analysis and both MIDI file readers (a file is read as a Clip File when it
 /// starts as one, whatever its ending).
 pub const FILE_VERSION: u32 = VERSION * 10_000 + midi::smf::VERSION * 100 + midi::clip::VERSION;
@@ -176,9 +177,13 @@ pub(crate) fn damaged(what: &str) -> Unread {
 
 /// Each pattern or clip as one part per channel or track with notes.
 fn from_project(path: &str, raw: &[u8]) -> Result<Vec<Found>, Unread> {
+    let mut joined: Vec<crate::rejoin::Joined> = Vec::new();
     let clips: Vec<MidiClip> = match case::to_lower(paths::extension(paths::file_name(path))).as_str() {
         ".flp" => {
             let flp = fl::events::load(raw).map_err(|_| damaged("not an FL Studio project, or damaged"))?;
+            // The song as the playlist lays it out, for the phrases it spreads over channels (added after the
+            // patterns' own parts, below).
+            joined = crate::rejoin::join(&crate::rejoin::voices(&fl::song::extract_channels(&flp)));
             fl::song::extract_midi(&flp)
         }
         // A file that isn't Bitwig's has no clips, as in the C# reader.
@@ -197,7 +202,30 @@ fn from_project(path: &str, raw: &[u8]) -> Result<Vec<Found>, Unread> {
             add(&mut found, &mut seen, notes, track, clip_name, &hints, drums, None, String::new());
         }
     }
+    for j in joined {
+        let clip = joined_clip(&j);
+        let hints = project_hints(&j.name, &j.name);
+        let before = found.len();
+        add(&mut found, &mut seen, j.notes, &j.name, &clip, &hints, false, None, String::new());
+        // Its pieces, so each one's card can show the whole phrase. It's never cut again: it's 16 bars at most.
+        if found.len() == before + 1
+            && let Some(f) = found.last_mut()
+        {
+            f.members = j.members;
+        }
+    }
     Ok(found)
+}
+
+/// A joined phrase's clip line: where it first plays in the song and how often it comes back ("From bar 9 of the
+/// song, 3 times").
+pub fn joined_clip(j: &crate::rejoin::Joined) -> String {
+    let times = match j.repeats {
+        1 => String::new(),
+        2 => ", twice".to_owned(),
+        n => format!(", {n} times"),
+    };
+    format!("From bar {} of the song{times}", j.first_bar + 1)
 }
 
 /// The names a project part is guessed from: its track and its clip's own name.
@@ -383,7 +411,7 @@ mod tests {
 
     #[test]
     fn versions() {
-        assert_eq!(project_version("a.FLP"), Some(1000 + fl::VERSION));
+        assert_eq!(project_version("a.FLP"), Some(1100 + fl::VERSION));
         assert_eq!(project_version("a.mid"), None);
     }
 }

@@ -22,6 +22,7 @@ pub mod instruments;
 pub mod keys;
 pub mod member;
 pub mod playing;
+pub mod rejoin;
 pub mod roles;
 pub mod store;
 
