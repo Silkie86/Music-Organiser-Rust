@@ -5,23 +5,27 @@
 //!
 //! 1. [`Pick::usual`]: what of the song is fitted to when nothing is picked by hand (its chords and bass for a tune,
 //!    its melodies for chords, over the bars where the most of them play together).
-//! 2. [`Own::of`]: the song's own parts in the library, which are left out. They'd fit best of all and say nothing.
+//! 2. [`Own::of`]: the song's own parts in the library (every save's, and a pack's loop it uses in the pack's other
+//!    keys), which are left out. They'd fit best of all and say nothing.
 //! 3. [`tried`]: the parts to try, as the page's filters let them through.
 //! 4. [`Tried::search`]: the search, its answer as places in the catalogue.
 //!
 //! Reading the song ([`crate::playing::read`]) and the index's slots ([`crate::store::MidiStore::slots`]) is the
 //! caller's, off the window's thread, and so is keeping them between searches.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use mo_formats::NoteEvent;
+use mo_formats::{NoteEvent, case};
 use rayon::prelude::*;
 
 use super::{Candidate, Search, Target, Wants};
-use crate::catalogue::{Catalogue, Entry, song_of};
+use crate::catalogue::{Catalogue, Entry, folder_key};
+use crate::index::{Source, SourceKind};
 use crate::playing::Song;
+use crate::roles::Role;
 use crate::store::SlotBook;
 
 /// The most bars of a song fitted to when none are picked: a loop's length, twice over.
@@ -62,49 +66,95 @@ impl Pick {
 /// A song's own parts in the library: what a search for parts that fit it leaves out.
 ///
 /// The library has every part of the song's saves, and they'd come first in any list (nothing sits with the song's
-/// chords like the song's own tune). The same notes in other keys are its own too: a pack's loop the song uses is in
-/// the library in every key the pack has it in.
+/// chords like the song's own tune). A pack's loop the song uses is its own in the pack's other keys too: the same
+/// shape in the same folder of `.mid` files, never drums, which is what the catalogue takes for one loop in several
+/// keys ([`Entry::key_group`]). The same shape anywhere else is not: a plain shape (a held note, a bassline on one
+/// pitch) is in many places, and those are parts worth offering.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Own {
     /// Places in [`Catalogue::entries`] of the parts in one of the song's saves.
-    places: HashSet<usize>,
-    /// Their notes' shapes in any key ([`crate::index::StoredPhrase::shape`]).
-    shapes: HashSet<i64>,
+    in_song: HashSet<usize>,
+    /// Places of the same loops in other keys.
+    other_keys: HashSet<usize>,
 }
 
 impl Own {
-    /// The own parts of the song `save` is a save of (its path: every save of the song counts, as
-    /// [`song_of`] tells them). One pass over the catalogue on rayon's threads; keep it for as long as the catalogue
-    /// and the song stay. Nothing is kept on the entries for it ([`Entry::is_in_song`] keeps each part's songs, which
-    /// one pass has no use for).
-    pub fn of(cat: &Catalogue, save: &str) -> Own {
-        let song = song_of(save);
-        let in_song = |e: &Entry| {
-            std::iter::once(&e.phrase.source).chain(&e.other_sources).any(|source| song_of(&source.path) == song)
+    /// The own parts of the song whose saves are at `saves`: every save's path, as the song library groups them
+    /// (`mo_library::Song::saves` and its `copies`; that grouping knows the saves you joined or split by hand, which
+    /// a file's name alone doesn't). Two passes over the catalogue, the second on rayon's threads; keep it for as
+    /// long as the catalogue and the song's saves stay.
+    pub fn of<'a>(cat: &Catalogue, saves: impl IntoIterator<Item = &'a str>) -> Own {
+        let saves: HashSet<String> = saves.into_iter().map(case::to_lower).collect();
+        if saves.is_empty() {
+            return Own::default();
+        }
+        // Each file is asked about once: every part of a file shares its source.
+        let mut asked: HashMap<*const Source, bool> = HashMap::new();
+        let mut is_save = |source: &Arc<Source>| {
+            *asked.entry(Arc::as_ptr(source)).or_insert_with(|| saves.contains(&case::to_lower(&source.path)))
         };
-        let own: Vec<(usize, Option<i64>)> = cat
-            .entries
-            .par_iter()
-            .enumerate()
-            .filter(|(_, e)| in_song(e))
-            .map(|(at, e)| (at, e.phrase.shape))
-            .collect();
-        Own { places: own.iter().map(|(at, _)| *at).collect(), shapes: own.iter().filter_map(|(_, s)| *s).collect() }
+        let mut in_song = HashSet::new();
+        // The loops among them that a folder of `.mid` files has: that folder, and the loop's shape.
+        let mut loops: HashSet<(String, i64)> = HashSet::new();
+        for (at, e) in cat.entries.iter().enumerate() {
+            if !sources(e).any(&mut is_save) {
+                continue;
+            }
+            in_song.insert(at);
+            if let Some(shape) = loop_shape(e) {
+                loops.extend(files(e).map(|file| (folder_key(&file.path), shape)));
+            }
+        }
+        // The same loops in other keys: the shape first, which few parts share, then the folder.
+        let shapes: HashSet<i64> = loops.iter().map(|(_, shape)| *shape).collect();
+        let other_keys = if loops.is_empty() {
+            HashSet::new()
+        } else {
+            cat.entries
+                .par_iter()
+                .enumerate()
+                .filter(|(at, e)| {
+                    !in_song.contains(at)
+                        && loop_shape(e)
+                            .filter(|shape| shapes.contains(shape))
+                            .is_some_and(|shape| files(e).any(|file| loops.contains(&(folder_key(&file.path), shape))))
+                })
+                .map(|(at, _)| at)
+                .collect()
+        };
+        Own { in_song, other_keys }
     }
 
-    /// Whether the part at `at` is one of the song's own, or the same notes in another key.
-    pub fn has(&self, at: usize, e: &Entry) -> bool {
-        self.places.contains(&at) || e.phrase.shape.is_some_and(|shape| self.shapes.contains(&shape))
+    /// Whether the part at `at` (a place in [`Catalogue::entries`]) is one of the song's own, or one of its loops in
+    /// another key.
+    pub fn has(&self, at: usize) -> bool {
+        self.in_song.contains(&at) || self.other_keys.contains(&at)
     }
 
     /// How many of the catalogue's parts are in one of the song's saves.
     pub fn len(&self) -> usize {
-        self.places.len()
+        self.in_song.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.places.is_empty()
+        self.in_song.is_empty()
     }
+}
+
+/// Every file a part's notes are in, the newest first.
+fn sources(e: &Entry) -> impl Iterator<Item = &Arc<Source>> {
+    std::iter::once(&e.phrase.source).chain(&e.other_sources)
+}
+
+/// The `.mid` files among them.
+fn files(e: &Entry) -> impl Iterator<Item = &Arc<Source>> {
+    sources(e).filter(|source| source.kind == SourceKind::File)
+}
+
+/// A part's shape, when it can be a loop a pack has in several keys: never drums (a drum pattern moved is other
+/// drums).
+fn loop_shape(e: &Entry) -> Option<i64> {
+    e.phrase.shape.filter(|_| !e.phrase.drums && e.role() != Role::Drums)
 }
 
 /// Parts of a catalogue for a search to try.
@@ -124,7 +174,7 @@ pub fn tried<'a>(cat: &'a Catalogue, own: &Own, keep: impl Fn(&Entry) -> bool + 
         .par_iter()
         .enumerate()
         // The cheap test first.
-        .filter(|(at, e)| !own.has(*at, e) && keep(e))
+        .filter(|(at, e)| !own.has(*at) && keep(e))
         .map(|(at, _)| at)
         .collect();
     Tried { cat, places }
@@ -170,21 +220,13 @@ impl Tried<'_> {
 #[cfg(test)]
 #[allow(clippy::indexing_slicing)]
 mod tests {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
-    use super::super::tests::{bass, chords, lane, song, tune, wandering};
+    use super::super::tests::{bass, chords, lane, note, song, tune, wandering};
     use super::*;
+    use crate::catalogue::tests::{phrase, source};
     use crate::fit::slots_of;
-    use crate::index::{Source, SourceKind, StoredPhrase};
-    use crate::roles::Role;
-    use crate::{analyser, playing};
+    use crate::index::StoredPhrase;
+    use crate::{PPQ, analyser, playing};
     use mo_formats::arrangement::Arrangement;
-
-    fn source(path: &str, kind: SourceKind, mtime: i64) -> Arc<Source> {
-        let daw = if kind == SourceKind::File { "MIDI" } else { "FL Studio" };
-        Arc::new(Source { path: path.into(), kind, daw: daw.into(), mtime, size: 1, tempo: None })
-    }
 
     /// A made-up index: the catalogue of its parts, their slots and their notes.
     #[derive(Default)]
@@ -198,30 +240,13 @@ mod tests {
         /// Adds a part with these notes, from this file. Its note hash is `hash`.
         fn add(&mut self, hash: &str, from: &Arc<Source>, role: Role, notes: Vec<NoteEvent>) {
             self.phrases.push(StoredPhrase {
-                id: self.phrases.len() as i64,
-                source: Arc::clone(from),
-                part: String::new(),
-                clip: hash.into(),
-                role,
-                role_why: String::new(),
-                your_role: None,
-                bars: 4,
                 notes: notes.len() as i32,
                 lowest: notes.iter().map(|n| n.key).min().unwrap_or(0),
                 highest: notes.iter().map(|n| n.key).max().unwrap_or(0),
-                key: None,
-                key_fact: None,
-                chroma: [0; 12],
-                chords: Vec::new(),
-                features: vec![0; 48],
-                hash: hash.into(),
-                members: String::new(),
-                program: None,
-                drums: false,
-                track_name: String::new(),
-                your_octave: None,
+                drums: role == Role::Drums,
                 shape: analyser::shape_of(&notes),
                 cut: Some(false),
+                ..phrase(self.phrases.len() as i64, from, "", hash, role, hash)
             });
             self.book.add(hash, &slots_of(&notes));
             self.notes.insert(hash.into(), notes);
@@ -250,35 +275,61 @@ mod tests {
         notes.iter().map(|n| NoteEvent { key: n.key + semitones, ..*n }).collect()
     }
 
-    /// The song of the tests' saves (its chords, bass and lead are in the library from its two saves), a pack with
-    /// the song's tune in three keys and a tune of its own in two, and a second song with a tune that fits.
+    /// A bar of sixteenths on one key: a hi-hat row, or a bassline that stays on its note.
+    fn sixteenths(key: u8) -> Vec<NoteEvent> {
+        (0..16).map(|at| note(at * PPQ / 4, PPQ / 4, key)).collect()
+    }
+
+    /// The song's saves, as the song library has them: two by its name, and one joined to it by hand.
+    const SAVES: [&str; 3] = [
+        r"C:\Projects\Didums\Didums_70.flp",
+        r"C:\Projects\Didums\Didums_69.flp",
+        r"C:\Projects\Old ideas\Riff final.flp",
+    ];
+
+    /// The song's parts from its three saves. The pack its lead came from, with the lead in two more keys. A folder
+    /// of exports with the song's bassline (saved after the song), the same in another key, its hi-hats and a
+    /// bassline of the hi-hats' shape. And what isn't the song's: the bassline's shape in another folder, a pack's
+    /// tune in two keys, another song with that tune, and tunes that go nowhere.
     fn library() -> Index {
-        let new_save = source(r"C:\Projects\Didums\Didums_70.flp", SourceKind::Project, 300);
-        let old_save = source(r"C:\Projects\Didums\Didums_69.flp", SourceKind::Project, 200);
+        let [new_save, old_save, joined_save] = SAVES.map(|path| source(path, SourceKind::Project, 300));
         let other_song = source(r"C:\Projects\Other\Other_3.flp", SourceKind::Project, 250);
-        let pack = source(r"D:\Packs\Leads\Lead 01.mid", SourceKind::File, 100);
-        // A file saved after the song has its bassline too: the newest copy of those notes isn't the song's.
-        let exported = source(r"D:\Exports\Sub.mid", SourceKind::File, 400);
+        let file = |path: &str, mtime: i64| source(path, SourceKind::File, mtime);
         let mut index = Index::default();
-        index.add("song bass", &exported, Role::Bass, bass());
+        // The newest copy of the song's bassline isn't the song's: the export was saved after it.
+        index.add("song bass", &file(r"D:\Exports\Sub.mid", 400), Role::Bass, bass());
         index.add("song chords", &new_save, Role::Chords, chords(0));
         index.add("song bass", &new_save, Role::Bass, bass());
         index.add("song lead", &new_save, Role::Melody, tune(0));
+        index.add("song hats", &new_save, Role::Drums, sixteenths(42));
         index.add("song lead", &old_save, Role::Melody, tune(0));
         index.add("old lead", &old_save, Role::Melody, wandering(3));
-        // The pack the song's lead came from has it in other keys too.
-        index.add("pack lead in F", &pack, Role::Melody, up(&tune(0), 5));
-        index.add("pack lead in D", &pack, Role::Melody, up(&tune(0), 2));
-        // A tune of the pack's own that sits with the chords: the song's an octave down, without its last two
-        // notes (so it's another loop, not the song's in another key).
+        index.add("joined riff", &joined_save, Role::Melody, wandering(4));
+        // The pack the lead came from.
+        index.add("song lead", &file(r"D:\Packs\Leads\Lead 01 C.mid", 100), Role::Melody, tune(0));
+        index.add("pack lead in F", &file(r"D:\Packs\Leads\Lead 01 F.mid", 100), Role::Melody, up(&tune(0), 5));
+        index.add("pack lead in D", &file(r"D:\Packs\Leads\Lead 01 D.mid", 100), Role::Melody, up(&tune(0), 2));
+        // Beside the exported bassline.
+        index.add("sub in D", &file(r"D:\Exports\Sub in D.mid", 100), Role::Bass, up(&bass(), 2));
+        index.add("song hats", &file(r"D:\Exports\Hats.mid", 100), Role::Drums, sixteenths(42));
+        index.add("pedal bass", &file(r"D:\Exports\Pedal.mid", 100), Role::Bass, sixteenths(33));
+        // Not the song's.
+        index.add("bass elsewhere", &file(r"D:\Packs\Bass\Roots.mid", 100), Role::Bass, up(&bass(), 7));
+        // Another project in the song's folder that plays its lead a minor third up: a riff played on another root
+        // in a project is another part, not a pack's loop in another key.
+        let sketch = source(r"C:\Projects\Didums\Sketch.flp", SourceKind::Project, 100);
+        index.add("sketch riff", &sketch, Role::Melody, up(&tune(0), 3));
+        // A tune that sits with the chords: the song's an octave down, without its last two notes (so it's another
+        // loop, not the song's in another key).
         let mut own_tune = tune(0);
         own_tune.iter_mut().for_each(|n| n.key -= 12);
         own_tune.truncate(10);
-        index.add("pack tune", &pack, Role::Melody, own_tune.clone());
-        index.add("pack tune in Eb", &pack, Role::Melody, up(&own_tune, 3));
+        index.add("pack tune", &file(r"D:\Packs\Tunes\Tune A.mid", 100), Role::Melody, own_tune.clone());
+        index.add("pack tune in Eb", &file(r"D:\Packs\Tunes\Tune Eb.mid", 100), Role::Melody, up(&own_tune, 3));
         index.add("other song's tune", &other_song, Role::Melody, up(&own_tune, 12));
         for seed in 0..6 {
-            index.add(&format!("wandering {seed}"), &pack, Role::Melody, wandering(seed + 10));
+            let path = format!(r"D:\Packs\Tunes\Wandering {seed}.mid");
+            index.add(&format!("wandering {seed}"), &file(&path, 100), Role::Melody, wandering(seed + 10));
         }
         index
     }
@@ -308,31 +359,37 @@ mod tests {
     }
 
     #[test]
-    fn the_songs_own_parts_are_left_out_in_every_key_and_every_save() {
+    fn the_songs_own_parts_are_every_saves_and_its_loops_in_other_keys() {
         let index = library();
         let cat = index.catalogue();
-        // Any save of the song names it.
-        let own = Own::of(&cat, r"C:\Projects\Didums\Didums_12.flp");
-        let has = |hash: &str| {
-            let at = cat.find(hash).unwrap();
-            own.has(at, &cat.entries[at])
-        };
-        // Its parts from the newest save and from an older one, and one whose newest copy is in another file.
-        assert!(has("song chords") && has("song bass") && has("song lead") && has("old lead"));
-        assert!(!cat.entries[cat.find("song bass").unwrap()].is_project());
-        assert_eq!(own.len(), 4);
-        // The pack's copies of its lead in other keys are the same loop.
-        assert!(has("pack lead in F") && has("pack lead in D"));
-        // The rest of the pack and the other song aren't.
+        // The saves as the library lists them, whatever the letters' case.
+        let own = Own::of(&cat, [SAVES[0], &SAVES[1].to_uppercase(), SAVES[2]]);
+        let has = |hash: &str| own.has(cat.find(hash).unwrap());
+        // Its parts from every save, the one joined by hand too.
+        assert!(has("song chords") && has("song lead") && has("song hats") && has("old lead") && has("joined riff"));
+        // And the bassline, whose newest copy is in another file.
+        assert!(has("song bass") && !cat.entries[cat.find("song bass").unwrap()].is_project());
+        assert_eq!(own.len(), 6);
+        // The pack's copies of its lead in other keys, and the export's of its bassline, are the same loops.
+        assert!(has("pack lead in F") && has("pack lead in D") && has("sub in D"));
+        // The bassline's shape in a folder the song has nothing from is another part: a plain shape is in many
+        // places. Nor does a drum part's shape make a bassline the song's.
+        assert!(!has("bass elsewhere") && !has("pedal bass"));
+        // Nor is the lead's shape in a project beside the song's: only a folder of `.mid` files has a loop's keys.
+        assert!(!has("sketch riff"));
+        // The rest of the library isn't the song's.
         assert!(!has("pack tune") && !has("pack tune in Eb") && !has("other song's tune") && !has("wandering 0"));
-        // Another song's own parts are its own.
-        let other = Own::of(&cat, r"C:\Projects\Other\Other_1.flp");
+
+        // Without the save joined by hand, its riff isn't the song's.
+        let two = Own::of(&cat, [SAVES[0], SAVES[1]]);
+        assert!(!two.has(cat.find("joined riff").unwrap()) && two.len() == 5);
+        // Another song's own parts are its own; the pack's tune isn't one of its loops (it has no file there).
+        let other = Own::of(&cat, [r"C:\Projects\Other\Other_3.flp"]);
         assert_eq!(other.len(), 1);
-        // "other song's tune" and the pack's are the same notes octaves apart: the same loop.
-        let at = cat.find("pack tune").unwrap();
-        assert!(other.has(at, &cat.entries[at]));
-        // A song the library has nothing of leaves nothing out.
-        assert!(Own::of(&cat, r"C:\Projects\New\New_1.flp").is_empty());
+        assert!(!other.has(cat.find("pack tune").unwrap()));
+        // A song the library has nothing of, or one with no saves, leaves nothing out.
+        assert!(Own::of(&cat, [r"C:\Projects\New\New_1.flp"]).is_empty());
+        assert_eq!(Own::of(&cat, []), Own::default());
     }
 
     #[test]
@@ -341,29 +398,37 @@ mod tests {
         let cat = index.catalogue();
         let song = song();
         let target = Pick::usual(&song, Wants::Tune).unwrap().target(&song).unwrap();
-        let own = Own::of(&cat, r"C:\Projects\Didums\Didums_70.flp");
+        let own = Own::of(&cat, SAVES);
 
         let tried = tried(&cat, &own, |_| true);
-        // 15 sets of notes, less the song's four and the pack's two copies of its lead.
-        assert_eq!((cat.entries.len(), tried.len()), (15, 9));
-        let (search, found) = index.search(&tried, &target, 3);
-        assert_eq!((search.looked, search.not_ready, search.unread, search.stopped), (9, 0, 0, false));
-        // The pack's tune comes first, as the copy that fits as it is (not the one in Eb, nor the other song's an
-        // octave up, which the list has once); none of the song's own parts is there.
-        assert_eq!(found[0], ("pack tune".to_owned(), 0));
-        assert!(found.iter().all(|(hash, _)| hash.starts_with("wandering") || hash == "pack tune"), "{found:?}");
-        assert_eq!(found.len(), 3);
+        // 21 sets of notes, less the song's six and its three loops in other keys.
+        assert_eq!((cat.entries.len(), tried.len()), (21, 12));
+        let (search, found) = index.search(&tried, &target, 20);
+        // The hi-hats' shape as a bassline is tried, as is every key's copy of the pack's tune.
+        assert_eq!((search.looked, search.not_ready, search.unread, search.stopped), (12, 0, 0, false));
+        // The pack's tune is found as the copy that fits as it is (not the one in Eb, nor the other song's an octave
+        // up: the list has a loop once), and the bassline from another folder with the move that puts it on the
+        // chords' roots. None of the song's own parts is there.
+        assert!(found.contains(&("pack tune".to_owned(), 0)), "{found:?}");
+        assert!(found.contains(&("bass elsewhere".to_owned(), 5)), "{found:?}");
+        let listed = |hash: &str| found.iter().any(|(found, _)| found == hash);
+        assert!(!listed("pack tune in Eb") && !listed("other song's tune"));
+        assert!(found.iter().all(|(hash, _)| !own.has(cat.find(hash).unwrap())), "{found:?}");
+        // The best first.
+        let sits: Vec<f64> = search.found.iter().map(|f| f.sits.judged()).collect();
+        assert!(sits.is_sorted_by(|a, b| a >= b), "{sits:?}");
 
-        // What the page's filters hide isn't tried: without the pack's files only the other song's tune is left,
-        // and it's found with nothing moved (octaves don't count).
+        // What the page's filters hide isn't tried: without the files only the other projects' two are left. The
+        // other song's tune is found with nothing moved (octaves don't count), the sketch's riff moved back down.
         let from_projects = super::tried(&cat, &own, |e| e.is_project());
-        assert_eq!(from_projects.len(), 1);
-        let (_, found) = index.search(&from_projects, &target, 3);
-        assert_eq!(found, [("other song's tune".to_owned(), 0)]);
+        assert_eq!(from_projects.len(), 2);
+        let (_, mut found) = index.search(&from_projects, &target, 3);
+        found.sort();
+        assert_eq!(found, [("other song's tune".to_owned(), 0), ("sketch riff".to_owned(), -3)]);
 
-        // Without the song's own parts left out they'd be what's found.
+        // Without the song's own parts left out they'd be found, and first.
         let nothing_left_out = super::tried(&cat, &Own::default(), |_| true);
-        assert_eq!(nothing_left_out.len(), 15);
+        assert_eq!(nothing_left_out.len(), 21);
         let (_, found) = index.search(&nothing_left_out, &target, 1);
         assert!(found[0].0.starts_with("song"), "{found:?}");
     }

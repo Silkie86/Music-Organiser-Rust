@@ -163,12 +163,16 @@ the next PR step by step). Solomon wants the highest effort here.
 - What the MIDI page's "Fits my song" list asks for (2026-11-11), no window in it yet:
   - `mo_midi::fit::for_song`: `Pick::usual` (what of a song is fitted to when nothing is picked by hand: its
     chords, arps and basslines for a tune, its melodies for chords, over up to 8 bars from where the most of them
-    play together), `Own::of` (the song's own parts in the catalogue, every save's, and the same notes in other
-    keys: one pass, kept by the caller while the song and the catalogue stay), `tried` (the parts the page's
+    play together, and only the parts that play in those bars), `Own::of` (the song's own parts in the catalogue:
+    whatever is in one of its saves, by the saves' paths as the song library groups them, since that knows the
+    saves joined or split by hand; and a pack's loop the song uses in the pack's other keys, which is the same
+    shape in the same folder of `.mid` files, never drums, as the catalogue's "in 12 keys". The same shape anywhere
+    else is not the song's: a held note or a one-pitch bassline is in many places), `tried` (the parts the page's
     filters let through, without the song's own) and `Tried::search` (the search, its answer as places in the
     catalogue).
-  - `mo_app::midi_fits`: the screen's logic and words. `song_choices` (the 8 songs saved last; the first is the
-    one being worked on), `fitted` (what the song gives to fit to, or why nothing can be, in plain words),
+  - `mo_app::midi_fits`: the screen's logic and words. `song_choices` (the 8 songs saved last, each with every
+    save it has; the first is the one being worked on), `SongChoice::own`, `fitted` (what the song gives to fit
+    to, or why nothing can be, in plain words; nothing asked, chords that can't be read fall back to the melody),
     `tried` (the page's own filters stay in force, through `mo_app::midi::passing`), `look` (the search, the best
     200, with how long it took and how much of that was reading notes: `log_line` is for the log, so the time on a
     real index gets measured), and the words (`fit_text`: "Fits 88%, 2 semitones down"; `result_text`,

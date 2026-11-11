@@ -1289,14 +1289,14 @@ pub fn write_part(dir: &std::path::Path, name: &str, bytes: &[u8]) -> std::io::R
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use mo_midi::{Source, SourceKind, StoredPhrase};
 
     use super::*;
 
-    fn phrase(path: &str, part: &str, role: Role, hash: &str, mtime: i64) -> StoredPhrase {
+    pub(crate) fn phrase(path: &str, part: &str, role: Role, hash: &str, mtime: i64) -> StoredPhrase {
         StoredPhrase {
             id: 1,
             source: Arc::new(Source {

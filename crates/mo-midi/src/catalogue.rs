@@ -252,8 +252,7 @@ impl Catalogue {
         for (at, e) in entries.iter().enumerate() {
             let p = &e.phrase;
             if let Some(shape) = p.shape.filter(|_| !e.is_project() && !p.drums && e.role() != Role::Drums) {
-                let folder = p.source.path.rfind(['\\', '/']).and_then(|cut| p.source.path.get(..cut)).unwrap_or("");
-                by_shape.entry((case::to_lower(folder), shape)).or_default().push(at);
+                by_shape.entry((folder_key(&p.source.path), shape)).or_default().push(at);
             }
         }
         let mut line_count = entries.len();
@@ -380,6 +379,12 @@ impl Catalogue {
         let hits = pool.into_iter().take(q.limit).map(|entry| Hit { entry, likeness: None }).collect();
         (hits, matching)
     }
+}
+
+/// The folder a file is in, in small letters: what tells one pack's folder of `.mid` files from another's when
+/// the same loop in other keys is looked for.
+pub(crate) fn folder_key(path: &str) -> String {
+    case::to_lower(path.rfind(['\\', '/']).and_then(|cut| path.get(..cut)).unwrap_or(""))
 }
 
 /// What's typed into a search, as the words [`Entry::matches`] takes: split at spaces, in small letters.
@@ -509,16 +514,16 @@ fn pick<T>(list: &mut Vec<T>, count: usize, seed: u64) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::index::Key;
 
-    fn source(path: &str, kind: SourceKind, mtime: i64) -> Arc<Source> {
+    pub(crate) fn source(path: &str, kind: SourceKind, mtime: i64) -> Arc<Source> {
         let daw = if kind == SourceKind::File { "MIDI" } else { "FL Studio" };
         Arc::new(Source { path: path.into(), kind, daw: daw.into(), mtime, size: 1, tempo: None })
     }
 
-    fn phrase(id: i64, src: &Arc<Source>, part: &str, clip: &str, role: Role, hash: &str) -> StoredPhrase {
+    pub(crate) fn phrase(id: i64, src: &Arc<Source>, part: &str, clip: &str, role: Role, hash: &str) -> StoredPhrase {
         StoredPhrase {
             id,
             source: Arc::clone(src),

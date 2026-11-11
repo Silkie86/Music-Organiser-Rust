@@ -10,7 +10,7 @@
 //!
 //! The slow work is the page's to run off the window's thread, newest wins (rule 12): reading the song
 //! (`mo_midi::playing::read`), the index's slots (`MidiStore::slots`, kept until a reading of the MIDI makes more),
-//! the song's own parts (`Own::of`, kept while the song and the list stay), then [`tried`] and [`look`].
+//! the song's own parts ([`SongChoice::own`], kept while the song and the list stay), then [`tried`] and [`look`].
 
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
@@ -43,13 +43,29 @@ pub struct SongChoice {
     pub save: String,
     /// When that save was written (Unix seconds): a save written again is read again.
     pub mtime: i64,
+    /// Every save of the song, as the song library groups them (the ones you joined to it by hand too, and the same
+    /// files found somewhere else): whatever the MIDI library has from any of them is the song's own.
+    pub saves: Vec<String>,
+}
+
+impl SongChoice {
+    /// The song's own parts in the catalogue, which a search for parts that fit it leaves out. Keep it while the
+    /// catalogue and the choice stay.
+    pub fn own(&self, cat: &Catalogue) -> Own {
+        Own::of(cat, self.saves.iter().map(String::as_str))
+    }
 }
 
 /// The songs saved last, the newest first: the first is the song being worked on.
 pub fn song_choices(songs: &[mo_library::Song], dates: &RealDates) -> Vec<SongChoice> {
     playing::worked_on(songs, dates, SONGS_OFFERED)
         .into_iter()
-        .map(|(song, save)| SongChoice { name: song.name.clone(), save: save.path.clone(), mtime: save.mtime })
+        .map(|(song, save)| SongChoice {
+            name: song.name.clone(),
+            save: save.path.clone(),
+            mtime: save.mtime,
+            saves: song.saves().chain(&song.copies).map(|s| s.path.clone()).collect(),
+        })
         .collect()
 }
 
@@ -70,33 +86,48 @@ pub struct Fitted {
 }
 
 /// What of `song` is fitted to, nothing picked by hand. `wanted`: what the page's switch asks for; none (the switch
-/// hasn't been touched): parts to play over the song's chords when it has any, else chords for its melody. Err: why
-/// nothing can be fitted, in plain words.
+/// hasn't been touched): parts to play over the song's chords when it has any that can be read, else chords for its
+/// melody. Err: why nothing can be fitted, in plain words.
 pub fn fitted(song: &Song, wanted: Option<Wants>) -> Result<Fitted, String> {
     let pitched = |p: &playing::Playing| !p.drums && p.role != Role::Drums && !p.notes.is_empty();
     if !song.parts.iter().any(pitched) {
         return Err("This song has no notes to fit to yet (drums aside).".to_owned());
     }
     let (chords, melody) = (Pick::usual(song, Wants::Tune), Pick::usual(song, Wants::Chords));
-    let pick = match (wanted, chords, melody) {
-        (Some(Wants::Tune) | None, Some(pick), _) | (Some(Wants::Chords) | None, _, Some(pick)) => pick,
-        (Some(Wants::Tune), None, melody) => {
-            let other = if melody.is_some() { " It has a melody: look for chords for that." } else { "" };
-            return Err(format!("No chords or bassline found in this song to play over.{other}"));
-        }
-        (Some(Wants::Chords), chords, None) => {
-            let other = if chords.is_some() { " It has chords: look for parts to play over them." } else { "" };
-            return Err(format!("No melody found in this song to put chords under.{other}"));
-        }
-        (None, None, None) => {
-            return Err("No chords, bassline or melody found in this song (drums and samples aside).".to_owned());
-        }
+    // What the parts are decides what's looked for (a melody alone wants chords), so the two always agree.
+    let of = |pick: &Option<Pick>| {
+        let pick = pick.clone()?;
+        let target = pick.target(song)?;
+        Some(Fitted { wants: target.wants(), pick, target })
     };
-    match pick.target(song) {
-        // What the parts are decides what's looked for (a melody alone wants chords), so the two always agree.
-        Some(target) => Ok(Fitted { wants: target.wants(), pick, target }),
-        None => Err(format!("No chords could be read in {} of this song.", bars_words(&pick.bars))),
+    let fitted = match wanted {
+        Some(Wants::Tune) => of(&chords),
+        Some(Wants::Chords) => of(&melody),
+        None => of(&chords).or_else(|| of(&melody)),
+    };
+    if let Some(fitted) = fitted {
+        return Ok(fitted);
     }
+    // Why not: nothing of the kind in the song, or nothing that could be read where it plays.
+    let no_chords = match &chords {
+        Some(pick) => format!("No chords could be read in {} of this song.", bars_words(&pick.bars)),
+        None => "No chords or bassline found in this song to play over.".to_owned(),
+    };
+    let no_melody = match &melody {
+        Some(pick) => format!("The melody couldn't be read in {} of this song.", bars_words(&pick.bars)),
+        None => "No melody found in this song to put chords under.".to_owned(),
+    };
+    Err(match (wanted, chords.is_some(), melody.is_some()) {
+        (Some(Wants::Tune), _, true) => format!("{no_chords} It has a melody: look for chords for that."),
+        (Some(Wants::Tune), _, false) => no_chords,
+        (Some(Wants::Chords), true, _) => format!("{no_melody} It has chords: look for parts to play over them."),
+        (Some(Wants::Chords), false, _) => no_melody,
+        (None, false, false) => {
+            "No chords, bassline or melody found in this song (drums and samples aside).".to_owned()
+        }
+        (None, true, _) => no_chords,
+        (None, false, true) => no_melody,
+    })
 }
 
 /// "bars 9–16" (the first bar is 1); "bar 9" for one.
@@ -107,13 +138,13 @@ pub fn bars_words(bars: &std::ops::Range<i64>) -> String {
 
 /// The picked parts' names: "Keys", "Keys and Sub", "Keys, Pad and Sub", "Keys, Pad and 3 more".
 fn part_names(song: &Song, pick: &Pick) -> String {
-    let names: Vec<&str> = pick
-        .parts
-        .iter()
-        .filter_map(|&at| song.parts.get(at))
-        .map(|p| p.name.as_str())
-        .filter(|n| !n.is_empty())
-        .collect();
+    // A name once: two channels called "Keys" (a layered sound) are "Keys".
+    let mut names: Vec<&str> = Vec::new();
+    for name in pick.parts.iter().filter_map(|&at| song.parts.get(at)).map(|p| p.name.as_str()) {
+        if !name.is_empty() && !names.contains(&name) {
+            names.push(name);
+        }
+    }
     match names.as_slice() {
         [] => String::new(),
         [one] => (*one).to_owned(),
@@ -239,7 +270,9 @@ fn parts(n: usize) -> String {
     if n == 1 { "1 part".to_owned() } else { format!("{} parts", thousands(n)) }
 }
 
-/// Under the toolbar: what the list holds, of how many.
+/// Under the toolbar: what the list holds. How many parts were tried is only said when the list was cut to its
+/// length: the parts tried count every key's copy of a loop and the list has a loop once, so "28 of 60" would read
+/// as 32 worse fits hidden when none is.
 pub fn result_text(l: &Looked) -> String {
     match (l.fits.len(), l.looked) {
         (0, 0) if l.not_ready > 0 => {
@@ -247,7 +280,9 @@ pub fn result_text(l: &Looked) -> String {
         }
         (0, 0) => "No parts to try: the filters leave none of the right kind.".to_owned(),
         (0, looked) => format!("None of {} fits.", parts(looked)),
-        (shown, looked) if shown < looked => format!("The {} that fit best of {}", thousands(shown), parts(looked)),
+        (shown, looked) if shown >= MOST => {
+            format!("The {} that fit best, of {} tried", thousands(shown), parts(looked))
+        }
         (shown, _) => format!("{}, best fit first", parts(shown)),
     }
 }
@@ -283,13 +318,13 @@ pub fn log_line(l: &Looked) -> String {
 #[allow(clippy::indexing_slicing)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Arc;
 
     use super::*;
+    use crate::midi::tests::phrase;
     use mo_formats::NoteAttribute;
     use mo_formats::arrangement::{Arrangement, LaneKind, PreviewClip, PreviewLane, PreviewNote};
     use mo_midi::fit::slots_of;
-    use mo_midi::{BAR, PPQ, Source, SourceKind, StoredPhrase};
+    use mo_midi::{BAR, PPQ, StoredPhrase};
 
     fn note(start: i64, length: i64, key: u8) -> NoteEvent {
         NoteEvent {
@@ -375,34 +410,14 @@ mod tests {
 
     impl Index {
         fn add(&mut self, hash: &str, path: &str, role: Role, notes: Vec<NoteEvent>) {
-            let kind = if path.ends_with(".mid") { SourceKind::File } else { SourceKind::Project };
-            let source =
-                Source { path: path.into(), kind, daw: "MIDI".into(), mtime: 1_760_000_000, size: 1, tempo: None };
             self.phrases.push(StoredPhrase {
                 id: self.phrases.len() as i64,
-                source: Arc::new(source),
-                part: String::new(),
-                clip: hash.into(),
-                role,
-                role_why: String::new(),
-                your_role: None,
-                bars: 4,
                 notes: notes.len() as i32,
                 lowest: notes.iter().map(|n| n.key).min().unwrap_or(0),
                 highest: notes.iter().map(|n| n.key).max().unwrap_or(0),
-                key: None,
-                key_fact: None,
-                chroma: [0; 12],
-                chords: Vec::new(),
-                features: vec![0; 48],
-                hash: hash.into(),
-                members: String::new(),
-                program: None,
-                drums: false,
-                track_name: String::new(),
-                your_octave: None,
                 shape: mo_midi::analyser::shape_of(&notes),
                 cut: Some(false),
+                ..phrase(path, hash, role, hash, 1_760_000_000)
             });
             self.book.add(hash, &slots_of(&notes));
             self.notes.insert(hash.into(), notes);
@@ -415,12 +430,19 @@ mod tests {
         }
     }
 
+    const SAVE: &str = "C:/Songs/Didums/Didums_70.flp";
+
+    /// The song as the page offers it: its saves are what the song library says they are.
+    fn choice() -> SongChoice {
+        SongChoice { name: "Didums".into(), save: SAVE.into(), mtime: 1_760_000_000, saves: vec![SAVE.into()] }
+    }
+
     /// The song's own chords and lead, a pack's tune that fits a tone up (and a two-note scrap of it), one that
     /// clashes, and a bassline.
     fn library() -> Index {
         let mut index = Index::default();
-        index.add("song chords", "C:/Songs/Didums/Didums_70.flp", Role::Chords, chords());
-        index.add("song lead", "C:/Songs/Didums/Didums_70.flp", Role::Melody, tune(0));
+        index.add("song chords", SAVE, Role::Chords, chords());
+        index.add("song lead", SAVE, Role::Melody, tune(0));
         let mut fits: Vec<NoteEvent> = tune(2).into_iter().map(|n| NoteEvent { key: n.key - 12, ..n }).collect();
         fits.truncate(10);
         index.add("fits a tone down", "D:/Packs/Leads/Lead 01.mid", Role::Melody, fits.clone());
@@ -475,6 +497,29 @@ mod tests {
     }
 
     #[test]
+    fn chords_that_cant_be_read_fall_back_to_the_melody_and_say_which_couldnt() {
+        // However it comes about that a part's notes give nothing to read (here they're all muted, which a song
+        // read from a save never has): the chords are there, but no target can be made of them.
+        let mut song = song();
+        song.parts[0].notes.iter_mut().for_each(|n| n.muted = true);
+        // Nothing asked: chords for the melody, which can be read.
+        let under = fitted(&song, None).unwrap();
+        assert_eq!((under.wants, under.pick.parts.clone()), (Wants::Chords, vec![1]));
+        // Asked to play over the chords: why not, and what there is.
+        assert_eq!(
+            fitted(&song, Some(Wants::Tune)).unwrap_err(),
+            "No chords could be read in bars 9–12 of this song. It has a melody: look for chords for that."
+        );
+        // The melody unreadable too: the words say it's the melody when chords for it were asked for.
+        song.parts[1].notes.iter_mut().for_each(|n| n.muted = true);
+        assert_eq!(
+            fitted(&song, Some(Wants::Chords)).unwrap_err(),
+            "The melody couldn't be read in bars 13–16 of this song. It has chords: look for parts to play over them."
+        );
+        assert_eq!(fitted(&song, None).unwrap_err(), "No chords could be read in bars 9–12 of this song.");
+    }
+
+    #[test]
     fn the_words_for_bars_parts_and_moves() {
         assert_eq!((bars_words(&(0..1)), bars_words(&(8..16))), ("bar 1".to_owned(), "bars 9–16".to_owned()));
         let named = |names: &[&str]| {
@@ -485,6 +530,8 @@ mod tests {
         assert_eq!(named(&["Keys", "Sub"]), "Keys and Sub");
         assert_eq!(named(&["Keys", "Pad", "Sub"]), "Keys, Pad and Sub");
         assert_eq!(named(&["Keys", "Pad", "Sub", "Arp", "Pluck"]), "Keys, Pad and 3 more");
+        // Two channels of one name are named once.
+        assert_eq!(named(&["Keys", "Keys", "Sub", "Keys"]), "Keys and Sub");
         assert_eq!(
             [0, 1, -1, 5, -6].map(move_words),
             ["as it is", "1 semitone up", "1 semitone down", "5 semitones up", "6 semitones down"]
@@ -506,7 +553,8 @@ mod tests {
         let cat = Catalogue::new(index.phrases.clone());
         let song = song();
         let over = fitted(&song, None).unwrap();
-        let own = Own::of(&cat, "C:/Songs/Didums/Didums_12.flp");
+        let own = choice().own(&cat);
+        assert_eq!(own.len(), 2);
         let place = |hash: &str| cat.find(hash).unwrap();
 
         // Settings' smallest part hides the scrap, so it isn't tried; nor are the song's own two.
@@ -535,7 +583,6 @@ mod tests {
         let words = Filters { text: "lead 02".into(), ..Filters::default() };
         let looked = index.look(&over, &tried(&cat, &own, &words));
         assert_eq!(looked.fits.iter().map(|f| f.entry).collect::<Vec<_>>(), [place("clashes")]);
-
         // And the years picked on the year strip (the made-up files are all of 2025).
         let years = |from, to| Filters { years: Some((from, to)), ..Filters::default() };
         assert_eq!((tried(&cat, &own, &years(2025, 2025)).len(), tried(&cat, &own, &years(2001, 2024)).len()), (4, 0));
@@ -575,7 +622,8 @@ mod tests {
         let mut notes = |_: i64, hash: &str| index.notes.get(hash).filter(|_| hash != "clashes").cloned();
         let some = look(&over, &all, &book, &mut notes, &pool, &AtomicBool::new(false));
         assert_eq!((some.looked, some.not_ready, some.unread, some.fits.len()), (4, 2, 1, 3));
-        assert_eq!(result_text(&some), "The 3 that fit best of 4 parts");
+        // Fewer lines than parts looked at doesn't mean worse fits were hidden: no "of 4" unless the list was cut.
+        assert_eq!(result_text(&some), "3 parts, best fit first");
         assert_eq!(
             left_out_text(&some),
             "2 parts left out until your MIDI is read again · 1 part left out (notes couldn't be read)"
@@ -590,11 +638,41 @@ mod tests {
         // Nothing fits: every part tried hardly plays where the chords do.
         let nothing = Looked { looked: 1_234, ..Looked::default() };
         assert_eq!(result_text(&nothing), "None of 1,234 parts fits.");
+        // A list cut to its length says of how many.
+        let fit = Fit { entry: 0, semitones: 0, sits: 1.0 };
+        let cut = Looked { fits: vec![fit; MOST], looked: 212_345, ..Looked::default() };
+        assert_eq!(result_text(&cut), "The 200 that fit best, of 212,345 parts tried");
     }
 
     #[test]
-    fn the_songs_offered_are_the_ones_saved_last() {
-        // `worked_on` picks them (tested in mo-midi); with no songs there's nothing to offer.
+    fn the_songs_offered_are_the_ones_saved_last_each_with_all_its_saves() {
+        let save = |path: &str, mtime: i64| mo_library::Save {
+            path: path.to_owned(),
+            name: mo_formats::paths::stem(mo_formats::paths::file_name(path)).to_owned(),
+            daw: "FL Studio".to_owned(),
+            folder: "C:\\Songs".to_owned(),
+            mtime,
+            ..mo_library::Save::default()
+        };
+        let now = 1_800_000_000;
+        let saves = vec![
+            save("C:\\Songs\\Night drive_12.flp", now - 500),
+            save("C:\\Songs\\Night drive_11.flp", now - 100),
+            save("C:\\Songs\\Dawn.flp", now - 300),
+        ];
+        let songs = mo_library::songs::group_songs(&saves, &mo_library::SongChoices::default());
+        let offered = song_choices(&songs, &RealDates::at(now));
+        // The song saved last first, read from the save written last, with every save it has.
+        assert_eq!(offered.len(), 2);
+        assert_eq!((offered[0].save.as_str(), offered[0].mtime), ("C:\\Songs\\Night drive_11.flp", now - 100));
+        let mut all = offered[0].saves.clone();
+        all.sort();
+        assert_eq!(all, ["C:\\Songs\\Night drive_11.flp", "C:\\Songs\\Night drive_12.flp"]);
+        assert_eq!(
+            (offered[1].name.as_str(), offered[1].saves.as_slice()),
+            ("Dawn", ["C:\\Songs\\Dawn.flp".to_owned()].as_slice())
+        );
+        // No songs, nothing to offer.
         assert!(song_choices(&[], &RealDates::now()).is_empty());
     }
 }
