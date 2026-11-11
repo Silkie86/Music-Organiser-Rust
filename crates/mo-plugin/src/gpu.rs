@@ -190,7 +190,13 @@ pub struct Gpu {
     size: Cell<slint::PhysicalSize>,
     /// Slint asked for the panel to be drawn again.
     redraw: Cell<bool>,
+    /// No picture could be had to draw in (the window is hidden or covered): not tried again before this, so a hidden
+    /// window never holds the DAW's thread up asking the card over and over.
+    not_before: Cell<Option<Instant>>,
 }
+
+/// How long drawing waits before trying again after the card had no picture of the window to give.
+const TRY_AGAIN: Duration = Duration::from_millis(250);
 
 impl Gpu {
     /// Sets the window with this handle up to be drawn on the card, `width` by `height` pixels. An error is why it
@@ -227,6 +233,7 @@ impl Gpu {
             card,
             size: Cell::new(slint::PhysicalSize::new(width.max(1), height.max(1))),
             redraw: Cell::new(true),
+            not_before: Cell::new(None),
         }))
     }
 
@@ -243,6 +250,8 @@ impl Gpu {
         }
         let size = slint::PhysicalSize::new(width, height);
         self.size.set(size);
+        // A new size is drawn at once: the window is plainly on show.
+        self.not_before.set(None);
         let scale = self.window.scale_factor();
         self.window.dispatch_event(slint::platform::WindowEvent::Resized { size: size.to_logical(scale) });
         self.redraw.set(true);
@@ -251,14 +260,16 @@ impl Gpu {
     /// Draws the panel into the window if Slint asked for it since the last time. An error is for the log: the
     /// frame is skipped.
     pub fn draw_if_needed(&self) -> Result<(), String> {
-        if !self.redraw.replace(false) {
+        if !self.redraw.get() || self.not_before.get().is_some_and(|at| Instant::now() < at) {
             return Ok(());
         }
         let Some(frame) = self.frame() else {
-            // No picture to draw in just now (the window is hidden, or changing size): asked again next time.
-            self.redraw.set(true);
+            // No picture to draw in just now (the window is hidden, or changing size): asked again in a while.
+            self.not_before.set(Some(Instant::now() + TRY_AGAIN));
             return Ok(());
         };
+        self.redraw.set(false);
+        self.not_before.set(None);
         let config = self.config.borrow();
         let view = frame.texture.create_view(&wgpu::TextureViewDescriptor::default());
         let drawn = self.renderer.render_to_texture_view(&view, config.width, config.height, config.format);
