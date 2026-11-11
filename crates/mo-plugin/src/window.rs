@@ -37,12 +37,18 @@ use std::time::{Duration, Instant};
 /// The panel's size, in logical pixels (before the screen's scaling).
 pub const WIDTH: f64 = 760.0;
 pub const HEIGHT: f64 = 560.0;
+/// The smallest the window can be dragged: the filter column still fits its lines, and the list a few words.
+pub const LEAST_WIDTH: f64 = 620.0;
+pub const LEAST_HEIGHT: f64 = 560.0;
+/// The biggest: more than any screen today, so a DAW that asks for a silly size doesn't get a picture that big.
+pub const MOST_WIDTH: f64 = 7680.0;
+pub const MOST_HEIGHT: f64 = 4320.0;
 
 /// How often the window's timer runs: Slint's timers and animations, and what background threads found.
 const TICK: Duration = Duration::from_millis(30);
 
 /// Opens the panel inside `parent` (the window the DAW lends), at `size`: the size the plugin told the DAW, so the two
-/// match. The window goes when the returned one is dropped.
+/// match. The DAW resizes it afterwards ([`baseview::Window::resize`]); the panel follows in its `resized`. The window goes when the returned one is dropped.
 pub fn open(
     parent: &impl raw_window_handle::HasWindowHandle,
     size: Size,
@@ -50,7 +56,7 @@ pub fn open(
 ) -> Result<baseview::Window, String> {
     crate::threads::note_crashes();
     let settings =
-        WindowSettings::new().with_title("Music Organiser").with_size(size).with_parent(parent).with_resizable(false);
+        WindowSettings::new().with_title("Music Organiser").with_size(size).with_parent(parent).with_resizable(true);
     let window = baseview::Window::create(settings, move |context| {
         Shown::new(context, instance).map_err(|why| HandlerError::from(std::io::Error::other(why)))
     })
