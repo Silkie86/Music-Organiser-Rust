@@ -1211,7 +1211,7 @@ final class FakeBitwig {
         /** The Bitwig version and API version the host reports (the script's stand-in reports the same). */
         String version = "6.1.2";
         int api = 25;
-        /** Methods of Bitwig's host that fail here, as in a Bitwig that doesn't have them. */
+        /** Methods of Bitwig's host, or of its transport, that fail here, as in a Bitwig that doesn't have them. */
         final Set<String> broken = new HashSet<>();
 
         // The arranger, for the arrange experiment.
@@ -3156,6 +3156,13 @@ final class FakeBitwig {
         };
 
         private final Stand transport = new Stand(Transport.class) {
+            @Override
+            void calling(Method method) {
+                // As in a Bitwig whose transport doesn't have this (its loop's start, say): Java's error for the method.
+                if (model.broken.contains(method.getName()))
+                    throw new AbstractMethodError("The stand-in Bitwig's transport has no " + method.getName() + ", as asked.");
+            }
+
             Param tempo() {
                 return tempo;
             }
