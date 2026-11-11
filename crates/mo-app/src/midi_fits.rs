@@ -17,7 +17,8 @@
 //! A part picked in the list is the part as it fits: [`moved`] gives its notes moved by what its line says, which is
 //! what the page then plays, drags out and sends to a DAW ([`moved_name`] names it so there), and [`card_text`] says
 //! so on its card. The move is two things added up ([`Fit::moved`]): the semitones that put the part in the song's
-//! key, and the octaves that put it where its kind of part plays beside the song (`mo_midi::fit::octave`).
+//! key, and the octaves that put it where its kind of part plays beside the song (the search's,
+//! `mo_midi::fit::octave`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -27,7 +28,6 @@ use mo_formats::NoteEvent;
 use mo_formats::dates::RealDates;
 use mo_library::songs::thousands;
 use mo_midi::fit::for_song::{Own, Pick, Tried};
-use mo_midi::fit::octave::Registers;
 use mo_midi::fit::{Found, Target, Wants};
 use mo_midi::playing::{self, Song};
 use mo_midi::store::SlotBook;
@@ -121,8 +121,6 @@ pub struct Fitted {
     pub wants: Wants,
     pub pick: Pick,
     pub target: Target,
-    /// Where each kind of part plays in the song, all of it: what says the octave a part found goes at.
-    pub registers: Registers,
 }
 
 /// What of `song` is fitted to, nothing picked by hand. `wanted`: what the page's switch asks for; none (the switch
@@ -134,12 +132,11 @@ pub fn fitted(song: &Song, wanted: Option<Wants>) -> Result<Fitted, String> {
         return Err("This song has no notes to fit to yet (drums aside).".to_owned());
     }
     let (chords, melody) = (Pick::usual(song, Wants::Tune), Pick::usual(song, Wants::Chords));
-    let registers = Registers::of(song);
     // What the parts are decides what's looked for (a melody alone wants chords), so the two always agree.
     let of = |pick: &Option<Pick>| {
         let pick = pick.clone()?;
         let target = pick.target(song)?;
-        Some(Fitted { wants: target.wants(), pick, target, registers })
+        Some(Fitted { wants: target.wants(), pick, target })
     };
     let (over, under) = (of(&chords), of(&melody));
     // The other way is only pointed to when it would work.
@@ -224,19 +221,17 @@ pub struct Fit {
     /// How far to move it into the song's key, in semitones (-6 to 5; 0: it's in key as it is). The part moves, never
     /// the song.
     pub semitones: i32,
-    /// How many octaves to move it as well, to where its kind of part plays beside the song (-3 to 3; up for more
-    /// than 0): a bassline saved two octaves up comes down.
+    /// How many octaves to move it as well, to where its kind of part plays beside the bars of the song it's fitted
+    /// to (-3 to 3; up for more than 0; `mo_midi::fit::octave`): a bassline saved two octaves up comes down.
     pub octaves: i32,
     /// How it sits moved so: about 0 (it clashes) to about 1 (as a tune written for those chords does).
     pub sits: f64,
 }
 
 impl Fit {
-    /// `role`: the kind the part was tried as; `registers`: where each kind plays in the song.
-    fn of(found: &Found, role: Role, registers: &Registers) -> Fit {
+    fn of(found: &Found) -> Fit {
         let (semitones, sits) = found.sits.best();
-        let octaves = registers.octaves(role, found.middle + f64::from(semitones));
-        Fit { entry: found.at, semitones, octaves, sits }
+        Fit { entry: found.at, semitones, octaves: found.octaves, sits }
     }
 
     /// How far it's moved in all, in semitones, up for more than 0: into the key and to the octave. What its line
@@ -298,8 +293,9 @@ pub fn moved_name(name: &str, semitones: i32) -> String {
 
 /// A part's notes moved by `semitones` in all ([`Fit::moved`]), as its line in the list says it fits: every note by
 /// exactly that (`NoteEvent::moved`), so what's heard is what the line and the name say. A note that would go past
-/// the lowest or the highest key there is has nowhere to go and is left out: the octave is picked by the middle of
-/// the part, so that's a note far from the rest of it (a key switch, or a stray).
+/// the lowest or the highest key there is has nowhere to go and is left out. The octave is never one that takes the
+/// part itself off the keyboard (`Registers::octaves_for`), so that's a stray far from the rest of it (a key switch),
+/// or a note within 6 keys of the keyboard's ends moved for the key.
 pub fn moved(notes: Vec<NoteEvent>, semitones: i32) -> Vec<NoteEvent> {
     if semitones == 0 {
         return notes;
@@ -356,12 +352,7 @@ pub fn look(
     };
     let search = tried.search(&fitted.target, book, &mut timed, MOST, pool, stop);
     Looked {
-        // A part the catalogue has lost its kind for can't be (the search was given it from there).
-        fits: search
-            .found
-            .iter()
-            .map(|found| Fit::of(found, tried.role(found.at).unwrap_or(Role::Other), &fitted.registers))
-            .collect(),
+        fits: search.found.iter().map(Fit::of).collect(),
         tried: tried.len(),
         looked: search.looked,
         close: search.close,
@@ -917,17 +908,17 @@ mod tests {
         let filters = Filters::default();
         let fits = |song: &Song| {
             let over = fitted(song, Some(Wants::Tune)).unwrap();
-            assert_eq!(over.registers, Registers::of(song));
             let looked = index.look(&over, &tried(&cat, &choice().own(&cat), &filters));
             move |hash: &str| *looked.fits.iter().find(|f| f.entry == place(hash)).unwrap()
         };
 
-        // The song's lead plays around E5 (its middle is 75), so a tune belongs half-way between that and a tune's
-        // usual place: 73.5. The pack's tune is saved an octave lower (its middle is 65, and 63 moved into the key):
-        // it goes up beside the lead, 2 semitones down for the key and an octave up.
+        // A tune belongs by a tune's usual place (72), wherever the song's own lead is. The pack's tune is saved an
+        // octave under that (its middle is 65, and 63 moved into the key): it goes up, 2 semitones down for the key
+        // and an octave up.
         let song = song();
         let fit = fits(&song);
-        assert_eq!(fitted(&song, None).unwrap().registers.wanted(Role::Melody), Some(73.5));
+        let registers = *fitted(&song, None).unwrap().target.registers();
+        assert_eq!((registers.of_kind(Role::Melody), registers.wanted(Role::Melody)), (Some(75.0), Some(72.0)));
         let tune = fit("fits a tone down");
         assert_eq!((tune.semitones, tune.octaves, tune.moved()), (-2, 1, 10));
         assert_eq!(fit_text(&tune), format!("Fits {}%, 10 semitones up", tune.percent()));
@@ -938,14 +929,12 @@ mod tests {
         // The pack's low one is there (34.5); the other (43) comes down an octave, to play where the sub does.
         let with_sub = song_of(vec![lane("Keys", 8, &chords()), lane("Sub", 8, &roots([33, 26, 31, 36]))]);
         let over = fitted(&with_sub, Some(Wants::Tune)).unwrap();
-        assert_eq!((over.pick.parts.clone(), over.registers.of_kind(Role::Bass)), (vec![0, 1], Some(31.0)));
+        assert_eq!((over.pick.parts.clone(), over.target.registers().of_kind(Role::Bass)), (vec![0, 1], Some(31.0)));
         let fit = fits(&with_sub);
         assert_eq!(fit("bassline").octaves, 0);
         let mid = fit("mid bass");
         assert_eq!((mid.semitones, mid.octaves, mid.moved()), (0, -1, -12));
-        // No tune in this song: one found goes by a tune's usual place (72), which the pack's low tune is short of
-        // by more than half an octave.
-        assert_eq!(over.registers.wanted(Role::Melody), Some(72.0));
+        // A tune found goes up here too.
         assert_eq!(fit("fits a tone down").octaves, 1);
         // The octave goes by where the part is once it's in key: as saved, the low tune is just within half an
         // octave of 72 (66); 3 semitones down for the key it's at 63, and goes up.

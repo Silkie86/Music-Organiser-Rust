@@ -27,8 +27,10 @@ unmoved.
 ## The octave a part goes at (`octave`)
 
 Every `theorybench octave --folds 0` run adds a line here by hand: 8-bar stretches, how many are left at the octave
-they were written at.
+they were written at. Before the command there was a first count with a throwaway script over all 906 songs, this
+fold among them: where the chords' usual place (58) came from.
 
-| Date | Run | Commit | A tune beside its song: shipped (usual place alone; C# app) | A tune, no other tune in the song: shipped (C# app) | An accompaniment: shipped (C# app) |
+| Date | Run | Commit | A tune beside a song with another tune: usual place / half-way / by the other tune (C# app) | A tune, no other tune in the song: usual place (C# app) | An accompaniment: usual place (C# app) |
 |---|---|---|---|---|---|
-| 2026-11-11 | octave pop909cl --folds 0, the rule as shipped. Before the command there was a first count with a throwaway script over all 906 songs, this fold among them: where the half-way pull and the chords' 58 came from | 23c5ede-dirty | 71.5% (72.7%; 65.1%) | 72.7% (61.0%) | 85.0% (69.5%) |
+| 2026-11-11 | octave pop909cl --folds 0, before the code review: every kind pulled half-way, a stray worth exactly a twentieth counted at the low end only, the C# rule ported with a note's least weight a beat and halves rounded up, all songs | 23c5ede-dirty | 72.7% / 71.5% / 65.3% (65.1%) | 72.7% (61.0%) | 85.0% (69.5%) |
+| 2026-11-11 | octave pop909cl --folds 0, after the review's fixes (`pairs`' songs, the C# rule ported exactly). Half-way was what shipped for a tune when this ran; it was 2.3 points under the usual place here, as it was 0.3 under on folds 1 to 4, and the pull on tunes was taken out after it. So for tunes this fold is no longer a clean last look: what ships is the usual-place number | 6bb0907-dirty | 73.7% / 71.4% / 64.4% (63.2%) | 73.7% (54.2%) | 85.3% (59.6%) |

@@ -2423,7 +2423,8 @@ pub fn sample() -> Loaded {
             true,
             4,
             400,
-            &[69, 72, 74, 76, 74, 72],
+            // High, as a flute's hook is written: fitted to a song it comes down an octave.
+            &[81, 84, 86, 88, 86, 84],
         ),
     ];
     for (i, (path, part, clip, role, tonic, minor, bars, age, keys)) in parts.into_iter().enumerate() {
@@ -3666,8 +3667,9 @@ mod tests {
         assert!(!looked.fits.is_empty());
         let own = |fit: &Fit| ask.cat.entry(fit.entry).is_none_or(|e| e.phrase.source.path.contains("Night drive"));
         assert!(!looked.fits.iter().any(own), "{looked:?}");
-        // Each comes with its octave: the arp is where an arp plays once it's in key; the flute hook, 5 semitones
-        // up for the key, would be above where a tune plays, and comes down an octave.
+        // Each comes with its octave: the arp is where an arp plays once it's in key; the flute hook is written
+        // high, and 5 semitones up for the key it would be well above where a tune plays, so it comes down an
+        // octave.
         let fit = |name: &str| {
             let named = |f: &&Fit| ask.cat.entry(f.entry).is_some_and(|e| page::title(e).starts_with(name));
             looked.fits.iter().find(named).map(|f| (f.semitones, f.octaves, midi_fits::fit_text(f)))
