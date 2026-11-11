@@ -3,7 +3,7 @@
 // with the app's own filters and orders)
 // and DAW check (every CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, FilterList, FilterView, FilterChoice, RangeSlider } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider } from "../../mo-ui/ui/studio.slint";
 export { FilterView, FilterChoice }
 import { ListView } from "../../mo-ui/ui/list.slint";
 
@@ -18,7 +18,9 @@ export struct SoundLine {
     // Its type, tempo, key and length, as far as the app knows them: after the folder.
     facts: string,
     favourite: bool,
-    // Its waveform, white on nothing (the line tints it); empty until it's read, or when it has none.
+    // Its type's colour, as its place in the theme's list (mo-app's `sounds::type_colour`); -1 for grey.
+    colour: int,
+    // Its waveform, white on nothing (the line tints it in its type's colour); empty until it's read, or when it has none.
     wave: image,
 }
 
@@ -271,6 +273,12 @@ export component Panel inherits Window {
                             padding-left: Space.md;
                             padding-right: Space.md;
                             spacing: Space.sm;
+                            // Its type's colour, as the app's own sound lines show it.
+                            VerticalLayout {
+                                horizontal-stretch: 0;
+                                alignment: center;
+                                Dot { tint: Theme.sound-type(sound.colour); }
+                            }
                             VerticalLayout {
                                 horizontal-stretch: 1;
                                 alignment: center;
@@ -296,7 +304,7 @@ export component Panel inherits Window {
                                     height: 30px;
                                     source: sound.wave;
                                     image-fit: fill;
-                                    colorize: i == root.picked ? Theme.accent : Theme.muted;
+                                    colorize: Theme.sound-type(sound.colour);
                                 }
                             }
                             if sound.favourite: VerticalLayout {
