@@ -5,7 +5,7 @@
 // (2026-11-03): the drives across the top, Biggest wins first, Also taking room, and the picked line's card beside
 // them. Only shared parts from studio.slint; mo-app decides every word (mo_app::space), mo-ui/src/space.rs fills it.
 import { Fit } from "../list.slint";
-import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, EmptyState, CardAction, CardActions, TickBox, LinkText, Meter, MenuItem, RightClickMenu } from "../studio.slint";
+import { Theme, Type, Space, Caps, Well, PageHeader, ListLine, SidePanel, PanelDivider, EmptyState, HowItWorks, CardAction, CardActions, TickBox, LinkText, Meter, MenuItem, RightClickMenu } from "../studio.slint";
 
 // One drive across the top.
 export struct DriveCard {
@@ -208,7 +208,10 @@ component SpaceCard inherits SidePanel {
     property <length> parts-end;
     // Another line's card starts at its top, not as far down as the last one was scrolled.
     property <string> picked: SpaceData.picked;
-    changed picked => { self.to-top(); }
+    changed picked => {
+        self.to-top();
+        how.open = false;
+    }
     close => { SpaceData.close-card(); }
     Caps { text: SpaceData.card-kind; }
     Text {
@@ -238,12 +241,6 @@ component SpaceCard inherits SidePanel {
             min-width: 0px;
         }
     }
-    Text {
-        text: SpaceData.card-lead;
-        color: Theme.muted;
-        font-size: Type.body;
-        wrap: word-wrap;
-    }
     // What to know about the parts and what the buttons do, then the buttons, above the parts: a long list of parts
     // can't push the main button out of sight.
     if SpaceData.card-note != "": Text {
@@ -256,6 +253,8 @@ component SpaceCard inherits SidePanel {
         actions: SpaceData.card-actions;
         chosen(id) => { SpaceData.chosen(id); }
     }
+    // How the line works, folded: the size, what the button does and the button come first (review C7).
+    how := HowItWorks { text: SpaceData.card-lead; }
     // The parts are measured as if none of their lines wrapped (Slint measures what's in a `for` so), but each is laid
     // out at its real height: so the box is at least as tall as where the last one ends, or the card's own height (and
     // what follows the parts) fell short of it, and a long card's last parts couldn't be scrolled to. `alignment:

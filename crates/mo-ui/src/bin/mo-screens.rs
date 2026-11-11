@@ -2901,7 +2901,7 @@ fn click(window: &MinimalSoftwareWindow, x: f32, y: f32) {
 }
 
 /// Settings, Shortcuts: where the fourth line's "No key" button shows once the mouse is on the line.
-const KEY_LINE_NO_KEY: (f32, f32) = (1218.0, 425.0);
+const KEY_LINE_NO_KEY: (f32, f32) = (1218.0, 444.0);
 
 /// The Sounds page's Tempo slider with no filter picked: its track's height in the window, where its higher handle
 /// rests, and where 150 BPM is along it.
