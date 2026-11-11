@@ -207,7 +207,31 @@ So the plan for the search: a first look at every part, then the close look at t
 for tunes and the best **10 in 100** when looking for chords (and never fewer than a few hundred, so a small
 library gets the close look throughout).
 
+## The search (2026-11-11)
+
+`mo_midi::fit::Target::search` puts the two looks together over the MIDI index.
+
+- **What's kept.** The index keeps each set of notes' slots (`slots` in `midi-index.db`, made when the notes are
+  saved, 3 to 7 bytes a slot), and a search loads them all into memory once (a `SlotBook`, about 200 bytes a part).
+- **The first look** goes over every part of the kind looked for, each set of notes once, on the app's background
+  threads.
+- **The close look** is given the best 2 in 100 (tunes) or 10 in 100 (chords), and never fewer than 300, so a small
+  library gets the close look throughout. Their notes are read from the index 256 parts at a time, the likeliest
+  first, so a search stopped for a newer one has already looked at the best of them.
+- **A loop in every key comes up once.** A pack's loop saved in twelve keys is twelve parts with one shape: the
+  search gives the copy that fits best, and of copies that fit alike the one that needs moving least.
+- **How fast.** 100,000 made-up four-bar parts on 4 threads, their notes already in memory
+  (`fit::tests::how_long_a_search_takes`): 0.06 s looking for tunes (2,000 close looks), 0.5 s looking for chords
+  (10,000 close looks, each part's chords read first). Reading the kept parts' notes from a real index on disk is
+  on top of that and isn't measured yet.
+
 ## What it doesn't know yet
+
+- **A song that isn't in 4/4.** The library's parts are all read as 4/4, and the first look goes by their 4/4
+  slots, lined up in time with the song's chords. The close look then loops a found tune by the song's own bars.
+  The two can disagree about where a loop comes round in 3/4 or 6/8. Not measured.
+- **The song's own parts are in the library too.** A search for a tune over a song's chords will find that song's
+  own tune first. Whoever lists what's found should leave out parts that come from the song's own file.
 
 - **How long a loop from the library is.** A part's length isn't saved with it, so a found part still goes round
   from its first note's bar to its last note's: a four-bar loop that rests in its last bar is heard as three bars.

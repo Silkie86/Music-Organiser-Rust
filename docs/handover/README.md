@@ -139,8 +139,17 @@ the next PR step by step). Solomon wants the highest effort here.
   (`MidiStore::slots`, a `SlotBook` by note hash, about 200 bytes a part in memory). Whoever keeps a book has to
   load it again after a read that saved parts or made slots (`Summary::slots`): the MIDI page's "did anything
   change" check after a read doesn't count `slots` yet, and must once it keeps a book. The fill tells no progress
-  (like the shapes one: seconds, once). Not built yet: the search itself (first look over all, close look at the
-  kept share, off the window's thread), a list on the MIDI page, and sending the part found into the project.
+  (like the shapes one: seconds, once).
+- The search (`mo_midi::fit::Target::search`, 2026-11-11): every part of the right kind, each set of notes once,
+  sorted by its slots (the first look, on the pool); then the best 2 in 100 (tunes) or 10 in 100 (chords), never
+  fewer than 300, have their notes read (on the caller's thread: the index's connection is one thread's) and get
+  the close look (on the pool), 256 at a time, the likeliest first. A loop a pack has in every key comes up once, as
+  the copy that fits best. A stop flag ends it for a newer search (rule 12). On 100,000 made-up parts, 4 threads,
+  the notes already in memory: 0.06 s for tunes, 0.5 s for chords. Known gaps: reading the kept parts' notes from a
+  real index on disk isn't in those times; the song's own parts are in the library too and come up (the page should
+  leave out parts from the song's own file); in a song that isn't in 4/4 the first look goes by the library's 4/4
+  slots while the close look loops a found tune by the song's bars. Not built yet: a list on the MIDI page, and
+  sending the part found into the project.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db
 writes once trusted. A decoder panic on a damaged file is caught with `mo_catch::catch`: one warning line in the log,
