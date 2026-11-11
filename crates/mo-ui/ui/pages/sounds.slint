@@ -360,6 +360,12 @@ export global SoundsData {
     callback shuffle();
     in property <bool> autoplay;
     callback toggle-autoplay();
+    // Trim silence: sounds play without the silence at their start and end (the files stay as they are).
+    in property <bool> trim-silence;
+    callback toggle-trim-silence();
+    // How quiet counts as silence for it, in dB below full scale, and a pick from its menu ("-50").
+    in property <int> trim-level-db: -60;
+    callback pick-trim-level(string);
 
     // How many sounds are shown, for the list's empty state.
     in property <int> shown;
@@ -1342,6 +1348,27 @@ export component SoundsPage inherits Rectangle {
                     text: "Autoplay";
                     on: SoundsData.autoplay;
                     clicked => { SoundsData.toggle-autoplay(); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                ToggleChip {
+                    text: "Trim silence";
+                    on: SoundsData.trim-silence;
+                    clicked => { SoundsData.toggle-trim-silence(); }
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                MenuButton {
+                    text: "Silence below " + SoundsData.trim-level-db + " dB";
+                    items: [
+                        { what: "-40 dB: cuts hiss and quiet noise too", id: "-40", enabled: true },
+                        { what: "-50 dB", id: "-50", enabled: true },
+                        { what: "-60 dB: the usual", id: "-60", enabled: true },
+                        { what: "-70 dB: keeps the faintest tails", id: "-70", enabled: true },
+                    ];
+                    chosen(id) => { SoundsData.pick-trim-level(id); }
                 }
             }
         }
