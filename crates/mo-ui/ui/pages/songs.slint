@@ -1,6 +1,6 @@
 // The Songs page: one line per song, newest save first, under time headings, with search, filter chips and a year
 // scrubber, and the picked song's panel beside it. Agreed with Solomon on 2026-10-31.
-import { ListView, Fit } from "../list.slint";
+import { ListView, ListBox, Fit } from "../list.slint";
 import { ArrangementPreview } from "arrangement.slint";
 import { Theme, AppKeys, Type, Space, PageHeader, Well, SearchBox, ToggleChip, FilterPicks, FilterList, FilterColumn, TickLine, FilterView, ListLine, Stars, YearRange, YearBar, Caps, ColumnHead, Heart, CloseButton, TabBar, LinkText, StudioButton, ActionKey, MenuLine, MenuCard, Groove, MenuItem, RightClickMenu, NoticeStrip, EmptyState, SidePanel } from "../studio.slint";
 
@@ -126,6 +126,8 @@ export global SongsData {
     in property <int> show-ask;
     // The last ask the list has turned to (list.slint's ListView keeps it).
     in-out property <int> show-done;
+    // Where the list is turned to (list.slint's ListView keeps it): it's there again when the page is shown again.
+    in-out property <length> list-y;
     // The song panel, shown while a song is picked.
     in property <PanelSong> song;
     in property <[string]> tabs;
@@ -862,158 +864,164 @@ export component SongsPage inherits Rectangle {
                             text: SongsData.message-text;
                         }
                         if SongsData.message == "": HorizontalLayout {
-                            VerticalLayout {
+                            ListBox {
                                 horizontal-stretch: 1;
-                                // The headings order the list: a click goes by that column, a second turns it round.
-                                HorizontalLayout {
-                                    padding-left: Space.xs + Space.md;
-                                    padding-right: Space.xs + Space.md;
-                                    spacing: Space.md;
-                                    ColumnHead {
-                                        horizontal-stretch: 1;
-                                        text: "SONG";
-                                        on: SongsData.order-column == "Song";
-                                        // A to Z first.
-                                        up: !SongsData.order-reversed;
-                                        clicked => { SongsData.order-picked("Song"); }
-                                    }
-                                    if list-well.wide: ColumnHead {
-                                        width: 150px;
-                                        right: true;
-                                        text: "STATUS";
-                                        on: SongsData.order-column == "Status";
-                                        up: SongsData.order-reversed;
-                                        clicked => { SongsData.order-picked("Status"); }
-                                    }
-                                    ColumnHead {
-                                        width: 90px;
-                                        right: true;
-                                        text: "LAST SAVED";
-                                        on: SongsData.order-column == "Last saved";
-                                        up: SongsData.order-reversed;
-                                        clicked => { SongsData.order-picked("Last saved"); }
-                                    }
-                                }
-                                list := ListView {
-                                    horizontal-stretch: 1;
-                                    row-height: SongsData.line-height;
-                                    rows: SongsData.lines.length;
-                                    show-top: SongsData.show-y;
-                                    show-ask: SongsData.show-ask;
-                                    show-done <=> SongsData.show-done;
-                                    for line in SongsData.lines: Rectangle {
-                                        // Every line this height: the list counts on it.
-                                        height: SongsData.line-height;
-                                        if line.heading != "": Caps {
-                                            x: Space.lg;
-                                            y: parent.height - self.height - Space.sm;
-                                            text: line.heading;
+                                turned: list.content-y;
+                                after: list.row-height;
+                                to-top => { list.to-top(); }
+                                VerticalLayout {
+                                    // The headings order the list: a click goes by that column, a second turns it round.
+                                    HorizontalLayout {
+                                        padding-left: Space.xs + Space.md;
+                                        padding-right: Space.xs + Space.md;
+                                        spacing: Space.md;
+                                        ColumnHead {
+                                            horizontal-stretch: 1;
+                                            text: "SONG";
+                                            on: SongsData.order-column == "Song";
+                                            // A to Z first.
+                                            up: !SongsData.order-reversed;
+                                            clicked => { SongsData.order-picked("Song"); }
                                         }
-                                        if line.heading == "": ListLine {
-                                            x: Space.xs;
-                                            width: parent.width - 2 * Space.xs;
-                                            selected: line.row == SongsData.selected;
-                                            // The date's tooltip, over the date at the right.
-                                            tip: line.date-tip;
-                                            tip-from: self.width - Space.md - 90px;
-                                            clicked => {
-                                                SongsData.select(line.row);
-                                                keys.focus();
+                                        if list-well.wide: ColumnHead {
+                                            width: 150px;
+                                            right: true;
+                                            text: "STATUS";
+                                            on: SongsData.order-column == "Status";
+                                            up: SongsData.order-reversed;
+                                            clicked => { SongsData.order-picked("Status"); }
+                                        }
+                                        ColumnHead {
+                                            width: 90px;
+                                            right: true;
+                                            text: "LAST SAVED";
+                                            on: SongsData.order-column == "Last saved";
+                                            up: SongsData.order-reversed;
+                                            clicked => { SongsData.order-picked("Last saved"); }
+                                        }
+                                    }
+                                    list := ListView {
+                                        horizontal-stretch: 1;
+                                        row-height: SongsData.line-height;
+                                        rows: SongsData.lines.length;
+                                        show-top: SongsData.show-y;
+                                        show-ask: SongsData.show-ask;
+                                        show-done <=> SongsData.show-done;
+                                        kept-y <=> SongsData.list-y;
+                                        for line in SongsData.lines: Rectangle {
+                                            // Every line this height: the list counts on it.
+                                            height: SongsData.line-height;
+                                            if line.heading != "": Caps {
+                                                x: Space.lg;
+                                                y: parent.height - self.height - Space.sm;
+                                                text: line.heading;
                                             }
-                                            double-clicked => {
-                                                SongsData.select(line.row);
-                                                SongsData.open();
-                                            }
-                                            // The line is picked first (ListLine does that), so the menu acts on it.
-                                            right-clicked(x, y) => {
-                                                keys.focus();
-                                                SongsData.song-menu-for(line.row);
-                                                song-menu.open-at(x, y);
-                                            }
-                                            // The DAW's colour, as a thin bar at the left (the design system's song row).
-                                            Rectangle {
-                                                x: Space.xs + 2px;
-                                                y: (parent.height - self.height) / 2;
-                                                width: 3px;
-                                                height: parent.height - 2 * Space.md;
-                                                border-radius: 1.5px;
-                                                background: Theme.daw(line.daw);
-                                            }
-                                            HorizontalLayout {
-                                                padding-left: Space.md;
-                                                padding-right: Space.md;
-                                                spacing: Space.md;
-                                                VerticalLayout {
-                                                    alignment: center;
-                                                    spacing: Space.xs;
-                                                    horizontal-stretch: 1;
-                                                    HorizontalLayout {
-                                                        spacing: Space.sm;
-                                                        alignment: start;
-                                                        Text {
-                                                            text: line.name;
-                                                            color: Theme.text;
-                                                            font-size: Type.row-title;
-                                                            font-weight: 500;
-                                                            overflow: elide;
-                                                        }
-                                                        if line.favourite: Heart { y: (parent.height - self.height) / 2; }
-                                                        // Its status as a small tag beside the name (the UX review of 10 Nov,
-                                                        // C5): one of the main things the list is filtered by. A wide list
-                                                        // has it in a column of its own.
-                                                        if line.status != "" && !list-well.wide: Rectangle {
-                                                            y: (parent.height - self.height) / 2;
-                                                            width: status-tag.preferred-width + 2 * Space.sm;
-                                                            height: 18px;
-                                                            border-radius: 9px;
-                                                            border-width: 1px;
-                                                            border-color: Theme.edge;
-                                                            status-tag := Text {
-                                                                text: line.status;
-                                                                color: Theme.muted;
-                                                                font-size: Type.tiny;
+                                            if line.heading == "": ListLine {
+                                                x: Space.xs;
+                                                width: parent.width - 2 * Space.xs;
+                                                selected: line.row == SongsData.selected;
+                                                // The date's tooltip, over the date at the right.
+                                                tip: line.date-tip;
+                                                tip-from: self.width - Space.md - 90px;
+                                                clicked => {
+                                                    SongsData.select(line.row);
+                                                    keys.focus();
+                                                }
+                                                double-clicked => {
+                                                    SongsData.select(line.row);
+                                                    SongsData.open();
+                                                }
+                                                // The line is picked first (ListLine does that), so the menu acts on it.
+                                                right-clicked(x, y) => {
+                                                    keys.focus();
+                                                    SongsData.song-menu-for(line.row);
+                                                    song-menu.open-at(x, y);
+                                                }
+                                                // The DAW's colour, as a thin bar at the left (the design system's song row).
+                                                Rectangle {
+                                                    x: Space.xs + 2px;
+                                                    y: (parent.height - self.height) / 2;
+                                                    width: 3px;
+                                                    height: parent.height - 2 * Space.md;
+                                                    border-radius: 1.5px;
+                                                    background: Theme.daw(line.daw);
+                                                }
+                                                HorizontalLayout {
+                                                    padding-left: Space.md;
+                                                    padding-right: Space.md;
+                                                    spacing: Space.md;
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        spacing: Space.xs;
+                                                        horizontal-stretch: 1;
+                                                        HorizontalLayout {
+                                                            spacing: Space.sm;
+                                                            alignment: start;
+                                                            Text {
+                                                                text: line.name;
+                                                                color: Theme.text;
+                                                                font-size: Type.row-title;
+                                                                font-weight: 500;
+                                                                overflow: elide;
+                                                            }
+                                                            if line.favourite: Heart { y: (parent.height - self.height) / 2; }
+                                                            // Its status as a small tag beside the name (the UX review of 10 Nov,
+                                                            // C5): one of the main things the list is filtered by. A wide list
+                                                            // has it in a column of its own.
+                                                            if line.status != "" && !list-well.wide: Rectangle {
+                                                                y: (parent.height - self.height) / 2;
+                                                                width: status-tag.preferred-width + 2 * Space.sm;
+                                                                height: 18px;
+                                                                border-radius: 9px;
+                                                                border-width: 1px;
+                                                                border-color: Theme.edge;
+                                                                status-tag := Text {
+                                                                    text: line.status;
+                                                                    color: Theme.muted;
+                                                                    font-size: Type.tiny;
+                                                                }
                                                             }
                                                         }
+                                                        Text {
+                                                            text: line.details;
+                                                            color: Theme.muted;
+                                                            font-size: Type.meta;
+                                                            overflow: elide;
+                                                        }
                                                     }
-                                                    Text {
-                                                        text: line.details;
-                                                        color: Theme.muted;
-                                                        font-size: Type.meta;
-                                                        overflow: elide;
+                                                    if list-well.wide: VerticalLayout {
+                                                        alignment: center;
+                                                        spacing: Space.xs;
+                                                        width: 150px;
+                                                        Text {
+                                                            text: line.missing;
+                                                            color: Theme.missing;
+                                                            font-size: Type.meta;
+                                                            horizontal-alignment: right;
+                                                            overflow: elide;
+                                                        }
+                                                        if line.status != "": Text {
+                                                            text: line.status;
+                                                            color: Theme.muted;
+                                                            font-size: Type.meta;
+                                                            horizontal-alignment: right;
+                                                        }
                                                     }
-                                                }
-                                                if list-well.wide: VerticalLayout {
-                                                    alignment: center;
-                                                    spacing: Space.xs;
-                                                    width: 150px;
-                                                    Text {
-                                                        text: line.missing;
-                                                        color: Theme.missing;
-                                                        font-size: Type.meta;
-                                                        horizontal-alignment: right;
-                                                        overflow: elide;
-                                                    }
-                                                    if line.status != "": Text {
-                                                        text: line.status;
-                                                        color: Theme.muted;
-                                                        font-size: Type.meta;
-                                                        horizontal-alignment: right;
-                                                    }
-                                                }
-                                                VerticalLayout {
-                                                    alignment: center;
-                                                    spacing: Space.xs;
-                                                    width: 90px;
-                                                    Text {
-                                                        text: line.date;
-                                                        color: Theme.muted;
-                                                        font-family: Theme.number-font;
-                                                        font-size: Type.meta;
-                                                        horizontal-alignment: right;
-                                                    }
-                                                    if line.rating > 0: HorizontalLayout {
-                                                        alignment: end;
-                                                        Stars { rating: line.rating; }
+                                                    VerticalLayout {
+                                                        alignment: center;
+                                                        spacing: Space.xs;
+                                                        width: 90px;
+                                                        Text {
+                                                            text: line.date;
+                                                            color: Theme.muted;
+                                                            font-family: Theme.number-font;
+                                                            font-size: Type.meta;
+                                                            horizontal-alignment: right;
+                                                        }
+                                                        if line.rating > 0: HorizontalLayout {
+                                                            alignment: end;
+                                                            Stars { rating: line.rating; }
+                                                        }
                                                     }
                                                 }
                                             }

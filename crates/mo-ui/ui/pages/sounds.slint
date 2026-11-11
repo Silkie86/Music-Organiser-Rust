@@ -2,7 +2,7 @@
 // sounds that fit your taste), with the type chips
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
-import { ListView, Fit } from "../list.slint";
+import { ListView, ListBox, Fit } from "../list.slint";
 import { Theme, AppKeys, Type, Space, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
@@ -372,6 +372,10 @@ export global SoundsData {
     in property <int> show-ask;
     // The last ask the list has turned to (list.slint's ListView keeps it).
     in-out property <int> show-done;
+    // Where the tiles and the List are turned to, each its own (list.slint's ListView keeps them): there again
+    // when the page or the view is shown again.
+    in-out property <length> tiles-y;
+    in-out property <length> lines-y;
     // The tiles or the lines were made afresh (the view switched between them, say): the page brings the picked sound
     // into view in them once they're laid out.
     callback list-made();
@@ -1571,7 +1575,10 @@ export component SoundsPage inherits Rectangle {
                         }
                         // The tiles' shapes come in one picture from the graphics card when there's one (`TileGrid`),
                         // under the list, which then shows only their words; without a card each tile draws its own.
-                        if SoundsData.empty-title == "" && SoundsData.shown > 0 && SoundsData.view == 0: grid-area := Rectangle {
+                        if SoundsData.empty-title == "" && SoundsData.shown > 0 && SoundsData.view == 0: grid-area := ListBox {
+                            turned: tiles.content-y;
+                            after: tiles.row-height;
+                            to-top => { tiles.to-top(); }
                             clip: true;
                             // The height of a tile's lines of words, the same for every tile.
                             name-probe := Text {
@@ -1634,10 +1641,13 @@ export component SoundsPage inherits Rectangle {
                                 show-top: SoundsData.show-row * self.row-height;
                                 show-ask: SoundsData.show-ask;
                                 show-done <=> SoundsData.show-done;
+                                kept-y <=> SoundsData.tiles-y;
                                 changed columns => { SoundsData.columns-changed(self.columns); }
+                                // `list-made` first: tiles made again don't turn to the picked sound while their
+                                // count of columns settles (sounds.rs `columns_before`).
                                 init => {
-                                    SoundsData.columns-changed(self.columns);
                                     SoundsData.list-made();
+                                    SoundsData.columns-changed(self.columns);
                                 }
                                 for r in SoundsData.tile-rows: HorizontalLayout {
                                     // Every row this height: the list counts on it.
@@ -1663,35 +1673,41 @@ export component SoundsPage inherits Rectangle {
                                 }
                             }
                         }
-                        if SoundsData.empty-title == "" && SoundsData.shown > 0 && (SoundsData.view == 1 || SoundsData.view == 3 || SoundsData.view == 4): list-box := VerticalLayout {
-                            // Two lines a sound where the columns would leave its name under about 100 px (in a
-                            // 900 px window); a big window with the panel and the year strip open keeps one line. The
-                            // columns take about 510 px (SoundLineView): make one wider, and raise this with it.
-                            property <bool> narrow: self.width < 660px;
-                            property <length> line-height: self.narrow ? 52px : 40px;
-                            ListHeading {
-                                history: SoundsData.view == 3;
-                                rediscover: SoundsData.view == 4;
-                                narrow: list-box.narrow;
-                            }
-                            lines := ListView {
-                                row-height: list-box.line-height;
-                                rows: SoundsData.lines.length;
-                                show-top: SoundsData.show-row * self.row-height;
-                                show-ask: SoundsData.show-ask;
-                                show-done <=> SoundsData.show-done;
-                                init => { SoundsData.list-made(); }
-                                for l in SoundsData.lines: SoundLineView {
-                                    // Every line this height: the list counts on it.
-                                    height: lines.row-height;
-                                    narrow: list-box.narrow;
-                                    line: l;
+                        if SoundsData.empty-title == "" && SoundsData.shown > 0 && (SoundsData.view == 1 || SoundsData.view == 3 || SoundsData.view == 4): ListBox {
+                            turned: lines.content-y;
+                            after: lines.row-height;
+                            to-top => { lines.to-top(); }
+                            list-box := VerticalLayout {
+                                // Two lines a sound where the columns would leave its name under about 100 px (in a
+                                // 900 px window); a big window with the panel and the year strip open keeps one line. The
+                                // columns take about 510 px (SoundLineView): make one wider, and raise this with it.
+                                property <bool> narrow: self.width < 660px;
+                                property <length> line-height: self.narrow ? 52px : 40px;
+                                ListHeading {
                                     history: SoundsData.view == 3;
                                     rediscover: SoundsData.view == 4;
-                                    chosen => { keys.focus(); }
-                                    right-clicked(x, y) => {
-                                        keys.focus();
-                                        menu.open-at(x, y);
+                                    narrow: list-box.narrow;
+                                }
+                                lines := ListView {
+                                    row-height: list-box.line-height;
+                                    rows: SoundsData.lines.length;
+                                    show-top: SoundsData.show-row * self.row-height;
+                                    show-ask: SoundsData.show-ask;
+                                    show-done <=> SoundsData.show-done;
+                                    kept-y <=> SoundsData.lines-y;
+                                    init => { SoundsData.list-made(); }
+                                    for l in SoundsData.lines: SoundLineView {
+                                        // Every line this height: the list counts on it.
+                                        height: lines.row-height;
+                                        narrow: list-box.narrow;
+                                        line: l;
+                                        history: SoundsData.view == 3;
+                                        rediscover: SoundsData.view == 4;
+                                        chosen => { keys.focus(); }
+                                        right-clicked(x, y) => {
+                                            keys.focus();
+                                            menu.open-at(x, y);
+                                        }
                                     }
                                 }
                             }

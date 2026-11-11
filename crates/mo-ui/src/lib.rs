@@ -259,15 +259,21 @@ fn finder_pages(app: &AppWindow, shortcuts: &Shortcuts) {
 }
 
 /// The actions Ctrl+K offers on a place: its page's own, then the app-wide ones that do something so far (not Ctrl+K
-/// itself, the help key once, and not the keys for moving about the page: Ctrl+F, Esc, Ctrl+Up and Ctrl+Down, which
-/// act on where the keys were before Ctrl+K took them).
+/// itself, the help key once, and not the keys for moving about the page: Ctrl+F, Esc, Ctrl+Up, Ctrl+Down and Home,
+/// which act on where the keys were before Ctrl+K took them).
 fn finder_actions(app: &AppWindow, shortcuts: &Shortcuts, place: Place) {
     let page = page_actions(place);
     let wide = APP_ACTIONS.iter().filter(|a| {
         is_built(a.id)
             && !matches!(
                 a.id,
-                "app.jump" | "app.helpF1" | "app.search" | "app.escape" | "app.prevItem" | "app.nextItem"
+                "app.jump"
+                    | "app.helpF1"
+                    | "app.search"
+                    | "app.escape"
+                    | "app.prevItem"
+                    | "app.nextItem"
+                    | "app.listTop"
             )
     });
     let actions = mo_app::finder::actions(shortcuts, page.iter().chain(wide));
@@ -328,6 +334,7 @@ fn show_button_keys(app: &AppWindow, shortcuts: &Shortcuts) {
     backup.set_run_key(action("backup.now"));
     backup.set_stop_key(action("backup.stop"));
     app.global::<MidiData>().set_read_again_key(shortcuts.key_of("midi.readAgain").into());
+    app.global::<AppKeys>().set_list_top_key(shortcuts.key_of("app.listTop").into());
 }
 
 /// Shows a place, and notes it for the log and the watchdog.
@@ -493,6 +500,9 @@ fn coming(place: Place) -> &'static str {
     }
 }
 
+/// The places with a list, which Home takes back to its top.
+const LISTED: [Place; 5] = [Place::Songs, Place::Sounds, Place::Presets, Place::Midi, Place::Plugins];
+
 /// The places with a search box, which Ctrl+F puts the keys in.
 const SEARCHED: [Place; 5] = [Place::Songs, Place::Sounds, Place::Presets, Place::Midi, Place::Plugins];
 
@@ -553,6 +563,19 @@ fn run(id: &str, weak: &Weak<AppWindow>, feed: &Feed, held: bool) -> bool {
                 Some(Place::Space) => space::escape(&app),
                 _ => false,
             };
+        }
+        // Home: the list on show back to its top, as the button over its corner does (Solomon's F12 note of 11
+        // Nov). The list on show sees the count change. Off the places with lists the key goes on, and so it does
+        // while Ctrl+K or the F12 note is open over the page.
+        "app.listTop" => {
+            if app.global::<FinderData>().get_open()
+                || app.get_note_open()
+                || !place().is_some_and(|p| LISTED.contains(&p))
+            {
+                return false;
+            }
+            let keys = app.global::<AppKeys>();
+            keys.set_list_top(keys.get_list_top().wrapping_add(1));
         }
         // Ctrl+Up and Ctrl+Down: the line above or below in the page's list, even while you type a search.
         "app.prevItem" | "app.nextItem" => {
