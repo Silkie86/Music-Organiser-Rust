@@ -1295,6 +1295,24 @@ export component SoundsPage inherits Rectangle {
                     false
                 }
             }
+            // How Tiles and List are ordered: one small drop-down beside the search, not a row of chips of its own
+            // (the UX review of 10 Nov, A4; Solomon, 10 Nov: "not all has to be chips"), and Shuffle for a new order.
+            if SoundsData.view < 2: VerticalLayout {
+                alignment: center;
+                OneOfChip {
+                    name: "Order";
+                    filter: SoundsData.order-filter;
+                    picked(text) => { SoundsData.pick-order(text); }
+                }
+            }
+            if SoundsData.view < 2: VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    text: "Shuffle";
+                    tip: "A new order";
+                    clicked => { SoundsData.shuffle(); }
+                }
+            }
             VerticalLayout {
                 alignment: center;
                 ToggleChip {
@@ -1307,22 +1325,6 @@ export component SoundsPage inherits Rectangle {
         // Each view's own choices, every one on show rather than in a menu (Solomon, 4 Nov 2026: "makes sure things
         // that are useful arent hidden away"). Each row is a FlexboxLayout in an `if`, with its filters in it always:
         // a filter in an `if` inside a FlexboxLayout is measured as if it wrapped, and leaves a gap under the row.
-        if SoundsData.view < 2: FlexboxLayout {
-            spacing: Space.md;
-            cross-axis-alignment: center;
-            vertical-stretch: 0;
-            FilterPicks {
-                name: "Order";
-                filter: SoundsData.order-filter;
-                toggled(text) => { SoundsData.pick-order(text); }
-            }
-            StudioButton {
-                horizontal-stretch: 0;
-                text: "Shuffle";
-                tip: "A new order";
-                clicked => { SoundsData.shuffle(); }
-            }
-        }
         // Rediscover's own choices, in place of the filters: the types as the Type filter shows them (the most used as
         // chips, the rest in a menu), the years, and how many, each on show.
         if SoundsData.view == 4: FlexboxLayout {
