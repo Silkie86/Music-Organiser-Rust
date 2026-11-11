@@ -78,6 +78,10 @@ light that means something. It should feel like a rack unit on a desk, not a web
   `TabBar`) is for views and tabs, and for one of three in the filter column.
   A chip for a choice that would show nothing ("Arranging 0") has faint words (`ToggleChip.dim`). A dot that shows
   a state is green, amber, red or grey, never a DAW's colour. Shuffle is a plain button everywhere.
+- Advice above a list folds into one strip (`NoticeStrip`, review A4): one line that says what there is, with
+  Show and Hide, so the list starts high. Its words shorten with "..." before the Show button is pushed off. On
+  Plugins it holds the install cards, the room-to-free line and the measure line; a warning the user must act on
+  (a half-made copy) stays outside it.
   A line inside a card has no buttons of its own: a click picks it and the card's buttons act on it (a song's Saves
   tab), with the same in its right-click menu.
 
