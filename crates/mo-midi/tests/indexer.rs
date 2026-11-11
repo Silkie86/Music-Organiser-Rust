@@ -504,6 +504,12 @@ fn every_set_of_notes_gets_its_slots_for_a_search() {
     assert_eq!((slots[0][0], slots[0][2], slots[0][4]), (half, half, 0));
     assert_eq!((slots[1][4], slots[1][7], slots[1][0]), (half, half, 0));
     assert_eq!(slots, mo_midi::fit::slots_of(&store.notes(tune.id, &tune.hash).unwrap()).as_slice());
+    // The bars the index keeps of each part are the bars its kept notes count to: what the page's loop and MIDI file
+    // are made with (the kept count) is what a search judges the part over (counted from the notes).
+    for part in &all {
+        let notes = store.notes(part.id, &part.hash).unwrap();
+        assert_eq!(i64::from(part.bars), mo_midi::analyser::bars_of(&notes), "{}", part.clip);
+    }
     // The page's own connection reads the same.
     assert_eq!(MidiStore::open_read_only(&db).unwrap().slots().unwrap().len(), 2);
 

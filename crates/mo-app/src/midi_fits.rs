@@ -140,8 +140,8 @@ pub struct Fitted {
 /// the bars it's fitted to, as the song has them. They go round as picked, every bar of them (one the parts rest in
 /// too), and the part found goes round beside them by its own length from the first of those bars
 /// ([`SongBars::round`]): as the part sounds dropped on that bar in the DAW. The search judges the two going round
-/// by the same rule, over the part's bars as it counts them, which for a few parts is a bar off the clip's
-/// (`docs/harmony/together-experiments.md`, "What's judged isn't always what's dropped").
+/// by the same rule over the same clip ([`mo_midi::analyser::clip_length`]), so what's heard here is what was judged
+/// (`docs/harmony/together-experiments.md`, "What's judged is what's dropped").
 #[derive(Clone, Debug, PartialEq)]
 pub struct SongBars {
     /// What plays: each picked part that sounds in the bars (never drums), in the order they're picked, which is the

@@ -257,8 +257,14 @@ the next PR step by step). Solomon wants the highest effort here.
     `midi_fits_with_song`) turns it off; the button says which it is, and the card's sound line says what's
     heard (`midi_fits::with_song_line`, or the part's own tempo: `show_sound` picks between the two with nothing
     read again). Never for drums or a plain list. Play in Bitwig and FL, Send and the drag are the part alone, as
-    before. Not the same loop the search judged for every part: see "What's judged isn't always what's dropped"
-    in `docs/harmony/together-experiments.md`.
+    before.
+  - What's judged is what's dropped (2026-11-11): one rule for a part's clip, `mo_midi::analyser::clip_of`
+    (whole bars from its first bar line, as many as the index counts, or to the end of the bar its last heard
+    note starts in; a note held a hair over the end stops there). The search hears a found part go round over it,
+    both looks, both ways round (`fit::slots_of`, `Target::fit`, `chart::backing`), and it's the loop that's
+    played (`mo_app::midi::loop_notes`) and the MIDI file that's dragged and sent (`part_clip`, which now ends on
+    a bar line). A last note a hair over a bar line no longer makes the part a bar longer to the search than it
+    is in the DAW. The index makes its slots again (`fit::SLOTS_ASKING`).
   Not built yet: picking a song's parts and bars by hand, hearing a part with the song playing in the DAW, and
   putting the part found at the right bar of the project.
 

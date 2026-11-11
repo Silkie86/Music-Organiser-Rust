@@ -108,7 +108,46 @@ fn round(x: f64) -> i64 {
 /// How many bars the notes take, from tick 0: at least 1, and 0 for no notes.
 pub fn bars_of(notes: &[NoteEvent]) -> i64 {
     let Some(end) = notes.iter().map(|n| n.start + n.length).max() else { return 0 };
+    bars_to(end)
+}
+
+/// How many bars from tick 0 notes that end at `end` take: a hundredth of a bar over a bar line isn't another bar.
+fn bars_to(end: i64) -> i64 {
     ((end as f64 / BAR as f64 - 0.01).ceil() as i64).max(1)
+}
+
+/// A part as its clip plays: the notes heard in it, and how long it is in ticks. The one rule for the loop the app
+/// plays, the MIDI file it drags and sends, and what a search hears go round (`crate::fit`), so what's judged is
+/// what's then heard and dropped.
+///
+/// It lasts `bars` whole bars of 4/4 from tick 0 (the index's count of the part, which is [`bars_of`] its notes; one
+/// at the least), or to the end of the bar its last heard note starts in when that's later: [`bars_of`] gives a
+/// hundredth of a bar past a bar line, and a note that starts in that hair is still in the clip. Heard are the notes
+/// that aren't muted and don't start before tick 0, each cut where the clip ends, as a clip going round in a DAW
+/// cuts it. That's never more than the hair of a last note held over the line: a count smaller than the bars the
+/// heard notes fill (a stale one, or one of other notes) gives the bars they fill.
+pub fn clip_of(notes: &[NoteEvent], bars: i64) -> (Vec<NoteEvent>, i64) {
+    let length = clip_ticks(notes, bars);
+    let heard = notes
+        .iter()
+        .filter(|n| !n.muted && n.start >= 0)
+        .map(|n| NoteEvent { length: n.length.min(length.saturating_sub(n.start)), ..*n })
+        .collect();
+    (heard, length)
+}
+
+/// How long the notes' clip is, in ticks: [`clip_of`]'s length with the bars counted from the notes ([`bars_of`],
+/// muted notes counted, as the index counts a part's). 0 for no notes.
+pub fn clip_length(notes: &[NoteEvent]) -> i64 {
+    if notes.is_empty() { 0 } else { clip_ticks(notes, bars_of(notes)) }
+}
+
+/// [`clip_of`]'s length.
+fn clip_ticks(notes: &[NoteEvent], bars: i64) -> i64 {
+    let heard = notes.iter().filter(|n| !n.muted && n.start >= 0);
+    let last = heard.clone().map(|n| n.start).max().unwrap_or(0);
+    let filled = heard.map(|n| n.start.saturating_add(n.length)).max().map_or(0, bars_to);
+    bars.max(filled).max(1).saturating_mul(BAR).max((last / BAR).saturating_add(1).saturating_mul(BAR))
 }
 
 /// One phrase of a part, from [`split`].
@@ -918,6 +957,45 @@ mod tests {
         assert_eq!(bars_of(&[note(0, BAR, 60)]), 1);
         assert_eq!(bars_of(&[note(0, BAR + 3, 60)]), 1, "a hair over the bar line is still one bar");
         assert_eq!(bars_of(&[note(0, BAR + 4, 60)]), 2);
+    }
+
+    #[test]
+    fn a_parts_clip_is_whole_bars_and_every_note_heard_ends_inside_it() {
+        let ends = |notes: &[NoteEvent]| notes.iter().map(|n| n.start + n.length).max();
+        // Four bars of half notes: four bars, as they are.
+        let tune: Vec<NoteEvent> = (0..8).map(|i| note(i * BAR / 2, BAR / 2, 60 + i as u8)).collect();
+        assert_eq!(clip_of(&tune, bars_of(&tune)), (tune.clone(), 4 * BAR));
+        assert_eq!(clip_length(&tune), 4 * BAR);
+        // The last note held a hair over the fourth line: still four bars, and the note stops at the line.
+        let mut over = tune.clone();
+        over[7].length += 3;
+        let (heard, length) = clip_of(&over, bars_of(&over));
+        assert_eq!((bars_of(&over), length, ends(&heard)), (4, 4 * BAR, Some(4 * BAR)));
+        assert_eq!((&heard[..7], heard[7].start), (&tune[..7], tune[7].start));
+        // A note that starts in that hair is in the clip, which has the bar it starts in: no note is left outside.
+        let mut grace = tune.clone();
+        grace.push(note(4 * BAR + 1, 2, 72));
+        let (heard, length) = clip_of(&grace, bars_of(&grace));
+        assert_eq!((bars_of(&grace), length, heard.len()), (4, 5 * BAR, 9));
+        assert_eq!(clip_length(&grace), 5 * BAR);
+        // Muted notes count for the bars (the index counts them) and aren't heard; nor is a note before tick 0.
+        let mut muted = tune.clone();
+        muted.push(NoteEvent { muted: true, ..note(4 * BAR, BAR, 60) });
+        muted.push(note(-10, 5, 60));
+        let (heard, length) = clip_of(&muted, bars_of(&muted));
+        assert_eq!((heard, length, clip_length(&muted)), (tune.clone(), 5 * BAR, 5 * BAR));
+        // More bars than the notes fill (a loop that rests at its end, told its length): as told. Fewer (a count
+        // that's stale, or none): the bars its notes fill, so no note is ever cut by more than the hair.
+        assert_eq!(clip_of(&tune, 8).1, 8 * BAR);
+        assert_eq!(clip_of(&tune, 2), (tune.clone(), 4 * BAR));
+        assert_eq!(clip_of(&[note(0, 3 * BAR, 60)], 0), (vec![note(0, 3 * BAR, 60)], 3 * BAR));
+        assert_eq!(clip_of(&[note(0, 3 * BAR + 3, 60)], 2), (vec![note(0, 3 * BAR, 60)], 3 * BAR));
+        // No notes: a bar of nothing to play, and no length to judge.
+        assert_eq!((clip_of(&[], 0), clip_length(&[])), ((Vec::new(), BAR), 0));
+        // Nothing overflows.
+        let far = [note(i64::MAX - 5, i64::MAX, 60)];
+        assert_eq!(clip_of(&far, i64::MAX).1, i64::MAX);
+        assert!(clip_of(&far, 1).0[0].length <= 5);
     }
 
     #[test]
