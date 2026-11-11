@@ -520,16 +520,17 @@ pub fn shown(app: &AppWindow) {
         Some(p.library.clone())
     });
     let Some(library) = library else { return };
-    // Ctrl+K read the index already: the page takes that read, or waits for it if it's still going.
+    // Ctrl+K read the index already: the page takes that read, or waits for it if it's still going. The read goes in a
+    // Box: on Windows, where a PathBuf is bigger, it's over clippy's size limit for one arm of an enum.
     enum Kept {
-        Read(Result<Loaded, String>),
+        Read(Box<Result<Loaded, String>>),
         Coming,
         None,
     }
     let kept = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         match p.finder_loaded.take() {
-            Some(read) => Kept::Read(read),
+            Some(read) => Kept::Read(Box::new(read)),
             None if p.finder_read && !p.finder_let_go => {
                 p.finder_for_page = true;
                 Kept::Coming
@@ -538,7 +539,7 @@ pub fn shown(app: &AppWindow) {
         }
     });
     match kept {
-        Kept::Read(read) => return show(app, read),
+        Kept::Read(read) => return show(app, *read),
         Kept::Coming => return,
         Kept::None => {}
     }
