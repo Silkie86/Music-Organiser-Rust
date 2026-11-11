@@ -704,9 +704,6 @@ export component MidiPage inherits Rectangle {
     changed search-asked => { search-box.focus-all(); }
 
     VerticalLayout {
-        // In a window wider than the list and card at their widest, the page stops there (see `Fit`).
-        x: 0;
-        width: min(root.width, Fit.page-max + 2 * Space.xl);
         padding: Space.xl;
         padding-bottom: Space.lg;
         spacing: Space.md;
@@ -799,8 +796,8 @@ export component MidiPage inherits Rectangle {
                 width: split.width - self.x;
                 height: split.height;
                 // The card's place is always there (empty until a part is picked), so nothing moves when one is.
-                property <length> list-width: min(Fit.list-max, max(380px, self.width - MidiData.panel-width - divider.width, self.width - Fit.card-max - divider.width));
-                property <length> card-width: min(Fit.card-max, self.width - self.list-width - divider.width);
+                property <length> list-width: min(Fit.list-max, max(380px, self.width - MidiData.panel-width - divider.width));
+                property <length> card-width: self.width - self.list-width - divider.width;
                 property <length> years-width: MidiData.years.length > 1 && MidiData.empty-title == "" ? 56px : 0px;
                 if area.years-width > 0: YearRange {
                     x: area.list-width - area.years-width;
@@ -864,9 +861,8 @@ export component MidiPage inherits Rectangle {
                 divider := PanelDivider {
                     x: area.list-width;
                     height: parent.height;
-                    // The card's width as it's shown, so a drag starts from what you see; no seam to drag once the
-                    // window has room for the list and the card at their widest.
-                    visible: area.card-width < Fit.card-max;
+                    // The card's width as it's shown, so a drag starts from what you see. The list stops at its
+                    // widest, so in a wide window the seam only goes left of there.
                     panel-width: area.card-width;
                     room: area.width;
                     resizing(w) => { MidiData.panel-width = w; }

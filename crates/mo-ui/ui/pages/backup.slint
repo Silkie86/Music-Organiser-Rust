@@ -92,12 +92,18 @@ export global BackupData {
 }
 
 export component BackupPage inherits Rectangle {
+    // Whether the window is wider than the choices at their widest and the narrow right column together. Set when
+    // the width changes, not bound to it: the page's width hangs on what its columns ask for, and a binding would
+    // go round in a circle.
+    property <bool> wide;
+    function fit() { self.wide = self.width > Fit.list-max + 440px + 3 * Space.xl; }
+    init => { self.fit(); }
+    changed width => { self.fit(); }
     Flickable {
         content-height: page.preferred-height;
         page := VerticalLayout {
-            // In a wide window the page stops at a list and a card's width (the UX review of 10 Nov, A1).
             x: 0;
-            width: min(root.width, Fit.page-max + 2 * Space.xl);
+            width: root.width;
             padding: Space.xl;
             spacing: Space.xl;
             alignment: start;
@@ -234,6 +240,8 @@ export component BackupPage inherits Rectangle {
                     spacing: Space.lg;
                     horizontal-stretch: 3;
                     alignment: start;
+                    // In a wide window the choices stop at a list's width and the right column takes the rest.
+                    max-width: Fit.list-max;
                     VerticalLayout {
                         spacing: Space.sm;
                         Caps { text: "HOW MUCH"; }
@@ -324,7 +332,8 @@ export component BackupPage inherits Rectangle {
                 // What goes, and the older versions the backup keeps.
                 VerticalLayout {
                     horizontal-stretch: 2;
-                    max-width: 440px;
+                    // Narrow beside the choices, until the window is wider than they get: then it takes the rest.
+                    max-width: root.wide ? 100000px : 440px;
                     alignment: start;
                     spacing: Space.lg;
                     Rectangle {
