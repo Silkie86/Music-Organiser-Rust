@@ -4,7 +4,7 @@
 use std::cell::RefCell;
 
 use mo_formats::NoteEvent;
-use mo_harmony::{ChordContext, ChordReader, ChordReading, Grid, Part, Span};
+use mo_harmony::{Backing, ChordContext, ChordReader, ChordReading, Grid, Note, Part, Span};
 
 use crate::keys::{heard_as, heard_notes};
 use crate::roles::Role;
@@ -27,10 +27,30 @@ pub struct Read {
     pub goes_on: bool,
 }
 
+/// Runs `f` with this thread's own chord reader.
+pub(crate) fn with_reader<T>(f: impl FnOnce(&mut ChordReader) -> T) -> T {
+    READER.with_borrow_mut(f)
+}
+
 /// Reads the chords of one part (notes at [`PPQ`], bars of 4/4), heard as its kind: a whole part as a loop (its first
 /// chord comes after its last), a piece `cut` from a longer stretch, or the first [`MOST_BARS`] of a longer part, as a
 /// stretch of a song. None for drums, or with no pitched notes.
 pub fn read(notes: &[NoteEvent], role: Role, cut: bool) -> Option<Read> {
+    let (heard, goes_on) = heard(notes, role)?;
+    let reading = reading_of(&heard, role, cut || goes_on)?;
+    Some(Read { reading, goes_on })
+}
+
+/// The same part's chords kept to fit tunes over ([`mo_harmony::sit`]): read as [`read`] reads them, its first
+/// [`MOST_BARS`] bars at most.
+pub fn backing(notes: &[NoteEvent], role: Role, cut: bool) -> Option<Backing> {
+    let (heard, goes_on) = heard(notes, role)?;
+    let reading = reading_of(&heard, role, cut || goes_on)?;
+    Some(Backing::of(&reading, &[Part { role: heard_as(role), notes: &heard }]))
+}
+
+/// The notes [`read`] hears: the pitched ones of the first [`MOST_BARS`] bars, and whether the part goes on past them.
+fn heard(notes: &[NoteEvent], role: Role) -> Option<(Vec<Note>, bool)> {
     if role == Role::Drums {
         return None;
     }
@@ -44,10 +64,13 @@ pub fn read(notes: &[NoteEvent], role: Role, cut: bool) -> Option<Read> {
             n.length = n.length.min(until - n.start);
         }
     }
-    let parts = [Part { role: heard_as(role), notes: &heard }];
-    let span = if cut || goes_on { Span::Window } else { Span::Loop };
-    let reading = READER.with_borrow_mut(|r| r.read(&parts, Grid::four_four(PPQ as u32), &ChordContext::new(span)))?;
-    Some(Read { reading, goes_on })
+    Some((heard, goes_on))
+}
+
+fn reading_of(heard: &[Note], role: Role, window: bool) -> Option<ChordReading> {
+    let parts = [Part { role: heard_as(role), notes: heard }];
+    let span = if window { Span::Window } else { Span::Loop };
+    with_reader(|r| r.read(&parts, Grid::four_four(PPQ as u32), &ChordContext::new(span)))
 }
 
 #[cfg(test)]

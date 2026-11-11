@@ -170,7 +170,7 @@ pub fn unread_file(e: &io::Error) -> Unread {
 /// read again once ([`crate::store::MidiStore::open`]).
 pub const GONE_BEFORE: &str = "It isn't there any more";
 
-fn damaged(what: &str) -> Unread {
+pub(crate) fn damaged(what: &str) -> Unread {
     Unread::Failed(format!("It looks cut short or damaged, or saved in a way the reader doesn't know yet ({what})"))
 }
 

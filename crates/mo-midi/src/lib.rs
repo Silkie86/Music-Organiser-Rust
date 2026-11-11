@@ -5,18 +5,23 @@
 //! ([`store`]), and listed from there; each part's key is read by `mo-harmony`'s key finder ([`keys`]). The C# app's
 //! `midi.db` is opened once, read-only, to take in the corrections you made there ([`store::bring_up_to_date`]);
 //! [`MidiIndex`] still reads all of it, for the twin test.
+//!
+//! A saved song is also read as it plays, each instrument in its place ([`playing`]), so that a part from the library
+//! can be fitted to the song being worked on: a tune over its chords, or chords under its tune ([`fit`]).
 
 pub mod analyser;
 pub mod catalogue;
 pub mod chart;
 pub mod chord;
 pub mod extract;
+pub mod fit;
 pub mod gm;
 pub mod index;
 pub mod indexer;
 pub mod instruments;
 pub mod keys;
 pub mod member;
+pub mod playing;
 pub mod roles;
 pub mod store;
 
