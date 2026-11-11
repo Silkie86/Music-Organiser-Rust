@@ -13,6 +13,7 @@
 use crate::audition::Played;
 use crate::library::{self, Asked, Library, ORDERS, Read, TYPES_SHOWN};
 use crate::threads::{background, lock};
+use crate::waves::{self, Kept};
 use crate::{ExtensionLine, Instance, Panel, SoundLine, TypeLine};
 use baseview::dpi::{PhysicalPosition, Size};
 use baseview::{
@@ -116,7 +117,12 @@ struct Slots {
     /// Counts askings: only the newest one's answer is shown.
     searches: AtomicU64,
     played: Mutex<Option<Played>>,
+    /// The waveforms read for the lines on show, with their asking's round ([`Kept::to_read`]).
+    waves: Mutex<Option<(u64, WavesRead)>>,
 }
+
+/// Each sound's waveform as a picture's pixels (made off the window's thread), or none.
+type WavesRead = Vec<(i64, Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>>)>;
 
 fn take<T>(slot: &Mutex<Option<T>>) -> Option<T> {
     lock(slot).take()
@@ -126,6 +132,8 @@ fn take<T>(slot: &Mutex<Option<T>>) -> Option<T> {
 struct Lines {
     library: RefCell<Option<Arc<Library>>>,
     shown: RefCell<Vec<usize>>,
+    /// The waveforms of the lines on show, as pictures.
+    waves: RefCell<Kept<slint::Image>>,
     notify: ModelNotify,
 }
 
@@ -140,6 +148,13 @@ impl Lines {
         let library = self.library.borrow();
         let at = *self.shown.borrow().get(row)?;
         library.as_ref()?.list.sound(at).map(|s| s.path.clone())
+    }
+
+    /// The id of the sound on `row`.
+    fn sound(&self, row: usize) -> Option<i64> {
+        let library = self.library.borrow();
+        let at = *self.shown.borrow().get(row)?;
+        library.as_ref()?.list.sound(at).map(|s| s.id)
     }
 }
 
@@ -159,6 +174,8 @@ impl Model for Lines {
             folder: library::folder(&sound.path).into(),
             facts: library::facts(sound).into(),
             favourite: sound.favourite,
+            // Asked for here, so only the lines on show are ever read.
+            wave: self.waves.borrow_mut().picture(row, sound.id).unwrap_or_default(),
         })
     }
 
@@ -227,6 +244,7 @@ impl Shown {
         let lines = Rc::new(Lines {
             library: RefCell::new(None),
             shown: RefCell::new(Vec::new()),
+            waves: RefCell::new(Kept::default()),
             notify: ModelNotify::default(),
         });
         let slots = Arc::new(Slots::default());
@@ -408,7 +426,31 @@ impl Shown {
             self.panel.set_playing(SharedString::new());
         }
         self.instance.player.tidy();
+        self.waves();
         self.render();
+    }
+
+    /// Takes in the waveforms a background thread read, and has the ones the lines on show still lack read next.
+    fn waves(&self) {
+        if let Some((round, found)) = take(&self.slots.waves) {
+            let found = found.into_iter().map(|(id, pixels)| (id, pixels.map(slint::Image::from_rgba8))).collect();
+            let rows = self.lines.waves.borrow_mut().take_in(round, found);
+            for (row, sound) in rows {
+                // The list may have changed since the line asked.
+                if self.lines.sound(row) == Some(sound) {
+                    self.lines.notify.row_changed(row);
+                }
+            }
+        }
+        let Some((round, ids)) = self.lines.waves.borrow_mut().to_read() else { return };
+        let scale = self.scale.get().clamp(0.5, 8.0);
+        let (width, height) = ((waves::WIDTH * scale).round() as u32, (waves::HEIGHT * scale).round() as u32);
+        let slots = Arc::clone(&self.slots);
+        background("mo-plugin-waves", move || {
+            let found = library::waves(&ids);
+            let pictures = found.iter().map(|(id, peaks)| (*id, waves::picture(peaks, width, height))).collect();
+            *lock(&slots.waves) = Some((round, pictures));
+        });
     }
 
     /// Slint draws the panel again if anything on it changed, and the window is asked to show it.
@@ -429,6 +471,9 @@ impl Shown {
         self.size.set((width, height));
         if (size.scale_factor - self.scale.get()).abs() > f64::EPSILON || self.picture.borrow().is_empty() {
             self.scale.set(size.scale_factor);
+            // Pictures made for the old scaling are the wrong size: the lines ask again.
+            self.lines.waves.borrow_mut().forget();
+            self.lines.notify.reset();
             self.window.window().dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged {
                 scale_factor: size.scale_factor as f32,
             });
