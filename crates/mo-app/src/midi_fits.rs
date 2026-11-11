@@ -13,6 +13,10 @@
 //! comes through [`Reads`] (the page's index on disk; made-up ones in the tests and the screenshots), and what's slow
 //! to make it keeps in a [`Kept`] for the next search: the song until its save is written again, the slots and the
 //! song's own parts until the index changes.
+//!
+//! A part picked in the list is the part as it fits: [`moved`] gives its notes moved by what its line says, which is
+//! what the page then plays, drags out and sends to a DAW ([`moved_name`] names it so there), and [`card_text`] says
+//! so on its card.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Weak};
@@ -244,6 +248,37 @@ pub fn move_words(semitones: i32) -> String {
 pub fn fit_text(fit: &Fit) -> String {
     let comma = if fit.semitones == 0 { "" } else { "," };
     format!("Fits {}%{comma} {}", fit.percent(), move_words(fit.semitones))
+}
+
+/// Said on the card of a part moved by `semitones` to fit `song`: how it's moved, and that what's done with it is
+/// moved so. "Moved 3 semitones up to fit Night drive: it plays, drags and goes to your DAW that way."
+pub fn card_text(semitones: i32, song: &str) -> String {
+    if semitones == 0 {
+        return format!("Fits {song} as it is: nothing is moved.");
+    }
+    format!("Moved {} to fit {song}: it plays, drags and goes to your DAW that way.", move_words(semitones))
+}
+
+/// What a part is called where it goes moved (the file dragged out, the clip in the DAW): "Arp clip (3 semitones
+/// up)", so it isn't taken for the part as it is in the library. Its own name when it isn't moved.
+pub fn moved_name(name: &str, semitones: i32) -> String {
+    if semitones == 0 { name.to_owned() } else { format!("{name} ({})", move_words(semitones)) }
+}
+
+/// A part's notes moved by `semitones`, as its line in the list says it fits: every note by exactly that
+/// (`NoteEvent::moved`), so what's heard is what the line and the name say. A note that would go past the lowest or
+/// the highest key there is has nowhere to go and is left out: that takes a move of at most 6 from a note within 6
+/// keys of the keyboard's ends, where no instrument plays (a key switch, or a stray).
+pub fn moved(notes: Vec<NoteEvent>, semitones: i32) -> Vec<NoteEvent> {
+    if semitones == 0 {
+        return notes;
+    }
+    notes.into_iter().filter_map(|n| n.moved(semitones)).collect()
+}
+
+/// A key moved with its part: the key a chart of the moved notes is spelled in.
+pub fn moved_key(key: mo_harmony::Key, semitones: i32) -> mo_harmony::Key {
+    mo_harmony::Key { tonic: mo_harmony::PitchClass::new(i32::from(key.tonic.number()) + semitones), ..key }
 }
 
 /// What a search came to, for the list and the words about it.
@@ -760,6 +795,47 @@ mod tests {
             (wants_words(Wants::Tune), wants_words(Wants::Chords)),
             ("To play over its chords", "Chords for its melody")
         );
+    }
+
+    #[test]
+    fn a_part_is_moved_by_what_its_line_says() {
+        let keys = |notes: &[NoteEvent]| notes.iter().map(|n| n.key).collect::<Vec<_>>();
+        let part = vec![note(0, PPQ, 60), note(PPQ, PPQ, 64), note(2 * PPQ, 2 * PPQ, 67)];
+        // As it is: the same notes.
+        assert_eq!(moved(part.clone(), 0), part);
+        // Up and down: every note by as much, and nothing else about it changed.
+        let down = moved(part.clone(), -2);
+        assert_eq!(keys(&down), [58, 62, 65]);
+        assert_eq!(down[2], NoteEvent { key: 65, ..part[2] });
+        assert_eq!(keys(&moved(part.clone(), 5)), [65, 69, 72]);
+        // Muted notes and steps move like the rest (what plays is decided where it's played).
+        let muted = NoteEvent { muted: true, step: true, ..part[0] };
+        assert_eq!(moved(vec![muted], 1), [NoteEvent { key: 61, ..muted }]);
+        // A note at the keyboard's end with nowhere to go is left out; the rest move by what the line says, never
+        // by anything else.
+        let ends = vec![note(0, PPQ, 1), note(PPQ, PPQ, 60), note(2 * PPQ, PPQ, 125)];
+        assert_eq!(keys(&moved(ends.clone(), 3)), [4, 63]);
+        assert_eq!(keys(&moved(ends.clone(), 2)), [3, 62, 127], "the top key itself is a key");
+        assert_eq!(keys(&moved(ends, -2)), [58, 123]);
+
+        // Its key moves with it, round the octave, major or minor as it was.
+        use mo_harmony::{Key, PitchClass};
+        assert_eq!(moved_key(Key::major(PitchClass::D), 3), Key::major(PitchClass::F));
+        assert_eq!(moved_key(Key::minor(PitchClass::C), -2), Key::minor(PitchClass::new(10)));
+        assert_eq!(moved_key(Key::minor(PitchClass::C), 0), Key::minor(PitchClass::C));
+
+        // What the card and the DAW say about it.
+        assert_eq!(
+            card_text(3, "Night drive"),
+            "Moved 3 semitones up to fit Night drive: it plays, drags and goes to your DAW that way."
+        );
+        assert_eq!(
+            card_text(-1, "Glass"),
+            "Moved 1 semitone down to fit Glass: it plays, drags and goes to your DAW that way."
+        );
+        assert_eq!(card_text(0, "Glass"), "Fits Glass as it is: nothing is moved.");
+        assert_eq!(moved_name("Arp clip", 3), "Arp clip (3 semitones up)");
+        assert_eq!(moved_name("Arp clip", 0), "Arp clip");
     }
 
     #[test]

@@ -196,8 +196,22 @@ the next PR step by step). Solomon wants the highest effort here.
     seconds after the DAW writes it, the song is found again by its saves (`SongChoice::among`, never by its
     label), and its list is worked out again from the save written last. If the folders can't be watched, picking
     the song again in the menu reads it again.
-  Not built yet: picking a song's parts and bars by hand, playing or sending a part moved by the semitones its
-  line says, and sending the part found into the project.
+  - A part in the list is the part as it fits (2026-11-11): `midi_fits::moved` moves its notes by exactly what its
+    line says (`NoteEvent::moved` in `mo-formats`; a note with no key to go to is left out), and on the page every
+    way a part's notes leave the index goes through one value, `PartOut` (`Page::part_out`: where to read them, how
+    far they're moved, the name that says so, "Arp clip (3 semitones up)"): the card's roll and chords
+    (`read_notes`), Play loop, Play in Bitwig and FL, Send to Bitwig and the drag. The card's key stays the part's
+    own (its heading says so, and the chords' that they're moved); a line above the roll says how it's moved
+    (`card_text`).
+  - How the picked part is moved is its own state (`Page::picked_fit`, worked out by `fit_picked` when a part is
+    picked and when a list comes on show): its line's in a "Fits my song" list; kept when a newer list of the same
+    save of the same song no longer has it (a filter ticked or a word typed while it plays changes nothing that's
+    heard) and through the index being read again; gone with the plain list or another song. `fit_follows` then
+    brings what's seen and heard into line, each compared with the move it was made with (`card_move`,
+    `loop_move`, `daw_move`): the roll and chords are read again, the loop or the part in a DAW started again,
+    only when the move is another.
+  Not built yet: picking a song's parts and bars by hand, the octave a part goes at, and putting the part found
+  at the right bar of the project.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db
 writes once trusted. A decoder panic on a damaged file is caught with `mo_catch::catch`: one warning line in the log,
