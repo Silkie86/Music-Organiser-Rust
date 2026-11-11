@@ -63,18 +63,25 @@ use octave::Registers;
 pub const SLOT: i64 = 2 * PPQ;
 
 /// How this crate asks for a part's slots ([`slots_of`]: which of its notes are heard, the slot's length, bars of
-/// 4/4): bump it when that changes.
-const SLOTS_ASKING: u32 = 1;
+/// 4/4, the stretch they're made over): bump it when that changes. 2: over the part's clip
+/// ([`crate::analyser::clip_length`]), where 1 went from the bar of its first note to the bar its last note ended
+/// in, a bar more for a last note a few ticks over a bar line.
+const SLOTS_ASKING: u32 = 2;
 
 /// What made the slots the index keeps of each set of notes: how `mo_harmony` makes slots and how it was asked, like
 /// [`crate::keys::VERSION`]. When the app's is another, the index makes them again from the notes it keeps (rule 7).
 pub const SLOTS_VERSION: u32 = mo_harmony::SLOTS_VERSION * 100 + SLOTS_ASKING;
 
-/// A library part's slots, for a search's first look: how long it plays each pitch class in every [`SLOT`], from the
-/// bar its first note is in to the bar its last note ends in (bars of 4/4, as every part of the library is read), its
-/// first 32 bars at the most. The same stretch the close look hears go round ([`Target::fit`]).
+/// A library part's slots, for a search's first look: how long it plays each pitch class in every [`SLOT`], over its
+/// clip as the app plays, drags and sends it ([`crate::analyser::clip_length`]: its bars of 4/4 from its first bar
+/// line), its first 32 bars at the most. The same stretch the close look hears go round ([`Target::fit`]). None
+/// when nothing in it is heard.
 pub fn slots_of(notes: &[NoteEvent]) -> Vec<Slot> {
-    mo_harmony::slots_of(&heard_notes(notes), Grid::four_four(PPQ as u32), SLOT)
+    let heard = heard_notes(notes);
+    if heard.is_empty() {
+        return Vec::new();
+    }
+    mo_harmony::slots_over(&heard, SLOT, 0, crate::analyser::clip_length(notes))
 }
 
 /// What's looked for.
@@ -223,7 +230,7 @@ impl Target {
         match &self.given {
             Given::Chords(backing) => {
                 let heard = heard_notes(notes);
-                sit(&heard, backing, own_round(&heard)?, &Sitting::SHIPPED)
+                sit(&heard, backing, own_round(notes)?, &Sitting::SHIPPED)
             }
             Given::Tune { notes: tune, line_up } => {
                 let backing = chart::backing(notes, role, cut)?;
@@ -240,12 +247,15 @@ impl Target {
     }
 }
 
-/// How a part from the library goes round over a song's chords: from the bar its first note is in to the bar its
-/// last note ends in, bars of 4/4 as every part of the library is read, whatever the song's time signature (a clip
-/// dropped into a song keeps its own length). The same stretch its slots are made over ([`slots_of`]), so the first
-/// look and the close look hear it go round alike. In a song in 4/4 it's [`LineUp::Loops`] from tick 0.
-fn own_round(notes: &[Note]) -> Option<LineUp> {
-    mo_harmony::own_bars(notes, BAR, 0).map(|(start, length)| LineUp::LoopsFrom { start, length })
+/// How a part from the library goes round over a song's chords: as its clip does dropped into the song
+/// ([`crate::analyser::clip_length`]: from its first bar line, for its bars as the index counts them, bars of 4/4
+/// whatever the song's time signature), so what's judged is what's then played, dragged and sent. An empty bar at
+/// its start is a bar of the clip, and a last note that hangs a few ticks over a bar line doesn't make one. The
+/// same stretch its slots are made over ([`slots_of`]), so the first look and the close look hear it go round
+/// alike. None for no notes.
+fn own_round(notes: &[NoteEvent]) -> Option<LineUp> {
+    let length = crate::analyser::clip_length(notes);
+    (length > 0).then_some(LineUp::LoopsFrom { start: 0, length })
 }
 
 /// Of the parts a first look sorts, the share that gets the close look, looking for tunes and for chords. Measured
@@ -1133,13 +1143,72 @@ mod tests {
         let three_four = Grid { ticks_per_beat: PPQ as u32, beats_per_bar: 3, bar_line: 0 };
         let target = Target::chords(&[(Role::Chords, &waltz)], three_four, None).unwrap();
         // A part of the library, four bars of 4/4 from its second bar, each note two quarter notes long. Dropped
-        // into the song it keeps its own length: it comes round every 16 quarter notes, the chords every 12.
+        // into the song it keeps its own length, the empty bar at its start too: it comes round every 20 quarter
+        // notes, the chords every 12.
         let found: Vec<NoteEvent> =
             [72, 76, 74, 77, 71, 74, 72, 76].iter().zip(0i64..).map(|(&k, i)| note(BAR + i * SLOT, SLOT, k)).collect();
         let close = target.fit(&found, Role::Melody, false).unwrap();
         // Its notes fill whole slots, so the first look hears just what the close look does.
         let first = target.first().look(&slots_of(&found)).unwrap();
         assert!((first - close.judged()).abs() < 1e-9, "{first} {}", close.judged());
+    }
+
+    /// What the search judges is the clip you then get: the part's bars as the index counts them, from its first bar
+    /// line. A last note a few ticks over a bar line doesn't make the loop a bar longer, and an empty or muted bar
+    /// at its start or end is a bar of it.
+    #[test]
+    fn a_part_found_is_judged_over_the_clip_you_get() {
+        let four_bars = Some(LineUp::LoopsFrom { start: 0, length: 4 * BAR });
+        // The tune written for the chords, its last note held a 200th of a bar past the fourth bar line: still four bars
+        // (five, by the bar its last note ends in), so it comes round with the chords, not a bar later each time.
+        let mut over = tune(0);
+        over.last_mut().unwrap().length += BAR / 200;
+        assert_eq!((crate::analyser::bars_of(&over), slots_of(&over).len()), (4, 8));
+        assert_eq!((own_round(&over), own_round(&tune(0))), (four_bars, four_bars));
+        let target = Target::chords(&[(Role::Chords, &chords(0))], Grid::four_four(PPQ as u32), None).unwrap();
+        let (exact, hangs) =
+            (target.fit(&tune(0), Role::Melody, false).unwrap(), target.fit(&over, Role::Melody, false));
+        let hangs = hangs.unwrap();
+        assert_eq!((exact.best().0, hangs.best().0), (0, 0));
+        assert!((exact.judged() - hangs.judged()).abs() < 0.01, "{} {}", exact.judged(), hangs.judged());
+        // Going round a bar late each time, as it was judged before, it sat worse: the search would have ranked it
+        // under parts that fit less well.
+        let Given::Chords(backing) = &target.given else { panic!("chords were given") };
+        let late =
+            sit(&heard_notes(&over), backing, LineUp::LoopsFrom { start: 0, length: 5 * BAR }, &Sitting::SHIPPED);
+        assert!(late.unwrap().judged() < hangs.judged() - 0.05);
+        // The first look hears the same four bars.
+        let first = target.first();
+        let (a, b) = (first.look(&slots_of(&tune(0))).unwrap(), first.look(&slots_of(&over)).unwrap());
+        assert!((a - b).abs() < 0.01, "{a} {b}");
+
+        // A muted bar before the tune: the clip is five bars with a bar of rest first, and so is what's judged.
+        let mut led: Vec<NoteEvent> = vec![NoteEvent { muted: true, ..note(0, BAR, 60) }];
+        led.extend(tune(0).into_iter().map(|n| NoteEvent { start: n.start + BAR, ..n }));
+        assert_eq!(own_round(&led), Some(LineUp::LoopsFrom { start: 0, length: 5 * BAR }));
+        let slots = slots_of(&led);
+        assert_eq!(slots.len(), 10);
+        assert!(slots[..2].iter().all(|slot| slot.iter().all(|t| *t == 0)) && slots[2].iter().any(|t| *t > 0));
+        // Muted notes after it count the same way: they're in the clip.
+        let mut trailed = tune(0);
+        trailed.push(NoteEvent { muted: true, ..note(4 * BAR, BAR, 60) });
+        assert_eq!(own_round(&trailed), Some(LineUp::LoopsFrom { start: 0, length: 5 * BAR }));
+        // Nothing heard: no slots; no notes: nothing to go round.
+        assert!(slots_of(&[NoteEvent { muted: true, ..note(0, BAR, 60) }]).is_empty());
+        assert_eq!((own_round(&[]), slots_of(&[]).len()), (None, 0));
+
+        // The other way, chords found for a tune: chords whose last one is held a 200th of a bar past the fourth line
+        // go round every four bars under the tune, as the same chords cut on the line do.
+        let mut held = chords(0);
+        for n in held.iter_mut().filter(|n| n.start == 3 * BAR) {
+            n.length += BAR / 200;
+        }
+        let under = Target::tune(&tune(0), Some(0..4 * BAR)).unwrap();
+        let (exact, hangs) =
+            (under.fit(&chords(0), Role::Chords, false).unwrap(), under.fit(&held, Role::Chords, false));
+        let hangs = hangs.unwrap();
+        assert_eq!((exact.best().0, hangs.best().0), (0, 0));
+        assert!((exact.judged() - hangs.judged()).abs() < 0.01, "{} {}", exact.judged(), hangs.judged());
     }
 
     #[test]

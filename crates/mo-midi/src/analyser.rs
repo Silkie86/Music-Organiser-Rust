@@ -111,6 +111,12 @@ pub fn bars_of(notes: &[NoteEvent]) -> i64 {
     ((end as f64 / BAR as f64 - 0.01).ceil() as i64).max(1)
 }
 
+/// How long the notes' clip is, in ticks: [`bars_of`] bars from tick 0, muted notes counted. It's the clip the app
+/// plays, drags and sends of a part, and so what a search hears the part go round in (`crate::fit`). 0 for no notes.
+pub fn clip_length(notes: &[NoteEvent]) -> i64 {
+    bars_of(notes).saturating_mul(BAR)
+}
+
 /// One phrase of a part, from [`split`].
 #[derive(Clone, Debug, PartialEq)]
 pub struct Piece {
