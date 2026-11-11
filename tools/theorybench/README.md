@@ -629,11 +629,14 @@ ported in `src/pairs.rs` as it was).
   count (`--folds`, 1; drawn as keyfit draws them).
 - **What is asked.** A stretch's own tune and accompaniment were written for each other, so a good matcher puts them
   together. Given the tune: does its own accompaniment sit better than another song's (`--others`, 50 of them, the
-  same ones every run, each tried at all 12 moves and scored at its best, as a search tries every part in every key)?
+  same ones every run and none twice, each tried at all 12 moves and scored at its best, as a search tries every part
+  in every key)?
   Is it first of all 51? Does it sit better than another stretch of the same song (the same key and style, other
   chords: the test of fitting bar by bar)? Then the same the other way round, from the accompaniment to the tune. A
-  tie counts as half. Last, how often the stretch's own pair sits best where it is, with no move.
-- **The two are lined up as written** (`Place::AsWritten`): bar 1 of the tune over bar 1 of the accompaniment, even
+  tie counts as half. Last, how often the stretch's own pair sits best where it is, with no move. A stretch the new
+  way can't score at all (chords the reader hears nothing in, a tune that hardly plays where they sound) is lost on
+  every count.
+- **The two are lined up as written** (`LineUp::AsWritten`): bar 1 of the tune over bar 1 of the accompaniment, even
   when the tune starts with a bar's rest. Starting each from its own first note's bar slides a tune against its own
   chords and costs about 6 points.
 - **Three ways are scored:** the new one; the C# app's (its first look picks 3 of the 12 moves by the notes alone,
@@ -1145,48 +1148,49 @@ against 50 from other songs. The old app is the C# matcher ported as it was.
 | | new | old app | new over old, in points (likely range) |
 |---|---|---|---|
 | chords for a tune: its own over another song's | 93.4% | 90.4% | +3.0 (+2.3 to +3.7) |
-| chords for a tune: first of all 51 | 53.8% | 40.0% | +13.8 (+11.2 to +16.7) |
-| chords for a tune: over another stretch of its song | 85.9% | 84.3% | +1.7 (+0.6 to +2.7) |
-| a tune for chords: its own over another song's | 92.6% | 90.3% | +2.3 (+1.6 to +3.0) |
-| a tune for chords: first of all 51 | 46.9% | 35.5% | +11.5 (+9.1 to +13.9) |
-| a tune for chords: over another stretch of its song | 85.4% | 83.7% | +1.7 (+1.0 to +2.6) |
-| its own pair sits best unmoved | 95.2% | 93.1% | +2.1 (+0.8 to +3.3) |
+| chords for a tune: first of all 51 | 53.7% | 39.8% | +13.9 (+11.4 to +16.6) |
+| chords for a tune: over another stretch of its song | 86.0% | 84.3% | +1.7 (+0.7 to +2.7) |
+| a tune for chords: its own over another song's | 92.6% | 90.3% | +2.3 (+1.7 to +3.0) |
+| a tune for chords: first of all 51 | 46.7% | 35.2% | +11.5 (+9.1 to +14.0) |
+| a tune for chords: over another stretch of its song | 85.5% | 83.7% | +1.8 (+1.0 to +2.6) |
+| its own pair sits best unmoved | 95.2% | 93.1% | +2.1 (+0.9 to +3.3) |
 
-**Fold 0, kept back** (170 songs, 1,425 stretches; looked at only with the numbers already chosen, see
-`test-runs.md`):
+**Fold 0, kept back** (170 songs, 1,425 stretches; looked at only with numbers already chosen, see `test-runs.md`):
 
 | | new | old app | new over old, in points (likely range) |
 |---|---|---|---|
-| chords for a tune: its own over another song's | 93.1% | 89.5% | +3.6 (+2.7 to +4.6) |
-| chords for a tune: first of all 51 | 54.0% | 35.2% | +18.8 (+15.5 to +21.8) |
-| chords for a tune: over another stretch of its song | 85.0% | 83.1% | +1.9 (+0.8 to +3.0) |
+| chords for a tune: its own over another song's | 93.2% | 89.5% | +3.6 (+2.8 to +4.6) |
+| chords for a tune: first of all 51 | 54.0% | 35.0% | +19.0 (+15.7 to +22.2) |
+| chords for a tune: over another stretch of its song | 85.2% | 83.1% | +2.1 (+1.0 to +3.2) |
 | a tune for chords: its own over another song's | 92.3% | 89.6% | +2.7 (+1.9 to +3.6) |
-| a tune for chords: first of all 51 | 45.5% | 36.5% | +9.0 (+6.1 to +11.8) |
-| a tune for chords: over another stretch of its song | 84.0% | 82.3% | +1.7 (+0.7 to +2.8) |
+| a tune for chords: first of all 51 | 45.3% | 36.1% | +9.2 (+6.4 to +12.0) |
+| a tune for chords: over another stretch of its song | 84.1% | 82.3% | +1.9 (+0.9 to +3.0) |
 | its own pair sits best unmoved | 94.7% | 93.8% | +1.0 (-0.4 to +2.4) |
 
 **Other lengths, fold 1** (`--bars`; the numbers were fitted on 8 bars only), new / old app:
 
 | stretch | stretches | chords for a tune: over another song's | first of 51 | a tune for chords: over another song's | first of 51 | best unmoved |
 |---|---|---|---|---|---|---|
-| 2 bars | 4,291 | 76.5% / 72.8% | 11.8% / 8.0% | 74.9% / 71.7% | 11.8% / 10.9% | 82.9% / 76.8% |
-| 4 bars | 3,024 | 87.7% / 83.7% | 30.3% / 21.7% | 86.2% / 83.1% | 27.4% / 20.4% | 89.8% / 87.5% |
-| 8 bars | 1,650 | 93.4% / 90.4% | 53.8% / 40.0% | 92.6% / 90.3% | 46.9% / 35.5% | 95.2% / 93.1% |
-| 16 bars | 877 | 96.6% / 94.5% | 70.5% / 56.3% | 96.2% / 94.7% | 63.5% / 53.8% | 97.6% / 96.2% |
+| 2 bars | 4,291 | 76.5% / 72.8% | 13.3% / 8.0% | 74.9% / 71.7% | 12.8% / 10.8% | 83.0% / 76.8% |
+| 4 bars | 3,024 | 87.7% / 83.8% | 31.3% / 21.6% | 86.3% / 83.1% | 27.6% / 20.4% | 90.0% / 87.5% |
+| 8 bars | 1,650 | 93.4% / 90.4% | 53.7% / 39.8% | 92.6% / 90.3% | 46.7% / 35.2% | 95.2% / 93.1% |
+| 16 bars | 877 | 96.6% / 94.5% | 70.5% / 56.0% | 96.2% / 94.7% | 63.5% / 53.1% | 97.3% / 96.2% |
 
-Every gain's likely range is above 0 but three: a tune for chords first of 51 at 2 bars (+1.0, -0.1 to +2.1), over
-another stretch of its song at 16 bars (+1.0, -0.1 to +2.1, both ways round), and best unmoved on fold 0.
+Every gain's likely range is above 0 but two, both for the own pair sitting best unmoved: at 16 bars (+1.0, -0.1 to
++2.2) and on fold 0 (+1.0, -0.4 to +2.4). One more only just clears it: a tune for chords over another stretch of
+its song at 16 bars (+1.0, +0.0 to +2.0).
 
 - **The fit.** `pairs pop909cl.jsonl --folds 2,3,4 --fit 8000 --tie colour=fifth --without
   above3,above4,above7,above8,above9`: 512 songs, 4,402 stretches, 8,800 questions (two stretches' tunes hardly
-  play where their accompaniment sounds, and ask none), loss 1.5227 a question. It prints the numbers in `Sitting::SHIPPED`.
+  play where their accompaniment sounds, and ask none), loss 1.5175 a question. It prints the numbers in
+  `Sitting::SHIPPED`.
 - **What the number means.** Of pairs written for each other, 5% sit under 0.48, a quarter under 0.67, half under
   0.79, a quarter over 0.88 and a tenth over 0.95. Of another song's parts at their best move, half sit under 0.50, a
   quarter over 0.58, a tenth over 0.67 and 5% over 0.72. So the number sorts a list well, but two parts at 0.7 may or
-  may not have been written for each other.
-- **The two rules cost 6 points of first place** for chords for a tune on fold 1 (59.7% with every number free)
-  and under a point elsewhere, and buy the jazz, gospel and blues hand cases: `docs/harmony/together-experiments.md`.
+  may not have been written for each other. It isn't held to 0 to 1: a tune all on thirds passes 1.
+- **The two rules cost 6 points of first place** for chords for a tune on fold 1 (59.5% with every number free) and
+  under a point elsewhere, and buy the jazz, gospel and blues hand cases: `docs/harmony/together-experiments.md`.
 - **Short stretches are hard for both.** Two bars of a pop tune fit a great many accompaniments: its own is first of
-  51 one time in nine. A search should show a list, never one answer, and say less the shorter the part.
+  51 about one time in eight. A search should show a list, never one answer, and say less the shorter the part.
 - **Only pop is measured here.** Next: jazz tunes over jazz voicings, and Solomon's own packs' chord and melody
   files made for each other (counts only, on his PC).

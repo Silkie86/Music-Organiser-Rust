@@ -129,16 +129,16 @@ impl Sitting {
     /// `colour` tell of: `theorybench pairs pop909cl.jsonl --folds 2,3,4 --fit 8000 --tie colour=fifth --without
     /// above3,above4,above7,above8,above9` prints them (tools/theorybench/README.md, "Tunes and chords together").
     pub const SHIPPED: Sitting = Sitting {
-        root: 0.726,
-        third: 0.951,
-        fifth: 0.662,
-        colour: 0.662,
-        beside: 0.070,
-        outside: -0.392,
-        no_chord: 0.233,
-        near_played: 0.075,
-        above: [-0.594, -0.464, 0.0, 0.0, -0.414, -0.710, 0.0, 0.0, 0.0, -0.287, -0.268],
-        alike: 0.336,
+        root: 0.732,
+        third: 0.960,
+        fifth: 0.667,
+        colour: 0.667,
+        beside: 0.060,
+        outside: -0.394,
+        no_chord: 0.238,
+        near_played: 0.068,
+        above: [-0.592, -0.460, 0.0, 0.0, -0.393, -0.702, 0.0, 0.0, 0.0, -0.274, -0.258],
+        alike: 0.335,
         shortest: 0.25,
         longest: 4.0,
     };
@@ -247,13 +247,19 @@ struct Stretch {
 /// The kind of each pitch class over a chord, in a backing that plays each pitch class this much (`scale`): a place
 /// in [`Sitting::worths`].
 fn kinds_over(chord: Chord, scale: &PerPitch<f64>) -> PerPitch<usize> {
+    // Whether the chord names a fifth of any kind (a flat or sharp one too).
+    let names_a_fifth = [6, 7, 8].iter().any(|&i| chord.has(i) && chord.role(i) == ToneRole::Fifth);
     let mut out = PerPitch([OUTSIDE; 12]);
     for pc in PitchClass::ALL {
         let interval = i32::from(pc.above(chord.root()));
         out[pc] = match chord.role(interval) {
+            // The root is the chord's whether or not the voicing plays it.
             ToneRole::Root => ROOT,
-            ToneRole::Third => THIRD,
-            ToneRole::Fifth => FIFTH,
+            // Only the third and fifth the chord names: an F over Csus2 is no third, an A flat over C7 no fifth.
+            ToneRole::Third if chord.has(interval) => THIRD,
+            ToneRole::Fifth if chord.has(interval) => FIFTH,
+            // A shell voicing leaves the fifth out: the plain fifth is still the chord's, when it names no other.
+            ToneRole::Fifth if interval == 7 && !names_a_fifth => FIFTH,
             _ if chord.has(interval) => COLOUR,
             _ if scale[pc] >= RARE => BESIDE,
             _ => OUTSIDE,
@@ -282,7 +288,7 @@ pub struct Backing {
     stretches: Vec<Stretch>,
     /// How much of the backing's sounding time each pitch class takes, the most-played 1.
     scale: PerPitch<f64>,
-    /// Half a bar (two beats) at a time: what each pitch class is there; none where nothing sounds.
+    /// Half a bar at a time ([`half_bar`]): what each pitch class is there; none where nothing sounds.
     halves: Vec<Option<PerPitch<Near>>>,
 }
 
@@ -303,7 +309,7 @@ impl Backing {
         // Whole bars: a stretch that ends mid-bar goes round at the next bar line.
         let length = span.saturating_add(bar - 1).div_euclid(bar).max(1).saturating_mul(bar);
         // How long each pitch class sounds in each half bar, and in all of it.
-        let half = grid.beat().saturating_mul(2);
+        let half = half_bar(grid);
         let count = usize::try_from(length.saturating_add(half - 1) / half).unwrap_or(0);
         let mut times = vec![PerPitch([0i64; 12]); count];
         let mut whole = PerPitch([0i64; 12]);
@@ -373,18 +379,28 @@ impl Backing {
         self.grid
     }
 
-    /// Half a bar: two beats.
     const fn half(&self) -> i64 {
-        self.grid.beat().saturating_mul(2)
+        half_bar(self.grid)
     }
 }
 
-/// How a tune and a backing are played together.
+/// The stretch of time the backing's notes are taken together in: half a bar where a bar's beats halve (two beats in
+/// 4/4, three eighths in 6/8), the whole bar where they don't (3/4), so it never runs over a bar line. The numbers
+/// were fitted in 4/4 alone.
+const fn half_bar(grid: Grid) -> i64 {
+    let bar = grid.bar();
+    if grid.bar_beats() % 2 == 0 && bar >= 2 { bar / 2 } else { bar }
+}
+
+/// How a tune and a backing are lined up to be played together.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Place {
+pub enum LineUp {
     /// Two loops: both go round from their own first bars (the bar each one's first note is in) until they meet again,
     /// as a part from the library is tried against another.
-    Loops,
+    Loops {
+        /// A tick where one of the tune's own bars starts (its grid's `bar_line`; 0 for a clip that starts on a bar).
+        bar_line: i64,
+    },
     /// Both as written, in the same time (a tick of the tune sounds with the same tick of the backing), played once:
     /// two parts of one song, or a tune already laid over the backing.
     AsWritten,
@@ -404,10 +420,7 @@ impl Shares {
     /// How the tune sits, with these numbers.
     pub fn sits(&self, how: &Sitting) -> Sits {
         let worths = how.worths();
-        let by_move = self.by_move.map(|shares| {
-            let sum: f64 = shares.iter().zip(&worths).map(|(share, worth)| share * worth).sum();
-            sum.clamp(0.0, 1.0)
-        });
+        let by_move = self.by_move.map(|shares| shares.iter().zip(&worths).map(|(share, worth)| share * worth).sum());
         Sits { by_move, heard: self.heard }
     }
 }
@@ -415,8 +428,9 @@ impl Shares {
 /// How a tune sits over a backing, for each way of moving it.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sits {
-    /// 0 (it clashes throughout) to 1 (it sits as a tune written for the backing does), with the tune moved up by 0
-    /// to 11 semitones.
+    /// About 0 (it clashes) to about 1 (it sits as a tune written for the backing does), with the tune moved up by 0
+    /// to 11 semitones. It isn't held to that range, so that the best stay in order: a tune all on thirds passes 1
+    /// and one that clashes throughout goes under 0. Hold it to 0 to 1 only to draw it.
     pub by_move: [f64; 12],
     /// The share of the tune (by weight) that plays where the backing has sound.
     pub heard: f64,
@@ -443,31 +457,35 @@ impl Sits {
     }
 }
 
-/// How well `tune` sits over `backing`, played together as `place` says. The tune's notes are in the backing's ticks
+/// How well `tune` sits over `backing`, the two lined up as `line_up` says. The tune's notes are in the backing's ticks
 /// (its beats and bars are the backing's). None for no notes, or when the tune hardly plays where the backing has
 /// sound.
-pub fn sit(tune: &[Note], backing: &Backing, place: Place, how: &Sitting) -> Option<Sits> {
-    shares(tune, backing, place, how).map(|shares| shares.sits(how))
+pub fn sit(tune: &[Note], backing: &Backing, line_up: LineUp, how: &Sitting) -> Option<Sits> {
+    shares(tune, backing, line_up, how).map(|shares| shares.sits(how))
 }
 
 /// What the tune's notes are over the backing ([`Shares`]); of `how`, only how much a note counts by its length
 /// matters here. See [`sit`].
-pub fn shares(tune: &[Note], backing: &Backing, place: Place, how: &Sitting) -> Option<Shares> {
+pub fn shares(tune: &[Note], backing: &Backing, line_up: LineUp, how: &Sitting) -> Option<Shares> {
     let (beat, bar, half) = (backing.grid.beat(), backing.grid.bar(), backing.half());
     let first = tune.iter().map(|n| n.start).min()?;
     let last = tune.iter().map(|n| n.end()).max()?;
     // Where the tune's time starts, how long it is before it goes round, and how long the two play together.
-    let (tune_start, tune_length, round) = match place {
-        Place::Loops => {
-            // The tune's first bar line, counted on the backing's grid from tick 0 of the tune's own time: bars are
-            // bars.
-            let start = first.div_euclid(bar).saturating_mul(bar);
+    let (tune_start, tune_length, round) = match line_up {
+        LineUp::Loops { bar_line } => {
+            // The bar the tune's first note is in, on the tune's own bar lines (a bar is as long as the backing's).
+            let start = first.saturating_sub(bar_line).div_euclid(bar).saturating_mul(bar).saturating_add(bar_line);
             let length = last.saturating_sub(start).saturating_add(bar - 1).div_euclid(bar).max(1).saturating_mul(bar);
             (start, length, round_of(length, backing.length, bar))
         }
         // Once through: a note before the backing or after it plays over silence.
-        Place::AsWritten => (backing.origin, i64::MAX, backing.length),
+        LineUp::AsWritten => (backing.origin, i64::MAX, backing.length),
     };
+
+    let loops = matches!(line_up, LineUp::Loops { .. });
+    // A note is followed over the backing no further than this: past it (a drone, or a damaged file's note that never
+    // ends) it would only hear the same again.
+    let furthest = MOST_BARS_ROUND.saturating_mul(bar);
 
     let mut sums = [[0.0f64; WORTHS]; 12];
     // How much of the tune (by weight, where it's heard) is on each pitch class, unmoved.
@@ -479,11 +497,12 @@ pub fn shares(tune: &[Note], backing: &Backing, place: Place, how: &Sitting) -> 
         turn += 1;
         for note in tune {
             let struck = note.start.saturating_sub(tune_start).saturating_add(offset);
-            let end = struck.saturating_add(note.duration()).min(round);
+            let sounds = note.duration().min(furthest);
+            let end = struck.saturating_add(sounds).min(round);
             // As two loops, the tune stops where the round ends; as written, a note outside the backing is still
             // part of the tune, only not heard over it.
             let start = struck.max(0);
-            if place == Place::Loops && start >= round {
+            if loops && start >= round {
                 continue;
             }
             let weight = (note.duration() as f64 / beat as f64).clamp(how.shortest, how.longest.max(how.shortest));
@@ -491,10 +510,7 @@ pub fn shares(tune: &[Note], backing: &Backing, place: Place, how: &Sitting) -> 
             if end <= start {
                 continue;
             }
-            let length = match place {
-                Place::Loops => (end - start) as f64,
-                Place::AsWritten => note.duration() as f64,
-            };
+            let length = if loops { (end - start) as f64 } else { sounds as f64 };
             // Each chord and each half bar of the backing the note sounds over, as the backing goes round under it.
             let mut at = start;
             while at < end {
@@ -562,8 +578,11 @@ pub fn shares(tune: &[Note], backing: &Backing, place: Place, how: &Sitting) -> 
 /// How long two loops play together: until they meet again, or once through the longer when that's past
 /// [`MOST_BARS_ROUND`].
 fn round_of(a: i64, b: i64, bar: i64) -> i64 {
-    let both = a / gcd(a, b) * b;
-    if both <= MOST_BARS_ROUND.saturating_mul(bar) { both } else { a.max(b) }
+    // Too long to count (a damaged file's stray note far away) is past it too.
+    match (a / gcd(a, b)).checked_mul(b) {
+        Some(both) if both <= MOST_BARS_ROUND.saturating_mul(bar) => both,
+        _ => a.max(b),
+    }
 }
 
 fn gcd(a: i64, b: i64) -> i64 {
@@ -575,6 +594,7 @@ fn gcd(a: i64, b: i64) -> i64 {
 mod tests {
     use super::*;
     use crate::notes::Role;
+    use crate::pitch::PcSet;
 
     const BEAT: i64 = 96;
     const BAR: i64 = 4 * BEAT;
@@ -633,7 +653,7 @@ mod tests {
     }
 
     fn sits(line: &[Note], backing: &Backing) -> Sits {
-        sit(line, backing, Place::Loops, &Sitting::SHIPPED).unwrap()
+        sit(line, backing, LineUp::Loops { bar_line: 0 }, &Sitting::SHIPPED).unwrap()
     }
 
     /// The numbers named in SET ("outside=-0.4,longest=2"), over the shipped ones: for trying a fit on the hand cases.
@@ -655,7 +675,7 @@ mod tests {
     fn show_the_hand_cases() {
         let how = from_env();
         for (name, line, backing) in cases() {
-            let sits = sit(&line, &backing, Place::Loops, &how).unwrap();
+            let sits = sit(&line, &backing, LineUp::Loops { bar_line: 0 }, &how).unwrap();
             let row: Vec<String> = sits.by_move.iter().map(|v| format!("{v:.2}")).collect();
             println!("{name:32} best {:+} | {}", sits.best().0, row.join(" "));
         }
@@ -794,7 +814,7 @@ mod tests {
         // beside Dm7 (the 9 it doesn't name) a whole step above the D played, a note beside G7 a whole step above
         // its D, and Cmaj7's third.
         let one_bar = tune(&[(0, 8, 76)]);
-        let shares = shares(&one_bar, &backing, Place::Loops, &Sitting::SHIPPED).unwrap();
+        let shares = shares(&one_bar, &backing, LineUp::Loops { bar_line: 0 }, &Sitting::SHIPPED).unwrap();
         let unmoved = shares.by_move[0];
         assert_eq!((unmoved[FIFTH], unmoved[BESIDE], unmoved[THIRD]), (0.25, 0.5, 0.25));
         assert_eq!(unmoved[NEAR_PLAYED], 0.5, "the backing plays an E under two of the four");
@@ -802,7 +822,10 @@ mod tests {
         assert_eq!(shares.heard, 1.0);
         // A tune that starts in a later bar still starts with the backing's first bar.
         let later = tune(&[(64, 8, 76)]);
-        assert_eq!(super::shares(&later, &backing, Place::Loops, &Sitting::SHIPPED).unwrap().by_move, shares.by_move);
+        assert_eq!(
+            super::shares(&later, &backing, LineUp::Loops { bar_line: 0 }, &Sitting::SHIPPED).unwrap().by_move,
+            shares.by_move
+        );
         // A three-bar tune and the four-bar backing meet again after twelve bars: each bar of one over each of the other.
         assert_eq!(round_of(3 * BAR, 4 * BAR, BAR), 12 * BAR);
         // Past 32 bars round, they play once through the longer.
@@ -818,18 +841,18 @@ mod tests {
         assert_eq!(backing.length(), 3 * BAR);
         // F over Dm7, B over G7, E over Cmaj7, where they're written.
         let line = tune(&[(8, 8, 77), (16, 8, 71), (24, 8, 76)]);
-        let written = sit(&line, &backing, Place::AsWritten, &Sitting::SHIPPED).unwrap();
+        let written = sit(&line, &backing, LineUp::AsWritten, &Sitting::SHIPPED).unwrap();
         assert_eq!(written.best().0, 0);
         assert!(written.moved(0) > 0.9, "{:?}", written.by_move);
         assert_eq!(written.heard, 1.0);
         // A note written before the backing starts is part of the tune, but isn't heard over it.
         let early = tune(&[(0, 8, 73), (8, 8, 77), (16, 8, 71), (24, 8, 76)]);
-        let with_early = sit(&early, &backing, Place::AsWritten, &Sitting::SHIPPED).unwrap();
+        let with_early = sit(&early, &backing, LineUp::AsWritten, &Sitting::SHIPPED).unwrap();
         assert_eq!(with_early.heard, 0.75);
         assert!((with_early.moved(0) - written.moved(0)).abs() < 0.05, "only the tune's balance of notes moves");
         // A tune written wholly outside the backing isn't heard at all.
-        assert!(sit(&tune(&[(0, 8, 72)]), &backing, Place::AsWritten, &Sitting::SHIPPED).is_none());
-        assert!(sit(&tune(&[(40, 8, 72)]), &backing, Place::AsWritten, &Sitting::SHIPPED).is_none());
+        assert!(sit(&tune(&[(0, 8, 72)]), &backing, LineUp::AsWritten, &Sitting::SHIPPED).is_none());
+        assert!(sit(&tune(&[(40, 8, 72)]), &backing, LineUp::AsWritten, &Sitting::SHIPPED).is_none());
     }
 
     #[test]
@@ -838,9 +861,9 @@ mod tests {
         let backing = backing(&[chord(0, 8, &[48, 55])]);
         let how = Sitting::SHIPPED;
         // On a note that's played beats a half step above one.
-        let on = sit(&tune(&[(0, 16, 72)]), &backing, Place::Loops, &how).unwrap();
+        let on = sit(&tune(&[(0, 16, 72)]), &backing, LineUp::Loops { bar_line: 0 }, &how).unwrap();
         assert!(on.moved(0) > on.moved(1) + 0.3, "{:?}", on.by_move);
-        assert!(sit(&[], &backing, Place::Loops, &how).is_none());
+        assert!(sit(&[], &backing, LineUp::Loops { bar_line: 0 }, &how).is_none());
     }
 
     #[test]
@@ -856,6 +879,87 @@ mod tests {
         assert_eq!((kind(0), kind(4)), (COLOUR, COLOUR), "its seventh and its ninth");
         assert_eq!((kind(7), kind(11)), (BESIDE, BESIDE), "G and B: not named, but in the backing's scale");
         assert_eq!((kind(1), kind(6), kind(10)), (OUTSIDE, OUTSIDE, OUTSIDE));
+    }
+
+    #[test]
+    fn only_the_third_and_fifth_a_chord_names_are_its_own() {
+        // Every note in the backing's scale, so a note the chord doesn't name is beside it.
+        let all = PerPitch([1.0; 12]);
+        let over =
+            |notes: &[i32]| kinds_over(Chord::new(PitchClass::new(0), PcSet::of(notes), PitchClass::new(0)), &all);
+        let kind = |kinds: &PerPitch<usize>, pc: i32| kinds[PitchClass::new(pc)];
+        // A Cmaj7 shell, C E B: the G it leaves out is still its fifth; an A flat or a G flat isn't.
+        let shell = over(&[0, 4, 11]);
+        assert_eq!((kind(&shell, 7), kind(&shell, 8), kind(&shell, 6)), (FIFTH, BESIDE, BESIDE));
+        // C7 with a flat fifth: G flat is its fifth, and G is none of its notes.
+        let flat = over(&[0, 4, 6, 10]);
+        assert_eq!((kind(&flat, 6), kind(&flat, 7)), (FIFTH, BESIDE));
+        // C7 with a sharp fifth the same.
+        let sharp = over(&[0, 4, 8, 10]);
+        assert_eq!((kind(&sharp, 8), kind(&sharp, 7)), (FIFTH, BESIDE));
+        // Csus2, C D G: the D stands where its third would; an F, an E and an E flat are no third of it.
+        let sus = over(&[0, 2, 7]);
+        assert_eq!((kind(&sus, 2), kind(&sus, 5), kind(&sus, 4), kind(&sus, 3)), (THIRD, BESIDE, BESIDE, BESIDE));
+        // The root is the chord's even from a rootless voicing's notes.
+        assert_eq!(kind(&shell, 0), ROOT);
+    }
+
+    #[test]
+    fn two_loops_start_from_the_tunes_own_bar_lines() {
+        // The same music twice: once with bars at 0, once with everything 100 ticks later and bars there.
+        let chords = [chord(0, 4, &[45, 60, 64, 67]), chord(4, 4, &[50, 60, 65, 69])];
+        let line = tune(&[(0, 8, 72), (8, 8, 77)]);
+        let plain = sit(&line, &backing(&chords), LineUp::Loops { bar_line: 0 }, &Sitting::SHIPPED).unwrap();
+        assert_eq!(plain.best().0, 0);
+        let later =
+            |notes: &[Note]| -> Vec<Note> { notes.iter().map(|n| Note { start: n.start + 100, ..*n }).collect() };
+        let notes = later(&chords.concat());
+        let parts = [Part { role: Role::Harmony, notes: &notes }];
+        let grid = Grid { bar_line: 100, ..Grid::four_four(BEAT as u32) };
+        let moved = Backing::read(&mut ChordReader::new(), &parts, grid, Span::Loop).unwrap();
+        // A tune whose bars are 100 ticks in too, and one from a clip whose bars start at 0: both sit as before.
+        for (tune, bar_line) in [(later(&line), 100), (later(&line), 100 - 3 * BAR), (line.clone(), 0)] {
+            let sits = sit(&tune, &moved, LineUp::Loops { bar_line }, &Sitting::SHIPPED).unwrap();
+            assert_eq!(sits.by_move, plain.by_move, "bar line {bar_line}");
+        }
+    }
+
+    #[test]
+    fn a_damaged_tune_neither_hangs_nor_overflows() {
+        // A note that never ends and one struck far away, as a damaged file gives them.
+        let backing = turnaround();
+        let mut line = guide_tones();
+        line.push(Note { start: 0, length: i64::MAX, key: 64, velocity: 50_000 });
+        line.push(Note { start: 1 << 62, length: 1 << 40, key: 60, velocity: 50_000 });
+        line.push(Note { start: i64::MIN, length: 96, key: 60, velocity: 50_000 });
+        for line_up in [LineUp::Loops { bar_line: 0 }, LineUp::Loops { bar_line: i64::MAX }, LineUp::AsWritten] {
+            let sits = sit(&line, &backing, line_up, &Sitting::SHIPPED);
+            assert!(sits.is_none_or(|s| s.by_move.iter().all(|v| v.is_finite())), "{line_up:?}");
+        }
+        // Two lengths too long to play round until they meet play once through the longer.
+        assert_eq!(round_of(i64::MAX - 1, 4 * BAR, BAR), i64::MAX - 1);
+    }
+
+    #[test]
+    fn the_backings_notes_are_taken_together_within_a_bar() {
+        let grid = |ticks_per_beat, beats_per_bar| Grid { ticks_per_beat, beats_per_bar, bar_line: 0 };
+        assert_eq!(half_bar(grid(96, 4)), 192, "4/4: two beats");
+        assert_eq!(half_bar(grid(48, 6)), 144, "6/8: three eighths");
+        assert_eq!(half_bar(grid(96, 3)), 288, "3/4: the bar, so it never runs over a bar line");
+        assert_eq!(half_bar(grid(96, 2)), 96, "2/4: a beat");
+        assert_eq!(half_bar(grid(1, 1)), 1);
+    }
+
+    #[test]
+    fn the_best_tunes_stay_in_order_past_one() {
+        // All on thirds and all on roots both sit as a tune written for the chords does: the thirds still come first.
+        let backing = turnaround();
+        let thirds = tune(&[(0, 8, 72), (8, 8, 77), (16, 8, 71), (24, 8, 76)]);
+        let roots = tune(&[(0, 8, 69), (8, 8, 74), (16, 8, 67), (24, 8, 72)]);
+        let sits =
+            |line: &[Note]| sit(line, &backing, LineUp::Loops { bar_line: 0 }, &Sitting::SHIPPED).unwrap().moved(0);
+        assert!(sits(&roots) > 0.95, "{}", sits(&roots));
+        assert!(sits(&thirds) > sits(&roots) + 0.05, "{} {}", sits(&thirds), sits(&roots));
     }
 
     #[test]

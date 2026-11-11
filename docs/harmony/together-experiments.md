@@ -26,7 +26,7 @@ Folds as the key finder draws them: fitted on folds 2 to 4, reported on fold 1, 
 The C# app's matcher (`HarmonyMatch.cs`) ported as it was (`tools/theorybench/src/pairs.rs`): the two parts laid over
 each other half a bar at a time, each tune note worth 1 where the accompaniment plays it in that half bar, less where
 it doesn't, less again where it rubs a note that is played. On fold 1 it puts a stretch's own pair over another song's
-90.4% of the time and first of 51 40.0% of the time. Its closer look on all 12 moves (it only looked closely at 3)
+90.4% of the time and first of 51 39.8% of the time. Its closer look on all 12 moves (it only looked closely at 3)
 scores the same, so its first pick of moves cost it nothing.
 
 ## What was found
@@ -34,7 +34,7 @@ scores the same, so its first pick of moves cost it nothing.
 1. **Line the two up as written.** The first measure started each part from the bar of its own first note, as two
    loops would be played. A tune that starts with a bar's rest was then slid a bar against its own chords: the new
    code, set to score the way the old app does, came to about 83% where the old app's own code scored 89%, and
-   matched it once the two were lined up. `Place::AsWritten` plays the two in the same time; `Place::Loops` stays for
+   matched it once the two were lined up. `LineUp::AsWritten` plays the two in the same time; `LineUp::Loops` stays for
    two loops that each start at their own bar 1.
 2. **Hand-set worths lose.** The first try gave each tune note a hand-set worth by what it is over the chord read
    under it (root, third, fifth, seventh, tension, avoid note). It scored far below the old app's way. Two reasons:
@@ -53,7 +53,8 @@ scores the same, so its first pick of moves cost it nothing.
    | the half-bar look (played, and the 11 distances) | 1.491 | 56.3% / 47.3% |
    | the tune as a whole beside the backing | 1.495 | 59.1% / 40.1% |
 
-   (An earlier, larger family of numbers than the one shipped, 500 steps each: the sizes are what matter.) What each
+   (An earlier, larger family of numbers than the one shipped, 500 steps each, before the review's fixes below:
+   the sizes are what matter.) What each
    note is over its chord is the largest piece, and it is the piece the old app didn't have. The tune as a whole
    matters most when picking a tune for chords.
 4. **A note on a strong beat counts no more than any other.** The more the strong beats counted, the worse it got:
@@ -90,39 +91,61 @@ scores the same, so its first pick of moves cost it nothing.
      somewhere in the stretch ("beside", worth a little) from one it hardly plays at all ("outside", marked down).
      The theory names (tension, avoid note) were tried first and fitted backwards on pop.
 
-   **What the two rules cost on pop, and what they buy.** With every number free the loss is 1.437 (1.523 with the
-   rules). On fold 1 a stretch's own accompaniment is then first of 51 59.7% of the time (53.8% with the rules) and
-   its own tune 47.8% (46.9%); its own over another song's, 94.1% and 93.0% (93.4% and 92.6%). So the rules give up
+   **What the two rules cost on pop, and what they buy.** With every number free the loss is 1.432 (1.518 with the
+   rules). On fold 1 a stretch's own accompaniment is then first of 51 59.5% of the time (53.7% with the rules) and
+   its own tune 47.4% (46.7%); its own over another song's, 94.1% and 93.0% (93.4% and 92.6%). So the rules give up
    6 points of first place for chords for a tune and under a point everywhere else. The free numbers put a colour
-   the chord names at -0.13, down with the notes it doesn't name (-0.20), where its fifth is 0.51. On the hand
+   the chord names at -0.12, down with the notes it doesn't name (-0.21), where its fifth is 0.52. On the hand
    cases they sit the tune on ninths and thirteenths at 0.41 where it's written and 0.88 up a fourth (0.98 and 1.00
    with the rules: up a fourth that tune is all fifths, thirds and a ninth, so both are right), and they sit the wrong
-   B over C7 above the blue third (0.80 over 0.74; with the rules 0.62 under 0.67).
+   B over C7 above the blue third (0.80 over 0.75; with the rules 0.62 under 0.67).
 9. **The fit is settled and repeatable.** The loss has one lowest point, so the fit starts from nothing and one
-   command gives the shipped numbers. It needs its 8,000 steps: at 3,000 the loss is there to four places (1.5227)
-   but the two least-used numbers are still on their way (a note over no chord 0.213, then 0.233; a note outside
-   -0.387, then -0.392). At 8,000 every number agrees to three places with a fit started from other numbers.
+   command gives the shipped numbers. It needs its 8,000 steps: at 3,000 the loss is there to four places but the
+   two least-used numbers are still on their way (a note over no chord another 0.02, a note outside another 0.005).
+   At 8,000 every number agreed to three places with a fit started from other numbers (tried before the review's
+   fixes below).
 
 ## The numbers shipped (`Sitting::SHIPPED`, version 1)
 
 | a tune note that is | worth |
 |---|---|
-| the chord's third (or a sus chord's 4th or 2nd) | 0.951 |
-| its root | 0.726 |
-| its fifth, or a colour it names (7, 6, 9, 11, 13) | 0.662 |
-| over sound with no chord read | 0.233 |
-| not in the chord, but played somewhere in the stretch | 0.070 |
-| not in the chord and hardly played anywhere | -0.392 |
+| the chord's third (or a sus chord's 4th or 2nd) | 0.960 |
+| its root | 0.732 |
+| its fifth (named, or the plain fifth a voicing leaves out), or a colour it names (7, 6, 9, 11, 13) | 0.667 |
+| over sound with no chord read | 0.238 |
+| not in the chord, but played somewhere in the stretch | 0.060 |
+| not in the chord and hardly played anywhere | -0.394 |
 
-Added by the half bar: 0.075 when the accompaniment plays the note there; and when it doesn't, for each played note
-it is above by a half step -0.594, a whole step -0.464, a fourth -0.414, a tritone -0.710, a minor seventh -0.287, a
-major seventh -0.268 (each by how strongly that note is played). Added once for the tune: 0.336 times how alike its
+Added by the half bar: 0.068 when the accompaniment plays the note there; and when it doesn't, for each played note
+it is above by a half step -0.592, a whole step -0.460, a fourth -0.393, a tritone -0.702, a minor seventh -0.274, a
+major seventh -0.258 (each by how strongly that note is played). Added once for the tune: 0.335 times how alike its
 balance of notes is to the accompaniment's.
 
 The scale is set so the best tenth of pairs written for each other sit at 0.95 or more and the middle one of another
 song's parts, at its best move, at 0.5: of pairs written for each other a quarter sit under 0.67 and half under 0.79;
 of another song's parts at their best move a quarter sit over 0.58 and a tenth over 0.67. So the number sorts a list
-well, but a single number is no promise: 0.7 can be either.
+well, but a single number is no promise: 0.7 can be either. It isn't held to 0 to 1 (a tune all on thirds reaches
+about 1.3, one that clashes throughout goes well under 0), so that the best stay in order; hold it only to draw it.
+
+## After the code review (2026-11-11)
+
+The review of the pull request found ten things; all are fixed, each with a test, and the numbers above and in the
+README are from after the fixes and a fresh fit (loss 1.5175; it was 1.5227).
+
+- **Only the third and fifth a chord names are its own.** An A flat over a C7 with no fifth voiced counted as its
+  fifth, and an F over Csus2 as its third (the top worth). Now the chord has to name them; the one note it may leave
+  out is the plain fifth of a shell voicing, when it names no other fifth.
+- **The best stay in order.** The number was held to 0 to 1, so a tune all on thirds and one all on roots both came
+  out at exactly 1 and tied. With all the fixes in, a stretch's own accompaniment is first of 51 more often at the
+  short lengths, where such ties were commonest (2 bars 13.3% from 11.8%, 4 bars 31.3% from 30.3%).
+- **Two loops start from the tune's own bar lines** (`LineUp::Loops { bar_line }`), not from tick 0.
+- **A damaged file can't hang or stop it:** a note that never ends is followed for 32 bars at most, and two lengths
+  too long to multiply play once through the longer.
+- **The half bar follows the metre:** half a bar where the beats halve, the whole bar in 3/4, never over a bar line.
+  (Still fitted in 4/4 alone.)
+- **The measure:** a stretch the new way can't score now loses every count (it was given "best unmoved"); no other
+  stretch is drawn twice, so "first of 51" is of 51; velocities and the cutting of stretches use the bench's shared
+  code. All ten together moved the 8-bar numbers by 0.3 points at most.
 
 ## What it doesn't know yet
 
@@ -131,8 +154,8 @@ well, but a single number is no promise: 0.7 can be either.
   cost or win there.
 - **A colour the chord doesn't name is still marked down.** A D held over a plain Cmaj7 (its 9th, a note any jazz
   player would hold there) is a note "beside" the chord that rubs the C a whole step under it and the E a seventh
-  under it: with C over Am7 before it, that two-note tune sits at 0.37, where an E in its place sits at 1.00 and an F
-  at 0. The order is right; the gap between a 9th and a third is what pop teaches. Over Cmaj9 the same D is named by
+  under it: with C over Am7 before it, that two-note tune sits at 0.37, where an E in its place sits at 1.22 and an F
+  at -0.24. The order is right; the gap between a 9th and a third is what pop teaches. Over Cmaj9 the same D is named by
   the chord and sits as a fifth does. This is the first thing jazz data should be asked about.
 - **Solomon's own packs** have chord and melody files made for each other (same folder, same name but for the
   word). Counting how often the matcher puts those together is the next real-world measure: it runs on his PC, and

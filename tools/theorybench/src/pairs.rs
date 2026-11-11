@@ -21,12 +21,13 @@
 use std::path::PathBuf;
 
 use mo_harmony::{
-    Backing, ChordReader, Grid, KINDS, Note, Part, Place, Role, Shares, Sitting, Span, WORTH_NAMES, WORTHS, shares,
+    Backing, ChordReader, Grid, KINDS, LineUp, Note, Part, Role, Shares, Sitting, Span, WORTH_NAMES, WORTHS, shares,
 };
 use rayon::prelude::*;
 
 use crate::item::{self, Item};
 use crate::keyfit;
+use crate::keys;
 use crate::metrics;
 
 /// Every piece is brought to this many ticks a beat, so two songs' stretches can be played together.
@@ -215,10 +216,10 @@ fn set(how: &mut Sitting, text: &str) -> Result<(), String> {
 /// The shares of stretch `t`'s tune over stretch `b`'s accompaniment.
 fn shares_of(stretches: &[Stretch], t: usize, b: usize, how: &Sitting) -> Option<Shares> {
     let (tune, back) = (stretches.get(t)?, stretches.get(b)?);
-    shares(&tune.tune, back.read.as_ref()?, Place::AsWritten, how)
+    shares(&tune.tune, back.read.as_ref()?, LineUp::AsWritten, how)
 }
 
-/// The other songs' stretches stretch `q` is asked against: the same ones every run.
+/// The other songs' stretches stretch `q` is asked against: the same ones every run, none of them twice.
 fn others_of(stretches: &[Stretch], q: usize, others: usize) -> Vec<usize> {
     let Some(own) = stretches.get(q) else { return Vec::new() };
     let mut seed = (q as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ 0x1234_5678_9abc_def0;
@@ -230,7 +231,7 @@ fn others_of(stretches: &[Stretch], q: usize, others: usize) -> Vec<usize> {
         seed ^= seed >> 7;
         seed ^= seed << 17;
         let o = (seed % stretches.len() as u64) as usize;
-        if stretches.get(o).is_some_and(|s| s.song != own.song) {
+        if stretches.get(o).is_some_and(|s| s.song != own.song) && !out.contains(&o) {
             out.push(o);
         }
     }
@@ -371,34 +372,28 @@ fn fit(
 
 /// A song's stretches of `bars` bars, one after another from its first bar line, each with enough notes in both.
 fn stretches_of(song: usize, item: &Item, bars: i64) -> Vec<Stretch> {
-    let scale = |t: i64| (t as i128 * PPQ as i128 / i128::from(item.ppq.max(1))) as i64;
-    let notes = |keep: &dyn Fn(usize, &str) -> bool| -> Vec<Note> {
-        let mut notes: Vec<Note> = item
-            .parts
-            .iter()
-            .enumerate()
-            .filter(|(i, p)| keep(*i, &p.role))
-            .flat_map(|(_, p)| p.notes.iter())
-            .map(|&(start, length, key, velocity)| Note {
-                start: scale(start - item.grid_origin()),
-                length: scale(length).max(1),
-                key,
-                velocity: u16::from(velocity) * 516,
-            })
-            .collect();
-        notes.sort_by_key(|n| (n.start, n.key));
-        notes
-    };
     // The tune is the first melody part alone (POP909's second, BRIDGE, is a counter-line that comes and goes).
-    let lead = item.parts.iter().position(|p| p.role == "melody");
-    let tune = notes(&|i, _| Some(i) == lead);
-    let backing = notes(&|_, role| role != "melody" && role != "drums");
-    let length = bars * 4 * PPQ;
-    let end = scale(item.length - item.grid_origin());
+    let lead = item.parts.iter().find(|p| p.role == "melody");
+    let mut tune: Vec<item::Note> = lead
+        .map(|p| p.notes.iter().map(|&(start, length, key, velocity)| item::Note { start, length, key, velocity }))
+        .into_iter()
+        .flatten()
+        .collect();
+    tune.sort_by_key(|n| (n.start, n.key));
+    let backing = item.notes_of(|role| role != "melody" && role != "drums");
+    // A stretch's notes as mo-harmony takes them, from tick 0 and at PPQ ticks a beat.
+    let scale = |t: i64| (i128::from(t) * i128::from(PPQ) / i128::from(item.ppq.max(1))) as i64;
+    let cut = |notes: &[item::Note], from: i64, length: i64| -> Vec<Note> {
+        keys::harmony_notes(&item::cut(notes, from, length))
+            .into_iter()
+            .map(|n| Note { start: scale(n.start), length: scale(n.length).max(1), ..n })
+            .collect()
+    };
+    let length = bars * item.bar();
     let mut reader = ChordReader::new();
     let mut out = Vec::new();
-    let mut from = 0;
-    while from + length <= end {
+    let mut from = item.grid_origin();
+    while from + length <= item.length {
         let (t, b) = (cut(&tune, from, length), cut(&backing, from, length));
         from += length;
         if t.len() < LEAST_TUNE || b.len() < LEAST_BACKING {
@@ -410,18 +405,6 @@ fn stretches_of(song: usize, item: &Item, bars: i64) -> Vec<Stretch> {
         out.push(Stretch { song, tune: t, read, old });
     }
     out
-}
-
-/// The notes starting in a stretch, moved to start at 0 and cut off at its end.
-fn cut(notes: &[Note], from: i64, length: i64) -> Vec<Note> {
-    let first = notes.partition_point(|n| n.start < from);
-    let end = notes.partition_point(|n| n.start < from + length);
-    notes
-        .get(first..end)
-        .unwrap_or_default()
-        .iter()
-        .map(|n| Note { start: n.start - from, length: n.length.min(from + length - n.start).max(1), ..*n })
-        .collect()
 }
 
 /// What one stretch's questions came to.
@@ -483,29 +466,35 @@ impl Tally {
     }
 }
 
-/// How stretch `t`'s tune sits over stretch `b`'s accompaniment, at its best move, and that move (0 to 11 up).
-fn score(stretches: &[Stretch], t: usize, b: usize, way: Way, how: &Sitting) -> (f64, usize) {
-    let (Some(tune), Some(back)) = (stretches.get(t), stretches.get(b)) else { return (0.0, 0) };
+/// How stretch `t`'s tune sits over stretch `b`'s accompaniment, at its best move, and that move (0 to 11 up). None
+/// when the way can't say: chords the reader hears nothing in, a tune that hardly plays where they sound.
+fn score(stretches: &[Stretch], t: usize, b: usize, way: Way, how: &Sitting) -> Option<(f64, usize)> {
+    let (tune, back) = (stretches.get(t)?, stretches.get(b)?);
     match way {
         Way::New => {
-            let Some(sits) = back.read.as_ref().and_then(|read| shares(&tune.tune, read, Place::AsWritten, how)) else {
-                return (0.0, 0);
-            };
-            let (semitones, score) = sits.sits(how).best();
-            (score, semitones.rem_euclid(12) as usize)
+            let sits = shares(&tune.tune, back.read.as_ref()?, LineUp::AsWritten, how)?.sits(how);
+            let (semitones, score) = sits.best();
+            Some((score, semitones.rem_euclid(12) as usize))
         }
-        Way::Old => old_fit(&tune.old, &back.old, 3),
-        Way::OldAll => old_fit(&tune.old, &back.old, 12),
+        Way::Old => Some(old_fit(&tune.old, &back.old, 3)),
+        Way::OldAll => Some(old_fit(&tune.old, &back.old, 12)),
     }
 }
 
 fn tally(stretches: &[Stretch], q: usize, others: usize, way: Way, how: &Sitting) -> Tally {
     let Some(own) = stretches.get(q) else { return Tally::default() };
     let mut t = Tally { asked: 1.0, ..Tally::default() };
-    let (mine, moved) = score(stretches, q, q, way, how);
-    t.unmoved = f64::from(u8::from(moved == 0));
+    // A stretch whose own pair the way can't score is lost on every count; another song's part it can't score would
+    // never be offered, so the stretch's own beats it.
+    let nothing = f64::NEG_INFINITY;
+    let own_pair = score(stretches, q, q, way, how);
+    let (mine, scored) = (own_pair.map_or(nothing, |m| m.0), own_pair.is_some());
+    t.unmoved = f64::from(u8::from(own_pair.is_some_and(|m| m.1 == 0)));
+    let other = |t: usize, b: usize| score(stretches, t, b, way, how).map_or(nothing, |s| s.0);
     let win = |a: f64, b: f64| {
-        if a > b {
+        if !scored {
+            0.0
+        } else if a > b {
             1.0
         } else if a == b {
             0.5
@@ -515,8 +504,7 @@ fn tally(stretches: &[Stretch], q: usize, others: usize, way: Way, how: &Sitting
     };
     let (mut chords_first, mut tune_first) = (true, true);
     for o in others_of(stretches, q, others) {
-        let chords = score(stretches, q, o, way, how).0;
-        let tune = score(stretches, o, q, way, how).0;
+        let (chords, tune) = (other(q, o), other(o, q));
         t.chords_wins += win(mine, chords);
         t.chords_pairs += 1.0;
         t.tune_wins += win(mine, tune);
@@ -528,9 +516,9 @@ fn tally(stretches: &[Stretch], q: usize, others: usize, way: Way, how: &Sitting
     t.tune_first = f64::from(u8::from(tune_first));
     // The other stretches of its own song.
     for (o, _) in stretches.iter().enumerate().filter(|(o, s)| *o != q && s.song == own.song) {
-        t.chords_near_wins += win(mine, score(stretches, q, o, way, how).0);
+        t.chords_near_wins += win(mine, other(q, o));
         t.chords_near_pairs += 1.0;
-        t.tune_near_wins += win(mine, score(stretches, o, q, way, how).0);
+        t.tune_near_wins += win(mine, other(o, q));
         t.tune_near_pairs += 1.0;
     }
     t
@@ -728,6 +716,46 @@ mod tests {
         // Moved down a half step it's the E again.
         assert_eq!(old_together(&off, &off, 11), Some(1.0));
         assert_eq!(old_fit(&off, &off, 12).1, 11);
+    }
+
+    /// A bar of C major under an E; its chords read, or not (as when the reader hears nothing in them).
+    fn stretch(song: usize, read: bool) -> Stretch {
+        let chord = [note(0, 4 * PPQ, 48), note(0, 4 * PPQ, 52), note(0, 4 * PPQ, 55)];
+        let tune = vec![note(0, 4 * PPQ, 76)];
+        let parts = [Part { role: Role::Harmony, notes: &chord }];
+        let backing = Backing::read(&mut ChordReader::new(), &parts, Grid::four_four(PPQ as u32), Span::Window);
+        assert!(backing.is_some());
+        Stretch { song, old: Old::of(&tune, &chord, 2), tune, read: backing.filter(|_| read) }
+    }
+
+    #[test]
+    fn no_stretch_is_drawn_twice_and_none_from_its_own_song() {
+        let stretches: Vec<Stretch> = (0..60).map(|i| stretch(i / 10, false)).collect();
+        for q in [0, 17, 59] {
+            let drawn = others_of(&stretches, q, 20);
+            let mut unique = drawn.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            assert_eq!((drawn.len(), unique.len()), (20, 20));
+            assert!(drawn.iter().all(|&o| o / 10 != q / 10));
+        }
+        // When there aren't that many, it stops with what there is.
+        assert!(others_of(&stretches[..12], 0, 20).len() <= 2);
+    }
+
+    #[test]
+    fn a_pair_the_new_way_cannot_score_is_lost() {
+        // Three songs with the same bar; the first one's chords aren't read.
+        let stretches = vec![stretch(0, false), stretch(1, true), stretch(2, true)];
+        let lost = tally(&stretches, 0, 2, Way::New, &Sitting::SHIPPED);
+        assert_eq!((lost.asked, lost.chords_pairs, lost.tune_pairs), (1.0, 2.0, 2.0));
+        assert_eq!((lost.unmoved, lost.chords_wins, lost.tune_wins), (0.0, 0.0, 0.0));
+        assert_eq!((lost.chords_first, lost.tune_first), (0.0, 0.0));
+        // The second sits best unmoved. Its tune over the third's chords ties (the same music) and beats the chords
+        // that can't be read; over its own chords the other two tunes (the same tune) tie with its own.
+        let read = tally(&stretches, 1, 2, Way::New, &Sitting::SHIPPED);
+        assert_eq!((read.unmoved, read.chords_wins, read.tune_wins), (1.0, 1.5, 1.0));
+        assert_eq!((read.chords_first, read.tune_first), (0.0, 0.0), "a tie is not first");
     }
 
     #[test]

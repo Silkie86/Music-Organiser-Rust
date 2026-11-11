@@ -21,4 +21,5 @@ unmoved.
 | Date | Run | `TOGETHER_VERSION` | Commit | Chords for a tune: new (old app) | A tune for chords: new (old app) | Best unmoved: new (old app) |
 |---|---|---|---|---|---|---|
 | 2026-11-11 | pairs pop909cl --folds 0, the fit at 3,000 steps | 1 | f0564ad-dirty | 93.1% / 53.8% / 85.0% (89.5% / 35.2% / 83.1%) | 92.3% / 45.5% / 84.0% (89.6% / 36.5% / 82.3%) | 94.7% (93.8%) |
-| 2026-11-11 | pairs pop909cl --folds 0, the fit run on to 8,000 steps (as shipped; no number moved more than 0.02) | 1 | f0564ad-dirty | 93.1% / 54.0% / 85.0% (89.5% / 35.2% / 83.1%) | 92.3% / 45.5% / 84.0% (89.6% / 36.5% / 82.3%) | 94.7% (93.8%) |
+| 2026-11-11 | pairs pop909cl --folds 0, the fit run on to 8,000 steps (no number moved more than 0.02) | 1 | f0564ad-dirty | 93.1% / 54.0% / 85.0% (89.5% / 35.2% / 83.1%) | 92.3% / 45.5% / 84.0% (89.6% / 36.5% / 82.3%) | 94.7% (93.8%) |
+| 2026-11-11 | pairs pop909cl --folds 0, after the code review's fixes and the fit run again (as shipped) | 1 | c9056f3-dirty | 93.2% / 54.0% / 85.2% (89.5% / 35.0% / 83.1%) | 92.3% / 45.3% / 84.1% (89.6% / 36.1% / 82.3%) | 94.7% (93.8%) |
