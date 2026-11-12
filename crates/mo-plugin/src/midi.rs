@@ -111,7 +111,7 @@ fn smallest_part(data: &Path) -> usize {
 }
 
 /// One of the app's settings, read from its settings file in `data` without changing it; none when it can't be read.
-fn setting(data: &Path, key: &str) -> Option<String> {
+pub(crate) fn setting(data: &Path, key: &str) -> Option<String> {
     let text = std::fs::read_to_string(data.join(mo_app::app_settings::FILE)).ok();
     let settings = mo_app::app_settings::AppSettings::from_parts(text.as_deref(), HashMap::new()).ok()?;
     settings.get(key).map(str::to_owned)
