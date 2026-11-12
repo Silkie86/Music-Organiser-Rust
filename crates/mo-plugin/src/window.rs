@@ -16,7 +16,9 @@ use crate::gpu::Gpu;
 use crate::library::{self, Asked, Library, ORDERS, Read};
 use crate::threads::{background, lock};
 use crate::waves::{self, Kept};
-use crate::{ExtensionLine, FilterChoice, FilterView, Instance, Panel, SkyName, SoundLine, YearBar};
+use crate::{
+    ExtensionLine, FilterChoice, FilterView, Instance, Panel, SkyName, SoundLine, SweptLine, TrailDot, YearBar,
+};
 use baseview::dpi::{PhysicalPosition, Size};
 use baseview::{
     Event, EventStatus, HandlerError, MouseButton, MouseEvent, ScrollDelta, TimerHandle, WindowContext, WindowEvent,
@@ -140,13 +142,17 @@ struct Slots {
     sky: Mutex<Option<SkyDrawn>>,
     /// The neighbourhoods the names over the map are for, with their asking's number ([`Sky::names_ask`]).
     names: Mutex<Option<(u64, Vec<mo_app::galaxy_names::Region>)>>,
-    /// The stars made ready for the graphics card, with their asking's number ([`Sky::pack_ask`]) and how many
-    /// are lit.
-    packed: Mutex<Option<(u64, Vec<u8>, u32)>>,
+    /// The stars made ready for the graphics card, and how they're lit ([`Sky::pack_ask`]).
+    packed: Mutex<Option<galaxy::Packed>>,
+    /// The mini-map's picture, with its asking's number ([`Sky::mini_ask`]).
+    mini: Mutex<Option<(u64, SkyPixels)>>,
 }
 
 /// A drag out that has ended: its file, when it started and how it ended.
 type Dragged = (std::path::PathBuf, Instant, Result<crate::drag::Outcome, String>);
+
+/// The Galaxy's trail as the panel shows it: its line, its dots, and the Swept card's sounds with the one it's on.
+type Trail = (String, Vec<(f32, f32, f32)>, Vec<usize>, usize);
 
 type SkyPixels = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
 /// The Galaxy's picture drawn: its number, the view it was drawn for and its pixels; or just its number when it
@@ -155,6 +161,16 @@ type SkyDrawn = Result<(u64, View, SkyPixels), u64>;
 
 /// Each sound's waveform as a picture's pixels (made off the window's thread), or none.
 type WavesRead = Vec<(i64, Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>>)>;
+
+/// A picture of the stars drawn on the processor, as pixels the panel can show.
+fn sky_pixels(drawn: &mo_app::galaxy_picture::Drawn) -> Option<SkyPixels> {
+    let (width, height) = (u32::try_from(drawn.width).ok()?, u32::try_from(drawn.height).ok()?);
+    let mut pixels = SkyPixels::new(width, height);
+    for (to, from) in pixels.make_mut_slice().iter_mut().zip(&drawn.pixels) {
+        *to = slint::Rgba8Pixel { r: from.r, g: from.g, b: from.b, a: from.a };
+    }
+    Some(pixels)
+}
 
 fn take<T>(slot: &Mutex<Option<T>>) -> Option<T> {
     lock(slot).take()
@@ -180,6 +196,18 @@ impl Lines {
         let library = self.library.borrow();
         let at = *self.shown.borrow().get(row)?;
         library.as_ref()?.list.sound(at).map(|s| s.path.clone())
+    }
+
+    /// The Swept card's line for the sound at place `at` in the whole list.
+    fn swept(&self, at: usize, current: bool) -> Option<SweptLine> {
+        let library = self.library.borrow();
+        let sound = library.as_ref()?.list.sound(at)?;
+        Some(SweptLine {
+            name: library::name(&sound.path).into(),
+            kind: sound.sound_type.as_str().into(),
+            colour: mo_app::sounds::type_colour(&sound.sound_type),
+            current,
+        })
     }
 
     /// The file of the sound at place `at` in the whole list (a star of the Galaxy).
@@ -477,6 +505,8 @@ struct Shown {
     sky: Rc<RefCell<Sky>>,
     /// The names last put over the Galaxy's map.
     sky_names: RefCell<Vec<SkyName>>,
+    /// The trail last put on the Galaxy: its line, its dots, and the Swept card's sounds with the one it's on.
+    sky_trail: RefCell<Trail>,
     /// The Galaxy's painter on the graphics card (the app's own), once there are stars to give it.
     painter: RefCell<Option<mo_sky::Sky>>,
     /// Painting the stars on the card went wrong: the processor's picture from then on.
@@ -528,6 +558,7 @@ impl Shown {
             heard: Rc::default(),
             sky: Rc::default(),
             sky_names: RefCell::default(),
+            sky_trail: RefCell::default(),
             painter: RefCell::new(None),
             painter_failed: Cell::new(false),
             sky_asked: Cell::new(false),
@@ -775,9 +806,12 @@ impl Shown {
                     {
                         play_star(at);
                         sky.picked = Some(at);
+                        sky.on_trail(at, true);
                     }
                 }
                 Moved::Hover => {
+                    // Someone's looking: the stars keep twinkling.
+                    sky.looked_at(Instant::now());
                     sky.hover = sky.star_at(x, y);
                     let name = sky.hover.and_then(|at| lines.path_at(at));
                     panel.set_sky_hover(name.as_deref().map(library::name).unwrap_or_default().into());
@@ -791,6 +825,7 @@ impl Shown {
         let (sky, weak) = (Rc::clone(&self.sky), panel.as_weak());
         let player = Arc::clone(&self.instance.player);
         let (heard, stop) = (Rc::clone(&self.heard), self.stopper());
+        let arrow_play = Rc::clone(&play);
         panel.on_sky_up(move |side| {
             let mut sky = sky.borrow_mut();
             let cancelled = cancelled.get();
@@ -821,6 +856,73 @@ impl Shown {
                     play(at);
                 }
                 sky.picked = Some(at);
+                sky.on_trail(at, false);
+            }
+        });
+        // Light by: what makes a star bigger and brighter, as the app's chip on the map.
+        let lights = Choices { chips: Rc::default(), more: Rc::default() };
+        let light_names = galaxy::LIGHTS.map(mo_app::galaxy_look::LightBy::name);
+        panel.set_sky_light(lights.view(&mo_app::filters::one_of(&light_names, self.sky.borrow().light_by().name())));
+        let (sky, weak) = (Rc::clone(&self.sky), panel.as_weak());
+        panel.on_sky_light_by(move |name| {
+            let Some(by) = galaxy::LIGHTS.into_iter().find(|by| by.name() == name.as_str()) else { return };
+            sky.borrow_mut().set_light_by(by);
+            if let Some(panel) = weak.upgrade() {
+                panel.set_sky_light(lights.view(&mo_app::filters::one_of(&light_names, by.name())));
+            }
+        });
+        let sky = Rc::clone(&self.sky);
+        panel.on_sky_mini_go(move |x, y| sky.borrow_mut().mini_go(x, y));
+        // An arrow key goes to the nearest star that way and plays it, as a click on it would.
+        // The Swept card: a click on a line, Back and Next go to that sound on the map and play it.
+        let (sky, play_star, right) = (Rc::clone(&self.sky), Rc::clone(&arrow_play), Rc::clone(&self.right_now));
+        panel.on_sky_swept_go(move |line| {
+            // Only the left button: a line takes the right one as a click too.
+            if right.get() {
+                return;
+            }
+            let found = usize::try_from(line).ok().and_then(|line| sky.borrow_mut().go_on_trail(line));
+            if let Some(at) = found {
+                play_star(at);
+            }
+        });
+        let (sky, play_star) = (Rc::clone(&self.sky), Rc::clone(&arrow_play));
+        panel.on_sky_swept_step(move |by| {
+            let found = sky.borrow_mut().step_on_trail(by);
+            if let Some(at) = found {
+                play_star(at);
+            }
+        });
+        let (sky, weak) = (Rc::clone(&self.sky), panel.as_weak());
+        panel.on_sky_swept_clear(move || {
+            sky.borrow_mut().clear_trail();
+            if let Some(panel) = weak.upgrade() {
+                panel.set_sky_swept_keys(false);
+            }
+        });
+        let (sky, play_star, weak) = (Rc::clone(&self.sky), arrow_play, panel.as_weak());
+        panel.on_sky_arrow(move |way| {
+            let Some(panel) = weak.upgrade() else { return };
+            // With the Swept card clicked into, Up and Down go through its sounds (as Back and Next).
+            if panel.get_sky_swept_keys() && way.abs() == 2 && !sky.borrow().trail().0.is_empty() {
+                let found = sky.borrow_mut().step_on_trail(way.signum());
+                if let Some(at) = found {
+                    play_star(at);
+                }
+                return;
+            }
+            panel.set_sky_swept_keys(false);
+            let way = match way {
+                -1 => (-1.0, 0.0),
+                1 => (1.0, 0.0),
+                -2 => (0.0, -1.0),
+                2 => (0.0, 1.0),
+                _ => return,
+            };
+            let found = sky.borrow_mut().arrow(way);
+            if let Some(at) = found {
+                sky.borrow_mut().on_trail(at, false);
+                play_star(at);
             }
         });
         let sky = Rc::clone(&self.sky);
@@ -887,14 +989,17 @@ impl Shown {
                 *lock(&slots.grid) = Some((set, grid));
             });
         }
+        let packed = self.sky_stars(&mut sky);
         let on_card = match &self.draws {
-            Draws::Card(gpu) if !self.painter_failed.get() => self.sky_on_card(&mut sky, gpu),
+            Draws::Card(gpu) if !self.painter_failed.get() => self.sky_on_card(&mut sky, gpu, packed),
             _ => false,
         };
         if !on_card {
             self.sky_on_processor(&mut sky);
         }
         self.sky_names(&mut sky);
+        self.sky_mini(&mut sky);
+        self.sky_trail(&sky);
         if let Some((x, y, width, height)) = sky.place() {
             self.panel.set_sky_x(x);
             self.panel.set_sky_y(y);
@@ -949,24 +1054,80 @@ impl Shown {
         }
     }
 
+    /// The trail: the line through the stars heard lately, their dots, and the Swept card. The panel is only told
+    /// when they've changed.
+    fn sky_trail(&self, sky: &Sky) {
+        let (path, dots) = sky.trail_on_view();
+        let (trail, on) = sky.trail();
+        let now: Trail = (path, dots, trail.to_vec(), on);
+        if *self.sky_trail.borrow() == now {
+            return;
+        }
+        self.panel.set_sky_trail(now.0.as_str().into());
+        let dots: Vec<TrailDot> = now.1.iter().map(|&(x, y, fade)| TrailDot { x, y, fade }).collect();
+        self.panel.set_sky_trail_dots(ModelRc::new(VecModel::from(dots)));
+        let lines: Vec<SweptLine> =
+            trail.iter().enumerate().filter_map(|(i, &at)| self.lines.swept(at, i == on)).collect();
+        self.panel.set_sky_swept(ModelRc::new(VecModel::from(lines)));
+        *self.sky_trail.borrow_mut() = now;
+    }
+
+    /// The mini-map: its picture of the whole map is drawn on a background thread when the stars on show change, and
+    /// its box follows the view.
+    fn sky_mini(&self, sky: &mut Sky) {
+        if let Some(picture) = sky.mini_ask() {
+            let slots = Arc::clone(&self.slots);
+            background("mo-plugin-galaxy-mini", move || {
+                let (set, started) = (picture.id, Instant::now());
+                // A fault in the drawing is noted: the mini-map keeps the picture it had.
+                let drawn = mo_catch::catch_crash(AssertUnwindSafe(|| sky_pixels(&picture.draw())));
+                crate::log::took_if_slow("Galaxy", "Drew the mini-map", started);
+                if let Some(pixels) = drawn.ok().flatten() {
+                    *lock(&slots.mini) = Some((set, pixels));
+                }
+            });
+        }
+        if let Some((set, pixels)) = take(&self.slots.mini)
+            && sky.mini_took(set)
+        {
+            self.panel.set_sky_mini_picture(slint::Image::from_rgba8_premultiplied(pixels));
+        }
+        let mini = sky.mini();
+        self.panel.set_sky_mini(mini.is_some());
+        if let Some(mini) = mini {
+            self.panel.set_sky_mini_title(mini.title.into());
+            self.panel.set_sky_mini_x(mini.x);
+            self.panel.set_sky_mini_y(mini.y);
+            self.panel.set_sky_mini_w(mini.width);
+            self.panel.set_sky_mini_h(mini.height);
+        }
+    }
+
+    /// The Galaxy's stars made ready, lit by what Light by says, on a background thread when the map, the filters
+    /// or Light by change: the ones to show now, when new ones have come.
+    fn sky_stars(&self, sky: &mut Sky) -> Option<galaxy::Packed> {
+        if let Some(library) = self.lines.library.borrow().as_ref()
+            && let Some(pack) = sky.pack_ask(library)
+        {
+            let slots = Arc::clone(&self.slots);
+            background("mo-plugin-galaxy-stars", move || {
+                let started = Instant::now();
+                let packed = pack.pack();
+                crate::log::took_if_slow("Galaxy", "Made the stars ready and lit", started);
+                *lock(&slots.packed) = Some(packed);
+            });
+        }
+        take(&self.slots.packed).filter(|packed| sky.packed(packed))
+    }
+
     /// The Galaxy's stars painted by the graphics card, with the app's own painter: every star goes to the card once
     /// (when the map or the filters change), and after that each picture only sends the view, so flying and moving
     /// the map keep the screen's pace with half a million stars. `false` when the card can't (the processor's
     /// picture is drawn instead).
-    fn sky_on_card(&self, sky: &mut Sky, gpu: &Gpu) -> bool {
-        if let Some(pack) = sky.pack_ask() {
-            let slots = Arc::clone(&self.slots);
-            background("mo-plugin-galaxy-stars", move || {
-                let started = Instant::now();
-                let (bytes, lit) = pack.pack();
-                crate::log::took_if_slow("Galaxy", "Made the stars ready for the graphics card", started);
-                *lock(&slots.packed) = Some((pack.set, bytes, lit));
-            });
-        }
+    fn sky_on_card(&self, sky: &mut Sky, gpu: &Gpu, packed: Option<galaxy::Packed>) -> bool {
         let (device, queue) = gpu.device();
         let well = self.panel.get_sky_well();
         let background = [well.red(), well.green(), well.blue()].map(|c| f32::from(c) / 255.0);
-        let packed = take(&self.slots.packed).filter(|(set, ..)| sky.packed(*set));
         let mut painter = self.painter.borrow_mut();
         if painter.is_none() && packed.is_none() {
             // No stars on the card yet: nothing is shown until they are (they're a moment away).
@@ -980,14 +1141,14 @@ impl Shown {
                 crate::log::took("Galaxy", "Set up the stars' painter on the graphics card", started);
                 painter
             });
-            if let Some((_, bytes, lit)) = &packed {
-                painter.set_stars(bytes, *lit);
+            if let Some(packed) = &packed {
+                painter.set_stars(&packed.bytes, packed.lit);
             }
             if !painter.has_stars() {
                 return Ok(None);
             }
-            let Some((view, scale, look)) = sky.on_card() else { return Ok(None) };
-            let texture = painter.draw(&view, scale, &look, mo_sky::Shine::default(), background);
+            let Some((view, scale, look, shine)) = sky.on_card(Instant::now()) else { return Ok(None) };
+            let texture = painter.draw(&view, scale, &look, shine, background);
             slint::Image::try_from(texture).map(Some).map_err(|e| format!("Slint wouldn't show the picture: {e}"))
         }));
         match painted {
@@ -1029,12 +1190,7 @@ impl Shown {
                 // A fault in the drawing is noted, and the next picture can still be asked for.
                 let drawn = mo_catch::catch_crash(AssertUnwindSafe(|| {
                     let drawn = picture.draw();
-                    let (width, height) = (u32::try_from(drawn.width).ok()?, u32::try_from(drawn.height).ok()?);
-                    let mut pixels = SkyPixels::new(width, height);
-                    for (to, from) in pixels.make_mut_slice().iter_mut().zip(&drawn.pixels) {
-                        *to = slint::Rgba8Pixel { r: from.r, g: from.g, b: from.b, a: from.a };
-                    }
-                    Some((drawn.id, drawn.view, pixels))
+                    Some((drawn.id, drawn.view, sky_pixels(&drawn)?))
                 }));
                 crate::log::took_if_slow("Galaxy", "Drew the stars", started);
                 *lock(&slots.sky) = Some(drawn.ok().flatten().ok_or(id));

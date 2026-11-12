@@ -33,7 +33,7 @@ mod window;
 mod ui {
     slint::include_modules!();
 }
-pub use ui::{ExtensionLine, FilterChoice, FilterView, Panel, SkyName, SoundLine, YearBar};
+pub use ui::{ExtensionLine, FilterChoice, FilterView, Panel, SkyName, SoundLine, SweptLine, TrailDot, YearBar};
 
 use audition::{Player, Playing};
 use check::Offered;
