@@ -139,7 +139,8 @@ export component Panel inherits Window {
     in property <int> playing-row: -1;
     in property <float> playing-at;
     callback search(string);
-    // Play a line's sound: from the start (0), or from the spot clicked on its waveform (up to 1, its end).
+    // A line was clicked: on its waveform at this spot (0 its start, up to 1, its end), or anywhere else on it (-1).
+    // The sound plays from the spot, or from the start; a click on the line that's playing stops it instead.
     callback play(int, float);
     // A line is being dragged out (onto a track): its row.
     callback drag-out(int);
@@ -479,7 +480,7 @@ export component Panel inherits Window {
                                 // A click on the waveform plays from that spot; anywhere else, from the start.
                                 root.play(i, wave.source.width > 0 && self.pressed-x >= wave.absolute-position.x - self.absolute-position.x
                                     && self.pressed-x < wave.absolute-position.x - self.absolute-position.x + wave.width
-                                    ? (self.pressed-x - (wave.absolute-position.x - self.absolute-position.x)) / wave.width : 0);
+                                    ? (self.pressed-x - (wave.absolute-position.x - self.absolute-position.x)) / wave.width : -1);
                             }
                             drag-out => { root.drag-out(i); }
                             HorizontalLayout {
