@@ -41,7 +41,7 @@ pub mod types;
 pub mod usage;
 pub mod word;
 
-pub use analysis::{ChordSpan, Peaks, SoundAnalysis};
+pub use analysis::{ChordSpan, Peaks, SILENT_DB, SoundAnalysis};
 pub use db::{
     Everything, KnownSound, SoundMatch, SoundsDb, SoundsError, StarPoint, TagCount, count_analysed,
     count_clap_could_hear,
@@ -110,6 +110,13 @@ impl Sound {
     /// filter and Rediscover both pick by it, so the two always agree (the whole-app review of 6 Nov, X3-23).
     pub fn is_of_types(&self, types: &[String]) -> bool {
         types::is_one_of(&self.sound_type, types)
+    }
+
+    /// Whether it's known to be silent all through, or empty ([`SoundAnalysis::is_silent`]): never while it isn't
+    /// analysed. The Sounds page leaves such sounds out until you ask for them, and Kits, Rediscover and Sounds like
+    /// this never pick one (Solomon, 12 Nov 2026: "hide silent audio files").
+    pub fn is_silent(&self) -> bool {
+        self.analysis.as_ref().is_some_and(SoundAnalysis::is_silent)
     }
 
     /// The file's name without its extension: "Kick_01".

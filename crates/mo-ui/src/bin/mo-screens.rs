@@ -2807,6 +2807,8 @@ fn sample_sounds() -> mo_ui::sounds::Library {
         ("Loops", "Break 172", "Drum loop", 5.6, Some(172.0), None),
         ("Loops", "Hats 128", "Drum loop", 7.5, Some(128.0), None),
         ("Misc", "Room Tone", "", 3.0, None, None),
+        // A render that came out blank: silent all through, so Hide silent sounds leaves it out, as it starts.
+        ("Misc", "Blank Render", "", 2.0, None, None),
     ];
     let day = |d: u32, h: u32| {
         chrono::NaiveDate::from_ymd_opt(2026, 10, d).and_then(|d| d.and_hms_opt(h, 15, 0)).unwrap_or_default()
@@ -2816,6 +2818,7 @@ fn sample_sounds() -> mo_ui::sounds::Library {
         .enumerate()
         .map(|(i, &(folder, name, ty, seconds, bpm, key))| {
             let is_loop = bpm.is_some();
+            let silent = name == "Blank Render";
             // A made-up waveform: hits fall away fast, loops pulse on the beat, long sounds swell.
             let waveform: Vec<f32> = (0..160)
                 .map(|x| {
@@ -2849,7 +2852,8 @@ fn sample_sounds() -> mo_ui::sounds::Library {
                     bpm,
                     key_tonic: key.map(|k| k.0),
                     key_minor: key.is_some_and(|k| k.1),
-                    waveform: waveform.into(),
+                    peak_db: if silent { -120.0 } else { 0.0 },
+                    waveform: if silent { vec![0.0; 160] } else { waveform }.into(),
                     ..SoundAnalysis::default()
                 }),
                 sound_type: if ty.is_empty() { mo_sounds::types::UNKNOWN.into() } else { ty.into() },

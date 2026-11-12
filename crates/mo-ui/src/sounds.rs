@@ -190,6 +190,8 @@ struct Page {
     re_likes: HashMap<i64, i64>,
     /// Hide duplicates has been set: by you, or from its setting when the sounds first showed.
     hide_copies_chosen: bool,
+    /// Hide silent sounds has been set: by you, or from its setting as the sounds were first read.
+    silent_chosen: bool,
     /// How far the sounds like your favourites reach has been set: by you, or from its setting when the sounds first
     /// showed.
     like_chosen: bool,
@@ -257,6 +259,7 @@ impl Default for Page {
             re_years: Vec::new(),
             re_likes: HashMap::new(),
             hide_copies_chosen: false,
+            silent_chosen: false,
             like_chosen: false,
             trim: false,
             trim_db: mo_audio::trim::DEFAULT_DB,
@@ -688,6 +691,7 @@ pub fn connect(app: &AppWindow, sounds_db: PathBuf, library_db: PathBuf, feed: F
             // The shuffle the page opens on: the sounds it puts first are read first. Not when you've picked another
             // order meanwhile, nor with Hide duplicates on: copies among the first would go again once the copies
             // are known, and the tiles after them move (review B-5).
+            PAGE.with(|p| silent_as_left(&mut p.borrow_mut()));
             let opening = PAGE.with(|p| {
                 let p = p.borrow();
                 let hiding = if p.hide_copies_chosen {
@@ -2305,11 +2309,12 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
         // Counted afresh for these sounds: the choices show without numbers until then.
         p.counts = None;
         p.open_on(view, autoplay);
-        // Hide duplicates as you left it, unless you've set it since the app started.
+        // Hide duplicates as you left it, unless you've set it since the app started; Hide silent sounds too.
         if !p.hide_copies_chosen {
             p.hide_copies_chosen = true;
             p.filters.hide_copies = crate::settings::value(list::HIDE_COPIES_KEY).as_deref() == Some("on");
         }
+        silent_as_left(&mut p);
         // How far the sounds like your favourites reach too.
         if !p.like_chosen {
             p.like_chosen = true;
@@ -2488,6 +2493,15 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
             if on && let Some(app) = weak_again.upgrade() {
                 copies::look_again(&app, true);
             }
+        }
+        if kind == list::HIDE_SILENT {
+            // Kept for next time, as Hide duplicates is.
+            let hide = PAGE.with(|p| {
+                let mut p = p.borrow_mut();
+                p.silent_chosen = true;
+                !p.filters.show_silent
+            });
+            crate::settings::remember(list::HIDE_SILENT_KEY, if hide { "on" } else { "off" });
         }
     });
     // The Favourites filter's "how adventurous" slider: how many sounds like each favourite show beside them. Kept
@@ -3126,8 +3140,7 @@ fn wire_rediscover(app: &AppWindow) {
         let Some(app) = weak.upgrade() else { return };
         PAGE.with(|p| {
             let mut p = p.borrow_mut();
-            let hide_copies = p.filters.hide_copies;
-            p.filters = Filters { folder: Some(folder.to_string()), hide_copies, ..Filters::default() };
+            p.filters = Filters { folder: Some(folder.to_string()), ..p.filters.cleared() };
             p.pick_view(LIST);
         });
         keep_view(LIST);
@@ -3361,6 +3374,14 @@ pub fn show_bitwig_for_screens(app: &AppWindow, shown: Option<BitwigShot<'_>>) {
     }
 }
 
+/// Hide silent sounds as you left it (on until you turn it off), unless it's been set since the app started.
+fn silent_as_left(p: &mut Page) {
+    if !p.silent_chosen {
+        p.silent_chosen = true;
+        p.filters.show_silent = crate::settings::value(list::HIDE_SILENT_KEY).as_deref() == Some("off");
+    }
+}
+
 /// Shows one of the views by its name (Ctrl+K's "Sounds › Galaxy"), as the view switch does.
 pub fn show_view(app: &AppWindow, name: &str) {
     if let Some(v) = VIEWS.iter().position(|n| *n == name) {
@@ -3382,9 +3403,11 @@ fn show_sound(app: &AppWindow, at: usize) {
     }
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        // Hide duplicates stays on unless the sound has copies (one of them might show in its place).
+        // Hide duplicates stays on unless the sound has copies (one of them might show in its place), and Hide silent
+        // sounds unless it's silent.
         let hide_copies = p.filters.hide_copies && !p.list.has_copies(at);
-        p.filters = Filters { hide_copies, ..Filters::default() };
+        let show_silent = p.filters.show_silent || p.list.sound(at).is_some_and(|s| s.is_silent());
+        p.filters = Filters { hide_copies, show_silent, ..p.filters.cleared() };
         p.to_pick = Some(at);
     });
     app.global::<SoundsData>().set_search(SharedString::new());
@@ -3449,12 +3472,19 @@ fn show_lists(app: &AppWindow) {
             format!("Reading the rest of your {} sounds…", thousands(all))
         } else if p.list.is_empty() {
             String::new()
-        } else if p.view == HISTORY && (Filters { years: None, ..p.filters.clone() }).any() {
-            // The years picked on the year strip don't narrow History, so they don't count here either.
+        } else if p.view == HISTORY
+            && ((Filters { years: None, ..p.filters.clone() }).any()
+                || (!p.filters.show_silent
+                    && p.played.iter().any(|&(i, _)| p.list.sound(i).is_some_and(|s| s.is_silent()))))
+        {
+            // The years picked on the year strip don't narrow History, so they don't count here either; silent sounds
+            // played and left out do.
             format!("{} of {} played", thousands(p.history.len()), thousands(p.played.len()))
         } else if p.view != HISTORY
             && p.view != REDISCOVER
-            && (p.filters.any() || (p.filters.hide_copies && p.list.copies().is_some_and(|n| n > 0)))
+            && (p.filters.any()
+                || (p.filters.hide_copies && p.list.copies().is_some_and(|n| n > 0))
+                || (!p.filters.show_silent && p.list.silent() > 0))
         {
             format!("{} of {} sounds", thousands(p.shown.len()), thousands(total))
         } else {
@@ -3514,6 +3544,8 @@ fn show_chips(app: &AppWindow) {
         data.set_like_favourites_words(list::like_favourites_words(f.like_favourites, known).into());
         data.set_hide_copies(f.hide_copies);
         data.set_hide_copies_text(list::hide_copies_text(copies::found()).into());
+        data.set_hide_silent(!f.show_silent);
+        data.set_hide_silent_text(list::hide_silent_text(p.partial.is_none().then(|| p.list.silent())).into());
         data.set_folder(f.folder.as_deref().unwrap_or_default().into());
         data.set_any_filter(f.any());
         // The box holds the words the list goes by: Clear filters takes them off too.

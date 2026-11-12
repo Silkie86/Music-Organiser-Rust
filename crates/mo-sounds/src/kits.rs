@@ -95,7 +95,8 @@ fn is_loop(s: &Sound) -> bool {
 }
 
 /// Fills every unlocked pad. Returns the seed used, so the kit can be rolled again the same. `sounds` is the whole
-/// library (hidden copies are left out here), `usage` from [`crate::usage::usage`], `index` from [`SoundIndex::build`].
+/// library (hidden copies and silent sounds are left out here), `usage` from [`crate::usage::usage`], `index` from
+/// [`SoundIndex::build`].
 pub fn roll(
     sounds: &[Sound],
     usage: &HashMap<i64, Usage>,
@@ -116,7 +117,7 @@ pub fn roll(
     if o.same_pack {
         the_pack = locked_ids.iter().find_map(|id| locked_sound(*id)).map(pack);
         if the_pack.is_none() {
-            let visible: Vec<&Sound> = sounds.iter().filter(|s| !s.hidden).collect();
+            let visible: Vec<&Sound> = sounds.iter().filter(|s| !s.hidden && !s.is_silent()).collect();
             the_pack = pick_pack(&visible, slots, &mut rng);
         }
     }
@@ -131,6 +132,7 @@ pub fn roll(
             .filter(|s| {
                 !s.hidden
                     && s.analysis.is_some()
+                    && !s.is_silent()
                     && !is_loop(s)
                     && slot.types.iter().any(|t| *t == s.sound_type)
                     && !used.contains(&s.id)
@@ -488,6 +490,29 @@ mod tests {
         let mut again = default_drum_kit();
         roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut again, &Options { seed: 4, ..Options::default() });
         assert_eq!(kit, again);
+    }
+
+    #[test]
+    fn a_silent_sound_fills_no_pad() {
+        // Every kick silent all through but sound 2 (Solomon, 12 Nov 2026: "hide silent audio files"): the kick pad
+        // gets 2 whatever the seed, or stays empty once 2 is silent too.
+        let mut sounds = library();
+        let kicks = |sounds: &mut Vec<Sound>, but: i64| {
+            for s in sounds.iter_mut().filter(|s| s.sound_type == "Kick" && s.id != but) {
+                s.analysis = Some(SoundAnalysis { peak_db: -120.0, ..SoundAnalysis::default() });
+            }
+        };
+        kicks(&mut sounds, 2);
+        for seed in 1..=20 {
+            let mut kit = default_drum_kit();
+            let o = Options { seed, randomness: 1.0, ..Options::default() };
+            roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &o);
+            assert_eq!(kit[0].sound, Some(2), "seed {seed}");
+        }
+        kicks(&mut sounds, 0);
+        let mut kit = default_drum_kit();
+        roll(&sounds, &HashMap::new(), &SoundIndex::default(), &mut kit, &Options { seed: 3, ..Options::default() });
+        assert_eq!(kit[0].sound, None);
     }
 
     #[test]
