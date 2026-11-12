@@ -15,6 +15,8 @@ mod other;
 #[cfg(feature = "play")]
 pub mod play;
 mod read;
+#[cfg(feature = "stretch")]
+pub mod stretch;
 pub mod trim;
 mod wma;
 mod write;

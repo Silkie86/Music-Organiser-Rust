@@ -53,7 +53,7 @@ rtrb = "0.3"
 thread-priority.workspace = true
 mo-app = { workspace = true }
 # Decoding sounds, and MIDI parts played with a SoundFont (`gm`): the DAW plays them, not the system's sound output.
-mo-audio = { path = "../mo-audio", default-features = false, features = ["gm"] }
+mo-audio = { path = "../mo-audio", default-features = false, features = ["gm", "stretch"] }
 mo-catch = { path = "../mo-catch" }
 # A MIDI part's notes, as the index hands them.
 mo-formats = { path = "../mo-formats" }

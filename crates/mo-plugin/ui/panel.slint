@@ -232,6 +232,9 @@ export component Panel inherits Window {
     // The Loop switch: a sound clicked plays round and round until it's stopped or another is clicked.
     in-out property <bool> loop-on;
     callback loop-changed(bool);
+    // Match tempo: while looping, a loop whose tempo is known plays at the DAW's, its pitch kept.
+    in-out property <bool> match-tempo;
+    callback match-tempo-changed(bool);
     // A choice was picked or unpicked on a filter ("type", "length", "key", "tag"): its words.
     callback pick(string, string);
     // Nothing picked on a filter (or "more-types": only the types in the More menu).
@@ -511,6 +514,16 @@ export component Panel inherits Window {
                         clicked => {
                             root.loop-on = !root.loop-on;
                             root.loop-changed(root.loop-on);
+                        }
+                    }
+                    if root.loop-on: StudioButton {
+                        horizontal-stretch: 0;
+                        text: "Match tempo";
+                        main: root.match-tempo;
+                        tip: "Loops play at the DAW's tempo, their pitch kept (loops the library knows the tempo of)";
+                        clicked => {
+                            root.match-tempo = !root.match-tempo;
+                            root.match-tempo-changed(root.match-tempo);
                         }
                     }
                     StudioButton {
