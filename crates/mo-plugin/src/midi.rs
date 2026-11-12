@@ -167,13 +167,14 @@ impl Parts {
 
     /// The part at `at` as a loop of sound played with the SoundFont at `font`, at `tempo` (the DAW's; or, when it
     /// hasn't said, the part's own file's, else 120), with the General MIDI sound the app's MIDI page matches to it.
-    /// Reads the index and makes the sound: call it off the panel's thread.
+    /// Reads the index and makes the sound: call it off the panel's thread. With it, when it's made at the DAW's
+    /// `tempo`, how many beats long it is and that tempo (it then plays in step with the DAW).
     pub fn sound(
         &self,
         at: usize,
         font_path: Option<&Path>,
         tempo: Option<f64>,
-    ) -> Result<mo_audio::AudioData, String> {
+    ) -> Result<(mo_audio::AudioData, Option<(f64, f64)>), String> {
         let font_path = font_path.ok_or(NO_SOUNDFONT)?;
         let e = self.cat.entry(at).ok_or("That part isn't in the list any more")?;
         let notes = self.notes(e)?;
@@ -181,6 +182,7 @@ impl Parts {
         if heard.is_empty() {
             return Err("Every note in it is muted, so there's nothing to hear".to_owned());
         }
+        let daw = tempo;
         let tempo = tempo.unwrap_or_else(|| {
             let library = self.index.parent().map(mo_library::songs_db::to_read).unwrap_or_default();
             page::read_tempo(&e.phrase.source, &library).bpm()
@@ -199,7 +201,12 @@ impl Parts {
             program: sound.program,
             drums: sound.drums,
         };
-        mo_audio::gm::render_loop(&font, &part)
+        let audio = mo_audio::gm::render_loop(&font, &part)?;
+        // The beats the sound holds: a long part is cut at the longest sound made.
+        let frames = audio.channels.first().map_or(0, Vec::len) as f64;
+        let made = frames / f64::from(audio.sample_rate.max(1)) * tempo / 60.0;
+        let beats = (length as f64 / mo_midi::PPQ as f64).min(made);
+        Ok((audio, daw.map(|t| (beats, t))))
     }
 
     /// The SoundFont at `path`, opened once and kept.
