@@ -4,7 +4,8 @@
 //! This goes between the two:
 //!
 //! 1. [`Pick::usual`]: what of the song is fitted to when nothing is picked by hand (its chords and bass for a tune,
-//!    its melodies for chords, over the bars where the most of them play together).
+//!    its melodies for chords, over the bars where the most of them play together). [`Pick::by_hand`] and
+//!    [`Pick::usual_in`]: the same with the parts, the bars or both picked by hand.
 //! 2. [`Own::of`]: the song's own parts in the library (every save's, and a pack's loop it uses in the pack's other
 //!    keys), which are left out. They'd fit best of all and say nothing.
 //! 3. [`tried`]: the parts to try, as the page's filters let them through.
@@ -47,19 +48,45 @@ impl Pick {
     /// those parts only the ones that play in those bars, so the pick names what's heard. None when the song has no
     /// such part.
     pub fn usual(song: &Song, wants: Wants) -> Option<Pick> {
-        let mut parts = match wants {
-            Wants::Tune => song.harmony_parts(),
-            Wants::Chords => song.melody_parts(),
+        Pick::by_hand(song, &usual_parts(song, wants), None)
+    }
+
+    /// The same parts over bars picked by hand (counted from 0): of the song's chords, arps and basslines (looking
+    /// for a tune) or its melodies (looking for chords), the ones that play in `bars`. None when none of them does.
+    pub fn usual_in(song: &Song, wants: Wants, bars: &Range<i64>) -> Option<Pick> {
+        Pick::by_hand(song, &usual_parts(song, wants), Some(bars))
+    }
+
+    /// Parts picked by hand (places in [`Song::parts`]; each counts once, in the song's order), over `bars` when
+    /// those are picked too, else over up to [`USUAL_BARS`] bars from the first bar where the most of the picked
+    /// parts play at once. Of the parts, only the ones that play in those bars are kept, so the pick names what's
+    /// heard. None when none of them plays there. Which parts can be picked is the caller's to say: drums picked
+    /// stay in the pick, and are left out of what's fitted to ([`Target::of_song`]).
+    pub fn by_hand(song: &Song, parts: &[usize], bars: Option<&Range<i64>>) -> Option<Pick> {
+        let mut parts = parts.to_vec();
+        parts.sort_unstable();
+        parts.dedup();
+        let bars = match bars {
+            Some(bars) => bars.clone(),
+            None => song.busiest_bars(&parts, USUAL_BARS)?,
         };
-        let bars = song.busiest_bars(&parts, USUAL_BARS)?;
         parts.retain(|&part| song.plays_in(part, &bars));
-        Some(Pick { parts, bars })
+        (!parts.is_empty()).then_some(Pick { parts, bars })
     }
 
     /// What a part from the library is fitted to ([`Target::of_song`]): a tune to find chords for when every picked
     /// part is a melody, else chords to find a tune for. None when the picked parts play nothing pitched in the bars.
     pub fn target(&self, song: &Song) -> Option<Target> {
         Target::of_song(song, &self.parts, &self.bars)
+    }
+}
+
+/// The parts fitted to when none are picked by hand, wherever they play: the song's chords, arps and basslines
+/// (looking for a tune), or its melodies (looking for chords).
+fn usual_parts(song: &Song, wants: Wants) -> Vec<usize> {
+    match wants {
+        Wants::Tune => song.harmony_parts(),
+        Wants::Chords => song.melody_parts(),
     }
 }
 
@@ -356,6 +383,33 @@ mod tests {
         assert_eq!(Pick::usual(&no_tune, Wants::Tune).unwrap(), Pick { parts: vec![0], bars: 0..4 });
         // Parts picked by hand that play nothing in the bars picked give nothing to fit to.
         assert!(Pick { parts: vec![0], bars: 0..4 }.target(&song).is_none());
+    }
+
+    #[test]
+    fn parts_and_bars_picked_by_hand_are_what_is_fitted_to() {
+        let song = song();
+        // Parts alone: up to 8 bars from where the most of them play together, as when the app picks. The bass plays
+        // bars 9 to 12 and the lead bars 13 to 16; however they're picked, each counts once, in the song's order.
+        let pick = Pick::by_hand(&song, &[2, 1, 2], None).unwrap();
+        assert_eq!(pick, Pick { parts: vec![1, 2], bars: 8..16 });
+        // A melody with something else is chords to play over; alone, a tune to find chords for.
+        assert_eq!(pick.target(&song).unwrap().wants(), Wants::Tune);
+        assert_eq!(Pick::by_hand(&song, &[2], None).unwrap().target(&song).unwrap().wants(), Wants::Chords);
+        // Bars too: the pick is over those very bars, and names only the parts that play in them.
+        assert_eq!(Pick::by_hand(&song, &[0, 2], Some(&(8..10))).unwrap(), Pick { parts: vec![0], bars: 8..10 });
+        assert_eq!(Pick::by_hand(&song, &[0, 2], Some(&(14..16))).unwrap(), Pick { parts: vec![0, 2], bars: 14..16 });
+        // None of them plays there, no such part, nothing picked: nothing to fit to.
+        assert!(Pick::by_hand(&song, &[2], Some(&(8..12))).is_none());
+        assert!(Pick::by_hand(&song, &[9], None).is_none());
+        assert!(Pick::by_hand(&song, &[], Some(&(8..12))).is_none());
+
+        // Bars alone: the parts the app would pick, of those the ones that play there.
+        assert_eq!(Pick::usual_in(&song, Wants::Tune, &(8..12)).unwrap(), Pick { parts: vec![0, 1], bars: 8..12 });
+        assert_eq!(Pick::usual_in(&song, Wants::Tune, &(12..16)).unwrap(), Pick { parts: vec![0], bars: 12..16 });
+        assert_eq!(Pick::usual_in(&song, Wants::Chords, &(12..14)).unwrap(), Pick { parts: vec![2], bars: 12..14 });
+        // The lead rests in bars 9 to 12, and nothing plays before bar 9.
+        assert!(Pick::usual_in(&song, Wants::Chords, &(8..12)).is_none());
+        assert!(Pick::usual_in(&song, Wants::Tune, &(0..8)).is_none());
     }
 
     #[test]

@@ -8,6 +8,10 @@
 //! stay in force ([`tried`]): a kind chip narrows the list to basslines, the search box to a pack. The song's own
 //! parts are never offered.
 //!
+//! Which parts and which bars can be picked by hand instead ([`yours`]: a [`YourPick`], remembered for each song),
+//! and every search says what there is to pick from and what's picked now (a [`Picker`]), also when nothing could be
+//! fitted, so the pick can be changed.
+//!
 //! The slow work is the page's to run off the window's thread, newest wins (rule 12). [`search`] is all of it in
 //! one call: reading the song, the index's slots, the song's own parts, then [`tried`] and [`look`]. What it reads
 //! comes through [`Reads`] (the page's index on disk; made-up ones in the tests and the screenshots), and what's slow
@@ -50,6 +54,10 @@ use mo_midi::{Catalogue, Role, StoredPhrase};
 
 use crate::midi::{self as page, Filters};
 
+pub mod yours;
+
+pub use yours::{PICKS_KEPT, PICKS_KEY, PartChoice, PartName, Picker, YourPick, YourPicks};
+
 /// The most lines the list shows: the parts that fit best.
 pub const MOST: usize = 200;
 
@@ -66,6 +74,9 @@ pub const WITH_SONG_KEY: &str = "midi_fits_with_song";
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SongChoice {
     pub name: String,
+    /// The song library's key for it (`mo_library::Song::key`), the same for every save of the song: what your pick
+    /// of its parts and bars is remembered under ([`YourPicks`]).
+    pub key: String,
     /// What the page's menu calls it: its name, with its folder after it where two of the songs offered share a name.
     /// No two of the songs offered have the same.
     pub label: String,
@@ -116,6 +127,7 @@ pub fn song_choices<'a>(songs: impl IntoIterator<Item = &'a mo_library::Song>, d
         }
         out.push(SongChoice {
             name: song.name.clone(),
+            key: song.key.clone(),
             label,
             save: save.path.clone(),
             mtime: save.mtime,
@@ -466,15 +478,22 @@ pub fn mark_words(mark: &Mark, with: &SongBars, song: &str) -> String {
     }
 }
 
-/// What of `song` is fitted to, nothing picked by hand. `wanted`: what the page's switch asks for; none (the switch
-/// hasn't been touched): parts to play over the song's chords when it has any that can be read, else chords for its
-/// melody. Err: why nothing can be fitted, in plain words.
-pub fn fitted(song: &Song, wanted: Option<Wants>) -> Result<Fitted, String> {
-    let pitched = |p: &playing::Playing| !p.drums && p.role != Role::Drums && !p.notes.is_empty();
-    if !song.parts.iter().any(pitched) {
+/// What of `song` is fitted to. `yours`: the parts and the bars you picked by hand ([`YourPick`]); what you didn't is
+/// the app's to pick. `wanted`: what the page's switch asks for; none (the switch hasn't been touched): parts to play
+/// over the song's chords when it has any that can be read, else chords for its melody. Err: why nothing can be
+/// fitted, in plain words.
+///
+/// - Nothing by hand: the song's chords and bass (or its melodies), over the bars where the most of them play
+///   together (`Pick::usual`).
+/// - Bars by hand: the same parts, of them the ones that play in your bars.
+/// - Parts by hand: those parts, over your bars or else where the most of them play together. What they are decides
+///   what's looked for, whatever the switch says: chords for them when every one is a melody, else parts to play
+///   over them. (The switch pressed is the app's pick of parts again: [`Picker::apps_parts`].)
+pub fn fitted(song: &Song, wanted: Option<Wants>, yours: &YourPick) -> Result<Fitted, String> {
+    if !song.parts.iter().any(yours::can_fit) {
         return Err("This song has no notes to fit to yet (drums aside).".to_owned());
     }
-    let (chords, melody) = (Pick::usual(song, Wants::Tune), Pick::usual(song, Wants::Chords));
+    let (your_parts, your_bars) = yours.in_song(song);
     // What the parts are decides what's looked for (a melody alone wants chords), so the two always agree.
     let of = |pick: &Option<Pick>| {
         let pick = pick.clone()?;
@@ -482,6 +501,14 @@ pub fn fitted(song: &Song, wanted: Option<Wants>) -> Result<Fitted, String> {
         let with = Arc::new(SongBars::of(song, &pick, target.wants()));
         Some(Fitted { wants: target.wants(), pick, target, with })
     };
+    if let Some(parts) = your_parts {
+        return by_hand(song, &parts, your_bars.as_ref(), &of);
+    }
+    let usual = |wants: Wants| match &your_bars {
+        Some(bars) => Pick::usual_in(song, wants, bars),
+        None => Pick::usual(song, wants),
+    };
+    let (chords, melody) = (usual(Wants::Tune), usual(Wants::Chords));
     let (over, under) = (of(&chords), of(&melody));
     // The other way is only pointed to when it would work.
     let (can_over, can_under) = (over.is_some(), under.is_some());
@@ -493,25 +520,74 @@ pub fn fitted(song: &Song, wanted: Option<Wants>) -> Result<Fitted, String> {
     if let Some(fitted) = fitted {
         return Ok(fitted);
     }
-    // Why not: nothing of the kind in the song, or nothing that could be read where it plays.
-    let no_chords = match &chords {
-        Some(pick) => format!("No chords could be read in {} of this song.", bars_words(&pick.bars)),
-        None => "No chords or bassline found in this song to play over.".to_owned(),
+    // Why not: nothing of the kind in the song, none of it in your bars, or nothing that could be read where it
+    // plays.
+    let there = your_bars.as_ref().map(bars_words);
+    let (any_chords, any_melody) = (!song.harmony_parts().is_empty(), !song.melody_parts().is_empty());
+    let no_chords = match (&chords, &there) {
+        (Some(pick), _) => format!("No chords could be read in {} of this song.", bars_words(&pick.bars)),
+        (None, Some(there)) if any_chords => format!("This song's chords and basslines don't play in {there}."),
+        (None, _) => "No chords or bassline found in this song to play over.".to_owned(),
     };
-    let no_melody = match &melody {
-        Some(pick) => format!("The melody couldn't be read in {} of this song.", bars_words(&pick.bars)),
-        None => "No melody found in this song to put chords under.".to_owned(),
+    let no_melody = match (&melody, &there) {
+        (Some(pick), _) => format!("The melody couldn't be read in {} of this song.", bars_words(&pick.bars)),
+        (None, Some(there)) if any_melody => format!("This song's melodies don't play in {there}."),
+        (None, _) => "No melody found in this song to put chords under.".to_owned(),
+    };
+    let (has_melody, has_chords) = match there {
+        Some(_) => ("A melody plays there", "Chords play there"),
+        None => ("It has a melody", "It has chords"),
     };
     Err(match wanted {
-        Some(Wants::Tune) if can_under => format!("{no_chords} It has a melody: look for chords for that."),
+        Some(Wants::Tune) if can_under => format!("{no_chords} {has_melody}: look for chords for that."),
         Some(Wants::Tune) => no_chords,
-        Some(Wants::Chords) if can_over => format!("{no_melody} It has chords: look for parts to play over them."),
+        Some(Wants::Chords) if can_over => format!("{no_melody} {has_chords}: look for parts to play over them."),
         Some(Wants::Chords) => no_melody,
-        None if chords.is_none() && melody.is_none() => {
-            "No chords, bassline or melody found in this song (drums and samples aside).".to_owned()
-        }
+        None if chords.is_none() && melody.is_none() => match &there {
+            Some(there) if any_chords || any_melody => {
+                format!("This song's chords, basslines and melodies don't play in {there}.")
+            }
+            _ => "No chords, bassline or melody found in this song (drums and samples aside).".to_owned(),
+        },
         None if chords.is_some() => no_chords,
         None => no_melody,
+    })
+}
+
+/// [`fitted`] for parts picked by hand (`picked`: their places in the song, each one that can be fitted to), over
+/// `bars` when those are picked too. `of`: what a pick is fitted to, when anything can be read from it.
+fn by_hand(
+    song: &Song,
+    picked: &[usize],
+    bars: Option<&std::ops::Range<i64>>,
+    of: &dyn Fn(&Option<Pick>) -> Option<Fitted>,
+) -> Result<Fitted, String> {
+    let names = || picked.iter().filter_map(|&at| song.parts.get(at)).map(|p| p.name.as_str());
+    // Two channels of one name are said once ([`names_words`]), and then it's one thing that "doesn't play".
+    let mut distinct: Vec<&str> = names().filter(|name| !name.is_empty()).collect();
+    distinct.sort_unstable();
+    distinct.dedup();
+    let (named, one) = match (distinct.len(), picked.len()) {
+        (0, 1) => ("The part you picked".to_owned(), true),
+        (0, _) => ("The parts you picked".to_owned(), false),
+        (count, _) => (names_words(names()), count == 1),
+    };
+    let Some(pick) = Pick::by_hand(song, picked, bars) else {
+        let plays = if one { "doesn't play" } else { "don't play" };
+        return Err(match bars {
+            Some(bars) => format!("{named} {plays} in {}.", bars_words(bars)),
+            // Each picked part has notes, so the song has bars where they play: not reached.
+            None => format!("{named} {plays} anywhere in this song."),
+        });
+    };
+    let there = bars_words(&pick.bars);
+    let melody = pick.parts.iter().all(|&at| song.parts.get(at).is_some_and(|p| p.role == Role::Melody));
+    of(&Some(pick)).ok_or_else(|| {
+        if melody {
+            format!("{named} couldn't be read in {there}.")
+        } else {
+            format!("No chords could be read from {named} in {there}.")
+        }
     })
 }
 
@@ -841,6 +917,8 @@ pub struct Asked<'a> {
     pub song: &'a SongChoice,
     /// What the page's switch asks for; none while it hasn't been touched ([`fitted`]).
     pub wanted: Option<Wants>,
+    /// The parts and bars of the song picked by hand; what isn't is the app's to pick ([`fitted`]).
+    pub yours: &'a YourPick,
     /// The page's catalogue. What a search keeps is for this very one: another (the index read again) has it made
     /// again.
     pub cat: &'a Arc<Catalogue>,
@@ -854,10 +932,13 @@ pub struct Asked<'a> {
 /// What a search came to.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Answer {
-    /// The list: what was looked for, what of the song it was fitted to ([`fitted_text`]), the parts found, and
-    /// what a part found is heard with.
-    Fits { wants: Wants, to: String, looked: Looked, with: Arc<SongBars> },
-    /// Nothing could be fitted, and why, in plain words.
+    /// The list: what was looked for, what of the song it was fitted to ([`fitted_text`]), the parts found, what a
+    /// part found is heard with, and what of the song there is to pick from, with what's picked now.
+    Fits { wants: Wants, to: String, looked: Looked, with: Arc<SongBars>, picker: Arc<Picker> },
+    /// The song was read, but nothing of it can be fitted to as it's picked now: why, in plain words, and what there
+    /// is to pick from, so the pick can be changed.
+    CantFit { why: String, picker: Arc<Picker> },
+    /// The search couldn't be made at all (the song or the index couldn't be read), and why, in plain words.
     Nothing(String),
     /// Stopped for a newer search: nothing to show.
     Stopped,
@@ -874,14 +955,17 @@ pub struct Empty {
     pub filters: bool,
 }
 
-/// The title in the list's place when the search couldn't be made at all (the song, the index).
+/// The title in the list's place when the search couldn't be made (the song, the index, or nothing of the song to
+/// fit to as it's picked).
 pub const COULDNT_LOOK: &str = "Couldn't look for parts that fit";
 
 /// What the list's place says instead of a list that has no lines. None when there's a list (or the search was
 /// stopped).
 pub fn empty_words(answer: &Answer) -> Option<Empty> {
     match answer {
-        Answer::Nothing(why) => Some(Empty { title: COULDNT_LOOK, text: why.clone(), filters: false }),
+        Answer::Nothing(why) | Answer::CantFit { why, .. } => {
+            Some(Empty { title: COULDNT_LOOK, text: why.clone(), filters: false })
+        }
         Answer::Fits { looked, .. } if looked.fits.is_empty() => Some(Empty {
             title: "No parts fit",
             text: result_text(looked),
@@ -892,8 +976,9 @@ pub fn empty_words(answer: &Answer) -> Option<Empty> {
     }
 }
 
-/// What one search made that the next can use again: the song as read, what of it is fitted to, its own parts in the
-/// catalogue and the index's slots. The page keeps one on its search's thread.
+/// What one search made that the next can use again: the song as read, what of it is fitted to (until the switch or
+/// your pick is another), its own parts in the catalogue and the index's slots. The page keeps one on its search's
+/// thread.
 #[derive(Default)]
 pub struct Kept {
     song: Option<KeptSong>,
@@ -915,7 +1000,16 @@ struct KeptSong {
     written: i64,
     song: Song,
     /// What of it is fitted to, for what was asked last.
-    fitted: Option<(Option<Wants>, Result<Fitted, String>)>,
+    fitted: Option<FittedFor>,
+}
+
+/// What of a song is fitted to for one thing asked: what the switch wanted and what was picked by hand, what that
+/// came to, and the picker that goes with it.
+struct FittedFor {
+    wanted: Option<Wants>,
+    yours: YourPick,
+    fitted: Result<Fitted, String>,
+    picker: Arc<Picker>,
 }
 
 /// One search, start to end: the parts of the catalogue that go best with the song asked for. Reads the song when
@@ -945,12 +1039,16 @@ pub fn search(
         }
     }
     let Some(song) = kept.song.as_mut() else { return Answer::Stopped };
-    if song.fitted.as_ref().is_none_or(|(wanted, _)| *wanted != asked.wanted) {
-        song.fitted = Some((asked.wanted, fitted(&song.song, asked.wanted)));
+    if song.fitted.as_ref().is_none_or(|was| was.wanted != asked.wanted || was.yours != *asked.yours) {
+        let fitted = fitted(&song.song, asked.wanted, asked.yours);
+        let picker = Arc::new(Picker::of(&song.song, asked.yours, fitted.as_ref().ok().map(|fitted| &fitted.pick)));
+        song.fitted = Some(FittedFor { wanted: asked.wanted, yours: asked.yours.clone(), fitted, picker });
     }
-    let fitted = match &song.fitted {
-        Some((_, Ok(fitted))) => fitted,
-        Some((_, Err(why))) => return Answer::Nothing(why.clone()),
+    let (fitted, picker) = match &song.fitted {
+        Some(FittedFor { fitted: Ok(fitted), picker, .. }) => (fitted, picker),
+        Some(FittedFor { fitted: Err(why), picker, .. }) => {
+            return Answer::CantFit { why: why.clone(), picker: Arc::clone(picker) };
+        }
         None => return Answer::Stopped,
     };
     // The very catalogue asked about, not one like it: a kept weak hold lets no other take its place in memory, so
@@ -979,7 +1077,13 @@ pub fn search(
     if looked.stopped {
         return Answer::Stopped;
     }
-    Answer::Fits { wants: fitted.wants, to: fitted_text(&song.song, fitted), looked, with: Arc::clone(&fitted.with) }
+    Answer::Fits {
+        wants: fitted.wants,
+        to: fitted_text(&song.song, fitted),
+        looked,
+        with: Arc::clone(&fitted.with),
+        picker: Arc::clone(picker),
+    }
 }
 
 #[cfg(test)]
@@ -1006,8 +1110,13 @@ mod tests {
         }
     }
 
+    /// What of `song` is fitted to with nothing picked by hand (picks by hand have their tests in [`yours`]).
+    fn fitted(song: &Song, wanted: Option<Wants>) -> Result<Fitted, String> {
+        super::fitted(song, wanted, &YourPick::default())
+    }
+
     /// Am7, Dm7, G7, Cmaj7, a bar each.
-    fn chords() -> Vec<NoteEvent> {
+    pub(super) fn chords() -> Vec<NoteEvent> {
         [[57, 60, 64, 67], [50, 60, 65, 69], [55, 59, 62, 65], [48, 59, 64, 67]]
             .iter()
             .zip(0i64..)
@@ -1016,7 +1125,7 @@ mod tests {
     }
 
     /// A tune on those chords' thirds, sevenths and roots, moved up by `up` semitones.
-    fn tune(up: u8) -> Vec<NoteEvent> {
+    pub(super) fn tune(up: u8) -> Vec<NoteEvent> {
         [[72, 76, 79], [77, 72, 74], [71, 77, 74], [76, 71, 72]]
             .iter()
             .zip(0i64..)
@@ -1035,7 +1144,7 @@ mod tests {
         tune(0).into_iter().zip(60u8..).map(|(n, key)| NoteEvent { key, ..n }).collect()
     }
 
-    fn lane(name: &str, at_bar: i64, notes: &[NoteEvent]) -> PreviewLane {
+    pub(super) fn lane(name: &str, at_bar: i64, notes: &[NoteEvent]) -> PreviewLane {
         let beats = |ticks: i64| ticks as f64 / PPQ as f64;
         let notes: Vec<PreviewNote> = notes
             .iter()
@@ -1052,7 +1161,7 @@ mod tests {
         PreviewLane { clips: vec![clip], ..PreviewLane::new(name, LaneKind::Instrument) }
     }
 
-    fn song_of(lanes: Vec<PreviewLane>) -> Song {
+    pub(super) fn song_of(lanes: Vec<PreviewLane>) -> Song {
         playing::of(&Arrangement {
             view: "Test",
             tempo: 120.0,
@@ -1064,7 +1173,7 @@ mod tests {
     }
 
     /// Chords from bar 9, and a lead over them from bar 13.
-    fn song() -> Song {
+    pub(super) fn song() -> Song {
         song_of(vec![lane("Keys", 8, &chords()), lane("Lead", 12, &tune(0))])
     }
 
@@ -1104,6 +1213,7 @@ mod tests {
     fn choice() -> SongChoice {
         SongChoice {
             name: "Didums".into(),
+            key: "c:/songs/didums\u{1f}fl studio\u{1f}didums".into(),
             label: "Didums".into(),
             save: SAVE.into(),
             mtime: 1_760_000_000,
@@ -1868,9 +1978,13 @@ mod tests {
         let found = dawn.among(&offered).unwrap();
         assert_eq!((found.label.as_str(), found.save.as_str()), ("Dawn · Songs", "C:\\Songs\\Dawn 2.flp"));
         assert_ne!(found.label, dawn.label);
+        // Its key is the song library's, the same with the new save: what's picked by hand for it stays with it.
+        assert!(!dawn.key.is_empty() && found.key == dawn.key, "{:?} {:?}", found.key, dawn.key);
+        assert!(songs.iter().any(|song| song.key == dawn.key));
         // Its namesake isn't it, though the label Dawn had would now be read as either.
         let namesake = offered.iter().find(|c| c.save == "D:\\Old\\Dawn.flp").unwrap();
         assert_eq!(namesake.label, "Dawn · Old");
+        assert_ne!(namesake.key, dawn.key);
         assert_eq!(namesake.among(std::slice::from_ref(&dawn)), None);
         // The save it was read from gone (deleted, or split off by hand): the song is the one with its other saves.
         let was = SongChoice { save: "C:\\Songs\\Dawn 3.flp".into(), ..found.clone() };
@@ -1929,7 +2043,9 @@ mod tests {
         let mut kept = Kept::default();
         assert!(kept.is_empty());
         let mut fake = Fake::new(&index);
-        let ask = |wanted, slots_made| Asked { song: &song, wanted, cat: &cat, filters: &filters, slots_made };
+        let apps = YourPick::default();
+        let ask =
+            |wanted, slots_made| Asked { song: &song, wanted, yours: &apps, cat: &cat, filters: &filters, slots_made };
         let entries = |answer: &Answer| match answer {
             Answer::Fits { looked, .. } => looked.fits.iter().map(|f| f.entry).collect::<Vec<_>>(),
             other => panic!("no list: {other:?}"),
@@ -1938,9 +2054,13 @@ mod tests {
 
         // The first search reads the song and the slots, and gives the list with what it was fitted to.
         let first = search(&mut kept, &mut fake, &ask(None, 1), &pool, &go);
-        let Answer::Fits { wants, to, looked, with } = &first else { panic!("{first:?}") };
+        let Answer::Fits { wants, to, looked, with, picker } = &first else { panic!("{first:?}") };
         assert_eq!((*wants, to.as_str()), (Wants::Tune, "To play over Keys, bars 9–12"));
         assert_eq!((with.names.as_str(), with.bars.clone(), with.voices.len()), ("Keys", 8..12, 1));
+        // And what there is to pick from: the song's two parts, the keys on as the app picked, nothing by hand.
+        let on = |picker: &Picker| picker.parts.iter().map(|p| (p.label.clone(), p.on)).collect::<Vec<_>>();
+        assert_eq!(on(picker), [("Keys".to_owned(), true), ("Lead".to_owned(), false)]);
+        assert_eq!((picker.bars.clone(), picker.length, picker.is_yours()), (Some(8..12), 16, false));
         assert_eq!((looked.tried, looked.fits[0].entry, looked.fits[0].semitones), (3, place("fits a tone down"), -2));
         assert_eq!(page_line(to, looked), "To play over Keys, bars 9–12 · 3 parts, best fit first");
         assert_eq!(empty_words(&first), None);
@@ -1950,7 +2070,7 @@ mod tests {
         // The same again, and the other way: nothing is read again.
         assert_eq!(entries(&search(&mut kept, &mut fake, &ask(None, 1), &pool, &go)), entries(&first));
         let under = search(&mut kept, &mut fake, &ask(Some(Wants::Chords), 1), &pool, &go);
-        let Answer::Fits { wants, to, looked, with: with_tune } = &under else { panic!("{under:?}") };
+        let Answer::Fits { wants, to, looked, with: with_tune, .. } = &under else { panic!("{under:?}") };
         assert_eq!((*wants, to.as_str(), looked.fits.len()), (Wants::Chords, "Chords for Lead, bars 13–16", 0));
         assert_eq!(
             (with_tune.names.as_str(), with_tune.bars.clone(), with_tune.wants),
@@ -1960,6 +2080,34 @@ mod tests {
         let none = "No parts to try: the filters leave none of the right kind.";
         assert_eq!(empty_words(&under), Some(Empty { title: "No parts fit", text: none.to_owned(), filters: true }));
         assert_eq!(page_line(to, looked), format!("Chords for Lead, bars 13–16 · {none}"));
+        assert_eq!((fake.songs_read, fake.slots_read), (1, 1));
+
+        // Parts and bars picked by hand: fitted to those, with nothing read again, and the picker says they're yours.
+        let both = YourPick {
+            parts: Some(vec![PartName { name: "Keys".into(), nth: 0 }, PartName { name: "Lead".into(), nth: 0 }]),
+            bars: Some(10..14),
+        };
+        let by_hand = search(&mut kept, &mut fake, &Asked { yours: &both, ..ask(None, 1) }, &pool, &go);
+        let Answer::Fits { wants, to, with, picker, .. } = &by_hand else { panic!("{by_hand:?}") };
+        assert_eq!((*wants, to.as_str()), (Wants::Tune, "To play over Keys and Lead, bars 11–14"));
+        assert_eq!((with.names.as_str(), with.bars.clone()), ("Keys and Lead", 10..14));
+        assert_eq!(on(picker), [("Keys".to_owned(), true), ("Lead".to_owned(), true)]);
+        assert_eq!(
+            (picker.bars.clone(), picker.your_parts, picker.your_bars, picker.pick()),
+            (Some(10..14), true, true, both.clone())
+        );
+        // A pick nothing can be fitted to: why, with the picker to change it by.
+        let rests = YourPick { bars: Some(0..4), ..both.clone() };
+        let cant = search(&mut kept, &mut fake, &Asked { yours: &rests, ..ask(None, 1) }, &pool, &go);
+        let Answer::CantFit { why, picker } = &cant else { panic!("{cant:?}") };
+        assert_eq!(why, "Keys and Lead don't play in bars 1–4.");
+        assert_eq!(
+            (on(picker), picker.bars.clone(), picker.pick()),
+            (on(&Picker::of(&super::tests::song(), &rests, None)), Some(0..4), rests.clone())
+        );
+        assert_eq!(empty_words(&cant), Some(Empty { title: COULDNT_LOOK, text: why.clone(), filters: false }));
+        // Back to the app's pick: the first list again.
+        assert_eq!(entries(&search(&mut kept, &mut fake, &ask(None, 1), &pool, &go)), entries(&first));
         assert_eq!((fake.songs_read, fake.slots_read), (1, 1));
 
         // The save written again: the song is read again, the slots aren't.
@@ -2014,7 +2162,8 @@ mod tests {
         let filters = Filters::default();
         let song = choice();
         let go = AtomicBool::new(false);
-        let ask = |wanted| Asked { song: &song, wanted, cat: &cat, filters: &filters, slots_made: 0 };
+        let apps = YourPick::default();
+        let ask = |wanted| Asked { song: &song, wanted, yours: &apps, cat: &cat, filters: &filters, slots_made: 0 };
 
         // The save can't be read: said with the song's name, and tried again the next time (the DAW may have been
         // writing it).
@@ -2031,13 +2180,14 @@ mod tests {
         fake.song = Ok(song_of(vec![lane("Lead", 0, &tune(0))]));
         // Read now. It has a melody alone: asked for parts to play over its chords, the answer is why not.
         let no_chords = search(&mut kept, &mut fake, &ask(Some(Wants::Tune)), &pool, &go);
+        let Answer::CantFit { why, picker } = &no_chords else { panic!("{no_chords:?}") };
         assert_eq!(
-            no_chords,
-            Answer::Nothing(
-                "No chords or bassline found in this song to play over. It has a melody: look for chords for that."
-                    .to_owned()
-            )
+            why,
+            "No chords or bassline found in this song to play over. It has a melody: look for chords for that."
         );
+        // What there is to pick from is still said: the lead, which isn't on.
+        assert_eq!((picker.parts.len(), picker.parts[0].label.as_str(), picker.parts[0].on), (1, "Lead", false));
+        assert_eq!(empty_words(&no_chords), Some(Empty { title: COULDNT_LOOK, text: why.clone(), filters: false }));
         assert_eq!((fake.songs_read, fake.slots_read), (2, 0));
 
         // Told to stop before it starts: nothing is read, and there's nothing to show.
@@ -2053,7 +2203,13 @@ mod tests {
         // No lines: fewer filters could give some, unless what's missing is the index's slots (the MIDI has to be
         // read again first, whatever the filters).
         let with = fitted(&super::tests::song(), None).unwrap().with;
-        let fits = |looked| Answer::Fits { wants: Wants::Tune, to: String::new(), looked, with: Arc::clone(&with) };
+        let fits = |looked| Answer::Fits {
+            wants: Wants::Tune,
+            to: String::new(),
+            looked,
+            with: Arc::clone(&with),
+            picker: Arc::default(),
+        };
         let words = |looked| empty_words(&fits(looked)).map(|e| (e.title, e.text, e.filters));
         assert_eq!(
             words(Looked { looked: 12, not_ready: 3, ..Looked::default() }),
