@@ -51,6 +51,9 @@ impl Pick {
         let mut parts = usual_parts(song, wants);
         let bars = song.busiest_bars(&parts, USUAL_BARS)?;
         parts.retain(|&part| song.plays_in(part, &bars));
+        // Not through `by_hand`, which gives nothing when no part is left (parts with nothing that sounds, in a
+        // damaged save): here the song still has parts of the kind, and the bars they're in, so the page can say
+        // they couldn't be read rather than that the song has none.
         Some(Pick { parts, bars })
     }
 
