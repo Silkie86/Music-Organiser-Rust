@@ -131,14 +131,29 @@ pub fn per_favourite(step: u8) -> u32 {
     (1u32 << step.min(LIKE_STEPS)) - 1
 }
 
+/// How far along the sounds like your favourites are, for the words by the slider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LikeKnown {
+    Yes,
+    Finding,
+    /// They can't be found: the fingerprints couldn't be read.
+    Missing,
+}
+
 /// The words by the Favourites filter's "how adventurous" slider at step `step`: "Only them" at 0, else how many like
-/// each favourite show ("+3 each"), or "Finding…" while they aren't `known` yet.
-pub fn like_favourites_words(step: u8, known: bool) -> String {
+/// each favourite show ("+3 each"), "Finding…" while they're being found, or "No fingerprints" when they can't be.
+pub fn like_favourites_words(step: u8, known: LikeKnown) -> String {
     match (step, known) {
         (0, _) => "Only them".to_owned(),
-        (_, false) => "Finding…".to_owned(),
-        (step, true) => format!("+{} each", per_favourite(step)),
+        (_, LikeKnown::Finding) => "Finding…".to_owned(),
+        (_, LikeKnown::Missing) => "No fingerprints".to_owned(),
+        (step, LikeKnown::Yes) => format!("+{} each", per_favourite(step)),
     }
+}
+
+/// Where the slider is (0 to 1) at step `step`.
+pub fn like_favourites_share(step: u8) -> f32 {
+    f32::from(step.min(LIKE_STEPS)) / f32::from(LIKE_STEPS)
 }
 
 /// The step the slider at `share` (0 to 1 along it) picks, to the nearest.
@@ -343,6 +358,11 @@ pub struct SoundList {
 #[derive(Debug, Default)]
 pub struct LikeFavourites {
     reach: Vec<u32>,
+    /// Which sounds were favourites when it was worked out: one you've since made not a favourite isn't let through
+    /// as one like them (its reach says 0) while it's worked out again.
+    was_favourite: Vec<bool>,
+    /// What it was worked out from ([`SoundList::like_key`]).
+    key: u64,
 }
 
 /// Your say about a sound since it was read: what you changed, over what the sound says.
@@ -665,14 +685,63 @@ impl SoundList {
     /// How close each sound is to your favourites of its type (with your say over which are favourites and each
     /// one's type), from the fingerprints in `index`, for [`SoundList::with_like_favourites`]. Slow on a big library:
     /// call it off the window's thread.
+    /// A copy (the same audio, once the copies are known) of a favourite is never one like them: it's no new sound.
     pub fn like_favourites_in(&self, index: &SoundIndex) -> Arc<LikeFavourites> {
-        let sounds: Vec<(i64, &str, bool)> = (0..self.len())
+        use mo_sounds::near::Role;
+        let was_favourite: Vec<bool> = (0..self.len()).map(|i| self.now_at(i).favourite).collect();
+        // The copy groups that hold a favourite.
+        let copied: std::collections::HashSet<u32> = self.copies.as_deref().map_or_else(Default::default, |c| {
+            c.group_of.iter().filter(|(i, _)| was_favourite[**i]).map(|(_, g)| *g).collect()
+        });
+        let sounds: Vec<(i64, &str, Role)> = (0..self.len())
             .map(|i| {
                 let now = self.now_at(i);
-                (now.sound.id, now.sound_type, now.favourite)
+                let copy = || self.copies.as_ref().and_then(|c| c.group_of.get(&i)).is_some_and(|g| copied.contains(g));
+                let role = if was_favourite[i] {
+                    Role::Favourite
+                } else if copy() {
+                    Role::Out
+                } else {
+                    Role::Other
+                };
+                (now.sound.id, now.sound_type, role)
             })
             .collect();
-        Arc::new(LikeFavourites { reach: mo_sounds::near::reach(index, &sounds) })
+        let reach = mo_sounds::near::reach(index, &sounds);
+        Arc::new(LikeFavourites { reach, was_favourite, key: self.like_key() })
+    }
+
+    /// What how close the sounds are to your favourites is worked out from, as a number: which are favourites, each
+    /// one's type (in any case), and which are copies of each other. The same number, the same answer (for the same
+    /// fingerprints). Goes through every sound: call it off the window's thread.
+    pub fn like_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.len().hash(&mut h);
+        for i in 0..self.len() {
+            let now = self.now_at(i);
+            now.favourite.hash(&mut h);
+            for b in now.sound_type.bytes() {
+                b.to_ascii_lowercase().hash(&mut h);
+            }
+            0xffu8.hash(&mut h);
+        }
+        self.copies.as_ref().map(|c| Arc::as_ptr(c) as usize).hash(&mut h);
+        h.finish()
+    }
+
+    /// The closeness this list holds, when it was worked out from what `key` says ([`SoundList::like_key`]): a list
+    /// made again with nothing in it changed (a tag, the use counts) needs it worked out no more.
+    pub fn like_favourites_for(&self, key: u64) -> Option<Arc<LikeFavourites>> {
+        self.like.clone().filter(|l| l.key == key)
+    }
+
+    /// The closeness `other` knows, when it shares this list's sounds and this list knows none yet (a list with the
+    /// use counts in, made from the same sounds).
+    pub fn keep_like_favourites_of(&mut self, other: &SoundList) {
+        if self.like.is_none() && self.shares_with(other) {
+            self.like = other.like.clone();
+        }
     }
 
     /// This list with `like` (from [`SoundList::like_favourites_in`] on a list sharing its sounds): the Favourites
@@ -967,7 +1036,10 @@ impl SoundList {
         let s = now.sound;
         if t.favourites
             && !now.favourite
-            && !self.like.as_ref().is_some_and(|like| like.reach.get(i).is_some_and(|&r| r < t.per_favourite))
+            && !self.like.as_ref().is_some_and(|like| {
+                like.reach.get(i).is_some_and(|&r| r < t.per_favourite)
+                    && !like.was_favourite.get(i).copied().unwrap_or(true)
+            })
         {
             return false;
         }
@@ -1920,6 +1992,21 @@ mod tests {
         assert_eq!(on.cleared(), off);
         // Kept by a list sharing the sounds; one for other sounds isn't taken.
         assert!(like.sharing().knows_like_favourites());
+        let mut with_use = list.sharing();
+        with_use.keep_like_favourites_of(&like);
+        assert!(with_use.knows_like_favourites());
+        assert!(with_use.like_favourites_for(list.like_key()).is_some());
+        // The favourite made not one: it shows no more while the closeness is worked out again, and the key differs.
+        let say = HashMap::from([(1, YourSay { favourite: Some(false), ..YourSay::default() })]);
+        let unhearted = like.with_say(Arc::new(say));
+        assert!(unhearted.like_favourites_for(unhearted.like_key()).is_none());
+        assert!(!shown(&unhearted, 2).contains(&1));
+        // A copy of the favourite (the same audio) is no sound like it: 2 is left out, 3 and 4 come in its place.
+        let same = SameAudio { groups: vec![vec![1, 2]], ..Default::default() };
+        let mut copied = list.clone();
+        copied.set_copies(&same);
+        let copied = copied.with_like_favourites(copied.like_favourites_in(&index));
+        assert_eq!(shown(&copied, 1), [1, 3]);
         assert!(
             !SoundList::new(Vec::new()).with_like_favourites(list.like_favourites_in(&index)).knows_like_favourites()
         );
@@ -1927,9 +2014,11 @@ mod tests {
             (per_favourite(0), per_favourite(1), per_favourite(LIKE_STEPS), per_favourite(99)),
             (0, 1, 255, 255)
         );
-        assert_eq!(like_favourites_words(0, false), "Only them");
-        assert_eq!(like_favourites_words(2, false), "Finding…");
-        assert_eq!(like_favourites_words(2, true), "+3 each");
+        assert_eq!(like_favourites_words(0, LikeKnown::Finding), "Only them");
+        assert_eq!(like_favourites_words(2, LikeKnown::Finding), "Finding…");
+        assert_eq!(like_favourites_words(2, LikeKnown::Missing), "No fingerprints");
+        assert_eq!(like_favourites_words(2, LikeKnown::Yes), "+3 each");
+        assert_eq!((like_favourites_share(0), like_favourites_share(4), like_favourites_share(99)), (0.0, 0.5, 1.0));
         assert_eq!(
             [0.0, 0.06, 0.07, 0.5, 1.0, 2.0, -1.0, f32::NAN].map(like_favourites_step),
             [0, 0, 1, 4, LIKE_STEPS, LIKE_STEPS, 0, 0]

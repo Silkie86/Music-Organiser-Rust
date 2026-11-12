@@ -32,6 +32,8 @@ struct Ask {
     look: u64,
     list: Arc<SoundList>,
     index: Arc<SoundIndex>,
+    /// The fingerprints are the ones the list's closeness was last worked out from.
+    same_index: bool,
 }
 
 thread_local! {
@@ -72,12 +74,21 @@ pub(super) fn wanted(app: &AppWindow) {
     let ask = LOOK.with(|l| {
         let mut l = l.borrow_mut();
         l.look += 1;
+        let same_index = l.of.as_ref().is_some_and(|(_, i)| std::ptr::eq(i.as_ptr(), Arc::as_ptr(&index)));
         l.of = Some((Arc::downgrade(&list), Arc::downgrade(&index)));
         l.busy = true;
         if l.worker.is_none() {
             let weak = app.as_weak();
             match Newest::start("Sounds like favourites", move |ask: Ask| {
-                let like = background::on_pool(|| ask.list.like_favourites_in(&ask.index));
+                // A list made again with nothing in it that counts changed (a tag, the use counts, the copies looked
+                // at again the same) keeps what it had, for the same fingerprints.
+                let like = background::on_pool(|| {
+                    let key = ask.list.like_key();
+                    match ask.list.like_favourites_for(key).filter(|_| ask.same_index) {
+                        Some(same) => same,
+                        None => ask.list.like_favourites_in(&ask.index),
+                    }
+                });
                 let weak = weak.clone();
                 let _ = slint::invoke_from_event_loop(move || {
                     if let Some(app) = weak.upgrade() {
@@ -88,12 +99,14 @@ pub(super) fn wanted(app: &AppWindow) {
                 Ok(worker) => l.worker = Some(worker),
                 Err(e) => {
                     log::error("Sounds", &format!("Couldn't start finding sounds like your favourites: {e}"));
+                    // Tried again the next time the list or the filters change.
                     l.busy = false;
+                    l.of = None;
                     return None;
                 }
             }
         }
-        Some(Ask { look: l.look, list: list.clone(), index: index.clone() })
+        Some(Ask { look: l.look, list: list.clone(), index: index.clone(), same_index })
     });
     if let Some(ask) = ask {
         LOOK.with(|l| {

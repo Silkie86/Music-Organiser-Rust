@@ -31,7 +31,7 @@ use mo_app::backup::thousands;
 use mo_app::filters::{Filter, Shown as Choice};
 use mo_app::galaxy_grid::Grid;
 use mo_app::galaxy_view::{Hold, Moved, View};
-use mo_app::sounds::{Order, SoundCounts, TEMPO_HIGH, TEMPO_LOW, TEMPO_STEP, TYPE_CHIPS};
+use mo_app::sounds::{LikeKnown, Order, SoundCounts, TEMPO_HIGH, TEMPO_LOW, TEMPO_STEP, TYPE_CHIPS};
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, TargetPixel,
 };
@@ -130,8 +130,9 @@ struct Slots {
     found: Mutex<Option<(u64, Vec<usize>, SoundCounts)>>,
     /// Counts askings: only the newest one's answer is shown.
     searches: AtomicU64,
-    /// The sounds like your favourites have been worked out (or couldn't be): the list is asked for again.
-    like_done: AtomicBool,
+    /// This panel has shown the list with the sounds like your favourites in (or said they couldn't be found), once
+    /// they were known: the library is shared by every panel, so each looks for itself ([`Window::tick`]).
+    like_shown: AtomicBool,
     played: Mutex<Option<Played>>,
     /// A line dragged out: which, and its file, once it's been checked to be there (or written, for a MIDI part),
     /// or why it can't go.
@@ -1247,14 +1248,18 @@ impl Shown {
                     self.lines.show(Some(Arc::clone(&library)), Arc::default());
                     self.panel.set_status("Getting the list ready".into());
                     self.column.show(&self.panel, Some(&library), &self.asked.borrow());
+                    like_wanted(&library, &self.asked.borrow(), &self.slots);
                     view(library, self.asked.borrow().clone(), Arc::clone(&self.slots));
                 }
                 Read::Not(why) => self.panel.set_status(why.into()),
             }
         }
-        if self.slots.like_done.swap(false, Ordering::AcqRel)
-            && let Some(library) = self.lines.library.borrow().clone()
+        // The sounds like your favourites became known (whichever panel asked for them): the list again, once.
+        if let Some(library) = self.lines.library.borrow().clone()
+            && !self.slots.like_shown.load(Ordering::Acquire)
+            && matches!(library.like(), Like::Ready(_) | Like::Not(_))
         {
+            self.slots.like_shown.store(true, Ordering::Release);
             let asked = self.asked.borrow().clone();
             self.column.show(&self.panel, Some(&library), &asked);
             view(library, asked, Arc::clone(&self.slots));
@@ -1581,16 +1586,14 @@ fn count_line(total: usize, found: Option<usize>) -> String {
 }
 
 /// Starts working out the sounds like your favourites on a background thread, when `asked` wants them and they haven't
-/// been yet: the list is asked for again once they're known ([`Slots::like_done`]).
-fn like_wanted(library: &Arc<Library>, asked: &Asked, slots: &Arc<Slots>) {
+/// been yet: every panel shows the list again once they're known ([`Slots::like_shown`]).
+fn like_wanted(library: &Arc<Library>, asked: &Asked, slots: &Slots) {
     if !library.start_like(asked) {
         return;
     }
-    let (library, slots) = (Arc::clone(library), Arc::clone(slots));
-    background("mo-plugin-like", move || {
-        library.read_like();
-        slots.like_done.store(true, Ordering::Release);
-    });
+    slots.like_shown.store(false, Ordering::Release);
+    let stopped = library::Stopped(Arc::clone(library));
+    background("mo-plugin-like", move || stopped.0.read_like());
 }
 
 /// Works out what `asked` shows of `library` on a background thread; it lands in `slots.found` with this asking's
@@ -1637,12 +1640,13 @@ impl Column {
         panel.set_mix_well(asked.filters.mix_well);
         panel.set_favourites(asked.filters.favourites);
         let step = asked.filters.like_favourites;
-        panel.set_like_favourites(f32::from(step) / f32::from(mo_app::sounds::LIKE_STEPS));
-        let words = match library.map(Library::like) {
-            Some(Like::Not(_)) if step > 0 => "Not found".to_owned(),
-            like => mo_app::sounds::like_favourites_words(step, matches!(like, Some(Like::Ready(_)))),
+        panel.set_like_favourites(mo_app::sounds::like_favourites_share(step));
+        let known = match library.map(Library::like) {
+            Some(Like::Ready(_)) => LikeKnown::Yes,
+            Some(Like::Not(_)) => LikeKnown::Missing,
+            _ => LikeKnown::Finding,
         };
-        panel.set_like_favourites_words(words.into());
+        panel.set_like_favourites_words(mo_app::sounds::like_favourites_words(step, known).into());
         panel.set_tempo_low(chips.tempo.low);
         panel.set_tempo_high(chips.tempo.high);
         panel.set_tempo_words(chips.tempo.words.as_str().into());

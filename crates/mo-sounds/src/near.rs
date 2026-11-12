@@ -3,15 +3,15 @@
 //! limited to favourites and make that something you can adjust how adventurous").
 //!
 //! Each sound is compared with the favourites of its type (a kick with your favourite kicks), in the same fingerprints
-//! "Sounds like this" uses ([`SoundIndex::active`]). The sounds of a type are then put in order, the closest first,
-//! and each is given its reach ([`reach`]): how many sounds like each favourite must be let through for it to show. With
-//! 10 favourite kicks, the 10 kicks closest to them have reach 0, the next 10 reach 1, and so on, so "3 like each"
-//! shows the 30 kicks most like them.
+//! "Sounds like this" uses ([`SoundIndex::active`]), and goes with the favourite it's most like. Each favourite's sounds
+//! are then put in order, the closest first, and each is given its reach ([`reach`]): how many sounds like each
+//! favourite must be let through for it to show. So "3 like each" shows the 3 sounds most like every favourite, not
+//! 30 piled round one of them in a crowded corner while the others get none.
 //!
-//! A type with many favourites is compared with at most [`POINTS`] of them, picked to be as unlike each other as they
-//! can be (each one is the favourite least like those picked so far), so a sound close to any favourite is still
-//! found close, and a big library is gone through in a moment. Every sound is scored on rayon's threads: call it on the
-//! app's low-priority pool, never the window's thread.
+//! A type with many favourites is compared through at most [`POINTS`] of them, picked to be as unlike each other as
+//! they can be (each one is the favourite least like those picked so far): the favourites close to a picked one share
+//! its sounds, as many more as there are of them. So a big library is gone through in a moment. Every sound is scored
+//! on rayon's threads: call it on the app's low-priority pool, never the window's thread.
 
 use rayon::prelude::*;
 
@@ -23,11 +23,22 @@ pub const POINTS: usize = 24;
 /// A sound's reach when no favourite of its type is known (or it has no fingerprint): it never shows as one like them.
 pub const NEVER: u32 = u32::MAX;
 
-/// For each of `sounds` (its id, its type as shown, and whether it's a favourite), in the same order: how many sounds
-/// like each favourite of its type must be let through for it to show ([`NEVER`] when it can't be). A favourite's is 0.
-/// Types are matched in any case ("kick" is Kick), as the Type filter matches them. A sound the fingerprints don't
-/// have, and every sound of a type with no favourite that has one, is [`NEVER`].
-pub fn reach(index: &SoundIndex, sounds: &[(i64, &str, bool)]) -> Vec<u32> {
+/// What a sound is to the favourites.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    Favourite,
+    /// One that may be like them.
+    Other,
+    /// Never one like them: the very same audio as a favourite (a copy in another pack is no new sound to try).
+    Out,
+}
+
+/// For each of `sounds` (its id, its type as shown, and what it is to the favourites), in the same order: how many
+/// sounds like each favourite of its type must be let through for it to show ([`NEVER`] when it can't be). A
+/// favourite's is 0. Types are matched in any case ("kick" is Kick), as the Type filter matches them. A sound the
+/// fingerprints don't have, every sound of a type with no favourite that has one, and every [`Role::Out`], is
+/// [`NEVER`].
+pub fn reach(index: &SoundIndex, sounds: &[(i64, &str, Role)]) -> Vec<u32> {
     let index = index.active();
     let mut out = vec![NEVER; sounds.len()];
     // Each type's places. A library has a few dozen types at most, so a list is quicker than lowering each name.
@@ -41,33 +52,53 @@ pub fn reach(index: &SoundIndex, sounds: &[(i64, &str, bool)]) -> Vec<u32> {
     for (_, places) in by_type {
         let favourites: Vec<Vec<f32>> = places
             .iter()
-            .filter(|&&i| sounds[i].2)
+            .filter(|&&i| sounds[i].2 == Role::Favourite)
             .filter_map(|&i| index.get(sounds[i].0).map(|v| v.into_owned()))
             .collect();
         if favourites.is_empty() {
             continue;
         }
         let points = spread(&favourites, POINTS);
-        let mut scored: Vec<(usize, f64)> = places
-            .par_iter()
-            .filter(|&&i| !sounds[i].2)
-            .filter_map(|&i| {
-                let best =
-                    points.iter().filter_map(|p| index.dot_with(sounds[i].0, p)).fold(f64::NEG_INFINITY, f64::max);
-                best.is_finite().then_some((i, best))
-            })
-            .collect();
-        // The closest first; equal ones by id, so the same sounds always come out the same.
-        scored.par_sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(sounds[a.0].0.cmp(&sounds[b.0].0)));
-        let each = favourites.len();
-        for (rank, (i, _)) in scored.into_iter().enumerate() {
-            out[i] = u32::try_from(rank / each).unwrap_or(NEVER - 1);
+        // How many favourites each picked one stands for: itself and those closest to it.
+        let mut stands_for = vec![0usize; points.len()];
+        for f in &favourites {
+            stands_for[closest(&points, |p| Some(dot(f, p))).map_or(0, |(at, _)| at)] += 1;
         }
-        for &i in places.iter().filter(|&&i| sounds[i].2) {
+        // Each sound with the picked favourite it's most like, and how like.
+        let scored: Vec<(usize, usize, f64)> = places
+            .par_iter()
+            .filter(|&&i| sounds[i].2 == Role::Other)
+            .filter_map(|&i| closest(&points, |p| index.dot_with(sounds[i].0, p)).map(|(at, like)| (i, at, like)))
+            .collect();
+        let mut by_point: Vec<Vec<(usize, f64)>> = vec![Vec::new(); points.len()];
+        for (i, at, like) in scored {
+            by_point[at].push((i, like));
+        }
+        for (group, each) in by_point.iter_mut().zip(&stands_for) {
+            // The closest first; equal ones by id, so the same sounds always come out the same.
+            group.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(sounds[a.0].0.cmp(&sounds[b.0].0)));
+            for (rank, (i, _)) in group.iter().enumerate() {
+                out[*i] = u32::try_from(rank / (*each).max(1)).unwrap_or(NEVER - 1);
+            }
+        }
+        for &i in places.iter().filter(|&&i| sounds[i].2 == Role::Favourite) {
             out[i] = 0;
         }
     }
     out
+}
+
+/// The one of `points` that `like` finds most alike (its place and how alike); none when `like` knows none of them.
+fn closest(points: &[&[f32]], like: impl Fn(&[f32]) -> Option<f64>) -> Option<(usize, f64)> {
+    let mut best: Option<(usize, f64)> = None;
+    for (at, p) in points.iter().enumerate() {
+        if let Some(l) = like(p)
+            && best.is_none_or(|(_, b)| l > b)
+        {
+            best = Some((at, l));
+        }
+    }
+    best
 }
 
 /// At most `max` of `vectors` (unit length), as unlike each other as they can be: the first, then each time the one
@@ -115,20 +146,25 @@ mod tests {
             (6, [1.0, 0.0]),
             (7, [0.0, 1.0]),
         ]);
+        use Role::{Favourite as F, Other as O};
         let sounds = [
-            (1, "Kick", true),
-            (2, "Kick", false),
-            (3, "kick", false),
-            (4, "KICK", false),
-            (5, "Kick", true),
-            (6, "Snare", false),
-            (7, "Snare", false),
-            (8, "Kick", false),
+            (1, "Kick", F),
+            (2, "Kick", O),
+            (3, "kick", O),
+            (4, "KICK", O),
+            (5, "Kick", F),
+            (6, "Snare", O),
+            (7, "Snare", O),
+            (8, "Kick", O),
         ];
         let r = reach(&index, &sounds);
-        // 2 and 4 are as close to a favourite each (each is the first two), 3 is the furthest: reach 1 with two
-        // favourites. Favourites 0; snares and the kick without a fingerprint never.
+        // 2 is the closest to favourite 1, 4 to favourite 5: each the first of its own. 3 is as far from either, so
+        // it goes with the first (1), after 2. Favourites 0; snares and the kick without a fingerprint never.
         assert_eq!(r, [0, 0, 1, 0, 0, NEVER, NEVER, NEVER]);
+        // A copy of a favourite (the same audio) is never one like it.
+        let mut copied = sounds;
+        copied[1].2 = Role::Out;
+        assert_eq!(reach(&index, &copied), [0, NEVER, 0, 0, 0, NEVER, NEVER, NEVER]);
     }
 
     #[test]
@@ -142,9 +178,26 @@ mod tests {
     }
 
     #[test]
+    fn each_favourite_gets_its_own_share_not_the_crowded_one_all() {
+        // Favourite 1 sits in a crowd (2, 3, 4 all very close), favourite 5 alone with one sound (6) further off.
+        let index = index(&[
+            (1, [1.0, 0.0]),
+            (2, [0.99, 0.01]),
+            (3, [0.98, 0.02]),
+            (4, [0.97, 0.03]),
+            (5, [0.0, 1.0]),
+            (6, [0.3, 0.7]),
+        ]);
+        use Role::{Favourite as F, Other as O};
+        let sounds = [(1, "Kick", F), (2, "Kick", O), (3, "Kick", O), (4, "Kick", O), (5, "Kick", F), (6, "Kick", O)];
+        // "1 like each": 2 for the first, 6 for the second, though 3 and 4 are closer to a favourite than 6 is.
+        assert_eq!(reach(&index, &sounds), [0, 0, 1, 2, 0, 0]);
+    }
+
+    #[test]
     fn nothing_to_compare_with_reaches_nothing() {
         let index = index(&[(1, [1.0, 0.0])]);
-        assert_eq!(reach(&index, &[(1, "Kick", false)]), [NEVER]);
+        assert_eq!(reach(&index, &[(1, "Kick", Role::Other)]), [NEVER]);
         assert!(reach(&index, &[]).is_empty());
     }
 }

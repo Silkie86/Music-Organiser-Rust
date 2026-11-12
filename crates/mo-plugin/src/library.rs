@@ -152,6 +152,20 @@ impl Library {
     }
 }
 
+/// Held by the work on the sounds like your favourites ([`Library::read_like`]) from when it's asked for: let go with
+/// them still not known (the work stopped part way, a panic, or its thread never started), it says they couldn't be,
+/// rather than "Finding…" for good.
+pub struct Stopped(pub Arc<Library>);
+
+impl Drop for Stopped {
+    fn drop(&mut self) {
+        let mut like = lock(&self.0.like);
+        if matches!(*like, Like::Reading) {
+            *like = Like::Not("it stopped part way".into());
+        }
+    }
+}
+
 /// The sounds' fingerprints in the app's own sound library beside `sounds_db`, made into the index "Sounds like this"
 /// searches, as the app makes it.
 fn fingerprints(sounds_db: &Path, analysed: usize) -> Result<SoundIndex, String> {

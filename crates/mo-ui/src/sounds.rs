@@ -2024,6 +2024,7 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
         // The copies Hide duplicates found meanwhile stay.
         let mut with_use = (*list).clone();
         with_use.keep_copies_of(&p.list);
+        with_use.keep_like_favourites_of(&p.list);
         p.list = Arc::new(with_use);
         // Your say since the sounds were read stays over them.
         yours::keep_showing(&mut p);
@@ -3498,14 +3499,14 @@ fn show_chips(app: &AppWindow) {
         data.set_used(f.used);
         data.set_knows_use(p.list.knows_use());
         data.set_favourites(f.favourites);
-        data.set_like_favourites(f32::from(f.like_favourites) / f32::from(list::LIKE_STEPS));
+        data.set_like_favourites(list::like_favourites_share(f.like_favourites));
         // Without fingerprints nothing can be found like them: it says so rather than "Finding…" for good.
-        let known = p.list.knows_like_favourites() && !like::busy();
-        let words = match &p.no_index {
-            Some(_) if !known && f.like_favourites > 0 => "No fingerprints".to_owned(),
-            _ => list::like_favourites_words(f.like_favourites, known),
+        let known = match (p.list.knows_like_favourites() && !like::busy(), &p.no_index) {
+            (true, _) => list::LikeKnown::Yes,
+            (false, Some(_)) => list::LikeKnown::Missing,
+            (false, None) => list::LikeKnown::Finding,
         };
-        data.set_like_favourites_words(words.into());
+        data.set_like_favourites_words(list::like_favourites_words(f.like_favourites, known).into());
         data.set_hide_copies(f.hide_copies);
         data.set_hide_copies_text(list::hide_copies_text(copies::found()).into());
         data.set_folder(f.folder.as_deref().unwrap_or_default().into());
