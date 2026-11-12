@@ -743,15 +743,16 @@ impl SoundIndex {
         let index = Some(self.active()).filter(|i| i.contains(of.id)).unwrap_or(&self.features);
         let Some(v) = index.get(of.id) else { return Vec::new() };
         let v = &*v;
-        // The C# app asks for 3 times as many and stops there; when hidden copies or other types use those up, this
-        // asks for more, so the list is only short when the library has no more.
+        // The C# app asks for 3 times as many and stops there; when hidden copies, silent sounds or other types use
+        // those up, this asks for more, so the list is only short when the library has no more. A silent sound is like
+        // nothing (its fingerprint is of no sound).
         let mut fetch = max.saturating_mul(3);
         loop {
             let found: Vec<(i64, f64)> = index
                 .nearest(v, fetch)
                 .into_iter()
                 .filter(|(id, _)| *id != of.id)
-                .filter_map(|(id, score)| get(id).filter(|s| !s.hidden).map(|s| (s, score)))
+                .filter_map(|(id, score)| get(id).filter(|s| !s.hidden && !s.is_silent()).map(|s| (s, score)))
                 .filter(|(s, _)| !same_type || s.sound_type == of.sound_type)
                 .map(|(s, score)| (s.id, crate::analyse::round_to(score, 3)))
                 .take(max)
@@ -834,6 +835,17 @@ mod tests {
         assert_eq!(same.iter().map(|x| x.0).collect::<Vec<_>>(), [4, 5]);
         // A sound the index doesn't have: nothing.
         assert!(index.similar(&sound(9, "9.wav"), get, 5, false).is_empty());
+    }
+
+    #[test]
+    fn a_silent_sound_is_like_no_other() {
+        let v = vectors(&[(1, &[1.0, 0.0]), (2, &[0.95, 0.05]), (3, &[0.0, 1.0])]);
+        let mut sounds: Vec<Sound> = (1..=3).map(|id| sound(id, &format!("{id}.wav"))).collect();
+        sounds[1].analysis = Some(crate::SoundAnalysis { peak_db: -120.0, ..crate::SoundAnalysis::default() });
+        let by_id: HashMap<i64, &Sound> = sounds.iter().map(|s| (s.id, s)).collect();
+        let index = SoundIndex { features: VectorIndex::clap(&v), clap: None, deep: false };
+        let s = index.similar(&sounds[0], |id| by_id.get(&id).copied(), 2, false);
+        assert_eq!(s.iter().map(|x| x.0).collect::<Vec<_>>(), [3]);
     }
 
     #[test]

@@ -153,7 +153,19 @@ pub struct SoundAnalysis {
     pub waveform: Peaks,
 }
 
+/// The loudest a silent sound gets, in dB below full scale: under any sample pack's noise floor or dither, and quieter
+/// than Trim silence's quietest level (-70 dB). An empty file, or one of only zeros, measures -120 dB.
+pub const SILENT_DB: f64 = -80.0;
+
 impl SoundAnalysis {
+    /// Whether the sound is silent all through, or empty: its loudest point ([`SoundAnalysis::peak_db`]) is at
+    /// [`SILENT_DB`] or under. That peak is measured with the two sides mixed into one, so a stereo sound whose sides
+    /// cancel out there (one is the other upside down) is still heard: nearly all that's left of it is the difference
+    /// between them, which puts its width near the most there is (1.41).
+    pub fn is_silent(&self) -> bool {
+        self.peak_db <= SILENT_DB && self.width < 1.3
+    }
+
     /// Reads the JSON the C# app stored. `None` when it isn't a readable analysis (the C# app then shows none too).
     pub fn from_json(json: &str) -> Option<SoundAnalysis> {
         let mut a: SoundAnalysis = serde_json::from_str(json).ok()?;

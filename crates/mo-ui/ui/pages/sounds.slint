@@ -351,6 +351,9 @@ export global SoundsData {
     // Hide duplicates: on, and its words with how many copies it hides (or how far finding them has got).
     in property <bool> hide-copies;
     in property <string> hide-copies-text: "Hide duplicates";
+    // Hide silent sounds: on (as it starts), and its words with how many sounds are silent all through or empty.
+    in property <bool> hide-silent: true;
+    in property <string> hide-silent-text: "Hide silent sounds";
     // Favourites from Bitwig: its card in the sound card's place (open), the multisamples in your Bitwig Library folders
     // (listed: they've been looked for), each with its tick (`on`), how many are ticked, whether a look is on (busy),
     // whether Mark as favourites (or Stop) can be clicked, what the last look said and the samples it didn't find.
@@ -373,7 +376,7 @@ export global SoundsData {
     // The forgotten folder clicked on Rediscover that the list is narrowed to (its own sounds), or none.
     in property <string> folder;
     in property <bool> any-filter;
-    // "mix-well", "unused", "used", "favourites", "hide-copies" or "folder".
+    // "mix-well", "unused", "used", "favourites", "hide-copies", "hide-silent" or "folder".
     callback toggle(string);
     callback clear();
 
@@ -2226,6 +2229,12 @@ export component SoundsPage inherits Rectangle {
                         text: SoundsData.hide-copies-text;
                         on: SoundsData.hide-copies;
                         clicked => { SoundsData.toggle("hide-copies"); }
+                    }
+                    // Sounds silent all through, or empty, are left out while it's on (Solomon, 12 Nov 2026).
+                    TickLine {
+                        text: SoundsData.hide-silent-text;
+                        on: SoundsData.hide-silent;
+                        clicked => { SoundsData.toggle("hide-silent"); }
                     }
                     // Favourites picked in Bitwig, saved as multisamples, brought in as the app's favourites.
                     HorizontalLayout {

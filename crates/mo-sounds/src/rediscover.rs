@@ -69,12 +69,12 @@ pub(crate) fn used_in(usage: &HashMap<i64, Usage>, id: i64) -> u32 {
 }
 
 /// The years the sounds' files are dated, newest first, each with how many sounds, for the page's year strip (which
-/// leaves out the years no one picks: `mo_app::year_strip::strip`). Hidden copies are left out, and so is a date that
-/// isn't real (still to come, or before 1981), which is in no year.
+/// leaves out the years no one picks: `mo_app::year_strip::strip`). Hidden copies and silent sounds are left out, as
+/// they're never suggested, and so is a date that isn't real (still to come, or before 1981), which is in no year.
 pub fn years(sounds: &[Sound]) -> Vec<(i32, usize)> {
     let mut counts: std::collections::BTreeMap<i32, usize> = std::collections::BTreeMap::new();
     let dates = RealDates::now();
-    for s in sounds.iter().filter(|s| !s.hidden && dates.local(s.added)) {
+    for s in sounds.iter().filter(|s| !s.hidden && !s.is_silent() && dates.local(s.added)) {
         *counts.entry(s.added.year()).or_default() += 1;
     }
     counts.into_iter().rev().collect()
@@ -95,14 +95,16 @@ fn dated_in(s: &Sound, years: Option<(i32, i32)>, dates: &RealDates) -> bool {
     years.is_none_or(|(first, last)| dates.local(s.added) && (first..=last).contains(&s.added.year()))
 }
 
-/// Suggests unused sounds you might like, best first. `sounds` is the whole library (hidden copies are left out
-/// here), `usage` comes from [`crate::usage::usage`], `index` from [`SoundIndex::build`].
+/// Suggests unused sounds you might like, best first. `sounds` is the whole library (hidden copies and silent sounds
+/// are left out here), `usage` comes from [`crate::usage::usage`], `index` from [`SoundIndex::build`].
 pub fn suggest(sounds: &[Sound], usage: &HashMap<i64, Usage>, index: &SoundIndex, o: &Options) -> Vec<Suggestion> {
     let mut rng = DotnetRandom::new(if o.seed == 0 { fresh_seed() } else { o.seed });
     let index = index.active();
     let sounds: Vec<&Sound> = sounds
         .iter()
-        .filter(|s| !s.hidden && s.analysis.is_some() && s.is_of_types(&o.sound_types) && index.contains(s.id))
+        .filter(|s| {
+            !s.hidden && s.analysis.is_some() && !s.is_silent() && s.is_of_types(&o.sound_types) && index.contains(s.id)
+        })
         .collect();
 
     // Your taste: what you've used, starred, rated or keep playing.
@@ -318,12 +320,13 @@ pub fn why_nothing(sounds: &[Sound], index: &SoundIndex, o: &Options) -> String 
 }
 
 /// Your sample folders by how little of them your projects use, then the biggest first: find forgotten packs.
-/// Hidden copies are left out. A folder spelt two ways (by case) counts once, under the first spelling met.
+/// Hidden copies and silent sounds are left out. A folder spelt two ways (by case) counts once, under the first
+/// spelling met.
 /// As in C#, a project's use of a hidden copy isn't credited to the copy that's shown.
 pub fn folders(sounds: &[Sound], usage: &HashMap<i64, Usage>) -> Vec<FolderUse> {
     let mut at: HashMap<String, usize> = HashMap::new();
     let mut out: Vec<FolderUse> = Vec::new();
-    for s in sounds.iter().filter(|s| !s.hidden) {
+    for s in sounds.iter().filter(|s| !s.hidden && !s.is_silent()) {
         let dir = directory(&s.path);
         let i = *at.entry(folder_letters(dir).collect()).or_insert_with(|| {
             let dir = if cfg!(windows) { dir.replace('/', "\\") } else { dir.to_owned() };
@@ -404,6 +407,24 @@ mod tests {
         assert_eq!(s[0].like, Some(1));
         // The same seed gives the same list.
         assert_eq!(s, suggest(&sounds, &usage, &index, &o));
+    }
+
+    #[test]
+    fn a_silent_sound_is_never_suggested() {
+        // Every kick but 1 (the one you use) silent all through: none is left to suggest.
+        let (mut sounds, usage, index) = library();
+        for s in sounds.iter_mut().filter(|s| s.id > 1 && s.id <= 10) {
+            s.analysis = Some(SoundAnalysis { peak_db: -120.0, ..SoundAnalysis::default() });
+        }
+        let o = Options { sound_types: vec!["Kick".into()], count: 3, seed: 5, ..Options::default() };
+        assert_eq!(suggest(&sounds, &usage, &index, &o), Vec::new());
+        // Nor are they counted in their folder.
+        let kicks = folders(&sounds, &usage).into_iter().find(|f| f.folder.ends_with("Kicks")).unwrap();
+        assert_eq!((kicks.sounds, kicks.used), (1, 1));
+        // A sound that only whispers is no silent one.
+        sounds[4].analysis = Some(SoundAnalysis { peak_db: -70.0, ..SoundAnalysis::default() });
+        let found = suggest(&sounds, &usage, &index, &o);
+        assert_eq!(found.iter().map(|s| s.id).collect::<Vec<_>>(), [5]);
     }
 
     #[test]
