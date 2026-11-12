@@ -226,6 +226,13 @@ impl Lines {
     }
 
     /// The id of the sound on `row`.
+    /// Whether the library knows the sound on `row` as a loop (Trim silence drags a loop as it is).
+    fn is_loop(&self, row: usize) -> bool {
+        let library = self.library.borrow();
+        let Some(&at) = self.shown.borrow().get(row) else { return false };
+        library.as_ref().and_then(|l| l.list.sound(at)).is_some_and(|s| s.analysis.as_ref().is_some_and(|a| a.is_loop))
+    }
+
     fn sound(&self, row: usize) -> Option<i64> {
         let library = self.library.borrow();
         let at = *self.shown.borrow().get(row)?;
@@ -649,13 +656,22 @@ impl Shown {
         panel.set_can_drag(crate::drag::CAN);
         let lines = Rc::clone(&self.lines);
         let slots = Arc::clone(&self.slots);
+        let player = Arc::clone(&self.instance.player);
         panel.on_drag_out(move |row| {
             let Some((row, path)) = usize::try_from(row).ok().and_then(|r| Some((r, lines.path(r)?))) else { return };
             let slots = Arc::clone(&slots);
+            let trim = player.trim();
+            let is_loop = lines.is_loop(row);
             // Whether the file is there is asked off the window's thread: its drive may be asleep or away.
             background("mo-plugin-drag", move || {
                 let path = std::path::PathBuf::from(path);
                 let found = if path.is_file() {
+                    // Trim silence on: the trimmed copy goes instead, as the app drags it (loops go as they are), or
+                    // the whole file when one can't be made, and the log says why.
+                    let (path, why) = mo_app::trim_copy::to_drag(&path, trim, is_loop);
+                    if let Some(why) = why {
+                        crate::log::line("Drag", &why);
+                    }
                     Ok(path)
                 } else {
                     Err(format!("Can't drag {}: the file isn't there", library::name(&path.to_string_lossy())))

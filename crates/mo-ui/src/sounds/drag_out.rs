@@ -1,6 +1,7 @@
 //! Dragging sounds off the Sounds page into a DAW or a folder (`crate::drag` runs the drag): a tile, a line of any
 //! list view, a pad of the kit builder, a "Sounds like this" line, a line of the Galaxy's swept list, or the picked
-//! sound by its card's handle. Each goes out as its own file, where it is on disk: never a copy, never moved (rule 2).
+//! sound by its card's handle. Each goes out as its own file, where it is on disk, never moved (rule 2); with Trim
+//! silence on, as a trimmed copy in the export folder instead ([`mo_app::trim_copy`]), the original left as it is.
 //!
 //! A drag that lands counts towards how liked the sound is, as in the C# app ([`super::did`]; the C# app counted it as
 //! the drag began).
@@ -103,7 +104,15 @@ pub fn card_at_row(app: &AppWindow, row: i32) -> Option<Payload> {
 fn carry(app: &AppWindow, at: usize, spot: Spot) {
     let Some((mut item, unread)) = item(app, at) else { return };
     // By its id: the sounds may be read again while it's carried, and another take its place.
-    let Some(id) = PAGE.with(|p| p.borrow().list.sound(at).map(|s| s.id)) else { return };
+    let Some((id, trim)) = PAGE.with(|p| {
+        let p = p.borrow();
+        p.list.sound(at).map(|s| {
+            let is_loop = s.analysis.as_ref().is_some_and(|a| a.is_loop);
+            (s.id, (p.trim.then_some(p.trim_db), is_loop))
+        })
+    }) else {
+        return;
+    };
     let under_way = drag::start(
         app,
         Drag {
@@ -115,6 +124,13 @@ fn carry(app: &AppWindow, at: usize, spot: Spot) {
                         item.card.title
                     ));
                 }
+                // Trim silence on: the trimmed copy goes instead (made now, or the one made before). One that can't
+                // be made leaves the original to go, and the log says why.
+                let (path, why) = mo_app::trim_copy::to_drag(&item.path, trim.0, trim.1);
+                if let Some(why) = why {
+                    mo_app::log::warning("Sounds", &why);
+                }
+                item.path = path;
                 // Its waveform, for its line on the card, read here too when it wasn't yet (none if it can't be).
                 if let Some(Unread { db, id }) = unread
                     && let Ok(waves) = super::peaks::read(&db, &[id])
