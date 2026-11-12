@@ -271,23 +271,32 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
     }
 
     fn process(&mut self, process: Process, mut audio: Audio, _events: Events) -> Result<ProcessStatus, PluginError> {
+        use clack_plugin::events::event_types::TransportFlags;
         // The DAW's tempo, for MIDI parts played at it (a plain store: nothing here waits).
         if let Some(transport) = process.transport
-            && transport.flags.contains(clack_plugin::events::event_types::TransportFlags::HAS_TEMPO)
+            && transport.flags.contains(TransportFlags::HAS_TEMPO)
         {
             self.player.set_tempo(transport.tempo);
         }
+        // Where the DAW's song is: a part plays in step with it while it plays, and stops when it stops.
+        let song = process.transport.filter(|t| t.flags.contains(TransportFlags::HAS_BEATS_TIMELINE)).map(|t| {
+            audition::Song {
+                playing: t.flags.contains(TransportFlags::IS_PLAYING),
+                beats: t.song_pos_beats.to_float(),
+                tempo: t.flags.contains(TransportFlags::HAS_TEMPO).then_some(t.tempo),
+            }
+        });
         let Some(mut port) = audio.output_port(0) else { return Ok(ProcessStatus::Continue) };
         let Some(mut channels) = port.channels()?.into_f32() else { return Ok(ProcessStatus::Continue) };
         if channels.channel_count() >= 2 {
             let (mut left, mut right) = channels.split_at_mut(1);
             if let (Some(left), Some(right)) = (left.channel_mut(0), right.channel_mut(0)) {
                 let len = left.len().min(right.len());
-                self.playing.fill(&mut left[..len], &mut right[..len]);
+                self.playing.fill_in_song(&mut left[..len], &mut right[..len], song);
             }
         } else if let Some(only) = channels.channel_mut(0) {
             let len = only.len().min(self.spare.len());
-            self.playing.fill(&mut only[..len], &mut self.spare[..len]);
+            self.playing.fill_in_song(&mut only[..len], &mut self.spare[..len], song);
             // More frames than the DAW said it would ever ask for: the rest stays quiet.
             only[len..].fill(0.0);
         }

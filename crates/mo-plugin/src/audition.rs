@@ -40,6 +40,12 @@ pub struct Voice {
     looping: bool,
     /// A loop whatever the Loop switch says (a MIDI part played with a SoundFont): the switch doesn't change it.
     always: bool,
+    /// How many beats long it is and the DAW's tempo it was made at, when it's made at it (a MIDI part, a loop
+    /// matched to the tempo): it then plays in step with the DAW while the DAW plays at that tempo
+    /// ([`Voice::follow`]).
+    beats: Option<(f64, f64)>,
+    /// Put in step with the DAW since the DAW last started playing.
+    in_step: bool,
 }
 
 impl Voice {
@@ -50,7 +56,17 @@ impl Voice {
             Some(c) => resample(c, from_rate, to_rate),
             None => left.clone(),
         };
-        Voice { left, right, at: 0, begins: 0.0, covers: 1.0, looping: false, always: false }
+        Voice {
+            left,
+            right,
+            at: 0,
+            begins: 0.0,
+            covers: 1.0,
+            looping: false,
+            always: false,
+            beats: None,
+            in_step: false,
+        }
     }
 
     /// Plays round and round while the Loop switch is on (it can be turned off as it plays).
@@ -63,6 +79,32 @@ impl Voice {
     fn always_looped(mut self) -> Voice {
         self.always = true;
         self.looped()
+    }
+
+    /// It's `beats` long, made at the DAW's tempo then (none when that isn't known, or it isn't made at the DAW's
+    /// tempo).
+    fn in_beats(mut self, beats: Option<(f64, f64)>) -> Voice {
+        self.beats = beats.filter(|(b, t)| b.is_finite() && *b > 0.0 && t.is_finite() && *t > 0.0);
+        self
+    }
+
+    /// While the DAW plays, at `song` beats into the song: a sound of known beats plays where the song is in it (a
+    /// 4-bar part at bar 6 plays its second bar), put there when the DAW starts and again whenever the two drift
+    /// apart by more than a few milliseconds (the DAW jumped, or looped back). Not once the DAW's tempo isn't the one
+    /// it was made at (it would drift and be put back over and over): it then plays on as it is.
+    fn follow(&mut self, song: Song) {
+        let len = self.left.len().min(self.right.len());
+        let Some((beats, made_at)) = self.beats else { return };
+        if len == 0 || !song.beats.is_finite() || song.tempo.is_some_and(|t| (t / made_at - 1.0).abs() > 0.002) {
+            return;
+        }
+        let want = ((song.beats.rem_euclid(beats) / beats * len as f64) as usize).min(len - 1);
+        let gap = self.at.abs_diff(want);
+        let apart = gap.min(len.saturating_sub(gap));
+        if !self.in_step || apart > DRIFT {
+            self.at = want;
+            self.in_step = true;
+        }
     }
 
     /// The Loop switch turned on or off while it plays: a sound plays on round, or to its end this time round.
@@ -125,6 +167,21 @@ fn resample(samples: &[f32], from: u32, to: u32) -> Vec<f32> {
         .collect()
 }
 
+/// How far a sound in step with the DAW may drift from it before it's put back in step: 2048 frames (under 50 ms at
+/// 44.1 kHz). The block the DAW hands over starts where the last ended, so in step it doesn't drift at all.
+const DRIFT: usize = 2048;
+
+/// The DAW's song, as its audio thread says it for a block of sound.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Song {
+    /// The DAW is playing (its play head moving).
+    pub playing: bool,
+    /// Where its play head is at the block's start, in beats from the song's start.
+    pub beats: f64,
+    /// Its tempo, when it says.
+    pub tempo: Option<f64>,
+}
+
 /// What the panel asks the audio thread to do.
 pub enum Ask {
     Play(Box<Voice>),
@@ -153,16 +210,32 @@ pub struct Playing {
     /// (The queue is checked for room first, so this stays empty; it's here so nothing is ever freed on this thread.)
     waiting: Option<Box<Voice>>,
     counts: Arc<Counts>,
+    /// The DAW was playing at the last block.
+    was_playing: bool,
 }
 
 impl Playing {
     /// Plays into `left` and `right` (the same length), taking any new asks first. Never waits, never makes or frees
     /// memory: a sound it's done with goes back to the panel's thread to be freed.
     pub fn fill(&mut self, left: &mut [f32], right: &mut [f32]) {
+        self.fill_in_song(left, right, None);
+    }
+
+    /// [`Playing::fill`], with where the DAW's song is (none when the DAW doesn't say). Starting the DAW puts a sound
+    /// of known beats in step with it; stopping it stops what plays.
+    pub fn fill_in_song(&mut self, left: &mut [f32], right: &mut [f32], song: Option<Song>) {
         if let Some(back) = self.waiting.take()
             && let Err(rtrb::PushError::Full(back)) = self.done.push(back)
         {
             self.waiting = Some(back);
+        }
+        if let Some(song) = song {
+            // The DAW stopped: so does the sound (handed back as one that ended), before any new pick is taken, so a
+            // pick made as the DAW stops plays. Only with room to hand it back: else at the next block.
+            if self.was_playing && !song.playing && self.waiting.is_none() {
+                self.retire(None);
+                self.was_playing = false;
+            }
         }
         // An ask is taken only while there's room to hand back the sound it replaces.
         while self.waiting.is_none() && !self.done.is_full() {
@@ -179,6 +252,18 @@ impl Playing {
                 }
                 Err(_) => break,
             }
+        }
+        if let Some(song) = song {
+            if let Some(voice) = &mut self.now {
+                if song.playing {
+                    voice.follow(song);
+                } else {
+                    // Put in step again when the DAW next starts.
+                    voice.in_step = false;
+                }
+            }
+            // A stop not yet handled (no room to hand the sound back) stays to be handled.
+            self.was_playing = song.playing || self.was_playing;
         }
         let mut written = 0;
         if let Some(voice) = &mut self.now {
@@ -261,7 +346,9 @@ pub enum Own {
 }
 
 /// Makes a sound to play, on the reading thread: why not, in plain words.
-pub type Made = Box<dyn FnOnce() -> Result<mo_audio::AudioData, String> + Send>;
+/// It's the sound and, when it's made at the DAW's tempo, how many beats long it is and that tempo (it then plays in
+/// step with the DAW).
+pub type Made = Box<dyn FnOnce() -> Result<(mo_audio::AudioData, Option<(f64, f64)>), String> + Send>;
 
 /// What became of a pick, for the panel's line under the list.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -391,7 +478,7 @@ impl Player {
         *lock(&self.done) = Some(done_out);
         self.rate.store(rate, Ordering::Release);
         self.settle();
-        Playing { asks, done, now: None, waiting: None, counts: Arc::clone(&self.counts) }
+        Playing { asks, done, now: None, waiting: None, counts: Arc::clone(&self.counts), was_playing: false }
     }
 
     /// The DAW stopped the track's audio (its side of the queues has gone with it, and what was playing).
@@ -472,8 +559,19 @@ impl Player {
                     return;
                 }
                 let name = format!("{name}{how}");
+                // A loop matched to the DAW's tempo plays in step with it, when it plays whole (not trimmed).
+                // Its length in beats, a whole number of them (else it would drift against the bars: then it doesn't
+                // follow).
+                let beats = match (stretched, self.tempo(), self.trim_level()) {
+                    (true, Some(tempo), None) if audio.sample_rate > 0 => {
+                        let frames = audio.channels.first().map_or(0, Vec::len);
+                        let beats = frames as f64 / f64::from(audio.sample_rate) * tempo / 60.0;
+                        ((beats - beats.round()).abs() < 0.02 && beats >= 1.0).then_some((beats, tempo))
+                    }
+                    _ => None,
+                };
                 match self.voice_from(&pick, audio, rate, stretched) {
-                    Ok(voice) if self.looping() => self.hand_over(Box::new(voice.looped()), name),
+                    Ok(voice) if self.looping() => self.hand_over(Box::new(voice.looped().in_beats(beats)), name),
                     Ok(voice) => self.hand_over(Box::new(voice), name),
                     Err(why) => Played::Not(why),
                 }
@@ -512,8 +610,8 @@ impl Player {
         let played = match made {
             Err(why) => Played::Not(why),
             Ok(_) if rate == 0 => Played::Not(NOT_STARTED.into()),
-            Ok(audio) => {
-                let voice = Voice::new(&audio.channels, audio.sample_rate, rate).always_looped();
+            Ok((audio, beats)) => {
+                let voice = Voice::new(&audio.channels, audio.sample_rate, rate).always_looped().in_beats(beats);
                 self.hand_over(Box::new(voice), name.into())
             }
         };
@@ -804,6 +902,46 @@ mod tests {
     }
 
     #[test]
+    fn a_part_plays_in_step_with_the_daw_and_stops_when_it_stops() {
+        let player = Player::default();
+        let mut playing = player.start(48_000);
+        // Four beats over eight frames: two frames a beat.
+        let samples: Vec<f32> = (0..8).map(|i| i as f32 / 10.0).collect();
+        let part = Voice::new(&[samples], 48_000, 48_000).always_looped().in_beats(Some((4.0, 120.0)));
+        player.hand_over(Box::new(part), "a".into());
+        let (mut l, mut r) = (vec![9.0; 2], vec![9.0; 2]);
+        let stopped = Some(Song { playing: false, beats: 0.0, tempo: Some(120.0) });
+        // The DAW stopped: it plays from where it was clicked, on its own.
+        playing.fill_in_song(&mut l, &mut r, stopped);
+        assert_eq!(l, [0.0, 0.1].map(|x| x * LEVEL).to_vec());
+        // The DAW starts at beat 5 (bar 2's second beat): the part jumps to its second beat, frame 2.
+        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: true, beats: 5.0, tempo: Some(120.0) }));
+        assert_eq!(l, [0.2, 0.3].map(|x| x * LEVEL).to_vec());
+        // In step, it plays on as it is.
+        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: true, beats: 6.0, tempo: Some(120.0) }));
+        assert_eq!(l, [0.4, 0.5].map(|x| x * LEVEL).to_vec());
+        // The DAW stops: so does the part.
+        playing.fill_in_song(&mut l, &mut r, stopped);
+        assert_eq!(l, vec![0.0; 2]);
+        assert!(playing.now.is_none());
+        // A sound of unknown beats isn't moved, but stops with the DAW too.
+        let sound = Voice::new(&[vec![0.1, 0.2, 0.3]], 48_000, 48_000).looped();
+        player.hand_over(Box::new(sound), "b".into());
+        let (mut l, mut r) = (vec![9.0; 1], vec![9.0; 1]);
+        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: true, beats: 2.5, tempo: Some(120.0) }));
+        assert_eq!(l, vec![0.1 * LEVEL]);
+        playing.fill_in_song(&mut l, &mut r, stopped);
+        assert!(playing.now.is_none());
+        // Made at 120 BPM, the DAW now at 124: it isn't jumped about, it plays on as it is (and still stops).
+        let part = Voice::new(&[vec![0.1, 0.2, 0.3, 0.4]], 48_000, 48_000).always_looped().in_beats(Some((4.0, 120.0)));
+        player.hand_over(Box::new(part), "c".into());
+        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: true, beats: 3.0, tempo: Some(124.0) }));
+        assert_eq!(l, vec![0.1 * LEVEL]);
+        playing.fill_in_song(&mut l, &mut r, Some(Song { playing: false, beats: 3.0, tempo: Some(124.0) }));
+        assert!(playing.now.is_none());
+    }
+
+    #[test]
     fn a_loop_starts_again_at_its_end_until_stopped() {
         let player = Player::default();
         let mut playing = player.start(48_000);
@@ -843,7 +981,7 @@ mod tests {
             |channels: Vec<Vec<f32>>| mo_audio::AudioData { sample_rate: 48_000, channels, ..Default::default() };
         let (tx, rx) = std::sync::mpsc::channel();
         let audio = made(vec![vec![0.5; 4], vec![0.25; 4]]);
-        player.play_made("Chords 01".into(), Box::new(move || Ok(audio)), move |p| tx.send(p).unwrap());
+        player.play_made("Chords 01".into(), Box::new(move || Ok((audio, None))), move |p| tx.send(p).unwrap());
         let told = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         assert!(matches!(&told, Played::Playing(name, _) if name == "Chords 01"), "{told:?}");
         let (mut l, mut r) = (vec![0.0; 6], vec![0.0; 6]);
