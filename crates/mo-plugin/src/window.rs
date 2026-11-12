@@ -10,6 +10,8 @@
 //! On Windows and Mac the window's thread is the DAW's main thread, so nothing slow ever runs on it: reading the
 //! library, searching it and reading a sound all run on background threads at low priority.
 
+mod midi_tab;
+
 use crate::audition::Played;
 use crate::galaxy::{self, Sky};
 use crate::gpu::Gpu;
@@ -129,8 +131,9 @@ struct Slots {
     /// Counts askings: only the newest one's answer is shown.
     searches: AtomicU64,
     played: Mutex<Option<Played>>,
-    /// A line dragged out: its row and its file, once it's been checked to be there, or why it can't go.
-    drag: Mutex<Option<(usize, Result<std::path::PathBuf, String>)>>,
+    /// A line dragged out: which, and its file, once it's been checked to be there (or written, for a MIDI part),
+    /// or why it can't go.
+    drag: Mutex<Option<(Carried, Result<std::path::PathBuf, String>)>>,
     /// A drag out that has ended: its file, when it started and how it ended.
     dragged: Mutex<Option<Dragged>>,
     /// The waveforms read for the lines on show, with their asking's round ([`Kept::to_read`]).
@@ -146,6 +149,13 @@ struct Slots {
     packed: Mutex<Option<galaxy::Packed>>,
     /// The mini-map's picture, with its asking's number ([`Sky::mini_ask`]).
     mini: Mutex<Option<(u64, SkyPixels)>>,
+}
+
+/// The line being dragged out: a row of the Sounds list, or of the MIDI tab's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Carried {
+    Sound(usize),
+    Part(usize),
 }
 
 /// A drag out that has ended: its file, when it started and how it ended.
@@ -488,6 +498,10 @@ struct Shown {
     /// What the search box, the filter column and the order ask of the list.
     asked: Rc<RefCell<Asked>>,
     column: Rc<Column>,
+    /// The MIDI tab.
+    midi: midi_tab::MidiTab,
+    /// What's being dragged out now.
+    carried: Cell<Option<Carried>>,
     /// The sound the "Playing" line names, as the player numbers it: the line goes when that sound ends.
     playing: Cell<Option<u64>>,
     /// The line last clicked to play: its row, its sound and its file.
@@ -550,6 +564,8 @@ impl Shown {
             instance,
             asked: Rc::new(RefCell::new(Asked { seed: seed(), ..Asked::default() })),
             column: Rc::new(Column::default()),
+            midi: midi_tab::MidiTab::new(),
+            carried: Cell::new(None),
             playing: Cell::new(None),
             played: Rc::new(RefCell::new(None)),
             wave_width: Cell::new(waves::WIDTH as f32),
@@ -644,7 +660,7 @@ impl Shown {
                 } else {
                     Err(format!("Can't drag {}: the file isn't there", library::name(&path.to_string_lossy())))
                 };
-                *lock(&slots.drag) = Some((row, found));
+                *lock(&slots.drag) = Some((Carried::Sound(row), found));
             });
         });
         panel.set_orders(ModelRc::new(slint::VecModel::from(
@@ -729,6 +745,7 @@ impl Shown {
         });
 
         self.fill_in_sky();
+        self.midi.fill_in(panel, &self.slots);
         let slots = Arc::clone(&self.slots);
         background("mo-plugin-library", move || *lock(&slots.library) = Some(library::read()));
     }
@@ -1280,6 +1297,7 @@ impl Shown {
             self.lines.waves.borrow_mut().forget();
             self.lines.notify.reset();
         }
+        self.midi.tick(&self.panel);
         self.drag();
         self.waves();
         self.sky();
@@ -1294,11 +1312,15 @@ impl Shown {
         if self.dragging.get() {
             return;
         }
-        let Some((row, found)) = take(&self.slots.drag) else { return };
+        let Some((carried, found)) = take(&self.slots.drag) else { return };
+        self.carried.set(Some(carried));
         match found {
             Ok(path) => {
                 self.dragging.set(true);
-                self.panel.set_carried(i32::try_from(row).unwrap_or(-1));
+                match carried {
+                    Carried::Sound(row) => self.panel.set_carried(i32::try_from(row).unwrap_or(-1)),
+                    Carried::Part(row) => self.panel.set_midi_carried(i32::try_from(row).unwrap_or(-1)),
+                }
                 let (slots, started) = (Arc::clone(&self.slots), Instant::now());
                 crate::drag::file(path.clone(), move |ended| *lock(&slots.dragged) = Some((path, started, ended)));
             }
@@ -1320,6 +1342,7 @@ impl Shown {
         crate::log::took("Drag", &format!("{} {how}", path.display()), started);
         self.dragging.set(false);
         self.panel.set_carried(-1);
+        self.panel.set_midi_carried(-1);
         // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't left
         // pressed.
         let position = self.pointer.get();
@@ -1331,7 +1354,12 @@ impl Shown {
         }
     }
 
+    /// Said under the list the line was dragged from.
     fn say_drag_failed(&self, why: String) {
+        if let Some(Carried::Part(_)) = self.carried.get() {
+            self.panel.set_midi_said(why.into());
+            return;
+        }
         self.playing.set(None);
         self.panel.set_playing(why.into());
     }

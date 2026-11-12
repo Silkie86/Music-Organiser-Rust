@@ -1,0 +1,101 @@
+//! The MIDI tab's parts: a small MIDI index of made-up files, read as the plugin reads the app's, filtered with the
+//! app's own filters, and a part written out as the MIDI file a drag carries.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
+
+use mo_midi::indexer::{self, Wanted};
+use mo_midi::store::MidiStore;
+use mo_midi::{Role, SourceKind};
+use mo_plugin::midi::{self, Asked, Read};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+
+/// A one-track MIDI file at 96 PPQ playing `keys` as quarter notes, one after another.
+fn smf(keys: &[u8]) -> Vec<u8> {
+    let mut track = Vec::new();
+    for &key in keys {
+        track.extend([0x00, 0x90, key, 100, 0x60, 0x80, key, 0]);
+    }
+    track.extend([0x00, 0xFF, 0x2F, 0x00]);
+    let mut out = b"MThd".to_vec();
+    out.extend([0, 0, 0, 6, 0, 0, 0, 1, 0, 96]);
+    out.extend(b"MTrk");
+    out.extend((track.len() as u32).to_be_bytes());
+    out.extend(track);
+    out
+}
+
+const BASS: &[u8] = &[36, 36, 43, 41, 36, 36, 43, 41];
+const TUNE: &[u8] = &[72, 74, 76, 79, 76, 74, 72, 71];
+
+/// A folder of made-up MIDI files and its index, made as the app's MIDI page makes one.
+fn index(name: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("Basslines")).unwrap();
+    std::fs::write(dir.join("Basslines").join("Low 01.mid"), smf(BASS)).unwrap();
+    std::fs::write(dir.join("Tune.mid"), smf(TUNE)).unwrap();
+    let wanted: Vec<Wanted> = ["Basslines/Low 01.mid", "Tune.mid"]
+        .iter()
+        .map(|f| {
+            let path = dir.join(f);
+            let meta = std::fs::metadata(&path).unwrap();
+            let mtime = meta.modified().unwrap().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64;
+            Wanted { path: path.to_string_lossy().into_owned(), kind: SourceKind::File, mtime, size: meta.len() as i64 }
+        })
+        .collect();
+    let db = dir.join("midi-index.db");
+    let mut store = MidiStore::open(&db).unwrap();
+    let pool = rayon::ThreadPoolBuilder::new().num_threads(2).build().unwrap();
+    let plan = indexer::plan(&wanted, &store.stamps().unwrap(), &[], false);
+    let folders = vec![dir.to_string_lossy().into_owned()];
+    indexer::run(&mut store, &plan, &folders, &pool, 2, &AtomicBool::new(false), &|_, _, _| {}).unwrap();
+    db
+}
+
+fn parts(db: &Path) -> std::sync::Arc<midi::Parts> {
+    match midi::read_from(db, 1) {
+        Read::Ready(parts) => parts,
+        Read::Not(why) => panic!("{why}"),
+    }
+}
+
+#[test]
+fn lists_filters_and_writes_a_part_out() {
+    let db = index("mo-plugin-midi");
+    let parts = parts(&db);
+    let (all, counts) = parts.view(&Asked::default());
+    assert_eq!(all.len(), 2);
+    assert_eq!(parts.lines(), 2);
+    // The app's own filters: search words, and a kind.
+    let low = Asked { filters: mo_app::midi::Filters { text: "low".into(), ..Default::default() }, ..Asked::default() };
+    let (found, _) = parts.view(&low);
+    assert_eq!(found.len(), 1);
+    let found_part = parts.entry(found[0]).unwrap();
+    assert!(mo_app::midi::title(found_part).contains("Low 01"), "{}", mo_app::midi::title(found_part));
+    let role = parts.entry(all[0]).unwrap().role();
+    let mut by_kind = Asked::default();
+    by_kind.filters.toggle(mo_app::midi::KIND, role.plural());
+    assert!(parts.view(&by_kind).0.iter().all(|&at| parts.entry(at).unwrap().role() == role));
+    // The filter column has every kind, with counts.
+    let chips = midi::chips(Some(&counts), &Asked::default());
+    assert_eq!(chips.kind.chips.len() + chips.kind.more.len(), Role::ALL.len());
+
+    // Dragged out: a MIDI file of its notes.
+    let file = parts.file(found[0]).unwrap();
+    let bytes = std::fs::read(&file).unwrap();
+    assert!(bytes.starts_with(b"MThd"));
+    assert_eq!(file.extension().and_then(|e| e.to_str()), Some("mid"));
+    std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
+}
+
+#[test]
+fn smallest_part_hides_short_ones() {
+    let db = index("mo-plugin-midi-smallest");
+    let parts = match midi::read_from(&db, 9) {
+        Read::Ready(parts) => parts,
+        Read::Not(why) => panic!("{why}"),
+    };
+    // Both made-up parts have 8 notes.
+    assert_eq!(parts.view(&Asked::default()).0.len(), 0);
+    assert_eq!(parts.lines(), 0);
+}

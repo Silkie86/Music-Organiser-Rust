@@ -24,6 +24,7 @@ pub mod galaxy;
 mod gpu;
 pub mod library;
 pub mod log;
+pub mod midi;
 pub mod state;
 mod threads;
 pub mod waves;
@@ -33,7 +34,9 @@ mod window;
 mod ui {
     slint::include_modules!();
 }
-pub use ui::{ExtensionLine, FilterChoice, FilterView, Panel, SkyName, SoundLine, SweptLine, TrailDot, YearBar};
+pub use ui::{
+    ExtensionLine, FilterChoice, FilterView, Panel, PartLine, SkyName, SoundLine, SweptLine, TrailDot, YearBar,
+};
 
 use audition::{Player, Playing};
 use check::Offered;

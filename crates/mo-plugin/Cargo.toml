@@ -55,6 +55,8 @@ mo-app = { workspace = true }
 # Decoding sounds only: the DAW plays them, not the system's sound output.
 mo-audio = { path = "../mo-audio", default-features = false }
 mo-catch = { path = "../mo-catch" }
+# The app's MIDI index, read-only, for the MIDI tab.
+mo-midi = { path = "../mo-midi" }
 # The galaxy's painter on the graphics card, the one the app draws its Galaxy with.
 mo-sky = { path = "../mo-sky" }
 mo-sounds = { path = "../mo-sounds" }
@@ -79,6 +81,8 @@ windows-core = "0.62"
 # A stand-in DAW for the tests: clack's host side.
 clack-host = { version = "0.2", features = ["clack-plugin"] }
 clack-extensions = { version = "0.2", features = ["audio-ports", "clack-host", "gui", "note-ports", "state"] }
+# The MIDI tab's test makes a small MIDI index of made-up files, as the app's indexer does.
+rayon.workspace = true
 
 [build-dependencies]
 slint-build.workspace = true

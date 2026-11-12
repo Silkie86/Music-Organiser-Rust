@@ -671,17 +671,10 @@ impl Model for Lines {
     }
 }
 
-/// A kind's colour, the Sounds page's colour for the same kind of sound (Keys, Lead, Bass, Vocal, Kick), so the two
-/// pages agree; grey for something else.
+/// A kind's colour, the Sounds page's colour for the same kind of sound (mo-app's, which the plugin's MIDI tab
+/// shares).
 fn colour(role: Role) -> i32 {
-    match role {
-        Role::Chords => 11,
-        Role::Melody => 9,
-        Role::Bass => 8,
-        Role::Arp => 14,
-        Role::Drums => 0,
-        Role::Other => -1,
-    }
+    page::role_colour(role)
 }
 
 fn why_text(p: &StoredPhrase) -> String {

@@ -24,6 +24,18 @@ export struct SoundLine {
     wave: image,
 }
 
+// A part from the app's MIDI index, as a line of the MIDI tab.
+export struct PartLine {
+    // The track or clip's name.
+    title: string,
+    // Where it's from: "Night drive 12 · FL Studio", or "MIDI file in Dark Keys".
+    from: string,
+    // "Piano · Chords · Cm · 8 bars · 64 notes".
+    details: string,
+    // Its kind's colour, as the app's MIDI page has it (a place in the theme's sound type colours; -1 for grey).
+    colour: int,
+}
+
 export struct ExtensionLine {
     // What the extension is for, in plain words.
     name: string,
@@ -206,6 +218,34 @@ export component Panel inherits Window {
     callback pick-order(int);
     callback copy();
 
+    // The MIDI tab: the parts, the status line ("1,234 parts", or what's wrong), the filter column as the app's MIDI
+    // page has it (mo-app's `midi::chips`), the orders, the year strip and the line picked.
+    in property <[PartLine]> parts;
+    in property <string> midi-status;
+    // Said over an empty list ("" for nothing).
+    in property <string> midi-empty;
+    in property <FilterView> kind-filter;
+    in property <FilterView> from-filter;
+    in property <FilterView> part-key-filter;
+    in property <[string]> midi-orders;
+    in property <int> midi-order;
+    in property <[YearBar]> midi-years;
+    in property <int> midi-years-from: -1;
+    in property <int> midi-years-to: -1;
+    in-out property <int> midi-picked: -1;
+    // The row being carried out (-1 for none), and what the drag said ("" for nothing).
+    in property <int> midi-carried: -1;
+    in property <string> midi-said;
+    callback midi-search(string);
+    // A choice was picked or unpicked on a filter ("kind", "from", "key"): its words; or nothing picked on one.
+    callback midi-pick(string, string);
+    callback midi-clear(string);
+    callback midi-pick-order(int);
+    callback midi-years-picked(int, int);
+    callback midi-years-cleared();
+    // A line is being dragged out (onto a track): its row.
+    callback midi-drag-out(int);
+
     title: "Music Organiser";
     preferred-width: 760px;
     preferred-height: 560px;
@@ -235,7 +275,7 @@ export component Panel inherits Window {
             }
             Rectangle { }
             Segmented {
-                choices: ["Sounds", "DAW check"];
+                choices: ["Sounds", "MIDI", "DAW check"];
                 current: root.view;
                 picked(i) => { root.view = i; }
             }
@@ -761,7 +801,140 @@ export component Panel inherits Window {
             }
         }
 
-        if root.view == 1: VerticalLayout {
+        if root.view == 1: HorizontalLayout {
+            spacing: Space.lg;
+            // The filter column, as the app's MIDI page has it.
+            Flickable {
+                width: 196px;
+                content-width: self.width;
+                content-height: max(self.height, part-lists.preferred-height);
+                mouse-drag-pan-enabled: false;
+                part-lists := VerticalLayout {
+                    x: 0;
+                    y: 0;
+                    width: parent.width - Space.md;
+                    alignment: start;
+                    spacing: Space.md;
+                    FilterList {
+                        name: "KIND";
+                        filter: root.kind-filter;
+                        toggled(text) => { root.midi-pick("kind", text); }
+                        cleared => { root.midi-clear("kind"); }
+                    }
+                    FilterList {
+                        name: "FROM";
+                        filter: root.from-filter;
+                        toggled(text) => { root.midi-pick("from", text); }
+                        cleared => { root.midi-clear("from"); }
+                    }
+                    FilterList {
+                        name: "KEY";
+                        filter: root.part-key-filter;
+                        toggled(text) => { root.midi-pick("key", text); }
+                        cleared => { root.midi-clear("key"); }
+                    }
+                }
+            }
+            VerticalLayout {
+                spacing: Space.md;
+                SearchBox {
+                    hint: "Search MIDI";
+                    edited(text) => { root.midi-search(text); }
+                }
+                HorizontalLayout {
+                    spacing: Space.md;
+                    Text {
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                        text: root.midi-status;
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                        overflow: elide;
+                    }
+                    Segmented {
+                        horizontal-stretch: 0;
+                        choices: root.midi-orders;
+                        current: root.midi-order;
+                        pad: Space.md;
+                        picked(i) => { root.midi-pick-order(i); }
+                    }
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                    property <length> years-width: root.midi-years.length > 1 ? 56px : 0px;
+                    if self.years-width > 0: YearRange {
+                        x: parent.width - self.width;
+                        y: 0;
+                        width: parent.years-width;
+                        height: parent.height;
+                        years: root.midi-years;
+                        picked-from: root.midi-years-from;
+                        picked-to: root.midi-years-to;
+                        picked(a, b) => { root.midi-years-picked(a, b); }
+                        cleared => { root.midi-years-cleared(); }
+                    }
+                    if root.midi-empty != "": Text {
+                        x: 0;
+                        width: parent.width - parent.years-width;
+                        height: parent.height;
+                        text: root.midi-empty;
+                        color: Theme.muted;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    ListView {
+                        x: 0;
+                        width: parent.width - parent.years-width;
+                        height: parent.height;
+                        row-height: 48px;
+                        rows: root.parts.length;
+                        for part[i] in root.parts: ListLine {
+                            height: 48px;
+                            selected: i == root.midi-picked;
+                            draggable: root.can-drag;
+                            lifted: i == root.midi-carried;
+                            clicked => { root.midi-picked = i; }
+                            drag-out => { root.midi-drag-out(i); }
+                            HorizontalLayout {
+                                padding-left: Space.md;
+                                padding-right: Space.md;
+                                spacing: Space.sm;
+                                VerticalLayout {
+                                    horizontal-stretch: 0;
+                                    alignment: center;
+                                    Dot { tint: Theme.sound-type(part.colour); }
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    Text {
+                                        text: part.title;
+                                        color: Theme.text;
+                                        font-size: Type.row-title;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: part.from + "  ·  " + part.details;
+                                        color: Theme.faint;
+                                        font-size: Type.meta;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Text {
+                    text: root.midi-said != "" ? root.midi-said : root.can-drag ? "Drag a part onto a track to put it there as a MIDI clip" : "";
+                    color: root.midi-said != "" ? Theme.accent : Theme.faint;
+                    font-size: Type.meta;
+                    overflow: elide;
+                }
+            }
+        }
+
+        if root.view == 2: VerticalLayout {
             spacing: Space.md;
             HorizontalLayout {
                 spacing: Space.md;
