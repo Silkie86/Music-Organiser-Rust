@@ -3449,16 +3449,12 @@ fn show_lists(app: &AppWindow) {
             format!("Reading the rest of your {} sounds…", thousands(all))
         } else if p.list.is_empty() {
             String::new()
-        } else if p.view == HISTORY
-            && (Filters { years: None, ..p.filters.clone() }.any() || !p.filters.search.trim().is_empty())
-        {
+        } else if p.view == HISTORY && (Filters { years: None, ..p.filters.clone() }).any() {
             // The years picked on the year strip don't narrow History, so they don't count here either.
             format!("{} of {} played", thousands(p.history.len()), thousands(p.played.len()))
         } else if p.view != HISTORY
             && p.view != REDISCOVER
-            && (p.filters.any()
-                || !p.filters.search.trim().is_empty()
-                || (p.filters.hide_copies && p.list.copies().is_some_and(|n| n > 0)))
+            && (p.filters.any() || (p.filters.hide_copies && p.list.copies().is_some_and(|n| n > 0)))
         {
             format!("{} of {} sounds", thousands(p.shown.len()), thousands(total))
         } else {
@@ -3520,6 +3516,10 @@ fn show_chips(app: &AppWindow) {
         data.set_hide_copies_text(list::hide_copies_text(copies::found()).into());
         data.set_folder(f.folder.as_deref().unwrap_or_default().into());
         data.set_any_filter(f.any());
+        // The box holds the words the list goes by: Clear filters takes them off too.
+        if data.get_search().as_str() != f.search {
+            data.set_search(f.search.as_str().into());
+        }
         let order = filters::one_of(&Order::ALL.map(Order::name), p.order.name());
         data.set_order_filter(CHOICES.with(|c| c.order.view(&order)));
         // In the List view the heading of the column the list goes by is lit too, with which way (review B5).
