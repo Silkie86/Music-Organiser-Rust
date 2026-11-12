@@ -647,6 +647,9 @@ impl Shown {
         panel.set_trim_choices(ModelRc::new(slint::VecModel::from(
             mo_audio::trim::choices().into_iter().map(SharedString::from).collect::<Vec<_>>(),
         )));
+        panel.set_loop_on(self.instance.player.looping());
+        let player = Arc::clone(&self.instance.player);
+        panel.on_loop_changed(move |on| player.set_loop(on));
         if let Some(db) = self.instance.player.trim() {
             panel.set_trim_level_db(db);
             panel.set_trim_silence(true);
