@@ -151,6 +151,11 @@ pub const LIT_BRIGHTEST: f32 = 1.5;
 /// dimmed too (to [`lit_weight`] of 0), and the left-out ones are kept at about half of it, so what the filters let
 /// through still reads.
 pub const DUST_LIT: f32 = 0.5;
+/// The stars the filters leave out are grey dust, whatever their type's colour, so the ones that match stand out in
+/// theirs: this grey (0 black to 1 white), and the most of it they ever lay over the page, however many crowd
+/// together, so even 450,000 left-out stars stay a faint grey haze under a few hundred that match.
+pub const DUST_GREY: f32 = 0.6;
+pub const DUST_MOST: f32 = 0.22;
 /// About how many of the best lit stars on the view show as points of their own when it's far out, and how many get
 /// spikes: a few thousand points read as "these", more would fill the map.
 const GLINTS: f32 = 2_500.0;

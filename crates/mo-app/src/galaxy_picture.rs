@@ -15,8 +15,8 @@ use rayon::prelude::*;
 
 use crate::galaxy_grid::Crowd;
 use crate::galaxy_look::{
-    self as gl, DUST_LIT, FALLOFF, FAR_GLOW, FAR_HALO, GLOW, GLOW_LIT, HALO, HOT, LIT_BRIGHTEST, Look, MIN_LIT,
-    UNLIT_SIZE, WHITE, lit_size, lit_weight,
+    self as gl, DUST_GREY, DUST_LIT, DUST_MOST, FALLOFF, FAR_GLOW, FAR_HALO, GLOW, GLOW_LIT, HALO, HOT, LIT_BRIGHTEST,
+    Look, MIN_LIT, UNLIT_SIZE, WHITE, lit_size, lit_weight,
 };
 use crate::galaxy_view::View;
 
@@ -169,7 +169,8 @@ impl Picture {
         let largest = if lighting { (r * UNLIT_SIZE * lit_size(1.0)).max(MIN_LIT * self.scale * 1.6) } else { r };
         let biggest = if self.glows { largest * HALO * if lighting { 2.0 } else { 1.0 } } else { largest } + 1.0;
         let bands = h.div_ceil(BAND).max(1);
-        // A left-out star is faint dust, fainter still with Light by on, when the unlit stars on show are dimmed too.
+        // A left-out star is faint grey dust, fainter still with Light by on, when the unlit stars on show are dimmed
+        // too (and however many crowd together, they never get past a faint haze: `dust`).
         let dust = 0.16 * if lighting { DUST_LIT } else { 1.0 };
         // The nebula's squares, lined up with the map so its light holds still as the map is dragged, and the stars
         // just past the picture's edges, whose light spreads onto it.
@@ -233,7 +234,11 @@ impl Picture {
             let y0 = band * BAND;
             cloud.light(rows, w, y0);
             for p in &placed[starts[band]..starts[band + 1]] {
-                disc(rows, w, y0, &p.4);
+                if p.1 {
+                    disc(rows, w, y0, &p.4);
+                } else {
+                    speck(rows, w, y0, &p.4);
+                }
             }
         });
         Drawn { id: self.id, view: self.view, width: w, height: h, pixels }
@@ -304,6 +309,40 @@ fn disc(rows: &mut [Rgba], w: usize, y0: usize, d: &Dot) {
     }
 }
 
+/// Draws a left-out star as grey dust (only its core, at its strength) on the rows in `rows`, as [`disc`] does: the
+/// fuller of dust a pixel already is, the less each speck adds, so it never goes past [`DUST_MOST`] grey.
+fn speck(rows: &mut [Rgba], w: usize, y0: usize, d: &Dot) {
+    let h = rows.len() / w.max(1);
+    let (x, y, r) = (d.x, d.y - y0 as f32, d.r);
+    let (x0, x1) = ((x - r - 1.0).floor().max(0.0) as usize, ((x + r + 1.0).ceil().max(0.0) as usize).min(w));
+    let (top, bottom) = ((y - r - 1.0).floor().max(0.0) as usize, ((y + r + 1.0).ceil().max(0.0) as usize).min(h));
+    for py in top..bottom {
+        let dy = (py as f32 + 0.5 - y).powi(2);
+        for px in x0..x1 {
+            let d2 = (px as f32 + 0.5 - x).powi(2) + dy;
+            let a = (r + 0.5 - d2.sqrt()).clamp(0.0, 1.0) * d.alpha;
+            if a > 0.0 {
+                lay_dust(&mut rows[py * w + px], a);
+            }
+        }
+    }
+}
+
+/// The grey of the left-out stars' dust (0 to 255).
+fn dust_grey() -> u8 {
+    (DUST_GREY * 255.0).round() as u8
+}
+
+/// Lays grey dust on a pixel at strength `a` (0 to 1), only as far as it's under [`DUST_MOST`] alpha: however much
+/// dust lands on it, it stays a faint grey haze. (The shown stars' light is screened on after it.)
+fn lay_dust(o: &mut Rgba, a: f32) {
+    let room = (1.0 - o.a as f32 / (DUST_MOST * 255.0)).max(0.0);
+    if room > 0.0 {
+        let g = dust_grey();
+        screen(o, [g, g, g], a * room);
+    }
+}
+
 /// Lights a pixel with `colour` at strength `a` (0 to 1): a "screen" blend, so light only ever adds, and a lot of it
 /// heads for white without spilling over. The picture's alpha follows its brightest colour, so it stays premultiplied.
 fn screen(o: &mut Rgba, colour: [u8; 3], a: f32) {
@@ -325,8 +364,9 @@ struct Cloud {
     size: f32,
     /// Where the first square's top left corner is on the picture, in pixels (up to the blur's reach before it).
     origin: (f32, f32),
-    /// Each square's colour (the stars' light, averaged) and how thick it is (0 to `CLOUD_LIGHT`).
-    squares: Vec<([f32; 3], f32)>,
+    /// Each square's colour (the shown stars' light, averaged), how thick it is (0 to `CLOUD_LIGHT`) and how thick
+    /// the left-out stars' grey dust is there (0 to [`DUST_MOST`]).
+    squares: Vec<([f32; 3], f32, f32)>,
 }
 
 impl Cloud {
@@ -336,26 +376,29 @@ impl Cloud {
         let cells = columns * rows;
         // Added up on every core: each core's share of the stars into a grid of its own, then the grids together.
         let share = placed.len().div_ceil(rayon::current_num_threads().max(1)).max(1);
-        let add = |mut sums: Vec<[f32; 4]>, (_, shown, _, first, d): &(usize, bool, usize, bool, Dot)| {
+        let add = |mut sums: Vec<[f32; 5]>, (_, shown, _, first, d): &(usize, bool, usize, bool, Dot)| {
             let (fx, fy) = ((d.x - origin.0) / size, (d.y - origin.1) / size);
             // Each star once: on the first band it's in.
             if !first || fx < 0.0 || fy < 0.0 || fx as usize >= columns || fy as usize >= rows {
                 return sums;
             }
-            // A star the filters leave out still glows a little, as it's drawn faint.
-            let weight = if *shown { 1.0 } else { 0.15 };
             let s = &mut sums[fy as usize * columns + fx as usize];
-            s[0] += d.colour[0] as f32 * weight;
-            s[1] += d.colour[1] as f32 * weight;
-            s[2] += d.colour[2] as f32 * weight;
-            s[3] += weight;
+            if *shown {
+                s[0] += d.colour[0] as f32;
+                s[1] += d.colour[1] as f32;
+                s[2] += d.colour[2] as f32;
+                s[3] += 1.0;
+            } else {
+                // A star the filters leave out still glows a little, as grey dust.
+                s[4] += 0.15;
+            }
             sums
         };
-        let sums = placed.par_chunks(share).map(|stars| stars.iter().fold(vec![[0.0f32; 4]; cells], add)).reduce(
-            || vec![[0.0f32; 4]; cells],
+        let sums = placed.par_chunks(share).map(|stars| stars.iter().fold(vec![[0.0f32; 5]; cells], add)).reduce(
+            || vec![[0.0f32; 5]; cells],
             |mut a, b| {
                 for (a, b) in a.iter_mut().zip(&b) {
-                    for j in 0..4 {
+                    for j in 0..5 {
                         a[j] += b[j];
                     }
                 }
@@ -371,11 +414,12 @@ impl Cloud {
         let squares = sums
             .iter()
             .map(|s| {
+                let dust = DUST_MOST * (1.0 - (-s[4] / CLOUD_THICK).exp());
                 if s[3] <= 1e-4 {
-                    return ([0.0; 3], 0.0);
+                    return ([0.0; 3], 0.0, dust);
                 }
                 let colour = [s[0] / s[3], s[1] / s[3], s[2] / s[3]];
-                (colour, CLOUD_LIGHT * (1.0 - (-s[3] / CLOUD_THICK).exp()))
+                (colour, CLOUD_LIGHT * (1.0 - (-s[3] / CLOUD_THICK).exp()), dust)
             })
             .collect();
         Cloud { columns, rows, size, origin, squares }
@@ -399,12 +443,18 @@ impl Cloud {
                 ];
                 let mut colour = [0.0f32; 3];
                 let mut thick = 0.0;
-                for ((c, t), k) in corners {
+                let mut dust = 0.0;
+                for ((c, t, d), k) in corners {
+                    dust += d * k;
                     let k = k * t;
                     thick += k;
                     for j in 0..3 {
                         colour[j] += c[j] * k;
                     }
+                }
+                if dust > 1e-3 {
+                    let g = dust_grey();
+                    screen(o, [g, g, g], dust);
                 }
                 if thick <= 1e-3 {
                     continue;
@@ -417,20 +467,20 @@ impl Cloud {
 }
 
 /// One pass of a box blur over a grid of sums, along its rows (`across`) or down its columns.
-fn blur(sums: &[[f32; 4]], columns: usize, rows: usize, across: bool) -> Vec<[f32; 4]> {
+fn blur(sums: &[[f32; 5]], columns: usize, rows: usize, across: bool) -> Vec<[f32; 5]> {
     let r = CLOUD_BLUR as isize;
     let k = 1.0 / (2 * r + 1) as f32;
-    let mut out = vec![[0.0f32; 4]; sums.len()];
+    let mut out = vec![[0.0f32; 5]; sums.len()];
     out.par_chunks_mut(columns.max(1)).enumerate().for_each(|(y, line)| {
         for (x, cell) in line.iter_mut().enumerate() {
-            let mut acc = [0.0f32; 4];
+            let mut acc = [0.0f32; 5];
             for d in -r..=r {
                 let (sx, sy) = if across { (x as isize + d, y as isize) } else { (x as isize, y as isize + d) };
                 if sx < 0 || sy < 0 || sx as usize >= columns || sy as usize >= rows {
                     continue;
                 }
                 let s = sums[sy as usize * columns + sx as usize];
-                for j in 0..4 {
+                for j in 0..5 {
                     acc[j] += s[j];
                 }
             }
@@ -714,13 +764,54 @@ mod tests {
         assert!(dust(&on) > 0, "still there");
         assert!(dust(&on) < dust(&off), "fainter with Light by on: {} against {}", dust(&on), dust(&off));
     }
+
+    #[test]
+    fn however_many_left_out_stars_crowd_together_they_stay_faint_grey_dust() {
+        // 20,000 left-out stars in a red crowd on the left, one shown red star on the right, far out.
+        let mut view = View::default();
+        (view.width, view.height) = (200.0, 100.0);
+        let mut stars: Vec<Option<StarPoint>> = (0..20_000)
+            .map(|i| Some(StarPoint { x: 0.2 + (i % 100) as f32 * 0.0005, y: 0.45 + (i / 100) as f32 * 0.0005 }))
+            .collect();
+        stars.push(Some(StarPoint { x: 0.75, y: 0.5 }));
+        let n = stars.len();
+        let d = Picture {
+            id: 1,
+            stars: Arc::new(stars),
+            count: n,
+            colours: Arc::new(vec![0; n]),
+            shown: Arc::new(vec![n - 1]),
+            light: Arc::default(),
+            order: Arc::default(),
+            palette: vec![[230, 40, 40], [110, 110, 110]],
+            view,
+            scale: 1.0,
+            crowd: Crowd::even(&view, 1),
+            glows: true,
+        }
+        .draw();
+        let most = (DUST_MOST * 255.0).ceil() as u8 + 2;
+        let mut dusty = 0;
+        for (i, px) in d.pixels.iter().enumerate() {
+            if i % d.width < d.width / 2 && px.a > 0 {
+                dusty += 1;
+                assert!(px.a <= most, "faint: alpha {} at {i}", px.a);
+                assert!(px.r.abs_diff(px.g) <= 2 && px.g.abs_diff(px.b) <= 2, "grey: {px:?} at {i}");
+            }
+        }
+        assert!(dusty > 0, "the dust is still there");
+        let (x, y) = d.view.to_view(0.75, 0.5, 1.0);
+        let star = d.pixels[y as usize * d.width + x as usize];
+        assert!(star.r > star.g + 40 && star.a > most, "the shown star keeps its colour: {star:?}");
+    }
 }
 
 #[cfg(test)]
 mod look {
     use super::*;
 
-    /// Draws 450,000 made-up stars in clumps to a PPM file named by GALAXY_LOOK, to judge the look by eye.
+    /// Draws 450,000 made-up stars in clumps to a PPM file named by GALAXY_LOOK, to judge the look by eye. With
+    /// GALAXY_FEW=n the filters let only one star in n through (318: as Kick with Favourites on a big library).
     #[test]
     #[ignore]
     fn render() {
@@ -764,14 +855,18 @@ mod look {
         ];
         let (l, t, r, b) = gl::on_view(&view);
         let in_view = stars.iter().flatten().filter(|p| p.x >= l && p.x <= r && p.y >= t && p.y <= b).count();
-        let crowd = crate::galaxy_grid::Grid::new(&stars, &(0..n).collect::<Vec<_>>()).crowd(l, t, r, b);
-        assert_eq!(crowd.in_view, in_view);
+        let few: usize = std::env::var("GALAXY_FEW").ok().and_then(|f| f.parse().ok()).unwrap_or(1).max(1);
+        let shown: Vec<usize> = (0..n).step_by(few).collect();
+        let crowd = crate::galaxy_grid::Grid::new(&stars, &shown).crowd(l, t, r, b);
+        if few == 1 {
+            assert_eq!(crowd.in_view, in_view);
+        }
         let p = Picture {
             id: 1,
             stars: Arc::new(stars),
             count: n,
             colours: Arc::new(colours),
-            shown: Arc::new((0..n).collect()),
+            shown: Arc::new(shown),
             light: Arc::default(),
             order: Arc::default(),
             palette,
