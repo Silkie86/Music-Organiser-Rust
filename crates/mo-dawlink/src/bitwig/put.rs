@@ -9,7 +9,11 @@
 //! ([`Link::record_clip`]). It takes as long as the part does to play.
 //!
 //! What it records over is replaced, as when a clip is dropped there: the bars on that track are the part's
-//! afterwards. Bitwig's undo takes it out again.
+//! afterwards. Bitwig's undo takes it out again, but how many presses that takes is untried: the job's last steps
+//! (the launcher clip deleted, the settings put back) may each be a step in Bitwig's undo history, after the take.
+//!
+//! A recording under way stops when [`Bitwig::stop_putting`] asks, or when someone stops Bitwig: the job puts the
+//! settings back, and what played so far stays in the arranger.
 //!
 //! Only in the project the bars were read from (by its name, which is all Bitwig tells the link: see
 //! [`Bitwig::play_with_song`]), on an instrument track, and with Bitwig stopped. Needs the extension 3.19 or later
@@ -22,10 +26,10 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use super::audition::{check_version, same_project, there};
+use super::audition::{check_version, same_project, selected_instrument, there};
 use super::link::Recorded;
 use super::send::{Turn, sentence};
-use super::{Bitwig, Error, Link, SongLoop};
+use super::{Bitwig, Error, Link, SongLoop, TakenOut};
 
 /// The extension version Put in the song needs.
 pub const PUT_NEEDS: &str = "3.19";
@@ -76,7 +80,8 @@ impl Bitwig {
     ///
     /// It goes in `_turn` ([`super::ticket`]), behind the sends, plays and stops asked for before it (so a part the
     /// app was playing there has stopped). `wanted` is asked as its turn comes and again before the recording starts:
-    /// one no longer wanted (the app is closing) puts nothing in ([`Error::Cancelled`]).
+    /// one no longer wanted (the app is closing, or it was called off) puts nothing in ([`Error::Cancelled`]). Once
+    /// it records, [`Bitwig::stop_putting`] stops it.
     pub fn put_in_song(
         &self,
         path: impl AsRef<Path>,
@@ -103,17 +108,7 @@ impl Bitwig {
         if !link.only_in().is_some_and(|open| same_project(open, &bars.project)) {
             return Err(Error::NotTheSong { open: link.hello().project.clone(), song: bars.project.clone() });
         }
-        let track = link.selected_track()?.ok_or(Error::NoTrackSelected)?;
-        if !matches!(track.kind.as_str(), "Instrument" | "Hybrid") {
-            return Err(Error::NotAnInstrumentTrack { name: track.name, kind: track.kind });
-        }
-        let track_id = track.id.ok_or_else(|| {
-            Error::Bitwig(
-                "Bitwig didn't say the selected track's ID, so the app couldn't record the part on it. Install the \
-                 extension again from Settings > DAWs."
-                    .into(),
-            )
-        })?;
+        let (track_id, track) = selected_instrument(&mut link, "record the part on it")?;
         stopped(&mut link)?;
         // Bitwig's own tempo is what the recording takes its time at; a link that doesn't say gets a long wait.
         let now = link.tempo_and_metre().unwrap_or_default();
@@ -131,9 +126,10 @@ impl Bitwig {
         }
         let slot = link.add_clip_to_record(&track_id, &shown)?;
         if !wanted() {
-            return Err(match link.delete_audition_clip(&track_id, slot, false) {
-                Ok(_) => Error::Cancelled,
-                Err(e) => left_in_launcher(&e, &track.name),
+            return Err(if took_out(&mut link, &track_id, slot) {
+                Error::Cancelled
+            } else {
+                left_in_launcher("It was called off before Bitwig recorded anything", &track)
             });
         }
         // The job's own waits (for Bitwig to show each setting, to start, to stop and to show everything back) get
@@ -141,45 +137,75 @@ impl Bitwig {
         let wait = link.change_timeout.saturating_add(playing_time(bars.length, tempo));
         let recorded = match link.record_clip(&track_id, slot, bars.start, bars.length, wait) {
             Ok(recorded) => recorded,
-            // The link refused before it began, in its own words (Bitwig plays, a launcher clip plays, the bars
-            // aren't whole bars of its time signature): nothing changed but the clip, which comes out again.
-            Err(e @ Error::Bitwig(_)) => {
-                return Err(match link.delete_audition_clip(&track_id, slot, false) {
-                    Ok(_) => e,
-                    Err(_) => left_in_launcher(&e, &track.name),
-                });
-            }
             // No answer (it ran out of time, or the connection went): the recording may still be under way, and the
             // job takes its clip out itself when it gets to the end.
-            Err(e) => {
+            Err(e @ (Error::TimedOut | Error::Closed | Error::Lost(_))) => {
                 return Err(Error::Bitwig(format!(
                     "{}. Bitwig may still be recording the part: give it a moment, then have a look there. If its \
-                     clip stays in \u{201c}{}\u{201d}'s clip launcher, delete it there.",
-                    sentence(&e),
-                    track.name
+                     clip stays in \u{201c}{track}\u{201d}'s clip launcher, delete it there.",
+                    sentence(&e)
                 )));
             }
+            // The job ran, and its answer couldn't be read: what it did is only to be seen in Bitwig. The link is
+            // still there, so the clip comes out again if the job left it (the answer would have said).
+            Err(Error::Unexpected) => {
+                let mut said = "Bitwig's answer about the recording wasn't one the app could read, so have a look at \
+                                the track there: the part may be in. Installing the extension again from Settings > \
+                                DAWs may help."
+                    .to_owned();
+                if !took_out(&mut link, &track_id, slot) {
+                    said.push_str(&format!(
+                        " If the part's clip is still in \u{201c}{track}\u{201d}'s clip launcher, delete it there."
+                    ));
+                }
+                return Err(Error::Bitwig(said));
+            }
+            // The link refused before it began, in its own words (Bitwig plays, a launcher clip plays, the bars
+            // aren't whole bars of its time signature), or the ask never went: nothing changed but the clip, which
+            // comes out again.
+            Err(e) => {
+                return Err(if took_out(&mut link, &track_id, slot) {
+                    e
+                } else {
+                    left_in_launcher(&sentence(&e), &track)
+                });
+            }
         };
-        // Also has the link forget the clip was the app's, whoever took it out.
-        let cleared = link.delete_audition_clip(&track_id, slot, false);
-        let clip_left = !recorded.launcher_clip_deleted && cleared.is_err();
+        // Also has the link forget the clip was the app's, whoever took it out. One the job didn't take out and
+        // this doesn't either (Bitwig didn't show it gone) is still there.
+        let clip_left = !took_out(&mut link, &track_id, slot) && !recorded.launcher_clip_deleted;
         let not_back = recorded.not_back.clone().unwrap_or_default();
         match went(&recorded) {
-            Ok(seen) => Ok(PutIn { track: track.name, seen, not_back, clip_left }),
+            Ok(seen) => Ok(PutIn { track, seen, not_back, clip_left }),
             Err(mut why) => {
                 if !not_back.is_empty() {
                     why.push_str(&format!(" Bitwig didn't show these back as they were: {}.", not_back.join(", ")));
                 }
                 if clip_left {
                     why.push_str(&format!(
-                        " The part's clip may still be in \u{201c}{}\u{201d}'s clip launcher there.",
-                        track.name
+                        " The part's clip may still be in \u{201c}{track}\u{201d}'s clip launcher there."
                     ));
                 }
                 Err(Error::Bitwig(why))
             }
         }
     }
+
+    /// Stops the recording [`Bitwig::put_in_song`] has under way, on a connection of its own (that one's waits for
+    /// the recording, and holds the turn). The job ends as soon as it next looks and puts every setting back;
+    /// [`Bitwig::put_in_song`] then says it was stopped part way, and what played so far stays in the arranger.
+    /// False when no recording was running to hear it (it hasn't begun, or is over): ask again while the put is
+    /// still under way.
+    pub fn stop_putting(&self) -> Result<bool, Error> {
+        self.connect()?.abort_recording()
+    }
+}
+
+/// Takes the part's clip out of the clip launcher again, and has the link forget it was the app's. Whether Bitwig
+/// showed it gone: not when the link doesn't answer, nor when it says the clip wasn't deleted (it was gone already,
+/// or Bitwig still shows it).
+fn took_out(link: &mut Link, track_id: &str, slot: usize) -> bool {
+    matches!(link.delete_audition_clip(track_id, slot, false), Ok(TakenOut { deleted: true, .. }))
 }
 
 /// Waits for Bitwig to show it's stopped: a part the app stopped there a moment ago may still show playing. The
@@ -212,11 +238,11 @@ fn playing_time(length: f64, tempo: Option<f64>) -> Duration {
     Duration::from_secs_f64(seconds)
 }
 
-/// What a failure says when the part's clip couldn't be taken out of the clip launcher again.
-fn left_in_launcher(why: &Error, track: &str) -> Error {
+/// What a failure says (`why`, with no full stop) when the part's clip couldn't be taken out of the clip launcher
+/// again.
+fn left_in_launcher(why: &str, track: &str) -> Error {
     Error::Bitwig(format!(
-        "{}. The part's clip may still be in \u{201c}{track}\u{201d}'s clip launcher there: delete it in Bitwig.",
-        sentence(why)
+        "{why}. The part's clip may still be in \u{201c}{track}\u{201d}'s clip launcher there: delete it in Bitwig."
     ))
 }
 
@@ -242,8 +268,8 @@ fn went(recorded: &Recorded) -> Result<Seen, String> {
         )),
         "didntStart" => Err("Bitwig didn't start playing, so nothing was recorded.".to_owned()),
         "aborted" => Err(format!(
-            "The recording was stopped part way{}. Some of the part may be in the arranger: Bitwig's undo takes it \
-             out.",
+            "The recording was stopped part way{}. Some of the part may be in the arranger: undo in Bitwig takes it \
+             out (it can take a few presses).",
             if why.is_empty() { String::new() } else { format!(" ({why})") }
         )),
         "abandoned" => Err("Another project came to the front in Bitwig while the part was being recorded, so the \

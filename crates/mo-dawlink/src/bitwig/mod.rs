@@ -17,7 +17,7 @@
 //! - [`Bitwig::audition_preset`] then [`Bitwig::stop_audition`] or [`Bitwig::keep_audition`]: a preset on a track of
 //!   its own playing a part (extension 3.20).
 //! - [`Bitwig::put_in_song`]: a MIDI part into the arranger at a song's bars, on the selected track (Bitwig records
-//!   it in from the clip launcher).
+//!   it in from the clip launcher); [`Bitwig::stop_putting`] stops a recording under way.
 //! - [`Bitwig::send_part_for_song`]: [`send_part`] for a part found for a song, with Bitwig's play start moved to
 //!   the first of the song's bars, so it marks where the clip goes (extension 3.23).
 //!

@@ -20,13 +20,13 @@ use std::net::{Ipv4Addr, Shutdown, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use mo_formats::paths::{file_name, stem};
 use serde_json::{Map, Value, json};
 
 use super::link::{ascii_json, take_message};
-use super::{Bitwig, DRUM_MACHINE_NAME, DeviceId, Hello, PLAY_START_NEEDS, PORT, WITH_SONG_NEEDS};
+use super::{Bitwig, DRUM_MACHINE_NAME, DeviceId, Hello, Metre, PLAY_START_NEEDS, PORT, WITH_SONG_NEEDS};
 
 /// The extension's words when "Let the app make changes" is off.
 pub const CHANGES_OFF: &str = "Changes are turned off. To let the app change things, turn on \"Let the app make \
@@ -195,8 +195,28 @@ pub struct World {
     pub arranger: Vec<FakeArrangerClip>,
     /// How the next `record` goes.
     pub recording: FakeRecording,
+    /// Whether Bitwig doesn't show a clip gone once the link deletes it: `deleteclip` answers `deleted` false, the
+    /// `record` job `launcherClipDeleted` false, and the clip stays in its slot.
+    pub clips_stay: bool,
+    /// The `record` job under way: one whose answer is still to come ([`World::late`]), which `recordabort` reaches.
+    under_way: Option<UnderWay>,
     /// How many tracks have been made, for their IDs.
     made: usize,
+}
+
+/// A `record` job whose answer is still to come ([`World::under_way`]).
+#[derive(Clone, Debug, PartialEq)]
+struct UnderWay {
+    /// Where its take is in [`World::arranger`].
+    take: usize,
+    /// The launcher clip it records from: the track's place in the listing, the slot and the file.
+    track: usize,
+    slot: usize,
+    file: String,
+    /// A bar's length in beats: what an aborted take keeps.
+    bar: f64,
+    /// Whether `recordabort` asked it to stop.
+    abort_asked: bool,
 }
 
 /// A clip the link's `record` job recorded into the arranger ([`World::arranger`]).
@@ -226,6 +246,9 @@ pub struct FakeRecording {
     pub ends: Option<String>,
     /// Whether the link never sees the clip's slot playing.
     pub unseen: bool,
+    /// Whether the job's answer leaves out what it decided, as an extension that answers another way would: the app
+    /// can't read it, though the job ran.
+    pub garbled: bool,
 }
 
 /// The parts of Bitwig's transport an audition with a song's bars sets and puts back ([`World::transport`]).
@@ -309,6 +332,8 @@ impl Default for World {
             time_signature: "4/4".into(),
             arranger: Vec::new(),
             recording: FakeRecording::default(),
+            clips_stay: false,
+            under_way: None,
             made: 0,
         };
         for track in &mut world.tracks {
@@ -447,7 +472,7 @@ impl World {
         };
         let cmd = map.get("cmd");
         let changes = match cmd.and_then(Value::as_str) {
-            Some("hello" | "selectedtrack" | "transport") => false,
+            Some("hello" | "selectedtrack" | "transport" | "recordabort") => false,
             Some(
                 "newtrack" | "insert" | "pads" | "clip" | "deleteclip" | "deletetrack" | "stoptracks" | "record"
                 | "playstart",
@@ -469,6 +494,14 @@ impl World {
                 "playStart": self.transport.play_start, "tempo": self.tempo, "timeSignature": self.time_signature,
             })),
             Some("record") => self.record(map),
+            // As the link's `abortRecording` (3.9): not a change, so it goes with changes off and in any project.
+            Some("recordabort") => {
+                let running = self.under_way.is_some();
+                if let Some(job) = &mut self.under_way {
+                    job.abort_asked = true;
+                }
+                Ok(json!({ "running": running }))
+            }
             Some("playstart") => self.mark_play_start(map),
             Some("deleteclip") => self.delete_clip(map),
             Some("deletetrack") => self.delete_track(map),
@@ -594,7 +627,8 @@ impl World {
         }
         let now =
             at.and_then(|t| self.tracks.get(t)).and_then(|t| t.clips.get(slot)).map(|c| sample_name(c).to_owned());
-        let deleted = matches!((&name, &now), (Some(name), Some(now)) if !now.is_empty() && name == now);
+        let deleted =
+            !self.clips_stay && matches!((&name, &now), (Some(name), Some(now)) if !now.is_empty() && name == now);
         if deleted
             && let Some(t) = at
             && let Some(clip) = self.tracks.get_mut(t).and_then(|t| t.clips.get_mut(slot))
@@ -729,24 +763,18 @@ impl World {
 
     /// A bar's length in beats, from the time signature, as the link's `barLength`.
     fn bar_beats(&self) -> Result<f64, String> {
-        let parts = self
-            .time_signature
-            .split_once('/')
-            .and_then(|(beats, unit)| Some((beats.trim().parse::<u32>().ok()?, unit.trim().parse::<u32>().ok()?)));
-        match parts {
-            Some((beats, unit)) if beats > 0 && unit > 0 => Ok(f64::from(beats) * 4.0 / f64::from(unit)),
-            _ => Err(format!(
-                "The link can't tell a bar's length from Bitwig's time signature \"{}\".",
-                self.time_signature
-            )),
-        }
+        // Read as the app reads it, which is as the link does: one reading, so the two can't differ.
+        Metre { tempo: None, time_signature: self.time_signature.clone() }.bar_beats().ok_or_else(|| {
+            format!("The link can't tell a bar's length from Bitwig's time signature \"{}\".", self.time_signature)
+        })
     }
 
     /// Records a launcher clip into the arranger, as the link's `record` job (3.9) answers once it's through: what
     /// it refuses before it begins (in the link's words), then the take on the track's timeline, the launcher clip
     /// taken out when asked, and what it says it saw. The stand-in doesn't play: the take is there at once, and the
     /// settings the job changes meanwhile (the master's mute, the play start, the transport's switches) are as they
-    /// were again, unless [`World::recording`] says some aren't.
+    /// were again, unless [`World::recording`] says some aren't. A test that has its answer come late
+    /// ([`World::late`]) has the job under way until then, for `recordabort` to stop ([`World::end_recording`]).
     fn record(&mut self, request: &Map<String, Value>) -> Result<Value, String> {
         let id = match request.get("trackId") {
             Some(Value::String(id)) if !id.is_empty() => id.clone(),
@@ -826,16 +854,21 @@ impl World {
         // The take: all of it, or what played before the clip's playing ended early (a bar less).
         let ended = self.recording.ends.clone().unwrap_or_else(|| "done".to_owned());
         let taken = if self.recording.ends.is_some() { (length - bar).max(bar) } else { length };
+        self.under_way =
+            Some(UnderWay { take: self.arranger.len(), track: t, slot, file: file.clone(), bar, abort_asked: false });
         self.arranger.push(FakeArrangerClip { track: id, at, length: taken, file, armed: arm });
         self.modified = true;
-        let deleted = on("deleteLauncherClip", false);
-        if deleted && let Some(clip) = self.tracks.get_mut(t).and_then(|t| t.clips.get_mut(slot)) {
+        // Asked to take the launcher clip out: whether Bitwig showed it gone; not asked, the link says nothing.
+        let deleted = on("deleteLauncherClip", false).then_some(!self.clips_stay);
+        if deleted == Some(true)
+            && let Some(clip) = self.tracks.get_mut(t).and_then(|t| t.clips.get_mut(slot))
+        {
             clip.clear();
         }
         say("decided", if replay { "recorded" } else { "notChecked" }.into());
         say("played", json!({ "from": at, "started": true, "ended": ended, "positionFrom": "bitwig", "heard": 4 }));
         say("seen", json!({ "clipPlayed": !self.recording.unseen, "slotRecording": true }));
-        say("launcherClipDeleted", if deleted { true.into() } else { Value::Null });
+        say("launcherClipDeleted", deleted.map_or(Value::Null, Value::Bool));
         say(
             "after",
             json!({
@@ -843,7 +876,39 @@ impl World {
                 "restoreFailed": self.recording.not_back,
             }),
         );
+        if self.recording.garbled
+            && let Some(map) = answer.as_object_mut()
+        {
+            map.remove("decided");
+        }
         Ok(answer)
+    }
+
+    /// Whether the `record` job under way has been asked to stop (`recordabort`).
+    fn abort_asked(&self) -> bool {
+        self.under_way.as_ref().is_some_and(|job| job.abort_asked)
+    }
+
+    /// Ends the `record` job under way as its answer (`message`) goes. One asked to stop meanwhile answers `aborted`,
+    /// as the link's: what played so far is in the arranger (a bar), and the launcher clip is where it was (the job
+    /// only takes it out after a whole take).
+    fn end_recording(&mut self, message: &mut Value) {
+        let Some(job) = self.under_way.take() else { return };
+        if !job.abort_asked {
+            return;
+        }
+        if let Some(take) = self.arranger.get_mut(job.take) {
+            take.length = take.length.min(job.bar);
+        }
+        if let Some(clip) = self.tracks.get_mut(job.track).and_then(|t| t.clips.get_mut(job.slot)) {
+            *clip = job.file;
+        }
+        let Some(result) = message.get_mut("result").and_then(Value::as_object_mut) else { return };
+        result.insert("decided".into(), "aborted".into());
+        result.insert("launcherClipDeleted".into(), Value::Null);
+        if let Some(played) = result.get_mut("played").and_then(Value::as_object_mut) {
+            played.insert("ended".into(), "aborted".into());
+        }
     }
 
     /// A file in a track's first empty clip launcher slot (of the first 8 the link reaches), as the link's `addClip`.
@@ -1254,11 +1319,22 @@ fn serve(mut stream: TcpStream, world: &Mutex<World>) {
                     return;
                 }
             };
-            let (reply, wait) = handle(&mut lock(world), &String::from_utf8_lossy(&body));
+            let (reply, wait, recording) = handle(&mut lock(world), &String::from_utf8_lossy(&body));
             match reply {
-                Reply::Answer(messages) => {
-                    if let Some(wait) = wait {
-                        thread::sleep(wait);
+                Reply::Answer(mut messages) => {
+                    match wait {
+                        // A recording under way ends as soon as it's asked to stop, as the link's does.
+                        Some(wait) if recording => {
+                            let began = Instant::now();
+                            while began.elapsed() < wait && !lock(world).abort_asked() {
+                                thread::sleep(Duration::from_millis(5));
+                            }
+                        }
+                        Some(wait) => thread::sleep(wait),
+                        None => {}
+                    }
+                    if recording && let Some(answer) = messages.last_mut() {
+                        lock(world).end_recording(answer);
                     }
                     if messages.iter().any(|m| write_message(&mut stream, m, lengths).is_err()) {
                         return;
@@ -1274,21 +1350,22 @@ fn serve(mut stream: TcpStream, world: &Mutex<World>) {
     }
 }
 
-/// Answers one request, as the link does, and says how long to wait first.
-fn handle(world: &mut World, text: &str) -> (Reply, Option<Duration>) {
+/// Answers one request, as the link does, and says how long to wait first, and whether that wait is a `record` job
+/// under way ([`World::end_recording`] ends it).
+fn handle(world: &mut World, text: &str) -> (Reply, Option<Duration>, bool) {
     let Ok(request) = serde_json::from_str::<Value>(text) else {
         world.requests.push(Value::String(text.to_owned()));
         let start: String = text.chars().take(80).collect();
         let error = format!("The request isn't JSON: {start}");
-        return (Reply::Answer(vec![json!({ "id": null, "ok": false, "error": error })]), None);
+        return (Reply::Answer(vec![json!({ "id": null, "ok": false, "error": error })]), None, false);
     };
     world.requests.push(request.clone());
     let cmd = request.get("cmd").and_then(Value::as_str).unwrap_or_default();
     if world.silent.iter().any(|c| c == cmd) {
-        return (Reply::Nothing, None);
+        return (Reply::Nothing, None, false);
     }
     if world.hang_up_on.iter().any(|c| c == cmd) {
-        return (Reply::HangUp, None);
+        return (Reply::HangUp, None, false);
     }
     let wait = world.late.iter().position(|(c, _)| c == cmd).map(|at| world.late.remove(at).1);
     let id = request.get("id").cloned().unwrap_or(Value::Null);
@@ -1296,9 +1373,14 @@ fn handle(world: &mut World, text: &str) -> (Reply, Option<Duration>) {
         Ok(result) => json!({ "id": id, "ok": true, "result": result }),
         Err(error) => json!({ "id": id, "ok": false, "error": error }),
     };
+    // A recording is only under way while its answer is still to come.
+    let recording = cmd == "record" && wait.is_some() && world.under_way.is_some();
+    if cmd == "record" && !recording {
+        world.under_way = None;
+    }
     let mut messages = std::mem::take(&mut world.before_answer);
     messages.push(answer);
-    (Reply::Answer(messages), wait)
+    (Reply::Answer(messages), wait, recording)
 }
 
 /// A message as the extension sends it: the JSON in plain ASCII and a newline, with the length in front (as Bitwig

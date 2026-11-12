@@ -570,6 +570,15 @@ impl Link {
         Recorded::from_json(&answer).ok_or(Error::Unexpected)
     }
 
+    /// Asks the record job running now ([`Link::record_clip`], on another connection: that one waits for its
+    /// answer) to stop (`recordabort`, extension 3.9). The job ends as soon as it next looks, puts every setting
+    /// back and answers `aborted`; what played so far stays in the arranger. Gives back whether a job was running
+    /// to hear it. It isn't a change, so it goes whatever project is in front and with changes off.
+    pub fn abort_recording(&mut self) -> Result<bool, Error> {
+        let answer = self.request(ask("recordabort", []), self.timeout)?;
+        answer.get("running").and_then(Value::as_bool).ok_or(Error::Unexpected)
+    }
+
     /// Puts a MIDI file in the first empty clip launcher slot of the track Bitwig keeps under `track_id` and launches
     /// it (which starts Bitwig playing, in step with the song), noted as the app's audition clip so
     /// [`Link::delete_audition_clip`] may take it out again. Gives back the slot. Extension 3.19 and later.

@@ -359,10 +359,12 @@ pub fn putting_line(with: &SongBars) -> String {
     format!("Bitwig records it in from bar {} on the track selected there", with.bars.start + 1)
 }
 
-/// The line under [`putting`] while Bitwig records the part: which bars, and about how long it takes.
+/// The line under [`putting`] while Bitwig records the part: which bars, about how long it takes, and how to end it
+/// early (the card's button, which reads "Stop the recording" meanwhile).
 pub fn recording_line(place: &PutPlace) -> String {
     format!(
-        "Bitwig is recording it into {} on the track selected there: {}. Leave Bitwig stopped until it's done",
+        "Bitwig is recording it into {} on the track selected there: {}. Leave Bitwig alone until it's done, or stop \
+         the recording from the part's card",
         bars_words(&place.range),
         about_seconds(place.seconds)
     )
@@ -382,6 +384,13 @@ fn about_seconds(seconds: f64) -> String {
 /// The card's headline when a part couldn't be put in its song; the line under it says why.
 pub const PUT_FAILED: &str = "Couldn't put the part in the song";
 
+/// The card's headline when you stopped a part being put in its song; the line under it says what Bitwig has of it
+/// (the link's words), or [`PUT_NOTHING`] when it was stopped before Bitwig recorded.
+pub const PUT_STOPPED: &str = "Stopped putting the part in the song";
+
+/// The line under [`PUT_STOPPED`] when it was stopped before Bitwig recorded anything.
+pub const PUT_NOTHING: &str = "Nothing was recorded.";
+
 /// What the card says once Bitwig has recorded a part into its song: whether all of it was seen to go in, the
 /// headline, and the line under it. `put`: what the link saw
 /// (`mo_dawlink::bitwig::Bitwig::put_in_song`).
@@ -392,7 +401,11 @@ pub fn put_words(put: &PutIn, place: &PutPlace, name: &str, song: &str) -> (bool
         Seen::Whole => (
             true,
             format!("{name} is in {song}"),
-            format!("In {bars} on \u{201c}{track}\u{201d} in Bitwig's arranger. Undo there takes it out again."),
+            // How many presses is untried in a real song: Bitwig may count the tidying up after the take as steps.
+            format!(
+                "In {bars} on \u{201c}{track}\u{201d} in Bitwig's arranger. Undo in Bitwig takes it out again (it \
+                 can take a few presses)."
+            ),
         ),
         Seen::Short => (
             false,
@@ -1348,7 +1361,7 @@ mod tests {
         assert_eq!(
             recording_line(&place),
             "Bitwig is recording it into bars 9\u{2013}12 on the track selected there: about 8 seconds. Leave Bitwig \
-             stopped until it's done"
+             alone until it's done, or stop the recording from the part's card"
         );
         assert_eq!(about_seconds(0.2), "about a second");
         assert_eq!(about_seconds(49.0), "about 49 seconds");
@@ -1369,7 +1382,8 @@ mod tests {
             (
                 true,
                 "Saw Lead is in Night drive".to_owned(),
-                "In bars 9\u{2013}12 on \u{201c}Bass\u{201d} in Bitwig's arranger. Undo there takes it out again."
+                "In bars 9\u{2013}12 on \u{201c}Bass\u{201d} in Bitwig's arranger. Undo in Bitwig takes it out again \
+                 (it can take a few presses)."
                     .to_owned()
             )
         );

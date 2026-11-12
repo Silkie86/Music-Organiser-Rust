@@ -285,3 +285,105 @@ fn bitwig_not_answering_in_time_says_it_may_still_be_recording() {
     // Nothing more was asked of a Bitwig that may be recording.
     assert_eq!(bitwig.world().commands().last().map(String::as_str), Some("record"));
 }
+
+#[test]
+fn a_recording_under_way_stops_when_asked() {
+    // The stand-in's recording takes 5 seconds, unless it's asked to stop.
+    let bitwig = with(|w| w.late = vec![("record".into(), Duration::from_secs(5))]);
+    let to = bitwig.bitwig();
+    // Nothing is recording yet: it says so, and the app asks again.
+    assert_eq!(to.stop_putting(), Ok(false));
+    let asked = std::time::Instant::now();
+    let said = std::thread::scope(|scope| {
+        // As the app does: asked until a recording hears it.
+        scope.spawn(|| {
+            while asked.elapsed() < Duration::from_secs(4) && !to.stop_putting().unwrap() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        });
+        put(&bitwig, "Stopped")
+    });
+    assert_eq!(
+        said.unwrap_err().to_string(),
+        "The recording was stopped part way. Some of the part may be in the arranger: undo in Bitwig takes it out (it \
+         can take a few presses)."
+    );
+    assert!(asked.elapsed() < Duration::from_secs(4), "it ended when asked: {:?}", asked.elapsed());
+    let world = bitwig.world();
+    // What played before the stop is in the arranger, and the clip it came from is out of the launcher again.
+    assert_eq!(world.arranger.iter().map(|take| (take.at, take.length)).collect::<Vec<_>>(), [(32.0, 4.0)]);
+    assert_eq!(world.tracks[2].clips, [""]);
+    assert!(world.auditions.is_empty());
+    assert_eq!(world.commands().last().map(String::as_str), Some("deleteclip"));
+    // The stop isn't a change: it's kept to no project, so it reaches the link whatever is in front.
+    let stop = world.requests.iter().find(|r| r["cmd"] == "recordabort").unwrap();
+    assert!(stop.get("onlyIn").is_none(), "{stop}");
+    drop(world);
+    // Once it's over, there's nothing to stop.
+    assert_eq!(to.stop_putting(), Ok(false));
+}
+
+#[test]
+fn a_clip_bitwig_doesnt_show_gone_is_said() {
+    // The take went in, but the clip it came from is still in the launcher.
+    let bitwig = with(|w| w.clips_stay = true);
+    let went = put(&bitwig, "Stays").unwrap();
+    assert_eq!((went.seen, went.clip_left), (Seen::Whole, true));
+    assert!(bitwig.world().tracks[2].clips[0].ends_with("Stays.mid"));
+    // Refused by Bitwig's settings, and the clip stays: the words say where it is.
+    let bitwig = with(|w| {
+        w.clips_stay = true;
+        w.recording.refuses = vec!["pre-roll".into()];
+    });
+    let said = put(&bitwig, "Refused and stays").unwrap_err().to_string();
+    assert_eq!(
+        said,
+        "Bitwig didn't take what the recording needs (pre-roll), so nothing was recorded. The part's clip may still \
+         be in \u{201c}Bass\u{201d}'s clip launcher there."
+    );
+    // Refused by the link before it began: the same.
+    let bitwig = with(|w| {
+        w.clips_stay = true;
+        w.launched = vec![(1, 0)];
+    });
+    let said = put(&bitwig, "Busy and stays").unwrap_err().to_string();
+    assert!(said.starts_with("A launcher clip on \"Kick\" is playing"), "{said}");
+    assert!(
+        said.ends_with(
+            "Stop it, then ask again. The part's clip may still be in \u{201c}Bass\u{201d}'s clip launcher there: \
+             delete it in Bitwig."
+        ),
+        "{said}"
+    );
+    // Called off once its clip was in: the same.
+    let bitwig = with(|w| w.clips_stay = true);
+    let asked = std::cell::Cell::new(0);
+    let wanted = || {
+        asked.set(asked.get() + 1);
+        asked.get() == 1
+    };
+    let said = bitwig.bitwig().put_in_song(part("Called off"), &bars_9_to_12(), &turn(), &wanted);
+    assert_eq!(
+        said.unwrap_err().to_string(),
+        "It was called off before Bitwig recorded anything. The part's clip may still be in \u{201c}Bass\u{201d}'s \
+         clip launcher there: delete it in Bitwig."
+    );
+}
+
+#[test]
+fn an_answer_the_app_cant_read_says_to_look_in_bitwig() {
+    let bitwig = with(|w| w.recording.garbled = true);
+    let said = put(&bitwig, "Garbled").unwrap_err().to_string();
+    // The job ran and took its clip out itself, which the answer would have said: so the app only says to look.
+    assert_eq!(
+        said,
+        "Bitwig's answer about the recording wasn't one the app could read, so have a look at the track there: the \
+         part may be in. Installing the extension again from Settings > DAWs may help. If the part's clip is still in \
+         \u{201c}Bass\u{201d}'s clip launcher, delete it there."
+    );
+    let world = bitwig.world();
+    assert_eq!(world.arranger.len(), 1);
+    // The link was still there, so it was asked to take the clip out, and to forget it was the app's.
+    assert_eq!(world.commands().last().map(String::as_str), Some("deleteclip"));
+    assert!(world.auditions.is_empty());
+}

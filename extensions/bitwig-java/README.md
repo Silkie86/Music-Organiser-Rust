@@ -181,12 +181,16 @@ whether Bitwig's audio engine is on.) The rest is additions, which the app can i
   made meanwhile is where it goes back to then, in place of where it was found.
 - Put in the song (the app, November 2026) needs no new command: it puts the part in a launcher slot of the
   selected track (`clip` with `audition`), has `record` play it once into the arranger at the song's bars, and
-  clears the note with `deleteclip`. The job was tried live on Bitwig 6.1.5 in the test project (October 2026:
-  armed or not, the muted master leaves it alone, the take isn't an alias of the launcher clip). Not yet tried
-  in a real song: a project with many tracks (the job disarms the others for the take, and looks at 128), whether
-  the take replaces what's in those bars as a dropped clip does, what the arranger clip is called, tempo changes
-  inside the bars (the job's time limit goes by the tempo it reads as it starts), and a launcher clip of yours
-  left playing or waiting (the job refuses then, and the app says which track).
+  clears the note with `deleteclip`. Stop the recording there sends `recordabort` on a connection of its own
+  (the first one waits for `record`'s answer), until a job says it was running. The job was tried live on
+  Bitwig 6.1.5 in the test project (October 2026: armed or not, the muted master leaves it alone, the take
+  isn't an alias of the launcher clip). Not yet tried in a real song: a project with many tracks (the job
+  disarms the others for the take, and looks at 128), whether the take replaces what's in those bars as a
+  dropped clip does, what the arranger clip is called, tempo changes inside the bars (the job's time limit goes
+  by the tempo it reads as it starts), a launcher clip of yours left playing or waiting (the job refuses then,
+  and the app says which track), and how many presses of Bitwig's undo take the part out again (after the take
+  the job deletes the launcher clip and puts the master's mute and the tracks' arms back, which Bitwig may
+  count as steps of their own).
 - From 3.22, for the MIDI page's Play in Bitwig in a "Fits my song" list: `clip` with `loop` (the song's bars, in
   beats) stops Bitwig, sets the arranger to go round those bars with Play starting at the first of them, and
   launches the part from its own start (`launchWithOptions("none", "from_start")`), so the part's first bar is

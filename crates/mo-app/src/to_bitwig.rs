@@ -54,20 +54,7 @@ pub fn part_card(feed: &Feed, name: &str) -> Job {
 /// card ([`part_card`]) with how it went. Returns whether it went in as asked. Waits for Bitwig, so never call it on
 /// the window's thread.
 pub fn send_part(job: Job, to: &Bitwig, path: &str, name: &str) -> bool {
-    match to.send_part(path, name) {
-        Ok(sent) if sent.went_in() => {
-            job.done_as(&sent.title(), &sent.detail());
-            true
-        }
-        Ok(sent) => {
-            job.failed_as(&sent.title(), &sent.detail());
-            false
-        }
-        Err(e) => {
-            job.failed_as(bitwig::PART_FAILED, &e.to_string());
-            false
-        }
-    }
+    part_sent(job, to.send_part(path, name), &|_| String::new())
 }
 
 /// [`send_part`] for a part found for a song (`mo_dawlink::bitwig::Bitwig::send_part_for_song`): Bitwig's play start
@@ -81,7 +68,13 @@ pub fn send_part_for_song(
     bars: &bitwig::SongLoop,
     says: &dyn Fn(&bitwig::Mark) -> String,
 ) -> bool {
-    match to.send_part_for_song(path, name, bars) {
+    part_sent(job, to.send_part_for_song(path, name, bars), says)
+}
+
+/// Ends a sent part's card with how it went (`sent`); one that went in as asked also says what `says` gives for its
+/// mark. Returns whether it went in as asked.
+fn part_sent(job: Job, sent: Result<bitwig::SentPart, bitwig::Error>, says: &dyn Fn(&bitwig::Mark) -> String) -> bool {
+    match sent {
         Ok(sent) if sent.went_in() => {
             job.done_as(&sent.title(), &format!("{}{}", sent.detail(), says(&sent.mark)));
             true

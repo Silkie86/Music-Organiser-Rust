@@ -286,23 +286,28 @@ the next PR step by step). Solomon wants the highest effort here.
     can put a clip in the clip launcher but not on the arranger's timeline, so:
     **Put in the song** (a button on a found part's card, `midi.putInSong`, no key by default as it writes into
     the project) has Bitwig record the part in: the part's MIDI file is written to the export folder as Send
-    writes it, goes in a launcher slot of the SELECTED track, the extension's `record` job (3.9, tried live on
-    Bitwig 6.1.5 in October) plays it once into the arranger from the first of the bars it was found for with
-    everything else silenced and disarmed, and the launcher clip comes out again
+    writes it (and removed again once Bitwig has it), goes in a launcher slot of the SELECTED track, the
+    extension's `record` job (3.9, tried live on Bitwig 6.1.5 in October) plays it once into the arranger from
+    the first of the bars it was found for with everything else silenced and disarmed, and the launcher clip
+    comes out again
     (`mo_dawlink::bitwig::Bitwig::put_in_song`, `bitwig/put.rs`; the page's `put_in_song` and `put_part`). It
     fills the fitted bars (a shorter part goes round) or its own length when longer (`midi_fits::put_place`),
-    replaces what was in those bars on that track (Bitwig's undo takes it out), and takes as long as the bars
-    play: the card says which bars and about how long, moves by the clock, and ends with what the link saw
-    (`midi_fits::put_words`: all of it, cut short, or not seen). Only in the song's own project, on an
-    instrument track, with Bitwig stopped (what the app plays there is stopped first), and where the song's
-    bars are whole bars of Bitwig's time signature now; one at a time (the button waits).
+    replaces what was in those bars on that track (Bitwig's undo takes it out; how many presses is untried),
+    and takes as long as the bars play: the card says which bars and about how long, moves by the clock, and
+    ends with what the link saw (`midi_fits::put_words`: all of it, cut short, or not seen). Only in the song's
+    own project, on an instrument track, with Bitwig stopped (what the app plays in Bitwig is stopped first),
+    and where the song's bars are whole bars of Bitwig's time signature now. One at a time: while one is being
+    put in, the same button reads "Stop the recording" (`PutButton`), which calls it off before Bitwig records
+    or has the link stop the job (`recordabort`, `Bitwig::stop_putting`, sent by `put_part`'s clock thread);
+    what played so far stays in the arranger. Closing the app doesn't stop a recording under way: the job in
+    Bitwig finishes and puts its settings back by itself.
     **Send to Bitwig** from such a list also moves Bitwig's play start to the first of those bars, so the clip
     it makes is dragged down to the mark (`Bitwig::send_part_for_song`, `Mark`, `midi_fits::mark_words`). That
     needs the extension 3.23 (a new `playstart` command; older ones get a line saying to install it again).
     Both go by where the part was fitted (`Page::bitwig_place`), whether "Play with the song" is on or not, and
     only for a Bitwig song read by its arranger. Not yet tried in a real song: see
     `extensions/bitwig-java/README.md` (many tracks, whether the take replaces what's there, the clip's name,
-    tempo changes inside the bars).
+    tempo changes inside the bars, how many presses of undo take it out).
   Not built yet: picking a song's parts and bars by hand, and putting a found part at its bar in FL Studio
   (there it's the drag).
 

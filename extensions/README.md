@@ -250,7 +250,8 @@ so a track going in above can't send a step to the wrong one (as the pasted trac
 `filetrack` and `arrange`'s clean-up do the same from 3.9. It began as an experiment the live tests tried
 (*Changes › Record into the arranger*, below); the runs of October 2026 on Bitwig 6.1.5 showed it works, and
 the Rust app's Put in the song now uses it for a part found for a song (`mo_dawlink::bitwig::Bitwig::put_in_song`:
-armed, the launcher clip taken out after, no replay).
+armed, the launcher clip taken out after, no replay; its Stop the recording sends `recordabort`,
+`Bitwig::stop_putting`).
 `probe` sees whether Bitwig carries out its panel commands for the link at all, which says whether a way that
 needs the focus in a panel could ever work. In the app they're `BitwigLink.RecordAsync` and `ProbeAsync`.
 

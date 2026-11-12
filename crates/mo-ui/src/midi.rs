@@ -152,8 +152,9 @@ struct Page {
     daw_move: i32,
     /// What the picked part's card says and offers about its fit now ([`show_card_fit`]).
     card_fit: CardFit,
-    /// A part is being put in its song in Bitwig ([`put_in_song`]): one at a time, so the button waits.
-    putting: bool,
+    /// While a part is being put in its song in Bitwig ([`put_in_song`]; one at a time): set to have it stopped
+    /// ([`PutButton::Stop`]).
+    putting: Option<Arc<AtomicBool>>,
     /// "Play with the song": a part found plays with the parts of the song it fits ([`Page::heard_with`]); off: alone,
     /// as in any other list. Remembered ([`midi_fits::WITH_SONG_KEY`]).
     with_song: bool,
@@ -221,9 +222,31 @@ struct CardFit {
     moved: bool,
     /// The octave buttons, for a part that's fitted (drums aside).
     octave: Option<OctaveButtons>,
-    /// Put in the song, for a part fitted to bars Bitwig's arranger has ([`Page::bitwig_place`]): whether it can be
-    /// pressed now (not while a part is being put in).
-    put: Option<bool>,
+    /// Put in the song, for a part fitted to bars Bitwig's arranger has ([`Page::bitwig_place`]): what the button
+    /// does now.
+    put: Option<PutButton>,
+}
+
+/// What the card's Put in the song button does now ([`CardFit::put`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PutButton {
+    /// Has Bitwig record the part into its song.
+    Put,
+    /// A part is being put in (one at a time): stops Bitwig recording it.
+    Stop,
+    /// The stop is on its way: the button waits until the card says how it went.
+    Stopping,
+}
+
+impl PutButton {
+    /// What the button reads, and whether it can be pressed.
+    fn reads(self) -> (&'static str, bool) {
+        match self {
+            PutButton::Put => ("Put in the song", true),
+            PutButton::Stop => ("Stop the recording", true),
+            PutButton::Stopping => ("Stopping the recording\u{2026}", false),
+        }
+    }
 }
 
 /// What a fitted part's octave buttons can do now.
@@ -341,9 +364,7 @@ impl Page {
     /// fitted to, for Bitwig's arranger to go round ([`midi_fits::bitwig_loop`]), or why Bitwig has no such bars.
     /// None when the part plays alone in the app too ([`Page::heard_with`]): nothing is said of the song then.
     fn bitwig_song(&self, at: usize) -> Option<BitwigSong> {
-        let with = self.heard_with(at)?;
-        let song = self.heard_song(at)?;
-        Some(BitwigSong { bars: midi_fits::bitwig_loop(&with, song), name: song.name.clone(), with })
+        self.in_bitwig(at, self.heard_with(at)?)
     }
 
     /// Where the part at `at` goes in its song in Bitwig: the bars of the song it was fitted to
@@ -351,7 +372,12 @@ impl Page {
     /// Whether it's heard with the song or alone makes no difference to where it goes. None for a part that isn't
     /// fitted.
     fn bitwig_place(&self, at: usize) -> Option<BitwigSong> {
-        let with = self.fitted_with(at)?;
+        self.in_bitwig(at, self.fitted_with(at)?)
+    }
+
+    /// The bars `with` of the song the part at `at` was fitted to, as Bitwig's arranger has them
+    /// ([`midi_fits::bitwig_loop`]), or why it has no such bars.
+    fn in_bitwig(&self, at: usize, with: Arc<SongBars>) -> Option<BitwigSong> {
         let song = self.heard_song(at)?;
         Some(BitwigSong { bars: midi_fits::bitwig_loop(&with, song), name: song.name.clone(), with })
     }
@@ -391,7 +417,11 @@ impl Page {
                 yours: fit.yours.is_some(),
             }),
             // Only where Bitwig's arranger has the bars: a song from FL Studio takes the part by a drag.
-            put: place.filter(|place| place.bars.is_ok()).map(|_| !self.putting),
+            put: place.filter(|place| place.bars.is_ok()).map(|_| match &self.putting {
+                None => PutButton::Put,
+                Some(stop) if stop.load(Ordering::SeqCst) => PutButton::Stopping,
+                Some(_) => PutButton::Stop,
+            }),
         }
     }
 
@@ -2309,12 +2339,13 @@ fn card(e: &mo_midi::Entry) -> PickedPart {
 
 /// The card's buttons, its octave buttons (`octave`, [`CardFit::octave`]: a fitted part's, by the line that says how
 /// it's moved) and the line's right-click menu, which has both: one list (rule 15: each shows its key). `put`
-/// ([`CardFit::put`]): Put in the song, beside Send to Bitwig, for a part fitted to bars Bitwig's arranger has.
+/// ([`CardFit::put`]): Put in the song, beside Send to Bitwig, for a part fitted to bars Bitwig's arranger has; while
+/// one is being put in, the same button stops the recording.
 fn actions(
     e: &mo_midi::Entry,
     shortcuts: &Shortcuts,
     octave: Option<OctaveButtons>,
-    put: Option<bool>,
+    put: Option<PutButton>,
 ) -> (Vec<CardAction>, Vec<CardAction>, Vec<MenuItem>) {
     // Down then up, as they sit side by side; the app's pick is offered back once the octave is yours.
     let mut octaves: Vec<(&str, &str, bool)> = Vec::new();
@@ -2336,8 +2367,9 @@ fn actions(
     };
     // Into your DAW first, by the drag handle above them; then finding more.
     let mut list: Vec<(&str, &str, bool)> = vec![("midi.toBitwig", "Send to Bitwig", true)];
-    if let Some(can) = put {
-        list.push(("midi.putInSong", "Put in the song", can));
+    if let Some(put) = put {
+        let (text, can) = put.reads();
+        list.push(("midi.putInSong", text, can));
     }
     list.push(("midi.moreLike", "More like this", true));
     if !e.within.is_empty() {
@@ -2649,16 +2681,25 @@ static CLOSING: AtomicBool = AtomicBool::new(false);
 
 /// Put in the song: the picked part into Bitwig's arranger at the bars of the song it was found for, on the track
 /// selected there. Bitwig's controller API can't lay a clip on the timeline, so Bitwig records it in
-/// (`mo_dawlink::bitwig::Bitwig::put_in_song`): the part is written as a new MIDI file in the export folder, as Send
-/// to Bitwig writes it (its name is the clip's), and what plays in Bitwig from the app stops first, as Bitwig only
-/// records from a stop. One at a time: the button waits until its card says how it went. False when there's nothing
-/// to put in.
+/// (`mo_dawlink::bitwig::Bitwig::put_in_song`): the part is written as a new MIDI file in the export folder under its
+/// own name (the clip's name in Bitwig; the file goes again once Bitwig has it), and what plays in Bitwig from the
+/// app stops first, as Bitwig only records from a stop. One at a time: while one is being put in, the same button
+/// stops the recording ([`PutButton`]). False when there's nothing to put in or stop.
 fn put_in_song(app: &AppWindow, at: usize) -> bool {
+    let data = app.global::<MidiData>();
+    // One is being put in: this stops it. Its own threads tell Bitwig ([`put_part`]), so the window never waits.
+    let stopping = PAGE.with(|p| {
+        let mut p = p.borrow_mut();
+        let Some(stop) = p.putting.clone() else { return false };
+        stop.store(true, Ordering::SeqCst);
+        show_card_fit(&data, &mut p);
+        true
+    });
+    if stopping {
+        return true;
+    }
     let Some((part, library, feed, song)) = PAGE.with(|p| {
         let p = p.borrow();
-        if p.putting {
-            return None;
-        }
         let song = p.bitwig_place(at).filter(|song| song.bars.is_ok())?;
         Some((p.part_out(at)?, p.library.clone(), p.feed.clone()?, song))
     }) else {
@@ -2669,14 +2710,15 @@ fn put_in_song(app: &AppWindow, at: usize) -> bool {
         return true;
     }
     // A part playing in Bitwig from here, or an audition from Presets, stops: its place in the line is before this.
-    stop_daw(app);
-    crate::presets::stop_audition_for_another(app);
+    // One playing in FL Studio plays on.
+    stop_in_bitwig(app, "It stopped: Bitwig records a part into your song from a stop.");
+    crate::presets::stop_audition_for_another(app, "Put in the song on the MIDI page has Bitwig record from a stop");
     let job = feed.start(&midi_fits::putting(&part.name, &song.name), &midi_fits::putting_line(&song.with));
     let ticket = mo_dawlink::bitwig::ticket();
-    let data = app.global::<MidiData>();
+    let stop = Arc::new(AtomicBool::new(false));
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
-        p.putting = true;
+        p.putting = Some(Arc::clone(&stop));
         show_card_fit(&data, &mut p);
     });
     let weak = app.as_weak();
@@ -2686,7 +2728,7 @@ fn put_in_song(app: &AppWindow, at: usize) -> bool {
             let data = app.global::<MidiData>();
             PAGE.with(|p| {
                 let mut p = p.borrow_mut();
-                p.putting = false;
+                p.putting = None;
                 show_card_fit(&data, &mut p);
             });
         });
@@ -2697,8 +2739,7 @@ fn put_in_song(app: &AppWindow, at: usize) -> bool {
         let _ = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| {
             let export = export_dir(&library);
             let export = export.as_deref().map_err(String::as_str);
-            let wanted = || !CLOSING.load(Ordering::SeqCst);
-            put_part(job, &to_bitwig::Bitwig::default(), &part, export, &song, ticket, &wanted)
+            put_part(job, &to_bitwig::Bitwig::default(), &part, export, &song, ticket, &stop)
         }));
         after();
     });
@@ -2714,6 +2755,10 @@ fn put_in_song(app: &AppWindow, at: usize) -> bool {
 /// the card's bar only.
 const PUT_SETS_UP: Duration = Duration::from_secs(4);
 
+/// How often the card's bar moves while Bitwig records, and a stop asked for meanwhile is looked for: as often as a
+/// card passes its progress on.
+const PUT_TICK: Duration = Duration::from_millis(250);
+
 /// Sets its flag when it goes.
 struct Over<'a>(&'a AtomicBool);
 
@@ -2725,8 +2770,10 @@ impl Drop for Over<'_> {
 
 /// Reads the part's notes, writes them as a new MIDI file in `export`, and has `to` record that into the song's bars
 /// on the selected track, ending `job`'s card with how it went. Its turn in Bitwig's line is waited for once the
-/// file is written. Returns the file written, if it was. Waits for Bitwig, for as long as the part plays, so never
-/// on the window's thread.
+/// file is written, and the file goes again once Bitwig has the notes (rule 28). `stop`, set meanwhile: before
+/// Bitwig records, nothing goes in; while it records, Bitwig is asked to stop
+/// (`mo_dawlink::bitwig::Bitwig::stop_putting`), and what played so far stays there. Returns whether all of it went
+/// in. Waits for Bitwig, for as long as the part plays, so never on the window's thread.
 fn put_part(
     job: mo_app::activity::Job,
     to: &to_bitwig::Bitwig,
@@ -2734,45 +2781,69 @@ fn put_part(
     export: Result<&Path, &str>,
     song: &BitwigSong,
     ticket: mo_dawlink::bitwig::Ticket<'_>,
-    wanted: &dyn Fn() -> bool,
-) -> Option<PathBuf> {
-    let failed = |job: mo_app::activity::Job, why: String| {
+    stop: &Arc<AtomicBool>,
+) -> bool {
+    use mo_dawlink::bitwig::Error;
+    let failed = |job: mo_app::activity::Job, title: &str, why: String| {
         log::warning("MIDI", &format!("Putting {} in {} failed: {why}", part.name, song.name));
-        job.failed_as(midi_fits::PUT_FAILED, &why);
+        job.failed_as(title, &why);
+        false
     };
     let fitted = match &song.bars {
         Ok(bars) => bars,
-        Err(why) => {
-            failed(job, format!("{why}."));
-            return None;
-        }
+        Err(why) => return failed(job, midi_fits::PUT_FAILED, format!("{why}.")),
     };
     let (file, ticks) = match part_file(part, export) {
         Ok(written) => written,
-        Err(why) => {
-            failed(job, why);
-            return None;
-        }
+        Err(why) => return failed(job, midi_fits::PUT_FAILED, why),
     };
     let place = midi_fits::put_place(fitted, &song.with, ticks);
     job.progress(0.0, Some(&midi_fits::recording_line(&place)));
     let turn = ticket.wait();
-    // Bitwig says nothing until the part is through, so the card's bar goes by the clock: the bars at the song's
-    // tempo, and a few seconds for Bitwig to set up and put its settings back.
-    let over = AtomicBool::new(false);
-    let put = std::thread::scope(|scope| {
-        scope.spawn(|| {
+    // Bitwig says nothing until the part is through, so the card's bar goes by the clock (the bars at the song's
+    // tempo, and a few seconds for Bitwig to set up and put its settings back), on a thread of its own: this one
+    // waits for Bitwig's answer. That thread also passes a stop on to Bitwig, on a connection of its own, and says
+    // whether a recording heard it.
+    let job = Arc::new(job);
+    let over = Arc::new(AtomicBool::new(false));
+    let clock = {
+        let (job, over, stop, to) = (Arc::clone(&job), Arc::clone(&over), Arc::clone(stop), *to);
+        let takes = place.seconds + PUT_SETS_UP.as_secs_f64();
+        background::spawn("Put in the song's clock", move || {
             let began = Instant::now();
+            // Asked until a recording hears it: one asked for just before Bitwig began, or that didn't get
+            // through, is asked again.
+            let (mut heard, mut warned) = (false, false);
             while !over.load(Ordering::SeqCst) {
-                let part = began.elapsed().as_secs_f64() / (place.seconds + PUT_SETS_UP.as_secs_f64());
-                job.progress(part.min(0.95) as f32, None);
-                std::thread::sleep(Duration::from_millis(100));
+                job.progress((began.elapsed().as_secs_f64() / takes).min(0.95) as f32, None);
+                if !heard && stop.load(Ordering::SeqCst) {
+                    heard = to.stop_putting().unwrap_or_else(|e| {
+                        if !warned {
+                            log::warning("MIDI", &format!("Couldn't ask Bitwig to stop the recording: {e}"));
+                        }
+                        warned = true;
+                        false
+                    });
+                }
+                std::thread::sleep(PUT_TICK);
             }
-        });
+            heard
+        })
+    };
+    let wanted = || !CLOSING.load(Ordering::SeqCst) && !stop.load(Ordering::SeqCst);
+    let put = {
         // Also when it ends in a panic, so the clock's thread always ends.
         let _over = Over(&over);
-        to.put_in_song(&file, &place.bars, &turn, wanted)
-    });
+        to.put_in_song(&file, &place.bars, &turn, &wanted)
+    };
+    // The next in Bitwig's line needn't wait for the card.
+    drop(turn);
+    // Bitwig has the notes, or took nothing: the file was new, under a name this gave it, and goes again.
+    let _ = std::fs::remove_file(&file);
+    // Whether a recording under way was told to stop: what it ends with is the stop's doing then.
+    let heard = clock.ok().and_then(|clock| clock.join().ok()).unwrap_or(false);
+    // The clock has ended, so the card is this thread's alone again; were it not, it fails by itself as it goes.
+    let Some(job) = Arc::into_inner(job) else { return false };
     match put {
         Ok(put) => {
             let (whole, title, line) = midi_fits::put_words(&put, &place, &part.name, &song.name);
@@ -2782,12 +2853,22 @@ fn put_part(
                 log::warning("MIDI", &format!("{title}: {line}"));
                 job.failed_as(&title, &line);
             }
+            whole
         }
-        // The app is closing: nothing went in, and nothing needs saying.
-        Err(mo_dawlink::bitwig::Error::Cancelled) => job.failed_as(midi_fits::PUT_FAILED, "The app was closing."),
-        Err(e) => failed(job, e.to_string()),
+        // Called off before Bitwig recorded anything: by you, or by the app closing.
+        Err(Error::Cancelled) if stop.load(Ordering::SeqCst) => {
+            job.done_as(midi_fits::PUT_STOPPED, midi_fits::PUT_NOTHING);
+            false
+        }
+        Err(Error::Cancelled) => {
+            job.failed_as(midi_fits::PUT_FAILED, "The app was closing.");
+            false
+        }
+        // Stopped part way: the link's words say what Bitwig may have of it. A failure the stop had no part in (it
+        // was pressed, but no recording heard it) keeps its own headline.
+        Err(e) if heard => failed(job, midi_fits::PUT_STOPPED, e.to_string()),
+        Err(e) => failed(job, midi_fits::PUT_FAILED, e.to_string()),
     }
-    Some(file)
 }
 
 /// For the screenshots: everything is worked out in place.
@@ -3708,7 +3789,7 @@ fn start_daw(app: &AppWindow, daw: Daw, at: usize) -> bool {
     }
     if daw == Daw::Bitwig {
         // One thing plays in Bitwig at a time: an audition on the Presets page stops (the review's D-8).
-        crate::presets::stop_audition_for_another(app);
+        crate::presets::stop_audition_for_another(app, "Play in Bitwig on the MIDI page took over");
     }
     // Its place in Bitwig's line, taken now, behind the stops just asked for (FL needs none).
     let ticket = (daw == Daw::Bitwig).then(mo_dawlink::bitwig::ticket);
@@ -3828,12 +3909,18 @@ fn stop_daw(app: &AppWindow) {
 /// Stops a part playing (or starting) in Bitwig from the MIDI page, for an audition on the Presets page that takes
 /// Bitwig over (the review's D-8): one thing plays there at a time, and the card says why it stopped.
 pub fn stop_bitwig_for_another(app: &AppWindow) {
+    stop_in_bitwig(app, "It stopped: an audition on the Presets page is playing in Bitwig now.");
+}
+
+/// Stops a part playing (or starting) in Bitwig from this page, and has its card say why (`note`). One playing in FL
+/// Studio plays on.
+fn stop_in_bitwig(app: &AppWindow, note: &str) {
     let data = app.global::<MidiData>();
     if data.get_daw_playing() != Daw::Bitwig.id() && data.get_daw_starting() != Daw::Bitwig.id() {
         return;
     }
     stop_daw(app);
-    data.set_daw_note("It stopped: an audition on the Presets page is playing in Bitwig now.".into());
+    data.set_daw_note(note.into());
 }
 
 thread_local! {
@@ -4500,11 +4587,14 @@ mod tests {
         let place = p.bitwig_place(4).unwrap();
         assert_eq!(place.bars, Ok(SongLoop { project: "Glass".into(), start: 32.0, length: 16.0 }));
         assert_eq!((place.name.as_str(), &place.with), ("Glass", &arranger));
-        assert_eq!(p.card_fit().put, Some(true));
-        // While one is being put in, the button waits.
-        p.putting = true;
-        assert_eq!(p.card_fit().put, Some(false));
-        p.putting = false;
+        assert_eq!(p.card_fit().put, Some(PutButton::Put));
+        // While one is being put in, the button stops the recording; once pressed, it waits.
+        let stop = Arc::new(AtomicBool::new(false));
+        p.putting = Some(stop.clone());
+        assert_eq!(p.card_fit().put, Some(PutButton::Stop));
+        stop.store(true, Ordering::SeqCst);
+        assert_eq!(p.card_fit().put, Some(PutButton::Stopping));
+        p.putting = None;
         // A song from FL Studio, or one read from Bitwig's scenes, has no bars in Bitwig's arranger: no button.
         listed(&mut p, &night, &arranger);
         assert!(p.bitwig_place(4).is_some_and(|place| place.bars.is_err()));
@@ -4521,13 +4611,24 @@ mod tests {
         let keys = Shortcuts::default();
         let e = p.cat.entry(4).unwrap();
         let ids = |list: &[CardAction]| list.iter().map(|a| a.id.to_string()).collect::<Vec<_>>();
-        let (card, _, menu) = actions(e, &keys, None, Some(false));
+        let (card, _, menu) = actions(e, &keys, None, Some(PutButton::Put));
         assert_eq!(ids(&card)[..3], ["midi.toBitwig", "midi.putInSong", "midi.moreLike"]);
         let put = &card[1];
-        assert_eq!((put.text.as_str(), put.key.as_str(), put.enabled), ("Put in the song", "", false));
+        assert_eq!((put.text.as_str(), put.key.as_str(), put.enabled), ("Put in the song", "", true));
         assert!(put.tip.contains("record the picked part into your song's arranger"), "{}", put.tip);
-        assert!(menu.iter().any(|m| m.id == "midi.putInSong" && !m.enabled));
-        assert!(actions(e, &keys, None, Some(true)).0[1].enabled);
+        assert!(put.tip.ends_with("while it records, stop the recording"), "{}", put.tip);
+        assert!(menu.iter().any(|m| m.id == "midi.putInSong" && m.enabled));
+        // The same button, and the same key, while one is being put in.
+        let reads = |put| {
+            let (card, _, menu) = actions(e, &keys, None, Some(put));
+            assert!(menu.iter().any(|m| m.id == "midi.putInSong" && m.enabled == card[1].enabled));
+            (card[1].id.to_string(), card[1].text.to_string(), card[1].enabled)
+        };
+        assert_eq!(reads(PutButton::Stop), ("midi.putInSong".to_owned(), "Stop the recording".to_owned(), true));
+        assert_eq!(
+            reads(PutButton::Stopping),
+            ("midi.putInSong".to_owned(), "Stopping the recording\u{2026}".to_owned(), false)
+        );
         let (card, _, menu) = actions(e, &keys, None, None);
         assert!(!ids(&card).contains(&"midi.putInSong".to_owned()));
         assert!(menu.iter().all(|m| m.id != "midi.putInSong"));
@@ -4552,6 +4653,12 @@ mod tests {
         }
     }
 
+    /// The files in a test's export folder now.
+    fn files_in(dir: &Path) -> Vec<String> {
+        let Ok(read) = std::fs::read_dir(dir) else { return Vec::new() };
+        read.filter_map(|f| Some(f.ok()?.file_name().to_string_lossy().into_owned())).collect()
+    }
+
     #[test]
     fn a_part_is_put_in_its_song_by_bitwig_recording_it_at_the_songs_bars() {
         let s = sample();
@@ -4564,19 +4671,21 @@ mod tests {
         let feed = Feed::default();
         let put = |feed: &Feed, export: Result<&Path, &str>, song: &BitwigSong| {
             let job = feed.start("Putting", "");
-            put_part(job, &bitwig.bitwig(), &part, export, song, mo_dawlink::bitwig::ticket(), &|| true)
+            let go_on = Arc::new(AtomicBool::new(false));
+            put_part(job, &bitwig.bitwig(), &part, export, song, mo_dawlink::bitwig::ticket(), &go_on)
         };
-        let file = put(&feed, Ok(dir.as_path()), &song).unwrap();
-        // A real MIDI file of the part as it fits, under the name that says so: the clip's name in Bitwig.
-        assert!(std::fs::read(&file).unwrap().starts_with(b"MThd"));
-        assert!(file.starts_with(&dir) && file.to_string_lossy().ends_with("(3 semitones up).mid"), "{file:?}");
+        assert!(put(&feed, Ok(dir.as_path()), &song));
         let world = bitwig.world();
         // On the selected track ("Bass"), from bar 9: the bars it was found for, or its own length when longer.
         let bars = i64::from(e.phrase.bars).max(4);
         assert_eq!(world.arranger.len(), 1, "{:?}", world.arranger);
         let take = &world.arranger[0];
         assert_eq!((take.at, take.length), (32.0, (bars * 4) as f64));
-        assert_eq!(take.file, file.to_string_lossy());
+        // From a MIDI file in the export folder under the name that says how it fits (the clip's name in Bitwig),
+        // which is gone again now Bitwig has the notes.
+        let file = Path::new(&take.file);
+        assert!(file.starts_with(&dir) && take.file.ends_with("(3 semitones up).mid"), "{file:?}");
+        assert_eq!(files_in(&dir), Vec::<String>::new());
         assert_eq!(world.commands().last().map(String::as_str), Some("deleteclip"));
         drop(world);
         let cards = feed.visible(Instant::now());
@@ -4585,11 +4694,12 @@ mod tests {
         assert!(card.detail.starts_with(&said), "{}", card.detail);
         assert_eq!(card.state, mo_app::activity::State::Done);
 
-        // Bitwig playing: nothing goes in, and the card says what to do.
+        // Bitwig playing: nothing goes in, the card says what to do, and the file written for it is gone.
         bitwig.world().playing = true;
         let feed = Feed::default();
-        assert!(put(&feed, Ok(dir.as_path()), &song).is_some(), "its file was written all the same");
+        assert!(!put(&feed, Ok(dir.as_path()), &song));
         assert_eq!(bitwig.world().arranger.len(), 1);
+        assert_eq!(files_in(&dir), Vec::<String>::new());
         let cards = feed.visible(Instant::now());
         let failed = cards.iter().find(|c| c.title == midi_fits::PUT_FAILED).unwrap();
         assert_eq!(failed.detail, "Bitwig is playing. Stop it, then try again.");
@@ -4597,19 +4707,71 @@ mod tests {
         // An export folder that isn't there, or a song with no bars in Bitwig: nothing is written or asked.
         let asked = bitwig.world().requests.len();
         let feed = Feed::default();
-        assert!(put(&feed, Err("The export folder isn't there."), &song).is_none());
+        assert!(!put(&feed, Err("The export folder isn't there."), &song));
         let no_bars = BitwigSong { bars: Err("Night drive isn't a Bitwig project".into()), ..song.clone() };
-        assert!(put(&feed, Ok(dir.as_path()), &no_bars).is_none());
+        assert!(!put(&feed, Ok(dir.as_path()), &no_bars));
         assert_eq!(bitwig.world().requests.len(), asked);
         let details: Vec<String> = feed.visible(Instant::now()).iter().map(|c| c.detail.clone()).collect();
         assert!(details.contains(&"The export folder isn't there.".to_owned()), "{details:?}");
         assert!(details.contains(&"Night drive isn't a Bitwig project.".to_owned()), "{details:?}");
-        // The app closing while it waits its turn: nothing goes in.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_part_being_put_in_its_song_can_be_stopped() {
+        let s = sample();
+        let part = part_out(&s, &s.cat.entries[0], 3);
+        let dir = std::env::temp_dir().join(format!("mo-ui-midi-put-stopped-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // The stand-in's recording takes 20 seconds, unless it's asked to stop.
+        let mut world = mo_dawlink::bitwig::fake::World::default();
+        world.late = vec![("record".into(), Duration::from_secs(20))];
+        let bitwig = mo_dawlink::bitwig::fake::FakeBitwig::with(world).unwrap();
+        let song = open_song();
+        let feed = Feed::default();
+        let stop = Arc::new(AtomicBool::new(false));
+        let asked = Instant::now();
+        let whole = std::thread::scope(|scope| {
+            // Stop the recording, pressed once Bitwig records.
+            scope.spawn(|| {
+                while asked.elapsed() < Duration::from_secs(15) && !bitwig.world().commands().contains(&"record".into())
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                stop.store(true, Ordering::SeqCst);
+            });
+            let job = feed.start("Putting", "");
+            put_part(job, &bitwig.bitwig(), &part, Ok(dir.as_path()), &song, mo_dawlink::bitwig::ticket(), &stop)
+        });
+        assert!(!whole);
+        assert!(asked.elapsed() < Duration::from_secs(15), "it ended when asked: {:?}", asked.elapsed());
+        let world = bitwig.world();
+        // Bitwig was asked to stop, what played so far is in the arranger, and the clip it came from is out again.
+        assert!(world.commands().contains(&"recordabort".to_owned()), "{:?}", world.commands());
+        assert_eq!(world.arranger.iter().map(|take| take.length).collect::<Vec<_>>(), [4.0]);
+        assert_eq!(world.tracks[2].clips, [""]);
+        drop(world);
+        assert_eq!(files_in(&dir), Vec::<String>::new());
+        let cards = feed.visible(Instant::now());
+        let card = cards.iter().find(|c| c.title == midi_fits::PUT_STOPPED).unwrap();
+        assert_eq!(
+            card.detail,
+            "The recording was stopped part way. Some of the part may be in the arranger: undo in Bitwig takes it \
+             out (it can take a few presses)."
+        );
+        assert_eq!(card.state, mo_app::activity::State::Failed);
+
+        // Stopped while it still waits its turn: nothing is asked of Bitwig, and the card says nothing was recorded.
+        let requests = bitwig.world().requests.len();
         let feed = Feed::default();
         let job = feed.start("Putting", "");
         let ticket = mo_dawlink::bitwig::ticket();
-        assert!(put_part(job, &bitwig.bitwig(), &part, Ok(dir.as_path()), &song, ticket, &|| false).is_some());
-        assert_eq!(bitwig.world().arranger.len(), 1);
+        assert!(!put_part(job, &bitwig.bitwig(), &part, Ok(dir.as_path()), &song, ticket, &stop));
+        assert_eq!(bitwig.world().requests.len(), requests);
+        assert_eq!(files_in(&dir), Vec::<String>::new());
+        let cards = feed.visible(Instant::now());
+        let card = cards.iter().find(|c| c.title == midi_fits::PUT_STOPPED).unwrap();
+        assert_eq!((card.detail.as_str(), card.state), (midi_fits::PUT_NOTHING, mo_app::activity::State::Done));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

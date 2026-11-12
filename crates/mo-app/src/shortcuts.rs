@@ -146,7 +146,8 @@ pub const MIDI_ACTIONS: &[Action] = &[
     action("midi.toBitwig", "Put the picked part into Bitwig as a clip on a new track", "Ctrl+B"),
     action(
         "midi.putInSong",
-        "Have Bitwig record the picked part into your song's arranger, at the bars it fits, on the selected track",
+        "Have Bitwig record the picked part into your song's arranger, at the bars it fits, on the selected track; \
+         while it records, stop the recording",
         "",
     ),
     action("midi.playBitwig", "Play the picked part through the track selected in Bitwig, or stop it", "Ctrl+Shift+B"),
