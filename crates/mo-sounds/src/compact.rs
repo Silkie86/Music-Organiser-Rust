@@ -2206,8 +2206,9 @@ mod tests {
         ] {
             assert!(plan(sql).contains("USING COVERING INDEX sounds_clap"), "{sql}: {}", plan(sql));
         }
-        // And the sounds' ids, for picking the first to show ([`SoundsDb::shown_ids`]), from the index of their paths.
-        let ids = "SELECT id FROM sounds";
+        // And the sounds' ids and paths, for picking the first to show ([`SoundsDb::shown_ids`]), from the index of
+        // their paths.
+        let ids = crate::db::SHOWN_IDS_SQL;
         assert!(plan(ids).contains("USING COVERING INDEX sounds_path"), "{}", plan(ids));
     }
 
@@ -2295,5 +2296,8 @@ mod tests {
             |sql: &str| -> String { conn.query_row(&format!("EXPLAIN QUERY PLAN {sql}"), [], |r| r.get(3)).unwrap() };
         assert_eq!(plan(OLD_SOUNDS), "SCAN sounds");
         assert!(plan(OLD_PRINTS).contains("USING COVERING INDEX ix_sound_prints_exact"), "{}", plan(OLD_PRINTS));
+        // The C# app's own sounds.db, open as it is, gives the ids and paths from the index of its paths too.
+        let ids = crate::db::SHOWN_IDS_SQL;
+        assert!(plan(ids).contains("USING COVERING INDEX sqlite_autoindex_sounds_1"), "{}", plan(ids));
     }
 }

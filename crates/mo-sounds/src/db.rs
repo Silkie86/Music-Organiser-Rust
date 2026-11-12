@@ -200,6 +200,9 @@ const COPY_ANALYSIS: usize = 12;
 /// The same with each one's two vectors after its columns, the analyser's and CLAP's.
 const SOUND_AND_VECTORS_SQL: &str = concat!("SELECT ", sound_columns!(), ", features, clap FROM sounds");
 
+/// The sounds' ids and paths, for [`SoundsDb::shown_ids`]: the index of the paths holds both, so it's read alone.
+pub(crate) const SHOWN_IDS_SQL: &str = "SELECT id, path FROM sounds";
+
 /// The sound library, open for reading only: SQLite itself refuses any change, so the C# app's data is safe.
 ///
 /// Either the C# app's `sounds.db` or the Rust app's compact copy of it ([`compact`]), of this version's format or the
@@ -418,23 +421,28 @@ impl SoundsDb {
         Ok(self.read_sounds(now, false)?.sounds)
     }
 
-    /// The ids of the sounds a list of them shows: all but the ones you've hidden as duplicates, in no order to go by.
-    /// Read from the index of the sounds' paths alone (a few megabytes for half a million sounds, where their rows
-    /// are hundreds), so it's quick whatever the rows hold: for picking which sounds to show first
-    /// ([`SoundsDb::some`]) while the rest are read.
+    /// The ids of the sounds a list of them shows: all but the ones you've hidden as duplicates and the files programs
+    /// left in a temp folder ([`crate::scan::in_temp_folder`], as a list leaves them out), in no order to go by. Read
+    /// from the index of the sounds' paths alone (a few megabytes for half a million sounds, where their rows are
+    /// hundreds), so it's quick whatever the rows hold: for picking which sounds to show first ([`SoundsDb::some`])
+    /// while the rest are read, and how many those are.
     pub fn shown_ids(&self) -> Result<Vec<i64>, SoundsError> {
         let _turn = turns::long_turn();
         let snapshot = self.conn.unchecked_transaction()?;
         let hidden = self.hidden()?;
-        let mut st = self.conn.prepare("SELECT id FROM sounds")?;
-        let rows = st.query_map([], |r| r.get::<_, i64>(0))?;
+        let mut st = self.conn.prepare(SHOWN_IDS_SQL)?;
         let mut ids = Vec::new();
-        for id in rows {
-            let id = id?;
-            if !hidden.contains(&id) {
-                ids.push(id);
+        {
+            let mut rows = st.query([])?;
+            while let Some(r) = rows.next()? {
+                let id: i64 = r.get(0)?;
+                let in_temp = matches!(r.get_ref(1)?, ValueRef::Text(t)
+                    if std::str::from_utf8(t).is_ok_and(crate::scan::in_temp_folder));
+                if !hidden.contains(&id) && !in_temp {
+                    ids.push(id);
+                }
+                turns::give_way();
             }
-            turns::give_way();
         }
         drop(st);
         snapshot.finish()?;
