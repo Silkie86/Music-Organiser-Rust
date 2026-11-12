@@ -773,6 +773,75 @@ class NewerApiTest {
         assertEquals(List.of(false, 64.0, 8.0, 8.0), loopNow());
     }
 
+    // ---- marking a bar with the play start (extension 3.23) ----
+
+    @Test
+    @DisplayName("moves the play start to a bar for a part sent for a song, and leaves a Bitwig that's playing to play on")
+    void marksABarWithThePlayStart() {
+        startWithALoopOfYourOwn();
+        assertJson(obj("was", 8, "playStart", 32), app.waitFor(obj("id", 1, "cmd", "playstart", "at", 32)).get("result"));
+        assertEquals(List.of(false, 64.0, 8.0, 32.0), loopNow());
+        assertFalse(bitwig.playingNow);
+        // Asked again for where it is already: nothing is set, and it says so all the same.
+        int sets = (int) bitwig.calls.stream().filter(c -> c.get(0).equals("playStart")).count();
+        assertJson(obj("was", 32, "playStart", 32), app.waitFor(obj("id", 2, "cmd", "playstart", "at", 32)).get("result"));
+        assertEquals(sets, (int) bitwig.calls.stream().filter(c -> c.get(0).equals("playStart")).count());
+        // While Bitwig plays, it plays on: the play start is where the next Play begins.
+        app.waitFor(obj("id", 3, "cmd", "clip", "trackId", "bass-id", "slot", 0, "path", "C:\\MIDI\\Bass.mid", "replace", true, "launch", true));
+        assertTrue(bitwig.playingNow);
+        assertJson(obj("was", 32, "playStart", 64), app.waitFor(obj("id", 4, "cmd", "playstart", "at", 64)).get("result"));
+        assertTrue(bitwig.playingNow);
+        assertFalse(bitwig.calls.contains(List.of("stop")), String.valueOf(bitwig.calls));
+    }
+
+    @Test
+    @DisplayName("keeps a mark asked for while a part plays with its song's bars: the play start goes back to the mark")
+    void aMarkOutlastsAPartPlayingWithItsBars() {
+        startWithALoopOfYourOwn();
+        app.waitFor(partWithBars(1, "MO Play 1.mid"));
+        assertEquals(List.of(true, 32.0, 32.0, 32.0), loopNow());
+        // The part sent is for the same bars, so the play start is there already: it's the mark's from now on.
+        assertJson(obj("was", 32, "playStart", 32), app.waitFor(obj("id", 2, "cmd", "playstart", "at", 32)).get("result"));
+        assertJson(obj("deleted", true, "loopBack", true), app.waitFor(takeOut(3, 1)).get("result"));
+        assertEquals(List.of(false, 64.0, 8.0, 32.0), loopNow());
+        // A mark somewhere else than the bars going round stays too.
+        app.waitFor(partWithBars(4, "MO Play 2.mid"));
+        assertJson(obj("was", 32, "playStart", 96), app.waitFor(obj("id", 5, "cmd", "playstart", "at", 96)).get("result"));
+        assertJson(obj("deleted", true, "loopBack", true), app.waitFor(takeOut(6, 1)).get("result"));
+        assertEquals(List.of(false, 64.0, 8.0, 96.0), loopNow());
+    }
+
+    @Test
+    @DisplayName("only marks a bar with changes on, in the project asked for, and says when Bitwig doesn't move the play start")
+    void refusesAMarkItMayNotMake() {
+        Model m = LinkTest.song();
+        m.timeSignature = "4/4";
+        m.playStart = 8;
+        m.playStartIgnored = true;
+        start(m);
+        assertMatches(LinkTest.CHANGES_OFF, error(app.waitFor(obj("id", 1, "cmd", "playstart", "at", 32))));
+        bitwig.allowChanges(true);
+        assertEquals("Bitwig has \"Night Drive\" open, not \"Glass\", so the link stopped before changing anything there.",
+                     error(app.waitFor(obj("id", 2, "cmd", "playstart", "at", 32, "onlyIn", "Glass"))));
+        assertEquals("at is a number of beats, 0 or more, not -4.", error(app.waitFor(obj("id", 3, "cmd", "playstart", "at", -4))));
+        assertEquals("at is a number of beats, 0 or more, not undefined.", error(app.waitFor(obj("id", 4, "cmd", "playstart"))));
+        assertFalse(bitwig.calls.stream().anyMatch(c -> c.get(0).equals("playStart")), String.valueOf(bitwig.calls));
+        // This Bitwig takes the ask and doesn't move it.
+        assertEquals("Bitwig didn't move the play start to beat 32.", error(app.waitFor(obj("id", 5, "cmd", "playstart", "at", 32))));
+        assertEquals(8.0, bitwig.playStartAt);
+    }
+
+    @Test
+    @DisplayName("says when this Bitwig doesn't let it reach the play start")
+    void saysWhenItCantReachThePlayStart() {
+        Model m = LinkTest.song();
+        m.broken.add("playStartPosition");
+        start(m);
+        bitwig.allowChanges(true);
+        assertEquals("This Bitwig didn't let the link reach the play start. A selftest says why.",
+                     error(app.waitFor(obj("id", 1, "cmd", "playstart", "at", 32))));
+    }
+
     // ---- auditioning a preset on a track of its own (extension 3.20) ----
 
     @Test

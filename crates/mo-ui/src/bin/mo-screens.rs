@@ -287,6 +287,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !back || (&again.fit, &again.roll_low) != (&moved.fit, &moved.roll_low) || octave_buttons().len() != 2 {
         return Err("midi-fits-octave.png: The app's octave didn't bring the part back".into());
     }
+    // Fitted to a Bitwig song read by its arranger: Bitwig has the bars a part was found for, so its card offers Put
+    // in the song beside Send to Bitwig, and Play in Bitwig plays it with those bars going round. (Nothing leaves
+    // the page here: no Bitwig is asked.)
+    mo_ui::midi::fit_sample_bitwig(&app);
+    if midi.get_fit_song() != "Glass" || midi.get_shown() == 0 {
+        return Err("midi-fits-bitwig.png: no part was found to fit the made-up Bitwig song".into());
+    }
+    mo_ui::midi::pick_row(&app, 0);
+    let buttons = || midi.get_actions().iter().map(|a| (a.id.to_string(), a.enabled)).collect::<Vec<_>>();
+    if buttons().get(..2) != Some(&[("midi.toBitwig".to_owned(), true), ("midi.putInSong".to_owned(), true)]) {
+        return Err(format!("midi-fits-bitwig.png: the card doesn't offer Put in the song: {:?}", buttons()).into());
+    }
+    if !midi.get_bitwig_with_song() {
+        return Err("midi-fits-bitwig.png: Play in Bitwig doesn't say it plays with the Bitwig song's bars".into());
+    }
+    if !mo_ui::midi::run_action(&app, "midi.putInSong") {
+        return Err("midi-fits-bitwig.png: Put in the song isn't one of the page's actions".into());
+    }
+    shots.push(("midi-fits-bitwig.png".into(), capture(&window)));
+    // An FL Studio song has no bars in Bitwig: no such button on its parts' cards.
+    mo_ui::midi::fit_sample(&app, true);
+    mo_ui::midi::pick_row(&app, 0);
+    if buttons().iter().any(|(id, _)| id == "midi.putInSong") {
+        return Err("midi-fits.png: Put in the song is offered for a song that isn't a Bitwig project".into());
+    }
     mo_ui::midi::fit_sample(&app, false);
     if !midi.get_fit_song().is_empty() || !midi.get_fit_none_title().is_empty() || !midi.get_picked().fit.is_empty() {
         return Err("midi-fits.png: \"Fits my song\" didn't go off".into());

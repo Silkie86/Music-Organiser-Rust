@@ -45,9 +45,12 @@ const LONGEST_WAIT: Duration = Duration::from_secs(3600);
 /// The extension version from which `insert` and `pads` find a track by its ID too, as `clip` does.
 pub const TRACK_IDS_EVERYWHERE: &str = "3.21";
 
+/// The extension version from which `playstart` moves where Bitwig's Play starts from ([`Link::move_play_start`]).
+pub const PLAY_START_NEEDS: &str = "3.23";
+
 /// The commands that change or select something in Bitwig's project, as the link lists them: each carries
 /// [`Link::only_in`] when it's set. Not `recordabort`, which must reach the link whatever project is in front.
-const PROJECT_COMMANDS: [&str; 16] = [
+const PROJECT_COMMANDS: [&str; 17] = [
     "set",
     "insert",
     "newtrack",
@@ -64,6 +67,7 @@ const PROJECT_COMMANDS: [&str; 16] = [
     "stoptracks",
     "deleteclip",
     "deletetrack",
+    "playstart",
 ];
 
 /// How taking an audition clip out went ([`Link::delete_audition_clip`], [`super::Bitwig::stop_playing`]).
@@ -75,6 +79,71 @@ pub struct TakenOut {
     /// play start back as the link found them (as far as they were still the link's to put back). None for a clip
     /// that played alone, and when its loop had gone back already.
     pub loop_back: Option<bool>,
+}
+
+/// Bitwig's tempo and time signature as its transport shows them now ([`Link::tempo_and_metre`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Metre {
+    /// In BPM; none when the link doesn't say.
+    pub tempo: Option<f64>,
+    /// As Bitwig writes it ("4/4", "7/8"); "" when the link doesn't say.
+    pub time_signature: String,
+}
+
+impl Metre {
+    /// A bar's length in beats (quarter notes), read from the time signature as the link's record job reads it; none
+    /// when it can't be told.
+    pub fn bar_beats(&self) -> Option<f64> {
+        let (beats, rest) = self.time_signature.trim_start().split_once('/')?;
+        let unit: String = rest.trim_start().chars().take_while(char::is_ascii_digit).collect();
+        let (beats, unit) = (beats.trim_end().parse::<u32>().ok()?, unit.parse::<u32>().ok()?);
+        (beats > 0 && unit > 0).then(|| f64::from(beats) * 4.0 / f64::from(unit))
+    }
+}
+
+/// What the link's record job answered ([`Link::record_clip`]): it plays a launcher clip once with Bitwig's arranger
+/// record on, which puts the clip on its track's arranger timeline, then sets Bitwig back as it found it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Recorded {
+    /// The job's own verdict: "recorded" (it heard the clip back from the arranger), "notChecked" (it recorded, and
+    /// wasn't asked to play it back), "nothing", "cantTell", "refused", "didntStart", "aborted", "abandoned" or
+    /// "failed".
+    pub decided: String,
+    /// How the clip's playing ended: "done" (at its end), "cut" (the link ended it just past its end), "timedOut"
+    /// or "stoppedEarly" (before its end); "" when it never played.
+    pub ended: String,
+    /// Whether the link saw the clip play.
+    pub clip_played: bool,
+    /// The settings Bitwig didn't take for the recording, by the link's names ("pre-roll", "arm"): it recorded
+    /// nothing then.
+    pub refused: Vec<String>,
+    /// Why it stopped part way or failed, in the link's words; "" when it didn't say.
+    pub why: String,
+    /// Whether the job took the launcher clip out once it was recorded.
+    pub launcher_clip_deleted: bool,
+    /// The settings Bitwig didn't show back as they were, by the link's names ("master mute"). None when the job
+    /// didn't wait to see them back: another project came to the front, or a step failed.
+    pub not_back: Option<Vec<String>>,
+}
+
+impl Recorded {
+    fn from_json(v: &Value) -> Option<Recorded> {
+        let decided = v.get("decided")?.as_str()?.to_owned();
+        let names = |list: Option<&Value>| -> Option<Vec<String>> {
+            Some(list?.as_array()?.iter().filter_map(|name| name.as_str().map(str::to_owned)).collect())
+        };
+        let played = v.get("played").filter(|p| p.is_object());
+        let why = ["abortWhy", "error"].iter().map(|key| text(v, key)).find(|words| !words.is_empty());
+        Some(Recorded {
+            decided,
+            ended: played.map(|p| text(p, "ended")).unwrap_or_default(),
+            clip_played: v.get("seen").is_some_and(|seen| flag(seen, "clipPlayed")),
+            refused: names(v.get("refused")).unwrap_or_default(),
+            why: why.unwrap_or_default(),
+            launcher_clip_deleted: flag(v, "launcherClipDeleted"),
+            not_back: names(v.get("after").and_then(|after| after.get("restoreFailed"))),
+        })
+    }
 }
 
 /// What the link in Bitwig says when the app connects (and to `hello`).
@@ -441,6 +510,73 @@ impl Link {
     pub fn is_playing(&mut self) -> Result<bool, Error> {
         let answer = self.request(ask("transport", []), self.timeout)?;
         answer.get("playing").and_then(Value::as_bool).ok_or(Error::Unexpected)
+    }
+
+    /// Bitwig's tempo and time signature now (`transport`, extension 3.16). Only reads.
+    pub fn tempo_and_metre(&mut self) -> Result<Metre, Error> {
+        let answer = self.request(ask("transport", []), self.timeout)?;
+        Ok(Metre {
+            tempo: answer.get("tempo").and_then(Value::as_f64).filter(|bpm| bpm.is_finite() && *bpm > 0.0),
+            time_signature: text(&answer, "timeSignature"),
+        })
+    }
+
+    /// Moves where Bitwig's Play starts from to `at` beats from the arranger's start (`playstart`, extension 3.23,
+    /// [`PLAY_START_NEEDS`]), so it marks a bar. A Bitwig that's playing plays on: the play start is where the next
+    /// Play begins. While a part plays with its song's bars going round ([`Link::add_audition_clip`]), the play start
+    /// goes back to this mark when the part stops, not to where it was before.
+    pub fn move_play_start(&mut self, at: f64) -> Result<(), Error> {
+        self.change(ask("playstart", [("at", at.into())])).map(|_| ())
+    }
+
+    /// Puts a MIDI file in the first empty clip launcher slot of the track Bitwig keeps under `track_id`, not
+    /// launched, for [`Link::record_clip`] to record: noted as the app's, so [`Link::delete_audition_clip`] may take
+    /// it out again. Gives back the slot. Extension 3.19 and later.
+    pub fn add_clip_to_record(&mut self, track_id: &str, path: &str) -> Result<usize, Error> {
+        let fields = [("trackId", track_id.into()), ("path", path.into()), ("audition", true.into())];
+        let answer = self.change(ask("clip", fields))?;
+        index(answer.get("slot")).ok_or(Error::Unexpected)
+    }
+
+    /// Records the launcher clip in `slot` of the track Bitwig keeps under `track_id` into the arranger, `at` beats
+    /// from its start, for `length` beats (both whole bars), with the track armed, and takes the launcher clip out
+    /// once it's recorded (the link's `record` job, extension 3.9). Bitwig has to be stopped. The job sets Bitwig up
+    /// so only the clip records and nothing is heard (the master muted, no metronome, loop, punch or pre-roll, the
+    /// other tracks disarmed, the play start at `at`), plays the clip through once, and puts everything back. It
+    /// takes as long as the clip, so the answer is waited for up to `wait`.
+    pub fn record_clip(
+        &mut self,
+        track_id: &str,
+        slot: usize,
+        at: f64,
+        length: f64,
+        wait: Duration,
+    ) -> Result<Recorded, Error> {
+        if self.hello.link < LINK_VERSION {
+            return Err(Error::OldLink);
+        }
+        let fields = [
+            ("trackId", track_id.into()),
+            ("slot", slot.into()),
+            ("at", at.into()),
+            ("length", length.into()),
+            // Armed is the way that stopped on the bar line in every live run (Bitwig 6.1.5, October 2026).
+            ("arm", true.into()),
+            ("deleteLauncherClip", true.into()),
+            // Playing it back to hear it there would take as long again.
+            ("replay", false.into()),
+        ];
+        let answer = self.request(ask("record", fields), wait)?;
+        Recorded::from_json(&answer).ok_or(Error::Unexpected)
+    }
+
+    /// Asks the record job running now ([`Link::record_clip`], on another connection: that one waits for its
+    /// answer) to stop (`recordabort`, extension 3.9). The job ends as soon as it next looks, puts every setting
+    /// back and answers `aborted`; what played so far stays in the arranger. Gives back whether a job was running
+    /// to hear it. It isn't a change, so it goes whatever project is in front and with changes off.
+    pub fn abort_recording(&mut self) -> Result<bool, Error> {
+        let answer = self.request(ask("recordabort", []), self.timeout)?;
+        answer.get("running").and_then(Value::as_bool).ok_or(Error::Unexpected)
     }
 
     /// Puts a MIDI file in the first empty clip launcher slot of the track Bitwig keeps under `track_id` and launches

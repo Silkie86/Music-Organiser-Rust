@@ -9,8 +9,9 @@ use std::thread;
 
 use mo_dawlink::bitwig::fake::{CHANGES_OFF, FakeBitwig, FakeDevice, World};
 use mo_dawlink::bitwig::{
-    DRUM_MACHINE_KEY, DeviceId, Error, KIT_FAILED, KitSound, KitTarget, PART_FAILED, PART_IN, Pad, PadContents,
-    SOUND_FAILED, SOUND_PLACE, drum_machine, kit_name, kit_pads, note_name, sending_kit, sending_part, sending_sound,
+    DRUM_MACHINE_KEY, DeviceId, Error, KIT_FAILED, KitSound, KitTarget, Mark, PART_FAILED, PART_IN, Pad, PadContents,
+    SOUND_FAILED, SOUND_PLACE, SongLoop, drum_machine, kit_name, kit_pads, note_name, sending_kit, sending_part,
+    sending_sound,
 };
 use serde_json::json;
 
@@ -610,6 +611,101 @@ fn a_part_whose_clip_bitwig_didnt_make_says_so() {
     assert!(matches!(gone, Err(Error::Missing { .. })), "{gone:?}");
     assert_eq!(bitwig.world().commands(), ["newtrack", "clip"]);
     let _ = PART_FAILED;
+}
+
+/// A MIDI file for a part, in a folder of its own.
+fn part_file(name: &str) -> PathBuf {
+    let file = fixtures(&format!("dawlink-part-{name}")).join(format!("{name}.mid"));
+    fs::write(&file, b"MThd\0\0\0\x06\0\x01\0\x01\x03\xc0").unwrap();
+    file
+}
+
+/// Bars 9 to 12 of the song the stand-in has open: 16 beats from beat 32, in 4/4.
+fn bars_9_to_12() -> SongLoop {
+    SongLoop { project: "Night Drive".into(), start: 32.0, length: 16.0 }
+}
+
+#[test]
+fn a_part_sent_for_a_song_has_bitwigs_play_start_mark_its_bars() {
+    let file = part_file("Saw Lead");
+    let bitwig = with(|w| w.transport.play_start = 8.0);
+    let sent = bitwig.bitwig().send_part_for_song(&file, "Saw Lead", &bars_9_to_12()).unwrap();
+    assert!(sent.went_in(), "{sent:?}");
+    assert_eq!(sent.mark, Mark::Moved);
+    // The card's own words stay the part's: the app adds the bar.
+    assert_eq!((sent.title(), sent.detail()), ("Saw Lead is in Bitwig".to_owned(), PART_IN.to_owned()));
+    let world = bitwig.world();
+    assert_eq!(world.transport.play_start, 32.0);
+    assert_eq!(world.commands(), ["newtrack", "clip", "playstart"]);
+    let mark = world.requests.last().unwrap();
+    assert_eq!((&mark["at"], &mark["onlyIn"]), (&json!(32.0), &json!("Night Drive")));
+    assert!(!world.playing, "nothing starts or stops for it");
+    // A part sent the plain way never touches the play start.
+    drop(world);
+    let plain = bitwig.bitwig().send_part(&file, "Saw Lead").unwrap();
+    assert_eq!(plain.mark, Mark::NotAsked);
+    assert_eq!(bitwig.world().commands().iter().filter(|c| *c == "playstart").count(), 1);
+}
+
+#[test]
+fn the_play_start_stays_in_another_project_and_with_an_older_extension() {
+    let file = part_file("Elsewhere");
+    // Another project is open: the part still goes in there, and the bars aren't its.
+    let bitwig = with(|w| {
+        w.project = "Glass".into();
+        w.transport.play_start = 8.0;
+    });
+    let sent = bitwig.bitwig().send_part_for_song(&file, "Elsewhere", &bars_9_to_12()).unwrap();
+    assert!(sent.went_in(), "{sent:?}");
+    assert_eq!(sent.mark, Mark::OtherProject("Glass".into()));
+    assert_eq!(bitwig.world().transport.play_start, 8.0);
+    assert_eq!(bitwig.world().commands(), ["newtrack", "clip"]);
+    // The same save typed another way is the song's.
+    let bitwig = with(|w| w.project = "night drive".into());
+    assert_eq!(bitwig.bitwig().send_part_for_song(&file, "Same", &bars_9_to_12()).unwrap().mark, Mark::Moved);
+    // An extension from before 3.23 doesn't know the command: it's never sent.
+    let bitwig = with(|w| {
+        w.hello.insert("extension".into(), "3.22".into());
+    });
+    let sent = bitwig.bitwig().send_part_for_song(&file, "Older", &bars_9_to_12()).unwrap();
+    assert!(sent.went_in(), "{sent:?}");
+    assert_eq!(sent.mark, Mark::OldExtension("the Music Organiser extension 3.22".into()));
+    assert_eq!(bitwig.world().commands(), ["newtrack", "clip"]);
+}
+
+#[test]
+fn says_when_bitwig_doesnt_move_the_play_start_and_leaves_it_for_a_part_that_didnt_go_in() {
+    let file = part_file("Stays");
+    let bitwig = with(|w| w.play_start_stays = true);
+    let sent = bitwig.bitwig().send_part_for_song(&file, "Stays", &bars_9_to_12()).unwrap();
+    // The part is in all the same.
+    assert!(sent.went_in(), "{sent:?}");
+    assert_eq!(sent.mark, Mark::NotMoved("Bitwig didn't move the play start to beat 32".into()));
+    assert_eq!(bitwig.world().transport.play_start, 0.0);
+    // A part whose clip didn't go in has nothing to drag there.
+    let broken = part_file("Broken for a song");
+    let bitwig = with(|w| w.unloadable.push("Broken for a song.mid".into()));
+    let sent = bitwig.bitwig().send_part_for_song(&broken, "Broken", &bars_9_to_12()).unwrap();
+    assert!(!sent.went_in());
+    assert_eq!(sent.mark, Mark::NotAsked);
+    assert_eq!(bitwig.world().commands(), ["newtrack", "clip"]);
+}
+
+#[test]
+fn a_mark_made_while_a_part_plays_with_the_songs_bars_is_where_the_play_start_goes_back_to() {
+    let bitwig = with(|w| w.transport.play_start = 8.0);
+    let turn = || mo_dawlink::bitwig::ticket().wait();
+    let playing =
+        bitwig.bitwig().play_with_song(part_file("MO Play 40"), Some(&bars_9_to_12()), &turn(), &|| true).unwrap();
+    assert_eq!(bitwig.world().transport.play_start, 32.0, "the bars go round from their first");
+    // The part is sent for the same bars while it plays: the play start is there already, and is the mark's now.
+    let sent = bitwig.bitwig().send_part_for_song(part_file("Saw Lead kept"), "Saw Lead", &bars_9_to_12()).unwrap();
+    assert_eq!(sent.mark, Mark::Moved);
+    let stopped = bitwig.bitwig().stop_playing(&playing, &turn()).unwrap();
+    assert_eq!(stopped.loop_back, Some(true));
+    let world = bitwig.world();
+    assert_eq!(world.transport.play_start, 32.0, "not back at bar 3: the mark stays");
+    assert!(!world.transport.looping, "the loop is as it was");
 }
 
 #[test]

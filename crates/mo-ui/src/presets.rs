@@ -2050,14 +2050,14 @@ pub fn left(app: &AppWindow) {
     }
 }
 
-/// Stops an audition playing or starting, for Play in Bitwig on the MIDI page taking Bitwig over (the review's
-/// D-8): one thing plays there at a time.
-pub fn stop_audition_for_another(app: &AppWindow) {
+/// Stops an audition playing or starting, for the MIDI page taking Bitwig over (the review's D-8): one thing plays
+/// there at a time. `why`: what took it over, for the page's words ("Play in Bitwig on the MIDI page took over").
+pub fn stop_audition_for_another(app: &AppWindow, why: &str) {
     if PAGE.with(|p| p.borrow().hearing.is_none()) {
         return;
     }
     stop_audition_now(app);
-    PAGE.with(|p| p.borrow_mut().message = "The audition stopped: Play in Bitwig on the MIDI page took over.".into());
+    PAGE.with(|p| p.borrow_mut().message = format!("The audition stopped: {why}."));
     show_all(app);
 }
 

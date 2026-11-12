@@ -49,6 +49,9 @@ pub enum Error {
     NoTrackSelected,
     /// The selected track can't play notes (an audio, group, effect or master track): its name and Bitwig's kind.
     NotAnInstrumentTrack { name: String, kind: String },
+    /// Bitwig has another project open than the song something is for (Put in the song): the one it has (its name;
+    /// "" when Bitwig didn't say which), and the song's.
+    NotTheSong { open: String, song: String },
     /// Something newer was asked for while this waited its turn, so it stopped (and took back what it had put in).
     Cancelled,
 }
@@ -120,6 +123,14 @@ impl fmt::Display for Error {
                 "\u{201c}{name}\u{201d} is {} track in Bitwig, so it can't play notes. Select an instrument track.",
                 a_kind(kind)
             ),
+            Error::NotTheSong { open, song } if open.is_empty() => write!(
+                f,
+                "Bitwig didn't say which project it has open, so the app left it alone. Open {song} in Bitwig, then \
+                 try again."
+            ),
+            Error::NotTheSong { open, song } => {
+                write!(f, "Bitwig has \u{201c}{open}\u{201d} open, not {song}. Open {song} there, then try again.")
+            }
             Error::Cancelled => f.write_str("Something newer was asked for, so this stopped."),
         }
     }

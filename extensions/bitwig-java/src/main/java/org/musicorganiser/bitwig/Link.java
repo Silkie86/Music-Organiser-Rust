@@ -400,7 +400,8 @@ final class Link {
         // Extension 3.8: another experiment, which only the live tests send.
         commands.put("filetrack", Command.job(this::fileTrack));
         // Extension 3.9: recording a launcher clip into the arranger, a way to stop it that doesn't wait behind it, and a
-        // probe of whether Bitwig carries out its panels' commands for the link. Only the live tests send them so far.
+        // probe of whether Bitwig carries out its panels' commands for the link. The live tests sent them first; the
+        // app's Put in the song (a part found for a song, into the arranger at the song's bars) sends record now.
         commands.put("record", Command.job(this::record));
         commands.put("recordabort", Command.answer(false, this::abortRecording));
         commands.put("probe", Command.job(this::probe));
@@ -424,6 +425,9 @@ final class Link {
         // Extension 3.22: clip takes "loop" (with "launch" and "audition"), for a part found for a song to play with the
         // song's bars going round: Bitwig stops, the arranger loops the bars, and the clip starts with the first of them.
         // deleteclip puts the loop and the play start back as they were found.
+        // Extension 3.23: playstart moves where Play starts from, for a part sent from the app's "Fits my song" list: the
+        // play start then marks the first of the song's bars it was found for, where its clip goes in the arranger.
+        commands.put("playstart", Command.job(this::markPlayStart));
     }
 
     // ---- Starting and stopping ----
@@ -2197,6 +2201,33 @@ final class Link {
         }, finish);
         if (stopping) waitFor(() -> !transport.isPlaying().get(), CHANGE_WAIT, stopped -> back.run(), finish);
         else back.run();
+    }
+
+    // ---- Marking a bar with the play start (extension 3.23) ----
+
+    /**
+     * Moves where Play starts from to `at` beats from the arranger's start (extension 3.23), for a part sent from a "Fits
+     * my song" list: the play start then marks the first of the bars the part was found for, where its clip is dragged
+     * to. A Bitwig that's playing plays on: the play start is where the next Play begins. Answers where it was (`was`)
+     * and where it is now (`playStart`).
+     *
+     * While a part plays with its song's bars going round (`clip` with `loop`), the play start is the link's, and goes
+     * back to where it was found when that part comes out. A mark asked for meanwhile is where it goes back to instead.
+     */
+    private void markPlayStart(Map<String, Object> request, Finish finish) {
+        if (!followed) throw new LinkError("This Bitwig didn't let the link reach the play start. A selftest says why.");
+        double at = beats(field(request, "at"), "at", false);
+        double was = transport.playStartPosition().get();
+        if (!same(was, at)) transport.playStartPosition().set(at);
+        waitFor(() -> same(transport.playStartPosition().get(), at), CHANGE_WAIT, moved -> {
+            if (!moved) throw new LinkError("Bitwig didn't move the play start to beat " + Json.number(at) + ".");
+            SongLoop loop = songLoop;
+            if (loop != null && loop.project.equals(frontProject())) loop.before.put("play start", at);
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("was", was);
+            m.put("playStart", transport.playStartPosition().get());
+            finish.ok(m);
+        }, finish);
     }
 
     /**
