@@ -441,9 +441,11 @@ impl Drop for SoundList {
 }
 
 impl SoundList {
-    /// The list from the library's sounds.
+    /// The list from the library's sounds: all but the copies you've hidden as duplicates, and the files programs left
+    /// in a temp folder that an older scan took in ([`mo_sounds::scan::in_temp_folder`]).
     pub fn new(sounds: Vec<Sound>) -> SoundList {
-        let mut sounds: Vec<Sound> = sounds.into_iter().filter(|s| !s.hidden).collect();
+        let mut sounds: Vec<Sound> =
+            sounds.into_par_iter().filter(|s| !s.hidden && !mo_sounds::scan::in_temp_folder(&s.path)).collect();
         // Leaving out the hidden copies keeps the room they took: give it back.
         sounds.shrink_to_fit();
         let hay = sounds.par_iter().map(|s| hay_of(&Now::of(s, None))).collect();
@@ -1846,6 +1848,17 @@ mod tests {
         assert_eq!(view(&none, Filters { favourites: true, ..Filters::default() }, Order::Name), [3]);
         // Of two copies, the favourite now is the one kept.
         assert_eq!(now.why_kept(kick, vocal), KeptFor::Favourite);
+    }
+
+    #[test]
+    fn the_files_a_program_left_in_a_temp_folder_stay_out_of_the_list() {
+        // FL Studio's blank renders, which an older scan took for closed hats (Solomon, 12 Nov 2026).
+        let list = SoundList::new(vec![
+            sound(1, r"C:\Users\silki\AppData\Local\Temp\Image-Line\{1FD56D3D}_U.wav", "Closed hat", None),
+            sound(2, r"I:\Samples\Temp\Closed Hat 01.wav", "Closed hat", None),
+        ]);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list.sound(0).map(|s| s.id), Some(2));
     }
 
     #[test]

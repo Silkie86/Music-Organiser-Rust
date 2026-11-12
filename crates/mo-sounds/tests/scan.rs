@@ -10,6 +10,8 @@ use mo_sounds::scan::{find_sounds, plan};
 
 fn folder(name: &str, files: &[(&str, usize)]) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    // A scan lists nothing in a temp folder, so neither may the build's own be in one.
+    assert!(!mo_sounds::scan::in_temp_folder(dir.to_str().unwrap()), "the build folder is in a temp folder: {dir:?}");
     let _ = fs::remove_dir_all(&dir);
     for (path, bytes) in files {
         let p = dir.join(path);
@@ -87,4 +89,22 @@ fn plans_what_to_listen_to_follow_and_forget() {
     assert!(moves.contains(&("Pack/Kick.wav".into(), "Pack 2/Kick.wav".into())));
     assert!(moves.contains(&("Pack/Pad.wav".into(), "Pack 2/Pad 90bpm.wav".into())));
     assert_eq!(p.forget, [at("Gone.wav")]);
+}
+
+/// A sample folder that holds a user's temp folder (his whole user folder, say): the files programs leave there, as FL
+/// Studio's blank renders, aren't listed, and one an older scan took in is forgotten though its file is still there
+/// (Solomon, 12 Nov 2026: "shouldnt be looking in temp and they are blank"). A folder of his own called Temp is his.
+#[test]
+fn leaves_out_the_files_in_a_temp_folder_and_forgets_the_ones_taken_in_before() {
+    let dir = folder(
+        "mo-sounds-temp",
+        &[("AppData/Local/Temp/Image-Line/{1FD56D3D}_U.wav", 3), ("Music/Samples/Temp/Kick.wav", 3)],
+    );
+    let root = dir.to_str().unwrap().to_owned();
+    let found = find_sounds(std::slice::from_ref(&root));
+    let names: Vec<String> = found.files.iter().map(|f| rel(&root, &f.path)).collect();
+    assert_eq!(names, ["Music/Samples/Temp/Kick.wav"]);
+    let render = dir.join("AppData/Local/Temp/Image-Line/{1FD56D3D}_U.wav").to_str().unwrap().to_owned();
+    let known = [KnownSound { path: render.clone(), size: 99, mtime: 1, has_clap: false }];
+    assert_eq!(plan(&found, &known, std::slice::from_ref(&root)).forget, [render]);
 }
