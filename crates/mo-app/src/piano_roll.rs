@@ -89,6 +89,13 @@ pub struct Picture {
     pub labels: Vec<Label>,
 }
 
+/// Where the bars run across the roll in `room` with `choices`, in points from the roll's left: from the first bar's
+/// start to the last one's end (a play head goes this far across at the same share of the part).
+pub fn bars_across(room: Room, choices: Choices) -> (f64, f64) {
+    let side = if choices.keyboard { SIDE_WITH_KEYBOARD } else { SIDE };
+    (side, room.width - room.margin)
+}
+
 /// The picture of `roll` in the `room` the window gives it, with `choices`, in `colours`, to be drawn at `scale` pixels
 /// to a point. A roll with no notes is the empty well.
 pub fn picture(roll: &Roll, room: Room, scale: f64, choices: Choices, colours: &Colours) -> Picture {

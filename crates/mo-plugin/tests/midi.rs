@@ -91,11 +91,24 @@ fn lists_filters_and_writes_a_part_out() {
         accent: mo_app::shapes::Colour::rgb(0x3DDC97, 1.0),
         ..Default::default()
     };
-    let roll = parts.roll(found[0], (200.0, 60.0, 2.0), &colours).unwrap();
+    let roll = parts.roll(found[0], (200.0, 60.0, 2.0), &colours, false).unwrap();
     assert_eq!((roll.width, roll.height), (400, 120));
     assert_eq!(roll.rgba.len(), 400 * 120 * 4);
     assert!(roll.rgba.chunks(4).any(|p| p[1] > p[0].saturating_add(60)), "a note is drawn, in the accent colour");
-    assert!(parts.roll(found[0], (0.0, 0.0, 1.0), &colours).is_err(), "no room, no roll");
+    assert!(parts.roll(found[0], (0.0, 0.0, 1.0), &colours, false).is_err(), "no room, no roll");
+    // The play head runs over the loop's bars: from the keyboard's edge to the right, where the first note starts.
+    assert_eq!((roll.points, roll.bars), (200.0, (52.0, 200.0)));
+    let first_note = (0..roll.width as usize)
+        .find(|&x| {
+            (0..roll.height as usize).any(|y| {
+                let p = &roll.rgba[(y * roll.width as usize + x) * 4..][..4];
+                p[1] > p[0].saturating_add(60)
+            })
+        })
+        .unwrap();
+    assert!((104..=106).contains(&first_note), "the first note starts where the bars do: {first_note}");
+    // A part of four bars or fewer isn't drawn wider to follow: it's all in sight.
+    assert_eq!(parts.roll(found[0], (200.0, 60.0, 2.0), &colours, true).unwrap().points, 200.0);
 
     // Dragged out: a MIDI file of its notes.
     let temp = db.parent().unwrap().join("Temp");

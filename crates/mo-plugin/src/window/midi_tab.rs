@@ -29,6 +29,9 @@ struct PartSlots {
     roll: Mutex<Option<(u64, Option<midi::RollPixels>)>>,
     /// Counts piano rolls asked for: only the newest is shown.
     rolls: AtomicU64,
+    /// The part the piano roll shows (its place in the catalogue), with the parts and the scale it was drawn at:
+    /// drawn again when following the playing is turned on or off, and the play head shows only over its own part.
+    rolled: Mutex<Option<(Arc<Parts>, usize, f64)>>,
 }
 
 /// The list's lines, made only for the rows shown.
@@ -124,6 +127,8 @@ pub(super) struct MidiTab {
     /// The tab was showing at the last tick: a reading that failed is tried again when it's shown again (the app
     /// may have made the index since).
     was_shown: Cell<bool>,
+    /// The play head's place last shown (-1 for none): the panel is told only when it moves.
+    head: Cell<f32>,
 }
 
 impl MidiTab {
@@ -139,6 +144,7 @@ impl MidiTab {
             column: Rc::default(),
             read_asked: Cell::new(false),
             was_shown: Cell::new(false),
+            head: Cell::new(-1.0),
         }
     }
 
@@ -188,6 +194,15 @@ impl MidiTab {
             let Some(&order) = usize::try_from(i).ok().and_then(|i| ORDERS.get(i)) else { return };
             change(&|a, _| a.order = order);
         });
+        // Following the playing turned on or off: the roll is drawn again for it.
+        let slots = Arc::clone(&self.slots);
+        let weak = panel.as_weak();
+        panel.on_midi_follow_changed(move || {
+            let rolled = lock(&slots.rolled).clone();
+            if let (Some(panel), Some((parts, at, scale))) = (weak.upgrade(), rolled) {
+                draw_roll(&panel, &slots, parts, at, scale);
+            }
+        });
         let lines = Rc::clone(&self.lines);
         let slots = Arc::clone(window_slots);
         let weak = panel.as_weak();
@@ -225,7 +240,22 @@ impl MidiTab {
     /// The piano roll goes (the list changed): a roll still being drawn isn't shown.
     fn forget_roll(&self, panel: &Panel) {
         self.slots.rolls.fetch_add(1, Ordering::AcqRel);
+        *lock(&self.slots.rolled) = None;
         panel.set_midi_roll(slint::Image::default());
+        panel.set_midi_roll_points(0.0);
+    }
+
+    /// The play head over the piano roll: `playing` is the part playing now (its place in the catalogue) and how far
+    /// through its loop it is (0 to 1); it shows only while that's the part the roll shows.
+    pub(super) fn show_head(&self, panel: &Panel, playing: Option<(usize, f32)>) {
+        let rolled = lock(&self.slots.rolled).as_ref().map(|r| r.1);
+        let head = match playing {
+            Some((at, place)) if rolled == Some(at) => place,
+            _ => -1.0,
+        };
+        if (head - self.head.replace(head)).abs() > f32::EPSILON {
+            panel.set_midi_head(head);
+        }
     }
 
     /// Finds the parts and the place in them of the part on a row, as the list shows it then.
@@ -269,8 +299,14 @@ impl MidiTab {
                 for (to, from) in pixels.make_mut_bytes().iter_mut().zip(&d.rgba) {
                     *to = *from;
                 }
+                panel.set_midi_roll_points(d.points as f32);
+                panel.set_midi_roll_from(d.bars.0 as f32);
+                panel.set_midi_roll_to(d.bars.1 as f32);
                 slint::Image::from_rgba8_premultiplied(pixels)
             });
+            if image.is_none() {
+                panel.set_midi_roll_points(0.0);
+            }
             panel.set_midi_roll(image.unwrap_or_default());
         }
         if let Some((number, found, counts)) = lock(&self.slots.found).take()
@@ -303,8 +339,10 @@ fn order_words(order: mo_app::midi::Order) -> String {
 /// pixels to a point, in the panel's colours; it shows once drawn, if it's still the newest asked for.
 fn draw_roll(panel: &Panel, slots: &Arc<PartSlots>, parts: Arc<Parts>, at: usize, scale: f64) {
     let number = slots.rolls.fetch_add(1, Ordering::AcqRel) + 1;
+    *lock(&slots.rolled) = Some((Arc::clone(&parts), at, scale));
     // The room the roll shows in once a part is picked (its height is set; its width is the list's).
     let (width, height) = (f64::from(panel.get_midi_roll_width()), ROLL_HEIGHT);
+    let follow = panel.get_midi_follow();
     let colours = colours(panel);
     let slots = Arc::clone(slots);
     background("mo-plugin-roll", move || {
@@ -312,7 +350,7 @@ fn draw_roll(panel: &Panel, slots: &Arc<PartSlots>, parts: Arc<Parts>, at: usize
             return;
         }
         let started = Instant::now();
-        let drawn = parts.roll(at, (width, height, scale), &colours);
+        let drawn = parts.roll(at, (width, height, scale), &colours, follow);
         if let Err(why) = &drawn {
             crate::log::line("MIDI", &format!("A part's piano roll couldn't be drawn: {why}"));
         }
