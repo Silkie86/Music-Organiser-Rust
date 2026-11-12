@@ -19,7 +19,7 @@ use mo_sounds::kits::{self, ExportOptions, KitSlot};
 use mo_sounds::music::NOTE_NAMES;
 use slint::{ComponentHandle, Model, ModelRc, VecModel};
 
-use super::{FEED, HERE, PAGE, Page, did, pick, play_picked, strings};
+use super::{FEED, HERE, PAGE, Page, clicked, did, pick, play_picked, strings};
 use crate::{AppWindow, MenuItem, PadLine, SoundsData};
 
 /// The kit builder's part of the page.
@@ -283,13 +283,12 @@ pub(super) fn wire(app: &AppWindow) {
         }
     });
     let weak = app.as_weak();
+    // A pad clicked as its sound's tile would be: the sound playing stops, any other is picked (and played with
+    // Autoplay on).
     data.on_pad_pick(move |i| {
         let Some(app) = weak.upgrade() else { return };
         let Some(at) = pad_place(i) else { return };
-        pick(&app, at);
-        if PAGE.with(|p| p.borrow().autoplay) {
-            play_picked(&app, 0.0);
-        }
+        clicked(&app, at);
     });
     let weak = app.as_weak();
     data.on_pad_play(move |i| {

@@ -52,8 +52,8 @@ use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedSt
 use crate::filters::FilterModels;
 use crate::finder::How;
 use crate::{
-    AlikeLine, AppWindow, CardAction, FolderLine, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile, SoundsData,
-    TileRow, UsedInLine, YearBar,
+    AlikeLine, AppKeys, AppWindow, CardAction, FolderLine, MenuItem, PickedSound, SoundFact, SoundLine, SoundTile,
+    SoundsData, TileRow, UsedInLine, YearBar,
 };
 use mo_library::ProjectFile;
 
@@ -2388,7 +2388,11 @@ fn show_actions(data: &SoundsData, shortcuts: &Shortcuts) {
     }
     data.set_menu(ModelRc::new(VecModel::from(menu)));
     data.set_actions(ModelRc::new(VecModel::from(actions)));
-    data.set_play_tip("Play or stop the picked sound. A right click anywhere stops it too.".into());
+    data.set_play_tip(
+        "Play or stop the picked sound. A click on the sound playing stops it too, and so does a right click on its \
+         waveform."
+            .into(),
+    );
     data.set_play_key(shortcuts.key_of("app.play").into());
     data.set_favourite_key(shortcuts.key_of(FAVOURITE).into());
     data.set_tag_key(shortcuts.key_of(TAG).into());
@@ -2630,8 +2634,16 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
     });
     let weak = app.as_weak();
     data.on_select(move |row| {
+        let Some(app) = weak.upgrade() else { return };
+        if let Some(at) = PAGE.with(|p| usize::try_from(row).ok().and_then(|r| p.borrow().entry(r))) {
+            clicked(&app, at);
+        }
+    });
+    // A right click over the waveform of the sound playing (on its tile or its card).
+    let weak = app.as_weak();
+    data.on_stop_sound(move || {
         if let Some(app) = weak.upgrade() {
-            select_row(&app, row, true);
+            stop(&app);
         }
     });
     let weak = app.as_weak();
@@ -2645,15 +2657,12 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
         play_picked(&app, 0.0);
         did::played(&app, at);
     });
-    // A sound like the picked one: picked in turn (and played with autoplay on), or played on a double-click.
+    // A sound like the picked one, clicked as its tile would be ([`clicked`]), or played on a double-click.
     let weak = app.as_weak();
     data.on_pick_alike(move |place| {
         let Some(app) = weak.upgrade() else { return };
         let Ok(at) = usize::try_from(place) else { return };
-        pick(&app, at);
-        if PAGE.with(|p| p.borrow().autoplay) {
-            play_picked(&app, 0.0);
-        }
+        clicked(&app, at);
     });
     let weak = app.as_weak();
     data.on_play_alike(move |place| {
@@ -3499,6 +3508,63 @@ fn show_picked_tags(data: &SoundsData, p: &Page) {
     data.set_picked_tags(view.chips);
 }
 
+/// A click on a sound, on its tile, list line, kit pad or star, or on a line of Sounds like this or of the Galaxy's
+/// Swept card ([`click_on`]): the sound playing stops when it's the one clicked, and stays picked (Solomon, 11 Nov
+/// 2026: "clicking it again stops the sound so we can still have a right click menu"); any other is picked, and played
+/// with Autoplay on. A double-click still plays: its second click stops the sound, then the double-click plays it
+/// again. A list line's pick for its right-click menu (`AppKeys.picking-for-menu`) only picks: the sound playing goes
+/// on and none starts, so the menu has the sound it was opened on, playing or not.
+pub(super) fn clicked(app: &AppWindow, at: usize) {
+    let autoplay = PAGE.with(|p| p.borrow().autoplay);
+    click_on(app, at, autoplay);
+}
+
+/// [`clicked`], with `play` in place of Autoplay: whether a sound the click picks plays. A line of the Galaxy's Swept
+/// card plays the sound it goes to, Autoplay or not.
+pub(super) fn click_on(app: &AppWindow, at: usize, play: bool) {
+    let for_menu = app.global::<AppKeys>().get_picking_for_menu();
+    let does = PAGE.with(|p| {
+        let p = p.borrow();
+        click_does(at, p.playing.map(|(i, _)| i), p.picked, play, for_menu)
+    });
+    match does {
+        Click::Stop { pick: also } => {
+            stop(app);
+            if also {
+                pick(app, at);
+            }
+        }
+        Click::Pick { play } => {
+            pick(app, at);
+            if play {
+                play_picked(app, 0.0);
+            }
+        }
+    }
+}
+
+/// What a click on the sound at `at` does ([`clicked`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Click {
+    /// It's the one playing: it stops, and is picked if it wasn't.
+    Stop { pick: bool },
+    /// It's picked, and played when `play`.
+    Pick { play: bool },
+}
+
+/// What a click on the sound at `at` does, with the sound at `playing` playing and the one at `picked` picked: `play`
+/// is whether a sound it picks plays (the page's Autoplay, mostly), `for_menu` a list line's pick for its right-click
+/// menu.
+fn click_does(at: usize, playing: Option<usize>, picked: Option<usize>, play: bool, for_menu: bool) -> Click {
+    if for_menu {
+        Click::Pick { play: false }
+    } else if playing == Some(at) {
+        Click::Stop { pick: picked != Some(at) }
+    } else {
+        Click::Pick { play }
+    }
+}
+
 /// Picks the sound on `row` of the view on show, opens its panel, and plays it when autoplay is on and `autoplay` asks.
 fn select_row(app: &AppWindow, row: i32, autoplay: bool) {
     let Some(at) = PAGE.with(|p| usize::try_from(row).ok().and_then(|r| p.borrow().entry(r))) else { return };
@@ -4108,6 +4174,28 @@ fn show_sending(app: &AppWindow, sending: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_click_on_the_sound_playing_stops_it_and_any_other_is_picked() {
+        // The sound at 3 plays and is picked: a click on it stops it, and it stays picked.
+        assert_eq!(click_does(3, Some(3), Some(3), true, false), Click::Stop { pick: false });
+        // Playing, but not picked (its card was closed, or a sweep played it): stopped and picked, so its card shows.
+        assert_eq!(click_does(3, Some(3), None, true, false), Click::Stop { pick: true });
+        assert_eq!(click_does(3, Some(3), Some(5), false, false), Click::Stop { pick: true });
+        // Any other sound: picked, and played with Autoplay on, whatever plays.
+        assert_eq!(click_does(4, Some(3), Some(3), true, false), Click::Pick { play: true });
+        assert_eq!(click_does(4, None, None, true, false), Click::Pick { play: true });
+        assert_eq!(click_does(4, None, Some(4), false, false), Click::Pick { play: false });
+    }
+
+    #[test]
+    fn a_pick_for_a_menu_never_stops_or_plays_a_sound() {
+        for (playing, picked) in [(Some(3), Some(3)), (Some(3), None), (None, None), (Some(5), Some(5))] {
+            for autoplay in [false, true] {
+                assert_eq!(click_does(3, playing, picked, autoplay, true), Click::Pick { play: false });
+            }
+        }
+    }
 
     /// 100 frames a second: silent for 0.2 s, loud for 0.3 s, silent to 1 s.
     fn quiet_loud_quiet() -> mo_audio::AudioData {

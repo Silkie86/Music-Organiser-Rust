@@ -437,6 +437,8 @@ export global SoundsData {
     callback panel-resized(length);
     callback play();
     callback seek(float);
+    // A right click over the waveform of the sound playing, on its tile or on its card: it stops.
+    callback stop-sound();
     callback close-panel();
     // The picked sound's right-click menu, and what was chosen (from it or a button on the card).
     in property <[MenuItem]> menu;
@@ -524,6 +526,11 @@ component SoundTileView inherits Rectangle {
     // A click on it, so the page can take the keys (arrows, Space) from the search box.
     callback chosen();
     callback right-clicked(length, length);
+    // Whether a point on the tile (as its line's `right-pressed` gives it) is over the tile's waveform.
+    pure function on-wave(x: length, y: length) -> bool {
+        return x >= Space.md && x <= root.width - Space.md
+            && y >= root.wave-top && y <= root.wave-top + root.wave-height;
+    }
     height: TileSize.height;
     border-radius: Theme.radius;
     border-width: root.on-card ? 0 : 1px;
@@ -548,6 +555,16 @@ component SoundTileView inherits Rectangle {
             SoundsData.select(root.tile.row);
         }
         double-clicked => { SoundsData.play-row(root.tile.row); }
+        // Over the waveform of the sound playing, a right click stops it (Solomon, 11 Nov 2026: "maybe only there over
+        // the waveform right click should stop it"), and the tile isn't picked; anywhere else on a tile, its menu.
+        // The tile's pick for the menu, just before, starts and stops nothing.
+        right-pressed(x, y) => {
+            if root.tile.playing && root.on-wave(x, y) {
+                SoundsData.stop-sound();
+                return true;
+            }
+            return false;
+        }
         right-clicked(x, y) => { root.right-clicked(x, y); }
         if root.itself: Dot {
             x: Space.md;
@@ -1155,6 +1172,7 @@ component SoundPanel inherits SidePanel {
             seconds: SoundsData.picked.seconds;
             can-seek: true;
             seek(at) => { SoundsData.seek(at); }
+            stop => { SoundsData.stop-sound(); }
         }
     }
     // Where to take the sound from to drag it into a DAW or a folder: a handle of its own, as a click on the waveform
