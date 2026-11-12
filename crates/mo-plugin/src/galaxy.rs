@@ -8,14 +8,16 @@
 
 use crate::library::Library;
 use mo_app::galaxy_grid::{Crowd, Grid};
-use mo_app::galaxy_look::{self, Look, on_view};
+use mo_app::galaxy_look::{self, Beat, LightBy, Look, on_view};
 use mo_app::galaxy_names::{self, Label, NO_KIND, Region};
 use mo_app::galaxy_picture::Picture;
 use mo_app::galaxy_view::{View, most_zoom_for};
 use mo_app::songs::thousands;
+use mo_sky::Shine;
 use mo_sounds::{Sound, StarPoint};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 /// The maps the app keeps, by what the stars were placed by: the one the app shows first, then the others.
 pub const SPACES: [&str; 3] = ["clap+features", "clap", "features"];
@@ -56,6 +58,15 @@ pub struct Mini {
     pub width: f32,
     pub height: f32,
 }
+
+/// What can light the stars in the plugin: the app's choices but "Used in songs" (the plugin doesn't read which songs
+/// use a sound, so that one would light nothing).
+pub const LIGHTS: [LightBy; 5] = [LightBy::Liked, LightBy::Length, LightBy::Newest, LightBy::Tempo, LightBy::Nothing];
+
+/// How often the stars are drawn again while they twinkle, and how long they go on after the Galaxy was last drawn
+/// for anything else or the mouse last moved over it (as the app's).
+const TWINKLE_EVERY: Duration = Duration::from_millis(80);
+const TWINKLE_FOR: Duration = Duration::from_secs(30);
 
 /// The most sounds the sweep's trail and the Swept card hold (as the app's).
 pub const TRAIL: usize = 16;
@@ -168,14 +179,44 @@ pub struct Pack {
     colours: Arc<Vec<i32>>,
     shown: Arc<Vec<usize>>,
     palette: Vec<[u8; 3]>,
+    library: Arc<Library>,
+    by: LightBy,
+    /// How lit each sound is by `by`, when it's been worked out for this library already.
+    light: Option<Arc<Vec<f32>>>,
+}
+
+/// The stars made ready ([`Pack::pack`]): as the card takes them, and how they're lit.
+pub struct Packed {
+    pub set: u64,
+    pub bytes: Vec<u8>,
+    /// How many stars at the end of `bytes` are the lit ones.
+    pub lit: u32,
+    by: LightBy,
+    light: Arc<Vec<f32>>,
+    order: Arc<Vec<u32>>,
+    share: f32,
 }
 
 impl Pack {
-    /// The stars as the card takes them, and how many at their end are lit (none: the plugin has no Light by yet).
-    /// On every core (call it off the panel's thread).
-    pub fn pack(&self) -> (Vec<u8>, u32) {
-        galaxy_look::pack(&self.stars, &self.colours, &self.palette, &self.shown, &[], &[])
+    /// The stars as the card takes them, lit by what Light by says (each sound ranked among those that have the
+    /// measure, as in the app). On every core (call it off the panel's thread).
+    pub fn pack(self) -> Packed {
+        let light = self.light.unwrap_or_else(|| Arc::new(galaxy_look::light(&self.library.list, self.by)));
+        let share = galaxy_look::lit_share(&self.stars, &self.shown, &light);
+        let order = galaxy_look::lit_order(&self.stars, &self.shown, &light);
+        let (bytes, lit) = galaxy_look::pack(&self.stars, &self.colours, &self.palette, &self.shown, &light, &order);
+        Packed { set: self.set, bytes, lit, by: self.by, light, order: Arc::new(order), share }
     }
+}
+
+/// How the stars on show are lit: what by, how lit each sound is, the lit ones from the least to the most, the share
+/// of the shown stars that are lit, and how many are.
+struct Lit {
+    by: LightBy,
+    light: Arc<Vec<f32>>,
+    order: Arc<Vec<u32>>,
+    share: f32,
+    count: u32,
 }
 
 /// The Galaxy's state on the panel's thread: the map, which stars are shown, the view, and which picture is on show.
@@ -202,8 +243,18 @@ pub struct Sky {
     /// The star under the mouse and the star last played, as places in the list: each gets a ring.
     pub hover: Option<usize>,
     pub picked: Option<usize>,
-    /// The showing the stars were last asked to be packed for the card: asked once.
-    packing: Option<u64>,
+    /// The showing (and Light by) the stars were last asked to be packed for: asked once.
+    packing: Option<(u64, LightBy)>,
+    /// What lights the stars, and how the ones on show are lit (as they were last packed).
+    light_by: LightBy,
+    lit: Option<Lit>,
+    /// The twinkle: its clock, since when the view has been still, until when the stars twinkle, when they were
+    /// last drawn, and whether that picture had stars drawn as stars (the ones that twinkle).
+    clock: Option<Instant>,
+    still_since: Option<Instant>,
+    twinkle_until: Option<Instant>,
+    drawn_at: Option<Instant>,
+    twinkle_shows: bool,
     /// The showing the mini-map's picture was last asked for: asked once.
     mini: Option<u64>,
     /// The sounds swept, clicked and gone to with the arrows lately, newest first, by place in the list; and the one
@@ -227,8 +278,9 @@ impl Sky {
     pub fn set_map(&mut self, map: Map) {
         self.view.most = most_zoom_for(map.count);
         self.map = Some(map);
-        // Another library's sounds: the trail's places in the list aren't theirs.
+        // Another library's sounds: the trail's places in the list aren't theirs, nor is how they're lit.
         self.clear_trail();
+        self.lit = None;
         self.changed_stars();
     }
 
@@ -334,50 +386,117 @@ impl Sky {
         on_view.then_some((x, y))
     }
 
-    /// What the card's stars are made from now ([`Pack::pack`] it off the panel's thread, then [`Sky::packed`]):
-    /// `None` with no map, or when this showing's were asked for already.
-    pub fn pack_ask(&mut self) -> Option<Pack> {
+    /// What lights the stars.
+    pub fn light_by(&self) -> LightBy {
+        self.light_by
+    }
+
+    /// Light by was chosen: the stars are packed again, lit that way (they stay as they are until then).
+    pub fn set_light_by(&mut self, by: LightBy) {
+        self.light_by = by;
+    }
+
+    /// What the stars are made ready from now ([`Pack::pack`] it off the panel's thread, then [`Sky::packed`]):
+    /// `None` with no map, or when this showing's (with this Light by) were asked for already.
+    pub fn pack_ask(&mut self, library: &Arc<Library>) -> Option<Pack> {
         let map = self.map.as_ref()?;
-        if self.packing == Some(self.set) {
+        if self.packing == Some((self.set, self.light_by)) {
             return None;
         }
-        self.packing = Some(self.set);
+        self.packing = Some((self.set, self.light_by));
         Some(Pack {
             set: self.set,
             stars: Arc::clone(&map.stars),
             colours: Arc::clone(&map.colours),
             shown: Arc::clone(&self.shown),
             palette: self.palette.clone(),
+            library: Arc::clone(library),
+            by: self.light_by,
+            // Ranked only when the library or Light by has changed: a new search reuses it.
+            light: self.lit.as_ref().filter(|lit| lit.by == self.light_by).map(|lit| Arc::clone(&lit.light)),
         })
     }
 
-    /// Whether stars packed for asking `set` are still the ones to show (the filters haven't changed since): then
-    /// they go to the card, and the next picture is of them.
-    pub fn packed(&mut self, set: u64) -> bool {
-        let current = set == self.set;
+    /// Whether these packed stars are still the ones to show (the filters and Light by haven't changed since): then
+    /// they go to the card, and the next picture is of them, lit their way.
+    pub fn packed(&mut self, packed: &Packed) -> bool {
+        let current = packed.set == self.set && packed.by == self.light_by;
         if current {
+            self.lit = Some(Lit {
+                by: packed.by,
+                light: Arc::clone(&packed.light),
+                order: Arc::clone(&packed.order),
+                share: packed.share,
+                count: packed.lit,
+            });
             self.stale = true;
         }
         current
     }
 
-    /// The picture the card is to draw now, if one is wanted: the view, the pixels a point and the look. The card
-    /// draws at once, on the panel's thread, so the picture is on show as soon as this is asked: it sits exactly on
-    /// the view.
-    pub fn on_card(&mut self) -> Option<(View, f32, Look)> {
-        if !self.stale || self.view.width < 1.0 || self.view.height < 1.0 {
+    /// The mouse moved over the Galaxy: someone's looking, so the stars keep twinkling.
+    pub fn looked_at(&mut self, now: Instant) {
+        if self.twinkle_shows {
+            self.twinkle_until = Some(now + TWINKLE_FOR);
+        }
+    }
+
+    /// Whether the stars are to be drawn again for their twinkle now: only while the Galaxy was drawn or looked at
+    /// lately, its picture has stars drawn as stars, and nothing is held or gliding (then they hold still, and the
+    /// twinkle comes back in from nothing).
+    fn twinkle_due(&mut self, now: Instant) -> bool {
+        let lately = self.twinkle_until.is_some_and(|until| now < until);
+        let moving = self.view.pressed() || self.view.flying();
+        match galaxy_look::beat(lately, self.twinkle_shows, moving) {
+            Beat::Stop | Beat::Hold => {
+                self.still_since = None;
+                false
+            }
+            Beat::Draw => self.drawn_at.is_none_or(|at| now.saturating_duration_since(at) >= TWINKLE_EVERY),
+        }
+    }
+
+    /// The picture the card is to draw now, if one is wanted (something changed, or the stars twinkle): the view,
+    /// the pixels a point, the look and what else lights the stars. The card draws at once, on the panel's thread, so
+    /// the picture is on show as soon as this is asked: it sits exactly on the view.
+    pub fn on_card(&mut self, now: Instant) -> Option<(View, f32, Look, Shine)> {
+        if self.view.width < 1.0 || self.view.height < 1.0 || self.map.is_none() {
             return None;
         }
-        self.map.as_ref()?;
+        if self.stale {
+            self.twinkle_until = Some(now + TWINKLE_FOR);
+        } else if !self.twinkle_due(now) {
+            return None;
+        }
         let (l, t, r, b) = on_view(&self.view);
         let crowd = match &self.grid {
             Some(grid) => grid.crowd(l, t, r, b),
             None => Crowd::even(&self.view, self.shown.len()),
         };
+        // Lit as the stars in hand were packed, even while newer ones (another Light by) are on their way.
+        let (share, count) = self.lit.as_ref().map_or((0.0, 0), |lit| (lit.share, lit.count));
+        let look = galaxy_look::look(&self.view, crowd, share);
+        let still = !self.view.pressed() && !self.view.flying();
+        let twinkle = if still {
+            let since = *self.still_since.get_or_insert(now);
+            galaxy_look::twinkle_amount(Some(now.saturating_duration_since(since)))
+        } else {
+            self.still_since = None;
+            0.0
+        };
+        let clock = *self.clock.get_or_insert(now);
+        let shine = Shine {
+            light_on: share > 0.0,
+            // Wrapped every hour, so after days open it still has the precision a smooth twinkle needs.
+            time: (now.saturating_duration_since(clock).as_secs_f64() % 3600.0) as f32,
+            twinkle,
+        };
+        self.twinkle_shows = galaxy_look::twinkles(&look, shine.light_on, count);
+        self.drawn_at = Some(now);
         self.asked += 1;
         self.stale = false;
         self.drawn = Some((self.asked, self.view));
-        Some((self.view, self.scale.max(0.25), galaxy_look::look(&self.view, crowd, 0.0)))
+        Some((self.view, self.scale.max(0.25), look, shine))
     }
 
     /// The next picture to draw, if one is wanted and none is being drawn: [`Picture::draw`] it off the panel's
@@ -402,8 +521,9 @@ impl Sky {
             count: map.count,
             colours: Arc::clone(&map.colours),
             shown: Arc::clone(&self.shown),
-            light: Arc::default(),
-            order: Arc::default(),
+            // Lit as on the card (the processor's picture doesn't twinkle).
+            light: self.lit.as_ref().map(|lit| Arc::clone(&lit.light)).unwrap_or_default(),
+            order: self.lit.as_ref().map(|lit| Arc::clone(&lit.order)).unwrap_or_default(),
             palette: self.palette.clone(),
             view: self.view,
             scale: if moving { self.scale.min(MOVING_SCALE) } else { self.scale }.max(0.25),
@@ -685,29 +805,80 @@ mod tests {
         assert!(x.abs() < 0.01 && y.abs() < 0.01 && (w - 200.0).abs() < 0.01 && (h - 100.0).abs() < 0.01);
     }
 
+    fn library() -> Arc<Library> {
+        let mut sounds = sounds();
+        sounds[1].favourite = true;
+        Arc::new(Library::new(sounds))
+    }
+
     #[test]
     fn the_card_gets_the_stars_once_a_showing_and_a_picture_only_when_something_changed() {
-        let mut sky = sky();
-        let pack = sky.pack_ask().expect("the stars to pack");
-        assert!(sky.pack_ask().is_none(), "asked once for a showing");
+        let (mut sky, library, now) = (sky(), library(), Instant::now());
+        sky.set_light_by(LightBy::Nothing);
+        let pack = sky.pack_ask(&library).expect("the stars to pack");
+        assert!(sky.pack_ask(&library).is_none(), "asked once for a showing");
         // Every placed star, 16 bytes each (the unplaced third sound has none); none lit.
-        let (bytes, lit) = pack.pack();
-        assert_eq!((bytes.len(), lit), (2 * galaxy_look::STAR_BYTES, 0));
-        assert!(sky.packed(pack.set));
-        let (view, scale, _) = sky.on_card().expect("a picture for the card");
-        assert_eq!((view.width, view.height, scale), (200.0, 100.0, 1.0));
-        assert!(sky.on_card().is_none(), "nothing changed since");
+        let packed = pack.pack();
+        assert_eq!((packed.bytes.len(), packed.lit), (2 * galaxy_look::STAR_BYTES, 0));
+        assert!(sky.packed(&packed));
+        let (view, scale, _, shine) = sky.on_card(now).expect("a picture for the card");
+        assert_eq!((view.width, view.height, scale, shine.light_on), (200.0, 100.0, 1.0, false));
+        assert!(sky.on_card(now).is_none(), "nothing changed since");
         // On show at once, exactly on the view.
         let (x, y, w, h) = sky.place().expect("a picture on show");
         assert!(x.abs() < 0.01 && y.abs() < 0.01 && (w - 200.0).abs() < 0.01 && (h - 100.0).abs() < 0.01);
         sky.moved();
-        assert!(sky.on_card().is_some());
+        assert!(sky.on_card(now).is_some());
         // The filters changed while the stars were being packed: those are dropped and asked for again.
-        let old = sky.pack_ask();
-        assert!(old.is_none());
+        assert!(sky.pack_ask(&library).is_none());
         sky.set_shown(Arc::new(vec![0]));
-        assert!(!sky.packed(pack.set));
-        assert!(sky.pack_ask().is_some());
+        assert!(!sky.packed(&packed));
+        assert!(sky.pack_ask(&library).is_some());
+    }
+
+    #[test]
+    fn light_by_lights_the_stars_and_they_twinkle_while_looked_at() {
+        let (mut sky, library, now) = (sky(), library(), Instant::now());
+        assert_eq!(sky.light_by(), LightBy::Liked, "as the app starts");
+        let packed = sky.pack_ask(&library).expect("the stars to pack").pack();
+        // The one favourite is the one lit star, and comes last on the card.
+        assert_eq!(packed.lit, 1);
+        assert!(sky.packed(&packed));
+        let (.., shine) = sky.on_card(now).expect("a picture");
+        assert!(shine.light_on);
+        assert_eq!(shine.twinkle, 0.0, "the twinkle comes in from nothing");
+        // The processor's picture is lit the same way.
+        sky.moved();
+        let picture = sky.picture().expect("a picture");
+        assert_eq!((picture.light.len(), picture.order.as_slice()), (3, &[1][..]));
+        sky.moved();
+        assert!(sky.on_card(now).is_some());
+        // Still, and drawn lately: drawn again every so often, a little brighter or dimmer each time.
+        assert!(sky.on_card(now + Duration::from_millis(10)).is_none(), "not that often");
+        let (.., shine) = sky.on_card(now + Duration::from_millis(500)).expect("a twinkle");
+        assert!(shine.twinkle > 0.0 && shine.time > 0.4);
+        // A button held: the stars hold still.
+        sky.view.press(10.0, 10.0, mo_app::galaxy_view::Hold::Pan);
+        assert!(sky.on_card(now + Duration::from_secs(1)).is_none());
+        sky.view.release(false);
+        let (.., shine) = sky.on_card(now + Duration::from_secs(2)).expect("a twinkle");
+        assert_eq!(shine.twinkle, 0.0, "back in from nothing");
+        // Nobody has looked for a while: it stops, until the mouse moves over the Galaxy again.
+        let later = now + Duration::from_secs(40);
+        assert!(sky.on_card(later).is_none());
+        sky.looked_at(later);
+        assert!(sky.on_card(later + Duration::from_millis(100)).is_some());
+        // Another Light by: packed again (the stars stay as they are until then), and one packed for the old
+        // choice that comes late is dropped.
+        assert!(sky.pack_ask(&library).is_none());
+        sky.set_light_by(LightBy::Nothing);
+        let pack = sky.pack_ask(&library).expect("the stars to pack again");
+        assert!(!sky.packed(&packed));
+        let packed = pack.pack();
+        assert_eq!(packed.lit, 0);
+        assert!(sky.packed(&packed));
+        let (.., shine) = sky.on_card(later + Duration::from_secs(1)).expect("a picture");
+        assert!(!shine.light_on);
     }
 
     #[test]

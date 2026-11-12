@@ -142,9 +142,8 @@ struct Slots {
     sky: Mutex<Option<SkyDrawn>>,
     /// The neighbourhoods the names over the map are for, with their asking's number ([`Sky::names_ask`]).
     names: Mutex<Option<(u64, Vec<mo_app::galaxy_names::Region>)>>,
-    /// The stars made ready for the graphics card, with their asking's number ([`Sky::pack_ask`]) and how many
-    /// are lit.
-    packed: Mutex<Option<(u64, Vec<u8>, u32)>>,
+    /// The stars made ready for the graphics card, and how they're lit ([`Sky::pack_ask`]).
+    packed: Mutex<Option<galaxy::Packed>>,
     /// The mini-map's picture, with its asking's number ([`Sky::mini_ask`]).
     mini: Mutex<Option<(u64, SkyPixels)>>,
 }
@@ -811,6 +810,8 @@ impl Shown {
                     }
                 }
                 Moved::Hover => {
+                    // Someone's looking: the stars keep twinkling.
+                    sky.looked_at(Instant::now());
                     sky.hover = sky.star_at(x, y);
                     let name = sky.hover.and_then(|at| lines.path_at(at));
                     panel.set_sky_hover(name.as_deref().map(library::name).unwrap_or_default().into());
@@ -856,6 +857,18 @@ impl Shown {
                 }
                 sky.picked = Some(at);
                 sky.on_trail(at, false);
+            }
+        });
+        // Light by: what makes a star bigger and brighter, as the app's chip on the map.
+        let lights = Choices { chips: Rc::default(), more: Rc::default() };
+        let light_names = galaxy::LIGHTS.map(mo_app::galaxy_look::LightBy::name);
+        panel.set_sky_light(lights.view(&mo_app::filters::one_of(&light_names, self.sky.borrow().light_by().name())));
+        let (sky, weak) = (Rc::clone(&self.sky), panel.as_weak());
+        panel.on_sky_light_by(move |name| {
+            let Some(by) = galaxy::LIGHTS.into_iter().find(|by| by.name() == name.as_str()) else { return };
+            sky.borrow_mut().set_light_by(by);
+            if let Some(panel) = weak.upgrade() {
+                panel.set_sky_light(lights.view(&mo_app::filters::one_of(&light_names, by.name())));
             }
         });
         let sky = Rc::clone(&self.sky);
@@ -976,8 +989,9 @@ impl Shown {
                 *lock(&slots.grid) = Some((set, grid));
             });
         }
+        let packed = self.sky_stars(&mut sky);
         let on_card = match &self.draws {
-            Draws::Card(gpu) if !self.painter_failed.get() => self.sky_on_card(&mut sky, gpu),
+            Draws::Card(gpu) if !self.painter_failed.get() => self.sky_on_card(&mut sky, gpu, packed),
             _ => false,
         };
         if !on_card {
@@ -1089,24 +1103,31 @@ impl Shown {
         }
     }
 
+    /// The Galaxy's stars made ready, lit by what Light by says, on a background thread when the map, the filters
+    /// or Light by change: the ones to show now, when new ones have come.
+    fn sky_stars(&self, sky: &mut Sky) -> Option<galaxy::Packed> {
+        if let Some(library) = self.lines.library.borrow().as_ref()
+            && let Some(pack) = sky.pack_ask(library)
+        {
+            let slots = Arc::clone(&self.slots);
+            background("mo-plugin-galaxy-stars", move || {
+                let started = Instant::now();
+                let packed = pack.pack();
+                crate::log::took_if_slow("Galaxy", "Made the stars ready and lit", started);
+                *lock(&slots.packed) = Some(packed);
+            });
+        }
+        take(&self.slots.packed).filter(|packed| sky.packed(packed))
+    }
+
     /// The Galaxy's stars painted by the graphics card, with the app's own painter: every star goes to the card once
     /// (when the map or the filters change), and after that each picture only sends the view, so flying and moving
     /// the map keep the screen's pace with half a million stars. `false` when the card can't (the processor's
     /// picture is drawn instead).
-    fn sky_on_card(&self, sky: &mut Sky, gpu: &Gpu) -> bool {
-        if let Some(pack) = sky.pack_ask() {
-            let slots = Arc::clone(&self.slots);
-            background("mo-plugin-galaxy-stars", move || {
-                let started = Instant::now();
-                let (bytes, lit) = pack.pack();
-                crate::log::took_if_slow("Galaxy", "Made the stars ready for the graphics card", started);
-                *lock(&slots.packed) = Some((pack.set, bytes, lit));
-            });
-        }
+    fn sky_on_card(&self, sky: &mut Sky, gpu: &Gpu, packed: Option<galaxy::Packed>) -> bool {
         let (device, queue) = gpu.device();
         let well = self.panel.get_sky_well();
         let background = [well.red(), well.green(), well.blue()].map(|c| f32::from(c) / 255.0);
-        let packed = take(&self.slots.packed).filter(|(set, ..)| sky.packed(*set));
         let mut painter = self.painter.borrow_mut();
         if painter.is_none() && packed.is_none() {
             // No stars on the card yet: nothing is shown until they are (they're a moment away).
@@ -1120,14 +1141,14 @@ impl Shown {
                 crate::log::took("Galaxy", "Set up the stars' painter on the graphics card", started);
                 painter
             });
-            if let Some((_, bytes, lit)) = &packed {
-                painter.set_stars(bytes, *lit);
+            if let Some(packed) = &packed {
+                painter.set_stars(&packed.bytes, packed.lit);
             }
             if !painter.has_stars() {
                 return Ok(None);
             }
-            let Some((view, scale, look)) = sky.on_card() else { return Ok(None) };
-            let texture = painter.draw(&view, scale, &look, mo_sky::Shine::default(), background);
+            let Some((view, scale, look, shine)) = sky.on_card(Instant::now()) else { return Ok(None) };
+            let texture = painter.draw(&view, scale, &look, shine, background);
             slint::Image::try_from(texture).map(Some).map_err(|e| format!("Slint wouldn't show the picture: {e}"))
         }));
         match painted {

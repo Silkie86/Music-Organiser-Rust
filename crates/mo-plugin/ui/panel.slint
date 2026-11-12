@@ -3,7 +3,7 @@
 // through the track, with the app's own filters and orders)
 // and DAW check (every CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
 export { FilterView, FilterChoice, YearBar }
 import { ListView } from "../../mo-ui/ui/list.slint";
 
@@ -152,6 +152,9 @@ export component Panel inherits Window {
     in property <float> sky-mini-h;
     // Pressed or dragged on, this far across and down it (0 to 1).
     callback sky-mini-go(float, float);
+    // What makes a star bigger and brighter ("Liked", "Length"...), one always picked.
+    in property <FilterView> sky-light;
+    callback sky-light-by(string);
     // The trail: a line through the stars heard lately (a path's commands, in the view's points), a dot on each, and
     // the Swept card that lists them, newest first.
     in property <string> sky-trail;
@@ -550,6 +553,14 @@ export component Panel inherits Window {
                             box-width: root.sky-mini-w;
                             box-height: root.sky-mini-h;
                             go(x, y) => { root.sky-mini-go(x, y); }
+                        }
+                        // The map's own setting, on the map, as the app's.
+                        OneOfChip {
+                            x: Space.md;
+                            y: Space.md;
+                            name: "Light by";
+                            filter: root.sky-light;
+                            picked(text) => { root.sky-light-by(text); }
                         }
                         // The Swept card, as the app's: the sounds heard on the map lately. It leaves the mini-map
                         // its corner, and stays away in a view too narrow for both it and the map.
