@@ -249,7 +249,7 @@ impl FileStore {
             None => self.load().unwrap_or_default(),
         };
         let done = look(&paths, &kept);
-        let read = done.iter().filter(|d| d.3).count();
+        let read = read_now(&done);
         // A kept file is gone only when its folder was looked through: one on a drive that's away now (unplugged or
         // asleep) is kept as it was, as curves.db keeps what it can't reach, and not read again when it's back (H-13).
         // The same goes for a folder under it that couldn't be looked in, a link to a moved folder among them (M-4).
@@ -268,7 +268,7 @@ impl FileStore {
         // Nothing read and nothing gone: the store is as it should be, so it isn't written.
         let not_kept =
             if read == 0 && gone.is_empty() { None } else { self.write(&done, &gone).err().map(|e| e.to_string()) };
-        found_of(done, not_kept)
+        found_of(done, read, not_kept)
     }
 
     /// Keeps what was read now, and forgets the files no longer found, in one go.
@@ -397,9 +397,13 @@ fn look(paths: &[PathBuf], kept: &HashMap<String, (i64, i64, Entry)>) -> Vec<Don
         .collect()
 }
 
-/// What was found, as [`Found`] gives it.
-fn found_of(done: Vec<Done>, not_kept: Option<String>) -> Found {
-    let read = done.iter().filter(|d| d.3).count();
+/// How many of `done` were read from their files now.
+fn read_now(done: &[Done]) -> usize {
+    done.iter().filter(|d| d.3).count()
+}
+
+/// What was found, as [`Found`] gives it: `read` is [`read_now`].
+fn found_of(done: Vec<Done>, read: usize, not_kept: Option<String>) -> Found {
     let mut files = Vec::with_capacity(done.len());
     let mut modified = Vec::with_capacity(done.len());
     let mut templates = Vec::new();
@@ -444,15 +448,18 @@ pub fn find_every(roots: &[PathBuf], store: &Path) -> (Found, Option<String>) {
 
 /// [`find_every`] without writing anything, for the CLAP plugin (which reads the app's files and never writes them):
 /// a file unchanged since the store at `store` kept it is taken from it, the rest are read now and not kept. With no
-/// store, or one that can't be used as it is (another layout or reader version, busy or damaged), every file is read:
-/// `Err` says why. Call it off the window's thread.
+/// store, or one that can't be used as it is (another layout or reader version, busy or damaged), every file is read,
+/// and the second half says why. Call it off the window's thread (from `mo_app::background::on_pool`, as it reads over
+/// every core of the current rayon pool).
 pub fn find_read_only(roots: &[PathBuf], store: &Path) -> (Found, Option<String>) {
     let (paths, _) = list_preset_files_and_unread(roots);
     let (kept, why) = match read_kept(store) {
         Ok(kept) => (kept, None),
         Err(why) => (HashMap::new(), Some(why)),
     };
-    (found_of(look(&paths, &kept), None), why)
+    let done = look(&paths, &kept);
+    let read = read_now(&done);
+    (found_of(done, read, None), why)
 }
 
 /// What the store at `path` holds, opened read-only (nothing made, emptied or changed), when it's this app's store of

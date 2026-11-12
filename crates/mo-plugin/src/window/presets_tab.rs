@@ -7,7 +7,7 @@ use super::{Carried, Choices, Slots};
 use crate::presets::{self, ORDERS, Presets, Read};
 use crate::threads::{background, lock};
 use crate::{Panel, PresetLine, YearBar};
-use mo_app::presets::{self as page, ChoiceCounts, Filters};
+use mo_app::presets::{self as page, ChoiceCounts, Filtered, Filters, Order};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
@@ -22,8 +22,9 @@ const VIEW: i32 = 2;
 #[derive(Default)]
 struct PresetSlots {
     read: Mutex<Option<Read>>,
-    /// What the list shows for what was asked, with the filter column's counts and the asking's number.
-    found: Mutex<Option<(u64, Vec<usize>, ChoiceCounts)>>,
+    /// What the list shows for what was asked (with the year strip's and the filter column's counts), and the
+    /// asking's number.
+    found: Mutex<Option<(u64, Filtered)>>,
     /// Counts askings: only the newest one's answer is shown.
     searches: AtomicU64,
 }
@@ -90,11 +91,24 @@ struct PresetColumn {
     format: Choices,
     plugin: Choices,
     counts: RefCell<Option<ChoiceCounts>>,
-    /// How many years the year strip was last given.
-    years: Cell<usize>,
+    /// The year strip's years for the list last worked out (with every filter but the years on, as the app's page
+    /// counts them), newest first, with how many each.
+    years: RefCell<Vec<(i32, usize)>>,
 }
 
 impl PresetColumn {
+    /// The year strip shows `years` from now on.
+    fn show_years(&self, panel: &Panel, years: Vec<(i32, usize)>) {
+        if *self.years.borrow() == years {
+            return;
+        }
+        let most = years.iter().map(|y| y.1).max().unwrap_or(1).max(1) as f32;
+        let bars: Vec<YearBar> =
+            years.iter().map(|&(year, n)| YearBar { year: year.to_string().into(), share: n as f32 / most }).collect();
+        panel.set_preset_years(ModelRc::new(VecModel::from(bars)));
+        *self.years.borrow_mut() = years;
+    }
+
     fn show(&self, panel: &Panel, presets: Option<&Presets>, filters: &Filters) {
         let counts = self.counts.borrow();
         let chips = match presets {
@@ -105,16 +119,7 @@ impl PresetColumn {
         panel.set_preset_kind_filter(self.kind.view(&chips.kind));
         panel.set_preset_format_filter(self.format.view(&chips.format));
         panel.set_preset_plugin_filter(self.plugin.view(&chips.plugin));
-        let years = presets.map_or(&[][..], |p| &p.years[..]);
-        let most = years.iter().map(|y| y.1).max().unwrap_or(1).max(1) as f32;
-        if self.years.replace(years.len()) != years.len() {
-            let bars: Vec<YearBar> = years
-                .iter()
-                .map(|&(year, n)| YearBar { year: year.to_string().into(), share: n as f32 / most })
-                .collect();
-            panel.set_preset_years(ModelRc::new(VecModel::from(bars)));
-        }
-        let (from, to) = mo_app::year_strip::picked_places(years, filters.years).unwrap_or((-1, -1));
+        let (from, to) = mo_app::year_strip::picked_places(&self.years.borrow(), filters.years).unwrap_or((-1, -1));
         panel.set_preset_years_from(from);
         panel.set_preset_years_to(to);
         let order = ORDERS.iter().position(|&(o, _)| o == filters.order).and_then(|i| i32::try_from(i).ok());
@@ -163,9 +168,9 @@ impl PresetsTab {
             let filters = Rc::clone(&self.filters);
             let column = Rc::clone(&self.column);
             let weak = panel.as_weak();
-            Rc::new(move |change: &dyn Fn(&mut Filters, Option<&Presets>)| {
+            Rc::new(move |change: &dyn Fn(&mut Filters, &PresetColumn)| {
                 let presets = lines.presets.borrow().clone();
-                change(&mut filters.borrow_mut(), presets.as_deref());
+                change(&mut filters.borrow_mut(), &column);
                 let filters = filters.borrow().clone();
                 if let Some(panel) = weak.upgrade() {
                     column.show(&panel, presets.as_deref(), &filters);
@@ -183,9 +188,8 @@ impl PresetsTab {
         panel.on_preset_clear(move |filter| change(&|f, _| f.clear_chip(&filter)));
         let change = Rc::clone(&changed);
         panel.on_preset_years_picked(move |a, b| {
-            change(&|f, presets| {
-                let years = presets.map_or(&[][..], |p| &p.years[..]);
-                f.years = mo_app::year_strip::year_span(years, a.min(b), a.max(b));
+            change(&|f, column| {
+                f.years = mo_app::year_strip::year_span(&column.years.borrow(), a.min(b), a.max(b));
             });
         });
         let change = Rc::clone(&changed);
@@ -193,7 +197,12 @@ impl PresetsTab {
         let change = changed;
         panel.on_preset_pick_order(move |i| {
             let Some(&(order, _)) = usize::try_from(i).ok().and_then(|i| ORDERS.get(i)) else { return };
-            change(&|f, _| (f.order, f.reversed) = (order, false));
+            // As the app's page picks a column's order: a second pick turns it round, a third goes back to the list
+            // by folder.
+            change(&|f, _| match order {
+                Order::Found => (f.order, f.reversed) = (Order::Found, false),
+                _ => f.order_by(order),
+            });
         });
         let lines = Rc::clone(&self.lines);
         let weak = panel.as_weak();
@@ -250,7 +259,7 @@ impl PresetsTab {
                 }
             }
         }
-        if let Some((number, found, counts)) = lock(&self.slots.found).take()
+        if let Some((number, Filtered { shown: found, years, counts })) = lock(&self.slots.found).take()
             && number == self.slots.searches.load(Ordering::Acquire)
         {
             let presets = self.lines.presets.borrow().clone();
@@ -262,6 +271,7 @@ impl PresetsTab {
             let empty = if found.is_empty() { "No presets match: take a filter or a word away" } else { "" };
             panel.set_preset_empty(empty.into());
             *self.column.counts.borrow_mut() = Some(counts);
+            self.column.show_years(panel, years);
             self.column.show(panel, presets.as_deref(), &self.filters.borrow());
             self.lines.show(presets, Arc::new(found));
         }
@@ -277,8 +287,8 @@ fn view(presets: Arc<Presets>, filters: Filters, slots: Arc<PresetSlots>) {
             return;
         }
         let started = Instant::now();
-        let (shown, counts) = presets.view(&filters);
-        crate::log::took_if_slow("Presets", &format!("Worked out a list of {} presets", shown.len()), started);
-        *lock(&slots.found) = Some((number, shown, counts));
+        let found = presets.view(&filters);
+        crate::log::took_if_slow("Presets", &format!("Worked out a list of {} presets", found.shown.len()), started);
+        *lock(&slots.found) = Some((number, found));
     });
 }

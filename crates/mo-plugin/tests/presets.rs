@@ -48,17 +48,22 @@ fn preset_files_are_listed_and_filtered_as_the_app_lists_them() {
     let names: Vec<&str> = presets.items.iter().map(|i| i.row.name.as_str()).collect();
     assert_eq!(names, ["Deep Bass", "Warm Pad"], "files that aren't presets are left out");
 
-    let (all, counts) = presets.view(&Filters::default());
-    assert_eq!(all.len(), 2);
+    let all = presets.view(&Filters::default());
+    assert_eq!(all.shown.len(), 2);
+    let year = all.years.first().expect("the files' year").0;
     let mut bass = Filters::default();
     bass.toggle(PART, "Bass");
-    let (shown, _) = presets.view(&bass);
+    let shown = presets.view(&bass).shown;
     assert_eq!(shown.len(), 1);
     assert_eq!(presets.items[shown[0]].row.name, "Deep Bass");
     let mut vst3 = Filters::default();
     vst3.toggle(FORMAT, "VST3");
-    assert!(presets.view(&vst3).0.is_empty());
-    let chips = presets.chips(Some(&counts), &Filters::default());
+    let none = presets.view(&vst3);
+    assert!(none.shown.is_empty());
+    assert!(none.years.iter().all(|y| y.1 == 0), "the year strip counts the filtered list: {:?}", none.years);
+    let this_year = Filters { years: Some((year, year)), ..Filters::default() };
+    assert_eq!(presets.view(&this_year).shown.len(), 2);
+    let chips = presets.chips(Some(&all.counts), &Filters::default());
     assert!(chips.part.chips.iter().chain(&chips.part.more).any(|c| c.text == "Bass" && c.count == "1"));
     assert_eq!(presets::count_line(2, None), "2 preset files");
     assert_eq!(presets::count_line(2, Some(1)), "1 of 2 preset files");

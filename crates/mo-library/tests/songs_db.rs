@@ -259,7 +259,11 @@ fn the_app_switches_to_songs_db_at_the_next_start_once_its_in_step() {
     let first = songs_db::at_start(dir, APP);
     assert_eq!(first.library, old);
     assert!(first.make_wanted() && !first.is_songs_db(), "{first:?}");
+    assert_eq!(songs_db::to_read(dir), old, "a reader that never writes reads library.db too");
     make(&old);
+    // Made but not yet the app's own: still library.db for such a reader, which never makes it the app's own.
+    assert_eq!(songs_db::to_read(dir), old);
+    assert!(songs_db::own_since(&new).is_none());
     // library.db changed since it was made (a setting written): library.db again, and it's made again.
     Connection::open(&old).unwrap().execute("INSERT INTO settings VALUES ('later', 'x')", []).unwrap();
     let changed = songs_db::at_start(dir, APP);
@@ -272,6 +276,7 @@ fn the_app_switches_to_songs_db_at_the_next_start_once_its_in_step() {
     assert_eq!(switched.library, new);
     assert_eq!(switched.state, State::Switched);
     assert!(songs_db::own_since(&new).is_some());
+    assert_eq!(songs_db::to_read(dir), new);
     assert_eq!(Library::open_read_only(&new).unwrap().setting("later").unwrap().as_deref(), Some("x"));
     // From then on, whatever happens to library.db.
     Connection::open(&old).unwrap().execute("INSERT INTO settings VALUES ('after', 'y')", []).unwrap();

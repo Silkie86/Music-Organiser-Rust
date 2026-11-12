@@ -12,10 +12,9 @@
 //! Like the sound library, the presets are shared by every copy of the plugin in the DAW while any of them holds them.
 
 use crate::threads::lock;
-use mo_app::presets::{self as page, ChoiceCounts, FilterChips, Filters, Item, Order};
+use mo_app::presets::{self as page, ChoiceCounts, FilterChips, Filtered, Filters, Item, Order};
 use mo_presets::file_store;
-use mo_presets::library::{self as plib, Source};
-use std::collections::HashMap;
+use mo_presets::library as plib;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
@@ -29,8 +28,6 @@ pub struct Presets {
     pub items: Vec<Item>,
     /// The plugins among them, most used first: the plugin filter's order.
     pub plugins: Vec<(String, usize)>,
-    /// The years the files were last changed in, newest first, with how many each: the year strip.
-    pub years: Vec<(i32, usize)>,
 }
 
 /// How reading the presets went.
@@ -56,9 +53,10 @@ pub fn read() -> Read {
     let started = std::time::Instant::now();
     let data = mo_app::paths::data_dir();
     let defaults = plib::default_folders();
-    let bitwig = page::bitwig_folders(&defaults, bitwig_saves(&data.join("library.db")));
+    let bitwig = page::bitwig_folders(&defaults, bitwig_saves(&mo_library::songs_db::to_read(&data)));
     let roots = page::preset_folders(&defaults, &bitwig);
-    let read = read_from(&roots, &data.join(file_store::FILE_NAME));
+    // On the app's low-priority threads, as the app reads them: never at the DAW's own priority.
+    let read = mo_app::background::on_pool(|| read_from(&roots, &data.join(file_store::FILE_NAME)));
     match &read {
         Read::Ready(presets) => {
             *lock(&SHARED) = Arc::downgrade(presets);
@@ -70,7 +68,9 @@ pub fn read() -> Read {
 }
 
 /// The library's saves' paths (opened read-only, read and let go): the Bitwig folders are found from them. None when
-/// the library can't be read; the usual folders are still looked in.
+/// the library can't be read; the usual folders are still looked in. Quick from the app's own `songs.db`; slow from the
+/// C# app's `library.db`, read only until `songs.db` is made (the plugin doesn't keep the app's list copy: that's a
+/// write).
 fn bitwig_saves(library: &Path) -> Vec<String> {
     let saves = mo_library::Library::open_read_only(library).and_then(|lib| lib.saves());
     match saves {
@@ -82,48 +82,30 @@ fn bitwig_saves(library: &Path) -> Vec<String> {
     }
 }
 
-/// The preset files under `roots`, with what the app's store at `store` kept of them.
+/// The preset files under `roots`, with what the app's store at `store` kept of them. Reads over every core of the
+/// current rayon pool.
 pub fn read_from(roots: &[PathBuf], store: &Path) -> Read {
     let (found, why) = file_store::find_read_only(roots, store);
     if let Some(why) = why {
         crate::log::line("Presets", &format!("Every preset file read, none taken from the app's list: {why}"));
     }
     crate::log::line("Presets", &format!("{} of {} preset files read from their files", found.read, found.files.len()));
-    let years: HashMap<String, Option<i32>> =
-        found.files.iter().zip(&found.modified).map(|(f, at)| (f.path.clone(), at.and_then(year_of_time))).collect();
-    let mut items: Vec<Item> = plib::rows(&[], &found.files)
-        .into_iter()
-        .map(|row| {
-            let year = match &row.source {
-                Source::File { path } => years.get(path).copied().flatten(),
-                Source::Song { .. } => None,
-            };
-            Item::new(row, String::new(), year)
-        })
-        .collect();
+    let items = page::file_items(&found.files, &found.modified);
     if items.is_empty() {
         return Read::Not(
             "No preset files found in your plugins' and Bitwig's preset folders (VST3 Presets, Bitwig's Library)"
                 .into(),
         );
     }
-    page::sort_files(&mut items);
     let plugins = page::plugins(&items);
-    let years = page::year_counts(&items, &Filters::default());
-    Read::Ready(Arc::new(Presets { items, plugins, years }))
-}
-
-fn year_of_time(m: std::time::SystemTime) -> Option<i32> {
-    let seconds = m.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
-    page::year_of(i64::try_from(seconds).ok()?)
+    Read::Ready(Arc::new(Presets { items, plugins }))
 }
 
 impl Presets {
-    /// The presets `filters` let through, in order, as places in [`Presets::items`], and the filter column's counts.
-    /// Goes over every line: call it off the panel's thread.
-    pub fn view(&self, filters: &Filters) -> (Vec<usize>, ChoiceCounts) {
-        let found = page::filtered(&self.items, filters);
-        (found.shown, found.counts)
+    /// The presets `filters` let through, in order, as places in [`Presets::items`], with the year strip's and the
+    /// filter column's counts for them. Goes over every line: call it off the panel's thread.
+    pub fn view(&self, filters: &Filters) -> Filtered {
+        page::filtered(&self.items, filters)
     }
 
     pub fn item(&self, at: usize) -> Option<&Item> {
