@@ -730,9 +730,9 @@ impl SoundIndex {
     }
 
     /// Sounds that sound like `of`, most alike first, with their likeness to 3 places: CLAP when deep listening is on
-    /// and has heard it, else the features. Hidden copies and `of` itself are left out; with `same_type`, so is
-    /// any sound of another type. `get` finds a sound by id (one it can't find is left out). As the C# app's
-    /// `SoundOrganiser.Similar`.
+    /// and has heard it, else the features. Hidden copies, silent sounds and `of` itself are left out; with
+    /// `same_type`, so is any sound of another type. `get` finds a sound by id (one it can't find is left out). A
+    /// silent sound has none like it. As the C# app's `SoundOrganiser.Similar`.
     pub fn similar<'a>(
         &self,
         of: &Sound,
@@ -740,6 +740,9 @@ impl SoundIndex {
         max: usize,
         same_type: bool,
     ) -> Vec<(i64, f64)> {
+        if of.is_silent() {
+            return Vec::new();
+        }
         let index = Some(self.active()).filter(|i| i.contains(of.id)).unwrap_or(&self.features);
         let Some(v) = index.get(of.id) else { return Vec::new() };
         let v = &*v;
@@ -846,6 +849,8 @@ mod tests {
         let index = SoundIndex { features: VectorIndex::clap(&v), clap: None, deep: false };
         let s = index.similar(&sounds[0], |id| by_id.get(&id).copied(), 2, false);
         assert_eq!(s.iter().map(|x| x.0).collect::<Vec<_>>(), [3]);
+        // Nor is any sound like a silent one.
+        assert!(index.similar(&sounds[1], |id| by_id.get(&id).copied(), 2, false).is_empty());
     }
 
     #[test]

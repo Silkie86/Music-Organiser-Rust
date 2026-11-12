@@ -264,10 +264,11 @@ impl Filters {
         }
     }
 
-    /// Turns one of the on/off chips on or off, by the name the page gives it: "mix-well", "unused", "used" or
-    /// "favourites" (any other name changes nothing). Used and Unused are never both on. When Used goes on or off,
-    /// the years picked on the year strip go too: its years then mean something else (the years of the songs that
-    /// use each sound, or the year each was added), so a span picked for one isn't kept for the other.
+    /// Turns one of the on/off chips on or off, by the name the page gives it: "mix-well", "unused", "used",
+    /// "favourites", [`HIDE_COPIES`], [`HIDE_SILENT`] or "folder" (which only goes off; any other name changes
+    /// nothing). Used and Unused are never both on. When Used goes on or off, the years picked on the year strip go
+    /// too: its years then mean something else (the years of the songs that use each sound, or the year each was
+    /// added), so a span picked for one isn't kept for the other.
     pub fn toggle(&mut self, chip: &str) {
         let by_use = self.used;
         match chip {
@@ -301,10 +302,10 @@ impl Filters {
         *self != none || !self.search.trim().is_empty()
     }
 
-    /// No filters and no search, as Clear filters leaves them, as on every page: Hide duplicates, Hide silent sounds and
-    /// how far the sounds like your favourites reach stay as they are. A search left in the box went on narrowing the
-    /// list after Clear filters, unseen (Solomon, 12 Nov 2026: "why are only these showing as favourites", then "same
-    /// issue").
+    /// No filters and no search, as Clear filters leaves them, as on every page: Hide duplicates, Hide silent sounds
+    /// and how far the sounds like your favourites reach stay as they are. A search left in the box went on narrowing
+    /// the list after Clear filters, unseen (Solomon, 12 Nov 2026: "why are only these showing as favourites", then
+    /// "same issue").
     pub fn cleared(&self) -> Filters {
         Filters {
             hide_copies: self.hide_copies,
@@ -1051,8 +1052,8 @@ impl SoundList {
         facets(&now, t) == [true; FACETS] && self.passes_others(i, &now, t)
     }
 
-    /// Everything but the chips' filters lets the sound at `i` (`now`) through: Hide silent sounds, favourites, Used and
-    /// Unused, the folder, the years and the search (last, as it's the slow one).
+    /// Everything but the chips' filters lets the sound at `i` (`now`) through: Hide silent sounds, favourites, Used
+    /// and Unused, the folder, the years and the search (last, as it's the slow one).
     fn passes_others(&self, i: usize, now: &Now, t: &Test) -> bool {
         let s = now.sound;
         if !t.show_silent && s.is_silent() {
@@ -1543,10 +1544,14 @@ pub fn hide_copies_text(found: CopiesFound) -> String {
 }
 
 /// The Hide silent sounds line's words: what it does, and how many of the sounds are silent all through or empty
-/// ([`SoundList::silent`]).
-pub fn hide_silent_text(silent: usize) -> String {
+/// ([`SoundList::silent`]); no number when there are none, or while it isn't known (only the first sounds are in).
+pub fn hide_silent_text(silent: Option<usize>) -> String {
     const NAME: &str = "Hide silent sounds";
-    if silent == 0 { format!("{NAME} · none") } else { format!("{NAME} · {}", short_count(silent)) }
+    match silent {
+        // "· none" doesn't fit the filter column beside its tick: no number says as much.
+        None | Some(0) => NAME.to_owned(),
+        Some(n) => format!("{NAME} · {}", short_count(n)),
+    }
 }
 
 /// Of the sounds with these `ids`, the `n` that [`Order::Shuffled`] puts first for `seed`, in that order: shown at
@@ -2159,8 +2164,12 @@ mod tests {
         assert!(asked.show_silent && !asked.any());
         assert_eq!(ids(&list, &list.view(&asked, Order::Name, 0)), [1, 2, 3, 4, 5, 6]);
         assert_eq!(Filters { favourites: true, ..asked.clone() }.cleared(), asked);
-        assert_eq!(hide_silent_text(0), "Hide silent sounds · none");
-        assert_eq!(hide_silent_text(2), "Hide silent sounds · 2");
+        assert_eq!(hide_silent_text(None), "Hide silent sounds");
+        assert_eq!(hide_silent_text(Some(0)), "Hide silent sounds");
+        assert_eq!(hide_silent_text(Some(2)), "Hide silent sounds · 2");
+        // Only the first minute is listened to: a longer sound quiet there may start later.
+        let long = SoundAnalysis { seconds: 210.0, peak_db: -120.0, ..SoundAnalysis::default() };
+        assert!(!long.is_silent() && SoundAnalysis { seconds: 60.0, ..long }.is_silent());
         // Nor is one among the sounds like your favourites, even shown and with a fingerprint like a favourite's.
         let mut fav = sound(7, r"I:\S\7 Kick.wav", "Kick", level(-6.0, 0.0));
         fav.favourite = true;

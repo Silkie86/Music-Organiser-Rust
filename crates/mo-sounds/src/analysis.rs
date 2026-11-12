@@ -159,11 +159,12 @@ pub const SILENT_DB: f64 = -80.0;
 
 impl SoundAnalysis {
     /// Whether the sound is silent all through, or empty: its loudest point ([`SoundAnalysis::peak_db`]) is at
-    /// [`SILENT_DB`] or under. That peak is measured with the two sides mixed into one, so a stereo sound whose sides
-    /// cancel out there (one is the other upside down) is still heard: nearly all that's left of it is the difference
-    /// between them, which puts its width near the most there is (1.41).
+    /// [`SILENT_DB`] or under. Only the first minute is listened to ([`mo_audio::MAX_SECONDS`]), so a longer sound is
+    /// never taken for silent: a stem may only start after it. The peak is measured with the two sides mixed into one,
+    /// so a stereo sound whose sides cancel out there (one is the other upside down) is still heard: nearly all that's
+    /// left of it is the difference between them, which puts its width near the most there is (1.41).
     pub fn is_silent(&self) -> bool {
-        self.peak_db <= SILENT_DB && self.width < 1.3
+        self.peak_db <= SILENT_DB && self.seconds <= mo_audio::MAX_SECONDS && self.width < 1.3
     }
 
     /// Reads the JSON the C# app stored. `None` when it isn't a readable analysis (the C# app then shows none too).

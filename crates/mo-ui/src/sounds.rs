@@ -3473,10 +3473,12 @@ fn show_lists(app: &AppWindow) {
         } else if p.list.is_empty() {
             String::new()
         } else if p.view == HISTORY
-            && ((Filters { years: None, ..p.filters.clone() }).any() || p.history.len() < p.played.len())
+            && ((Filters { years: None, ..p.filters.clone() }).any()
+                || (!p.filters.show_silent
+                    && p.played.iter().any(|&(i, _)| p.list.sound(i).is_some_and(|s| s.is_silent()))))
         {
             // The years picked on the year strip don't narrow History, so they don't count here either; silent sounds
-            // left out do.
+            // played and left out do.
             format!("{} of {} played", thousands(p.history.len()), thousands(p.played.len()))
         } else if p.view != HISTORY
             && p.view != REDISCOVER
@@ -3543,7 +3545,7 @@ fn show_chips(app: &AppWindow) {
         data.set_hide_copies(f.hide_copies);
         data.set_hide_copies_text(list::hide_copies_text(copies::found()).into());
         data.set_hide_silent(!f.show_silent);
-        data.set_hide_silent_text(list::hide_silent_text(p.list.silent()).into());
+        data.set_hide_silent_text(list::hide_silent_text(p.partial.is_none().then(|| p.list.silent())).into());
         data.set_folder(f.folder.as_deref().unwrap_or_default().into());
         data.set_any_filter(f.any());
         // The box holds the words the list goes by: Clear filters takes them off too.

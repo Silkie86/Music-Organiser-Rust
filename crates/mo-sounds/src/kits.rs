@@ -117,7 +117,7 @@ pub fn roll(
     if o.same_pack {
         the_pack = locked_ids.iter().find_map(|id| locked_sound(*id)).map(pack);
         if the_pack.is_none() {
-            let visible: Vec<&Sound> = sounds.iter().filter(|s| !s.hidden).collect();
+            let visible: Vec<&Sound> = sounds.iter().filter(|s| !s.hidden && !s.is_silent()).collect();
             the_pack = pick_pack(&visible, slots, &mut rng);
         }
     }

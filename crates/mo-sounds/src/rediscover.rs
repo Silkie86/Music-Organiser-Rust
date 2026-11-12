@@ -292,6 +292,11 @@ pub fn why_nothing(sounds: &[Sound], index: &SoundIndex, o: &Options) -> String 
     if of_type.is_empty() {
         return format!("No sounds are sorted as {types} yet. Pick another type, or Any type.");
     }
+    // Silent sounds are never suggested.
+    let of_type: Vec<&Sound> = of_type.into_iter().filter(|s| !s.is_silent()).collect();
+    if of_type.is_empty() {
+        return format!("Every {kind}sound is silent all through: there's none to suggest.");
+    }
     // Only sounds the index has can be suggested (deep listening may not have heard these yet).
     let mut of_type: Vec<&Sound> = of_type.into_iter().filter(|s| index.active().contains(s.id)).collect();
     if of_type.is_empty() {
@@ -418,9 +423,16 @@ mod tests {
         }
         let o = Options { sound_types: vec!["Kick".into()], count: 3, seed: 5, ..Options::default() };
         assert_eq!(suggest(&sounds, &usage, &index, &o), Vec::new());
-        // Nor are they counted in their folder.
+        // Nor are they counted in their folder, nor in why there's none: the kick that isn't silent is used.
         let kicks = folders(&sounds, &usage).into_iter().find(|f| f.folder.ends_with("Kicks")).unwrap();
         assert_eq!((kicks.sounds, kicks.used), (1, 1));
+        assert!(why_nothing(&sounds, &index, &o).starts_with("Every Kick sound is used in a project already"));
+        let mut all_silent = sounds.clone();
+        all_silent[0].analysis = Some(SoundAnalysis { peak_db: -120.0, ..SoundAnalysis::default() });
+        assert_eq!(
+            why_nothing(&all_silent, &index, &o),
+            "Every Kick sound is silent all through: there's none to suggest."
+        );
         // A sound that only whispers is no silent one.
         sounds[4].analysis = Some(SoundAnalysis { peak_db: -70.0, ..SoundAnalysis::default() });
         let found = suggest(&sounds, &usage, &index, &o);
