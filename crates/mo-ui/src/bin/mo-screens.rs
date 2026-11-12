@@ -743,7 +743,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     wide_shots(&app, &window, &out)?;
     types_fill_the_column(&app, &window)?;
     tag_box_checks(&app, &window)?;
-    right_click_while_playing(&app, &window)?;
+    stopping_by_click(&app, &window)?;
     Ok(())
 }
 
@@ -905,53 +905,82 @@ fn tag_box_checks(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Res
     }
 }
 
-/// A right click while a sound plays is for stopping it (Solomon, 11 Nov: "right click to stop could also work in the
-/// main app too"): a tile right-clicked then is neither picked nor given its menu (a pick could play it), and once Esc
-/// has stopped the sound the same right click picks the tile and opens its menu, as before. The stop itself is heard
-/// by the window's own watcher as the button comes up, which these shots have no winit window for: right_click.rs's
-/// tests check when a press is a click and when it's a drag. Last, as the tile it picks would show in the shots.
-fn right_click_while_playing(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
+/// Stopping the sound playing without its Stop button (Solomon, 11 Nov 2026: "maybe it should be clicking it again
+/// stops the sound so we can still have a right click menu", then "maybe only there over the waveform right click
+/// should stop it"). A click on its tile stops it, and it stays picked. A right click on the tile's name opens the
+/// tile's menu, and the sound goes on: the pick for the menu starts and stops nothing. A right click over its waveform,
+/// on the tile or on its card, stops it and opens no menu, and a click on the card's waveform plays from there. With
+/// the card open first, so the tiles keep their places as they're picked, and clicks on one spot further apart than a
+/// double-click. Last, as it leaves a tile picked.
+fn stopping_by_click(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
     use slint::platform::Key;
     let sounds = app.global::<mo_ui::SoundsData>();
+    let name = || sounds.get_picked().name.to_string();
+    let plays = mo_ui::sounds::plays;
+    let wait = || {
+        capture(window);
+        capture(window)
+    };
     start_on(app, Place::Sounds);
+    sounds.invoke_clear();
     sounds.invoke_pick_view(0);
     sounds.invoke_select(0);
     capture(window);
-    if !sounds.get_playing() {
-        sounds.invoke_play();
-    }
-    // The card put away with the sound still playing: nothing is picked, so a pick would show.
-    sounds.invoke_close_panel();
-    capture(window);
-    if !mo_ui::sounds::plays() {
-        return Err("right click: the sound didn't play, or stopped as its card was put away".into());
-    }
-    let (x, y) = MENU_TILE;
-    hover(window, x, y);
-    let before = capture(window);
-    right_click(window, x, y);
-    let after = capture(window);
-    if sounds.get_panel_shown() || !same_in(&before, &after, MENU_AREA) {
-        return Err(format!("right click: the tile at {x}, {y} was picked or opened its menu while a sound played"));
-    }
-    press(app, Key::Escape, false);
-    capture(window);
-    if mo_ui::sounds::plays() {
-        return Err("right click: Esc didn't stop the sound".into());
-    }
-    right_click(window, x, y);
-    let menu = capture(window);
-    if !sounds.get_panel_shown() || same_in(&after, &menu, MENU_AREA) {
-        return Err(format!(
-            "right click: with nothing playing, the tile at {x}, {y} didn't open its menu; has the grid moved?"
-        ));
-    }
-    // Away again: a click above the page shuts the menu, the card is put away, and what its pick played stops.
-    click(window, 600.0, 20.0);
-    sounds.invoke_close_panel();
-    if mo_ui::sounds::plays() {
+    if plays() {
         press(app, Key::Escape, false);
     }
+    wait();
+    // A click on a tile picks it; with Autoplay on it plays (else Play does).
+    let (x, y) = MENU_TILE;
+    click(window, x, y);
+    wait();
+    if !plays() {
+        sounds.invoke_play();
+        wait();
+    }
+    let tile = name();
+    if !sounds.get_playing() {
+        return Err(format!("stop by click: the click at {x}, {y} picked nothing that plays; has the grid moved?"));
+    }
+    click(window, x, y);
+    wait();
+    if plays() || name() != tile || !sounds.get_panel_shown() {
+        return Err(format!("stop by click: a click on {tile} as it played didn't stop it, or didn't leave it picked"));
+    }
+    sounds.invoke_play();
+    let before = wait();
+    right_click(window, x, y);
+    let menu = wait();
+    if !plays() || name() != tile || same_in(&before, &menu, MENU_OVER) {
+        return Err(format!(
+            "stop by click: a right click on {tile}'s name as it played stopped it, or opened no menu"
+        ));
+    }
+    // Away again: a click above the page shuts the menu.
+    click(window, 600.0, 20.0);
+    let before = wait();
+    let (wx, wy) = TILE_WAVE;
+    right_click(window, wx, wy);
+    let after = wait();
+    if plays() || !same_in(&before, &after, MENU_OVER) {
+        return Err(format!(
+            "stop by click: a right click on {tile}'s waveform as it played didn't stop it, or opened its menu"
+        ));
+    }
+    sounds.invoke_play();
+    wait();
+    let (cx, cy) = CARD_WAVE;
+    right_click(window, cx, cy);
+    wait();
+    if plays() {
+        return Err("stop by click: a right click on the card's waveform as its sound played didn't stop it".into());
+    }
+    click(window, cx, cy);
+    wait();
+    if !plays() {
+        return Err("stop by click: a click on the card's waveform didn't play the sound from there".into());
+    }
+    press(app, Key::Escape, false);
     hover(window, -1.0, -1.0);
     capture(window);
     Ok(())
@@ -3050,8 +3079,11 @@ const FIRST_LINE: (u32, u32, u32, u32) = (250, 335, 400, 30);
 const MENU_TILE: (f32, f32) = (560.0, 301.0);
 const MENU_LINES_TOP: f32 = 4.0;
 const MENU_LINE: f32 = 32.0;
-/// Under the mouse at [`MENU_TILE`]: the tile's own corner and the menu's first three lines, once it's open.
-const MENU_AREA: (u32, u32, u32, u32) = (560, 301, 200, 100);
+/// With the card open: the waveform of the tile at [`MENU_TILE`], and the waveform on the card.
+const TILE_WAVE: (f32, f32) = (560.0, 345.0);
+const CARD_WAVE: (f32, f32) = (1200.0, 315.0);
+/// Below and right of the mouse at [`MENU_TILE`], off its tile (with the card open): a menu opened there covers it.
+const MENU_OVER: (u32, u32, u32, u32) = (700, 400, 120, 80);
 /// The Sounds card's Add a tag box, the card turned down to its end (with a sound's six tags over it).
 const TAG_BOX: (f32, f32) = (1130.0, 490.0);
 /// The Songs, Presets, MIDI and Plugins lists in the short window: left of the activity cards, which move on their own.

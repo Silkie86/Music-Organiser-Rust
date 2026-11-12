@@ -30,7 +30,7 @@ use mo_sounds::{SoundsDb, StarPoint};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel};
 
 use super::sky::{Shine, Sky};
-use super::{CHOICES, FEED, HERE, PAGE, pick, play_picked};
+use super::{CHOICES, FEED, HERE, PAGE, clicked, pick, play_picked};
 use crate::gpu;
 use crate::{AppWindow, GalaxyLabel, SoundsData, SweptLine, Theme, TrailDot};
 
@@ -110,6 +110,9 @@ pub(super) struct Galaxy {
     scale: f32,
     /// The press going on was cancelled (the window lost the mouse), so it isn't a click.
     cancelled: bool,
+    /// The press going on was a double-click's second: the double-click has had it (the window hears of a double-click
+    /// before the button's coming up), so its coming up isn't a click as well, which would stop the star again.
+    doubled: bool,
     /// Counts the pictures asked for, so an older one that arrives late is dropped.
     asked: u64,
     /// The shown stars on a grid over the map, to find the one under the mouse and count the ones on the view.
@@ -157,6 +160,7 @@ impl Default for Galaxy {
             view: View::default(),
             scale: 1.0,
             cancelled: false,
+            doubled: false,
             asked: 0,
             grid: None,
             packed: None,
@@ -511,6 +515,7 @@ pub(super) fn wire(app: &AppWindow) {
             let g = &mut p.borrow_mut().galaxy;
             g.view.press(x, y, if pan { Hold::Pan } else { Hold::Sweep });
             g.cancelled = false;
+            g.doubled = false;
             g.sweep = Sweep::default();
         });
         let data = app.global::<SoundsData>();
@@ -557,13 +562,13 @@ pub(super) fn wire(app: &AppWindow) {
             return;
         }
         app.global::<SoundsData>().set_galaxy_grabbing(false);
-        let (click, swept, panned) = PAGE.with(|p| {
+        let (click, swept, panned, doubled) = PAGE.with(|p| {
             let g = &mut p.borrow_mut().galaxy;
             let cancelled = std::mem::take(&mut g.cancelled);
             let swept = g.view.sweeping() && g.sweep.played.is_some();
             let panned = g.view.panning();
             g.sweep = Sweep::default();
-            (g.view.release(cancelled), swept, panned)
+            (g.view.release(cancelled), swept, panned, std::mem::take(&mut g.doubled))
         });
         SWEEP_TIMER.with(Timer::stop);
         // The drag drew quick pictures: the sharp one now.
@@ -575,22 +580,25 @@ pub(super) fn wire(app: &AppWindow) {
         if swept {
             super::stop(&app);
         }
+        if doubled {
+            return;
+        }
         let Some(at) = click.and_then(|(x, y)| star_at(x, y)) else { return };
         on_trail(&app, at, false);
-        pick(&app, at);
-        if PAGE.with(|p| p.borrow().autoplay) {
-            play_picked(&app, 0.0);
-        }
+        // As a click on its tile: the star playing stops; any other is picked (and played with Autoplay on).
+        clicked(&app, at);
     });
-    // A double-click plays the star; with autoplay on, its first click already did.
+    // A double-click plays the star from its start, as a tile's does: its first click may have stopped it (it was the
+    // one playing). Its button's coming up, heard after this, is no click of its own.
     let weak = app.as_weak();
     data.on_galaxy_double(move || {
         let Some(app) = weak.upgrade() else { return };
-        let (autoplay, (x, y)) = PAGE.with(|p| {
-            let p = p.borrow();
-            (p.autoplay, p.galaxy.view.mouse)
+        let (x, y) = PAGE.with(|p| {
+            let mut p = p.borrow_mut();
+            p.galaxy.doubled = true;
+            p.galaxy.view.mouse
         });
-        if !autoplay && let Some(at) = star_at(x, y) {
+        if let Some(at) = star_at(x, y) {
             pick(&app, at);
             play_picked(&app, 0.0);
         }

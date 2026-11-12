@@ -141,8 +141,7 @@ pub fn window_event(what: &'static str) {
 /// long freeze. (On Windows, winit says nothing of a covered window, and a minimised one is a resize to nothing.)
 /// Whether the window is the one in front goes to the pages too (`AppKeys.window-active`, before Slint hears of it):
 /// a text box that loses the keys to another app's window isn't one whose keys went elsewhere in this one (the
-/// code review of the 10 Nov review's U-1 fix). A right click on something playing stops it ([`crate::right_click`]).
-/// Nothing else is changed: every event goes on to Slint as before.
+/// code review of the 10 Nov review's U-1 fix). Nothing else is changed: every event goes on to Slint as before.
 ///
 /// Slint keeps one such watcher a window, so this one is the app's: anything else that needs the window's own events
 /// must be called from here, not set up beside it.
@@ -151,10 +150,8 @@ pub fn watch_window(app: &crate::AppWindow) {
     use slint::winit_030::winit::event::WindowEvent;
     use slint::winit_030::{EventResult, WinitWindowAccessor};
     let mut minimised = false;
-    let mut right = crate::right_click::RightClick::default();
     let weak = app.as_weak();
     app.window().on_winit_window_event(move |_, event| {
-        right.heard(&weak, event);
         if let WindowEvent::Focused(active) = event
             && let Some(app) = weak.upgrade()
         {

@@ -182,10 +182,10 @@ export global AppKeys {
     // text), passed on to the app's shortcuts, so Ctrl+Up and Ctrl+Down step through the list even while you type:
     // whether it ran. The text and Ctrl, Shift, Alt, Meta and repeat, as the window's own `key`.
     callback key(string, bool, bool, bool, bool, bool) -> bool;
-    // Whether anything plays that Esc would stop first (a sound, the MIDI page's loop, a part or an audition in a DAW).
-    // A right click then stops it (the window's own watcher, mo-ui's right_click.rs, once the button comes up where it
-    // went down), so a list line's right click opens no menu meanwhile. False where nothing answers (the test plugin).
-    callback plays() -> bool;
+    // True only while a list line picks itself for its right-click menu (`ListLine` calls its `clicked` for that): a
+    // pick, not a click, for a page whose click does more than pick. On Sounds a click on the sound playing stops it,
+    // and that pick leaves it playing.
+    in-out property <bool> picking-for-menu;
 }
 
 // The one tooltip (rules 15 and 16): after the mouse rests on a control for a moment, says what it does and shows its
@@ -1532,11 +1532,12 @@ export component ListLine inherits Rectangle {
     in property <string> tip;
     in property <length> tip-from;
     in property <length> tip-below;
+    // A left click, and a right one's pick of the line for its menu, just before `right-clicked`: then
+    // `AppKeys.picking-for-menu` is true.
     callback clicked;
     callback double-clicked;
     // A right click, after the line is picked, with the mouse's place in the window: the page opens its
-    // `RightClickMenu` there. Not while anything plays (`AppKeys.plays`): that right click stops it instead, and the
-    // next one opens the menu.
+    // `RightClickMenu` there.
     callback right-clicked(length, length);
     // Whether the mouse is over it (it's shaded then).
     out property <bool> hovered: touch.has-hover;
@@ -1596,11 +1597,11 @@ export component ListLine inherits Rectangle {
                 // the mouse): the button's coming up won't be heard here, so the drag is off now.
                 root.drag-let-go();
             }
-            // While something plays, the right click is for stopping it: nothing is picked (a pick could play the line)
-            // and no menu opens.
-            if e.kind == PointerEventKind.down && e.button == PointerEventButton.right && !AppKeys.plays() {
-                // The menu acts on what's picked, so pick this line first.
+            if e.kind == PointerEventKind.down && e.button == PointerEventButton.right {
+                // The menu acts on what's picked, so pick this line first: as a pick for the menu, not a click.
+                AppKeys.picking-for-menu = true;
                 root.clicked();
+                AppKeys.picking-for-menu = false;
                 root.right-clicked(self.absolute-position.x + self.mouse-x, self.absolute-position.y + self.mouse-y);
             }
         }
@@ -3096,6 +3097,9 @@ export component Waveform inherits Rectangle {
     // Each line's width: thin enough that the lines stay apart.
     in property <length> line: max(1px, root.width / max(1, root.points) * 0.6);
     callback seek(float);
+    // A right click over it while it plays (one that can seek: a tile's waveform is its tile's): the page stops the
+    // sound (Solomon, 11 Nov 2026: "maybe only there over the waveform right click should stop it").
+    callback stop();
     // Where the Waveform sits in the window, in pixels. The window puts a picture on a whole pixel but draws a path just
     // where it is, so the card draws the lines as far past a whole pixel as the Waveform sits, and the picture goes that
     // far back: the lines land just where the path's would.
@@ -3164,6 +3168,13 @@ export component Waveform inherits Rectangle {
         enabled: root.can-seek;
         mouse-cursor: root.can-seek ? MouseCursor.pointer : MouseCursor.default;
         clicked => { root.seek(clamp(self.mouse-x / self.width, 0, 1)); }
+        // Let go over it, as a click is.
+        pointer-event(e) => {
+            if e.kind == PointerEventKind.up && e.button == PointerEventButton.right && root.playing
+                && self.mouse-x >= 0 && self.mouse-x <= self.width && self.mouse-y >= 0 && self.mouse-y <= self.height {
+                root.stop();
+            }
+        }
     }
     if root.can-seek && area.has-hover && root.seconds > 0: Rectangle {
         property <float> at: clamp(area.mouse-x / root.width, 0, 1) * root.seconds;
