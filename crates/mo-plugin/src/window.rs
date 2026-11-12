@@ -633,14 +633,25 @@ impl Shown {
         panel.set_can_drag(crate::drag::CAN);
         let lines = Rc::clone(&self.lines);
         let slots = Arc::clone(&self.slots);
+        let player = Arc::clone(&self.instance.player);
         panel.on_drag_out(move |row| {
             let Some((row, path)) = usize::try_from(row).ok().and_then(|r| Some((r, lines.path(r)?))) else { return };
             let slots = Arc::clone(&slots);
+            let trim = player.trim();
             // Whether the file is there is asked off the window's thread: its drive may be asleep or away.
             background("mo-plugin-drag", move || {
                 let path = std::path::PathBuf::from(path);
                 let found = if path.is_file() {
-                    Ok(path)
+                    // Trim silence on: the trimmed copy goes instead (as the app drags it), or the whole file when
+                    // one can't be made, and the log says why.
+                    match trim.map(|db| mo_app::trim_copy::for_drag(&path, db, &mo_app::trim_copy::folder())) {
+                        Some(Ok(Some(copy))) => Ok(copy),
+                        Some(Err(why)) => {
+                            crate::log::line("Drag", &format!("Dragged the whole file: {why}"));
+                            Ok(path)
+                        }
+                        _ => Ok(path),
+                    }
                 } else {
                     Err(format!("Can't drag {}: the file isn't there", library::name(&path.to_string_lossy())))
                 };
