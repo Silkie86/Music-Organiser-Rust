@@ -197,6 +197,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     shots.push(("midi-fits.png".into(), capture(&window)));
+    // What of the song the list is fitted to is under the switch, to pick by hand: its parts as chips, the app's
+    // lit (the bassline), and its bars on the slider (all eight). None of it is yours yet.
+    let parts = || {
+        let chips = midi.get_fit_parts().chips;
+        chips.iter().map(|c| format!("{}{} {}", if c.on { '+' } else { '-' }, c.text, c.count)).collect::<Vec<_>>()
+    };
+    let bars = || (midi.get_fit_bars_from(), midi.get_fit_bars_to(), midi.get_fit_bars_length());
+    let picker =
+        || format!("{:?} {:?} \"{}\" yours: {}", parts(), bars(), midi.get_fit_bars_text(), midi.get_fit_pick_yours());
+    let apps = picker();
+    if !midi.get_fit_pick_shown()
+        || apps != r#"["-Keys melody", "+Sub bassline", "-Lead melody"] (0, 8, 8) "Bars 1–8 of 8" yours: false"#
+    {
+        return Err(format!("midi-fits-pick.png: the app's pick of the song isn't shown: {apps}").into());
+    }
+    // The parts lit are the app's (the menu's "The app's pick" is the line ticked), and the slider is there.
+    if midi.get_fit_parts_yours() || !midi.get_fit_bars_shown() {
+        return Err("midi-fits-pick.png: the app's parts are said to be yours, or the bars have no slider".into());
+    }
+    let apps_list = (midi.get_result(), midi.get_shown());
+    // The lead's chip pressed, and the slider's higher handle dragged to the fifth bar line: the list is fitted to
+    // the bassline and the lead over bars 1 to 4, and the app's pick is offered back.
+    midi.invoke_fit_part_toggled("Lead".into());
+    midi.invoke_fit_bars_picked(0, 4);
+    let yours = picker();
+    if yours != r#"["-Keys melody", "+Sub bassline", "+Lead melody"] (0, 4, 8) "Bars 1–4 of 8" yours: true"#
+        || !midi.get_fit_parts_yours()
+        || !midi.get_result().starts_with("To play over Sub and Lead, bars 1–4 · ")
+    {
+        return Err(format!("midi-fits-pick.png: a pick by hand isn't shown or fitted to: {yours}").into());
+    }
+    shots.push(("midi-fits-pick.png".into(), capture(&window)));
+    // The narrowest window has no room for the chips beside the slider: the parts are in the filter's menu.
+    save_narrow(&window, &out, "midi-fits-pick-narrow.png")?;
+    // Off and on again, the song is fitted to what you picked of it: it's remembered for the song.
+    mo_ui::midi::fit_sample(&app, false);
+    if midi.get_fit_pick_shown() {
+        return Err("midi-fits-pick.png: the picker is still shown with \"Fits my song\" off".into());
+    }
+    mo_ui::midi::fit_sample(&app, true);
+    if picker() != yours {
+        return Err(format!("midi-fits-pick.png: the song's pick wasn't remembered: {}", picker()).into());
+    }
+    // The switch pressed: the parts go back to the app (the song's melodies now, to put chords under), the bars
+    // stay yours.
+    midi.invoke_fit_wants_picked(1);
+    if picker() != r#"["+Keys melody", "-Sub bassline", "+Lead melody"] (0, 4, 8) "Bars 1–4 of 8" yours: true"# {
+        return Err(
+            format!("midi-fits-pick.png: the switch didn't give the parts back to the app: {}", picker()).into()
+        );
+    }
+    // "The app's pick": all of it is the app's again, and so is the list once the switch is back too.
+    midi.invoke_fit_apps_pick();
+    midi.invoke_fit_wants_picked(0);
+    if picker() != apps || (midi.get_result(), midi.get_shown()) != apps_list {
+        return Err(format!("midi-fits-pick.png: The app's pick didn't bring the app's back: {}", picker()).into());
+    }
     // "Play with the song" off: it plays alone at its own tempo, still moved to fit; and on again.
     midi.invoke_fit_with_song_toggled();
     let alone = midi.get_sound_line();
