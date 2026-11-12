@@ -370,6 +370,14 @@ fn read_note(dir: &Path) -> Option<Note> {
     })
 }
 
+/// The song library a reader that never writes opens in the app's data folder `dir` (the CLAP plugin): `songs.db` once
+/// it's the app's own library, or when there's no `library.db`; `library.db` until then. Unlike [`at_start`] it never
+/// notes `songs.db` as the app's own: only the app does.
+pub fn to_read(dir: &Path) -> PathBuf {
+    let (songs, old) = (dir.join(FILE_NAME), dir.join(OLD_FILE_NAME));
+    if own_since(&songs).is_some() || !old.is_file() { songs } else { old }
+}
+
 /// Since when (Unix seconds) the `songs.db` at `songs` has been the app's own library; `None` while it isn't (or isn't
 /// there, or can't be read).
 pub fn own_since(songs: &Path) -> Option<i64> {

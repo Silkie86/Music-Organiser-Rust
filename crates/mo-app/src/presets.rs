@@ -258,6 +258,31 @@ impl Item {
     }
 }
 
+/// The list's lines for preset files found (`mo_presets::file_store`'s `files`, with when each was last changed, in
+/// the same order), each with its year, in the list's order ([`sort_files`]). Files that aren't presets are left out.
+pub fn file_items(found: &[mo_presets::library::FoundPreset], modified: &[Option<std::time::SystemTime>]) -> Vec<Item> {
+    let years: HashMap<&str, Option<i32>> =
+        found.iter().zip(modified).map(|(f, at)| (f.path.as_str(), at.and_then(year_of_time))).collect();
+    let mut items: Vec<Item> = mo_presets::library::rows(&[], found)
+        .into_iter()
+        .map(|row| {
+            let year = match &row.source {
+                Source::File { path } => years.get(path.as_str()).copied().flatten(),
+                Source::Song { .. } => None,
+            };
+            Item::new(row, String::new(), year)
+        })
+        .collect();
+    sort_files(&mut items);
+    items
+}
+
+/// The year of a time, or `None` for one before 1970 or not a real date.
+pub fn year_of_time(m: std::time::SystemTime) -> Option<i32> {
+    let seconds = m.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    year_of(i64::try_from(seconds).ok()?)
+}
+
 /// The year of a time in seconds since 1970 (UTC), or `None` for one that's not a real date.
 pub fn year_of(seconds: i64) -> Option<i32> {
     use chrono::Datelike as _;

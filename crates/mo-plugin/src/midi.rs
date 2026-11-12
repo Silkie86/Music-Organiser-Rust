@@ -170,7 +170,7 @@ impl Parts {
             return Err("Every note in it is muted, so there's nothing to hear".to_owned());
         }
         let tempo = tempo.unwrap_or_else(|| {
-            let library = self.index.parent().map(|d| d.join("library.db")).unwrap_or_default();
+            let library = self.index.parent().map(mo_library::songs_db::to_read).unwrap_or_default();
             page::read_tempo(&e.phrase.source, &library).bpm()
         });
         let font = self.font(font_path)?;
