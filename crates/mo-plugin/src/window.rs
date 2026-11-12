@@ -746,8 +746,34 @@ impl Shown {
 
         self.fill_in_sky();
         self.midi.fill_in(panel, &self.slots);
+        self.fill_in_midi_play();
         let slots = Arc::clone(&self.slots);
         background("mo-plugin-library", move || *lock(&slots.library) = Some(library::read()));
+    }
+
+    /// A click on a MIDI part plays it as a loop with the app's SoundFont, at the DAW's tempo, through the track; a
+    /// click on the one playing stops it (the same rule as a sound's line, which has no waveform here).
+    fn fill_in_midi_play(&self) {
+        let player = Arc::clone(&self.instance.player);
+        let slots = Arc::clone(&self.slots);
+        let (right_now, heard, stop_it) = (Rc::clone(&self.right_now), Rc::clone(&self.heard), self.stopper());
+        let midi = self.midi.part_finder();
+        self.panel.on_midi_play(move |row| {
+            let Some((parts, at)) = usize::try_from(row).ok().and_then(&midi) else { return };
+            let playing = heard.get().is_some_and(|(what, _)| what == Heard::Part(at));
+            match line_click(playing, right_now.get(), -1.0) {
+                Click::Play(_) => {}
+                Click::Stop => return stop_it(),
+                Click::Nothing => return,
+            }
+            let Some(name) = parts.entry(at).map(mo_app::midi::title) else { return };
+            heard.set(Some((Heard::Part(at), false)));
+            let tempo = player.tempo();
+            let make: crate::audition::Made =
+                Box::new(move || parts.sound(at, crate::midi::soundfont().as_deref(), tempo));
+            let slots = Arc::clone(&slots);
+            player.play_made(name, make, move |played| *lock(&slots.played) = Some(played));
+        });
     }
 
     /// What the mouse does on the Galaxy, as on the app's Sounds page: the wheel flies in and out, the right or
@@ -1658,6 +1684,8 @@ fn seed() -> u64 {
 enum Heard {
     Line(i64),
     Star(usize),
+    /// A MIDI part, by its place in the MIDI tab's catalogue.
+    Part(usize),
 }
 
 /// What a click on a list line does.

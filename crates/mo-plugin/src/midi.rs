@@ -70,8 +70,11 @@ pub fn read() -> Read {
         }
         Read::Not(why) => crate::log::took("MIDI", &format!("Not read: {why}"), started),
     }
-    // Drag files the app or the plugin left a day or more ago go (only the app's own drag folders).
+    // Drag files the app or the plugin left a day or more ago go (only the app's own drag folders). On Windows only,
+    // as the app sweeps: elsewhere Temp is shared by everyone on the computer.
+    #[cfg(windows)]
     let swept = mo_app::drag_out::sweep(&std::env::temp_dir(), std::time::SystemTime::now());
+    #[cfg(windows)]
     if swept.removed > 0 || swept.failed > 0 {
         crate::log::line("Drag", &format!("Cleared {} old drag files ({} couldn't be)", swept.removed, swept.failed));
     }
@@ -81,9 +84,39 @@ pub fn read() -> Read {
 /// Settings › MIDI's smallest part, read from the app's settings file without changing it (the app's own loading
 /// puts a damaged file aside, which is a write); the app's default when it can't be read.
 fn smallest_part(data: &Path) -> usize {
+    page::smallest_part_from(setting(data, page::SMALLEST_PART_KEY).as_deref())
+}
+
+/// One of the app's settings, read from its settings file in `data` without changing it; none when it can't be read.
+fn setting(data: &Path, key: &str) -> Option<String> {
     let text = std::fs::read_to_string(data.join(mo_app::app_settings::FILE)).ok();
-    let settings = mo_app::app_settings::AppSettings::from_parts(text.as_deref(), HashMap::new()).ok();
-    page::smallest_part_from(settings.as_ref().and_then(|s| s.get(page::SMALLEST_PART_KEY)))
+    let settings = mo_app::app_settings::AppSettings::from_parts(text.as_deref(), HashMap::new()).ok()?;
+    settings.get(key).map(str::to_owned)
+}
+
+/// The SoundFont parts play with: the one picked on the app's MIDI page, else the one the app keeps in its data
+/// folder; none when neither is there. Reads files: call it off the panel's thread.
+pub fn soundfont() -> Option<PathBuf> {
+    let data = mo_app::paths::data_dir();
+    page::soundfont_path(setting(&data, page::SOUNDFONT_KEY).as_deref(), &data)
+}
+
+/// What's said when there's no SoundFont to play parts with.
+pub const NO_SOUNDFONT: &str = "No SoundFont to play MIDI with: pick one on the app's MIDI page";
+
+/// The SoundFont last opened, kept while the plugin is loaded: opening one takes a while.
+static FONT: Mutex<Option<(PathBuf, mo_audio::gm::Font)>> = Mutex::new(None);
+
+fn font(path: &Path) -> Result<mo_audio::gm::Font, String> {
+    let mut kept = lock(&FONT);
+    if let Some((at, font)) = kept.as_ref()
+        && at == path
+    {
+        return Ok(font.clone());
+    }
+    let font = mo_audio::gm::open(path)?;
+    *kept = Some((path.to_owned(), font.clone()));
+    Ok(font)
 }
 
 /// The parts in the MIDI index at `index`.
@@ -124,13 +157,54 @@ impl Parts {
         self.cat.entry(at)
     }
 
+    /// The part at `at` as a loop of sound played with the SoundFont at `font`, at `tempo` (the DAW's; or, when it
+    /// hasn't said, the part's own file's, else 120), with the General MIDI sound the app's MIDI page matches to it.
+    /// Reads the index and makes the sound: call it off the panel's thread.
+    pub fn sound(
+        &self,
+        at: usize,
+        font_path: Option<&Path>,
+        tempo: Option<f64>,
+    ) -> Result<mo_audio::AudioData, String> {
+        let font_path = font_path.ok_or(NO_SOUNDFONT)?;
+        let e = self.cat.entry(at).ok_or("That part isn't in the list any more")?;
+        let notes = self.notes(e)?;
+        let (heard, length) = page::loop_notes(&notes, e.phrase.bars);
+        if heard.is_empty() {
+            return Err("Every note in it is muted, so there's nothing to hear".to_owned());
+        }
+        let tempo = tempo.unwrap_or_else(|| {
+            let library = self.index.parent().map(|d| d.join("library.db")).unwrap_or_default();
+            page::read_tempo(&e.phrase.source, &library).bpm()
+        });
+        let font = font(font_path)?;
+        let notes: Vec<mo_audio::gm::Note> = heard
+            .iter()
+            .map(|n| mo_audio::gm::Note { start: n.start, length: n.length, key: n.key, velocity: n.velocity7() })
+            .collect();
+        let sound = page::gm_sound(e);
+        let part = mo_audio::gm::Part {
+            notes: &notes,
+            ppq: mo_midi::PPQ,
+            length,
+            tempo,
+            program: sound.program,
+            drums: sound.drums,
+        };
+        mo_audio::gm::render_loop(&font, &part)
+    }
+
+    /// A part's notes, read from the index (opened, read and let go again).
+    fn notes(&self, e: &Entry) -> Result<Vec<mo_formats::NoteEvent>, String> {
+        let store = MidiStore::open_read_only(&self.index).map_err(|e| format!("Couldn't open the MIDI index: {e}"))?;
+        store.notes(e.phrase.id, &e.phrase.hash).map_err(|e| format!("Its notes couldn't be read: {e}"))
+    }
+
     /// The part at `at` as one MIDI file in a new drag folder in `temp` (the system's Temp), as the app's own drag
     /// writes it. Reads the index and writes a file: call it off the panel's thread.
     pub fn file(&self, at: usize, temp: &Path) -> Result<PathBuf, String> {
         let e = self.cat.entry(at).ok_or("That part isn't in the list any more")?;
-        let store = MidiStore::open_read_only(&self.index).map_err(|e| format!("Couldn't open the MIDI index: {e}"))?;
-        let notes = store.notes(e.phrase.id, &e.phrase.hash).map_err(|e| format!("Its notes couldn't be read: {e}"))?;
-        drop(store);
+        let notes = self.notes(e)?;
         // The plugin hands over the file alone (no card), so the card's colour doesn't matter.
         let out = mo_app::drag_out::from_part(&page::title(e), &notes, e.phrase.bars, 0)?;
         let payload = out.write(temp).map_err(|e| format!("Couldn't write the MIDI file in Temp: {e}"))?;

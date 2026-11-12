@@ -206,6 +206,12 @@ impl MidiTab {
         self.column.show(panel, None, &self.asked.borrow());
     }
 
+    /// Finds the parts and the place in them of the part on a row, as the list shows it then.
+    pub(super) fn part_finder(&self) -> impl Fn(usize) -> Option<(Arc<Parts>, usize)> + 'static {
+        let lines = Rc::clone(&self.lines);
+        move |row| Some((lines.parts.borrow().clone()?, lines.at(row)?))
+    }
+
     /// The row showing the part at place `at` in the catalogue (-1 for none): the one being carried.
     pub(super) fn row_of(&self, at: usize) -> i32 {
         self.lines.row_of(at)
