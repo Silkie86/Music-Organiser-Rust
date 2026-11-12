@@ -7,12 +7,13 @@
 //! 1. stamp every star, a tiny soft dot, onto a layer where the light adds up;
 //! 2. stamp them again onto a quarter-size layer;
 //! 3. blur that layer, across and then down, into the glow;
-//! 4. squeeze the brightness of the stamps and the glow into the picture, over the page's background;
+//! 4. squeeze the brightness of the stamps and the glow into the picture, over the page's background, the stars the
+//!    filters leave out on their own, as grey dust that never gets past a faint haze, so the ones that match stand out;
 //! 5. draw the stars as stars over it: a core in the star's colour, white-hot in its very middle, in a soft glow.
 //!    On a dark page their light is screened on (as the processor's picture does), so a cluster glows where they crowd
 //!    but keeps its colour; on a light page (Paper) they're laid over it, as the processor's picture is laid over the
-//!    page. Once the stars are far enough apart to tell apart every star is drawn so, the left-out ones as faint dust:
-//!    first as small and bright as the painted dot under it, growing and brightening as the view flies in
+//!    page. Once the stars are far enough apart to tell apart every star is drawn so, the left-out ones as faint grey
+//!    dust: first as small and bright as the painted dot under it, growing and brightening as the view flies in
 //!    (`mo_app::galaxy_look::look`). Far out only the stars "Light by" lights most are, each a bright point of its own
 //!    with a short, faint glow, so they stand out at every zoom. The very brightest get faint four-point spikes, and
 //!    every star twinkles very slightly (only in brightness, and not while the mouse sweeps, drags or glides, so it
@@ -65,6 +66,8 @@ struct Camera {
     bright: f32,
     gain: f32,
     _c: f32,
+    // Crisp stars: the page's colour (red, green, blue, 0 to 1; the last is unused), for the left-out stars' dust.
+    page: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> camera: Camera;
 
@@ -78,7 +81,9 @@ struct Stamp {
     @builtin(position) position: vec4<f32>,
     // The pixel's place from the star's middle, in pixels.
     @location(0) local: vec2<f32>,
-    @location(1) light: vec3<f32>,
+    // A shown star's light in its colour; a left-out one's in the last channel only, as grey dust (step 4 squeezes it
+    // on its own, to a low ceiling, so however many there are they stay a faint haze).
+    @location(1) light: vec4<f32>,
 };
 
 @vertex
@@ -88,15 +93,16 @@ fn stamp_vertex(@builtin(vertex_index) v: u32, @location(0) at: vec2<f32>, @loca
     var out: Stamp;
     out.position = vec4((at - camera.centre) * camera.unit + local * camera.pixel, 0.0, 1.0);
     out.local = local;
-    out.light = unpack4x8unorm(colour).rgb * weight * camera.strength;
+    let c = unpack4x8unorm(colour);
+    let w = weight * camera.strength;
+    out.light = select(vec4(c.rgb * w, 0.0), vec4(0.0, 0.0, 0.0, w), c.a < 0.5 / 255.0);
     return out;
 }
 
 @fragment
 fn stamp_fragment(in: Stamp) -> @location(0) vec4<f32> {
     let s = camera.size;
-    let c = in.light * exp(-dot(in.local, in.local) / (2.0 * s * s));
-    return vec4(c, max(c.r, max(c.g, c.b)));
+    return in.light * exp(-dot(in.local, in.local) / (2.0 * s * s));
 }
 
 // The numbers below are mo_app::galaxy_look's, which the processor's picture uses too (a test checks they match).
@@ -113,6 +119,8 @@ const HALO: f32 = 2.8;
 const FALLOFF: f32 = 1.3;
 const LIT_BRIGHTEST: f32 = 1.5;
 const DUST_LIT: f32 = 0.5;
+const DUST_GREY: f32 = 0.6;
+const DUST_MOST: f32 = 0.22;
 
 struct Crisp {
     @builtin(position) position: vec4<f32>,
@@ -124,8 +132,7 @@ struct Crisp {
     @location(2) radius: f32,
     @location(3) halo: f32,
     @location(4) spikes: f32,
-    // 1 for a shown star, 0 for a left-out one; how lit it is (0 to 1, 0 with Light by off).
-    @location(5) shown: f32,
+    // How lit it is (0 to 1, 0 with Light by off).
     @location(6) lit: f32,
     // How strong its glow is: all of it close up, a little far out, where many glints would add up to white.
     @location(7) glow: f32,
@@ -162,8 +169,10 @@ fn crisp_vertex(@builtin(vertex_index) v: u32, @builtin(instance_index) star: u3
     // Where the stars have only just come apart, as bright as the painted dot it takes over from (its light squeezed
     // as the painted picture's is, its colour's brightest part heading for 1), going to its close-up brightness as
     // the view flies in, so it neither jumps nor dips.
+    // A left-out star is grey dust, as bright as the painted dust it takes over from.
     let most = max(c.r, max(c.g, c.b));
-    let painted_dot = (1.0 - exp(-camera.gain * weight * most)) / max(most, 0.001);
+    let painted_dot = select(DUST_MOST * (1.0 - exp(-camera.gain * weight)),
+                             (1.0 - exp(-camera.gain * weight * most)) / max(most, 0.001), shown);
     let core = camera.strength * mix(painted_dot, close, camera.bright);
     // Far out a star that glints shows as brightly as close up, as much as it glints, and as the view flies in it
     // never gets dimmer.
@@ -206,7 +215,6 @@ fn crisp_vertex(@builtin(vertex_index) v: u32, @builtin(instance_index) star: u3
     out.radius = radius;
     out.halo = halo;
     out.spikes = spikes;
-    out.shown = select(0.0, 1.0, shown);
     out.lit = lit;
     out.glow = mix(FAR_GLOW, 1.0, camera.bright);
     return out;
@@ -229,14 +237,14 @@ fn crisp_fragment(in: Crisp) -> @location(0) vec4<f32> {
         let fade = clamp(1.0 - d / in.spikes, 0.0, 1.0);
         spike = 0.3 * (exp(-a.y * 1.8) + exp(-a.x * 1.8)) * fade * fade;
     }
-    let shown = in.shown > 0.5;
+    // (Only shown stars come here: the left-out ones are drawn as dust, by `dust_fragment`.)
     // The glow (with the spikes) and the core are screened together, as the processor's picture screens a star's core
     // over its glow: where the glow is under the core it lights it a little more, and nothing goes past 1, so the core
     // keeps the star's own colour (light past 1 would be cut channel by channel, turning a blue star cyan).
-    let around = select(0.0, min(glow + spike, 1.0), shown);
+    let around = min(glow + spike, 1.0);
     let g = in.colour * around;
     let k = in.colour * core;
-    let white = select(0.0, WHITE * hot * core * in.glow, shown) * max(in.colour.r, max(in.colour.g, in.colour.b));
+    let white = WHITE * hot * core * in.glow * max(in.colour.r, max(in.colour.g, in.colour.b));
     // How strongly it shows, the same way (its alpha, at least each of its colours, so it stays premultiplied).
     let ga = in.strength * around;
     let ka = in.strength * core;
@@ -245,6 +253,19 @@ fn crisp_fragment(in: Crisp) -> @location(0) vec4<f32> {
     // dense cluster to white. On a light page screened light wouldn't show, so there it's laid over the picture by how
     // strongly it shows (its alpha), as the processor's picture is laid over the page.
     return vec4(min(g + k - g * k + vec3(white), vec3(1.0)), min(ga + ka - ga * ka + white, 1.0));
+}
+
+// A left-out star close up: a faint grey dot, laid a little way from the page towards grey by how strongly it
+// shows. It's drawn with the lighter (on a dark page) or the darker (on a light one) of it and what's there, never
+// added, so where thousands of them crowd together they stay as faint as one.
+@fragment
+fn dust_fragment(in: Crisp) -> @location(0) vec4<f32> {
+    let core = clamp(in.radius + 0.5 - length(in.local), 0.0, 1.0);
+    let a = min(in.strength * core, DUST_MOST);
+    if (a < 0.002) {
+        discard;
+    }
+    return vec4(mix(camera.page.rgb, vec3(DUST_GREY), a), 1.0);
 }
 
 // A triangle over the whole picture, for the steps that work pixel by pixel.
@@ -297,10 +318,10 @@ struct Shade {
 
 @fragment
 fn shade_fragment(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
-    let s = textureLoad(stamps, vec2<i32>(at.xy), 0).rgb;
+    let st = textureLoad(stamps, vec2<i32>(at.xy), 0);
     let uv = at.xy / vec2<f32>(textureDimensions(stamps));
-    let g = textureSampleLevel(glow, linear, uv, 0.0).rgb;
-    let c = s * shade.core + g * shade.glow;
+    let gl = textureSampleLevel(glow, linear, uv, 0.0);
+    let c = st.rgb * shade.core + gl.rgb * shade.glow;
     let l = max(c.r, max(c.g, c.b));
     var lit = vec3(0.0);
     var a = 0.0;
@@ -309,7 +330,11 @@ fn shade_fragment(@builtin(position) at: vec4<f32>) -> @location(0) vec4<f32> {
         a = 1.0 - exp(-l * shade.gain);
         lit = c * (a / l);
     }
-    return vec4(lit + shade.background.rgb * (1.0 - a), 1.0);
+    // The left-out stars' grey dust, under the shown ones: squeezed the same way, but only ever up to DUST_MOST of the
+    // way from the page to grey.
+    let dust = DUST_MOST * (1.0 - exp(-(st.a * shade.core + gl.a * shade.glow) * shade.gain));
+    let under = mix(shade.background.rgb, vec3(DUST_GREY), dust);
+    return vec4(lit + under * (1.0 - a), 1.0);
 }
 "#;
 
@@ -359,6 +384,9 @@ pub struct Sky {
     /// The stars as stars, screened on (a dark page) or laid over (a light one).
     crisp: wgpu::RenderPipeline,
     crisp_over: wgpu::RenderPipeline,
+    /// The left-out stars as faint grey dust, the same two ways.
+    dust: wgpu::RenderPipeline,
+    dust_over: wgpu::RenderPipeline,
     blur_across: wgpu::RenderPipeline,
     blur_down: wgpu::RenderPipeline,
     shade: wgpu::RenderPipeline,
@@ -370,6 +398,8 @@ pub struct Sky {
     shade_numbers: wgpu::Buffer,
     stars: Option<wgpu::Buffer>,
     count: u32,
+    /// How many of the stars, at the start, the filters leave out (`pack` puts them first).
+    left_out: u32,
     /// How many of the stars, at the end, are lit by the measure: far out only the best lit of them are drawn as stars.
     lit: u32,
     /// Counts the stars sent, so the painted picture kept for a twinkle is never one of stars sent before.
@@ -379,8 +409,8 @@ pub struct Sky {
 
 const LAYER: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 const PICTURE: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-/// The camera as the shader reads it (`Camera`): 20 f32.
-const CAMERA_BYTES: u64 = 80;
+/// The camera as the shader reads it (`Camera`): 24 f32.
+const CAMERA_BYTES: u64 = 96;
 
 impl Sky {
     pub fn new(device: &wgpu::Device, queue: &wgpu::Queue) -> Sky {
@@ -477,28 +507,34 @@ impl Sky {
             dst_factor: wgpu::BlendFactor::One,
             operation: wgpu::BlendOperation::Add,
         };
-        let crisp_with = |label: &str, dst_factor| {
+        let crisp_with = |label: &str, fragment: &str, dst_factor, operation| {
             pipeline(
                 label,
                 &camera_layout,
                 "crisp_vertex",
                 &stars_in,
-                "crisp_fragment",
+                fragment,
                 PICTURE,
                 Some(wgpu::BlendState {
-                    color: wgpu::BlendComponent {
-                        src_factor: wgpu::BlendFactor::One,
-                        dst_factor,
-                        operation: wgpu::BlendOperation::Add,
-                    },
+                    color: wgpu::BlendComponent { src_factor: wgpu::BlendFactor::One, dst_factor, operation },
                     alpha: keep_alpha,
                 }),
             )
         };
         // A dark page: screened on (what's there times one minus the star's light, plus the light). A light page:
         // laid over (what's there times one minus how strongly the star shows, plus its light).
-        let crisp = crisp_with("galaxy crisp stars", wgpu::BlendFactor::OneMinusSrc);
-        let crisp_over = crisp_with("galaxy crisp stars over a light page", wgpu::BlendFactor::OneMinusSrcAlpha);
+        let plus = wgpu::BlendOperation::Add;
+        let crisp = crisp_with("galaxy crisp stars", "crisp_fragment", wgpu::BlendFactor::OneMinusSrc, plus);
+        let crisp_over = crisp_with(
+            "galaxy crisp stars over a light page",
+            "crisp_fragment",
+            wgpu::BlendFactor::OneMinusSrcAlpha,
+            plus,
+        );
+        // The left-out stars' dust: the lighter of it and what's there on a dark page, the darker on a light one.
+        let one = wgpu::BlendFactor::One;
+        let dust = crisp_with("galaxy dust", "dust_fragment", one, wgpu::BlendOperation::Max);
+        let dust_over = crisp_with("galaxy dust over a light page", "dust_fragment", one, wgpu::BlendOperation::Min);
         let blur_across =
             pipeline("galaxy glow across", &texture_layout, "whole_vertex", &[], "blur_across", LAYER, None);
         let blur_down = pipeline("galaxy glow down", &texture_layout, "whole_vertex", &[], "blur_down", LAYER, None);
@@ -533,6 +569,8 @@ impl Sky {
             stamp,
             crisp,
             crisp_over,
+            dust,
+            dust_over,
             blur_across,
             blur_down,
             shade,
@@ -544,6 +582,7 @@ impl Sky {
             shade_numbers: buffer("galaxy squeeze", 32),
             stars: None,
             count: 0,
+            left_out: 0,
             lit: 0,
             sent: 0,
             layers: None,
@@ -556,7 +595,7 @@ impl Sky {
         let count = (bytes.len() / look::STAR_BYTES) as u32;
         self.sent += 1;
         if count == 0 {
-            (self.stars, self.count, self.lit) = (None, 0, 0);
+            (self.stars, self.count, self.lit, self.left_out) = (None, 0, 0, 0);
             return;
         }
         let fits = self.stars.as_ref().is_some_and(|b| b.size() >= bytes.len() as u64);
@@ -573,11 +612,16 @@ impl Sky {
         }
         self.count = count;
         self.lit = lit.min(count);
+        // A left-out star's light byte is 0, a shown one's 1 to 255, and `pack` puts the left-out ones first.
+        let (stars, _) = bytes.as_chunks::<{ look::STAR_BYTES }>();
+        let left_out = |star: &[u8; look::STAR_BYTES]| star[look::LIGHT_BYTE] == 0;
+        self.left_out = stars.partition_point(left_out) as u32;
+        debug_assert!(!stars[self.left_out as usize..].iter().any(left_out), "the left-out stars come first");
     }
 
     /// Forgets the stars (a new library is coming).
     pub fn clear_stars(&mut self) {
-        (self.stars, self.count, self.lit) = (None, 0, 0);
+        (self.stars, self.count, self.lit, self.left_out) = (None, 0, 0, 0);
         self.sent += 1;
     }
 
@@ -686,6 +730,10 @@ impl Sky {
                 look.bright,
                 look.gain,
                 0.0,
+                background[0],
+                background[1],
+                background[2],
+                1.0,
             ]);
             self.queue.write_buffer(&self.cameras[i].0, 0, &look::bytes(&numbers));
         }
@@ -704,6 +752,12 @@ impl Sky {
             [r, g, b].iter().fold(0, |rgb, c| (rgb << 8) | (c.clamp(0.0, 1.0) * 255.0).round() as u32),
         );
         let crisp_pipeline = if light_page { &self.crisp_over } else { &self.crisp };
+        let dust_pipeline = if light_page { &self.dust_over } else { &self.dust };
+        // The left-out stars come first, as `pack` sorts them: they're drawn as dust, the rest as stars over them. (Far
+        // out only the lit ones from `glint_start` are drawn, all shown, so past every left-out one: no dust.)
+        let left_out = self.left_out.min(count);
+        let (as_dust, as_stars) =
+            (as_stars.start..left_out.max(as_stars.start), left_out.max(as_stars.start)..as_stars.end);
         let (stamp, blur_across, blur_down, shade_pipeline) =
             (&self.stamp, &self.blur_across, &self.blur_down, &self.shade);
         let groups = [&self.cameras[0].1, &self.cameras[1].1, &self.cameras[2].1];
@@ -772,9 +826,13 @@ impl Sky {
             && let Some(stars) = stars
         {
             let mut p = pass(&mut encoder, &target, None);
-            p.set_pipeline(crisp_pipeline);
             p.set_bind_group(0, groups[2], &[]);
             p.set_vertex_buffer(0, stars.slice(..));
+            if !as_dust.is_empty() {
+                p.set_pipeline(dust_pipeline);
+                p.draw(0..6, as_dust);
+            }
+            p.set_pipeline(crisp_pipeline);
             p.draw(0..6, as_stars);
         }
         self.queue.submit(Some(encoder.finish()));
@@ -813,6 +871,8 @@ mod tests {
             ("FALLOFF", look::FALLOFF),
             ("LIT_BRIGHTEST", look::LIT_BRIGHTEST),
             ("DUST_LIT", look::DUST_LIT),
+            ("DUST_GREY", look::DUST_GREY),
+            ("DUST_MOST", look::DUST_MOST),
         ] {
             assert!(SHADER.contains(&format!("const {name}: f32 = {value:?};")), "{name} isn't {value} in the shader");
         }

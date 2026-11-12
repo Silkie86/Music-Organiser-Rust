@@ -21,6 +21,7 @@ mod tests {
     /// GALAXY_GPU_VIEW (the view's size in points, as "1100x800"), GALAXY_GPU_LIT ("length,liked,nothing") and
     /// GALAXY_GPU_PAGES ("dark,paper"). GALAXY_GPU_MAP=blob lays the stars out as a big library's map is, most of them
     /// in one crowded blob, with the view in its middle; GALAXY_GPU_AT ("0.05,0.05") puts the view's middle elsewhere.
+    /// GALAXY_GPU_FEW=318 lets only one star in 318 through the filters (Kick with Favourites on a big library).
     /// Each picture's line in the output (`LOOK ...`) says how many stars were on it and how bright it is on average (0
     /// to 255 over the page), to see brightness change with zoom.
     #[test]
@@ -87,8 +88,10 @@ mod tests {
             [220, 220, 110],
             [110, 110, 110],
         ];
-        // Every third star left out by the filters, as a filter would.
-        let shown: Vec<usize> = (0..stars.len()).filter(|i| i % 3 != 0).collect();
+        // Every third star left out by the filters, as a filter would; with GALAXY_GPU_FEW=n, all but one in n (as
+        // Kick with Favourites lets 1,413 of 450,000 through: n of 318).
+        let few: Option<usize> = std::env::var("GALAXY_GPU_FEW").ok().and_then(|n| n.parse().ok()).filter(|&n| n > 0);
+        let shown: Vec<usize> = (0..stars.len()).filter(|i| few.map_or(i % 3 != 0, |n| i % n == 0)).collect();
         let grid = mo_app::galaxy_grid::Grid::new(&stars, &shown);
         let mut sky = Sky::new(&device, &queue);
         // Lit as Length lights them: every sound has a length, so each has a rank from 0 to 1. As Liked: about one
