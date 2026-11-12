@@ -468,11 +468,11 @@ struct Shown {
     wave_width: Cell<f32>,
     /// A line's file is being carried out now ([`Shown::drag`]).
     dragging: Cell<bool>,
-    /// Where the right button went down, while it's down: let go in the same spot, it's a click.
-    right_press: Cell<Option<LogicalPosition>>,
     /// The panel is being told of the right button going down or coming up, now: a line under the mouse takes
-    /// that as a click (the app's lines open a menu with it), and here it mustn't play the line.
+    /// that as a click too (the app's lines open a menu with it), and [`line_click`] has to tell the two apart.
     right_now: Rc<Cell<bool>>,
+    /// What was last clicked to be heard, and whether it has started playing: a click on it again stops it.
+    heard: Rc<Cell<Option<(Heard, bool)>>>,
     /// The Galaxy: its map, its view and which picture is on show.
     sky: Rc<RefCell<Sky>>,
     /// The names last put over the Galaxy's map.
@@ -524,8 +524,8 @@ impl Shown {
             played: Rc::new(RefCell::new(None)),
             wave_width: Cell::new(waves::WIDTH as f32),
             dragging: Cell::new(false),
-            right_press: Cell::new(None),
             right_now: Rc::default(),
+            heard: Rc::default(),
             sky: Rc::default(),
             sky_names: RefCell::default(),
             painter: RefCell::new(None),
@@ -559,26 +559,25 @@ impl Shown {
         let player = Arc::clone(&self.instance.player);
         let slots = Arc::clone(&self.slots);
         let last_played = Rc::clone(&self.played);
-        let right_now = Rc::clone(&self.right_now);
+        let stop = self.stopper();
+        let (right_now, heard, stop_it) = (Rc::clone(&self.right_now), Rc::clone(&self.heard), Rc::clone(&stop));
         panel.on_play(move |row, from| {
-            // A right click stops the sound: it never starts the line under it.
-            if right_now.get() {
-                return;
-            }
             let Some(row) = usize::try_from(row).ok() else { return };
+            let Some(sound) = lines.sound(row) else { return };
+            let playing = heard.get().is_some_and(|(what, _)| what == Heard::Line(sound));
+            let from = match line_click(playing, right_now.get(), from) {
+                Click::Play(from) => from,
+                Click::Stop => return stop_it(),
+                Click::Nothing => return,
+            };
             let Some(path) = lines.path(row) else { return };
-            *last_played.borrow_mut() = lines.sound(row).map(|sound| (row, sound, path.clone().into()));
+            *last_played.borrow_mut() = Some((row, sound, path.clone().into()));
+            heard.set(Some((Heard::Line(sound), false)));
             let slots = Arc::clone(&slots);
             player.play(path.into(), from, move |played| *lock(&slots.played) = Some(played));
         });
-        let player = Arc::clone(&self.instance.player);
-        let weak = panel.as_weak();
-        panel.on_stop(move || {
-            player.stop();
-            if let Some(panel) = weak.upgrade() {
-                panel.set_playing(SharedString::new());
-            }
-        });
+        let stop_it = Rc::clone(&stop);
+        panel.on_stop(move || stop_it());
         // Trim silence, for this plugin while it's loaded: it starts off, at -60 dB, and shows what the player has
         // when the window opens again.
         panel.set_trim_choices(ModelRc::new(slint::VecModel::from(
@@ -733,9 +732,10 @@ impl Shown {
             let lines = Rc::clone(&self.lines);
             let player = Arc::clone(&self.instance.player);
             let slots = Arc::clone(&self.slots);
-            let last_played = Rc::clone(&self.played);
+            let (last_played, heard) = (Rc::clone(&self.played), Rc::clone(&self.heard));
             Rc::new(move |at: usize| {
                 let Some(path) = lines.path_at(at) else { return };
+                heard.set(Some((Heard::Star(at), false)));
                 // No line of the list was clicked: a waveform heard next isn't any line's.
                 *last_played.borrow_mut() = None;
                 let slots = Arc::clone(&slots);
@@ -790,6 +790,7 @@ impl Shown {
         panel.on_sky_cancelled(move || was_cancelled.set(true));
         let (sky, weak) = (Rc::clone(&self.sky), panel.as_weak());
         let player = Arc::clone(&self.instance.player);
+        let (heard, stop) = (Rc::clone(&self.heard), self.stopper());
         panel.on_sky_up(move |side| {
             let mut sky = sky.borrow_mut();
             let cancelled = cancelled.get();
@@ -810,9 +811,15 @@ impl Shown {
             // Let go after sweeping: the sound stops with the mouse, as in the app.
             if was_swept {
                 player.stop();
+                heard.set(None);
             }
             if let Some(at) = click.and_then(|(x, y)| sky.star_at(x, y)) {
-                play(at);
+                // A click on the star that's playing stops it (it stays ringed).
+                if heard.get().is_some_and(|(what, _)| what == Heard::Star(at)) {
+                    stop();
+                } else {
+                    play(at);
+                }
                 sky.picked = Some(at);
             }
         });
@@ -1068,10 +1075,13 @@ impl Shown {
             let line = match played {
                 Played::Playing(name, n) => {
                     self.playing.set(Some(n));
+                    // What was clicked is what's heard now.
+                    self.heard.set(self.heard.get().map(|(what, _)| (what, true)));
                     format!("Playing {name}")
                 }
                 Played::Not(why) => {
                     self.playing.set(None);
+                    self.heard.set(None);
                     why
                 }
             };
@@ -1081,6 +1091,10 @@ impl Shown {
             && !self.instance.player.still_playing(n)
         {
             self.playing.set(None);
+            // It ended: a click on it plays it again. (Not while a newer pick is still being read.)
+            if self.heard.get().is_some_and(|(_, started)| started) {
+                self.heard.set(None);
+            }
             self.panel.set_playing(SharedString::new());
         }
         // The line on the waveform of the line clicked, while that sound plays and the line still shows it.
@@ -1240,9 +1254,23 @@ impl Shown {
         }
     }
 
-    /// Stops what's playing (the Stop button, a right click, Esc).
+    /// Stops what's playing, from wherever in the panel it's asked.
+    fn stopper(&self) -> Rc<dyn Fn()> {
+        let (player, heard) = (Arc::clone(&self.instance.player), Rc::clone(&self.heard));
+        let weak = self.panel.as_weak();
+        Rc::new(move || {
+            player.stop();
+            heard.set(None);
+            if let Some(panel) = weak.upgrade() {
+                panel.set_playing(SharedString::new());
+            }
+        })
+    }
+
+    /// Stops what's playing (Esc).
     fn stop(&self) {
         self.instance.player.stop();
+        self.heard.set(None);
         self.playing.set(None);
         self.panel.set_playing(SharedString::new());
     }
@@ -1283,21 +1311,11 @@ impl WindowHandler for Shown {
                     if !self.context.has_focus() {
                         let _ = self.context.focus();
                     }
-                    if button == MouseButton::Right {
-                        self.right_press.set(Some(self.pointer.get()));
-                    }
                     self.right_now.set(button == MouseButton::Right);
                     self.send(Slint::PointerPressed { position: self.pointer.get(), button: slint_button(button) });
                     self.right_now.set(false);
                 }
                 MouseEvent::ButtonReleased { button, .. } => {
-                    // A right click stops the sound (a right drag is the Galaxy's map being moved: it doesn't).
-                    if button == MouseButton::Right
-                        && let Some(pressed) = self.right_press.take()
-                        && still(pressed, self.pointer.get())
-                    {
-                        self.stop();
-                    }
                     self.right_now.set(button == MouseButton::Right);
                     self.send(Slint::PointerReleased { position: self.pointer.get(), button: slint_button(button) });
                     self.right_now.set(false);
@@ -1448,9 +1466,33 @@ fn seed() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
 }
 
-/// Whether the mouse let go where it was pressed (within a few points): a click, not a drag.
-fn still(pressed: LogicalPosition, now: LogicalPosition) -> bool {
-    (now.x - pressed.x).abs() + (now.y - pressed.y).abs() <= mo_app::galaxy_view::STILL
+/// What's being heard: a list line's sound (by its id) or a star (by its sound's place in the list).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Heard {
+    Line(i64),
+    Star(usize),
+}
+
+/// What a click on a list line does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Click {
+    /// Plays its sound from this spot (0 the start, 1 the end).
+    Play(f32),
+    Stop,
+    Nothing,
+}
+
+/// What a click on a list line does, as on the app's Sounds page (Solomon, 11 Nov 2026): a click on the line that's
+/// `playing` stops it, unless it's on its waveform, which plays from that spot (`from` is 0 to 1 there, below 0
+/// anywhere else on the line); a `right` click stops it only over its waveform, and does nothing anywhere else.
+fn line_click(playing: bool, right: bool, from: f32) -> Click {
+    let on_waveform = from >= 0.0;
+    match (right, playing, on_waveform) {
+        (true, true, true) | (false, true, false) => Click::Stop,
+        (true, ..) => Click::Nothing,
+        (false, _, true) => Click::Play(from.min(1.0)),
+        (false, false, false) => Click::Play(0.0),
+    }
 }
 
 fn slint_button(button: MouseButton) -> PointerEventButton {
@@ -1516,10 +1558,18 @@ mod tests {
     }
 
     #[test]
-    fn a_right_click_is_a_press_let_go_in_the_same_spot() {
-        let at = |x, y| LogicalPosition::new(x, y);
-        assert!(still(at(100.0, 50.0), at(102.0, 51.0)));
-        assert!(!still(at(100.0, 50.0), at(120.0, 50.0)));
+    fn a_click_on_the_playing_line_stops_it_and_a_right_click_only_over_its_waveform() {
+        // A line that isn't playing: a click plays it, from the start or from the spot on its waveform.
+        assert_eq!(line_click(false, false, -1.0), Click::Play(0.0));
+        assert_eq!(line_click(false, false, 0.4), Click::Play(0.4));
+        // The one playing: a click stops it, a click on its waveform plays from there.
+        assert_eq!(line_click(true, false, -1.0), Click::Stop);
+        assert_eq!(line_click(true, false, 0.0), Click::Play(0.0));
+        // A right click stops only over the playing line's waveform, and never starts anything.
+        assert_eq!(line_click(true, true, 0.7), Click::Stop);
+        assert_eq!(line_click(true, true, -1.0), Click::Nothing);
+        assert_eq!(line_click(false, true, 0.7), Click::Nothing);
+        assert_eq!(line_click(false, true, -1.0), Click::Nothing);
     }
 
     #[test]
