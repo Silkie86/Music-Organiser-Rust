@@ -3722,6 +3722,9 @@ fn picked_sound(p: &Page, at: usize) -> PickedSound {
         colour: list::type_colour(now.sound_type),
         type_from: type_from.into(),
         path: mo_app::shell::wrappable_path(&s.path).into(),
+        path_tails: ModelRc::new(VecModel::from(
+            mo_app::shell::path_tails(&s.path).into_iter().map(SharedString::from).collect::<Vec<_>>(),
+        )),
         wave: wave(s).into(),
         points: points(s),
         seconds: a.map_or(0.0, |a| a.seconds.min(mo_audio::MAX_SECONDS)) as f32,
