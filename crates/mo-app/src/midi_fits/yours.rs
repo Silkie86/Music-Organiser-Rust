@@ -3,7 +3,8 @@
 //! Until you pick, the app does ([`super::fitted`]): the song's chords and bass, or its melodies, over the bars where
 //! the most of them play together. A pick of yours is a [`YourPick`]: the parts by name ([`PartName`]: a song saved
 //! again may have its parts in other places, but a part keeps its name), the bars by number. Either can be left to
-//! the app.
+//! the app. A search reads it against the song as it's saved now ([`YourPick::in_song`], an [`InSong`]): a part
+//! that's gone drops out, and bars past the song's end are cut off.
 //!
 //! [`Picker`] is what the page shows to pick from, made by each search: every part of the song that can be fitted to
 //! and whether it's on, the bars fitted to, and how long the song is. A press there changes the page's copy of it
@@ -13,7 +14,6 @@
 //! [`YourPicks`] remembers the pick for each song, by the song library's key for it (so every save of the song has
 //! it): the last [`PICKS_KEPT`] songs', in one setting ([`PICKS_KEY`]).
 
-use std::collections::HashMap;
 use std::ops::Range;
 
 use mo_midi::Role;
@@ -33,8 +33,12 @@ pub const PICKS_KEY: &str = "midi_fits_picks";
 /// How many songs' picks are remembered: the ones picked for last.
 pub const PICKS_KEPT: usize = 32;
 
-/// The most parts of one pick read back from the setting: a file on disk is never trusted to be small.
-const PARTS_READ: usize = 256;
+/// The most parts of one pick that are remembered.
+const PARTS_KEPT: usize = 256;
+
+/// The longest the setting is read at, in bytes: the picks kept are a few kilobytes, so anything far past that isn't
+/// the app's own writing, and isn't read into memory.
+const TEXT_MOST: usize = 1 << 20;
 
 /// Whether a part of a song can be fitted to: it plays notes, and they're pitches (not a drum plugin's pads, nor a
 /// part that plays as drums do).
@@ -80,11 +84,9 @@ impl YourPick {
         self.parts.is_none() && self.bars.is_none()
     }
 
-    /// The pick as `song` has it now: the parts' places in [`Song::parts`], in the song's order, and the bars. A part
-    /// the song has no more (renamed or deleted since) or that can't be fitted to ([`can_fit`]) drops out, and with
-    /// none left the parts are the app's to pick again. Bars past the song's end are cut off ([`held_bars`]), and
-    /// bars that start past it are the app's to pick again.
-    pub fn in_song(&self, song: &Song) -> (Option<Vec<usize>>, Option<Range<i64>>) {
+    /// The pick as `song` has it now ([`InSong`]): the one place that says what a remembered pick means for the
+    /// song as it's saved today.
+    pub fn in_song(&self, song: &Song) -> InSong {
         let fits = |at: &usize| song.parts.get(*at).is_some_and(can_fit);
         let parts = self.parts.as_ref().and_then(|names| {
             let mut places: Vec<usize> = names.iter().filter_map(|name| name.place(song)).filter(fits).collect();
@@ -94,8 +96,20 @@ impl YourPick {
         });
         let length = song.bars();
         let bars = self.bars.as_ref().filter(|bars| bars.start < length).and_then(|bars| held_bars(bars, length));
-        (parts, bars)
+        InSong { parts, bars }
     }
+}
+
+/// A pick of yours as one song has it now ([`YourPick::in_song`]): what [`super::fitted`] fits to.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InSong {
+    /// The parts' places in [`Song::parts`], each once, in the song's order. A part the song has no more (renamed
+    /// or deleted since) or that can't be fitted to ([`can_fit`]) has dropped out; none: the app picks them (also
+    /// when none of yours is left).
+    pub parts: Option<Vec<usize>>,
+    /// The bars, counted from 0, cut off at the song's end ([`held_bars`]); none: the app picks them (also when
+    /// yours start past the song's end).
+    pub bars: Option<Range<i64>>,
 }
 
 /// Bars picked by hand (counted from 0), held to a song of `length` bars: they start in the song (its last bar at
@@ -142,30 +156,30 @@ pub struct Picker {
 }
 
 impl Picker {
-    /// The picker for `song` after a search asked for `yours`: `fitted` is what the list was fitted to, none when
-    /// nothing could be. The parts that are on are yours (every one the song still has, also one that rests through
-    /// the bars and so isn't heard), else the app's.
-    pub fn of(song: &Song, yours: &YourPick, fitted: Option<&Pick>) -> Picker {
-        let (your_parts, your_bars) = yours.in_song(song);
-        let on: &[usize] = match (&your_parts, fitted) {
+    /// The picker for `song` after a search asked for `yours` (your pick as the song has it): `fitted` is what the
+    /// list was fitted to, none when nothing could be. The parts that are on are yours (every one the song still
+    /// has, also one that rests through the bars and so isn't heard), else the app's.
+    pub fn of(song: &Song, yours: &InSong, fitted: Option<&Pick>) -> Picker {
+        let on: &[usize] = match (&yours.parts, fitted) {
             (Some(parts), _) => parts,
             (None, Some(pick)) => &pick.parts,
             (None, None) => &[],
         };
-        // Which of its name each part is, counted as [`PartName::of`] counts: among every part of the song.
-        let mut seen: HashMap<&str, usize> = HashMap::new();
-        let mut parts = Vec::new();
-        for (at, part) in song.parts.iter().enumerate() {
-            let count = seen.entry(part.name.as_str()).or_insert(0);
-            let nth = *count;
-            *count += 1;
-            if !can_fit(part) {
-                continue;
-            }
+        let mut parts: Vec<PartChoice> = Vec::new();
+        for (at, part) in song.parts.iter().enumerate().filter(|(_, part)| can_fit(part)) {
+            let Some(named) = PartName::of(song, at) else { continue };
+            // No two chips say the same: the second "Keys" shown is "Keys (2)". Counted among the chips, not as
+            // [`PartName`] counts (among every part): a bassline called as the drum kit before it is has no "(2)".
             let name = if part.name.is_empty() { "No name" } else { part.name.as_str() };
+            let mut label = name.to_owned();
+            let mut n = 1;
+            while parts.iter().any(|shown| shown.label == label) {
+                n += 1;
+                label = format!("{name} ({n})");
+            }
             parts.push(PartChoice {
-                part: PartName { name: part.name.clone(), nth },
-                label: if nth == 0 { name.to_owned() } else { format!("{name} ({})", nth + 1) },
+                part: named,
+                label,
                 kind: if part.sample { "Sample" } else { page::role_label(part.role) },
                 sample: part.sample,
                 bars: part.bars.clone(),
@@ -174,10 +188,10 @@ impl Picker {
         }
         Picker {
             parts,
-            bars: fitted.map(|pick| pick.bars.clone()).or_else(|| your_bars.clone()),
+            bars: fitted.map(|pick| pick.bars.clone()).or_else(|| yours.bars.clone()),
             length: song.bars(),
-            your_parts: your_parts.is_some(),
-            your_bars: your_bars.is_some(),
+            your_parts: yours.parts.is_some(),
+            your_bars: yours.bars.is_some(),
         }
     }
 
@@ -229,6 +243,10 @@ impl Picker {
 
 /// Your picks, remembered: one for each of the songs picked for last ([`PICKS_KEPT`] of them), the newest first,
 /// each under the song library's key for its song (`mo_library::Song::key`: the same for every save of it).
+///
+/// A pick is the song's as the Songs page groups it. A song joined to another there goes by that song's key from
+/// then on, and so by its pick (they're one song now; parts its save doesn't have drop out as ever), and a save
+/// split off is a song of its own with nothing picked yet.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct YourPicks(Vec<(String, YourPick)>);
 
@@ -245,18 +263,23 @@ struct KeptPick {
 }
 
 impl YourPicks {
-    /// The picks as the setting has them (`text`: what [`PICKS_KEY`] holds). A setting that can't be read is no
-    /// picks: the app picks again, as it does for a song not picked for yet.
+    /// The picks as the setting has them (`text`: what [`PICKS_KEY`] holds). One that can't be read (a hand edit, a
+    /// later version's) is left out and the others stay; a setting that can't be read at all is no picks: the app
+    /// picks again, as it does for a song not picked for yet.
     pub fn read(text: &str) -> YourPicks {
-        let kept: Vec<KeptPick> = serde_json::from_str(text).unwrap_or_default();
+        if text.len() > TEXT_MOST {
+            return YourPicks::default();
+        }
+        let entries: Vec<serde_json::Value> = serde_json::from_str(text).unwrap_or_default();
         let mut picks: Vec<(String, YourPick)> = Vec::new();
-        for kept in kept {
+        for entry in entries {
             if picks.len() >= PICKS_KEPT {
                 break;
             }
+            let Ok(kept) = serde_json::from_value::<KeptPick>(entry) else { continue };
             let named = |(name, nth)| PartName { name, nth };
             let parts: Option<Vec<PartName>> =
-                kept.parts.map(|parts| parts.into_iter().take(PARTS_READ).map(named).collect());
+                kept.parts.map(|parts| parts.into_iter().take(PARTS_KEPT).map(named).collect());
             let pick = YourPick {
                 parts: parts.filter(|parts| !parts.is_empty()),
                 bars: kept.bars.filter(|(start, end)| *start >= 0 && end > start).map(|(start, end)| start..end),
@@ -307,13 +330,18 @@ impl YourPicks {
         if pick.is_empty() {
             return at.map(|at| self.0.remove(at)).is_some();
         }
-        if at == Some(0) && self.0.first().is_some_and(|(_, was)| was == pick) {
+        // As it's read back: the same number of parts at the most.
+        let mut pick = pick.clone();
+        if let Some(parts) = &mut pick.parts {
+            parts.truncate(PARTS_KEPT);
+        }
+        if at == Some(0) && self.0.first().is_some_and(|(_, was)| *was == pick) {
             return false;
         }
         if let Some(at) = at {
             self.0.remove(at);
         }
-        self.0.insert(0, (song.to_owned(), pick.clone()));
+        self.0.insert(0, (song.to_owned(), pick));
         self.0.truncate(PICKS_KEPT);
         true
     }
@@ -325,8 +353,17 @@ mod tests {
     use mo_midi::fit::Wants;
 
     use super::super::tests::{chords, lane, song, song_of, tune};
-    use super::super::{fitted, fitted_text};
+    use super::super::{Fitted, fitted, fitted_text};
     use super::*;
+
+    /// What of `song` is fitted to for a pick of yours, read as the search reads it.
+    fn fit_to(song: &Song, wanted: Option<Wants>, yours: &YourPick) -> Result<Fitted, String> {
+        fitted(song, wanted, &yours.in_song(song))
+    }
+
+    fn picker_of(song: &Song, yours: &YourPick, fitted: Option<&Pick>) -> Picker {
+        Picker::of(song, &yours.in_song(song), fitted)
+    }
 
     fn named(name: &str, nth: usize) -> PartName {
         PartName { name: name.into(), nth }
@@ -359,12 +396,12 @@ mod tests {
     fn parts_picked_by_hand_are_what_the_list_is_fitted_to() {
         // Chords in bars 9 to 12, a lead over the next four.
         let song = song();
-        let fit = |yours: &YourPick, wanted| fitted(&song, wanted, yours).map(|f| fitted_text(&song, &f));
+        let fit = |yours: &YourPick, wanted| fit_to(&song, wanted, yours).map(|f| fitted_text(&song, &f));
         // The lead alone: chords for it, whatever the switch asked for last (what the parts are decides).
         assert_eq!(fit(&parts(&["Lead"]), None).unwrap(), "Chords for Lead, bars 13–16");
         assert_eq!(fit(&parts(&["Lead"]), Some(Wants::Tune)).unwrap(), "Chords for Lead, bars 13–16");
         // Both: something to play over the two, from where the first of them comes in.
-        let both = fitted(&song, None, &parts(&["Lead", "Keys"])).unwrap();
+        let both = fit_to(&song, None, &parts(&["Lead", "Keys"])).unwrap();
         assert_eq!((both.wants, both.pick.parts.clone(), both.pick.bars.clone()), (Wants::Tune, vec![0, 1], 8..16));
         assert_eq!(fitted_text(&song, &both), "To play over Keys and Lead, bars 9–16");
         // What a part found is heard with is the same parts and bars.
@@ -373,24 +410,43 @@ mod tests {
 
         // A part the song has no more drops out, and with none left the app picks, as if nothing were picked.
         assert_eq!(fit(&parts(&["Pad", "Lead"]), None).unwrap(), "Chords for Lead, bars 13–16");
-        assert_eq!(fitted(&song, None, &parts(&["Pad"])), fitted(&song, None, &YourPick::default()));
+        assert_eq!(fit_to(&song, None, &parts(&["Pad"])), fit_to(&song, None, &YourPick::default()));
         // Drums can't be picked: their notes pick pads.
         let mut with_drums = song.clone();
         with_drums.parts[0].drums = true;
-        assert_eq!(parts(&["Keys", "Lead"]).in_song(&with_drums), (Some(vec![1]), None));
+        assert_eq!(parts(&["Keys", "Lead"]).in_song(&with_drums), InSong { parts: Some(vec![1]), bars: None });
         // A sampler can, by hand only: its notes are taken as written.
         let mut sampled = song.clone();
         sampled.parts[0].sample = true;
-        assert_eq!(fitted(&sampled, None, &YourPick::default()).unwrap().wants, Wants::Chords);
-        let by_hand = fitted(&sampled, None, &parts(&["Keys"])).unwrap();
+        assert_eq!(fit_to(&sampled, None, &YourPick::default()).unwrap().wants, Wants::Chords);
+        let by_hand = fit_to(&sampled, None, &parts(&["Keys"])).unwrap();
         assert_eq!(fitted_text(&sampled, &by_hand), "To play over Keys, bars 9–12");
+
+        // Picked parts that can't be read: the words name the ones that play in the bars, as they're the ones tried.
+        let mut muted = song.clone();
+        muted.parts[1].notes.iter_mut().for_each(|n| n.muted = true);
+        let lead_bars = YourPick { bars: Some(12..16), ..parts(&["Keys", "Lead"]) };
+        assert_eq!(fit_to(&muted, None, &lead_bars).unwrap_err(), "Lead couldn't be read in bars 13–16.");
+        muted.parts[0].notes.iter_mut().for_each(|n| n.muted = true);
+        assert_eq!(
+            fit_to(&muted, None, &parts(&["Keys", "Lead"])).unwrap_err(),
+            "No chords could be read from Keys and Lead in bars 9–16."
+        );
+        // A part with nothing that sounds (a damaged save's: one chord, of no length, on a bar line).
+        let mut no_length = song.clone();
+        no_length.parts[0].notes.retain(|n| n.start == 8 * mo_midi::BAR);
+        no_length.parts[0].notes.iter_mut().for_each(|n| n.length = 0);
+        assert_eq!(
+            fit_to(&no_length, None, &parts(&["Keys"])).unwrap_err(),
+            "Keys doesn't play anything that sounds in this song."
+        );
     }
 
     #[test]
     fn bars_picked_by_hand_are_the_bars_the_list_is_fitted_to() {
         let song = song();
         let bars = |bars: Range<i64>| YourPick { parts: None, bars: Some(bars) };
-        let fit = |yours: &YourPick, wanted| fitted(&song, wanted, yours).map(|f| fitted_text(&song, &f));
+        let fit = |yours: &YourPick, wanted| fit_to(&song, wanted, yours).map(|f| fitted_text(&song, &f));
         // The app's parts over your bars: the chords where you say.
         assert_eq!(fit(&bars(8..10), None).unwrap(), "To play over Keys, bars 9–10");
         // Where only the lead plays, it's the lead that's fitted to; asked for parts over the chords, why not.
@@ -416,7 +472,7 @@ mod tests {
         // A song with no melody at all says that, whatever the bars.
         let keys_only = song_of(vec![lane("Keys", 8, &chords())]);
         assert_eq!(
-            fitted(&keys_only, Some(Wants::Chords), &bars(0..4)).unwrap_err(),
+            fit_to(&keys_only, Some(Wants::Chords), &bars(0..4)).unwrap_err(),
             "No melody found in this song to put chords under."
         );
 
@@ -427,13 +483,21 @@ mod tests {
         assert_eq!(fit(&rests, None).unwrap_err(), "Lead doesn't play in bars 9–12.");
         let rest = YourPick { bars: Some(0..4), ..parts(&["Keys", "Lead"]) };
         assert_eq!(fit(&rest, None).unwrap_err(), "Keys and Lead don't play in bars 1–4.");
+        // Two channels of one name are one thing; with a part that has no name, they're "the parts you picked".
+        let twins = song_of(vec![lane("Keys", 8, &chords()), lane("Keys", 8, &chords()), lane("", 8, &tune(0))]);
+        let two_keys = YourPick { parts: Some(vec![named("Keys", 0), named("Keys", 1)]), bars: Some(0..4) };
+        assert_eq!(fit_to(&twins, None, &two_keys).unwrap_err(), "Keys doesn't play in bars 1–4.");
+        let unnamed = YourPick { parts: Some(vec![named("Keys", 0), named("", 0)]), bars: Some(0..4) };
+        assert_eq!(fit_to(&twins, None, &unnamed).unwrap_err(), "The parts you picked don't play in bars 1–4.");
+        let one_unnamed = YourPick { parts: Some(vec![named("", 0)]), bars: Some(0..4) };
+        assert_eq!(fit_to(&twins, None, &one_unnamed).unwrap_err(), "The part you picked doesn't play in bars 1–4.");
         // Of two picked, the one that plays there is what's fitted to and named.
         let one = YourPick { bars: Some(8..12), ..parts(&["Keys", "Lead"]) };
         assert_eq!(fit(&one, None).unwrap(), "To play over Keys, bars 9–12");
 
         // Bars are held to the song (16 bars here): cut off at its end, and left to the app when they start past it.
         assert_eq!(fit(&bars(14..99), None).unwrap(), "Chords for Lead, bars 15–16");
-        assert_eq!(fitted(&song, None, &bars(40..48)), fitted(&song, None, &YourPick::default()));
+        assert_eq!(fit_to(&song, None, &bars(40..48)), fit_to(&song, None, &YourPick::default()));
         assert_eq!(held_bars(&(-3..2), 16), Some(0..2));
         assert_eq!(held_bars(&(99..120), 16), Some(15..16));
         assert_eq!(held_bars(&(5..5), 16), Some(5..6));
@@ -447,8 +511,8 @@ mod tests {
         let mut song = song_of(vec![lane("Keys", 8, &chords()), lane("Lead", 12, &tune(0)), lane("Kit", 8, &chords())]);
         song.parts[2].drums = true;
         // Nothing picked: the app's parts are on, and nothing is yours.
-        let apps = fitted(&song, None, &YourPick::default()).unwrap();
-        let mut picker = Picker::of(&song, &YourPick::default(), Some(&apps.pick));
+        let apps = fit_to(&song, None, &YourPick::default()).unwrap();
+        let mut picker = picker_of(&song, &YourPick::default(), Some(&apps.pick));
         let shown = |p: &Picker| p.parts.iter().map(|c| (c.label.clone(), c.kind, c.on)).collect::<Vec<_>>();
         assert_eq!(shown(&picker), [("Keys".to_owned(), "Chords", true), ("Lead".to_owned(), "Melody", false)]);
         assert_eq!(picker.parts[1].bars, 12..16);
@@ -464,8 +528,8 @@ mod tests {
         let yours = picker.pick();
         assert_eq!(yours, YourPick { bars: Some(13..16), ..parts(&["Lead"]) });
         // The search asked for that gives the picker back as it was left.
-        let by_hand = fitted(&song, None, &yours).unwrap();
-        let after = Picker::of(&song, &yours, Some(&by_hand.pick));
+        let by_hand = fit_to(&song, None, &yours).unwrap();
+        let after = picker_of(&song, &yours, Some(&by_hand.pick));
         assert_eq!(after, picker);
         assert!(after.your_parts && after.your_bars);
 
@@ -489,15 +553,15 @@ mod tests {
 
         // Nothing could be fitted (the lead rests in your bars): the picker still shows your pick, to change it.
         let rests = YourPick { bars: Some(8..12), ..parts(&["Lead"]) };
-        assert!(fitted(&song, None, &rests).is_err());
-        let stuck = Picker::of(&song, &rests, None);
+        assert!(fit_to(&song, None, &rests).is_err());
+        let stuck = picker_of(&song, &rests, None);
         assert_eq!(shown(&stuck), [("Keys".to_owned(), "Chords", false), ("Lead".to_owned(), "Melody", true)]);
         assert_eq!((stuck.bars.clone(), stuck.pick()), (Some(8..12), rests));
 
         // Two parts of one name are told apart, a part with no name has words, and a sampler says what it is.
         let mut twins = song_of(vec![lane("Keys", 0, &chords()), lane("Keys", 0, &chords()), lane("", 0, &tune(0))]);
         twins.parts[1].sample = true;
-        let picker = Picker::of(&twins, &YourPick { parts: Some(vec![named("Keys", 1)]), bars: None }, None);
+        let picker = picker_of(&twins, &YourPick { parts: Some(vec![named("Keys", 1)]), bars: None }, None);
         assert_eq!(
             shown(&picker),
             [
@@ -507,6 +571,20 @@ mod tests {
             ]
         );
         assert_eq!(picker.pick().parts, Some(vec![named("Keys", 1)]));
+        // A chip's number counts the chips: a bassline called as the drum kit before it is has none, though it's
+        // the second part of its name, and is remembered as that.
+        let mut kit_first =
+            song_of(vec![lane("808", 0, &chords()), lane("808", 0, &tune(0)), lane("808", 4, &tune(0))]);
+        kit_first.parts[0].drums = true;
+        let picker = picker_of(&kit_first, &YourPick::default(), None);
+        let chips: Vec<(&str, usize)> = picker.parts.iter().map(|c| (c.label.as_str(), c.part.nth)).collect();
+        assert_eq!(chips, [("808", 1), ("808 (2)", 2)]);
+        // A part really named like a numbered chip doesn't share its words with one.
+        let named_so =
+            song_of(vec![lane("Keys", 0, &chords()), lane("Keys (2)", 0, &chords()), lane("Keys", 0, &chords())]);
+        let picker = picker_of(&named_so, &YourPick::default(), None);
+        let chips: Vec<&str> = picker.parts.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(chips, ["Keys", "Keys (2)", "Keys (3)"]);
     }
 
     #[test]
@@ -554,5 +632,18 @@ mod tests {
                       {"song":"d","bars":[-4,2]},{"song":"e","bars":[4,6]},{"song":"e","bars":[1,2]}]"#;
         let read = YourPicks::read(odd);
         assert_eq!((read.len(), read.of("e")), (1, YourPick { parts: None, bars: Some(4..6) }));
+        // One that can't be read at all (a hand edit, a later version's shape) is left out, and the others stay.
+        let mixed = r#"[{"song":"a","bars":[1,2,3]},{"song":"b","parts":[["Lead",-1]]},7,{"song":"c","bars":[0,8]},
+                        {"song":"d","parts":[["Lead",0]],"later":true}]"#;
+        let read = YourPicks::read(mixed);
+        assert_eq!((read.len(), read.of("c")), (2, YourPick { parts: None, bars: Some(0..8) }));
+        assert_eq!(read.of("d"), parts(&["Lead"]));
+        // A pick is kept with as many parts as are read back.
+        let all: Vec<PartName> = (0..PARTS_KEPT + 9).map(|nth| named("Layer", nth)).collect();
+        let mut big = YourPicks::default();
+        assert!(big.set("layers", &YourPick { parts: Some(all), bars: None }));
+        assert_eq!(big.of("layers").parts.map(|parts| parts.len()), Some(PARTS_KEPT));
+        assert_eq!(YourPicks::read(&big.text()), big);
+        assert!(!big.set("layers", &big.of("layers")));
     }
 }

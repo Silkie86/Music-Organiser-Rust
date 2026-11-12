@@ -308,17 +308,18 @@ the next PR step by step). Solomon wants the highest effort here.
     only for a Bitwig song read by its arranger. Not yet tried in a real song: see
     `extensions/bitwig-java/README.md` (many tracks, whether the take replaces what's there, the clip's name,
     tempo changes inside the bars, how many presses of undo take it out).
-  **Parts and bars picked by hand** (the logic; the page's controls come next): `midi_fits::fitted` takes a
-  `YourPick` (`mo-app/src/midi_fits/yours.rs`): the parts by name (`PartName`: its name and which of that name it
-  is, as a save written again moves a part's place), the bars by number, either left to the app
-  (`mo_midi::fit::for_song::Pick::by_hand` and `usual_in`). Parts by hand decide what's looked for (chords for
-  them when all are melodies, else parts over them), whatever the switch says; a sampler can be picked by hand
-  only; bars are held to the song and to 32. Every search's answer carries a `Picker` (each part that can be
+  **Parts and bars picked by hand** (the logic; the page's controls come next): a pick is a `YourPick`
+  (`mo-app/src/midi_fits/yours.rs`): the parts by name (`PartName`: its name and which of that name it is, as a
+  save written again moves a part's place), the bars by number, either left to the app. A search reads it
+  against the save (`YourPick::in_song`: parts that are gone drop out, bars are held to the song and to 32) and
+  `midi_fits::fitted` fits to that (`mo_midi::fit::for_song::Pick::by_hand` and `usual_in`). Parts by hand
+  decide what's looked for (chords for them when all are melodies, else parts over them), whatever the switch
+  says; a sampler can be picked by hand only. Every search's answer carries a `Picker` (each part that can be
   fitted to and whether it's on, the bars, the song's length), also when nothing can be fitted
   (`Answer::CantFit`), and the page changes its copy of it (`toggle`, `set_bars`, `apps_parts`, `apps_pick`)
   and asks for `Picker::pick`. `YourPicks` remembers the pick for the last 32 songs under the song library's
-  key (`SongChoice::key`), as one setting (`midi_fits_picks`). Until the page has its controls it always asks
-  with nothing picked.
+  key (`SongChoice::key`: a song joined to another on the Songs page goes by that song's pick from then on), as
+  one setting (`midi_fits_picks`). Until the page has its controls it always asks with nothing picked.
   Not built yet: those controls, and putting a found part at its bar in FL Studio (there it's the drag).
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db

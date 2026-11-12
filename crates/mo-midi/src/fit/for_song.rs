@@ -48,7 +48,10 @@ impl Pick {
     /// those parts only the ones that play in those bars, so the pick names what's heard. None when the song has no
     /// such part.
     pub fn usual(song: &Song, wants: Wants) -> Option<Pick> {
-        Pick::by_hand(song, &usual_parts(song, wants), None)
+        let mut parts = usual_parts(song, wants);
+        let bars = song.busiest_bars(&parts, USUAL_BARS)?;
+        parts.retain(|&part| song.plays_in(part, &bars));
+        Some(Pick { parts, bars })
     }
 
     /// The same parts over bars picked by hand (counted from 0): of the song's chords, arps and basslines (looking
@@ -60,8 +63,9 @@ impl Pick {
     /// Parts picked by hand (places in [`Song::parts`]; each counts once, in the song's order), over `bars` when
     /// those are picked too, else over up to [`USUAL_BARS`] bars from the first bar where the most of the picked
     /// parts play at once. Of the parts, only the ones that play in those bars are kept, so the pick names what's
-    /// heard. None when none of them plays there. Which parts can be picked is the caller's to say: drums picked
-    /// stay in the pick, and are left out of what's fitted to ([`Target::of_song`]).
+    /// heard. None when none of them sounds there: in bars of yours they rest through, or with nothing of theirs
+    /// that sounds at all. Which parts can be picked is the caller's to say: drums picked stay in the pick, and are
+    /// left out of what's fitted to ([`Target::of_song`]).
     pub fn by_hand(song: &Song, parts: &[usize], bars: Option<&Range<i64>>) -> Option<Pick> {
         let mut parts = parts.to_vec();
         parts.sort_unstable();
