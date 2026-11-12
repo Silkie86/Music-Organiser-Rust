@@ -871,7 +871,7 @@ fn tag_box_checks(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Res
     window.set_size(PhysicalSize::new(WIDTH, SHORT));
     start_on(app, Place::Sounds);
     sounds.invoke_pick_view(0);
-    sounds.invoke_select(0);
+    pick_sound(app, 0);
     capture(window);
     press(app, "t", true);
     capture(window);
@@ -909,9 +909,10 @@ fn tag_box_checks(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Res
 /// stops the sound so we can still have a right click menu", then "maybe only there over the waveform right click
 /// should stop it"). A click on its tile stops it, and it stays picked. A right click on the tile's name opens the
 /// tile's menu, and the sound goes on: the pick for the menu starts and stops nothing. A right click over its waveform,
-/// on the tile or on its card, stops it and opens no menu, and a click on the card's waveform plays from there. With
-/// the card open first, so the tiles keep their places as they're picked, and clicks on one spot further apart than a
-/// double-click. Last, as it leaves a tile picked.
+/// on the tile or on its card, stops it and opens no menu, and a right click on the tile once it's stopped opens its
+/// menu and plays nothing, Autoplay or not. A click on the card's waveform plays from there. With the card open first,
+/// so the tiles keep their places as they're picked, and clicks on one spot further apart than a double-click. Last,
+/// as it leaves a tile picked.
 fn stopping_by_click(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> Result<(), String> {
     use slint::platform::Key;
     let sounds = app.global::<mo_ui::SoundsData>();
@@ -924,7 +925,7 @@ fn stopping_by_click(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> 
     start_on(app, Place::Sounds);
     sounds.invoke_clear();
     sounds.invoke_pick_view(0);
-    sounds.invoke_select(0);
+    pick_sound(app, 0);
     capture(window);
     if plays() {
         press(app, Key::Escape, false);
@@ -967,6 +968,18 @@ fn stopping_by_click(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> 
             "stop by click: a right click on {tile}'s waveform as it played didn't stop it, or opened its menu"
         ));
     }
+    // Stopped now: a right click on it opens its menu, and with Autoplay on (as here) its pick for the menu still
+    // plays nothing, as a click would.
+    right_click(window, x, y);
+    let menu = wait();
+    if plays() || name() != tile || same_in(&after, &menu, MENU_OVER) {
+        return Err(format!(
+            "stop by click: a right click on {tile} once it had stopped played it (Autoplay {}), or opened no menu",
+            if sounds.get_autoplay() { "on" } else { "off" }
+        ));
+    }
+    click(window, 600.0, 20.0);
+    wait();
     sounds.invoke_play();
     wait();
     let (cx, cy) = CARD_WAVE;
@@ -1030,7 +1043,7 @@ fn card_keys_checks(
     };
     start_on(app, Place::Sounds);
     sounds.invoke_pick_view(0);
-    sounds.invoke_select(0);
+    pick_sound(app, 0);
     capture(window);
     // Ctrl+T, a tag typed and Enter, then Esc in the empty box until the card closes (the first may stop the sound).
     press(app, "t", true);
@@ -1072,7 +1085,7 @@ fn card_keys_checks(
     // The card closing while another app's window is in front (a read of the library dropped its sound), with the
     // keys in its tag box: the box lost them to that window, not to this one, so they come back to the list with the
     // window (the code review of the fix). The system's word comes first, as the window's watcher has it.
-    sounds.invoke_select(0);
+    pick_sound(app, 0);
     capture(window);
     press(app, "t", true);
     capture(window);
@@ -1344,6 +1357,14 @@ fn press(app: &mo_ui::AppWindow, key: impl Into<slint::SharedString>, ctrl: bool
     slint::platform::update_timers_and_animations();
 }
 
+/// Picks the sound on `row` of the Sounds page and, with Autoplay on, plays it from its start, as a click on it did
+/// before a click on the sound playing stopped it: what plays stops first (Esc's first step). For a check or a shot
+/// that picks a sound to look at it; [`stopping_by_click`] clicks the one playing.
+fn pick_sound(app: &mo_ui::AppWindow, row: i32) {
+    mo_ui::sounds::stop_on_escape(app);
+    app.global::<mo_ui::SoundsData>().invoke_select(row);
+}
+
 /// One more press of `key` from holding it down (the keyboard's repeat).
 fn held(app: &mo_ui::AppWindow, key: impl Into<slint::SharedString>) {
     app.window().dispatch_event(slint::platform::WindowEvent::KeyPressRepeated { text: key.into() });
@@ -1454,7 +1475,7 @@ fn lists_keep_their_place(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow
                 // took the card's room too, their button sat at the far right, and the click picked a tile instead
                 // (the check failed on and off, 11 Nov).
                 if !sounds.get_panel_shown() {
-                    sounds.invoke_select(0);
+                    pick_sound(app, 0);
                 }
             }
             Place::Presets => mo_ui::presets::show_section(app, Section::Sounds),
@@ -1641,7 +1662,7 @@ fn sounds_shots(
     app.set_place(Place::Sounds.index() as i32);
     let data = app.global::<mo_ui::SoundsData>();
     // Autoplay is on, so picking a sound plays it.
-    data.invoke_select(6);
+    pick_sound(app, 6);
     data.set_played(0.35);
     shots.push(("sounds-panel.png".into(), capture(window)));
     // A sound deep in a pack, with folder names too long for a line, and six tags: its card wraps them, at the usual
@@ -1649,7 +1670,7 @@ fn sounds_shots(
     // with every run.
     data.set_search("Boom Kick".into());
     data.invoke_search_edited("Boom Kick".into());
-    data.invoke_select(0);
+    pick_sound(app, 0);
     capture(window);
     shots.push(("sounds-panel-long.png".into(), capture(window)));
     // The same card's switch on its other side: the projects that use the sound, newest first, with the card turned
@@ -1761,7 +1782,7 @@ fn sounds_shots(
     shots.push(("sounds-history.png".into(), capture(window)));
     data.invoke_close_panel();
     data.invoke_pick_view(2);
-    data.invoke_select(3);
+    pick_sound(app, 3);
     capture(window);
     shots.push(("sounds-galaxy.png".into(), capture(window)));
     // A search that leaves no stars: the list's word says so over the dimmed galaxy, once.
@@ -1863,7 +1884,7 @@ fn sounds_shots(
     // are still turned down to their end from the check before: the search leaves one, at the top.
     data.set_search("Boom Kick".into());
     data.invoke_search_edited("Boom Kick".into());
-    data.invoke_select(0);
+    pick_sound(app, 0);
     // Drawn after each, as a click would be: the tiles' list isn't made again many times between two draws.
     capture(window);
     data.invoke_set_type("Perc".into());
@@ -1942,7 +1963,7 @@ fn found_turned_down(app: &mo_ui::AppWindow, window: &MinimalSoftwareWindow) -> 
             }
             before = down;
             search("Boom Kick");
-            data.invoke_select(0);
+            pick_sound(app, 0);
             if plain(&draw(), first) {
                 return Err(format!(
                     "sounds {name}: turned down {by} px (or to its end), a search that left one sound, picked before \

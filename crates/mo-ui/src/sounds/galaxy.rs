@@ -30,7 +30,7 @@ use mo_sounds::{SoundsDb, StarPoint};
 use slint::{ComponentHandle, Image, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, Timer, TimerMode, VecModel};
 
 use super::sky::{Shine, Sky};
-use super::{CHOICES, FEED, HERE, PAGE, clicked, pick, play_picked};
+use super::{CHOICES, FEED, HERE, PAGE, click_on, clicked, pick, play_picked};
 use crate::gpu;
 use crate::{AppWindow, GalaxyLabel, SoundsData, SweptLine, Theme, TrailDot};
 
@@ -588,17 +588,20 @@ pub(super) fn wire(app: &AppWindow) {
         // As a click on its tile: the star playing stops; any other is picked (and played with Autoplay on).
         clicked(&app, at);
     });
-    // A double-click plays the star from its start, as a tile's does: its first click may have stopped it (it was the
-    // one playing). Its button's coming up, heard after this, is no click of its own.
+    // A double-click plays the star, as a tile's does: from its start when its first click stopped it (it was the one
+    // playing) or only picked it (Autoplay off), and on from its first click's start when that played it. Its
+    // button's coming up, heard after this, is no click of its own.
     let weak = app.as_weak();
     data.on_galaxy_double(move || {
         let Some(app) = weak.upgrade() else { return };
-        let (x, y) = PAGE.with(|p| {
+        let ((x, y), playing) = PAGE.with(|p| {
             let mut p = p.borrow_mut();
             p.galaxy.doubled = true;
-            p.galaxy.view.mouse
+            (p.galaxy.view.mouse, p.playing.map(|(i, _)| i))
         });
-        if let Some(at) = star_at(x, y) {
+        if let Some(at) = star_at(x, y)
+            && playing != Some(at)
+        {
             pick(&app, at);
             play_picked(&app, 0.0);
         }
@@ -630,7 +633,7 @@ pub(super) fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_galaxy_swept_go(move |i| {
         if let Some(app) = weak.upgrade() {
-            go_to_swept(&app, usize::try_from(i).unwrap_or(0));
+            go_to_swept(&app, usize::try_from(i).unwrap_or(0), true);
         }
     });
     let weak = app.as_weak();
@@ -1007,7 +1010,9 @@ fn on_trail(app: &AppWindow, at: usize, swept: bool) {
 }
 
 /// Goes to the `i`th sound on the trail (0 the newest): picks it, plays it and glides the map to it, keeping the zoom.
-fn go_to_swept(app: &AppWindow, i: usize) {
+/// A click on its line (`click`) is a click on its sound ([`click_on`]), playing it Autoplay or not: the sound playing
+/// stops instead, and the line's pick for a right click plays nothing.
+fn go_to_swept(app: &AppWindow, i: usize, click: bool) {
     let found = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let g = &mut p.galaxy;
@@ -1021,8 +1026,12 @@ fn go_to_swept(app: &AppWindow, i: usize) {
     });
     let Some(at) = found else { return };
     show_trail(app);
-    pick(app, at);
-    play_picked(app, 0.0);
+    if click {
+        click_on(app, at, true);
+    } else {
+        pick(app, at);
+        play_picked(app, 0.0);
+    }
     fly(app);
 }
 
@@ -1034,7 +1043,7 @@ fn swept_step(app: &AppWindow, by: i32) {
         Some((g.trail_at as i64 + i64::from(by)).clamp(0, last as i64) as usize)
     });
     if let Some(to) = to {
-        go_to_swept(app, to);
+        go_to_swept(app, to, false);
     }
 }
 

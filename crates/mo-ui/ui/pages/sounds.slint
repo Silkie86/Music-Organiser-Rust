@@ -526,11 +526,10 @@ component SoundTileView inherits Rectangle {
     // A click on it, so the page can take the keys (arrows, Space) from the search box.
     callback chosen();
     callback right-clicked(length, length);
-    // Whether a point in the window (as `right-clicked` gives it) is over the tile's waveform.
+    // Whether a point on the tile (as its line's `right-pressed` gives it) is over the tile's waveform.
     pure function on-wave(x: length, y: length) -> bool {
-        return x >= root.absolute-position.x + Space.md && x <= root.absolute-position.x + root.width - Space.md
-            && y >= root.absolute-position.y + root.wave-top
-            && y <= root.absolute-position.y + root.wave-top + root.wave-height;
+        return x >= Space.md && x <= root.width - Space.md
+            && y >= root.wave-top && y <= root.wave-top + root.wave-height;
     }
     height: TileSize.height;
     border-radius: Theme.radius;
@@ -557,15 +556,16 @@ component SoundTileView inherits Rectangle {
         }
         double-clicked => { SoundsData.play-row(root.tile.row); }
         // Over the waveform of the sound playing, a right click stops it (Solomon, 11 Nov 2026: "maybe only there over
-        // the waveform right click should stop it"); anywhere else on a tile, its menu. The tile's pick for the menu,
-        // just before, starts and stops nothing.
-        right-clicked(x, y) => {
+        // the waveform right click should stop it"), and the tile isn't picked; anywhere else on a tile, its menu.
+        // The tile's pick for the menu, just before, starts and stops nothing.
+        right-pressed(x, y) => {
             if root.tile.playing && root.on-wave(x, y) {
                 SoundsData.stop-sound();
-            } else {
-                root.right-clicked(x, y);
+                return true;
             }
+            return false;
         }
+        right-clicked(x, y) => { root.right-clicked(x, y); }
         if root.itself: Dot {
             x: Space.md;
             y: Space.md + (root.line-height - self.height) / 2;
