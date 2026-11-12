@@ -3,7 +3,7 @@
 // through the track, with the app's own filters and orders)
 // and DAW check (every CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PickButton, PointerPad, HoverNote, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
 export { FilterView, FilterChoice, YearBar }
 import { ListView } from "../../mo-ui/ui/list.slint";
 
@@ -30,6 +30,32 @@ export struct ExtensionLine {
     // The id the DAW was asked for, exactly.
     id: string,
     offered: bool,
+}
+
+// A neighbourhood's name over the Galaxy's map: which one, where the middle of its bottom edge is, its type's colour
+// and how strongly it shows.
+export struct SkyName {
+    region: int,
+    name: string,
+    x: length,
+    y: length,
+    colour: int,
+    fade: float,
+}
+
+// A dot on the Galaxy's trail: where its star is on the view, and how strongly it shows (fainter with age).
+export struct TrailDot {
+    x: length,
+    y: length,
+    fade: float,
+}
+
+// A line of the Galaxy's Swept card: a sound heard on the map lately, and whether Back and Next are on it.
+export struct SweptLine {
+    name: string,
+    kind: string,
+    colour: int,
+    current: bool,
 }
 
 export component Panel inherits Window {
@@ -75,7 +101,19 @@ export component Panel inherits Window {
     in-out property <bool> galaxy;
     // The stars' picture, and where it sits on the Galaxy's view now (it's moved and stretched with the view until
     // the next picture is drawn).
+    // The names over the map, zoomed out (a click flies into its neighbourhood), and the rings round the star under
+    // the mouse and the star last played.
+    in property <[SkyName]> sky-names;
+    callback sky-name(int);
+    in property <bool> sky-ring;
+    in property <length> sky-ring-x;
+    in property <length> sky-ring-y;
+    in property <bool> sky-picked;
+    in property <length> sky-picked-x;
+    in property <length> sky-picked-y;
     in property <image> sky-picture;
+    // What the Galaxy sits on: the graphics card paints its picture over the same colour.
+    out property <color> sky-well: Theme.well;
     in property <length> sky-x;
     in property <length> sky-y;
     in property <length> sky-w;
@@ -104,6 +142,32 @@ export component Panel inherits Window {
     callback sky-gone();
     // Back out to the whole map.
     callback sky-home();
+    // The mini-map, once the view has flown in: the whole map, with a box round the part on show (0 to 1 each way).
+    in property <bool> sky-mini;
+    in property <image> sky-mini-picture;
+    in property <string> sky-mini-title;
+    in property <float> sky-mini-x;
+    in property <float> sky-mini-y;
+    in property <float> sky-mini-w;
+    in property <float> sky-mini-h;
+    // Pressed or dragged on, this far across and down it (0 to 1).
+    callback sky-mini-go(float, float);
+    // What makes a star bigger and brighter ("Liked", "Length"...), one always picked.
+    in property <FilterView> sky-light;
+    callback sky-light-by(string);
+    // The trail: a line through the stars heard lately (a path's commands, in the view's points), a dot on each, and
+    // the Swept card that lists them, newest first.
+    in property <string> sky-trail;
+    in property <[TrailDot]> sky-trail-dots;
+    in property <[SweptLine]> sky-swept;
+    // The Swept card was clicked into: Up and Down go through its sounds.
+    in-out property <bool> sky-swept-keys;
+    callback sky-swept-go(int);
+    // 1: to the sound swept before (Back); -1: to the one after (Next).
+    callback sky-swept-step(int);
+    callback sky-swept-clear();
+    // An arrow key with the keys on the Galaxy: -1 Left, 1 Right, -2 Up, 2 Down (as the app numbers them).
+    callback sky-arrow(int);
     // The year strip beside the sounds, as on the app's Sounds page: the years sounds were added in, newest first,
     // and the places of the years picked (-1 for none). Drag over years to show only those.
     in property <[YearBar]> years;
@@ -116,7 +180,8 @@ export component Panel inherits Window {
     in property <int> playing-row: -1;
     in property <float> playing-at;
     callback search(string);
-    // Play a line's sound: from the start (0), or from the spot clicked on its waveform (up to 1, its end).
+    // A line was clicked: on its waveform at this spot (0 its start, up to 1, its end), or anywhere else on it (-1).
+    // The sound plays from the spot, or from the start; a click on the line that's playing stops it instead.
     callback play(int, float);
     // A line is being dragged out (onto a track): its row.
     callback drag-out(int);
@@ -366,7 +431,10 @@ export component Panel inherits Window {
                         background: Theme.well;
                         border-radius: Theme.radius;
                         clip: true;
-                        init => { root.sky-size(self.width, self.height); }
+                        init => {
+                            root.sky-size(self.width, self.height);
+                            sky-keys.focus();
+                        }
                         changed width => { root.sky-size(self.width, self.height); }
                         changed height => { root.sky-size(self.width, self.height); }
                         Image {
@@ -377,6 +445,30 @@ export component Panel inherits Window {
                             source: root.sky-picture;
                             image-fit: fill;
                         }
+                        if root.sky-trail != "": Path {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            height: parent.height;
+                            viewbox-x: 0;
+                            viewbox-y: 0;
+                            viewbox-width: parent.width / 1px;
+                            viewbox-height: parent.height / 1px;
+                            commands: root.sky-trail;
+                            stroke: Theme.text;
+                            stroke-width: 1.2px;
+                            opacity: 0.45;
+                        }
+                        for d in root.sky-trail-dots: Rectangle {
+                            x: d.x - 4px;
+                            y: d.y - 4px;
+                            width: 8px;
+                            height: 8px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: Theme.text;
+                            opacity: 0.2 + 0.6 * d.fade;
+                        }
                         if root.sky-note != "": Text {
                             width: parent.width - 2 * Space.lg;
                             text: root.sky-note;
@@ -386,16 +478,188 @@ export component Panel inherits Window {
                             vertical-alignment: center;
                             wrap: word-wrap;
                         }
+                        if root.sky-ring: Rectangle {
+                            x: root.sky-ring-x - 7px;
+                            y: root.sky-ring-y - 7px;
+                            width: 14px;
+                            height: 14px;
+                            border-radius: 7px;
+                            border-width: 1.5px;
+                            border-color: Theme.text;
+                            opacity: 0.7;
+                        }
+                        if root.sky-picked: Rectangle {
+                            x: root.sky-picked-x - 9px;
+                            y: root.sky-picked-y - 9px;
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            border-width: 2px;
+                            border-color: Theme.accent;
+                        }
+                        // The keys come here when the Galaxy opens or is pressed (and leave for the search box when
+                        // that's clicked): the arrows go from star to star.
+                        sky-keys := FocusScope {
+                            width: 0;
+                            height: 0;
+                            key-pressed(e) => {
+                                if e.text == Key.LeftArrow {
+                                    root.sky-arrow(-1);
+                                } else if e.text == Key.RightArrow {
+                                    root.sky-arrow(1);
+                                } else if e.text == Key.UpArrow {
+                                    root.sky-arrow(-2);
+                                } else if e.text == Key.DownArrow {
+                                    root.sky-arrow(2);
+                                } else {
+                                    return reject;
+                                }
+                                accept
+                            }
+                        }
                         PointerPad {
                             grabbing: root.sky-grabbing;
-                            down(x, y) => { root.sky-down(x, y, false); }
-                            side-down(x, y) => { root.sky-down(x, y, true); }
+                            down(x, y) => {
+                                sky-keys.focus();
+                                root.sky-swept-keys = false;
+                                root.sky-down(x, y, false);
+                            }
+                            side-down(x, y) => {
+                                sky-keys.focus();
+                                root.sky-down(x, y, true);
+                            }
                             side-up => { root.sky-up(true); }
                             move(x, y) => { root.sky-move(x, y); }
                             cancelled => { root.sky-cancelled(); }
                             up => { root.sky-up(false); }
                             wheel(x, dx, dy, ctrl, shift) => { root.sky-wheel(dy); }
                             gone => { root.sky-gone(); }
+                        }
+                        for l in root.sky-names: MapName {
+                            x: l.x - self.width / 2;
+                            y: l.y - self.height;
+                            text: l.name;
+                            tint: Theme.sound-type(l.colour);
+                            opacity: l.fade;
+                            clicked => { root.sky-name(l.region); }
+                        }
+                        if root.sky-mini: MapInset {
+                            x: parent.width - self.width - Space.md;
+                            y: parent.height - self.height - Space.md;
+                            picture: root.sky-mini-picture;
+                            title: root.sky-mini-title;
+                            box-x: root.sky-mini-x;
+                            box-y: root.sky-mini-y;
+                            box-width: root.sky-mini-w;
+                            box-height: root.sky-mini-h;
+                            go(x, y) => { root.sky-mini-go(x, y); }
+                        }
+                        // The map's own setting, on the map, as the app's.
+                        OneOfChip {
+                            x: Space.md;
+                            y: Space.md;
+                            name: "Light by";
+                            filter: root.sky-light;
+                            picked(text) => { root.sky-light-by(text); }
+                        }
+                        // The Swept card, as the app's: the sounds heard on the map lately. It leaves the mini-map
+                        // its corner, and stays away in a view too narrow for both it and the map.
+                        if root.sky-swept.length > 0 && parent.width >= 420px: Rectangle {
+                            x: parent.width - self.width - Space.md;
+                            y: Space.md;
+                            width: 250px;
+                            height: min(swept-card.preferred-height, parent.height - 2 * Space.md - (root.sky-mini ? 170px + Space.md : 0px));
+                            background: Theme.surface;
+                            border-radius: Theme.radius;
+                            border-width: 1px;
+                            // Accent while the arrow keys go through it.
+                            border-color: root.sky-swept-keys && sky-keys.has-focus ? Theme.accent : Theme.edge;
+                            clip: true;
+                            // The card takes its own clicks and the wheel, so they don't reach the map under it; a
+                            // click on it hands it the arrow keys.
+                            TouchArea {
+                                clicked => {
+                                    sky-keys.focus();
+                                    root.sky-swept-keys = true;
+                                }
+                                scroll-event(e) => { accept }
+                            }
+                            swept-card := VerticalLayout {
+                                padding: Space.md;
+                                spacing: Space.xs;
+                                HorizontalLayout {
+                                    spacing: Space.sm;
+                                    Caps {
+                                        text: "SWEPT";
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                    StudioButton {
+                                        text: "Back";
+                                        tip: "The sound swept before this one";
+                                        clicked => {
+                                            sky-keys.focus();
+                                            root.sky-swept-keys = true;
+                                            root.sky-swept-step(1);
+                                        }
+                                    }
+                                    StudioButton {
+                                        text: "Next";
+                                        tip: "The sound swept after this one";
+                                        clicked => {
+                                            sky-keys.focus();
+                                            root.sky-swept-keys = true;
+                                            root.sky-swept-step(-1);
+                                        }
+                                    }
+                                }
+                                for line[i] in root.sky-swept: ListLine {
+                                    height: 30px;
+                                    selected: line.current;
+                                    tip: line.kind;
+                                    clicked => {
+                                        sky-keys.focus();
+                                        root.sky-swept-keys = true;
+                                        root.sky-swept-go(i);
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: Space.sm;
+                                        padding-right: Space.sm;
+                                        spacing: Space.sm;
+                                        alignment: start;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Dot { tint: Theme.sound-type(line.colour); }
+                                        }
+                                        Text {
+                                            text: line.name;
+                                            color: line.current ? Theme.text : Theme.muted;
+                                            font-size: Type.meta;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                            horizontal-stretch: 1;
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: Space.sm;
+                                    // What the arrow keys do here, so it's seen, not guessed.
+                                    Text {
+                                        text: root.sky-swept-keys && sky-keys.has-focus ? "Up and Down go through these" : "Click here, then Up and Down";
+                                        color: root.sky-swept-keys && sky-keys.has-focus ? Theme.accent : Theme.muted;
+                                        font-size: Type.meta;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                    LinkText {
+                                        text: "Clear";
+                                        tint: Theme.muted;
+                                        font-size: Type.meta;
+                                        clicked => { root.sky-swept-clear(); }
+                                    }
+                                }
+                            }
                         }
                         if root.sky-hover != "": HoverNote {
                             text: root.sky-hover;
@@ -429,7 +693,7 @@ export component Panel inherits Window {
                                 // A click on the waveform plays from that spot; anywhere else, from the start.
                                 root.play(i, wave.source.width > 0 && self.pressed-x >= wave.absolute-position.x - self.absolute-position.x
                                     && self.pressed-x < wave.absolute-position.x - self.absolute-position.x + wave.width
-                                    ? (self.pressed-x - (wave.absolute-position.x - self.absolute-position.x)) / wave.width : 0);
+                                    ? (self.pressed-x - (wave.absolute-position.x - self.absolute-position.x)) / wave.width : -1);
                             }
                             drag-out => { root.drag-out(i); }
                             HorizontalLayout {

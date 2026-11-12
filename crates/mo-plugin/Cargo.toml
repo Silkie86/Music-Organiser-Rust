@@ -25,6 +25,7 @@ clack-extensions = { version = "0.2", features = [
     "log",
     "note-ports",
     "raw-window-handle_06",
+    "state",
     "track-info",
 ] }
 # The plugin's own window inside the one the DAW lends it (MIT/Apache).
@@ -54,6 +55,8 @@ mo-app = { workspace = true }
 # Decoding sounds only: the DAW plays them, not the system's sound output.
 mo-audio = { path = "../mo-audio", default-features = false }
 mo-catch = { path = "../mo-catch" }
+# The galaxy's painter on the graphics card, the one the app draws its Galaxy with.
+mo-sky = { path = "../mo-sky" }
 mo-sounds = { path = "../mo-sounds" }
 
 [target.'cfg(windows)'.dependencies]
@@ -75,7 +78,7 @@ windows-core = "0.62"
 [dev-dependencies]
 # A stand-in DAW for the tests: clack's host side.
 clack-host = { version = "0.2", features = ["clack-plugin"] }
-clack-extensions = { version = "0.2", features = ["audio-ports", "clack-host", "gui", "note-ports"] }
+clack-extensions = { version = "0.2", features = ["audio-ports", "clack-host", "gui", "note-ports", "state"] }
 
 [build-dependencies]
 slint-build.workspace = true

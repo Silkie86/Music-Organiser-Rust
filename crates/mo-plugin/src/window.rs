@@ -16,7 +16,9 @@ use crate::gpu::Gpu;
 use crate::library::{self, Asked, Library, ORDERS, Read};
 use crate::threads::{background, lock};
 use crate::waves::{self, Kept};
-use crate::{ExtensionLine, FilterChoice, FilterView, Instance, Panel, SoundLine, YearBar};
+use crate::{
+    ExtensionLine, FilterChoice, FilterView, Instance, Panel, SkyName, SoundLine, SweptLine, TrailDot, YearBar,
+};
 use baseview::dpi::{PhysicalPosition, Size};
 use baseview::{
     Event, EventStatus, HandlerError, MouseButton, MouseEvent, ScrollDelta, TimerHandle, WindowContext, WindowEvent,
@@ -129,6 +131,8 @@ struct Slots {
     played: Mutex<Option<Played>>,
     /// A line dragged out: its row and its file, once it's been checked to be there, or why it can't go.
     drag: Mutex<Option<(usize, Result<std::path::PathBuf, String>)>>,
+    /// A drag out that has ended: its file, when it started and how it ended.
+    dragged: Mutex<Option<Dragged>>,
     /// The waveforms read for the lines on show, with their asking's round ([`Kept::to_read`]).
     waves: Mutex<Option<(u64, WavesRead)>>,
     /// The Galaxy's map as the app last kept it, or why there's none.
@@ -136,7 +140,19 @@ struct Slots {
     /// The grid for finding the star under the mouse, with its asking's number ([`Sky::grid_ask`]).
     grid: Mutex<Option<(u64, Grid)>>,
     sky: Mutex<Option<SkyDrawn>>,
+    /// The neighbourhoods the names over the map are for, with their asking's number ([`Sky::names_ask`]).
+    names: Mutex<Option<(u64, Vec<mo_app::galaxy_names::Region>)>>,
+    /// The stars made ready for the graphics card, and how they're lit ([`Sky::pack_ask`]).
+    packed: Mutex<Option<galaxy::Packed>>,
+    /// The mini-map's picture, with its asking's number ([`Sky::mini_ask`]).
+    mini: Mutex<Option<(u64, SkyPixels)>>,
 }
+
+/// A drag out that has ended: its file, when it started and how it ended.
+type Dragged = (std::path::PathBuf, Instant, Result<crate::drag::Outcome, String>);
+
+/// The Galaxy's trail as the panel shows it: its line, its dots, and the Swept card's sounds with the one it's on.
+type Trail = (String, Vec<(f32, f32, f32)>, Vec<usize>, usize);
 
 type SkyPixels = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
 /// The Galaxy's picture drawn: its number, the view it was drawn for and its pixels; or just its number when it
@@ -145,6 +161,16 @@ type SkyDrawn = Result<(u64, View, SkyPixels), u64>;
 
 /// Each sound's waveform as a picture's pixels (made off the window's thread), or none.
 type WavesRead = Vec<(i64, Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>>)>;
+
+/// A picture of the stars drawn on the processor, as pixels the panel can show.
+fn sky_pixels(drawn: &mo_app::galaxy_picture::Drawn) -> Option<SkyPixels> {
+    let (width, height) = (u32::try_from(drawn.width).ok()?, u32::try_from(drawn.height).ok()?);
+    let mut pixels = SkyPixels::new(width, height);
+    for (to, from) in pixels.make_mut_slice().iter_mut().zip(&drawn.pixels) {
+        *to = slint::Rgba8Pixel { r: from.r, g: from.g, b: from.b, a: from.a };
+    }
+    Some(pixels)
+}
 
 fn take<T>(slot: &Mutex<Option<T>>) -> Option<T> {
     lock(slot).take()
@@ -170,6 +196,18 @@ impl Lines {
         let library = self.library.borrow();
         let at = *self.shown.borrow().get(row)?;
         library.as_ref()?.list.sound(at).map(|s| s.path.clone())
+    }
+
+    /// The Swept card's line for the sound at place `at` in the whole list.
+    fn swept(&self, at: usize, current: bool) -> Option<SweptLine> {
+        let library = self.library.borrow();
+        let sound = library.as_ref()?.list.sound(at)?;
+        Some(SweptLine {
+            name: library::name(&sound.path).into(),
+            kind: sound.sound_type.as_str().into(),
+            colour: mo_app::sounds::type_colour(&sound.sound_type),
+            current,
+        })
     }
 
     /// The file of the sound at place `at` in the whole list (a star of the Galaxy).
@@ -458,10 +496,21 @@ struct Shown {
     wave_width: Cell<f32>,
     /// A line's file is being carried out now ([`Shown::drag`]).
     dragging: Cell<bool>,
-    /// Where the right button went down, while it's down: let go in the same spot, it's a click.
-    right_press: Cell<Option<LogicalPosition>>,
+    /// The panel is being told of the right button going down or coming up, now: a line under the mouse takes
+    /// that as a click too (the app's lines open a menu with it), and [`line_click`] has to tell the two apart.
+    right_now: Rc<Cell<bool>>,
+    /// What was last clicked to be heard, and whether it has started playing: a click on it again stops it.
+    heard: Rc<Cell<Option<(Heard, bool)>>>,
     /// The Galaxy: its map, its view and which picture is on show.
     sky: Rc<RefCell<Sky>>,
+    /// The names last put over the Galaxy's map.
+    sky_names: RefCell<Vec<SkyName>>,
+    /// The trail last put on the Galaxy: its line, its dots, and the Swept card's sounds with the one it's on.
+    sky_trail: RefCell<Trail>,
+    /// The Galaxy's painter on the graphics card (the app's own), once there are stars to give it.
+    painter: RefCell<Option<mo_sky::Sky>>,
+    /// Painting the stars on the card went wrong: the processor's picture from then on.
+    painter_failed: Cell<bool>,
     /// The Galaxy's map has been asked for.
     sky_asked: Cell<bool>,
     /// When the timer last ran: a glide of the Galaxy goes on by the time since.
@@ -505,8 +554,13 @@ impl Shown {
             played: Rc::new(RefCell::new(None)),
             wave_width: Cell::new(waves::WIDTH as f32),
             dragging: Cell::new(false),
-            right_press: Cell::new(None),
+            right_now: Rc::default(),
+            heard: Rc::default(),
             sky: Rc::default(),
+            sky_names: RefCell::default(),
+            sky_trail: RefCell::default(),
+            painter: RefCell::new(None),
+            painter_failed: Cell::new(false),
             sky_asked: Cell::new(false),
             ticked: Cell::new(Instant::now()),
             _timer: timer,
@@ -536,21 +590,25 @@ impl Shown {
         let player = Arc::clone(&self.instance.player);
         let slots = Arc::clone(&self.slots);
         let last_played = Rc::clone(&self.played);
+        let stop = self.stopper();
+        let (right_now, heard, stop_it) = (Rc::clone(&self.right_now), Rc::clone(&self.heard), Rc::clone(&stop));
         panel.on_play(move |row, from| {
             let Some(row) = usize::try_from(row).ok() else { return };
+            let Some(sound) = lines.sound(row) else { return };
+            let playing = heard.get().is_some_and(|(what, _)| what == Heard::Line(sound));
+            let from = match line_click(playing, right_now.get(), from) {
+                Click::Play(from) => from,
+                Click::Stop => return stop_it(),
+                Click::Nothing => return,
+            };
             let Some(path) = lines.path(row) else { return };
-            *last_played.borrow_mut() = lines.sound(row).map(|sound| (row, sound, path.clone().into()));
+            *last_played.borrow_mut() = Some((row, sound, path.clone().into()));
+            heard.set(Some((Heard::Line(sound), false)));
             let slots = Arc::clone(&slots);
             player.play(path.into(), from, move |played| *lock(&slots.played) = Some(played));
         });
-        let player = Arc::clone(&self.instance.player);
-        let weak = panel.as_weak();
-        panel.on_stop(move || {
-            player.stop();
-            if let Some(panel) = weak.upgrade() {
-                panel.set_playing(SharedString::new());
-            }
-        });
+        let stop_it = Rc::clone(&stop);
+        panel.on_stop(move || stop_it());
         // Trim silence, for this plugin while it's loaded: it starts off, at -60 dB, and shows what the player has
         // when the window opens again.
         panel.set_trim_choices(ModelRc::new(slint::VecModel::from(
@@ -705,9 +763,10 @@ impl Shown {
             let lines = Rc::clone(&self.lines);
             let player = Arc::clone(&self.instance.player);
             let slots = Arc::clone(&self.slots);
-            let last_played = Rc::clone(&self.played);
+            let (last_played, heard) = (Rc::clone(&self.played), Rc::clone(&self.heard));
             Rc::new(move |at: usize| {
                 let Some(path) = lines.path_at(at) else { return };
+                heard.set(Some((Heard::Star(at), false)));
                 // No line of the list was clicked: a waveform heard next isn't any line's.
                 *last_played.borrow_mut() = None;
                 let slots = Arc::clone(&slots);
@@ -723,6 +782,8 @@ impl Shown {
                 return;
             }
             sky.view.press(x, y, if pan { Hold::Pan } else { Hold::Sweep });
+            // While a button is held the ring round the star under the mouse stays away.
+            sky.hover = None;
             was_cancelled.set(false);
             last.set(None);
             if let Some(panel) = weak.upgrade() {
@@ -744,10 +805,15 @@ impl Shown {
                         && last.replace(Some(at)) != Some(at)
                     {
                         play_star(at);
+                        sky.picked = Some(at);
+                        sky.on_trail(at, true);
                     }
                 }
                 Moved::Hover => {
-                    let name = sky.star_at(x, y).and_then(|at| lines.path_at(at));
+                    // Someone's looking: the stars keep twinkling.
+                    sky.looked_at(Instant::now());
+                    sky.hover = sky.star_at(x, y);
+                    let name = sky.hover.and_then(|at| lines.path_at(at));
                     panel.set_sky_hover(name.as_deref().map(library::name).unwrap_or_default().into());
                     panel.set_sky_hover_x(x);
                     panel.set_sky_hover_y(y);
@@ -758,6 +824,8 @@ impl Shown {
         panel.on_sky_cancelled(move || was_cancelled.set(true));
         let (sky, weak) = (Rc::clone(&self.sky), panel.as_weak());
         let player = Arc::clone(&self.instance.player);
+        let (heard, stop) = (Rc::clone(&self.heard), self.stopper());
+        let arrow_play = Rc::clone(&play);
         panel.on_sky_up(move |side| {
             let mut sky = sky.borrow_mut();
             let cancelled = cancelled.get();
@@ -778,13 +846,94 @@ impl Shown {
             // Let go after sweeping: the sound stops with the mouse, as in the app.
             if was_swept {
                 player.stop();
+                heard.set(None);
             }
             if let Some(at) = click.and_then(|(x, y)| sky.star_at(x, y)) {
-                play(at);
+                // A click on the star that's playing stops it (it stays ringed).
+                if heard.get().is_some_and(|(what, _)| what == Heard::Star(at)) {
+                    stop();
+                } else {
+                    play(at);
+                }
+                sky.picked = Some(at);
+                sky.on_trail(at, false);
             }
         });
-        let weak = panel.as_weak();
+        // Light by: what makes a star bigger and brighter, as the app's chip on the map.
+        let lights = Choices { chips: Rc::default(), more: Rc::default() };
+        let light_names = galaxy::LIGHTS.map(mo_app::galaxy_look::LightBy::name);
+        panel.set_sky_light(lights.view(&mo_app::filters::one_of(&light_names, self.sky.borrow().light_by().name())));
+        let (sky, weak) = (Rc::clone(&self.sky), panel.as_weak());
+        panel.on_sky_light_by(move |name| {
+            let Some(by) = galaxy::LIGHTS.into_iter().find(|by| by.name() == name.as_str()) else { return };
+            sky.borrow_mut().set_light_by(by);
+            if let Some(panel) = weak.upgrade() {
+                panel.set_sky_light(lights.view(&mo_app::filters::one_of(&light_names, by.name())));
+            }
+        });
+        let sky = Rc::clone(&self.sky);
+        panel.on_sky_mini_go(move |x, y| sky.borrow_mut().mini_go(x, y));
+        // An arrow key goes to the nearest star that way and plays it, as a click on it would.
+        // The Swept card: a click on a line, Back and Next go to that sound on the map and play it.
+        let (sky, play_star, right) = (Rc::clone(&self.sky), Rc::clone(&arrow_play), Rc::clone(&self.right_now));
+        panel.on_sky_swept_go(move |line| {
+            // Only the left button: a line takes the right one as a click too.
+            if right.get() {
+                return;
+            }
+            let found = usize::try_from(line).ok().and_then(|line| sky.borrow_mut().go_on_trail(line));
+            if let Some(at) = found {
+                play_star(at);
+            }
+        });
+        let (sky, play_star) = (Rc::clone(&self.sky), Rc::clone(&arrow_play));
+        panel.on_sky_swept_step(move |by| {
+            let found = sky.borrow_mut().step_on_trail(by);
+            if let Some(at) = found {
+                play_star(at);
+            }
+        });
+        let (sky, weak) = (Rc::clone(&self.sky), panel.as_weak());
+        panel.on_sky_swept_clear(move || {
+            sky.borrow_mut().clear_trail();
+            if let Some(panel) = weak.upgrade() {
+                panel.set_sky_swept_keys(false);
+            }
+        });
+        let (sky, play_star, weak) = (Rc::clone(&self.sky), arrow_play, panel.as_weak());
+        panel.on_sky_arrow(move |way| {
+            let Some(panel) = weak.upgrade() else { return };
+            // With the Swept card clicked into, Up and Down go through its sounds (as Back and Next).
+            if panel.get_sky_swept_keys() && way.abs() == 2 && !sky.borrow().trail().0.is_empty() {
+                let found = sky.borrow_mut().step_on_trail(way.signum());
+                if let Some(at) = found {
+                    play_star(at);
+                }
+                return;
+            }
+            panel.set_sky_swept_keys(false);
+            let way = match way {
+                -1 => (-1.0, 0.0),
+                1 => (1.0, 0.0),
+                -2 => (0.0, -1.0),
+                2 => (0.0, 1.0),
+                _ => return,
+            };
+            let found = sky.borrow_mut().arrow(way);
+            if let Some(at) = found {
+                sky.borrow_mut().on_trail(at, false);
+                play_star(at);
+            }
+        });
+        let sky = Rc::clone(&self.sky);
+        panel.on_sky_name(move |region| {
+            if let Ok(region) = usize::try_from(region) {
+                sky.borrow_mut().fly_into_name(region);
+            }
+        });
+        let (sky, weak) = (Rc::clone(&self.sky), panel.as_weak());
         panel.on_sky_gone(move || {
+            sky.borrow_mut().hover = None;
             if let Some(panel) = weak.upgrade() {
                 panel.set_sky_hover(SharedString::new());
             }
@@ -840,6 +989,191 @@ impl Shown {
                 *lock(&slots.grid) = Some((set, grid));
             });
         }
+        let packed = self.sky_stars(&mut sky);
+        let on_card = match &self.draws {
+            Draws::Card(gpu) if !self.painter_failed.get() => self.sky_on_card(&mut sky, gpu, packed),
+            _ => false,
+        };
+        if !on_card {
+            self.sky_on_processor(&mut sky);
+        }
+        self.sky_names(&mut sky);
+        self.sky_mini(&mut sky);
+        self.sky_trail(&sky);
+        if let Some((x, y, width, height)) = sky.place() {
+            self.panel.set_sky_x(x);
+            self.panel.set_sky_y(y);
+            self.panel.set_sky_w(width);
+            self.panel.set_sky_h(height);
+        }
+    }
+
+    /// What's over the Galaxy's picture: the names of its neighbourhoods (found on a background thread when the stars
+    /// on show change) and the rings round the star under the mouse and the star last played.
+    fn sky_names(&self, sky: &mut Sky) {
+        if let Some(naming) = sky.names_ask() {
+            let slots = Arc::clone(&self.slots);
+            background("mo-plugin-galaxy-names", move || {
+                let started = Instant::now();
+                let found = naming.find();
+                crate::log::took_if_slow("Galaxy", &format!("Named {} neighbourhoods", found.len()), started);
+                *lock(&slots.names) = Some((naming.set, found));
+            });
+        }
+        if let Some((set, regions)) = take(&self.slots.names) {
+            sky.set_regions(set, regions);
+        }
+        let names: Vec<SkyName> = sky
+            .names()
+            .into_iter()
+            .map(|l| SkyName {
+                region: i32::try_from(l.region).unwrap_or(-1),
+                name: l.name.to_uppercase().into(),
+                x: l.x,
+                y: l.y,
+                colour: l.colour,
+                fade: l.fade,
+            })
+            .collect();
+        // Only when they've changed: the panel isn't told to draw the same names again every tick.
+        if *self.sky_names.borrow() != names {
+            self.panel.set_sky_names(ModelRc::new(VecModel::from(names.clone())));
+            *self.sky_names.borrow_mut() = names;
+        }
+        let hover = sky.hover.and_then(|at| sky.where_is(at));
+        self.panel.set_sky_ring(hover.is_some());
+        if let Some((x, y)) = hover {
+            self.panel.set_sky_ring_x(x);
+            self.panel.set_sky_ring_y(y);
+        }
+        let picked = sky.picked.and_then(|at| sky.where_is(at));
+        self.panel.set_sky_picked(picked.is_some());
+        if let Some((x, y)) = picked {
+            self.panel.set_sky_picked_x(x);
+            self.panel.set_sky_picked_y(y);
+        }
+    }
+
+    /// The trail: the line through the stars heard lately, their dots, and the Swept card. The panel is only told
+    /// when they've changed.
+    fn sky_trail(&self, sky: &Sky) {
+        let (path, dots) = sky.trail_on_view();
+        let (trail, on) = sky.trail();
+        let now: Trail = (path, dots, trail.to_vec(), on);
+        if *self.sky_trail.borrow() == now {
+            return;
+        }
+        self.panel.set_sky_trail(now.0.as_str().into());
+        let dots: Vec<TrailDot> = now.1.iter().map(|&(x, y, fade)| TrailDot { x, y, fade }).collect();
+        self.panel.set_sky_trail_dots(ModelRc::new(VecModel::from(dots)));
+        let lines: Vec<SweptLine> =
+            trail.iter().enumerate().filter_map(|(i, &at)| self.lines.swept(at, i == on)).collect();
+        self.panel.set_sky_swept(ModelRc::new(VecModel::from(lines)));
+        *self.sky_trail.borrow_mut() = now;
+    }
+
+    /// The mini-map: its picture of the whole map is drawn on a background thread when the stars on show change, and
+    /// its box follows the view.
+    fn sky_mini(&self, sky: &mut Sky) {
+        if let Some(picture) = sky.mini_ask() {
+            let slots = Arc::clone(&self.slots);
+            background("mo-plugin-galaxy-mini", move || {
+                let (set, started) = (picture.id, Instant::now());
+                // A fault in the drawing is noted: the mini-map keeps the picture it had.
+                let drawn = mo_catch::catch_crash(AssertUnwindSafe(|| sky_pixels(&picture.draw())));
+                crate::log::took_if_slow("Galaxy", "Drew the mini-map", started);
+                if let Some(pixels) = drawn.ok().flatten() {
+                    *lock(&slots.mini) = Some((set, pixels));
+                }
+            });
+        }
+        if let Some((set, pixels)) = take(&self.slots.mini)
+            && sky.mini_took(set)
+        {
+            self.panel.set_sky_mini_picture(slint::Image::from_rgba8_premultiplied(pixels));
+        }
+        let mini = sky.mini();
+        self.panel.set_sky_mini(mini.is_some());
+        if let Some(mini) = mini {
+            self.panel.set_sky_mini_title(mini.title.into());
+            self.panel.set_sky_mini_x(mini.x);
+            self.panel.set_sky_mini_y(mini.y);
+            self.panel.set_sky_mini_w(mini.width);
+            self.panel.set_sky_mini_h(mini.height);
+        }
+    }
+
+    /// The Galaxy's stars made ready, lit by what Light by says, on a background thread when the map, the filters
+    /// or Light by change: the ones to show now, when new ones have come.
+    fn sky_stars(&self, sky: &mut Sky) -> Option<galaxy::Packed> {
+        if let Some(library) = self.lines.library.borrow().as_ref()
+            && let Some(pack) = sky.pack_ask(library)
+        {
+            let slots = Arc::clone(&self.slots);
+            background("mo-plugin-galaxy-stars", move || {
+                let started = Instant::now();
+                let packed = pack.pack();
+                crate::log::took_if_slow("Galaxy", "Made the stars ready and lit", started);
+                *lock(&slots.packed) = Some(packed);
+            });
+        }
+        take(&self.slots.packed).filter(|packed| sky.packed(packed))
+    }
+
+    /// The Galaxy's stars painted by the graphics card, with the app's own painter: every star goes to the card once
+    /// (when the map or the filters change), and after that each picture only sends the view, so flying and moving
+    /// the map keep the screen's pace with half a million stars. `false` when the card can't (the processor's
+    /// picture is drawn instead).
+    fn sky_on_card(&self, sky: &mut Sky, gpu: &Gpu, packed: Option<galaxy::Packed>) -> bool {
+        let (device, queue) = gpu.device();
+        let well = self.panel.get_sky_well();
+        let background = [well.red(), well.green(), well.blue()].map(|c| f32::from(c) / 255.0);
+        let mut painter = self.painter.borrow_mut();
+        if painter.is_none() && packed.is_none() {
+            // No stars on the card yet: nothing is shown until they are (they're a moment away).
+            return true;
+        }
+        // A fault in the card's own code is caught here, so it never reaches the DAW.
+        let painted = mo_catch::catch_crash(AssertUnwindSafe(|| {
+            let painter = painter.get_or_insert_with(|| {
+                let started = Instant::now();
+                let painter = mo_sky::Sky::new(device, queue);
+                crate::log::took("Galaxy", "Set up the stars' painter on the graphics card", started);
+                painter
+            });
+            if let Some(packed) = &packed {
+                painter.set_stars(&packed.bytes, packed.lit);
+            }
+            if !painter.has_stars() {
+                return Ok(None);
+            }
+            let Some((view, scale, look, shine)) = sky.on_card(Instant::now()) else { return Ok(None) };
+            let texture = painter.draw(&view, scale, &look, shine, background);
+            slint::Image::try_from(texture).map(Some).map_err(|e| format!("Slint wouldn't show the picture: {e}"))
+        }));
+        match painted {
+            Ok(Ok(Some(picture))) => self.panel.set_sky_picture(picture),
+            Ok(Ok(None)) => {}
+            Ok(Err(why)) => {
+                crate::log::line("Galaxy", &format!("{why}: the stars are drawn on the processor"));
+                self.give_up_the_painter(sky, &mut painter);
+            }
+            Err(_) => {
+                crate::log::line("Galaxy", "Painting the stars on the card crashed: they're drawn on the processor");
+                self.give_up_the_painter(sky, &mut painter);
+            }
+        }
+        !self.painter_failed.get()
+    }
+
+    fn give_up_the_painter(&self, sky: &mut Sky, painter: &mut Option<mo_sky::Sky>) {
+        *painter = None;
+        self.painter_failed.set(true);
+        sky.moved();
+    }
+
+    /// The Galaxy's picture drawn on the processor, on a background thread (no graphics card to draw with).
+    fn sky_on_processor(&self, sky: &mut Sky) {
         match take(&self.slots.sky) {
             Some(Ok((id, view, pixels))) => {
                 if sky.took(id, view) {
@@ -856,22 +1190,11 @@ impl Shown {
                 // A fault in the drawing is noted, and the next picture can still be asked for.
                 let drawn = mo_catch::catch_crash(AssertUnwindSafe(|| {
                     let drawn = picture.draw();
-                    let (width, height) = (u32::try_from(drawn.width).ok()?, u32::try_from(drawn.height).ok()?);
-                    let mut pixels = SkyPixels::new(width, height);
-                    for (to, from) in pixels.make_mut_slice().iter_mut().zip(&drawn.pixels) {
-                        *to = slint::Rgba8Pixel { r: from.r, g: from.g, b: from.b, a: from.a };
-                    }
-                    Some((drawn.id, drawn.view, pixels))
+                    Some((drawn.id, drawn.view, sky_pixels(&drawn)?))
                 }));
                 crate::log::took_if_slow("Galaxy", "Drew the stars", started);
                 *lock(&slots.sky) = Some(drawn.ok().flatten().ok_or(id));
             });
-        }
-        if let Some((x, y, width, height)) = sky.place() {
-            self.panel.set_sky_x(x);
-            self.panel.set_sky_y(y);
-            self.panel.set_sky_w(width);
-            self.panel.set_sky_h(height);
         }
     }
 
@@ -908,10 +1231,13 @@ impl Shown {
             let line = match played {
                 Played::Playing(name, n) => {
                     self.playing.set(Some(n));
+                    // What was clicked is what's heard now.
+                    self.heard.set(self.heard.get().map(|(what, _)| (what, true)));
                     format!("Playing {name}")
                 }
                 Played::Not(why) => {
                     self.playing.set(None);
+                    self.heard.set(None);
                     why
                 }
             };
@@ -921,6 +1247,10 @@ impl Shown {
             && !self.instance.player.still_playing(n)
         {
             self.playing.set(None);
+            // It ended: a click on it plays it again. (Not while a newer pick is still being read.)
+            if self.heard.get().is_some_and(|(_, started)| started) {
+                self.heard.set(None);
+            }
             self.panel.set_playing(SharedString::new());
         }
         // The line on the waveform of the line clicked, while that sound plays and the line still shows it.
@@ -956,46 +1286,53 @@ impl Shown {
         self.render();
     }
 
-    /// Carries a dragged line's file out, once it's been found: the system's drag holds this thread until it's let
-    /// go (the timer still runs meanwhile, so nothing is kept borrowed across it).
+    /// Carries a dragged line's file out, once it's been found: the system's drag runs on a thread of its own
+    /// (`drag.rs`) and its end comes back in a slot ([`Shown::dragged`]).
     fn drag(&self) {
+        self.dragged();
         if self.dragging.get() {
             return;
         }
         let Some((row, found)) = take(&self.slots.drag) else { return };
-        let said = match found {
+        match found {
             Ok(path) => {
                 self.dragging.set(true);
                 self.panel.set_carried(i32::try_from(row).unwrap_or(-1));
-                self.render();
-                let started = Instant::now();
-                let done = crate::drag::file(&path);
-                let how = match &done {
-                    Ok(crate::drag::Outcome::Landed) => "landed".to_owned(),
-                    Ok(crate::drag::Outcome::Cancelled) => "let go where nothing took it, or called off".to_owned(),
-                    Err(why) => format!("failed: {why}"),
-                };
-                crate::log::took("Drag", &format!("{} {how}", path.display()), started);
-                self.dragging.set(false);
-                self.panel.set_carried(-1);
-                // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't
-                // left pressed.
-                let position = self.pointer.get();
-                let event =
-                    slint::platform::WindowEvent::PointerReleased { position, button: PointerEventButton::Left };
-                self.draws.window().dispatch_event(event);
-                self.draws.window().dispatch_event(slint::platform::WindowEvent::PointerExited);
-                done.err()
+                let (slots, started) = (Arc::clone(&self.slots), Instant::now());
+                crate::drag::file(path.clone(), move |ended| *lock(&slots.dragged) = Some((path, started, ended)));
             }
             Err(why) => {
                 crate::log::line("Drag", &why);
-                Some(why)
+                self.say_drag_failed(why);
             }
-        };
-        if let Some(why) = said {
-            self.playing.set(None);
-            self.panel.set_playing(why.into());
         }
+    }
+
+    /// A drag out has ended: the line is let go, and the panel says so if it couldn't be carried.
+    fn dragged(&self) {
+        let Some((path, started, ended)) = take(&self.slots.dragged) else { return };
+        let how = match &ended {
+            Ok(crate::drag::Outcome::Landed) => "landed".to_owned(),
+            Ok(crate::drag::Outcome::Cancelled) => "let go where nothing took it, or called off".to_owned(),
+            Err(why) => format!("failed: {why}"),
+        };
+        crate::log::took("Drag", &format!("{} {how}", path.display()), started);
+        self.dragging.set(false);
+        self.panel.set_carried(-1);
+        // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't left
+        // pressed.
+        let position = self.pointer.get();
+        let event = slint::platform::WindowEvent::PointerReleased { position, button: PointerEventButton::Left };
+        self.draws.window().dispatch_event(event);
+        self.draws.window().dispatch_event(slint::platform::WindowEvent::PointerExited);
+        if let Err(why) = ended {
+            self.say_drag_failed(why);
+        }
+    }
+
+    fn say_drag_failed(&self, why: String) {
+        self.playing.set(None);
+        self.panel.set_playing(why.into());
     }
 
     /// A waveform picture's size in the screen's own pixels: as wide as the panel now draws them.
@@ -1073,9 +1410,23 @@ impl Shown {
         }
     }
 
-    /// Stops what's playing (the Stop button, a right click, Esc).
+    /// Stops what's playing, from wherever in the panel it's asked.
+    fn stopper(&self) -> Rc<dyn Fn()> {
+        let (player, heard) = (Arc::clone(&self.instance.player), Rc::clone(&self.heard));
+        let weak = self.panel.as_weak();
+        Rc::new(move || {
+            player.stop();
+            heard.set(None);
+            if let Some(panel) = weak.upgrade() {
+                panel.set_playing(SharedString::new());
+            }
+        })
+    }
+
+    /// Stops what's playing (Esc).
     fn stop(&self) {
         self.instance.player.stop();
+        self.heard.set(None);
         self.playing.set(None);
         self.panel.set_playing(SharedString::new());
     }
@@ -1116,20 +1467,14 @@ impl WindowHandler for Shown {
                     if !self.context.has_focus() {
                         let _ = self.context.focus();
                     }
-                    if button == MouseButton::Right {
-                        self.right_press.set(Some(self.pointer.get()));
-                    }
+                    self.right_now.set(button == MouseButton::Right);
                     self.send(Slint::PointerPressed { position: self.pointer.get(), button: slint_button(button) });
+                    self.right_now.set(false);
                 }
                 MouseEvent::ButtonReleased { button, .. } => {
-                    // A right click stops the sound (a right drag is the Galaxy's map being moved: it doesn't).
-                    if button == MouseButton::Right
-                        && let Some(pressed) = self.right_press.take()
-                        && still(pressed, self.pointer.get())
-                    {
-                        self.stop();
-                    }
+                    self.right_now.set(button == MouseButton::Right);
                     self.send(Slint::PointerReleased { position: self.pointer.get(), button: slint_button(button) });
+                    self.right_now.set(false);
                 }
                 MouseEvent::WheelScrolled { delta, .. } => {
                     let (delta_x, delta_y) = match delta {
@@ -1277,9 +1622,33 @@ fn seed() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64)
 }
 
-/// Whether the mouse let go where it was pressed (within a few points): a click, not a drag.
-fn still(pressed: LogicalPosition, now: LogicalPosition) -> bool {
-    (now.x - pressed.x).abs() + (now.y - pressed.y).abs() <= mo_app::galaxy_view::STILL
+/// What's being heard: a list line's sound (by its id) or a star (by its sound's place in the list).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Heard {
+    Line(i64),
+    Star(usize),
+}
+
+/// What a click on a list line does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Click {
+    /// Plays its sound from this spot (0 the start, 1 the end).
+    Play(f32),
+    Stop,
+    Nothing,
+}
+
+/// What a click on a list line does, as on the app's Sounds page (Solomon, 11 Nov 2026): a click on the line that's
+/// `playing` stops it, unless it's on its waveform, which plays from that spot (`from` is 0 to 1 there, below 0
+/// anywhere else on the line); a `right` click stops it only over its waveform, and does nothing anywhere else.
+fn line_click(playing: bool, right: bool, from: f32) -> Click {
+    let on_waveform = from >= 0.0;
+    match (right, playing, on_waveform) {
+        (true, true, true) | (false, true, false) => Click::Stop,
+        (true, ..) => Click::Nothing,
+        (false, _, true) => Click::Play(from.min(1.0)),
+        (false, false, false) => Click::Play(0.0),
+    }
 }
 
 fn slint_button(button: MouseButton) -> PointerEventButton {
@@ -1345,10 +1714,18 @@ mod tests {
     }
 
     #[test]
-    fn a_right_click_is_a_press_let_go_in_the_same_spot() {
-        let at = |x, y| LogicalPosition::new(x, y);
-        assert!(still(at(100.0, 50.0), at(102.0, 51.0)));
-        assert!(!still(at(100.0, 50.0), at(120.0, 50.0)));
+    fn a_click_on_the_playing_line_stops_it_and_a_right_click_only_over_its_waveform() {
+        // A line that isn't playing: a click plays it, from the start or from the spot on its waveform.
+        assert_eq!(line_click(false, false, -1.0), Click::Play(0.0));
+        assert_eq!(line_click(false, false, 0.4), Click::Play(0.4));
+        // The one playing: a click stops it, a click on its waveform plays from there.
+        assert_eq!(line_click(true, false, -1.0), Click::Stop);
+        assert_eq!(line_click(true, false, 0.0), Click::Play(0.0));
+        // A right click stops only over the playing line's waveform, and never starts anything.
+        assert_eq!(line_click(true, true, 0.7), Click::Stop);
+        assert_eq!(line_click(true, true, -1.0), Click::Nothing);
+        assert_eq!(line_click(false, true, 0.7), Click::Nothing);
+        assert_eq!(line_click(false, true, -1.0), Click::Nothing);
     }
 
     #[test]

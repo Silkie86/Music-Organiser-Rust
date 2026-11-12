@@ -135,8 +135,9 @@ whether Bitwig's audio engine is on.) The rest is additions, which the app can i
   Bitwig put it: the new track's `index`, `name`, `type` and launcher clips, and the clip selected in the
   arranger before and after. From 3.9 it takes `trackId` in place of `track`, and says the new track's `id` and
   every track that's new (`newTracks`), found by ID.
-- `record` ✎ with `trackId`, `slot`, `at` and `length` (in beats, whole bars): **an experiment** (extension
-  3.9), which only the live tests send. It records the launcher clip into the arranger, as Bitwig's user guide
+- `record` ✎ with `trackId`, `slot`, `at` and `length` (in beats, whole bars): from extension 3.9, first as an
+  experiment only the live tests sent; the app's Put in the song (the MIDI page, a part found for a song) sends
+  it now, armed, with `deleteLauncherClip` and no replay. It records the launcher clip into the arranger, as Bitwig's user guide
   says a person does, which needs no focus or selection (copy and paste act on Bitwig's own selection, which
   is why `arrange` failed). It refuses unless Bitwig is stopped with arranger record off and the slot has a
   clip. It keeps every setting it changes, then sets them so only the clip records and nothing is heard:
@@ -172,6 +173,24 @@ whether Bitwig's audio engine is on.) The rest is additions, which the app can i
   each whether its panel showed before and after each go (`visible`), whether the route `ran` it, and whether
   the link put the panel back as it was (`restored`). A panel that shows and hides with them means Bitwig
   carried them out for the link.
+- From 3.23, for the MIDI page's Send to Bitwig in a "Fits my song" list: `playstart` ✎ with `at` (beats from the
+  arranger's start) moves where Play starts from, so the play start marks the first of the song's bars a part was
+  found for, where its clip is dragged to from the launcher. A Bitwig that's playing plays on. It answers where
+  the play start was (`was`) and is (`playStart`), or says when Bitwig didn't move it. While a part plays with its
+  song's bars going round (`clip` with `loop`), the play start is the link's until that part comes out: a mark
+  made meanwhile is where it goes back to then, in place of where it was found.
+- Put in the song (the app, November 2026) needs no new command: it puts the part in a launcher slot of the
+  selected track (`clip` with `audition`), has `record` play it once into the arranger at the song's bars, and
+  clears the note with `deleteclip`. Stop the recording there sends `recordabort` on a connection of its own
+  (the first one waits for `record`'s answer), until a job says it was running. The job was tried live on
+  Bitwig 6.1.5 in the test project (October 2026: armed or not, the muted master leaves it alone, the take
+  isn't an alias of the launcher clip). Not yet tried in a real song: a project with many tracks (the job
+  disarms the others for the take, and looks at 128), whether the take replaces what's in those bars as a
+  dropped clip does, what the arranger clip is called, tempo changes inside the bars (the job's time limit goes
+  by the tempo it reads as it starts), a launcher clip of yours left playing or waiting (the job refuses then,
+  and the app says which track), and how many presses of Bitwig's undo take the part out again (after the take
+  the job deletes the launcher clip and puts the master's mute and the tracks' arms back, which Bitwig may
+  count as steps of their own).
 - From 3.22, for the MIDI page's Play in Bitwig in a "Fits my song" list: `clip` with `loop` (the song's bars, in
   beats) stops Bitwig, sets the arranger to go round those bars with Play starting at the first of them, and
   launches the part from its own start (`launchWithOptions("none", "from_start")`), so the part's first bar is

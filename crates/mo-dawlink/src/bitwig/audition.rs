@@ -90,13 +90,29 @@ impl Playing {
 }
 
 /// Refuses, with nothing sent, when the extension is older than `needs`.
-fn check_version(hello: &Hello, needs: &'static str) -> Result<(), Error> {
+pub(super) fn check_version(hello: &Hello, needs: &'static str) -> Result<(), Error> {
     hello.can_send()?;
     if !hello.at_least(needs) {
         let has = if hello.runtime == "java" { hello.answering() } else { String::new() };
         return Err(Error::OldExtension { has, needs });
     }
     Ok(())
+}
+
+/// The instrument track selected in Bitwig, where a part plays or is recorded: its ID and its name. `so`: what the app
+/// couldn't do without the ID, for the words when Bitwig doesn't say one.
+pub(super) fn selected_instrument(link: &mut Link, so: &str) -> Result<(String, String), Error> {
+    let track = link.selected_track()?.ok_or(Error::NoTrackSelected)?;
+    if !matches!(track.kind.as_str(), "Instrument" | "Hybrid") {
+        return Err(Error::NotAnInstrumentTrack { name: track.name, kind: track.kind });
+    }
+    let id = track.id.ok_or_else(|| {
+        Error::Bitwig(format!(
+            "Bitwig didn't say the selected track's ID, so the app couldn't {so}. Install the extension again from \
+             Settings > DAWs."
+        ))
+    })?;
+    Ok((id, track.name))
 }
 
 /// A preset playing a part on a track of its own in Bitwig ([`Bitwig::audition_preset`]): what stopping or keeping it
@@ -139,12 +155,12 @@ fn new_track_failed(e: Error, name: &str) -> Error {
 /// The name is all Bitwig tells the link of the project it has open (never its folder), so two saves with one name
 /// can't be told apart here: with the other one open, its bars are the ones that go round. Stopping the part puts
 /// its loop and play start back all the same.
-fn same_project(open: &str, song: &str) -> bool {
+pub(super) fn same_project(open: &str, song: &str) -> bool {
     !open.is_empty() && open.to_lowercase() == song.to_lowercase()
 }
 
 /// Checks a file the link is to load is there, as each send does.
-fn there(path: &Path) -> Result<String, Error> {
+pub(super) fn there(path: &Path) -> Result<String, Error> {
     let shown = path.to_string_lossy().into_owned();
     if !path.is_file() {
         return Err(Error::Missing { file: file_name(&shown).to_owned(), path: shown });
@@ -214,23 +230,13 @@ impl Bitwig {
             Some(_) => WithSong::OtherProject(link.hello().project.clone()),
         };
         let looped = song.filter(|_| with_song == WithSong::Looping);
-        let track = link.selected_track()?.ok_or(Error::NoTrackSelected)?;
-        if !matches!(track.kind.as_str(), "Instrument" | "Hybrid") {
-            return Err(Error::NotAnInstrumentTrack { name: track.name, kind: track.kind });
-        }
-        let track_id = track.id.ok_or_else(|| {
-            Error::Bitwig(
-                "Bitwig didn't say the selected track's ID, so the app couldn't take the part out again. Install the \
-                 extension again from Settings > DAWs."
-                    .into(),
-            )
-        })?;
+        let (track_id, track) = selected_instrument(&mut link, "take the part out again")?;
         // If Bitwig can't say, take it as playing: stopping then leaves Bitwig as it is. With the song's bars the
         // link stops Bitwig first and starts it at the first of them, so stopping the part always stops Bitwig.
         let was_playing = looped.is_none() && link.is_playing().unwrap_or(true);
         let slot = link.add_audition_clip(&track_id, &shown, looped.map(|song| (song.start, song.length)))?;
         let playing = Playing {
-            track: track.name,
+            track,
             with_song,
             track_id,
             slot,
