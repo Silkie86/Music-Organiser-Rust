@@ -6,6 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::sync::OnceLock;
 
 use mo_formats::case;
 use mo_formats::paths::{file_name, has_extension};
@@ -38,14 +39,67 @@ pub fn is_hidden_folder(name: &str) -> bool {
     name.starts_with('.') || case::eq_ignore_case(name, "__MACOSX")
 }
 
-/// A file a scan lists: one the app reads, not a shadow.
+/// A file a scan lists: one the app reads, not a shadow, and not in a temp folder ([`in_temp_folder`]).
 pub fn is_sound_file(path: &str) -> bool {
-    can_read(path) && !is_mac_shadow(path)
+    can_read(path) && !is_mac_shadow(path) && !in_temp_folder(path)
+}
+
+/// Whether `path` (a file or a folder) is in a temp folder, or is one: any user's `AppData\Local\Temp`, or the one this
+/// computer gives programs (`TEMP`) when that's a folder called Temp or Tmp ([`temp_named`]). Programs leave their
+/// short-lived files there, never a sample of his: FL Studio's renders (`Temp\Image-Line\{…}_U.wav`), blank and soon
+/// gone, were listed as closed hats (Solomon, 12 Nov 2026: "shouldnt be looking in temp and they are blank"). So a
+/// scan lists none, and a list leaves out the ones an older scan took in. A folder of his own that's only called Temp
+/// (`J:\Samples\Temp`) is his. Letter case and the way the slashes lean don't matter.
+pub fn in_temp_folder(path: &str) -> bool {
+    in_app_data_temp(path) || given_temp().is_some_and(|temp| is_in(path, temp))
+}
+
+/// Whether `path` has `AppData\Local\Temp` in it: a Windows user's temp folder, whoever's it is.
+fn in_app_data_temp(path: &str) -> bool {
+    let (mut before, mut last) = ("", "");
+    for name in names(path) {
+        if name.eq_ignore_ascii_case("temp")
+            && last.eq_ignore_ascii_case("local")
+            && before.eq_ignore_ascii_case("appdata")
+        {
+            return true;
+        }
+        (before, last) = (last, name);
+    }
+    false
+}
+
+/// The temp folder this computer gives programs, worked out once, when it's one called Temp or Tmp ([`temp_named`]).
+/// `None` for the usual one, in `AppData\Local\Temp`, which [`in_app_data_temp`] already finds.
+fn given_temp() -> Option<&'static str> {
+    static TEMP: OnceLock<Option<String>> = OnceLock::new();
+    TEMP.get_or_init(|| temp_named(std::env::temp_dir().to_str()?).filter(|t| !in_app_data_temp(t))).as_deref()
+}
+
+/// `folder`, when it's a folder called Temp or Tmp: never the top of a drive, nor a folder of his own that `TEMP` was
+/// pointed at (`D:\Samples`), whose sounds would all be left out.
+fn temp_named(folder: &str) -> Option<String> {
+    let last = names(folder).last()?;
+    (last.eq_ignore_ascii_case("temp") || last.eq_ignore_ascii_case("tmp")).then(|| folder.to_owned())
+}
+
+/// Whether `path` is `folder` or inside it, name by name: letter case aside, whichever way the slashes lean between
+/// names. Both start with the same slash, or neither starts with one (a network share's `\\server` is never `/tmp`).
+fn is_in(path: &str, folder: &str) -> bool {
+    let root = |p: &str| p.chars().next().filter(|c| matches!(c, '\\' | '/'));
+    let mut inside = names(path);
+    root(path) == root(folder) && names(folder).all(|f| inside.next().is_some_and(|p| case::eq_ignore_case(p, f)))
+}
+
+/// The names in a path, whichever way its slashes lean.
+fn names(path: &str) -> impl Iterator<Item = &str> {
+    path.split(['\\', '/']).filter(|n| !n.is_empty())
 }
 
 /// Every sound file in `folders`, with the size and modified time the folder listing gave, walked on every core of the
 /// current rayon pool (the caller runs it on the low-priority pool). Folders that couldn't be read this time are listed
-/// in `unreadable`, so their sounds aren't taken for gone.
+/// in `unreadable`, so their sounds aren't taken for gone. The files in a temp folder aren't sounds ([`is_sound_file`]),
+/// so one an older scan took in is taken for gone, and forgotten.
 pub fn find_sounds(folders: &[String]) -> Found {
     find_files(folders, &is_sound_file, &|name, _parent| is_hidden_folder(name))
 }
@@ -284,6 +338,34 @@ mod tests {
         assert!(is_hidden_folder("__macosx"));
         assert!(is_hidden_folder(".git"));
         assert!(!is_hidden_folder("Kicks"));
+    }
+
+    #[test]
+    fn files_in_a_temp_folder_are_no_sounds() {
+        // FL Studio's renders, in its user's temp folder (and anyone else's), and that folder itself.
+        assert!(in_temp_folder(r"C:\Users\silki\AppData\Local\Temp\Image-Line\{1FD56D3D-62AD}_U.wav"));
+        assert!(in_temp_folder("D:/Users/Other/appdata/LOCAL/temp/x.wav"));
+        assert!(in_temp_folder(r"C:\Users\silki\AppData\Local\Temp"));
+        assert!(!is_sound_file(r"C:\Users\silki\AppData\Local\Temp\Image-Line\a.wav"));
+        assert!(is_sound_file(r"J:\Samples\Kick.wav"));
+        // A folder of his own that's only called Temp, or only starts like one, is his.
+        assert!(!in_temp_folder(r"J:\Samples\Temp\Kick.wav"));
+        assert!(!in_temp_folder(r"J:\Samples\Temporary Kicks\Kick.wav"));
+        assert!(!in_temp_folder(r"C:\Users\silki\AppData\Local\Templates\x.wav"));
+        assert!(!in_temp_folder(r"C:\Users\silki\AppData\Temp\x.wav"));
+        // The temp folder programs are given counts when it's called Temp or Tmp, never a drive or a folder of his.
+        assert_eq!(temp_named(r"R:\Temp\").as_deref(), Some(r"R:\Temp\"));
+        assert_eq!(temp_named("/tmp").as_deref(), Some("/tmp"));
+        assert_eq!(temp_named(r"D:\"), None);
+        assert_eq!(temp_named(r"D:\Samples"), None);
+        assert!(is_in(r"r:\temp\Image-Line\x.wav", r"R:\Temp\"));
+        assert!(is_in("/tmp/x.wav", "/tmp"));
+        assert!(!is_in(r"R:\Temporary\x.wav", r"R:\Temp"));
+        assert!(!is_in("tmp/x.wav", "/tmp"));
+        assert!(!is_in(r"\\tmp\share\x.wav", "/tmp"));
+        // The usual temp folder is found by its AppData\Local\Temp alone.
+        assert_eq!(temp_named(r"C:\Users\silki\AppData\Local\Temp").filter(|t| !in_app_data_temp(t)), None);
+        assert!(!is_in(r"D:\x.wav", r"R:\Temp"));
     }
 
     #[test]
