@@ -70,9 +70,10 @@ fn in_app_data_temp(path: &str) -> bool {
 }
 
 /// The temp folder this computer gives programs, worked out once, when it's one called Temp or Tmp ([`temp_named`]).
+/// `None` for the usual one, in `AppData\Local\Temp`, which [`in_app_data_temp`] already finds.
 fn given_temp() -> Option<&'static str> {
     static TEMP: OnceLock<Option<String>> = OnceLock::new();
-    TEMP.get_or_init(|| temp_named(std::env::temp_dir().to_str()?)).as_deref()
+    TEMP.get_or_init(|| temp_named(std::env::temp_dir().to_str()?).filter(|t| !in_app_data_temp(t))).as_deref()
 }
 
 /// `folder`, when it's a folder called Temp or Tmp: never the top of a drive, nor a folder of his own that `TEMP` was
@@ -82,12 +83,12 @@ fn temp_named(folder: &str) -> Option<String> {
     (last.eq_ignore_ascii_case("temp") || last.eq_ignore_ascii_case("tmp")).then(|| folder.to_owned())
 }
 
-/// Whether `path` is `folder` or inside it, name by name: letter case aside, whichever way the slashes lean. Both start
-/// at the top of a drive, or neither does.
+/// Whether `path` is `folder` or inside it, name by name: letter case aside, whichever way the slashes lean between
+/// names. Both start with the same slash, or neither starts with one (a network share's `\\server` is never `/tmp`).
 fn is_in(path: &str, folder: &str) -> bool {
-    let rooted = |p: &str| p.starts_with(['\\', '/']);
+    let root = |p: &str| p.chars().next().filter(|c| matches!(c, '\\' | '/'));
     let mut inside = names(path);
-    rooted(path) == rooted(folder) && names(folder).all(|f| inside.next().is_some_and(|p| case::eq_ignore_case(p, f)))
+    root(path) == root(folder) && names(folder).all(|f| inside.next().is_some_and(|p| case::eq_ignore_case(p, f)))
 }
 
 /// The names in a path, whichever way its slashes lean.
@@ -361,6 +362,9 @@ mod tests {
         assert!(is_in("/tmp/x.wav", "/tmp"));
         assert!(!is_in(r"R:\Temporary\x.wav", r"R:\Temp"));
         assert!(!is_in("tmp/x.wav", "/tmp"));
+        assert!(!is_in(r"\\tmp\share\x.wav", "/tmp"));
+        // The usual temp folder is found by its AppData\Local\Temp alone.
+        assert_eq!(temp_named(r"C:\Users\silki\AppData\Local\Temp").filter(|t| !in_app_data_temp(t)), None);
         assert!(!is_in(r"D:\x.wav", r"R:\Temp"));
     }
 

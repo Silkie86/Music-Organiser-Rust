@@ -10,6 +10,8 @@ use mo_sounds::scan::{find_sounds, plan};
 
 fn folder(name: &str, files: &[(&str, usize)]) -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    // A scan lists nothing in a temp folder, so neither may the build's own be in one.
+    assert!(!mo_sounds::scan::in_temp_folder(dir.to_str().unwrap()), "the build folder is in a temp folder: {dir:?}");
     let _ = fs::remove_dir_all(&dir);
     for (path, bytes) in files {
         let p = dir.join(path);

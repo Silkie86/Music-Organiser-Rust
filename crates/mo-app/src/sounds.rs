@@ -445,7 +445,7 @@ impl SoundList {
     /// in a temp folder that an older scan took in ([`mo_sounds::scan::in_temp_folder`]).
     pub fn new(sounds: Vec<Sound>) -> SoundList {
         let mut sounds: Vec<Sound> =
-            sounds.into_iter().filter(|s| !s.hidden && !mo_sounds::scan::in_temp_folder(&s.path)).collect();
+            sounds.into_par_iter().filter(|s| !s.hidden && !mo_sounds::scan::in_temp_folder(&s.path)).collect();
         // Leaving out the hidden copies keeps the room they took: give it back.
         sounds.shrink_to_fit();
         let hay = sounds.par_iter().map(|s| hay_of(&Now::of(s, None))).collect();
