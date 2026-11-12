@@ -660,7 +660,7 @@ impl Model for Lines {
             date: page::date_text(&p.cat.dates, e.phrase.source.mtime).into(),
             bars: if e.phrase.bars > 0 { e.phrase.bars.to_string() } else { String::new() }.into(),
             files: thousands(e.copies()).into(),
-            colour: colour(e.role()),
+            colour: page::role_colour(e.role()),
             why: why_text(&e.phrase).into(),
             picked: p.picked == Some(hit.entry),
         })
@@ -669,12 +669,6 @@ impl Model for Lines {
     fn model_tracker(&self) -> &dyn ModelTracker {
         &self.notify
     }
-}
-
-/// A kind's colour, the Sounds page's colour for the same kind of sound (mo-app's, which the plugin's MIDI tab
-/// shares).
-fn colour(role: Role) -> i32 {
-    page::role_colour(role)
 }
 
 fn why_text(p: &StoredPhrase) -> String {
@@ -2312,7 +2306,7 @@ fn card(e: &mo_midi::Entry) -> PickedPart {
     PickedPart {
         kind: page::role_label(e.role()).into(),
         kind_why: why_text(p).into(),
-        colour: colour(e.role()),
+        colour: page::role_colour(e.role()),
         title: page::title(e).into(),
         from: page::from_text(e).into(),
         path: mo_app::shell::wrappable_path(&p.source.path).into(),
@@ -4163,7 +4157,7 @@ fn carry(app: &AppWindow, at: usize, spot: Spot) {
     // Moved as it fits the song, in a "Fits my song" list; the file's name says so.
     let Some((part, colour)) = PAGE.with(|p| {
         let p = p.borrow();
-        Some((p.part_out(at)?, colour(p.cat.entry(at)?.role())))
+        Some((p.part_out(at)?, page::role_colour(p.cat.entry(at)?.role())))
     }) else {
         return;
     };
@@ -4199,7 +4193,7 @@ pub fn card_at_row(app: &AppWindow, row: usize) -> Option<mo_app::drag_out::Payl
     let (part, colour) = PAGE.with(|p| {
         let p = p.borrow();
         let at = p.shown.get(row)?.entry;
-        Some((p.part_out(at)?, colour(p.cat.entry(at)?.role())))
+        Some((p.part_out(at)?, page::role_colour(p.cat.entry(at)?.role())))
     })?;
     let notes = part.notes(&mut None).ok()?;
     let out = mo_app::drag_out::from_part(&part.name, &notes, part.bars, tint(app, colour)).ok()?;

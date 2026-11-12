@@ -124,17 +124,16 @@ impl Parts {
         self.cat.entry(at)
     }
 
-    /// The part at `at` as one MIDI file in a new drag folder in Temp, as the app's own drag writes it. Reads the
-    /// index and writes a file: call it off the panel's thread.
-    pub fn file(&self, at: usize) -> Result<PathBuf, String> {
+    /// The part at `at` as one MIDI file in a new drag folder in `temp` (the system's Temp), as the app's own drag
+    /// writes it. Reads the index and writes a file: call it off the panel's thread.
+    pub fn file(&self, at: usize, temp: &Path) -> Result<PathBuf, String> {
         let e = self.cat.entry(at).ok_or("That part isn't in the list any more")?;
         let store = MidiStore::open_read_only(&self.index).map_err(|e| format!("Couldn't open the MIDI index: {e}"))?;
         let notes = store.notes(e.phrase.id, &e.phrase.hash).map_err(|e| format!("Its notes couldn't be read: {e}"))?;
         drop(store);
         // The plugin hands over the file alone (no card), so the card's colour doesn't matter.
         let out = mo_app::drag_out::from_part(&page::title(e), &notes, e.phrase.bars, 0)?;
-        let payload =
-            out.write(&std::env::temp_dir()).map_err(|e| format!("Couldn't write the MIDI file in Temp: {e}"))?;
+        let payload = out.write(temp).map_err(|e| format!("Couldn't write the MIDI file in Temp: {e}"))?;
         payload.files.into_iter().next().ok_or_else(|| "There was nothing to drag".to_owned())
     }
 }

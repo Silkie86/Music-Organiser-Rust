@@ -52,8 +52,8 @@ fn index(name: &str) -> PathBuf {
     db
 }
 
-fn parts(db: &Path) -> std::sync::Arc<midi::Parts> {
-    match midi::read_from(db, 1) {
+fn parts(db: &Path, smallest: usize) -> std::sync::Arc<midi::Parts> {
+    match midi::read_from(db, smallest) {
         Read::Ready(parts) => parts,
         Read::Not(why) => panic!("{why}"),
     }
@@ -62,7 +62,7 @@ fn parts(db: &Path) -> std::sync::Arc<midi::Parts> {
 #[test]
 fn lists_filters_and_writes_a_part_out() {
     let db = index("mo-plugin-midi");
-    let parts = parts(&db);
+    let parts = parts(&db, 1);
     let (all, counts) = parts.view(&Asked::default());
     assert_eq!(all.len(), 2);
     assert_eq!(parts.lines(), 2);
@@ -81,20 +81,18 @@ fn lists_filters_and_writes_a_part_out() {
     assert_eq!(chips.kind.chips.len() + chips.kind.more.len(), Role::ALL.len());
 
     // Dragged out: a MIDI file of its notes.
-    let file = parts.file(found[0]).unwrap();
+    let temp = db.parent().unwrap().join("Temp");
+    std::fs::create_dir_all(&temp).unwrap();
+    let file = parts.file(found[0], &temp).unwrap();
     let bytes = std::fs::read(&file).unwrap();
     assert!(bytes.starts_with(b"MThd"));
     assert_eq!(file.extension().and_then(|e| e.to_str()), Some("mid"));
-    std::fs::remove_dir_all(file.parent().unwrap()).unwrap();
 }
 
 #[test]
 fn smallest_part_hides_short_ones() {
     let db = index("mo-plugin-midi-smallest");
-    let parts = match midi::read_from(&db, 9) {
-        Read::Ready(parts) => parts,
-        Read::Not(why) => panic!("{why}"),
-    };
+    let parts = parts(&db, 9);
     // Both made-up parts have 8 notes.
     assert_eq!(parts.view(&Asked::default()).0.len(), 0);
     assert_eq!(parts.lines(), 0);

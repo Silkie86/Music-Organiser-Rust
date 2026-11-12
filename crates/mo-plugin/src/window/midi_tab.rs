@@ -41,6 +41,12 @@ impl PartLines {
         self.notify.reset();
     }
 
+    /// The row showing the part at place `at` in the catalogue, or -1.
+    fn row_of(&self, at: usize) -> i32 {
+        let row = self.shown.borrow().iter().position(|&a| a == at);
+        row.and_then(|r| i32::try_from(r).ok()).unwrap_or(-1)
+    }
+
     /// The part on `row`, as a place in the catalogue.
     fn at(&self, row: usize) -> Option<usize> {
         self.shown.borrow().get(row).copied()
@@ -109,8 +115,11 @@ pub(super) struct MidiTab {
     slots: Arc<PartSlots>,
     asked: Rc<RefCell<Asked>>,
     column: Rc<PartColumn>,
-    /// The index has been asked for (the first time the tab showed).
+    /// The index has been asked for and not yet answered, or it was read: not asked for again.
     read_asked: Cell<bool>,
+    /// The tab was showing at the last tick: a reading that failed is tried again when it's shown again (the app
+    /// may have made the index since).
+    was_shown: Cell<bool>,
 }
 
 impl MidiTab {
@@ -125,6 +134,7 @@ impl MidiTab {
             asked: Rc::default(),
             column: Rc::default(),
             read_asked: Cell::new(false),
+            was_shown: Cell::new(false),
         }
     }
 
@@ -179,6 +189,7 @@ impl MidiTab {
         let weak = panel.as_weak();
         panel.on_midi_drag_out(move |row| {
             let Some(row) = usize::try_from(row).ok() else { return };
+            // Carried by its place in the catalogue: a new list may land before the file is written.
             let (Some(parts), Some(at)) = (lines.parts.borrow().clone(), lines.at(row)) else { return };
             if let Some(panel) = weak.upgrade() {
                 panel.set_midi_said(SharedString::new());
@@ -187,17 +198,24 @@ impl MidiTab {
             // Its notes are read from the index and written to a file off the window's thread.
             background("mo-plugin-drag", move || {
                 let started = Instant::now();
-                let file = parts.file(at);
+                let file = parts.file(at, &std::env::temp_dir());
                 crate::log::took_if_slow("Drag", "Wrote a MIDI part to drag", started);
-                *lock(&slots.drag) = Some((Carried::Part(row), file));
+                *lock(&slots.drag) = Some((Carried::Part(at), file));
             });
         });
         self.column.show(panel, None, &self.asked.borrow());
     }
 
+    /// The row showing the part at place `at` in the catalogue (-1 for none): the one being carried.
+    pub(super) fn row_of(&self, at: usize) -> i32 {
+        self.lines.row_of(at)
+    }
+
     /// Takes in what background threads found; the index is read the first time the tab shows.
     pub(super) fn tick(&self, panel: &Panel) {
-        if panel.get_view() == VIEW && !self.read_asked.replace(true) {
+        let shown = panel.get_view() == VIEW;
+        let just_shown = !self.was_shown.replace(shown) && shown;
+        if just_shown && !self.read_asked.replace(true) {
             let slots = Arc::clone(&self.slots);
             background("mo-plugin-midi", move || *lock(&slots.read) = Some(midi::read()));
         }
@@ -209,14 +227,18 @@ impl MidiTab {
                     self.column.show(panel, Some(&parts), &self.asked.borrow());
                     view(parts, self.asked.borrow().clone(), Arc::clone(&self.slots));
                 }
-                Read::Not(why) => panel.set_midi_status(why.into()),
+                Read::Not(why) => {
+                    panel.set_midi_status(why.into());
+                    self.read_asked.set(false);
+                }
             }
         }
         if let Some((number, found, counts)) = lock(&self.slots.found).take()
             && number == self.slots.searches.load(Ordering::Acquire)
         {
             let parts = self.lines.parts.borrow().clone();
-            let total = parts.as_ref().map_or(0, |p| p.lines());
+            // Worked out with the list, off this thread.
+            let total = counts.lines;
             let narrowed = self.asked.borrow().filters.any();
             panel.set_midi_status(midi::count_line(total, narrowed.then_some(found.len())).into());
             panel.set_midi_picked(-1);

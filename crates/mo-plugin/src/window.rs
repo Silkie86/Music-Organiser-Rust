@@ -151,7 +151,7 @@ struct Slots {
     mini: Mutex<Option<(u64, SkyPixels)>>,
 }
 
-/// The line being dragged out: a row of the Sounds list, or of the MIDI tab's.
+/// The line being dragged out: a row of the Sounds list, or a part of the MIDI tab's (its place in the catalogue).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Carried {
     Sound(usize),
@@ -1319,7 +1319,7 @@ impl Shown {
                 self.dragging.set(true);
                 match carried {
                     Carried::Sound(row) => self.panel.set_carried(i32::try_from(row).unwrap_or(-1)),
-                    Carried::Part(row) => self.panel.set_midi_carried(i32::try_from(row).unwrap_or(-1)),
+                    Carried::Part(at) => self.panel.set_midi_carried(self.midi.row_of(at)),
                 }
                 let (slots, started) = (Arc::clone(&self.slots), Instant::now());
                 crate::drag::file(path.clone(), move |ended| *lock(&slots.dragged) = Some((path, started, ended)));
@@ -1327,6 +1327,7 @@ impl Shown {
             Err(why) => {
                 crate::log::line("Drag", &why);
                 self.say_drag_failed(why);
+                self.carried.set(None);
             }
         }
     }
@@ -1352,6 +1353,7 @@ impl Shown {
         if let Err(why) = ended {
             self.say_drag_failed(why);
         }
+        self.carried.set(None);
     }
 
     /// Said under the list the line was dragged from.

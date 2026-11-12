@@ -191,6 +191,8 @@ export component Panel inherits Window {
     // far through the whole sound (0 the start, 1 the end).
     in property <int> playing-row: -1;
     in property <float> playing-at;
+    // What's typed in the search box: kept while another tab shows, as the list keeps it.
+    in-out property <string> search-text;
     callback search(string);
     // A line was clicked: on its waveform at this spot (0 its start, up to 1, its end), or anywhere else on it (-1).
     // The sound plays from the spot, or from the start; a click on the line that's playing stops it instead.
@@ -236,6 +238,8 @@ export component Panel inherits Window {
     // The row being carried out (-1 for none), and what the drag said ("" for nothing).
     in property <int> midi-carried: -1;
     in property <string> midi-said;
+    // What's typed in the search box: kept while the tab is away, as the list keeps it.
+    in-out property <string> midi-search-text;
     callback midi-search(string);
     // A choice was picked or unpicked on a filter ("kind", "from", "key"): its words; or nothing picked on one.
     callback midi-pick(string, string);
@@ -402,6 +406,7 @@ export component Panel inherits Window {
                     SearchBox {
                         horizontal-stretch: 1;
                         hint: "Search sounds";
+                        text <=> root.search-text;
                         edited(text) => { root.search(text); }
                     }
                     Segmented {
@@ -839,6 +844,7 @@ export component Panel inherits Window {
                 spacing: Space.md;
                 SearchBox {
                     hint: "Search MIDI";
+                    text <=> root.midi-search-text;
                     edited(text) => { root.midi-search(text); }
                 }
                 HorizontalLayout {
