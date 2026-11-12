@@ -9,8 +9,9 @@
 //! The newest pick wins: one reading thread at a time takes the newest pick waiting, so clicking down a list reads
 //! only the sound you stop on (and the one being read when you started).
 //!
-//! A pick is a sound's file, or a sound made on that thread ([`Player::play_made`]: a MIDI part played with a
-//! SoundFont), which loops until it's stopped or replaced.
+//! A sound can also be made instead of read ([`Player::play_made`]: a MIDI part played with a SoundFont), on a thread
+//! of its own so a slow one holds up no file; it loops until it's stopped or replaced, and it too plays only if it's
+//! still the newest pick once it's made.
 
 use crate::threads::lock;
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -76,13 +77,15 @@ impl Voice {
         self.begins + self.covers * (self.at.min(len) as f32 / len as f32)
     }
 
+    /// Played to its end; never for a loop with something in it, which starts again instead ([`Voice::wrap`]).
     fn done(&self) -> bool {
-        self.at >= self.left.len().min(self.right.len())
+        let len = self.left.len().min(self.right.len());
+        !(self.looping && len > 0) && self.at >= len
     }
 
-    /// At its end: a loop starts again (one with nothing in it ends).
+    /// At its end: a loop starts again.
     fn wrap(&mut self) {
-        if self.looping && self.done() && self.left.len().min(self.right.len()) > 0 {
+        if self.looping && self.at >= self.left.len().min(self.right.len()) {
             self.at = 0;
         }
     }
@@ -215,17 +218,11 @@ fn start(from: f32, read: usize, file_seconds: f64, rate: u32) -> Start {
 
 /// What's to be read next.
 struct Pick {
-    what: What,
+    path: PathBuf,
+    /// Where in the whole sound to start: 0 the start, 1 the end.
+    from: f32,
     number: u64,
     told: Box<dyn FnOnce(Played) + Send>,
-}
-
-/// What a pick plays.
-enum What {
-    /// A sound's file, from this far into the whole sound (0 the start, 1 the end).
-    File { path: PathBuf, from: f32 },
-    /// A sound made when its turn comes, named for the panel, played as a loop.
-    Made { name: String, make: Made },
 }
 
 /// Makes a sound to play, on the reading thread: why not, in plain words.
@@ -287,7 +284,9 @@ impl Player {
 
     /// The DAW's tempo now (the audio thread's side: a plain store, nothing waits).
     pub fn set_tempo(&self, bpm: f64) {
-        if bpm.is_finite() && bpm > 0.0 {
+        // One a part can be played at (as the app takes a file's): a DAW's odd moment while its tempo is dragged
+        // is left out.
+        if bpm.is_finite() && (20.0..=400.0).contains(&bpm) {
             self.tempo.store(bpm.to_bits(), Ordering::Relaxed);
         }
     }
@@ -329,19 +328,9 @@ impl Player {
     /// Plays the sound at `path` from `from` of the way into the whole sound (0 the start, 1 the end), read on a
     /// background thread at low priority; `told` hears how it went, unless a newer pick came first.
     pub fn play(self: &Arc<Self>, path: PathBuf, from: f32, told: impl FnOnce(Played) + Send + 'static) {
-        let from = if from.is_finite() { from.clamp(0.0, 1.0) } else { 0.0 };
-        self.pick(What::File { path, from }, Box::new(told));
-    }
-
-    /// Plays the sound `make` makes (named `name`) as a loop, made on the reading thread when its turn comes, as
-    /// [`Player::play`] reads a file.
-    pub fn play_made(self: &Arc<Self>, name: String, make: Made, told: impl FnOnce(Played) + Send + 'static) {
-        self.pick(What::Made { name, make }, Box::new(told));
-    }
-
-    fn pick(self: &Arc<Self>, what: What, told: Box<dyn FnOnce(Played) + Send>) {
         let number = self.picks.fetch_add(1, Ordering::AcqRel) + 1;
-        *lock(&self.next) = Some(Pick { what, number, told });
+        let from = if from.is_finite() { from.clamp(0.0, 1.0) } else { 0.0 };
+        *lock(&self.next) = Some(Pick { path, from, number, told: Box::new(told) });
         if self.reading.swap(true, Ordering::AcqRel) {
             // The reading thread is running: it takes this pick next.
             return;
@@ -376,17 +365,6 @@ impl Player {
         if self.picks.load(Ordering::Acquire) != pick.number {
             return;
         }
-        let Pick { what, number, told } = pick;
-        let (path, from) = match what {
-            What::File { path, from } => (path, from),
-            What::Made { name, make } => {
-                if let Some(played) = self.made(&name, make, number) {
-                    told(played);
-                }
-                return;
-            }
-        };
-        let pick = File { path, from, number };
         let name = pick.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let started = std::time::Instant::now();
         let read = mo_audio::read(&pick.path, MOST_SECONDS);
@@ -414,7 +392,22 @@ impl Player {
             Played::Playing(..) => crate::log::took_if_slow("Play", &format!("Read {}", pick.path.display()), started),
             Played::Not(why) => crate::log::took("Play", &format!("{}: {why}", pick.path.display()), started),
         }
-        told(played);
+        (pick.told)(played);
+    }
+
+    /// Plays the sound `make` makes (named `name`) as a loop. It's made on a thread of its own at low priority, so a
+    /// slow one holds up no other pick, and plays only if it's still the newest pick once it's made; `told` hears how
+    /// it went, unless a newer pick came first.
+    pub fn play_made(self: &Arc<Self>, name: String, make: Made, told: impl FnOnce(Played) + Send + 'static) {
+        let number = self.picks.fetch_add(1, Ordering::AcqRel) + 1;
+        // A file still to be read is no longer the newest pick.
+        lock(&self.next).take();
+        let me = Arc::clone(self);
+        crate::threads::background("mo-plugin-make", move || {
+            if let Some(played) = me.made(&name, make, number) {
+                told(played);
+            }
+        });
     }
 
     /// Makes a sound to loop and plays it, if its pick is still the newest when it's made (none when it isn't).
@@ -441,7 +434,7 @@ impl Player {
 
     /// The sound ready to play from the pick's spot. `audio` is the file read from its start; a spot past what was
     /// read (over a minute into a long file) is read from there instead, where the file's kind can be.
-    fn voice_from(&self, pick: &File, mut audio: mo_audio::AudioData, rate: u32) -> Result<Voice, String> {
+    fn voice_from(&self, pick: &Pick, mut audio: mo_audio::AudioData, rate: u32) -> Result<Voice, String> {
         let read = audio.channels.first().map_or(0, Vec::len);
         // The whole file's length in frames, as `start` takes it.
         let whole = (audio.file_seconds * f64::from(audio.sample_rate)).max(read as f64).max(1.0);
@@ -523,13 +516,6 @@ impl Player {
     }
 }
 
-/// A file pick, while it's read.
-struct File {
-    path: PathBuf,
-    from: f32,
-    number: u64,
-}
-
 fn take_next(player: &Player) -> Option<Pick> {
     lock(&player.next).take()
 }
@@ -565,8 +551,8 @@ mod tests {
         assert!(Voice::new(&[vec![0.1; 4]], 48_000, 48_000).from(1.0).done());
     }
 
-    fn pick(from: f32) -> File {
-        File { path: PathBuf::new(), from, number: 1 }
+    fn pick(from: f32) -> Pick {
+        Pick { path: PathBuf::new(), from, number: 1, told: Box::new(|_| {}) }
     }
 
     #[test]
@@ -666,6 +652,16 @@ mod tests {
         playing.fill(&mut l, &mut r);
         assert_eq!(l, [0.1, 0.2, 0.1, 0.2, 0.1].map(|x| x * LEVEL).to_vec());
         assert!(player.still_playing(n));
+        // A block that ends right on the loop's end doesn't end the loop.
+        let (mut l, mut r) = (vec![9.0; 1], vec![9.0; 1]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![0.2 * LEVEL]);
+        assert!(playing.now.is_some(), "still looping");
+        let (mut l, mut r) = (vec![9.0; 2], vec![9.0; 2]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![0.1 * LEVEL, 0.2 * LEVEL]);
+        assert!(player.still_playing(n));
+        let (mut l, mut r) = (vec![9.0; 5], vec![9.0; 5]);
         player.stop();
         playing.fill(&mut l, &mut r);
         assert_eq!(l, vec![0.0; 5]);
@@ -677,6 +673,7 @@ mod tests {
         let player = Arc::new(Player::default());
         assert_eq!(player.tempo(), None);
         player.set_tempo(f64::NAN);
+        player.set_tempo(0.5);
         assert_eq!(player.tempo(), None);
         player.set_tempo(128.0);
         assert_eq!(player.tempo(), Some(128.0));

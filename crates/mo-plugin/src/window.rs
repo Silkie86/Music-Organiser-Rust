@@ -758,6 +758,7 @@ impl Shown {
         let slots = Arc::clone(&self.slots);
         let (right_now, heard, stop_it) = (Rc::clone(&self.right_now), Rc::clone(&self.heard), self.stopper());
         let midi = self.midi.part_finder();
+        let last_played = Rc::clone(&self.played);
         self.panel.on_midi_play(move |row| {
             let Some((parts, at)) = usize::try_from(row).ok().and_then(&midi) else { return };
             let playing = heard.get().is_some_and(|(what, _)| what == Heard::Part(at));
@@ -768,6 +769,8 @@ impl Shown {
             }
             let Some(name) = parts.entry(at).map(mo_app::midi::title) else { return };
             heard.set(Some((Heard::Part(at), false)));
+            // No sound's line shows where this plays.
+            *last_played.borrow_mut() = None;
             let tempo = player.tempo();
             let make: crate::audition::Made =
                 Box::new(move || parts.sound(at, crate::midi::soundfont().as_deref(), tempo));

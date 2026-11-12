@@ -31,6 +31,9 @@ pub struct Parts {
     pub smallest: usize,
     /// The years the parts' files were saved in, newest first, with how many each: the year strip.
     pub years: Vec<(i32, usize)>,
+    /// The SoundFont last opened to play a part, kept while the parts are (opening one takes a while; it goes with
+    /// them when the last plugin window closes).
+    font: Mutex<Option<(PathBuf, mo_audio::gm::Font)>>,
 }
 
 /// How reading the index went.
@@ -104,21 +107,6 @@ pub fn soundfont() -> Option<PathBuf> {
 /// What's said when there's no SoundFont to play parts with.
 pub const NO_SOUNDFONT: &str = "No SoundFont to play MIDI with: pick one on the app's MIDI page";
 
-/// The SoundFont last opened, kept while the plugin is loaded: opening one takes a while.
-static FONT: Mutex<Option<(PathBuf, mo_audio::gm::Font)>> = Mutex::new(None);
-
-fn font(path: &Path) -> Result<mo_audio::gm::Font, String> {
-    let mut kept = lock(&FONT);
-    if let Some((at, font)) = kept.as_ref()
-        && at == path
-    {
-        return Ok(font.clone());
-    }
-    let font = mo_audio::gm::open(path)?;
-    *kept = Some((path.to_owned(), font.clone()));
-    Ok(font)
-}
-
 /// The parts in the MIDI index at `index`.
 pub fn read_from(index: &Path, smallest: usize) -> Read {
     if !index.is_file() {
@@ -136,7 +124,7 @@ pub fn read_from(index: &Path, smallest: usize) -> Read {
     drop(store);
     let cat = Catalogue::new(phrases);
     let years = page::year_counts(&cat);
-    Read::Ready(Arc::new(Parts { cat, index: index.to_owned(), smallest, years }))
+    Read::Ready(Arc::new(Parts { cat, index: index.to_owned(), smallest, years, font: Mutex::new(None) }))
 }
 
 impl Parts {
@@ -177,7 +165,7 @@ impl Parts {
             let library = self.index.parent().map(|d| d.join("library.db")).unwrap_or_default();
             page::read_tempo(&e.phrase.source, &library).bpm()
         });
-        let font = font(font_path)?;
+        let font = self.font(font_path)?;
         let notes: Vec<mo_audio::gm::Note> = heard
             .iter()
             .map(|n| mo_audio::gm::Note { start: n.start, length: n.length, key: n.key, velocity: n.velocity7() })
@@ -192,6 +180,21 @@ impl Parts {
             drums: sound.drums,
         };
         mo_audio::gm::render_loop(&font, &part)
+    }
+
+    /// The SoundFont at `path`, opened once and kept.
+    fn font(&self, path: &Path) -> Result<mo_audio::gm::Font, String> {
+        let mut kept = lock(&self.font);
+        if let Some((at, font)) = kept.as_ref()
+            && at == path
+        {
+            return Ok(font.clone());
+        }
+        // The one kept goes first: two big SoundFonts aren't held at once.
+        *kept = None;
+        let font = mo_audio::gm::open(path)?;
+        *kept = Some((path.to_owned(), font.clone()));
+        Ok(font)
     }
 
     /// A part's notes, read from the index (opened, read and let go again).
