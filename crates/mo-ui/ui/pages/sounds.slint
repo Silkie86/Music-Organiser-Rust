@@ -2224,17 +2224,20 @@ export component SoundsPage inherits Rectangle {
                             clicked => { SoundsData.toggle("folder"); }
                         }
                     }
-                    // Only sounds whose audio is exactly the same are copies: one of each shows while it's on.
-                    TickLine {
-                        text: SoundsData.hide-copies-text;
-                        on: SoundsData.hide-copies;
-                        clicked => { SoundsData.toggle("hide-copies"); }
-                    }
-                    // Sounds silent all through, or empty, are left out while it's on (Solomon, 12 Nov 2026).
-                    TickLine {
-                        text: SoundsData.hide-silent-text;
-                        on: SoundsData.hide-silent;
-                        clicked => { SoundsData.toggle("hide-silent"); }
+                    // What's left out of every list while it's ticked, the two lines together.
+                    VerticalLayout {
+                        // Only sounds whose audio is exactly the same are copies: one of each shows while it's on.
+                        TickLine {
+                            text: SoundsData.hide-copies-text;
+                            on: SoundsData.hide-copies;
+                            clicked => { SoundsData.toggle("hide-copies"); }
+                        }
+                        // Sounds silent all through, or empty, are left out while it's on (Solomon, 12 Nov 2026).
+                        TickLine {
+                            text: SoundsData.hide-silent-text;
+                            on: SoundsData.hide-silent;
+                            clicked => { SoundsData.toggle("hide-silent"); }
+                        }
                     }
                     // Favourites picked in Bitwig, saved as multisamples, brought in as the app's favourites.
                     HorizontalLayout {
