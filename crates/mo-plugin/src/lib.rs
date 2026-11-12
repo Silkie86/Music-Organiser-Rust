@@ -240,6 +240,8 @@ impl PluginTrackInfoImpl for MainThread<'_> {
 /// The audio thread's part: plays what the panel picked.
 pub struct Processor {
     playing: Playing,
+    /// The panel's player: told the DAW's tempo.
+    player: Arc<Player>,
     /// Room for the right side when the DAW gives only one output channel (made here, not on the audio thread).
     spare: Vec<f32>,
 }
@@ -261,11 +263,18 @@ impl<'a> PluginAudioProcessor<'a, Shared, MainThread<'a>> for Processor {
         );
         Ok(Processor {
             playing: shared.instance.player.start(rate),
+            player: Arc::clone(&shared.instance.player),
             spare: vec![0.0; audio_config.max_frames_count as usize],
         })
     }
 
-    fn process(&mut self, _process: Process, mut audio: Audio, _events: Events) -> Result<ProcessStatus, PluginError> {
+    fn process(&mut self, process: Process, mut audio: Audio, _events: Events) -> Result<ProcessStatus, PluginError> {
+        // The DAW's tempo, for MIDI parts played at it (a plain store: nothing here waits).
+        if let Some(transport) = process.transport
+            && transport.flags.contains(clack_plugin::events::event_types::TransportFlags::HAS_TEMPO)
+        {
+            self.player.set_tempo(transport.tempo);
+        }
         let Some(mut port) = audio.output_port(0) else { return Ok(ProcessStatus::Continue) };
         let Some(mut channels) = port.channels()?.into_f32() else { return Ok(ProcessStatus::Continue) };
         if channels.channel_count() >= 2 {

@@ -8,6 +8,10 @@
 //!
 //! The newest pick wins: one reading thread at a time takes the newest pick waiting, so clicking down a list reads
 //! only the sound you stop on (and the one being read when you started).
+//!
+//! A sound can also be made instead of read ([`Player::play_made`]: a MIDI part played with a SoundFont), on a thread
+//! of its own so a slow one holds up no file; it loops until it's stopped or replaced, and it too plays only if it's
+//! still the newest pick once it's made.
 
 use crate::threads::lock;
 use rtrb::{Consumer, Producer, RingBuffer};
@@ -32,6 +36,8 @@ pub struct Voice {
     /// on the waveform that shows where it's playing.
     begins: f32,
     covers: f32,
+    /// Starts again at its end, until it's stopped or replaced.
+    looping: bool,
 }
 
 impl Voice {
@@ -42,7 +48,13 @@ impl Voice {
             Some(c) => resample(c, from_rate, to_rate),
             None => left.clone(),
         };
-        Voice { left, right, at: 0, begins: 0.0, covers: 1.0 }
+        Voice { left, right, at: 0, begins: 0.0, covers: 1.0, looping: false }
+    }
+
+    /// Plays round and round.
+    fn looped(mut self) -> Voice {
+        self.looping = true;
+        self
     }
 
     /// Starts `part` of the way in (0 the start, 1 the end) instead of at the start.
@@ -65,8 +77,17 @@ impl Voice {
         self.begins + self.covers * (self.at.min(len) as f32 / len as f32)
     }
 
+    /// Played to its end; never for a loop with something in it, which starts again instead ([`Voice::wrap`]).
     fn done(&self) -> bool {
-        self.at >= self.left.len().min(self.right.len())
+        let len = self.left.len().min(self.right.len());
+        !(self.looping && len > 0) && self.at >= len
+    }
+
+    /// At its end: a loop starts again.
+    fn wrap(&mut self) {
+        if self.looping && self.at >= self.left.len().min(self.right.len()) {
+            self.at = 0;
+        }
     }
 }
 
@@ -140,6 +161,7 @@ impl Playing {
         let mut written = 0;
         if let Some(voice) = &mut self.now {
             for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+                voice.wrap();
                 if voice.done() {
                     break;
                 }
@@ -203,6 +225,9 @@ struct Pick {
     told: Box<dyn FnOnce(Played) + Send>,
 }
 
+/// Makes a sound to play, on the reading thread: why not, in plain words.
+pub type Made = Box<dyn FnOnce() -> Result<mo_audio::AudioData, String> + Send>;
+
 /// What became of a pick, for the panel's line under the list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Played {
@@ -233,6 +258,8 @@ pub struct Player {
     /// Trim silence: the level (dB below full scale, `mo_audio::trim::LEVELS_DB`) under which a sound's start and end
     /// count as silence and aren't played; 0 while it's off.
     trim_db: AtomicI32,
+    /// The DAW's tempo, as an `f64`'s bits, as its audio thread last said; 0 before it has.
+    tempo: AtomicU64,
 }
 
 impl Player {
@@ -253,6 +280,23 @@ impl Player {
     /// Trim silence's level as a sample's size, while it's on.
     fn trim_level(&self) -> Option<f32> {
         self.trim().map(mo_audio::trim::level_of_db)
+    }
+
+    /// The DAW's tempo now (the audio thread's side: a plain store, nothing waits).
+    pub fn set_tempo(&self, bpm: f64) {
+        // One a part can be played at (as the app takes a file's): a DAW's odd moment while its tempo is dragged
+        // is left out.
+        if bpm.is_finite() && (20.0..=400.0).contains(&bpm) {
+            self.tempo.store(bpm.to_bits(), Ordering::Relaxed);
+        }
+    }
+
+    /// The DAW's tempo, once its audio thread has said it.
+    pub fn tempo(&self) -> Option<f64> {
+        match self.tempo.load(Ordering::Relaxed) {
+            0 => None,
+            bits => Some(f64::from_bits(bits)),
+        }
     }
 
     /// The DAW starts the track's audio at `rate` samples a second: the audio thread's side, to give the DAW.
@@ -349,6 +393,43 @@ impl Player {
             Played::Not(why) => crate::log::took("Play", &format!("{}: {why}", pick.path.display()), started),
         }
         (pick.told)(played);
+    }
+
+    /// Plays the sound `make` makes (named `name`) as a loop. It's made on a thread of its own at low priority, so a
+    /// slow one holds up no other pick, and plays only if it's still the newest pick once it's made; `told` hears how
+    /// it went, unless a newer pick came first.
+    pub fn play_made(self: &Arc<Self>, name: String, make: Made, told: impl FnOnce(Played) + Send + 'static) {
+        let number = self.picks.fetch_add(1, Ordering::AcqRel) + 1;
+        // A file still to be read is no longer the newest pick.
+        lock(&self.next).take();
+        let me = Arc::clone(self);
+        crate::threads::background("mo-plugin-make", move || {
+            if let Some(played) = me.made(&name, make, number) {
+                told(played);
+            }
+        });
+    }
+
+    /// Makes a sound to loop and plays it, if its pick is still the newest when it's made (none when it isn't).
+    fn made(&self, name: &str, make: Made, number: u64) -> Option<Played> {
+        let started = std::time::Instant::now();
+        let made = make();
+        if self.picks.load(Ordering::Acquire) != number {
+            return None;
+        }
+        let rate = self.rate.load(Ordering::Acquire);
+        let played = match made {
+            Err(why) => Played::Not(why),
+            Ok(_) if rate == 0 => Played::Not(NOT_STARTED.into()),
+            Ok(audio) => {
+                self.hand_over(Box::new(Voice::new(&audio.channels, audio.sample_rate, rate).looped()), name.into())
+            }
+        };
+        match &played {
+            Played::Playing(..) => crate::log::took_if_slow("Play", &format!("Made {name}"), started),
+            Played::Not(why) => crate::log::took("Play", &format!("{name}: {why}"), started),
+        }
+        Some(played)
     }
 
     /// The sound ready to play from the pick's spot. `audio` is the file read from its start; a spot past what was
@@ -559,6 +640,59 @@ mod tests {
         assert_eq!(lock(&player.done).as_ref().unwrap().slots(), 0);
         playing.fill(&mut l, &mut r);
         assert_eq!(l, vec![0.0; 4]);
+    }
+
+    #[test]
+    fn a_loop_starts_again_at_its_end_until_stopped() {
+        let player = Player::default();
+        let mut playing = player.start(48_000);
+        let looped = Voice::new(&[vec![0.1, 0.2]], 48_000, 48_000).looped();
+        let Played::Playing(_, n) = player.hand_over(Box::new(looped), "a".into()) else { panic!("not handed over") };
+        let (mut l, mut r) = (vec![9.0; 5], vec![9.0; 5]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, [0.1, 0.2, 0.1, 0.2, 0.1].map(|x| x * LEVEL).to_vec());
+        assert!(player.still_playing(n));
+        // A block that ends right on the loop's end doesn't end the loop.
+        let (mut l, mut r) = (vec![9.0; 1], vec![9.0; 1]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![0.2 * LEVEL]);
+        assert!(playing.now.is_some(), "still looping");
+        let (mut l, mut r) = (vec![9.0; 2], vec![9.0; 2]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![0.1 * LEVEL, 0.2 * LEVEL]);
+        assert!(player.still_playing(n));
+        let (mut l, mut r) = (vec![9.0; 5], vec![9.0; 5]);
+        player.stop();
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![0.0; 5]);
+        assert!(!player.still_playing(n));
+    }
+
+    #[test]
+    fn a_made_sound_plays_and_the_daw_tempo_is_kept() {
+        let player = Arc::new(Player::default());
+        assert_eq!(player.tempo(), None);
+        player.set_tempo(f64::NAN);
+        player.set_tempo(0.5);
+        assert_eq!(player.tempo(), None);
+        player.set_tempo(128.0);
+        assert_eq!(player.tempo(), Some(128.0));
+        let mut playing = player.start(48_000);
+        let made =
+            |channels: Vec<Vec<f32>>| mo_audio::AudioData { sample_rate: 48_000, channels, ..Default::default() };
+        let (tx, rx) = std::sync::mpsc::channel();
+        let audio = made(vec![vec![0.5; 4], vec![0.25; 4]]);
+        player.play_made("Chords 01".into(), Box::new(move || Ok(audio)), move |p| tx.send(p).unwrap());
+        let told = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(matches!(&told, Played::Playing(name, _) if name == "Chords 01"), "{told:?}");
+        let (mut l, mut r) = (vec![0.0; 6], vec![0.0; 6]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![0.5 * LEVEL; 6]);
+        assert_eq!(r, vec![0.25 * LEVEL; 6]);
+        // What couldn't be made is told.
+        let (tx, rx) = std::sync::mpsc::channel();
+        player.play_made("x".into(), Box::new(|| Err("No SoundFont".into())), move |p| tx.send(p).unwrap());
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap(), Played::Not("No SoundFont".into()));
     }
 
     #[test]
