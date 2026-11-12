@@ -239,6 +239,13 @@ pub fn read() -> Read {
     read
 }
 
+/// Whether the app's Sounds page shows silent sounds (its Hide silent sounds turned off), as its settings file says:
+/// read without changing it; hidden when it can't be read, as the app starts. Reads a file: off the panel's thread.
+pub fn shows_silent() -> bool {
+    let setting = crate::midi::setting(&mo_app::paths::data_dir(), mo_app::sounds::HIDE_SILENT_KEY);
+    setting.as_deref() == Some("off")
+}
+
 /// The app's own sound library beside `sounds_db` (its copy: the plugin never reads the old file).
 pub fn read_from(sounds_db: &Path) -> Read {
     let copy = mo_sounds::compact::copy_of(sounds_db);

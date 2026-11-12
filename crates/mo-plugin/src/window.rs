@@ -134,6 +134,8 @@ struct Slots {
     /// This panel has shown the list with the sounds like your favourites in (or said they couldn't be found), once
     /// they were known: the library is shared by every panel, so each looks for itself ([`Window::tick`]).
     like_shown: AtomicBool,
+    /// The app's Sounds page shows silent sounds (its Hide silent sounds is off), as read with the library.
+    shows_silent: AtomicBool,
     played: Mutex<Option<Played>>,
     /// A line dragged out: which, and its file, once it's been checked to be there (or written, for a MIDI part),
     /// or why it can't go.
@@ -783,7 +785,11 @@ impl Shown {
         self.presets.fill_in(panel, &self.slots);
         self.fill_in_midi_play();
         let slots = Arc::clone(&self.slots);
-        background("mo-plugin-library", move || *lock(&slots.library) = Some(library::read()));
+        background("mo-plugin-library", move || {
+            // As the app's Sounds page left Hide silent sounds, before the list's first view.
+            slots.shows_silent.store(library::shows_silent(), Ordering::Release);
+            *lock(&slots.library) = Some(library::read());
+        });
     }
 
     /// A click on a MIDI part plays it as a loop with the app's SoundFont, at the DAW's tempo, through the track; a
@@ -1291,6 +1297,7 @@ impl Shown {
                     // The list comes with its first view, so it never shows in an order nobody asked for.
                     self.lines.show(Some(Arc::clone(&library)), Arc::default());
                     self.panel.set_status("Getting the list ready".into());
+                    self.asked.borrow_mut().filters.show_silent = self.slots.shows_silent.load(Ordering::Acquire);
                     self.column.show(&self.panel, Some(&library), &self.asked.borrow());
                     like_wanted(&library, &self.asked.borrow(), &self.slots);
                     view(library, self.asked.borrow().clone(), Arc::clone(&self.slots));
@@ -1313,7 +1320,12 @@ impl Shown {
         {
             let library = self.lines.library.borrow().clone();
             let total = library.as_ref().map_or(0, |l| l.list.len());
-            let narrowed = self.asked.borrow().any();
+            // Silent sounds hidden narrow it too (they're not a filter the Clear chip takes off).
+            let hiding_silent = {
+                let asked = self.asked.borrow();
+                !asked.filters.show_silent && library.as_ref().is_some_and(|l| l.list.silent() > 0)
+            };
+            let narrowed = self.asked.borrow().any() || hiding_silent;
             self.panel.set_status(count_line(total, narrowed.then_some(found.len())).into());
             self.panel.set_picked(-1);
             *self.column.counts.borrow_mut() = Some(counts);
@@ -1693,6 +1705,8 @@ impl Column {
         panel.set_tag_filter(self.tag.view(&chips.tag));
         panel.set_mix_well(asked.filters.mix_well);
         panel.set_favourites(asked.filters.favourites);
+        panel.set_hide_silent(!asked.filters.show_silent);
+        panel.set_hide_silent_words(mo_app::sounds::hide_silent_text(library.map(|l| l.list.silent())).into());
         let step = asked.filters.like_favourites;
         panel.set_like_favourites(mo_app::sounds::like_favourites_share(step));
         let known = match library.map(Library::like) {

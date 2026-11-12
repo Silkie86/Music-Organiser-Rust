@@ -104,6 +104,9 @@ export component Panel inherits Window {
     in property <FilterView> tag-filter;
     in property <bool> mix-well;
     in property <bool> favourites;
+    // Hide silent sounds (as the app's Sounds page has it), and its words with how many there are.
+    in property <bool> hide-silent: true;
+    in property <string> hide-silent-words: "Hide silent sounds";
     // With Favourites on: how far the sounds like them reach (0 only them, 1 the most adventurous), the words by it,
     // and the slider let go at a place (0 to 1).
     in-out property <float> like-favourites;
@@ -233,7 +236,7 @@ export component Panel inherits Window {
     callback pick(string, string);
     // Nothing picked on a filter (or "more-types": only the types in the More menu).
     callback clear(string);
-    // An on/off line: "mix-well" or "favourites".
+    // An on/off line: "mix-well", "favourites" or "hide-silent".
     callback toggle(string);
     callback tempo-picked(int, int);
     callback pick-order(int);
@@ -466,6 +469,11 @@ export component Panel inherits Window {
                             value <=> root.like-favourites;
                             words: root.like-favourites-words;
                             released(v) => { root.like-favourites-set(v); }
+                        }
+                        TickLine {
+                            text: root.hide-silent-words;
+                            on: root.hide-silent;
+                            clicked => { root.toggle("hide-silent"); }
                         }
                     }
                 }
