@@ -131,6 +131,15 @@ struct Page {
     fit_song: Option<SongChoice>,
     /// What's looked for, once you've chosen; until then the song decides ([`midi_fits::fitted`]).
     fit_wants: Option<Wants>,
+    /// What of the song you picked by hand for the list to be fitted to (its parts, its bars): what the next search
+    /// is asked for. Nothing picked: the app picks.
+    fit_yours: midi_fits::YourPick,
+    /// The picker on show, where that's picked: the last search's, with the presses since ([`fit_pick_pressed`]).
+    /// None until a search has read the song.
+    fit_picker: Option<midi_fits::Picker>,
+    /// What you picked for each of the songs picked for last, as the setting remembers them
+    /// ([`midi_fits::PICKS_KEY`]).
+    fit_picks: midi_fits::YourPicks,
     /// Goes up each time a reading of the MIDI made slots and no new index to show: the slots a search kept are read
     /// again.
     fit_slots_made: u64,
@@ -285,6 +294,68 @@ impl Page {
     /// Whether the list is "Fits my song"'s: it's on, and there's an index to search.
     fn fitting(&self) -> bool {
         self.fit_song.is_some() && self.notes.is_some()
+    }
+
+    /// What's picked by hand for the song the list is fitted to is `yours` from here: it's what the next search is
+    /// asked for, and it's remembered for the song ([`Page::fit_picks`]). Whether what's remembered changed, so
+    /// the setting is to be written ([`remember_fit_picks`]).
+    fn fit_pick_is(&mut self, yours: midi_fits::YourPick) -> bool {
+        self.fit_yours = yours;
+        let Some(song) = self.fit_song.as_ref() else { return false };
+        self.fit_picks.set(&song.key, &self.fit_yours)
+    }
+
+    /// A press where the song's parts and bars are picked: the page's picker changes as `press` says, and what's
+    /// picked by hand is the next search's and the song's to remember ([`Page::fit_pick_is`]: whether the setting
+    /// is to be written). None when the press changed nothing (a handle held still), so nothing is asked for; or
+    /// while there's no picker.
+    fn fit_pick_press(&mut self, press: impl FnOnce(&mut midi_fits::Picker)) -> Option<bool> {
+        let picker = self.fit_picker.as_mut()?;
+        let before = picker.clone();
+        press(picker);
+        if *picker == before {
+            return None;
+        }
+        let yours = picker.pick();
+        Some(self.fit_pick_is(yours))
+    }
+
+    /// The switch for what's looked for was pressed: the app's pick of the song's chords to play over, or of its
+    /// melodies to put chords under. So parts picked by hand go back to the app (they decided what's looked for,
+    /// and the switch would do nothing); bars of yours stay. Whether the setting is to be written.
+    fn fit_wants_press(&mut self, wants: Wants) -> bool {
+        self.fit_wants = Some(wants);
+        if let Some(picker) = self.fit_picker.as_mut() {
+            picker.apps_parts();
+        }
+        let yours = midi_fits::YourPick { parts: None, bars: self.fit_yours.bars.clone() };
+        yours != self.fit_yours && self.fit_pick_is(yours)
+    }
+
+    /// The list is fitted to `song` from here. Whether it's another song than before: that one decides for itself
+    /// what's looked for, and is fitted to what you picked of it the last time, if you did. The same one picked
+    /// again keeps what you chose.
+    fn fit_song_is(&mut self, song: SongChoice) -> bool {
+        let another = self.fit_song.as_ref().is_none_or(|was| was.among(std::slice::from_ref(&song)).is_none());
+        if another {
+            self.fit_wants = None;
+            self.fit_yours = self.fit_picks.of(&song.key);
+            self.fit_picker = None;
+        }
+        self.fit_song = Some(song);
+        // Ranked by how each part fits now, not by its likeness to one.
+        self.target = None;
+        another
+    }
+
+    /// "Fits my song" is off: a search still running is told to stop. What's picked by hand stays remembered for
+    /// the song ([`Page::fit_picks`]), which has it again when it's picked again. Whether it was on.
+    fn fit_is_off(&mut self) -> bool {
+        self.fit_stop.store(true, Ordering::Relaxed);
+        self.fit_wants = None;
+        self.fit_yours = midi_fits::YourPick::default();
+        self.fit_picker = None;
+        self.fit_song.take().is_some()
     }
 
     /// How the part at `at` in the catalogue fits the song, while "Fits my song" is on and the list on show has it.
@@ -573,6 +644,8 @@ struct FitAsk {
     filters: Filters,
     song: SongChoice,
     wanted: Option<Wants>,
+    /// What of the song is picked by hand.
+    yours: midi_fits::YourPick,
     slots_made: u64,
     from: NotesFrom,
     stop: Arc<AtomicBool>,
@@ -624,7 +697,17 @@ thread_local! {
     static HERE: RefCell<bool> = const { RefCell::new(false) };
     /// The filter chips' lines, kept between showings: kinds, From and Key.
     static CHIPS: [FilterModels; 3] = Default::default();
+    /// "Fits my song"'s parts to fit to, kept between showings as the filters' are: as chips, and all in the menu.
+    static FIT_PARTS: [FilterModels; 2] = Default::default();
+    /// The small picture over its bars' slider, kept so a showing that doesn't change it makes nothing again.
+    static FIT_PLAYS: Rc<VecModel<f32>> = Rc::default();
+    /// Waits for the bars' slider to rest before the picks are written to the settings ([`remember_fit_picks`]).
+    static FIT_PICKS_WRITE: slint::Timer = slint::Timer::default();
 }
+
+/// How long the bars' slider rests before the picks are written to the settings: a drag says where it is at every
+/// step, and each write is of all the settings.
+const FIT_PICKS_REST: Duration = Duration::from_millis(400);
 
 struct Lines {
     page: Rc<RefCell<Page>>,
@@ -728,11 +811,14 @@ pub fn connect(app: &AppWindow, library: PathBuf, feed: Feed, shortcuts: &Shortc
     });
     // "Play with the song" is on until you turn it off.
     let with_song = crate::settings::value(midi_fits::WITH_SONG_KEY).is_none_or(|v| v != "0");
+    // What you picked of each song for "Fits my song" to fit to, the last time.
+    let picks = crate::settings::value(midi_fits::PICKS_KEY).unwrap_or_default();
     PAGE.with(|p| {
         let mut p = p.borrow_mut();
         p.library = library;
         p.feed = Some(feed);
         p.with_song = with_song;
+        p.fit_picks = midi_fits::YourPicks::read(&picks);
     });
     app.global::<MidiData>().set_fit_with_song(with_song);
     wire(app);
@@ -887,9 +973,38 @@ fn wire(app: &AppWindow) {
     let weak = app.as_weak();
     data.on_fit_wants_picked(move |place| {
         if let (Some(app), Some(&wants)) = (weak.upgrade(), usize::try_from(place).ok().and_then(|i| WANTS.get(i))) {
-            PAGE.with(|p| p.borrow_mut().fit_wants = Some(wants));
-            show_fit(&app);
-            relist(&app);
+            fit_wants_picked(&app, wants);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_fit_part_toggled(move |label| {
+        if let Some(app) = weak.upgrade() {
+            fit_pick_pressed(&app, true, |picker| picker.toggle_label(&label));
+        }
+    });
+    let weak = app.as_weak();
+    data.on_fit_parts_cleared(move || {
+        if let Some(app) = weak.upgrade() {
+            // The menu's "The app's pick": parts of yours go back to the app. Parts that are the app's already
+            // stay as they are (the line is ticked, and a press on it has nothing to change).
+            fit_pick_pressed(&app, true, |picker| {
+                if picker.your_parts {
+                    picker.apps_parts();
+                }
+            });
+        }
+    });
+    let weak = app.as_weak();
+    data.on_fit_bars_picked(move |low, high| {
+        if let Some(app) = weak.upgrade() {
+            // Said at every step of a drag: the list follows at once, the setting is written when it rests.
+            fit_pick_pressed(&app, false, |picker| picker.slide_bars(low.into(), high.into()));
+        }
+    });
+    let weak = app.as_weak();
+    data.on_fit_apps_pick(move || {
+        if let Some(app) = weak.upgrade() {
+            fit_pick_pressed(&app, true, midi_fits::Picker::apps_pick);
         }
     });
     let weak = app.as_weak();
@@ -1528,6 +1643,7 @@ fn fit_ask(p: &mut Page, ask: &Ask) -> Option<FitAsk> {
         filters: ask.filters.clone(),
         song,
         wanted: p.fit_wants,
+        yours: p.fit_yours.clone(),
         slots_made: p.fit_slots_made,
         from,
         stop: p.fit_stop.clone(),
@@ -1621,12 +1737,10 @@ fn fit_search(ask: &FitAsk, state: &mut FitKept) -> Answer {
         }
     };
     let mut reads = FitReads { from: &ask.from, cat: &ask.cat, open: &mut state.open };
-    // Nothing is picked by hand yet: the page's controls for that come next (`midi_fits::yours`).
-    let yours = midi_fits::YourPick::default();
     let asked = midi_fits::Asked {
         song: &ask.song,
         wanted: ask.wanted,
-        yours: &yours,
+        yours: &ask.yours,
         cat: &ask.cat,
         filters: &ask.filters,
         slots_made: ask.slots_made,
@@ -1746,15 +1860,21 @@ fn fit_listed(app: &AppWindow, id: u64, answer: Answer) {
         if p.asked != id || !p.fitting() {
             return None;
         }
-        let (fits, line, wants, with) = match answer {
-            Answer::Fits { wants, to, looked, with, .. } => {
+        let (fits, line, wants, with, picker) = match answer {
+            Answer::Fits { wants, to, looked, with, picker } => {
                 let line = midi_fits::page_line(&to, &looked);
-                (looked.fits, line, Some(wants), Some(with))
+                (looked.fits, line, Some(wants), Some(with), Some(picker))
             }
-            Answer::CantFit { .. } | Answer::Nothing(_) | Answer::Stopped => {
-                (Vec::new(), String::new(), p.fit_wants, None)
-            }
+            // Nothing could be fitted to what's picked: the picker stays, to pick something else.
+            Answer::CantFit { picker, .. } => (Vec::new(), String::new(), p.fit_wants, None, Some(picker)),
+            Answer::Nothing(_) | Answer::Stopped => (Vec::new(), String::new(), p.fit_wants, None, None),
         };
+        // The picker as this search left it: the newest ask's, so it has every press so far. A search that never
+        // got to the song's parts (it couldn't start, or the song or the index couldn't be read this time) has
+        // none: the page keeps the one it shows, so what's picked by hand stays in sight, to be changed.
+        if let Some(picker) = picker {
+            p.fit_picker = Some(Arc::unwrap_or_clone(picker));
+        }
         // A part whose octave you chose goes there, in this list as in any other.
         let mut fits = fits;
         midi_fits::with_yours(&mut fits, &p.cat, &p.your_octaves);
@@ -1776,8 +1896,96 @@ fn fit_listed(app: &AppWindow, id: u64, answer: Answer) {
     show_fit_none(&data, none);
     // What was looked for, which the song decided unless you chose.
     data.set_fit_wants(wants_place(wants));
+    show_fit_pick(app);
     show_order(&data);
     fit_follows(app);
+}
+
+/// The switch for what's looked for was pressed ([`Page::fit_wants_press`]): the list is worked out again for it.
+fn fit_wants_picked(app: &AppWindow, wants: Wants) {
+    if PAGE.with(|p| p.borrow_mut().fit_wants_press(wants)) {
+        remember_fit_picks(true);
+    }
+    show_fit(app);
+    show_fit_pick(app);
+    relist(app);
+}
+
+/// A press where the song's parts and bars are picked ([`Page::fit_pick_press`]): the page's picker shows it at
+/// once, it's remembered for the song (`at_once`, or once the slider rests: [`remember_fit_picks`]), and the list
+/// is worked out again (the newest ask wins, so a handle dragged along asks for its last place). A press that
+/// changes nothing asks for nothing.
+fn fit_pick_pressed(app: &AppWindow, at_once: bool, press: impl FnOnce(&mut midi_fits::Picker)) {
+    let changed = PAGE.with(|p| p.borrow_mut().fit_pick_press(press));
+    let Some(write) = changed else { return };
+    if write {
+        remember_fit_picks(at_once);
+    }
+    show_fit_pick(app);
+    relist(app);
+}
+
+/// Writes what's picked for each song to the settings ([`midi_fits::PICKS_KEY`]): `at_once` for a press, or once
+/// the bars' slider has rested for [`FIT_PICKS_REST`] (a drag changes the pick at every step, and each write is of
+/// all the settings). A write at once is of the newest picks, so a write still waiting has nothing left to do. One
+/// still waiting when the app closes goes then ([`write_picks_waiting`]).
+fn remember_fit_picks(at_once: bool) {
+    let write = || {
+        let picks = PAGE.with(|p| p.borrow().fit_picks.text());
+        crate::settings::remember(midi_fits::PICKS_KEY, &picks);
+    };
+    if at_once {
+        FIT_PICKS_WRITE.with(slint::Timer::stop);
+        write();
+    } else {
+        FIT_PICKS_WRITE.with(|timer| timer.start(slint::TimerMode::SingleShot, FIT_PICKS_REST, write));
+    }
+}
+
+/// Where the song's parts and bars are picked, as the page's picker has them now: the parts as the shared filter's
+/// chips (and all in its menu, for a narrow window), the bars on the slider under the picture of where the parts
+/// play. Nothing until a search has read the song, or for a song with no part to fit to.
+fn show_fit_pick(app: &AppWindow) {
+    let data = app.global::<MidiData>();
+    let shown = PAGE.with(|p| {
+        let p = p.borrow();
+        let picker = p.fit_picker.as_ref().filter(|picker| !picker.parts.is_empty())?;
+        Some((
+            picker.parts_shown(),
+            picker.parts_menu(),
+            picker.bars.clone(),
+            picker.length,
+            picker.plays_shown(),
+            picker.bars_text(),
+            (picker.your_parts, picker.is_yours()),
+        ))
+    });
+    let Some((chips, menu, bars, length, plays, text, (your_parts, yours))) = shown else {
+        data.set_fit_pick_shown(false);
+        return;
+    };
+    let line = |at: i64| i32::try_from(at).unwrap_or(i32::MAX);
+    FIT_PARTS.with(|[as_chips, as_menu]| {
+        data.set_fit_parts(as_chips.view(&chips));
+        data.set_fit_parts_menu(as_menu.view(&menu));
+    });
+    data.set_fit_parts_yours(your_parts);
+    FIT_PLAYS.with(|model| {
+        if !model.iter().eq(plays.iter().copied()) {
+            model.set_vec(plays);
+        }
+        data.set_fit_bars_play(ModelRc::from(model.clone()));
+    });
+    // The slider only with bars fitted to: with none, its handles would stand for bars that aren't.
+    data.set_fit_bars_shown(bars.is_some());
+    if let Some(bars) = bars {
+        data.set_fit_bars_length(line(length));
+        data.set_fit_bars_from(line(bars.start));
+        data.set_fit_bars_to(line(bars.end));
+    }
+    data.set_fit_bars_text(text.into());
+    data.set_fit_pick_yours(yours);
+    data.set_fit_pick_shown(true);
 }
 
 /// "Play with the song" turned on or off: remembered, and the picked part's card and the loop playing follow at
@@ -1892,19 +2100,12 @@ fn pick_fit_song(app: &AppWindow, label: &str) {
     let picked = PAGE.with(|p| {
         let mut p = p.borrow_mut();
         let song = p.fit_songs.iter().find(|s| s.label == label).cloned()?;
-        // Another song decides for itself what's looked for; the same one picked again keeps what you chose.
-        let another = p.fit_song.as_ref().is_none_or(|was| was.among(std::slice::from_ref(&song)).is_none());
-        if another {
-            p.fit_wants = None;
-        }
-        p.fit_song = Some(song);
-        // Ranked by how each part fits now, not by its likeness to one.
-        p.target = None;
-        Some(another)
+        Some(p.fit_song_is(song))
     });
     let Some(another) = picked else { return };
     if another {
         app.global::<MidiData>().set_fit_wants(-1);
+        show_fit_pick(app);
     }
     show_fit(app);
     relist(app);
@@ -1913,13 +2114,9 @@ fn pick_fit_song(app: &AppWindow, label: &str) {
 /// "Fits my song" goes off (the caller works the list out again): what its searches kept is let go, as the index's
 /// slots alone are tens of megabytes.
 fn fit_off(app: &AppWindow) {
-    let was_on = PAGE.with(|p| {
-        let mut p = p.borrow_mut();
-        p.fit_stop.store(true, Ordering::Relaxed);
-        p.fit_wants = None;
-        p.fit_song.take().is_some()
-    });
+    let was_on = PAGE.with(|p| p.borrow_mut().fit_is_off());
     show_fit(app);
+    show_fit_pick(app);
     if was_on {
         fit_job(app, FitJob::LetGo);
     }
@@ -1938,6 +2135,15 @@ pub fn songs_offered(app: &AppWindow, songs: Vec<SongChoice>) {
         let now = p.fit_song.as_ref().and_then(|was| was.among(&songs)).cloned();
         let again = now.is_some() && now != p.fit_song;
         if again {
+            // Joined to another song on the Songs page since (the library has another key for it): it goes by that
+            // song's pick, as the two are one song now.
+            let joined = now.as_ref().zip(p.fit_song.as_ref()).is_some_and(|(now, was)| now.key != was.key);
+            if let Some(now) = now.as_ref().filter(|_| joined) {
+                p.fit_yours = p.fit_picks.of(&now.key);
+                // The picker on show still has the old pick: gone until the search for the new one answers, so
+                // a press can't put the old one in the new one's place.
+                p.fit_picker = None;
+            }
             p.fit_song = now;
         }
         // The menu's lines only when they're others: a menu that's open keeps its place.
@@ -1952,6 +2158,7 @@ pub fn songs_offered(app: &AppWindow, songs: Vec<SongChoice>) {
     if again {
         // Its label may be another too (a second song of its name).
         show_fit(app);
+        show_fit_pick(app);
         relist(app);
     }
 }
@@ -3940,6 +4147,15 @@ fn watch_fl(app: &AppWindow) {
     });
 }
 
+/// When the app closes, before the settings are written for the last time (`settings::finish_up`): bars picked on
+/// the slider a moment ago, still waiting for it to rest ([`remember_fit_picks`]), go to the settings now. Nothing
+/// when none is waiting (so a page that never read its picks can't write over them).
+pub fn write_picks_waiting() {
+    if FIT_PICKS_WRITE.with(slint::Timer::running) {
+        remember_fit_picks(true);
+    }
+}
+
 /// When the app closes: stops a part playing in a DAW, so Bitwig's clip doesn't loop on and no note hangs in FL.
 /// Waits a moment at most (Bitwig answers on this computer).
 pub fn finish_up() {
@@ -5197,6 +5413,7 @@ mod tests {
             filters: Filters::default(),
             song,
             wanted: None,
+            yours: midi_fits::YourPick::default(),
             slots_made: 0,
             from: s.notes.clone(),
             stop: Arc::default(),
@@ -5228,6 +5445,108 @@ mod tests {
         // Told to stop, it gives nothing to show.
         let stopped = FitAsk { stop: Arc::new(AtomicBool::new(true)), ..ask };
         assert_eq!(fit_search(&stopped, &mut FitKept::default()), Answer::Stopped);
+    }
+
+    #[test]
+    fn the_songs_parts_and_bars_picked_by_hand_are_asked_for_and_remembered() {
+        use midi_fits::{Picker, YourPick, YourPicks};
+        let s = sample();
+        let songs = sample_songs();
+        let (cat, notes) = (Arc::new(s.cat), s.notes);
+        let mut p = Page { cat: cat.clone(), fit_songs: songs.clone(), ..Page::default() };
+        // A search for what the page asks for now, whose picker the page then shows: what it says it's fitted to.
+        let search = |p: &mut Page| {
+            let Some(song) = p.fit_song.clone() else { panic!("no song is picked") };
+            let ask = FitAsk {
+                id: 1,
+                cat: cat.clone(),
+                filters: Filters::default(),
+                song,
+                wanted: p.fit_wants,
+                yours: p.fit_yours.clone(),
+                slots_made: 0,
+                from: notes.clone(),
+                stop: Arc::default(),
+            };
+            let (to, picker) = match fit_search(&ask, &mut FitKept::default()) {
+                Answer::Fits { to, picker, .. } => (to, picker),
+                Answer::CantFit { why, picker } => (why, picker),
+                other => panic!("no picker: {other:?}"),
+            };
+            p.fit_picker = Some(Arc::unwrap_or_clone(picker));
+            to
+        };
+        let on = |p: &Page| {
+            let picker = p.fit_picker.as_ref().map(|picker| picker.parts.iter().filter(|part| part.on));
+            picker.map(|on| on.map(|part| part.label.as_str()).collect::<Vec<_>>().join(", ")).unwrap_or_default()
+        };
+        let yours = |p: &Page| p.fit_picker.as_ref().is_some_and(Picker::is_yours);
+
+        // A song picked, with nothing of it picked by hand: the app's pick, its bassline over all eight bars.
+        assert!(p.fit_song_is(songs[0].clone()));
+        assert_eq!((search(&mut p).as_str(), on(&p).as_str(), yours(&p)), ("To play over Sub, bars 1–8", "Sub", false));
+        // The lead's chip pressed: it's on at once, remembered for the song (the setting is to be written), and
+        // what the next search is fitted to.
+        assert_eq!(p.fit_pick_press(|picker| picker.toggle_label("Lead")), Some(true));
+        assert_eq!(p.fit_picks.text(), r#"[{"song":"night drive","parts":[["Sub",0],["Lead",0]]}]"#);
+        assert_eq!((on(&p).as_str(), yours(&p)), ("Sub, Lead", true));
+        assert_eq!(search(&mut p), "To play over Sub and Lead, bars 1–8");
+        // A press that changes nothing (a handle held where it is, words no chip says) asks for nothing.
+        assert_eq!(p.fit_pick_press(|picker| picker.slide_bars(0, 8)), None);
+        assert_eq!(p.fit_pick_press(|picker| picker.toggle_label("Pad")), None);
+        // The slider's higher handle dragged to the fifth bar line: bars 1 to 4, remembered with the parts.
+        assert_eq!(p.fit_pick_press(|picker| picker.slide_bars(0, 4)), Some(true));
+        let kept = r#"[{"song":"night drive","parts":[["Sub",0],["Lead",0]],"bars":[0,4]}]"#;
+        assert_eq!(p.fit_picks.text(), kept);
+        assert_eq!(search(&mut p), "To play over Sub and Lead, bars 1–4");
+        let picked = p.fit_yours.clone();
+
+        // The switch pressed: the parts go back to the app (its pick of the song's melodies now), the bars stay.
+        // Until the search says which parts those are, none is lit.
+        assert!(p.fit_wants_press(Wants::Chords));
+        assert_eq!(p.fit_picks.text(), r#"[{"song":"night drive","bars":[0,4]}]"#);
+        assert_eq!(
+            (p.fit_wants, p.fit_yours.clone(), on(&p).as_str()),
+            (Some(Wants::Chords), YourPick { parts: None, bars: Some(0..4) }, "")
+        );
+        assert_eq!(search(&mut p), "Chords for Keys and Lead, bars 1–4");
+        assert_eq!((on(&p).as_str(), yours(&p)), ("Keys, Lead", true));
+        // Pressed with no parts of yours to give back: nothing to write.
+        assert!(!p.fit_wants_press(Wants::Tune));
+
+        // Another song has its own pick (none yet), and decides for itself what's looked for.
+        assert!(p.fit_song_is(songs[1].clone()));
+        assert_eq!((p.fit_yours.clone(), p.fit_wants, p.fit_picker.is_none()), (YourPick::default(), None, true));
+        // The first one again: fitted to what you picked of it the last time.
+        assert!(p.fit_song_is(songs[0].clone()));
+        assert_eq!(p.fit_yours, YourPick { parts: None, bars: Some(0..4) });
+        assert_eq!(search(&mut p), "To play over Sub, bars 1–4");
+        // Picked again while it's on, it keeps what's chosen and its picker.
+        p.fit_wants = Some(Wants::Tune);
+        assert!(!p.fit_song_is(songs[0].clone()));
+        assert_eq!((p.fit_wants, p.fit_picker.is_some()), (Some(Wants::Tune), true));
+        // Off: nothing is asked for by hand, and the song's pick stays remembered for when it's on again.
+        assert!(p.fit_is_off());
+        assert_eq!((p.fit_yours.clone(), p.fit_picker.is_none(), p.fit_is_off()), (YourPick::default(), true, false));
+        assert!(p.fit_song_is(songs[0].clone()));
+        assert_eq!(p.fit_yours.bars, Some(0..4));
+        // "The app's pick": nothing is yours, and nothing is remembered for the song. The parts were the app's
+        // already, so they stay lit.
+        search(&mut p);
+        assert_eq!(p.fit_pick_press(Picker::apps_pick), Some(true));
+        assert_eq!((p.fit_picks.text().as_str(), on(&p).as_str()), ("[]", "Sub"));
+        assert_eq!((p.fit_yours.clone(), yours(&p)), (YourPick::default(), false));
+        assert_eq!(search(&mut p), "To play over Sub, bars 1–8");
+        // With no picker yet (the song isn't read), a press has nothing to change.
+        p.fit_picker = None;
+        assert_eq!(p.fit_pick_press(Picker::apps_pick), None);
+
+        // The app started again with the setting as it was after the bars were picked: the song has that pick.
+        let mut later = Page { fit_picks: YourPicks::read(kept), ..Page::default() };
+        assert!(later.fit_song_is(songs[0].clone()));
+        assert_eq!(later.fit_yours, picked);
+        assert!(later.fit_song_is(songs[1].clone()));
+        assert_eq!(later.fit_yours, YourPick::default());
     }
 
     #[test]
@@ -5306,6 +5625,7 @@ mod tests {
             filters: Filters::default(),
             song: song.clone(),
             wanted,
+            yours: midi_fits::YourPick::default(),
             slots_made: 0,
             from: loaded.notes.clone(),
             stop: Arc::default(),

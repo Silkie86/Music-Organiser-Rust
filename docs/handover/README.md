@@ -308,19 +308,33 @@ the next PR step by step). Solomon wants the highest effort here.
     only for a Bitwig song read by its arranger. Not yet tried in a real song: see
     `extensions/bitwig-java/README.md` (many tracks, whether the take replaces what's there, the clip's name,
     tempo changes inside the bars, how many presses of undo take it out).
-  **Parts and bars picked by hand** (the logic; the page's controls come next): a pick is a `YourPick`
-  (`mo-app/src/midi_fits/yours.rs`): the parts by name (`PartName`: its name and which of that name it is, as a
-  save written again moves a part's place), the bars by number, either left to the app. A search reads it
-  against the save (`YourPick::in_song`: parts that are gone drop out, bars are held to the song and to 32) and
-  `midi_fits::fitted` fits to that (`mo_midi::fit::for_song::Pick::by_hand` and `usual_in`). Parts by hand
-  decide what's looked for (chords for them when all are melodies, else parts over them), whatever the switch
-  says; a sampler can be picked by hand only. Every search's answer carries a `Picker` (each part that can be
-  fitted to and whether it's on, the bars, the song's length), also when nothing can be fitted
-  (`Answer::CantFit`), and the page changes its copy of it (`toggle`, `set_bars`, `apps_parts`, `apps_pick`)
-  and asks for `Picker::pick`. `YourPicks` remembers the pick for the last 32 songs under the song library's
-  key (`SongChoice::key`: a song joined to another on the Songs page goes by that song's pick from then on), as
-  one setting (`midi_fits_picks`). Until the page has its controls it always asks with nothing picked.
-  Not built yet: those controls, and putting a found part at its bar in FL Studio (there it's the drag).
+  **Parts and bars picked by hand:** a pick is a `YourPick` (`mo-app/src/midi_fits/yours.rs`): the parts by
+  name (`PartName`: its name and which of that name it is, as a save written again moves a part's place), the
+  bars by number, either left to the app. A search reads it against the save (`YourPick::in_song`: parts that
+  are gone drop out, bars are held to the song and to 32) and `midi_fits::fitted` fits to that
+  (`mo_midi::fit::for_song::Pick::by_hand` and `usual_in`). Parts by hand decide what's looked for (chords for
+  them when all are melodies, else parts over them), whatever the switch says; a sampler can be picked by hand
+  only. Every search's answer carries a `Picker` (each part that can be fitted to and whether it's on, the
+  bars, the song's length), also when nothing can be fitted (`Answer::CantFit`). `YourPicks` remembers the
+  pick for the last 32 songs under the song library's key (`SongChoice::key`: a song joined to another on the
+  Songs page goes by that song's pick from then on), as one setting (`midi_fits_picks`).
+  On the page it's a line under the "Fits my song" controls, there while a song is picked: the parts as the
+  shared `FilterPicks` named "Fit to" (`Picker::parts_shown`: a chip each saying its kind, samplers last, a
+  menu for the rest of a long list; `Picker::parts_menu`, all in the menu (`filters::show_in_menu`), where the
+  chips don't fit beside the slider, which `midi.slint` measures on a strip that's never drawn, with nothing
+  picked in its menu so picking there can't flip it), then the bars on the shared `RangeSlider` (handles on
+  the bar lines of `Picker::bars`, moved by `slide_bars`; no slider while no bars are fitted to), whose strips
+  are a picture of where the parts that are on play (`Picker::plays_shown`), and "The app's pick" while
+  anything is yours. The menu's first line says "The app's pick" too and is ticked while the parts are the
+  app's (`any-text` / `any-on` on `FilterPicks`). The page (`mo-ui/src/midi.rs`) keeps a copy of the last
+  answer's picker: a press changes it at once (`Page::fit_pick_press`), is remembered (`Page::fit_pick_is`;
+  the setting is written at once for a press, and once the slider rests for a drag or as the app closes:
+  `remember_fit_picks`, `write_picks_waiting`) and asks for the list again; the newest answer's picker replaces the copy, and an answer with none (the search
+  couldn't start, the song couldn't be read) leaves it. Giving the parts back to the app (the switch for
+  what's looked for: `Page::fit_wants_press`; "The app's pick") turns every chip off until the next answer
+  says which the app picks.
+  Not built yet: putting a found part at its bar in FL Studio (there it's the drag); telling the app a part
+  is another kind than it takes it for; the song's markers as jumps for the bars.
 
 **Sounds backend** (`mo-sounds`, `mo-audio`): finished. Left: streaming long files while they play; sounds.db
 writes once trusted. A decoder panic on a damaged file is caught with `mo_catch::catch`: one warning line in the log,

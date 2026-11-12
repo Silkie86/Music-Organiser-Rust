@@ -45,12 +45,28 @@ pub fn show(choices: &[(String, String)], picked: &[String]) -> Filter {
     if choices.len() <= CHIPS_UP_TO {
         return Filter { chips: shown, ..Filter::default() };
     }
-    // In the order they were picked, as the menu shows them.
+    Filter { more_picked: picked_among(&shown, picked), more: shown, chips: Vec::new() }
+}
+
+/// [`show`] with every choice in the menu, however few there are: for a place with no room for a chip each (the MIDI
+/// page's parts of a song, in a narrow window). The menu's chip says what's picked, as a long list's does.
+pub fn show_in_menu(choices: &[(String, String)], picked: &[String]) -> Filter {
+    let mut all = show(choices, picked);
+    if all.more.is_empty() {
+        all.more = std::mem::take(&mut all.chips);
+        all.more_picked = picked_among(&all.more, picked);
+    }
+    all
+}
+
+/// What a menu's chip says of the ones in `picked` that are among its lines (`shown`), in the order they were
+/// picked and in the menu's own words.
+fn picked_among(shown: &[Shown], picked: &[String]) -> String {
     let on: Vec<&str> = picked
         .iter()
         .filter_map(|p| shown.iter().find(|s| s.text.eq_ignore_ascii_case(p)).map(|s| s.text.as_str()))
         .collect();
-    Filter { more_picked: picked_words(&on), more: shown, chips: Vec::new() }
+    picked_words(&on)
 }
 
 /// [`show`] for a long list whose first choices are picked far more than the rest (the sounds' types, the most used
@@ -63,11 +79,7 @@ pub fn show_split(choices: &[(String, String)], picked: &[String], up_to: usize)
         return all;
     }
     let more = all.more.split_off(up_to.min(all.more.len()));
-    let on: Vec<&str> = picked
-        .iter()
-        .filter_map(|p| more.iter().find(|s| s.text.eq_ignore_ascii_case(p)).map(|s| s.text.as_str()))
-        .collect();
-    Filter { more_picked: picked_words(&on), chips: all.more, more }
+    Filter { more_picked: picked_among(&more, picked), chips: all.more, more }
 }
 
 /// A choice where one is always picked, such as the order a list is in: each choice as a chip of its own, with the
@@ -168,6 +180,27 @@ mod tests {
         // A short list is all chips.
         let short = show_split(&types[..CHIPS_UP_TO], &[], 3);
         assert_eq!((short.chips.len(), short.more.len()), (CHIPS_UP_TO, 0));
+    }
+
+    #[test]
+    fn a_list_can_be_all_in_the_menu_however_short() {
+        // Three choices, two picked (one of them no longer a choice): chips anywhere else, all in the menu here.
+        let parts = vec![("Keys".to_owned(), "chords".to_owned()), ("Sub".to_owned(), "bassline".to_owned())];
+        let picked = ["sub".to_owned(), "Gone".to_owned()];
+        let menu = show_in_menu(&parts, &picked);
+        assert!(menu.chips.is_empty());
+        assert_eq!(
+            menu.more.iter().map(|c| (c.text.as_str(), c.count.as_str(), c.on)).collect::<Vec<_>>(),
+            [("Keys", "chords", false), ("Sub", "bassline", true), ("Gone", "0", true)]
+        );
+        assert_eq!(menu.more_picked, "Sub + 1");
+        // The same lines as the chips would be.
+        assert_eq!(menu.more, show(&parts, &picked).chips);
+        // Nothing picked: the chip says nothing. A long list is as `show` makes it.
+        assert_eq!(show_in_menu(&parts, &[]).more_picked, "");
+        let long: Vec<(String, String)> = (0..=CHIPS_UP_TO).map(|n| (format!("Synth {n}"), String::new())).collect();
+        let picked = ["Synth 3".to_owned()];
+        assert_eq!(show_in_menu(&long, &picked), show(&long, &picked));
     }
 
     #[test]
