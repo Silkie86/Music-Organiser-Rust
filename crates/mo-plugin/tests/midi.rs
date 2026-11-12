@@ -80,6 +80,11 @@ fn lists_filters_and_writes_a_part_out() {
     let chips = midi::chips(Some(&counts), &Asked::default());
     assert_eq!(chips.kind.chips.len() + chips.kind.more.len(), Role::ALL.len());
 
+    // Heard: with no SoundFont there's nothing to play it with, and a file that isn't one is said so.
+    assert_eq!(parts.sound(found[0], None, Some(120.0)).unwrap_err(), midi::NO_SOUNDFONT);
+    let not_a_font = db.parent().unwrap().join("Tune.mid");
+    assert!(parts.sound(found[0], Some(&not_a_font), None).unwrap_err().contains("isn't a SoundFont"));
+
     // Dragged out: a MIDI file of its notes.
     let temp = db.parent().unwrap().join("Temp");
     std::fs::create_dir_all(&temp).unwrap();

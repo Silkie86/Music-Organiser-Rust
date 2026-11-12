@@ -366,6 +366,10 @@ export global SoundsData {
     callback bitwig-toggle();
     callback bitwig-tick(int);
     callback bitwig-mark();
+    // Save the samples not found as sounds, in the first sample folder's From Bitwig folder: what Save as sounds does
+    // ("": no button).
+    in property <string> bitwig-save-note;
+    callback bitwig-save();
     // The forgotten folder clicked on Rediscover that the list is narrowed to (its own sounds), or none.
     in property <string> folder;
     in property <bool> any-filter;
@@ -1089,8 +1093,22 @@ component BitwigCard inherits Rectangle {
             font-size: Type.meta;
             wrap: word-wrap;
         }
+        if SoundsData.bitwig-save-note != "": Text {
+            text: SoundsData.bitwig-save-note;
+            color: Theme.muted;
+            font-size: Type.meta;
+            wrap: word-wrap;
+        }
+        if SoundsData.bitwig-save-note != "": HorizontalLayout {
+            alignment: start;
+            StudioButton {
+                text: "Save as sounds";
+                enabled: !SoundsData.bitwig-busy;
+                clicked => { SoundsData.bitwig-save(); }
+            }
+        }
         if SoundsData.bitwig-missing.length > 0: Caps { text: "NOT FOUND IN YOUR LIBRARY"; }
-        // A line a sample: "Snare 3 Select › Hmy_Snr.wav".
+        // A line a sample, with why: "Snare 3 Select › Hmy_Snr.wav: no sound by this name".
         if SoundsData.bitwig-missing.length > 0: ListView {
             vertical-stretch: 1;
             min-height: 80px;

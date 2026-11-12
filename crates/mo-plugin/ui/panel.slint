@@ -254,6 +254,9 @@ export component Panel inherits Window {
     callback midi-years-cleared();
     // A line is being dragged out (onto a track): its row.
     callback midi-drag-out(int);
+    // A part was clicked: it plays as a loop through the track (with the app's SoundFont), or stops when it's the
+    // one playing.
+    callback midi-play(int);
 
     title: "Music Organiser";
     preferred-width: 760px;
@@ -853,10 +856,19 @@ export component Panel inherits Window {
             }
             VerticalLayout {
                 spacing: Space.md;
-                SearchBox {
-                    hint: "Search MIDI";
-                    text <=> root.midi-search-text;
-                    edited(text) => { root.midi-search(text); }
+                HorizontalLayout {
+                    spacing: Space.sm;
+                    SearchBox {
+                        horizontal-stretch: 1;
+                        hint: "Search MIDI";
+                        text <=> root.midi-search-text;
+                        edited(text) => { root.midi-search(text); }
+                    }
+                    StudioButton {
+                        horizontal-stretch: 0;
+                        text: "Stop";
+                        clicked => { root.stop(); }
+                    }
                 }
                 HorizontalLayout {
                     spacing: Space.md;
@@ -911,7 +923,10 @@ export component Panel inherits Window {
                             selected: i == root.midi-picked;
                             draggable: root.can-drag;
                             lifted: i == root.midi-carried;
-                            clicked => { root.midi-picked = i; }
+                            clicked => {
+                                root.midi-picked = i;
+                                root.midi-play(i);
+                            }
                             drag-out => { root.midi-drag-out(i); }
                             HorizontalLayout {
                                 padding-left: Space.md;
@@ -943,8 +958,9 @@ export component Panel inherits Window {
                     }
                 }
                 Text {
-                    text: root.midi-said != "" ? root.midi-said : root.can-drag ? "Drag a part onto a track to put it there as a MIDI clip" : "";
-                    color: root.midi-said != "" ? Theme.accent : Theme.faint;
+                    text: root.midi-said != "" ? root.midi-said : root.playing != "" ? root.playing
+                        : root.can-drag ? "Click a part to hear it, drag it onto a track to put it there as a MIDI clip" : "Click a part to hear it";
+                    color: root.midi-said != "" || root.playing != "" ? Theme.accent : Theme.faint;
                     font-size: Type.meta;
                     overflow: elide;
                 }
