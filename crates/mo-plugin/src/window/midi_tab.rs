@@ -129,6 +129,8 @@ pub(super) struct MidiTab {
     was_shown: Cell<bool>,
     /// The play head's place last shown (-1 for none): the panel is told only when it moves.
     head: Cell<f32>,
+    /// The track's name has picked the list's first filter (once only: the filters are the user's after that).
+    track_picked: Cell<bool>,
 }
 
 impl MidiTab {
@@ -145,6 +147,7 @@ impl MidiTab {
             read_asked: Cell::new(false),
             was_shown: Cell::new(false),
             head: Cell::new(-1.0),
+            track_picked: Cell::new(false),
         }
     }
 
@@ -280,6 +283,16 @@ impl MidiTab {
         if let Some(read) = lock(&self.slots.read).take() {
             match read {
                 Read::Ready(parts) => {
+                    // On a track named for a kind of part, the list opens on it ("Bass": basslines).
+                    let kinds = mo_midi::roles::Role::ALL.map(mo_midi::roles::Role::plural);
+                    let named = if self.track_picked.replace(true) {
+                        Vec::new()
+                    } else {
+                        crate::track::named(&panel.get_track(), kinds)
+                    };
+                    for kind in named {
+                        self.asked.borrow_mut().filters.toggle(mo_app::midi::KIND, &kind);
+                    }
                     self.lines.show(Some(Arc::clone(&parts)), Arc::default());
                     panel.set_midi_status("Getting the list ready".into());
                     self.column.show(panel, Some(&parts), &self.asked.borrow());

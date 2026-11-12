@@ -28,6 +28,7 @@ pub mod midi;
 pub mod presets;
 pub mod state;
 mod threads;
+mod track;
 pub mod waves;
 mod window;
 
@@ -68,6 +69,8 @@ pub struct Instance {
     pub offered: Vec<Offered>,
     /// The track the plugin is on, when the DAW says.
     pub track: Mutex<String>,
+    /// The track's colour (red, green, blue), when the DAW says.
+    pub track_colour: Mutex<Option<[u8; 3]>>,
     pub player: Arc<Player>,
 }
 
@@ -119,6 +122,7 @@ impl DefaultPluginFactory for MoPlugin {
                 host: check::host_line(&info),
                 offered,
                 track: Mutex::new(String::new()),
+                track_colour: Mutex::new(None),
                 player: Arc::new(Player::default()),
             }),
             _card: real.then(gpu::hold),
@@ -172,11 +176,15 @@ impl MainThread<'_> {
         let Some(track_info) = self.track_info else { return };
         let mut host = self.host;
         let mut buffer = TrackInfoBuffer::new();
-        let name = track_info
-            .get(&mut host, &mut buffer)
+        let info = track_info.get(&mut host, &mut buffer);
+        let name = info
+            .as_ref()
             .and_then(|info| info.name().map(|n| String::from_utf8_lossy(n).trim_end_matches('\0').to_owned()))
             .unwrap_or_default();
+        // A see-through colour is the DAW's "none".
+        let colour = info.and_then(|info| info.color()).filter(|c| c.alpha > 0).map(|c| [c.red, c.green, c.blue]);
         *threads::lock(&self.shared.instance.track) = name;
+        *threads::lock(&self.shared.instance.track_colour) = colour;
     }
 
     /// The panel's size as the DAW counts it: in pixels at the scaling it gave (Windows, Linux), or in points (Mac).

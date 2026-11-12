@@ -136,6 +136,9 @@ struct Slots {
     like_shown: AtomicBool,
     /// The app's Sounds page shows silent sounds (its Hide silent sounds is off), as read with the library.
     shows_silent: AtomicBool,
+    /// The sound types the track's name names ("Kick" on a Kick track), worked out with the library: the list's
+    /// first filter.
+    track_types: Mutex<Vec<String>>,
     played: Mutex<Option<Played>>,
     /// A line dragged out: which, and its file, once it's been checked to be there (or written, for a MIDI part),
     /// or why it can't go.
@@ -627,6 +630,10 @@ impl Shown {
         let panel = &self.panel;
         panel.set_host(self.instance.host.as_str().into());
         panel.set_track(lock(&self.instance.track).as_str().into());
+        panel.set_track_colour(match *lock(&self.instance.track_colour) {
+            Some([r, g, b]) => slint::Color::from_rgb_u8(r, g, b),
+            None => slint::Color::from_argb_u8(0, 0, 0, 0),
+        });
         let extensions: Vec<ExtensionLine> = self
             .instance
             .offered
@@ -805,10 +812,18 @@ impl Shown {
         self.presets.fill_in(panel, &self.slots);
         self.fill_in_midi_play();
         let slots = Arc::clone(&self.slots);
+        let track = lock(&self.instance.track).clone();
         background("mo-plugin-library", move || {
             // As the app's Sounds page left Hide silent sounds, before the list's first view.
             slots.shows_silent.store(library::shows_silent(), Ordering::Release);
-            *lock(&slots.library) = Some(library::read());
+            let read = library::read();
+            // The types the track's name names, among the library's (it goes over every sound: not on the panel's
+            // thread).
+            if let Read::Ready(library) = &read {
+                let types = library.list.type_counts();
+                *lock(&slots.track_types) = crate::track::named(&track, types.iter().map(|(t, _)| t.as_str()));
+            }
+            *lock(&slots.library) = Some(read);
         });
     }
 
@@ -1318,6 +1333,10 @@ impl Shown {
                     self.lines.show(Some(Arc::clone(&library)), Arc::default());
                     self.panel.set_status("Getting the list ready".into());
                     self.asked.borrow_mut().filters.show_silent = self.slots.shows_silent.load(Ordering::Acquire);
+                    // On a track named for a kind of sound, the list opens on it ("Kick": kicks).
+                    for t in std::mem::take(&mut *lock(&self.slots.track_types)) {
+                        self.asked.borrow_mut().filters.toggle_type(&t);
+                    }
                     self.column.show(&self.panel, Some(&library), &self.asked.borrow());
                     like_wanted(&library, &self.asked.borrow(), &self.slots);
                     view(library, self.asked.borrow().clone(), Arc::clone(&self.slots));

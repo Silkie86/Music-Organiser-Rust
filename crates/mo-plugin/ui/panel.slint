@@ -85,6 +85,8 @@ export component Panel inherits Window {
     // The DAW and its version, and the track the plugin is on, when the DAW says.
     in property <string> host;
     in property <string> track;
+    // The track's colour, when the DAW says (see-through when it doesn't): a dot by its name.
+    in property <color> track-colour: transparent;
     in property <[SoundLine]> sounds;
     // How the read went: "Reading the sound library", "1,234 sounds", or what's wrong.
     in property <string> status;
@@ -342,10 +344,21 @@ export component Panel inherits Window {
                     font-size: Type.heading;
                     font-weight: 600;
                 }
-                Text {
-                    text: root.track == "" ? root.host : root.host + "  ·  track " + root.track;
-                    color: Theme.muted;
-                    font-size: Type.meta;
+                HorizontalLayout {
+                    spacing: Space.sm;
+                    Text {
+                        text: root.track == "" ? root.host : root.host + "  ·  track " + root.track;
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                    }
+                    if root.track != "" && root.track-colour.alpha > 0: Rectangle {
+                        width: 8px;
+                        height: 8px;
+                        y: (parent.height - self.height) / 2;
+                        border-radius: 4px;
+                        background: root.track-colour;
+                    }
+                    Rectangle { }
                 }
             }
             Rectangle { }
