@@ -1360,6 +1360,12 @@ impl Shown {
             }
             None => self.panel.set_playing_row(-1),
         }
+        // The play head over the MIDI tab's piano roll, while the part it shows plays.
+        let part = match (self.heard.get(), self.playing.get()) {
+            (Some((Heard::Part(at), _)), Some(n)) => self.instance.player.place(n).map(|place| (at, place)),
+            _ => None,
+        };
+        self.midi.show_head(&self.panel, part);
         self.instance.player.tidy();
         // The window is taller or shorter: the column shows as many types as it now has room for.
         if usize::try_from(self.panel.get_type_lines()).is_ok_and(|lines| lines != self.column.type_lines.get()) {

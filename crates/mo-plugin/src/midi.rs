@@ -42,7 +42,19 @@ pub struct RollPixels {
     pub width: u32,
     pub height: u32,
     pub rgba: Vec<u8>,
+    /// How wide the picture shows, in points: the room's width, or wider when it follows the playing (it then
+    /// scrolls under the play head).
+    pub points: f64,
+    /// Where the loop's bars run across the picture, in points from its left: the play head goes from the first to
+    /// the second as the loop plays.
+    pub bars: (f64, f64),
 }
+
+/// While following the playing, the roll shows this many bars at a time (a longer part scrolls under the play head).
+pub const FOLLOW_BARS: i64 = 4;
+
+/// The widest a roll picture is drawn, in pixels.
+const WIDEST: f64 = 8192.0;
 
 /// How reading the index went.
 pub enum Read {
@@ -205,17 +217,28 @@ impl Parts {
         Ok(font)
     }
 
-    /// The part at `at` drawn as the app's MIDI page draws its piano roll (mo-app's `piano_roll`, with its keyboard
-    /// down the side and no names), for a room `width` by `height` points at `scale` pixels to a point. Reads the
-    /// index and draws: call it off the panel's thread.
+    /// The part at `at` as it loops when clicked, drawn as the app's MIDI page draws its piano roll (mo-app's
+    /// `piano_roll`, with its keyboard down the side and no names), for a room `width` by `height` points at `scale`
+    /// pixels to a point. With `follow`, a part longer than [`FOLLOW_BARS`] is drawn wider, that many bars to the
+    /// room's width, to scroll under the play head. Reads the index and draws: call it off the panel's thread.
     pub fn roll(
         &self,
         at: usize,
         (width, height, scale): (f64, f64, f64),
         colours: &mo_app::piano_roll::Colours,
+        follow: bool,
     ) -> Result<RollPixels, String> {
         let e = self.cat.entry(at).ok_or("That part isn't in the list any more")?;
-        let roll = page::roll(&self.notes(e)?, e.phrase.bars);
+        // The notes as they loop, over the loop's whole length: the play head's share of the loop is its share of
+        // the bars drawn.
+        let (heard, length) = page::loop_notes(&self.notes(e)?, e.phrase.bars);
+        let bars = (length / mo_midi::BAR).max(1);
+        let roll = page::roll(&heard, i32::try_from(bars).unwrap_or(i32::MAX));
+        let width = if follow && bars > FOLLOW_BARS {
+            (width * bars as f64 / FOLLOW_BARS as f64).min(WIDEST / scale.max(0.5)).max(width)
+        } else {
+            width
+        };
         let room = mo_app::piano_roll::Room { width, height, left: 0.0, margin: 0.0, name: 9.0 };
         if !room.fits() {
             return Err("No room for the piano roll".into());
@@ -223,7 +246,13 @@ impl Parts {
         let choices = mo_app::piano_roll::Choices { keyboard: true, names: false };
         let picture = mo_app::piano_roll::picture(&roll, room, scale, choices, colours);
         let pixmap = picture.scene.paint(scale);
-        Ok(RollPixels { width: pixmap.width(), height: pixmap.height(), rgba: pixmap.data().to_vec() })
+        Ok(RollPixels {
+            width: pixmap.width(),
+            height: pixmap.height(),
+            rgba: pixmap.data().to_vec(),
+            points: width,
+            bars: mo_app::piano_roll::bars_across(room, choices),
+        })
     }
 
     /// A part's notes, read from the index (opened, read and let go again).

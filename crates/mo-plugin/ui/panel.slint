@@ -270,8 +270,17 @@ export component Panel inherits Window {
     callback midi-play(int);
     // The piano roll of the part picked (empty for none), drawn by mo-app's piano roll for a room this big.
     in property <image> midi-roll;
-    // How wide the roll shows (the list's width): the picture is drawn this wide.
+    // How wide the roll shows (the list's width): the picture is drawn this wide, or wider when it follows the playing.
     in-out property <length> midi-roll-width: 400px;
+    // How wide the picture is (0 for none), and where the loop's bars run across it.
+    in property <length> midi-roll-points;
+    in property <length> midi-roll-from;
+    in property <length> midi-roll-to;
+    // How far through its loop the part the roll shows is playing (0 to 1), or -1 when it isn't playing.
+    in property <float> midi-head: -1;
+    // The roll follows the playing: a long part is drawn a few bars to the room, and scrolls under the play head.
+    in-out property <bool> midi-follow: true;
+    callback midi-follow-changed();
 
     // The Presets tab: the preset files, the status line, the filter column as the app's Presets page has it (mo-app's
     // `presets::filter_chips`), the orders, the year strip and the line picked.
@@ -1011,19 +1020,48 @@ export component Panel inherits Window {
                     background: Theme.well;
                     border-radius: Theme.radius;
                     clip: true;
+                    property <length> wide: root.midi-roll-points > 0 ? root.midi-roll-points : self.width;
+                    property <length> head-x: root.midi-roll-from + root.midi-head * (root.midi-roll-to - root.midi-roll-from);
+                    // How far the picture is moved left: the play head kept in the middle while following, within
+                    // the picture's ends.
+                    property <length> shift: root.midi-follow && root.midi-head >= 0 && self.wide > self.width
+                        ? max(0px, min(self.head-x - self.width / 2, self.wide - self.width)) : 0px;
                     Image {
-                        width: parent.width;
+                        x: -parent.shift;
+                        width: parent.wide;
                         height: parent.height;
                         source: root.midi-roll;
                         image-fit: fill;
                     }
+                    if root.midi-head >= 0 && root.midi-roll-points > 0: Rectangle {
+                        x: parent.head-x - parent.shift - 1px;
+                        y: 0;
+                        width: 2px;
+                        height: parent.height;
+                        background: Theme.accent;
+                    }
                 }
-                Text {
-                    text: root.midi-said != "" ? root.midi-said : root.playing != "" ? root.playing
-                        : root.can-drag ? "Click a part to hear it, drag it onto a track to put it there as a MIDI clip" : "Click a part to hear it";
-                    color: root.midi-said != "" || root.playing != "" ? Theme.accent : Theme.faint;
-                    font-size: Type.meta;
-                    overflow: elide;
+                HorizontalLayout {
+                    spacing: Space.md;
+                    Text {
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                        text: root.midi-said != "" ? root.midi-said : root.playing != "" ? root.playing
+                            : root.can-drag ? "Click a part to hear it, drag it onto a track to put it there as a MIDI clip" : "Click a part to hear it";
+                        color: root.midi-said != "" || root.playing != "" ? Theme.accent : Theme.faint;
+                        font-size: Type.meta;
+                        overflow: elide;
+                    }
+                    if root.midi-picked >= 0: TickLine {
+                        horizontal-stretch: 0;
+                        width: 150px;
+                        text: "Follow playback";
+                        on: root.midi-follow;
+                        clicked => {
+                            root.midi-follow = !root.midi-follow;
+                            root.midi-follow-changed();
+                        }
+                    }
                 }
             }
         }
