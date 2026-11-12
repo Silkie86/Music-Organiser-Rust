@@ -34,6 +34,7 @@ pub mod liking;
 pub mod music;
 pub mod rediscover;
 pub mod scan;
+pub mod trimmed;
 mod turns;
 pub mod types;
 pub mod usage;

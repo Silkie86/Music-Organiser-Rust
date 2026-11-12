@@ -56,11 +56,21 @@ fn merge<T: Ord + Copy>(sorted: &mut Vec<T>, more: &[T]) {
 /// one project listing it twice (a Bitwig copy and a relative path) counts once (the C# app counted it twice). Sounds
 /// no project uses are left out (their use is [`Usage::default`]).
 pub fn usage(sounds: &[Sound], uses: &[SampleUse]) -> HashMap<i64, Usage> {
+    // A trimmed copy Trim silence dragged into a project counts as a use of its original, found by the mark in the
+    // copy's name ([`crate::trimmed`]). Worked out only when some project uses a copy.
+    let copies = uses.iter().any(|u| crate::trimmed::mark_in(file_name(&u.path)).is_some());
+    let originals: HashMap<String, &str> = if copies {
+        sounds.iter().map(|s| (crate::trimmed::mark(&s.path), s.path.as_str())).collect()
+    } else {
+        HashMap::new()
+    };
     let mut by_path: HashMap<String, Usage> = HashMap::new();
     let mut by_name: HashMap<String, Usage> = HashMap::new();
     for u in uses {
-        by_path.entry(case::key(&u.path)).or_default().add(u);
-        by_name.entry(case::key(file_name(&u.path))).or_default().add(u);
+        let original = crate::trimmed::mark_in(file_name(&u.path)).and_then(|m| originals.get(m)).copied();
+        let path = original.unwrap_or(&u.path);
+        by_path.entry(case::key(path)).or_default().add(u);
+        by_name.entry(case::key(file_name(path))).or_default().add(u);
     }
     // File names more than one sound in the library has: a project naming only that can't say which it meant.
     let mut seen = HashSet::new();
@@ -83,6 +93,15 @@ pub fn usage(sounds: &[Sound], uses: &[SampleUse]) -> HashMap<i64, Usage> {
 mod tests {
     use super::*;
     use crate::test_support::sound;
+
+    #[test]
+    fn a_trimmed_copy_in_a_project_counts_for_its_original() {
+        let sounds = vec![sound(1, "D:\\Samples\\Kick.wav"), sound(2, "D:\\Samples\\Snare.wav")];
+        let copy = format!("E:\\Exports\\Trimmed sounds\\{}", crate::trimmed::copy_name("D:\\Samples\\Kick.wav", -60));
+        let found = usage(&sounds, &[used(&copy, 2, 1, &[2026]), used("D:\\Samples\\Kick.wav", 1, 0, &[2025])]);
+        assert_eq!(found[&1].projects, 3);
+        assert!(!found.contains_key(&2));
+    }
 
     fn used(path: &str, projects: u32, recent: u32, years: &[i32]) -> SampleUse {
         // Projects numbered from the first year they were saved in, one each.

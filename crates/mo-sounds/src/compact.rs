@@ -2018,14 +2018,14 @@ pub(crate) fn unpacked_peaks(bytes: &[u8]) -> Peaks {
 /// A 64-bit FNV-1a hash: simple, and the same every time (Rust's own may change between releases). What laying a copy
 /// out anew checks each fingerprint it wrote against, without holding them all.
 #[derive(Clone, Copy)]
-struct Hash(u64);
+pub(crate) struct Hash(pub(crate) u64);
 
 impl Hash {
-    fn new() -> Hash {
+    pub(crate) fn new() -> Hash {
         Hash(0xcbf2_9ce4_8422_2325)
     }
 
-    fn bytes(&mut self, bytes: &[u8]) {
+    pub(crate) fn bytes(&mut self, bytes: &[u8]) {
         for &b in bytes {
             self.0 = (self.0 ^ u64::from(b)).wrapping_mul(0x0000_0100_0000_01b3);
         }
