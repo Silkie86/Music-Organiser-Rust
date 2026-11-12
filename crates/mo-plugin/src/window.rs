@@ -143,6 +143,8 @@ struct Slots {
     /// The stars made ready for the graphics card, with their asking's number ([`Sky::pack_ask`]) and how many
     /// are lit.
     packed: Mutex<Option<(u64, Vec<u8>, u32)>>,
+    /// The mini-map's picture, with its asking's number ([`Sky::mini_ask`]).
+    mini: Mutex<Option<(u64, SkyPixels)>>,
 }
 
 /// A drag out that has ended: its file, when it started and how it ended.
@@ -155,6 +157,16 @@ type SkyDrawn = Result<(u64, View, SkyPixels), u64>;
 
 /// Each sound's waveform as a picture's pixels (made off the window's thread), or none.
 type WavesRead = Vec<(i64, Option<slint::SharedPixelBuffer<slint::Rgba8Pixel>>)>;
+
+/// A picture of the stars drawn on the processor, as pixels the panel can show.
+fn sky_pixels(drawn: &mo_app::galaxy_picture::Drawn) -> Option<SkyPixels> {
+    let (width, height) = (u32::try_from(drawn.width).ok()?, u32::try_from(drawn.height).ok()?);
+    let mut pixels = SkyPixels::new(width, height);
+    for (to, from) in pixels.make_mut_slice().iter_mut().zip(&drawn.pixels) {
+        *to = slint::Rgba8Pixel { r: from.r, g: from.g, b: from.b, a: from.a };
+    }
+    Some(pixels)
+}
 
 fn take<T>(slot: &Mutex<Option<T>>) -> Option<T> {
     lock(slot).take()
@@ -791,6 +803,7 @@ impl Shown {
         let (sky, weak) = (Rc::clone(&self.sky), panel.as_weak());
         let player = Arc::clone(&self.instance.player);
         let (heard, stop) = (Rc::clone(&self.heard), self.stopper());
+        let arrow_play = Rc::clone(&play);
         panel.on_sky_up(move |side| {
             let mut sky = sky.borrow_mut();
             let cancelled = cancelled.get();
@@ -821,6 +834,23 @@ impl Shown {
                     play(at);
                 }
                 sky.picked = Some(at);
+            }
+        });
+        let sky = Rc::clone(&self.sky);
+        panel.on_sky_mini_go(move |x, y| sky.borrow_mut().mini_go(x, y));
+        // An arrow key goes to the nearest star that way and plays it, as a click on it would.
+        let (sky, play_star) = (Rc::clone(&self.sky), arrow_play);
+        panel.on_sky_arrow(move |way| {
+            let way = match way {
+                -1 => (-1.0, 0.0),
+                1 => (1.0, 0.0),
+                -2 => (0.0, -1.0),
+                2 => (0.0, 1.0),
+                _ => return,
+            };
+            let found = sky.borrow_mut().arrow(way);
+            if let Some(at) = found {
+                play_star(at);
             }
         });
         let sky = Rc::clone(&self.sky);
@@ -895,6 +925,7 @@ impl Shown {
             self.sky_on_processor(&mut sky);
         }
         self.sky_names(&mut sky);
+        self.sky_mini(&mut sky);
         if let Some((x, y, width, height)) = sky.place() {
             self.panel.set_sky_x(x);
             self.panel.set_sky_y(y);
@@ -946,6 +977,37 @@ impl Shown {
         if let Some((x, y)) = picked {
             self.panel.set_sky_picked_x(x);
             self.panel.set_sky_picked_y(y);
+        }
+    }
+
+    /// The mini-map: its picture of the whole map is drawn on a background thread when the stars on show change, and
+    /// its box follows the view.
+    fn sky_mini(&self, sky: &mut Sky) {
+        if let Some(picture) = sky.mini_ask() {
+            let slots = Arc::clone(&self.slots);
+            background("mo-plugin-galaxy-mini", move || {
+                let (set, started) = (picture.id, Instant::now());
+                // A fault in the drawing is noted: the mini-map keeps the picture it had.
+                let drawn = mo_catch::catch_crash(AssertUnwindSafe(|| sky_pixels(&picture.draw())));
+                crate::log::took_if_slow("Galaxy", "Drew the mini-map", started);
+                if let Some(pixels) = drawn.ok().flatten() {
+                    *lock(&slots.mini) = Some((set, pixels));
+                }
+            });
+        }
+        if let Some((set, pixels)) = take(&self.slots.mini)
+            && sky.mini_took(set)
+        {
+            self.panel.set_sky_mini_picture(slint::Image::from_rgba8_premultiplied(pixels));
+        }
+        let mini = sky.mini();
+        self.panel.set_sky_mini(mini.is_some());
+        if let Some(mini) = mini {
+            self.panel.set_sky_mini_title(mini.title.into());
+            self.panel.set_sky_mini_x(mini.x);
+            self.panel.set_sky_mini_y(mini.y);
+            self.panel.set_sky_mini_w(mini.width);
+            self.panel.set_sky_mini_h(mini.height);
         }
     }
 
@@ -1029,12 +1091,7 @@ impl Shown {
                 // A fault in the drawing is noted, and the next picture can still be asked for.
                 let drawn = mo_catch::catch_crash(AssertUnwindSafe(|| {
                     let drawn = picture.draw();
-                    let (width, height) = (u32::try_from(drawn.width).ok()?, u32::try_from(drawn.height).ok()?);
-                    let mut pixels = SkyPixels::new(width, height);
-                    for (to, from) in pixels.make_mut_slice().iter_mut().zip(&drawn.pixels) {
-                        *to = slint::Rgba8Pixel { r: from.r, g: from.g, b: from.b, a: from.a };
-                    }
-                    Some((drawn.id, drawn.view, pixels))
+                    Some((drawn.id, drawn.view, sky_pixels(&drawn)?))
                 }));
                 crate::log::took_if_slow("Galaxy", "Drew the stars", started);
                 *lock(&slots.sky) = Some(drawn.ok().flatten().ok_or(id));

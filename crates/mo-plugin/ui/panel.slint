@@ -3,7 +3,7 @@
 // through the track, with the app's own filters and orders)
 // and DAW check (every CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PickButton, PointerPad, HoverNote, MapName, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PickButton, PointerPad, HoverNote, MapName, MapInset, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
 export { FilterView, FilterChoice, YearBar }
 import { ListView } from "../../mo-ui/ui/list.slint";
 
@@ -127,6 +127,18 @@ export component Panel inherits Window {
     callback sky-gone();
     // Back out to the whole map.
     callback sky-home();
+    // The mini-map, once the view has flown in: the whole map, with a box round the part on show (0 to 1 each way).
+    in property <bool> sky-mini;
+    in property <image> sky-mini-picture;
+    in property <string> sky-mini-title;
+    in property <float> sky-mini-x;
+    in property <float> sky-mini-y;
+    in property <float> sky-mini-w;
+    in property <float> sky-mini-h;
+    // Pressed or dragged on, this far across and down it (0 to 1).
+    callback sky-mini-go(float, float);
+    // An arrow key with the keys on the Galaxy: -1 Left, 1 Right, -2 Up, 2 Down (as the app numbers them).
+    callback sky-arrow(int);
     // The year strip beside the sounds, as on the app's Sounds page: the years sounds were added in, newest first,
     // and the places of the years picked (-1 for none). Drag over years to show only those.
     in property <[YearBar]> years;
@@ -390,7 +402,10 @@ export component Panel inherits Window {
                         background: Theme.well;
                         border-radius: Theme.radius;
                         clip: true;
-                        init => { root.sky-size(self.width, self.height); }
+                        init => {
+                            root.sky-size(self.width, self.height);
+                            sky-keys.focus();
+                        }
                         changed width => { root.sky-size(self.width, self.height); }
                         changed height => { root.sky-size(self.width, self.height); }
                         Image {
@@ -429,10 +444,36 @@ export component Panel inherits Window {
                             border-width: 2px;
                             border-color: Theme.accent;
                         }
+                        // The keys come here when the Galaxy opens or is pressed (and leave for the search box when
+                        // that's clicked): the arrows go from star to star.
+                        sky-keys := FocusScope {
+                            width: 0;
+                            height: 0;
+                            key-pressed(e) => {
+                                if e.text == Key.LeftArrow {
+                                    root.sky-arrow(-1);
+                                } else if e.text == Key.RightArrow {
+                                    root.sky-arrow(1);
+                                } else if e.text == Key.UpArrow {
+                                    root.sky-arrow(-2);
+                                } else if e.text == Key.DownArrow {
+                                    root.sky-arrow(2);
+                                } else {
+                                    return reject;
+                                }
+                                accept
+                            }
+                        }
                         PointerPad {
                             grabbing: root.sky-grabbing;
-                            down(x, y) => { root.sky-down(x, y, false); }
-                            side-down(x, y) => { root.sky-down(x, y, true); }
+                            down(x, y) => {
+                                sky-keys.focus();
+                                root.sky-down(x, y, false);
+                            }
+                            side-down(x, y) => {
+                                sky-keys.focus();
+                                root.sky-down(x, y, true);
+                            }
                             side-up => { root.sky-up(true); }
                             move(x, y) => { root.sky-move(x, y); }
                             cancelled => { root.sky-cancelled(); }
@@ -447,6 +488,17 @@ export component Panel inherits Window {
                             tint: Theme.sound-type(l.colour);
                             opacity: l.fade;
                             clicked => { root.sky-name(l.region); }
+                        }
+                        if root.sky-mini: MapInset {
+                            x: parent.width - self.width - Space.md;
+                            y: parent.height - self.height - Space.md;
+                            picture: root.sky-mini-picture;
+                            title: root.sky-mini-title;
+                            box-x: root.sky-mini-x;
+                            box-y: root.sky-mini-y;
+                            box-width: root.sky-mini-w;
+                            box-height: root.sky-mini-h;
+                            go(x, y) => { root.sky-mini-go(x, y); }
                         }
                         if root.sky-hover != "": HoverNote {
                             text: root.sky-hover;

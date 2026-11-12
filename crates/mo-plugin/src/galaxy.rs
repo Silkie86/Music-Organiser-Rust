@@ -12,6 +12,7 @@ use mo_app::galaxy_look::{self, Look, on_view};
 use mo_app::galaxy_names::{self, Label, NO_KIND, Region};
 use mo_app::galaxy_picture::Picture;
 use mo_app::galaxy_view::{View, most_zoom_for};
+use mo_app::songs::thousands;
 use mo_sounds::{Sound, StarPoint};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -31,6 +32,30 @@ const MOST_SWEEP_STEPS: usize = 200;
 
 /// While the map is moving its picture is drawn no finer than this (pixels a point), so each one comes sooner.
 const MOVING_SCALE: f32 = 1.0;
+
+/// The mini-map is this many points each way (as the app's), and comes once the view has flown in this far and is
+/// this big.
+pub const MINI: f32 = 132.0;
+const MINI_FROM_ZOOM: f32 = 1.25;
+const MINI_ROOM: (f32, f32) = (420.0, 320.0);
+
+/// The mini-map's view: the whole map, at its own size.
+fn mini_view() -> View {
+    let mut view = View::default();
+    (view.width, view.height) = (MINI, MINI);
+    view
+}
+
+/// What the mini-map says: its line ("×4  ·  1,234 in view") and the box round the part of the map on show, as parts
+/// of the mini-map (0 to 1 each way).
+#[derive(Debug, PartialEq)]
+pub struct Mini {
+    pub title: String,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
 
 /// Each sound's star, by the sound's place in the list; `None` for a sound the map hasn't placed.
 pub type Stars = Arc<Vec<Option<StarPoint>>>;
@@ -176,6 +201,8 @@ pub struct Sky {
     pub picked: Option<usize>,
     /// The showing the stars were last asked to be packed for the card: asked once.
     packing: Option<u64>,
+    /// The showing the mini-map's picture was last asked for: asked once.
+    mini: Option<u64>,
     /// A picture is being drawn now.
     drawing: bool,
     /// The view or the stars changed since the last picture was asked for.
@@ -395,6 +422,92 @@ impl Sky {
         }
     }
 
+    /// The mini-map's picture to draw now ([`Picture::draw`] it off the panel's thread, then [`Sky::mini_took`] with
+    /// its `id`): the whole map as the filters leave it, in plain dots. `None` with no map, or when this showing's
+    /// was asked for already.
+    pub fn mini_ask(&mut self) -> Option<Picture> {
+        let map = self.map.as_ref()?;
+        if self.mini == Some(self.set) {
+            return None;
+        }
+        self.mini = Some(self.set);
+        let view = mini_view();
+        Some(Picture {
+            id: self.set,
+            stars: Arc::clone(&map.stars),
+            count: map.count,
+            colours: Arc::clone(&map.colours),
+            shown: Arc::clone(&self.shown),
+            light: Arc::default(),
+            order: Arc::default(),
+            palette: self.palette.clone(),
+            view,
+            scale: self.scale.max(0.25),
+            crowd: Crowd::even(&view, self.shown.len()),
+            glows: false,
+        })
+    }
+
+    /// Whether a mini-map picture drawn for asking `set` is still the one to show (the filters haven't changed).
+    pub fn mini_took(&self, set: u64) -> bool {
+        set == self.set
+    }
+
+    /// The mini-map as it is now: `None` until the view has flown in (and while there's no room for it).
+    pub fn mini(&self) -> Option<Mini> {
+        let view = &self.view;
+        let count = self.map.as_ref()?.count;
+        if view.zoom <= MINI_FROM_ZOOM || view.width < MINI_ROOM.0 || view.height < MINI_ROOM.1 || count == 0 {
+            return None;
+        }
+        let mini = mini_view();
+        let (l, t, r, b) = on_view(view);
+        let corner = |x: f32, y: f32| {
+            let (px, py) = mini.to_view(x, y, 1.0);
+            ((px / MINI).clamp(0.0, 1.0), (py / MINI).clamp(0.0, 1.0))
+        };
+        let ((x0, y0), (x1, y1)) = (corner(l, t), corner(r, b));
+        let title = match &self.grid {
+            Some(grid) => format!("×{:.0}  ·  {} in view", view.zoom, thousands(grid.count_in(l, t, r, b))),
+            None => format!("×{:.0}", view.zoom),
+        };
+        Some(Mini { title, x: x0, y: y0, width: x1 - x0, height: y1 - y0 })
+    }
+
+    /// A press on the mini-map, (`x`, `y`) of the way across and down it: the view glides there, as far in as it is.
+    pub fn mini_go(&mut self, x: f32, y: f32) {
+        let (x, y) = mini_view().to_map(x.clamp(0.0, 1.0) * MINI, y.clamp(0.0, 1.0) * MINI);
+        let zoom = self.view.zoom;
+        self.view.fly_to(x.clamp(0.0, 1.0), y.clamp(0.0, 1.0), zoom);
+        self.stale = true;
+    }
+
+    /// An arrow key (`way`: (1, 0) for Right, (0, 1) for Down): the nearest star that way from the picked one (or
+    /// from the middle of the view) is picked, and the map glides to keep it in sight, as in the app. The star to
+    /// play: its place in the list. `None` when there's no star that way, or no grid yet.
+    pub fn arrow(&mut self, way: (f32, f32)) -> Option<usize> {
+        let stars = &self.map.as_ref()?.stars;
+        let star = |at: usize| stars.get(at).copied().flatten();
+        let from = self.picked.and_then(star).map_or((self.view.cx, self.view.cy), |s| (s.x, s.y));
+        // A view moved off the map starts from its nearest edge, so the stars on the map are still found.
+        let from = (from.0.clamp(0.0, 1.0), from.1.clamp(0.0, 1.0));
+        // At least a star's width on the view, so each press shows a move.
+        let least = NEAR / self.view.unit().max(f32::MIN_POSITIVE);
+        let at = self.grid.as_ref()?.toward(from.0, from.1, way, least)?;
+        let to = star(at)?;
+        self.picked = Some(at);
+        // Off the view or near its edge: the map glides (as far in as it is) to put the star in the middle.
+        let (x, y) = self.view.to_view(to.x, to.y, 1.0);
+        let (width, height) = (self.view.width, self.view.height);
+        let edge = 0.1 * width.min(height);
+        if x < edge || y < edge || x > width - edge || y > height - edge {
+            let zoom = self.view.zoom;
+            self.view.fly_to(to.x, to.y, zoom);
+            self.stale = true;
+        }
+        Some(at)
+    }
+
     /// The shown stars the mouse passed going from `from` to `to` on the view, in the order it passed them, each once.
     pub fn passed(&self, from: (f32, f32), to: (f32, f32)) -> Vec<usize> {
         let far = (to.0 - from.0).hypot(to.1 - from.1);
@@ -561,5 +674,67 @@ mod tests {
         // A sweep across it passes it once; one that stays away passes none.
         assert_eq!(sky.passed((x - 30.0, y), (x + 30.0, y)), [0]);
         assert!(sky.passed((x - 30.0, y + 40.0), (x + 30.0, y + 40.0)).is_empty());
+    }
+
+    fn with_grid(mut sky: Sky) -> Sky {
+        let (set, stars, shown) = sky.grid_ask().expect("a grid to make");
+        sky.set_grid(set, Grid::new(&stars, &shown));
+        sky
+    }
+
+    #[test]
+    fn the_mini_map_comes_once_flown_in_and_a_press_on_it_glides_there() {
+        let mut sky = with_grid(sky());
+        sky.resize(600.0, 400.0);
+        assert_eq!(sky.mini(), None, "the whole map is on show");
+        // Its picture is asked for once a showing: the whole map, whatever the view.
+        let picture = sky.mini_ask().expect("a mini-map to draw");
+        assert!(sky.mini_ask().is_none());
+        assert_eq!((picture.view.width, picture.view.zoom, picture.glows), (MINI, 1.0, false));
+        assert!(sky.mini_took(picture.id));
+        sky.view.zoom = 4.0;
+        (sky.view.cx, sky.view.cy) = (0.25, 0.5);
+        let mini = sky.mini().expect("a mini-map");
+        assert_eq!(mini.title, "×4  ·  1 in view");
+        // The box is round the part on show: about the left star, and smaller than the mini-map.
+        let middle = (mini.x + mini.width / 2.0, mini.y + mini.height / 2.0);
+        assert!((middle.0 - 0.25).abs() < 0.05 && (middle.1 - 0.5).abs() < 0.05, "{mini:?}");
+        assert!(mini.width < 0.5 && mini.height < 0.5, "{mini:?}");
+        // No room for it in a small view.
+        sky.resize(300.0, 400.0);
+        assert_eq!(sky.mini(), None);
+        sky.resize(600.0, 400.0);
+        // A press on its right half glides the view there, no further in or out.
+        sky.mini_go(0.75, 0.5);
+        assert!(sky.view.flying());
+        sky.view.glide(std::time::Duration::from_secs(60));
+        assert!((sky.view.cx - 0.75).abs() < 0.05 && (sky.view.cy - 0.5).abs() < 0.01, "{:?}", sky.view);
+        assert!((sky.view.zoom - 4.0).abs() < 0.01);
+        // The filters changed while a picture was drawn: it isn't shown, and a new one is asked for.
+        sky.set_shown(Arc::new(vec![0]));
+        assert!(!sky.mini_took(picture.id));
+        assert!(sky.mini_ask().is_some());
+    }
+
+    #[test]
+    fn an_arrow_key_picks_the_nearest_star_that_way_and_keeps_it_in_sight() {
+        let mut sky = sky();
+        assert_eq!(sky.arrow((1.0, 0.0)), None, "no grid yet");
+        let mut sky = with_grid(sky);
+        // From the middle of the view with no star picked.
+        assert_eq!(sky.arrow((-1.0, 0.0)), Some(0));
+        assert_eq!(sky.picked, Some(0));
+        assert!(!sky.view.flying(), "it's well inside the view");
+        assert_eq!(sky.arrow((1.0, 0.0)), Some(1), "from the picked star now");
+        assert_eq!(sky.arrow((1.0, 0.0)), None, "none further right");
+        assert_eq!(sky.arrow((0.0, -1.0)), None, "none above");
+        assert_eq!(sky.picked, Some(1));
+        // Flown in on the right star, the left one is off the view: the map glides to it.
+        sky.view.zoom = 8.0;
+        (sky.view.cx, sky.view.cy) = (0.75, 0.5);
+        assert_eq!(sky.arrow((-1.0, 0.0)), Some(0));
+        assert!(sky.view.flying());
+        sky.view.glide(std::time::Duration::from_secs(60));
+        assert!((sky.view.cx - 0.25).abs() < 0.01 && (sky.view.zoom - 8.0).abs() < 0.01, "{:?}", sky.view);
     }
 }
