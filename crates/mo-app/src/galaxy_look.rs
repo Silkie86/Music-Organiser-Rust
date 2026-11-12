@@ -263,6 +263,8 @@ pub const STAMP: f32 = 1.0 / 6.0;
 /// and the last 0 when the filters leave it out, 1 to 255 by how lit it is when they let it through) and its weight
 /// (an f32).
 pub const STAR_BYTES: usize = 16;
+/// Where in a star's bytes its light byte is: 0 for a left-out star, 1 to 255 for a shown one.
+pub const LIGHT_BYTE: usize = 11;
 
 /// What the shaders need for one view.
 #[derive(Clone, Copy, Debug, PartialEq)]

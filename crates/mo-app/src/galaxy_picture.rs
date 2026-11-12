@@ -227,7 +227,7 @@ impl Picture {
             })
             .collect();
         placed.par_sort_unstable_by_key(|p| (p.0, p.1, p.2));
-        let cloud = Cloud::new(&placed, w, h, size, grid);
+        let cloud = Cloud::new(&placed, w, h, size, grid, if lighting { DUST_LIT } else { 1.0 });
         // Where each band's stars start.
         let starts: Vec<usize> = (0..=bands).map(|b| placed.partition_point(|p| p.0 < b)).collect();
         pixels.par_chunks_mut((w * BAND).max(1)).enumerate().for_each(|(band, rows)| {
@@ -309,8 +309,8 @@ fn disc(rows: &mut [Rgba], w: usize, y0: usize, d: &Dot) {
     }
 }
 
-/// Draws a left-out star as grey dust (only its core, at its strength) on the rows in `rows`, as [`disc`] does: the
-/// fuller of dust a pixel already is, the less each speck adds, so it never goes past [`DUST_MOST`] grey.
+/// Draws a left-out star as grey dust (only its core, at its strength) on the rows in `rows`, as [`disc`] does, the
+/// way the graphics card does: the lighter of it and what's there, never added, so a crowd stays as faint as one.
 fn speck(rows: &mut [Rgba], w: usize, y0: usize, d: &Dot) {
     let h = rows.len() / w.max(1);
     let (x, y, r) = (d.x, d.y - y0 as f32, d.r);
@@ -329,18 +329,16 @@ fn speck(rows: &mut [Rgba], w: usize, y0: usize, d: &Dot) {
 }
 
 /// The grey of the left-out stars' dust (0 to 255).
-fn dust_grey() -> u8 {
-    (DUST_GREY * 255.0).round() as u8
-}
+const DUST_GREY_BYTE: u8 = (DUST_GREY * 255.0 + 0.5) as u8;
 
-/// Lays grey dust on a pixel at strength `a` (0 to 1), only as far as it's under [`DUST_MOST`] alpha: however much
-/// dust lands on it, it stays a faint grey haze. (The shown stars' light is screened on after it.)
+/// Lays grey dust on a pixel at strength `a` (0 to 1, never more than [`DUST_MOST`]): each of its colours and its
+/// alpha become the larger of what's there and the dust's, so however much dust lands on it, it stays a faint grey
+/// haze. (The shown stars' light is screened on after it.)
 fn lay_dust(o: &mut Rgba, a: f32) {
-    let room = (1.0 - o.a as f32 / (DUST_MOST * 255.0)).max(0.0);
-    if room > 0.0 {
-        let g = dust_grey();
-        screen(o, [g, g, g], a * room);
-    }
+    let a = a.min(DUST_MOST);
+    let g = (DUST_GREY_BYTE as f32 * a).round() as u8;
+    (o.r, o.g, o.b) = (o.r.max(g), o.g.max(g), o.b.max(g));
+    o.a = o.a.max((a * 255.0).round() as u8);
 }
 
 /// Lights a pixel with `colour` at strength `a` (0 to 1): a "screen" blend, so light only ever adds, and a lot of it
@@ -370,7 +368,15 @@ struct Cloud {
 }
 
 impl Cloud {
-    fn new(placed: &[(usize, bool, usize, bool, Dot)], w: usize, h: usize, size: f32, origin: (f32, f32)) -> Cloud {
+    /// `dust` is how bright the left-out stars' grey dust is (1, or [`DUST_LIT`] with Light by on).
+    fn new(
+        placed: &[(usize, bool, usize, bool, Dot)],
+        w: usize,
+        h: usize,
+        size: f32,
+        origin: (f32, f32),
+        dust: f32,
+    ) -> Cloud {
         let columns = ((w as f32 - origin.0) / size).ceil() as usize + 2 * CLOUD_BLUR + 1;
         let rows = ((h as f32 - origin.1) / size).ceil() as usize + 2 * CLOUD_BLUR + 1;
         let cells = columns * rows;
@@ -390,7 +396,7 @@ impl Cloud {
                 s[3] += 1.0;
             } else {
                 // A star the filters leave out still glows a little, as grey dust.
-                s[4] += 0.15;
+                s[4] += 0.15 * dust;
             }
             sums
         };
@@ -453,7 +459,7 @@ impl Cloud {
                     }
                 }
                 if dust > 1e-3 {
-                    let g = dust_grey();
+                    let g = DUST_GREY_BYTE;
                     screen(o, [g, g, g], dust);
                 }
                 if thick <= 1e-3 {
