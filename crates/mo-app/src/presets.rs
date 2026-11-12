@@ -472,10 +472,11 @@ pub struct Filters {
 }
 
 impl Filters {
-    /// Whether any chip is on (the Clear chip shows then). The search box has its own ×, and the unused synths are
-    /// an option, not a filter.
+    /// Whether anything narrows the list that Clear filters takes off: a chip, or words in the search box (Clear
+    /// filters shows then). The unused synths are an option, not a filter.
     pub fn any(&self) -> bool {
-        self.choice != Choice::default()
+        !self.search.trim().is_empty()
+            || self.choice != Choice::default()
             || !self.formats.is_empty()
             || !self.parts.is_empty()
             || self.from != From::All
@@ -511,9 +512,10 @@ impl Filters {
         }
     }
 
-    /// Every chip off, the search, the option and the order kept.
+    /// Every chip off and the search gone, as Clear filters leaves them on every page; the option and the order kept.
+    /// A search left in the box went on narrowing the list unseen (Solomon, 12 Nov 2026, on Sounds: "same issue").
     pub fn cleared(&self) -> Filters {
-        Filters { search: self.search.clone(), unused: self.unused, ..self.only_order() }
+        Filters { unused: self.unused, ..self.only_order() }
     }
 
     /// No filter at all, in this one's order: the order isn't a filter, so it outlives them.
@@ -1761,6 +1763,10 @@ mod tests {
         // The part is searched too.
         assert_eq!(shown(&all, &Filters { search: "bass".into(), ..f.clone() }), [0]);
         assert!(!f.any() && Filters { from: From::Songs, ..f.clone() }.any());
+        // Words in the search box narrow it too, and Clear filters takes them off with the chips.
+        let searched = Filters { search: "bass".into(), unused: true, ..f.clone() };
+        assert!(searched.any() && !Filters { search: " ".into(), ..f.clone() }.any());
+        assert_eq!(searched.cleared(), Filters { unused: true, ..f.clone() });
 
         // A click on a heading: A to Z by its column, lines the same there as they were found; a second click turns
         // it round; a third puts the list back. The order isn't a filter, and Clear keeps it.

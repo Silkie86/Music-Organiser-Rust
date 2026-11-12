@@ -237,19 +237,21 @@ impl Filters {
         }
     }
 
-    /// Whether any filter is set (for the Clear chip). The search box doesn't count: it has its own ×. Nor does Keys
+    /// Whether anything narrows the list that Clear filters takes off: a filter, or words in the search box. Not Keys
     /// that mix well with no key picked: it changes nothing then, and its chip isn't shown. Nor Hide duplicates: Clear
-    /// leaves it as it is.
+    /// filters leaves it as it is.
     pub fn any(&self) -> bool {
         let mix_well = self.mix_well && self.keys.is_empty();
         let none =
             Filters { search: self.search.clone(), mix_well, hide_copies: self.hide_copies, ..Filters::default() };
-        *self != none
+        *self != none || !self.search.trim().is_empty()
     }
 
-    /// No filters, as the Clear chip leaves them: the search box and Hide duplicates stay as they are.
+    /// No filters and no search, as Clear filters leaves them, as on every page: only Hide duplicates stays as it is.
+    /// A search left in the box went on narrowing the list after Clear filters, unseen (Solomon, 12 Nov 2026: "why are
+    /// only these showing as favourites", then "same issue").
     pub fn cleared(&self) -> Filters {
-        Filters { search: self.search.clone(), hide_copies: self.hide_copies, ..Filters::default() }
+        Filters { hide_copies: self.hide_copies, ..Filters::default() }
     }
 }
 
@@ -2360,9 +2362,13 @@ mod tests {
     }
 
     #[test]
-    fn clear_counts_filters_but_not_the_search() {
-        assert!(!Filters { search: "kick".into(), ..Filters::default() }.any());
+    fn clear_takes_off_the_search_too() {
+        let andy = Filters { search: "andy".into(), favourites: true, hide_copies: true, ..Filters::default() };
+        assert!(Filters { search: "andy".into(), ..Filters::default() }.any());
+        assert!(!Filters { search: "  ".into(), ..Filters::default() }.any());
         assert!(Filters { favourites: true, ..Filters::default() }.any());
+        assert_eq!(andy.cleared(), Filters { hide_copies: true, ..Filters::default() });
+        assert!(!andy.cleared().any());
         assert_eq!(Order::from_name("Most liked"), Order::MostLiked);
         assert_eq!(Order::from_name("whatever"), Order::Shuffled);
     }

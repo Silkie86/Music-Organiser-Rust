@@ -530,6 +530,7 @@ component CurvePanel inherits SidePanel {
         min-width: 0px;
     }
     if PresetsData.renaming: rename := SearchBox {
+        search: false;
         hint: "A name for this curve";
         text <=> PresetsData.rename-text;
         // It takes the keys as it's made, and a change handler starts from what `init` leaves, so the one below would

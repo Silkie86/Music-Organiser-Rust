@@ -688,28 +688,34 @@ export component StudioSlider inherits HorizontalLayout {
     }
 }
 
-// The search box: a pressed-in field with its hint shown until something is typed.
+// The search box: a pressed-in field with its hint shown until something is typed. While it holds words it stays lit,
+// as a picked filter is, with a × that takes them off: a search left in it went on narrowing the list unseen
+// (Solomon, 12 Nov 2026: "why are only these showing as favourites").
 export component SearchBox inherits Rectangle {
     in property <string> hint: "Search";
     in-out property <string> text <=> input.text;
     // The page's own search, not a box for a name: Ctrl+Up and Ctrl+Down step through the page's list from it, and Esc
     // goes on to the app's keys (the page's next step back), as anywhere on the page.
     in property <bool> page-search;
+    // A search, lit with its × while it holds words; a box for a name (a rename) is neither.
+    in property <bool> search: true;
     // Whether the keys are in it: a page gives them back to its list when a box for a name goes (on a card).
     out property <bool> has-keys: input.has-focus;
     callback edited(string);
     // Down and Enter go to the page first (and Esc, in a box that isn't the page's search); it returns true when it
     // used the key.
     callback key(string) -> bool;
+    // Words in a search narrow what it searches: it's lit then, and its × shows.
+    property <bool> narrows: root.search && input.text != "";
     forward-focus: input;
     // One height for every control in a row (buttons, view switches, search): the row lines up.
     height: 32px;
     border-radius: Theme.radius;
     border-width: 1px;
-    border-color: input.has-focus ? Theme.accent : Theme.edge;
+    border-color: input.has-focus || root.narrows ? Theme.accent : Theme.edge;
     background: Theme.well;
     animate border-color { duration: Motion.tap; }
-    // The same magnifier as Ctrl+K's, lit while you type, so every search looks like one.
+    // The same magnifier as Ctrl+K's, lit while you type and while words are in it, so every search looks like one.
     Path {
         x: 10px;
         y: (parent.height - self.height) / 2;
@@ -718,7 +724,7 @@ export component SearchBox inherits Rectangle {
         viewbox-width: 16;
         viewbox-height: 16;
         commands: Icons.search;
-        stroke: input.has-focus ? Theme.accent : Theme.faint;
+        stroke: input.has-focus || root.narrows ? Theme.accent : Theme.faint;
         stroke-width: 1.6px;
     }
     Text {
@@ -732,7 +738,8 @@ export component SearchBox inherits Rectangle {
     }
     input := TextInput {
         x: 34px;
-        width: parent.width - 44px;
+        // Short of the × while it shows, so the words never run under it.
+        width: parent.width - self.x - (root.narrows ? clear.width + 10px : 10px);
         height: parent.height;
         color: Theme.text;
         font-size: Type.body;
@@ -760,6 +767,18 @@ export component SearchBox inherits Rectangle {
                 }
             }
             reject
+        }
+    }
+
+    // The words off in one click, as Clear filters takes them off with the filters. The keys stay where they were.
+    clear := CloseButton {
+        visible: root.narrows;
+        x: parent.width - self.width - 6px;
+        y: (parent.height - self.height) / 2;
+        tip: "Clear the search";
+        clicked => {
+            input.text = "";
+            root.edited("");
         }
     }
 
