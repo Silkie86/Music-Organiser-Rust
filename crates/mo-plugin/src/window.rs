@@ -15,7 +15,7 @@ mod midi_tab;
 use crate::audition::Played;
 use crate::galaxy::{self, Sky};
 use crate::gpu::Gpu;
-use crate::library::{self, Asked, Library, ORDERS, Read};
+use crate::library::{self, Asked, Library, Like, ORDERS, Read};
 use crate::threads::{background, lock};
 use crate::waves::{self, Kept};
 use crate::{
@@ -130,6 +130,8 @@ struct Slots {
     found: Mutex<Option<(u64, Vec<usize>, SoundCounts)>>,
     /// Counts askings: only the newest one's answer is shown.
     searches: AtomicU64,
+    /// The sounds like your favourites have been worked out (or couldn't be): the list is asked for again.
+    like_done: AtomicBool,
     played: Mutex<Option<Played>>,
     /// A line dragged out: which, and its file, once it's been checked to be there (or written, for a MIDI part),
     /// or why it can't go.
@@ -700,6 +702,7 @@ impl Shown {
                     column.show(&panel, library.as_deref(), &asked);
                 }
                 if let Some(library) = library {
+                    like_wanted(&library, &asked, &slots);
                     view(library, asked, Arc::clone(&slots));
                 }
             })
@@ -723,6 +726,10 @@ impl Shown {
         });
         let change = Rc::clone(&changed);
         panel.on_toggle(move |line| change(&|a, _| a.filters.toggle(&line)));
+        let change = Rc::clone(&changed);
+        panel.on_like_favourites_set(move |share| {
+            change(&|a, _| a.filters.like_favourites = mo_app::sounds::like_favourites_step(share));
+        });
         let change = Rc::clone(&changed);
         panel.on_tempo_picked(move |low, high| change(&|a, _| a.filters.set_tempo(low, high)));
         // The year strip: places on it dragged over become the years picked.
@@ -1245,6 +1252,13 @@ impl Shown {
                 Read::Not(why) => self.panel.set_status(why.into()),
             }
         }
+        if self.slots.like_done.swap(false, Ordering::AcqRel)
+            && let Some(library) = self.lines.library.borrow().clone()
+        {
+            let asked = self.asked.borrow().clone();
+            self.column.show(&self.panel, Some(&library), &asked);
+            view(library, asked, Arc::clone(&self.slots));
+        }
         if let Some((number, found, counts)) = take(&self.slots.found)
             && number == self.slots.searches.load(Ordering::Acquire)
         {
@@ -1566,6 +1580,19 @@ fn count_line(total: usize, found: Option<usize>) -> String {
     }
 }
 
+/// Starts working out the sounds like your favourites on a background thread, when `asked` wants them and they haven't
+/// been yet: the list is asked for again once they're known ([`Slots::like_done`]).
+fn like_wanted(library: &Arc<Library>, asked: &Asked, slots: &Arc<Slots>) {
+    if !library.start_like(asked) {
+        return;
+    }
+    let (library, slots) = (Arc::clone(library), Arc::clone(slots));
+    background("mo-plugin-like", move || {
+        library.read_like();
+        slots.like_done.store(true, Ordering::Release);
+    });
+}
+
 /// Works out what `asked` shows of `library` on a background thread; it lands in `slots.found` with this asking's
 /// number, and only the newest asking's answer is shown.
 fn view(library: Arc<Library>, asked: Asked, slots: Arc<Slots>) {
@@ -1609,6 +1636,13 @@ impl Column {
         panel.set_tag_filter(self.tag.view(&chips.tag));
         panel.set_mix_well(asked.filters.mix_well);
         panel.set_favourites(asked.filters.favourites);
+        let step = asked.filters.like_favourites;
+        panel.set_like_favourites(f32::from(step) / f32::from(mo_app::sounds::LIKE_STEPS));
+        let words = match library.map(Library::like) {
+            Some(Like::Not(_)) if step > 0 => "Not found".to_owned(),
+            like => mo_app::sounds::like_favourites_words(step, matches!(like, Some(Like::Ready(_)))),
+        };
+        panel.set_like_favourites_words(words.into());
         panel.set_tempo_low(chips.tempo.low);
         panel.set_tempo_high(chips.tempo.high);
         panel.set_tempo_words(chips.tempo.words.as_str().into());

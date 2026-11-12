@@ -32,6 +32,7 @@ pub mod kits;
 pub mod learn;
 pub mod liking;
 pub mod music;
+pub mod near;
 pub mod rediscover;
 pub mod scan;
 pub mod trimmed;
