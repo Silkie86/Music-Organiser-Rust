@@ -38,6 +38,8 @@ pub struct Voice {
     covers: f32,
     /// Starts again at its end, until it's stopped or replaced.
     looping: bool,
+    /// A loop whatever the Loop switch says (a MIDI part played with a SoundFont): the switch doesn't change it.
+    always: bool,
 }
 
 impl Voice {
@@ -48,13 +50,26 @@ impl Voice {
             Some(c) => resample(c, from_rate, to_rate),
             None => left.clone(),
         };
-        Voice { left, right, at: 0, begins: 0.0, covers: 1.0, looping: false }
+        Voice { left, right, at: 0, begins: 0.0, covers: 1.0, looping: false, always: false }
     }
 
-    /// Plays round and round.
+    /// Plays round and round while the Loop switch is on (it can be turned off as it plays).
     fn looped(mut self) -> Voice {
         self.looping = true;
         self
+    }
+
+    /// Plays round and round, whatever the Loop switch says.
+    fn always_looped(mut self) -> Voice {
+        self.always = true;
+        self.looped()
+    }
+
+    /// The Loop switch turned on or off while it plays: a sound plays on round, or to its end this time round.
+    fn switch_loop(&mut self, on: bool) {
+        if !self.always {
+            self.looping = on;
+        }
     }
 
     /// Starts `part` of the way in (0 the start, 1 the end) instead of at the start.
@@ -114,6 +129,8 @@ fn resample(samples: &[f32], from: u32, to: u32) -> Vec<f32> {
 pub enum Ask {
     Play(Box<Voice>),
     Stop,
+    /// The Loop switch, turned on or off.
+    Loop(bool),
 }
 
 /// What the audio thread counts for the panel (plain numbers only: nothing there waits).
@@ -155,6 +172,11 @@ impl Playing {
                     self.retire(Some(voice));
                 }
                 Ok(Ask::Stop) => self.retire(None),
+                Ok(Ask::Loop(on)) => {
+                    if let Some(voice) = &mut self.now {
+                        voice.switch_loop(on);
+                    }
+                }
                 Err(_) => break,
             }
         }
@@ -260,6 +282,8 @@ pub struct Player {
     trim_db: AtomicI32,
     /// The DAW's tempo, as an `f64`'s bits, as its audio thread last said; 0 before it has.
     tempo: AtomicU64,
+    /// The Loop switch: a sound clicked plays round and round until it's stopped (or another is clicked).
+    looping: AtomicBool,
 }
 
 impl Player {
@@ -280,6 +304,18 @@ impl Player {
     /// Trim silence's level as a sample's size, while it's on.
     fn trim_level(&self) -> Option<f32> {
         self.trim().map(mo_audio::trim::level_of_db)
+    }
+
+    /// Turns the Loop switch on or off: from the next sound played, and for the one playing now.
+    pub fn set_loop(&self, on: bool) {
+        self.looping.store(on, Ordering::Release);
+        // Nothing playing (the track's audio not started) is nothing to change.
+        let _ = self.ask(Ask::Loop(on));
+    }
+
+    /// Whether the Loop switch is on.
+    pub fn looping(&self) -> bool {
+        self.looping.load(Ordering::Acquire)
     }
 
     /// The DAW's tempo now (the audio thread's side: a plain store, nothing waits).
@@ -383,6 +419,7 @@ impl Player {
                     *lock(&self.heard) = Some((pick.path.clone(), wave));
                 }
                 match self.voice_from(&pick, audio, rate) {
+                    Ok(voice) if self.looping() => self.hand_over(Box::new(voice.looped()), name),
                     Ok(voice) => self.hand_over(Box::new(voice), name),
                     Err(why) => Played::Not(why),
                 }
@@ -422,7 +459,8 @@ impl Player {
             Err(why) => Played::Not(why),
             Ok(_) if rate == 0 => Played::Not(NOT_STARTED.into()),
             Ok(audio) => {
-                self.hand_over(Box::new(Voice::new(&audio.channels, audio.sample_rate, rate).looped()), name.into())
+                let voice = Voice::new(&audio.channels, audio.sample_rate, rate).always_looped();
+                self.hand_over(Box::new(voice), name.into())
             }
         };
         match &played {
@@ -640,6 +678,32 @@ mod tests {
         assert_eq!(lock(&player.done).as_ref().unwrap().slots(), 0);
         playing.fill(&mut l, &mut r);
         assert_eq!(l, vec![0.0; 4]);
+    }
+
+    #[test]
+    fn the_loop_switch_turned_off_lets_a_sound_end_but_never_a_midi_part() {
+        let player = Player::default();
+        let mut playing = player.start(48_000);
+        player.set_loop(true);
+        assert!(player.looping());
+        let sound = Voice::new(&[vec![0.1, 0.2]], 48_000, 48_000).looped();
+        player.hand_over(Box::new(sound), "a".into());
+        let (mut l, mut r) = (vec![9.0; 3], vec![9.0; 3]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, [0.1, 0.2, 0.1].map(|x| x * LEVEL).to_vec());
+        // Turned off as it plays: it plays to its end this time round, and stops.
+        player.set_loop(false);
+        let (mut l, mut r) = (vec![9.0; 3], vec![9.0; 3]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![0.2 * LEVEL, 0.0, 0.0]);
+        assert!(playing.now.is_none());
+        // A MIDI part loops whatever the switch says.
+        let part = Voice::new(&[vec![0.3]], 48_000, 48_000).always_looped();
+        player.hand_over(Box::new(part), "b".into());
+        player.set_loop(false);
+        let (mut l, mut r) = (vec![9.0; 3], vec![9.0; 3]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![0.3 * LEVEL; 3]);
     }
 
     #[test]

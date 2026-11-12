@@ -226,6 +226,9 @@ export component Panel inherits Window {
     in property <[string]> trim-choices;
     // A pick from its menu: "-50 dB", or "" for off.
     callback pick-trim(string);
+    // The Loop switch: a sound clicked plays round and round until it's stopped or another is clicked.
+    in-out property <bool> loop-on;
+    callback loop-changed(bool);
     // A choice was picked or unpicked on a filter ("type", "length", "key", "tag"): its words.
     callback pick(string, string);
     // Nothing picked on a filter (or "more-types": only the types in the More menu).
@@ -491,6 +494,16 @@ export component Panel inherits Window {
                         none-text: "Off: play the whole file";
                         choices: root.trim-choices;
                         picked(t) => { root.pick-trim(t); }
+                    }
+                    StudioButton {
+                        horizontal-stretch: 0;
+                        text: "Loop";
+                        main: root.loop-on;
+                        tip: root.loop-on ? "Looping: a sound plays round until you stop it" : "Play sounds round and round until you stop them";
+                        clicked => {
+                            root.loop-on = !root.loop-on;
+                            root.loop-changed(root.loop-on);
+                        }
                     }
                     StudioButton {
                         horizontal-stretch: 0;
