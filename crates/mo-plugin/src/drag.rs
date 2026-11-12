@@ -8,10 +8,12 @@
 //! linking are offered, never moving: whatever takes the file can use it where it is or copy it, and can never move
 //! the sample away (rule 2). How each drag went is in the plugin's log.
 //!
-//! The drag runs on a thread of its own, set up for OLE there, as JUCE's plugins run theirs: Windows holds the
-//! thread a drag is on until the file is let go, and in Bitwig a drag run on the window's own thread was never
-//! offered a place to land (Solomon's log, 11 Nov 2026: every track answered "nothing"). The window's thread goes
-//! on meanwhile and is told how it ended.
+//! The drag runs on the window's own thread, as other plugins' drags do (Scaler's way, and the open plugins read on
+//! 12 Nov 2026), after the window lets go of the mouse. That last part is what was missing: the window (baseview)
+//! holds the mouse while a button is down, and when Windows' drag took the mouse for itself the window took it
+//! straight back, so the drag never saw the mouse leave the panel and nothing under it was ever asked to take the
+//! file (Solomon's log, 11 Nov 2026: every drag ended with "nothing offered"). On a thread of its own the drag
+//! couldn't get the mouse at all, and never started (12 Nov 2026).
 //!
 //! Not on Mac or Linux yet: there the lines can't be dragged.
 
@@ -29,18 +31,14 @@ pub enum Outcome {
     Cancelled,
 }
 
-/// Hands `file` to the system's drag and drop, on a thread of its own, and tells `done` there how it ended once
-/// it's let go. An error is what to tell the user: the drag couldn't start.
-pub fn file(file: PathBuf, done: impl FnOnce(Result<Outcome, String>) + Send + 'static) {
-    // At normal priority, unlike other background work: the mouse is waiting on it.
-    let started = std::thread::Builder::new().name("mo-plugin-drag".into()).spawn(move || {
-        let ended = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| hand_over(&file)))
-            .unwrap_or_else(|_| Err("the drag crashed".into()));
-        done(ended);
-    });
-    if let Err(e) = started {
-        crate::log::line("Drag", &format!("No thread to carry the file on: {e}"));
-    }
+/// Hands `file` to the system's drag and drop and waits until it's let go, then tells `done` how it ended. Call it
+/// on the window's thread from its timer, with nothing borrowed that the timer needs: on Windows the timer still
+/// runs while the file is carried. An error is what to tell the user: the drag couldn't start.
+pub fn file(file: PathBuf, done: impl FnOnce(Result<Outcome, String>)) {
+    crate::log::line("Drag", &format!("Carrying {}", file.display()));
+    let ended = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| hand_over(&file)))
+        .unwrap_or_else(|_| Err("the drag crashed".into()));
+    done(ended);
 }
 
 #[cfg(not(windows))]
@@ -75,7 +73,7 @@ mod ole {
         IDropSource_Impl, OleInitialize, OleUninitialize,
     };
     use windows::Win32::System::SystemServices::{MK_LBUTTON, MK_MBUTTON, MK_RBUTTON, MODIFIERKEYS_FLAGS};
-    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON};
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, ReleaseCapture, VK_LBUTTON, VK_RBUTTON};
     use windows::Win32::UI::Shell::{
         BHID_DataObject, DROPFILES, IShellItem, SHCreateDataObject, SHCreateItemFromParsingName,
     };
@@ -83,9 +81,10 @@ mod ole {
     use windows::core::{BOOL, HRESULT, PCWSTR, implement};
 
     pub fn drag(file: &Path) -> Result<Outcome, String> {
-        // SAFETY: called on the drag's own thread, which nothing else uses: it's set up for OLE here for as long as
-        // the drag lasts, and the matching OleUninitialize below hands that back. The data object and the drop
-        // source are made, used and let go on this thread, between the two.
+        // SAFETY: called on the window's thread. The window (baseview) has set the thread up for OLE already, so this
+        // only counts one more use of it, and the matching OleUninitialize below hands it back. In a DAW whose main
+        // thread is set up another way this fails, and the drag is off. The data object and the drop source are
+        // made, used and let go on this thread, between the two.
         if let Err(e) = unsafe { OleInitialize(None) } {
             return Err(format!("Windows' drag and drop isn't ready in this DAW ({e})"));
         }
@@ -114,6 +113,10 @@ mod ole {
         let source: IDropSource = Source { offered: Arc::clone(&offered) }.into();
         let allowed = DROPEFFECT_COPY | DROPEFFECT_LINK;
         let mut effect = DROPEFFECT_NONE;
+        // The window lets go of the mouse first, so the drag has it to itself (it told the panel the button is up as
+        // it did: the panel is told again when the drag ends).
+        // SAFETY: a plain call on the window's thread, which holds the mouse.
+        let _ = unsafe { ReleaseCapture() };
         // SAFETY: `data` and `source` are live COM objects for the whole call, and `effect` outlives it.
         let hr = unsafe { DoDragDrop(&data, &source, allowed, &mut effect) };
         crate::log::line(

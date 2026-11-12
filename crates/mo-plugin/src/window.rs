@@ -1286,8 +1286,9 @@ impl Shown {
         self.render();
     }
 
-    /// Carries a dragged line's file out, once it's been found: the system's drag runs on a thread of its own
-    /// (`drag.rs`) and its end comes back in a slot ([`Shown::dragged`]).
+    /// Carries a dragged line's file out, once it's been found: the system's drag holds this thread until it's let
+    /// go (`drag.rs`; the timer still runs meanwhile, and finds `dragging` set), and its end comes back in a slot
+    /// ([`Shown::dragged`]).
     fn drag(&self) {
         self.dragged();
         if self.dragging.get() {

@@ -68,9 +68,13 @@ pub struct Library {
 }
 
 impl Library {
-    /// Sounds hidden as duplicates stay out, as in the app's lists (rule 2: their files are still there).
+    /// Sounds hidden as duplicates stay out, as in the app's lists (rule 2: their files are still there), and so do
+    /// the files programs leave in Windows' temp folder ([`in_temp`]).
     pub fn new(sounds: Vec<Sound>) -> Library {
-        let mut list = SoundList::new(sounds.into_iter().filter(|s| !s.hidden && !s.path.is_empty()).collect());
+        let temp = temp_folder();
+        let mut list = SoundList::new(
+            sounds.into_iter().filter(|s| !s.hidden && !s.path.is_empty() && !in_temp(&s.path, &temp)).collect(),
+        );
         // Most liked, until the plugin reads how songs use each sound: favourites first, then the most played.
         list.set_liked(|s| f64::from(u8::from(s.favourite)) * 1000.0 + f64::from(s.plays));
         let types = list.type_counts();
@@ -85,6 +89,27 @@ impl Library {
     pub fn view(&self, asked: &Asked) -> (Vec<usize>, SoundCounts) {
         mo_app::background::on_pool(|| self.list.view_counted(&asked.filters, asked.order, asked.seed))
     }
+}
+
+/// Windows' temp folder for this user, as a path's start to match (lower case, ending in a backslash): empty off
+/// Windows.
+fn temp_folder() -> String {
+    if !cfg!(windows) {
+        return String::new();
+    }
+    let mut temp = std::env::temp_dir().to_string_lossy().to_lowercase().replace('/', "\\");
+    if !temp.ends_with('\\') {
+        temp.push('\\');
+    }
+    temp
+}
+
+/// Whether a sound's file is in a temp folder: the one `temp` names, or any user's `AppData\Local\Temp`. Programs
+/// leave their own short-lived files there (FL Studio's `Image-Line` renders, blank and gone soon after), never a
+/// sample of his (Solomon, 12 Nov 2026: "shouldnt be looking in temp and they are blank").
+fn in_temp(path: &str, temp: &str) -> bool {
+    let path = path.to_lowercase().replace('/', "\\");
+    (!temp.is_empty() && path.starts_with(temp)) || path.contains("\\appdata\\local\\temp\\")
 }
 
 /// What the panel asks of the list: the app's own filters (with the search box's words), and the order.
@@ -192,6 +217,25 @@ pub fn waves_from(sounds_db: &Path, ids: &[i64]) -> Vec<(i64, mo_sounds::Peaks)>
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn files_in_a_temp_folder_stay_out() {
+        let temp = r"c:\users\silki\appdata\local\temp\";
+        assert!(in_temp(r"C:\Users\silki\AppData\Local\Temp\Image-Line\{1FD56D3D}_U.wav", temp));
+        assert!(in_temp(r"D:\Users\Other\AppData\Local\Temp\x.wav", ""));
+        assert!(in_temp(r"T:\Scratch\x.wav", r"t:\scratch\"));
+        // A folder of his own that only has "Temp" in its name is his.
+        assert!(!in_temp(r"J:\Samples\Temp\Kick.wav", temp));
+        assert!(!in_temp(r"J:\Samples\Temporary Kicks\Kick.wav", temp));
+        assert!(!in_temp(r"C:\Users\silki\AppData\Local\Templates\x.wav", temp));
+        let mut sounds = vec![
+            Sound::new(1, r"C:\Users\silki\AppData\Local\Temp\Image-Line\a.wav"),
+            Sound::new(2, r"J:\Samples\Kick.wav"),
+        ];
+        sounds[0].sound_type = mo_sounds::Word::new("Closed hat");
+        assert_eq!(Library::new(sounds).list.len(), 1);
+    }
+
     use super::*;
 
     fn sound(id: i64, path: &str, kind: &str, favourite: bool) -> Sound {
