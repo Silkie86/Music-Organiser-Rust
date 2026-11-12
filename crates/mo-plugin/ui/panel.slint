@@ -36,6 +36,17 @@ export struct PartLine {
     colour: int,
 }
 
+// A preset file, as a line of the Presets tab (mo-app's `presets::line`).
+export struct PresetLine {
+    name: string,
+    // "Serum · Bass  ·  Synth  ·  fxp".
+    details: string,
+    // The part guessed from its name or category ("Bass", "Pad?"), or "".
+    part: string,
+    // The part's colour (a place in the theme's sound type colours; -1 for grey).
+    colour: int,
+}
+
 export struct ExtensionLine {
     // What the extension is for, in plain words.
     name: string,
@@ -257,6 +268,36 @@ export component Panel inherits Window {
     // How wide the roll shows (the list's width): the picture is drawn this wide.
     in-out property <length> midi-roll-width: 400px;
 
+    // The Presets tab: the preset files, the status line, the filter column as the app's Presets page has it (mo-app's
+    // `presets::filter_chips`), the orders, the year strip and the line picked.
+    in property <[PresetLine]> presets;
+    in property <string> preset-status;
+    in property <string> preset-empty;
+    in property <FilterView> preset-part-filter;
+    in property <FilterView> preset-kind-filter;
+    in property <FilterView> preset-format-filter;
+    in property <FilterView> preset-plugin-filter;
+    in property <[string]> preset-orders;
+    in property <int> preset-order;
+    in property <[YearBar]> preset-years;
+    in property <int> preset-years-from: -1;
+    in property <int> preset-years-to: -1;
+    in-out property <int> preset-picked: -1;
+    in property <int> preset-carried: -1;
+    // Said under the list: where the picked preset loads, or what a drag said ("" for nothing).
+    in property <string> preset-said;
+    in-out property <string> preset-search-text;
+    callback preset-search(string);
+    // A choice was picked or unpicked on a filter ("part", "type", "format", "plugin"); or nothing picked on one.
+    callback preset-pick(string, string);
+    callback preset-clear(string);
+    callback preset-pick-order(int);
+    callback preset-years-picked(int, int);
+    callback preset-years-cleared();
+    callback preset-click(int);
+    // A line is being dragged out (onto a track or a device): its row.
+    callback preset-drag-out(int);
+
     title: "Music Organiser";
     preferred-width: 760px;
     preferred-height: 560px;
@@ -286,7 +327,7 @@ export component Panel inherits Window {
             }
             Rectangle { }
             Segmented {
-                choices: ["Sounds", "MIDI", "DAW check"];
+                choices: ["Sounds", "MIDI", "Presets", "DAW check"];
                 current: root.view;
                 picked(i) => { root.view = i; }
             }
@@ -976,7 +1017,158 @@ export component Panel inherits Window {
             }
         }
 
-        if root.view == 2: VerticalLayout {
+        if root.view == 2: HorizontalLayout {
+            spacing: Space.lg;
+            // The filter column, as the app's Presets page has it.
+            Flickable {
+                width: 196px;
+                content-width: self.width;
+                content-height: max(self.height, preset-lists.preferred-height);
+                mouse-drag-pan-enabled: false;
+                preset-lists := VerticalLayout {
+                    x: 0;
+                    y: 0;
+                    width: parent.width - Space.md;
+                    alignment: start;
+                    spacing: Space.md;
+                    FilterList {
+                        name: "PART";
+                        filter: root.preset-part-filter;
+                        toggled(text) => { root.preset-pick("part", text); }
+                        cleared => { root.preset-clear("part"); }
+                    }
+                    FilterList {
+                        name: "TYPE";
+                        filter: root.preset-kind-filter;
+                        toggled(text) => { root.preset-pick("type", text); }
+                        cleared => { root.preset-clear("type"); }
+                    }
+                    FilterList {
+                        name: "FORMAT";
+                        filter: root.preset-format-filter;
+                        toggled(text) => { root.preset-pick("format", text); }
+                        cleared => { root.preset-clear("format"); }
+                    }
+                    FilterList {
+                        name: "PLUGIN";
+                        filter: root.preset-plugin-filter;
+                        toggled(text) => { root.preset-pick("plugin", text); }
+                        cleared => { root.preset-clear("plugin"); }
+                    }
+                }
+            }
+            VerticalLayout {
+                spacing: Space.md;
+                SearchBox {
+                    hint: "Search presets";
+                    text <=> root.preset-search-text;
+                    edited(text) => { root.preset-search(text); }
+                }
+                HorizontalLayout {
+                    spacing: Space.md;
+                    Text {
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                        text: root.preset-status;
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                        overflow: elide;
+                    }
+                    Segmented {
+                        horizontal-stretch: 0;
+                        choices: root.preset-orders;
+                        current: root.preset-order;
+                        pad: Space.md;
+                        picked(i) => { root.preset-pick-order(i); }
+                    }
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                    property <length> years-width: root.preset-years.length > 1 ? 56px : 0px;
+                    if self.years-width > 0: YearRange {
+                        x: parent.width - self.width;
+                        y: 0;
+                        width: parent.years-width;
+                        height: parent.height;
+                        years: root.preset-years;
+                        picked-from: root.preset-years-from;
+                        picked-to: root.preset-years-to;
+                        picked(a, b) => { root.preset-years-picked(a, b); }
+                        cleared => { root.preset-years-cleared(); }
+                    }
+                    if root.preset-empty != "": Text {
+                        x: 0;
+                        width: parent.width - parent.years-width;
+                        height: parent.height;
+                        text: root.preset-empty;
+                        color: Theme.muted;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                        wrap: word-wrap;
+                    }
+                    ListView {
+                        x: 0;
+                        width: parent.width - parent.years-width;
+                        height: parent.height;
+                        row-height: 48px;
+                        rows: root.presets.length;
+                        for preset[i] in root.presets: ListLine {
+                            height: 48px;
+                            selected: i == root.preset-picked;
+                            draggable: root.can-drag;
+                            lifted: i == root.preset-carried;
+                            clicked => {
+                                root.preset-picked = i;
+                                root.preset-click(i);
+                            }
+                            drag-out => { root.preset-drag-out(i); }
+                            HorizontalLayout {
+                                padding-left: Space.md;
+                                padding-right: Space.md;
+                                spacing: Space.sm;
+                                VerticalLayout {
+                                    horizontal-stretch: 0;
+                                    alignment: center;
+                                    Dot { tint: Theme.sound-type(preset.colour); }
+                                }
+                                VerticalLayout {
+                                    horizontal-stretch: 1;
+                                    alignment: center;
+                                    Text {
+                                        text: preset.name;
+                                        color: Theme.text;
+                                        font-size: Type.row-title;
+                                        overflow: elide;
+                                    }
+                                    Text {
+                                        text: preset.details;
+                                        color: Theme.faint;
+                                        font-size: Type.meta;
+                                        overflow: elide;
+                                    }
+                                }
+                                Text {
+                                    horizontal-stretch: 0;
+                                    vertical-alignment: center;
+                                    text: preset.part;
+                                    color: Theme.muted;
+                                    font-size: Type.meta;
+                                }
+                            }
+                        }
+                    }
+                }
+                Text {
+                    text: root.preset-said != "" ? root.preset-said
+                        : root.can-drag ? "Drag a preset onto a track or a device to load it" : "Click a preset to see where it loads";
+                    color: root.preset-said != "" ? Theme.accent : Theme.faint;
+                    font-size: Type.meta;
+                    overflow: elide;
+                }
+            }
+        }
+
+        if root.view == 3: VerticalLayout {
             spacing: Space.md;
             HorizontalLayout {
                 spacing: Space.md;

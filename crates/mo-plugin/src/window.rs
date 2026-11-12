@@ -11,6 +11,7 @@
 //! library, searching it and reading a sound all run on background threads at low priority.
 
 mod midi_tab;
+mod presets_tab;
 
 use crate::audition::Played;
 use crate::galaxy::{self, Sky};
@@ -151,11 +152,13 @@ struct Slots {
     mini: Mutex<Option<(u64, SkyPixels)>>,
 }
 
-/// The line being dragged out: a row of the Sounds list, or a part of the MIDI tab's (its place in the catalogue).
+/// The line being dragged out: a row of the Sounds list, a part of the MIDI tab's (its place in the catalogue), or a
+/// preset of the Presets tab's (its place in the list).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Carried {
     Sound(usize),
     Part(usize),
+    Preset(usize),
 }
 
 /// A drag out that has ended: its file, when it started and how it ended.
@@ -508,6 +511,8 @@ struct Shown {
     column: Rc<Column>,
     /// The MIDI tab.
     midi: midi_tab::MidiTab,
+    /// The Presets tab.
+    presets: presets_tab::PresetsTab,
     /// What's being dragged out now.
     carried: Cell<Option<Carried>>,
     /// The sound the "Playing" line names, as the player numbers it: the line goes when that sound ends.
@@ -573,6 +578,7 @@ impl Shown {
             asked: Rc::new(RefCell::new(Asked { seed: seed(), ..Asked::default() })),
             column: Rc::new(Column::default()),
             midi: midi_tab::MidiTab::new(),
+            presets: presets_tab::PresetsTab::new(),
             carried: Cell::new(None),
             playing: Cell::new(None),
             played: Rc::new(RefCell::new(None)),
@@ -763,6 +769,7 @@ impl Shown {
 
         self.fill_in_sky();
         self.midi.fill_in(panel, &self.slots);
+        self.presets.fill_in(panel, &self.slots);
         self.fill_in_midi_play();
         let slots = Arc::clone(&self.slots);
         background("mo-plugin-library", move || *lock(&slots.library) = Some(library::read()));
@@ -1348,6 +1355,7 @@ impl Shown {
             self.lines.notify.reset();
         }
         self.midi.tick(&self.panel);
+        self.presets.tick(&self.panel);
         self.drag();
         self.waves();
         self.sky();
@@ -1370,6 +1378,7 @@ impl Shown {
                 match carried {
                     Carried::Sound(row) => self.panel.set_carried(i32::try_from(row).unwrap_or(-1)),
                     Carried::Part(at) => self.panel.set_midi_carried(self.midi.row_of(at)),
+                    Carried::Preset(at) => self.panel.set_preset_carried(self.presets.row_of(at)),
                 }
                 let (slots, started) = (Arc::clone(&self.slots), Instant::now());
                 crate::drag::file(path.clone(), move |ended| *lock(&slots.dragged) = Some((path, started, ended)));
@@ -1394,6 +1403,7 @@ impl Shown {
         self.dragging.set(false);
         self.panel.set_carried(-1);
         self.panel.set_midi_carried(-1);
+        self.panel.set_preset_carried(-1);
         // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't left
         // pressed.
         let position = self.pointer.get();
@@ -1408,9 +1418,10 @@ impl Shown {
 
     /// Said under the list the line was dragged from.
     fn say_drag_failed(&self, why: String) {
-        if let Some(Carried::Part(_)) = self.carried.get() {
-            self.panel.set_midi_said(why.into());
-            return;
+        match self.carried.get() {
+            Some(Carried::Part(_)) => return self.panel.set_midi_said(why.into()),
+            Some(Carried::Preset(_)) => return self.panel.set_preset_said(why.into()),
+            _ => {}
         }
         self.playing.set(None);
         self.panel.set_playing(why.into());
