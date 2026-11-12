@@ -147,6 +147,8 @@ pub struct Missing {
     pub from: PathBuf,
     /// The sample's file name.
     pub sample: String,
+    /// Where it is in the multisample's zip (two samples may share a file name in different folders of it).
+    pub entry: usize,
     /// Why it wasn't found.
     pub why: Why,
 }
@@ -206,6 +208,8 @@ struct Library<'a> {
     by_shape: HashMap<(i32, i32), Vec<(i64, usize)>>,
     /// Library files' prints, kept through the look: one file may be asked about by many samples.
     prints: std::sync::Mutex<HashMap<usize, Option<Print>>>,
+    /// And their prints with the silence at their ends cut (step 4).
+    unpadded: std::sync::Mutex<HashMap<usize, Option<Print>>>,
 }
 
 /// A sound's length to the millisecond.
@@ -225,7 +229,13 @@ impl<'a> Library<'a> {
                 by_shape.entry((a.sample_rate, a.channel_count)).or_default().push((millis(a.seconds), i));
             }
         }
-        Library { sounds, by_name, by_shape, prints: std::sync::Mutex::default() }
+        Library {
+            sounds,
+            by_name,
+            by_shape,
+            prints: std::sync::Mutex::default(),
+            unpadded: std::sync::Mutex::default(),
+        }
     }
 
     /// The sounds named `name` (ignoring capitals).
@@ -240,6 +250,17 @@ impl<'a> Library<'a> {
             .get(&(rate, channels))
             .map(|all| all.iter().filter(|(m, _)| (m - ms).abs() <= 1).map(|&(_, i)| i).collect())
             .unwrap_or_default()
+    }
+
+    /// The print of the sound at `i`'s file with the silence at its ends cut (step 4), worked out once a look: many
+    /// samples may share its name.
+    fn unpadded(&self, i: usize) -> Option<Print> {
+        if let Some(p) = self.unpadded.lock().unwrap_or_else(std::sync::PoisonError::into_inner).get(&i) {
+            return *p;
+        }
+        let print = unpadded(Path::new(&self.sounds[i].path));
+        self.unpadded.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(i, print);
+        print
     }
 
     /// The print of the sound at `i`'s file, worked out once a look (`None`: it couldn't be read).
@@ -351,8 +372,9 @@ fn find_all(library: &Library, name: &str, bytes: &[u8], temp: &Path) -> Result<
     }
     // Its length, rate and channels, from the sample itself, to find it under another name.
     let in_temp = InTemp(temp.join(temp_name(name)));
+    // Temp couldn't take it (full, say): its audio can't be looked at, so it's judged by its name alone.
     if std::fs::write(&in_temp.0, bytes).is_err() {
-        return Err(());
+        return Ok((found, false));
     }
     let Ok(head) = mo_audio::read(&in_temp.0, 0.001) else { return Err(()) };
     if head.sample_rate == 0 || head.channels.is_empty() {
@@ -390,7 +412,7 @@ fn find_all(library: &Library, name: &str, bytes: &[u8], temp: &Path) -> Result<
     if !named.is_empty()
         && let Some(sample) = unpadded(&in_temp.0)
     {
-        found = named.into_iter().filter(|&i| unpadded(&path_of(i)).is_some_and(|a| a == sample)).collect();
+        found = named.into_iter().filter(|&i| library.unpadded(i) == Some(sample)).collect();
     }
     let trimmed = !found.is_empty();
     Ok((found, trimmed))
@@ -399,17 +421,11 @@ fn find_all(library: &Library, name: &str, bytes: &[u8], temp: &Path) -> Result<
 /// The most of a sound decoded for step 4 (a sample is 64 MB at most, about 6 minutes of 16-bit stereo).
 const UNPADDED_MOST_SECONDS: f64 = 30.0 * 60.0;
 
-/// A sound's audio with digital silence cut from both ends, for step 4: its rate, its channels, and its samples (each
-/// frame's channels in turn, bit for bit). `None` when it can't be read whole and exactly, or it's all silence (never
-/// taken for another).
-#[derive(PartialEq)]
-struct Unpadded {
-    rate: u32,
-    channels: usize,
-    samples: Vec<u32>,
-}
-
-fn unpadded(path: &Path) -> Option<Unpadded> {
+/// The print of a sound's audio with digital silence cut from both ends, for step 4: its rate, its channels and its
+/// samples bit for bit, through SHA-256 (as [`copies::print_of`] prints them). `None` when it can't be read whole and
+/// exactly, or it's all silence (never taken for another).
+fn unpadded(path: &Path) -> Option<Print> {
+    use sha2::{Digest, Sha256};
     // A 32-bit whole-number or 64-bit float WAV isn't read exactly.
     if mo_audio::can_read_from(path) && !mo_audio::reads_exactly(path) {
         return None;
@@ -422,8 +438,22 @@ fn unpadded(path: &Path) -> Option<Unpadded> {
     let silent = |i: usize| audio.channels.iter().all(|c| c[i] == 0.0);
     let start = (0..audio.len()).find(|&i| !silent(i))?;
     let end = (start..audio.len()).rfind(|&i| !silent(i))? + 1;
-    let samples = (start..end).flat_map(|i| audio.channels.iter().map(move |c| c[i].to_bits())).collect();
-    Some(Unpadded { rate, channels: audio.channels.len(), samples })
+    let mut h = Sha256::new();
+    h.update(b"MO same audio unpadded 1\0");
+    h.update(rate.to_le_bytes());
+    h.update((audio.channels.len() as u64).to_le_bytes());
+    h.update(((end - start) as u64).to_le_bytes());
+    let mut buf = Vec::with_capacity(4096 * audio.channels.len() * 4);
+    for from in (start..end).step_by(4096) {
+        buf.clear();
+        for i in from..(from + 4096).min(end) {
+            for c in &audio.channels {
+                buf.extend_from_slice(&c[i].to_bits().to_le_bytes());
+            }
+        }
+        h.update(&buf);
+    }
+    Some(h.finalize().into())
 }
 
 /// What one multisample gave.
@@ -501,7 +531,13 @@ fn look_in(m: &Multisample, library: &Library, temp: &Path, stop: &AtomicBool) -
                 one.sounds.extend(found);
             }
             Err(why) => {
-                one.missing.push(Missing { multisample: m.name.clone(), from: m.path.clone(), sample: name, why });
+                one.missing.push(Missing {
+                    multisample: m.name.clone(),
+                    from: m.path.clone(),
+                    sample: name,
+                    entry: at,
+                    why,
+                });
             }
         }
     }
@@ -591,15 +627,8 @@ pub fn summary(found: &Found, marked: Marked) -> String {
         }
         words.push('.');
         if marked.typed > 0 {
-            words.push_str(&format!(
-                " {} the type {} multisample names.",
-                if marked.typed == 1 {
-                    "1 was given".to_owned()
-                } else {
-                    format!("{} were given", thousands(marked.typed))
-                },
-                if marked.typed == 1 { "its" } else { "their" }
-            ));
+            words.push(' ');
+            words.push_str(&typed_words(marked.typed));
         }
         if found.samples_unpadded > 0 {
             words.push_str(&format!(
@@ -689,6 +718,25 @@ pub fn takes_type(given: &str, sound_type: &str, source: &str) -> bool {
     !matches!(source, "you" | "name") && !sound_type.eq_ignore_ascii_case(given)
 }
 
+/// What giving `n` sounds their multisample's type says: "3 were given the type their multisample names."
+pub fn typed_words(n: usize) -> String {
+    if n == 1 {
+        "1 was given the type its multisample names.".to_owned()
+    } else {
+        format!("{} were given the type their multisample names.", thousands(n))
+    }
+}
+
+/// The sample folders (Settings › Sounds) as the song library at `library_db` keeps them, whole paths only (none when
+/// it can't be read). Opens it: never on the window's thread.
+pub fn sample_folders(library_db: &Path) -> Vec<PathBuf> {
+    if !library_db.exists() {
+        return Vec::new();
+    }
+    let folders = mo_library::Library::open_read_only(library_db).and_then(|l| l.list_setting("sample_folders"));
+    folders.unwrap_or_default().into_iter().map(PathBuf::from).filter(|f| f.is_absolute()).collect()
+}
+
 /// The folder in a sample folder that samples not found in the library are saved into, a folder for each
 /// multisample (Solomon, 12 Nov 2026: "Yes, into a From Bitwig folder").
 pub const FROM_BITWIG: &str = "From Bitwig";
@@ -711,23 +759,10 @@ pub struct Saved {
     pub stopped: bool,
 }
 
-/// A name that's safe as one file or folder name on Windows: no slashes, no `<>:"|?*`, no control characters, no dots
-/// or spaces at the end, never "." or "..".
+/// A name that's safe as one file or folder name on Windows ([`mo_formats::textscan::safe_file_name`]: no slashes or
+/// `<>:"|?*`, no dots or spaces at the ends, not a device's name like "Aux", not too long).
 pub fn safe_name(name: &str) -> String {
-    let mut out: String =
-        name.chars()
-            .map(|c| {
-                if c.is_control() || matches!(c, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*') {
-                    '_'
-                } else {
-                    c
-                }
-            })
-            .collect();
-    while out.ends_with(['.', ' ']) {
-        out.pop();
-    }
-    if out.trim().is_empty() { "_".to_owned() } else { out }
+    mo_formats::textscan::safe_file_name(name)
 }
 
 /// Where a sample saved from `multisample` goes in the sample folder `into`.
@@ -743,14 +778,17 @@ pub fn saved_folder(into: &Path, multisample: &str) -> PathBuf {
 /// Multisamples are only read. Off the window's thread.
 pub fn save_missing(missing: &[Missing], into: &Path, stop: &AtomicBool) -> Saved {
     let mut saved = Saved::default();
-    let mut by_file: Vec<(&Path, &str, Vec<&str>)> = Vec::new();
+    // A list a multisample, in order.
+    let mut by_file: Vec<Vec<&Missing>> = Vec::new();
     for m in missing.iter().filter(|m| m.why != Why::Unplayable) {
         match by_file.last_mut() {
-            Some((from, _, samples)) if *from == m.from.as_path() => samples.push(&m.sample),
-            _ => by_file.push((&m.from, &m.multisample, vec![&m.sample])),
+            Some(samples) if samples[0].from == m.from => samples.push(m),
+            _ => by_file.push(vec![m]),
         }
     }
-    for (from, multisample, samples) in by_file {
+    for list in by_file {
+        let (from, multisample) = (list[0].from.as_path(), list[0].multisample.as_str());
+        let samples: Vec<(&str, usize)> = list.iter().map(|m| (m.sample.as_str(), m.entry)).collect();
         if stop.load(Ordering::Relaxed) {
             saved.stopped = true;
             break;
@@ -763,31 +801,23 @@ pub fn save_missing(missing: &[Missing], into: &Path, stop: &AtomicBool) -> Save
         let mut zip = match zip {
             Ok(zip) => zip,
             Err(why) => {
-                samples.iter().for_each(|s| fail(&mut saved, s, why.clone()));
+                samples.iter().for_each(|(s, _)| fail(&mut saved, s, why.clone()));
                 continue;
             }
         };
         let folder = saved_folder(into, multisample);
         if let Err(e) = std::fs::create_dir_all(&folder) {
-            samples.iter().for_each(|s| fail(&mut saved, s, e.to_string()));
+            samples.iter().for_each(|(s, _)| fail(&mut saved, s, e.to_string()));
             continue;
         }
-        // The zip's entries by their file names, read once.
-        let mut at_of: HashMap<String, usize> = HashMap::new();
-        for at in 0..zip.len() {
-            if let Ok(entry) = zip.by_index(at)
-                && let Ok(full) = entry.name()
-                && let Some(name) = file_name(&full)
-            {
-                at_of.entry(name.to_owned()).or_insert(at);
-            }
-        }
-        for sample in samples {
-            let Some(&at) = at_of.get(sample) else {
-                fail(&mut saved, sample, "it's no longer in the multisample".to_owned());
-                continue;
-            };
+        for (sample, at) in samples {
+            // By its place in the zip, as the look found it: still the same sample only if its name is too (the
+            // multisample may have been saved again since).
             let bytes = zip.by_index(at).map_err(|e| e.to_string()).and_then(|entry| {
+                let same = entry.name().ok().as_deref().and_then(file_name) == Some(sample);
+                if !same {
+                    return Err("it's no longer in the multisample".to_owned());
+                }
                 let mut bytes = Vec::new();
                 entry.take(BIGGEST_SAMPLE + 1).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
                 if bytes.len() as u64 > BIGGEST_SAMPLE { Err("it's too big".to_owned()) } else { Ok(bytes) }
@@ -977,7 +1007,8 @@ mod tests {
         assert_eq!(safe_name("Snare: 2?"), "Snare_ 2_");
         assert_eq!(safe_name("a/b\\c"), "a_b_c");
         assert_eq!(safe_name("Kick. "), "Kick");
-        assert_eq!(safe_name(".."), "_");
+        assert_eq!(safe_name(".."), "untitled");
+        assert_eq!(safe_name("Aux"), "_Aux");
         assert!(is_half_saved(&temp_name("x.part")));
         assert!(!is_half_saved(&temp_name("x.wav")));
     }
@@ -991,8 +1022,13 @@ mod tests {
 
     #[test]
     fn missing_samples_a_line_a_multisample() {
-        let miss =
-            |m: &str, s: &str, why| Missing { multisample: m.into(), from: PathBuf::new(), sample: s.into(), why };
+        let miss = |m: &str, s: &str, why| Missing {
+            multisample: m.into(),
+            from: PathBuf::new(),
+            sample: s.into(),
+            entry: 0,
+            why,
+        };
         let found = Found {
             samples: 5,
             samples_found: 1,

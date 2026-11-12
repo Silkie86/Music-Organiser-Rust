@@ -263,3 +263,27 @@ fn a_sample_bitwig_padded_with_silence_is_found_under_its_own_name() {
     );
     assert_eq!(fs::read_dir(&temp).unwrap().count(), 0);
 }
+
+#[test]
+fn two_samples_of_one_name_in_a_multisample_are_both_saved() {
+    let dir = folder("same-name");
+    let samples = dir.join("samples");
+    let temp = dir.join("temp");
+    fs::create_dir_all(&samples).unwrap();
+    fs::create_dir_all(&temp).unwrap();
+    let (one, two) = (dir.join("one.wav"), dir.join("two.wav"));
+    wav(&one, &tone(37, 1200));
+    wav(&two, &tone(41, 1200));
+    let m = multisample(
+        &dir.join("Toms.multisample"),
+        &[("a/Tom.wav", fs::read(&one).unwrap()), ("b/Tom.wav", fs::read(&two).unwrap())],
+    );
+    let found = look(&[m], &[], &temp, &AtomicBool::new(false), |_, _| {});
+    assert_eq!(found.missing.len(), 2);
+    let saved = save_missing(&found.missing, &samples, &AtomicBool::new(false));
+    let into = samples.join(bitwig_favourites::FROM_BITWIG).join("Toms");
+    assert_eq!(saved.paths, vec![into.join("Tom.wav"), into.join("Tom (2).wav")]);
+    assert_eq!(fs::read(&saved.paths[0]).unwrap(), fs::read(&one).unwrap());
+    assert_eq!(fs::read(&saved.paths[1]).unwrap(), fs::read(&two).unwrap());
+    assert_eq!(saved.types, vec![Some("Tom"), Some("Tom")]);
+}

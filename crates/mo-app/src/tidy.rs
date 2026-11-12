@@ -242,17 +242,7 @@ impl Places {
                 crate::bitwig_convert::export_root(set.as_deref(), crate::bitwig_convert::documents().as_deref())
             })
             .filter(|e| e.is_absolute());
-        let sample_folders = library
-            .exists()
-            .then(|| {
-                mo_library::Library::open_read_only(library).and_then(|lib| lib.list_setting("sample_folders")).ok()
-            })
-            .flatten()
-            .unwrap_or_default()
-            .into_iter()
-            .map(PathBuf::from)
-            .filter(|f| f.is_absolute())
-            .collect();
+        let sample_folders = crate::bitwig_favourites::sample_folders(library);
         Places { data: paths::data_dir(), temp: std::env::temp_dir(), beside_first, exports, sample_folders }
     }
 }

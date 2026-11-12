@@ -53,8 +53,9 @@ struct Card {
     /// Samples saved into the From Bitwig folder, with the type their multisample names, to make favourites once the
     /// page has them as sounds.
     pending: Vec<(PathBuf, Option<&'static str>)>,
-    /// Looking for those among the page's sounds is under way.
+    /// Looking for those among the page's sounds is under way, and whether the sounds were read again meanwhile.
     resolving: bool,
+    again: bool,
 }
 
 thread_local! {
@@ -161,8 +162,13 @@ pub(super) fn show_for_screens(
         c.list = Some(found);
         c.said = said.to_owned();
         c.missing = missing.iter().map(|m| (*m).to_owned()).collect();
-        let made_up =
-            Missing { multisample: String::new(), from: PathBuf::new(), sample: String::new(), why: Why::NoSuchName };
+        let made_up = Missing {
+            multisample: String::new(),
+            from: PathBuf::new(),
+            sample: String::new(),
+            entry: 0,
+            why: Why::NoSuchName,
+        };
         c.saveable = vec![made_up; saveable];
         c.save_into = (saveable > 0).then(|| PathBuf::from(r"I:\Samples"));
     });
@@ -270,8 +276,7 @@ pub(super) fn mark(app: &AppWindow) {
 /// The first sample folder there is (Settings › Sounds), to save the samples not found into. Opens the song library:
 /// never on the window's thread.
 fn first_sample_folder(library_db: &Path) -> Option<PathBuf> {
-    let folders = mo_library::Library::open_read_only(library_db).and_then(|l| l.list_setting("sample_folders"));
-    folders.ok()?.into_iter().map(PathBuf::from).find(|f| f.is_absolute() && f.is_dir())
+    favs::sample_folders(library_db).into_iter().find(|f| f.is_dir())
 }
 
 /// What the look numbered `ask` found: the sounds the page lists that aren't favourites yet made so ([`favourites`]),
@@ -350,6 +355,10 @@ fn favourites(app: &AppWindow, sounds: &[i64], types: &[(i64, &'static str)]) ->
 /// window's thread, then the sample folders scanned again; they become favourites once the page has them
 /// ([`sounds_read`]).
 pub(super) fn save(app: &AppWindow) {
+    if super::HERE.with(|h| *h.borrow()) {
+        return;
+    }
+    let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
     let Some((missing, into)) = CARD.with(|c| {
         let mut c = c.borrow_mut();
         if c.saving || c.stop.is_some() || c.saveable.is_empty() {
@@ -361,11 +370,9 @@ pub(super) fn save(app: &AppWindow) {
     }) else {
         return;
     };
-    if super::HERE.with(|h| *h.borrow()) {
-        return;
-    }
-    let Some(feed) = FEED.with(|f| f.borrow().clone()) else { return };
     show(app);
+    // Kept to put back if the thread can't start, so Save as sounds is still there.
+    let kept = missing.clone();
     let weak = app.as_weak();
     let started = background::spawn("Bitwig favourites save", move || {
         let job = feed
@@ -397,7 +404,11 @@ pub(super) fn save(app: &AppWindow) {
     });
     if let Err(e) = started {
         log::error("Sounds", &format!("Couldn't start saving the Bitwig samples: {e}"));
-        CARD.with(|c| c.borrow_mut().saving = false);
+        CARD.with(|c| {
+            let mut c = c.borrow_mut();
+            c.saving = false;
+            c.saveable = kept;
+        });
         show(app);
     }
 }
@@ -416,7 +427,10 @@ fn saved_as_files(app: &AppWindow, said: String, paths: Vec<(PathBuf, Option<&'s
     } else if scanning {
         format!("{said} They become favourites once the app has scanned the folder.")
     } else {
-        format!("{said} The app scans it at its next start: Mark as favourites then makes them favourites.")
+        format!(
+            "{said} The app can't scan your sample folders just now: once they're scanned, Mark as favourites finds \
+             them."
+        )
     };
     CARD.with(|c| {
         let mut c = c.borrow_mut();
@@ -424,7 +438,11 @@ fn saved_as_files(app: &AppWindow, said: String, paths: Vec<(PathBuf, Option<&'s
         c.said = said;
         c.missing.clear();
         if scanning {
-            c.pending.extend(paths);
+            for path in paths {
+                if !c.pending.iter().any(|(p, _)| *p == path.0) {
+                    c.pending.push(path);
+                }
+            }
         }
     });
     show(app);
@@ -436,7 +454,12 @@ fn saved_as_files(app: &AppWindow, said: String, paths: Vec<(PathBuf, Option<&'s
 fn resolve(app: &AppWindow) {
     let Some(pending) = CARD.with(|c| {
         let mut c = c.borrow_mut();
-        if c.resolving || c.pending.is_empty() || !sounds_whole() {
+        if c.resolving {
+            // The sounds were read again meanwhile: looked through again once this look is done.
+            c.again = true;
+            return None;
+        }
+        if c.pending.is_empty() || !sounds_whole() {
             return None;
         }
         c.resolving = true;
@@ -464,7 +487,8 @@ fn resolve(app: &AppWindow) {
 /// The saved samples `pending` are the sounds `ids` (`None`: not read yet): those become favourites, and take the
 /// type their multisample names.
 fn resolved(app: &AppWindow, pending: &[(PathBuf, Option<&'static str>)], ids: &[Option<i64>]) {
-    let found: Vec<i64> = ids.iter().flatten().copied().collect();
+    let mut seen = HashSet::new();
+    let found: Vec<i64> = ids.iter().flatten().copied().filter(|&id| seen.insert(id)).collect();
     let types: Vec<(i64, &'static str)> =
         pending.iter().zip(ids).filter_map(|((_, kind), id)| Some(((*id)?, (*kind)?))).collect();
     let marked = if found.is_empty() { Marked::default() } else { favourites(app, &found, &types) };
@@ -480,19 +504,7 @@ fn resolved(app: &AppWindow, pending: &[(PathBuf, Option<&'static str>)], ids: &
                 mo_app::songs::plural(found.len(), "sound"),
                 if found.len() == 1 { "is" } else { "are" },
             );
-            let words = if marked.typed > 0 {
-                format!(
-                    "{words} {} the type {} multisample names.",
-                    if marked.typed == 1 {
-                        "1 was given".to_owned()
-                    } else {
-                        format!("{} were given", mo_app::songs::thousands(marked.typed))
-                    },
-                    if marked.typed == 1 { "its" } else { "their" }
-                )
-            } else {
-                words
-            };
+            let words = if marked.typed > 0 { format!("{words} {}", favs::typed_words(marked.typed)) } else { words };
             log::info("Sounds", &format!("Favourites from Bitwig: {words} ({} newly)", marked.newly));
             c.said = if c.pending.is_empty() {
                 words
@@ -502,6 +514,10 @@ fn resolved(app: &AppWindow, pending: &[(PathBuf, Option<&'static str>)], ids: &
         }
     });
     show(app);
+    // The sounds were read again while this look went on: the samples still waiting may be among them now.
+    if CARD.with(|c| std::mem::take(&mut c.borrow_mut().again)) {
+        resolve(app);
+    }
 }
 
 /// The look numbered `ask` is over: the card says `said`, and lists `missing`.
