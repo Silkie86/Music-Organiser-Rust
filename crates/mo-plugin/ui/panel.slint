@@ -1033,7 +1033,7 @@ export component Panel inherits Window {
                         source: root.midi-roll;
                         image-fit: fill;
                     }
-                    if root.midi-head >= 0: Rectangle {
+                    if root.midi-head >= 0 && root.midi-roll-points > 0: Rectangle {
                         x: parent.head-x - parent.shift - 1px;
                         y: 0;
                         width: 2px;
