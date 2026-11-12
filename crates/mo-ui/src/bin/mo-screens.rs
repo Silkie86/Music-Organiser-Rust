@@ -1757,13 +1757,20 @@ fn sounds_shots(
     pick_sound(app, 0);
     capture(window);
     shots.push(("sounds-panel-long.png".into(), capture(window)));
-    // The same card's switch on its other side: the projects that use the sound, newest first, with the card turned
-    // down to them.
+    // The mouse resting on that path, cut short at its start: its tip shows the whole of it.
+    hover(window, CARD_PATH.0, CARD_PATH.1);
+    let before = capture_after(window, Duration::from_millis(150));
+    let after = capture_after(window, Duration::from_millis(750));
+    hover(window, -1.0, -1.0);
+    if before == after {
+        return Err(format!("sounds-path-tip.png: no tip came up at {CARD_PATH:?}; has the card's path moved?"));
+    }
+    shots.push(("sounds-path-tip.png".into(), after));
+    // The same card's switch on its other side: the projects that use the sound, newest first. They show with no
+    // turning, as the card's path keeps to one line.
     data.set_card_list(1);
     capture(window);
-    let top = capture(window);
-    let down = card_down(window, &top, "sounds-panel-used-in.png").map_err(|e| e.to_string())?;
-    shots.push(("sounds-panel-used-in.png".into(), down));
+    shots.push(("sounds-panel-used-in.png".into(), capture(window)));
     data.set_card_list(0);
     let wide = data.get_panel_width();
     data.set_panel_width(320.0);
@@ -2834,7 +2841,8 @@ fn sample_sounds() -> mo_ui::sounds::Library {
                     (shape * wobble).clamp(0.02, 1.0)
                 })
                 .collect();
-            // The picked one sits deep in a pack, with folder names too long for a line: its card must wrap them.
+            // The picked one sits deep in a pack, with folder names too long for a line: its card shows as much of the
+            // path's end as fits on one.
             let path = if name == "Boom Kick" {
                 format!(
                     r"D:\Samples\Packs\Vintage_Drum_Machines_Collection_Vol_2\Kicks_And_Bass_Drums\Processed\{name}.wav"
@@ -3220,6 +3228,8 @@ const MENU_LINE: f32 = 32.0;
 /// With the card open: the waveform of the tile at [`MENU_TILE`], and the waveform on the card.
 const TILE_WAVE: (f32, f32) = (560.0, 345.0);
 const CARD_WAVE: (f32, f32) = (1200.0, 315.0);
+/// The path on the Sounds card, on its one line (Boom Kick's, cut short at its start).
+const CARD_PATH: (f32, f32) = (1150.0, 249.0);
 /// Below and right of the mouse at [`MENU_TILE`], off its tile (with the card open): a menu opened there covers it.
 const MENU_OVER: (u32, u32, u32, u32) = (700, 400, 120, 80);
 /// The Sounds card's Add a tag box, the card turned down to its end (with a sound's six tags over it).

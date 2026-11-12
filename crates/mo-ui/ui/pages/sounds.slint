@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Heights, Well, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Heights, Well, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, HoverSense, Tip, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -122,7 +122,10 @@ export struct PickedSound {
     colour: int,
     // Where the type came from: "you set this", "from its name", "learned from your library".
     type-from: string,
+    // The whole path (for its tip), and as the card shows it on one line: the whole path, then cut shorter at its
+    // start one folder at a time ("…\Drums\Kick.wav"), longest first.
     path: string,
+    path-tails: [string],
     wave: string,
     points: int,
     // How long the waveform lasts (the analysis reads up to the first minute).
@@ -1130,7 +1133,8 @@ component BitwigCard inherits Rectangle {
 }
 
 // The picked sound: what it is, its waveform (click to play from there), Play and what else it can do, its facts and
-// tags. Nothing in it may be wider than the card: long names and paths wrap, and so do the buttons and tags.
+// tags. Nothing in it may be wider than the card: long names wrap, and so do the buttons and tags; the path keeps to
+// one line.
 component SoundPanel inherits SidePanel {
     close => { SoundsData.close-panel(); }
     // Whether the tag box has the keys: when the card closes with them, the page gives them back to its list.
@@ -1177,13 +1181,47 @@ component SoundPanel inherits SidePanel {
             }
         }
     }
-    // The path breaks after its slashes (the Rust side marks them), or anywhere in a folder name too long for a line.
-    Text {
-        text: SoundsData.picked.path;
-        color: Theme.muted;
-        font-size: Type.meta;
-        wrap: word-wrap;
+    // The path on one line, so the card keeps its height from sound to sound and what's under it stays put (Solomon,
+    // 12 Nov 2026): as much of its end as fits, its first folders cut to "…"; the whole path in its tip.
+    Rectangle {
         min-width: 0px;
+        height: one-line.preferred-height;
+        one-line := Text {
+            text: "…";
+            font-size: Type.meta;
+            visible: false;
+        }
+        for tail[i] in SoundsData.picked.path-tails: Rectangle {
+            width: parent.width;
+            height: parent.height;
+            // Of the cuts, longest first, the one that shows is the first that fits: this one fits, and the one
+            // before (longer) doesn't. The last shows anyway, its end cut if even that's too long.
+            this := Text {
+                text: tail;
+                font-size: Type.meta;
+                visible: false;
+            }
+            longer := Text {
+                text: i == 0 ? "" : SoundsData.picked.path-tails[i - 1];
+                font-size: Type.meta;
+                visible: false;
+            }
+            visible: (i == 0 || longer.preferred-width > self.width)
+                && (this.preferred-width <= self.width || i == SoundsData.picked.path-tails.length - 1);
+            Text {
+                width: parent.width;
+                text: tail;
+                color: Theme.muted;
+                font-size: Type.meta;
+                overflow: elide;
+            }
+        }
+        path-sense := HoverSense { }
+        Tip {
+            text: SoundsData.picked.path;
+            hovering: path-sense.hovered;
+            at-y: parent.height + Space.xs;
+        }
     }
     Well {
         height: 88px;

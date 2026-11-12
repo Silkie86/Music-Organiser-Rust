@@ -129,6 +129,24 @@ pub fn wrappable_path(path: &str) -> String {
     shown
 }
 
+/// A path as a card shows it on one line: the whole path, then with its first folders cut to "…" one at a time
+/// ("…\Drums\Kick.wav"), down to its file's name ("…\Kick.wav"), longest first. The card shows the longest that
+/// fits, so it keeps its height from sound to sound (Solomon, 12 Nov 2026: "should just show the last folder or
+/// whatever can fit in the same space so it doesnt move around each time"). A network share's two slashes and the
+/// first slash of a Mac or Linux path are no cut. Only for showing: copying or opening uses the path itself.
+pub fn path_tails(path: &str) -> Vec<String> {
+    let slash = |c: char| matches!(c, '\\' | '/');
+    let mut tails = vec![path.to_owned()];
+    let mut before: Option<char> = None;
+    for (at, c) in path.char_indices() {
+        if slash(c) && at > 0 && !before.is_some_and(slash) && at + 1 < path.len() {
+            tails.push(format!("…{}", &path[at..]));
+        }
+        before = Some(c);
+    }
+    tails
+}
+
 /// Starts it with nothing tying it to this app, so a DAW keeps running when the app closes or the launcher restarts
 /// it (the C# app's lesson: a DAW started otherwise went down with the app, losing unsaved work). A launcher is
 /// waited for, so call this from a background thread; a DAW is left running.
@@ -273,6 +291,18 @@ mod tests {
         assert_eq!(wrappable_path("Boom Kick.wav"), "Boom Kick.wav");
         // Taking the marks out gives the path back.
         assert_eq!(wrappable_path(SONG).replace(wrap, ""), SONG);
+    }
+
+    #[test]
+    fn a_path_on_one_line_cuts_its_first_folders_one_at_a_time() {
+        assert_eq!(
+            path_tails(r"D:\Samples\Drums\Kick.wav"),
+            [r"D:\Samples\Drums\Kick.wav", r"…\Samples\Drums\Kick.wav", r"…\Drums\Kick.wav", r"…\Kick.wav"]
+        );
+        // A network share's two slashes, and the first slash of a Mac or Linux path, are no cut.
+        assert_eq!(path_tails(r"\\nas\share\Kick.wav"), [r"\\nas\share\Kick.wav", r"…\share\Kick.wav", r"…\Kick.wav"]);
+        assert_eq!(path_tails("/s/a.wav"), ["/s/a.wav", "…/a.wav"]);
+        assert_eq!(path_tails("Kick.wav"), ["Kick.wav"]);
     }
 }
 
