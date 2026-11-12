@@ -188,6 +188,8 @@ fn main() -> Result<(), slint::PlatformError> {
     mo_ui::daws::finish_up();
     // A plugin move still copying is told to stop, its copy cleared, rather than leave a half copy on the other drive.
     mo_ui::plugins::stop_moves();
+    // Bars picked on the MIDI page's slider a moment ago, not yet in the settings, go into them first.
+    mo_ui::midi::write_picks_waiting();
     // A settings change still waiting to be written goes now.
     mo_ui::settings::finish_up();
     // A Remove still sending things to the Recycle Bin stops, and keeps what went for Put back.

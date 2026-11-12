@@ -1067,6 +1067,12 @@ export struct FilterView {
 // list longer than 16 lines scrolls, and only the lines in sight are made, as in MenuChip's menu.
 export component PicksChip inherits MenuChipFace {
     in property <[FilterChoice]> choices;
+    // What the first line says, which picks none: "Any" for a filter. Where there's always a pick and that line
+    // gives it back to the app, it says so (the MIDI page's "Fit to": "The app's pick").
+    in property <string> any-text: "Any";
+    // Whether that first line is ticked: while nothing is picked. Where the lines ticked aren't all picked by hand
+    // (the MIDI page's "Fit to" ticks the parts the app picked too), the page says when it is.
+    in property <bool> any-on: root.value == "";
     // A line was picked or unpicked (its words), or Any was.
     callback toggled(string);
     callback cleared();
@@ -1079,8 +1085,8 @@ export component PicksChip inherits MenuChipFace {
         close-policy: close-on-click-outside;
         MenuCard {
             MenuLine {
-                text: "Any";
-                on: root.value == "";
+                text: root.any-text;
+                on: root.any-on;
                 tickable: true;
                 clicked => {
                     menu.close();
@@ -1133,6 +1139,9 @@ export component FilterPicks inherits FlexboxLayout {
     in property <FilterView> filter;
     // What the menu after the chips is called, when there are both.
     in property <string> more-name: "More";
+    // What the menu's first line says, and whether it's ticked (PicksChip's `any-text` and `any-on`).
+    in property <string> any-text: "Any";
+    in property <bool> any-on: root.filter.more-picked == "";
     // A choice was picked or unpicked: its words, as its chip or menu line says them.
     callback toggled(string);
     // The menu's Any: it unpicks what's picked in the menu (all of the filter, unless some choices are chips too).
@@ -1160,6 +1169,8 @@ export component FilterPicks inherits FlexboxLayout {
                 name: root.name;
                 value: root.filter.more-picked;
                 choices: root.filter.more;
+                any-text: root.any-text;
+                any-on: root.any-on;
                 toggled(text) => { root.toggled(text); }
                 cleared => { root.cleared(); }
             }
@@ -1192,6 +1203,8 @@ export component FilterPicks inherits FlexboxLayout {
         name: root.more-name;
         value: root.filter.more-picked;
         choices: root.filter.more;
+        any-text: root.any-text;
+        any-on: root.any-on;
         joined-left: self.x > 0;
         toggled(text) => { root.toggled(text); }
         cleared => { root.cleared(); }
@@ -1280,7 +1293,8 @@ export component HoverSense inherits Rectangle {
 // is lit (the accent means "on"). `bars` stand over the track, one for each equal part of it: how much there is at
 // each place, 0 to 1 of the tallest, and the ones between the handles are the bright ones. A press takes the nearer
 // handle and a drag moves it a `step` at a time; `changed` says where both are, and the page gives them back as
-// `low` and `high`.
+// `low` and `high`. Where the handles always pick something (`always-on`: the MIDI page's bars of a song, which are
+// what a list is fitted to even when they're the whole song), it's lit with both at their ends too.
 export component RangeSlider inherits Rectangle {
     in property <int> low-end;
     in property <int> high-end: 100;
@@ -1288,8 +1302,9 @@ export component RangeSlider inherits Rectangle {
     in property <int> low;
     in property <int> high: 100;
     in property <[float]> bars;
+    in property <bool> always-on;
     callback changed(int, int);
-    out property <bool> on: root.low > root.low-end || root.high < root.high-end;
+    out property <bool> on: root.always-on || root.low > root.low-end || root.high < root.high-end;
     property <length> knob: 14px;
     // How far a handle's middle can go.
     property <length> run: self.width - root.knob;
