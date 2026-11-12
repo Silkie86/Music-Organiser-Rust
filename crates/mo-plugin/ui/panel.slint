@@ -4,7 +4,7 @@
 // and DAW check (every CLAP extension the DAW was asked for, and whether it has it).
 
 import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
-export { FilterView, FilterChoice, YearBar }
+export { FilterView, FilterChoice, YearBar, Theme }
 import { ListView } from "../../mo-ui/ui/list.slint";
 
 import "../../mo-ui/fonts/IBMPlexSans-400.ttf";
@@ -252,6 +252,10 @@ export component Panel inherits Window {
     // A part was clicked: it plays as a loop through the track (with the app's SoundFont), or stops when it's the
     // one playing.
     callback midi-play(int);
+    // The piano roll of the part picked (empty for none), drawn by mo-app's piano roll for a room this big.
+    in property <image> midi-roll;
+    // How wide the roll shows (the list's width): the picture is drawn this wide.
+    in-out property <length> midi-roll-width: 400px;
 
     title: "Music Organiser";
     preferred-width: 760px;
@@ -944,6 +948,22 @@ export component Panel inherits Window {
                                 }
                             }
                         }
+                    }
+                }
+                // The piano roll of the part picked, as the app's MIDI page draws it.
+                Rectangle {
+                    height: root.midi-picked >= 0 ? 120px : 0px;
+                    init => { root.midi-roll-width = self.width; }
+                    changed width => { root.midi-roll-width = self.width; }
+                    visible: root.midi-picked >= 0;
+                    background: Theme.well;
+                    border-radius: Theme.radius;
+                    clip: true;
+                    Image {
+                        width: parent.width;
+                        height: parent.height;
+                        source: root.midi-roll;
+                        image-fit: fill;
                     }
                 }
                 Text {

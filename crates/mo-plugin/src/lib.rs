@@ -35,7 +35,7 @@ mod ui {
     slint::include_modules!();
 }
 pub use ui::{
-    ExtensionLine, FilterChoice, FilterView, Panel, PartLine, SkyName, SoundLine, SweptLine, TrailDot, YearBar,
+    ExtensionLine, FilterChoice, FilterView, Panel, PartLine, SkyName, SoundLine, SweptLine, Theme, TrailDot, YearBar,
 };
 
 use audition::{Player, Playing};

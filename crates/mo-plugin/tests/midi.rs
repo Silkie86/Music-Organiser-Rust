@@ -85,6 +85,18 @@ fn lists_filters_and_writes_a_part_out() {
     let not_a_font = db.parent().unwrap().join("Tune.mid");
     assert!(parts.sound(found[0], Some(&not_a_font), None).unwrap_err().contains("isn't a SoundFont"));
 
+    // Its piano roll, as the app's MIDI page draws it: as big as asked, notes in the accent colour on the well.
+    let colours = mo_app::piano_roll::Colours {
+        well: 0x101010,
+        accent: mo_app::shapes::Colour::rgb(0x3DDC97, 1.0),
+        ..Default::default()
+    };
+    let roll = parts.roll(found[0], (200.0, 60.0, 2.0), &colours).unwrap();
+    assert_eq!((roll.width, roll.height), (400, 120));
+    assert_eq!(roll.rgba.len(), 400 * 120 * 4);
+    assert!(roll.rgba.chunks(4).any(|p| p[1] > p[0].saturating_add(60)), "a note is drawn, in the accent colour");
+    assert!(parts.roll(found[0], (0.0, 0.0, 1.0), &colours).is_err(), "no room, no roll");
+
     // Dragged out: a MIDI file of its notes.
     let temp = db.parent().unwrap().join("Temp");
     std::fs::create_dir_all(&temp).unwrap();
