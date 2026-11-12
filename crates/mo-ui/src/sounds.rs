@@ -2114,6 +2114,8 @@ fn brought_up_to_date(app: &AppWindow, r: Refreshed) {
         galaxy::shown(app);
     }
     crate::space::sounds_changed(app);
+    // Samples saved from Bitwig may be among the sounds now; Mark as favourites may work now.
+    bitwig::sounds_read(app);
 }
 
 /// What the page does once [`take_refreshed`] has put the sounds read again in place: what needs the window.
@@ -2269,7 +2271,6 @@ fn rest_arrived(app: &AppWindow, rest: Refreshed) {
     });
     if first {
         brought_up_to_date(app, rest);
-        bitwig::sounds_read(app);
     }
 }
 
@@ -2775,6 +2776,12 @@ fn wire_yours(app: &AppWindow, data: &SoundsData) {
     data.on_bitwig_mark(move || {
         if let Some(app) = weak.upgrade() {
             bitwig::mark(&app);
+        }
+    });
+    let weak = app.as_weak();
+    data.on_bitwig_save(move || {
+        if let Some(app) = weak.upgrade() {
+            bitwig::save(&app);
         }
     });
 }
@@ -3307,13 +3314,15 @@ pub struct BitwigShot<'a> {
     pub ticked: &'a [&'a str],
     pub said: &'a str,
     pub missing: &'a [&'a str],
+    /// How many of them Save as sounds would save (into a made-up I:\Samples).
+    pub saveable: usize,
 }
 
 /// For the screenshots: Favourites from Bitwig's card open on made-up multisamples (`ticked` by name), with what a
 /// look said and the samples it didn't find (none for a card not used yet); `None` closes it. Never reads a folder.
 pub fn show_bitwig_for_screens(app: &AppWindow, shown: Option<BitwigShot<'_>>) {
     match shown {
-        Some(BitwigShot { names, ticked, said, missing }) => {
+        Some(BitwigShot { names, ticked, said, missing, saveable }) => {
             let found = names
                 .iter()
                 .map(|n| mo_app::bitwig_favourites::Multisample {
@@ -3321,7 +3330,7 @@ pub fn show_bitwig_for_screens(app: &AppWindow, shown: Option<BitwigShot<'_>>) {
                     name: (*n).to_owned(),
                 })
                 .collect();
-            bitwig::show_for_screens(app, found, ticked, said, missing);
+            bitwig::show_for_screens(app, found, ticked, said, missing, saveable);
         }
         None => bitwig::close(app),
     }

@@ -7,7 +7,9 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use mo_app::bitwig_favourites::{self, Marked, Multisample, is_temp_file, look, missing_lines, multisamples, summary};
+use mo_app::bitwig_favourites::{
+    self, Marked, Multisample, Why, is_temp_file, look, missing_lines, multisamples, save_missing, sounds_at, summary,
+};
 use mo_sounds::{Sound, SoundAnalysis};
 
 fn folder(name: &str) -> PathBuf {
@@ -90,6 +92,8 @@ fn samples_are_found_by_their_file_or_their_audio_only() {
     hat_noted[4..8].copy_from_slice(&riff.to_le_bytes());
     let clap_path = dir.join("clap.wav");
     wav(&clap_path, &tone(17, 2500));
+    // A sample Bitwig recorded from an instrument: only inside the multisample.
+    wav(&dir.join("recorded.wav"), &tone(19, 2200));
     let m = multisample(
         &dir.join("Drums Select.multisample"),
         &[
@@ -97,6 +101,7 @@ fn samples_are_found_by_their_file_or_their_audio_only() {
             ("Kick.wav", fs::read(&kick).unwrap()),
             ("Hat.wav", hat_noted),
             ("Clap.wav", fs::read(&clap_path).unwrap()),
+            ("Snare 036 - c1.wav", fs::read(dir.join("recorded.wav")).unwrap()),
         ],
     );
     let broken = dir.join("Broken.multisample");
@@ -106,14 +111,20 @@ fn samples_are_found_by_their_file_or_their_audio_only() {
     let found = look(&[m, broken], &library, &temp, &AtomicBool::new(false), |_, _| {});
     // The snare (both copies by its own name), the kick by its bytes, the hat by its audio; never the look-alike clap.
     assert_eq!(found.sounds, vec![1, 2, 3, 4]);
-    assert_eq!((found.multisamples, found.samples, found.samples_found), (1, 4, 3));
-    assert_eq!(found.missing.len(), 1);
+    // "Drums Select" names no type, so none is given.
+    assert_eq!(found.types, vec![]);
+    assert_eq!((found.multisamples, found.samples, found.samples_found), (1, 5, 3));
+    assert_eq!(found.missing.len(), 2);
     assert_eq!(found.missing[0].sample, "Clap.wav");
     assert_eq!(found.unreadable.len(), 1);
-    assert_eq!(missing_lines(&found)[0], "Drums Select: Clap.wav");
+    // A sound named Clap.wav is in the library, but its audio is different.
+    assert_eq!(found.missing[0].why, Why::OtherAudio);
+    assert_eq!(missing_lines(&found)[0], "Drums Select: Clap.wav (same name, different audio)");
+    // No sound has the recorded one's name, nor its audio.
+    assert_eq!((found.missing[1].sample.as_str(), found.missing[1].why), ("Snare 036 - c1.wav", Why::NoSuchName));
     assert!(
-        summary(&found, Marked { newly: 3, already: 1 })
-            .starts_with("Found 3 of 4 samples in your sound library: 4 sounds now favourites (1 already were).")
+        summary(&found, Marked { newly: 3, already: 1, typed: 0 })
+            .starts_with("Found 3 of 5 samples in your sound library: 4 sounds now favourites (1 already were).")
     );
     // Every sample written to Temp went again.
     assert_eq!(fs::read_dir(&temp).unwrap().count(), 0);
@@ -144,4 +155,111 @@ fn multisamples_are_listed_from_each_library_once() {
     assert_eq!(names, ["A Kick", "b Snare"]);
     assert!(!is_temp_file("A Kick.multisample"));
     assert_eq!(bitwig_favourites::MULTISAMPLES, "Multisamples");
+}
+
+#[test]
+fn samples_not_found_are_saved_into_from_bitwig_and_never_over_a_file() {
+    let dir = folder("saved");
+    let samples = dir.join("samples");
+    let temp = dir.join("temp");
+    fs::create_dir_all(&samples).unwrap();
+    fs::create_dir_all(&temp).unwrap();
+    // The library has a Clap.wav, but not this one's audio; nothing has the recorded snare's name or audio.
+    let clap = samples.join("Clap.wav");
+    wav(&clap, &tone(17, 2500));
+    let library = vec![sound(1, &clap, 2500)];
+    let other_clap = dir.join("other clap.wav");
+    wav(&other_clap, &tone(23, 2500));
+    let recorded = dir.join("recorded.wav");
+    wav(&recorded, &tone(19, 2200));
+    let m = multisample(
+        &dir.join("Snare 2..multisample"),
+        &[("Clap.wav", fs::read(&other_clap).unwrap()), ("Snare 036 - c1.wav", fs::read(&recorded).unwrap())],
+    );
+    let zip_before = fs::read(&m.path).unwrap();
+    let found = look(std::slice::from_ref(&m), &library, &temp, &AtomicBool::new(false), |_, _| {});
+    assert_eq!(found.missing.len(), 2);
+
+    let saved = save_missing(&found.missing, &samples, &AtomicBool::new(false));
+    // In the sample folder › From Bitwig › the multisample's name (its dot at the end left out, as Windows does).
+    let into = samples.join(bitwig_favourites::FROM_BITWIG).join("Snare 2");
+    assert_eq!(saved.paths, vec![into.join("Clap.wav"), into.join("Snare 036 - c1.wav")]);
+    assert_eq!((saved.written, saved.there, saved.failed.len()), (2, 0, 0));
+    assert_eq!(saved.types, vec![Some("Snare"), Some("Snare")]);
+    assert_eq!(fs::read(&saved.paths[0]).unwrap(), fs::read(&other_clap).unwrap());
+    assert_eq!(fs::read(&saved.paths[1]).unwrap(), fs::read(&recorded).unwrap());
+    // Nothing half-written is left, and the multisample is as it was.
+    assert_eq!(fs::read_dir(&into).unwrap().count(), 2);
+    assert_eq!(fs::read(&m.path).unwrap(), zip_before);
+    assert!(summary_of(&saved, &samples).starts_with("Saved 2 samples into "));
+
+    // Run again: the same files are there, nothing is written.
+    let again = save_missing(&found.missing, &samples, &AtomicBool::new(false));
+    assert_eq!((again.written, again.there, again.paths.clone()), (0, 2, saved.paths.clone()));
+
+    // A file of its name with other bytes is never written over: the sample gets " (2)".
+    fs::write(into.join("Clap.wav"), b"mine").unwrap();
+    let beside = save_missing(&found.missing[..1], &samples, &AtomicBool::new(false));
+    assert_eq!(beside.paths, vec![into.join("Clap (2).wav")]);
+    assert_eq!(fs::read(into.join("Clap.wav")).unwrap(), b"mine");
+
+    // Once scanned, the saved files are found among the sounds by their paths, either slash and letter case aside.
+    let scanned = vec![
+        sound(7, &into.join("clap (2).WAV"), 2500),
+        sound(8, &into.join("Snare 036 - c1.wav"), 2200),
+        sound(9, &clap, 2500),
+    ];
+    let gone = into.join("Not scanned yet.wav");
+    assert_eq!(
+        sounds_at(&[into.join("Clap (2).wav"), gone, saved.paths[1].clone()], &scanned),
+        [Some(7), None, Some(8)]
+    );
+}
+
+fn summary_of(saved: &bitwig_favourites::Saved, into: &Path) -> String {
+    bitwig_favourites::saved_summary(saved, into)
+}
+
+#[test]
+fn a_sample_bitwig_padded_with_silence_is_found_under_its_own_name() {
+    let dir = folder("padded");
+    let samples = dir.join("samples");
+    let temp = dir.join("temp");
+    fs::create_dir_all(&samples).unwrap();
+    fs::create_dir_all(&temp).unwrap();
+    // The library's snare and tom, as in his sample folder.
+    let snare = samples.join("Snare 036 - c1.wav");
+    wav(&snare, &tone(29, 1500));
+    let tom = samples.join("Tom.wav");
+    wav(&tom, &tone(31, 1500));
+    let library = vec![sound(1, &snare, 1500), sound(2, &tom, 1500)];
+    // Bitwig's copies: silence before and after. The tom's last sample is different, so it isn't the same sound.
+    let pad = |mut audio: Vec<f32>| {
+        let mut out = vec![0.0; 900];
+        out.append(&mut audio);
+        out.extend(std::iter::repeat_n(0.0, 4000));
+        out
+    };
+    let padded_snare = dir.join("padded snare.wav");
+    wav(&padded_snare, &pad(tone(29, 1500)));
+    let mut tom_changed = tone(31, 1500);
+    tom_changed[1499] = 0.125;
+    let padded_tom = dir.join("padded tom.wav");
+    wav(&padded_tom, &pad(tom_changed));
+    let m = multisample(
+        &dir.join("Stylus.multisample"),
+        &[("Snare 036 - c1.wav", fs::read(&padded_snare).unwrap()), ("Tom.wav", fs::read(&padded_tom).unwrap())],
+    );
+    let found = look(&[m], &library, &temp, &AtomicBool::new(false), |_, _| {});
+    assert_eq!(found.sounds, vec![1]);
+    assert_eq!(found.types, vec![]);
+    assert_eq!((found.samples_found, found.samples_unpadded), (1, 1));
+    assert_eq!(found.missing.len(), 1);
+    assert_eq!((found.missing[0].sample.as_str(), found.missing[0].why), ("Tom.wav", Why::OtherAudio));
+    let said = summary(&found, Marked { newly: 1, already: 0, typed: 0 });
+    assert!(
+        said.contains(" 1 was the same sound once the silence Bitwig added before and after it was left out."),
+        "{said}"
+    );
+    assert_eq!(fs::read_dir(&temp).unwrap().count(), 0);
 }

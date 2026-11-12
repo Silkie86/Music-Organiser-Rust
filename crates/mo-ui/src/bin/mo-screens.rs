@@ -1773,13 +1773,25 @@ fn sounds_shots(
     let names =
         ["Clap 1 Select", "Kicks 1 Select", "OHH 2 Select", "rim 1", "Snare 3 Select", "Stylus Drums - Snare 2"];
     let ticked = ["Kicks 1 Select", "rim 1", "Snare 3 Select"];
-    let shot = |said, missing| mo_ui::sounds::BitwigShot { names: &names, ticked: &ticked, said, missing };
+    let shot = |said, missing: &'static [&'static str]| mo_ui::sounds::BitwigShot {
+        names: &names,
+        ticked: &ticked,
+        said,
+        missing,
+        saveable: missing.len(),
+    };
     mo_ui::sounds::show_bitwig_for_screens(app, Some(shot("", &[])));
     shots.push(("sounds-bitwig-favourites.png".into(), capture(window)));
-    let missing = ["rim 1 › Rim 07.wav", "Snare 3 Select › Hmy_Snr.wav", "Snare 3 Select › Hyper Snare.wav"];
-    let said = "Found 368 of 371 samples in your sound library: 370 sounds now favourites (12 already were). 3 samples \
-        not found.";
-    mo_ui::sounds::show_bitwig_for_screens(app, Some(shot(said, &missing)));
+    const MISSING: [&str; 3] = [
+        "rim 1 › Rim 07.wav: no sound by this name",
+        "Snare 3 Select › Hmy_Snr.wav: same name, different audio",
+        "Snare 3 Select › Hyper Snare.wav: no sound by this name",
+    ];
+    let said = "Found 368 of 371 samples in your sound library: 370 sounds now favourites (12 already were). 210 \
+        were given the type their multisample names. 40 were the same sound once the silence Bitwig added before and \
+        after them was left out. 3 samples not found: 2 are only in the multisample (Bitwig may have recorded them, \
+        or their files aren't in your sample folders); 1 has a sound of yours by its name, but different audio.";
+    mo_ui::sounds::show_bitwig_for_screens(app, Some(shot(said, &MISSING)));
     shots.push(("sounds-bitwig-favourites-done.png".into(), capture(window)));
     mo_ui::sounds::show_bitwig_for_screens(app, None);
     // A tile dragged out to a DAW: dimmed while it's carried, with the card that follows the mouse a little way on
