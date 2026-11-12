@@ -3,7 +3,7 @@
 // its piano roll, its key as the key finder reads it, its facts, and what you can do with it. Only shared parts from
 // studio.slint; mo-app decides every word (mo_app::midi), mo-ui/src/midi.rs fills it.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, MenuChip, FilterList, FilterColumn, FilterView, ListLine, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Well, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, FilterView, RangeSlider, ListLine, DragHandle, Caps, ColumnHead, StudioButton, MenuItem, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Dot, PageHeader, YearRange, YearBar } from "../studio.slint";
 
 // One part in the list.
 export struct MidiLine {
@@ -138,6 +138,35 @@ export global MidiData {
     // "Play with the song": Play loop plays a part found with the parts of the song it fits, at the song's tempo.
     in property <bool> fit-with-song;
     callback fit-with-song-toggled();
+    // What of the song the list is fitted to, to pick by hand (mo-app's midi_fits::yours); shown once the song has
+    // been read. Its parts as a shared filter: the ones on are fitted to (yours, else the app's). `fit-parts` has a
+    // chip for each (and a menu after them in a song with many), `fit-parts-menu` the same choices all in the menu,
+    // for a window with no room for the chips.
+    in property <bool> fit-pick-shown;
+    in property <FilterView> fit-parts;
+    in property <FilterView> fit-parts-menu;
+    // Whether the parts that are on were picked by hand: until then they're the app's pick, and the menu's first
+    // line ("The app's pick") is the one ticked.
+    in property <bool> fit-parts-yours;
+    // A part's chip or menu line was pressed (its words); the menu's first line, which gives the parts back to the
+    // app.
+    callback fit-part-toggled(string);
+    callback fit-parts-cleared();
+    // Its bars on a slider whose handles stand on bar lines, counted from 0 at the song's start to `fit-bars-length`
+    // at its end: the bars between `fit-bars-from` and `fit-bars-to` are fitted to. `fit-bars-play` is the small
+    // picture over it (how many of those parts play, strip by strip), and `fit-bars-text` says "Bars 9–16 of 64".
+    // No slider (`fit-bars-shown` off) while no bars are fitted to: the words say how long the song is.
+    in property <bool> fit-bars-shown;
+    in property <int> fit-bars-length;
+    in property <int> fit-bars-from;
+    in property <int> fit-bars-to;
+    in property <[float]> fit-bars-play;
+    in property <string> fit-bars-text;
+    // The handles were moved to these bar lines.
+    callback fit-bars-picked(int, int);
+    // Some of that is your pick, so the app's is offered back.
+    in property <bool> fit-pick-yours;
+    callback fit-apps-pick();
     // Said in the list's place while it has no lines of "Fits my song": it's looking, no part fits, or the search
     // couldn't be made ("" otherwise). And whether fewer filters could give it lines, so clearing them is offered.
     in property <string> fit-none-title;
@@ -748,11 +777,77 @@ component PartPanel inherits SidePanel {
     Rectangle { vertical-stretch: 1; }
 }
 
+// What the list says of itself, after the "Fits my song" chip and its switch: how a part found is heard, the "parts
+// like this one" chip, and the list's own line. On the same line as those where the page is wide enough, on a line
+// of its own where it isn't (MidiPage's `fit-two-lines`).
+component ListSays inherits HorizontalLayout {
+    spacing: Space.sm;
+    // How a part found is heard: with the song's parts it fits (lit), or alone.
+    if MidiData.fit-song != "": VerticalLayout {
+        alignment: center;
+        ToggleChip {
+            text: "Play with the song";
+            on: MidiData.fit-with-song;
+            clicked => { MidiData.fit-with-song-toggled(); }
+        }
+    }
+    // Only the parts like this one: the shared chip, as on the other pages; a click shows them all again.
+    if MidiData.target != "": VerticalLayout {
+        alignment: center;
+        ToggleChip {
+            text: MidiData.target + "  ×";
+            on: true;
+            clicked => { MidiData.clear-target(); }
+        }
+    }
+    Text {
+        text: MidiData.result;
+        color: Theme.muted;
+        font-size: Type.meta;
+        vertical-alignment: center;
+        overflow: elide;
+        horizontal-stretch: 1;
+        min-width: 0px;
+    }
+}
+
 export component MidiPage inherits Rectangle {
     forward-focus: search-box;
     // Ctrl+F (app.search): the keys go to the search box, its words picked so typing replaces them (review X3-22).
     property <int> search-asked: AppKeys.search;
     changed search-asked => { search-box.focus-all(); }
+    // Two things about "Fits my song" go by how wide the page is. Whether the song's parts fit as chips on the line
+    // they share with the bars' slider ("Fit to"), measured on a strip that's never drawn: the 520px is the room the
+    // bars' words, a short slider and "The app's pick" need. The strip is measured with nothing picked in its menu
+    // (a song with more parts than chips has one), and 160px kept for what that menu's chip says is picked: so
+    // picking in the menu, which changes those words, never turns the chips into a menu and back. And whether the
+    // page is too narrow for the song's chip, its switch, "Play with the song" and the list's own line all on one
+    // line (they need about 990px to leave the line room to say something): then the last two go on a line of their
+    // own.
+    // Both are set when the page's width or the chips change, not bound to them: the page's width hangs on what
+    // its lines ask for, and a binding would go round in a circle (as on the Backup page).
+    property <bool> fit-chips-fit;
+    property <bool> fit-narrow;
+    property <bool> fit-two-lines: root.fit-narrow && MidiData.fit-song != "";
+    property <length> fit-chips-width: fit-chips.preferred-width;
+    property <length> fit-menu-room: MidiData.fit-parts.more.length > 0 ? 160px : 0px;
+    function fit-measure() {
+        self.fit-chips-fit = self.fit-chips-width + self.fit-menu-room + 520px <= self.width - 2 * Space.xl;
+        self.fit-narrow = self.width < 990px;
+    }
+    init => { self.fit-measure(); }
+    changed width => { self.fit-measure(); }
+    changed fit-chips-width => { self.fit-measure(); }
+    changed fit-menu-room => { self.fit-measure(); }
+    fit-chips := FilterPicks {
+        visible: false;
+        x: 0;
+        y: 0;
+        width: 0;
+        height: 0;
+        name: "Fit to";
+        filter: { chips: MidiData.fit-parts.chips, more: MidiData.fit-parts.more, more-picked: "" };
+    }
 
     VerticalLayout {
         padding: Space.xl;
@@ -844,32 +939,70 @@ export component MidiPage inherits Rectangle {
                     }
                 }
             }
-            // How a part found is heard: with the song's parts it fits (lit), or alone.
-            if MidiData.fit-song != "": VerticalLayout {
+            // What the list says of itself follows on the same line, or on the next where the page is too narrow
+            // for it there.
+            if !root.fit-two-lines: ListSays {
+                horizontal-stretch: 1;
+            }
+            if root.fit-two-lines: Rectangle { }
+        }
+        if root.fit-two-lines: ListSays {
+            vertical-stretch: 0;
+        }
+        // What of the song the list is fitted to, to pick by hand: its parts as a shared filter (lit: fitted to),
+        // then its bars on the shared slider, under a small picture of where those parts play. The row is there
+        // from the moment a song is picked, so the list doesn't move when the song has been read.
+        if MidiData.fit-song != "": HorizontalLayout {
+            // From the left, each thing as wide as it asks to be: on a very wide page the room left over stays at
+            // the right. Where there's less room than that, the slider is what gives.
+            alignment: start;
+            spacing: Space.md;
+            vertical-stretch: 0;
+            height: 46px;
+            if MidiData.fit-pick-shown: VerticalLayout {
                 alignment: center;
-                ToggleChip {
-                    text: "Play with the song";
-                    on: MidiData.fit-with-song;
-                    clicked => { MidiData.fit-with-song-toggled(); }
+                horizontal-stretch: 0;
+                // Never squeezed onto two lines: the chips are only shown where they fit on one.
+                min-width: picks.preferred-width;
+                picks := FilterPicks {
+                    name: "Fit to";
+                    any-text: "The app's pick";
+                    any-on: !MidiData.fit-parts-yours;
+                    // A chip for each part where they fit on the line beside the bars, else all in the menu.
+                    filter: root.fit-chips-fit ? MidiData.fit-parts : MidiData.fit-parts-menu;
+                    toggled(text) => { MidiData.fit-part-toggled(text); }
+                    cleared => { MidiData.fit-parts-cleared(); }
                 }
             }
-            // Only the parts like this one: the shared chip, as on the other pages; a click shows them all again.
-            if MidiData.target != "": VerticalLayout {
-                alignment: center;
-                ToggleChip {
-                    text: MidiData.target + "  ×";
-                    on: true;
-                    clicked => { MidiData.clear-target(); }
-                }
-            }
-            Text {
-                text: MidiData.result;
+            if MidiData.fit-pick-shown: Text {
+                text: MidiData.fit-bars-text;
                 color: Theme.muted;
                 font-size: Type.meta;
                 vertical-alignment: center;
-                overflow: elide;
+                horizontal-stretch: 0;
+            }
+            if MidiData.fit-pick-shown && MidiData.fit-bars-shown: RangeSlider {
                 horizontal-stretch: 1;
-                min-width: 0px;
+                min-width: 160px;
+                preferred-width: 960px;
+                max-width: 960px;
+                // The bars between the handles are always what's fitted to, the whole of a short song too.
+                always-on: true;
+                low-end: 0;
+                high-end: MidiData.fit-bars-length;
+                low: MidiData.fit-bars-from;
+                high: MidiData.fit-bars-to;
+                bars: MidiData.fit-bars-play;
+                changed(low, high) => { MidiData.fit-bars-picked(low, high); }
+            }
+            if MidiData.fit-pick-shown && MidiData.fit-pick-yours: VerticalLayout {
+                alignment: center;
+                StudioButton {
+                    horizontal-stretch: 0;
+                    text: "The app's pick";
+                    tip: "Fit to the parts and bars the app picks for this song, as before you chose";
+                    clicked => { MidiData.fit-apps-pick(); }
+                }
             }
         }
         split := Rectangle {

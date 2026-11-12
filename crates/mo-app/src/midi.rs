@@ -599,6 +599,19 @@ pub fn role_label(role: Role) -> &'static str {
     }
 }
 
+/// A kind's colour, the Sounds page's colour for the same kind of sound (Keys, Lead, Bass, Vocal, Kick), so the two
+/// pages agree: a place in the theme's sound type colours, -1 for grey (something else).
+pub fn role_colour(role: Role) -> i32 {
+    match role {
+        Role::Chords => 11,
+        Role::Melody => 9,
+        Role::Bass => 8,
+        Role::Arp => 14,
+        Role::Drums => 0,
+        Role::Other => -1,
+    }
+}
+
 /// The line's title: the track or clip's name, else the file's.
 pub fn title(e: &Entry) -> String {
     let t = e.title();

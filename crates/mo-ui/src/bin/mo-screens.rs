@@ -24,6 +24,8 @@ const HEIGHT: u32 = 900;
 const NARROW: u32 = 900;
 /// A window short enough that the Songs, Presets, MIDI and Plugins samples' lists scroll (app.slint's min-height).
 const SHORT: u32 = 600;
+/// Tall enough for the filter column's foot (Favourites and its Sounds like them slider) to show.
+const TALL_FAVOURITES: u32 = 1180;
 /// Solomon's own window: an ultrawide screen at 100% (across, down).
 const WIDE: (u32, u32) = (3440, 1369);
 
@@ -197,6 +199,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     shots.push(("midi-fits.png".into(), capture(&window)));
+    // What of the song the list is fitted to is under the switch, to pick by hand: its parts as chips, the app's
+    // lit (the bassline), and its bars on the slider (all eight). None of it is yours yet.
+    let parts = || {
+        let chips = midi.get_fit_parts().chips;
+        chips.iter().map(|c| format!("{}{} {}", if c.on { '+' } else { '-' }, c.text, c.count)).collect::<Vec<_>>()
+    };
+    let bars = || (midi.get_fit_bars_from(), midi.get_fit_bars_to(), midi.get_fit_bars_length());
+    let picker =
+        || format!("{:?} {:?} \"{}\" yours: {}", parts(), bars(), midi.get_fit_bars_text(), midi.get_fit_pick_yours());
+    let apps = picker();
+    if !midi.get_fit_pick_shown()
+        || apps != r#"["-Keys melody", "+Sub bassline", "-Lead melody"] (0, 8, 8) "Bars 1–8 of 8" yours: false"#
+    {
+        return Err(format!("midi-fits-pick.png: the app's pick of the song isn't shown: {apps}").into());
+    }
+    // The parts lit are the app's (the menu's "The app's pick" is the line ticked), and the slider is there.
+    if midi.get_fit_parts_yours() || !midi.get_fit_bars_shown() {
+        return Err("midi-fits-pick.png: the app's parts are said to be yours, or the bars have no slider".into());
+    }
+    let apps_list = (midi.get_result(), midi.get_shown());
+    // The lead's chip pressed, and the slider's higher handle dragged to the fifth bar line: the list is fitted to
+    // the bassline and the lead over bars 1 to 4, and the app's pick is offered back.
+    midi.invoke_fit_part_toggled("Lead".into());
+    midi.invoke_fit_bars_picked(0, 4);
+    let yours = picker();
+    if yours != r#"["-Keys melody", "+Sub bassline", "+Lead melody"] (0, 4, 8) "Bars 1–4 of 8" yours: true"#
+        || !midi.get_fit_parts_yours()
+        || !midi.get_result().starts_with("To play over Sub and Lead, bars 1–4 · ")
+    {
+        return Err(format!("midi-fits-pick.png: a pick by hand isn't shown or fitted to: {yours}").into());
+    }
+    shots.push(("midi-fits-pick.png".into(), capture(&window)));
+    // The narrowest window has no room for the chips beside the slider: the parts are in the filter's menu.
+    save_narrow(&window, &out, "midi-fits-pick-narrow.png")?;
+    // Off and on again, the song is fitted to what you picked of it: it's remembered for the song.
+    mo_ui::midi::fit_sample(&app, false);
+    if midi.get_fit_pick_shown() {
+        return Err("midi-fits-pick.png: the picker is still shown with \"Fits my song\" off".into());
+    }
+    mo_ui::midi::fit_sample(&app, true);
+    if picker() != yours {
+        return Err(format!("midi-fits-pick.png: the song's pick wasn't remembered: {}", picker()).into());
+    }
+    // The switch pressed: the parts go back to the app (the song's melodies now, to put chords under), the bars
+    // stay yours.
+    midi.invoke_fit_wants_picked(1);
+    if picker() != r#"["+Keys melody", "-Sub bassline", "+Lead melody"] (0, 4, 8) "Bars 1–4 of 8" yours: true"# {
+        return Err(
+            format!("midi-fits-pick.png: the switch didn't give the parts back to the app: {}", picker()).into()
+        );
+    }
+    // "The app's pick": all of it is the app's again, and so is the list once the switch is back too.
+    midi.invoke_fit_apps_pick();
+    midi.invoke_fit_wants_picked(0);
+    if picker() != apps || (midi.get_result(), midi.get_shown()) != apps_list {
+        return Err(format!("midi-fits-pick.png: The app's pick didn't bring the app's back: {}", picker()).into());
+    }
     // "Play with the song" off: it plays alone at its own tempo, still moved to fit; and on again.
     midi.invoke_fit_with_song_toggled();
     let alone = midi.get_sound_line();
@@ -1769,17 +1828,46 @@ fn sounds_shots(
     shots.push(("sounds-duplicates.png".into(), hidden));
     data.invoke_toggle("hide-copies".into());
     mo_ui::sounds::show_copies_for_screens(app, None);
+    // Favourites, then the sounds most like them too: the slider halfway (7 like each).
+    // A tall window, so the slider under Favourites shows (at the foot of the filter column).
+    window.set_size(PhysicalSize::new(WIDTH, TALL_FAVOURITES));
+    data.invoke_toggle("favourites".into());
+    let only = capture_sized(window, (WIDTH, TALL_FAVOURITES), Duration::from_millis(400));
+    data.invoke_like_favourites_set(0.4);
+    let like = capture_sized(window, (WIDTH, TALL_FAVOURITES), Duration::from_millis(400));
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    if like == only {
+        return Err("sounds-like-favourites.png: the Sounds like them slider changed nothing".into());
+    }
+    // The window's lowest [`HEIGHT`] rows, where the slider is, as the shots are all that size.
+    let foot = |shot: Vec<u8>| shot[((TALL_FAVOURITES - HEIGHT) * WIDTH * 3) as usize..].to_vec();
+    shots.push(("sounds-favourites.png".into(), foot(only)));
+    shots.push(("sounds-like-favourites.png".into(), foot(like)));
+    data.invoke_like_favourites_set(0.0);
+    data.invoke_toggle("favourites".into());
     // Favourites from Bitwig: its card in the sound card's place, some multisamples ticked, then after a look.
     let names =
         ["Clap 1 Select", "Kicks 1 Select", "OHH 2 Select", "rim 1", "Snare 3 Select", "Stylus Drums - Snare 2"];
     let ticked = ["Kicks 1 Select", "rim 1", "Snare 3 Select"];
-    let shot = |said, missing| mo_ui::sounds::BitwigShot { names: &names, ticked: &ticked, said, missing };
+    let shot = |said, missing: &'static [&'static str]| mo_ui::sounds::BitwigShot {
+        names: &names,
+        ticked: &ticked,
+        said,
+        missing,
+        saveable: missing.len(),
+    };
     mo_ui::sounds::show_bitwig_for_screens(app, Some(shot("", &[])));
     shots.push(("sounds-bitwig-favourites.png".into(), capture(window)));
-    let missing = ["rim 1 › Rim 07.wav", "Snare 3 Select › Hmy_Snr.wav", "Snare 3 Select › Hyper Snare.wav"];
-    let said = "Found 368 of 371 samples in your sound library: 370 sounds now favourites (12 already were). 3 samples \
-        not found.";
-    mo_ui::sounds::show_bitwig_for_screens(app, Some(shot(said, &missing)));
+    const MISSING: [&str; 3] = [
+        "rim 1 › Rim 07.wav: no sound by this name",
+        "Snare 3 Select › Hmy_Snr.wav: same name, different audio",
+        "Snare 3 Select › Hyper Snare.wav: no sound by this name",
+    ];
+    let said = "Found 368 of 371 samples in your sound library: 370 sounds now favourites (12 already were). 210 \
+        were given the type their multisample names. 40 were the same sound once the silence Bitwig added before and \
+        after them was left out. 3 samples not found: 2 are only in the multisample (Bitwig may have recorded them, \
+        or their files aren't in your sample folders); 1 has a sound of yours by its name, but different audio.";
+    mo_ui::sounds::show_bitwig_for_screens(app, Some(shot(said, &MISSING)));
     shots.push(("sounds-bitwig-favourites-done.png".into(), capture(window)));
     mo_ui::sounds::show_bitwig_for_screens(app, None);
     // A tile dragged out to a DAW: dimmed while it's carried, with the card that follows the mouse a little way on

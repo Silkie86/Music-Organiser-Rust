@@ -1198,22 +1198,9 @@ fn read_all(at: &Where) -> Result<(), String> {
             started.elapsed().as_secs_f64()
         ),
     );
-    let (found, templates) = (kept.files, kept.templates);
     // Each file's year from the time the store looked at already: no second look at every file (X2-4).
-    let years: HashMap<String, Option<i32>> =
-        found.iter().zip(&kept.modified).map(|(f, at)| (f.path.clone(), at.and_then(year_of_time))).collect();
-    let mut items: Vec<Item> = plib::rows(&[], &found)
-        .into_iter()
-        .map(|row| {
-            let year = match &row.source {
-                Source::File { path } => years.get(path).copied().flatten(),
-                Source::Song { .. } => None,
-            };
-            Item::new(row, String::new(), year)
-        })
-        .collect();
-    // In the list's order, so filtering needn't sort them.
-    logic::sort_files(&mut items);
+    let items = logic::file_items(&kept.files, &kept.modified);
+    let templates = kept.templates;
     let files = items.len();
     let templates = Arc::new(templates);
     on_window(move |app| {
@@ -1222,10 +1209,6 @@ fn read_all(at: &Where) -> Result<(), String> {
     });
     add(items, 0, files, None);
     Ok(())
-}
-
-fn year_of_time(m: std::time::SystemTime) -> Option<i32> {
-    logic::year_of(m.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs() as i64)
 }
 
 /// Adds lines read on another thread to the page. While reading goes on the list is shown afresh at most four times

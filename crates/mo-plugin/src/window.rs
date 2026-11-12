@@ -10,10 +10,13 @@
 //! On Windows and Mac the window's thread is the DAW's main thread, so nothing slow ever runs on it: reading the
 //! library, searching it and reading a sound all run on background threads at low priority.
 
+mod midi_tab;
+mod presets_tab;
+
 use crate::audition::Played;
 use crate::galaxy::{self, Sky};
 use crate::gpu::Gpu;
-use crate::library::{self, Asked, Library, ORDERS, Read};
+use crate::library::{self, Asked, Library, Like, ORDERS, Read};
 use crate::threads::{background, lock};
 use crate::waves::{self, Kept};
 use crate::{
@@ -29,7 +32,7 @@ use mo_app::backup::thousands;
 use mo_app::filters::{Filter, Shown as Choice};
 use mo_app::galaxy_grid::Grid;
 use mo_app::galaxy_view::{Hold, Moved, View};
-use mo_app::sounds::{Order, SoundCounts, TEMPO_HIGH, TEMPO_LOW, TEMPO_STEP, TYPE_CHIPS};
+use mo_app::sounds::{LikeKnown, Order, SoundCounts, TEMPO_HIGH, TEMPO_LOW, TEMPO_STEP, TYPE_CHIPS};
 use slint::platform::software_renderer::{
     MinimalSoftwareWindow, PremultipliedRgbaColor, RepaintBufferType, TargetPixel,
 };
@@ -128,9 +131,13 @@ struct Slots {
     found: Mutex<Option<(u64, Vec<usize>, SoundCounts)>>,
     /// Counts askings: only the newest one's answer is shown.
     searches: AtomicU64,
+    /// This panel has shown the list with the sounds like your favourites in (or said they couldn't be found), once
+    /// they were known: the library is shared by every panel, so each looks for itself ([`Window::tick`]).
+    like_shown: AtomicBool,
     played: Mutex<Option<Played>>,
-    /// A line dragged out: its row and its file, once it's been checked to be there, or why it can't go.
-    drag: Mutex<Option<(usize, Result<std::path::PathBuf, String>)>>,
+    /// A line dragged out: which, and its file, once it's been checked to be there (or written, for a MIDI part),
+    /// or why it can't go.
+    drag: Mutex<Option<(Carried, Result<std::path::PathBuf, String>)>>,
     /// A drag out that has ended: its file, when it started and how it ended.
     dragged: Mutex<Option<Dragged>>,
     /// The waveforms read for the lines on show, with their asking's round ([`Kept::to_read`]).
@@ -146,6 +153,15 @@ struct Slots {
     packed: Mutex<Option<galaxy::Packed>>,
     /// The mini-map's picture, with its asking's number ([`Sky::mini_ask`]).
     mini: Mutex<Option<(u64, SkyPixels)>>,
+}
+
+/// The line being dragged out: a row of the Sounds list, a part of the MIDI tab's (its place in the catalogue), or a
+/// preset of the Presets tab's (its place in the list).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Carried {
+    Sound(usize),
+    Part(usize),
+    Preset(usize),
 }
 
 /// A drag out that has ended: its file, when it started and how it ended.
@@ -216,6 +232,13 @@ impl Lines {
     }
 
     /// The id of the sound on `row`.
+    /// Whether the library knows the sound on `row` as a loop (Trim silence drags a loop as it is).
+    fn is_loop(&self, row: usize) -> bool {
+        let library = self.library.borrow();
+        let Some(&at) = self.shown.borrow().get(row) else { return false };
+        library.as_ref().and_then(|l| l.list.sound(at)).is_some_and(|s| s.analysis.as_ref().is_some_and(|a| a.is_loop))
+    }
+
     fn sound(&self, row: usize) -> Option<i64> {
         let library = self.library.borrow();
         let at = *self.shown.borrow().get(row)?;
@@ -480,7 +503,8 @@ struct Shown {
     draws: Draws,
     panel: Panel,
     size: Cell<(u32, u32)>,
-    scale: Cell<f64>,
+    /// The screen's pixels to a point (shared with what draws pictures for the panel).
+    scale: Rc<Cell<f64>>,
     pointer: Cell<LogicalPosition>,
     lines: Rc<Lines>,
     slots: Arc<Slots>,
@@ -488,6 +512,12 @@ struct Shown {
     /// What the search box, the filter column and the order ask of the list.
     asked: Rc<RefCell<Asked>>,
     column: Rc<Column>,
+    /// The MIDI tab.
+    midi: midi_tab::MidiTab,
+    /// The Presets tab.
+    presets: presets_tab::PresetsTab,
+    /// What's being dragged out now.
+    carried: Cell<Option<Carried>>,
     /// The sound the "Playing" line names, as the player numbers it: the line goes when that sound ends.
     playing: Cell<Option<u64>>,
     /// The line last clicked to play: its row, its sound and its file.
@@ -543,13 +573,16 @@ impl Shown {
             draws,
             panel,
             size: Cell::new((0, 0)),
-            scale: Cell::new(1.0),
+            scale: Rc::new(Cell::new(1.0)),
             pointer: Cell::new(LogicalPosition::default()),
             lines,
             slots,
             instance,
             asked: Rc::new(RefCell::new(Asked { seed: seed(), ..Asked::default() })),
             column: Rc::new(Column::default()),
+            midi: midi_tab::MidiTab::new(),
+            presets: presets_tab::PresetsTab::new(),
+            carried: Cell::new(None),
             playing: Cell::new(None),
             played: Rc::new(RefCell::new(None)),
             wave_width: Cell::new(waves::WIDTH as f32),
@@ -633,18 +666,27 @@ impl Shown {
         panel.set_can_drag(crate::drag::CAN);
         let lines = Rc::clone(&self.lines);
         let slots = Arc::clone(&self.slots);
+        let player = Arc::clone(&self.instance.player);
         panel.on_drag_out(move |row| {
             let Some((row, path)) = usize::try_from(row).ok().and_then(|r| Some((r, lines.path(r)?))) else { return };
             let slots = Arc::clone(&slots);
+            let trim = player.trim();
+            let is_loop = lines.is_loop(row);
             // Whether the file is there is asked off the window's thread: its drive may be asleep or away.
             background("mo-plugin-drag", move || {
                 let path = std::path::PathBuf::from(path);
                 let found = if path.is_file() {
+                    // Trim silence on: the trimmed copy goes instead, as the app drags it (loops go as they are), or
+                    // the whole file when one can't be made, and the log says why.
+                    let (path, why) = mo_app::trim_copy::to_drag(&path, trim, is_loop);
+                    if let Some(why) = why {
+                        crate::log::line("Drag", &why);
+                    }
                     Ok(path)
                 } else {
                     Err(format!("Can't drag {}: the file isn't there", library::name(&path.to_string_lossy())))
                 };
-                *lock(&slots.drag) = Some((row, found));
+                *lock(&slots.drag) = Some((Carried::Sound(row), found));
             });
         });
         panel.set_orders(ModelRc::new(slint::VecModel::from(
@@ -668,6 +710,7 @@ impl Shown {
                     column.show(&panel, library.as_deref(), &asked);
                 }
                 if let Some(library) = library {
+                    like_wanted(&library, &asked, &slots);
                     view(library, asked, Arc::clone(&slots));
                 }
             })
@@ -691,6 +734,10 @@ impl Shown {
         });
         let change = Rc::clone(&changed);
         panel.on_toggle(move |line| change(&|a, _| a.filters.toggle(&line)));
+        let change = Rc::clone(&changed);
+        panel.on_like_favourites_set(move |share| {
+            change(&|a, _| a.filters.like_favourites = mo_app::sounds::like_favourites_step(share));
+        });
         let change = Rc::clone(&changed);
         panel.on_tempo_picked(move |low, high| change(&|a, _| a.filters.set_tempo(low, high)));
         // The year strip: places on it dragged over become the years picked.
@@ -729,8 +776,43 @@ impl Shown {
         });
 
         self.fill_in_sky();
+        self.midi.fill_in(panel, &self.slots);
+        self.presets.fill_in(panel, &self.slots);
+        self.fill_in_midi_play();
         let slots = Arc::clone(&self.slots);
         background("mo-plugin-library", move || *lock(&slots.library) = Some(library::read()));
+    }
+
+    /// A click on a MIDI part plays it as a loop with the app's SoundFont, at the DAW's tempo, through the track; a
+    /// click on the one playing stops it (the same rule as a sound's line, which has no waveform here).
+    fn fill_in_midi_play(&self) {
+        let player = Arc::clone(&self.instance.player);
+        let slots = Arc::clone(&self.slots);
+        let (right_now, heard, stop_it) = (Rc::clone(&self.right_now), Rc::clone(&self.heard), self.stopper());
+        let midi = self.midi.part_finder();
+        let last_played = Rc::clone(&self.played);
+        let roll = self.midi.roll_drawer(&self.panel);
+        let scale = Rc::clone(&self.scale);
+        self.panel.on_midi_play(move |row| {
+            let Some((parts, at)) = usize::try_from(row).ok().and_then(&midi) else { return };
+            // Its piano roll, whether it plays or stops.
+            roll(Arc::clone(&parts), at, scale.get());
+            let playing = heard.get().is_some_and(|(what, _)| what == Heard::Part(at));
+            match line_click(playing, right_now.get(), -1.0) {
+                Click::Play(_) => {}
+                Click::Stop => return stop_it(),
+                Click::Nothing => return,
+            }
+            let Some(name) = parts.entry(at).map(mo_app::midi::title) else { return };
+            heard.set(Some((Heard::Part(at), false)));
+            // No sound's line shows where this plays.
+            *last_played.borrow_mut() = None;
+            let tempo = player.tempo();
+            let make: crate::audition::Made =
+                Box::new(move || parts.sound(at, crate::midi::soundfont().as_deref(), tempo));
+            let slots = Arc::clone(&slots);
+            player.play_made(name, make, move |played| *lock(&slots.played) = Some(played));
+        });
     }
 
     /// What the mouse does on the Galaxy, as on the app's Sounds page: the wheel flies in and out, the right or
@@ -1207,10 +1289,21 @@ impl Shown {
                     self.lines.show(Some(Arc::clone(&library)), Arc::default());
                     self.panel.set_status("Getting the list ready".into());
                     self.column.show(&self.panel, Some(&library), &self.asked.borrow());
+                    like_wanted(&library, &self.asked.borrow(), &self.slots);
                     view(library, self.asked.borrow().clone(), Arc::clone(&self.slots));
                 }
                 Read::Not(why) => self.panel.set_status(why.into()),
             }
+        }
+        // The sounds like your favourites became known (whichever panel asked for them): the list again, once.
+        if let Some(library) = self.lines.library.borrow().clone()
+            && !self.slots.like_shown.load(Ordering::Acquire)
+            && matches!(library.like(), Like::Ready(_) | Like::Not(_))
+        {
+            self.slots.like_shown.store(true, Ordering::Release);
+            let asked = self.asked.borrow().clone();
+            self.column.show(&self.panel, Some(&library), &asked);
+            view(library, asked, Arc::clone(&self.slots));
         }
         if let Some((number, found, counts)) = take(&self.slots.found)
             && number == self.slots.searches.load(Ordering::Acquire)
@@ -1280,6 +1373,8 @@ impl Shown {
             self.lines.waves.borrow_mut().forget();
             self.lines.notify.reset();
         }
+        self.midi.tick(&self.panel);
+        self.presets.tick(&self.panel);
         self.drag();
         self.waves();
         self.sky();
@@ -1294,17 +1389,23 @@ impl Shown {
         if self.dragging.get() {
             return;
         }
-        let Some((row, found)) = take(&self.slots.drag) else { return };
+        let Some((carried, found)) = take(&self.slots.drag) else { return };
+        self.carried.set(Some(carried));
         match found {
             Ok(path) => {
                 self.dragging.set(true);
-                self.panel.set_carried(i32::try_from(row).unwrap_or(-1));
+                match carried {
+                    Carried::Sound(row) => self.panel.set_carried(i32::try_from(row).unwrap_or(-1)),
+                    Carried::Part(at) => self.panel.set_midi_carried(self.midi.row_of(at)),
+                    Carried::Preset(at) => self.panel.set_preset_carried(self.presets.row_of(at)),
+                }
                 let (slots, started) = (Arc::clone(&self.slots), Instant::now());
                 crate::drag::file(path.clone(), move |ended| *lock(&slots.dragged) = Some((path, started, ended)));
             }
             Err(why) => {
                 crate::log::line("Drag", &why);
                 self.say_drag_failed(why);
+                self.carried.set(None);
             }
         }
     }
@@ -1320,6 +1421,8 @@ impl Shown {
         crate::log::took("Drag", &format!("{} {how}", path.display()), started);
         self.dragging.set(false);
         self.panel.set_carried(-1);
+        self.panel.set_midi_carried(-1);
+        self.panel.set_preset_carried(-1);
         // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't left
         // pressed.
         let position = self.pointer.get();
@@ -1329,9 +1432,16 @@ impl Shown {
         if let Err(why) = ended {
             self.say_drag_failed(why);
         }
+        self.carried.set(None);
     }
 
+    /// Said under the list the line was dragged from.
     fn say_drag_failed(&self, why: String) {
+        match self.carried.get() {
+            Some(Carried::Part(_)) => return self.panel.set_midi_said(why.into()),
+            Some(Carried::Preset(_)) => return self.panel.set_preset_said(why.into()),
+            _ => {}
+        }
         self.playing.set(None);
         self.panel.set_playing(why.into());
     }
@@ -1520,6 +1630,17 @@ fn count_line(total: usize, found: Option<usize>) -> String {
     }
 }
 
+/// Starts working out the sounds like your favourites on a background thread, when `asked` wants them and they haven't
+/// been yet: every panel shows the list again once they're known ([`Slots::like_shown`]).
+fn like_wanted(library: &Arc<Library>, asked: &Asked, slots: &Slots) {
+    if !library.start_like(asked) {
+        return;
+    }
+    slots.like_shown.store(false, Ordering::Release);
+    let stopped = library::Stopped(Arc::clone(library));
+    background("mo-plugin-like", move || stopped.0.read_like());
+}
+
 /// Works out what `asked` shows of `library` on a background thread; it lands in `slots.found` with this asking's
 /// number, and only the newest asking's answer is shown.
 fn view(library: Arc<Library>, asked: Asked, slots: Arc<Slots>) {
@@ -1563,6 +1684,14 @@ impl Column {
         panel.set_tag_filter(self.tag.view(&chips.tag));
         panel.set_mix_well(asked.filters.mix_well);
         panel.set_favourites(asked.filters.favourites);
+        let step = asked.filters.like_favourites;
+        panel.set_like_favourites(mo_app::sounds::like_favourites_share(step));
+        let known = match library.map(Library::like) {
+            Some(Like::Ready(_)) => LikeKnown::Yes,
+            Some(Like::Not(_)) => LikeKnown::Missing,
+            _ => LikeKnown::Finding,
+        };
+        panel.set_like_favourites_words(mo_app::sounds::like_favourites_words(step, known).into());
         panel.set_tempo_low(chips.tempo.low);
         panel.set_tempo_high(chips.tempo.high);
         panel.set_tempo_words(chips.tempo.words.as_str().into());
@@ -1628,6 +1757,8 @@ fn seed() -> u64 {
 enum Heard {
     Line(i64),
     Star(usize),
+    /// A MIDI part, by its place in the MIDI tab's catalogue.
+    Part(usize),
 }
 
 /// What a click on a list line does.

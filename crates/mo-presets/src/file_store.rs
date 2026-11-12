@@ -232,49 +232,7 @@ impl FileStore {
     }
 
     fn load(&self) -> rusqlite::Result<HashMap<String, (i64, i64, Entry)>> {
-        let mut st = self.conn.prepare(
-            "SELECT path, size, modified, error, format, name, plugin, plugin_id, kind, category, creator, tags,
-                programs, wraps, t_plugin, t_state_field, t_state_file, t_preset_name, t_plugin_id FROM files",
-        )?;
-        let rows = st.query_map([], |r| {
-            let path: String = r.get(0)?;
-            let (size, modified): (i64, i64) = (r.get(1)?, r.get(2)?);
-            let error: Option<String> = r.get(3)?;
-            let file = match error {
-                Some(e) => Err(NotAPreset(e)),
-                None => Ok(PresetFile {
-                    format: format_of(r.get(4)?),
-                    name: r.get(5)?,
-                    plugin: r.get(6)?,
-                    plugin_id: r.get(7)?,
-                    kind: kind_of(r.get(8)?),
-                    category: r.get(9)?,
-                    creator: r.get(10)?,
-                    tags: r
-                        .get::<_, String>(11)?
-                        .split(TAG_SPLIT)
-                        .filter(|t| !t.is_empty())
-                        .map(str::to_owned)
-                        .collect(),
-                    programs: u32::try_from(r.get::<_, i64>(12)?).unwrap_or(1),
-                    wraps_plugin: r.get(13)?,
-                }),
-            };
-            let template = match r.get::<_, Option<String>>(14)? {
-                Some(plugin) => Some(Template {
-                    path: PathBuf::from(&path),
-                    plugin,
-                    state_field: r.get::<_, Option<String>>(15)?.unwrap_or_default(),
-                    state_file: r.get::<_, Option<String>>(16)?.unwrap_or_default(),
-                    preset_name: r.get::<_, Option<String>>(17)?.unwrap_or_default(),
-                    plugin_id: r.get::<_, Option<String>>(18)?.unwrap_or_default(),
-                    modified: Some(time_of(modified)),
-                }),
-                None => None,
-            };
-            Ok((path, (modified, size, Entry { file, template })))
-        })?;
-        rows.collect()
+        load_from(&self.conn)
     }
 
     /// Every preset file under `roots` (walked as `library::find_preset_files` walks) with what each says, and the
@@ -290,36 +248,8 @@ impl FileStore {
             Some(kept) => kept,
             None => self.load().unwrap_or_default(),
         };
-        let done: Vec<Done> = paths
-            .par_iter()
-            .map(|path| {
-                let text = path.to_string_lossy().into_owned();
-                let now = stamp(path);
-                if let (Some((at, size, _)), Some((k_at, k_size, entry))) = (now, kept.get(&text))
-                    && at == *k_at
-                    && size == *k_size
-                {
-                    let found = FoundPreset { path: text, file: entry.file.clone() };
-                    return (found, entry.template.clone(), None, false, now.map(|n| n.2));
-                }
-                let Some(entry) = read_entry(path) else {
-                    // Couldn't be read just now: listed as the page always listed it, and read again next time.
-                    let found = crate::library::read_preset_file(path);
-                    return (found, None, None, true, now.map(|n| n.2));
-                };
-                // A file that couldn't be looked at, or changed while it was read, is read again next time. Its time
-                // is the one after the read, so a file changed meanwhile gets its newer time.
-                let after = stamp(path);
-                let keep = now.filter(|(at, size, _)| after.is_some_and(|(a, s, _)| a == *at && s == *size));
-                let template = entry.template.map(|mut t| {
-                    t.modified = now.map(|(_, _, m)| m).or(t.modified);
-                    t
-                });
-                let found = FoundPreset { path: text, file: entry.file };
-                (found, template, keep.map(|(at, size, _)| (at, size)), true, after.or(now).map(|n| n.2))
-            })
-            .collect();
-        let read = done.iter().filter(|d| d.3).count();
+        let done = look(&paths, &kept);
+        let read = read_now(&done);
         // A kept file is gone only when its folder was looked through: one on a drive that's away now (unplugged or
         // asleep) is kept as it was, as curves.db keeps what it can't reach, and not read again when it's back (H-13).
         // The same goes for a folder under it that couldn't be looked in, a link to a moved folder among them (M-4).
@@ -338,15 +268,7 @@ impl FileStore {
         // Nothing read and nothing gone: the store is as it should be, so it isn't written.
         let not_kept =
             if read == 0 && gone.is_empty() { None } else { self.write(&done, &gone).err().map(|e| e.to_string()) };
-        let mut files = Vec::with_capacity(done.len());
-        let mut modified = Vec::with_capacity(done.len());
-        let mut templates = Vec::new();
-        for (found, template, _, _, at) in done {
-            files.push(found);
-            modified.push(at);
-            templates.extend(template);
-        }
-        Found { files, templates: bw::newest_templates(templates), read, not_kept, modified }
+        found_of(done, read, not_kept)
     }
 
     /// Keeps what was read now, and forgets the files no longer found, in one go.
@@ -399,6 +321,100 @@ impl FileStore {
     }
 }
 
+/// Everything a store holds, by path: each file's last-written time, size and what was read from it.
+fn load_from(conn: &Connection) -> rusqlite::Result<HashMap<String, (i64, i64, Entry)>> {
+    let mut st = conn.prepare(
+        "SELECT path, size, modified, error, format, name, plugin, plugin_id, kind, category, creator, tags,
+            programs, wraps, t_plugin, t_state_field, t_state_file, t_preset_name, t_plugin_id FROM files",
+    )?;
+    let rows = st.query_map([], |r| {
+        let path: String = r.get(0)?;
+        let (size, modified): (i64, i64) = (r.get(1)?, r.get(2)?);
+        let error: Option<String> = r.get(3)?;
+        let file = match error {
+            Some(e) => Err(NotAPreset(e)),
+            None => Ok(PresetFile {
+                format: format_of(r.get(4)?),
+                name: r.get(5)?,
+                plugin: r.get(6)?,
+                plugin_id: r.get(7)?,
+                kind: kind_of(r.get(8)?),
+                category: r.get(9)?,
+                creator: r.get(10)?,
+                tags: r.get::<_, String>(11)?.split(TAG_SPLIT).filter(|t| !t.is_empty()).map(str::to_owned).collect(),
+                programs: u32::try_from(r.get::<_, i64>(12)?).unwrap_or(1),
+                wraps_plugin: r.get(13)?,
+            }),
+        };
+        let template = match r.get::<_, Option<String>>(14)? {
+            Some(plugin) => Some(Template {
+                path: PathBuf::from(&path),
+                plugin,
+                state_field: r.get::<_, Option<String>>(15)?.unwrap_or_default(),
+                state_file: r.get::<_, Option<String>>(16)?.unwrap_or_default(),
+                preset_name: r.get::<_, Option<String>>(17)?.unwrap_or_default(),
+                plugin_id: r.get::<_, Option<String>>(18)?.unwrap_or_default(),
+                modified: Some(time_of(modified)),
+            }),
+            None => None,
+        };
+        Ok((path, (modified, size, Entry { file, template })))
+    })?;
+    rows.collect()
+}
+
+/// Each of `paths` with what it says: from `kept` when it's unchanged since, else read now (over every core of the
+/// current rayon pool).
+fn look(paths: &[PathBuf], kept: &HashMap<String, (i64, i64, Entry)>) -> Vec<Done> {
+    paths
+        .par_iter()
+        .map(|path| {
+            let text = path.to_string_lossy().into_owned();
+            let now = stamp(path);
+            if let (Some((at, size, _)), Some((k_at, k_size, entry))) = (now, kept.get(&text))
+                && at == *k_at
+                && size == *k_size
+            {
+                let found = FoundPreset { path: text, file: entry.file.clone() };
+                return (found, entry.template.clone(), None, false, now.map(|n| n.2));
+            }
+            let Some(entry) = read_entry(path) else {
+                // Couldn't be read just now: listed as the page always listed it, and read again next time.
+                let found = crate::library::read_preset_file(path);
+                return (found, None, None, true, now.map(|n| n.2));
+            };
+            // A file that couldn't be looked at, or changed while it was read, is read again next time. Its time
+            // is the one after the read, so a file changed meanwhile gets its newer time.
+            let after = stamp(path);
+            let keep = now.filter(|(at, size, _)| after.is_some_and(|(a, s, _)| a == *at && s == *size));
+            let template = entry.template.map(|mut t| {
+                t.modified = now.map(|(_, _, m)| m).or(t.modified);
+                t
+            });
+            let found = FoundPreset { path: text, file: entry.file };
+            (found, template, keep.map(|(at, size, _)| (at, size)), true, after.or(now).map(|n| n.2))
+        })
+        .collect()
+}
+
+/// How many of `done` were read from their files now.
+fn read_now(done: &[Done]) -> usize {
+    done.iter().filter(|d| d.3).count()
+}
+
+/// What was found, as [`Found`] gives it: `read` is [`read_now`].
+fn found_of(done: Vec<Done>, read: usize, not_kept: Option<String>) -> Found {
+    let mut files = Vec::with_capacity(done.len());
+    let mut modified = Vec::with_capacity(done.len());
+    let mut templates = Vec::new();
+    for (found, template, _, _, at) in done {
+        files.push(found);
+        modified.push(at);
+        templates.extend(template);
+    }
+    Found { files, templates: bw::newest_templates(templates), read, not_kept, modified }
+}
+
 /// One file found: what it says, its template, its stamp when what was read now is to be kept, and whether it was read
 /// now.
 /// A file found: what it says, its template, its stamp to keep (when it's to be kept), whether it was read now, and
@@ -428,6 +444,53 @@ pub fn find(roots: &[PathBuf], store: &Path) -> (Found, Option<String>) {
 /// [`find`] when `roots` are every folder the page looks in: files kept from any other folder are forgotten.
 pub fn find_every(roots: &[PathBuf], store: &Path) -> (Found, Option<String>) {
     find_in(roots, store, true)
+}
+
+/// [`find_every`] without writing anything, for the CLAP plugin (which reads the app's files and never writes them):
+/// a file unchanged since the store at `store` kept it is taken from it, the rest are read now and not kept. With no
+/// store, or one that can't be used as it is (another layout or reader version, busy or damaged), every file is read,
+/// and the second half says why. Call it off the window's thread (from `mo_app::background::on_pool`, as it reads over
+/// every core of the current rayon pool).
+pub fn find_read_only(roots: &[PathBuf], store: &Path) -> (Found, Option<String>) {
+    let (paths, _) = list_preset_files_and_unread(roots);
+    let (kept, why) = match read_kept(store) {
+        Ok(kept) => (kept, None),
+        Err(why) => (HashMap::new(), Some(why)),
+    };
+    let done = look(&paths, &kept);
+    let read = read_now(&done);
+    (found_of(done, read, None), why)
+}
+
+/// What the store at `path` holds, opened read-only (nothing made, emptied or changed), when it's this app's store of
+/// this layout read by these readers.
+fn read_kept(path: &Path) -> Result<HashMap<String, (i64, i64, Entry)>, String> {
+    if !path.is_file() {
+        return Err(format!("{} isn't there yet", path.display()));
+    }
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = Connection::open_with_flags(path, flags).map_err(|e| e.to_string())?;
+    let set_up = || -> rusqlite::Result<(i64, i64)> {
+        conn.busy_timeout(Duration::from_secs(2))?;
+        conn.pragma_update(None, "query_only", true)?;
+        conn.pragma_update(None, "temp_store", "MEMORY")?;
+        let id: i64 = conn.pragma_query_value(None, "application_id", |r| r.get(0))?;
+        let layout: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
+        Ok((id, layout))
+    };
+    let (id, layout) = set_up().map_err(|e| e.to_string())?;
+    if id != APPLICATION_ID || layout != LAYOUT {
+        return Err(format!("{} isn't the app's preset list of this layout", path.display()));
+    }
+    let version = format!("{VERSION}/bitwig {}", mo_formats::bitwig::VERSION);
+    let kept: Option<String> = conn
+        .query_row("SELECT value FROM meta WHERE key = 'version'", [], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if kept.as_deref() != Some(version.as_str()) {
+        return Err(format!("{} was read by other readers", path.display()));
+    }
+    load_from(&conn).map_err(|e| e.to_string())
 }
 
 fn find_in(roots: &[PathBuf], store: &Path, every_root: bool) -> (Found, Option<String>) {
@@ -498,6 +561,37 @@ mod tests {
             .and_then(|c| c.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)))
             .expect("rows");
         assert_eq!(rows, 2, "the removed file is forgotten");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reading_without_writing_uses_what_was_kept_and_changes_nothing() {
+        let dir = folder("read-only");
+        let presets = dir.join("presets");
+        std::fs::create_dir_all(&presets).expect("folders");
+        std::fs::write(presets.join("Lead.fxp"), fxp(b"Abcd", "Lead")).expect("write");
+        let store = dir.join("data").join(FILE_NAME);
+        let roots = [presets.clone()];
+
+        // No store yet: every file is read, and none is made.
+        let (first, why) = find_read_only(&roots, &store);
+        assert!(why.is_some(), "it says why the files were all read");
+        assert_eq!((first.files.len(), first.read), (1, 1));
+        assert!(!store.exists(), "no store is made");
+
+        let (_, why) = find(&roots, &store);
+        assert_eq!(why, None);
+        std::fs::write(presets.join("Pad.fxp"), fxp(b"Abcd", "Pad")).expect("write");
+        let before = std::fs::read(&store).expect("store");
+        let (second, why) = find_read_only(&roots, &store);
+        assert_eq!(why, None);
+        assert_eq!(second.read, 1, "only the new file is read");
+        assert_eq!(second.files, crate::library::find_preset_files(&roots));
+        assert_eq!(std::fs::read(&store).expect("store"), before, "the store is as it was");
+        let rows: i64 = Connection::open(&store)
+            .and_then(|c| c.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0)))
+            .expect("rows");
+        assert_eq!(rows, 1, "the new file isn't kept");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

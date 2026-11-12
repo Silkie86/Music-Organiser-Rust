@@ -7,9 +7,11 @@
 //! that's gone drops out, and bars past the song's end are cut off.
 //!
 //! [`Picker`] is what the page shows to pick from, made by each search: every part of the song that can be fitted to
-//! and whether it's on, the bars fitted to, and how long the song is. A press there changes the page's copy of it
-//! ([`Picker::toggle`], [`Picker::set_bars`], [`Picker::apps_parts`], [`Picker::apps_pick`]), and [`Picker::pick`] is
-//! then what the next search is asked for.
+//! and whether it's on, the bars fitted to, and how long the song is. The page shows the parts as one of the shared
+//! filters ([`Picker::parts_shown`]) and the bars on a slider ([`Picker::bars`]) under a small picture of where the
+//! parts play ([`Picker::plays_shown`]). A press there changes the page's copy of it ([`Picker::toggle_label`],
+//! [`Picker::slide_bars`], [`Picker::apps_parts`], [`Picker::apps_pick`]), and [`Picker::pick`] is then what the next
+//! search is asked for.
 //!
 //! [`YourPicks`] remembers the pick for each song, by the song library's key for it (so every save of the song has
 //! it): the last [`PICKS_KEPT`] songs', in one setting ([`PICKS_KEY`]).
@@ -21,7 +23,8 @@ use mo_midi::fit::for_song::Pick;
 use mo_midi::playing::{Playing, Song};
 use serde::{Deserialize, Serialize};
 
-use crate::midi as page;
+use crate::filters;
+use crate::midi::role_label;
 
 /// The most bars picked by hand: as far as two parts are heard going round together before they're taken to never
 /// meet (`mo_harmony::round_of`).
@@ -35,6 +38,10 @@ pub const PICKS_KEPT: usize = 32;
 
 /// The most parts of one pick that are remembered.
 const PARTS_KEPT: usize = 256;
+
+/// The most strips the small picture over the bars' slider has ([`Picker::plays_shown`]): one for each bar of a song
+/// this long, and each a few bars wide in a longer one, so they stay wide enough to see.
+pub const MOST_STRIPS: usize = 128;
 
 /// The longest the setting is read at, in bytes: the picks kept are a few kilobytes, so anything far past that isn't
 /// the app's own writing, and isn't read into memory.
@@ -130,15 +137,37 @@ pub struct PartChoice {
     pub part: PartName,
     /// What its chip says: its name, with "(2)" after it for the second part of that name.
     pub label: String,
-    /// The kind of part the app takes it for ("Chords", "Bassline", "Melody"), or "Sample" for a sampler.
-    pub kind: &'static str,
+    /// The kind of part the app takes it for, as its chip says after its name: the MIDI page's word for it in small
+    /// letters ("chords", "bassline", "melody"), or "sample" for a sampler.
+    pub kind: String,
     /// A sampler (`mo_midi::playing::Playing::sample`): the app never picks one, and picked by hand its notes are
     /// taken as written, which is right when the sample is tuned to the keys.
     pub sample: bool,
-    /// The bars it plays in, counted from 0.
+    /// The bars it plays in, counted from 0: from its first note's bar to the bar after its last.
     pub bars: Range<i64>,
+    /// The stretches of bars its clips are in ([`plays_of`]), in order: where it plays, and where it rests between.
+    pub plays: Vec<Range<i64>>,
     /// Whether it's one of the parts picked: by you, else by the app.
     pub on: bool,
+}
+
+/// The stretches of bars a part plays in, in order: the bars its clips are in, joined where they touch or overlap.
+/// A part that has no clip plays from its first note's bar to its last.
+pub fn plays_of(part: &Playing) -> Vec<Range<i64>> {
+    let mut bars: Vec<Range<i64>> =
+        part.clips.iter().map(|clip| clip.bars.clone()).filter(|b| b.end > b.start).collect();
+    bars.sort_unstable_by_key(|b| (b.start, b.end));
+    let mut joined: Vec<Range<i64>> = Vec::new();
+    for next in bars {
+        match joined.last_mut() {
+            Some(last) if next.start <= last.end => last.end = last.end.max(next.end),
+            _ => joined.push(next),
+        }
+    }
+    if joined.is_empty() && part.bars.end > part.bars.start {
+        joined.push(part.bars.clone());
+    }
+    joined
 }
 
 /// What the page shows to pick a song's parts and bars from, as one search left them.
@@ -146,7 +175,10 @@ pub struct PartChoice {
 pub struct Picker {
     /// Every part of the song that can be fitted to ([`can_fit`]), in the project's order.
     pub parts: Vec<PartChoice>,
-    /// The bars fitted to, counted from 0: yours, else the app's. None when the app found none to pick.
+    /// The bars fitted to, counted from 0: yours, else the app's. They're where the bars' slider has its two
+    /// handles: on the bar lines they start and end at, from 0 (the song's first bar line) to [`Picker::length`] (its
+    /// last). None when the app found none to pick: there's nothing for a slider to show then, and no bars of yours
+    /// would help (no part that's looked for plays anywhere in the song).
     pub bars: Option<Range<i64>>,
     /// How many bars the song's notes run.
     pub length: i64,
@@ -170,19 +202,22 @@ impl Picker {
             let Some(named) = PartName::of(song, at) else { continue };
             // No two chips say the same: the second "Keys" shown is "Keys (2)". Counted among the chips, not as
             // [`PartName`] counts (among every part): a bassline called as the drum kit before it is has no "(2)".
+            // Capitals don't make two names two: the shared filters match a pick without minding them
+            // ([`filters::show`]), so "keys" beside "Keys" is "keys (2)".
             let name = if part.name.is_empty() { "No name" } else { part.name.as_str() };
             let mut label = name.to_owned();
             let mut n = 1;
-            while parts.iter().any(|shown| shown.label == label) {
+            while parts.iter().any(|shown| shown.label.eq_ignore_ascii_case(&label)) {
                 n += 1;
                 label = format!("{name} ({n})");
             }
             parts.push(PartChoice {
                 part: named,
                 label,
-                kind: if part.sample { "Sample" } else { page::role_label(part.role) },
+                kind: if part.sample { "sample".to_owned() } else { role_label(part.role).to_lowercase() },
                 sample: part.sample,
                 bars: part.bars.clone(),
+                plays: plays_of(part),
                 on: on.contains(&at),
             });
         }
@@ -219,6 +254,14 @@ impl Picker {
         self.your_parts = self.parts.iter().any(|p| p.on);
     }
 
+    /// A press on the chip that says `label` ([`Picker::parts_shown`]'s words for it): [`Picker::toggle`] for its
+    /// part. Nothing for words no chip says.
+    pub fn toggle_label(&mut self, label: &str) {
+        if let Some(at) = self.parts.iter().position(|p| p.label == label) {
+            self.toggle(at);
+        }
+    }
+
     /// The bars set by hand, counted from 0, held to the song ([`held_bars`]): they're yours from here.
     pub fn set_bars(&mut self, bars: Range<i64>) {
         if let Some(bars) = held_bars(&bars, self.length) {
@@ -227,16 +270,116 @@ impl Picker {
         }
     }
 
-    /// The parts are the app's to pick again: the page's switch for what's looked for was pressed, which is the
-    /// app's pick of the song's chords, or of its melodies. Bars of yours stay. Which parts are on, the next search's
-    /// picker says.
-    pub fn apps_parts(&mut self) {
-        self.your_parts = false;
+    /// The slider's handles moved to the bar lines `low` and `high` ([`Picker::bars`] is where they were): the
+    /// bars between are yours from here. They stay a bar long at the least (the handle that moved stops a bar short
+    /// of the other) and [`MOST_BARS`] at the most (the handle that moved pulls the other along). Handles left
+    /// where they are (a press on one that doesn't move it) change nothing: the app's bars stay the app's. Nor does
+    /// anything change with no bars fitted to, as there's no slider then.
+    pub fn slide_bars(&mut self, low: i64, high: i64) {
+        let Some(was) = self.bars.clone() else { return };
+        if (low, high) == (was.start, was.end) {
+            return;
+        }
+        let low_moved = low != was.start;
+        let (mut low, mut high) = (low.clamp(0, self.length.max(0)), high.clamp(0, self.length.max(0)));
+        if high <= low {
+            if low_moved {
+                low = high - 1;
+            } else {
+                high = low + 1;
+            }
+        }
+        if high - low > MOST_BARS {
+            if low_moved {
+                high = low + MOST_BARS;
+            } else {
+                low = high - MOST_BARS;
+            }
+        }
+        if held_bars(&(low..high), self.length) != self.bars {
+            self.set_bars(low..high);
+        }
     }
 
-    /// Everything is the app's to pick again.
-    pub fn apps_pick(&mut self) {
+    /// The parts as the page offers them, each with its name and the kind of part it is: the ones an instrument
+    /// plays first, in the project's order, then the samplers (which only a pick by hand turns on). With them, the
+    /// names of the ones that are on, and how many of them aren't samplers.
+    fn choices(&self) -> (Vec<(String, String)>, Vec<String>, usize) {
+        let ordered = || self.parts.iter().filter(|p| !p.sample).chain(self.parts.iter().filter(|p| p.sample));
+        let choices = ordered().map(|p| (p.label.clone(), p.kind.clone())).collect();
+        let on = ordered().filter(|p| p.on).map(|p| p.label.clone()).collect();
+        (choices, on, self.parts.iter().filter(|p| !p.sample).count())
+    }
+
+    /// The parts as one of the shared filters shows its choices ([`filters::show_split`]): a chip for each part of a
+    /// song with few; in a song with many, a chip for each of the first that an instrument plays and a menu after
+    /// them for the rest (the samplers among them). Each says the part's name and, where a filter has its count, the
+    /// kind of part it is. The ones on are the parts fitted to: yours, else the app's.
+    pub fn parts_shown(&self) -> filters::Filter {
+        let (choices, on, played) = self.choices();
+        filters::show_split(&choices, &on, played.min(filters::CHIPS_UP_TO))
+    }
+
+    /// The same choices all in the filter's menu, for a window with no room for the chips beside the bars' slider:
+    /// the menu's chip says which are on ("Keys + 2").
+    pub fn parts_menu(&self) -> filters::Filter {
+        let (choices, on, _) = self.choices();
+        filters::show_in_menu(&choices, &on)
+    }
+
+    /// The small picture over the bars' slider: the song's length cut into strips ([`MOST_STRIPS`] at the most, a
+    /// strip a bar of a song no longer than that), and for each, how many of the parts that are on play there, from
+    /// 0 to 1 of the most that play together anywhere. So the bars worth fitting to stand tallest, and the bars the
+    /// parts rest in are flat. With no part on (the app found none to pick), every part counts.
+    pub fn plays_shown(&self) -> Vec<f32> {
+        let length = usize::try_from(self.length).unwrap_or(0);
+        let strips = length.min(MOST_STRIPS);
+        if strips == 0 {
+            return Vec::new();
+        }
+        let any_on = self.parts.iter().any(|p| p.on);
+        let counted: Vec<&PartChoice> = self.parts.iter().filter(|p| p.on || !any_on).collect();
+        // Strip `at` is the bars from `at * length / strips` up to where the next one starts, as the slider lays
+        // its strips over its track.
+        let bars_of = |at: usize| (at * length / strips) as i64..((at + 1) * length).div_ceil(strips) as i64;
+        let plays_in =
+            |part: &PartChoice, bars: &Range<i64>| part.plays.iter().any(|p| p.start < bars.end && p.end > bars.start);
+        let counts: Vec<usize> =
+            (0..strips).map(|at| counted.iter().filter(|part| plays_in(part, &bars_of(at))).count()).collect();
+        let most = counts.iter().copied().max().unwrap_or(0).max(1);
+        counts.into_iter().map(|count| count as f32 / most as f32).collect()
+    }
+
+    /// What's said beside the slider: "Bars 9–16 of 64" (the first bar is 1), or "64 bars" with none fitted to.
+    pub fn bars_text(&self) -> String {
+        let Some(bars) = &self.bars else {
+            return if self.length == 1 { "1 bar".to_owned() } else { format!("{} bars", self.length.max(0)) };
+        };
+        let (first, last) = (bars.start + 1, bars.end.max(bars.start + 1));
+        if last == first {
+            format!("Bar {first} of {}", self.length)
+        } else {
+            format!("Bars {first}–{last} of {}", self.length)
+        }
+    }
+
+    /// The parts are the app's to pick again: the page's switch for what's looked for was pressed (the app's pick
+    /// of the song's chords, or of its melodies), or the parts' own "The app's pick". Bars of yours stay. Which parts
+    /// the app picks, the next search's picker says: until then none is on, so the ones that were don't stay lit as
+    /// if still picked, and a press on a chip before the answer starts from that chip alone.
+    pub fn apps_parts(&mut self) {
         self.your_parts = false;
+        self.parts.iter_mut().for_each(|part| part.on = false);
+    }
+
+    /// Everything is the app's to pick again. Parts that are the app's already stay on, as they're still its pick.
+    /// Bars that were yours stay where they are on the slider until the next search says which the app picks (a
+    /// slider that went and came back would only flicker); should that search not get as far as the song (it
+    /// couldn't be read this time), the page says so in the list's place, and the picker stays as this left it.
+    pub fn apps_pick(&mut self) {
+        if self.your_parts {
+            self.apps_parts();
+        }
         self.your_bars = false;
     }
 }
@@ -348,7 +491,8 @@ impl YourPicks {
 }
 
 #[cfg(test)]
-#[allow(clippy::indexing_slicing)]
+// The stretches of bars a part plays in are a list of ranges, and often a list of one.
+#[allow(clippy::indexing_slicing, clippy::single_range_in_vec_init)]
 mod tests {
     use mo_midi::fit::Wants;
 
@@ -363,6 +507,11 @@ mod tests {
 
     fn picker_of(song: &Song, yours: &YourPick, fitted: Option<&Pick>) -> Picker {
         Picker::of(song, &yours.in_song(song), fitted)
+    }
+
+    /// Each part a picker offers: what its chip says, its kind, and whether it's on.
+    fn shown(picker: &Picker) -> Vec<(String, &str, bool)> {
+        picker.parts.iter().map(|c| (c.label.clone(), c.kind.as_str(), c.on)).collect()
     }
 
     fn named(name: &str, nth: usize) -> PartName {
@@ -513,8 +662,7 @@ mod tests {
         // Nothing picked: the app's parts are on, and nothing is yours.
         let apps = fit_to(&song, None, &YourPick::default()).unwrap();
         let mut picker = picker_of(&song, &YourPick::default(), Some(&apps.pick));
-        let shown = |p: &Picker| p.parts.iter().map(|c| (c.label.clone(), c.kind, c.on)).collect::<Vec<_>>();
-        assert_eq!(shown(&picker), [("Keys".to_owned(), "Chords", true), ("Lead".to_owned(), "Melody", false)]);
+        assert_eq!(shown(&picker), [("Keys".to_owned(), "chords", true), ("Lead".to_owned(), "melody", false)]);
         assert_eq!(picker.parts[1].bars, 12..16);
         assert_eq!((picker.bars.clone(), picker.length, picker.is_yours()), (Some(8..12), 16, false));
         assert_eq!(picker.pick(), YourPick::default());
@@ -533,9 +681,15 @@ mod tests {
         assert_eq!(after, picker);
         assert!(after.your_parts && after.your_bars);
 
-        // The switch pressed: the parts are the app's again, the bars stay yours.
+        // The switch pressed: the parts are the app's again, the bars stay yours. None is lit until the next search
+        // says which the app picks, so a chip pressed before then is the one part picked (not that one with the
+        // parts that were yours before).
         picker.apps_parts();
         assert_eq!(picker.pick(), YourPick { parts: None, bars: Some(13..16) });
+        assert!(picker.parts.iter().all(|part| !part.on));
+        let mut early = picker.clone();
+        early.toggle(0);
+        assert_eq!(early.pick(), YourPick { bars: Some(13..16), ..parts(&["Keys"]) });
         // The last part turned off: the app picks the parts again.
         let mut none_on = after.clone();
         none_on.toggle(1);
@@ -543,6 +697,18 @@ mod tests {
         // The app's pick back, all of it.
         picker.apps_pick();
         assert_eq!((picker.pick(), picker.is_yours()), (YourPick::default(), false));
+        let mut by_hand = after.clone();
+        by_hand.apps_pick();
+        assert_eq!((by_hand.pick(), by_hand.parts.iter().any(|part| part.on)), (YourPick::default(), false));
+        // With only the bars yours, the parts are the app's already: they stay lit, as they're still its pick.
+        let mut bars_only = picker_of(&song, &YourPick::default(), Some(&apps.pick));
+        bars_only.set_bars(8..10);
+        assert!(bars_only.is_yours());
+        bars_only.apps_pick();
+        assert_eq!(
+            (shown(&bars_only), bars_only.is_yours()),
+            (vec![("Keys".to_owned(), "chords", true), ("Lead".to_owned(), "melody", false)], false)
+        );
         // A press on a chip that isn't there, and bars for a song with none, change nothing.
         let mut same = after.clone();
         same.toggle(9);
@@ -555,7 +721,7 @@ mod tests {
         let rests = YourPick { bars: Some(8..12), ..parts(&["Lead"]) };
         assert!(fit_to(&song, None, &rests).is_err());
         let stuck = picker_of(&song, &rests, None);
-        assert_eq!(shown(&stuck), [("Keys".to_owned(), "Chords", false), ("Lead".to_owned(), "Melody", true)]);
+        assert_eq!(shown(&stuck), [("Keys".to_owned(), "chords", false), ("Lead".to_owned(), "melody", true)]);
         assert_eq!((stuck.bars.clone(), stuck.pick()), (Some(8..12), rests));
 
         // Two parts of one name are told apart, a part with no name has words, and a sampler says what it is.
@@ -565,9 +731,9 @@ mod tests {
         assert_eq!(
             shown(&picker),
             [
-                ("Keys".to_owned(), "Chords", false),
-                ("Keys (2)".to_owned(), "Sample", true),
-                ("No name".to_owned(), "Melody", false)
+                ("Keys".to_owned(), "chords", false),
+                ("Keys (2)".to_owned(), "sample", true),
+                ("No name".to_owned(), "melody", false)
             ]
         );
         assert_eq!(picker.pick().parts, Some(vec![named("Keys", 1)]));
@@ -585,6 +751,157 @@ mod tests {
         let picker = picker_of(&named_so, &YourPick::default(), None);
         let chips: Vec<&str> = picker.parts.iter().map(|c| c.label.as_str()).collect();
         assert_eq!(chips, ["Keys", "Keys (2)", "Keys (3)"]);
+        // Nor do capitals make two names two chips: the shared filters match a pick without minding them.
+        let capitals = song_of(vec![lane("Keys", 0, &chords()), lane("keys", 0, &chords())]);
+        let picker = picker_of(&capitals, &YourPick::default(), None);
+        let chips: Vec<&str> = picker.parts.iter().map(|c| c.label.as_str()).collect();
+        assert_eq!(chips, ["Keys", "keys (2)"]);
+    }
+
+    #[test]
+    fn the_page_shows_the_picker_as_chips_a_slider_and_a_picture() {
+        // Chords in bars 9 to 12 and again in 17 to 20, a lead in the four bars between.
+        let mut keys = lane("Keys", 8, &chords());
+        let again = keys.clips[0].clone();
+        keys.clips.push(mo_formats::arrangement::PreviewClip { start: 64.0, ..again });
+        let song = song_of(vec![keys, lane("Lead", 12, &tune(0))]);
+        let apps = fit_to(&song, None, &YourPick::default()).unwrap();
+        let mut picker = picker_of(&song, &YourPick::default(), Some(&apps.pick));
+        assert_eq!(picker.parts[0].plays, [8..12, 16..20]);
+        assert_eq!((picker.parts[1].plays.clone(), picker.length), (vec![12..16], 20));
+
+        // The parts: a chip each, saying its name and its kind, the app's on.
+        let chips = |p: &Picker| {
+            let shown = p.parts_shown();
+            assert!(shown.more.is_empty() && shown.more_picked.is_empty());
+            shown.chips.into_iter().map(|c| (c.text, c.count, c.on)).collect::<Vec<_>>()
+        };
+        let chip = |text: &str, kind: &str, on: bool| (text.to_owned(), kind.to_owned(), on);
+        assert_eq!(chips(&picker), [chip("Keys", "chords", true), chip("Lead", "melody", false)]);
+        // The bars: the slider's handles on the bar lines round the app's (the eight bars where the keys play most), and
+        // the words beside it.
+        assert_eq!((picker.bars.clone(), picker.bars_text()), (Some(8..16), "Bars 9–16 of 20".to_owned()));
+        // The picture: a strip a bar, tall where the keys play and flat where they rest.
+        let picture = |p: &Picker| p.plays_shown().iter().map(|h| (h * 2.0).round() as u8).collect::<Vec<_>>();
+        let strips = |runs: &[(usize, u8)]| runs.iter().flat_map(|&(n, tall)| vec![tall; n]).collect::<Vec<_>>();
+        assert_eq!(picture(&picker), strips(&[(8, 0), (4, 2), (4, 0), (4, 2)]));
+
+        // A press on the lead's chip: both are on, and the picture is of both (they never play together, so each
+        // bar either plays in is as tall as any).
+        picker.toggle_label("Lead");
+        assert_eq!(chips(&picker), [chip("Keys", "chords", true), chip("Lead", "melody", true)]);
+        assert_eq!(picker.pick(), parts(&["Keys", "Lead"]));
+        assert_eq!(picture(&picker), strips(&[(8, 0), (12, 2)]));
+        // Words no chip says change nothing.
+        let before = picker.clone();
+        picker.toggle_label("Pad");
+        assert_eq!(picker, before);
+
+        // The slider: a press on a handle that leaves it where it is changes nothing, and the bars stay the app's.
+        picker.slide_bars(8, 16);
+        assert_eq!((picker.bars.clone(), picker.your_bars), (Some(8..16), false));
+        // The higher handle dragged back, and the bars are yours.
+        picker.slide_bars(8, 14);
+        assert_eq!(
+            (picker.bars.clone(), picker.your_bars, picker.bars_text()),
+            (Some(8..14), true, "Bars 9–14 of 20".to_owned())
+        );
+        // A handle dragged onto the other stops a bar short of it: whichever moved.
+        picker.slide_bars(14, 14);
+        assert_eq!((picker.bars.clone(), picker.bars_text()), (Some(13..14), "Bar 14 of 20".to_owned()));
+        picker.slide_bars(13, 13);
+        assert_eq!(picker.bars, Some(13..14));
+        picker.slide_bars(13, 2);
+        assert_eq!(picker.bars, Some(13..14));
+        picker.slide_bars(20, 14);
+        assert_eq!(picker.bars, Some(13..14));
+        picker.slide_bars(0, 14);
+        picker.slide_bars(0, 0);
+        assert_eq!(picker.bars, Some(0..1));
+        picker.slide_bars(20, 1);
+        assert_eq!(picker.bars, Some(0..1));
+        // Past the song's ends it stops at them.
+        picker.slide_bars(-5, 99);
+        assert_eq!(picker.bars, Some(0..20));
+
+        // A long song: the bars are 32 at the most, and the handle that moved pulls the other along. Its picture's
+        // strips are a few bars each.
+        let long = PartChoice { plays: vec![0..150], on: true, ..picker.parts[0].clone() };
+        let mut picker = Picker { parts: vec![long], bars: Some(0..32), length: 300, ..Picker::default() };
+        assert_eq!((picker.bars_text(), picker.is_yours()), ("Bars 1–32 of 300".to_owned(), false));
+        picker.slide_bars(0, 200);
+        assert_eq!((picker.bars.clone(), picker.is_yours()), (Some(168..200), true));
+        picker.slide_bars(100, 200);
+        assert_eq!(picker.bars, Some(100..132));
+        picker.slide_bars(100, 110);
+        assert_eq!(picker.bars, Some(100..110));
+        // With no bars fitted to (nothing that's looked for plays anywhere in the song) there's no slider: nothing
+        // moves, and the words say how long the song is.
+        let mut no_bars = Picker { parts: picker.parts.clone(), length: 300, ..Picker::default() };
+        no_bars.slide_bars(0, 200);
+        assert_eq!(
+            (no_bars.bars.clone(), no_bars.bars_text(), no_bars.is_yours()),
+            (None, "300 bars".to_owned(), false)
+        );
+        let tall = picker.plays_shown();
+        assert_eq!((tall.len(), tall.iter().filter(|h| **h == 1.0).count()), (MOST_STRIPS, MOST_STRIPS / 2));
+        assert!(tall[..MOST_STRIPS / 2].iter().all(|h| *h == 1.0) && tall[MOST_STRIPS / 2..].iter().all(|h| *h == 0.0));
+        // With no part on (the app found none to pick), the picture is of every part; a song with no bars has none.
+        picker.parts[0].on = false;
+        assert_eq!(picker.plays_shown(), tall);
+        assert!(Picker::default().plays_shown().is_empty());
+        assert_eq!(Picker { length: 1, ..Picker::default() }.bars_text(), "1 bar");
+
+        // A window with no room for the chips has the same choices in the filter's menu, its chip saying which are on.
+        let menu = before.parts_menu();
+        let lines: Vec<_> = menu.more.iter().map(|c| (c.text.clone(), c.count.clone(), c.on)).collect();
+        assert_eq!(lines, [chip("Keys", "chords", true), chip("Lead", "melody", true)]);
+        assert_eq!((menu.chips.len(), menu.more_picked.as_str()), (0, "Keys + 1"));
+
+        // Samplers come after the parts an instrument plays, whatever the project's order.
+        let mut sampled =
+            song_of(vec![lane("Vox", 0, &tune(0)), lane("Keys", 0, &chords()), lane("Lead", 0, &tune(0))]);
+        sampled.parts[0].sample = true;
+        let by_hand = YourPick { parts: Some(vec![named("Vox", 0), named("Lead", 0)]), bars: None };
+        let picker = picker_of(&sampled, &by_hand, None);
+        assert_eq!(
+            chips(&picker),
+            [chip("Keys", "chords", false), chip("Lead", "melody", true), chip("Vox", "sample", true)]
+        );
+        assert_eq!(picker.parts_menu().more_picked, "Lead + 1");
+        // More parts than there's room for as chips: the ones an instrument plays are the chips (as many as there's
+        // room for), and the rest, the samplers among them, are in the menu after them.
+        let mut many: Vec<_> = (1..=7).map(|n| lane(&format!("Synth {n}"), 0, &chords())).collect();
+        many.extend((1..=5).map(|n| lane(&format!("Chop {n}"), 0, &tune(0))));
+        let mut many = song_of(many);
+        many.parts[7..].iter_mut().for_each(|part| part.sample = true);
+        let two =
+            YourPick { parts: Some(vec![named("Synth 3", 0), named("Chop 2", 0), named("Chop 4", 0)]), bars: None };
+        let picker = picker_of(&many, &two, None);
+        let shown = picker.parts_shown();
+        let texts = |shown: &[filters::Shown]| shown.iter().map(|c| c.text.clone()).collect::<Vec<_>>().join(", ");
+        assert_eq!(texts(&shown.chips), "Synth 1, Synth 2, Synth 3, Synth 4, Synth 5, Synth 6, Synth 7");
+        assert_eq!(texts(&shown.more), "Chop 1, Chop 2, Chop 3, Chop 4, Chop 5");
+        assert_eq!((shown.more_picked.as_str(), shown.chips.iter().filter(|c| c.on).count()), ("Chop 2 + 1", 1));
+        let menu = picker.parts_menu();
+        assert_eq!((menu.more.len(), menu.more_picked.as_str()), (12, "Synth 3 + 2"));
+        // More instruments than chips: the first of them, and nothing but the menu for a song of samplers alone.
+        let synths: Vec<_> = (1..=14).map(|n| lane(&format!("Synth {n}"), 0, &chords())).collect();
+        let mut synths = song_of(synths);
+        let shown = picker_of(&synths, &YourPick::default(), None).parts_shown();
+        assert_eq!((shown.chips.len(), shown.more.len()), (filters::CHIPS_UP_TO, 14 - filters::CHIPS_UP_TO));
+        synths.parts.iter_mut().for_each(|part| part.sample = true);
+        let shown = picker_of(&synths, &YourPick::default(), None).parts_shown();
+        assert_eq!((shown.chips.len(), shown.more.len(), shown.more_picked.as_str()), (0, 14, ""));
+
+        // Where a part plays: its clips' bars, joined where they touch; with no clip, from its first note to its last.
+        let mut touching = lane("Keys", 8, &chords());
+        let next = touching.clips[0].clone();
+        touching.clips.push(mo_formats::arrangement::PreviewClip { start: 48.0, ..next });
+        let mut song = song_of(vec![touching]);
+        assert_eq!(plays_of(&song.parts[0]), [8..16]);
+        song.parts[0].clips.clear();
+        assert_eq!(plays_of(&song.parts[0]), [8..16]);
     }
 
     #[test]

@@ -224,6 +224,9 @@ pub struct Places {
     /// The export folder (the one set, else the one in Documents), whose "MIDI browser" folder Send to Bitwig writes
     /// parts to; none when it can't be told.
     pub exports: Option<PathBuf>,
+    /// The sample folders, whose "From Bitwig" folder Favourites from Bitwig saves samples into
+    /// ([`crate::bitwig_favourites::save_missing`]).
+    pub sample_folders: Vec<PathBuf>,
 }
 
 impl Places {
@@ -239,7 +242,8 @@ impl Places {
                 crate::bitwig_convert::export_root(set.as_deref(), crate::bitwig_convert::documents().as_deref())
             })
             .filter(|e| e.is_absolute());
-        Places { data: paths::data_dir(), temp: std::env::temp_dir(), beside_first, exports }
+        let sample_folders = crate::bitwig_favourites::sample_folders(library);
+        Places { data: paths::data_dir(), temp: std::env::temp_dir(), beside_first, exports, sample_folders }
     }
 }
 
@@ -315,6 +319,13 @@ pub fn sweep(places: &Places, now: SystemTime, bin: &dyn Bin) -> Tidied {
     done.add(remove_older(&places.temp, crate::midi::is_play_file, DAY, now, true));
     // A Bitwig multisample's sample, written for a moment while Favourites from Bitwig looks for it: a crash can leave one.
     done.add(remove_older(&places.temp, crate::bitwig_favourites::is_temp_file, DAY, now, true));
+    // A sample Favourites from Bitwig was still saving into a sample folder's From Bitwig folder (a folder a
+    // multisample, never through a link).
+    for from in places.sample_folders.iter().filter_map(|f| real_folder(f, &[crate::bitwig_favourites::FROM_BITWIG])) {
+        for folder in real_subfolders(&from) {
+            done.add(remove_older(&folder, crate::bitwig_favourites::is_half_saved, WRITING, now, false));
+        }
+    }
     // A part Send to Bitwig was still writing when the app stopped (its own name, given only while it's written).
     if let Some(sent) = places.exports.as_deref().and_then(|e| real_folder(e, &[crate::midi::EXPORT_SUBFOLDER])) {
         done.add(remove_older(&sent, crate::midi::is_half_sent, WRITING, now, false));
@@ -874,6 +885,12 @@ fn own_files(folder: &Path, is_kind: impl Fn(&str) -> bool) -> Vec<(PathBuf, Met
         .collect()
 }
 
+/// The folders right inside `folder`, never a link or a junction.
+fn real_subfolders(folder: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(folder) else { return Vec::new() };
+    entries.flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_dir())).map(|e| e.path()).collect()
+}
+
 /// A tool's report named as it names them: `start`, then the time it ran (digits, `-` and `_`, starting with a
 /// digit), then `.txt`.
 fn is_report(name: &str, start: &str) -> bool {
@@ -955,7 +972,13 @@ mod tests {
 
     /// The sweep's folders for a test in `dir`; tests that need the folder beside the first data folder set it.
     fn test_places(dir: &Path) -> Places {
-        Places { data: dir.join("data"), temp: dir.join("temp"), beside_first: None, exports: None }
+        Places {
+            data: dir.join("data"),
+            temp: dir.join("temp"),
+            beside_first: None,
+            exports: None,
+            sample_folders: Vec::new(),
+        }
     }
 
     /// A folder for one test, made by the test and removed after: never a real data or temp folder (rule 11).
@@ -1594,6 +1617,32 @@ mod tests {
     }
 
     #[test]
+    fn a_bitwig_sample_still_being_saved_goes_and_nothing_else_in_the_sample_folder() {
+        let dir = test_folder("from-bitwig");
+        let samples = dir.join("Samples");
+        let places = Places { sample_folders: vec![samples.clone()], ..test_places(&dir) };
+        let bin = TestBin(dir.join("bin"));
+        let now = SystemTime::now();
+        let from = samples.join(crate::bitwig_favourites::FROM_BITWIG);
+        let half = from.join("Snare 3 Select").join("mo-bitwig-sample-4120-7.part");
+        changed_at(&half, now);
+        // Never: the samples saved, his own files, and the same name anywhere else in the sample folder.
+        let kept = [
+            from.join("Snare 3 Select").join("Hmy_Snr.wav"),
+            from.join("Snare 3 Select").join("mo-bitwig-sample-4120-8.wav"),
+            from.join("mo-bitwig-sample-4120-9.part"),
+            samples.join("Kicks").join("mo-bitwig-sample-4120-10.part"),
+        ];
+        for k in &kept {
+            changed_at(k, now);
+        }
+        assert_eq!(sweep(&places, now + Duration::from_secs(60), &bin).removed, 0);
+        assert_eq!(sweep(&places, now + WRITING * 2, &bin).removed, 1);
+        assert!(!half.exists() && kept.iter().all(|k| k.exists()));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn leftovers_dated_far_on_go_and_ones_a_little_ahead_wait() {
         let dir = test_folder("ahead");
         let places = test_places(&dir);
@@ -1616,8 +1665,7 @@ mod tests {
     fn leftovers_go_once_old_enough_and_the_users_files_never() {
         let dir = test_folder("leftovers");
         let local = dir.join("local");
-        let places =
-            Places { data: dir.join("data"), temp: dir.join("temp"), beside_first: Some(local.clone()), exports: None };
+        let places = Places { beside_first: Some(local.clone()), ..test_places(&dir) };
         let bin = TestBin(dir.join("bin"));
         let data = &places.data;
         // Gone an hour after they were written: what's left of a write.
