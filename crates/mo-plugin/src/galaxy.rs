@@ -8,7 +8,8 @@
 
 use crate::library::Library;
 use mo_app::galaxy_grid::{Crowd, Grid};
-use mo_app::galaxy_look::on_view;
+use mo_app::galaxy_look::{self, Look, on_view};
+use mo_app::galaxy_names::{self, Label, NO_KIND, Region};
 use mo_app::galaxy_picture::Picture;
 use mo_app::galaxy_view::{View, most_zoom_for};
 use mo_sounds::{Sound, StarPoint};
@@ -34,6 +35,54 @@ const MOVING_SCALE: f32 = 1.0;
 /// Each sound's star, by the sound's place in the list; `None` for a sound the map hasn't placed.
 pub type Stars = Arc<Vec<Option<StarPoint>>>;
 
+/// Each sound's type, for the names over the map: a place in `names` by the sound's place in the list ([`NO_KIND`]
+/// for none), and each type's colour (as the app's `kinds_of`).
+#[derive(Default)]
+pub struct Kinds {
+    of: Vec<u32>,
+    names: Vec<String>,
+    colours: Vec<i32>,
+}
+
+impl Kinds {
+    /// A sound with no type, or "Unknown", names nothing.
+    fn of(sounds: &[Sound]) -> Kinds {
+        let mut kinds = Kinds::default();
+        let mut ids: HashMap<&str, u32> = HashMap::new();
+        for s in sounds {
+            let t = s.sound_type.as_str();
+            if t.is_empty() || t == mo_sounds::types::UNKNOWN {
+                kinds.of.push(NO_KIND);
+                continue;
+            }
+            let id = *ids.entry(t).or_insert_with(|| {
+                kinds.names.push(t.to_owned());
+                kinds.colours.push(mo_app::sounds::type_colour(t));
+                (kinds.names.len() - 1) as u32
+            });
+            kinds.of.push(id);
+        }
+        kinds
+    }
+}
+
+/// What the names over the map are found from ([`Naming::find`]), with the number to hand them back with
+/// ([`Sky::set_regions`]).
+pub struct Naming {
+    pub set: u64,
+    stars: Stars,
+    kinds: Arc<Kinds>,
+    shown: Arc<Vec<usize>>,
+}
+
+impl Naming {
+    /// The neighbourhoods of the map where one sound type is most of the shown stars, biggest first. Slow with many
+    /// stars (call it off the panel's thread).
+    pub fn find(&self) -> Vec<Region> {
+        galaxy_names::find(&self.stars, &self.kinds.of, &self.kinds.names, &self.kinds.colours, &self.shown)
+    }
+}
+
 /// Where each sound of the list sits, and its colour.
 #[derive(Clone)]
 pub struct Map {
@@ -42,6 +91,8 @@ pub struct Map {
     pub colours: Arc<Vec<i32>>,
     /// How many are placed.
     pub count: usize,
+    /// Each sound's type, for the names over the map.
+    pub kinds: Arc<Kinds>,
 }
 
 impl Map {
@@ -51,7 +102,7 @@ impl Map {
             sounds.iter().map(|s| places.get(&s.id).copied().filter(|p| p.x.is_finite() && p.y.is_finite())).collect();
         let count = stars.iter().flatten().count();
         let colours = sounds.iter().map(|s| mo_app::sounds::type_colour(s.sound_type.as_str())).collect();
-        Map { stars: Arc::new(stars), colours: Arc::new(colours), count }
+        Map { stars: Arc::new(stars), colours: Arc::new(colours), count, kinds: Arc::new(Kinds::of(sounds)) }
     }
 }
 
@@ -81,6 +132,24 @@ pub fn read_from(sounds_db: &std::path::Path, library: &Library) -> Result<Map, 
     Err(NONE.into())
 }
 
+/// The stars to be made ready for the graphics card (`mo_sky`), with the number to hand them back with
+/// ([`Sky::packed`]).
+pub struct Pack {
+    pub set: u64,
+    stars: Stars,
+    colours: Arc<Vec<i32>>,
+    shown: Arc<Vec<usize>>,
+    palette: Vec<[u8; 3]>,
+}
+
+impl Pack {
+    /// The stars as the card takes them, and how many at their end are lit (none: the plugin has no Light by yet).
+    /// On every core (call it off the panel's thread).
+    pub fn pack(&self) -> (Vec<u8>, u32) {
+        galaxy_look::pack(&self.stars, &self.colours, &self.palette, &self.shown, &[], &[])
+    }
+}
+
 /// The Galaxy's state on the panel's thread: the map, which stars are shown, the view, and which picture is on show.
 #[derive(Default)]
 pub struct Sky {
@@ -99,6 +168,14 @@ pub struct Sky {
     pub palette: Vec<[u8; 3]>,
     /// Counts the pictures asked for.
     asked: u64,
+    /// The showing the names over the map were last asked for: asked once. And the neighbourhoods found.
+    naming: Option<u64>,
+    regions: Vec<Region>,
+    /// The star under the mouse and the star last played, as places in the list: each gets a ring.
+    pub hover: Option<usize>,
+    pub picked: Option<usize>,
+    /// The showing the stars were last asked to be packed for the card: asked once.
+    packing: Option<u64>,
     /// A picture is being drawn now.
     drawing: bool,
     /// The view or the stars changed since the last picture was asked for.
@@ -122,11 +199,14 @@ impl Sky {
     /// The filters let these through now (places in the list).
     pub fn set_shown(&mut self, shown: Arc<Vec<usize>>) {
         self.shown = shown;
+        // The rings go: their stars may be ones the filters leave out now.
+        (self.hover, self.picked) = (None, None);
         self.changed_stars();
     }
 
     fn changed_stars(&mut self) {
         self.set += 1;
+        self.regions = Vec::new();
         self.grid = None;
         self.stale = true;
     }
@@ -170,6 +250,98 @@ impl Sky {
     /// The view moved (a glide, a pan): a new picture is wanted.
     pub fn moved(&mut self) {
         self.stale = true;
+    }
+
+    /// What the names over the map are found from now ([`Naming::find`] off the panel's thread, then
+    /// [`Sky::set_regions`]): `None` with no map, or when this showing's were asked for already.
+    pub fn names_ask(&mut self) -> Option<Naming> {
+        let map = self.map.as_ref()?;
+        if self.naming == Some(self.set) {
+            return None;
+        }
+        self.naming = Some(self.set);
+        Some(Naming {
+            set: self.set,
+            stars: Arc::clone(&map.stars),
+            kinds: Arc::clone(&map.kinds),
+            shown: Arc::clone(&self.shown),
+        })
+    }
+
+    /// Takes the neighbourhoods found for asking `set`, unless the stars have changed since.
+    pub fn set_regions(&mut self, set: u64, regions: Vec<Region>) {
+        if set == self.set {
+            self.regions = regions;
+        }
+    }
+
+    /// The names where they are on the view now: the biggest few, fading as the view flies in, none over another.
+    pub fn names(&self) -> Vec<Label> {
+        // About a capital's width with its letter spacing, and the line with its padding (as the app guesses them).
+        galaxy_names::place(&self.regions, &self.view, |name| (name.chars().count() as f32 * 10.5 + 16.0, 22.0))
+    }
+
+    /// Flies into the neighbourhood a clicked name is over (its place in the regions found).
+    pub fn fly_into_name(&mut self, region: usize) {
+        if let Some(region) = self.regions.get(region) {
+            self.view.fly_into(region.area);
+            self.stale = true;
+        }
+    }
+
+    /// Where the star of the sound at `at` in the list is on the view, in points: `None` when it's off the view
+    /// or has no star.
+    pub fn where_is(&self, at: usize) -> Option<(f32, f32)> {
+        let star = (*self.map.as_ref()?.stars.get(at)?)?;
+        let (x, y) = self.view.to_view(star.x, star.y, 1.0);
+        let on_view = (0.0..=self.view.width).contains(&x) && (0.0..=self.view.height).contains(&y);
+        on_view.then_some((x, y))
+    }
+
+    /// What the card's stars are made from now ([`Pack::pack`] it off the panel's thread, then [`Sky::packed`]):
+    /// `None` with no map, or when this showing's were asked for already.
+    pub fn pack_ask(&mut self) -> Option<Pack> {
+        let map = self.map.as_ref()?;
+        if self.packing == Some(self.set) {
+            return None;
+        }
+        self.packing = Some(self.set);
+        Some(Pack {
+            set: self.set,
+            stars: Arc::clone(&map.stars),
+            colours: Arc::clone(&map.colours),
+            shown: Arc::clone(&self.shown),
+            palette: self.palette.clone(),
+        })
+    }
+
+    /// Whether stars packed for asking `set` are still the ones to show (the filters haven't changed since): then
+    /// they go to the card, and the next picture is of them.
+    pub fn packed(&mut self, set: u64) -> bool {
+        let current = set == self.set;
+        if current {
+            self.stale = true;
+        }
+        current
+    }
+
+    /// The picture the card is to draw now, if one is wanted: the view, the pixels a point and the look. The card
+    /// draws at once, on the panel's thread, so the picture is on show as soon as this is asked: it sits exactly on
+    /// the view.
+    pub fn on_card(&mut self) -> Option<(View, f32, Look)> {
+        if !self.stale || self.view.width < 1.0 || self.view.height < 1.0 {
+            return None;
+        }
+        self.map.as_ref()?;
+        let (l, t, r, b) = on_view(&self.view);
+        let crowd = match &self.grid {
+            Some(grid) => grid.crowd(l, t, r, b),
+            None => Crowd::even(&self.view, self.shown.len()),
+        };
+        self.asked += 1;
+        self.stale = false;
+        self.drawn = Some((self.asked, self.view));
+        Some((self.view, self.scale.max(0.25), galaxy_look::look(&self.view, crowd, 0.0)))
     }
 
     /// The next picture to draw, if one is wanted and none is being drawn: [`Picture::draw`] it off the panel's
@@ -318,6 +490,52 @@ mod tests {
         // On show where it was drawn: the whole view.
         let (x, y, w, h) = sky.place().expect("a picture on show");
         assert!(x.abs() < 0.01 && y.abs() < 0.01 && (w - 200.0).abs() < 0.01 && (h - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn the_card_gets_the_stars_once_a_showing_and_a_picture_only_when_something_changed() {
+        let mut sky = sky();
+        let pack = sky.pack_ask().expect("the stars to pack");
+        assert!(sky.pack_ask().is_none(), "asked once for a showing");
+        // Every placed star, 16 bytes each (the unplaced third sound has none); none lit.
+        let (bytes, lit) = pack.pack();
+        assert_eq!((bytes.len(), lit), (2 * galaxy_look::STAR_BYTES, 0));
+        assert!(sky.packed(pack.set));
+        let (view, scale, _) = sky.on_card().expect("a picture for the card");
+        assert_eq!((view.width, view.height, scale), (200.0, 100.0, 1.0));
+        assert!(sky.on_card().is_none(), "nothing changed since");
+        // On show at once, exactly on the view.
+        let (x, y, w, h) = sky.place().expect("a picture on show");
+        assert!(x.abs() < 0.01 && y.abs() < 0.01 && (w - 200.0).abs() < 0.01 && (h - 100.0).abs() < 0.01);
+        sky.moved();
+        assert!(sky.on_card().is_some());
+        // The filters changed while the stars were being packed: those are dropped and asked for again.
+        let old = sky.pack_ask();
+        assert!(old.is_none());
+        sky.set_shown(Arc::new(vec![0]));
+        assert!(!sky.packed(pack.set));
+        assert!(sky.pack_ask().is_some());
+    }
+
+    #[test]
+    fn names_are_found_once_a_showing_and_the_rings_follow_their_stars() {
+        let mut sky = sky();
+        let naming = sky.names_ask().expect("names to find");
+        assert!(sky.names_ask().is_none(), "asked once for a showing");
+        sky.set_regions(naming.set, naming.find());
+        // Three stars are too few for a neighbourhood: no names, and placing none is fine.
+        assert!(sky.names().len() <= 1);
+        // The first sound's star is on the view, the unplaced third has none.
+        let (x, y) = sky.where_is(0).expect("on the view");
+        assert!((0.0..=200.0).contains(&x) && (0.0..=100.0).contains(&y));
+        assert_eq!(sky.where_is(2), None);
+        // New filters: the rings go, and the names are asked for again.
+        (sky.hover, sky.picked) = (Some(0), Some(1));
+        sky.set_shown(Arc::new(vec![1]));
+        assert_eq!((sky.hover, sky.picked), (None, None));
+        sky.set_regions(naming.set, naming.find());
+        assert!(sky.names().is_empty(), "names found for the old showing are dropped");
+        assert!(sky.names_ask().is_some());
     }
 
     #[test]

@@ -3,7 +3,7 @@
 // through the track, with the app's own filters and orders)
 // and DAW check (every CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PickButton, PointerPad, HoverNote, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PickButton, PointerPad, HoverNote, MapName, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
 export { FilterView, FilterChoice, YearBar }
 import { ListView } from "../../mo-ui/ui/list.slint";
 
@@ -30,6 +30,17 @@ export struct ExtensionLine {
     // The id the DAW was asked for, exactly.
     id: string,
     offered: bool,
+}
+
+// A neighbourhood's name over the Galaxy's map: which one, where the middle of its bottom edge is, its type's colour
+// and how strongly it shows.
+export struct SkyName {
+    region: int,
+    name: string,
+    x: length,
+    y: length,
+    colour: int,
+    fade: float,
 }
 
 export component Panel inherits Window {
@@ -75,7 +86,19 @@ export component Panel inherits Window {
     in-out property <bool> galaxy;
     // The stars' picture, and where it sits on the Galaxy's view now (it's moved and stretched with the view until
     // the next picture is drawn).
+    // The names over the map, zoomed out (a click flies into its neighbourhood), and the rings round the star under
+    // the mouse and the star last played.
+    in property <[SkyName]> sky-names;
+    callback sky-name(int);
+    in property <bool> sky-ring;
+    in property <length> sky-ring-x;
+    in property <length> sky-ring-y;
+    in property <bool> sky-picked;
+    in property <length> sky-picked-x;
+    in property <length> sky-picked-y;
     in property <image> sky-picture;
+    // What the Galaxy sits on: the graphics card paints its picture over the same colour.
+    out property <color> sky-well: Theme.well;
     in property <length> sky-x;
     in property <length> sky-y;
     in property <length> sky-w;
@@ -386,6 +409,25 @@ export component Panel inherits Window {
                             vertical-alignment: center;
                             wrap: word-wrap;
                         }
+                        if root.sky-ring: Rectangle {
+                            x: root.sky-ring-x - 7px;
+                            y: root.sky-ring-y - 7px;
+                            width: 14px;
+                            height: 14px;
+                            border-radius: 7px;
+                            border-width: 1.5px;
+                            border-color: Theme.text;
+                            opacity: 0.7;
+                        }
+                        if root.sky-picked: Rectangle {
+                            x: root.sky-picked-x - 9px;
+                            y: root.sky-picked-y - 9px;
+                            width: 18px;
+                            height: 18px;
+                            border-radius: 9px;
+                            border-width: 2px;
+                            border-color: Theme.accent;
+                        }
                         PointerPad {
                             grabbing: root.sky-grabbing;
                             down(x, y) => { root.sky-down(x, y, false); }
@@ -396,6 +438,14 @@ export component Panel inherits Window {
                             up => { root.sky-up(false); }
                             wheel(x, dx, dy, ctrl, shift) => { root.sky-wheel(dy); }
                             gone => { root.sky-gone(); }
+                        }
+                        for l in root.sky-names: MapName {
+                            x: l.x - self.width / 2;
+                            y: l.y - self.height;
+                            text: l.name;
+                            tint: Theme.sound-type(l.colour);
+                            opacity: l.fade;
+                            clicked => { root.sky-name(l.region); }
                         }
                         if root.sky-hover != "": HoverNote {
                             text: root.sky-hover;

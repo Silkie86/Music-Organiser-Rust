@@ -6,12 +6,16 @@
 //! (the shell's own data object for it: the file list `CF_HDROP` and the shell's other forms), so a DAW that takes
 //! a file from Explorer finds what it looks for; if the shell can't make that, as a plain file list. Copying and
 //! linking are offered, never moving: whatever takes the file can use it where it is or copy it, and can never move
-//! the sample away (rule 2). How each drag went is in the plugin's log. Windows runs the drag on the window's thread (in a DAW, its main thread) and holds it until
-//! the file is let go, as it does for a drag from the DAW's own browser.
+//! the sample away (rule 2). How each drag went is in the plugin's log.
+//!
+//! The drag runs on a thread of its own, set up for OLE there, as JUCE's plugins run theirs: Windows holds the
+//! thread a drag is on until the file is let go, and in Bitwig a drag run on the window's own thread was never
+//! offered a place to land (Solomon's log, 11 Nov 2026: every track answered "nothing"). The window's thread goes
+//! on meanwhile and is told how it ended.
 //!
 //! Not on Mac or Linux yet: there the lines can't be dragged.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Whether lines can be dragged out on this system.
 pub const CAN: bool = cfg!(windows);
@@ -25,11 +29,18 @@ pub enum Outcome {
     Cancelled,
 }
 
-/// Hands `file` to the system's drag and drop, and waits until it's let go. Call it on the window's thread, with
-/// nothing borrowed that the window's timer needs: on Windows the timer still runs meanwhile. An error is what to tell
-/// the user: the drag couldn't start.
-pub fn file(file: &Path) -> Result<Outcome, String> {
-    hand_over(file)
+/// Hands `file` to the system's drag and drop, on a thread of its own, and tells `done` there how it ended once
+/// it's let go. An error is what to tell the user: the drag couldn't start.
+pub fn file(file: PathBuf, done: impl FnOnce(Result<Outcome, String>) + Send + 'static) {
+    // At normal priority, unlike other background work: the mouse is waiting on it.
+    let started = std::thread::Builder::new().name("mo-plugin-drag".into()).spawn(move || {
+        let ended = mo_catch::catch_crash(std::panic::AssertUnwindSafe(|| hand_over(&file)))
+            .unwrap_or_else(|_| Err("the drag crashed".into()));
+        done(ended);
+    });
+    if let Err(e) = started {
+        crate::log::line("Drag", &format!("No thread to carry the file on: {e}"));
+    }
 }
 
 #[cfg(not(windows))]
@@ -72,9 +83,9 @@ mod ole {
     use windows::core::{BOOL, HRESULT, PCWSTR, implement};
 
     pub fn drag(file: &Path) -> Result<Outcome, String> {
-        // SAFETY: called on the window's thread, which is the thread the drag runs on. The window (baseview) has set
-        // the thread up for OLE already, so this only counts one more use of it, and the matching OleUninitialize
-        // below hands it back. In a DAW whose main thread is set up another way this fails, and the drag is off.
+        // SAFETY: called on the drag's own thread, which nothing else uses: it's set up for OLE here for as long as
+        // the drag lasts, and the matching OleUninitialize below hands that back. The data object and the drop
+        // source are made, used and let go on this thread, between the two.
         if let Err(e) = unsafe { OleInitialize(None) } {
             return Err(format!("Windows' drag and drop isn't ready in this DAW ({e})"));
         }
@@ -226,6 +237,11 @@ mod tests {
     // On Windows the drag itself needs a held mouse button and somewhere to drop: never run by a test.
     #[test]
     fn off_windows_a_drag_says_it_cant() {
-        assert!(file(Path::new("kick.wav")).is_err());
+        let (tell, told) = std::sync::mpsc::channel();
+        file(PathBuf::from("kick.wav"), move |ended| {
+            let _ = tell.send(ended);
+        });
+        let ended = told.recv_timeout(std::time::Duration::from_secs(10)).expect("the drag's end is told");
+        assert!(ended.is_err());
     }
 }

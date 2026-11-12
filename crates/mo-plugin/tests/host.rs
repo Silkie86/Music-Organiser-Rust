@@ -6,6 +6,7 @@
 use clack_extensions::audio_ports::{AudioPortInfoBuffer, PluginAudioPorts};
 use clack_extensions::gui::{GuiApiType, GuiConfiguration, GuiSize, PluginGui};
 use clack_extensions::note_ports::{NotePortInfoBuffer, PluginNotePorts};
+use clack_extensions::state::PluginState;
 use clack_host::factory::plugin::PluginFactory;
 use clack_host::prelude::*;
 use clack_plugin::entry::SinglePluginEntry;
@@ -64,6 +65,37 @@ fn one_stereo_output_one_note_input_and_a_window() {
     assert_eq!(gui.adjust_size(&handle, bigger), Some(bigger));
     gui.set_size(&handle, bigger).unwrap();
     assert_eq!(gui.get_size(&handle), Some(bigger));
+}
+
+/// The DAW saves the plugin's state with its project and hands it back: the window's size comes back with it, and
+/// a state that isn't the plugin's is taken without a fuss (the project must still open).
+#[test]
+fn its_state_goes_into_the_project_and_comes_back() {
+    let entry = entry();
+    let mut saved = Vec::new();
+    let dragged_to = {
+        let mut plugin = instance(&entry);
+        let handle = plugin.plugin_handle();
+        let gui = handle.get_extension::<PluginGui>().unwrap();
+        let opens_at = gui.get_size(&handle).unwrap();
+        let bigger = GuiSize { width: opens_at.width + 120, height: opens_at.height + 80 };
+        gui.set_size(&handle, bigger).unwrap();
+        handle.get_extension::<PluginState>().unwrap().save(&handle, &mut saved).unwrap();
+        bigger
+    };
+    assert!(!saved.is_empty());
+
+    let mut plugin = instance(&entry);
+    let handle = plugin.plugin_handle();
+    let gui = handle.get_extension::<PluginGui>().unwrap();
+    let state = handle.get_extension::<PluginState>().unwrap();
+    assert_ne!(gui.get_size(&handle), Some(dragged_to));
+    state.load(&handle, &mut &saved[..]).unwrap();
+    assert_eq!(gui.get_size(&handle), Some(dragged_to));
+
+    state.load(&handle, &mut &b"not this plugin's state \xff\xfe"[..]).unwrap();
+    state.load(&handle, &mut &b""[..]).unwrap();
+    assert_eq!(gui.get_size(&handle), Some(dragged_to));
 }
 
 #[test]

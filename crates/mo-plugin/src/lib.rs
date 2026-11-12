@@ -24,6 +24,7 @@ pub mod galaxy;
 mod gpu;
 pub mod library;
 pub mod log;
+pub mod state;
 mod threads;
 pub mod waves;
 mod window;
@@ -32,7 +33,7 @@ mod window;
 mod ui {
     slint::include_modules!();
 }
-pub use ui::{ExtensionLine, FilterChoice, FilterView, Panel, SoundLine, YearBar};
+pub use ui::{ExtensionLine, FilterChoice, FilterView, Panel, SkyName, SoundLine, YearBar};
 
 use audition::{Player, Playing};
 use check::Offered;
@@ -46,8 +47,10 @@ use clack_extensions::log::{HostLog, LogSeverity};
 use clack_extensions::note_ports::{
     NoteDialect, NoteDialects, NotePortInfo, NotePortInfoWriter, PluginNotePorts, PluginNotePortsImpl,
 };
+use clack_extensions::state::{PluginState, PluginStateImpl};
 use clack_extensions::track_info::{HostTrackInfo, PluginTrackInfo, PluginTrackInfoImpl, TrackInfoBuffer};
 use clack_plugin::prelude::*;
+use clack_plugin::stream::{InputStream, OutputStream};
 use std::cell::{Cell, RefCell};
 use std::ffi::CString;
 use std::sync::{Arc, Mutex};
@@ -75,7 +78,8 @@ impl Plugin for MoPlugin {
             .register::<PluginAudioPorts>()
             .register::<PluginNotePorts>()
             .register::<PluginGui>()
-            .register::<PluginTrackInfo>();
+            .register::<PluginTrackInfo>()
+            .register::<PluginState>();
     }
 }
 
@@ -194,6 +198,32 @@ impl MainThread<'_> {
     fn say(&self, severity: LogSeverity, line: &str) {
         let (Some(log), Ok(line)) = (self.log, CString::new(line.replace('\0', " "))) else { return };
         log.log(&self.host.shared(), severity, &line);
+    }
+}
+
+/// The DAW keeps the plugin's state in its project and hands it back (`state.rs`).
+impl PluginStateImpl for MainThread<'_> {
+    fn save(&self, output: &mut OutputStream) -> Result<(), PluginError> {
+        use std::io::Write;
+        let state = state::write(self.panel.get());
+        output.write_all(state.as_bytes()).map_err(|_| PluginError::Message("The DAW didn't take the plugin's state"))
+    }
+
+    fn load(&self, input: &mut InputStream) -> Result<(), PluginError> {
+        use std::io::Read;
+        let mut state = Vec::new();
+        // A state the DAW can't hand over whole is the one thing that fails; whatever it says is taken as it can be.
+        input
+            .take(state::MOST)
+            .read_to_end(&mut state)
+            .map_err(|_| PluginError::Message("The DAW couldn't hand the plugin's state back"))?;
+        let kept = state::read(&String::from_utf8_lossy(&state));
+        if let Some((width, height)) = kept.panel {
+            // For the next time the window opens: an open one keeps the size it has.
+            self.panel.set(fit_panel(width, height));
+        }
+        log::line("State", &format!("The DAW handed back the plugin's state: {kept:?}"));
+        Ok(())
     }
 }
 

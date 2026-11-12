@@ -16,7 +16,7 @@ use crate::gpu::Gpu;
 use crate::library::{self, Asked, Library, ORDERS, Read};
 use crate::threads::{background, lock};
 use crate::waves::{self, Kept};
-use crate::{ExtensionLine, FilterChoice, FilterView, Instance, Panel, SoundLine, YearBar};
+use crate::{ExtensionLine, FilterChoice, FilterView, Instance, Panel, SkyName, SoundLine, YearBar};
 use baseview::dpi::{PhysicalPosition, Size};
 use baseview::{
     Event, EventStatus, HandlerError, MouseButton, MouseEvent, ScrollDelta, TimerHandle, WindowContext, WindowEvent,
@@ -129,6 +129,8 @@ struct Slots {
     played: Mutex<Option<Played>>,
     /// A line dragged out: its row and its file, once it's been checked to be there, or why it can't go.
     drag: Mutex<Option<(usize, Result<std::path::PathBuf, String>)>>,
+    /// A drag out that has ended: its file, when it started and how it ended.
+    dragged: Mutex<Option<Dragged>>,
     /// The waveforms read for the lines on show, with their asking's round ([`Kept::to_read`]).
     waves: Mutex<Option<(u64, WavesRead)>>,
     /// The Galaxy's map as the app last kept it, or why there's none.
@@ -136,7 +138,15 @@ struct Slots {
     /// The grid for finding the star under the mouse, with its asking's number ([`Sky::grid_ask`]).
     grid: Mutex<Option<(u64, Grid)>>,
     sky: Mutex<Option<SkyDrawn>>,
+    /// The neighbourhoods the names over the map are for, with their asking's number ([`Sky::names_ask`]).
+    names: Mutex<Option<(u64, Vec<mo_app::galaxy_names::Region>)>>,
+    /// The stars made ready for the graphics card, with their asking's number ([`Sky::pack_ask`]) and how many
+    /// are lit.
+    packed: Mutex<Option<(u64, Vec<u8>, u32)>>,
 }
+
+/// A drag out that has ended: its file, when it started and how it ended.
+type Dragged = (std::path::PathBuf, Instant, Result<crate::drag::Outcome, String>);
 
 type SkyPixels = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
 /// The Galaxy's picture drawn: its number, the view it was drawn for and its pixels; or just its number when it
@@ -460,8 +470,17 @@ struct Shown {
     dragging: Cell<bool>,
     /// Where the right button went down, while it's down: let go in the same spot, it's a click.
     right_press: Cell<Option<LogicalPosition>>,
+    /// The panel is being told of the right button going down or coming up, now: a line under the mouse takes
+    /// that as a click (the app's lines open a menu with it), and here it mustn't play the line.
+    right_now: Rc<Cell<bool>>,
     /// The Galaxy: its map, its view and which picture is on show.
     sky: Rc<RefCell<Sky>>,
+    /// The names last put over the Galaxy's map.
+    sky_names: RefCell<Vec<SkyName>>,
+    /// The Galaxy's painter on the graphics card (the app's own), once there are stars to give it.
+    painter: RefCell<Option<mo_sky::Sky>>,
+    /// Painting the stars on the card went wrong: the processor's picture from then on.
+    painter_failed: Cell<bool>,
     /// The Galaxy's map has been asked for.
     sky_asked: Cell<bool>,
     /// When the timer last ran: a glide of the Galaxy goes on by the time since.
@@ -506,7 +525,11 @@ impl Shown {
             wave_width: Cell::new(waves::WIDTH as f32),
             dragging: Cell::new(false),
             right_press: Cell::new(None),
+            right_now: Rc::default(),
             sky: Rc::default(),
+            sky_names: RefCell::default(),
+            painter: RefCell::new(None),
+            painter_failed: Cell::new(false),
             sky_asked: Cell::new(false),
             ticked: Cell::new(Instant::now()),
             _timer: timer,
@@ -536,7 +559,12 @@ impl Shown {
         let player = Arc::clone(&self.instance.player);
         let slots = Arc::clone(&self.slots);
         let last_played = Rc::clone(&self.played);
+        let right_now = Rc::clone(&self.right_now);
         panel.on_play(move |row, from| {
+            // A right click stops the sound: it never starts the line under it.
+            if right_now.get() {
+                return;
+            }
             let Some(row) = usize::try_from(row).ok() else { return };
             let Some(path) = lines.path(row) else { return };
             *last_played.borrow_mut() = lines.sound(row).map(|sound| (row, sound, path.clone().into()));
@@ -723,6 +751,8 @@ impl Shown {
                 return;
             }
             sky.view.press(x, y, if pan { Hold::Pan } else { Hold::Sweep });
+            // While a button is held the ring round the star under the mouse stays away.
+            sky.hover = None;
             was_cancelled.set(false);
             last.set(None);
             if let Some(panel) = weak.upgrade() {
@@ -744,10 +774,12 @@ impl Shown {
                         && last.replace(Some(at)) != Some(at)
                     {
                         play_star(at);
+                        sky.picked = Some(at);
                     }
                 }
                 Moved::Hover => {
-                    let name = sky.star_at(x, y).and_then(|at| lines.path_at(at));
+                    sky.hover = sky.star_at(x, y);
+                    let name = sky.hover.and_then(|at| lines.path_at(at));
                     panel.set_sky_hover(name.as_deref().map(library::name).unwrap_or_default().into());
                     panel.set_sky_hover_x(x);
                     panel.set_sky_hover_y(y);
@@ -781,10 +813,18 @@ impl Shown {
             }
             if let Some(at) = click.and_then(|(x, y)| sky.star_at(x, y)) {
                 play(at);
+                sky.picked = Some(at);
             }
         });
-        let weak = panel.as_weak();
+        let sky = Rc::clone(&self.sky);
+        panel.on_sky_name(move |region| {
+            if let Ok(region) = usize::try_from(region) {
+                sky.borrow_mut().fly_into_name(region);
+            }
+        });
+        let (sky, weak) = (Rc::clone(&self.sky), panel.as_weak());
         panel.on_sky_gone(move || {
+            sky.borrow_mut().hover = None;
             if let Some(panel) = weak.upgrade() {
                 panel.set_sky_hover(SharedString::new());
             }
@@ -840,6 +880,132 @@ impl Shown {
                 *lock(&slots.grid) = Some((set, grid));
             });
         }
+        let on_card = match &self.draws {
+            Draws::Card(gpu) if !self.painter_failed.get() => self.sky_on_card(&mut sky, gpu),
+            _ => false,
+        };
+        if !on_card {
+            self.sky_on_processor(&mut sky);
+        }
+        self.sky_names(&mut sky);
+        if let Some((x, y, width, height)) = sky.place() {
+            self.panel.set_sky_x(x);
+            self.panel.set_sky_y(y);
+            self.panel.set_sky_w(width);
+            self.panel.set_sky_h(height);
+        }
+    }
+
+    /// What's over the Galaxy's picture: the names of its neighbourhoods (found on a background thread when the stars
+    /// on show change) and the rings round the star under the mouse and the star last played.
+    fn sky_names(&self, sky: &mut Sky) {
+        if let Some(naming) = sky.names_ask() {
+            let slots = Arc::clone(&self.slots);
+            background("mo-plugin-galaxy-names", move || {
+                let started = Instant::now();
+                let found = naming.find();
+                crate::log::took_if_slow("Galaxy", &format!("Named {} neighbourhoods", found.len()), started);
+                *lock(&slots.names) = Some((naming.set, found));
+            });
+        }
+        if let Some((set, regions)) = take(&self.slots.names) {
+            sky.set_regions(set, regions);
+        }
+        let names: Vec<SkyName> = sky
+            .names()
+            .into_iter()
+            .map(|l| SkyName {
+                region: i32::try_from(l.region).unwrap_or(-1),
+                name: l.name.to_uppercase().into(),
+                x: l.x,
+                y: l.y,
+                colour: l.colour,
+                fade: l.fade,
+            })
+            .collect();
+        // Only when they've changed: the panel isn't told to draw the same names again every tick.
+        if *self.sky_names.borrow() != names {
+            self.panel.set_sky_names(ModelRc::new(VecModel::from(names.clone())));
+            *self.sky_names.borrow_mut() = names;
+        }
+        let hover = sky.hover.and_then(|at| sky.where_is(at));
+        self.panel.set_sky_ring(hover.is_some());
+        if let Some((x, y)) = hover {
+            self.panel.set_sky_ring_x(x);
+            self.panel.set_sky_ring_y(y);
+        }
+        let picked = sky.picked.and_then(|at| sky.where_is(at));
+        self.panel.set_sky_picked(picked.is_some());
+        if let Some((x, y)) = picked {
+            self.panel.set_sky_picked_x(x);
+            self.panel.set_sky_picked_y(y);
+        }
+    }
+
+    /// The Galaxy's stars painted by the graphics card, with the app's own painter: every star goes to the card once
+    /// (when the map or the filters change), and after that each picture only sends the view, so flying and moving
+    /// the map keep the screen's pace with half a million stars. `false` when the card can't (the processor's
+    /// picture is drawn instead).
+    fn sky_on_card(&self, sky: &mut Sky, gpu: &Gpu) -> bool {
+        if let Some(pack) = sky.pack_ask() {
+            let slots = Arc::clone(&self.slots);
+            background("mo-plugin-galaxy-stars", move || {
+                let started = Instant::now();
+                let (bytes, lit) = pack.pack();
+                crate::log::took_if_slow("Galaxy", "Made the stars ready for the graphics card", started);
+                *lock(&slots.packed) = Some((pack.set, bytes, lit));
+            });
+        }
+        let (device, queue) = gpu.device();
+        let well = self.panel.get_sky_well();
+        let background = [well.red(), well.green(), well.blue()].map(|c| f32::from(c) / 255.0);
+        let packed = take(&self.slots.packed).filter(|(set, ..)| sky.packed(*set));
+        let mut painter = self.painter.borrow_mut();
+        if painter.is_none() && packed.is_none() {
+            // No stars on the card yet: nothing is shown until they are (they're a moment away).
+            return true;
+        }
+        // A fault in the card's own code is caught here, so it never reaches the DAW.
+        let painted = mo_catch::catch_crash(AssertUnwindSafe(|| {
+            let painter = painter.get_or_insert_with(|| {
+                let started = Instant::now();
+                let painter = mo_sky::Sky::new(device, queue);
+                crate::log::took("Galaxy", "Set up the stars' painter on the graphics card", started);
+                painter
+            });
+            if let Some((_, bytes, lit)) = &packed {
+                painter.set_stars(bytes, *lit);
+            }
+            if !painter.has_stars() {
+                return Ok(None);
+            }
+            let Some((view, scale, look)) = sky.on_card() else { return Ok(None) };
+            let texture = painter.draw(&view, scale, &look, mo_sky::Shine::default(), background);
+            slint::Image::try_from(texture).map(Some).map_err(|e| format!("Slint wouldn't show the picture: {e}"))
+        }));
+        match painted {
+            Ok(Ok(Some(picture))) => self.panel.set_sky_picture(picture),
+            Ok(Ok(None)) => {}
+            Ok(Err(why)) => {
+                crate::log::line("Galaxy", &format!("{why}: the stars are drawn on the processor"));
+                self.give_up_the_painter(sky, &mut painter);
+            }
+            Err(_) => {
+                crate::log::line("Galaxy", "Painting the stars on the card crashed: they're drawn on the processor");
+                self.give_up_the_painter(sky, &mut painter);
+            }
+        }
+        !self.painter_failed.get()
+    }
+
+    fn give_up_the_painter(&self, sky: &mut Sky, painter: &mut Option<mo_sky::Sky>) {
+        *painter = None;
+        self.painter_failed.set(true);
+        sky.moved();
+    }
+
+    /// The Galaxy's picture drawn on the processor, on a background thread (no graphics card to draw with).
+    fn sky_on_processor(&self, sky: &mut Sky) {
         match take(&self.slots.sky) {
             Some(Ok((id, view, pixels))) => {
                 if sky.took(id, view) {
@@ -866,12 +1032,6 @@ impl Shown {
                 crate::log::took_if_slow("Galaxy", "Drew the stars", started);
                 *lock(&slots.sky) = Some(drawn.ok().flatten().ok_or(id));
             });
-        }
-        if let Some((x, y, width, height)) = sky.place() {
-            self.panel.set_sky_x(x);
-            self.panel.set_sky_y(y);
-            self.panel.set_sky_w(width);
-            self.panel.set_sky_h(height);
         }
     }
 
@@ -956,46 +1116,53 @@ impl Shown {
         self.render();
     }
 
-    /// Carries a dragged line's file out, once it's been found: the system's drag holds this thread until it's let
-    /// go (the timer still runs meanwhile, so nothing is kept borrowed across it).
+    /// Carries a dragged line's file out, once it's been found: the system's drag runs on a thread of its own
+    /// (`drag.rs`) and its end comes back in a slot ([`Shown::dragged`]).
     fn drag(&self) {
+        self.dragged();
         if self.dragging.get() {
             return;
         }
         let Some((row, found)) = take(&self.slots.drag) else { return };
-        let said = match found {
+        match found {
             Ok(path) => {
                 self.dragging.set(true);
                 self.panel.set_carried(i32::try_from(row).unwrap_or(-1));
-                self.render();
-                let started = Instant::now();
-                let done = crate::drag::file(&path);
-                let how = match &done {
-                    Ok(crate::drag::Outcome::Landed) => "landed".to_owned(),
-                    Ok(crate::drag::Outcome::Cancelled) => "let go where nothing took it, or called off".to_owned(),
-                    Err(why) => format!("failed: {why}"),
-                };
-                crate::log::took("Drag", &format!("{} {how}", path.display()), started);
-                self.dragging.set(false);
-                self.panel.set_carried(-1);
-                // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't
-                // left pressed.
-                let position = self.pointer.get();
-                let event =
-                    slint::platform::WindowEvent::PointerReleased { position, button: PointerEventButton::Left };
-                self.draws.window().dispatch_event(event);
-                self.draws.window().dispatch_event(slint::platform::WindowEvent::PointerExited);
-                done.err()
+                let (slots, started) = (Arc::clone(&self.slots), Instant::now());
+                crate::drag::file(path.clone(), move |ended| *lock(&slots.dragged) = Some((path, started, ended)));
             }
             Err(why) => {
                 crate::log::line("Drag", &why);
-                Some(why)
+                self.say_drag_failed(why);
             }
-        };
-        if let Some(why) = said {
-            self.playing.set(None);
-            self.panel.set_playing(why.into());
         }
+    }
+
+    /// A drag out has ended: the line is let go, and the panel says so if it couldn't be carried.
+    fn dragged(&self) {
+        let Some((path, started, ended)) = take(&self.slots.dragged) else { return };
+        let how = match &ended {
+            Ok(crate::drag::Outcome::Landed) => "landed".to_owned(),
+            Ok(crate::drag::Outcome::Cancelled) => "let go where nothing took it, or called off".to_owned(),
+            Err(why) => format!("failed: {why}"),
+        };
+        crate::log::took("Drag", &format!("{} {how}", path.display()), started);
+        self.dragging.set(false);
+        self.panel.set_carried(-1);
+        // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't left
+        // pressed.
+        let position = self.pointer.get();
+        let event = slint::platform::WindowEvent::PointerReleased { position, button: PointerEventButton::Left };
+        self.draws.window().dispatch_event(event);
+        self.draws.window().dispatch_event(slint::platform::WindowEvent::PointerExited);
+        if let Err(why) = ended {
+            self.say_drag_failed(why);
+        }
+    }
+
+    fn say_drag_failed(&self, why: String) {
+        self.playing.set(None);
+        self.panel.set_playing(why.into());
     }
 
     /// A waveform picture's size in the screen's own pixels: as wide as the panel now draws them.
@@ -1119,7 +1286,9 @@ impl WindowHandler for Shown {
                     if button == MouseButton::Right {
                         self.right_press.set(Some(self.pointer.get()));
                     }
+                    self.right_now.set(button == MouseButton::Right);
                     self.send(Slint::PointerPressed { position: self.pointer.get(), button: slint_button(button) });
+                    self.right_now.set(false);
                 }
                 MouseEvent::ButtonReleased { button, .. } => {
                     // A right click stops the sound (a right drag is the Galaxy's map being moved: it doesn't).
@@ -1129,7 +1298,9 @@ impl WindowHandler for Shown {
                     {
                         self.stop();
                     }
+                    self.right_now.set(button == MouseButton::Right);
                     self.send(Slint::PointerReleased { position: self.pointer.get(), button: slint_button(button) });
+                    self.right_now.set(false);
                 }
                 MouseEvent::WheelScrolled { delta, .. } => {
                     let (delta_x, delta_y) = match delta {
