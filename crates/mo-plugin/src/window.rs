@@ -13,7 +13,7 @@
 mod midi_tab;
 mod presets_tab;
 
-use crate::audition::Played;
+use crate::audition::{Own, Played};
 use crate::galaxy::{self, Sky};
 use crate::gpu::Gpu;
 use crate::library::{self, Asked, Library, Like, ORDERS, Read};
@@ -231,6 +231,23 @@ impl Lines {
     /// The file of the sound at place `at` in the whole list (a star of the Galaxy).
     fn path_at(&self, at: usize) -> Option<String> {
         self.library.borrow().as_ref()?.list.sound(at).map(|s| s.path.clone())
+    }
+
+    /// The tempo of the sound at place `at` in the whole list, as the library knows it.
+    fn tempo_at(&self, at: usize) -> Own {
+        let library = self.library.borrow();
+        match library.as_ref().and_then(|l| l.list.sound(at)?.analysis.as_ref()) {
+            Some(a) if a.is_loop => a.bpm.map_or(Own::Unknown, Own::Bpm),
+            _ => Own::NotALoop,
+        }
+    }
+
+    /// [`Lines::tempo_at`] for the sound on `row`.
+    fn tempo(&self, row: usize) -> Own {
+        match self.shown.borrow().get(row) {
+            Some(&at) => self.tempo_at(at),
+            None => Own::NotALoop,
+        }
     }
 
     /// The id of the sound on `row`.
@@ -640,7 +657,7 @@ impl Shown {
             *last_played.borrow_mut() = Some((row, sound, path.clone().into()));
             heard.set(Some((Heard::Line(sound), false)));
             let slots = Arc::clone(&slots);
-            player.play(path.into(), from, move |played| *lock(&slots.played) = Some(played));
+            player.play(path.into(), from, lines.tempo(row), move |played| *lock(&slots.played) = Some(played));
         });
         let stop_it = Rc::clone(&stop);
         panel.on_stop(move || stop_it());
@@ -652,6 +669,9 @@ impl Shown {
         panel.set_loop_on(self.instance.player.looping());
         let player = Arc::clone(&self.instance.player);
         panel.on_loop_changed(move |on| player.set_loop(on));
+        panel.set_match_tempo(self.instance.player.matching());
+        let player = Arc::clone(&self.instance.player);
+        panel.on_match_tempo_changed(move |on| player.set_matching(on));
         if let Some(db) = self.instance.player.trim() {
             panel.set_trim_level_db(db);
             panel.set_trim_silence(true);
@@ -861,7 +881,7 @@ impl Shown {
                 // No line of the list was clicked: a waveform heard next isn't any line's.
                 *last_played.borrow_mut() = None;
                 let slots = Arc::clone(&slots);
-                player.play(path.into(), 0.0, move |played| *lock(&slots.played) = Some(played));
+                player.play(path.into(), 0.0, lines.tempo_at(at), move |played| *lock(&slots.played) = Some(played));
             })
         };
         let (sky, weak) = (Rc::clone(&self.sky), panel.as_weak());

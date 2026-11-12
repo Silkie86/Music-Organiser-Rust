@@ -243,8 +243,21 @@ struct Pick {
     path: PathBuf,
     /// Where in the whole sound to start: 0 the start, 1 the end.
     from: f32,
+    /// The sound's own tempo, as the library knows it: with Loop and Match tempo on, a loop plays at the DAW's.
+    tempo: Own,
     number: u64,
     told: Box<dyn FnOnce(Played) + Send>,
+}
+
+/// A picked sound's own tempo, as the library knows it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Own {
+    /// Not a loop (a kick, a snare): it plays at its own speed, with nothing said.
+    NotALoop,
+    /// A loop whose tempo isn't known: at its own speed, and the line says why.
+    Unknown,
+    /// A loop at this many BPM.
+    Bpm(f64),
 }
 
 /// Makes a sound to play, on the reading thread: why not, in plain words.
@@ -284,6 +297,8 @@ pub struct Player {
     tempo: AtomicU64,
     /// The Loop switch: a sound clicked plays round and round until it's stopped (or another is clicked).
     looping: AtomicBool,
+    /// Match tempo: while looping, a loop whose tempo is known plays at the DAW's, its pitch kept.
+    matching: AtomicBool,
 }
 
 impl Player {
@@ -316,6 +331,38 @@ impl Player {
     /// Whether the Loop switch is on.
     pub fn looping(&self) -> bool {
         self.looping.load(Ordering::Acquire)
+    }
+
+    /// Turns Match tempo on or off: from the next sound played.
+    pub fn set_matching(&self, on: bool) {
+        self.matching.store(on, Ordering::Release);
+    }
+
+    /// Whether Match tempo is on.
+    pub fn matching(&self) -> bool {
+        self.matching.load(Ordering::Acquire)
+    }
+
+    /// With Loop and Match tempo on, `audio` (a sound of tempo `own`) at the DAW's tempo, whether it was stretched,
+    /// and the words the playing line adds ("at 128 BPM"); as it is, with why not, when a loop can't be (and nothing
+    /// said for a sound that isn't a loop, or when it isn't asked for).
+    fn matched(&self, audio: mo_audio::AudioData, own: Own) -> (mo_audio::AudioData, bool, String) {
+        if !(self.looping() && self.matching()) {
+            return (audio, false, String::new());
+        }
+        let bpm = match own {
+            Own::NotALoop => return (audio, false, String::new()),
+            Own::Unknown => return (audio, false, " (its tempo isn't known: at its own speed)".into()),
+            Own::Bpm(bpm) => bpm,
+        };
+        let Some(tempo) = self.tempo() else { return (audio, false, " (the DAW hasn't said its tempo yet)".into()) };
+        match mo_audio::stretch::to_tempo(&audio, bpm, tempo) {
+            Ok(stretched) => (stretched, true, format!(" at {tempo:.0} BPM")),
+            Err(why) => {
+                crate::log::line("Play", &format!("Not stretched: {why}"));
+                (audio, false, " (couldn't be stretched: at its own speed)".into())
+            }
+        }
     }
 
     /// The DAW's tempo now (the audio thread's side: a plain store, nothing waits).
@@ -363,10 +410,11 @@ impl Player {
 
     /// Plays the sound at `path` from `from` of the way into the whole sound (0 the start, 1 the end), read on a
     /// background thread at low priority; `told` hears how it went, unless a newer pick came first.
-    pub fn play(self: &Arc<Self>, path: PathBuf, from: f32, told: impl FnOnce(Played) + Send + 'static) {
+    /// `tempo` is the sound's own, as the library knows it.
+    pub fn play(self: &Arc<Self>, path: PathBuf, from: f32, tempo: Own, told: impl FnOnce(Played) + Send + 'static) {
         let number = self.picks.fetch_add(1, Ordering::AcqRel) + 1;
         let from = if from.is_finite() { from.clamp(0.0, 1.0) } else { 0.0 };
-        *lock(&self.next) = Some(Pick { path, from, number, told: Box::new(told) });
+        *lock(&self.next) = Some(Pick { path, from, tempo, number, told: Box::new(told) });
         if self.reading.swap(true, Ordering::AcqRel) {
             // The reading thread is running: it takes this pick next.
             return;
@@ -418,7 +466,13 @@ impl Player {
                     let wave = crate::waves::peaks(&audio.channels, crate::waves::PEAKS);
                     *lock(&self.heard) = Some((pick.path.clone(), wave));
                 }
-                match self.voice_from(&pick, audio, rate) {
+                let (audio, stretched, how) = self.matched(audio, pick.tempo);
+                // The stretch can take a moment: a newer pick made meanwhile wins.
+                if self.picks.load(Ordering::Acquire) != pick.number {
+                    return;
+                }
+                let name = format!("{name}{how}");
+                match self.voice_from(&pick, audio, rate, stretched) {
                     Ok(voice) if self.looping() => self.hand_over(Box::new(voice.looped()), name),
                     Ok(voice) => self.hand_over(Box::new(voice), name),
                     Err(why) => Played::Not(why),
@@ -471,8 +525,15 @@ impl Player {
     }
 
     /// The sound ready to play from the pick's spot. `audio` is the file read from its start; a spot past what was
-    /// read (over a minute into a long file) is read from there instead, where the file's kind can be.
-    fn voice_from(&self, pick: &Pick, mut audio: mo_audio::AudioData, rate: u32) -> Result<Voice, String> {
+    /// read (over a minute into a long file) is read from there instead, where the file's kind can be; not when it
+    /// was `stretched` (the file's own frames aren't the stretched sound's).
+    fn voice_from(
+        &self,
+        pick: &Pick,
+        mut audio: mo_audio::AudioData,
+        rate: u32,
+        stretched: bool,
+    ) -> Result<Voice, String> {
         let read = audio.channels.first().map_or(0, Vec::len);
         // The whole file's length in frames, as `start` takes it.
         let whole = (audio.file_seconds * f64::from(audio.sample_rate)).max(read as f64).max(1.0);
@@ -492,6 +553,7 @@ impl Player {
                     .of_file(0.0, read as f64 / whole)
                     .from(part)),
             },
+            Start::Past(_) if stretched => Err("Only the first minute of a loop plays at the DAW's tempo".into()),
             Start::Past(_) if !mo_audio::can_read_from(&pick.path) => {
                 Err("Only the first minute of this kind of file plays".into())
             }
@@ -590,7 +652,7 @@ mod tests {
     }
 
     fn pick(from: f32) -> Pick {
-        Pick { path: PathBuf::new(), from, number: 1, told: Box::new(|_| {}) }
+        Pick { path: PathBuf::new(), from, tempo: Own::NotALoop, number: 1, told: Box::new(|_| {}) }
     }
 
     #[test]
@@ -601,19 +663,19 @@ mod tests {
             mo_audio::AudioData { sample_rate: 1_000, channels: vec![s], file_seconds: 0.1, ..Default::default() };
         let player = Player::default();
         // Off: the whole sound.
-        assert_eq!(player.voice_from(&pick(0.0), audio.clone(), 1_000).unwrap().left.len(), 100);
+        assert_eq!(player.voice_from(&pick(0.0), audio.clone(), 1_000, false).unwrap().left.len(), 100);
         player.set_trim(Some(-60));
         // From the start: from the first loud frame to the end of the sound and its 10 ms tail.
-        let v = player.voice_from(&pick(0.0), audio.clone(), 1_000).unwrap();
+        let v = player.voice_from(&pick(0.0), audio.clone(), 1_000, false).unwrap();
         assert_eq!((v.left.len(), v.left[0]), (40, 0.5));
         // Its place on the waveform counts into the whole file: it starts a fifth of the way in.
         assert!((v.place() - 0.2).abs() < 1e-6 && (v.covers - 0.4).abs() < 1e-6);
         // A spot in the sound plays from there; one in the quiet end plays as asked.
-        assert_eq!(player.voice_from(&pick(0.3), audio.clone(), 1_000).unwrap().left.len(), 30);
-        let v = player.voice_from(&pick(0.8), audio.clone(), 1_000).unwrap();
+        assert_eq!(player.voice_from(&pick(0.3), audio.clone(), 1_000, false).unwrap().left.len(), 30);
+        let v = player.voice_from(&pick(0.8), audio.clone(), 1_000, false).unwrap();
         assert_eq!((v.left.len(), v.at), (100, 80));
         player.set_trim(None);
-        assert_eq!(player.voice_from(&pick(0.0), audio, 1_000).unwrap().left.len(), 100);
+        assert_eq!(player.voice_from(&pick(0.0), audio, 1_000, false).unwrap().left.len(), 100);
     }
 
     #[test]
@@ -651,7 +713,7 @@ mod tests {
             file_seconds: 0.1,
             ..Default::default()
         };
-        assert!((player.voice_from(&pick(0.3), audio, 1_000).unwrap().place() - 0.3).abs() < 1e-6);
+        assert!((player.voice_from(&pick(0.3), audio, 1_000, false).unwrap().place() - 0.3).abs() < 1e-6);
     }
 
     #[test]
@@ -704,6 +766,41 @@ mod tests {
         let (mut l, mut r) = (vec![9.0; 3], vec![9.0; 3]);
         playing.fill(&mut l, &mut r);
         assert_eq!(l, vec![0.3 * LEVEL; 3]);
+    }
+
+    #[test]
+    fn match_tempo_stretches_a_loop_only_when_asked_and_the_tempos_are_known() {
+        let player = Player::default();
+        let second = mo_audio::AudioData {
+            sample_rate: 48_000,
+            channels: vec![(0..48_000).map(|i| (i as f32 * 0.05).sin() * 0.2).collect()],
+            file_seconds: 1.0,
+            embedded_tempo: None,
+            embedded_root_note: None,
+            embedded_is_loop: Some(true),
+        };
+        let len = |a: &mo_audio::AudioData| a.channels[0].len();
+        // Off, or the loop switch off: played as it is, with nothing said.
+        let (same, _, said) = player.matched(second.clone(), Own::Bpm(120.0));
+        assert_eq!((len(&same), said.as_str()), (48_000, ""));
+        player.set_loop(true);
+        player.set_matching(true);
+        // On, but a tempo missing: at its own speed, and why.
+        let (same, _, said) = player.matched(second.clone(), Own::Unknown);
+        assert_eq!(len(&same), 48_000);
+        assert!(said.contains("isn't known"), "{said}");
+        let (same, _, said) = player.matched(second.clone(), Own::Bpm(120.0));
+        assert_eq!(len(&same), 48_000);
+        assert!(said.contains("hasn't said"), "{said}");
+        // Both known: a 120 BPM loop at the DAW's 100 is a fifth longer.
+        player.set_tempo(100.0);
+        let (same, stretched, said) = player.matched(second.clone(), Own::NotALoop);
+        assert_eq!((len(&same), stretched, said.as_str()), (48_000, false, ""), "a kick plays as it is, nothing said");
+        let (slower, stretched, said) = player.matched(second, Own::Bpm(120.0));
+        assert_eq!(said, " at 100 BPM");
+        assert!(stretched);
+        let want = 48_000.0 * 1.2;
+        assert!((len(&slower) as f64 - want).abs() / want < 0.02, "{} frames", len(&slower));
     }
 
     #[test]
