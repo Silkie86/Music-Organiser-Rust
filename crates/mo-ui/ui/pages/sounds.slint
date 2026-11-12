@@ -3,7 +3,7 @@
 // and filters over them and the picked sound's panel beside them. Agreed mock-up: the design canvas, 2026-11-01.
 // The picked sound's card takes your say: a favourite, your own type and tags, kept in the app's own sound library.
 import { ListView, ListBox, Fit } from "../list.slint";
-import { Theme, AppKeys, Type, Space, Heights, Well, StudioSlider, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
+import { Theme, AppKeys, Type, Space, Heights, Well, StudioSlider, LikeFavourites, SearchBox, ToggleChip, MenuChip, FilterPicks, FilterList, FilterColumn, TickLine, RangeSlider, OneOfChip, FilterView, FilterChoice, ListLine, DragHandle, Caps, ColumnHead, Heart, HeartToggle, TagChip, WordBox, PickButton, StudioButton, CloseButton, HoverNote, PointerPad, Segmented, MenuItem, MenuButton, CardAction, CardActions, RightClickMenu, SidePanel, PanelDivider, EmptyState, Waveform, Dot, PageHeader, LinkText, MapName, MapInset, YearRange, YearBar } from "../studio.slint";
 
 // One tile: `row` is its place in the shown sounds, for picking it.
 export struct SoundTile {
@@ -343,6 +343,11 @@ export global SoundsData {
     // The use counts are in, so the Used and Unused chips can work.
     in property <bool> knows-use;
     in property <bool> favourites;
+    // With Favourites on: how far the sounds like them reach (0 only them, 1 the most adventurous), the words by it
+    // ("+3 like each"), and the slider let go at a place (0 to 1).
+    in-out property <float> like-favourites;
+    in property <string> like-favourites-words;
+    callback like-favourites-set(float);
     // Hide duplicates: on, and its words with how many copies it hides (or how far finding them has got).
     in property <bool> hide-copies;
     in property <string> hide-copies-text: "Hide duplicates";
@@ -2192,6 +2197,12 @@ export component SoundsPage inherits Rectangle {
                             text: "Favourites";
                             on: SoundsData.favourites;
                             clicked => { SoundsData.toggle("favourites"); }
+                        }
+                        // The sounds most like your favourites show beside them, a few or many.
+                        if SoundsData.favourites: LikeFavourites {
+                            value <=> SoundsData.like-favourites;
+                            words: SoundsData.like-favourites-words;
+                            released(v) => { SoundsData.like-favourites-set(v); }
                         }
                         if SoundsData.knows-use: TickLine {
                             text: "In my projects";

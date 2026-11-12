@@ -12,6 +12,7 @@ pub use drag_out::card_at_row;
 mod galaxy;
 mod grid;
 mod kit;
+mod like;
 mod peaks;
 mod sky;
 mod yours;
@@ -189,6 +190,9 @@ struct Page {
     re_likes: HashMap<i64, i64>,
     /// Hide duplicates has been set: by you, or from its setting when the sounds first showed.
     hide_copies_chosen: bool,
+    /// How far the sounds like your favourites reach has been set: by you, or from its setting when the sounds first
+    /// showed.
+    like_chosen: bool,
     /// Trim silence is on: sounds play without the silence at their start and end ([`mo_audio::trim`]).
     trim: bool,
     /// The level Trim silence counts as silence, in dB below full scale (`mo_audio::trim::LEVELS_DB`).
@@ -253,6 +257,7 @@ impl Default for Page {
             re_years: Vec::new(),
             re_likes: HashMap::new(),
             hide_copies_chosen: false,
+            like_chosen: false,
             trim: false,
             trim_db: mo_audio::trim::DEFAULT_DB,
             trim_chosen: false,
@@ -1887,6 +1892,8 @@ pub fn index_known(app: &AppWindow, index: Arc<SoundIndex>) {
         find_alike(app, at);
     }
     galaxy::index_known(app);
+    // Sounds like your favourites, for these fingerprints.
+    like::wanted(app);
     // Rediscover was waiting on the fingerprints. New ones later don't dig its sounds out again: they'd all change.
     if first && PAGE.with(|p| p.borrow().re_started) {
         rediscover_now(app);
@@ -2017,6 +2024,7 @@ fn use_known(app: &AppWindow, list: Arc<SoundList>) {
         // The copies Hide duplicates found meanwhile stay.
         let mut with_use = (*list).clone();
         with_use.keep_copies_of(&p.list);
+        with_use.keep_like_favourites_of(&p.list);
         p.list = Arc::new(with_use);
         // Your say since the sounds were read stays over them.
         yours::keep_showing(&mut p);
@@ -2302,6 +2310,13 @@ pub fn show(app: &AppWindow, library: Library, view: Option<&str>, autoplay: Opt
             p.hide_copies_chosen = true;
             p.filters.hide_copies = crate::settings::value(list::HIDE_COPIES_KEY).as_deref() == Some("on");
         }
+        // How far the sounds like your favourites reach too.
+        if !p.like_chosen {
+            p.like_chosen = true;
+            p.filters.like_favourites = crate::settings::value(list::LIKE_FAVOURITES_KEY)
+                .and_then(|v| v.parse::<u8>().ok())
+                .map_or(0, |v| v.min(list::LIKE_STEPS));
+        }
         // Trim silence too.
         if !p.trim_chosen {
             p.trim_chosen = true;
@@ -2474,6 +2489,15 @@ fn wire(app: &AppWindow, feed: Feed, shortcuts: &Shortcuts) {
                 copies::look_again(&app, true);
             }
         }
+    });
+    // The Favourites filter's "how adventurous" slider: how many sounds like each favourite show beside them. Kept
+    // for next time (the app's own settings file).
+    let weak = app.as_weak();
+    data.on_like_favourites_set(move |share| {
+        let step = list::like_favourites_step(share);
+        PAGE.with(|p| p.borrow_mut().like_chosen = true);
+        crate::settings::remember(list::LIKE_FAVOURITES_KEY, &step.to_string());
+        change(&weak, |f| f.like_favourites = step);
     });
     let weak = app.as_weak();
     data.on_years_picked(move |a, b| {
@@ -3143,6 +3167,7 @@ fn change(weak: &slint::Weak<AppWindow>, f: impl FnOnce(&mut Filters)) {
 /// duplicates on, the copies are looked for first if they aren't known for these sounds ([`copies::wanted`]).
 fn refresh(app: &AppWindow) {
     copies::wanted(app);
+    like::wanted(app);
     show_chips(app);
     let ask = PAGE.with(|p| {
         let mut p = p.borrow_mut();
@@ -3483,6 +3508,14 @@ fn show_chips(app: &AppWindow) {
         data.set_used(f.used);
         data.set_knows_use(p.list.knows_use());
         data.set_favourites(f.favourites);
+        data.set_like_favourites(list::like_favourites_share(f.like_favourites));
+        // Without fingerprints nothing can be found like them: it says so rather than "Finding…" for good.
+        let known = match (p.list.knows_like_favourites() && !like::busy(), &p.no_index) {
+            (true, _) => list::LikeKnown::Yes,
+            (false, Some(_)) => list::LikeKnown::Missing,
+            (false, None) => list::LikeKnown::Finding,
+        };
+        data.set_like_favourites_words(list::like_favourites_words(f.like_favourites, known).into());
         data.set_hide_copies(f.hide_copies);
         data.set_hide_copies_text(list::hide_copies_text(copies::found()).into());
         data.set_folder(f.folder.as_deref().unwrap_or_default().into());

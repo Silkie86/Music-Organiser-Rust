@@ -24,6 +24,8 @@ const HEIGHT: u32 = 900;
 const NARROW: u32 = 900;
 /// A window short enough that the Songs, Presets, MIDI and Plugins samples' lists scroll (app.slint's min-height).
 const SHORT: u32 = 600;
+/// Tall enough for the filter column's foot (Favourites and its Sounds like them slider) to show.
+const TALL_FAVOURITES: u32 = 1180;
 /// Solomon's own window: an ultrawide screen at 100% (across, down).
 const WIDE: (u32, u32) = (3440, 1369);
 
@@ -1826,6 +1828,23 @@ fn sounds_shots(
     shots.push(("sounds-duplicates.png".into(), hidden));
     data.invoke_toggle("hide-copies".into());
     mo_ui::sounds::show_copies_for_screens(app, None);
+    // Favourites, then the sounds most like them too: the slider halfway (7 like each).
+    // A tall window, so the slider under Favourites shows (at the foot of the filter column).
+    window.set_size(PhysicalSize::new(WIDTH, TALL_FAVOURITES));
+    data.invoke_toggle("favourites".into());
+    let only = capture_sized(window, (WIDTH, TALL_FAVOURITES), Duration::from_millis(400));
+    data.invoke_like_favourites_set(0.4);
+    let like = capture_sized(window, (WIDTH, TALL_FAVOURITES), Duration::from_millis(400));
+    window.set_size(PhysicalSize::new(WIDTH, HEIGHT));
+    if like == only {
+        return Err("sounds-like-favourites.png: the Sounds like them slider changed nothing".into());
+    }
+    // The window's lowest [`HEIGHT`] rows, where the slider is, as the shots are all that size.
+    let foot = |shot: Vec<u8>| shot[((TALL_FAVOURITES - HEIGHT) * WIDTH * 3) as usize..].to_vec();
+    shots.push(("sounds-favourites.png".into(), foot(only)));
+    shots.push(("sounds-like-favourites.png".into(), foot(like)));
+    data.invoke_like_favourites_set(0.0);
+    data.invoke_toggle("favourites".into());
     // Favourites from Bitwig: its card in the sound card's place, some multisamples ticked, then after a look.
     let names =
         ["Clap 1 Select", "Kicks 1 Select", "OHH 2 Select", "rim 1", "Snare 3 Select", "Stylus Drums - Snare 2"];

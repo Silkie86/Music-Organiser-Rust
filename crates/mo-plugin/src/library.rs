@@ -9,9 +9,10 @@
 //! and the others use the same one while any panel is open.
 
 use crate::threads::lock;
-use mo_app::sounds::{self, Filters, Order, SoundChips, SoundCounts, SoundList};
+use mo_app::sounds::{self, Filters, LikeFavourites, Order, SoundChips, SoundCounts, SoundList};
 use mo_sounds::Sound;
-use std::path::Path;
+use mo_sounds::index::SoundIndex;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, Weak};
 
 /// The orders the panel offers, as the app names them.
@@ -65,6 +66,23 @@ pub struct Library {
     pub tags: Vec<String>,
     /// How many sounds were added in each year, newest first: the year strip.
     pub years: Vec<(i32, usize)>,
+    /// The app's sound library it was read from (its old `sounds.db` beside it), for the fingerprints read later
+    /// ([`Library::read_like`]), and how many sounds CLAP could have heard then (as the app counts them, hidden copies
+    /// too), which says whether its fingerprints are the ones to use.
+    from: Option<(PathBuf, usize)>,
+    /// How close each sound is to your favourites, once worked out (or why it couldn't be).
+    like: Mutex<Like>,
+}
+
+/// Sounds like your favourites, in the plugin: worked out once, the first time they're asked for.
+#[derive(Clone, Default)]
+pub enum Like {
+    #[default]
+    NotYet,
+    Reading,
+    Ready(Arc<LikeFavourites>),
+    /// Why it couldn't be, in plain words.
+    Not(String),
 }
 
 impl Library {
@@ -79,14 +97,87 @@ impl Library {
         let tags = list.tags();
         // By the year each sound was added (the plugin doesn't read which songs use a sound).
         let years = list.year_counts(false);
-        Library { list, types, tags, years }
+        Library { list, types, tags, years, from: None, like: Mutex::default() }
     }
 
     /// The places in the list of the sounds `asked` lets through, in its order, and how many each filter choice would
-    /// show. Worked out on the app's low-priority pool (never the DAW's threads).
+    /// show. Worked out on the app's low-priority pool (never the DAW's threads). With Favourites on and sounds like
+    /// them asked for, those show too once they're known ([`Library::read_like`]).
     pub fn view(&self, asked: &Asked) -> (Vec<usize>, SoundCounts) {
-        mo_app::background::on_pool(|| self.list.view_counted(&asked.filters, asked.order, asked.seed))
+        let like = match self.like() {
+            Like::Ready(like) if asked.filters.wants_like_favourites() => Some(like),
+            _ => None,
+        };
+        mo_app::background::on_pool(|| {
+            let list = like.map(|like| self.list.with_like_favourites(like));
+            list.as_ref().unwrap_or(&self.list).view_counted(&asked.filters, asked.order, asked.seed)
+        })
     }
+
+    /// How far working out the sounds like your favourites has got.
+    pub fn like(&self) -> Like {
+        lock(&self.like).clone()
+    }
+
+    /// Whether the sounds like your favourites should be worked out now for `asked`: they're asked for and haven't
+    /// been yet. Says so once: it's then under way ([`Library::read_like`] does it).
+    pub fn start_like(&self, asked: &Asked) -> bool {
+        let mut like = lock(&self.like);
+        let start = asked.filters.wants_like_favourites() && matches!(*like, Like::NotYet);
+        if start {
+            *like = Like::Reading;
+        }
+        start
+    }
+
+    /// Works out how close each sound is to your favourites, from the sounds' fingerprints in the app's library: read
+    /// once (it's opened, read and let go again, as [`read`] does), and let go once it's worked out, so only the
+    /// answer (a number for each sound) is kept. Slow: seconds for a big library, and the fingerprints take a few
+    /// hundred megabytes while it works (call it off the panel's thread).
+    pub fn read_like(&self) {
+        let started = std::time::Instant::now();
+        let like = match &self.from {
+            Some((sounds_db, analysed)) => match fingerprints(sounds_db, *analysed) {
+                Ok(index) => Like::Ready(mo_app::background::on_pool(|| self.list.like_favourites_in(&index))),
+                Err(why) => Like::Not(why),
+            },
+            None => Like::Not("No sound library to read".into()),
+        };
+        let said = match &like {
+            Like::Not(why) => format!("Sounds like your favourites not worked out: {why}"),
+            _ => "Worked out the sounds like your favourites".to_owned(),
+        };
+        crate::log::took("Library", &said, started);
+        *lock(&self.like) = like;
+    }
+}
+
+/// Held by the work on the sounds like your favourites ([`Library::read_like`]) from when it's asked for: let go with
+/// them still not known (the work stopped part way, a panic, or its thread never started), it says they couldn't be,
+/// rather than "Finding…" for good.
+pub struct Stopped(pub Arc<Library>);
+
+impl Drop for Stopped {
+    fn drop(&mut self) {
+        let mut like = lock(&self.0.like);
+        if matches!(*like, Like::Reading) {
+            *like = Like::Not("it stopped part way".into());
+        }
+    }
+}
+
+/// The sounds' fingerprints in the app's own sound library beside `sounds_db`, made into the index "Sounds like this"
+/// searches, as the app makes it.
+fn fingerprints(sounds_db: &Path, analysed: usize) -> Result<SoundIndex, String> {
+    let copy = mo_sounds::compact::copy_of(sounds_db);
+    let db = match mo_sounds::SoundsDb::open_read_only(&copy) {
+        Ok(db) if db.is_copy() => db,
+        Ok(_) => return Err("the sound library isn't one this plugin can read".into()),
+        Err(e) => return Err(format!("couldn't open the sound library: {e}")),
+    };
+    let (features, clap) = db.fingerprints(analysed).map_err(|e| format!("couldn't read the fingerprints: {e}"))?;
+    drop(db);
+    Ok(mo_app::background::on_pool(|| SoundIndex::from_gathered(features, clap, analysed)))
 }
 
 /// What the panel asks of the list: the app's own filters (with the search box's words), and the order.
@@ -161,7 +252,12 @@ pub fn read_from(sounds_db: &Path) -> Read {
     };
     // One read, then the file is let go (`db` drops here).
     match db.all(chrono::Local::now().naive_local()) {
-        Ok(sounds) => Read::Ready(Arc::new(Library::new(sounds))),
+        Ok(sounds) => {
+            let analysed = mo_sounds::count_clap_could_hear(&sounds, mo_sounds::compact::grow::new_since(&copy));
+            let mut library = Library::new(sounds);
+            library.from = Some((sounds_db.to_path_buf(), analysed));
+            Read::Ready(Arc::new(library))
+        }
         Err(e) => Read::Not(format!("Couldn't read the sound library: {e}")),
     }
 }

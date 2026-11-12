@@ -688,6 +688,42 @@ export component StudioSlider inherits HorizontalLayout {
     }
 }
 
+// The Favourites filter's "how adventurous": the sounds most like your favourites show beside them, from only them (0)
+// to the most adventurous (1). `words` says how many ("+3 each"); `released` where the slider was let go. On the app's
+// Sounds page and in the plugin's Sounds view alike, under the Favourites line; the slider's words are Rediscover's
+// ("Safe" … "Far"), short enough for the filter column.
+export component LikeFavourites inherits VerticalLayout {
+    in-out property <float> value;
+    in property <string> words;
+    callback released(float);
+    padding-right: Space.sm;
+    HorizontalLayout {
+        height: 22px;
+        Text {
+            text: "Sounds like them";
+            color: Theme.muted;
+            font-size: Type.meta;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.words;
+            color: root.value > 0 ? Theme.text : Theme.faint;
+            font-size: Type.meta;
+            font-weight: root.value > 0 ? 600 : 400;
+            horizontal-alignment: right;
+            vertical-alignment: center;
+            horizontal-stretch: 1;
+        }
+    }
+    StudioSlider {
+        low: "Safe";
+        high: "Far";
+        tip: "How adventurous: left shows only your favourites, right more and more sounds like them, further afield";
+        value <=> root.value;
+        released(v) => { root.released(v); }
+    }
+}
+
 // The search box: a pressed-in field with its hint shown until something is typed.
 export component SearchBox inherits Rectangle {
     in property <string> hint: "Search";

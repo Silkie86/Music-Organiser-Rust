@@ -3,7 +3,7 @@
 // through the track, with the app's own filters and orders)
 // and DAW check (every CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, LikeFavourites, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, OneOfChip, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
 export { FilterView, FilterChoice, YearBar, Theme }
 import { ListView } from "../../mo-ui/ui/list.slint";
 
@@ -93,6 +93,11 @@ export component Panel inherits Window {
     in property <FilterView> tag-filter;
     in property <bool> mix-well;
     in property <bool> favourites;
+    // With Favourites on: how far the sounds like them reach (0 only them, 1 the most adventurous), the words by it,
+    // and the slider let go at a place (0 to 1).
+    in-out property <float> like-favourites;
+    in property <string> like-favourites-words;
+    callback like-favourites-set(float);
     // The Tempo slider: its ends and step, where its handles are, what's picked in words, and its bars.
     in property <int> tempo-low-end;
     in property <int> tempo-high-end: 100;
@@ -402,6 +407,12 @@ export component Panel inherits Window {
                             text: "Favourites";
                             on: root.favourites;
                             clicked => { root.toggle("favourites"); }
+                        }
+                        // The sounds most like your favourites show beside them, a few or many.
+                        if root.favourites: LikeFavourites {
+                            value <=> root.like-favourites;
+                            words: root.like-favourites-words;
+                            released(v) => { root.like-favourites-set(v); }
                         }
                     }
                 }
