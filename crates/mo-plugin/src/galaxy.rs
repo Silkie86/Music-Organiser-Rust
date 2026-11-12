@@ -57,6 +57,9 @@ pub struct Mini {
     pub height: f32,
 }
 
+/// The most sounds the sweep's trail and the Swept card hold (as the app's).
+pub const TRAIL: usize = 16;
+
 /// Each sound's star, by the sound's place in the list; `None` for a sound the map hasn't placed.
 pub type Stars = Arc<Vec<Option<StarPoint>>>;
 
@@ -203,6 +206,10 @@ pub struct Sky {
     packing: Option<u64>,
     /// The showing the mini-map's picture was last asked for: asked once.
     mini: Option<u64>,
+    /// The sounds swept, clicked and gone to with the arrows lately, newest first, by place in the list; and the one
+    /// the Swept card's Back and Next are on.
+    trail: Vec<usize>,
+    trail_at: usize,
     /// A picture is being drawn now.
     drawing: bool,
     /// The view or the stars changed since the last picture was asked for.
@@ -220,6 +227,8 @@ impl Sky {
     pub fn set_map(&mut self, map: Map) {
         self.view.most = most_zoom_for(map.count);
         self.map = Some(map);
+        // Another library's sounds: the trail's places in the list aren't theirs.
+        self.clear_trail();
         self.changed_stars();
     }
 
@@ -508,6 +517,77 @@ impl Sky {
         Some(at)
     }
 
+    /// Puts a sound on the trail, newest first (as the app: a swept one moves to the front; a clicked one already on
+    /// it stays where it is), and Back and Next start from it.
+    pub fn on_trail(&mut self, at: usize, swept: bool) {
+        match self.trail.iter().position(|&on| on == at) {
+            Some(i) if !swept => self.trail_at = i,
+            found => {
+                if let Some(i) = found {
+                    self.trail.remove(i);
+                }
+                self.trail.insert(0, at);
+                self.trail.truncate(TRAIL);
+                self.trail_at = 0;
+            }
+        }
+    }
+
+    /// The trail, newest first (places in the list), and which of them Back and Next are on.
+    pub fn trail(&self) -> (&[usize], usize) {
+        (&self.trail, self.trail_at)
+    }
+
+    pub fn clear_trail(&mut self) {
+        self.trail.clear();
+        self.trail_at = 0;
+    }
+
+    /// Goes to the `i`th sound on the trail (0 the newest): it's picked and the map glides to it, as far in as it
+    /// is. The sound to play: its place in the list.
+    pub fn go_on_trail(&mut self, i: usize) -> Option<usize> {
+        let at = *self.trail.get(i)?;
+        self.trail_at = i;
+        self.picked = Some(at);
+        if let Some(star) = self.map.as_ref().and_then(|map| *map.stars.get(at)?) {
+            let zoom = self.view.zoom;
+            self.view.fly_to(star.x, star.y, zoom);
+            self.stale = true;
+        }
+        Some(at)
+    }
+
+    /// Goes `by` sounds down the trail (1: to the one swept before) or up it (-1), stopping at its ends.
+    pub fn step_on_trail(&mut self, by: i32) -> Option<usize> {
+        let last = self.trail.len().checked_sub(1)?;
+        let to = if by > 0 { (self.trail_at + 1).min(last) } else { self.trail_at.saturating_sub(1) };
+        self.go_on_trail(to)
+    }
+
+    /// The trail on the view now: the line through its stars (as a path's commands, empty with fewer than two) and
+    /// a dot for each star on or just off the view (x, y in points, and how strongly it shows: fainter with age).
+    pub fn trail_on_view(&self) -> (String, Vec<(f32, f32, f32)>) {
+        use std::fmt::Write;
+        let Some(map) = &self.map else { return Default::default() };
+        let count = self.trail.len().max(1) as f32;
+        let mut on_view: Vec<(f32, f32, f32)> = Vec::new();
+        for (i, &at) in self.trail.iter().enumerate() {
+            if let Some(star) = map.stars.get(at).copied().flatten() {
+                let (x, y) = self.view.to_view(star.x, star.y, 1.0);
+                on_view.push((x, y, 1.0 - i as f32 / count));
+            }
+        }
+        let mut path = String::new();
+        if on_view.len() > 1 {
+            for (i, (x, y, _)) in on_view.iter().enumerate() {
+                let _ = write!(path, "{} {x:.1} {y:.1} ", if i == 0 { "M" } else { "L" });
+            }
+        }
+        let (width, height) = (self.view.width, self.view.height);
+        on_view.retain(|&(x, y, _)| x > -10.0 && y > -10.0 && x < width + 10.0 && y < height + 10.0);
+        (path, on_view)
+    }
+
     /// The shown stars the mouse passed going from `from` to `to` on the view, in the order it passed them, each once.
     pub fn passed(&self, from: (f32, f32), to: (f32, f32)) -> Vec<usize> {
         let far = (to.0 - from.0).hypot(to.1 - from.1);
@@ -736,5 +816,44 @@ mod tests {
         assert!(sky.view.flying());
         sky.view.glide(std::time::Duration::from_secs(60));
         assert!((sky.view.cx - 0.25).abs() < 0.01 && (sky.view.zoom - 8.0).abs() < 0.01, "{:?}", sky.view);
+    }
+
+    #[test]
+    fn the_trail_keeps_the_sounds_heard_lately_newest_first() {
+        let mut sky = with_grid(sky());
+        assert_eq!(sky.trail_on_view(), (String::new(), Vec::new()));
+        sky.on_trail(0, true);
+        sky.on_trail(1, true);
+        assert_eq!(sky.trail(), (&[1, 0][..], 0));
+        // A clicked one already on it stays where it is; a swept one moves to the front.
+        sky.on_trail(0, false);
+        assert_eq!(sky.trail(), (&[1, 0][..], 1));
+        sky.on_trail(0, true);
+        assert_eq!(sky.trail(), (&[0, 1][..], 0));
+        // The line goes through both stars, and the older one's dot is fainter.
+        let (path, dots) = sky.trail_on_view();
+        let (x0, y0) = sky.view.to_view(0.25, 0.5, 1.0);
+        let (x1, y1) = sky.view.to_view(0.75, 0.5, 1.0);
+        assert_eq!(path, format!("M {x0:.1} {y0:.1} L {x1:.1} {y1:.1} "));
+        assert_eq!(dots, [(x0, y0, 1.0), (x1, y1, 0.5)]);
+        // Back goes to the one before, and stops at the end; Next comes back.
+        assert_eq!(sky.step_on_trail(1), Some(1));
+        assert_eq!((sky.picked, sky.trail().1), (Some(1), 1));
+        assert!(sky.view.flying(), "the map glides to it");
+        assert_eq!(sky.step_on_trail(1), Some(1));
+        assert_eq!(sky.step_on_trail(-1), Some(0));
+        assert_eq!(sky.go_on_trail(5), None);
+        // A sound with no star is on the card's list, not on the map's line.
+        sky.on_trail(2, true);
+        assert_eq!(sky.trail().0, [2, 0, 1]);
+        assert_eq!(sky.trail_on_view().1.len(), 2);
+        // No more than the card holds.
+        for at in 10..40 {
+            sky.on_trail(at, true);
+        }
+        assert_eq!(sky.trail().0.len(), TRAIL);
+        sky.clear_trail();
+        assert_eq!(sky.trail(), (&[][..], 0));
+        assert_eq!(sky.step_on_trail(1), None);
     }
 }

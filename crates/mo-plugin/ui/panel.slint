@@ -3,7 +3,7 @@
 // through the track, with the app's own filters and orders)
 // and DAW check (every CLAP extension the DAW was asked for, and whether it has it).
 
-import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PickButton, PointerPad, HoverNote, MapName, MapInset, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
+import { Theme, Type, Space, SearchBox, ListLine, StudioButton, Segmented, TickLine, Caps, Heart, Dot, FilterList, FilterView, FilterChoice, RangeSlider, PickButton, PointerPad, HoverNote, MapName, MapInset, LinkText, YearRange, YearBar } from "../../mo-ui/ui/studio.slint";
 export { FilterView, FilterChoice, YearBar }
 import { ListView } from "../../mo-ui/ui/list.slint";
 
@@ -41,6 +41,21 @@ export struct SkyName {
     y: length,
     colour: int,
     fade: float,
+}
+
+// A dot on the Galaxy's trail: where its star is on the view, and how strongly it shows (fainter with age).
+export struct TrailDot {
+    x: length,
+    y: length,
+    fade: float,
+}
+
+// A line of the Galaxy's Swept card: a sound heard on the map lately, and whether Back and Next are on it.
+export struct SweptLine {
+    name: string,
+    kind: string,
+    colour: int,
+    current: bool,
 }
 
 export component Panel inherits Window {
@@ -137,6 +152,17 @@ export component Panel inherits Window {
     in property <float> sky-mini-h;
     // Pressed or dragged on, this far across and down it (0 to 1).
     callback sky-mini-go(float, float);
+    // The trail: a line through the stars heard lately (a path's commands, in the view's points), a dot on each, and
+    // the Swept card that lists them, newest first.
+    in property <string> sky-trail;
+    in property <[TrailDot]> sky-trail-dots;
+    in property <[SweptLine]> sky-swept;
+    // The Swept card was clicked into: Up and Down go through its sounds.
+    in-out property <bool> sky-swept-keys;
+    callback sky-swept-go(int);
+    // 1: to the sound swept before (Back); -1: to the one after (Next).
+    callback sky-swept-step(int);
+    callback sky-swept-clear();
     // An arrow key with the keys on the Galaxy: -1 Left, 1 Right, -2 Up, 2 Down (as the app numbers them).
     callback sky-arrow(int);
     // The year strip beside the sounds, as on the app's Sounds page: the years sounds were added in, newest first,
@@ -416,6 +442,30 @@ export component Panel inherits Window {
                             source: root.sky-picture;
                             image-fit: fill;
                         }
+                        if root.sky-trail != "": Path {
+                            x: 0;
+                            y: 0;
+                            width: parent.width;
+                            height: parent.height;
+                            viewbox-x: 0;
+                            viewbox-y: 0;
+                            viewbox-width: parent.width / 1px;
+                            viewbox-height: parent.height / 1px;
+                            commands: root.sky-trail;
+                            stroke: Theme.text;
+                            stroke-width: 1.2px;
+                            opacity: 0.45;
+                        }
+                        for d in root.sky-trail-dots: Rectangle {
+                            x: d.x - 4px;
+                            y: d.y - 4px;
+                            width: 8px;
+                            height: 8px;
+                            border-radius: 4px;
+                            border-width: 1px;
+                            border-color: Theme.text;
+                            opacity: 0.2 + 0.6 * d.fade;
+                        }
                         if root.sky-note != "": Text {
                             width: parent.width - 2 * Space.lg;
                             text: root.sky-note;
@@ -468,6 +518,7 @@ export component Panel inherits Window {
                             grabbing: root.sky-grabbing;
                             down(x, y) => {
                                 sky-keys.focus();
+                                root.sky-swept-keys = false;
                                 root.sky-down(x, y, false);
                             }
                             side-down(x, y) => {
@@ -499,6 +550,105 @@ export component Panel inherits Window {
                             box-width: root.sky-mini-w;
                             box-height: root.sky-mini-h;
                             go(x, y) => { root.sky-mini-go(x, y); }
+                        }
+                        // The Swept card, as the app's: the sounds heard on the map lately. It leaves the mini-map
+                        // its corner, and stays away in a view too narrow for both it and the map.
+                        if root.sky-swept.length > 0 && parent.width >= 420px: Rectangle {
+                            x: parent.width - self.width - Space.md;
+                            y: Space.md;
+                            width: 250px;
+                            height: min(swept-card.preferred-height, parent.height - 2 * Space.md - (root.sky-mini ? 170px + Space.md : 0px));
+                            background: Theme.surface;
+                            border-radius: Theme.radius;
+                            border-width: 1px;
+                            // Accent while the arrow keys go through it.
+                            border-color: root.sky-swept-keys && sky-keys.has-focus ? Theme.accent : Theme.edge;
+                            clip: true;
+                            // The card takes its own clicks and the wheel, so they don't reach the map under it; a
+                            // click on it hands it the arrow keys.
+                            TouchArea {
+                                clicked => {
+                                    sky-keys.focus();
+                                    root.sky-swept-keys = true;
+                                }
+                                scroll-event(e) => { accept }
+                            }
+                            swept-card := VerticalLayout {
+                                padding: Space.md;
+                                spacing: Space.xs;
+                                HorizontalLayout {
+                                    spacing: Space.sm;
+                                    Caps {
+                                        text: "SWEPT";
+                                        vertical-alignment: center;
+                                        horizontal-stretch: 1;
+                                    }
+                                    StudioButton {
+                                        text: "Back";
+                                        tip: "The sound swept before this one";
+                                        clicked => {
+                                            sky-keys.focus();
+                                            root.sky-swept-keys = true;
+                                            root.sky-swept-step(1);
+                                        }
+                                    }
+                                    StudioButton {
+                                        text: "Next";
+                                        tip: "The sound swept after this one";
+                                        clicked => {
+                                            sky-keys.focus();
+                                            root.sky-swept-keys = true;
+                                            root.sky-swept-step(-1);
+                                        }
+                                    }
+                                }
+                                for line[i] in root.sky-swept: ListLine {
+                                    height: 30px;
+                                    selected: line.current;
+                                    tip: line.kind;
+                                    clicked => {
+                                        sky-keys.focus();
+                                        root.sky-swept-keys = true;
+                                        root.sky-swept-go(i);
+                                    }
+                                    HorizontalLayout {
+                                        padding-left: Space.sm;
+                                        padding-right: Space.sm;
+                                        spacing: Space.sm;
+                                        alignment: start;
+                                        VerticalLayout {
+                                            alignment: center;
+                                            Dot { tint: Theme.sound-type(line.colour); }
+                                        }
+                                        Text {
+                                            text: line.name;
+                                            color: line.current ? Theme.text : Theme.muted;
+                                            font-size: Type.meta;
+                                            vertical-alignment: center;
+                                            overflow: elide;
+                                            horizontal-stretch: 1;
+                                        }
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: Space.sm;
+                                    // What the arrow keys do here, so it's seen, not guessed.
+                                    Text {
+                                        text: root.sky-swept-keys && sky-keys.has-focus ? "Up and Down go through these" : "Click here, then Up and Down";
+                                        color: root.sky-swept-keys && sky-keys.has-focus ? Theme.accent : Theme.muted;
+                                        font-size: Type.meta;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                        horizontal-stretch: 1;
+                                    }
+                                    LinkText {
+                                        text: "Clear";
+                                        tint: Theme.muted;
+                                        font-size: Type.meta;
+                                        clicked => { root.sky-swept-clear(); }
+                                    }
+                                }
+                            }
                         }
                         if root.sky-hover != "": HoverNote {
                             text: root.sky-hover;

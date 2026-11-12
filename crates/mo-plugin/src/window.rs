@@ -16,7 +16,9 @@ use crate::gpu::Gpu;
 use crate::library::{self, Asked, Library, ORDERS, Read};
 use crate::threads::{background, lock};
 use crate::waves::{self, Kept};
-use crate::{ExtensionLine, FilterChoice, FilterView, Instance, Panel, SkyName, SoundLine, YearBar};
+use crate::{
+    ExtensionLine, FilterChoice, FilterView, Instance, Panel, SkyName, SoundLine, SweptLine, TrailDot, YearBar,
+};
 use baseview::dpi::{PhysicalPosition, Size};
 use baseview::{
     Event, EventStatus, HandlerError, MouseButton, MouseEvent, ScrollDelta, TimerHandle, WindowContext, WindowEvent,
@@ -150,6 +152,9 @@ struct Slots {
 /// A drag out that has ended: its file, when it started and how it ended.
 type Dragged = (std::path::PathBuf, Instant, Result<crate::drag::Outcome, String>);
 
+/// The Galaxy's trail as the panel shows it: its line, its dots, and the Swept card's sounds with the one it's on.
+type Trail = (String, Vec<(f32, f32, f32)>, Vec<usize>, usize);
+
 type SkyPixels = slint::SharedPixelBuffer<slint::Rgba8Pixel>;
 /// The Galaxy's picture drawn: its number, the view it was drawn for and its pixels; or just its number when it
 /// couldn't be drawn.
@@ -192,6 +197,18 @@ impl Lines {
         let library = self.library.borrow();
         let at = *self.shown.borrow().get(row)?;
         library.as_ref()?.list.sound(at).map(|s| s.path.clone())
+    }
+
+    /// The Swept card's line for the sound at place `at` in the whole list.
+    fn swept(&self, at: usize, current: bool) -> Option<SweptLine> {
+        let library = self.library.borrow();
+        let sound = library.as_ref()?.list.sound(at)?;
+        Some(SweptLine {
+            name: library::name(&sound.path).into(),
+            kind: sound.sound_type.as_str().into(),
+            colour: mo_app::sounds::type_colour(&sound.sound_type),
+            current,
+        })
     }
 
     /// The file of the sound at place `at` in the whole list (a star of the Galaxy).
@@ -489,6 +506,8 @@ struct Shown {
     sky: Rc<RefCell<Sky>>,
     /// The names last put over the Galaxy's map.
     sky_names: RefCell<Vec<SkyName>>,
+    /// The trail last put on the Galaxy: its line, its dots, and the Swept card's sounds with the one it's on.
+    sky_trail: RefCell<Trail>,
     /// The Galaxy's painter on the graphics card (the app's own), once there are stars to give it.
     painter: RefCell<Option<mo_sky::Sky>>,
     /// Painting the stars on the card went wrong: the processor's picture from then on.
@@ -540,6 +559,7 @@ impl Shown {
             heard: Rc::default(),
             sky: Rc::default(),
             sky_names: RefCell::default(),
+            sky_trail: RefCell::default(),
             painter: RefCell::new(None),
             painter_failed: Cell::new(false),
             sky_asked: Cell::new(false),
@@ -787,6 +807,7 @@ impl Shown {
                     {
                         play_star(at);
                         sky.picked = Some(at);
+                        sky.on_trail(at, true);
                     }
                 }
                 Moved::Hover => {
@@ -834,13 +855,50 @@ impl Shown {
                     play(at);
                 }
                 sky.picked = Some(at);
+                sky.on_trail(at, false);
             }
         });
         let sky = Rc::clone(&self.sky);
         panel.on_sky_mini_go(move |x, y| sky.borrow_mut().mini_go(x, y));
         // An arrow key goes to the nearest star that way and plays it, as a click on it would.
-        let (sky, play_star) = (Rc::clone(&self.sky), arrow_play);
+        // The Swept card: a click on a line, Back and Next go to that sound on the map and play it.
+        let (sky, play_star, right) = (Rc::clone(&self.sky), Rc::clone(&arrow_play), Rc::clone(&self.right_now));
+        panel.on_sky_swept_go(move |line| {
+            // Only the left button: a line takes the right one as a click too.
+            if right.get() {
+                return;
+            }
+            let found = usize::try_from(line).ok().and_then(|line| sky.borrow_mut().go_on_trail(line));
+            if let Some(at) = found {
+                play_star(at);
+            }
+        });
+        let (sky, play_star) = (Rc::clone(&self.sky), Rc::clone(&arrow_play));
+        panel.on_sky_swept_step(move |by| {
+            let found = sky.borrow_mut().step_on_trail(by);
+            if let Some(at) = found {
+                play_star(at);
+            }
+        });
+        let (sky, weak) = (Rc::clone(&self.sky), panel.as_weak());
+        panel.on_sky_swept_clear(move || {
+            sky.borrow_mut().clear_trail();
+            if let Some(panel) = weak.upgrade() {
+                panel.set_sky_swept_keys(false);
+            }
+        });
+        let (sky, play_star, weak) = (Rc::clone(&self.sky), arrow_play, panel.as_weak());
         panel.on_sky_arrow(move |way| {
+            let Some(panel) = weak.upgrade() else { return };
+            // With the Swept card clicked into, Up and Down go through its sounds (as Back and Next).
+            if panel.get_sky_swept_keys() && way.abs() == 2 && !sky.borrow().trail().0.is_empty() {
+                let found = sky.borrow_mut().step_on_trail(way.signum());
+                if let Some(at) = found {
+                    play_star(at);
+                }
+                return;
+            }
+            panel.set_sky_swept_keys(false);
             let way = match way {
                 -1 => (-1.0, 0.0),
                 1 => (1.0, 0.0),
@@ -850,6 +908,7 @@ impl Shown {
             };
             let found = sky.borrow_mut().arrow(way);
             if let Some(at) = found {
+                sky.borrow_mut().on_trail(at, false);
                 play_star(at);
             }
         });
@@ -926,6 +985,7 @@ impl Shown {
         }
         self.sky_names(&mut sky);
         self.sky_mini(&mut sky);
+        self.sky_trail(&sky);
         if let Some((x, y, width, height)) = sky.place() {
             self.panel.set_sky_x(x);
             self.panel.set_sky_y(y);
@@ -978,6 +1038,24 @@ impl Shown {
             self.panel.set_sky_picked_x(x);
             self.panel.set_sky_picked_y(y);
         }
+    }
+
+    /// The trail: the line through the stars heard lately, their dots, and the Swept card. The panel is only told
+    /// when they've changed.
+    fn sky_trail(&self, sky: &Sky) {
+        let (path, dots) = sky.trail_on_view();
+        let (trail, on) = sky.trail();
+        let now: Trail = (path, dots, trail.to_vec(), on);
+        if *self.sky_trail.borrow() == now {
+            return;
+        }
+        self.panel.set_sky_trail(now.0.as_str().into());
+        let dots: Vec<TrailDot> = now.1.iter().map(|&(x, y, fade)| TrailDot { x, y, fade }).collect();
+        self.panel.set_sky_trail_dots(ModelRc::new(VecModel::from(dots)));
+        let lines: Vec<SweptLine> =
+            trail.iter().enumerate().filter_map(|(i, &at)| self.lines.swept(at, i == on)).collect();
+        self.panel.set_sky_swept(ModelRc::new(VecModel::from(lines)));
+        *self.sky_trail.borrow_mut() = now;
     }
 
     /// The mini-map: its picture of the whole map is drawn on a background thread when the stars on show change, and
