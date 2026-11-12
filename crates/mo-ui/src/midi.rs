@@ -1634,9 +1634,12 @@ fn fit_search(ask: &FitAsk, state: &mut FitKept) -> Answer {
         }
     };
     let mut reads = FitReads { from: &ask.from, cat: &ask.cat, open: &mut state.open };
+    // Nothing is picked by hand yet: the page's controls for that come next (`midi_fits::yours`).
+    let yours = midi_fits::YourPick::default();
     let asked = midi_fits::Asked {
         song: &ask.song,
         wanted: ask.wanted,
+        yours: &yours,
         cat: &ask.cat,
         filters: &ask.filters,
         slots_made: ask.slots_made,
@@ -1757,11 +1760,13 @@ fn fit_listed(app: &AppWindow, id: u64, answer: Answer) {
             return None;
         }
         let (fits, line, wants, with) = match answer {
-            Answer::Fits { wants, to, looked, with } => {
+            Answer::Fits { wants, to, looked, with, .. } => {
                 let line = midi_fits::page_line(&to, &looked);
                 (looked.fits, line, Some(wants), Some(with))
             }
-            Answer::Nothing(_) | Answer::Stopped => (Vec::new(), String::new(), p.fit_wants, None),
+            Answer::CantFit { .. } | Answer::Nothing(_) | Answer::Stopped => {
+                (Vec::new(), String::new(), p.fit_wants, None)
+            }
         };
         // A part whose octave you chose goes there, in this list as in any other.
         let mut fits = fits;
@@ -2927,6 +2932,7 @@ pub fn fit_sample_follows(app: &AppWindow) -> bool {
 fn sample_songs() -> Vec<SongChoice> {
     let song = |name: &str, saves: &[&str]| SongChoice {
         name: name.to_owned(),
+        key: name.to_lowercase(),
         label: name.to_owned(),
         save: saves.first().copied().unwrap_or_default().to_owned(),
         mtime: 1_762_100_000,
@@ -5210,7 +5216,7 @@ mod tests {
         };
         let mut state = FitKept::default();
         let answer = fit_search(&ask, &mut state);
-        let Answer::Fits { wants, to, looked, with } = answer else { panic!("no list: {answer:?}") };
+        let Answer::Fits { wants, to, looked, with, .. } = answer else { panic!("no list: {answer:?}") };
         // The made-up song is read from the sample's own parts: its bassline is what there is to play over (its
         // keys are single notes in a row, which the song's reader doesn't take for chords).
         assert_eq!((wants, to.as_str()), (Wants::Tune, "To play over Sub, bars 1–8"));
@@ -5301,6 +5307,7 @@ mod tests {
             .into_owned();
         let song = SongChoice {
             name: "MO Recipe 02 notes".into(),
+            key: "mo recipe 02 notes".into(),
             label: "MO Recipe 02 notes".into(),
             save: save.clone(),
             mtime: 0,
@@ -5321,14 +5328,15 @@ mod tests {
         // Chords for its melody: the scale is tried (its slots and its notes come from the index, kept open), and
         // the song's save is read from disk, where its time can be told.
         let answer = fit_search(&with_index, &mut state);
-        let Answer::Fits { wants, to, looked, with } = answer else { panic!("no list: {answer:?}") };
+        let Answer::Fits { wants, to, looked, with, .. } = answer else { panic!("no list: {answer:?}") };
         assert_eq!((wants, looked.tried, looked.not_ready, looked.unread), (Wants::Chords, 1, 0, 0));
         assert!(to.starts_with("Chords for "), "{to}");
         assert!(with.wants == Wants::Chords && !with.voices.is_empty() && with.length > 0, "{with:?}");
         assert!(written_now(&save) > 0 && state.open.is_some());
         // A song with a melody alone has nothing to play a tune over: said in plain words.
         let answer = fit_search(&ask(Some(Wants::Tune)), &mut state);
-        assert!(matches!(&answer, Answer::Nothing(why) if why.contains("look for chords for that")), "{answer:?}");
+        let cant = matches!(&answer, Answer::CantFit { why, .. } if why.contains("look for chords for that"));
+        assert!(cant, "{answer:?}");
         // The same song asked about another index (here an empty one): nothing of the first is offered.
         let answer = fit_search(&ask(Some(Wants::Chords)), &mut state);
         let Answer::Fits { looked, .. } = answer else { panic!("no list: {answer:?}") };
