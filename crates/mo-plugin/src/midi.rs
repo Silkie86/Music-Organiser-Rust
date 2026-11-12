@@ -36,6 +36,14 @@ pub struct Parts {
     font: Mutex<Option<(PathBuf, mo_audio::gm::Font)>>,
 }
 
+/// A piano roll drawn: its size in pixels and its pixels, four bytes each (red, green, blue, how much shows; the
+/// colour already scaled by that, which an opaque picture doesn't notice).
+pub struct RollPixels {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
+}
+
 /// How reading the index went.
 pub enum Read {
     Ready(Arc<Parts>),
@@ -195,6 +203,27 @@ impl Parts {
         let font = mo_audio::gm::open(path)?;
         *kept = Some((path.to_owned(), font.clone()));
         Ok(font)
+    }
+
+    /// The part at `at` drawn as the app's MIDI page draws its piano roll (mo-app's `piano_roll`, with its keyboard
+    /// down the side and no names), for a room `width` by `height` points at `scale` pixels to a point. Reads the
+    /// index and draws: call it off the panel's thread.
+    pub fn roll(
+        &self,
+        at: usize,
+        (width, height, scale): (f64, f64, f64),
+        colours: &mo_app::piano_roll::Colours,
+    ) -> Result<RollPixels, String> {
+        let e = self.cat.entry(at).ok_or("That part isn't in the list any more")?;
+        let roll = page::roll(&self.notes(e)?, e.phrase.bars);
+        let room = mo_app::piano_roll::Room { width, height, left: 0.0, margin: 0.0, name: 9.0 };
+        if !room.fits() {
+            return Err("No room for the piano roll".into());
+        }
+        let choices = mo_app::piano_roll::Choices { keyboard: true, names: false };
+        let picture = mo_app::piano_roll::picture(&roll, room, scale, choices, colours);
+        let pixmap = picture.scene.paint(scale);
+        Ok(RollPixels { width: pixmap.width(), height: pixmap.height(), rgba: pixmap.data().to_vec() })
     }
 
     /// A part's notes, read from the index (opened, read and let go again).

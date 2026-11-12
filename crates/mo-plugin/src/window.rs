@@ -497,7 +497,8 @@ struct Shown {
     draws: Draws,
     panel: Panel,
     size: Cell<(u32, u32)>,
-    scale: Cell<f64>,
+    /// The screen's pixels to a point (shared with what draws pictures for the panel).
+    scale: Rc<Cell<f64>>,
     pointer: Cell<LogicalPosition>,
     lines: Rc<Lines>,
     slots: Arc<Slots>,
@@ -564,7 +565,7 @@ impl Shown {
             draws,
             panel,
             size: Cell::new((0, 0)),
-            scale: Cell::new(1.0),
+            scale: Rc::new(Cell::new(1.0)),
             pointer: Cell::new(LogicalPosition::default()),
             lines,
             slots,
@@ -775,8 +776,12 @@ impl Shown {
         let (right_now, heard, stop_it) = (Rc::clone(&self.right_now), Rc::clone(&self.heard), self.stopper());
         let midi = self.midi.part_finder();
         let last_played = Rc::clone(&self.played);
+        let roll = self.midi.roll_drawer(&self.panel);
+        let scale = Rc::clone(&self.scale);
         self.panel.on_midi_play(move |row| {
             let Some((parts, at)) = usize::try_from(row).ok().and_then(&midi) else { return };
+            // Its piano roll, whether it plays or stops.
+            roll(Arc::clone(&parts), at, scale.get());
             let playing = heard.get().is_some_and(|(what, _)| what == Heard::Part(at));
             match line_click(playing, right_now.get(), -1.0) {
                 Click::Play(_) => {}

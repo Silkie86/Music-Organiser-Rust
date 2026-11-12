@@ -5,7 +5,7 @@
 use super::{Carried, Choices, Slots};
 use crate::midi::{self, Asked, ORDERS, Parts, Read};
 use crate::threads::{background, lock};
-use crate::{Panel, PartLine, YearBar};
+use crate::{Panel, PartLine, Theme, YearBar};
 use mo_app::midi::{self as page, ChoiceCounts};
 use slint::{ComponentHandle, Model, ModelNotify, ModelRc, ModelTracker, SharedString, VecModel};
 use std::cell::{Cell, RefCell};
@@ -25,6 +25,10 @@ struct PartSlots {
     found: Mutex<Option<(u64, Vec<usize>, ChoiceCounts)>>,
     /// Counts askings: only the newest one's answer is shown.
     searches: AtomicU64,
+    /// The piano roll drawn for the part picked, with its asking's number (none: it couldn't be).
+    roll: Mutex<Option<(u64, Option<midi::RollPixels>)>>,
+    /// Counts piano rolls asked for: only the newest is shown.
+    rolls: AtomicU64,
 }
 
 /// The list's lines, made only for the rows shown.
@@ -206,6 +210,24 @@ impl MidiTab {
         self.column.show(panel, None, &self.asked.borrow());
     }
 
+    /// Draws a part's piano roll (the parts, its place in them and the screen's pixels to a point), as
+    /// [`draw_roll`] does.
+    pub(super) fn roll_drawer(&self, panel: &Panel) -> impl Fn(Arc<Parts>, usize, f64) + 'static {
+        let slots = Arc::clone(&self.slots);
+        let weak = panel.as_weak();
+        move |parts, at, scale| {
+            if let Some(panel) = weak.upgrade() {
+                draw_roll(&panel, &slots, parts, at, scale);
+            }
+        }
+    }
+
+    /// The piano roll goes (the list changed): a roll still being drawn isn't shown.
+    fn forget_roll(&self, panel: &Panel) {
+        self.slots.rolls.fetch_add(1, Ordering::AcqRel);
+        panel.set_midi_roll(slint::Image::default());
+    }
+
     /// Finds the parts and the place in them of the part on a row, as the list shows it then.
     pub(super) fn part_finder(&self) -> impl Fn(usize) -> Option<(Arc<Parts>, usize)> + 'static {
         let lines = Rc::clone(&self.lines);
@@ -239,6 +261,18 @@ impl MidiTab {
                 }
             }
         }
+        if let Some((number, drawn)) = lock(&self.slots.roll).take()
+            && number == self.slots.rolls.load(Ordering::Acquire)
+        {
+            let image = drawn.map(|d| {
+                let mut pixels = slint::SharedPixelBuffer::<slint::Rgba8Pixel>::new(d.width, d.height);
+                for (to, from) in pixels.make_mut_bytes().iter_mut().zip(&d.rgba) {
+                    *to = *from;
+                }
+                slint::Image::from_rgba8_premultiplied(pixels)
+            });
+            panel.set_midi_roll(image.unwrap_or_default());
+        }
         if let Some((number, found, counts)) = lock(&self.slots.found).take()
             && number == self.slots.searches.load(Ordering::Acquire)
         {
@@ -248,6 +282,7 @@ impl MidiTab {
             let narrowed = self.asked.borrow().filters.any();
             panel.set_midi_status(midi::count_line(total, narrowed.then_some(found.len())).into());
             panel.set_midi_picked(-1);
+            self.forget_roll(panel);
             let empty = if found.is_empty() && narrowed { "No parts match: take a filter or a word away" } else { "" };
             panel.set_midi_empty(empty.into());
             *self.column.counts.borrow_mut() = Some(counts);
@@ -262,6 +297,50 @@ fn order_words(order: mo_app::midi::Order) -> String {
     let words = order.words(false);
     let mut chars = words.chars();
     chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
+}
+
+/// Draws the piano roll of the part at `at` on a background thread, for the room the panel has for it at `scale`
+/// pixels to a point, in the panel's colours; it shows once drawn, if it's still the newest asked for.
+fn draw_roll(panel: &Panel, slots: &Arc<PartSlots>, parts: Arc<Parts>, at: usize, scale: f64) {
+    let number = slots.rolls.fetch_add(1, Ordering::AcqRel) + 1;
+    // The room the roll shows in once a part is picked (its height is set; its width is the list's).
+    let (width, height) = (f64::from(panel.get_midi_roll_width()), ROLL_HEIGHT);
+    let colours = colours(panel);
+    let slots = Arc::clone(slots);
+    background("mo-plugin-roll", move || {
+        if slots.rolls.load(Ordering::Acquire) != number {
+            return;
+        }
+        let started = Instant::now();
+        let drawn = parts.roll(at, (width, height, scale), &colours);
+        if let Err(why) = &drawn {
+            crate::log::line("MIDI", &format!("A part's piano roll couldn't be drawn: {why}"));
+        }
+        crate::log::took_if_slow("MIDI", "Drew a piano roll", started);
+        *lock(&slots.roll) = Some((number, drawn.ok()));
+    });
+}
+
+/// The piano roll's height on the panel, in points (panel.slint's `roll-well`).
+const ROLL_HEIGHT: f64 = 120.0;
+
+/// The piano roll's colours, as the app's MIDI page takes them from its theme.
+fn colours(panel: &Panel) -> mo_app::piano_roll::Colours {
+    use mo_app::shapes::Colour;
+    let t = panel.global::<Theme>();
+    let rgb = |c: slint::Color| (u32::from(c.red()) << 16) | (u32::from(c.green()) << 8) | u32::from(c.blue());
+    let colour = |c: slint::Color| Colour::rgb(rgb(c), f64::from(c.alpha()) / 255.0);
+    let (white_key, black_key) =
+        if t.get_light() { (t.get_surface(), t.get_text()) } else { (t.get_muted(), t.get_background()) };
+    mo_app::piano_roll::Colours {
+        well: rgb(t.get_well()),
+        shine: colour(t.get_shine()),
+        edge: colour(t.get_edge()),
+        white_key: colour(white_key),
+        black_key: colour(black_key),
+        accent: colour(t.get_accent()),
+        accent_text: colour(t.get_accent_text()),
+    }
 }
 
 /// Works out what `asked` shows of `parts` on a background thread; it lands in `slots.found` with this asking's
