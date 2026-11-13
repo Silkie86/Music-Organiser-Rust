@@ -1,0 +1,9 @@
+{
+  "format": "Vital LFO shapes (.vitallfo shape files, and the eight LFOs in a .vital preset)",
+  "about": "Worked out 2026-11-13 from Solomon's Vital data folder (Factory\\LFOs, his preset packs), with how Vital draws a line taken from its source (maths only). The reader is crates/mo-formats/src/vital.rs. Not loaded by Format Lab: plain JSON, kept here as notes. y is kept top down (1 is the bottom: value = 1 - y); a shape repeats, so the last point joins the first at x = 1, bent by the last point's power.",
+  "files": [
+    { "ending": ".vitallfo", "seen": "Vital 1.5 factory and pack shapes", "layout": "JSON { name?, num_points, points: [x0, y0, x1, y1, ...], powers: [one per point], smooth }. x runs 0 to 1 in order. powers[i] bends the line from point i to the next as t' = (e^(p t) - 1) / (e^p - 1): 0 straight, above 0 late, below 0 early. smooth draws each line as an S (not kept by the app).", "app": "bend = (0.5 - t'(0.5)) * 4, kept to -1..1 (a power of about 2.2 is a full bend)." },
+    { "ending": ".vital", "seen": "Vital 1.5 presets", "layout": "JSON preset; settings.lfos is a list of 8 shapes as above. An LFO nobody changed is Vital's own start: name 'Triangle', 3 points (0,1) (0.5,0) (1,1), powers 0, smooth false; it's passed over.", "app": "each changed LFO is a shape named 'preset - Vital - LFO N'." },
+    { "ending": "Vital.config", "seen": "%APPDATA%\\vital (Windows)", "layout": "JSON settings; data_directory is the data folder when it's been moved (else Documents\\Vital)." }
+  ]
+}

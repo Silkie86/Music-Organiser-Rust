@@ -60,10 +60,10 @@ pub struct ShapePoint {
 /// An LFO shape.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shape {
-    /// Which plugin saved it: "Serum 2", "Serum 2 FX", "Serum" or "LFOTool" (a `.shp` file is Serum 1's format, which
+    /// Which plugin saved it: "Serum 2", "Serum 2 FX", "Serum", "LFOTool" or "Vital" (a `.shp` file is Serum 1's format, which
     /// LFOTool shares: it's called Serum's).
     pub product: String,
-    /// Which of a preset's graphs it is ("Graph 3"); "" for a shape file, which holds one.
+    /// Which of a preset's graphs or LFOs it is ("Graph 3", "LFO 2"); "" for a shape file, which holds one.
     pub part: String,
     /// Its points, the last one at x = 1.
     pub points: Vec<ShapePoint>,
@@ -189,18 +189,27 @@ fn pixel_points(raw: &[u8], n: usize, of: usize, which: usize) -> Option<Vec<(f6
 /// the first value at the end when the last point isn't there already. None when a number isn't one, or no point is
 /// left.
 fn closed(points: impl Iterator<Item = (f64, f64, f64)>) -> Option<Vec<ShapePoint>> {
+    closed_with(points, |c| (c - 0.5) * 2.0)
+}
+
+/// As [`closed`], with each point's bend made by `bend` from what the file keeps (Vital keeps a power, not Serum's 0
+/// to 1). Points are top down, as both keep them.
+pub(crate) fn closed_with(
+    points: impl Iterator<Item = (f64, f64, f64)>,
+    bend: impl Fn(f64) -> f64,
+) -> Option<Vec<ShapePoint>> {
     let mut out: Vec<ShapePoint> = Vec::new();
     for (x, y, c) in points {
         if !(x.is_finite() && y.is_finite() && c.is_finite()) {
             return None;
         }
-        // Serum keeps its points in order; a point a hair before the last (Serum 2 saves -0 for 0) is put on it, and
+        // The plugins keep their points in order; a point a hair before the last (Serum 2 saves -0 for 0) is put on it, and
         // adding 0 turns -0 into 0, which sorts with it.
         let before = out.last().map_or(0.0, |p| p.x);
         out.push(ShapePoint {
             x: x.clamp(before, 1.0) + 0.0,
             value: 1.0 - y.clamp(0.0, 1.0),
-            bend: ((c - 0.5) * 2.0).clamp(-1.0, 1.0),
+            bend: bend(c).clamp(-1.0, 1.0),
         });
     }
     let (first, last) = (*out.first()?, *out.last()?);

@@ -21,6 +21,7 @@ pub mod presets;
 pub mod serum;
 pub mod studio_one;
 pub mod textscan;
+pub mod vital;
 pub mod zipped;
 
 pub use model::{

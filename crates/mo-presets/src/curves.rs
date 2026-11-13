@@ -6,7 +6,8 @@
 //! - Bitwig's automation clips, on any setting's lane whose values run 0 to 1 (not the tempo lane, in BPM).
 //! - Curve files you saved in Bitwig's library (a pack's curves are locked and left out).
 //! - Plugins' LFO shapes: Serum 2's and Serum 1's shape files, and the graphs in LFOTool's presets
-//!   ([`mo_formats::serum`]). A shape repeats, so it's kept as one bar.
+//!   ([`mo_formats::serum`]), and Vital's shape files and the LFOs drawn in its presets ([`mo_formats::vital`]). A
+//!   shape repeats, so it's kept as one bar.
 //!
 //! Each shape is kept once ([`shape_id`]): two clips are the same curve when their points match once stretched to the
 //! same length and height (to three decimals), wherever they sit, whichever song, track or knob they're on. So a clip
@@ -32,7 +33,7 @@ use mo_formats::bitwig::{self, automation, curve};
 use mo_formats::fl::automation::FlAutomation;
 use mo_formats::fl::events;
 use mo_formats::fl::song::read_song;
-use mo_formats::serum;
+use mo_formats::{serum, vital};
 
 use crate::fixes::{FixesError, is_there, make_new, text_at};
 use crate::{export, names};
@@ -83,7 +84,7 @@ impl SourceKind {
             Some(SourceKind::BitwigClip)
         } else if lower.ends_with(".bwcurve") {
             Some(SourceKind::BitwigCurve)
-        } else if serum::is_shape_file(&lower) {
+        } else if serum::is_shape_file(&lower) || vital::is_shape_file(&lower) {
             Some(SourceKind::PluginShape)
         } else {
             None
@@ -110,6 +111,7 @@ fn read_version(path: &str) -> i64 {
         Some(SourceKind::FlKnobMoves) => mo_formats::fl::VERSION,
         Some(SourceKind::BitwigClip) => automation::VERSION * 1000 + bitwig::VERSION,
         Some(SourceKind::BitwigCurve) => curve::VERSION * 1000 + bitwig::VERSION,
+        Some(SourceKind::PluginShape) if vital::is_shape_file(path) => vital::VERSION,
         Some(SourceKind::PluginShape) => serum::VERSION,
         None => 0,
     };
@@ -225,12 +227,13 @@ pub fn found_in(path: &str, raw: Vec<u8>, modified: i64) -> Vec<Found> {
             let source = place.source(SourceKind::BitwigCurve, &c.name, "", "", 0.0);
             found(shape(&points, 1.0), c.beat_length.unwrap_or(4.0), source).into_iter().collect()
         } else if kind == Some(SourceKind::PluginShape) {
-            serum::read(path, &raw)
+            let shapes = if vital::is_shape_file(path) { vital::read(path, &raw) } else { serum::read(path, &raw) };
+            shapes
                 .into_iter()
                 .filter_map(|s| {
                     let points: Vec<(f64, f64, f64)> = s.points.iter().map(|p| (p.x, p.value, p.bend)).collect();
                     // A shape file's name is the shape's; a preset's graphs are named by the preset and the graph
-                    // ("Sidechain-1 - LFOTool - Graph 3"), so each has its own.
+                    // ("Sidechain-1 - LFOTool - Graph 3", "Wob - Vital - LFO 2"), so each has its own.
                     let name = if s.part.is_empty() { place.song.clone() } else { String::new() };
                     let source = place.source(SourceKind::PluginShape, &name, &s.product, &s.part, 0.0);
                     found(shape(&points, 1.0), SHAPE_BEATS, source)
@@ -1168,6 +1171,33 @@ mod tests {
         // Its curve file says it repeats.
         let file = file(c, &dir.join(FOLDER)).unwrap();
         assert_eq!(curve::read(std::fs::read(file).unwrap()).unwrap().category, "Periodic");
+        drop(db);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn vitals_shapes_and_a_presets_drawn_lfos_are_plugin_shapes() {
+        let dir = temp_dir("vital");
+        // Vital's Saw Up, and a preset whose second LFO was drawn (the others are Vital's own triangle, passed over).
+        let saw = r#"{"num_points":3,"points":[0.0,1.0,1.0,0.0,1.0,1.0],"powers":[0.0,0.0,0.0],"smooth":false}"#;
+        let triangle =
+            r#"{"name":"Triangle","num_points":3,"points":[0.0,1.0,0.5,0.0,1.0,1.0],"powers":[0.0,0.0,0.0]}"#;
+        let drawn = r#"{"num_points":2,"points":[0.0,1.0,0.25,0.0],"powers":[0.0,0.0]}"#;
+        let preset = format!(r#"{{"settings":{{"lfos":[{triangle},{drawn},{triangle}]}}}}"#);
+        std::fs::write(dir.join("Saw Up.vitallfo"), saw).unwrap();
+        std::fs::write(dir.join("Wob.vital"), preset).unwrap();
+        let paths: Vec<String> =
+            ["Saw Up.vitallfo", "Wob.vital"].map(|f| dir.join(f).to_string_lossy().into_owned()).into();
+        assert!(paths.iter().all(|p| SourceKind::of(p) == Some(SourceKind::PluginShape)));
+        assert_ne!(read_version(&paths[0]), 0);
+        let mut db = CurvesDb::open(&dir.join(FILE_NAME)).unwrap();
+        assert_eq!(db.scan(&paths, &Progress::default()).unwrap(), 2);
+        let mut list = db.list().unwrap();
+        list.sort_by(|a, b| a.name.cmp(&b.name));
+        let names: Vec<&str> = list.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["Saw Up", "Wob - Vital - LFO 2"]);
+        assert_eq!(list[0].points, [p(0.0, 0.0, 0.0), p(1.0, 1.0, 0.0), p(1.0, 0.0, 0.0)]);
+        assert!(list.iter().all(|c| c.sources[0].device == "Vital" && c.length_beats == SHAPE_BEATS));
         drop(db);
         std::fs::remove_dir_all(&dir).unwrap();
     }
