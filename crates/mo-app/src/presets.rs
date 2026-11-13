@@ -1539,16 +1539,6 @@ pub fn kind_from(l: &str) -> Option<SourceKind> {
 }
 
 impl CurveFilters {
-    pub fn passes(&self, c: &Curve) -> bool {
-        self.passes_rest(c) && self.found_in(c)
-    }
-
-    /// Whether the search and Show hidden let it through, whichever way it was found.
-    fn passes_rest(&self, c: &Curve) -> bool {
-        (self.hidden || !c.hidden)
-            && filter::search_matches(&self.search, &curve_texts(c).iter().map(String::as_str).collect::<Vec<_>>())
-    }
-
     /// Whether it was found in one of the ways picked (or none is picked).
     fn found_in(&self, c: &Curve) -> bool {
         self.kinds.is_empty() || c.sources.iter().any(|s| self.kinds.contains(&s.kind))

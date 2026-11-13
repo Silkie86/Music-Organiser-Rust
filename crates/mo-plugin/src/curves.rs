@@ -43,7 +43,8 @@ pub fn read_from(path: &Path) -> Read {
     }
     match CurvesDb::open_read_only(path).and_then(|db| db.list()) {
         Ok(list) if list.is_empty() => Read::Not("The app has found no curves in your songs yet".into()),
-        Ok(curves) => Read::Ready(Curves { keys: CurveKey::all(&curves), curves }),
+        // Sorting them into groups draws every curve: on the app's low-priority threads, not the host's.
+        Ok(curves) => Read::Ready(Curves { keys: mo_app::background::on_pool(|| CurveKey::all(&curves)), curves }),
         Err(e) => Read::Not(format!("The app's curves couldn't be read: {e}")),
     }
 }

@@ -3,7 +3,7 @@
 //! its shape (rises, pumps, gates...), its rhythm (how often it repeats, as a note length) and its feel (smooth or
 //! sharp). Worked out from its points alone, once, when the list is read.
 //!
-//! How: the curve is drawn at 512 places across ([`value_at`], with the same bends the page draws), its height
+//! How: the curve is drawn at 16 places per 1/32 note (512 to 65536) ([`value_at`], with the same bends the page draws), its height
 //! stretched to 0 to 1. Its rhythm is the shortest note length it repeats at, at least twice, in its length in beats
 //! (a plugin's shape is one bar); one that doesn't repeat is named by its whole length. Its shape is read from one
 //! repeat: mostly flat at two heights is a gate, at three or more steps; else the moves up and down of at least a
@@ -168,7 +168,8 @@ impl Feel {
 /// How many places a curve is drawn at for each 1/32 note, and at least and at most in all.
 const SAMPLES_PER_32ND: f64 = 16.0;
 const FEWEST_SAMPLES: usize = 512;
-const MOST_SAMPLES: usize = 16384;
+/// Enough for 1/32 notes (8 samples each, the fewest a repeat is looked for at) in a clip 128 bars long.
+const MOST_SAMPLES: usize = 65536;
 /// How near two drawings must be (on average, of the curve's height) to count as the same: a repeat.
 const SAME: f64 = 0.05;
 /// The smallest move up or down counted, of the curve's height.
@@ -259,7 +260,9 @@ fn draw(points: &[CurvePoint], n: usize) -> Vec<f64> {
     out
 }
 
-/// The curve's value at `x`, drawn as the page draws it: a bend `b` puts a line's middle `0.5 - b / 4` of the way.
+/// The curve's value at `x`, drawn as the page draws it ([`crate::presets::curve_path`]): a bent line is a
+/// quadratic curve whose handle leans from the line's middle toward its late corner (bend above 0) or its early one
+/// (below 0), by the bend's size. A broken bend (not a number) is straight, as on the page.
 pub fn value_at(points: &[CurvePoint], x: f64) -> f64 {
     let (Some(first), Some(last)) = (points.first(), points.last()) else { return 0.0 };
     if x < first.x {
@@ -273,9 +276,26 @@ pub fn value_at(points: &[CurvePoint], x: f64) -> f64 {
         return b.y;
     }
     let t = ((x - a.x) / width).clamp(0.0, 1.0);
-    let middle = (0.5 - a.bend.clamp(-1.0, 1.0) / 4.0).clamp(0.01, 0.99);
-    let k = middle / (1.0 - middle);
-    a.y + (b.y - a.y) * (k * t / (1.0 + (k - 1.0) * t))
+    a.y + (b.y - a.y) * bent(t, a.bend)
+}
+
+/// How far along a line bent by `bend` is at `t` of its width (both 0 to 1). On a line from (0, 0) to (1, 1) the
+/// page's handle is at (0.5 + bend / 2, 0.5 - bend / 2); the curve's x is solved for its step, then its height read.
+fn bent(t: f64, bend: f64) -> f64 {
+    let bend = if bend.is_finite() { bend.clamp(-1.0, 1.0) } else { 0.0 };
+    if bend.abs() < 0.01 {
+        return t;
+    }
+    let (cx, cy) = (0.5 + bend / 2.0, 0.5 - bend / 2.0);
+    // x(s) = 2 s (1 - s) cx + s^2, so (1 - 2 cx) s^2 + 2 cx s - t = 0.
+    let a = 1.0 - 2.0 * cx;
+    let s = if a.abs() < 1e-9 {
+        t / (2.0 * cx)
+    } else {
+        (-2.0 * cx + (4.0 * cx * cx + 4.0 * a * t).max(0.0).sqrt()) / (2.0 * a)
+    }
+    .clamp(0.0, 1.0);
+    2.0 * s * (1.0 - s) * cy + s * s
 }
 
 /// The shortest note length the drawing (`length_beats` long) repeats at, at least twice, and how many samples one
@@ -574,9 +594,16 @@ mod tests {
     #[test]
     fn a_curve_is_drawn_with_its_bends() {
         let line = [p(0.0, 0.0, 1.0), p(1.0, 1.0, 0.0)];
-        assert!((value_at(&line, 0.5) - 0.25).abs() < 1e-9, "a full late bend is a quarter up half way");
+        // The page's curve with its handle in the late corner: half way across it's (1 - 1/sqrt 2)^2 up.
+        let late = (1.0 - 0.5f64.sqrt()).powi(2);
+        assert!((value_at(&line, 0.5) - late).abs() < 1e-9, "a full late bend is low half way");
         let line = [p(0.0, 0.0, -1.0), p(1.0, 1.0, 0.0)];
-        assert!((value_at(&line, 0.5) - 0.75).abs() < 1e-9);
+        assert!((value_at(&line, 0.5) - (1.0 - late)).abs() < 1e-9);
+        let line = [p(0.0, 0.0, 0.5), p(1.0, 1.0, 0.0)];
+        assert!(value_at(&line, 0.5) < 0.5 && value_at(&line, 0.5) > late);
+        // A broken bend is straight, as the page draws it.
+        let line = [p(0.0, 0.0, f64::NAN), p(1.0, 1.0, 0.0)];
+        assert!((value_at(&line, 0.3) - 0.3).abs() < 1e-9);
         // A jump: the second point wins; before the first and after the last, they hold.
         let jump = [p(0.2, 0.3, 0.0), p(0.5, 0.0, 0.0), p(0.5, 1.0, 0.0), p(0.8, 1.0, 0.0)];
         assert_eq!((value_at(&jump, 0.0), value_at(&jump, 0.5), value_at(&jump, 0.9)), (0.3, 1.0, 1.0));
