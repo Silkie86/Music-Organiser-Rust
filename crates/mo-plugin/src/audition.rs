@@ -51,6 +51,43 @@ pub struct Voice {
     fresh: bool,
     /// Frames of quiet still to go before it plays: the wait for the next beat or bar.
     wait: usize,
+    /// A part sent out as notes, not heard: how many frames long it is (it has no sound of its own).
+    quiet: Option<usize>,
+    /// Its notes, sent out of the plugin as it plays (Send MIDI), in its frames, by their start.
+    notes: Vec<NoteOut>,
+}
+
+/// A note of a part sent out as MIDI: where it starts and ends in the part's frames, its key, and how hard it's
+/// played (0 to 1, from MIDI 2.0's 16-bit velocity: rule 22).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NoteOut {
+    pub start: usize,
+    pub end: usize,
+    pub key: u8,
+    pub velocity: f64,
+}
+
+/// A note going out in a block of sound: how far into the block, its key, how hard (0 to 1) and whether it starts or
+/// ends.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sent {
+    pub offset: u32,
+    pub key: u8,
+    pub velocity: f64,
+    pub on: bool,
+}
+
+/// The most notes sent in one block (room made when the track's audio starts): a block is a few milliseconds.
+const SENT_MOST: usize = 1024;
+
+/// What a made loop is: a sound, or notes to send out with how long the part is, in seconds.
+pub enum MadeLoop {
+    Sound(mo_audio::AudioData),
+    /// Each note's start and end in seconds, its key and how hard (0 to 1).
+    Notes {
+        seconds: f64,
+        notes: Vec<(f64, f64, u8, f64)>,
+    },
 }
 
 impl Voice {
@@ -73,7 +110,34 @@ impl Voice {
             in_step: false,
             fresh: true,
             wait: 0,
+            quiet: None,
+            notes: Vec::new(),
         }
+    }
+
+    /// A part `frames` long sent out as `notes` (in seconds, as [`MadeLoop::Notes`]) at `rate` frames a second, with
+    /// no sound of its own: it plays as quiet while its notes go out.
+    pub fn notes_only(frames: usize, notes: &[(f64, f64, u8, f64)], rate: u32) -> Voice {
+        let at = |seconds: f64| ((seconds.max(0.0) * f64::from(rate)).round() as usize).min(frames);
+        let mut notes: Vec<NoteOut> = notes
+            .iter()
+            .filter(|(start, end, key, _)| start.is_finite() && end.is_finite() && *key < 128)
+            .map(|&(start, end, key, velocity)| {
+                let start = at(start).min(frames.saturating_sub(1));
+                // At least a frame long, so its end is never before its start.
+                NoteOut { start, end: at(end).max(start + 1), key, velocity: velocity.clamp(0.0, 1.0) }
+            })
+            .collect();
+        notes.sort_by_key(|n| n.start);
+        let mut voice = Voice::new(&[], rate, rate);
+        voice.quiet = Some(frames);
+        voice.notes = notes;
+        voice
+    }
+
+    /// How many frames long it is.
+    fn len(&self) -> usize {
+        self.quiet.unwrap_or_else(|| self.left.len().min(self.right.len()))
     }
 
     /// Plays round and round while the Loop switch is on (it can be turned off as it plays).
@@ -100,7 +164,7 @@ impl Voice {
     /// apart by more than a few milliseconds (the DAW jumped, or looped back). Not once the DAW's tempo isn't the one
     /// it was made at (it would drift and be put back over and over): it then plays on as it is.
     fn follow(&mut self, song: Song) {
-        let len = self.left.len().min(self.right.len());
+        let len = self.len();
         let Some((beats, made_at)) = self.beats else { return };
         if len == 0 || !song.beats.is_finite() || song.tempo.is_some_and(|t| (t / made_at - 1.0).abs() > 0.002) {
             return;
@@ -145,7 +209,7 @@ impl Voice {
 
     /// Starts `part` of the way in (0 the start, 1 the end) instead of at the start.
     fn from(mut self, part: f64) -> Voice {
-        let len = self.left.len().min(self.right.len());
+        let len = self.len();
         self.at = ((part.clamp(0.0, 1.0) * len as f64) as usize).min(len);
         self
     }
@@ -159,19 +223,19 @@ impl Voice {
 
     /// Where it's playing now, as a part of the whole file (0 the start, 1 the end).
     fn place(&self) -> f32 {
-        let len = self.left.len().min(self.right.len()).max(1);
+        let len = self.len().max(1);
         self.begins + self.covers * (self.at.min(len) as f32 / len as f32)
     }
 
     /// Played to its end; never for a loop with something in it, which starts again instead ([`Voice::wrap`]).
     fn done(&self) -> bool {
-        let len = self.left.len().min(self.right.len());
+        let len = self.len();
         !(self.looping && len > 0) && self.at >= len
     }
 
     /// At its end: a loop starts again.
     fn wrap(&mut self) {
-        if self.looping && self.at >= self.left.len().min(self.right.len()) {
+        if self.looping && self.at >= self.len() {
             self.at = 0;
         }
     }
@@ -248,6 +312,12 @@ pub struct Playing {
     was_playing: bool,
     /// The DAW's frames a second.
     rate: u32,
+    /// The notes going out in this block (Send MIDI): room for [`SENT_MOST`], made when the track's audio starts.
+    sent: Vec<Sent>,
+    /// The keys whose notes are still on, so they can be ended when the part stops or jumps.
+    sounding: [bool; 128],
+    /// Where in the block a part stopping now stops: its notes end there.
+    stops_at: u32,
 }
 
 impl Playing {
@@ -260,6 +330,8 @@ impl Playing {
     /// [`Playing::fill`], with where the DAW's song is (none when the DAW doesn't say). Starting the DAW puts a sound
     /// of known beats in step with it; stopping it stops what plays.
     pub fn fill_in_song(&mut self, left: &mut [f32], right: &mut [f32], song: Option<Song>) {
+        self.sent.clear();
+        self.stops_at = 0;
         if let Some(back) = self.waiting.take()
             && let Err(rtrb::PushError::Full(back)) = self.done.push(back)
         {
@@ -295,7 +367,12 @@ impl Playing {
                     voice.lock_to(song, self.rate);
                 }
                 if song.playing {
+                    let was = voice.at;
                     voice.follow(song);
+                    // Put somewhere else: the notes on end, and those from there start as it plays.
+                    if voice.at != was && !voice.notes.is_empty() {
+                        all_off(&mut self.sounding, &mut self.sent, 0);
+                    }
                 } else {
                     // Put in step again when the DAW next starts.
                     voice.in_step = false;
@@ -306,10 +383,15 @@ impl Playing {
         }
         let mut written = 0;
         let level = LEVEL * (1.0 - f32::from_bits(self.counts.down.load(Ordering::Acquire))).clamp(0.0, 1.0);
-        if let Some(voice) = &mut self.now {
+        let last = u32::try_from(left.len().saturating_sub(1)).unwrap_or(u32::MAX);
+        let Playing { now, sent, sounding, counts, .. } = self;
+        if let Some(voice) = now {
             // Without a song, or once looked at, a new sound plays straight away.
             voice.fresh = false;
-            for (l, r) in left.iter_mut().zip(right.iter_mut()) {
+            // The stretch of the part played without a jump (it starts again at its end): where it began in the part
+            // and in the block.
+            let mut stretch: Option<(usize, usize)> = None;
+            for (i, (l, r)) in left.iter_mut().zip(right.iter_mut()).enumerate() {
                 if voice.wait > 0 {
                     voice.wait -= 1;
                     *l = 0.0;
@@ -317,22 +399,42 @@ impl Playing {
                     written += 1;
                     continue;
                 }
+                let before = voice.at;
                 voice.wrap();
+                if voice.at != before
+                    && let Some((from, offset)) = stretch.take()
+                {
+                    notes_in(&voice.notes, (from, before), offset, last, sent, sounding);
+                }
                 if voice.done() {
                     break;
                 }
-                *l = voice.left[voice.at] * level;
-                *r = voice.right[voice.at] * level;
+                stretch.get_or_insert((voice.at, i));
+                (*l, *r) = match voice.quiet {
+                    Some(_) => (0.0, 0.0),
+                    None => (voice.left[voice.at] * level, voice.right[voice.at] * level),
+                };
                 voice.at += 1;
                 written += 1;
             }
-            self.counts.place.store(voice.place().to_bits(), Ordering::Release);
+            if let Some((from, offset)) = stretch {
+                notes_in(&voice.notes, (from, voice.at), offset, last, sent, sounding);
+            }
+            counts.place.store(voice.place().to_bits(), Ordering::Release);
         }
         left[written..].fill(0.0);
         right[written..].fill(0.0);
+        self.stops_at = u32::try_from(written).unwrap_or(u32::MAX).min(last);
         if self.now.as_ref().is_some_and(|v| v.done()) && self.waiting.is_none() {
             self.retire(None);
         }
+        // In the order they happen; an end before a start at the same spot (a key played again).
+        self.sent.sort_unstable_by_key(|n| (n.offset, n.on));
+    }
+
+    /// The notes going out in the block just filled (Send MIDI), in order.
+    pub fn sent(&self) -> &[Sent] {
+        &self.sent
     }
 
     /// The Loop switch turned from the DAW (its knob), on the audio thread: as [`Player::set_loop`], without the
@@ -345,11 +447,61 @@ impl Playing {
 
     /// Hands the sound playing now back to the panel's thread and plays `next` instead.
     fn retire(&mut self, next: Option<Box<Voice>>) {
+        // Its notes still on end where it stops.
+        all_off(&mut self.sounding, &mut self.sent, self.stops_at);
         if let Some(old) = std::mem::replace(&mut self.now, next) {
             self.counts.ended.fetch_add(1, Ordering::AcqRel);
             if let Err(rtrb::PushError::Full(old)) = self.done.push(old) {
                 self.waiting = Some(old);
             }
+        }
+    }
+}
+
+/// Sends `note` unless the block's room for notes is full (it never makes memory on the audio thread).
+fn send(sent: &mut Vec<Sent>, note: Sent) {
+    if sent.len() < sent.capacity() {
+        sent.push(note);
+    }
+}
+
+/// Ends every note still on, at `offset` into the block.
+fn all_off(sounding: &mut [bool; 128], sent: &mut Vec<Sent>, offset: u32) {
+    for (key, on) in sounding.iter_mut().enumerate() {
+        if std::mem::take(on) {
+            send(sent, Sent { offset, key: key as u8, velocity: 0.0, on: false });
+        }
+    }
+}
+
+/// The part played from frame `from` to just before `to` (`span`), starting `offset` into the block: the notes that
+/// start and end in it are sent, at their places in the block (never past its `last` frame).
+fn notes_in(
+    notes: &[NoteOut],
+    span: (usize, usize),
+    offset: usize,
+    last: u32,
+    sent: &mut Vec<Sent>,
+    sounding: &mut [bool; 128],
+) {
+    let (from, to) = span;
+    let place = |at: usize| u32::try_from(offset + (at - from)).unwrap_or(u32::MAX).min(last);
+    for note in notes {
+        if note.start >= to {
+            // Sorted by start: none after it starts or ends here (a long note that ends here started before it).
+            break;
+        }
+        let key = usize::from(note.key);
+        if (from..to).contains(&note.start) {
+            if sounding[key] {
+                send(sent, Sent { offset: place(note.start), key: note.key, velocity: 0.0, on: false });
+            }
+            send(sent, Sent { offset: place(note.start), key: note.key, velocity: note.velocity, on: true });
+            sounding[key] = true;
+        }
+        if note.end > from && note.end <= to {
+            send(sent, Sent { offset: place(note.end.min(to - 1)), key: note.key, velocity: 0.0, on: false });
+            sounding[key] = false;
         }
     }
 }
@@ -405,7 +557,7 @@ pub enum Own {
 /// Makes a sound to play, on the reading thread: why not, in plain words.
 /// It's the sound and, when it's made at the DAW's tempo, how many beats long it is and that tempo (it then plays in
 /// step with the DAW).
-pub type Made = Box<dyn FnOnce() -> Result<(mo_audio::AudioData, Option<(f64, f64)>), String> + Send>;
+pub type Made = Box<dyn FnOnce() -> Result<(MadeLoop, Option<(f64, f64)>), String> + Send>;
 
 /// What became of a pick, for the panel's line under the list.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -445,6 +597,8 @@ pub struct Player {
     matching: AtomicBool,
     /// In time turned off: a sound clicked while the song plays starts straight away, not on the next beat or bar.
     free: AtomicBool,
+    /// Send MIDI: a MIDI part plays as notes out of the plugin, not with the SoundFont.
+    midi_out: AtomicBool,
 }
 
 impl Player {
@@ -499,6 +653,16 @@ impl Player {
     /// next beat (a hit) or bar (a loop).
     pub fn set_in_time(&self, on: bool) {
         self.free.store(!on, Ordering::Release);
+    }
+
+    /// Turns Send MIDI on or off: from the next part played.
+    pub fn set_midi_out(&self, on: bool) {
+        self.midi_out.store(on, Ordering::Release);
+    }
+
+    /// Whether Send MIDI is on.
+    pub fn midi_out(&self) -> bool {
+        self.midi_out.load(Ordering::Acquire)
     }
 
     /// Whether In time is on (it starts on).
@@ -559,7 +723,18 @@ impl Player {
         *lock(&self.done) = Some(done_out);
         self.rate.store(rate, Ordering::Release);
         self.settle();
-        Playing { asks, done, now: None, waiting: None, counts: Arc::clone(&self.counts), was_playing: false, rate }
+        Playing {
+            asks,
+            done,
+            now: None,
+            waiting: None,
+            counts: Arc::clone(&self.counts),
+            was_playing: false,
+            rate,
+            sent: Vec::with_capacity(SENT_MOST),
+            sounding: [false; 128],
+            stops_at: 0,
+        }
     }
 
     /// The DAW stopped the track's audio (its side of the queues has gone with it, and what was playing).
@@ -691,9 +866,15 @@ impl Player {
         let played = match made {
             Err(why) => Played::Not(why),
             Ok(_) if rate == 0 => Played::Not(NOT_STARTED.into()),
-            Ok((audio, beats)) => {
-                let voice = Voice::new(&audio.channels, audio.sample_rate, rate).always_looped().in_beats(beats);
-                self.hand_over(Box::new(voice), name.into())
+            Ok((made, beats)) => {
+                let voice = match made {
+                    MadeLoop::Sound(audio) => Voice::new(&audio.channels, audio.sample_rate, rate),
+                    MadeLoop::Notes { seconds, notes } => {
+                        let frames = (seconds.max(0.0) * f64::from(rate)).round() as usize;
+                        Voice::notes_only(frames.max(1), &notes, rate)
+                    }
+                };
+                self.hand_over(Box::new(voice.always_looped().in_beats(beats)), name.into())
             }
         };
         match &played {
@@ -1070,6 +1251,59 @@ mod tests {
     }
 
     #[test]
+    fn a_part_sent_as_midi_sends_its_notes_in_time_and_ends_them() {
+        let player = Player::default();
+        // Ten frames a second: a part of one second, a note at 0.2 s to 0.5 s and one at 0.8 s to the end.
+        let mut playing = player.start(10);
+        let notes = [(0.2, 0.5, 60, 1.0), (0.8, 1.0, 64, 0.5)];
+        let part = Voice::notes_only(10, &notes, 10).always_looped();
+        player.hand_over(Box::new(part), "part".into());
+        let on = |offset, key, velocity| Sent { offset, key, velocity, on: true };
+        let off = |offset, key| Sent { offset, key, velocity: 0.0, on: false };
+        let (mut l, mut r) = (vec![9.0; 6], vec![9.0; 6]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(l, vec![0.0; 6], "nothing heard: the notes go out instead");
+        assert_eq!(playing.sent(), [on(2, 60, 1.0), off(5, 60)]);
+        // On round: the second note ends at the part's end, and the first starts again.
+        let (mut l, mut r) = (vec![9.0; 8], vec![9.0; 8]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(playing.sent(), [on(2, 64, 0.5), off(3, 64), on(6, 60, 1.0)]);
+        // Stopped with a note on: it ends.
+        player.stop();
+        let (mut l, mut r) = (vec![9.0; 2], vec![9.0; 2]);
+        playing.fill(&mut l, &mut r);
+        assert_eq!(playing.sent(), [off(0, 60)]);
+        playing.fill(&mut l, &mut r);
+        assert!(playing.sent().is_empty());
+    }
+
+    #[test]
+    fn a_part_sent_as_midi_ends_its_notes_when_the_daw_jumps_or_stops() {
+        let player = Player::default();
+        // 120 BPM at four frames a second: two frames a beat; a four-beat part with a note over its first beat.
+        let mut playing = player.start(4);
+        let part = Voice::notes_only(8, &[(0.0, 0.5, 48, 0.8)], 4).always_looped().in_beats(Some((4.0, 120.0)));
+        player.hand_over(Box::new(part), "part".into());
+        let song = |playing: bool, beats: f64| Some(Song { playing, beats, tempo: Some(120.0), bar: None });
+        let on = Sent { offset: 0, key: 48, velocity: 0.8, on: true };
+        let (mut l, mut r) = (vec![9.0; 1], vec![9.0; 1]);
+        playing.fill_in_song(&mut l, &mut r, song(true, 0.0));
+        assert_eq!(playing.sent(), [on]);
+        // The DAW jumps to beat 2: the note on ends there; none starts until the part comes round.
+        playing.fill_in_song(&mut l, &mut r, song(true, 2.0));
+        assert_eq!(playing.sent(), [Sent { offset: 0, key: 48, velocity: 0.0, on: false }]);
+        // Picked again at the start, then the DAW stops: the note ends with it. (A jump back here would be too small to
+        // put it back in step: [`DRIFT`] is far more than these few frames.)
+        let part = Voice::notes_only(8, &[(0.0, 0.5, 48, 0.8)], 4).always_looped().in_beats(Some((4.0, 120.0)));
+        player.hand_over(Box::new(part), "again".into());
+        playing.fill_in_song(&mut l, &mut r, song(true, 0.0));
+        assert_eq!(playing.sent(), [on]);
+        playing.fill_in_song(&mut l, &mut r, song(false, 0.5));
+        assert_eq!(playing.sent(), [Sent { offset: 0, key: 48, velocity: 0.0, on: false }]);
+        assert!(playing.now.is_none());
+    }
+
+    #[test]
     fn a_loop_starts_again_at_its_end_until_stopped() {
         let player = Player::default();
         let mut playing = player.start(48_000);
@@ -1109,7 +1343,9 @@ mod tests {
             |channels: Vec<Vec<f32>>| mo_audio::AudioData { sample_rate: 48_000, channels, ..Default::default() };
         let (tx, rx) = std::sync::mpsc::channel();
         let audio = made(vec![vec![0.5; 4], vec![0.25; 4]]);
-        player.play_made("Chords 01".into(), Box::new(move || Ok((audio, None))), move |p| tx.send(p).unwrap());
+        player.play_made("Chords 01".into(), Box::new(move || Ok((MadeLoop::Sound(audio), None))), move |p| {
+            tx.send(p).unwrap()
+        });
         let told = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         assert!(matches!(&told, Played::Playing(name, _) if name == "Chords 01"), "{told:?}");
         let (mut l, mut r) = (vec![0.0; 6], vec![0.0; 6]);

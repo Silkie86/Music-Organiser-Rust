@@ -84,6 +84,15 @@ fn lists_filters_and_writes_a_part_out() {
     assert_eq!(parts.sound(found[0], None, Some(120.0)).unwrap_err(), midi::NO_SOUNDFONT);
     let not_a_font = db.parent().unwrap().join("Tune.mid");
     assert!(parts.sound(found[0], Some(&not_a_font), None).unwrap_err().contains("isn't a SoundFont"));
+    // Sent as MIDI, it needs no SoundFont: its eight quarter notes at 120 BPM, half a second each, as it loops.
+    let (made, beats) = parts.notes_out(found[0], Some(120.0)).unwrap();
+    let mo_plugin::audition::MadeLoop::Notes { seconds, notes } = made else { panic!("not notes") };
+    assert_eq!(beats, Some((seconds * 2.0, 120.0)), "in beats at the DAW's tempo");
+    assert_eq!(notes.len(), BASS.len());
+    assert_eq!(notes.iter().map(|n| n.2).collect::<Vec<_>>(), BASS);
+    let (start, end, _, velocity) = notes[1];
+    assert!((start - 0.5).abs() < 1e-9 && (end - 1.0).abs() < 1e-9, "{start} to {end}");
+    assert!((velocity - 100.0 / 127.0).abs() < 0.01, "{velocity}");
 
     // Its piano roll, as the app's MIDI page draws it: as big as asked, notes in the accent colour on the well.
     let colours = mo_app::piano_roll::Colours {

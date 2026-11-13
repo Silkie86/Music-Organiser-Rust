@@ -209,6 +209,33 @@ impl Parts {
         Ok((audio, daw.map(|t| (beats, t))))
     }
 
+    /// The part at `at` as notes to send out of the plugin (Send MIDI), as it loops, timed at `tempo` (as
+    /// [`Parts::sound`]): no SoundFont is needed. Reads the index: call it off the panel's thread.
+    pub fn notes_out(
+        &self,
+        at: usize,
+        tempo: Option<f64>,
+    ) -> Result<(crate::audition::MadeLoop, Option<(f64, f64)>), String> {
+        let e = self.cat.entry(at).ok_or("That part isn't in the list any more")?;
+        let notes = self.notes(e)?;
+        let (heard, length) = page::loop_notes(&notes, e.phrase.bars);
+        if heard.is_empty() {
+            return Err("Every note in it is muted, so there's nothing to send".to_owned());
+        }
+        let daw = tempo;
+        let tempo = tempo.unwrap_or_else(|| {
+            let library = self.index.parent().map(mo_library::songs_db::to_read).unwrap_or_default();
+            page::read_tempo(&e.phrase.source, &library).bpm()
+        });
+        let seconds = |ticks: i64| ticks as f64 / mo_midi::PPQ as f64 * 60.0 / tempo;
+        let sent = heard
+            .iter()
+            .map(|n| (seconds(n.start), seconds(n.start + n.length.max(1)), n.key, f64::from(n.velocity) / 65535.0))
+            .collect();
+        let beats = length as f64 / mo_midi::PPQ as f64;
+        Ok((crate::audition::MadeLoop::Notes { seconds: seconds(length), notes: sent }, daw.map(|t| (beats, t))))
+    }
+
     /// The SoundFont at `path`, opened once and kept.
     fn font(&self, path: &Path) -> Result<mo_audio::gm::Font, String> {
         let mut kept = lock(&self.font);
