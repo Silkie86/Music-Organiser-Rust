@@ -20,6 +20,8 @@ symphonia = { version = "0.6", default-features = false, features = ["mp3", "fla
 # General MIDI sounds from a SoundFont (.sf2), for playing MIDI parts: the Rust port of MeltySynth, which the C# app
 # used. MIT.
 rustysynth = { version = "1.3", optional = true }
+# The queue a recording's audio comes in through, from a thread that must never wait (`record`). MIT or Apache-2.0.
+rtrb = "0.3"
 # Stretching a loop to another tempo without changing its pitch (`stretch`): written in Rust, MIT.
 timestretch = { version = "0.16", default-features = false, optional = true }
 
@@ -32,6 +34,8 @@ windows = { version = "0.62", features = ["Win32_Media_MediaFoundation", "Win32_
 # libraries to build (ALSA's headers on Linux).
 default = ["play"]
 play = ["dep:cpal"]
+# Recording a sound card's input (`record::card`).
+record = ["dep:cpal"]
 # Playing MIDI parts with a SoundFont (`gm`).
 gm = ["dep:rustysynth"]
 # Stretching loops to another tempo (`stretch`).

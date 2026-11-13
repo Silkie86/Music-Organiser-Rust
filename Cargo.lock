@@ -3234,6 +3234,7 @@ version = "0.1.0"
 dependencies = [
  "cpal",
  "mo-catch",
+ "rtrb",
  "rustysynth",
  "symphonia",
  "timestretch",

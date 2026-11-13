@@ -143,6 +143,8 @@ struct Slots {
     played: Mutex<Option<Played>>,
     /// How putting a sound in Bitwig's Sampler went, in words.
     sampler: Mutex<Option<String>>,
+    /// The sound card inputs Record can open, by name, once the system has said.
+    inputs: Mutex<Option<Vec<String>>>,
     /// A line dragged out: which, and its file, once it's been checked to be there (or written, for a MIDI part),
     /// or why it can't go.
     drag: Mutex<Option<(Carried, Result<std::path::PathBuf, String>)>>,
@@ -170,6 +172,8 @@ enum Carried {
     Sound(usize),
     Part(usize),
     Preset(usize),
+    /// The last take Record saved.
+    Recording,
 }
 
 /// A drag out that has ended: its file, when it started and how it ended.
@@ -540,6 +544,8 @@ struct Shown {
     presets: presets_tab::PresetsTab,
     /// What's being dragged out now.
     carried: Cell<Option<Carried>>,
+    /// The last take Record saved, shown as a line to hear and drag out.
+    recorded: Rc<RefCell<Option<std::path::PathBuf>>>,
     /// The sound the "Playing" line names, as the player numbers it: the line goes when that sound ends.
     playing: Cell<Option<u64>>,
     /// The line last clicked to play: its row, its sound and its file.
@@ -605,6 +611,7 @@ impl Shown {
             midi: midi_tab::MidiTab::new(),
             presets: presets_tab::PresetsTab::new(),
             carried: Cell::new(None),
+            recorded: Rc::default(),
             playing: Cell::new(None),
             played: Rc::new(RefCell::new(None)),
             wave_width: Cell::new(waves::WIDTH as f32),
@@ -868,6 +875,7 @@ impl Shown {
         self.midi.fill_in(panel, &self.slots);
         self.presets.fill_in(panel, &self.slots, &self.instance);
         self.fill_in_midi_play();
+        self.fill_in_record();
         let slots = Arc::clone(&self.slots);
         let track = lock(&self.instance.track).clone();
         background("mo-plugin-library", move || {
@@ -933,6 +941,81 @@ impl Shown {
                 (Knob::InTime, _) => panel.set_in_time(player.in_time()),
                 _ => {}
             }
+        }
+    }
+
+    /// Record: what it records from, its button, and the last take as a line to hear and drag into the project.
+    fn fill_in_record(&self) {
+        let panel = &self.panel;
+        let recorder = &self.instance.recorder;
+        panel.set_recording(recorder.recording());
+        // The sound cards are asked for off the window's thread: the system can take a while to answer.
+        let slots = Arc::clone(&self.slots);
+        background("mo-plugin-inputs", move || *lock(&slots.inputs) = Some(crate::record::inputs()));
+        let weak = panel.as_weak();
+        panel.on_record_from_picked(move |picked| {
+            if let Some(panel) = weak.upgrade() {
+                panel.set_record_from(picked);
+            }
+        });
+        let (recorder, player, weak) = (Arc::clone(recorder), Arc::clone(&self.instance.player), panel.as_weak());
+        panel.on_record(move || {
+            let Some(panel) = weak.upgrade() else { return };
+            let from = panel.get_record_from();
+            let card = (!from.is_empty()).then(|| from.to_string());
+            match recorder.start(card, player.trim()) {
+                Ok(()) => {
+                    panel.set_recording(true);
+                    panel.set_record_said("Starting".into());
+                }
+                Err(why) => panel.set_record_said(why.into()),
+            }
+        });
+        let recorder = Arc::clone(&self.instance.recorder);
+        panel.on_record_stop(move || recorder.stop());
+        let (recorded, player, slots) =
+            (Rc::clone(&self.recorded), Arc::clone(&self.instance.player), Arc::clone(&self.slots));
+        let (heard, last_played) = (Rc::clone(&self.heard), Rc::clone(&self.played));
+        panel.on_recorded_play(move || {
+            let Some(path) = recorded.borrow().clone() else { return };
+            heard.set(None);
+            *last_played.borrow_mut() = None;
+            let slots = Arc::clone(&slots);
+            player.play(path, 0.0, Own::NotALoop, move |played| *lock(&slots.played) = Some(played));
+        });
+        let (recorded, slots) = (Rc::clone(&self.recorded), Arc::clone(&self.slots));
+        panel.on_recorded_drag_out(move || {
+            let Some(path) = recorded.borrow().clone() else { return };
+            let slots = Arc::clone(&slots);
+            // Saved trimmed already: it goes as it is, once it's checked to be there still.
+            background("mo-plugin-drag", move || {
+                let found = if path.is_file() {
+                    Ok(path)
+                } else {
+                    Err(format!("Can't drag {}: the file isn't there any more", path.display()))
+                };
+                *lock(&slots.drag) = Some((Carried::Recording, found));
+            });
+        });
+    }
+
+    /// What Record has to tell: how the take is going, or what became of it.
+    fn record_said(&self) {
+        if let Some(inputs) = take(&self.slots.inputs) {
+            let names: Vec<SharedString> = inputs.into_iter().map(SharedString::from).collect();
+            self.panel.set_record_from_choices(ModelRc::new(VecModel::from(names)));
+        }
+        let Some(said) = lock(&self.instance.recorder.said).take() else { return };
+        self.panel.set_record_said(said.words().into());
+        match said {
+            crate::record::Said::Going { .. } => self.panel.set_recording(true),
+            crate::record::Said::Saved(path) => {
+                self.panel.set_recording(false);
+                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                self.panel.set_recorded_name(name.into());
+                *self.recorded.borrow_mut() = Some(path);
+            }
+            crate::record::Said::Failed(_) => self.panel.set_recording(false),
         }
     }
 
@@ -1511,6 +1594,7 @@ impl Shown {
         if let Some(said) = take(&self.slots.sampler) {
             self.panel.set_playing(said.into());
         }
+        self.record_said();
         if let Some(n) = self.playing.get()
             && !self.instance.player.still_playing(n)
         {
@@ -1579,6 +1663,7 @@ impl Shown {
                     Carried::Sound(row) => self.panel.set_carried(i32::try_from(row).unwrap_or(-1)),
                     Carried::Part(at) => self.panel.set_midi_carried(self.midi.row_of(at)),
                     Carried::Preset(at) => self.panel.set_preset_carried(self.presets.row_of(at)),
+                    Carried::Recording => self.panel.set_recorded_carried(true),
                 }
                 let (slots, started) = (Arc::clone(&self.slots), Instant::now());
                 crate::drag::file(path.clone(), move |ended| *lock(&slots.dragged) = Some((path, started, ended)));
@@ -1604,6 +1689,7 @@ impl Shown {
         self.panel.set_carried(-1);
         self.panel.set_midi_carried(-1);
         self.panel.set_preset_carried(-1);
+        self.panel.set_recorded_carried(false);
         // The system's drag kept the button's coming up for itself: the panel is told, so the line isn't left
         // pressed.
         let position = self.pointer.get();
@@ -1621,6 +1707,7 @@ impl Shown {
         match self.carried.get() {
             Some(Carried::Part(_)) => return self.panel.set_midi_said(why.into()),
             Some(Carried::Preset(_)) => return self.panel.set_preset_said(why.into()),
+            Some(Carried::Recording) => return self.panel.set_record_said(why.into()),
             _ => {}
         }
         self.playing.set(None);

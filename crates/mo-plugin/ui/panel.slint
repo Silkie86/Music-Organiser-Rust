@@ -232,6 +232,20 @@ export component Panel inherits Window {
     in property <bool> can-drag;
     in property <int> carried: -1;
     callback stop();
+    // Record: what comes in, from the DAW's input to the plugin (its sidechain) or straight from a sound card, saved
+    // as a WAV that drags out like a sound. `record-from` is the card's name, "" for the DAW's input.
+    in property <[string]> record-from-choices;
+    in property <string> record-from;
+    in property <bool> recording;
+    in property <string> record-said;
+    // The last take saved, by its file name ("" for none), dragged out like a sound; `recorded-carried` while it is.
+    in property <string> recorded-name;
+    in property <bool> recorded-carried;
+    callback record-from-picked(string);
+    callback record();
+    callback record-stop();
+    callback recorded-play();
+    callback recorded-drag-out();
     // In Bitwig: the picked sound goes in the place of the Sampler selected there, keeping its settings.
     in property <bool> in-bitwig;
     callback try-in-sampler();
@@ -577,6 +591,55 @@ export component Panel inherits Window {
                         text: "In Bitwig's Sampler";
                         tip: "Put the picked sound in the Sampler selected in Bitwig, keeping its settings (a first try)";
                         clicked => { root.try-in-sampler(); }
+                    }
+                }
+                HorizontalLayout {
+                    spacing: Space.sm;
+                    PickButton {
+                        horizontal-stretch: 0;
+                        name: "Record from";
+                        value: root.record-from;
+                        none-text: "The DAW's input to the plugin";
+                        choices: root.record-from-choices;
+                        picked(t) => { root.record-from-picked(t); }
+                    }
+                    StudioButton {
+                        horizontal-stretch: 0;
+                        text: root.recording ? "Stop recording" : "Record";
+                        main: root.recording;
+                        tip: root.record-from == "" ? "Record what the DAW sends the plugin's input (in Bitwig, pick it in the plugin's sidechain)" : "Record " + root.record-from + " straight from the sound card";
+                        clicked => {
+                            if root.recording {
+                                root.record-stop();
+                            } else {
+                                root.record();
+                            }
+                        }
+                    }
+                    Text {
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                        text: root.record-said;
+                        color: Theme.muted;
+                        font-size: Type.meta;
+                        overflow: elide;
+                    }
+                }
+                if root.recorded-name != "": ListLine {
+                    height: 36px;
+                    draggable: root.can-drag;
+                    lifted: root.recorded-carried;
+                    clicked => { root.recorded-play(); }
+                    drag-out => { root.recorded-drag-out(); }
+                    HorizontalLayout {
+                        padding-left: Space.md;
+                        padding-right: Space.md;
+                        Text {
+                            vertical-alignment: center;
+                            text: root.recorded-name + "  \u{b7}  click to hear it, drag it into your project";
+                            color: Theme.text;
+                            overflow: elide;
+                        }
                     }
                 }
                 HorizontalLayout {
