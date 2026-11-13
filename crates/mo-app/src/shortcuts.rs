@@ -129,6 +129,7 @@ pub const PRESETS_ACTIONS: &[Action] = &[
 pub const CURVES_ACTIONS: &[Action] = &[
     action("curves.toBitwig", "Save the picked curve into Bitwig's curves library", "Ctrl+B"),
     action("curves.reveal", "Show the picked curve's file, to drag onto a Bitwig lane", "Ctrl+Shift+F"),
+    action("curves.hear", "Hear the picked curve as the volume of a tone, or stop it", "Ctrl+P"),
     action("curves.rename", "Rename the picked curve", "F2"),
     action("curves.hide", "Hide the picked curve, or show it again", "Delete"),
     action("curves.revealSong", "Show the file of the song the picked curve came from in its folder", "Ctrl+Shift+E"),

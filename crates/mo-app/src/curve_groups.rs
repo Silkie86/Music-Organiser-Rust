@@ -266,8 +266,8 @@ fn most(shapes: &[Shape]) -> Option<Shape> {
     shapes.iter().copied().max_by(|a, b| count(a).cmp(&count(b)).then(std::cmp::Ordering::Greater))
 }
 
-/// The curve drawn at `n + 1` places evenly across, walking its lines once (as [`value_at`] draws each).
-fn draw(points: &[CurvePoint], n: usize) -> Vec<f64> {
+/// The curve drawn at `n + 1` places evenly across, 0 to 1 (as [`value_at`] draws each, walking its lines once).
+pub fn draw(points: &[CurvePoint], n: usize) -> Vec<f64> {
     let mut out = Vec::with_capacity(n + 1);
     let mut at = 0usize; // the first point past x
     for i in 0..=n {
